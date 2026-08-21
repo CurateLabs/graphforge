@@ -52,8 +52,9 @@ const REL_TYPE: &str = "LINK";
 const BATCH_ROWS: usize = 8_192;
 const EDGE_PUBLISH_ROWS: usize = 1_048_576;
 
-const ONE_HOP: &str = "MATCH (a)-[r]->(b) RETURN b.node_uuid AS id LIMIT 1000";
-const TWO_HOP: &str = "MATCH (a)-[r1]->(b)-[r2]->(c) RETURN c.node_uuid AS id LIMIT 1000";
+const ONE_HOP: &str = "MATCH (a)-[r]->(b) RETURN b.node_uuid AS id ORDER BY id LIMIT 1000";
+const TWO_HOP: &str =
+    "MATCH (a)-[r1]->(b)-[r2]->(c) RETURN c.node_uuid AS id ORDER BY id LIMIT 1000";
 const COUNT_EDGES: &str = "MATCH ()-[r:LINK]->() RETURN count(r) AS total";
 
 // ---------------------------------------------------------------------------
@@ -156,6 +157,7 @@ fn generate_spill_runs(
     seed: u64,
     buffer_edges: usize,
     work: &Path,
+    cancelled: Option<&AtomicBool>,
 ) -> SpillRuns {
     assert!((1..=31).contains(&scale), "SCALE must fit u32 vertex ids");
     assert!(buffer_edges >= 1, "buffer_edges must be positive");
@@ -169,7 +171,13 @@ fn generate_spill_runs(
     let mut self_loops_rejected = 0u64;
     let mut peak_buffer_len = 0usize;
 
-    for _ in 0..raw_attempts {
+    for attempt in 0..raw_attempts {
+        if attempt % 65_536 == 0 {
+            assert!(
+                !cancelled.is_some_and(|flag| flag.load(Ordering::SeqCst)),
+                "certification watchdog cancelled bounded generation"
+            );
+        }
         let (src, dst) = kronecker_edge(scale, initiator, &mut rng);
         if src == dst {
             self_loops_rejected += 1;
@@ -311,6 +319,7 @@ fn bounded_generation(
         seed,
         buffer_edges,
         work.path(),
+        None,
     );
     let mut edges = Vec::new();
     let mut hasher = Sha256::new();
@@ -335,15 +344,29 @@ fn bounded_generation(
 /// external merge proves the requested live-edge floor. Every window remains
 /// on disk and the final merge deduplicates across window boundaries, so the
 /// stopping decision never relies on a probabilistic estimate.
-fn generate_target_live_runs(
+#[derive(Clone, Copy)]
+struct TargetLiveGeneration {
     scale: u32,
     edge_factor: u32,
     initiator: Initiator,
     seed: u64,
     buffer_edges: usize,
     target_live_edges: u64,
+}
+
+fn generate_target_live_runs(
+    request: &TargetLiveGeneration,
     work: &Path,
-) -> (SpillRuns, MergeCounts) {
+    cancelled: &AtomicBool,
+) -> (SpillRuns, MergeCounts, String) {
+    let TargetLiveGeneration {
+        scale,
+        edge_factor,
+        initiator,
+        seed,
+        buffer_edges,
+        target_live_edges,
+    } = *request;
     let mut combined = SpillRuns {
         runs: Vec::new(),
         raw_attempts: 0,
@@ -351,6 +374,10 @@ fn generate_target_live_runs(
         peak_buffer_len: 0,
     };
     for window in 0u64.. {
+        assert!(
+            !cancelled.load(Ordering::SeqCst),
+            "certification watchdog cancelled target-live generation"
+        );
         let window_dir = work.join(format!("window-{window:04}"));
         fs::create_dir_all(&window_dir).expect("target-live window directory");
         let window_seed = seed.wrapping_add(window.wrapping_mul(0x9E37_79B9_7F4A_7C15));
@@ -361,6 +388,7 @@ fn generate_target_live_runs(
             window_seed,
             buffer_edges,
             &window_dir,
+            Some(cancelled),
         );
         combined.raw_attempts = combined.raw_attempts.saturating_add(generated.raw_attempts);
         combined.self_loops_rejected = combined
@@ -368,9 +396,37 @@ fn generate_target_live_runs(
             .saturating_add(generated.self_loops_rejected);
         combined.peak_buffer_len = combined.peak_buffer_len.max(generated.peak_buffer_len);
         combined.runs.extend(generated.runs);
-        let counts = merge_runs(&combined.runs, |_, _| {});
+        let compact_path = work.join(format!("accumulated-{window:04}.bin"));
+        let mut writer = BufWriter::new(File::create(&compact_path).expect("create compact run"));
+        let mut digest = Sha256::new();
+        let counts = merge_runs(&combined.runs, |src, dst| {
+            let src = src.to_le_bytes();
+            let dst = dst.to_le_bytes();
+            writer.write_all(&src).expect("write compact src");
+            writer.write_all(&dst).expect("write compact dst");
+            digest.update(src);
+            digest.update(dst);
+        });
+        writer.flush().expect("flush compact run");
+        drop(writer);
+        for obsolete in &combined.runs {
+            fs::remove_file(obsolete).expect("remove superseded spill run");
+        }
+        combined.runs = vec![compact_path];
         if counts.live_unique_edges >= target_live_edges {
-            return (combined, counts);
+            let duplicates_rejected = combined
+                .raw_attempts
+                .checked_sub(combined.self_loops_rejected)
+                .and_then(|value| value.checked_sub(counts.live_unique_edges))
+                .expect("target-live generator counts reconcile");
+            return (
+                combined,
+                MergeCounts {
+                    live_unique_edges: counts.live_unique_edges,
+                    duplicates_rejected,
+                },
+                format!("sha256:{}", hex_encode(digest.finalize())),
+            );
         }
     }
     unreachable!("unbounded deterministic window iterator")
@@ -484,6 +540,7 @@ fn run_rung(
         profile.seed,
         rung.buffer_edges,
         &spill_dir,
+        None,
     );
     let generate_s = gen_started.elapsed().as_secs_f64();
     let gen_violation = envelope_violation(&env, ladder_started, &project, &spill_dir);
@@ -1395,10 +1452,13 @@ struct ResourceMonitor {
 
 impl ResourceMonitor {
     fn start(workspace: PathBuf, envelope: Envelope) -> Self {
+        let initial_rss = current_rss_bytes().expect("certification host must expose process RSS");
+        let initial_disk = allocated_bytes(&workspace)
+            .expect("certification host must expose allocated disk bytes");
         let cancellation = CancellationToken::new();
         let stop = Arc::new(AtomicBool::new(false));
-        let peak_rss = Arc::new(AtomicU64::new(0));
-        let peak_disk = Arc::new(AtomicU64::new(0));
+        let peak_rss = Arc::new(AtomicU64::new(initial_rss));
+        let peak_disk = Arc::new(AtomicU64::new(initial_disk));
         let failure = Arc::new(AtomicU64::new(0));
         let worker_cancellation = cancellation.clone();
         let worker_stop = Arc::clone(&stop);
@@ -1410,7 +1470,7 @@ impl ResourceMonitor {
         let worker = thread::spawn(move || {
             let mut samples = 0_u8;
             while !worker_stop.load(Ordering::Relaxed) {
-                let rss = current_rss_bytes();
+                let rss = current_rss_bytes().expect("certification RSS probe failed");
                 worker_peak_rss.fetch_max(rss, Ordering::Relaxed);
                 let mut code = if rss > envelope.rss_bytes {
                     1
@@ -1420,7 +1480,8 @@ impl ResourceMonitor {
                     0
                 };
                 if samples == 0 {
-                    let disk = allocated_bytes(&worker_workspace);
+                    let disk = allocated_bytes(&worker_workspace)
+                        .expect("certification disk probe failed");
                     worker_peak_disk.fetch_max(disk, Ordering::Relaxed);
                     if disk > envelope.disk_bytes {
                         code = 2;
@@ -1450,7 +1511,7 @@ impl ResourceMonitor {
     }
 
     fn sample_disk(&self) {
-        let disk = allocated_bytes(&self.workspace);
+        let disk = allocated_bytes(&self.workspace).expect("certification disk probe failed");
         self.peak_disk.fetch_max(disk, Ordering::Relaxed);
         if disk > self.envelope.disk_bytes {
             self.failure
@@ -1470,7 +1531,7 @@ impl ResourceMonitor {
     }
 }
 
-fn current_rss_bytes() -> u64 {
+fn current_rss_bytes() -> Result<u64, &'static str> {
     fs::read_to_string("/proc/self/status")
         .ok()
         .and_then(|text| {
@@ -1481,10 +1542,9 @@ fn current_rss_bytes() -> u64 {
                 .parse::<u64>()
                 .ok()
         })
-        .map_or_else(
-            || peak_rss().map_or(0, |value| value.0),
-            |kibibytes| kibibytes.saturating_mul(1024),
-        )
+        .map(|kibibytes| kibibytes.saturating_mul(1024))
+        .or_else(|| peak_rss().map(|value| value.0))
+        .ok_or("process RSS is unavailable")
 }
 
 impl Drop for ResourceMonitor {
@@ -1496,7 +1556,7 @@ impl Drop for ResourceMonitor {
     }
 }
 
-fn allocated_bytes(path: &Path) -> u64 {
+fn allocated_bytes(path: &Path) -> Result<u64, &'static str> {
     let output = Command::new("du").arg("-sk").arg(path).output();
     output
         .ok()
@@ -1509,18 +1569,65 @@ fn allocated_bytes(path: &Path) -> u64 {
                 .parse::<u64>()
                 .ok()
         })
-        .unwrap_or(0)
-        .saturating_mul(1024)
+        .map(|kibibytes| kibibytes.saturating_mul(1024))
+        .ok_or("allocated disk usage is unavailable")
 }
 
 fn result_fingerprint(result: &graphforge_api::ExecutionResult) -> String {
     let mut hasher = Sha256::new();
+    if let Some(batch) = result.batches.first() {
+        for field in batch.schema().fields() {
+            hasher.update(field.name().as_bytes());
+            hasher.update([0]);
+            hasher.update(field.data_type().to_string().as_bytes());
+            hasher.update([u8::from(field.is_nullable())]);
+        }
+    }
     for batch in &result.batches {
-        hasher.update(batch.num_rows().to_le_bytes());
-        hasher.update(batch.num_columns().to_le_bytes());
-        for column in batch.columns() {
-            hasher.update(format!("{:?}", column.data_type()).as_bytes());
-            hasher.update(format!("{column:?}").as_bytes());
+        for row in 0..batch.num_rows() {
+            for column in batch.columns() {
+                let value = arrow::util::display::array_value_to_string(column, row)
+                    .expect("canonical Arrow display value");
+                hasher.update(value.len().to_le_bytes());
+                hasher.update(value.as_bytes());
+            }
+        }
+    }
+    format!("sha256:{}", hex_encode(hasher.finalize()))
+}
+
+fn authority_fingerprint(graph: &GraphForge) -> String {
+    let mut hasher = Sha256::new();
+    let ontology = graph.workspace_ontology().expect("workspace ontology");
+    hasher.update(
+        ontology
+            .to_canonical_json()
+            .expect("canonical workspace ontology"),
+    );
+    hasher.update(
+        graph
+            .workspace_configuration()
+            .expect("workspace configuration authority")
+            .to_canonical_json()
+            .expect("canonical workspace configuration"),
+    );
+    let capabilities = graph
+        .project_capabilities()
+        .expect("project capability authority");
+    // The final public column is the generation identity, which is expected to
+    // change during import and therefore is not capability authority.
+    for field in capabilities.schema.fields().iter().take(4) {
+        hasher.update(field.name().as_bytes());
+        hasher.update(field.data_type().to_string().as_bytes());
+    }
+    for batch in &capabilities.batches {
+        for row in 0..batch.num_rows() {
+            for column in batch.columns().iter().take(4) {
+                let value = arrow::util::display::array_value_to_string(column, row)
+                    .expect("canonical capability value");
+                hasher.update(value.len().to_le_bytes());
+                hasher.update(value.as_bytes());
+            }
         }
     }
     format!("sha256:{}", hex_encode(hasher.finalize()))
@@ -1573,19 +1680,24 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
     };
     let spill_root = root.join("spill");
     fs::create_dir_all(&spill_root).expect("certification spill root");
-    let (spills, generated_counts) = target_live
-        .map(|target| {
-            generate_target_live_runs(
+    let generated = target_live.map(|target| {
+        generate_target_live_runs(
+            &TargetLiveGeneration {
                 scale,
                 edge_factor,
                 initiator,
                 seed,
-                if scale == 26 { 16_777_216 } else { 512 },
-                target,
-                &spill_root,
-            )
-        })
-        .unzip();
+                buffer_edges: if scale == 26 { 16_777_216 } else { 512 },
+                target_live_edges: target,
+            },
+            &spill_root,
+            journal.cancellation(),
+        )
+    });
+    let (spills, generated_counts, target_live_fingerprint) = generated
+        .map_or((None, None, None), |(spills, counts, fingerprint)| {
+            (Some(spills), Some(counts), Some(fingerprint))
+        });
     let (summary, edges) = if target_live.is_none() {
         let (summary, edges) = bounded_generation(scale, edge_factor, initiator, seed, 512);
         assert!(summary.reconciles());
@@ -1594,12 +1706,7 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
         (None, None)
     };
     let generation_fingerprint = summary.as_ref().map_or_else(
-        || {
-            format!(
-                "sha256:{}",
-                hex_encode(Sha256::digest(b"target-live-window-set"))
-            )
-        },
+        || target_live_fingerprint.expect("target-live payload fingerprint"),
         |value| value.input_fingerprint.clone(),
     );
     journal.pass("generate", phase, Some(generation_fingerprint));
@@ -1643,6 +1750,7 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
     journal.pass("source_query_1hop", phase, Some(source_1hop.clone()));
     let phase = Instant::now();
     let source_2hop = result_fingerprint(&graph.execute(TWO_HOP).expect("source 2hop"));
+    let source_authority_fingerprint = authority_fingerprint(&graph);
     journal.pass("source_query_2hop", phase, Some(source_2hop.clone()));
 
     let phase = Instant::now();
@@ -1710,7 +1818,9 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
     journal.pass("imported_query_1hop", phase, Some(imported_1hop.clone()));
     let phase = Instant::now();
     let imported_2hop = result_fingerprint(&imported_graph.execute(TWO_HOP).expect("import 2hop"));
+    let imported_authority_fingerprint = authority_fingerprint(&imported_graph);
     assert_eq!(source_2hop, imported_2hop);
+    assert_eq!(source_authority_fingerprint, imported_authority_fingerprint);
     journal.pass("imported_query_2hop", phase, Some(imported_2hop.clone()));
 
     // Representative drills use the same verifier/import boundaries but never
@@ -1718,8 +1828,14 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
     let phase = Instant::now();
     let corrupt = root.join("corrupt.gfpb");
     fs::copy(&package, &corrupt).expect("copy corrupt drill");
-    let mut file = fs::OpenOptions::new().append(true).open(&corrupt).unwrap();
-    file.write_all(b"corruption").unwrap();
+    {
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(&corrupt)
+            .expect("open corrupt drill package");
+        file.write_all(b"corruption").expect("append corruption");
+        file.flush().expect("flush corruption");
+    }
     assert!(
         verify_portable_v2(
             &PortableVerifyRequest {
@@ -1796,6 +1912,7 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
         "raw_attempts": spills.as_ref().map_or_else(|| summary.as_ref().unwrap().raw_attempts, |value| value.raw_attempts),
         "self_loops_rejected": spills.as_ref().map_or_else(|| summary.as_ref().unwrap().self_loops_rejected, |value| value.self_loops_rejected),
         "duplicates_rejected": generated_counts.as_ref().map_or_else(|| summary.as_ref().unwrap().duplicates_rejected, |value| value.duplicates_rejected),
+        "generated_live_unique_edges": generated_counts.as_ref().map_or_else(|| summary.as_ref().unwrap().live_unique_edges, |value| value.live_unique_edges),
         "source_nodes": source_nodes, "source_edges": source_edges,
         "imported_nodes": imported_nodes, "imported_edges": imported_edges,
         "source_project_fingerprint": project_fingerprint(source_nodes, source_edges, &source_1hop, &source_2hop),
@@ -1804,6 +1921,8 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
         "package_class": serde_json::to_value(verified.package_class).expect("package class JSON"),
         "integrity": serde_json::to_value(verified.integrity).expect("integrity JSON"),
         "compatibility": serde_json::to_value(verified.compatibility).expect("compatibility JSON"),
+        "source_authority_fingerprint": source_authority_fingerprint,
+        "imported_authority_fingerprint": imported_authority_fingerprint,
         "phases": journal.phases,
     })
 }
@@ -1851,8 +1970,19 @@ fn target_live_windows_are_deterministic_bounded_and_reconciled() {
     let first = TempDir::new().unwrap();
     let second = TempDir::new().unwrap();
     let run = |root: &Path| {
-        let (spills, counts) =
-            generate_target_live_runs(10, 1, profile.initiator, profile.seed, 128, 1_000, root);
+        let cancelled = AtomicBool::new(false);
+        let (spills, counts, generated_fingerprint) = generate_target_live_runs(
+            &TargetLiveGeneration {
+                scale: 10,
+                edge_factor: 1,
+                initiator: profile.initiator,
+                seed: profile.seed,
+                buffer_edges: 128,
+                target_live_edges: 1_000,
+            },
+            root,
+            &cancelled,
+        );
         let mut digest = Sha256::new();
         let replay = merge_runs(&spills.runs, |src, dst| {
             digest.update(src.to_le_bytes());
@@ -1865,7 +1995,11 @@ fn target_live_windows_are_deterministic_bounded_and_reconciled() {
         );
         assert!(counts.live_unique_edges >= 1_000);
         assert!(spills.peak_buffer_len <= 128);
-        (counts.live_unique_edges, hex_encode(digest.finalize()))
+        assert_eq!(
+            generated_fingerprint,
+            format!("sha256:{}", hex_encode(digest.finalize()))
+        );
+        (counts.live_unique_edges, generated_fingerprint)
     };
     assert_eq!(run(first.path()), run(second.path()));
 }
@@ -1889,18 +2023,14 @@ fn certification_target_live_full_lifecycle_evidence() {
         .max()
         .unwrap_or(0);
     let source_edges = lifecycle["source_edges"].as_u64().unwrap();
+    let generated_live_edges = lifecycle["generated_live_unique_edges"].as_u64().unwrap();
     assert!(source_edges >= 1_000_000_000);
+    assert_eq!(source_edges, generated_live_edges);
     let profile_digest = format!(
         "sha256:{}",
         hex_encode(Sha256::digest(include_bytes!(
             "fixtures/scale_g500_certification.v1.json"
         )))
-    );
-    let empty_authority = format!(
-        "sha256:{}",
-        hex_encode(Sha256::digest(
-            b"graphforge-empty-ontology-capability-authority/1"
-        ))
     );
     let evidence = json!({
         "schema": "graphforge-billion-edge-certification-evidence/1",
@@ -1914,7 +2044,7 @@ fn certification_target_live_full_lifecycle_evidence() {
         "host": {
             "provider": std::env::var("GF_G500_CERT_PROVIDER").expect("approved provider input"),
             "sku": std::env::var("GF_G500_CERT_SKU").expect("approved SKU input"),
-            "os": format!("Linux {}", command_text("uname", &["-r"])),
+            "os": command_text("uname", &["-s"]),
             "kernel": command_text("uname", &["-r"]),
             "filesystem": normalized_filesystem(root.path()),
             "memory_bytes": linux_memory_bytes(),
@@ -1923,7 +2053,7 @@ fn certification_target_live_full_lifecycle_evidence() {
         "tools": { "rustc": command_text("rustc", &["--version"]), "cargo": command_text("cargo", &["--version"]) },
         "counts": {
             "raw_attempts": lifecycle["raw_attempts"], "self_loops_rejected": lifecycle["self_loops_rejected"],
-            "duplicates_rejected": lifecycle["duplicates_rejected"], "live_unique_edges": source_edges,
+            "duplicates_rejected": lifecycle["duplicates_rejected"], "live_unique_edges": generated_live_edges,
             "source_nodes": lifecycle["source_nodes"], "source_edges": source_edges,
             "imported_nodes": lifecycle["imported_nodes"], "imported_edges": lifecycle["imported_edges"],
         },
@@ -1935,7 +2065,7 @@ fn certification_target_live_full_lifecycle_evidence() {
             "policy": "complete-current-generation"
         },
         "equivalence": { "source_project_fingerprint": lifecycle["source_project_fingerprint"], "imported_project_fingerprint": lifecycle["imported_project_fingerprint"] },
-        "authority": { "source_fingerprint": empty_authority.clone(), "imported_fingerprint": empty_authority },
+        "authority": { "source_fingerprint": lifecycle["source_authority_fingerprint"], "imported_fingerprint": lifecycle["imported_authority_fingerprint"] },
         "phases": phases,
         "envelope": { "peak_rss_bytes": peak_rss, "peak_disk_bytes": peak_disk, "wall_time_s": started.elapsed().as_secs_f64() },
         "result": "pass", "first_failure": null,

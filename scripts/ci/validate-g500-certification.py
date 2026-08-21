@@ -44,6 +44,16 @@ class EvidenceError(ValueError):
     pass
 
 
+def require_mapping(evidence: dict[str, Any], key: str, fields: tuple[str, ...]) -> dict[str, Any]:
+    section = evidence.get(key)
+    if not isinstance(section, dict):
+        raise EvidenceError(f"missing or malformed section: {key}")
+    absent = [field for field in fields if field not in section or section[field] is None]
+    if absent:
+        raise EvidenceError(f"missing {key} fields: " + ", ".join(absent))
+    return section
+
+
 def reject_sensitive(value: Any, trail: str = "$") -> None:
     if isinstance(value, dict):
         for key, child in value.items():
@@ -61,7 +71,11 @@ def validate(evidence: dict[str, Any], expected_sha: str | None) -> None:
     reject_sensitive(evidence)
     if evidence.get("schema") != "graphforge-billion-edge-certification-evidence/1":
         raise EvidenceError("unsupported evidence schema")
-    if expected_sha and evidence.get("git_sha") != expected_sha:
+    if not expected_sha:
+        raise EvidenceError("--expected-sha is required to pin the dispatched commit")
+    if re.fullmatch(r"[0-9a-f]{40}", expected_sha) is None:
+        raise EvidenceError("--expected-sha must be an exact lowercase 40-hex commit")
+    if evidence.get("git_sha") != expected_sha:
         raise EvidenceError("evidence git_sha does not match dispatched commit")
     expected_profile = "sha256:" + hashlib.sha256(PROFILE.read_bytes()).hexdigest()
     if evidence.get("profile_sha256") != expected_profile:
@@ -77,7 +91,20 @@ def validate(evidence: dict[str, Any], expected_sha: str | None) -> None:
     }
     if evidence.get("run") != expected_run:
         raise EvidenceError("run command/profile is not the approved target-live contract")
-    counts = evidence.get("counts", {})
+    counts = require_mapping(
+        evidence,
+        "counts",
+        (
+            "raw_attempts",
+            "self_loops_rejected",
+            "duplicates_rejected",
+            "live_unique_edges",
+            "source_nodes",
+            "source_edges",
+            "imported_nodes",
+            "imported_edges",
+        ),
+    )
     raw = counts.get("raw_attempts")
     loops = counts.get("self_loops_rejected")
     dupes = counts.get("duplicates_rejected")
@@ -109,10 +136,16 @@ def validate(evidence: dict[str, Any], expected_sha: str | None) -> None:
     }
     if package != expected_package:
         raise EvidenceError("portable-v2 package contract is incomplete or incompatible")
-    authority = evidence.get("authority", {})
+    authority = require_mapping(
+        evidence, "authority", ("source_fingerprint", "imported_fingerprint")
+    )
     if authority.get("source_fingerprint") != authority.get("imported_fingerprint"):
         raise EvidenceError("ontology/capability authority changed across import")
-    equivalence = evidence.get("equivalence", {})
+    equivalence = require_mapping(
+        evidence,
+        "equivalence",
+        ("source_project_fingerprint", "imported_project_fingerprint"),
+    )
     if equivalence.get("source_project_fingerprint") != equivalence.get(
         "imported_project_fingerprint"
     ):
@@ -156,7 +189,7 @@ def validate(evidence: dict[str, Any], expected_sha: str | None) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("evidence", type=Path)
-    parser.add_argument("--expected-sha")
+    parser.add_argument("--expected-sha", required=True)
     args = parser.parse_args()
     value = json.loads(args.evidence.read_text(encoding="utf-8"))
     if not isinstance(value, dict):

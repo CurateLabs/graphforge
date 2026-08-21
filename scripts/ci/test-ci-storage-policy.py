@@ -396,13 +396,21 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
 def validate_g500_artifact_negative_fixtures() -> None:
     text = (WORKFLOWS / "g500-certification.yml").read_text()
     artifact_contracts(text)
+    g500_marker = "          name: g500-certification-${{ inputs.commit_sha }}"
+    g500_start = text.index(g500_marker)
+    retention = "          retention-days: 14"
+    retention_at = text.index(retention, g500_start)
+    retention_mutation = (
+        text[:retention_at] + "          retention-days: 30" + text[retention_at + len(retention) :]
+    )
+    assert retention_mutation[g500_start:].count("retention-days: 30") == 1
     mutations = (
         text.replace(
             "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1",
             "actions/upload-artifact@65f0bc87b66c8c4f1891f20b5c7a8028c9d7c796 # v4.6.2",
             1,
         ),
-        text.replace("retention-days: 14", "retention-days: 30", 1),
+        retention_mutation,
         text.replace(
             "            ${{ runner.temp }}/g500-certification-phase-journal.json",
             "            ${{ runner.temp }}/project.gfpb",

@@ -93,27 +93,82 @@ def evidence():
 
 
 def test_accepts_complete_sanitized_evidence():
-    schema = Path("docs/development/evidence/g500-certification.schema.json")
+    schema = VALIDATOR.ROOT / "docs/development/evidence/g500-certification.schema.json"
     contract = json.loads(schema.read_text())
     Draft202012Validator.check_schema(contract)
     Draft202012Validator(contract).validate(evidence())
     VALIDATOR.validate(evidence(), SHA)
 
 
-@pytest.mark.parametrize("mutation", ["short", "identity", "authority", "path", "rss", "phase"])
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "short",
+        "unreconciled",
+        "run",
+        "identity",
+        "authority",
+        "missing_authority",
+        "path",
+        "rss",
+        "disk",
+        "wall_time",
+        "phase",
+        "package",
+        "equivalence",
+        "missing_equivalence",
+        "provider",
+        "capacity",
+        "failed_result",
+        "missing_node_count",
+    ],
+)
 def test_rejects_incomplete_or_unsafe_evidence(mutation):
     value = evidence()
     if mutation == "short":
-        value["counts"]["live_unique_edges"] -= 1
+        for key in ("raw_attempts", "live_unique_edges", "source_edges", "imported_edges"):
+            value["counts"][key] -= 1
+    if mutation == "unreconciled":
+        value["counts"]["raw_attempts"] += 1
+    if mutation == "run":
+        value["run"]["seed"] = 2
     if mutation == "identity":
         value["identities"]["imported_generation"] = value["identities"]["source_generation"]
     if mutation == "authority":
         value["authority"]["imported_fingerprint"] = DIGEST_B
+    if mutation == "missing_authority":
+        value.pop("authority")
     if mutation == "path":
         value["tools"]["rustc"] = "/usr/bin/rustc"
     if mutation == "rss":
         value["envelope"]["peak_rss_bytes"] = 137_438_953_473
+    if mutation == "disk":
+        value["envelope"]["peak_disk_bytes"] = 1_099_511_627_777
+    if mutation == "wall_time":
+        value["envelope"]["wall_time_s"] = 14_401
     if mutation == "phase":
         value["phases"].pop()
+    if mutation == "package":
+        value["package"]["class"] = "partial"
+    if mutation == "equivalence":
+        value["equivalence"]["imported_project_fingerprint"] = DIGEST_B
+    if mutation == "missing_equivalence":
+        value.pop("equivalence")
+    if mutation == "provider":
+        value["host"]["provider"] = "local"
+    if mutation == "capacity":
+        value["host"]["memory_bytes"] -= 1
+    if mutation == "failed_result":
+        value["result"] = "fail"
+        value["first_failure"] = "generate"
+    if mutation == "missing_node_count":
+        value["counts"].pop("source_nodes")
     with pytest.raises(VALIDATOR.EvidenceError):
         VALIDATOR.validate(value, SHA)
+
+
+def test_requires_expected_sha():
+    with pytest.raises(VALIDATOR.EvidenceError, match="expected-sha"):
+        VALIDATOR.validate(evidence(), None)
+    with pytest.raises(VALIDATOR.EvidenceError, match="40-hex"):
+        VALIDATOR.validate(evidence(), "A" * 40)
