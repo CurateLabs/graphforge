@@ -11,12 +11,14 @@ load(
     "rust_test",
 )
 
-def gf_rust_library(name, deps = [], compile_data = [], crate_features = [], **kwargs):
+def gf_rust_library(name, deps = [], compile_data = [], crate_features = [], crate_aliases = {}, **kwargs):
     """rust_library wired to crate_universe deps for this package's Cargo.toml."""
+    resolved_aliases = aliases()
+    resolved_aliases.update(crate_aliases)
     rust_library(
         name = name,
         srcs = kwargs.pop("srcs", native.glob(["src/**/*.rs"])),
-        aliases = aliases(),
+        aliases = resolved_aliases,
         compile_data = compile_data,
         crate_features = crate_features,
         edition = "2024",
