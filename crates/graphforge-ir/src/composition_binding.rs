@@ -173,6 +173,12 @@ impl CompositionBindingContext {
         &self.composition
     }
 
+    /// Exact authored bridges adopted by this compiled context.
+    #[must_use]
+    pub fn bridges(&self) -> &[BridgeDocument] {
+        &self.bridges
+    }
+
     /// Return a copy carrying authenticated generation storage IDs.
     #[must_use]
     pub fn with_generation_storage_ids(

@@ -33,8 +33,8 @@ pub use graphforge_io::{
     ResultSinkFormat, ResultSinkOptions, ResultSinkProgress, ResultSinkReceipt,
 };
 use graphforge_ir::{
-    BindError, Binder, CompositionBindingContext, GraphOp, GraphPlan, IrExpr, ProcedureRegistry,
-    RuntimeCatalog,
+    BindError, Binder, CompositionBindingContext, CompositionBindingLimits, GraphOp, GraphPlan,
+    IrExpr, ProcedureRegistry, RuntimeCatalog,
 };
 use graphforge_ontology::{OntologyCompiler, OntologyHandle, OntologyLoader};
 use graphforge_storage::GraphCatalog;
@@ -682,6 +682,7 @@ impl GraphForge {
         Ok(graph)
     }
 
+    #[allow(clippy::too_many_lines)] // open authenticates every coupled generation participant
     fn open_resolved_with_options(
         container_dir: PathBuf,
         resolved_generation: ResolvedProjectGeneration,
@@ -699,17 +700,42 @@ impl GraphForge {
         let runtime_catalog = load_runtime_catalog(&dir)?;
         let semantic_storage_bindings =
             graphforge_storage::semantic_storage_bindings(&resolved_generation)?;
+        let default_composition_context = load_composition_binding(&resolved_generation)?;
         if semantic_storage_bindings.is_none()
-            && resolved_generation
-                .participant_snapshot("workspace", "ontology_composition")?
-                .is_some()
+            && let Some(context) = &default_composition_context
         {
-            graphforge_storage::require_atomic_legacy_migration(&dir)?;
+            if context.composition().modules.len() == 1 {
+                graphforge_storage::SemanticStorageBindings::project_legacy_unambiguous(
+                    context.composition(),
+                    &dir,
+                )?;
+            } else {
+                graphforge_storage::require_atomic_legacy_migration(&dir)?;
+            }
         }
         if let Some(bindings) = &semantic_storage_bindings {
+            let context = default_composition_context.as_ref().ok_or_else(|| {
+                GfError::Validation(
+                    "semantic bindings have no compiled persisted composition authority".into(),
+                )
+            })?;
+            bindings.validate_against(context.composition())?;
             let inventory = resolved_generation.graph_files_inventory()?;
             bindings.validate_physical_routes_with_inventory(&dir, inventory.as_ref())?;
         }
+        let default_composition_context =
+            match (default_composition_context, &semantic_storage_bindings) {
+                (Some(context), Some(bindings)) => Some(Arc::new(
+                    context.with_generation_storage_ids(
+                        bindings
+                            .bindings
+                            .iter()
+                            .map(|binding| (binding.symbol.clone(), binding.storage_id)),
+                    ),
+                )),
+                (None, Some(_)) => unreachable!("semantic composition validated above"),
+                (context, None) => context,
+            };
         if read_only {
             graphforge_storage::validate_runtime_entity_label_ids(
                 &dir,
@@ -767,7 +793,7 @@ impl GraphForge {
             ontology_document,
             runtime_catalog: Arc::new(Mutex::new(runtime_catalog)),
             semantic_storage_bindings: Arc::new(Mutex::new(semantic_storage_bindings)),
-            default_composition_context: Arc::new(Mutex::new(None)),
+            default_composition_context: Arc::new(Mutex::new(default_composition_context)),
             procedures: Arc::new(Mutex::new(ProcedureRegistry::new())),
             ontology_mode,
             runtime,
@@ -3916,6 +3942,26 @@ fn participant_encoding(
             "committed participant has unsupported encoding".into(),
         )),
     }
+}
+
+fn load_composition_binding(
+    generation: &ResolvedProjectGeneration,
+) -> Result<Option<Arc<CompositionBindingContext>>, GfError> {
+    let Some(snapshot) = generation.participant_snapshot(
+        graphforge_storage::WORKSPACE_CAPABILITY_ID,
+        graphforge_storage::WORKSPACE_ONTOLOGY_COMPOSITION_FAMILY,
+    )?
+    else {
+        return Ok(None);
+    };
+    let authority =
+        graphforge_storage::WorkspaceOntologyComposition::from_canonical_json(&snapshot.bytes)?;
+    let compiled = authority.compile()?;
+    Ok(Some(Arc::new(CompositionBindingContext::new(
+        Arc::new(compiled),
+        authority.bridges,
+        CompositionBindingLimits::default(),
+    ))))
 }
 
 #[allow(clippy::too_many_arguments)] // participant assembly carries authenticated audit context

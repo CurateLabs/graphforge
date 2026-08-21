@@ -15,12 +15,10 @@ use graphforge_ontology::{
 use super::GraphForge;
 use graphforge_core::OntologyMode;
 
-fn install_composition_authority(forge: &GraphForge, fingerprint: &str) {
+fn install_composition_authority(forge: &GraphForge, context: &CompositionBindingContext) {
     use graphforge_storage::{
-        ProjectCapability, ProjectGenerationRequest, ProjectParticipant,
-        ProjectParticipantEncoding, ProjectStageOutcome,
+        ProjectCapability, ProjectGenerationRequest, ProjectParticipant, ProjectStageOutcome,
     };
-    use sha2::{Digest, Sha256};
 
     let parent =
         graphforge_storage::resolve_project_generation(forge.resolved_generation.container_root())
@@ -40,21 +38,14 @@ fn install_composition_authority(forge: &GraphForge, fingerprint: &str) {
             bytes: snapshot.bytes,
         })
         .collect::<Vec<_>>();
-    let mut bytes = serde_json::to_vec(&serde_json::json!({
-        "composition_fingerprint": fingerprint
-    }))
-    .unwrap();
-    bytes.push(b'\n');
-    participants.push(ProjectParticipant {
-        capability_id: "workspace".into(),
-        capability_version: 1,
-        record_family_id: "ontology_composition".into(),
-        record_version: 1,
-        encoding: ProjectParticipantEncoding::Json,
-        schema_fingerprint: Sha256::digest(b"test-composition-authority/1").into(),
-        row_count: 1,
-        bytes,
-    });
+    participants.push(
+        graphforge_storage::WorkspaceOntologyComposition::from_compiled(
+            context.composition(),
+            context.bridges().to_vec(),
+        )
+        .to_project_participant()
+        .unwrap(),
+    );
     participants.sort_by(|left, right| {
         (&left.capability_id, &left.record_family_id)
             .cmp(&(&right.capability_id, &right.record_family_id))
@@ -142,6 +133,24 @@ fn composed_fixture(
     QualifiedSymbol,
 ) {
     composed_fixture_with_predicates(default, &[BridgePredicate::Equivalent])
+}
+
+fn single_module_fixture() -> Arc<CompositionBindingContext> {
+    let module = module("research", &["Person"]);
+    let compiled = compile_inventory(InventoryCompileRequest {
+        modules: &[module],
+        bridges: &[],
+        activation: &[],
+        profile_default: ActivationMode::Strict,
+        limits: CompositionLimits::default(),
+        cancelled: None,
+    })
+    .unwrap();
+    Arc::new(CompositionBindingContext::new(
+        Arc::new(compiled),
+        Vec::new(),
+        CompositionBindingLimits::default(),
+    ))
 }
 
 fn composed_fixture_with_predicates(
@@ -294,6 +303,74 @@ fn facade_does_not_install_unpublished_semantic_bindings() {
 }
 
 #[test]
+fn facade_migrates_legacy_routes_with_atomic_participants_and_plain_reopen() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("project");
+    let forge = GraphForge::new(Some(path.to_str().unwrap())).unwrap();
+    let mut writer =
+        graphforge_storage::GraphWriter::open_at(&forge.dir, OntologyMode::Strict, 1).unwrap();
+    let left = graphforge_core::uuid::new_v7();
+    let right = graphforge_core::uuid::new_v7();
+    writer
+        .create_node(left, graphforge_core::TypeId(0))
+        .unwrap();
+    writer
+        .create_node(right, graphforge_core::TypeId(0))
+        .unwrap();
+    writer
+        .create_edge(graphforge_core::uuid::new_v7(), "KNOWS", &left, &right)
+        .unwrap();
+    writer.flush().unwrap();
+    forge
+        .publish_graph_mutation(&graphforge_exec::MutationReceipt::default())
+        .unwrap();
+    let context = single_module_fixture();
+    install_composition_authority(&forge, &context);
+    drop(forge);
+
+    let forge = GraphForge::new(Some(path.to_str().unwrap())).unwrap();
+    let before = graphforge_storage::resolve_project_generation(&path)
+        .unwrap()
+        .generation_uuid();
+    *forge.current_generation_uuid.lock().unwrap() = uuid::Uuid::now_v7();
+    forge
+        .execute("CREATE (n:`research:Person`)")
+        .expect_err("stale legacy publication must fail");
+    assert!(forge.dir.join("topology/edges/KNOWS.parquet").exists());
+    assert_eq!(
+        std::fs::read_dir(forge.dir.join("topology/edges"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("s-"))
+            .count(),
+        0
+    );
+    *forge.current_generation_uuid.lock().unwrap() = before;
+    forge.execute("CREATE (n:`research:Person`)").unwrap();
+    let generation = graphforge_storage::resolve_project_generation(&path).unwrap();
+    assert_ne!(generation.generation_uuid(), before);
+    assert!(generation.graph_files_inventory().unwrap().is_some());
+    assert!(
+        generation
+            .participant_snapshot("graph", graphforge_storage::GRAPH_SEMANTIC_BINDINGS_FAMILY)
+            .unwrap()
+            .is_some()
+    );
+    drop(forge);
+    let reopened = GraphForge::new(Some(path.to_str().unwrap())).unwrap();
+    let rows = reopened
+        .execute("MATCH (n:`research:Person`) RETURN n")
+        .unwrap();
+    assert_eq!(
+        rows.batches
+            .iter()
+            .map(arrow::record_batch::RecordBatch::num_rows)
+            .sum::<usize>(),
+        3
+    );
+}
+
+#[test]
 fn stale_parent_publication_leaves_graph_and_bindings_at_old_generation() {
     let dir = tempfile::TempDir::new().unwrap();
     let path = dir.path().join("project");
@@ -365,7 +442,7 @@ fn semantic_publication_replays_one_durable_operation_idempotently() {
     let path = dir.path().join("project");
     let forge = GraphForge::new(Some(path.to_str().unwrap())).unwrap();
     let (context, _, _) = composed_fixture(ActivationMode::Strict);
-    install_composition_authority(&forge, context.fingerprint());
+    install_composition_authority(&forge, &context);
     drop(forge);
     let forge = GraphForge::new(Some(path.to_str().unwrap())).unwrap();
     forge
@@ -488,7 +565,7 @@ fn facade_publishes_reopens_and_queries_exact_colliding_semantic_routes() {
     let path_text = path.to_str().unwrap();
     let first = GraphForge::new(Some(path_text)).unwrap();
     let (context, _, _) = composed_fixture(ActivationMode::Strict);
-    install_composition_authority(&first, context.fingerprint());
+    install_composition_authority(&first, &context);
     drop(first);
 
     let forge = GraphForge::new(Some(path_text)).unwrap();
@@ -567,7 +644,7 @@ fn facade_reopens_relation_edge_property_through_default_context() {
     let path_text = path.to_str().unwrap();
     let bootstrap = GraphForge::new(Some(path_text)).unwrap();
     let (context, _, _) = composed_fixture(ActivationMode::Strict);
-    install_composition_authority(&bootstrap, context.fingerprint());
+    install_composition_authority(&bootstrap, &context);
     drop(bootstrap);
 
     let forge = GraphForge::new(Some(path_text)).unwrap();

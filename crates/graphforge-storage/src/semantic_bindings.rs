@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use graphforge_core::{GfError, ProjectErrorCode};
@@ -20,6 +21,7 @@ pub const MAX_SEMANTIC_BINDINGS: usize = 1_000_000;
 /// Maximum canonical participant bytes.
 pub const MAX_SEMANTIC_BINDING_BYTES: usize = 64 * 1024 * 1024;
 const MAX_SEMANTIC_PARQUET_COLUMNS: usize = 4_096;
+const MAX_SEMANTIC_PARQUET_METADATA_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_SEMANTIC_STRING_BYTES: usize = 4_096;
 /// Parquet schema metadata key authenticating the opaque route.
 pub const SEMANTIC_ROUTE_METADATA_KEY: &str = "graphforge.semantic_route";
@@ -669,6 +671,7 @@ impl SemanticStorageBindings {
             if !path.exists() {
                 continue;
             }
+            preflight_parquet_footer(&path)?;
             let file = File::open(&path).map_err(|_| corrupt("semantic route file is missing"))?;
             let builder =
                 parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)
@@ -681,7 +684,9 @@ impl SemanticStorageBindings {
                 || schema.metadata().get(SEMANTIC_COMPOSITION_METADATA_KEY)
                     != Some(&self.composition_fingerprint)
             {
-                return Err(corrupt("semantic route metadata does not match binding"));
+                return Err(corrupt(&format!(
+                    "semantic route metadata does not match binding for {relative}"
+                )));
             }
             let join_key = match binding.route_kind {
                 SemanticRouteKind::NodeProperty => "node_uuid",
@@ -839,7 +844,24 @@ pub fn semantic_storage_bindings(
 ) -> Result<Option<SemanticStorageBindings>, GfError> {
     let bindings = generation
         .participant_snapshot(GRAPH_CAPABILITY_ID, GRAPH_SEMANTIC_BINDINGS_FAMILY)?
-        .map(|snapshot| SemanticStorageBindings::from_canonical_json(&snapshot.bytes))
+        .map(|snapshot| {
+            let expected_schema: [u8; 32] =
+                Sha256::digest(b"graphforge-semantic-storage-bindings/1").into();
+            if snapshot.capability_version != crate::GRAPH_CAPABILITY_VERSION
+                || snapshot.record_version != GRAPH_SEMANTIC_BINDINGS_VERSION
+                || snapshot.encoding != "json"
+                || snapshot.schema_fingerprint != expected_schema
+            {
+                return Err(corrupt(
+                    "semantic binding participant descriptor is unsupported",
+                ));
+            }
+            let bindings = SemanticStorageBindings::from_canonical_json(&snapshot.bytes)?;
+            if snapshot.row_count != bindings.bindings.len() as u64 {
+                return Err(corrupt("semantic binding participant row count disagrees"));
+            }
+            Ok(bindings)
+        })
         .transpose()?;
     if let Some(bindings) = &bindings {
         let composition = generation
@@ -977,6 +999,7 @@ pub fn apply_legacy_route_moves(
             return Err(corrupt(&format!("legacy migration rename failed: {error}")));
         }
         let rewrite = (|| {
+            preflight_parquet_footer(&backup)?;
             let builder = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
                 File::open(&backup).map_err(|_| corrupt("legacy migration source cannot open"))?,
             )
@@ -1037,6 +1060,34 @@ fn corrupt(message: &str) -> GfError {
         code: ProjectErrorCode::ProjectCorrupt,
         message: message.into(),
     }
+}
+
+fn preflight_parquet_footer(path: &Path) -> Result<(), GfError> {
+    let mut file = File::open(path).map_err(|_| corrupt("semantic Parquet cannot be opened"))?;
+    let length = file
+        .metadata()
+        .map_err(|_| corrupt("semantic Parquet metadata cannot be read"))?
+        .len();
+    if length < 12 {
+        return Err(corrupt("semantic Parquet footer is truncated"));
+    }
+    file.seek(SeekFrom::End(-8))
+        .map_err(|_| corrupt("semantic Parquet footer cannot be read"))?;
+    let mut footer = [0_u8; 8];
+    file.read_exact(&mut footer)
+        .map_err(|_| corrupt("semantic Parquet footer cannot be read"))?;
+    if &footer[4..] != b"PAR1" {
+        return Err(corrupt("semantic Parquet footer magic is invalid"));
+    }
+    let metadata_len = u64::from(u32::from_le_bytes(footer[..4].try_into().unwrap()));
+    if metadata_len > MAX_SEMANTIC_PARQUET_METADATA_BYTES
+        || metadata_len
+            .checked_add(8)
+            .is_none_or(|total| total > length)
+    {
+        return Err(corrupt("semantic Parquet metadata exceeds admission limit"));
+    }
+    Ok(())
 }
 
 fn legacy_ambiguous(message: &str) -> GfError {
@@ -1545,6 +1596,26 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("GF_SEMANTIC_LEGACY_AMBIGUOUS"));
+    }
+
+    #[test]
+    fn parquet_footer_limit_fails_before_decoder_allocation() {
+        use std::io::Write;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("adversarial.parquet");
+        let mut file = File::create(&path).unwrap();
+        file.write_all(b"PAR1").unwrap();
+        file.write_all(&(u32::MAX).to_le_bytes()).unwrap();
+        file.write_all(b"PAR1").unwrap();
+        drop(file);
+        let error = preflight_parquet_footer(&path).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("metadata exceeds admission limit"),
+            "{error:?}"
+        );
     }
 
     #[test]
