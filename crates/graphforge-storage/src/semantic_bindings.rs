@@ -164,6 +164,7 @@ impl SemanticStorageBindings {
         if topology_path.exists() {
             use arrow::array::{Array, ListArray, UInt32Array};
             use arrow::datatypes::DataType;
+            preflight_parquet_footer(&topology_path)?;
             let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
                 File::open(&topology_path)
                     .map_err(|_| legacy_ambiguous("legacy topology cannot be opened"))?,
@@ -561,6 +562,7 @@ impl SemanticStorageBindings {
             .filter(|binding| binding.route_kind == SemanticRouteKind::Entity)
             .map(|binding| binding.storage_id)
             .collect::<BTreeSet<_>>();
+        preflight_parquet_footer(&path)?;
         let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
             File::open(path).map_err(|_| corrupt("semantic topology cannot be opened"))?,
         )
@@ -1133,6 +1135,7 @@ fn binding_has_retained_data(
         if !path.exists() {
             return Ok(false);
         }
+        preflight_parquet_footer(&path)?;
         let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
             File::open(path).map_err(|_| corrupt("removal topology cannot be opened"))?,
         )
@@ -1168,6 +1171,7 @@ fn binding_has_retained_data(
     if !path.exists() {
         return Ok(false);
     }
+    preflight_parquet_footer(&path)?;
     let builder = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
         File::open(path).map_err(|_| corrupt("removal route cannot be opened"))?,
     )
@@ -1603,13 +1607,31 @@ mod tests {
         use std::io::Write;
 
         let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("adversarial.parquet");
+        let path = dir.path().join("topology/nodes.parquet");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let mut file = File::create(&path).unwrap();
         file.write_all(b"PAR1").unwrap();
         file.write_all(&(u32::MAX).to_le_bytes()).unwrap();
         file.write_all(b"PAR1").unwrap();
         drop(file);
         let error = preflight_parquet_footer(&path).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("metadata exceeds admission limit"),
+            "{error:?}"
+        );
+        let composition = compiled("1");
+        let error = SemanticStorageBindings::project_legacy_unambiguous(&composition, dir.path())
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("metadata exceeds admission limit"),
+            "{error:?}"
+        );
+        let bindings = SemanticStorageBindings::project(&composition, None).unwrap();
+        let error = bindings.validate_physical_routes(dir.path()).unwrap_err();
         assert!(
             error
                 .to_string()

@@ -3954,6 +3954,24 @@ fn load_composition_binding(
     else {
         return Ok(None);
     };
+    let expected_schema: [u8; 32] = Sha256::digest(
+        format!(
+            "workspace/{}@1",
+            graphforge_storage::WORKSPACE_ONTOLOGY_COMPOSITION_FAMILY
+        )
+        .as_bytes(),
+    )
+    .into();
+    if snapshot.capability_version != graphforge_storage::WORKSPACE_CAPABILITY_VERSION
+        || snapshot.record_version != graphforge_storage::WORKSPACE_ONTOLOGY_COMPOSITION_VERSION
+        || snapshot.encoding != "json"
+        || snapshot.schema_fingerprint != expected_schema
+        || snapshot.row_count != 1
+    {
+        return Err(GfError::Validation(
+            "unsupported workspace ontology composition participant contract".into(),
+        ));
+    }
     let authority =
         graphforge_storage::WorkspaceOntologyComposition::from_canonical_json(&snapshot.bytes)?;
     let compiled = authority.compile()?;
