@@ -93,6 +93,29 @@ inventory. The legacy canonical ontology digest is retained; a deterministic
 when an explicit migration publishes the first M9 authority generation. Until
 then export remains legacy and no implicit format upgrade occurs.
 
+## Query binding and explain receipts
+
+`CompositionBindingContext` is the immutable Rust authority supplied to the
+Binder and `GraphForge::execute_with_composition`. Resolution tries an exact
+module qualifier first and permits shorthand only for one candidate. Adopted
+bridge assertions retain their authored direction and bounded predicate;
+symmetric predicates may be traversed in reverse, while conflicting or
+non-computable required semantics fail deterministically.
+
+Activation remains scoped. A module or bridge override determines the effective
+exploratory, advisory, or strict policy for that decision; the composition
+default is used only when no exact override exists. Advisory and exploratory
+fallbacks intern a separately tagged RuntimeCatalog identity, while strict,
+ambiguous, wrong-owner, invalid-endpoint, and conflicting binds fail without
+publishing the staged catalog snapshot.
+
+Every successful composed resolution adds a bounded `BindingExplainReceipt` to
+the `GraphPlan`. It contains the exact composition fingerprint, effective mode,
+ordered qualified/unique/bridge/runtime decisions, and attributable advisory
+diagnostics with remediation. The plan-local numeric semantic projection is
+derived only from identity-sorted qualified symbols; it is never persisted or
+presented as an ontology or runtime-catalog identity.
+
 ## Diagnostics and resource contract
 
 Every failure is `{ code, phase, message, subjects, candidates, limit }`.
