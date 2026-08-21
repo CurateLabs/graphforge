@@ -9,8 +9,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    PortableV2Error, PortableV2ErrorCode, PortableV2Limits, ResolvedProjectGeneration,
-    WORKSPACE_CAPABILITY_ID, WORKSPACE_CONFIGURATION_FAMILY,
+    PortableV2Error, PortableV2ErrorCode, PortableV2ExactIdentity, PortableV2Limits,
+    ResolvedProjectGeneration, WORKSPACE_CAPABILITY_ID, WORKSPACE_CONFIGURATION_FAMILY,
 };
 
 /// Stable semantic participant identity. Runtime catalog IDs and host paths are never selectors.
@@ -37,6 +37,9 @@ pub enum PortableV2SelectionProfile {
     Settings,
     /// Explicit stable identities.
     Custom(Vec<PortableV2ParticipantId>),
+    /// Exact projected ontology module or bridge identities. The immutable
+    /// preview exposes the complete emitted composition closure.
+    OntologyComposition(Vec<PortableV2ExactIdentity>),
 }
 
 /// Selection planning request.
@@ -56,6 +59,8 @@ pub enum PortableV2SelectionReason {
     Requested,
     /// Required ontology/schema closure.
     RequiredSchemaAuthority,
+    /// Required exact multi-ontology composition closure.
+    RequiredOntologyComposition,
     /// Not part of the requested profile.
     ProfileExcluded,
 }
@@ -75,6 +80,21 @@ pub struct PortableV2SelectionEntry {
     pub row_count: u64,
 }
 
+/// Exact ontology module or bridge emitted by composition projection.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct PortableV2ProjectedSelectionEntry {
+    /// Projected component kind (`ontology` or `schema`).
+    pub kind: String,
+    /// Exact semantic identity addressable by callers.
+    pub identity: PortableV2ExactIdentity,
+    /// Stable component identity used by the portable manifest.
+    pub participant_id: String,
+    /// Whether this exact identity was directly requested or closure-added.
+    pub reason: PortableV2SelectionReason,
+    /// Exact canonical projected payload bytes.
+    pub estimated_bytes: u64,
+}
+
 /// Immutable deterministic preview consumed by both export representations.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct PortableV2SelectionPlan {
@@ -88,6 +108,8 @@ pub struct PortableV2SelectionPlan {
     pub included: Vec<PortableV2SelectionEntry>,
     /// Excluded participants in canonical identity order.
     pub excluded: Vec<PortableV2SelectionEntry>,
+    /// Exact projected ontology closure in canonical identity order.
+    pub projected: Vec<PortableV2ProjectedSelectionEntry>,
     /// Explicit redaction reason codes; values are never retained.
     pub redactions: Vec<String>,
     /// Required portable capability contracts.
@@ -160,21 +182,36 @@ pub fn preview_portable_v2_selection(
             PortableV2SelectionProfile::Artifacts => kind == "derived-artifact",
             PortableV2SelectionProfile::Settings => kind == "settings",
             PortableV2SelectionProfile::Custom(_) => custom.as_ref().unwrap().contains(&identity),
+            PortableV2SelectionProfile::OntologyComposition(_) => {
+                identity.capability_id == crate::WORKSPACE_CAPABILITY_ID
+                    && identity.record_family_id == crate::WORKSPACE_ONTOLOGY_COMPOSITION_FAMILY
+            }
         };
         if selected {
             requested.insert(identity);
         }
     }
-    if requested.is_empty() && matches!(request.profile, PortableV2SelectionProfile::Custom(_)) {
+    if requested.is_empty()
+        && matches!(
+            request.profile,
+            PortableV2SelectionProfile::Custom(_)
+                | PortableV2SelectionProfile::OntologyComposition(_)
+        )
+    {
         return Err(incompatible("selection matched no portable components"));
     }
 
-    let needs_schema = requested.iter().any(|identity| {
-        matches!(
-            component_kind(&identity.capability_id, &identity.record_family_id),
-            "ontology" | "graph-data" | "derived-artifact"
-        )
-    });
+    let exact_composition = matches!(
+        request.profile,
+        PortableV2SelectionProfile::OntologyComposition(_)
+    );
+    let needs_schema = !exact_composition
+        && requested.iter().any(|identity| {
+            matches!(
+                component_kind(&identity.capability_id, &identity.record_family_id),
+                "ontology" | "graph-data" | "derived-artifact"
+            )
+        });
     let schema = descriptors
         .iter()
         .filter(|descriptor| {
@@ -185,7 +222,7 @@ pub fn preview_portable_v2_selection(
             record_family_id: descriptor.record_family_id.clone(),
         })
         .collect::<BTreeSet<_>>();
-    let auto = if needs_schema {
+    let mut auto = if needs_schema {
         schema
             .difference(&requested)
             .cloned()
@@ -193,10 +230,25 @@ pub fn preview_portable_v2_selection(
     } else {
         BTreeSet::new()
     };
+    let needs_composition = requested.iter().any(|identity| {
+        matches!(
+            component_kind(&identity.capability_id, &identity.record_family_id),
+            "ontology" | "graph-data" | "derived-artifact"
+        )
+    });
+    let composition = PortableV2ParticipantId {
+        capability_id: crate::WORKSPACE_CAPABILITY_ID.to_owned(),
+        record_family_id: crate::WORKSPACE_ONTOLOGY_COMPOSITION_FAMILY.to_owned(),
+    };
+    if needs_composition && available.contains(&composition) && !requested.contains(&composition) {
+        auto.insert(composition.clone());
+    }
     if request.strict && !auto.is_empty() {
-        return Err(incompatible(
-            "strict selection requires undeclared schema authority",
-        ));
+        return Err(incompatible(if auto.contains(&composition) {
+            "strict selection requires undeclared ontology composition closure"
+        } else {
+            "strict selection requires undeclared schema authority"
+        }));
     }
     let selected = requested.union(&auto).cloned().collect::<BTreeSet<_>>();
     validate_settings(generation, &selected, limits)?;
@@ -225,7 +277,11 @@ pub fn preview_portable_v2_selection(
         let entry = PortableV2SelectionEntry {
             kind: component_kind(&identity.capability_id, &identity.record_family_id).into(),
             reason: if auto.contains(&identity) {
-                PortableV2SelectionReason::RequiredSchemaAuthority
+                if identity == composition {
+                    PortableV2SelectionReason::RequiredOntologyComposition
+                } else {
+                    PortableV2SelectionReason::RequiredSchemaAuthority
+                }
             } else if is_selected {
                 PortableV2SelectionReason::Requested
             } else {
@@ -263,9 +319,18 @@ pub fn preview_portable_v2_selection(
         PortableV2SelectionProfile::DataComponents
         | PortableV2SelectionProfile::Artifacts
         | PortableV2SelectionProfile::Settings
-        | PortableV2SelectionProfile::Custom(_) => "component-selective",
+        | PortableV2SelectionProfile::Custom(_)
+        | PortableV2SelectionProfile::OntologyComposition(_) => "component-selective",
     }
     .to_owned();
+    let projected = projected_composition_entries(generation, request, &selected, limits)?;
+    total = projected.iter().try_fold(total, |sum, entry| {
+        sum.checked_add(entry.estimated_bytes)
+            .ok_or_else(|| limit("selection byte overflow"))
+    })?;
+    if total > limits.max_total_bytes {
+        return Err(limit("selection bytes exceed limit"));
+    }
     let mut plan = PortableV2SelectionPlan {
         source_generation_uuid: generation.generation_uuid().hyphenated().to_string(),
         source_manifest_sha256: format!("sha256:{}", hex(generation.manifest_sha256())),
@@ -273,6 +338,7 @@ pub fn preview_portable_v2_selection(
         include_graph_tree: included.iter().any(|entry| entry.kind == "graph-data"),
         included,
         excluded,
+        projected,
         redactions: Vec::new(),
         required_capabilities,
         estimated_payload_bytes: total,
@@ -280,6 +346,195 @@ pub fn preview_portable_v2_selection(
     };
     plan.selection_fingerprint = fingerprint(&plan)?;
     Ok(plan)
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "keeps exact identity validation and transitive module/bridge closure in one audit path"
+)]
+fn projected_composition_entries(
+    generation: &ResolvedProjectGeneration,
+    request: &PortableV2SelectionRequest,
+    selected: &BTreeSet<PortableV2ParticipantId>,
+    limits: PortableV2Limits,
+) -> Result<Vec<PortableV2ProjectedSelectionEntry>, PortableV2Error> {
+    let authority = PortableV2ParticipantId {
+        capability_id: crate::WORKSPACE_CAPABILITY_ID.into(),
+        record_family_id: crate::WORKSPACE_ONTOLOGY_COMPOSITION_FAMILY.into(),
+    };
+    if !selected.contains(&authority) {
+        return Ok(Vec::new());
+    }
+    let path = generation
+        .participant_path(&authority.capability_id, &authority.record_family_id)
+        .map_err(storage)?;
+    let mut file = File::open(path).map_err(storage_io)?;
+    let cap = limits.max_manifest_bytes.min(limits.max_entry_bytes);
+    let mut bytes = Vec::new();
+    std::io::Read::by_ref(&mut file)
+        .take(cap.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(storage_io)?;
+    if bytes.len() as u64 > cap {
+        return Err(limit("composition preview exceeds limit"));
+    }
+    let composition =
+        crate::WorkspaceOntologyComposition::from_canonical_json(&bytes).map_err(storage)?;
+    let requested = match &request.profile {
+        PortableV2SelectionProfile::OntologyComposition(values) => {
+            let set = values.iter().cloned().collect::<BTreeSet<_>>();
+            if set.len() != values.len() {
+                return Err(incompatible("duplicate projected ontology selector"));
+            }
+            Some(set)
+        }
+        _ => None,
+    };
+    let module_identity = |module: &crate::WorkspaceCompositionModule| PortableV2ExactIdentity {
+        id: module.id.ontology_id.clone(),
+        version: module.id.authored_version.clone(),
+        content_digest: format!("sha256:{}", module.id.canonical_digest),
+    };
+    let bridge_identity = |bridge: &graphforge_ontology::BridgeDocument| {
+        let digest = graphforge_ontology::bridge_document_digest(bridge)
+            .map_err(|_| incompatible("composition bridge digest"))?;
+        Ok::<_, PortableV2Error>((
+            PortableV2ExactIdentity {
+                id: bridge.bridge_id.clone(),
+                version: bridge.authored_version.clone(),
+                content_digest: format!("sha256:{digest}"),
+            },
+            digest,
+        ))
+    };
+    let module_by_identity = composition
+        .modules
+        .iter()
+        .map(|module| (module_identity(module), module))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut bridge_by_identity = std::collections::BTreeMap::new();
+    for bridge in &composition.bridges {
+        let (identity, digest) = bridge_identity(bridge)?;
+        bridge_by_identity.insert(identity, (bridge, digest));
+    }
+    let mut closure = requested.clone().unwrap_or_else(|| {
+        module_by_identity
+            .keys()
+            .chain(bridge_by_identity.keys())
+            .cloned()
+            .collect()
+    });
+    if requested.as_ref().is_some_and(|roots| {
+        roots.iter().any(|identity| {
+            !module_by_identity.contains_key(identity) && !bridge_by_identity.contains_key(identity)
+        })
+    }) {
+        return Err(incompatible("projected ontology selector is absent"));
+    }
+    loop {
+        let before = closure.len();
+        for identity in closure.clone() {
+            if let Some(module) = module_by_identity.get(&identity) {
+                closure.extend(module.dependencies.iter().map(|dependency| {
+                    PortableV2ExactIdentity {
+                        id: dependency.ontology_id.clone(),
+                        version: dependency.authored_version.clone(),
+                        content_digest: format!("sha256:{}", dependency.canonical_digest),
+                    }
+                }));
+            } else if let Some((bridge, _)) = bridge_by_identity.get(&identity) {
+                closure.extend(
+                    bridge
+                        .source_modules
+                        .iter()
+                        .chain(&bridge.target_modules)
+                        .map(|module| PortableV2ExactIdentity {
+                            id: module.ontology_id.clone(),
+                            version: module.authored_version.clone(),
+                            content_digest: format!("sha256:{}", module.canonical_digest),
+                        }),
+                );
+                closure.extend(bridge.dependencies.iter().map(|dependency| {
+                    PortableV2ExactIdentity {
+                        id: dependency.bridge_id.clone(),
+                        version: dependency.authored_version.clone(),
+                        content_digest: format!("sha256:{}", dependency.canonical_digest),
+                    }
+                }));
+            }
+        }
+        if closure.len() == before {
+            break;
+        }
+    }
+    if closure.iter().any(|identity| {
+        !module_by_identity.contains_key(identity) && !bridge_by_identity.contains_key(identity)
+    }) {
+        return Err(incompatible(
+            "projected ontology dependency closure is missing",
+        ));
+    }
+    let mut entries = Vec::new();
+    for module in &composition.modules {
+        let identity = PortableV2ExactIdentity {
+            id: module.id.ontology_id.clone(),
+            version: module.id.authored_version.clone(),
+            content_digest: format!("sha256:{}", module.id.canonical_digest),
+        };
+        if !closure.contains(&identity) {
+            continue;
+        }
+        let payload = crate::project_portable_v2::canonical_json(
+            &serde_json::to_value(&module.document)
+                .map_err(|_| incompatible("composition preview serialization"))?,
+        )?;
+        entries.push(PortableV2ProjectedSelectionEntry {
+            kind: "ontology".into(),
+            participant_id: format!("ontology-module-{}", module.id.canonical_digest),
+            reason: if requested
+                .as_ref()
+                .is_some_and(|set| set.contains(&identity))
+            {
+                PortableV2SelectionReason::Requested
+            } else {
+                PortableV2SelectionReason::RequiredOntologyComposition
+            },
+            identity,
+            estimated_bytes: payload.len() as u64,
+        });
+    }
+    for bridge in &composition.bridges {
+        let digest = graphforge_ontology::bridge_document_digest(bridge)
+            .map_err(|_| incompatible("composition bridge digest"))?;
+        let identity = PortableV2ExactIdentity {
+            id: bridge.bridge_id.clone(),
+            version: bridge.authored_version.clone(),
+            content_digest: format!("sha256:{digest}"),
+        };
+        if !closure.contains(&identity) {
+            continue;
+        }
+        let payload = crate::project_portable_v2::canonical_json(
+            &serde_json::to_value(bridge)
+                .map_err(|_| incompatible("composition preview serialization"))?,
+        )?;
+        entries.push(PortableV2ProjectedSelectionEntry {
+            kind: "schema".into(),
+            participant_id: format!("ontology-bridge-{digest}"),
+            reason: if requested
+                .as_ref()
+                .is_some_and(|set| set.contains(&identity))
+            {
+                PortableV2SelectionReason::Requested
+            } else {
+                PortableV2SelectionReason::RequiredOntologyComposition
+            },
+            identity,
+            estimated_bytes: payload.len() as u64,
+        });
+    }
+    entries.sort_by(|left, right| left.participant_id.cmp(&right.participant_id));
+    Ok(entries)
 }
 
 pub(crate) fn validate_selection_plan(

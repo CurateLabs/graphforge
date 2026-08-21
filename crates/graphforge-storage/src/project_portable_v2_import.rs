@@ -1,11 +1,15 @@
 //! Verification-first, bounded portable-v2 project import.
 
 use std::fs::{self, OpenOptions};
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
 use graphforge_core::GfError;
+use graphforge_ontology::{
+    ActivationMode, ActivationRecord, ActivationScope, AuthoredModule, BridgeSetId,
+    CompositionLimits, InventoryCompileRequest, OntologyModuleId, compile_inventory,
+};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -30,6 +34,114 @@ pub struct PortableV2ImportReceipt {
     pub transport_digest: Option<String>,
     /// Atomic project-generation publication receipt.
     pub publication: ProjectPublicationReceipt,
+    /// Durable non-authoritative composition candidate, when imported.
+    pub staged_composition: Option<PortableV2StagedCompositionReceipt>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// Payload-free identity of the durable non-authoritative candidate.
+pub struct PortableV2StagedCompositionReceipt {
+    /// Verified portable package identity.
+    pub package_digest: String,
+    /// Verified portable composition identity.
+    pub portable_composition_digest: String,
+    /// Recompiled workspace composition identity.
+    pub workspace_composition_fingerprint: String,
+}
+
+/// Authenticated selective-package state passed to an explicit typed consumer.
+///
+/// Payloads remain in callback-scoped private staging and are removed before
+/// [`consume_selective_portable_v2`] returns. The ontology candidate is never
+/// installed as project authority implicitly.
+#[derive(Debug)]
+pub struct PortableV2SelectiveCandidate {
+    /// Full authenticated package report.
+    pub report: PortableV2Report,
+    /// Recompiled, non-authoritative ontology candidate when present.
+    pub ontology: Option<crate::WorkspacePortableOntologyStaging>,
+    /// Payload-free staged-composition receipt when present.
+    pub staged_composition: Option<PortableV2StagedCompositionReceipt>,
+}
+
+/// Verify and privately materialize a selective package for one typed consumer.
+///
+/// Complete packages must use [`import_complete_portable_v2`]. The callback is
+/// the only scope in which authenticated data paths are available; staging is
+/// deterministically removed on success or error and no project is mutated.
+pub fn consume_selective_portable_v2<T>(
+    source: impl AsRef<Path>,
+    limits: PortableV2Limits,
+    cancelled: Option<&AtomicBool>,
+    consume: impl FnOnce(&Path, &PortableV2SelectiveCandidate) -> Result<T, PortableV2Error>,
+) -> Result<T, PortableV2Error> {
+    let owner = tempfile::tempdir().map_err(|_| {
+        PortableV2Error::new(PortableV2ErrorCode::Io, "cannot create selective staging")
+    })?;
+    let stage = owner.path().join("materialized");
+    let report = materialize_verified_portable_v2(source.as_ref(), &stage, limits, cancelled)?;
+    if report.package_class == PortableV2PackageClass::Complete {
+        return Err(PortableV2Error::new(
+            PortableV2ErrorCode::Incompatible,
+            "complete package requires complete-project import",
+        ));
+    }
+    let (ontology, staged_composition) = if report.ontology_composition.is_some() {
+        let (candidate, receipt) = build_staged_composition(&stage, &report, limits)?;
+        let bytes = read_bounded_payload(
+            &candidate.source,
+            limits.max_manifest_bytes,
+            "selective staged composition",
+        )?;
+        (
+            Some(
+                crate::WorkspacePortableOntologyStaging::from_canonical_json(&bytes)
+                    .map_err(storage)?,
+            ),
+            Some(receipt),
+        )
+    } else {
+        (None, None)
+    };
+    consume(
+        &stage,
+        &PortableV2SelectiveCandidate {
+            report,
+            ontology,
+            staged_composition,
+        },
+    )
+}
+
+/// Reopen and validate the durable non-authoritative ontology candidate.
+///
+/// This function never changes active ontology authority. It is the storage
+/// seam consumed by an explicit lifecycle request.
+pub fn load_portable_ontology_staging(
+    generation: &crate::ResolvedProjectGeneration,
+    limits: PortableV2Limits,
+) -> Result<Option<crate::WorkspacePortableOntologyStaging>, PortableV2Error> {
+    let present = generation
+        .participant_descriptors()
+        .map_err(storage)?
+        .iter()
+        .any(|descriptor| {
+            descriptor.capability_id == crate::WORKSPACE_CAPABILITY_ID
+                && descriptor.record_family_id == crate::WORKSPACE_PORTABLE_ONTOLOGY_STAGING_FAMILY
+        });
+    if !present {
+        return Ok(None);
+    }
+    let path = generation
+        .participant_path(
+            crate::WORKSPACE_CAPABILITY_ID,
+            crate::WORKSPACE_PORTABLE_ONTOLOGY_STAGING_FAMILY,
+        )
+        .map_err(storage)?;
+    let bytes = read_bounded_payload(&path, limits.max_manifest_bytes, "staged composition")?;
+    crate::WorkspacePortableOntologyStaging::from_canonical_json(&bytes)
+        .map(Some)
+        .map_err(storage)
 }
 
 /// Sanitized import lifecycle phase.
@@ -349,6 +461,23 @@ fn import_materialized(
             content_sha256,
         });
     }
+    let staged_composition = if report.ontology_composition.is_some() {
+        let (candidate, receipt) = build_staged_composition(stage, report, limits)?;
+        participants.push(candidate);
+        Some(receipt)
+    } else {
+        None
+    };
+    participants.sort_by(|left, right| {
+        (
+            &left.participant.capability_id,
+            &left.participant.record_family_id,
+        )
+            .cmp(&(
+                &right.participant.capability_id,
+                &right.participant.record_family_id,
+            ))
+    });
     let request = ProjectGenerationRequest {
         transaction_uuid,
         generation_uuid,
@@ -420,7 +549,310 @@ fn import_materialized(
         package_digest: report.package_digest.clone(),
         transport_digest: report.transport_digest.clone(),
         publication,
+        staged_composition,
     })
+}
+
+fn parse_mode(value: &str) -> Result<ActivationMode, PortableV2Error> {
+    match value {
+        "exploratory" => Ok(ActivationMode::Exploratory),
+        "advisory" => Ok(ActivationMode::Advisory),
+        "strict" => Ok(ActivationMode::Strict),
+        _ => Err(PortableV2Error::new(
+            PortableV2ErrorCode::Incompatible,
+            "portable activation mode",
+        )),
+    }
+}
+
+fn build_staged_composition(
+    stage: &Path,
+    report: &PortableV2Report,
+    limits: PortableV2Limits,
+) -> Result<(ProjectFileParticipant, PortableV2StagedCompositionReceipt), PortableV2Error> {
+    let control = report.ontology_composition.as_ref().ok_or_else(|| {
+        PortableV2Error::new(
+            PortableV2ErrorCode::Incompatible,
+            "composition control absent",
+        )
+    })?;
+    let module_ids = control
+        .modules
+        .iter()
+        .map(|module| {
+            (
+                format!(
+                    "ontology-module-{}",
+                    module.content_digest.trim_start_matches("sha256:")
+                ),
+                OntologyModuleId {
+                    ontology_id: module.ontology_id.clone(),
+                    authored_version: module.version.clone(),
+                    canonical_digest: module
+                        .content_digest
+                        .trim_start_matches("sha256:")
+                        .to_owned(),
+                },
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let bridge_ids = control
+        .bridge_sets
+        .iter()
+        .map(|bridge| {
+            (
+                format!(
+                    "ontology-bridge-{}",
+                    bridge.content_digest.trim_start_matches("sha256:")
+                ),
+                BridgeSetId {
+                    bridge_id: bridge.bridge_id.clone(),
+                    authored_version: bridge.version.clone(),
+                    canonical_digest: bridge
+                        .content_digest
+                        .trim_start_matches("sha256:")
+                        .to_owned(),
+                },
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let (authored, bridges) = load_staged_composition_entries(stage, report, limits, &module_ids)?;
+    let activations = build_staged_activations(control)?;
+    let exact_bridges = resolve_staged_bridge_ids(&bridges, &bridge_ids)?;
+    let compiled = compile_inventory(InventoryCompileRequest {
+        modules: &authored,
+        bridges: &exact_bridges,
+        activation: &activations,
+        profile_default: parse_mode(&control.activation_profile.profile_default)?,
+        limits: CompositionLimits::default(),
+        cancelled: None,
+    })
+    .map_err(|_| {
+        PortableV2Error::new(
+            PortableV2ErrorCode::Incompatible,
+            "staged composition closure",
+        )
+    })?;
+    let composition = crate::WorkspaceOntologyComposition::from_compiled(&compiled, bridges);
+    let staged = crate::WorkspacePortableOntologyStaging {
+        contract_version: 1,
+        package_digest: report.package_digest.clone(),
+        portable_composition_digest: control.composition_digest.clone(),
+        composition,
+    };
+    let (participant, source, bytes) = persist_staged_composition(stage, &staged)?;
+    let receipt = PortableV2StagedCompositionReceipt {
+        package_digest: report.package_digest.clone(),
+        portable_composition_digest: control.composition_digest.clone(),
+        workspace_composition_fingerprint: staged.composition.composition_fingerprint.clone(),
+    };
+    Ok((
+        ProjectFileParticipant {
+            participant: ProjectParticipant {
+                bytes: Vec::new(),
+                ..participant
+            },
+            source,
+            byte_length: bytes.len() as u64,
+            content_sha256: Sha256::digest(&bytes).into(),
+        },
+        receipt,
+    ))
+}
+
+fn load_staged_composition_entries(
+    stage: &Path,
+    report: &PortableV2Report,
+    limits: PortableV2Limits,
+    module_ids: &std::collections::BTreeMap<String, OntologyModuleId>,
+) -> Result<
+    (
+        Vec<AuthoredModule>,
+        Vec<graphforge_ontology::BridgeDocument>,
+    ),
+    PortableV2Error,
+> {
+    let mut authored = Vec::new();
+    let mut bridges = Vec::new();
+    for entry in &report.ontology_composition_entries {
+        let bytes = read_bounded_payload(
+            &stage.join(&entry.path),
+            limits.max_manifest_bytes,
+            &entry.path,
+        )?;
+        if entry.kind != "ontology" {
+            bridges.push(serde_json::from_slice(&bytes).map_err(|_| {
+                PortableV2Error::at(
+                    PortableV2ErrorCode::InvalidStructure,
+                    &entry.path,
+                    "staged ontology bridge",
+                )
+            })?);
+            continue;
+        }
+        let document = serde_json::from_slice(&bytes).map_err(|_| {
+            PortableV2Error::at(
+                PortableV2ErrorCode::InvalidStructure,
+                &entry.path,
+                "staged ontology module",
+            )
+        })?;
+        let id = module_ids
+            .get(entry.path.split('/').nth(3).unwrap_or_default())
+            .cloned()
+            .ok_or_else(|| {
+                PortableV2Error::new(PortableV2ErrorCode::Incompatible, "staged module identity")
+            })?;
+        let dependencies = entry
+            .required_dependencies
+            .iter()
+            .map(|dependency| {
+                module_ids.get(dependency).cloned().ok_or_else(|| {
+                    PortableV2Error::new(
+                        PortableV2ErrorCode::Incompatible,
+                        "staged module dependency closure",
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        authored.push(AuthoredModule {
+            allow_projected_identity: id.ontology_id.starts_with("legacy:"),
+            id,
+            dependencies,
+            doc: document,
+        });
+    }
+    Ok((authored, bridges))
+}
+
+fn build_staged_activations(
+    control: &crate::project_portable_v2::PortableV2OntologyComposition,
+) -> Result<Vec<ActivationRecord>, PortableV2Error> {
+    control
+        .activation_profile
+        .overrides
+        .iter()
+        .map(|activation| {
+            let scope = match activation.scope.as_str() {
+                "module" => ActivationScope::Module,
+                "bridge" => ActivationScope::Bridge,
+                _ => {
+                    return Err(PortableV2Error::new(
+                        PortableV2ErrorCode::Incompatible,
+                        "activation scope",
+                    ));
+                }
+            };
+            Ok(ActivationRecord {
+                scope,
+                subject: format!(
+                    "{}@{}#{}",
+                    activation.subject.id,
+                    activation.subject.version,
+                    activation
+                        .subject
+                        .content_digest
+                        .trim_start_matches("sha256:")
+                ),
+                mode: parse_mode(&activation.mode)?,
+            })
+        })
+        .collect()
+}
+
+fn resolve_staged_bridge_ids(
+    bridges: &[graphforge_ontology::BridgeDocument],
+    bridge_ids: &std::collections::BTreeMap<String, BridgeSetId>,
+) -> Result<Vec<BridgeSetId>, PortableV2Error> {
+    bridges
+        .iter()
+        .map(|bridge| {
+            bridge_ids
+                .values()
+                .find(|id| {
+                    id.bridge_id == bridge.bridge_id
+                        && id.authored_version == bridge.authored_version
+                })
+                .cloned()
+                .ok_or_else(|| {
+                    PortableV2Error::new(
+                        PortableV2ErrorCode::Incompatible,
+                        "staged bridge identity",
+                    )
+                })
+        })
+        .collect()
+}
+
+fn persist_staged_composition(
+    stage: &Path,
+    staged: &crate::WorkspacePortableOntologyStaging,
+) -> Result<(ProjectParticipant, PathBuf, Vec<u8>), PortableV2Error> {
+    let participant = staged.to_project_participant().map_err(storage)?;
+    let bytes = participant.bytes.clone();
+    let source = stage.join("portable-ontology-staging.json");
+    let mut output = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&source)
+        .map_err(|_| {
+            PortableV2Error::new(
+                PortableV2ErrorCode::Io,
+                "cannot stage composition candidate",
+            )
+        })?;
+    output.write_all(&bytes).map_err(|_| {
+        PortableV2Error::new(
+            PortableV2ErrorCode::Io,
+            "cannot write composition candidate",
+        )
+    })?;
+    output.sync_all().map_err(|_| {
+        PortableV2Error::new(PortableV2ErrorCode::Io, "cannot sync composition candidate")
+    })?;
+    Ok((participant, source, bytes))
+}
+
+fn read_bounded_payload(
+    path: &Path,
+    limit: u64,
+    context: &str,
+) -> Result<Vec<u8>, PortableV2Error> {
+    let metadata = fs::symlink_metadata(path).map_err(|_| {
+        PortableV2Error::at(
+            PortableV2ErrorCode::InvalidStructure,
+            context,
+            "payload unavailable",
+        )
+    })?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > limit {
+        return Err(PortableV2Error::at(
+            PortableV2ErrorCode::LimitExceeded,
+            context,
+            "payload bound",
+        ));
+    }
+    let mut file =
+        crate::project_portable_v2_export::open_source_no_follow(path).map_err(|_| {
+            PortableV2Error::at(
+                PortableV2ErrorCode::InvalidStructure,
+                context,
+                "payload open",
+            )
+        })?;
+    let mut bytes = Vec::new();
+    std::io::Read::by_ref(&mut file)
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|_| PortableV2Error::at(PortableV2ErrorCode::Io, context, "payload read"))?;
+    if bytes.len() as u64 > limit || bytes.len() as u64 != metadata.len() {
+        return Err(PortableV2Error::at(
+            PortableV2ErrorCode::LimitExceeded,
+            context,
+            "payload bound",
+        ));
+    }
+    Ok(bytes)
 }
 
 fn find_participant_file(
@@ -561,6 +993,170 @@ mod tests {
                 capability_version: 1,
             },
         ]
+    }
+
+    fn composition_package() -> (tempfile::TempDir, PathBuf) {
+        let source = tempfile::tempdir().unwrap();
+        let parent = crate::open_or_initialize_project(source.path()).unwrap();
+        let document = graphforge_ontology::OntologyDoc {
+            ontology_id: "https://graphforge.dev/ontology/portable-import".into(),
+            version: "release-2026.08".into(),
+            entity_types: Vec::new(),
+            relation_types: Vec::new(),
+            properties: Vec::new(),
+            constraints: Vec::new(),
+            migrations: Vec::new(),
+        };
+        let legacy = crate::WorkspaceOntology {
+            contract_version: 1,
+            mode: crate::WorkspaceOntologyMode::Strict,
+            source_format: Some(crate::WorkspaceOntologySourceFormat::Json),
+            canonical_ontology_sha256: Some("a".repeat(64)),
+            canonical_ontology: Some(serde_json::to_value(document).unwrap()),
+        };
+        let composition = crate::WorkspaceOntologyComposition::virtual_legacy(&legacy)
+            .unwrap()
+            .unwrap();
+        let mut participants = crate::empty_workspace_participants().unwrap();
+        participants.push(composition.to_project_participant().unwrap());
+        participants.sort_by(|left, right| {
+            (&left.capability_id, &left.record_family_id)
+                .cmp(&(&right.capability_id, &right.record_family_id))
+        });
+        let request = ProjectGenerationRequest {
+            transaction_uuid: Uuid::new_v4(),
+            generation_uuid: Uuid::new_v4(),
+            capabilities: supported(),
+            participants,
+        };
+        let ProjectStageOutcome::Staged(staged) =
+            crate::stage_project_generation(source.path(), &request).unwrap()
+        else {
+            panic!("fresh composition generation replayed");
+        };
+        staged
+            .validate(|_| Ok(()), |_, _| Ok(()))
+            .unwrap()
+            .publish()
+            .unwrap();
+        drop(parent);
+        let generation = crate::resolve_project_generation(source.path()).unwrap();
+        let package_parent = tempfile::tempdir().unwrap();
+        let package = package_parent.path().join("composition.gfproject");
+        let limits = crate::PortableV2ExportLimits::default();
+        let plan = crate::plan_complete_portable_v2(&generation, limits).unwrap();
+        crate::export_complete_portable_v2(
+            &plan,
+            &package,
+            crate::PortableV2Output::Expanded,
+            limits,
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .unwrap();
+        (package_parent, package)
+    }
+
+    #[test]
+    fn durable_composition_staging_reopens_replays_and_fails_without_partial_authority() {
+        let (_package_parent, package) = composition_package();
+        let parent = tempfile::tempdir().unwrap();
+        let target = parent.path().join("imported");
+        let transaction = Uuid::new_v4();
+        let generation = Uuid::new_v4();
+        let first = import_complete_portable_v2(
+            &package,
+            &target,
+            transaction,
+            generation,
+            &supported(),
+            PortableV2Limits::default(),
+            None,
+        )
+        .unwrap();
+        assert!(first.staged_composition.is_some());
+        let reopened = crate::resolve_project_generation(&target).unwrap();
+        let staged = load_portable_ontology_staging(&reopened, PortableV2Limits::default())
+            .unwrap()
+            .expect("verified candidate must survive reopen");
+        assert_eq!(staged.package_digest, first.package_digest);
+        assert!(
+            reopened
+                .participant_snapshots()
+                .unwrap()
+                .iter()
+                .all(|entry| {
+                    entry.record_family_id != crate::WORKSPACE_ONTOLOGY_COMPOSITION_FAMILY
+                })
+        );
+
+        let replay = import_complete_portable_v2(
+            &package,
+            &target,
+            transaction,
+            generation,
+            &supported(),
+            PortableV2Limits::default(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(replay.publication.generation_uuid, generation);
+        let conflict = import_complete_portable_v2(
+            &package,
+            &target,
+            transaction,
+            Uuid::new_v4(),
+            &supported(),
+            PortableV2Limits::default(),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(conflict.code, PortableV2ErrorCode::Io);
+        assert_eq!(
+            crate::resolve_project_generation(&target)
+                .unwrap()
+                .generation_uuid(),
+            generation
+        );
+
+        for (name, capabilities, cancelled, expected) in [
+            (
+                "cancelled",
+                supported(),
+                AtomicBool::new(true),
+                PortableV2ErrorCode::Cancelled,
+            ),
+            (
+                "unsupported",
+                Vec::new(),
+                AtomicBool::new(false),
+                PortableV2ErrorCode::Incompatible,
+            ),
+        ] {
+            let failed = parent.path().join(name);
+            let transaction = Uuid::new_v4();
+            let error = import_complete_portable_v2(
+                &package,
+                &failed,
+                transaction,
+                Uuid::new_v4(),
+                &capabilities,
+                PortableV2Limits::default(),
+                Some(&cancelled),
+            )
+            .unwrap_err();
+            assert_eq!(error.code, expected, "{name}");
+            assert!(!failed.exists(), "{name} published a target");
+            let residue = parent
+                .path()
+                .join(format!(".{name}.portable-v2-{}", transaction.hyphenated()));
+            assert!(!residue.exists(), "{name} retained private staging");
+            let owner = residue.with_file_name(format!(
+                ".{name}.portable-v2-{}.owner",
+                transaction.hyphenated()
+            ));
+            assert!(!owner.exists(), "{name} retained its ownership marker");
+        }
     }
 
     #[test]

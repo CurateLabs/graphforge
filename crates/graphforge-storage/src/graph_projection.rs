@@ -12,7 +12,8 @@ use std::sync::Arc;
 use arrow::array::{
     Array, ArrayRef, BinaryArray, BooleanArray, FixedSizeBinaryArray, FixedSizeListArray,
     Float32Array, Float64Array, Int32Array, Int64Array, LargeBinaryArray, LargeListArray,
-    LargeStringArray, ListArray, StringArray, StructArray, UInt32Array, UInt64Array,
+    LargeStringArray, ListArray, ListBuilder, StringArray, StringBuilder, StructArray, UInt32Array,
+    UInt64Array,
 };
 use arrow::compute::{concat_batches, take};
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
@@ -443,7 +444,15 @@ fn selected_catalog_rows(target: &Path, catalog: &RecordBatch) -> Result<Vec<usi
 
     let mut active_owners = BTreeSet::new();
     for row in 0..catalog.num_rows() {
-        if kinds.value(row) == "entity_type" && type_ids.contains(&ids.value(row)) {
+        if kinds.value(row) == "entity_type"
+            && type_ids.iter().any(|stored| {
+                *stored == ids.value(row)
+                    || graphforge_ir::runtime_type_id_from_entity_plan_id(graphforge_core::TypeId(
+                        *stored,
+                    ))
+                    .is_some_and(|runtime| runtime.0 == ids.value(row))
+            })
+        {
             active_owners.insert(names.value(row).to_owned());
         }
     }
@@ -452,7 +461,13 @@ fn selected_catalog_rows(target: &Path, catalog: &RecordBatch) -> Result<Vec<usi
     let mut selected = BTreeSet::new();
     for row in 0..catalog.num_rows() {
         let keep = match kinds.value(row) {
-            "entity_type" => type_ids.contains(&ids.value(row)),
+            "entity_type" => type_ids.iter().any(|stored| {
+                *stored == ids.value(row)
+                    || graphforge_ir::runtime_type_id_from_entity_plan_id(graphforge_core::TypeId(
+                        *stored,
+                    ))
+                    .is_some_and(|runtime| runtime.0 == ids.value(row))
+            }),
             "relation_type" => relation_names.contains(names.value(row)),
             "property" => {
                 property_names.contains(names.value(row))
@@ -502,7 +517,7 @@ fn read_parquet(path: &Path) -> Result<Vec<RecordBatch>, GfError> {
         .map_err(|error| GfError::Storage(error.to_string()))
 }
 
-fn write_parquet(path: &Path, batch: &RecordBatch) -> Result<(), GfError> {
+pub(crate) fn write_parquet(path: &Path, batch: &RecordBatch) -> Result<(), GfError> {
     let parent = path
         .parent()
         .ok_or_else(|| validation("graph parquet target has no parent"))?;
@@ -514,7 +529,7 @@ fn write_parquet(path: &Path, batch: &RecordBatch) -> Result<(), GfError> {
     Ok(())
 }
 
-fn projected_graph_fingerprint(root: &Path) -> Result<[u8; 32], GfError> {
+pub(crate) fn projected_graph_fingerprint(root: &Path) -> Result<[u8; 32], GfError> {
     let mut paths = Vec::new();
     let nodes = root.join("topology/nodes.parquet");
     if nodes.exists() {
@@ -528,7 +543,34 @@ fn projected_graph_fingerprint(root: &Path) -> Result<[u8; 32], GfError> {
         paths.push(runtime_catalog);
     }
     paths.sort();
+    fingerprint_graph_paths(root, paths)
+}
 
+/// Portable semantic graph identity excludes runtime catalog IDs while
+/// retaining decoded topology, edges, node properties, and edge properties.
+pub(crate) fn portable_graph_data_fingerprint(root: &Path) -> Result<[u8; 32], GfError> {
+    let runtime_entity_names = portable_runtime_entity_names(root)?;
+    let mut paths = Vec::new();
+    let nodes = root.join("topology/nodes.parquet");
+    if nodes.exists() {
+        paths.push(nodes);
+    }
+    for directory in ["topology/edges", "properties", "edge_properties"] {
+        paths.extend(sorted_parquet_files(&root.join(directory))?);
+    }
+    paths.sort();
+    fingerprint_graph_paths_with_runtime_names(root, paths, Some(&runtime_entity_names))
+}
+
+fn fingerprint_graph_paths(root: &Path, paths: Vec<PathBuf>) -> Result<[u8; 32], GfError> {
+    fingerprint_graph_paths_with_runtime_names(root, paths, None)
+}
+
+fn fingerprint_graph_paths_with_runtime_names(
+    root: &Path,
+    paths: Vec<PathBuf>,
+    runtime_entity_names: Option<&BTreeMap<u32, String>>,
+) -> Result<[u8; 32], GfError> {
     let mut writer = CanonicalWriter::new();
     writer.raw(b"GFGP1").map_err(canonical_error)?;
     writer
@@ -547,7 +589,7 @@ fn projected_graph_fingerprint(root: &Path) -> Result<[u8; 32], GfError> {
             .map(RecordBatch::schema)
             .ok_or_else(|| validation("graph projection table has no schema"))?;
         let batch = concat_batches(&schema, &batches).map_err(storage)?;
-        let logical = logical_fingerprint_batch(relative, &batch)?;
+        let logical = logical_fingerprint_batch(relative, &batch, runtime_entity_names)?;
         encode_table(&mut writer, &logical)?;
     }
     fingerprint(
@@ -558,9 +600,13 @@ fn projected_graph_fingerprint(root: &Path) -> Result<[u8; 32], GfError> {
     .map_err(canonical_error)
 }
 
-fn logical_fingerprint_batch(relative: &str, batch: &RecordBatch) -> Result<RecordBatch, GfError> {
+fn logical_fingerprint_batch(
+    relative: &str,
+    batch: &RecordBatch,
+    runtime_entity_names: Option<&BTreeMap<u32, String>>,
+) -> Result<RecordBatch, GfError> {
     let source_schema = batch.schema();
-    let names: Vec<&str> = if relative == "topology/nodes.parquet" {
+    let mut names: Vec<&str> = if relative == "topology/nodes.parquet" {
         vec!["node_uuid", "type_id", "type_ids"]
     } else if relative.starts_with("topology/edges/") {
         let mut names = vec!["edge_uuid", "src_uuid", "dst_uuid"];
@@ -577,20 +623,146 @@ fn logical_fingerprint_batch(relative: &str, batch: &RecordBatch) -> Result<Reco
             .map(|field| field.name().as_str())
             .collect()
     };
+    if !relative.starts_with("topology/") {
+        names.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+    }
     let mut fields = Vec::with_capacity(names.len());
     let mut columns = Vec::with_capacity(names.len());
     for name in names {
         let index = source_schema
             .index_of(name)
             .map_err(|_| validation(format!("graph fingerprint field {name} is absent")))?;
-        fields.push(Arc::clone(&source_schema.fields()[index]));
-        columns.push(Arc::clone(batch.column(index)));
+        if let Some(names) = runtime_entity_names.filter(|_| {
+            relative == "topology/nodes.parquet" && matches!(name, "type_id" | "type_ids")
+        }) {
+            let (field, column) = portable_node_type_column(name, batch.column(index), names)?;
+            fields.push(field);
+            columns.push(column);
+        } else {
+            fields.push(Arc::clone(&source_schema.fields()[index]));
+            columns.push(Arc::clone(batch.column(index)));
+        }
     }
     let schema = Arc::new(Schema::new_with_metadata(
         fields,
         source_schema.metadata().clone(),
     ));
     RecordBatch::try_new(schema, columns).map_err(storage)
+}
+
+fn portable_runtime_entity_names(root: &Path) -> Result<BTreeMap<u32, String>, GfError> {
+    let path = root.join("topology/runtime_catalog.parquet");
+    if !path.exists() {
+        return Ok(BTreeMap::new());
+    }
+    let batches = read_parquet(&path)?;
+    let schema = batches
+        .first()
+        .map(RecordBatch::schema)
+        .ok_or_else(|| validation("runtime catalog has no schema"))?;
+    let batch = concat_batches(&schema, &batches).map_err(storage)?;
+    // Parsing through RuntimeCatalog applies the catalog's complete structural
+    // and uniqueness validation before IDs are used as portable authority.
+    let canonical = graphforge_ir::RuntimeCatalog::from_record_batch(&batch)?.to_record_batch();
+    let kinds = string_column(&canonical, "entry_kind")?;
+    let names = string_column(&canonical, "name")?;
+    let ids = canonical
+        .column_by_name("runtime_id")
+        .and_then(|column| column.as_any().downcast_ref::<UInt32Array>())
+        .ok_or_else(|| validation("runtime catalog runtime_id is not UInt32"))?;
+    let mut result = BTreeMap::new();
+    for row in 0..canonical.num_rows() {
+        if kinds.value(row) == "entity_type"
+            && result
+                .insert(ids.value(row), names.value(row).to_owned())
+                .is_some()
+        {
+            return Err(validation("runtime catalog has a duplicate entity type ID"));
+        }
+    }
+    Ok(result)
+}
+
+fn portable_type_name(id: u32, runtime: &BTreeMap<u32, String>) -> Result<String, GfError> {
+    let id = graphforge_core::TypeId(id);
+    if graphforge_ir::is_runtime_entity_type_id(id) {
+        let local = graphforge_ir::runtime_type_id_from_entity_plan_id(id)
+            .expect("runtime entity tag checked")
+            .0;
+        return runtime
+            .get(&local)
+            .map(|name| format!("runtime-entity:{name}"))
+            .ok_or_else(|| validation("node runtime type ID has no catalog name"));
+    }
+    if id.0 & graphforge_ir::RUNTIME_RELATION_TYPE_TAG != 0 {
+        return Err(validation("node type carries a runtime relation tag"));
+    }
+    // Untagged IDs are generation-bound semantic storage IDs. Their stable
+    // namespace is deliberately distinct from runtime names; #872 validates
+    // these IDs against the authenticated semantic-binding participant when a
+    // generation is admitted.
+    Ok(format!("semantic-storage-id:{}", id.0))
+}
+
+fn portable_node_type_column(
+    name: &str,
+    column: &ArrayRef,
+    runtime: &BTreeMap<u32, String>,
+) -> Result<(Arc<Field>, ArrayRef), GfError> {
+    if name == "type_id" {
+        let values = column
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .ok_or_else(|| validation("node type_id is not UInt32"))?;
+        let mut builder = StringBuilder::with_capacity(values.len(), values.len() * 32);
+        for row in 0..values.len() {
+            if values.is_null(row) {
+                builder.append_null();
+            } else {
+                builder.append_value(portable_type_name(values.value(row), runtime)?);
+            }
+        }
+        return Ok((
+            Arc::new(Field::new(name, DataType::Utf8, true)),
+            Arc::new(builder.finish()),
+        ));
+    }
+    let lists = column
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .ok_or_else(|| validation("node type_ids is not List"))?;
+    let mut builder = ListBuilder::new(StringBuilder::new());
+    for row in 0..lists.len() {
+        if lists.is_null(row) {
+            builder.append(false);
+            continue;
+        }
+        let values = lists.value(row);
+        let values = values
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .ok_or_else(|| validation("node type_ids values are not UInt32"))?;
+        let mut resolved = Vec::with_capacity(values.len());
+        for item in 0..values.len() {
+            if values.is_null(item) {
+                return Err(validation("node type_ids contains null"));
+            }
+            resolved.push(portable_type_name(values.value(item), runtime)?);
+        }
+        resolved.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+        if resolved.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(validation("node type_ids contains a duplicate assignment"));
+        }
+        for value in resolved {
+            builder.values().append_value(value);
+        }
+        builder.append(true);
+    }
+    let values: ArrayRef = Arc::new(builder.finish());
+    Ok((
+        Arc::new(Field::new(name, values.data_type().clone(), true)),
+        values,
+    ))
 }
 
 fn encode_table(writer: &mut CanonicalWriter, batch: &RecordBatch) -> Result<(), GfError> {
@@ -2196,6 +2368,66 @@ mod tests {
             )),
             &DataType::Utf8
         );
+    }
+
+    fn portable_typed_graph(label: &str, catalog_prefix: Option<&str>) -> TempDir {
+        let root = TempDir::new().unwrap();
+        let mut catalog = RuntimeCatalog::new();
+        if let Some(prefix) = catalog_prefix {
+            catalog.intern_label(prefix);
+        }
+        let runtime_id = catalog.intern_label(label);
+        let storage_id = graphforge_ir::runtime_entity_type_id(runtime_id);
+        let mut writer = GraphWriter::open_at(root.path(), OntologyMode::Exploratory, TS).unwrap();
+        writer.create_node(uuid(91), storage_id).unwrap();
+        writer.flush().unwrap();
+        write_parquet(
+            &root.path().join("topology/runtime_catalog.parquet"),
+            &catalog.to_record_batch(),
+        )
+        .unwrap();
+        root
+    }
+
+    #[test]
+    fn portable_type_fingerprint_is_name_stable_parallel_and_semantic() {
+        let first = portable_typed_graph("Person", None);
+        let shifted = portable_typed_graph("Person", Some("EarlierInsertion"));
+        let changed = portable_typed_graph("Company", None);
+        let expected = portable_graph_data_fingerprint(first.path()).unwrap();
+        assert_eq!(
+            expected,
+            portable_graph_data_fingerprint(shifted.path()).unwrap(),
+            "runtime catalog allocation order must not leak into portable identity"
+        );
+        assert_ne!(
+            expected,
+            portable_graph_data_fingerprint(changed.path()).unwrap(),
+            "changing only the semantic type assignment must change identity"
+        );
+        std::thread::scope(|scope| {
+            let handles = (0..8)
+                .map(|_| scope.spawn(|| portable_graph_data_fingerprint(first.path()).unwrap()))
+                .collect::<Vec<_>>();
+            for handle in handles {
+                assert_eq!(handle.join().unwrap(), expected);
+            }
+        });
+    }
+
+    #[test]
+    fn portable_type_fingerprint_fails_closed_for_unresolved_runtime_id() {
+        let root = TempDir::new().unwrap();
+        let mut writer = GraphWriter::open_at(root.path(), OntologyMode::Exploratory, TS).unwrap();
+        writer
+            .create_node(
+                uuid(92),
+                graphforge_ir::runtime_entity_type_id(graphforge_ir::RuntimeTypeId(41)),
+            )
+            .unwrap();
+        writer.flush().unwrap();
+        let error = portable_graph_data_fingerprint(root.path()).unwrap_err();
+        assert!(error.to_string().contains("no catalog name"));
     }
 
     fn id_map(batch: &RecordBatch, uuid_name: &str, id_name: &str) -> BTreeMap<[u8; 16], u64> {

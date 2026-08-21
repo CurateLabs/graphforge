@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path};
 use std::sync::atomic::{AtomicBool, Ordering};
 use unicode_normalization::UnicodeNormalization;
@@ -19,6 +19,8 @@ use unicode_normalization::UnicodeNormalization;
 const MANIFEST_PATH: &str = "data/graphforge-project.json";
 pub(crate) const RUNTIME_MAP_PATH: &str =
     "data/components/compatibility/graphforge-runtime-map/runtime-generation.json";
+pub(crate) const ONTOLOGY_COMPOSITION_PATH: &str =
+    "data/components/compatibility/graphforge-ontology-composition/composition.json";
 const BAGIT: &[u8] = b"BagIt-Version: 1.0\nTag-File-Character-Encoding: UTF-8\n";
 const BAG_INFO: &[u8] = b"Bag-Software-Agent: GraphForge portable-v2\nBagging-Date: 1970-01-01\n";
 
@@ -109,6 +111,76 @@ pub struct PortableV2Report {
     pub compatibility: PortableV2Compatibility,
     pub authenticity: PortableV2Authenticity,
     pub transport_digest: Option<String>,
+    /// Exact authenticated multi-ontology compatibility control, when present.
+    pub ontology_composition: Option<PortableV2OntologyComposition>,
+    /// Authenticated bounded payload entries available to explicit lifecycle consumers.
+    pub ontology_composition_entries: Vec<PortableV2CompositionEntry>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct PortableV2CompositionEntry {
+    pub kind: String,
+    pub identity: PortableV2ExactIdentity,
+    pub path: String,
+    pub media_type: String,
+    pub length: u64,
+    pub sha256: String,
+    pub required_dependencies: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortableV2ExactIdentity {
+    pub id: String,
+    pub version: String,
+    pub content_digest: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortableV2ActivationOverride {
+    pub scope: String,
+    pub subject: PortableV2ExactIdentity,
+    pub mode: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortableV2ActivationProfile {
+    pub profile_default: String,
+    pub overrides: Vec<PortableV2ActivationOverride>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortableV2OntologyModule {
+    pub ontology_id: String,
+    pub version: String,
+    pub content_digest: String,
+    pub dialect: String,
+    pub profile: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortableV2BridgeSet {
+    pub bridge_id: String,
+    pub version: String,
+    pub content_digest: String,
+    pub source_modules: Vec<PortableV2ExactIdentity>,
+    pub target_modules: Vec<PortableV2ExactIdentity>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortableV2OntologyComposition {
+    pub contract: String,
+    pub activation_profile: PortableV2ActivationProfile,
+    pub modules: Vec<PortableV2OntologyModule>,
+    pub bridge_sets: Vec<PortableV2BridgeSet>,
+    pub required_features: Vec<String>,
+    pub optional_features: Vec<String>,
+    pub composition_digest: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -291,15 +363,471 @@ pub fn verify_portable_v2(
         ));
     }
     if metadata.is_dir() {
+        preflight_expanded(source, limits)?;
+    } else if metadata.is_file() {
+        preflight_bundle(source, limits, cancelled)?;
+    }
+    let report = if metadata.is_dir() {
         verify_expanded(source, mode, limits, cancelled)
     } else if metadata.is_file() {
         verify_bundle(source, mode, limits, cancelled)
     } else {
-        Err(PortableV2Error::new(
+        return Err(PortableV2Error::new(
             PortableV2ErrorCode::InvalidStructure,
             "source is not a regular file or directory",
-        ))
+        ));
+    }?;
+    if mode == PortableV2Mode::Full && report.ontology_composition.is_some() {
+        let staging = tempfile::tempdir().map_err(|_| {
+            PortableV2Error::new(
+                PortableV2ErrorCode::Io,
+                "cannot stage semantic verification",
+            )
+        })?;
+        if metadata.is_dir() {
+            materialize_expanded(source, staging.path(), limits, cancelled)?;
+        } else {
+            materialize_bundle(source, staging.path(), limits, cancelled)?;
+        }
+        validate_materialized_ontology_composition(staging.path(), &report, limits, cancelled)?;
     }
+    Ok(report)
+}
+
+fn admit_manifest(bytes: &[u8], limits: PortableV2Limits) -> Result<Manifest, PortableV2Error> {
+    if bytes.len() as u64 > limits.max_manifest_bytes {
+        return Err(PortableV2Error::at(
+            PortableV2ErrorCode::LimitExceeded,
+            MANIFEST_PATH,
+            "manifest size",
+        ));
+    }
+    let (manifest, canonical_without_digest) = parse_manifest(bytes, limits)?;
+    let expected = format!(
+        "sha256:{}",
+        hex(&Sha256::digest(
+            [
+                b"graphforge-project/2\0".as_slice(),
+                canonical_without_digest.as_slice()
+            ]
+            .concat()
+        ))
+    );
+    if !constant_time_eq(expected.as_bytes(), manifest.package_digest.as_bytes()) {
+        return Err(PortableV2Error::at(
+            PortableV2ErrorCode::DigestMismatch,
+            MANIFEST_PATH,
+            "package digest",
+        ));
+    }
+    validate_semantics(&manifest, limits)?;
+    Ok(manifest)
+}
+
+fn admit_composition_features(bytes: &[u8]) -> Result<(), PortableV2Error> {
+    let control: PortableV2OntologyComposition = serde_json::from_slice(bytes).map_err(|_| {
+        PortableV2Error::at(
+            PortableV2ErrorCode::InvalidStructure,
+            ONTOLOGY_COMPOSITION_PATH,
+            "ontology composition schema",
+        )
+    })?;
+    if control.required_features.iter().any(|feature| {
+        !matches!(
+            feature.as_str(),
+            "provenance-bridges@1" | "qualified-symbols@1"
+        )
+    }) {
+        return Err(PortableV2Error::at(
+            PortableV2ErrorCode::UnsupportedFuture,
+            ONTOLOGY_COMPOSITION_PATH,
+            "required ontology composition feature",
+        ));
+    }
+    Ok(())
+}
+
+fn read_bounded_file(path: &Path, limit: u64, entry: &str) -> Result<Vec<u8>, PortableV2Error> {
+    let metadata = fs::symlink_metadata(path).map_err(|_| {
+        PortableV2Error::at(
+            PortableV2ErrorCode::InvalidStructure,
+            entry,
+            "control unavailable",
+        )
+    })?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > limit {
+        return Err(PortableV2Error::at(
+            PortableV2ErrorCode::LimitExceeded,
+            entry,
+            "control bound",
+        ));
+    }
+    let mut file =
+        crate::project_portable_v2_export::open_source_no_follow(path).map_err(|_| {
+            PortableV2Error::at(
+                PortableV2ErrorCode::InvalidStructure,
+                entry,
+                "unsafe control",
+            )
+        })?;
+    let mut bytes = Vec::new();
+    std::io::Read::by_ref(&mut file)
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|_| PortableV2Error::at(PortableV2ErrorCode::Io, entry, "cannot read control"))?;
+    if bytes.len() as u64 > limit {
+        return Err(PortableV2Error::at(
+            PortableV2ErrorCode::LimitExceeded,
+            entry,
+            "control bound",
+        ));
+    }
+    Ok(bytes)
+}
+
+fn preflight_expanded(root: &Path, limits: PortableV2Limits) -> Result<(), PortableV2Error> {
+    let manifest = read_bounded_file(
+        &root.join(MANIFEST_PATH),
+        limits.max_manifest_bytes,
+        MANIFEST_PATH,
+    )?;
+    let admitted = admit_manifest(&manifest, limits)?;
+    if admitted
+        .requirements
+        .capabilities
+        .iter()
+        .any(|capability| capability == "ontology-composition@1")
+    {
+        let control = read_bounded_file(
+            &root.join(ONTOLOGY_COMPOSITION_PATH),
+            limits.max_manifest_bytes,
+            ONTOLOGY_COMPOSITION_PATH,
+        )?;
+        admit_composition_features(&control)?;
+    }
+    Ok(())
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "keeps bounded header census and admission ordering in one pre-mutation audit path"
+)]
+fn preflight_bundle(
+    path: &Path,
+    limits: PortableV2Limits,
+    cancelled: Option<&AtomicBool>,
+) -> Result<(), PortableV2Error> {
+    let mut input = File::open(path)
+        .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::Io, "cannot open bundle"))?;
+    let mut pending_pax = None;
+    let mut admitted_manifest = None;
+    let mut pending_composition: Option<Vec<u8>> = None;
+    let mut admitted_composition = false;
+    let mut entries = 0_u64;
+    let mut total = 0_u64;
+    loop {
+        check_cancel(cancelled)?;
+        let mut header = [0_u8; 512];
+        input.read_exact(&mut header).map_err(|_| {
+            PortableV2Error::new(PortableV2ErrorCode::InvalidStructure, "truncated bundle")
+        })?;
+        if header.iter().all(|byte| *byte == 0) {
+            break;
+        }
+        let size = parse_octal(&header[124..136])?;
+        let raw_path = header_path(&header)?;
+        entries = entries.checked_add(1).ok_or_else(|| {
+            PortableV2Error::new(PortableV2ErrorCode::LimitExceeded, "bundle entry count")
+        })?;
+        if entries > limits.max_entries {
+            return Err(PortableV2Error::new(
+                PortableV2ErrorCode::LimitExceeded,
+                "bundle entry count",
+            ));
+        }
+        total = total.checked_add(size).ok_or_else(|| {
+            PortableV2Error::new(PortableV2ErrorCode::LimitExceeded, "bundle total bytes")
+        })?;
+        if total > limits.max_total_bytes {
+            return Err(PortableV2Error::new(
+                PortableV2ErrorCode::LimitExceeded,
+                "bundle total bytes",
+            ));
+        }
+        if header[156] == b'x' {
+            let bytes = read_unhashed_payload(&mut input, size, limits.max_path_bytes + 32)?;
+            pending_pax = Some(parse_pax(std::str::from_utf8(&bytes).map_err(|_| {
+                PortableV2Error::new(PortableV2ErrorCode::InvalidPath, "PAX path is not UTF-8")
+            })?)?);
+            continue;
+        }
+        let entry = pending_pax.take().unwrap_or(raw_path);
+        if entry == MANIFEST_PATH || entry == ONTOLOGY_COMPOSITION_PATH {
+            let cap = limits.max_manifest_bytes;
+            let bytes = read_unhashed_payload(
+                &mut input,
+                size,
+                usize::try_from(cap).unwrap_or(usize::MAX),
+            )?;
+            if entry == MANIFEST_PATH {
+                let admitted = admit_manifest(&bytes, limits)?;
+                let needs_composition = admitted
+                    .requirements
+                    .capabilities
+                    .iter()
+                    .any(|capability| capability == "ontology-composition@1");
+                if !needs_composition {
+                    admitted_manifest = Some(admitted);
+                    continue;
+                }
+                admitted_manifest = Some(admitted);
+                if let Some(control) = pending_composition.take() {
+                    admit_composition_features(&control)?;
+                    admitted_composition = true;
+                }
+            } else if admitted_manifest.is_some() {
+                admit_composition_features(&bytes)?;
+                admitted_composition = true;
+            } else {
+                // Canonical bundles sort paths, so the composition control can
+                // precede the root manifest. Retain only this bounded control;
+                // no component payload is read before both admission documents
+                // have been checked.
+                pending_composition = Some(bytes);
+            }
+        } else {
+            let padding = (512 - size % 512) % 512;
+            let skip = i64::try_from(size.saturating_add(padding)).map_err(|_| {
+                PortableV2Error::new(PortableV2ErrorCode::LimitExceeded, "bundle entry size")
+            })?;
+            input.seek(SeekFrom::Current(skip)).map_err(|_| {
+                PortableV2Error::new(PortableV2ErrorCode::InvalidStructure, "truncated bundle")
+            })?;
+        }
+    }
+    let Some(manifest) = admitted_manifest else {
+        return Err(PortableV2Error::at(
+            PortableV2ErrorCode::InvalidStructure,
+            MANIFEST_PATH,
+            "required preflight control is missing",
+        ));
+    };
+    if manifest
+        .requirements
+        .capabilities
+        .iter()
+        .any(|capability| capability == "ontology-composition@1")
+        && !admitted_composition
+    {
+        return Err(PortableV2Error::at(
+            PortableV2ErrorCode::InvalidStructure,
+            ONTOLOGY_COMPOSITION_PATH,
+            "required preflight control is missing",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_materialized_ontology_composition(
+    root: &Path,
+    report: &PortableV2Report,
+    limits: PortableV2Limits,
+    cancelled: Option<&AtomicBool>,
+) -> Result<(), PortableV2Error> {
+    let Some(control) = &report.ontology_composition else {
+        return Ok(());
+    };
+    validate_semantic_payload_budget(report, limits)?;
+    for entry in &report.ontology_composition_entries {
+        check_cancel(cancelled)?;
+        let value = read_canonical_semantic_payload(root, entry)?;
+        if entry.kind == "ontology" {
+            validate_materialized_ontology(entry, value)?;
+        } else {
+            validate_materialized_bridge(entry, value, control)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_semantic_payload_budget(
+    report: &PortableV2Report,
+    limits: PortableV2Limits,
+) -> Result<(), PortableV2Error> {
+    let mut aggregate = 0_u64;
+    for entry in &report.ontology_composition_entries {
+        aggregate = aggregate.checked_add(entry.length).ok_or_else(|| {
+            PortableV2Error::new(
+                PortableV2ErrorCode::LimitExceeded,
+                "semantic payload overflow",
+            )
+        })?;
+        if aggregate > limits.max_manifest_bytes {
+            return Err(PortableV2Error::new(
+                PortableV2ErrorCode::LimitExceeded,
+                "semantic payload budget",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn read_canonical_semantic_payload(
+    root: &Path,
+    entry: &PortableV2CompositionEntry,
+) -> Result<Value, PortableV2Error> {
+    let path = root.join(&entry.path);
+    let metadata = fs::symlink_metadata(&path).map_err(|_| {
+        PortableV2Error::at(
+            PortableV2ErrorCode::InvalidStructure,
+            &entry.path,
+            "semantic payload unavailable",
+        )
+    })?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() != entry.length {
+        return Err(PortableV2Error::at(
+            PortableV2ErrorCode::InvalidStructure,
+            &entry.path,
+            "semantic payload is not the authenticated regular file",
+        ));
+    }
+    let length = usize::try_from(entry.length).map_err(|_| {
+        PortableV2Error::new(PortableV2ErrorCode::LimitExceeded, "semantic payload size")
+    })?;
+    let mut file =
+        crate::project_portable_v2_export::open_source_no_follow(&path).map_err(|_| {
+            PortableV2Error::at(
+                PortableV2ErrorCode::InvalidStructure,
+                &entry.path,
+                "cannot open semantic payload",
+            )
+        })?;
+    let mut bytes = Vec::with_capacity(length);
+    std::io::Read::by_ref(&mut file)
+        .take(entry.length.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|_| {
+            PortableV2Error::at(
+                PortableV2ErrorCode::Io,
+                &entry.path,
+                "cannot read semantic payload",
+            )
+        })?;
+    if bytes.len() != length {
+        return Err(PortableV2Error::at(
+            PortableV2ErrorCode::ConcurrentMutation,
+            &entry.path,
+            "semantic payload changed",
+        ));
+    }
+    let value = serde_json::from_slice(&bytes).map_err(|_| {
+        PortableV2Error::at(
+            PortableV2ErrorCode::InvalidStructure,
+            &entry.path,
+            "semantic payload JSON",
+        )
+    })?;
+    if canonical_json(&value)? != bytes {
+        return Err(PortableV2Error::at(
+            PortableV2ErrorCode::Incompatible,
+            &entry.path,
+            "semantic payload is noncanonical",
+        ));
+    }
+    Ok(value)
+}
+
+fn validate_materialized_ontology(
+    entry: &PortableV2CompositionEntry,
+    value: Value,
+) -> Result<(), PortableV2Error> {
+    let document: graphforge_ontology::OntologyDoc =
+        serde_json::from_value(value).map_err(|_| {
+            PortableV2Error::at(
+                PortableV2ErrorCode::InvalidStructure,
+                &entry.path,
+                "ontology module schema",
+            )
+        })?;
+    let digest = graphforge_ontology::module_document_digest(&document).map_err(|_| {
+        PortableV2Error::at(
+            PortableV2ErrorCode::Incompatible,
+            &entry.path,
+            "ontology module canonicalization",
+        )
+    })?;
+    if (!entry.identity.id.starts_with("legacy:") && document.ontology_id != entry.identity.id)
+        || (!entry.identity.id.starts_with("legacy:") && document.version != entry.identity.version)
+        || entry.identity.content_digest != format!("sha256:{digest}")
+    {
+        return Err(PortableV2Error::at(
+            PortableV2ErrorCode::DigestMismatch,
+            &entry.path,
+            "ontology module semantic identity",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_materialized_bridge(
+    entry: &PortableV2CompositionEntry,
+    value: Value,
+    control: &PortableV2OntologyComposition,
+) -> Result<(), PortableV2Error> {
+    let document: graphforge_ontology::BridgeDocument =
+        serde_json::from_value(value).map_err(|_| {
+            PortableV2Error::at(
+                PortableV2ErrorCode::InvalidStructure,
+                &entry.path,
+                "ontology bridge schema",
+            )
+        })?;
+    let digest = graphforge_ontology::bridge_document_digest(&document).map_err(|_| {
+        PortableV2Error::at(
+            PortableV2ErrorCode::Incompatible,
+            &entry.path,
+            "ontology bridge canonicalization",
+        )
+    })?;
+    let expected = control
+        .bridge_sets
+        .iter()
+        .find(|bridge| {
+            bridge.bridge_id == entry.identity.id
+                && bridge.version == entry.identity.version
+                && bridge.content_digest == entry.identity.content_digest
+        })
+        .ok_or_else(|| {
+            PortableV2Error::new(PortableV2ErrorCode::Incompatible, "bridge control closure")
+        })?;
+    let exact_identity = |module: &graphforge_ontology::OntologyModuleId| PortableV2ExactIdentity {
+        id: module.ontology_id.clone(),
+        version: module.authored_version.clone(),
+        content_digest: format!("sha256:{}", module.canonical_digest),
+    };
+    let sources = document
+        .source_modules
+        .iter()
+        .map(exact_identity)
+        .collect::<Vec<_>>();
+    let targets = document
+        .target_modules
+        .iter()
+        .map(exact_identity)
+        .collect::<Vec<_>>();
+    if document.bridge_id != entry.identity.id
+        || document.authored_version != entry.identity.version
+        || entry.identity.content_digest != format!("sha256:{digest}")
+        || sources != expected.source_modules
+        || targets != expected.target_modules
+    {
+        return Err(PortableV2Error::at(
+            PortableV2ErrorCode::DigestMismatch,
+            &entry.path,
+            "ontology bridge semantic identity",
+        ));
+    }
+    Ok(())
 }
 
 /// Fully verify a package, then stream its authenticated component entries
@@ -949,6 +1477,8 @@ fn validate_package(
     validate_semantics(&manifest, limits)?;
     validate_bag_manifests(&map, &manifest)?;
     validate_runtime_map(&map, &manifest, limits)?;
+    let (ontology_composition, ontology_composition_entries) =
+        validate_ontology_composition(&map, &manifest, limits)?;
     let full = mode == PortableV2Mode::Full;
     Ok(PortableV2Report {
         contract: "graphforge-portable-verify/2",
@@ -966,6 +1496,8 @@ fn validate_package(
         compatibility: PortableV2Compatibility::Supported,
         authenticity: PortableV2Authenticity::Unsigned,
         transport_digest: transport.map(|x| format!("sha256:{x}")),
+        ontology_composition,
+        ontology_composition_entries,
     })
 }
 
@@ -1119,6 +1651,7 @@ fn validate_semantics(m: &Manifest, limits: PortableV2Limits) -> Result<(), Port
         "evidence@1",
         "provenance@1",
         "compatibility@1",
+        "ontology-composition@1",
     ];
     if m.requirements
         .capabilities
@@ -1164,7 +1697,14 @@ fn validate_semantics(m: &Manifest, limits: PortableV2Limits) -> Result<(), Port
                 ));
             }
             previous = Some(&f.path);
-            if f.length > limits.max_entry_bytes || !sha(&f.sha256) || !valid_media(&f.media_type) {
+            if f.length > limits.max_entry_bytes {
+                return Err(PortableV2Error::at(
+                    PortableV2ErrorCode::LimitExceeded,
+                    &f.path,
+                    "file descriptor size",
+                ));
+            }
+            if !sha(&f.sha256) || !valid_media(&f.media_type) {
                 return Err(PortableV2Error::at(
                     PortableV2ErrorCode::Incompatible,
                     &f.path,
@@ -1405,6 +1945,403 @@ fn validate_runtime_map(
         ));
     }
     validate_runtime_map_contents(&runtime, manifest)
+}
+
+fn validate_ontology_composition(
+    map: &BTreeMap<&str, &Entry>,
+    manifest: &Manifest,
+    limits: PortableV2Limits,
+) -> Result<
+    (
+        Option<PortableV2OntologyComposition>,
+        Vec<PortableV2CompositionEntry>,
+    ),
+    PortableV2Error,
+> {
+    let required = manifest
+        .requirements
+        .capabilities
+        .iter()
+        .any(|capability| capability == "ontology-composition@1");
+    let component = manifest.components.iter().find(|component| {
+        component.kind == "compatibility"
+            && component.participant_id == "graphforge-ontology-composition"
+    });
+    if required != component.is_some() {
+        return Err(PortableV2Error::new(
+            PortableV2ErrorCode::Incompatible,
+            "ontology composition capability/component mismatch",
+        ));
+    }
+    let Some(component) = component else {
+        return Ok((None, Vec::new()));
+    };
+    if component.files.len() != 1
+        || component.files[0].path != ONTOLOGY_COMPOSITION_PATH
+        || component.files[0].media_type != "application/vnd.graphforge.ontology-composition+json"
+        || component.files[0].length > limits.max_manifest_bytes
+    {
+        return Err(PortableV2Error::at(
+            PortableV2ErrorCode::Incompatible,
+            ONTOLOGY_COMPOSITION_PATH,
+            "ontology composition descriptor",
+        ));
+    }
+    let bytes = read_entry_bytes_from_map(map, ONTOLOGY_COMPOSITION_PATH)?;
+    let value = UniqueValue::deserialize(&mut serde_json::Deserializer::from_slice(&bytes))
+        .map_err(|_| {
+            PortableV2Error::at(
+                PortableV2ErrorCode::InvalidStructure,
+                ONTOLOGY_COMPOSITION_PATH,
+                "ontology composition JSON",
+            )
+        })?
+        .0;
+    if canonical_json(&value).map_err(|_| {
+        PortableV2Error::at(
+            PortableV2ErrorCode::Incompatible,
+            ONTOLOGY_COMPOSITION_PATH,
+            "ontology composition canonicalization",
+        )
+    })? != bytes
+    {
+        return Err(PortableV2Error::at(
+            PortableV2ErrorCode::Incompatible,
+            ONTOLOGY_COMPOSITION_PATH,
+            "ontology composition is noncanonical",
+        ));
+    }
+    let control: PortableV2OntologyComposition =
+        serde_json::from_value(value.clone()).map_err(|_| {
+            PortableV2Error::at(
+                PortableV2ErrorCode::InvalidStructure,
+                ONTOLOGY_COMPOSITION_PATH,
+                "ontology composition schema",
+            )
+        })?;
+    validate_ontology_composition_contents(&control, component, limits)?;
+    let mut unsigned = value;
+    unsigned
+        .as_object_mut()
+        .ok_or_else(|| PortableV2Error::new(PortableV2ErrorCode::InvalidStructure, "composition"))?
+        .remove("composition_digest");
+    let mut digest = Sha256::new();
+    digest.update(b"graphforge-ontology-composition/1\0");
+    digest.update(canonical_json(&unsigned).map_err(|_| {
+        PortableV2Error::new(PortableV2ErrorCode::Incompatible, "composition identity")
+    })?);
+    let expected = format!("sha256:{}", hex(&digest.finalize()));
+    if !constant_time_eq(expected.as_bytes(), control.composition_digest.as_bytes()) {
+        return Err(PortableV2Error::at(
+            PortableV2ErrorCode::DigestMismatch,
+            ONTOLOGY_COMPOSITION_PATH,
+            "composition digest",
+        ));
+    }
+    let entries = validate_ontology_component_descriptors(&control, manifest)?;
+    Ok((Some(control), entries))
+}
+
+fn validate_ontology_component_descriptors(
+    control: &PortableV2OntologyComposition,
+    manifest: &Manifest,
+) -> Result<Vec<PortableV2CompositionEntry>, PortableV2Error> {
+    let mut entries = Vec::new();
+    for (kind, identity, component_id, file_name, media_type) in control
+        .modules
+        .iter()
+        .map(|module| {
+            let identity = PortableV2ExactIdentity {
+                id: module.ontology_id.clone(),
+                version: module.version.clone(),
+                content_digest: module.content_digest.clone(),
+            };
+            (
+                "ontology",
+                identity,
+                format!(
+                    "ontology-module-{}",
+                    module.content_digest.trim_start_matches("sha256:")
+                ),
+                "module.json",
+                "application/vnd.graphforge.ontology+json",
+            )
+        })
+        .chain(control.bridge_sets.iter().map(|bridge| {
+            let identity = PortableV2ExactIdentity {
+                id: bridge.bridge_id.clone(),
+                version: bridge.version.clone(),
+                content_digest: bridge.content_digest.clone(),
+            };
+            (
+                "schema",
+                identity,
+                format!(
+                    "ontology-bridge-{}",
+                    bridge.content_digest.trim_start_matches("sha256:")
+                ),
+                "bridge.json",
+                "application/vnd.graphforge.ontology-bridge+json",
+            )
+        }))
+    {
+        let component = manifest
+            .components
+            .iter()
+            .find(|component| component.kind == kind && component.participant_id == component_id)
+            .ok_or_else(|| {
+                PortableV2Error::new(
+                    PortableV2ErrorCode::Incompatible,
+                    "missing ontology composition payload component",
+                )
+            })?;
+        let expected_path = format!("data/components/{kind}/{component_id}/{file_name}");
+        if component.files.len() != 1
+            || component.files[0].path != expected_path
+            || component.files[0].media_type != media_type
+        {
+            return Err(PortableV2Error::at(
+                PortableV2ErrorCode::Incompatible,
+                &expected_path,
+                "ontology composition payload descriptor",
+            ));
+        }
+        let file = &component.files[0];
+        entries.push(PortableV2CompositionEntry {
+            kind: kind.into(),
+            identity,
+            path: file.path.clone(),
+            media_type: file.media_type.clone(),
+            length: file.length,
+            sha256: file.sha256.clone(),
+            required_dependencies: component.required_dependencies.clone(),
+        });
+    }
+    entries.sort_by(|left, right| left.path.as_bytes().cmp(right.path.as_bytes()));
+    Ok(entries)
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "keeps the closed composition contract and its closure checks auditable together"
+)]
+fn validate_ontology_composition_contents(
+    control: &PortableV2OntologyComposition,
+    component: &ManifestComponent,
+    limits: PortableV2Limits,
+) -> Result<(), PortableV2Error> {
+    if control.contract != "graphforge-ontology-composition/1"
+        || control.modules.len() as u64 > limits.max_components
+        || control.bridge_sets.len() as u64 > limits.max_components
+        || control.activation_profile.overrides.len() as u64
+            > limits.max_components.saturating_mul(2)
+        || !matches!(
+            control.activation_profile.profile_default.as_str(),
+            "exploratory" | "advisory" | "strict"
+        )
+    {
+        return Err(PortableV2Error::new(
+            PortableV2ErrorCode::LimitExceeded,
+            "ontology composition contract or bound",
+        ));
+    }
+    let modules = control
+        .modules
+        .iter()
+        .map(|module| {
+            validate_exact_fields(&module.ontology_id, &module.version, &module.content_digest)?;
+            if module.dialect != "graphforge-ontology"
+                || !matches!(
+                    module.profile.as_str(),
+                    "exploratory" | "advisory" | "strict"
+                )
+            {
+                return Err(PortableV2Error::new(
+                    PortableV2ErrorCode::Incompatible,
+                    "ontology module metadata",
+                ));
+            }
+            Ok((
+                module.ontology_id.as_str(),
+                module.version.as_str(),
+                module.content_digest.as_str(),
+            ))
+        })
+        .collect::<Result<Vec<_>, PortableV2Error>>()?;
+    if modules.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(PortableV2Error::new(
+            PortableV2ErrorCode::Incompatible,
+            "ontology module order",
+        ));
+    }
+    let bridges = control
+        .bridge_sets
+        .iter()
+        .map(|bridge| {
+            validate_exact_fields(&bridge.bridge_id, &bridge.version, &bridge.content_digest)?;
+            validate_identity_list(&bridge.source_modules, &modules)?;
+            validate_identity_list(&bridge.target_modules, &modules)?;
+            Ok((
+                bridge.bridge_id.as_str(),
+                bridge.version.as_str(),
+                bridge.content_digest.as_str(),
+            ))
+        })
+        .collect::<Result<Vec<_>, PortableV2Error>>()?;
+    if bridges.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(PortableV2Error::new(
+            PortableV2ErrorCode::Incompatible,
+            "bridge set order",
+        ));
+    }
+    let overrides = &control.activation_profile.overrides;
+    let mut prior = None;
+    for activation in overrides {
+        let identity = exact_tuple(&activation.subject)?;
+        let scope = activation.scope.as_str();
+        if !matches!(scope, "module" | "bridge")
+            || !matches!(
+                activation.mode.as_str(),
+                "exploratory" | "advisory" | "strict"
+            )
+            || (scope == "module" && !modules.contains(&identity))
+            || (scope == "bridge" && !bridges.contains(&identity))
+        {
+            return Err(PortableV2Error::new(
+                PortableV2ErrorCode::Incompatible,
+                "activation closure",
+            ));
+        }
+        let key = (scope, identity, activation.mode.as_str());
+        if prior >= Some(key) {
+            return Err(PortableV2Error::new(
+                PortableV2ErrorCode::Incompatible,
+                "activation order",
+            ));
+        }
+        prior = Some(key);
+    }
+    for features in [&control.required_features, &control.optional_features] {
+        unique_sorted(features, "ontology composition features")?;
+        if features.len() > 256 || features.iter().any(|value| !valid_feature(value)) {
+            return Err(PortableV2Error::new(
+                PortableV2ErrorCode::UnsupportedFuture,
+                "ontology composition feature",
+            ));
+        }
+    }
+    if control.required_features.iter().any(|feature| {
+        !matches!(
+            feature.as_str(),
+            "provenance-bridges@1" | "qualified-symbols@1"
+        )
+    }) {
+        return Err(PortableV2Error::new(
+            PortableV2ErrorCode::UnsupportedFuture,
+            "required ontology composition feature",
+        ));
+    }
+    let dependency_ids = component
+        .required_dependencies
+        .iter()
+        .collect::<BTreeSet<_>>();
+    let expected_dependencies = control
+        .modules
+        .iter()
+        .map(|module| {
+            format!(
+                "ontology-module-{}",
+                module.content_digest.trim_start_matches("sha256:")
+            )
+        })
+        .chain(control.bridge_sets.iter().map(|bridge| {
+            format!(
+                "ontology-bridge-{}",
+                bridge.content_digest.trim_start_matches("sha256:")
+            )
+        }))
+        .collect::<BTreeSet<_>>();
+    if dependency_ids.len() != component.required_dependencies.len()
+        || dependency_ids != expected_dependencies.iter().collect::<BTreeSet<_>>()
+    {
+        return Err(PortableV2Error::new(
+            PortableV2ErrorCode::Incompatible,
+            "ontology composition dependency closure",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_identity_list<'a>(
+    values: &'a [PortableV2ExactIdentity],
+    modules: &[(&'a str, &'a str, &'a str)],
+) -> Result<(), PortableV2Error> {
+    if values.is_empty() {
+        return Err(PortableV2Error::new(
+            PortableV2ErrorCode::Incompatible,
+            "empty bridge endpoint",
+        ));
+    }
+    let identities = values
+        .iter()
+        .map(exact_tuple)
+        .collect::<Result<Vec<_>, _>>()?;
+    if identities.windows(2).any(|pair| pair[0] >= pair[1])
+        || identities
+            .iter()
+            .any(|identity| !modules.contains(identity))
+    {
+        return Err(PortableV2Error::new(
+            PortableV2ErrorCode::Incompatible,
+            "bridge endpoint closure",
+        ));
+    }
+    Ok(())
+}
+
+fn exact_tuple(value: &PortableV2ExactIdentity) -> Result<(&str, &str, &str), PortableV2Error> {
+    validate_exact_fields(&value.id, &value.version, &value.content_digest)?;
+    Ok((&value.id, &value.version, &value.content_digest))
+}
+
+fn validate_exact_fields(id: &str, version: &str, digest: &str) -> Result<(), PortableV2Error> {
+    let scheme = id.find(':').unwrap_or_default();
+    if id.len() > 2048
+        || scheme == 0
+        || !id[..scheme].bytes().enumerate().all(|(index, byte)| {
+            if index == 0 {
+                byte.is_ascii_alphabetic()
+            } else {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'.' | b'-')
+            }
+        })
+        || id[scheme + 1..].is_empty()
+        || id.chars().any(char::is_whitespace)
+        || id.nfc().ne(id.chars())
+        || version.is_empty()
+        || version.len() > 256
+        || version.chars().any(char::is_control)
+        || version.nfc().ne(version.chars())
+        || !digest.strip_prefix("sha256:").is_some_and(sha)
+    {
+        return Err(PortableV2Error::new(
+            PortableV2ErrorCode::Incompatible,
+            "exact ontology identity",
+        ));
+    }
+    Ok(())
+}
+
+fn valid_feature(value: &str) -> bool {
+    let Some((name, version)) = value.rsplit_once('@') else {
+        return false;
+    };
+    valid_id(name)
+        && version
+            .as_bytes()
+            .first()
+            .is_some_and(|byte| byte.is_ascii_digit() && *byte != b'0')
+        && version.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 fn runtime_map_descriptor(manifest: &Manifest) -> Result<Option<&ManifestFile>, PortableV2Error> {
@@ -1662,8 +2599,23 @@ fn hash_file(
     retain_limit: Option<u64>,
     cancelled: Option<&AtomicBool>,
 ) -> Result<([u8; 32], Option<Vec<u8>>), PortableV2Error> {
-    let mut f = File::open(path)
-        .map_err(|_| PortableV2Error::at(PortableV2ErrorCode::Io, entry, "cannot open entry"))?;
+    let mut f = crate::project_portable_v2_export::open_source_no_follow(path).map_err(|_| {
+        PortableV2Error::at(
+            PortableV2ErrorCode::InvalidStructure,
+            entry,
+            "cannot safely open entry",
+        )
+    })?;
+    let before = f.metadata().map_err(|_| {
+        PortableV2Error::at(PortableV2ErrorCode::Io, entry, "cannot inspect open entry")
+    })?;
+    if !before.is_file() || has_multiple_links(&before) || before.len() != length {
+        return Err(PortableV2Error::at(
+            PortableV2ErrorCode::ConcurrentMutation,
+            entry,
+            "opened entry identity differs from inventory",
+        ));
+    }
     let mut h = Sha256::new();
     if retain_limit.is_some_and(|limit| length > limit) {
         return Err(PortableV2Error::at(
@@ -1706,6 +2658,23 @@ fn hash_file(
             bytes.extend_from_slice(&b[..n]);
         }
         left -= n as u64;
+    }
+    let after = f.metadata().map_err(|_| {
+        PortableV2Error::at(
+            PortableV2ErrorCode::Io,
+            entry,
+            "cannot re-inspect open entry",
+        )
+    })?;
+    if !same_identity(&before, &after)
+        || before.len() != after.len()
+        || modified(&before) != modified(&after)
+    {
+        return Err(PortableV2Error::at(
+            PortableV2ErrorCode::ConcurrentMutation,
+            entry,
+            "open entry changed while hashing",
+        ));
     }
     Ok((h.finalize().into(), kept))
 }
@@ -2078,7 +3047,9 @@ fn hex(bytes: &[u8]) -> String {
 }
 fn retained_limit(path: &str, limits: PortableV2Limits) -> Option<u64> {
     match path {
-        MANIFEST_PATH | RUNTIME_MAP_PATH => Some(limits.max_manifest_bytes),
+        MANIFEST_PATH | RUNTIME_MAP_PATH | ONTOLOGY_COMPOSITION_PATH => {
+            Some(limits.max_manifest_bytes)
+        }
         "bagit.txt" | "bag-info.txt" | "manifest-sha256.txt" | "tagmanifest-sha256.txt" => {
             Some(limits.max_tag_manifest_bytes)
         }
@@ -2205,7 +3176,7 @@ mod tests {
     }
 
     #[test]
-    fn pre_m9_reader_rejects_required_ontology_composition_before_payload_access() {
+    fn current_reader_recognizes_the_m9_capability_before_payload_validation() {
         let mut value: Value = serde_json::from_str(include_str!(
             "../../../tests/fixtures/portable-v2/ontology-only.manifest.json"
         ))
@@ -2216,8 +3187,94 @@ mod tests {
         capabilities.push(Value::String("ontology-composition@1".into()));
         capabilities.sort_by(|left, right| left.as_str().cmp(&right.as_str()));
         let manifest: Manifest = serde_json::from_value(value).unwrap();
-        let error = validate_semantics(&manifest, PortableV2Limits::default()).unwrap_err();
-        assert_eq!(error.code, PortableV2ErrorCode::UnsupportedFuture);
+        validate_semantics(&manifest, PortableV2Limits::default()).unwrap();
+    }
+
+    fn composition_vector() -> (PortableV2OntologyComposition, ManifestComponent) {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/portable-v2/multi-ontology-vectors.json"
+        ))
+        .unwrap();
+        let control = serde_json::from_value(fixture["composition"].clone()).unwrap();
+        let component = serde_json::from_value(serde_json::json!({
+            "kind": "compatibility",
+            "participant_id": "graphforge-ontology-composition",
+            "required_dependencies": [
+                format!("ontology-bridge-{}", "4".repeat(64)),
+                format!("ontology-module-{}", "1".repeat(64)),
+                format!("ontology-module-{}", "2".repeat(64)),
+                format!("ontology-module-{}", "3".repeat(64))
+            ],
+            "files": [{
+                "media_type": "application/vnd.graphforge.ontology-composition+json",
+                "path": ONTOLOGY_COMPOSITION_PATH,
+                "length": 1,
+                "sha256": format!("sha256:{}", "1".repeat(64))
+            }]
+        }))
+        .unwrap();
+        (control, component)
+    }
+
+    #[test]
+    fn composition_control_rejects_duplicate_dangling_and_unbounded_closure() {
+        let (valid, component) = composition_vector();
+        validate_ontology_composition_contents(&valid, &component, PortableV2Limits::default())
+            .unwrap();
+
+        let mut duplicate = valid.clone();
+        duplicate.modules.push(duplicate.modules[0].clone());
+        assert_eq!(
+            validate_ontology_composition_contents(
+                &duplicate,
+                &component,
+                PortableV2Limits::default()
+            )
+            .unwrap_err()
+            .code,
+            PortableV2ErrorCode::Incompatible
+        );
+
+        let mut dangling = valid.clone();
+        dangling.bridge_sets[0].source_modules[0].content_digest =
+            format!("sha256:{}", "9".repeat(64));
+        assert_eq!(
+            validate_ontology_composition_contents(
+                &dangling,
+                &component,
+                PortableV2Limits::default()
+            )
+            .unwrap_err()
+            .code,
+            PortableV2ErrorCode::Incompatible
+        );
+
+        let mut unsupported = valid.clone();
+        unsupported
+            .required_features
+            .push("future-contract@2".into());
+        unsupported.required_features.sort();
+        assert_eq!(
+            validate_ontology_composition_contents(
+                &unsupported,
+                &component,
+                PortableV2Limits::default()
+            )
+            .unwrap_err()
+            .code,
+            PortableV2ErrorCode::UnsupportedFuture
+        );
+
+        let limits = PortableV2Limits {
+            max_components: 1,
+            ..PortableV2Limits::default()
+        };
+        assert_eq!(
+            validate_ontology_composition_contents(&valid, &component, limits)
+                .unwrap_err()
+                .code,
+            PortableV2ErrorCode::LimitExceeded
+        );
     }
 
     #[test]
@@ -2372,6 +3429,43 @@ mod tests {
         out.extend_from_slice(payload);
         out.resize(out.len() + ((512 - payload.len() % 512) % 512), 0);
         out
+    }
+
+    #[test]
+    fn bundle_preflight_bounds_header_scan_before_admission() {
+        let parent = tempfile::tempdir().unwrap();
+        let count_bundle = parent.path().join("count.gfpb");
+        let mut bytes = Vec::new();
+        for index in 0..3 {
+            bytes.extend(tar_entry(&format!("data/payload-{index}"), b"x"));
+        }
+        bytes.extend([0_u8; 1024]);
+        fs::write(&count_bundle, bytes).unwrap();
+        let error = preflight_bundle(
+            &count_bundle,
+            PortableV2Limits {
+                max_entries: 2,
+                ..PortableV2Limits::default()
+            },
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, PortableV2ErrorCode::LimitExceeded);
+
+        let bytes_bundle = parent.path().join("bytes.gfpb");
+        let mut bytes = tar_entry("data/payload", b"xx");
+        bytes.extend([0_u8; 1024]);
+        fs::write(&bytes_bundle, bytes).unwrap();
+        let error = preflight_bundle(
+            &bytes_bundle,
+            PortableV2Limits {
+                max_total_bytes: 1,
+                ..PortableV2Limits::default()
+            },
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, PortableV2ErrorCode::LimitExceeded);
     }
 
     #[test]

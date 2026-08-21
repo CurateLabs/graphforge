@@ -11,6 +11,11 @@ use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
+use crate::project_portable_v2::{
+    PortableV2ActivationOverride, PortableV2ActivationProfile, PortableV2BridgeSet,
+    PortableV2ExactIdentity, PortableV2OntologyComposition, PortableV2OntologyModule,
+};
+use crate::workspace_participants::MAX_WORKSPACE_ONTOLOGY_COMPOSITION_BYTES;
 use crate::{
     PortableV2Error, PortableV2ErrorCode, PortableV2Limits, PortableV2Mode, PortableV2PackageClass,
     PortableV2SelectionPlan, PortableV2SelectionProfile, PortableV2SelectionRequest,
@@ -167,6 +172,34 @@ impl PortableV2ExportPlan {
             return Err(limit("entry count exceeds configured limit"));
         }
 
+        let existing: serde_json::Value =
+            serde_json::from_slice(&self.manifest).map_err(storage)?;
+        let dependency_map = existing["components"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|component| {
+                let id = component["participant_id"].as_str()?.to_owned();
+                let dependencies = component["required_dependencies"]
+                    .as_array()?
+                    .iter()
+                    .filter_map(|value| value.as_str().map(str::to_owned))
+                    .collect::<Vec<_>>();
+                Some((id, dependencies))
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let media_map = existing["components"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|component| component["files"].as_array().into_iter().flatten())
+            .filter_map(|file| {
+                Some((
+                    file["path"].as_str()?.to_owned(),
+                    file["media_type"].as_str()?.to_owned(),
+                ))
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
         let mut components = Vec::new();
         let mut roots = Vec::new();
         let mut by_component: std::collections::BTreeMap<(String, String), Vec<&PlannedFile>> =
@@ -191,7 +224,10 @@ impl PortableV2ExportPlan {
                 files
                     .iter()
                     .map(|file| ComponentFile {
-                        media_type: media_type_for_path(&file.path).into(),
+                        media_type: media_map
+                            .get(&file.path)
+                            .cloned()
+                            .unwrap_or_else(|| media_type_for_path(&file.path).into()),
                         path: file.path.clone(),
                         length: file.length,
                         sha256: hex(file.digest),
@@ -200,8 +236,11 @@ impl PortableV2ExportPlan {
             };
             components.push(Component {
                 kind,
+                required_dependencies: dependency_map
+                    .get(&participant_id)
+                    .cloned()
+                    .unwrap_or_default(),
                 participant_id,
-                required_dependencies: vec![],
                 files: component_files,
             });
         }
@@ -209,15 +248,20 @@ impl PortableV2ExportPlan {
         roots.sort();
         roots.dedup();
 
-        let capabilities = components
+        let mut capabilities = components
             .iter()
             .map(|component| format!("{}@1", component.kind))
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
+        if components
+            .iter()
+            .any(|component| component.participant_id == "graphforge-ontology-composition")
+        {
+            capabilities.push("ontology-composition@1".to_owned());
+            capabilities.sort();
+        }
         let generation_uuid = self.generation_uuid.hyphenated().to_string();
-        let existing: serde_json::Value =
-            serde_json::from_slice(&self.manifest).map_err(storage)?;
         let source_manifest = existing["source_generation"]["manifest_sha256"]
             .as_str()
             .unwrap_or_default()
@@ -406,6 +450,304 @@ struct RuntimeGraphTree {
     inventory_participant_id: String,
 }
 
+fn exact_identity(id: &str, version: &str, digest: &str) -> PortableV2ExactIdentity {
+    PortableV2ExactIdentity {
+        id: id.to_owned(),
+        version: version.to_owned(),
+        content_digest: format!("sha256:{digest}"),
+    }
+}
+
+fn module_component_id(digest: &str) -> String {
+    format!("ontology-module-{digest}")
+}
+
+fn bridge_component_id(digest: &str) -> String {
+    format!("ontology-bridge-{digest}")
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "projection appends one authenticated closure to the existing immutable plan"
+)]
+fn project_ontology_composition(
+    source: &Path,
+    projected: &[crate::PortableV2ProjectedSelectionEntry],
+    limits: PortableV2ExportLimits,
+    total: &mut u64,
+    files: &mut Vec<PlannedFile>,
+    components: &mut Vec<Component>,
+    roots: &mut Vec<String>,
+) -> Result<(), ExportError> {
+    let mut input = open_source_no_follow(source)?;
+    let before = identity(&input.metadata().map_err(storage)?)?;
+    if before.len > MAX_WORKSPACE_ONTOLOGY_COMPOSITION_BYTES as u64 {
+        return Err(limit(
+            "ontology composition authority exceeds configured limit",
+        ));
+    }
+    let mut bytes = Vec::new();
+    std::io::Read::by_ref(&mut input)
+        .take(MAX_WORKSPACE_ONTOLOGY_COMPOSITION_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(storage)?;
+    if bytes.len() as u64 != before.len || identity(&input.metadata().map_err(storage)?)? != before
+    {
+        return Err(err(
+            "GF_SOURCE_CHANGED",
+            "ontology composition changed during planning",
+        ));
+    }
+    let composition =
+        crate::WorkspaceOntologyComposition::from_canonical_json(&bytes).map_err(storage)?;
+
+    let selected = projected
+        .iter()
+        .map(|entry| entry.identity.clone())
+        .collect::<BTreeSet<_>>();
+    let mut modules = Vec::with_capacity(projected.len());
+    let mut all_dependencies = Vec::new();
+    for module in &composition.modules {
+        let exact = exact_identity(
+            &module.id.ontology_id,
+            &module.id.authored_version,
+            &module.id.canonical_digest,
+        );
+        if !selected.contains(&exact) {
+            continue;
+        }
+        let component_id = module_component_id(&module.id.canonical_digest);
+        let path = format!("data/components/ontology/{component_id}/module.json");
+        let payload = canonical_json(&serde_json::to_value(&module.document).map_err(storage)?)?;
+        let file = inline_control(&path, payload, limits, total)?;
+        let component_file = ComponentFile {
+            media_type: "application/vnd.graphforge.ontology+json".into(),
+            path,
+            length: file.length,
+            sha256: hex(file.digest),
+        };
+        files.push(file);
+        roots.push(component_id.clone());
+        all_dependencies.push(component_id.clone());
+        let subject = module.id.display_ref();
+        let profile = composition
+            .activation
+            .iter()
+            .find(|activation| {
+                activation.scope.as_str() == "module" && activation.subject == subject
+            })
+            .map_or(composition.profile_default, |activation| activation.mode);
+        modules.push(PortableV2OntologyModule {
+            ontology_id: module.id.ontology_id.clone(),
+            version: module.id.authored_version.clone(),
+            content_digest: format!("sha256:{}", module.id.canonical_digest),
+            dialect: "graphforge-ontology".into(),
+            profile: profile.as_str().into(),
+        });
+        components.push(Component {
+            kind: "ontology".into(),
+            participant_id: component_id,
+            required_dependencies: module
+                .dependencies
+                .iter()
+                .map(|dependency| module_component_id(&dependency.canonical_digest))
+                .collect(),
+            files: vec![component_file],
+        });
+    }
+
+    let mut bridges = Vec::with_capacity(composition.bridges.len());
+    let mut bridge_identities = std::collections::BTreeMap::new();
+    for bridge in &composition.bridges {
+        let digest = graphforge_ontology::bridge_document_digest(bridge).map_err(storage)?;
+        let exact = exact_identity(&bridge.bridge_id, &bridge.authored_version, &digest);
+        if !selected.contains(&exact) {
+            continue;
+        }
+        bridge_identities.insert(
+            format!("{}@{}#{digest}", bridge.bridge_id, bridge.authored_version),
+            exact_identity(&bridge.bridge_id, &bridge.authored_version, &digest),
+        );
+        let component_id = bridge_component_id(&digest);
+        let path = format!("data/components/schema/{component_id}/bridge.json");
+        let payload = canonical_json(&serde_json::to_value(bridge).map_err(storage)?)?;
+        let file = inline_control(&path, payload, limits, total)?;
+        let component_file = ComponentFile {
+            media_type: "application/vnd.graphforge.ontology-bridge+json".into(),
+            path,
+            length: file.length,
+            sha256: hex(file.digest),
+        };
+        files.push(file);
+        roots.push(component_id.clone());
+        all_dependencies.push(component_id.clone());
+        let mut dependencies = bridge
+            .source_modules
+            .iter()
+            .chain(&bridge.target_modules)
+            .map(|module| module_component_id(&module.canonical_digest))
+            .chain(
+                bridge
+                    .dependencies
+                    .iter()
+                    .map(|dependency| bridge_component_id(&dependency.canonical_digest)),
+            )
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        dependencies.sort();
+        components.push(Component {
+            kind: "schema".into(),
+            participant_id: component_id,
+            required_dependencies: dependencies,
+            files: vec![component_file],
+        });
+        bridges.push(PortableV2BridgeSet {
+            bridge_id: bridge.bridge_id.clone(),
+            version: bridge.authored_version.clone(),
+            content_digest: format!("sha256:{digest}"),
+            source_modules: bridge
+                .source_modules
+                .iter()
+                .map(|module| {
+                    exact_identity(
+                        &module.ontology_id,
+                        &module.authored_version,
+                        &module.canonical_digest,
+                    )
+                })
+                .collect(),
+            target_modules: bridge
+                .target_modules
+                .iter()
+                .map(|module| {
+                    exact_identity(
+                        &module.ontology_id,
+                        &module.authored_version,
+                        &module.canonical_digest,
+                    )
+                })
+                .collect(),
+        });
+    }
+    modules.sort_by(|left, right| {
+        (&left.ontology_id, &left.version, &left.content_digest).cmp(&(
+            &right.ontology_id,
+            &right.version,
+            &right.content_digest,
+        ))
+    });
+    bridges.sort_by(|left, right| {
+        (&left.bridge_id, &left.version, &left.content_digest).cmp(&(
+            &right.bridge_id,
+            &right.version,
+            &right.content_digest,
+        ))
+    });
+    let module_identities = composition
+        .modules
+        .iter()
+        .filter(|module| {
+            selected.contains(&exact_identity(
+                &module.id.ontology_id,
+                &module.id.authored_version,
+                &module.id.canonical_digest,
+            ))
+        })
+        .map(|module| {
+            (
+                module.id.display_ref(),
+                exact_identity(
+                    &module.id.ontology_id,
+                    &module.id.authored_version,
+                    &module.id.canonical_digest,
+                ),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut overrides = composition
+        .activation
+        .iter()
+        .filter(|activation| {
+            if activation.scope.as_str() == "module" {
+                module_identities.contains_key(&activation.subject)
+            } else {
+                bridge_identities.contains_key(&activation.subject)
+            }
+        })
+        .map(|activation| {
+            let subject = if activation.scope.as_str() == "module" {
+                module_identities.get(&activation.subject)
+            } else {
+                bridge_identities.get(&activation.subject)
+            }
+            .ok_or_else(|| err("GF_PROJECT_CORRUPT", "composition activation is dangling"))?;
+            Ok(PortableV2ActivationOverride {
+                scope: activation.scope.as_str().into(),
+                subject: subject.clone(),
+                mode: activation.mode.as_str().into(),
+            })
+        })
+        .collect::<Result<Vec<_>, ExportError>>()?;
+    overrides.sort_by(|left, right| {
+        (
+            &left.scope,
+            &left.subject.id,
+            &left.subject.version,
+            &left.subject.content_digest,
+            &left.mode,
+        )
+            .cmp(&(
+                &right.scope,
+                &right.subject.id,
+                &right.subject.version,
+                &right.subject.content_digest,
+                &right.mode,
+            ))
+    });
+    let mut control = PortableV2OntologyComposition {
+        contract: "graphforge-ontology-composition/1".into(),
+        activation_profile: PortableV2ActivationProfile {
+            profile_default: composition.profile_default.as_str().into(),
+            overrides,
+        },
+        modules,
+        bridge_sets: bridges,
+        required_features: vec!["provenance-bridges@1".into(), "qualified-symbols@1".into()],
+        optional_features: Vec::new(),
+        composition_digest: String::new(),
+    };
+    let mut unsigned = serde_json::to_value(&control).map_err(storage)?;
+    unsigned
+        .as_object_mut()
+        .expect("composition is an object")
+        .remove("composition_digest");
+    let mut digest = Sha256::new();
+    digest.update(b"graphforge-ontology-composition/1\0");
+    digest.update(canonical_json(&unsigned)?);
+    control.composition_digest = format!("sha256:{}", hex(digest.finalize().into()));
+    let control_bytes = canonical_json(&serde_json::to_value(control).map_err(storage)?)?;
+    let path = crate::project_portable_v2::ONTOLOGY_COMPOSITION_PATH;
+    let file = inline_control(path, control_bytes, limits, total)?;
+    let component_file = ComponentFile {
+        media_type: "application/vnd.graphforge.ontology-composition+json".into(),
+        path: path.into(),
+        length: file.length,
+        sha256: hex(file.digest),
+    };
+    files.push(file);
+    roots.push("graphforge-ontology-composition".into());
+    all_dependencies.sort();
+    all_dependencies.dedup();
+    components.push(Component {
+        kind: "compatibility".into(),
+        participant_id: "graphforge-ontology-composition".into(),
+        required_dependencies: all_dependencies,
+        files: vec![component_file],
+    });
+    Ok(())
+}
+
 /// Plan every canonical participant of one already-pinned generation.
 pub fn plan_complete_portable_v2(
     g: &ResolvedProjectGeneration,
@@ -440,9 +782,17 @@ pub fn plan_selected_portable_v2(
     let mut roots = Vec::new();
     let mut runtime_participants = Vec::new();
     let mut graph_inventory_participant = None;
+    let mut ontology_composition_source = None;
     let mut total = 0;
     for d in g.participant_descriptors()? {
         if !selection.includes(&d.capability_id, &d.record_family_id) {
+            continue;
+        }
+        if d.capability_id == crate::WORKSPACE_CAPABILITY_ID
+            && d.record_family_id == crate::WORKSPACE_ONTOLOGY_COMPOSITION_FAMILY
+        {
+            ontology_composition_source =
+                Some(g.participant_path(&d.capability_id, &d.record_family_id)?);
             continue;
         }
         let id = portable_participant_id(&d.capability_id, &d.record_family_id);
@@ -485,6 +835,17 @@ pub fn plan_selected_portable_v2(
             required_dependencies: vec![],
             files: vec![cf],
         });
+    }
+    if let Some(source) = ontology_composition_source {
+        project_ontology_composition(
+            &source,
+            &selection.projected,
+            limits,
+            &mut total,
+            &mut files,
+            &mut components,
+            &mut roots,
+        )?;
     }
     if selection.include_graph_tree
         && let Some(inv) = g.graph_files_inventory()?
@@ -579,12 +940,20 @@ pub fn plan_selected_portable_v2(
     roots.sort();
     collisions(&files)?;
     let capabilities = || {
-        components
+        let mut capabilities = components
             .iter()
             .map(|component| format!("{}@1", component.kind))
             .collect::<BTreeSet<_>>()
             .into_iter()
-            .collect()
+            .collect::<Vec<_>>();
+        if components.iter().any(|component| {
+            component.kind == "compatibility"
+                && component.participant_id == "graphforge-ontology-composition"
+        }) {
+            capabilities.push("ontology-composition@1".to_owned());
+            capabilities.sort();
+        }
+        capabilities
     };
     let source = || Source {
         generation_uuid: g.generation_uuid().hyphenated().to_string(),
@@ -1256,7 +1625,7 @@ fn identity(m: &fs::Metadata) -> Result<Identity, ExportError> {
     }
 }
 #[cfg(unix)]
-fn open_source_no_follow(path: &Path) -> Result<File, ExportError> {
+pub(crate) fn open_source_no_follow(path: &Path) -> Result<File, ExportError> {
     use std::path::Component;
     if fs::symlink_metadata(path)
         .map_err(storage)?
@@ -1317,7 +1686,7 @@ fn open_source_no_follow(path: &Path) -> Result<File, ExportError> {
     Ok(descriptor.into())
 }
 #[cfg(windows)]
-fn open_source_no_follow(path: &Path) -> Result<File, ExportError> {
+pub(crate) fn open_source_no_follow(path: &Path) -> Result<File, ExportError> {
     use std::os::windows::fs::OpenOptionsExt;
     const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
     reject_windows_reparse_components(path)?;
@@ -1587,6 +1956,12 @@ mod tests {
     use crate::open_or_initialize_project;
 
     fn graph_generation() -> (tempfile::TempDir, ResolvedProjectGeneration) {
+        graph_generation_with_composition(false)
+    }
+
+    fn graph_generation_with_composition(
+        include_composition: bool,
+    ) -> (tempfile::TempDir, ResolvedProjectGeneration) {
         let project = tempfile::tempdir().unwrap();
         let parent = open_or_initialize_project(project.path()).unwrap();
         let tree = tempfile::tempdir().unwrap();
@@ -1596,6 +1971,32 @@ mod tests {
         let (_, inventory) = crate::capture_graph_files(tree.path()).unwrap();
         let mut participants = crate::empty_workspace_participants().unwrap();
         participants.insert(0, inventory);
+        if include_composition {
+            let document = graphforge_ontology::OntologyDoc {
+                ontology_id: "https://graphforge.dev/ontology/portable".into(),
+                version: "release-2026.08".into(),
+                entity_types: vec![],
+                relation_types: vec![],
+                properties: vec![],
+                constraints: vec![],
+                migrations: vec![],
+            };
+            let legacy = crate::WorkspaceOntology {
+                contract_version: 1,
+                mode: crate::WorkspaceOntologyMode::Strict,
+                source_format: Some(crate::WorkspaceOntologySourceFormat::Json),
+                canonical_ontology_sha256: Some("a".repeat(64)),
+                canonical_ontology: Some(serde_json::to_value(document).unwrap()),
+            };
+            let composition = crate::WorkspaceOntologyComposition::virtual_legacy(&legacy)
+                .unwrap()
+                .unwrap();
+            participants.push(composition.to_project_participant().unwrap());
+            participants.sort_by(|left, right| {
+                (&left.capability_id, &left.record_family_id)
+                    .cmp(&(&right.capability_id, &right.record_family_id))
+            });
+        }
         let request = crate::ProjectGenerationRequest {
             transaction_uuid: Uuid::new_v4(),
             generation_uuid: Uuid::new_v4(),
@@ -1629,6 +2030,948 @@ mod tests {
         drop(parent);
         let generation = crate::resolve_project_generation(project.path()).unwrap();
         (project, generation)
+    }
+
+    fn graph_generation_with_bridge() -> (tempfile::TempDir, ResolvedProjectGeneration) {
+        use graphforge_ontology::{
+            ActivationMode, AuthoredModule, BridgeAssertion, BridgeDocument, BridgePredicate,
+            BridgeProvenance, BridgeSetId, CompositionLimits, EntityTypeDef,
+            InventoryCompileRequest, MappingMethod, OntologyDoc, OntologyModuleId, QualifiedSymbol,
+            SymbolKind, bridge_document_digest, compile_inventory, module_document_digest,
+        };
+
+        let module = |ontology_id: &str| {
+            let document = OntologyDoc {
+                ontology_id: ontology_id.into(),
+                version: "opaque-v1".into(),
+                entity_types: vec![EntityTypeDef {
+                    name: "Person".into(),
+                    r#abstract: false,
+                    parent: None,
+                }],
+                relation_types: Vec::new(),
+                properties: Vec::new(),
+                constraints: Vec::new(),
+                migrations: Vec::new(),
+            };
+            AuthoredModule {
+                id: OntologyModuleId {
+                    ontology_id: document.ontology_id.clone(),
+                    authored_version: document.version.clone(),
+                    canonical_digest: module_document_digest(&document).unwrap(),
+                },
+                dependencies: Vec::new(),
+                doc: document,
+                allow_projected_identity: false,
+            }
+        };
+        let source = module("https://graphforge.dev/ontology/source");
+        let target = module("https://graphforge.dev/ontology/target");
+        let qualified = |module: &AuthoredModule| QualifiedSymbol {
+            module: module.id.clone(),
+            kind: SymbolKind::Entity,
+            local_id: "Person".into(),
+        };
+        let bridge = BridgeDocument {
+            bridge_id: "https://graphforge.dev/bridge/person".into(),
+            authored_version: "bridge-v1".into(),
+            source_modules: vec![source.id.clone()],
+            target_modules: vec![target.id.clone()],
+            dependencies: Vec::new(),
+            shared_surfaces: Vec::new(),
+            assertions: vec![BridgeAssertion {
+                source: qualified(&source),
+                target: qualified(&target),
+                predicate: BridgePredicate::Equivalent,
+                directional: false,
+                provenance: BridgeProvenance {
+                    method: MappingMethod::Authored,
+                    confidence: None,
+                    justification: "portable fixture".into(),
+                    evidence_refs: Vec::new(),
+                },
+                valid_from: None,
+                valid_to: None,
+            }],
+            enforcement: Some(ActivationMode::Strict),
+        };
+        let bridge_id = BridgeSetId {
+            bridge_id: bridge.bridge_id.clone(),
+            authored_version: bridge.authored_version.clone(),
+            canonical_digest: bridge_document_digest(&bridge).unwrap(),
+        };
+        let compiled = compile_inventory(InventoryCompileRequest {
+            modules: &[source, target],
+            bridges: &[bridge_id],
+            activation: &[],
+            profile_default: ActivationMode::Strict,
+            limits: CompositionLimits::default(),
+            cancelled: None,
+        })
+        .unwrap();
+        let composition =
+            crate::WorkspaceOntologyComposition::from_compiled(&compiled, vec![bridge]);
+
+        let project = tempfile::tempdir().unwrap();
+        let parent = open_or_initialize_project(project.path()).unwrap();
+        let mut participants = crate::empty_workspace_participants().unwrap();
+        participants.push(composition.to_project_participant().unwrap());
+        participants.sort_by(|left, right| {
+            (&left.capability_id, &left.record_family_id)
+                .cmp(&(&right.capability_id, &right.record_family_id))
+        });
+        let request = crate::ProjectGenerationRequest {
+            transaction_uuid: Uuid::new_v4(),
+            generation_uuid: Uuid::new_v4(),
+            capabilities: vec![
+                crate::ProjectCapability {
+                    capability_id: "graph".into(),
+                    capability_version: 1,
+                },
+                crate::ProjectCapability {
+                    capability_id: "workspace".into(),
+                    capability_version: 1,
+                },
+            ],
+            participants,
+        };
+        let crate::ProjectStageOutcome::Staged(staged) =
+            crate::stage_project_generation(project.path(), &request).unwrap()
+        else {
+            panic!("fresh composition generation replayed");
+        };
+        staged
+            .validate(|_| Ok(()), |_, _| Ok(()))
+            .unwrap()
+            .publish()
+            .unwrap();
+        drop(parent);
+        let generation = crate::resolve_project_generation(project.path()).unwrap();
+        (project, generation)
+    }
+
+    fn graph_generation_with_transitive_bridge_chain() -> (
+        tempfile::TempDir,
+        ResolvedProjectGeneration,
+        PortableV2ExactIdentity,
+        String,
+    ) {
+        use graphforge_ontology::{
+            ActivationMode, AuthoredModule, BridgeAssertion, BridgeDocument, BridgePredicate,
+            BridgeProvenance, BridgeSetId, CompositionLimits, EntityTypeDef,
+            InventoryCompileRequest, MappingMethod, OntologyDoc, OntologyModuleId, QualifiedSymbol,
+            SymbolKind, bridge_document_digest, compile_inventory, module_document_digest,
+        };
+        let module = |name: &str, dependencies: Vec<OntologyModuleId>| {
+            let document = OntologyDoc {
+                ontology_id: format!("https://graphforge.dev/ontology/{name}"),
+                version: "v1".into(),
+                entity_types: vec![EntityTypeDef {
+                    name: "Person".into(),
+                    r#abstract: false,
+                    parent: None,
+                }],
+                relation_types: vec![],
+                properties: vec![],
+                constraints: vec![],
+                migrations: vec![],
+            };
+            AuthoredModule {
+                id: OntologyModuleId {
+                    ontology_id: document.ontology_id.clone(),
+                    authored_version: document.version.clone(),
+                    canonical_digest: module_document_digest(&document).unwrap(),
+                },
+                dependencies,
+                doc: document,
+                allow_projected_identity: false,
+            }
+        };
+        let base = module("base", vec![]);
+        let source = module("source-chain", vec![base.id.clone()]);
+        let target = module("target-chain", vec![]);
+        let unrelated = module("unrelated", vec![]);
+        let assertion = |from: &AuthoredModule, to: &AuthoredModule| BridgeAssertion {
+            source: QualifiedSymbol {
+                module: from.id.clone(),
+                kind: SymbolKind::Entity,
+                local_id: "Person".into(),
+            },
+            target: QualifiedSymbol {
+                module: to.id.clone(),
+                kind: SymbolKind::Entity,
+                local_id: "Person".into(),
+            },
+            predicate: BridgePredicate::Equivalent,
+            directional: false,
+            provenance: BridgeProvenance {
+                method: MappingMethod::Authored,
+                confidence: None,
+                justification: "transitive portable closure fixture".into(),
+                evidence_refs: vec![],
+            },
+            valid_from: None,
+            valid_to: None,
+        };
+        let bridge_a = BridgeDocument {
+            bridge_id: "https://graphforge.dev/bridge/a".into(),
+            authored_version: "v1".into(),
+            source_modules: vec![base.id.clone()],
+            target_modules: vec![target.id.clone()],
+            dependencies: vec![],
+            shared_surfaces: vec![],
+            assertions: vec![assertion(&base, &target)],
+            enforcement: Some(ActivationMode::Advisory),
+        };
+        let bridge_a_id = BridgeSetId {
+            bridge_id: bridge_a.bridge_id.clone(),
+            authored_version: bridge_a.authored_version.clone(),
+            canonical_digest: bridge_document_digest(&bridge_a).unwrap(),
+        };
+        let bridge_b = BridgeDocument {
+            bridge_id: "https://graphforge.dev/bridge/b".into(),
+            authored_version: "v1".into(),
+            source_modules: vec![source.id.clone()],
+            target_modules: vec![target.id.clone()],
+            dependencies: vec![bridge_a_id.clone()],
+            shared_surfaces: vec![],
+            assertions: vec![assertion(&source, &target)],
+            enforcement: Some(ActivationMode::Strict),
+        };
+        let bridge_b_id = BridgeSetId {
+            bridge_id: bridge_b.bridge_id.clone(),
+            authored_version: bridge_b.authored_version.clone(),
+            canonical_digest: bridge_document_digest(&bridge_b).unwrap(),
+        };
+        let modules = [base, source, target, unrelated];
+        let compiled = compile_inventory(InventoryCompileRequest {
+            modules: &modules,
+            bridges: &[bridge_a_id, bridge_b_id.clone()],
+            activation: &[],
+            profile_default: ActivationMode::Strict,
+            limits: CompositionLimits::default(),
+            cancelled: None,
+        })
+        .unwrap();
+        let composition =
+            crate::WorkspaceOntologyComposition::from_compiled(&compiled, vec![bridge_a, bridge_b]);
+        let root_identity = exact_identity(
+            &bridge_b_id.bridge_id,
+            &bridge_b_id.authored_version,
+            &bridge_b_id.canonical_digest,
+        );
+        let unrelated_digest = modules[3].id.canonical_digest.clone();
+        let project = tempfile::tempdir().unwrap();
+        open_or_initialize_project(project.path()).unwrap();
+        let mut participants = crate::empty_workspace_participants().unwrap();
+        participants.push(composition.to_project_participant().unwrap());
+        participants.sort_by(|left, right| {
+            (&left.capability_id, &left.record_family_id)
+                .cmp(&(&right.capability_id, &right.record_family_id))
+        });
+        let request = crate::ProjectGenerationRequest {
+            transaction_uuid: Uuid::new_v4(),
+            generation_uuid: Uuid::new_v4(),
+            capabilities: vec![
+                crate::ProjectCapability {
+                    capability_id: "graph".into(),
+                    capability_version: 1,
+                },
+                crate::ProjectCapability {
+                    capability_id: "workspace".into(),
+                    capability_version: 1,
+                },
+            ],
+            participants,
+        };
+        let crate::ProjectStageOutcome::Staged(staged) =
+            crate::stage_project_generation(project.path(), &request).unwrap()
+        else {
+            panic!("fresh transitive composition replayed");
+        };
+        staged
+            .validate(|_| Ok(()), |_, _| Ok(()))
+            .unwrap()
+            .publish()
+            .unwrap();
+        let generation = crate::resolve_project_generation(project.path()).unwrap();
+        (project, generation, root_identity, unrelated_digest)
+    }
+
+    fn resign_test_manifest(plan: &mut PortableV2ExportPlan) {
+        let mut manifest: serde_json::Value = serde_json::from_slice(&plan.manifest).unwrap();
+        manifest.as_object_mut().unwrap().remove("package_digest");
+        let semantic = canonical_json(&manifest).unwrap();
+        let mut digest = Sha256::new();
+        digest.update(b"graphforge-project/2\0");
+        digest.update(semantic);
+        plan.package_digest = digest.finalize().into();
+        manifest.as_object_mut().unwrap().insert(
+            "package_digest".into(),
+            serde_json::Value::String(format!("sha256:{}", hex(plan.package_digest))),
+        );
+        plan.manifest = canonical_json(&manifest).unwrap();
+    }
+
+    fn replace_test_control(plan: &mut PortableV2ExportPlan, path: &str, bytes: Vec<u8>) {
+        let file = plan
+            .files
+            .iter_mut()
+            .find(|file| file.path == path)
+            .unwrap();
+        let old_length = file.length;
+        file.length = bytes.len() as u64;
+        file.digest = Sha256::digest(&bytes).into();
+        file.source = PlannedSource::Control(bytes);
+        plan.payload_bytes = plan
+            .payload_bytes
+            .checked_sub(old_length)
+            .unwrap()
+            .checked_add(file.length)
+            .unwrap();
+
+        let mut manifest: serde_json::Value = serde_json::from_slice(&plan.manifest).unwrap();
+        let descriptor = manifest["components"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .flat_map(|component| component["files"].as_array_mut().unwrap())
+            .find(|descriptor| descriptor["path"] == path)
+            .unwrap();
+        descriptor["length"] = file.length.into();
+        descriptor["sha256"] = hex(file.digest).into();
+        plan.manifest = canonical_json(&manifest).unwrap();
+        resign_test_manifest(plan);
+    }
+
+    fn write_test_representations(plan: &PortableV2ExportPlan, root: &Path) -> (PathBuf, PathBuf) {
+        let expanded_path = root.join("hostile.gfproject");
+        let bundle_path = root.join("hostile.gfpb");
+        let limits = PortableV2ExportLimits::default();
+        expanded(plan, &expanded_path, limits, &|| false, &mut |_| {}).unwrap();
+        bundle(plan, &bundle_path, limits, &|| false, &mut |_| {}).unwrap();
+        (expanded_path, bundle_path)
+    }
+
+    #[test]
+    fn composition_projection_has_one_identity_in_both_forms_and_is_not_runtime_authority() {
+        let (_project, generation) = graph_generation_with_composition(true);
+        let limits = PortableV2ExportLimits::default();
+        let plan = plan_complete_portable_v2(&generation, limits).unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let expanded = output.path().join("composition.gfproject");
+        let bundle = output.path().join("composition.gfpb");
+        let cancelled = AtomicBool::new(false);
+        let expanded_receipt = export_complete_portable_v2(
+            &plan,
+            &expanded,
+            PortableV2Output::Expanded,
+            limits,
+            &cancelled,
+            |_| {},
+        )
+        .unwrap();
+        let bundle_receipt = export_complete_portable_v2(
+            &plan,
+            &bundle,
+            PortableV2Output::Bundle,
+            limits,
+            &cancelled,
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(
+            expanded_receipt.package_digest,
+            bundle_receipt.package_digest
+        );
+        let expanded_report =
+            verify_portable_v2(&expanded, PortableV2Mode::Full, limits, Some(&cancelled)).unwrap();
+        let bundle_report =
+            verify_portable_v2(&bundle, PortableV2Mode::Full, limits, Some(&cancelled)).unwrap();
+        assert_eq!(
+            expanded_report.ontology_composition,
+            bundle_report.ontology_composition
+        );
+        assert!(expanded_report.ontology_composition.is_some());
+
+        let runtime: serde_json::Value = serde_json::from_slice(
+            &fs::read(expanded.join(
+                "data/components/compatibility/graphforge-runtime-map/runtime-generation.json",
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            runtime["participants"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|participant| {
+                    participant["record_family_id"] != crate::WORKSPACE_ONTOLOGY_COMPOSITION_FAMILY
+                })
+        );
+
+        let supported = generation
+            .capabilities()
+            .into_iter()
+            .map(|capability| crate::ProjectCapability {
+                capability_id: capability.capability_id,
+                capability_version: capability.capability_version,
+            })
+            .collect::<Vec<_>>();
+        let imported = output.path().join("imported-project");
+        let import_receipt = crate::import_complete_portable_v2(
+            &expanded,
+            &imported,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &supported,
+            limits,
+            Some(&cancelled),
+        )
+        .unwrap();
+        assert!(import_receipt.staged_composition.is_some());
+        let reopened = crate::resolve_project_generation(&imported).unwrap();
+        let staged = crate::load_portable_ontology_staging(&reopened, limits)
+            .unwrap()
+            .expect("verified composition remains durably staged");
+        assert_eq!(
+            staged.package_digest,
+            format!("sha256:{}", hex(expanded_receipt.package_digest))
+        );
+        assert!(
+            reopened
+                .participant_snapshots()
+                .unwrap()
+                .iter()
+                .all(|participant| participant.record_family_id
+                    != crate::WORKSPACE_ONTOLOGY_COMPOSITION_FAMILY)
+        );
+
+        let cancelled_before_import = AtomicBool::new(true);
+        let cancelled_target = output.path().join("cancelled-project");
+        let error = crate::import_complete_portable_v2(
+            &expanded,
+            &cancelled_target,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &supported,
+            limits,
+            Some(&cancelled_before_import),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, PortableV2ErrorCode::Cancelled);
+        assert!(!cancelled_target.exists());
+    }
+
+    #[test]
+    fn semantic_tamper_and_future_feature_precede_payload() {
+        let (_project, generation) = graph_generation_with_composition(true);
+        let limits = PortableV2ExportLimits::default();
+        let original = plan_complete_portable_v2(&generation, limits).unwrap();
+        let module_path = original
+            .files
+            .iter()
+            .find(|file| file.path.ends_with("/module.json"))
+            .unwrap()
+            .path
+            .clone();
+        let module_bytes = match &original
+            .files
+            .iter()
+            .find(|file| file.path == module_path)
+            .unwrap()
+            .source
+        {
+            PlannedSource::Control(bytes) => bytes.clone(),
+            PlannedSource::File { .. } => panic!("projected module must be an inline control"),
+        };
+        let mut module: serde_json::Value = serde_json::from_slice(&module_bytes).unwrap();
+        module["ontology_id"] = "https://graphforge.dev/ontology/tampered".into();
+        let tampered_module = canonical_json(&module).unwrap();
+
+        let mut semantic_tamper = original.clone();
+        replace_test_control(&mut semantic_tamper, &module_path, tampered_module.clone());
+        let outputs = tempfile::tempdir().unwrap();
+        let (expanded, bundle) = write_test_representations(&semantic_tamper, outputs.path());
+        for package in [&expanded, &bundle] {
+            let error =
+                verify_portable_v2(package, PortableV2Mode::Full, limits, None).unwrap_err();
+            assert!(matches!(
+                error.code,
+                PortableV2ErrorCode::InvalidStructure | PortableV2ErrorCode::DigestMismatch
+            ));
+            assert_eq!(error.entry.as_deref(), Some(module_path.as_str()));
+        }
+
+        let mut future = semantic_tamper;
+        let control_path = crate::project_portable_v2::ONTOLOGY_COMPOSITION_PATH;
+        let control_bytes = match &future
+            .files
+            .iter()
+            .find(|file| file.path == control_path)
+            .unwrap()
+            .source
+        {
+            PlannedSource::Control(bytes) => bytes.clone(),
+            PlannedSource::File { .. } => panic!("composition must be an inline control"),
+        };
+        let mut control: serde_json::Value = serde_json::from_slice(&control_bytes).unwrap();
+        control["required_features"]
+            .as_array_mut()
+            .unwrap()
+            .push("future-contract@2".into());
+        control["required_features"]
+            .as_array_mut()
+            .unwrap()
+            .sort_by(|left, right| left.as_str().cmp(&right.as_str()));
+        control
+            .as_object_mut()
+            .unwrap()
+            .remove("composition_digest");
+        let mut digest = Sha256::new();
+        digest.update(b"graphforge-ontology-composition/1\0");
+        digest.update(canonical_json(&control).unwrap());
+        control["composition_digest"] = format!("sha256:{}", hex(digest.finalize().into())).into();
+        replace_test_control(&mut future, control_path, canonical_json(&control).unwrap());
+        let outputs = tempfile::tempdir().unwrap();
+        let (expanded, bundle) = write_test_representations(&future, outputs.path());
+        for package in [&expanded, &bundle] {
+            let error =
+                verify_portable_v2(package, PortableV2Mode::Full, limits, None).unwrap_err();
+            assert_eq!(error.code, PortableV2ErrorCode::UnsupportedFuture);
+            assert_eq!(error.entry.as_deref(), Some(control_path));
+        }
+    }
+
+    #[test]
+    fn bridge_semantic_tamper_fails_in_both_representations() {
+        let (_project, generation) = graph_generation_with_bridge();
+        let limits = PortableV2ExportLimits::default();
+        let mut plan = plan_complete_portable_v2(&generation, limits).unwrap();
+        let bridge_path = plan
+            .files
+            .iter()
+            .find(|file| file.path.ends_with("/bridge.json"))
+            .unwrap()
+            .path
+            .clone();
+        let bytes = match &plan
+            .files
+            .iter()
+            .find(|file| file.path == bridge_path)
+            .unwrap()
+            .source
+        {
+            PlannedSource::Control(bytes) => bytes.clone(),
+            PlannedSource::File { .. } => panic!("projected bridge must be an inline control"),
+        };
+        let mut bridge: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        bridge["authored_version"] = "tampered-v2".into();
+        replace_test_control(&mut plan, &bridge_path, canonical_json(&bridge).unwrap());
+        let outputs = tempfile::tempdir().unwrap();
+        let (expanded, bundle) = write_test_representations(&plan, outputs.path());
+        for package in [&expanded, &bundle] {
+            let error =
+                verify_portable_v2(package, PortableV2Mode::Full, limits, None).unwrap_err();
+            assert_eq!(error.code, PortableV2ErrorCode::DigestMismatch);
+            assert_eq!(error.entry.as_deref(), Some(bridge_path.as_str()));
+        }
+    }
+
+    #[test]
+    fn semantic_descriptor_kind_path_and_media_mismatches_fail_in_both_forms() {
+        let (_project, generation) = graph_generation_with_composition(true);
+        let limits = PortableV2ExportLimits::default();
+        let original = plan_complete_portable_v2(&generation, limits).unwrap();
+        let module_path = original
+            .files
+            .iter()
+            .find(|file| file.path.ends_with("/module.json"))
+            .unwrap()
+            .path
+            .clone();
+        for mutation in ["kind", "path", "media"] {
+            let mut plan = original.clone();
+            let mut manifest: serde_json::Value = serde_json::from_slice(&plan.manifest).unwrap();
+            let component = manifest["components"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|component| {
+                    component["files"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|file| file["path"] == module_path)
+                })
+                .unwrap();
+            match mutation {
+                "kind" => component["kind"] = "schema".into(),
+                "path" => {
+                    component["files"][0]["path"] =
+                        "data/components/ontology/wrong/module.json".into()
+                }
+                "media" => component["files"][0]["media_type"] = "application/octet-stream".into(),
+                _ => unreachable!(),
+            }
+            plan.manifest = canonical_json(&manifest).unwrap();
+            resign_test_manifest(&mut plan);
+            let outputs = tempfile::tempdir().unwrap();
+            let (expanded, bundle) = write_test_representations(&plan, outputs.path());
+            for package in [&expanded, &bundle] {
+                let error =
+                    verify_portable_v2(package, PortableV2Mode::Full, limits, None).unwrap_err();
+                assert!(
+                    matches!(
+                        error.code,
+                        PortableV2ErrorCode::Incompatible
+                            | PortableV2ErrorCode::InvalidStructure
+                            | PortableV2ErrorCode::DigestMismatch
+                    ),
+                    "{mutation}: {error:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn versioned_m9_interchange_ledger_covers_required_matrix() {
+        let ledger: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/portable-v2/m9-interchange-cases.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            ledger["contract"],
+            "graphforge-portable-v2-m9-interchange-cases/1"
+        );
+        assert_eq!(
+            ledger["representations"],
+            serde_json::json!(["expanded", "bundle"])
+        );
+        assert_eq!(
+            ledger["positive_package_classes"],
+            serde_json::json!([
+                "complete",
+                "ontology-only",
+                "component-selective",
+                "graph-data-subset"
+            ])
+        );
+        let cases = ledger["negative_cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|case| case["name"].as_str().unwrap())
+            .collect::<BTreeSet<_>>();
+        for required in [
+            "future-manifest-capability-before-payload",
+            "future-composition-feature-before-semantic-payload",
+            "module-semantic-digest-tamper",
+            "bridge-semantic-digest-tamper",
+            "semantic-descriptor-kind-path-media-mismatch",
+            "semantic-payload-budget",
+            "cancelled-private-materialization",
+            "durable-staging-replay",
+            "durable-staging-transaction-conflict",
+            "durable-staging-publication-failure",
+        ] {
+            assert!(cases.contains(required), "missing {required}");
+        }
+    }
+
+    #[test]
+    fn complete_ontology_data_and_custom_profiles_keep_composition_closure() {
+        let (_project, generation) = graph_generation_with_composition(true);
+        let limits = PortableV2ExportLimits::default();
+        let requests = [
+            PortableV2SelectionRequest {
+                profile: PortableV2SelectionProfile::Complete,
+                strict: false,
+            },
+            PortableV2SelectionRequest {
+                profile: PortableV2SelectionProfile::OntologyOnly,
+                strict: false,
+            },
+            PortableV2SelectionRequest {
+                profile: PortableV2SelectionProfile::DataComponents,
+                strict: false,
+            },
+            PortableV2SelectionRequest {
+                profile: PortableV2SelectionProfile::Custom(vec![crate::PortableV2ParticipantId {
+                    capability_id: crate::GRAPH_CAPABILITY_ID.into(),
+                    record_family_id: crate::GRAPH_FILES_FAMILY.into(),
+                }]),
+                strict: false,
+            },
+        ];
+        for (index, request) in requests.iter().enumerate() {
+            let selection = preview_portable_v2_selection(&generation, request, limits).unwrap();
+            assert!(selection.includes(
+                crate::WORKSPACE_CAPABILITY_ID,
+                crate::WORKSPACE_ONTOLOGY_COMPOSITION_FAMILY
+            ));
+            assert!(!selection.projected.is_empty());
+            let mut reports = Vec::new();
+            for representation in [PortableV2Output::Expanded, PortableV2Output::Bundle] {
+                let plan = plan_selected_portable_v2(&generation, &selection, limits).unwrap();
+                let output = tempfile::tempdir().unwrap();
+                let extension = if representation == PortableV2Output::Expanded {
+                    "gfproject"
+                } else {
+                    "gfpb"
+                };
+                let destination = output.path().join(format!("class-{index}.{extension}"));
+                export_complete_portable_v2(
+                    &plan,
+                    &destination,
+                    representation,
+                    limits,
+                    &AtomicBool::new(false),
+                    |_| {},
+                )
+                .unwrap();
+                let report =
+                    verify_portable_v2(&destination, PortableV2Mode::Full, limits, None).unwrap();
+                assert!(report.ontology_composition.is_some());
+                reports.push(report);
+            }
+            assert_eq!(reports[0].package_digest, reports[1].package_digest);
+            assert_eq!(
+                reports[0].ontology_composition,
+                reports[1].ontology_composition
+            );
+            assert_eq!(
+                reports[0].ontology_composition_entries,
+                reports[1].ontology_composition_entries
+            );
+        }
+
+        let complete = preview_portable_v2_selection(&generation, &requests[0], limits).unwrap();
+        let exact = complete.projected[0].identity.clone();
+        let projected = preview_portable_v2_selection(
+            &generation,
+            &PortableV2SelectionRequest {
+                profile: PortableV2SelectionProfile::OntologyComposition(vec![exact.clone()]),
+                strict: false,
+            },
+            limits,
+        )
+        .unwrap();
+        assert!(projected.projected.iter().any(|entry| {
+            entry.identity == exact && entry.reason == crate::PortableV2SelectionReason::Requested
+        }));
+        assert!(projected.estimated_payload_bytes > 0);
+    }
+
+    #[test]
+    fn exact_composition_selection_closes_bridges_without_widening() {
+        let (_project, generation) = graph_generation_with_bridge();
+        let limits = PortableV2ExportLimits::default();
+        let all = preview_portable_v2_selection(
+            &generation,
+            &PortableV2SelectionRequest {
+                profile: PortableV2SelectionProfile::Complete,
+                strict: false,
+            },
+            limits,
+        )
+        .unwrap();
+        let source = all
+            .projected
+            .iter()
+            .find(|entry| entry.identity.id.ends_with("/source"))
+            .unwrap()
+            .identity
+            .clone();
+        let bridge = all
+            .projected
+            .iter()
+            .find(|entry| entry.identity.id.contains("/bridge/"))
+            .unwrap()
+            .identity
+            .clone();
+
+        let module_only = preview_portable_v2_selection(
+            &generation,
+            &PortableV2SelectionRequest {
+                profile: PortableV2SelectionProfile::OntologyComposition(vec![source.clone()]),
+                strict: true,
+            },
+            limits,
+        )
+        .unwrap();
+        assert_eq!(module_only.projected.len(), 1);
+        assert_eq!(module_only.projected[0].identity, source);
+        let module_plan = plan_selected_portable_v2(&generation, &module_only, limits).unwrap();
+        let module_manifest: serde_json::Value =
+            serde_json::from_slice(&module_plan.manifest).unwrap();
+        let control = module_plan
+            .files
+            .iter()
+            .find(|file| file.path == crate::project_portable_v2::ONTOLOGY_COMPOSITION_PATH)
+            .unwrap();
+        let PlannedSource::Control(bytes) = &control.source else {
+            panic!("composition must be inline")
+        };
+        let control: PortableV2OntologyComposition = serde_json::from_slice(bytes).unwrap();
+        assert_eq!(control.modules.len(), 1);
+        assert!(control.bridge_sets.is_empty());
+        assert_eq!(module_manifest["package_class"], "component-selective");
+
+        let bridge_closed = preview_portable_v2_selection(
+            &generation,
+            &PortableV2SelectionRequest {
+                profile: PortableV2SelectionProfile::OntologyComposition(vec![bridge.clone()]),
+                strict: true,
+            },
+            limits,
+        )
+        .unwrap();
+        assert_eq!(bridge_closed.projected.len(), 3);
+        assert_eq!(
+            bridge_closed
+                .projected
+                .iter()
+                .filter(|entry| entry.reason == crate::PortableV2SelectionReason::Requested)
+                .count(),
+            1
+        );
+        assert!(
+            bridge_closed
+                .projected
+                .iter()
+                .any(|entry| entry.identity == bridge)
+        );
+        assert!(
+            bridge_closed
+                .projected
+                .iter()
+                .filter(|entry| entry.kind == "ontology")
+                .all(|entry| entry.reason
+                    == crate::PortableV2SelectionReason::RequiredOntologyComposition)
+        );
+
+        let missing = PortableV2ExactIdentity {
+            id: "https://graphforge.dev/ontology/absent".into(),
+            version: "v1".into(),
+            content_digest: format!("sha256:{}", "f".repeat(64)),
+        };
+        let error = preview_portable_v2_selection(
+            &generation,
+            &PortableV2SelectionRequest {
+                profile: PortableV2SelectionProfile::OntologyComposition(vec![missing]),
+                strict: true,
+            },
+            limits,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, PortableV2ErrorCode::Incompatible);
+    }
+
+    #[test]
+    fn transitive_module_and_bridge_closure_is_exact_in_both_forms() {
+        let (_project, generation, root_bridge, unrelated_digest) =
+            graph_generation_with_transitive_bridge_chain();
+        let limits = PortableV2ExportLimits::default();
+        let selection = preview_portable_v2_selection(
+            &generation,
+            &PortableV2SelectionRequest {
+                profile: PortableV2SelectionProfile::OntologyComposition(vec![root_bridge.clone()]),
+                strict: true,
+            },
+            limits,
+        )
+        .unwrap();
+        assert_eq!(selection.projected.len(), 5);
+        assert_eq!(
+            selection
+                .projected
+                .iter()
+                .filter(|entry| entry.reason == crate::PortableV2SelectionReason::Requested)
+                .count(),
+            1
+        );
+        assert!(
+            selection
+                .projected
+                .iter()
+                .any(|entry| entry.identity == root_bridge)
+        );
+        assert!(
+            !selection
+                .projected
+                .iter()
+                .any(|entry| entry.identity.content_digest.ends_with(&unrelated_digest))
+        );
+
+        let plan = plan_selected_portable_v2(&generation, &selection, limits).unwrap();
+        let manifest: serde_json::Value = serde_json::from_slice(&plan.manifest).unwrap();
+        let components = manifest["components"].as_array().unwrap();
+        assert_eq!(
+            components
+                .iter()
+                .filter(|component| matches!(
+                    component["kind"].as_str(),
+                    Some("ontology" | "schema")
+                ))
+                .count(),
+            5
+        );
+        assert!(
+            !serde_json::to_string(&manifest)
+                .unwrap()
+                .contains(&unrelated_digest)
+        );
+        let control_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == crate::project_portable_v2::ONTOLOGY_COMPOSITION_PATH)
+            .unwrap();
+        let PlannedSource::Control(control_bytes) = &control_file.source else {
+            panic!("composition must be inline")
+        };
+        let control: PortableV2OntologyComposition = serde_json::from_slice(control_bytes).unwrap();
+        assert_eq!(control.modules.len(), 3);
+        assert_eq!(control.bridge_sets.len(), 2);
+        assert!(
+            !control
+                .modules
+                .iter()
+                .any(|module| module.content_digest.ends_with(&unrelated_digest))
+        );
+
+        let output = tempfile::tempdir().unwrap();
+        let mut reports = Vec::new();
+        for representation in [PortableV2Output::Expanded, PortableV2Output::Bundle] {
+            let path = output
+                .path()
+                .join(if representation == PortableV2Output::Expanded {
+                    "chain.gfproject"
+                } else {
+                    "chain.gfpb"
+                });
+            export_complete_portable_v2(
+                &plan,
+                &path,
+                representation,
+                limits,
+                &AtomicBool::new(false),
+                |_| {},
+            )
+            .unwrap();
+            reports.push(verify_portable_v2(&path, PortableV2Mode::Full, limits, None).unwrap());
+        }
+        assert_eq!(reports[0].package_digest, reports[1].package_digest);
+        assert_eq!(
+            reports[0].ontology_composition,
+            reports[1].ontology_composition
+        );
+        assert_eq!(reports[0].ontology_composition_entries.len(), 5);
+        assert_eq!(
+            reports[0].ontology_composition_entries,
+            reports[1].ontology_composition_entries
+        );
     }
 
     #[test]

@@ -144,29 +144,34 @@ pub use project_portable_v2_export::{
 };
 pub use project_portable_v2_import::{
     PortableV2ImportPhase, PortableV2ImportProgress, PortableV2ImportReceipt,
-    import_complete_portable_v2, import_complete_portable_v2_with_progress,
+    PortableV2SelectiveCandidate, PortableV2StagedCompositionReceipt,
+    consume_selective_portable_v2, import_complete_portable_v2,
+    import_complete_portable_v2_with_progress, load_portable_ontology_staging,
 };
 
 pub mod project_portable_v2;
 pub use project_portable_v2::{
-    PortableV2Authenticity, PortableV2Compatibility, PortableV2Error, PortableV2ErrorCode,
-    PortableV2Integrity, PortableV2Limits, PortableV2Mode, PortableV2PackageClass,
-    PortableV2Report, PortableV2Representation, materialize_verified_portable_v2,
-    verify_portable_v2,
+    PortableV2ActivationOverride, PortableV2ActivationProfile, PortableV2Authenticity,
+    PortableV2BridgeSet, PortableV2Compatibility, PortableV2CompositionEntry, PortableV2Error,
+    PortableV2ErrorCode, PortableV2ExactIdentity, PortableV2Integrity, PortableV2Limits,
+    PortableV2Mode, PortableV2OntologyComposition, PortableV2OntologyModule,
+    PortableV2PackageClass, PortableV2Report, PortableV2Representation,
+    materialize_verified_portable_v2, verify_portable_v2,
 };
 
 mod project_portable_v2_selection;
 pub use project_portable_v2_selection::{
-    PortableV2ParticipantId, PortableV2SelectionEntry, PortableV2SelectionPlan,
-    PortableV2SelectionProfile, PortableV2SelectionReason, PortableV2SelectionRequest,
-    preview_portable_v2_selection,
+    PortableV2ParticipantId, PortableV2ProjectedSelectionEntry, PortableV2SelectionEntry,
+    PortableV2SelectionPlan, PortableV2SelectionProfile, PortableV2SelectionReason,
+    PortableV2SelectionRequest, preview_portable_v2_selection,
 };
 
 pub mod project_portable_v2_subset;
 pub use project_portable_v2_subset::{
     PortableV2GraphSelector, PortableV2GraphSubsetMeta, PortableV2PropertyProjection,
     PortableV2SubsetClosure, PortableV2SubsetPlan, PortableV2SubsetRequest,
-    plan_graph_subset_portable_v2, preview_portable_v2_graph_subset,
+    plan_graph_subset_portable_v2, portable_v2_graph_data_fingerprint,
+    preview_portable_v2_graph_subset,
 };
 
 pub mod project_portable_v2_oci;
@@ -188,10 +193,11 @@ pub use workspace_participants::{
     MAX_WORKSPACE_REPOSITORY_SNAPSHOT_ENTRIES, MAX_WORKSPACE_REPOSITORY_SNAPSHOT_ID_BYTES,
     WORKSPACE_CAPABILITY_ID, WORKSPACE_CAPABILITY_VERSION, WORKSPACE_CONFIGURATION_FAMILY,
     WORKSPACE_ONTOLOGY_COMPOSITION_FAMILY, WORKSPACE_ONTOLOGY_COMPOSITION_VERSION,
-    WORKSPACE_ONTOLOGY_FAMILY, WORKSPACE_REPOSITORY_SNAPSHOT_FAMILY,
-    WORKSPACE_REPOSITORY_SNAPSHOT_VERSION, WorkspaceCompositionModule, WorkspaceConfiguration,
-    WorkspaceOntology, WorkspaceOntologyComposition, WorkspaceOntologyMode,
-    WorkspaceOntologySourceFormat, WorkspaceRepositoryDefinitionDigest,
+    WORKSPACE_ONTOLOGY_FAMILY, WORKSPACE_PORTABLE_ONTOLOGY_STAGING_FAMILY,
+    WORKSPACE_REPOSITORY_SNAPSHOT_FAMILY, WORKSPACE_REPOSITORY_SNAPSHOT_VERSION,
+    WorkspaceCompositionModule, WorkspaceConfiguration, WorkspaceOntology,
+    WorkspaceOntologyComposition, WorkspaceOntologyMode, WorkspaceOntologySourceFormat,
+    WorkspacePortableOntologyStaging, WorkspaceRepositoryDefinitionDigest,
     WorkspaceRepositoryGitProvenance, WorkspaceRepositorySnapshot, WorkspaceRepositorySourceDigest,
     empty_workspace_participants,
 };

@@ -28,6 +28,8 @@ pub const WORKSPACE_CONFIGURATION_FAMILY: &str = "configuration";
 pub const WORKSPACE_REPOSITORY_SNAPSHOT_FAMILY: &str = "repository_snapshot";
 /// Canonical multi-ontology composition authority record family.
 pub const WORKSPACE_ONTOLOGY_COMPOSITION_FAMILY: &str = "ontology_composition";
+/// Verified portable composition candidate; never runtime ontology authority.
+pub const WORKSPACE_PORTABLE_ONTOLOGY_STAGING_FAMILY: &str = "portable_ontology_staging";
 /// Frozen composition participant contract version.
 pub const WORKSPACE_ONTOLOGY_COMPOSITION_VERSION: u32 = 1;
 /// Maximum canonical composition authority size.
@@ -122,6 +124,62 @@ pub struct WorkspaceOntologyComposition {
     pub profile_default: ActivationMode,
     /// Recomputed exact composition identity.
     pub composition_fingerprint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+/// Verified portable composition candidate staged in a generation.
+///
+/// This participant is deliberately non-authoritative. Normal project open
+/// never hydrates it into the active ontology composition; an explicit
+/// lifecycle operation must validate and adopt it.
+pub struct WorkspacePortableOntologyStaging {
+    /// Frozen staging contract version.
+    pub contract_version: u32,
+    /// Semantic identity of the verified portable package.
+    pub package_digest: String,
+    /// Semantic identity of the portable composition control.
+    pub portable_composition_digest: String,
+    /// Fully compiled candidate retained for later explicit adoption.
+    pub composition: WorkspaceOntologyComposition,
+}
+
+impl WorkspacePortableOntologyStaging {
+    /// Encode the validated candidate as canonical JSON.
+    pub fn to_canonical_json(&self) -> Result<Vec<u8>, GfError> {
+        if self.contract_version != 1 {
+            return Err(corrupt("portable ontology staging identity is invalid"));
+        }
+        validate_sha256(
+            self.package_digest
+                .strip_prefix("sha256:")
+                .unwrap_or_default(),
+            "portable package",
+        )?;
+        validate_sha256(
+            self.portable_composition_digest
+                .strip_prefix("sha256:")
+                .unwrap_or_default(),
+            "portable composition",
+        )?;
+        self.composition.compile()?;
+        canonical_json(self, "portable ontology staging")
+    }
+
+    /// Decode and fully revalidate one canonical candidate.
+    pub fn from_canonical_json(bytes: &[u8]) -> Result<Self, GfError> {
+        parse_canonical_json(bytes, "portable ontology staging", |record: &Self| {
+            record.to_canonical_json().map(|_| ())
+        })
+    }
+
+    /// Convert the candidate into its non-authoritative generation participant.
+    pub fn to_project_participant(&self) -> Result<ProjectParticipant, GfError> {
+        Ok(participant(
+            WORKSPACE_PORTABLE_ONTOLOGY_STAGING_FAMILY,
+            self.to_canonical_json()?,
+        ))
+    }
 }
 
 /// Project-level graph directedness metadata for GSI profiling.

@@ -30,3 +30,8 @@ inputs/exclusions, closure for all four
 package classes, older-reader behavior, typed negative results, and operational
 non-mutation invariants. It deliberately contains no runtime identity or TCK
 result in the composition identity.
+
+`m9-interchange-cases.json` is the versioned Rust conformance ledger for #841.
+It freezes the four package classes, both representations, cross-form receipts,
+semantic tamper and future-feature ordering, and the durable non-authoritative
+staging replay/conflict/cancellation/failure matrix.

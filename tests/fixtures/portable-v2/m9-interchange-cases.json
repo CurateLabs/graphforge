@@ -1,0 +1,55 @@
+{
+  "contract": "graphforge-portable-v2-m9-interchange-cases/1",
+  "representations": ["expanded", "bundle"],
+  "positive_package_classes": [
+    "complete",
+    "ontology-only",
+    "component-selective",
+    "graph-data-subset"
+  ],
+  "positive_cases": [
+    {
+      "package_class": "complete",
+      "expected_query_rows": ["00000000-0000-0000-0000-000000000001", "00000000-0000-0000-0000-000000000002", "00000000-0000-0000-0000-000000000003"],
+      "expected_query_fingerprint": "sha256:bbb672f255891facbe5850b261c02d8b771ffc370d64c6c4387b7689aeb754a4",
+      "expected_data_fingerprint": "sha256:f6895f68ffba0161ba9376616123fdb256abe1c59544f1292b61e8b3c042e8af"
+    },
+    {
+      "package_class": "ontology-only",
+      "expected_query_rows": [],
+      "expected_query_fingerprint": "sha256:b0e3df4931dc2a3c11b43a8b4a753e85b65f4997432004e4fd4fe76b913a222d",
+      "expected_data_fingerprint": null
+    },
+    {
+      "package_class": "component-selective",
+      "expected_query_rows": [],
+      "expected_query_fingerprint": "sha256:b0e3df4931dc2a3c11b43a8b4a753e85b65f4997432004e4fd4fe76b913a222d",
+      "expected_data_fingerprint": null
+    },
+    {
+      "package_class": "graph-data-subset",
+      "expected_query_rows": ["00000000-0000-0000-0000-000000000001", "00000000-0000-0000-0000-000000000002"],
+      "expected_query_fingerprint": "sha256:02b3d933c8fc1f7c934e370928830e31043adae4b13fc3ae00efd06a59490148",
+      "expected_data_fingerprint": "sha256:b827191bd679e4a6b90cd41dc768cdced9293073e4974407188a961525f3c620"
+    }
+  ],
+  "required_receipts": [
+    "package_digest",
+    "composition_digest",
+    "data_fingerprint",
+    "query_results"
+  ],
+  "negative_cases": [
+    {"name":"future-manifest-capability-before-payload","result":"unsupported_future"},
+    {"name":"future-composition-feature-before-semantic-payload","result":"unsupported_future"},
+    {"name":"module-semantic-digest-tamper","result":"digest_mismatch"},
+    {"name":"bridge-semantic-digest-tamper","result":"digest_mismatch"},
+    {"name":"semantic-descriptor-kind-path-media-mismatch","result":"incompatible"},
+    {"name":"semantic-payload-budget","result":"limit_exceeded"},
+    {"name":"cancelled-private-materialization","result":"cancelled"},
+    {"name":"durable-staging-replay","result":"idempotent_replay"},
+    {"name":"durable-staging-transaction-conflict","result":"transaction_conflict"},
+    {"name":"durable-staging-publication-failure","result":"old_or_absent"}
+  ],
+  "authority_invariant": "non-authoritative-staging-only"
+}

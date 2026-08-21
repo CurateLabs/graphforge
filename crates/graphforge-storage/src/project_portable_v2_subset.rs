@@ -1,6 +1,7 @@
 //! Deterministic portable-v2 graph-data-subset planning (#786).
 
 use std::collections::BTreeSet;
+use std::path::Path;
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -89,6 +90,23 @@ pub struct PortableV2SubsetPlan {
     pub(crate) projection: GraphProjectionSelection,
 }
 
+/// Fingerprint canonical logical graph data decoded from the actual Parquet
+/// topology, edge, property, edge-property, and runtime-catalog tables.
+pub fn portable_v2_graph_data_fingerprint(
+    graph_root: &Path,
+    limits: PortableV2Limits,
+) -> Result<String, PortableV2Error> {
+    let (inventory, _) = capture_graph_files(graph_root).map_err(storage)?;
+    if inventory.file_count > limits.max_entries
+        || inventory.total_byte_length > limits.max_total_bytes
+    {
+        return Err(limit("graph data fingerprint exceeds configured limit"));
+    }
+    let digest = crate::graph_projection::portable_graph_data_fingerprint(graph_root)
+        .map_err(|_| incompatible("canonical graph data fingerprint"))?;
+    Ok(format!("sha256:{}", hex(digest)))
+}
+
 /// Resolve one bounded deterministic graph-data subset without writing a package.
 pub fn preview_portable_v2_graph_subset(
     generation: &ResolvedProjectGeneration,
@@ -174,7 +192,7 @@ pub fn preview_portable_v2_graph_subset(
         selected_node_count: summary.node_uuids.len() as u64,
         selected_edge_count: summary.edge_uuids.len() as u64,
         endpoint_node_count: summary.endpoint_node_uuids.len() as u64,
-        result_fingerprint: format!("sha256:{}", hex(summary.graph_content_fingerprint)),
+        result_fingerprint: portable_v2_graph_data_fingerprint(staging.path(), limits)?,
         subset_fingerprint: String::new(),
         projection,
     };
@@ -204,7 +222,7 @@ pub fn plan_graph_subset_portable_v2(
     .map_err(|error| map_projection(&error))?;
     if summary.node_uuids.len() as u64 != plan.selected_node_count
         || summary.edge_uuids.len() as u64 != plan.selected_edge_count
-        || format!("sha256:{}", hex(summary.graph_content_fingerprint)) != plan.result_fingerprint
+        || portable_v2_graph_data_fingerprint(staging.path(), limits)? != plan.result_fingerprint
     {
         return Err(PortableV2Error::new(
             PortableV2ErrorCode::ConcurrentMutation,
@@ -297,6 +315,7 @@ fn build_subset_component_selection(
         package_class: "graph-data-subset".into(),
         included,
         excluded,
+        projected: Vec::new(),
         redactions: redactions.iter().cloned().collect(),
         required_capabilities,
         estimated_payload_bytes: total,
@@ -429,7 +448,7 @@ mod tests {
     use std::fs;
     use std::sync::atomic::AtomicBool;
 
-    use graphforge_core::{OntologyMode, TypeId};
+    use graphforge_core::OntologyMode;
     use graphforge_ir::IrLiteral;
     use uuid::Uuid;
 
@@ -456,10 +475,15 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let nodes = [uuid(1), uuid(2), uuid(3)];
         let edges = [uuid(11), uuid(12)];
+        let mut runtime_catalog = graphforge_ir::RuntimeCatalog::new();
+        let person = graphforge_ir::runtime_entity_type_id(runtime_catalog.intern_label("Person"));
+        runtime_catalog.intern_relation_type("KNOWS");
+        runtime_catalog.intern_property("value", Some("Person"));
+        runtime_catalog.intern_property("secret", Some("Person"));
         let mut writer =
             GraphWriter::open_at(workspace.path(), OntologyMode::Exploratory, TS).unwrap();
         for (index, node) in nodes.iter().enumerate() {
-            writer.create_node(*node, TypeId(1)).unwrap();
+            writer.create_node(*node, person).unwrap();
             writer
                 .set_properties(
                     node,
@@ -478,9 +502,38 @@ mod tests {
             .create_edge(edges[1], "KNOWS", &nodes[1], &nodes[2])
             .unwrap();
         writer.flush().unwrap();
+        crate::graph_projection::write_parquet(
+            &workspace.path().join("topology/runtime_catalog.parquet"),
+            &runtime_catalog.to_record_batch(),
+        )
+        .unwrap();
         let (_, files) = capture_graph_files(workspace.path()).unwrap();
         let mut participants = empty_workspace_participants().unwrap();
         participants.insert(0, files);
+        let document = graphforge_ontology::OntologyDoc {
+            ontology_id: "https://graphforge.dev/ontology/subset".into(),
+            version: "v1".into(),
+            entity_types: vec![],
+            relation_types: vec![],
+            properties: vec![],
+            constraints: vec![],
+            migrations: vec![],
+        };
+        let legacy = crate::WorkspaceOntology {
+            contract_version: 1,
+            mode: crate::WorkspaceOntologyMode::Strict,
+            source_format: Some(crate::WorkspaceOntologySourceFormat::Json),
+            canonical_ontology_sha256: Some("b".repeat(64)),
+            canonical_ontology: Some(serde_json::to_value(document).unwrap()),
+        };
+        let composition = crate::WorkspaceOntologyComposition::virtual_legacy(&legacy)
+            .unwrap()
+            .unwrap();
+        participants.push(composition.to_project_participant().unwrap());
+        participants.sort_by(|left, right| {
+            (&left.capability_id, &left.record_family_id)
+                .cmp(&(&right.capability_id, &right.record_family_id))
+        });
         let generation_uuid = Uuid::now_v7();
         let request = ProjectGenerationRequest {
             transaction_uuid: Uuid::now_v7(),
@@ -564,6 +617,7 @@ mod tests {
         assert_eq!(a.selection_fingerprint, preview.subset_fingerprint);
         let report =
             verify_portable_v2(&expanded, PortableV2Mode::Full, limits, Some(&cancelled)).unwrap();
+        assert!(report.ontology_composition.is_some());
         assert_eq!(
             report.package_class,
             crate::PortableV2PackageClass::GraphDataSubset
@@ -610,5 +664,241 @@ mod tests {
         };
         let error = preview_portable_v2_graph_subset(&generation, &unordered, limits).unwrap_err();
         assert_eq!(error.code, PortableV2ErrorCode::Incompatible);
+    }
+
+    fn imported_node_query(root: &std::path::Path) -> Vec<String> {
+        let generation = resolve_project_generation(root).unwrap();
+        graph_tree_query(&generation.graph_tree_root())
+    }
+
+    fn graph_tree_query(root: &std::path::Path) -> Vec<String> {
+        use arrow::array::{Array as _, FixedSizeBinaryArray};
+        let mut rows = crate::catalog::read_nodes(root)
+            .unwrap()
+            .into_iter()
+            .flat_map(|batch| {
+                let index = batch.schema().index_of("node_uuid").unwrap();
+                let values = batch
+                    .column(index)
+                    .as_any()
+                    .downcast_ref::<FixedSizeBinaryArray>()
+                    .unwrap();
+                (0..values.len())
+                    .map(|row| {
+                        Uuid::from_slice(values.value(row))
+                            .unwrap()
+                            .hyphenated()
+                            .to_string()
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        rows.sort();
+        rows
+    }
+
+    fn query_fingerprint(rows: &[String]) -> String {
+        let mut digest = Sha256::new();
+        digest.update(b"graphforge-portable-v2-query-result/1\0");
+        digest.update(serde_json::to_vec(rows).unwrap());
+        format!("sha256:{}", hex(digest.finalize().into()))
+    }
+
+    #[test]
+    fn versioned_m9_positive_matrix_executes_both_representations() {
+        let ledger: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/portable-v2/m9-interchange-cases.json"
+        ))
+        .unwrap();
+        let (root, nodes, _edges) = publish_graph_project();
+        let generation = resolve_project_generation(root.path()).unwrap();
+        let limits = PortableV2Limits::default();
+        let complete = crate::preview_portable_v2_selection(
+            &generation,
+            &crate::PortableV2SelectionRequest {
+                profile: crate::PortableV2SelectionProfile::Complete,
+                strict: false,
+            },
+            limits,
+        )
+        .unwrap();
+        let exact = complete.projected[0].identity.clone();
+        let selected_nodes = [nodes[0], nodes[1]]
+            .map(|uuid| uuid.hyphenated().to_string())
+            .to_vec();
+        let subset = preview_portable_v2_graph_subset(
+            &generation,
+            &PortableV2SubsetRequest {
+                selector: PortableV2GraphSelector {
+                    node_uuids: selected_nodes,
+                    edge_uuids: vec![],
+                },
+                closure: PortableV2SubsetClosure::InducedEdges,
+                projection: PortableV2PropertyProjection::default(),
+            },
+            limits,
+        )
+        .unwrap();
+        let supported = generation
+            .capabilities()
+            .into_iter()
+            .map(|capability| ProjectCapability {
+                capability_id: capability.capability_id,
+                capability_version: capability.capability_version,
+            })
+            .collect::<Vec<_>>();
+
+        for case in ledger["positive_cases"].as_array().unwrap() {
+            let class = case["package_class"].as_str().unwrap();
+            let plan = match class {
+                "complete" => crate::plan_selected_portable_v2(&generation, &complete, limits),
+                "ontology-only" => {
+                    let selection = crate::preview_portable_v2_selection(
+                        &generation,
+                        &crate::PortableV2SelectionRequest {
+                            profile: crate::PortableV2SelectionProfile::OntologyOnly,
+                            strict: false,
+                        },
+                        limits,
+                    )
+                    .unwrap();
+                    crate::plan_selected_portable_v2(&generation, &selection, limits)
+                }
+                "component-selective" => {
+                    let selection = crate::preview_portable_v2_selection(
+                        &generation,
+                        &crate::PortableV2SelectionRequest {
+                            profile: crate::PortableV2SelectionProfile::OntologyComposition(vec![
+                                exact.clone(),
+                            ]),
+                            strict: true,
+                        },
+                        limits,
+                    )
+                    .unwrap();
+                    crate::plan_selected_portable_v2(&generation, &selection, limits)
+                }
+                "graph-data-subset" => plan_graph_subset_portable_v2(&generation, &subset, limits),
+                _ => panic!("unknown positive conformance class"),
+            }
+            .unwrap();
+            let outputs = tempfile::tempdir().unwrap();
+            let mut receipts = Vec::new();
+            let mut reports = Vec::new();
+            let mut query_rows = Vec::new();
+            let mut data_fingerprints = Vec::new();
+            for representation in [PortableV2Output::Expanded, PortableV2Output::Bundle] {
+                let extension = if representation == PortableV2Output::Expanded {
+                    "gfproject"
+                } else {
+                    "gfpb"
+                };
+                let package = outputs.path().join(format!("{class}.{extension}"));
+                receipts.push(
+                    export_complete_portable_v2(
+                        &plan,
+                        &package,
+                        representation,
+                        limits,
+                        &AtomicBool::new(false),
+                        |_| {},
+                    )
+                    .unwrap(),
+                );
+                reports.push(
+                    verify_portable_v2(&package, PortableV2Mode::Full, limits, None).unwrap(),
+                );
+                match (class, representation) {
+                    ("complete", _) => {
+                        let imported = outputs.path().join(format!("{class}-{extension}-import"));
+                        crate::import_complete_portable_v2(
+                            &package,
+                            &imported,
+                            Uuid::new_v4(),
+                            Uuid::new_v4(),
+                            &supported,
+                            limits,
+                            None,
+                        )
+                        .unwrap();
+                        query_rows.push(imported_node_query(&imported));
+                        let imported_generation = resolve_project_generation(&imported).unwrap();
+                        data_fingerprints.push(Some(
+                            portable_v2_graph_data_fingerprint(
+                                &imported_generation.graph_tree_root(),
+                                limits,
+                            )
+                            .unwrap(),
+                        ));
+                    }
+                    ("ontology-only" | "component-selective" | "graph-data-subset", _) => {
+                        let rows = crate::consume_selective_portable_v2(
+                            &package,
+                            limits,
+                            None,
+                            |stage, candidate| {
+                                assert_eq!(
+                                    candidate.report.package_digest,
+                                    reports.last().unwrap().package_digest
+                                );
+                                assert!(candidate.ontology.is_some());
+                                assert!(candidate.staged_composition.is_some());
+                                Ok(if class == "graph-data-subset" {
+                                    let graph = stage.join("data/components/graph-data/graph-tree");
+                                    (
+                                        graph_tree_query(&graph),
+                                        Some(portable_v2_graph_data_fingerprint(&graph, limits)?),
+                                    )
+                                } else {
+                                    (Vec::new(), None)
+                                })
+                            },
+                        )
+                        .unwrap();
+                        query_rows.push(rows.0);
+                        data_fingerprints.push(rows.1);
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(receipts[0].package_digest, receipts[1].package_digest);
+            assert_eq!(reports[0].package_digest, reports[1].package_digest);
+            assert_eq!(
+                reports[0]
+                    .ontology_composition
+                    .as_ref()
+                    .map(|value| &value.composition_digest),
+                reports[1]
+                    .ontology_composition
+                    .as_ref()
+                    .map(|value| &value.composition_digest)
+            );
+            let expected_rows =
+                serde_json::from_value::<Vec<String>>(case["expected_query_rows"].clone()).unwrap();
+            assert!(query_rows.iter().all(|rows| rows == &query_rows[0]));
+            assert_eq!(query_rows[0], expected_rows, "{class}");
+            assert_eq!(
+                query_fingerprint(&query_rows[0]),
+                case["expected_query_fingerprint"].as_str().unwrap()
+            );
+            assert!(
+                data_fingerprints
+                    .iter()
+                    .all(|fingerprint| fingerprint == &data_fingerprints[0])
+            );
+            assert_eq!(
+                data_fingerprints[0].as_deref(),
+                case["expected_data_fingerprint"].as_str(),
+                "{class} canonical graph data"
+            );
+            if class == "graph-data-subset" {
+                assert_eq!(
+                    data_fingerprints[0].as_deref(),
+                    Some(subset.result_fingerprint.as_str())
+                );
+                assert_eq!(receipts[0].selection_fingerprint, subset.subset_fingerprint);
+                assert_eq!(receipts[1].selection_fingerprint, subset.subset_fingerprint);
+            }
+        }
     }
 }
