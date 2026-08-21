@@ -74,6 +74,9 @@ jobs:
       - name: Test changed-path classifier
         run: scripts/ci/test-classify-changes.sh
 
+      - name: Test CodSpeed nightly policy
+        run: python3 scripts/ci/test-codspeed-nightly.py
+
       - name: Test Repository Policy suite classifier
         run: scripts/ci/test-classify-policy-suites.sh
 
@@ -1120,12 +1123,12 @@ jobs:
           python3 scripts/ci/test-assemble-bazel-binding-packages.py
 
   bazel-diagnostics:
-    # Non-required: dual-build parity + cache observe/collect. Must not be in
-    # ci-gate needs. Fail closed on harness crashes (no fabricated JSON).
+    # Non-required parity/cache diagnostics are intentionally disabled for
+    # pull requests. Preserve the recipe until it moves to maintenance CI.
     name: Bazel Diagnostics
     runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: changes
-    if: needs.changes.outputs.bazel == 'true'
+    if: github.event_name == 'workflow_dispatch' && needs.changes.outputs.bazel == 'true'
     timeout-minutes: 120
     steps:
       - name: Checkout code

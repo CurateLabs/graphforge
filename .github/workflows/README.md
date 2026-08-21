@@ -98,6 +98,8 @@ Python, Gherkin, native binding, Pulumi, Terraform, or Bazel jobs. Pull-request
 native binding acceptance is Linux-only and uses Cargo's `dev` profile for
 maturin/napi assembly. Authoritative Rust compile/test is Bazel
 (`//:ci_rust_tests`) under `Bazel Bootstrap`.
+The non-required Cargo/Bazel parity and cache-observation diagnostics do not
+run on pull requests; they remain available for future maintenance CI.
 When Rust surfaces change, `Windows graphforge-storage Locks` runs the native
 project-root lock, exact filesystem primitive, NTFS admission, and real
 publication-kill/fault-oracle cross-checks on `blacksmith-4vcpu-windows-2025`.
@@ -121,19 +123,25 @@ deployments remain serialized to GitHub Pages.
 
 ### `codspeed.yml` — CodSpeed
 
-Builds the divan benchmark targets with `cargo codspeed` and measures them
-under CodSpeed's CPU simulation instrument on pull requests to `main`, pushes
-to `main`, and manual dispatch. It reports performance deltas against the base
-commit as evidence. It is not part of the `CI Gate` aggregate, but its external
-check must still be resolved for the PR to reach the required `CLEAN` state.
-Its Cargo build stays a diagnostic path next to authoritative Bazel
-compilation. Comparable-run and measurement-floor triage is documented in
+Runs once nightly against the exact latest `main` SHA, plus explicit manual
+dispatch. Pull requests and pushes do not trigger CodSpeed. The latest
+successful scheduled workflow SHA skips all nightly benchmark runners when
+`main` has not changed; missing or unsuccessful prior evidence fails closed to
+running the suite. Its Cargo
+build stays a diagnostic path next to authoritative Bazel compilation.
+Comparable-run and measurement-floor triage is documented in
 [`docs/development/benchmarking.md`](../../docs/development/benchmarking.md).
 M6 pure kernels use simulation on the ordinary pinned CI runner; durable
 open/recovery/commit/GC/compaction use CodSpeed's isolated bare-metal
-`codspeed-macro` ARM64 runner. Weekly/manual runs
-also retain exact-SHA replay and compaction peak-RSS artifacts while CodSpeed
-memory mode is unavailable for this project.
+`codspeed-macro` ARM64 runner. Manual runs also retain exact-SHA replay and
+compaction peak-RSS artifacts while CodSpeed memory mode is unavailable for
+this project.
+
+### CodeRabbit
+
+CodeRabbit automatic review is disabled to preserve its limited quota. After
+the required `CI Gate` is green and a pull request is otherwise ready to merge,
+request the final review explicitly with `@coderabbitai review`.
 
 ### `binding-release-candidate.yml`
 
