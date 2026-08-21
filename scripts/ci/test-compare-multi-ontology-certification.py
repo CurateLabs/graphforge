@@ -1,0 +1,74 @@
+#!/usr/bin/env python3
+"""Mutation tests for the #843 four-surface certification comparator."""
+
+from __future__ import annotations
+
+import importlib.util
+import json
+from pathlib import Path
+import tempfile
+
+SCRIPT = Path(__file__).with_name("compare-multi-ontology-certification.py")
+SPEC = importlib.util.spec_from_file_location("certification_comparator", SCRIPT)
+assert SPEC is not None and SPEC.loader is not None
+MODULE = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(MODULE)
+
+
+def report(surface: str) -> dict[str, object]:
+    return {
+        "contract": MODULE.CONTRACT,
+        "surface": surface,
+        "composition_before": "1" * 64,
+        "composition_after": "2" * 64,
+        "migration_plan_digest": "3" * 64,
+        "module_ids": ["urn:graphforge:evidence@v1", "urn:graphforge:research@v1"],
+        "bridge_ids": ["urn:graphforge:research-evidence@v1"],
+        "retained_data": {"rows_scanned": 1, "name": "Ada", "birth_year": 1815},
+        "cases": {
+            "retained_data_migration": {"outcome": "migrated", "atomic": True},
+            "portable_complete": {"outcome": "round_trip"},
+        },
+    }
+
+
+def compare(values: dict[str, dict[str, object]]) -> list[str]:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        paths = {}
+        for surface, value in values.items():
+            path = root / f"{surface}.json"
+            path.write_text(json.dumps(value), encoding="utf-8")
+            paths[surface] = path
+        return MODULE.compare(paths)
+
+
+def main() -> None:
+    baseline = {surface: report(surface) for surface in MODULE.SURFACES}
+    assert compare(baseline) == []
+
+    mutated = {surface: report(surface) for surface in MODULE.SURFACES}
+    mutated["node"]["cases"] = {
+        "retained_data_migration": {"outcome": "migrated", "atomic": False},
+        "portable_complete": {"outcome": "round_trip"},
+    }
+    assert any("node: certification outcome differs" in error for error in compare(mutated))
+
+    mutated = {surface: report(surface) for surface in MODULE.SURFACES}
+    mutated["python"]["retained_data"] = {"rows_scanned": 0, "name": "", "birth_year": True}
+    errors = compare(mutated)
+    assert any("python: retained_data values are invalid" in error for error in errors)
+
+    mutated = {surface: report(surface) for surface in MODULE.SURFACES}
+    mutated["cli"]["module_ids"] = list(reversed(mutated["cli"]["module_ids"]))
+    assert any("cli: module_ids must be" in error for error in compare(mutated))
+
+    mutated = {surface: report(surface) for surface in MODULE.SURFACES}
+    mutated["rust"]["composition_after"] = mutated["rust"]["composition_before"]
+    assert any("migration did not change" in error for error in compare(mutated))
+
+    print("multi-ontology certification comparator mutation tests: PASS")
+
+
+if __name__ == "__main__":
+    main()

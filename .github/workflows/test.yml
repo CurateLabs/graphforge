@@ -90,6 +90,7 @@ jobs:
         run: |
           python3 scripts/ci/test-multi-ontology-surface-gate.py
           python3 scripts/ci/test-compare-multi-ontology-parity.py
+          python3 scripts/ci/test-compare-multi-ontology-certification.py
 
       - name: Validate multi-ontology four-surface parity
         run: python3 scripts/ci/multi-ontology-surface-gate.py
