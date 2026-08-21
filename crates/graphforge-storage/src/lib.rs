@@ -187,9 +187,11 @@ pub use workspace_participants::{
     GraphDirectedness, MAX_WORKSPACE_REPOSITORY_SNAPSHOT_BYTES,
     MAX_WORKSPACE_REPOSITORY_SNAPSHOT_ENTRIES, MAX_WORKSPACE_REPOSITORY_SNAPSHOT_ID_BYTES,
     WORKSPACE_CAPABILITY_ID, WORKSPACE_CAPABILITY_VERSION, WORKSPACE_CONFIGURATION_FAMILY,
+    WORKSPACE_ONTOLOGY_COMPOSITION_FAMILY, WORKSPACE_ONTOLOGY_COMPOSITION_VERSION,
     WORKSPACE_ONTOLOGY_FAMILY, WORKSPACE_REPOSITORY_SNAPSHOT_FAMILY,
-    WORKSPACE_REPOSITORY_SNAPSHOT_VERSION, WorkspaceConfiguration, WorkspaceOntology,
-    WorkspaceOntologyMode, WorkspaceOntologySourceFormat, WorkspaceRepositoryDefinitionDigest,
+    WORKSPACE_REPOSITORY_SNAPSHOT_VERSION, WorkspaceCompositionModule, WorkspaceConfiguration,
+    WorkspaceOntology, WorkspaceOntologyComposition, WorkspaceOntologyMode,
+    WorkspaceOntologySourceFormat, WorkspaceRepositoryDefinitionDigest,
     WorkspaceRepositoryGitProvenance, WorkspaceRepositorySnapshot, WorkspaceRepositorySourceDigest,
     empty_workspace_participants,
 };

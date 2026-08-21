@@ -3,6 +3,11 @@
 use std::collections::BTreeMap;
 
 use graphforge_core::{GfError, OntologyMode, ProjectErrorCode};
+use graphforge_ontology::{
+    ActivationMode, ActivationRecord, AuthoredModule, BridgeDocument, BridgeSetId,
+    CompiledComposition, CompositionLimits, InventoryCompileRequest, OntologyDoc, OntologyModuleId,
+    bridge_document_digest, compile_inventory, module_document_digest,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -20,6 +25,12 @@ pub const WORKSPACE_ONTOLOGY_FAMILY: &str = "ontology";
 pub const WORKSPACE_CONFIGURATION_FAMILY: &str = "configuration";
 /// Canonical repository reconciliation snapshot record family.
 pub const WORKSPACE_REPOSITORY_SNAPSHOT_FAMILY: &str = "repository_snapshot";
+/// Canonical multi-ontology composition authority record family.
+pub const WORKSPACE_ONTOLOGY_COMPOSITION_FAMILY: &str = "ontology_composition";
+/// Frozen composition participant contract version.
+pub const WORKSPACE_ONTOLOGY_COMPOSITION_VERSION: u32 = 1;
+/// Maximum canonical composition authority size.
+pub const MAX_WORKSPACE_ONTOLOGY_COMPOSITION_BYTES: usize = 16 * 1024 * 1024;
 /// Frozen repository snapshot contract version.
 pub const WORKSPACE_REPOSITORY_SNAPSHOT_VERSION: u32 = 1;
 /// Maximum canonical repository snapshot participant size.
@@ -77,6 +88,39 @@ pub struct WorkspaceOntology {
     pub canonical_ontology_sha256: Option<String>,
     /// Validated canonical ontology document, absent when mode is `none`.
     pub canonical_ontology: Option<Value>,
+}
+
+/// One exact authored module retained by composition authority.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceCompositionModule {
+    /// Exact semantic module identity.
+    pub id: OntologyModuleId,
+    /// Exact dependency identities in canonical order.
+    pub dependencies: Vec<OntologyModuleId>,
+    /// Independently validated authored document.
+    pub document: OntologyDoc,
+    /// Whether this is the explicit legacy virtual identity projection.
+    #[serde(default)]
+    pub allow_projected_identity: bool,
+}
+
+/// Canonical project-generation participant for multi-ontology authority.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceOntologyComposition {
+    /// Frozen record contract version.
+    pub contract_version: u32,
+    /// Exact authored modules; input order is not authority.
+    pub modules: Vec<WorkspaceCompositionModule>,
+    /// Exact adopted bridge documents.
+    pub bridges: Vec<BridgeDocument>,
+    /// Scoped activation records.
+    pub activation: Vec<ActivationRecord>,
+    /// Default progressive enforcement.
+    pub profile_default: ActivationMode,
+    /// Recomputed exact composition identity.
+    pub composition_fingerprint: String,
 }
 
 /// Project-level graph directedness metadata for GSI profiling.
@@ -218,6 +262,152 @@ impl WorkspaceOntology {
     }
 }
 
+impl WorkspaceOntologyComposition {
+    /// Build canonical persisted authority from one successfully compiled composition.
+    #[must_use]
+    pub fn from_compiled(
+        composition: &CompiledComposition,
+        mut bridges: Vec<BridgeDocument>,
+    ) -> Self {
+        bridges.sort_by(|left, right| {
+            (&left.bridge_id, &left.authored_version)
+                .cmp(&(&right.bridge_id, &right.authored_version))
+        });
+        Self {
+            contract_version: WORKSPACE_ONTOLOGY_COMPOSITION_VERSION,
+            modules: composition
+                .modules
+                .iter()
+                .map(|module| WorkspaceCompositionModule {
+                    id: module.id.clone(),
+                    dependencies: module.dependencies.clone(),
+                    document: module.doc.clone(),
+                    allow_projected_identity: module.id.ontology_id.starts_with("legacy:"),
+                })
+                .collect(),
+            bridges,
+            activation: composition.activation.clone(),
+            profile_default: composition.profile_default,
+            composition_fingerprint: composition.fingerprint.clone(),
+        }
+    }
+
+    /// Project an older single-ontology participant without publishing or rewriting it.
+    ///
+    /// # Errors
+    /// Returns corruption when the legacy authority is internally inconsistent.
+    pub fn virtual_legacy(legacy: &WorkspaceOntology) -> Result<Option<Self>, GfError> {
+        let Some(value) = &legacy.canonical_ontology else {
+            return Ok(None);
+        };
+        let document: OntologyDoc = serde_json::from_value(value.clone())
+            .map_err(|_| corrupt("legacy ontology document is malformed"))?;
+        let document_digest = module_document_digest(&document)
+            .map_err(|_| corrupt("legacy ontology document cannot be canonicalized"))?;
+        let legacy_digest = legacy
+            .canonical_ontology_sha256
+            .as_deref()
+            .ok_or_else(|| corrupt("legacy ontology digest is missing"))?;
+        let module = AuthoredModule {
+            id: OntologyModuleId {
+                ontology_id: format!("legacy:{legacy_digest}"),
+                authored_version: "legacy-v1".to_owned(),
+                canonical_digest: document_digest,
+            },
+            dependencies: Vec::new(),
+            doc: document,
+            allow_projected_identity: true,
+        };
+        let compiled = compile_inventory(InventoryCompileRequest {
+            modules: std::slice::from_ref(&module),
+            bridges: &[],
+            activation: &[],
+            profile_default: match legacy.mode {
+                WorkspaceOntologyMode::None => ActivationMode::Exploratory,
+                WorkspaceOntologyMode::Advisory => ActivationMode::Advisory,
+                WorkspaceOntologyMode::Strict => ActivationMode::Strict,
+            },
+            limits: CompositionLimits::default(),
+            cancelled: None,
+        })
+        .map_err(|_| corrupt("legacy ontology virtual composition is invalid"))?;
+        Ok(Some(Self::from_compiled(&compiled, Vec::new())))
+    }
+
+    /// Recompile and validate exact identities and the recorded fingerprint.
+    ///
+    /// # Errors
+    /// Returns corruption for malformed, incoherent, or noncanonical authority.
+    pub fn compile(&self) -> Result<CompiledComposition, GfError> {
+        validate_composition(self)?;
+        let authored = self
+            .modules
+            .iter()
+            .map(|module| AuthoredModule {
+                id: module.id.clone(),
+                dependencies: module.dependencies.clone(),
+                doc: module.document.clone(),
+                allow_projected_identity: module.allow_projected_identity,
+            })
+            .collect::<Vec<_>>();
+        let bridge_ids = self
+            .bridges
+            .iter()
+            .map(|bridge| {
+                Ok(BridgeSetId {
+                    bridge_id: bridge.bridge_id.clone(),
+                    authored_version: bridge.authored_version.clone(),
+                    canonical_digest: bridge_document_digest(bridge)
+                        .map_err(|_| corrupt("bridge document cannot be canonicalized"))?,
+                })
+            })
+            .collect::<Result<Vec<_>, GfError>>()?;
+        let compiled = compile_inventory(InventoryCompileRequest {
+            modules: &authored,
+            bridges: &bridge_ids,
+            activation: &self.activation,
+            profile_default: self.profile_default,
+            limits: CompositionLimits::default(),
+            cancelled: None,
+        })
+        .map_err(|_| corrupt("ontology composition does not compile"))?;
+        if compiled.fingerprint != self.composition_fingerprint {
+            return Err(corrupt("ontology composition fingerprint does not match"));
+        }
+        Ok(compiled)
+    }
+
+    /// Validate and return canonical JSON plus LF.
+    pub fn to_canonical_json(&self) -> Result<Vec<u8>, GfError> {
+        self.compile()?;
+        let bytes = canonical_json(self, "workspace ontology composition")?;
+        if bytes.len() > MAX_WORKSPACE_ONTOLOGY_COMPOSITION_BYTES {
+            return Err(corrupt("workspace ontology composition exceeds size limit"));
+        }
+        Ok(bytes)
+    }
+
+    /// Parse exact canonical JSON plus LF and validate its compiled identity.
+    pub fn from_canonical_json(bytes: &[u8]) -> Result<Self, GfError> {
+        if bytes.len() > MAX_WORKSPACE_ONTOLOGY_COMPOSITION_BYTES {
+            return Err(corrupt("workspace ontology composition exceeds size limit"));
+        }
+        parse_canonical_json(
+            bytes,
+            "workspace ontology composition",
+            |record: &WorkspaceOntologyComposition| record.compile().map(|_| ()),
+        )
+    }
+
+    /// Encode this authority as one registered project participant.
+    pub fn to_project_participant(&self) -> Result<ProjectParticipant, GfError> {
+        Ok(participant(
+            WORKSPACE_ONTOLOGY_COMPOSITION_FAMILY,
+            self.to_canonical_json()?,
+        ))
+    }
+}
+
 impl WorkspaceConfiguration {
     /// Construct the empty authoritative configuration for a new project.
     #[must_use]
@@ -352,6 +542,25 @@ fn validate_ontology(record: &WorkspaceOntology) -> Result<(), GfError> {
         }
         WorkspaceOntologyMode::None => Err(corrupt("workspace ontology absence is inconsistent")),
     }
+}
+
+fn validate_composition(record: &WorkspaceOntologyComposition) -> Result<(), GfError> {
+    if record.contract_version != WORKSPACE_ONTOLOGY_COMPOSITION_VERSION {
+        return Err(corrupt(
+            "unsupported workspace ontology composition contract",
+        ));
+    }
+    if record.composition_fingerprint.len() != 64
+        || !record
+            .composition_fingerprint
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(corrupt(
+            "workspace ontology composition fingerprint is malformed",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_configuration(record: &WorkspaceConfiguration) -> Result<(), GfError> {
@@ -707,6 +916,81 @@ mod tests {
             WorkspaceRepositorySnapshot::from_canonical_json(with_unrestricted_field.as_bytes())
                 .unwrap_err()
                 .code(),
+            "GF_PROJECT_CORRUPT"
+        );
+    }
+
+    #[test]
+    fn legacy_ontology_projects_without_rewriting_and_first_composition_is_canonical() {
+        let document = OntologyDoc {
+            ontology_id: "https://graphforge.dev/ontology/legacy".into(),
+            version: "1.0.0".into(),
+            entity_types: vec![graphforge_ontology::EntityTypeDef {
+                name: "Person".into(),
+                r#abstract: false,
+                parent: None,
+            }],
+            relation_types: vec![],
+            properties: vec![],
+            constraints: vec![],
+            migrations: vec![],
+        };
+        let value = serde_json::to_value(&document).unwrap();
+        let legacy = WorkspaceOntology {
+            contract_version: 1,
+            mode: WorkspaceOntologyMode::Strict,
+            source_format: Some(WorkspaceOntologySourceFormat::Json),
+            canonical_ontology_sha256: Some(encode_hex(&Sha256::digest(
+                serde_json::to_vec(&value).unwrap(),
+            ))),
+            canonical_ontology: Some(value),
+        };
+        let projected = WorkspaceOntologyComposition::virtual_legacy(&legacy)
+            .unwrap()
+            .unwrap();
+        assert!(projected.modules[0].id.ontology_id.starts_with("legacy:"));
+        assert_eq!(projected.profile_default, ActivationMode::Strict);
+
+        let bytes = projected.to_canonical_json().unwrap();
+        assert_eq!(
+            WorkspaceOntologyComposition::from_canonical_json(&bytes).unwrap(),
+            projected
+        );
+        let participant = projected.to_project_participant().unwrap();
+        assert_eq!(
+            participant.record_family_id,
+            WORKSPACE_ONTOLOGY_COMPOSITION_FAMILY
+        );
+        assert_eq!(
+            legacy.to_canonical_json().unwrap(),
+            legacy.to_canonical_json().unwrap()
+        );
+    }
+
+    #[test]
+    fn composition_participant_rejects_fingerprint_tampering() {
+        let legacy = WorkspaceOntology::none();
+        assert!(
+            WorkspaceOntologyComposition::virtual_legacy(&legacy)
+                .unwrap()
+                .is_none()
+        );
+
+        let mut future = WorkspaceOntologyComposition {
+            contract_version: 2,
+            modules: vec![],
+            bridges: vec![],
+            activation: vec![],
+            profile_default: ActivationMode::Exploratory,
+            composition_fingerprint: "00".repeat(32),
+        };
+        assert_eq!(
+            future.to_canonical_json().unwrap_err().code(),
+            "GF_PROJECT_CORRUPT"
+        );
+        future.contract_version = 1;
+        assert_eq!(
+            future.to_canonical_json().unwrap_err().code(),
             "GF_PROJECT_CORRUPT"
         );
     }

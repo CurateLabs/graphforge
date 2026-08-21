@@ -801,7 +801,11 @@ fn reset_partial_generation(generations: &Path, generation_uuid: Uuid) -> Result
     let generation = generations.join(generation_uuid.hyphenated().to_string());
     let workspace = generation.join(PARTICIPANTS_DIR).join("workspace");
     if workspace.exists() {
-        for family in ["configuration.json", "ontology.json"] {
+        for family in [
+            "configuration.json",
+            "ontology.json",
+            "ontology_composition.json",
+        ] {
             let path = workspace.join(family);
             if path.exists() {
                 std::fs::remove_file(&path).map_err(|error| {
@@ -856,7 +860,15 @@ fn validate_partial_workspace_participants(participants: &Path) -> Result<(), Gf
         })
         .collect::<Result<Vec<_>, _>>()?;
     names.sort();
-    if names != ["configuration.json", "ontology.json"] && names != ["configuration.json"] {
+    let valid = names == ["configuration.json"]
+        || names == ["configuration.json", "ontology.json"]
+        || names
+            == [
+                "configuration.json",
+                "ontology.json",
+                "ontology_composition.json",
+            ];
+    if !valid {
         return Err(unsupported(
             "uninitialized workspace contains unknown entries",
         ));
