@@ -8,9 +8,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AggExpr, CreatePattern, Direction, ExprArena, ExprId, IrVersion, OntologyVersion,
-    ProcedureDefinition, ProcedureYield, ProjectItem, RemovePropItem, SetMapItem, SetPropItem,
-    SortOrder, TypeId, VarId,
+    AggExpr, BindingExplainReceipt, CreatePattern, Direction, ExprArena, ExprId, IrVersion,
+    OntologyVersion, ProcedureDefinition, ProcedureYield, ProjectItem, RemovePropItem, SetMapItem,
+    SetPropItem, SortOrder, TypeId, VarId,
 };
 
 /// Child projection column consumed by pattern-comprehension lowering.
@@ -387,6 +387,12 @@ pub struct GraphPlan {
     ///
     /// `None` in `Exploratory` mode (no formal ontology present).
     pub ontology_version: Option<OntologyVersion>,
+    /// Exact multi-ontology composition identity used during binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub composition_fingerprint: Option<String>,
+    /// Deterministic bounded semantic-resolution explanations.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub binding_receipts: Vec<BindingExplainReceipt>,
     /// Active ontology enforcement mode.
     pub ontology_mode: OntologyMode,
     /// Optional feature flags that affect plan behaviour.
@@ -409,6 +415,8 @@ impl GraphPlan {
             ir_version: IrVersion::CURRENT,
             dialect: dialect.into(),
             ontology_version: None,
+            composition_fingerprint: None,
+            binding_receipts: Vec::new(),
             ontology_mode: OntologyMode::default(),
             feature_flags: Vec::new(),
             ops: Vec::new(),
@@ -429,6 +437,8 @@ pub struct GraphPlanBuilder {
     ir_version: IrVersion,
     dialect: String,
     ontology_version: Option<OntologyVersion>,
+    composition_fingerprint: Option<String>,
+    binding_receipts: Vec<BindingExplainReceipt>,
     ontology_mode: OntologyMode,
     feature_flags: Vec<String>,
     ops: Vec<GraphOp>,
@@ -448,6 +458,18 @@ impl GraphPlanBuilder {
     pub fn ontology_version(mut self, v: impl Into<OntologyVersion>) -> Self {
         self.ontology_version = Some(v.into());
         self
+    }
+
+    /// Carry exact composition identity through the plan.
+    #[must_use]
+    pub fn composition_fingerprint(mut self, fingerprint: impl Into<String>) -> Self {
+        self.composition_fingerprint = Some(fingerprint.into());
+        self
+    }
+
+    /// Append one deterministic symbol-binding explanation.
+    pub fn push_binding_receipt(&mut self, receipt: BindingExplainReceipt) {
+        self.binding_receipts.push(receipt);
     }
 
     /// Set the ontology mode (default: [`OntologyMode::Exploratory`]).
@@ -491,6 +513,8 @@ impl GraphPlanBuilder {
             ir_version: self.ir_version,
             dialect: self.dialect,
             ontology_version: self.ontology_version,
+            composition_fingerprint: self.composition_fingerprint,
+            binding_receipts: self.binding_receipts,
             ontology_mode: self.ontology_mode,
             feature_flags: self.feature_flags,
             ops: self.ops,

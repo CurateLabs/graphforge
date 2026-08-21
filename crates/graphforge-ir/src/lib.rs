@@ -22,6 +22,12 @@ pub use catalog::{
     runtime_type_id_from_entity_plan_id,
 };
 
+pub mod composition_binding;
+pub use composition_binding::{
+    BindingDecision, BindingDiagnostic, BindingDiagnosticCode, BindingExplainReceipt,
+    CompositionBindingContext, CompositionBindingLimits, SymbolBinding,
+};
+
 pub mod expr;
 pub use expr::{BinaryOpKind, CaseArm, ExprArena, IrExpr, IrLiteral, UnaryOpKind};
 pub use graphforge_ast::QuantifierKind;

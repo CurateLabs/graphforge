@@ -22,6 +22,7 @@ use graphforge_core::{PropId, Span, TypeId};
 use graphforge_ontology::OntologyHandle;
 
 use crate::catalog::RuntimeCatalog;
+use crate::composition_binding::{BindingDiagnosticCode, CompositionBindingContext, SymbolBinding};
 use crate::expr::{BinaryOpKind, CaseArm, IrExpr, IrLiteral, UnaryOpKind};
 use crate::plan::{
     GraphOp, GraphPlan, GraphPlanBuilder, OntologyMode, PATTERN_COMPREHENSION_VALUE_ALIAS, SortKey,
@@ -73,6 +74,10 @@ pub enum BindErrorKind {
     /// / `NoSingleRelationshipType` / … — the harness checks the phase, not the
     /// sub-code, so one kind with a descriptive message suffices (#956).
     InvalidArgument,
+    /// A composed ontology symbol has multiple valid candidates.
+    AmbiguousComposedSymbol,
+    /// A composed ontology qualifier or bridge path is invalid/conflicting.
+    CompositionConflict,
 }
 
 /// The semantic kind a pattern variable is bound to, tracked so a later use
@@ -143,6 +148,7 @@ pub struct Binder {
     mode: OntologyMode,
     procedures: Arc<ProcedureRegistry>,
     typed_uuid_params: HashMap<String, UuidParamClass>,
+    composition: Option<Arc<CompositionBindingContext>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,7 +175,15 @@ impl Binder {
             mode,
             procedures: Arc::new(ProcedureRegistry::new()),
             typed_uuid_params: HashMap::new(),
+            composition: None,
         }
+    }
+
+    /// Supplies compiled multi-ontology binding authority.
+    #[must_use]
+    pub fn with_composition(mut self, composition: Arc<CompositionBindingContext>) -> Self {
+        self.composition = Some(composition);
+        self
     }
 
     /// Supplies the procedures available while binding `CALL` clauses.
@@ -212,6 +226,7 @@ impl Binder {
             mode: self.mode,
             procedures: Arc::clone(&self.procedures),
             typed_uuid_params: self.typed_uuid_params.clone(),
+            composition: self.composition.clone(),
         };
         let result = staged_binder.bind_staged(ast);
         if result.is_ok() {
@@ -242,6 +257,9 @@ impl Binder {
         }
 
         let mut builder = GraphPlan::builder(dialect).ontology_mode(self.mode);
+        if let Some(composition) = &self.composition {
+            builder = builder.composition_fingerprint(composition.fingerprint());
+        }
         if let Some(v) = ontology_version {
             builder = builder.ontology_version(v);
         }
@@ -341,6 +359,9 @@ impl Binder {
         }
 
         let mut builder = GraphPlan::builder(dialect).ontology_mode(self.mode);
+        if let Some(composition) = &self.composition {
+            builder = builder.composition_fingerprint(composition.fingerprint());
+        }
         if let Some(version) = ontology_version {
             builder = builder.ontology_version(version);
         }
@@ -4452,6 +4473,25 @@ impl Binder {
     // -----------------------------------------------------------------------
 
     fn resolve_label(&self, name: &str, span: Span, s: &mut BinderState) -> TypeId {
+        if let Some(composition) = &self.composition {
+            return match composition.resolve(graphforge_ontology::SymbolKind::Entity, name) {
+                Ok((binding, receipt)) => {
+                    s.builder.push_binding_receipt(receipt);
+                    match binding {
+                        SymbolBinding::Qualified(symbol) => {
+                            TypeId(composition.semantic_id(&symbol))
+                        }
+                        SymbolBinding::Runtime { local_id, .. } => crate::runtime_entity_type_id(
+                            self.catalog.lock().unwrap().intern_label(&local_id),
+                        ),
+                    }
+                }
+                Err(diagnostic) => {
+                    Self::push_composition_error(diagnostic, span, s);
+                    TypeId(u32::MAX)
+                }
+            };
+        }
         if let Some(handle) = &self.ontology
             && let Some(id) = handle.entity_type_id(name)
         {
@@ -4481,6 +4521,25 @@ impl Binder {
     }
 
     fn resolve_relation_type(&self, name: &str, span: Span, s: &mut BinderState) -> TypeId {
+        if let Some(composition) = &self.composition {
+            return match composition.resolve(graphforge_ontology::SymbolKind::Relation, name) {
+                Ok((binding, receipt)) => {
+                    s.builder.push_binding_receipt(receipt);
+                    match binding {
+                        SymbolBinding::Qualified(symbol) => {
+                            TypeId(composition.semantic_id(&symbol))
+                        }
+                        SymbolBinding::Runtime { local_id, .. } => crate::runtime_relation_type_id(
+                            self.catalog.lock().unwrap().intern_relation_type(&local_id),
+                        ),
+                    }
+                }
+                Err(diagnostic) => {
+                    Self::push_composition_error(diagnostic, span, s);
+                    TypeId(u32::MAX)
+                }
+            };
+        }
         if let Some(handle) = &self.ontology
             && let Some(id) = handle.relation_type_id(name)
         {
@@ -4525,6 +4584,44 @@ impl Binder {
         if matches!(name, "node_uuid" | "edge_uuid") {
             return PropId(self.catalog.lock().unwrap().intern_property(name, None).0);
         }
+        if let Some(composition) = &self.composition {
+            let owned = match &owner {
+                BoundPropertyOwner::Entity(Some(owner)) => {
+                    Some((graphforge_ontology::SymbolKind::Entity, owner.as_str()))
+                }
+                BoundPropertyOwner::Relationship(Some(owner)) => {
+                    Some((graphforge_ontology::SymbolKind::Relation, owner.as_str()))
+                }
+                BoundPropertyOwner::Entity(None)
+                | BoundPropertyOwner::Relationship(None)
+                | BoundPropertyOwner::Value => None,
+            };
+            let resolution = owned.map_or_else(
+                || composition.resolve(graphforge_ontology::SymbolKind::Property, name),
+                |(kind, owner)| composition.resolve_owned_property(kind, owner, name),
+            );
+            return match resolution {
+                Ok((binding, receipt)) => {
+                    s.builder.push_binding_receipt(receipt);
+                    match binding {
+                        SymbolBinding::Qualified(symbol) => {
+                            PropId(composition.semantic_id(&symbol))
+                        }
+                        SymbolBinding::Runtime { local_id, .. } => PropId(
+                            self.catalog
+                                .lock()
+                                .unwrap()
+                                .intern_property(&local_id, None)
+                                .0,
+                        ),
+                    }
+                }
+                Err(diagnostic) => {
+                    Self::push_composition_error(diagnostic, span, s);
+                    PropId(u32::MAX)
+                }
+            };
+        }
         match self.mode {
             OntologyMode::Strict => self.resolve_strict_property(name, span, owner, s),
             OntologyMode::Advisory => {
@@ -4539,6 +4636,37 @@ impl Binder {
                 PropId(self.catalog.lock().unwrap().intern_property(name, None).0)
             }
         }
+    }
+
+    fn push_composition_error(
+        diagnostic: crate::BindingDiagnostic,
+        span: Span,
+        s: &mut BinderState,
+    ) {
+        let kind = match diagnostic.code {
+            BindingDiagnosticCode::AmbiguousSymbol => BindErrorKind::AmbiguousComposedSymbol,
+            BindingDiagnosticCode::UnknownSymbol => BindErrorKind::UnknownLabel,
+            _ => BindErrorKind::CompositionConflict,
+        };
+        let candidates = if diagnostic.candidates.is_empty() {
+            String::new()
+        } else {
+            format!("; candidates: {}", diagnostic.candidates.join(", "))
+        };
+        s.errors.push(BindError::new(
+            kind,
+            span,
+            format!(
+                "{}: {}{}; remediation: {}",
+                serde_json::to_value(diagnostic.code)
+                    .ok()
+                    .and_then(|value| value.as_str().map(ToOwned::to_owned))
+                    .unwrap_or_else(|| "composition_error".to_owned()),
+                diagnostic.subject,
+                candidates,
+                diagnostic.remediation
+            ),
+        ));
     }
 
     fn resolve_strict_property(
