@@ -102,10 +102,10 @@ fn seed_generation_chain(root: &std::path::Path, delta_count: usize) {
 fn durable_commit(bencher: Bencher) {
     bencher
         .with_inputs(prepared_publication)
-        .bench_local_values(|(root, workspace, request)| {
+        .bench_local_refs(|(root, workspace, request)| {
             let ProjectStageOutcome::Staged(staged) = stage_project_generation_with_graph_tree(
                 root.path(),
-                &request,
+                request,
                 Some(workspace.path()),
             )
             .unwrap() else {
@@ -191,7 +191,7 @@ fn spill_compaction(bencher: Bencher) {
             publish_delta(root.path());
             root
         })
-        .bench_local_values(|root| {
+        .bench_local_refs(|root| {
             let limits = GraphDeltaCompactionLimits::default();
             compact_graph_delta(
                 root.path(),

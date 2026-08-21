@@ -42,6 +42,22 @@ if missing:
     print("missing M6 benchmarks: " + ", ".join(missing), file=sys.stderr)
     raise SystemExit(1)
 
+walltime_source = (ROOT / "crates/graphforge-storage/benches/m6_storage_io.rs").read_text(
+    encoding="utf-8"
+)
+for name in ("durable_commit", "spill_compaction"):
+    function = re.search(
+        rf"(?ms)^fn\s+{re.escape(name)}\s*\([^)]*\)\s*\{{(.*?)(?=^#\[divan::bench|\Z)",
+        walltime_source,
+    )
+    if function is None:
+        raise SystemExit(f"cannot inspect TempDir-backed benchmark {name}")
+    body = function.group(1)
+    if ".bench_local_refs(" not in body or ".bench_local_values(" in body:
+        raise SystemExit(
+            f"{name} must keep TempDir teardown outside the timed region with bench_local_refs"
+        )
+
 workflow = WORKFLOW.read_text(encoding="utf-8")
 walltime_job = workflow.split("  m6-walltime:\n", 1)
 if len(walltime_job) != 2:
