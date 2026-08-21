@@ -19,6 +19,8 @@ pub const GRAPH_SEMANTIC_BINDINGS_VERSION: u32 = 1;
 pub const MAX_SEMANTIC_BINDINGS: usize = 1_000_000;
 /// Maximum canonical participant bytes.
 pub const MAX_SEMANTIC_BINDING_BYTES: usize = 64 * 1024 * 1024;
+const MAX_SEMANTIC_PARQUET_COLUMNS: usize = 4_096;
+const MAX_SEMANTIC_STRING_BYTES: usize = 4_096;
 /// Parquet schema metadata key authenticating the opaque route.
 pub const SEMANTIC_ROUTE_METADATA_KEY: &str = "graphforge.semantic_route";
 /// Parquet schema metadata key authenticating the owning composition.
@@ -526,6 +528,21 @@ impl SemanticStorageBindings {
                 ));
             }
         }
+        let expected_count = composition
+            .modules
+            .iter()
+            .try_fold(0usize, |count, module| {
+                count
+                    .checked_add(module.doc.entity_types.len())
+                    .and_then(|count| count.checked_add(module.doc.relation_types.len()))
+                    .and_then(|count| count.checked_add(module.doc.properties.len()))
+                    .ok_or_else(|| corrupt("composition semantic closure count overflows"))
+            })?;
+        if self.bindings.len() != expected_count {
+            return Err(corrupt(
+                "semantic bindings do not cover the complete composition closure",
+            ));
+        }
         Ok(())
     }
 
@@ -657,6 +674,9 @@ impl SemanticStorageBindings {
                 parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)
                     .map_err(|_| corrupt("semantic route Parquet metadata is invalid"))?;
             let schema = builder.schema();
+            if schema.fields().len() > MAX_SEMANTIC_PARQUET_COLUMNS {
+                return Err(corrupt("semantic route column count exceeds limit"));
+            }
             if schema.metadata().get(SEMANTIC_ROUTE_METADATA_KEY) != Some(&binding.route)
                 || schema.metadata().get(SEMANTIC_COMPOSITION_METADATA_KEY)
                     != Some(&self.composition_fingerprint)
@@ -749,6 +769,12 @@ impl SemanticStorageBindings {
         let mut ids = BTreeSet::new();
         let mut routes = BTreeMap::new();
         for binding in &self.bindings {
+            if binding.symbol.local_id.len() > MAX_SEMANTIC_STRING_BYTES
+                || binding.symbol.module.ontology_id.len() > MAX_SEMANTIC_STRING_BYTES
+                || binding.symbol.module.authored_version.len() > MAX_SEMANTIC_STRING_BYTES
+            {
+                return Err(corrupt("semantic binding string exceeds limit"));
+            }
             if binding.route
                 != Self::opaque_route(binding.route_kind, &binding.symbol, binding.owner.as_ref())
             {
@@ -885,6 +911,127 @@ pub fn require_atomic_legacy_migration(graph_root: &Path) -> Result<(), GfError>
     Ok(())
 }
 
+/// Rewrite a preflighted unambiguous legacy workspace to authenticated opaque
+/// routes. The caller must hold graph publication authority and publish the
+/// returned binding participant in the same generation. A local failure rolls
+/// every completed rename back before returning.
+pub struct LegacyRouteMigration {
+    completed: Vec<(PathBuf, PathBuf, PathBuf)>,
+    committed: bool,
+}
+
+impl LegacyRouteMigration {
+    /// Keep the opaque routes after their binding participant is published.
+    pub fn commit(&mut self) {
+        for (_, _, backup) in &self.completed {
+            let _ = std::fs::remove_file(backup);
+        }
+        self.committed = true;
+    }
+}
+
+impl Drop for LegacyRouteMigration {
+    fn drop(&mut self) {
+        if !self.committed {
+            for (old, new, backup) in self.completed.iter().rev() {
+                let _ = std::fs::remove_file(new);
+                let _ = std::fs::rename(backup, old);
+            }
+        }
+    }
+}
+
+/// Apply deterministic preflighted route moves and return a rollback guard.
+/// The caller commits the guard only after publishing the matching bindings.
+pub fn apply_legacy_route_moves(
+    graph_root: &Path,
+    route_moves: &[(PathBuf, PathBuf)],
+    bindings: &SemanticStorageBindings,
+) -> Result<LegacyRouteMigration, GfError> {
+    let mut completed = Vec::new();
+    for (old_relative, new_relative) in route_moves {
+        let old = graph_root.join(old_relative);
+        let new = graph_root.join(new_relative);
+        let binding = bindings
+            .bindings
+            .iter()
+            .find(|binding| binding.physical_path(Path::new("")).as_ref() == Some(new_relative))
+            .ok_or_else(|| corrupt("legacy migration destination has no binding"))?;
+        if new.exists() {
+            return Err(corrupt("legacy migration destination already exists"));
+        }
+        let parent = new
+            .parent()
+            .ok_or_else(|| corrupt("legacy migration destination has no parent"))?;
+        std::fs::create_dir_all(parent)
+            .map_err(|_| corrupt("legacy migration destination cannot be created"))?;
+        let backup = old.with_extension("parquet.legacy-backup");
+        if backup.exists() {
+            return Err(corrupt("legacy migration backup already exists"));
+        }
+        if let Err(error) = std::fs::rename(&old, &backup) {
+            for (prior_old, prior_new, prior_backup) in completed.iter().rev() {
+                let _ = std::fs::remove_file(prior_new);
+                let _ = std::fs::rename(prior_backup, prior_old);
+            }
+            return Err(corrupt(&format!("legacy migration rename failed: {error}")));
+        }
+        let rewrite = (|| {
+            let builder = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+                File::open(&backup).map_err(|_| corrupt("legacy migration source cannot open"))?,
+            )
+            .map_err(|_| corrupt("legacy migration source metadata is invalid"))?;
+            if builder.schema().fields().len() > MAX_SEMANTIC_PARQUET_COLUMNS {
+                return Err(corrupt("legacy migration column count exceeds limit"));
+            }
+            let mut metadata = builder.schema().metadata().clone();
+            metadata.insert(SEMANTIC_ROUTE_METADATA_KEY.into(), binding.route.clone());
+            metadata.insert(
+                SEMANTIC_COMPOSITION_METADATA_KEY.into(),
+                bindings.composition_fingerprint.clone(),
+            );
+            let schema = std::sync::Arc::new(arrow::datatypes::Schema::new_with_metadata(
+                builder.schema().fields().clone(),
+                metadata,
+            ));
+            let mut writer = parquet::arrow::ArrowWriter::try_new(
+                File::create(&new)
+                    .map_err(|_| corrupt("legacy migration destination cannot open"))?,
+                schema,
+                None,
+            )
+            .map_err(|_| corrupt("legacy migration writer cannot be built"))?;
+            for batch in builder
+                .with_batch_size(8192)
+                .build()
+                .map_err(|_| corrupt("legacy migration reader cannot be built"))?
+            {
+                writer
+                    .write(&batch.map_err(|_| corrupt("legacy migration batch is invalid"))?)
+                    .map_err(|_| corrupt("legacy migration batch cannot be written"))?;
+            }
+            writer
+                .close()
+                .map_err(|_| corrupt("legacy migration output cannot close"))?;
+            Ok(())
+        })();
+        if let Err(error) = rewrite {
+            let _ = std::fs::remove_file(&new);
+            let _ = std::fs::rename(&backup, &old);
+            for (prior_old, prior_new, prior_backup) in completed.iter().rev() {
+                let _ = std::fs::remove_file(prior_new);
+                let _ = std::fs::rename(prior_backup, prior_old);
+            }
+            return Err(error);
+        }
+        completed.push((old, new, backup));
+    }
+    Ok(LegacyRouteMigration {
+        completed,
+        committed: false,
+    })
+}
+
 fn corrupt(message: &str) -> GfError {
     GfError::Project {
         code: ProjectErrorCode::ProjectCorrupt,
@@ -970,14 +1117,44 @@ fn binding_has_retained_data(
     if !path.exists() {
         return Ok(false);
     }
-    let metadata = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+    let builder = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
         File::open(path).map_err(|_| corrupt("removal route cannot be opened"))?,
     )
-    .map_err(|_| corrupt("removal route metadata is invalid"))?
-    .metadata()
-    .file_metadata()
-    .num_rows();
-    Ok(metadata > 0)
+    .map_err(|_| corrupt("removal route metadata is invalid"))?;
+    if matches!(
+        binding.route_kind,
+        SemanticRouteKind::NodeProperty | SemanticRouteKind::EdgeProperty
+    ) {
+        let column = binding
+            .symbol
+            .local_id
+            .split_once(':')
+            .map(|(_, property)| property)
+            .ok_or_else(|| corrupt("removal property has no qualified column"))?;
+        if !builder
+            .schema()
+            .fields()
+            .iter()
+            .any(|field| field.name() == column)
+        {
+            return Ok(false);
+        }
+        for batch in builder
+            .with_batch_size(8192)
+            .build()
+            .map_err(|_| corrupt("removal property reader cannot be built"))?
+        {
+            let batch = batch.map_err(|_| corrupt("removal property batch is invalid"))?;
+            let values = batch
+                .column_by_name(column)
+                .ok_or_else(|| corrupt("removal property column disappeared"))?;
+            if values.null_count() < values.len() {
+                return Ok(true);
+            }
+        }
+        return Ok(false);
+    }
+    Ok(builder.metadata().file_metadata().num_rows() > 0)
 }
 
 fn binding_key(
@@ -1269,6 +1446,41 @@ mod tests {
                 && binding.symbol.local_id == "KNOWS:since"
         }));
 
+        let other_column = tempfile::TempDir::new().unwrap();
+        let mut writer = crate::GraphWriter::open_at(
+            other_column.path(),
+            graphforge_core::OntologyMode::Strict,
+            1,
+        )
+        .unwrap()
+        .with_semantic_composition_fingerprint(Some(first.fingerprint.clone()));
+        let left = graphforge_core::uuid::new_v7();
+        let right = graphforge_core::uuid::new_v7();
+        writer
+            .create_node(left, graphforge_core::TypeId(1))
+            .unwrap();
+        writer
+            .create_node(right, graphforge_core::TypeId(1))
+            .unwrap();
+        let edge = graphforge_core::uuid::new_v7();
+        writer
+            .create_edge(edge, &relation.route, &left, &right)
+            .unwrap();
+        writer
+            .set_edge_properties(
+                &edge,
+                Some(&relation.route),
+                HashMap::from([("other".into(), graphforge_ir::IrLiteral::Int(1))]),
+            )
+            .unwrap();
+        writer.flush().unwrap();
+        SemanticStorageBindings::project_with_graph_scan(
+            &next,
+            Some(&initial),
+            other_column.path(),
+        )
+        .expect("an unrelated populated owner column must not retain the removed property");
+
         let retained = tempfile::TempDir::new().unwrap();
         let mut writer =
             crate::GraphWriter::open_at(retained.path(), graphforge_core::OntologyMode::Strict, 1)
@@ -1333,6 +1545,53 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("GF_SEMANTIC_LEGACY_AMBIGUOUS"));
+    }
+
+    #[test]
+    fn unambiguous_legacy_routes_rewrite_with_metadata_and_reopen() {
+        use std::collections::HashMap;
+
+        let composition = compiled("1");
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut writer =
+            crate::GraphWriter::open_at(dir.path(), graphforge_core::OntologyMode::Strict, 1)
+                .unwrap();
+        let left = graphforge_core::uuid::new_v7();
+        let right = graphforge_core::uuid::new_v7();
+        writer
+            .create_node(left, graphforge_core::TypeId(0))
+            .unwrap();
+        writer
+            .create_node(right, graphforge_core::TypeId(0))
+            .unwrap();
+        let edge = graphforge_core::uuid::new_v7();
+        writer.create_edge(edge, "KNOWS", &left, &right).unwrap();
+        writer
+            .set_edge_properties(
+                &edge,
+                Some("KNOWS"),
+                HashMap::from([("since".into(), graphforge_ir::IrLiteral::Int(2020))]),
+            )
+            .unwrap();
+        writer.flush().unwrap();
+
+        let projection =
+            SemanticStorageBindings::project_legacy_unambiguous(&composition, dir.path()).unwrap();
+        assert!(!projection.route_moves.is_empty());
+        let mut migration =
+            apply_legacy_route_moves(dir.path(), &projection.route_moves, &projection.bindings)
+                .unwrap();
+        projection
+            .bindings
+            .validate_physical_routes(dir.path())
+            .unwrap();
+        migration.commit();
+        drop(migration);
+        assert!(!dir.path().join("topology/edges/KNOWS.parquet").exists());
+        projection
+            .bindings
+            .validate_physical_routes(dir.path())
+            .unwrap();
     }
 
     #[test]

@@ -5474,6 +5474,7 @@ mod tests {
             computed_properties: vec![],
         };
         let cfg = CreateConfig {
+            semantic_composition_fingerprint: None,
             nodes: nodes.clone(),
             edges: vec![edge.clone()],
             ref_cols: vec![],
@@ -5510,6 +5511,7 @@ mod tests {
         assert_eq!(persisted_node_ids(dir.path()).unwrap().len(), 4);
 
         let invalid_untyped = CreateConfig {
+            semantic_composition_fingerprint: None,
             nodes: nodes.clone(),
             edges: vec![ResolvedEdgeSpec {
                 rel_type_id: None,
@@ -5529,6 +5531,7 @@ mod tests {
                 .contains("relationship type")
         );
         let invalid_undirected = CreateConfig {
+            semantic_composition_fingerprint: None,
             nodes,
             edges: vec![ResolvedEdgeSpec {
                 direction: graphforge_ir::Direction::Undirected,
@@ -5674,6 +5677,7 @@ mod tests {
             graphforge_storage::GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, 1)
                 .unwrap();
         let cfg = CreateConfig {
+            semantic_composition_fingerprint: None,
             nodes: vec![reference.clone()],
             edges: vec![],
             ref_cols: vec![],
@@ -5748,6 +5752,7 @@ mod tests {
             computed_properties: vec![],
         };
         let mut edge_cfg = CreateConfig {
+            semantic_composition_fingerprint: None,
             nodes: vec![],
             edges: vec![edge.clone()],
             ref_cols: vec![],
@@ -5866,6 +5871,7 @@ mod tests {
             arrow::datatypes::Field::new("name", arrow::datatypes::DataType::Utf8, false),
         ]));
         let cfg = CreateConfig {
+            semantic_composition_fingerprint: None,
             nodes: vec![ResolvedNodeSpec {
                 var: 1,
                 label_ids: vec![7],

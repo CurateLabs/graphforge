@@ -472,6 +472,12 @@ pub struct GraphForge {
     runtime: Arc<OwnedRuntime>,
 }
 
+type BoundGenerationStorage = (
+    Arc<CompositionBindingContext>,
+    graphforge_storage::SemanticStorageBindings,
+    Vec<(std::path::PathBuf, std::path::PathBuf)>,
+);
+
 impl std::fmt::Debug for GraphForge {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Custom impl: the ontology handle / runtime catalog are large and not
@@ -1065,7 +1071,7 @@ impl GraphForge {
                 self.ontology_mode,
             )
             .with_procedures(self.procedure_snapshot());
-            if let Some((composition, _)) = &composition {
+            if let Some((composition, _, _)) = &composition {
                 binder = binder.with_composition(Arc::clone(composition));
             }
             binder
@@ -1075,21 +1081,22 @@ impl GraphForge {
 
         validate_call_params(&plan, params)?;
 
-        let candidate = composition.as_ref().map(|(_, candidate)| candidate);
-        let composition_mode =
-            composition
-                .as_ref()
-                .map(|(context, _)| match context.composition().profile_default {
-                    graphforge_ontology::ActivationMode::Exploratory => OntologyMode::Exploratory,
-                    graphforge_ontology::ActivationMode::Advisory => OntologyMode::Advisory,
-                    graphforge_ontology::ActivationMode::Strict => OntologyMode::Strict,
-                });
+        let candidate = composition.as_ref().map(|(_, candidate, _)| candidate);
+        let legacy_route_moves = composition.as_ref().map(|(_, _, moves)| moves.as_slice());
+        let composition_mode = composition.as_ref().map(|(context, _, _)| {
+            match context.composition().profile_default {
+                graphforge_ontology::ActivationMode::Exploratory => OntologyMode::Exploratory,
+                graphforge_ontology::ActivationMode::Advisory => OntologyMode::Advisory,
+                graphforge_ontology::ActivationMode::Strict => OntologyMode::Strict,
+            }
+        });
         let result = self.run_plan_with_publish_and_bindings(
             &plan,
             params,
             publish,
             candidate,
             composition_mode,
+            legacy_route_moves,
         );
         let result = result.map_err(publicize_query_error)?;
         shape_result(result, self.ontology_mode, self.ontology.as_ref())
@@ -1099,21 +1106,31 @@ impl GraphForge {
     fn bind_generation_storage(
         &self,
         context: &Arc<CompositionBindingContext>,
-    ) -> Result<
-        (
-            Arc<CompositionBindingContext>,
-            graphforge_storage::SemanticStorageBindings,
-        ),
-        GfError,
-    > {
+    ) -> Result<BoundGenerationStorage, GfError> {
         let current = self
             .semantic_storage_bindings
             .lock()
             .expect("semantic storage binding lock poisoned");
-        let projected = graphforge_storage::SemanticStorageBindings::project(
-            context.composition(),
-            current.as_ref(),
-        )?;
+        let (projected, route_moves) =
+            if current.is_none() && context.composition().modules.len() == 1 {
+                let projection =
+                    graphforge_storage::SemanticStorageBindings::project_legacy_unambiguous(
+                        context.composition(),
+                        &self.dir,
+                    )?;
+                (projection.bindings, projection.route_moves)
+            } else {
+                if current.is_none() {
+                    graphforge_storage::require_atomic_legacy_migration(&self.dir)?;
+                }
+                (
+                    graphforge_storage::SemanticStorageBindings::project(
+                        context.composition(),
+                        current.as_ref(),
+                    )?,
+                    Vec::new(),
+                )
+            };
         projected.validate_against(context.composition())?;
         let context = context.with_generation_storage_ids(
             projected
@@ -1122,7 +1139,7 @@ impl GraphForge {
                 .map(|binding| (binding.symbol.clone(), binding.storage_id)),
         );
         drop(current);
-        Ok((Arc::new(context), projected))
+        Ok((Arc::new(context), projected, route_moves))
     }
 
     /// Build a session reflecting the current runtime catalog and run `plan`,
@@ -1142,7 +1159,7 @@ impl GraphForge {
         params: &HashMap<String, IrLiteral>,
         publish: bool,
     ) -> Result<ExecutionResult, GfError> {
-        self.run_plan_with_publish_and_bindings(plan, params, publish, None, None)
+        self.run_plan_with_publish_and_bindings(plan, params, publish, None, None, None)
     }
 
     #[allow(clippy::too_many_lines)] // one visibility lock spans execution and publication
@@ -1153,6 +1170,7 @@ impl GraphForge {
         publish: bool,
         candidate_bindings: Option<&graphforge_storage::SemanticStorageBindings>,
         composition_mode: Option<OntologyMode>,
+        legacy_route_moves: Option<&[(std::path::PathBuf, std::path::PathBuf)]>,
     ) -> Result<ExecutionResult, GfError> {
         use graphforge_exec::ExecutionSession;
 
@@ -1195,6 +1213,19 @@ impl GraphForge {
                 )
             })
             .transpose()?;
+        let mut legacy_migration = None;
+        if legacy_route_moves.is_some_and(|moves| !moves.is_empty()) {
+            if !is_write || !publish {
+                return Err(GfError::Validation(
+                    "GF_SEMANTIC_LEGACY_MIGRATION_REQUIRED: run a publishing write to migrate the unambiguous legacy generation".into(),
+                ));
+            }
+            legacy_migration = Some(graphforge_storage::apply_legacy_route_moves(
+                &self.dir,
+                legacy_route_moves.expect("checked"),
+                candidate_bindings.expect("legacy migration has candidate bindings"),
+            )?);
+        }
 
         // Open a catalog snapshot reflecting the freshly-bound runtime catalog so
         // read scans resolve property names interned during bind.
@@ -1287,6 +1318,9 @@ impl GraphForge {
                     .semantic_storage_bindings
                     .lock()
                     .expect("semantic storage binding lock poisoned") = Some(candidate.clone());
+            }
+            if let Some(migration) = &mut legacy_migration {
+                migration.commit();
             }
         }
         if is_write

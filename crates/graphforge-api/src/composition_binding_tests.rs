@@ -94,38 +94,31 @@ fn module(name: &str, entities: &[&str]) -> AuthoredModule {
                 parent: None,
             })
             .collect(),
-        relation_types: (name == "research")
-            .then_some(RelationTypeDef {
-                name: "KNOWS".to_owned(),
-                src: "Person".to_owned(),
-                dst: "Person".to_owned(),
-                inverse: None,
-                semantic: SemanticFlags::default(),
-            })
-            .into_iter()
-            .collect(),
-        properties: (name == "research")
-            .then_some(vec![
-                PropertyDef {
-                    owner: "Person".to_owned(),
-                    name: "name".to_owned(),
-                    value_type: PropertyValueType::Utf8,
-                    nullable: true,
-                    multivalued: false,
-                    default_json: None,
-                },
-                PropertyDef {
-                    owner: "KNOWS".to_owned(),
-                    name: "since".to_owned(),
-                    value_type: PropertyValueType::Int64,
-                    nullable: true,
-                    multivalued: false,
-                    default_json: None,
-                },
-            ])
-            .into_iter()
-            .flatten()
-            .collect(),
+        relation_types: vec![RelationTypeDef {
+            name: "KNOWS".to_owned(),
+            src: "Person".to_owned(),
+            dst: "Person".to_owned(),
+            inverse: None,
+            semantic: SemanticFlags::default(),
+        }],
+        properties: vec![
+            PropertyDef {
+                owner: "Person".to_owned(),
+                name: "name".to_owned(),
+                value_type: PropertyValueType::Utf8,
+                nullable: true,
+                multivalued: false,
+                default_json: None,
+            },
+            PropertyDef {
+                owner: "KNOWS".to_owned(),
+                name: "since".to_owned(),
+                value_type: PropertyValueType::Int64,
+                nullable: true,
+                multivalued: false,
+                default_json: None,
+            },
+        ],
         constraints: vec![],
         migrations: vec![],
     };
@@ -298,6 +291,115 @@ fn facade_does_not_install_unpublished_semantic_bindings() {
         .execute_with_composition("MATCH (n:Person) RETURN n", context)
         .expect_err("ambiguous bind");
     assert!(forge.semantic_storage_bindings.lock().unwrap().is_none());
+}
+
+#[test]
+fn stale_parent_publication_leaves_graph_and_bindings_at_old_generation() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("project");
+    let forge = GraphForge::new(Some(path.to_str().unwrap())).unwrap();
+    let before = graphforge_storage::resolve_project_generation(&path)
+        .unwrap()
+        .generation_uuid();
+    let (context, _, _) = composed_fixture(ActivationMode::Strict);
+    *forge.current_generation_uuid.lock().unwrap() = uuid::Uuid::now_v7();
+
+    let error = forge
+        .execute_with_composition(
+            "CREATE (n:`research:Person` {name:'must-not-publish'})",
+            context,
+        )
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("generation changed"),
+        "{error:?}"
+    );
+    assert!(forge.semantic_storage_bindings.lock().unwrap().is_none());
+    assert_eq!(
+        graphforge_storage::resolve_project_generation(&path)
+            .unwrap()
+            .generation_uuid(),
+        before
+    );
+    drop(forge);
+    let reopened = GraphForge::new(Some(path.to_str().unwrap())).unwrap();
+    assert!(reopened.semantic_storage_bindings.lock().unwrap().is_none());
+    assert_eq!(
+        reopened
+            .execute("MATCH (n) RETURN n")
+            .unwrap()
+            .batches
+            .iter()
+            .map(arrow::record_batch::RecordBatch::num_rows)
+            .sum::<usize>(),
+        0
+    );
+}
+
+#[test]
+fn generation_hydration_rejects_incomplete_bindings_with_matching_fingerprint() {
+    let forge = GraphForge::new(None).unwrap();
+    let (context, _, _) = composed_fixture(ActivationMode::Strict);
+    let complete =
+        graphforge_storage::SemanticStorageBindings::project(context.composition(), None).unwrap();
+    let mut incomplete = complete.bindings.clone();
+    incomplete.pop();
+    *forge.semantic_storage_bindings.lock().unwrap() = Some(
+        graphforge_storage::SemanticStorageBindings::new(
+            context.fingerprint().to_owned(),
+            incomplete,
+        )
+        .unwrap(),
+    );
+    assert!(
+        forge
+            .install_generation_composition_context(&context)
+            .is_err()
+    );
+    assert!(forge.default_composition_context.lock().unwrap().is_none());
+}
+
+#[test]
+fn semantic_publication_replays_one_durable_operation_idempotently() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("project");
+    let forge = GraphForge::new(Some(path.to_str().unwrap())).unwrap();
+    let (context, _, _) = composed_fixture(ActivationMode::Strict);
+    install_composition_authority(&forge, context.fingerprint());
+    drop(forge);
+    let forge = GraphForge::new(Some(path.to_str().unwrap())).unwrap();
+    forge
+        .execute_with_composition(
+            "CREATE (n:`research:Person` {name:'first'})",
+            context.clone(),
+        )
+        .unwrap();
+    forge
+        .install_generation_composition_context(&context)
+        .unwrap();
+    let result = forge
+        .execute_write_without_publish(
+            "CREATE (n:`genealogy:Person` {name:'replayed'})",
+            &std::collections::HashMap::new(),
+        )
+        .unwrap();
+    let receipt = result.mutation_receipt.unwrap();
+    let operation = uuid::Uuid::now_v7();
+    forge
+        .publish_graph_mutation_with_context(&receipt, operation, None, 1)
+        .unwrap();
+    let first = graphforge_storage::resolve_project_generation(&path)
+        .unwrap()
+        .generation_uuid();
+    forge
+        .publish_graph_mutation_with_context(&receipt, operation, None, 1)
+        .unwrap();
+    assert_eq!(
+        graphforge_storage::resolve_project_generation(&path)
+            .unwrap()
+            .generation_uuid(),
+        first
+    );
 }
 
 #[test]
@@ -481,6 +583,18 @@ fn facade_reopens_relation_edge_property_through_default_context() {
             context.clone(),
         )
         .unwrap();
+    forge
+        .execute_with_composition(
+            "CREATE (a:`genealogy:Person` {name:'G1'}), (b:`genealogy:Person` {name:'G2'})",
+            context.clone(),
+        )
+        .unwrap();
+    forge
+        .execute_with_composition(
+            "MATCH (a:`genealogy:Person` {name:'G1'}), (b:`genealogy:Person` {name:'G2'}) CREATE (a)-[r:`genealogy:KNOWS` {since:1999}]->(b)",
+            context.clone(),
+        )
+        .unwrap();
     let installed = forge
         .semantic_storage_bindings
         .lock()
@@ -490,8 +604,20 @@ fn facade_reopens_relation_edge_property_through_default_context() {
     let relation = installed
         .bindings
         .iter()
-        .find(|binding| binding.route_kind == graphforge_storage::SemanticRouteKind::Relation)
+        .find(|binding| {
+            binding.route_kind == graphforge_storage::SemanticRouteKind::Relation
+                && binding.symbol.module.ontology_id.ends_with("/research")
+        })
         .unwrap();
+    let genealogy_relation = installed
+        .bindings
+        .iter()
+        .find(|binding| {
+            binding.route_kind == graphforge_storage::SemanticRouteKind::Relation
+                && binding.symbol.module.ontology_id.ends_with("/genealogy")
+        })
+        .unwrap();
+    assert_ne!(relation.route, genealogy_relation.route);
     let edge_path = forge
         .dir
         .join("topology/edges")
@@ -574,5 +700,17 @@ fn facade_reopens_relation_edge_property_through_default_context() {
     assert_eq!(
         arrow::util::display::array_value_to_string(before_batch.column(0), 0).unwrap(),
         "2020"
+    );
+    let genealogy = reopened
+        .execute("MATCH (a:`genealogy:Person`)-[r:`genealogy:KNOWS`]->(b:`genealogy:Person`) RETURN r.since")
+        .unwrap();
+    let genealogy_batch = genealogy
+        .batches
+        .iter()
+        .find(|batch| batch.num_rows() > 0)
+        .expect("colliding genealogy relation query returned no rows");
+    assert_eq!(
+        arrow::util::display::array_value_to_string(genealogy_batch.column(0), 0).unwrap(),
+        "1999"
     );
 }
