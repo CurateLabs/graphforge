@@ -1,5 +1,5 @@
 {
-  "checksum": "115b96cc2f71a9518e66a493357c5a36fabfa8911d60c734b577612bd5a8ceb8",
+  "checksum": "fb283564fd3498c1dd8968a3a7ec2bbebf603eb6f6e3d401bac7af43302d9def",
   "crates": {
     "adler2 2.0.1": {
       "name": "adler2",
@@ -12743,6 +12743,10 @@
               "target": "napi"
             },
             {
+              "id": "serde 1.0.228",
+              "target": "serde"
+            },
+            {
               "id": "serde_json 1.0.151",
               "target": "serde_json"
             },
@@ -12823,6 +12827,10 @@
               "target": "pyo3"
             },
             {
+              "id": "serde 1.0.228",
+              "target": "serde"
+            },
+            {
               "id": "serde_json 1.0.151",
               "target": "serde_json"
             },
@@ -12897,6 +12905,11 @@
               "target": "serde_json"
             },
             {
+              "id": "serde_yaml_ng 0.9.36",
+              "target": "serde_yaml_ng",
+              "alias": "serde_yaml"
+            },
+            {
               "id": "uuid 1.24.1",
               "target": "uuid"
             }
@@ -12914,6 +12927,10 @@
             {
               "id": "parquet 58.3.0",
               "target": "parquet"
+            },
+            {
+              "id": "sha2 0.11.0",
+              "target": "sha2"
             },
             {
               "id": "tempfile 3.27.0",

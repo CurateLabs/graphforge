@@ -1,0 +1,5 @@
+"""Normative multi-ontology conformance fixtures."""
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(glob(["*"], exclude = ["BUILD.bazel"]))

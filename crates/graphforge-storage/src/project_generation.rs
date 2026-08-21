@@ -615,6 +615,20 @@ pub fn resolve_verified_generation(
     })
 }
 
+/// Resolve and lease one immutable generation by exact UUID.
+///
+/// The generation's own bounded canonical manifest is authenticated before
+/// the existing digest-bound resolver is invoked. This never consults
+/// `CURRENT`, enumerates generation directories, or accepts an unvalidated
+/// caller-provided digest.
+pub fn resolve_generation_by_uuid(
+    container_root: &Path,
+    generation_uuid: Uuid,
+) -> Result<ResolvedProjectGeneration, GfError> {
+    let manifest_sha256 = validated_generation_manifest_sha256(container_root, generation_uuid)?;
+    resolve_verified_generation(container_root, generation_uuid, manifest_sha256)
+}
+
 /// Open a supported project or create the first committed generation in an
 /// explicitly empty directory.
 ///

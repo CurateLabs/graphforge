@@ -4,6 +4,7 @@
 
 mod composite;
 mod import_session;
+mod multi_ontology;
 mod portable;
 mod transaction;
 
@@ -4741,6 +4742,474 @@ impl GraphForge {
         };
         py.detach(|| self.inner.clear_ontology(request))
             .map_err(|error| to_pyerr(py, &error))
+    }
+
+    fn ontology_modules(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        multi_ontology::ontology_modules(self, py)
+    }
+
+    fn ontology_authority_state(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        multi_ontology::authority_state(self, py)
+    }
+
+    #[pyo3(signature = (ontology_id, *, authored_version=None, canonical_digest=None))]
+    fn inspect_ontology_module(
+        &self,
+        py: Python<'_>,
+        ontology_id: &str,
+        authored_version: Option<&str>,
+        canonical_digest: Option<&str>,
+    ) -> PyResult<Py<PyAny>> {
+        multi_ontology::inspect_module(self, py, ontology_id, authored_version, canonical_digest)
+    }
+
+    fn validate_ontology_module(
+        &self,
+        py: Python<'_>,
+        document: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        multi_ontology::validate_module(self, py, document)
+    }
+
+    #[pyo3(signature = (document, dependencies, *, enforcement=None))]
+    fn create_ontology_module(
+        &self,
+        py: Python<'_>,
+        document: &Bound<'_, PyAny>,
+        dependencies: &Bound<'_, PyAny>,
+        enforcement: Option<&str>,
+    ) -> PyResult<Py<PyAny>> {
+        multi_ontology::create_module(self, py, document, dependencies, enforcement)
+    }
+
+    #[pyo3(signature = (text, dependencies, *, format="auto"))]
+    fn import_ontology_module(
+        &self,
+        py: Python<'_>,
+        text: &str,
+        dependencies: &Bound<'_, PyAny>,
+        format: &str,
+    ) -> PyResult<Py<PyAny>> {
+        multi_ontology::import_module(self, py, text, format, dependencies)
+    }
+
+    #[pyo3(signature = (candidate, *, expected_project_generation_uuid, expected_composition_fingerprint, operation_uuid, actor_uuid=None, cancellation=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn adopt_ontology_module(
+        &mut self,
+        py: Python<'_>,
+        candidate: &Bound<'_, PyAny>,
+        expected_project_generation_uuid: &str,
+        expected_composition_fingerprint: Option<&str>,
+        operation_uuid: &str,
+        actor_uuid: Option<&str>,
+        cancellation: Option<&PyCancellationToken>,
+    ) -> PyResult<Py<PyAny>> {
+        multi_ontology::adopt_module(
+            self,
+            py,
+            candidate,
+            expected_project_generation_uuid,
+            expected_composition_fingerprint,
+            operation_uuid,
+            actor_uuid,
+            cancellation,
+        )
+    }
+
+    #[pyo3(signature = (ontology_id, document, dependencies, *, authored_version=None, canonical_digest=None))]
+    fn preview_update_ontology_module(
+        &self,
+        py: Python<'_>,
+        ontology_id: &str,
+        document: &Bound<'_, PyAny>,
+        dependencies: &Bound<'_, PyAny>,
+        authored_version: Option<&str>,
+        canonical_digest: Option<&str>,
+    ) -> PyResult<Py<PyAny>> {
+        multi_ontology::preview_update_module(
+            self,
+            py,
+            ontology_id,
+            authored_version,
+            canonical_digest,
+            document,
+            dependencies,
+        )
+    }
+
+    #[pyo3(signature = (ontology_id, document, dependencies, *, authored_version=None, canonical_digest=None, enforcement=None, expected_project_generation_uuid, expected_composition_fingerprint, operation_uuid, actor_uuid=None, cancellation=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn update_ontology_module(
+        &mut self,
+        py: Python<'_>,
+        ontology_id: &str,
+        document: &Bound<'_, PyAny>,
+        dependencies: &Bound<'_, PyAny>,
+        authored_version: Option<&str>,
+        canonical_digest: Option<&str>,
+        enforcement: Option<&str>,
+        expected_project_generation_uuid: &str,
+        expected_composition_fingerprint: Option<&str>,
+        operation_uuid: &str,
+        actor_uuid: Option<&str>,
+        cancellation: Option<&PyCancellationToken>,
+    ) -> PyResult<Py<PyAny>> {
+        multi_ontology::update_module(
+            self,
+            py,
+            ontology_id,
+            authored_version,
+            canonical_digest,
+            document,
+            dependencies,
+            enforcement,
+            expected_project_generation_uuid,
+            expected_composition_fingerprint,
+            operation_uuid,
+            actor_uuid,
+            cancellation,
+        )
+    }
+
+    #[pyo3(signature = (ontology_id, *, authored_version=None, canonical_digest=None))]
+    fn preview_delete_ontology_module(
+        &self,
+        py: Python<'_>,
+        ontology_id: &str,
+        authored_version: Option<&str>,
+        canonical_digest: Option<&str>,
+    ) -> PyResult<Py<PyAny>> {
+        multi_ontology::preview_delete_module(
+            self,
+            py,
+            ontology_id,
+            authored_version,
+            canonical_digest,
+        )
+    }
+
+    #[pyo3(signature = (ontology_id, *, authored_version=None, canonical_digest=None, expected_project_generation_uuid, expected_composition_fingerprint, operation_uuid, actor_uuid=None, cancellation=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn delete_ontology_module(
+        &mut self,
+        py: Python<'_>,
+        ontology_id: &str,
+        authored_version: Option<&str>,
+        canonical_digest: Option<&str>,
+        expected_project_generation_uuid: &str,
+        expected_composition_fingerprint: Option<&str>,
+        operation_uuid: &str,
+        actor_uuid: Option<&str>,
+        cancellation: Option<&PyCancellationToken>,
+    ) -> PyResult<Py<PyAny>> {
+        multi_ontology::delete_module(
+            self,
+            py,
+            ontology_id,
+            authored_version,
+            canonical_digest,
+            expected_project_generation_uuid,
+            expected_composition_fingerprint,
+            operation_uuid,
+            actor_uuid,
+            cancellation,
+        )
+    }
+
+    #[pyo3(signature = (ontology_id, *, format, authored_version=None, canonical_digest=None))]
+    fn export_ontology_module(
+        &self,
+        py: Python<'_>,
+        ontology_id: &str,
+        format: &str,
+        authored_version: Option<&str>,
+        canonical_digest: Option<&str>,
+    ) -> PyResult<String> {
+        multi_ontology::export_module(
+            self,
+            py,
+            ontology_id,
+            authored_version,
+            canonical_digest,
+            format,
+        )
+    }
+
+    fn ontology_bridges(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        multi_ontology::ontology_bridges(self, py)
+    }
+
+    #[pyo3(signature = (bridge_id, *, authored_version=None, canonical_digest=None))]
+    fn inspect_ontology_bridge(
+        &self,
+        py: Python<'_>,
+        bridge_id: &str,
+        authored_version: Option<&str>,
+        canonical_digest: Option<&str>,
+    ) -> PyResult<Py<PyAny>> {
+        multi_ontology::inspect_bridge(self, py, bridge_id, authored_version, canonical_digest)
+    }
+
+    fn validate_ontology_bridge(
+        &self,
+        py: Python<'_>,
+        document: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        multi_ontology::validate_bridge(self, py, document)
+    }
+    fn create_ontology_bridge(
+        &self,
+        py: Python<'_>,
+        document: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        multi_ontology::create_bridge(self, py, document)
+    }
+
+    #[pyo3(signature = (text, *, format="auto"))]
+    fn import_ontology_bridge(
+        &self,
+        py: Python<'_>,
+        text: &str,
+        format: &str,
+    ) -> PyResult<Py<PyAny>> {
+        multi_ontology::import_bridge(self, py, text, format)
+    }
+
+    #[pyo3(signature = (candidate, *, expected_project_generation_uuid, expected_composition_fingerprint, operation_uuid, actor_uuid=None, cancellation=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn adopt_ontology_bridge(
+        &mut self,
+        py: Python<'_>,
+        candidate: &Bound<'_, PyAny>,
+        expected_project_generation_uuid: &str,
+        expected_composition_fingerprint: Option<&str>,
+        operation_uuid: &str,
+        actor_uuid: Option<&str>,
+        cancellation: Option<&PyCancellationToken>,
+    ) -> PyResult<Py<PyAny>> {
+        multi_ontology::adopt_bridge(
+            self,
+            py,
+            candidate,
+            expected_project_generation_uuid,
+            expected_composition_fingerprint,
+            operation_uuid,
+            actor_uuid,
+            cancellation,
+        )
+    }
+
+    #[pyo3(signature = (bridge_id, document, *, authored_version=None, canonical_digest=None))]
+    fn preview_update_ontology_bridge(
+        &self,
+        py: Python<'_>,
+        bridge_id: &str,
+        document: &Bound<'_, PyAny>,
+        authored_version: Option<&str>,
+        canonical_digest: Option<&str>,
+    ) -> PyResult<Py<PyAny>> {
+        multi_ontology::preview_update_bridge(
+            self,
+            py,
+            bridge_id,
+            authored_version,
+            canonical_digest,
+            document,
+        )
+    }
+
+    #[pyo3(signature = (bridge_id, document, *, authored_version=None, canonical_digest=None, expected_project_generation_uuid, expected_composition_fingerprint, operation_uuid, actor_uuid=None, cancellation=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn update_ontology_bridge(
+        &mut self,
+        py: Python<'_>,
+        bridge_id: &str,
+        document: &Bound<'_, PyAny>,
+        authored_version: Option<&str>,
+        canonical_digest: Option<&str>,
+        expected_project_generation_uuid: &str,
+        expected_composition_fingerprint: Option<&str>,
+        operation_uuid: &str,
+        actor_uuid: Option<&str>,
+        cancellation: Option<&PyCancellationToken>,
+    ) -> PyResult<Py<PyAny>> {
+        multi_ontology::update_bridge(
+            self,
+            py,
+            bridge_id,
+            authored_version,
+            canonical_digest,
+            document,
+            expected_project_generation_uuid,
+            expected_composition_fingerprint,
+            operation_uuid,
+            actor_uuid,
+            cancellation,
+        )
+    }
+
+    #[pyo3(signature = (bridge_id, *, authored_version=None, canonical_digest=None))]
+    fn preview_delete_ontology_bridge(
+        &self,
+        py: Python<'_>,
+        bridge_id: &str,
+        authored_version: Option<&str>,
+        canonical_digest: Option<&str>,
+    ) -> PyResult<Py<PyAny>> {
+        multi_ontology::preview_delete_bridge(
+            self,
+            py,
+            bridge_id,
+            authored_version,
+            canonical_digest,
+        )
+    }
+
+    #[pyo3(signature = (bridge_id, *, authored_version=None, canonical_digest=None, expected_project_generation_uuid, expected_composition_fingerprint, operation_uuid, actor_uuid=None, cancellation=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn delete_ontology_bridge(
+        &mut self,
+        py: Python<'_>,
+        bridge_id: &str,
+        authored_version: Option<&str>,
+        canonical_digest: Option<&str>,
+        expected_project_generation_uuid: &str,
+        expected_composition_fingerprint: Option<&str>,
+        operation_uuid: &str,
+        actor_uuid: Option<&str>,
+        cancellation: Option<&PyCancellationToken>,
+    ) -> PyResult<Py<PyAny>> {
+        multi_ontology::delete_bridge(
+            self,
+            py,
+            bridge_id,
+            authored_version,
+            canonical_digest,
+            expected_project_generation_uuid,
+            expected_composition_fingerprint,
+            operation_uuid,
+            actor_uuid,
+            cancellation,
+        )
+    }
+
+    #[pyo3(signature = (bridge_id, *, format, authored_version=None, canonical_digest=None))]
+    fn export_ontology_bridge(
+        &self,
+        py: Python<'_>,
+        bridge_id: &str,
+        format: &str,
+        authored_version: Option<&str>,
+        canonical_digest: Option<&str>,
+    ) -> PyResult<String> {
+        multi_ontology::export_bridge(
+            self,
+            py,
+            bridge_id,
+            authored_version,
+            canonical_digest,
+            format,
+        )
+    }
+
+    fn ontology_activation_profile(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        multi_ontology::activation_profile(self, py)
+    }
+
+    #[pyo3(signature = (profile_default, activation, *, expected_project_generation_uuid, expected_composition_fingerprint, operation_uuid, actor_uuid=None, cancellation=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn change_ontology_activation_profile(
+        &mut self,
+        py: Python<'_>,
+        profile_default: &str,
+        activation: &Bound<'_, PyAny>,
+        expected_project_generation_uuid: &str,
+        expected_composition_fingerprint: Option<&str>,
+        operation_uuid: &str,
+        actor_uuid: Option<&str>,
+        cancellation: Option<&PyCancellationToken>,
+    ) -> PyResult<Py<PyAny>> {
+        multi_ontology::change_activation_profile(
+            self,
+            py,
+            profile_default,
+            activation,
+            expected_project_generation_uuid,
+            expected_composition_fingerprint,
+            operation_uuid,
+            actor_uuid,
+            cancellation,
+        )
+    }
+
+    fn validate_ontology_composition(
+        &self,
+        py: Python<'_>,
+        candidate: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        multi_ontology::validate_composition(self, py, candidate)
+    }
+
+    #[pyo3(signature = (candidate, *, expected_project_generation_uuid, expected_composition_fingerprint, operation_uuid, actor_uuid=None, cancellation=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn preflight_ontology_composition(
+        &self,
+        py: Python<'_>,
+        candidate: &Bound<'_, PyAny>,
+        expected_project_generation_uuid: &str,
+        expected_composition_fingerprint: Option<&str>,
+        operation_uuid: &str,
+        actor_uuid: Option<&str>,
+        cancellation: Option<&PyCancellationToken>,
+    ) -> PyResult<Py<PyAny>> {
+        multi_ontology::preflight_composition(
+            self,
+            py,
+            candidate,
+            expected_project_generation_uuid,
+            expected_composition_fingerprint,
+            operation_uuid,
+            actor_uuid,
+            cancellation,
+        )
+    }
+
+    #[pyo3(signature = (kind, local_id, *, module=None, max_candidates=16))]
+    fn explain_ontology_resolution(
+        &self,
+        py: Python<'_>,
+        kind: &str,
+        local_id: &str,
+        module: Option<&Bound<'_, PyAny>>,
+        max_candidates: usize,
+    ) -> PyResult<Py<PyAny>> {
+        multi_ontology::explain_resolution(self, py, module, kind, local_id, max_candidates)
+    }
+
+    fn portable_ontology_staging(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        multi_ontology::portable_staging(self, py)
+    }
+
+    #[pyo3(signature = (*, expected_project_generation_uuid, expected_composition_fingerprint, operation_uuid, actor_uuid=None, cancellation=None))]
+    fn adopt_portable_ontology_staging(
+        &mut self,
+        py: Python<'_>,
+        expected_project_generation_uuid: &str,
+        expected_composition_fingerprint: Option<&str>,
+        operation_uuid: &str,
+        actor_uuid: Option<&str>,
+        cancellation: Option<&PyCancellationToken>,
+    ) -> PyResult<Py<PyAny>> {
+        multi_ontology::adopt_portable_staging(
+            self,
+            py,
+            expected_project_generation_uuid,
+            expected_composition_fingerprint,
+            operation_uuid,
+            actor_uuid,
+            cancellation,
+        )
     }
 
     /// Rank nodes by a centrality/structural algorithm (`by=`). Returns a

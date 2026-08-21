@@ -10,5 +10,5 @@ mod store;
 pub use store::{
     DeletePreview, ExportFormat, ImportFormatHint, InventoryMetadata, InventoryMutationReceipt,
     InventorySnapshot, ModuleInspect, ModuleLifecycleStatus, ModuleListEntry, ModuleSelector,
-    OntologyInventory, UpdatePreview,
+    OntologyInventory, SnapshotModule, UpdatePreview,
 };

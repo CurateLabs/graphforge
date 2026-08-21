@@ -3,6 +3,7 @@
 use super::compile::CompiledComposition;
 use super::diagnostic::{CompositionDiagnostic, CompositionError, DiagnosticCode, DiagnosticLimit};
 use super::identity::{OntologyModuleId, QualifiedSymbol, SymbolKind};
+use serde::{Deserialize, Serialize};
 
 /// Request to resolve a symbol against a compiled composition.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,7 +19,7 @@ pub struct ResolveRequest<'a> {
 }
 
 /// Successful resolution outcome.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolutionOutcome {
     /// Exact qualified symbol.
     pub symbol: QualifiedSymbol,

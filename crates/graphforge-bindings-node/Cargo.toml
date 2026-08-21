@@ -21,6 +21,7 @@ arrow = { workspace = true }
 # `HashMap<String, serde_json::Value>` query parameters.
 napi = { workspace = true, features = ["serde-json"] }
 napi-derive = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
 

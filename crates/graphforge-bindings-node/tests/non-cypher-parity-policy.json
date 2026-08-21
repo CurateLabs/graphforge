@@ -1,8 +1,8 @@
 {
   "contractVersion": 1,
   "rustManifest": "../../../tests/contracts/non-cypher-rust-surface.json",
-  "releaseSurfaceCount": 214,
-  "releaseSurfaceDigest": "d817ccffa04880533ba34ba4049d2bf66d0fe159d61d67c39675030cbba87a0d",
+  "releaseSurfaceCount": 244,
+  "releaseSurfaceDigest": "158d34aaf86b09739624d74cbeafc5b011fd482b71eff15311db4306458cd202",
   "requiredEquivalent": [
     "GraphForge.adopt_ontology",
     "GraphForge.clear_ontology",
@@ -13,6 +13,7 @@
     "GraphForge.workspace_ontology"
   ],
   "rustEvidenceGroupMap": {
+    "multi-ontology-lifecycle": "multiOntology",
     "infra-validation": "lifecycleConstruction",
     "repository-sync": "lifecycleConstruction",
     "ontology-lifecycle": "ontologyLifecycle",
@@ -36,6 +37,36 @@
       "CheckpointView.execute",
       "CheckpointView.inspect_adjacency",
       "CheckpointView.project_capabilities",
+      "GraphForge.adopt_ontology_bridge",
+      "GraphForge.adopt_ontology_module",
+      "GraphForge.adopt_portable_ontology_staging",
+      "GraphForge.change_ontology_activation_profile",
+      "GraphForge.create_ontology_bridge",
+      "GraphForge.create_ontology_module",
+      "GraphForge.delete_ontology_bridge",
+      "GraphForge.delete_ontology_module",
+      "GraphForge.explain_ontology_resolution",
+      "GraphForge.export_ontology_bridge",
+      "GraphForge.export_ontology_module",
+      "GraphForge.import_ontology_bridge",
+      "GraphForge.import_ontology_module",
+      "GraphForge.inspect_ontology_bridge",
+      "GraphForge.inspect_ontology_module",
+      "GraphForge.ontology_activation_profile",
+      "GraphForge.ontology_authority_state",
+      "GraphForge.ontology_bridges",
+      "GraphForge.ontology_modules",
+      "GraphForge.portable_ontology_staging",
+      "GraphForge.preflight_ontology_composition",
+      "GraphForge.preview_delete_ontology_bridge",
+      "GraphForge.preview_delete_ontology_module",
+      "GraphForge.preview_update_ontology_bridge",
+      "GraphForge.preview_update_ontology_module",
+      "GraphForge.update_ontology_bridge",
+      "GraphForge.update_ontology_module",
+      "GraphForge.validate_ontology_bridge",
+      "GraphForge.validate_ontology_composition",
+      "GraphForge.validate_ontology_module",
       "GraphForge.add_edge",
       "GraphForge.add_node",
       "GraphForge.adopt_ontology",
@@ -264,6 +295,20 @@
     }
   },
   "evidence": {
+    "multiOntology": {
+      "multi-ontology.test.mjs": [
+        "positive CRUD import export",
+        "exact identity and ambiguity",
+        "dependency blocked deletion",
+        "unsupported future portability",
+        "cancellation",
+        "idempotent replay",
+        "no partial import or authority change",
+        "bounded structured diagnostics",
+        "deterministic path free serialization",
+        "packaged clean install"
+      ]
+    },
     "ontologyLifecycle": {
       "ontology-lifecycle.test.mjs": [
         "Rust-owned ontology lifecycle is deterministic and durable"

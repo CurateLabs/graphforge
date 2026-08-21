@@ -8,6 +8,11 @@ then checks exact qualified resolution and activation ownership.
 must preserve the source generation and composition fingerprint. These are
 contract fixtures for implementation issues #836-#843, not a second runtime.
 
+`binding-parity-v1.json` is the shared Rust/Python/Node/CLI lifecycle oracle for
+#842. `$base` and `$dependent` are symbolic references replaced with the exact
+content-derived identities returned by Rust before constructing the bridge.
+Its ten cases are the required cross-surface conformance matrix.
+
 Validate deterministically from the repository root:
 
 ```bash

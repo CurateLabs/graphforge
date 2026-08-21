@@ -3,14 +3,14 @@
 use std::path::PathBuf;
 
 use graphforge_api::{
-    GfError, PortableSelection, PortableV2Error, PortableV2ErrorCode, PortableV2ExportRequest,
-    PortableV2GraphSelector, PortableV2ImportRequest, PortableV2Limits, PortableV2Mode,
-    PortableV2OciAuthenticityPolicy, PortableV2OciPublishFacadeRequest,
-    PortableV2OciPullFacadeRequest, PortableV2OciSignatureMaterial, PortableV2Output,
-    PortableV2ParticipantId, PortableV2PropertyProjection, PortableV2SelectionPreviewRequest,
-    PortableV2SelectionProfile, PortableV2SelectionRequest, PortableV2SubsetClosure,
-    PortableV2SubsetPlan, PortableV2SubsetPreviewRequest, PortableV2SubsetRequest,
-    PortableVerifyRequest, ResultSinkOptions, ResultSinkReceipt,
+    GfError, PortableSelection, PortableV2Error, PortableV2ExportRequest, PortableV2GraphSelector,
+    PortableV2ImportRequest, PortableV2Limits, PortableV2Mode, PortableV2OciAuthenticityPolicy,
+    PortableV2OciPublishFacadeRequest, PortableV2OciPullFacadeRequest,
+    PortableV2OciSignatureMaterial, PortableV2Output, PortableV2ParticipantId,
+    PortableV2PropertyProjection, PortableV2SelectionPreviewRequest, PortableV2SelectionProfile,
+    PortableV2SelectionRequest, PortableV2SubsetClosure, PortableV2SubsetPlan,
+    PortableV2SubsetPreviewRequest, PortableV2SubsetRequest, PortableVerifyRequest,
+    ResultSinkOptions, ResultSinkReceipt,
 };
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
@@ -21,30 +21,15 @@ use crate::{
 };
 
 /// Map a sanitized portable-v2 failure without credentials, headers, or host paths.
-pub(crate) fn to_portable_pyerr(py: Python<'_>, error: &PortableV2Error) -> PyErr {
-    let message = error.to_string();
-    let err = PyErr::new::<crate::StorageError, _>(message);
+pub(crate) fn to_portable_pyerr(py: Python<'_>, error: PortableV2Error) -> PyErr {
+    let entry = error.entry.clone();
+    let projected = graphforge_api::MultiOntologyError::from(error);
+    let err = crate::multi_ontology::to_multi_ontology_pyerr(py, &projected);
     let value = err.value(py);
-    let _ = value.setattr("code", portable_error_code(error.code));
-    if let Some(entry) = &error.entry {
+    if let Some(entry) = &entry {
         let _ = value.setattr("entry", entry.as_str());
     }
     err
-}
-
-fn portable_error_code(code: PortableV2ErrorCode) -> &'static str {
-    match code {
-        PortableV2ErrorCode::Cancelled => "Cancelled",
-        PortableV2ErrorCode::LimitExceeded => "LimitExceeded",
-        PortableV2ErrorCode::Io => "Io",
-        PortableV2ErrorCode::InvalidStructure => "InvalidStructure",
-        PortableV2ErrorCode::InvalidPath => "InvalidPath",
-        PortableV2ErrorCode::DuplicateEntry => "DuplicateEntry",
-        PortableV2ErrorCode::UnsupportedFuture => "UnsupportedFuture",
-        PortableV2ErrorCode::Incompatible => "Incompatible",
-        PortableV2ErrorCode::DigestMismatch => "DigestMismatch",
-        PortableV2ErrorCode::ConcurrentMutation => "ConcurrentMutation",
-    }
 }
 
 fn selection_from_checkpoint(checkpoint: Option<String>) -> PortableSelection {
@@ -409,7 +394,7 @@ pub(crate) fn preview_portable_v2_selection(
     };
     let plan = py
         .detach(|| forge.inner.preview_portable_v2_selection(&request))
-        .map_err(|error| to_portable_pyerr(py, &error))?;
+        .map_err(|error| to_portable_pyerr(py, error))?;
     json_value_to_python(py, &selection_plan_json(&plan))
 }
 
@@ -435,7 +420,7 @@ pub(crate) fn preview_portable_v2_graph_subset(
     };
     let plan = py
         .detach(|| forge.inner.preview_portable_v2_graph_subset(&request))
-        .map_err(|error| to_portable_pyerr(py, &error))?;
+        .map_err(|error| to_portable_pyerr(py, error))?;
     json_value_to_python(py, &subset_plan_json(&plan))
 }
 
@@ -503,7 +488,7 @@ pub(crate) fn export_portable_v2(
                     }
                 })
         })
-        .map_err(|error| to_portable_pyerr(py, &error))?;
+        .map_err(|error| to_portable_pyerr(py, error))?;
     if let Some(error) = progress_error
         .into_inner()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -529,7 +514,7 @@ pub(crate) fn verify_portable_v2(
     let cancelled = cancellation.map(|token| token.inner.flag());
     let report = py
         .detach(|| graphforge_api::verify_portable_v2(&request, cancelled))
-        .map_err(|error| to_portable_pyerr(py, &error))?;
+        .map_err(|error| to_portable_pyerr(py, error))?;
     json_value_to_python(py, &verify_result_json(py, &report)?)
 }
 
@@ -551,7 +536,7 @@ pub(crate) fn import_portable_v2(
     let root = PathBuf::from(project_root);
     let result = py
         .detach(|| graphforge_api::GraphForge::import_portable_v2(&root, &request, cancelled))
-        .map_err(|error| to_portable_pyerr(py, &error))?;
+        .map_err(|error| to_portable_pyerr(py, error))?;
     json_value_to_python(py, &import_result_json(&result))
 }
 
@@ -584,7 +569,7 @@ pub(crate) fn publish_portable_v2_oci(
     let cancelled = cancellation.map(|token| token.inner.flag());
     let reference = py
         .detach(|| graphforge_api::publish_portable_v2_oci(&request, cancelled))
-        .map_err(|error| to_portable_pyerr(py, &error))?;
+        .map_err(|error| to_portable_pyerr(py, error))?;
     json_value_to_python(py, &oci_reference_json(py, &reference)?)
 }
 
@@ -617,7 +602,7 @@ pub(crate) fn pull_portable_v2_oci(
     let cancelled = cancellation.map(|token| token.inner.flag());
     let receipt = py
         .detach(|| graphforge_api::pull_portable_v2_oci(&request, cancelled))
-        .map_err(|error| to_portable_pyerr(py, &error))?;
+        .map_err(|error| to_portable_pyerr(py, error))?;
     json_value_to_python(py, &oci_pull_json(py, &receipt)?)
 }
 

@@ -6,7 +6,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use graphforge_core::{GfError, ProjectErrorCode};
-use graphforge_ontology::{CompiledComposition, QualifiedSymbol, SymbolKind};
+use graphforge_ontology::{CompiledComposition, OntologyModuleId, QualifiedSymbol, SymbolKind};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -254,7 +254,7 @@ impl SemanticStorageBindings {
         composition: &CompiledComposition,
         previous: Option<&Self>,
     ) -> Result<Self, GfError> {
-        Self::project_with_removal_scan(composition, previous, None)
+        Self::project_with_removal_scan(composition, previous, None, &[])
     }
 
     /// Project while permitting removed bindings only when an exact pinned
@@ -264,7 +264,22 @@ impl SemanticStorageBindings {
         previous: Option<&Self>,
         graph_root: &Path,
     ) -> Result<Self, GfError> {
-        Self::project_with_removal_scan(composition, previous, Some(graph_root))
+        Self::project_with_removal_scan(composition, previous, Some(graph_root), &[])
+    }
+
+    /// Project with graph scanning and Rust-verified schema-identical module upgrades.
+    pub fn project_with_graph_scan_identity_equivalent(
+        composition: &CompiledComposition,
+        previous: Option<&Self>,
+        graph_root: &Path,
+        identity_equivalent: &[(OntologyModuleId, OntologyModuleId)],
+    ) -> Result<Self, GfError> {
+        Self::project_with_removal_scan(
+            composition,
+            previous,
+            Some(graph_root),
+            identity_equivalent,
+        )
     }
 
     #[allow(clippy::too_many_lines)] // projection is a single fail-closed authority calculation
@@ -272,6 +287,7 @@ impl SemanticStorageBindings {
         composition: &CompiledComposition,
         previous: Option<&Self>,
         graph_root: Option<&Path>,
+        identity_equivalent: &[(OntologyModuleId, OntologyModuleId)],
     ) -> Result<Self, GfError> {
         if let Some(previous) = previous
             && previous.composition_fingerprint == composition.fingerprint
@@ -293,7 +309,10 @@ impl SemanticStorageBindings {
                         migration.from_version == prior.symbol.module.authored_version
                             && migration.to_version == next.id.authored_version
                     });
-                    if !declared {
+                    let verified_equivalent = identity_equivalent
+                        .iter()
+                        .any(|(old, new)| old == &prior.symbol.module && new == &next.id);
+                    if !declared && !verified_equivalent {
                         return Err(corrupt(
                             "module upgrade would carry stored IDs without an explicit authored migration lineage",
                         ));

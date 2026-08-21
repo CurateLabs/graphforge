@@ -28,7 +28,7 @@ pub use bridge::{
     BridgeImportFormatHint, BridgeInspect, BridgeInventory, BridgeLifecycleStatus, BridgeListEntry,
     BridgeMutationReceipt, BridgePredicate, BridgeProvenance, BridgeSelector, BridgeSnapshot,
     BridgeUpdatePreview, MappingConfidence, MappingMethod, ModuleSymbolTable, SharedSurfaceHint,
-    validate_bridge_document,
+    SnapshotBridge, SnapshotModuleSymbols, validate_bridge_document,
 };
 pub use compiler::{OntologyCompiler, OntologyRuntime, PropertyOwnerKind};
 pub use composition::{
@@ -44,7 +44,7 @@ pub use handle::{OntologyFormat, OntologyHandle};
 pub use inventory::{
     DeletePreview, ExportFormat, ImportFormatHint, InventoryMetadata, InventoryMutationReceipt,
     InventorySnapshot, ModuleInspect, ModuleLifecycleStatus, ModuleListEntry, ModuleSelector,
-    OntologyInventory, UpdatePreview,
+    OntologyInventory, SnapshotModule, UpdatePreview,
 };
 pub use loader::OntologyLoader;
 pub use migration::{MigrationEngine, MigrationStep, TransformKind};

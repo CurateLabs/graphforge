@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use graphforge_api::{
-    CancellationToken, GfError, PortableSelection, PortableV2Authenticity, PortableV2Compatibility,
-    PortableV2Error, PortableV2ErrorCode, PortableV2ExportRequest, PortableV2GraphSelector,
+    CancellationToken, GfError, MultiOntologyError, PortableSelection, PortableV2Authenticity,
+    PortableV2Compatibility, PortableV2Error, PortableV2ExportRequest, PortableV2GraphSelector,
     PortableV2ImportRequest, PortableV2Integrity, PortableV2Limits, PortableV2Mode,
     PortableV2OciAuthenticityPolicy, PortableV2OciPublishFacadeRequest,
     PortableV2OciPullFacadeRequest, PortableV2OciSignatureMaterial, PortableV2OciSignatureState,
@@ -22,23 +22,14 @@ use napi_derive::napi;
 use crate::error::to_napi_err;
 use crate::{Result, napi_validation};
 
-pub(crate) fn to_portable_napi_err(error: &PortableV2Error) -> crate::NodeError {
-    let code = match error.code {
-        PortableV2ErrorCode::Cancelled => "Cancelled",
-        PortableV2ErrorCode::LimitExceeded => "LimitExceeded",
-        PortableV2ErrorCode::Io => "Io",
-        PortableV2ErrorCode::InvalidStructure => "InvalidStructure",
-        PortableV2ErrorCode::InvalidPath => "InvalidPath",
-        PortableV2ErrorCode::DuplicateEntry => "DuplicateEntry",
-        PortableV2ErrorCode::UnsupportedFuture => "UnsupportedFuture",
-        PortableV2ErrorCode::Incompatible => "Incompatible",
-        PortableV2ErrorCode::DigestMismatch => "DigestMismatch",
-        PortableV2ErrorCode::ConcurrentMutation => "ConcurrentMutation",
-    };
-    napi::Error::new(code.to_owned(), error.to_string())
+pub(crate) fn to_portable_napi_err(error: PortableV2Error) -> crate::NodeError {
+    let envelope = MultiOntologyError::from(error);
+    let reason = serde_json::to_string(&envelope)
+        .unwrap_or_else(|_| format!("{{\"code\":\"{}\"}}", envelope.code()));
+    napi::Error::new(envelope.code().to_owned(), reason)
 }
 
-fn to_portable_deferred_err(env: Env, error: &PortableV2Error) -> napi::Error {
+fn to_portable_deferred_err(env: Env, error: PortableV2Error) -> napi::Error {
     let value = napi::JsError::from(to_portable_napi_err(error)).into_unknown(env);
     napi::Error::from(value)
 }
@@ -522,7 +513,7 @@ pub(crate) fn preview_selection(
     };
     let plan = graph
         .preview_portable_v2_selection(&request)
-        .map_err(|error| to_portable_napi_err(&error))?;
+        .map_err(to_portable_napi_err)?;
     Ok(selection_plan_json(&plan))
 }
 
@@ -539,7 +530,7 @@ pub(crate) fn preview_subset(
     };
     let plan = graph
         .preview_portable_v2_graph_subset(&request)
-        .map_err(|error| to_portable_napi_err(&error))?;
+        .map_err(to_portable_napi_err)?;
     Ok(subset_plan_json(&plan))
 }
 
@@ -565,7 +556,7 @@ impl Task for ExportPortableTask {
     fn resolve(&mut self, env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
         output
             .map(export_result_output)
-            .map_err(|error| to_portable_deferred_err(env, &error))
+            .map_err(|error| to_portable_deferred_err(env, error))
     }
 }
 
@@ -588,7 +579,7 @@ impl Task for VerifyPortableTask {
     fn resolve(&mut self, env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
         output
             .map(verify_report_output)
-            .map_err(|error| to_portable_deferred_err(env, &error))
+            .map_err(|error| to_portable_deferred_err(env, error))
     }
 }
 
@@ -618,7 +609,7 @@ impl Task for ImportPortableTask {
                 generation_uuid: result.generation_uuid.to_string(),
                 idempotent_replay: result.idempotent_replay,
             })
-            .map_err(|error| to_portable_deferred_err(env, &error))
+            .map_err(|error| to_portable_deferred_err(env, error))
     }
 }
 
@@ -685,7 +676,7 @@ impl Task for PublishOciTask {
     fn resolve(&mut self, env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
         output
             .map(oci_reference_output)
-            .map_err(|error| to_portable_deferred_err(env, &error))
+            .map_err(|error| to_portable_deferred_err(env, error))
     }
 }
 
@@ -713,7 +704,7 @@ impl Task for PullOciTask {
                 report: verify_report_output(receipt.report),
                 signature_state: signature_state_token(receipt.signature_state),
             })
-            .map_err(|error| to_portable_deferred_err(env, &error))
+            .map_err(|error| to_portable_deferred_err(env, error))
     }
 }
 

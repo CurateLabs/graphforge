@@ -194,7 +194,8 @@ jobs:
           # package smoke, GIL, and non-Cypher contracts required before publish.
           for test_file in \
             crates/graphforge-bindings-py/tests/smoke.py \
-            crates/graphforge-bindings-py/tests/gil_release.py; do
+            crates/graphforge-bindings-py/tests/gil_release.py \
+            crates/graphforge-bindings-py/tests/multi_ontology.py; do
             uv run --isolated --no-project --with "${wheels[0]}" python "$test_file"
           done
           GRAPHFORGE_PYTHON_PARITY_REPORT="$PYTHON_RC_EVIDENCE_DIR/python-classification.json" \
@@ -675,6 +676,23 @@ jobs:
           popd
           wait "$cli_pack_pid"
           wait "$agent_skills_pack_pid"
+
+      - name: Clean-install packed Node package and CLI binary
+        shell: bash
+        run: |
+          package_root="$RUNNER_TEMP/graphforge-multi-ontology-package-smoke"
+          mkdir -p "$package_root"
+          cd "$package_root"
+          npm init --yes
+          npm_artifacts="$GITHUB_WORKSPACE/candidate/release-artifacts/npm"
+          main_packages=("$npm_artifacts"/curatelabs-graphforge-[0-9]*.tgz)
+          cli_packages=("$npm_artifacts"/curatelabs-graphforge-cli-*.tgz)
+          native_packages=("$npm_artifacts"/curatelabs-graphforge-linux-x64-gnu-*.tgz)
+          test "${#main_packages[@]}" -eq 1
+          test "${#cli_packages[@]}" -eq 1
+          test "${#native_packages[@]}" -eq 1
+          npm install "${main_packages[0]}" "${cli_packages[0]}" "${native_packages[0]}"
+          node "$GITHUB_WORKSPACE/scripts/ci/multi-ontology-packaged-smoke.mjs"
 
       - name: Package the complete Rust surface
         shell: bash

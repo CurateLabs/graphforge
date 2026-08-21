@@ -71,7 +71,7 @@ struct ModuleRecord {
 }
 
 /// List row returned in identity order.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModuleListEntry {
     /// Exact module identity.
     pub id: OntologyModuleId,
@@ -86,7 +86,7 @@ pub struct ModuleListEntry {
 }
 
 /// Detailed inspect receipt for one module.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModuleInspect {
     /// List metadata.
     pub entry: ModuleListEntry,
@@ -99,7 +99,7 @@ pub struct ModuleInspect {
 }
 
 /// Non-mutating update impact preview.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpdatePreview {
     /// Source generation the preview was computed against.
     pub source_generation: u64,
@@ -114,7 +114,7 @@ pub struct UpdatePreview {
 }
 
 /// Non-mutating delete impact preview.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeletePreview {
     /// Source generation the preview was computed against.
     pub source_generation: u64,
@@ -124,6 +124,9 @@ pub struct DeletePreview {
     pub dependent_modules: Vec<OntologyModuleId>,
     /// Activation subjects referencing the target.
     pub activation_refs: Vec<String>,
+    /// Exact bridge identities whose module endpoints reference the target.
+    #[serde(default)]
+    pub bridge_refs: Vec<BridgeSetId>,
     /// True when delete would succeed without remediation.
     pub safe: bool,
 }
@@ -525,12 +528,14 @@ impl OntologyInventory {
             .filter(|a| a.subject == target.id.display_ref())
             .map(|a| a.subject.clone())
             .collect();
+        let bridge_refs = Vec::new();
         let safe = dependent_modules.is_empty() && activation_refs.is_empty();
         Ok(DeletePreview {
             source_generation: self.generation,
             target: target.id.clone(),
             dependent_modules,
             activation_refs,
+            bridge_refs,
             safe,
         })
     }

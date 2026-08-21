@@ -18,9 +18,12 @@ clap = { workspace = true }
 uuid = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml = { workspace = true }
 
 [dev-dependencies]
+graphforge-storage = { version = "0.5.2", path = "../graphforge-storage" }
 parquet = { workspace = true }
+sha2 = { workspace = true }
 tempfile = "3"
 
 [lints]

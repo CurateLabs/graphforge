@@ -209,6 +209,9 @@ pre-push-fast:  ## Run fast checks only — format, lint, type, security, docstr
 	@python3 scripts/ci/test-api-bdd-policy.py
 	@echo "━━━ Multi-ontology contract fixtures ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@python3 scripts/ci/multi-ontology-contract-check.py
+	@python3 scripts/ci/test-multi-ontology-surface-gate.py
+	@python3 scripts/ci/multi-ontology-surface-gate.py
+	@python3 scripts/ci/test-compare-multi-ontology-parity.py
 	@echo "━━━ Format check ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@$(MAKE) format-check
 	@echo "━━━ Lint ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

@@ -20,6 +20,7 @@ use uuid::Uuid;
 include!(concat!(env!("OUT_DIR"), "/project_skills.rs"));
 
 mod maintenance_cli;
+mod ontology_cli;
 mod portable_cli;
 
 const MAX_SKILL_MANIFEST_BYTES: u64 = 256 * 1024;
@@ -271,6 +272,11 @@ enum Command {
     Portable {
         #[command(subcommand)]
         command: portable_cli::PortableCommand,
+    },
+    /// Composable ontology module, bridge, activation, and composition lifecycle.
+    Ontology {
+        #[command(subcommand)]
+        command: ontology_cli::OntologyCommand,
     },
     /// Stream a Cypher result to Parquet or Arrow IPC without full materialization.
     Query(portable_cli::QueryArgs),
@@ -680,8 +686,16 @@ fn write_export_result(
         writeln!(
             output,
             "{}",
-            serde_json::to_string(result)
-                .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?
+            serde_json::to_string(&serde_json::json!({
+                "contract": result.contract,
+                "source": result.source,
+                "checkpoint": result.checkpoint,
+                "generation_uuid": result.generation_uuid,
+                "envelope_sha256": result.envelope_sha256,
+                "byte_length": result.byte_length,
+                "participant_count": result.participant_count,
+            }))
+            .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?
         )
         .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
     } else {
@@ -1047,7 +1061,25 @@ fn is_repository_command(command: &Command) -> bool {
 }
 
 #[allow(clippy::too_many_lines)] // CLI command dispatch table
-fn run(cli: Cli, output: &mut dyn Write) -> Result<i32, graphforge_api::GfError> {
+pub(crate) enum CliRuntimeError {
+    Core(graphforge_api::GfError),
+    MultiOntology(graphforge_api::MultiOntologyError),
+}
+
+impl From<graphforge_api::GfError> for CliRuntimeError {
+    fn from(error: graphforge_api::GfError) -> Self {
+        Self::Core(error)
+    }
+}
+
+impl From<graphforge_api::MultiOntologyError> for CliRuntimeError {
+    fn from(error: graphforge_api::MultiOntologyError) -> Self {
+        Self::MultiOntology(error)
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn run(cli: Cli, output: &mut dyn Write) -> Result<i32, CliRuntimeError> {
     if cli.info {
         writeln!(output, "graphforge {}", env!("CARGO_PKG_VERSION"))
             .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
@@ -1065,7 +1097,8 @@ fn run(cli: Cli, output: &mut dyn Write) -> Result<i32, graphforge_api::GfError>
             cli.json,
             cli.skills_bundle_dir.as_deref(),
             output,
-        );
+        )
+        .map_err(Into::into);
     }
     // Repository-independent portable commands must not call RepositoryContext::discover.
     if let Command::Portable { command } = command {
@@ -1091,15 +1124,19 @@ fn run(cli: Cli, output: &mut dyn Write) -> Result<i32, graphforge_api::GfError>
                 let path_text = path.to_str().ok_or_else(|| {
                     graphforge_api::GfError::Validation("--project must be valid UTF-8".into())
                 })?;
-                let graph = GraphForge::new(Some(path_text))?;
-                return portable_cli::run_portable(&graph, &path, command, cli.json, output)
+                let mut graph = GraphForge::new(Some(path_text))?;
+                return portable_cli::run_portable(&mut graph, &path, command, cli.json, output)
                     .map(|()| 0);
             }
         }
     }
     let path = resolve_project_path(cli.project, cli.project_dir)?;
     let command = match command {
-        Command::Import(args) => return run_import(args, &path, cli.json, output).map(|()| 0),
+        Command::Import(args) => {
+            return run_import(args, &path, cli.json, output)
+                .map(|()| 0)
+                .map_err(Into::into);
+        }
         command => command,
     };
     if handle_revert_before_open(&command, &path, cli.json, output)? {
@@ -1110,21 +1147,38 @@ fn run(cli: Cli, output: &mut dyn Write) -> Result<i32, graphforge_api::GfError>
     })?;
     let mut graph = GraphForge::new(Some(path_text))?;
     let command = match command {
-        Command::Export(args) => return run_export(&graph, args, cli.json, output).map(|()| 0),
+        Command::Export(args) => {
+            return run_export(&graph, args, cli.json, output)
+                .map(|()| 0)
+                .map_err(Into::into);
+        }
         Command::Query(args) => {
-            return portable_cli::run_query(&graph, &args, cli.json, output).map(|()| 0);
+            return portable_cli::run_query(&graph, &args, cli.json, output)
+                .map(|()| 0)
+                .map_err(Into::into);
         }
         Command::ImportSession { command } => {
-            return portable_cli::run_import_session(&graph, command, cli.json, output).map(|()| 0);
+            return portable_cli::run_import_session(&graph, command, cli.json, output)
+                .map(|()| 0)
+                .map_err(Into::into);
         }
         Command::Recovery => {
-            return maintenance_cli::run_recovery(&graph, cli.json, output).map(|()| 0);
+            return maintenance_cli::run_recovery(&graph, cli.json, output)
+                .map(|()| 0)
+                .map_err(Into::into);
         }
         Command::Transaction { command } => {
-            return maintenance_cli::run_transaction(&graph, command, cli.json, output).map(|()| 0);
+            return maintenance_cli::run_transaction(&graph, command, cli.json, output)
+                .map(|()| 0)
+                .map_err(Into::into);
         }
         Command::Maintenance { command } => {
-            return maintenance_cli::run_maintenance(&graph, command, cli.json, output).map(|()| 0);
+            return maintenance_cli::run_maintenance(&graph, command, cli.json, output)
+                .map(|()| 0)
+                .map_err(Into::into);
+        }
+        Command::Ontology { command } => {
+            return ontology_cli::run_ontology(&mut graph, command, cli.json, output).map(|()| 0);
         }
         command => command,
     };
@@ -1132,7 +1186,11 @@ fn run(cli: Cli, output: &mut dyn Write) -> Result<i32, graphforge_api::GfError>
         Command::Revert(args)
         | Command::Checkpoint {
             command: CheckpointCommand::Revert(args),
-        } => return run_revert(&mut graph, args, cli.json, output).map(|()| 0),
+        } => {
+            return run_revert(&mut graph, args, cli.json, output)
+                .map(|()| 0)
+                .map_err(Into::into);
+        }
         command => command,
     };
     let result = match command {
@@ -1231,6 +1289,7 @@ where
                     JsonErrorDetails {
                         source: "argument_parser",
                         kind: clap_error_kind(error.kind()),
+                        semantic_code: None,
                     },
                 )
                 .expect("writing to Vec cannot fail");
@@ -1248,7 +1307,7 @@ where
     let exit_code = match run(cli, &mut stdout) {
         Ok(exit_code) => exit_code,
         Err(error) => {
-            write_error(&error, json, &mut stderr).expect("writing to Vec cannot fail");
+            write_runtime_error(&error, json, &mut stderr).expect("writing to Vec cannot fail");
             error_exit_code(&error)
         }
     };
@@ -1272,6 +1331,7 @@ fn write_error(
             JsonErrorDetails {
                 source: "runtime",
                 kind: runtime_error_kind(error),
+                semantic_code: stable_semantic_code(error),
             },
         )
     } else {
@@ -1279,26 +1339,100 @@ fn write_error(
     }
 }
 
+fn write_runtime_error(
+    error: &CliRuntimeError,
+    json: bool,
+    output: &mut dyn Write,
+) -> io::Result<()> {
+    match error {
+        CliRuntimeError::Core(error) => write_error(error, json, output),
+        CliRuntimeError::MultiOntology(error) if json => {
+            #[derive(serde::Serialize)]
+            struct Envelope<'a> {
+                error: &'a graphforge_api::MultiOntologyError,
+            }
+            serde_json::to_writer(&mut *output, &Envelope { error }).map_err(io::Error::other)?;
+            writeln!(output)
+        }
+        CliRuntimeError::MultiOntology(error) => {
+            writeln!(output, "{}: {}", error.code, error.message)
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
-struct JsonErrorDetails {
+struct JsonErrorDetails<'a> {
     source: &'static str,
     kind: &'static str,
+    semantic_code: Option<&'a str>,
 }
 
 fn write_json_error(
     output: &mut dyn Write,
     code: &'static str,
     message: &str,
-    details: JsonErrorDetails,
+    details: JsonErrorDetails<'_>,
 ) -> io::Result<()> {
     let code = serde_json::to_string(code).map_err(io::Error::other)?;
     let message = serde_json::to_string(message).map_err(io::Error::other)?;
     let source = serde_json::to_string(details.source).map_err(io::Error::other)?;
     let kind = serde_json::to_string(details.kind).map_err(io::Error::other)?;
-    writeln!(
-        output,
-        "{{\"error\":{{\"code\":{code},\"message\":{message},\"details\":{{\"source\":{source},\"kind\":{kind}}}}}}}"
-    )
+    if let Some(semantic_code) = details.semantic_code {
+        let semantic_code = serde_json::to_string(semantic_code).map_err(io::Error::other)?;
+        writeln!(
+            output,
+            "{{\"error\":{{\"code\":{code},\"message\":{message},\"details\":{{\"source\":{source},\"kind\":{kind},\"semantic_code\":{semantic_code}}}}}}}"
+        )
+    } else {
+        writeln!(
+            output,
+            "{{\"error\":{{\"code\":{code},\"message\":{message},\"details\":{{\"source\":{source},\"kind\":{kind}}}}}}}"
+        )
+    }
+}
+
+fn stable_semantic_code(error: &graphforge_api::GfError) -> Option<&str> {
+    match error.code() {
+        "GF_CANCELLED" => return Some("lifecycle.cancelled"),
+        "GF_RESOURCE_LIMIT" => return Some("resource.bytes"),
+        "GF_TRANSACTION_CONFLICT" => return Some("inventory.generation_conflict"),
+        _ => {}
+    }
+    let message = match error {
+        graphforge_api::GfError::Validation(message)
+        | graphforge_api::GfError::Execution(message)
+        | graphforge_api::GfError::Storage(message)
+        | graphforge_api::GfError::Ontology(message) => message.as_str(),
+        _ => return None,
+    };
+    let candidate = message.split_once(':')?.0;
+    if candidate.contains('.')
+        && candidate
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte == b'.' || byte == b'_')
+    {
+        return Some(candidate);
+    }
+    match candidate {
+        "Cancelled" => Some("lifecycle.cancelled"),
+        "LimitExceeded" => Some("resource.bytes"),
+        "UnsupportedFuture" => Some("interchange.unsupported_future"),
+        "DigestMismatch" | "DuplicateEntry" | "InvalidStructure" => Some("interchange.integrity"),
+        "ConcurrentMutation" => Some("inventory.generation_conflict"),
+        "Incompatible" => Some("interchange.selection"),
+        "Io" | "InvalidPath" => Some("interchange.io"),
+        _ if message.contains("dependency-blocked") => Some("dependency.in_use"),
+        _ if message.contains("selector is ambiguous") => Some("resolution.ambiguous"),
+        _ if message.contains("not found") || message.contains("is absent") => {
+            Some("inventory.not_found")
+        }
+        _ if message.contains("generation is stale")
+            || message.contains("fingerprint is stale") =>
+        {
+            Some("inventory.generation_conflict")
+        }
+        _ => None,
+    }
 }
 
 const fn clap_error_kind(kind: ErrorKind) -> &'static str {
@@ -1340,10 +1474,11 @@ const fn runtime_error_kind(error: &graphforge_api::GfError) -> &'static str {
     }
 }
 
-fn error_exit_code(error: &graphforge_api::GfError) -> i32 {
+fn error_exit_code(error: &CliRuntimeError) -> i32 {
     match error {
-        graphforge_api::GfError::Validation(_) => 2,
-        graphforge_api::GfError::Storage(_) => 3,
+        CliRuntimeError::Core(graphforge_api::GfError::Validation(_)) => 2,
+        CliRuntimeError::Core(graphforge_api::GfError::Storage(_)) => 3,
+        CliRuntimeError::MultiOntology(error) if error.code == "GF_VALIDATION" => 2,
         _ => 1,
     }
 }
@@ -1363,7 +1498,7 @@ pub fn run_process() {
         Err(error) => {
             let _ = output.flush();
             let stderr = io::stderr();
-            write_error(&error, json, &mut stderr.lock()).expect("write CLI stderr");
+            write_runtime_error(&error, json, &mut stderr.lock()).expect("write CLI stderr");
             std::process::exit(error_exit_code(&error));
         }
     }
@@ -1645,8 +1780,26 @@ mod tests {
                 value["error"]["details"],
                 serde_json::json!({"source": "runtime", "kind": kind})
             );
-            assert_eq!(error_exit_code(&error), exit_code);
+            assert_eq!(error_exit_code(&CliRuntimeError::Core(error)), exit_code);
         }
+    }
+
+    #[test]
+    fn runtime_json_preserves_stable_semantic_code() {
+        let error = graphforge_api::GfError::Validation(
+            "dependency.in_use: exact module has bounded dependants".into(),
+        );
+        let mut output = Vec::new();
+        write_error(&error, true, &mut output).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(
+            value["error"]["details"]["semantic_code"],
+            "dependency.in_use"
+        );
+        assert_eq!(
+            value["error"]["message"],
+            "validation error: dependency.in_use: exact module has bounded dependants"
+        );
     }
 
     #[test]
@@ -1956,7 +2109,7 @@ mod tests {
         ));
 
         let root = tempdir().unwrap();
-        fs::write(root.path().join("manifest.json"), br#"{}"#).unwrap();
+        fs::write(root.path().join("manifest.json"), br"{}").unwrap();
         assert!(matches!(
             load_skill_bundle(root.path()),
             Err(graphforge_api::GfError::Validation(_))
@@ -2034,10 +2187,10 @@ mod tests {
         ];
         for (error, expected) in cases {
             assert_eq!(runtime_error_kind(&error), expected);
-            assert_eq!(error_exit_code(&error), 1);
             let mut output = Vec::new();
             write_error(&error, false, &mut output).unwrap();
             assert!(!output.is_empty());
+            assert_eq!(error_exit_code(&CliRuntimeError::Core(error)), 1);
         }
     }
 
@@ -2153,6 +2306,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn checkpoint_commands_execute_end_to_end_through_the_reusable_cli() {
         let project = tempdir().unwrap();
         let path = project.path().join("state");
@@ -2393,6 +2547,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn arrow_result_export_preserves_geoarrow_fields_values_and_nulls() {
         use std::collections::HashMap;
         use std::io::Cursor;
@@ -2448,8 +2603,8 @@ mod tests {
                         "crs": case["crs"],
                     },
                     "coordinates": case["coordinates"],
-                    "extension_name": case.get("preservedOnly").and_then(|value| value.as_bool()).unwrap_or(false).then(|| case["extensionName"].clone()),
-                    "extension_metadata": case.get("preservedOnly").and_then(|value| value.as_bool()).unwrap_or(false).then(|| case["extensionMetadata"].clone()),
+                        "extension_name": case.get("preservedOnly").and_then(serde_json::Value::as_bool).unwrap_or(false).then(|| case["extensionName"].clone()),
+                        "extension_metadata": case.get("preservedOnly").and_then(serde_json::Value::as_bool).unwrap_or(false).then(|| case["extensionMetadata"].clone()),
                 }))
                 .unwrap();
                 (name, PropValue::Spatial(spatial))
@@ -2479,12 +2634,12 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .map(|value| value.as_u64().unwrap() as usize)
+            .map(|value| usize::try_from(value.as_u64().unwrap()).unwrap())
             .collect::<Vec<_>>();
         assert_eq!(
             batches
                 .iter()
-                .map(|batch| batch.num_rows())
+                .map(arrow::array::RecordBatch::num_rows)
                 .collect::<Vec<_>>(),
             expected_batches
         );
@@ -2510,7 +2665,7 @@ mod tests {
             let mut coordinates = Vec::new();
             flatten_value(
                 column.as_ref(),
-                fixture["rows"]["populated"].as_u64().unwrap() as usize,
+                usize::try_from(fixture["rows"]["populated"].as_u64().unwrap()).unwrap(),
                 &mut coordinates,
             );
             let expected = case["flat"]
@@ -2520,7 +2675,9 @@ mod tests {
                 .map(|value| value.as_f64().unwrap())
                 .collect::<Vec<_>>();
             assert_eq!(coordinates, expected);
-            assert!(column.is_null(fixture["rows"]["null"].as_u64().unwrap() as usize));
+            assert!(
+                column.is_null(usize::try_from(fixture["rows"]["null"].as_u64().unwrap()).unwrap())
+            );
         }
     }
 }

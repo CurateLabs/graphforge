@@ -21,6 +21,7 @@ futures = { workspace = true }
 # same pyo3 0.28) for zero-copy RecordBatch → pyarrow.Table transfer.
 arrow = { workspace = true, features = ["pyarrow"] }
 # algorithm publication recipes are versioned JSON values owned by the Rust facade.
+serde.workspace = true
 serde_json.workspace = true
 uuid = { workspace = true }
 # `extension-module` is enabled HERE only (a Python extension must not link

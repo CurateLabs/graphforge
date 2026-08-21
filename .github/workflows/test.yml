@@ -86,6 +86,14 @@ jobs:
       - name: Validate multi-ontology contract fixtures
         run: python3 scripts/ci/multi-ontology-contract-check.py
 
+      - name: Test multi-ontology four-surface gate
+        run: |
+          python3 scripts/ci/test-multi-ontology-surface-gate.py
+          python3 scripts/ci/test-compare-multi-ontology-parity.py
+
+      - name: Validate multi-ontology four-surface parity
+        run: python3 scripts/ci/multi-ontology-surface-gate.py
+
       - name: Test aggregate merge gate
         run: scripts/ci/test-require-gates.sh
 
@@ -570,6 +578,7 @@ jobs:
           for test_file in crates/graphforge-bindings-py/tests/*.py; do
             /tmp/gf-native/bin/python "$test_file"
           done
+          /tmp/gf-native/bin/python crates/graphforge-bindings-py/tests/multi_ontology.py
           GRAPHFORGE_PYTHON_PARITY_REPORT=dist/python-non-cypher-classification.json \
             /tmp/gf-native/bin/python \
             crates/graphforge-bindings-py/tests/non_cypher_release.py \
@@ -830,6 +839,28 @@ jobs:
           uv venv /tmp/gf-concurrency --python 3.13
           uv pip install --python /tmp/gf-concurrency/bin/python "${wheels[0]}"
           pnpm install --frozen-lockfile
+
+      - name: Compare real multi-ontology semantics across all public surfaces
+        shell: bash
+        run: |
+          report_root="${{ runner.temp }}/multi-ontology-parity"
+          mkdir -p "$report_root"
+          GRAPHFORGE_MULTI_ONTOLOGY_PARITY_REPORT="$report_root/rust.json" \
+            cargo test -q -p graphforge-api --lib \
+              writes_canonical_rust_semantic_parity_report_when_requested
+          GRAPHFORGE_MULTI_ONTOLOGY_PARITY_REPORT="$report_root/cli.json" \
+            cargo test -q -p graphforge-cli --test multi_ontology \
+              emit_authenticated_parity_report
+          GRAPHFORGE_MULTI_ONTOLOGY_PARITY_REPORT="$report_root/python.json" \
+            /tmp/gf-concurrency/bin/python \
+              crates/graphforge-bindings-py/tests/multi_ontology.py
+          GRAPHFORGE_MULTI_ONTOLOGY_PARITY_REPORT="$report_root/node.json" \
+            node --test crates/graphforge-bindings-node/tests/multi-ontology.test.mjs
+          python3 scripts/ci/compare-multi-ontology-parity.py \
+            --rust "$report_root/rust.json" \
+            --python "$report_root/python.json" \
+            --node "$report_root/node.json" \
+            --cli "$report_root/cli.json"
 
       - name: Run required short concurrency matrix
         shell: bash

@@ -1,0 +1,129 @@
+{
+  "contract": "graphforge-multi-ontology-four-surface/1",
+  "issue": 842,
+  "policy": {
+    "surfaces": ["rust", "python", "node", "cli"],
+    "omission_default": "forbidden",
+    "member_reuse": "forbidden_except_explicit_mode_adapters",
+    "evidence": "per_case_exact_non_skipped_behavioral_test_with_semantic_markers"
+  },
+  "operations": [
+    {"id":"module.list","rust":"GraphForge.ontology_modules","python":"GraphForge.ontology_modules","node":"GraphForge.ontologyModules","cli":"ontology/module/list"},
+    {"id":"module.get","rust":"GraphForge.inspect_ontology_module[exact]","python":"GraphForge.inspect_ontology_module[exact]","node":"GraphForge.inspectOntologyModule[exact]","cli":"ontology/module/get"},
+    {"id":"module.inspect","rust":"GraphForge.inspect_ontology_module[selector]","python":"GraphForge.inspect_ontology_module[selector]","node":"GraphForge.inspectOntologyModule[selector]","cli":"ontology/module/inspect"},
+    {"id":"module.validate","rust":"GraphForge.validate_ontology_module","python":"GraphForge.validate_ontology_module","node":"GraphForge.validateOntologyModule","cli":"ontology/module/validate"},
+    {"id":"module.create_register","rust":"GraphForge.create_ontology_module","python":"GraphForge.create_ontology_module","node":"GraphForge.createOntologyModule","cli":"ontology/module/create"},
+    {"id":"module.import","rust":"GraphForge.import_ontology_module","python":"GraphForge.import_ontology_module","node":"GraphForge.importOntologyModule","cli":"ontology/module/import"},
+    {"id":"module.adopt","rust":"GraphForge.adopt_ontology_module","python":"GraphForge.adopt_ontology_module","node":"GraphForge.adoptOntologyModule","cli":"ontology/module/adopt"},
+    {"id":"module.preview_update","rust":"GraphForge.preview_update_ontology_module","python":"GraphForge.preview_update_ontology_module","node":"GraphForge.previewUpdateOntologyModule","cli":"ontology/module/preview-update"},
+    {"id":"module.update_replace","rust":"GraphForge.update_ontology_module","python":"GraphForge.update_ontology_module","node":"GraphForge.updateOntologyModule","cli":"ontology/module/update"},
+    {"id":"module.preview_delete","rust":"GraphForge.preview_delete_ontology_module","python":"GraphForge.preview_delete_ontology_module","node":"GraphForge.previewDeleteOntologyModule","cli":"ontology/module/preview-delete"},
+    {"id":"module.delete","rust":"GraphForge.delete_ontology_module","python":"GraphForge.delete_ontology_module","node":"GraphForge.deleteOntologyModule","cli":"ontology/module/delete"},
+    {"id":"module.export","rust":"GraphForge.export_ontology_module","python":"GraphForge.export_ontology_module","node":"GraphForge.exportOntologyModule","cli":"ontology/module/export"},
+
+    {"id":"bridge.list","rust":"GraphForge.ontology_bridges","python":"GraphForge.ontology_bridges","node":"GraphForge.ontologyBridges","cli":"ontology/bridge/list"},
+    {"id":"bridge.get","rust":"GraphForge.inspect_ontology_bridge[exact]","python":"GraphForge.inspect_ontology_bridge[exact]","node":"GraphForge.inspectOntologyBridge[exact]","cli":"ontology/bridge/get"},
+    {"id":"bridge.inspect","rust":"GraphForge.inspect_ontology_bridge[selector]","python":"GraphForge.inspect_ontology_bridge[selector]","node":"GraphForge.inspectOntologyBridge[selector]","cli":"ontology/bridge/inspect"},
+    {"id":"bridge.validate","rust":"GraphForge.validate_ontology_bridge","python":"GraphForge.validate_ontology_bridge","node":"GraphForge.validateOntologyBridge","cli":"ontology/bridge/validate"},
+    {"id":"bridge.create_register","rust":"GraphForge.create_ontology_bridge","python":"GraphForge.create_ontology_bridge","node":"GraphForge.createOntologyBridge","cli":"ontology/bridge/create"},
+    {"id":"bridge.import","rust":"GraphForge.import_ontology_bridge","python":"GraphForge.import_ontology_bridge","node":"GraphForge.importOntologyBridge","cli":"ontology/bridge/import"},
+    {"id":"bridge.adopt","rust":"GraphForge.adopt_ontology_bridge","python":"GraphForge.adopt_ontology_bridge","node":"GraphForge.adoptOntologyBridge","cli":"ontology/bridge/adopt"},
+    {"id":"bridge.preview_update","rust":"GraphForge.preview_update_ontology_bridge","python":"GraphForge.preview_update_ontology_bridge","node":"GraphForge.previewUpdateOntologyBridge","cli":"ontology/bridge/preview-update"},
+    {"id":"bridge.update_replace","rust":"GraphForge.update_ontology_bridge","python":"GraphForge.update_ontology_bridge","node":"GraphForge.updateOntologyBridge","cli":"ontology/bridge/update"},
+    {"id":"bridge.preview_delete","rust":"GraphForge.preview_delete_ontology_bridge","python":"GraphForge.preview_delete_ontology_bridge","node":"GraphForge.previewDeleteOntologyBridge","cli":"ontology/bridge/preview-delete"},
+    {"id":"bridge.delete","rust":"GraphForge.delete_ontology_bridge","python":"GraphForge.delete_ontology_bridge","node":"GraphForge.deleteOntologyBridge","cli":"ontology/bridge/delete"},
+    {"id":"bridge.export","rust":"GraphForge.export_ontology_bridge","python":"GraphForge.export_ontology_bridge","node":"GraphForge.exportOntologyBridge","cli":"ontology/bridge/export"},
+
+    {"id":"activation.inspect","rust":"GraphForge.ontology_activation_profile","python":"GraphForge.ontology_activation_profile","node":"GraphForge.ontologyActivationProfile","cli":"ontology/activation/inspect"},
+    {"id":"activation.change","rust":"GraphForge.change_ontology_activation_profile","python":"GraphForge.change_ontology_activation_profile","node":"GraphForge.changeOntologyActivationProfile","cli":"ontology/activation/change"},
+    {"id":"composition.validate","rust":"GraphForge.validate_ontology_composition","python":"GraphForge.validate_ontology_composition","node":"GraphForge.validateOntologyComposition","cli":"ontology/composition/validate"},
+    {"id":"composition.preflight","rust":"GraphForge.preflight_ontology_composition","python":"GraphForge.preflight_ontology_composition","node":"GraphForge.preflightOntologyComposition","cli":"ontology/composition/preflight"},
+    {"id":"composition.resolution_explain","rust":"GraphForge.explain_ontology_resolution","python":"GraphForge.explain_ontology_resolution","node":"GraphForge.explainOntologyResolution","cli":"ontology/composition/explain-resolution"},
+
+    {"id":"portable.inspect","rust":"crate.verify_portable_v2[structure_only]","python":"GraphForge.verify_portable_v2[structure_only]","node":"GraphForge.verifyPortableV2[structureOnly]","cli":"portable/verify/inspect"},
+    {"id":"portable.verify","rust":"crate.verify_portable_v2[full]","python":"GraphForge.verify_portable_v2[full]","node":"GraphForge.verifyPortableV2[full]","cli":"portable/verify/full"},
+    {"id":"portable.export","rust":"GraphForge.export_portable_v2","python":"GraphForge.export_portable_v2","node":"GraphForge.exportPortableV2","cli":"portable/export"},
+    {"id":"portable.import","rust":"GraphForge.import_portable_v2","python":"GraphForge.import_portable_v2","node":"GraphForge.importPortableV2","cli":"portable/import"},
+    {"id":"portable.post_import_inspect","rust":"GraphForge.portable_ontology_staging","python":"GraphForge.portable_ontology_staging","node":"GraphForge.portableOntologyStaging","cli":"portable/staging/inspect"},
+    {"id":"portable.post_import_adopt","rust":"GraphForge.adopt_portable_ontology_staging","python":"GraphForge.adopt_portable_ontology_staging","node":"GraphForge.adoptPortableOntologyStaging","cli":"portable/staging/adopt"}
+  ],
+  "required_conformance_cases": [
+    "positive_crud_import_export",
+    "exact_identity_and_ambiguity",
+    "dependency_blocked_deletion",
+    "unsupported_future_portability",
+    "cancellation",
+    "idempotent_replay",
+    "no_partial_import_or_authority_change",
+    "bounded_structured_diagnostics",
+    "deterministic_path_free_cli_json",
+    "packaged_clean_install"
+  ],
+  "case_evidence": {
+    "positive_crud_import_export": {
+      "rust":{"path":"crates/graphforge-api/src/multi_ontology.rs","symbol":"conformance_positive_crud_import_export","kind":"rust_test","markers":["create_ontology_module","export_ontology_bridge"]},
+      "python":{"path":"crates/graphforge-bindings-py/tests/multi_ontology.py","symbol":"test_positive_crud_import_export","kind":"python_test","markers":["create_ontology_module","export_ontology_bridge"]},
+      "node":{"path":"crates/graphforge-bindings-node/tests/multi-ontology.test.mjs","symbol":"positive CRUD import export","kind":"node_test","markers":["createOntologyModule","exportOntologyBridge"]},
+      "cli":{"path":"crates/graphforge-cli/tests/multi_ontology.rs","symbol":"positive_crud_import_export","kind":"rust_test","markers":["bridge_export","module_export"]}
+    },
+    "exact_identity_and_ambiguity": {
+      "rust":{"path":"crates/graphforge-api/src/multi_ontology.rs","symbol":"conformance_exact_identity_and_ambiguity","kind":"rust_test","markers":["OntologyModuleSelector","SelectorAmbiguous"]},
+      "python":{"path":"crates/graphforge-bindings-py/tests/multi_ontology.py","symbol":"test_exact_identity_and_ambiguity","kind":"python_test","markers":["ontology_id","selector_ambiguous"]},
+      "node":{"path":"crates/graphforge-bindings-node/tests/multi-ontology.test.mjs","symbol":"exact identity and ambiguity","kind":"node_test","markers":["ontologyId","selector_ambiguous"]},
+      "cli":{"path":"crates/graphforge-cli/tests/multi_ontology.rs","symbol":"exact_identity_and_ambiguity","kind":"rust_test","markers":["--ontology-id","resolution.ambiguous"]}
+    },
+    "dependency_blocked_deletion": {
+      "rust":{"path":"crates/graphforge-api/src/multi_ontology.rs","symbol":"conformance_dependency_blocked_deletion","kind":"rust_test","markers":["preview_delete_ontology_module","DependencyBlocked"]},
+      "python":{"path":"crates/graphforge-bindings-py/tests/multi_ontology.py","symbol":"test_dependency_blocked_deletion","kind":"python_test","markers":["preview_delete_ontology_module","dependency_blocked"]},
+      "node":{"path":"crates/graphforge-bindings-node/tests/multi-ontology.test.mjs","symbol":"dependency blocked deletion","kind":"node_test","markers":["previewDeleteOntologyModule","dependency_blocked"]},
+      "cli":{"path":"crates/graphforge-cli/tests/multi_ontology.rs","symbol":"dependency_blocked_deletion","kind":"rust_test","markers":["preview-delete","dependency.in_use"]}
+    },
+    "unsupported_future_portability": {
+      "rust":{"path":"crates/graphforge-api/src/multi_ontology.rs","symbol":"conformance_unsupported_future_portability","kind":"rust_test","markers":["verify_portable_v2","UnsupportedFutureVersion"]},
+      "python":{"path":"crates/graphforge-bindings-py/tests/multi_ontology.py","symbol":"test_unsupported_future_portability","kind":"python_test","markers":["verify_portable_v2","unsupported_future_version"]},
+      "node":{"path":"crates/graphforge-bindings-node/tests/multi-ontology.test.mjs","symbol":"unsupported future portability","kind":"node_test","markers":["verifyPortableV2","unsupported_future_version"]},
+      "cli":{"path":"crates/graphforge-cli/tests/multi_ontology.rs","symbol":"unsupported_future_portability","kind":"rust_test","markers":["portable","interchange.unsupported_future"]}
+    },
+    "cancellation": {
+      "rust":{"path":"crates/graphforge-api/src/multi_ontology.rs","symbol":"conformance_cancellation","kind":"rust_test","markers":["CancellationToken","GF_CANCELLED"]},
+      "python":{"path":"crates/graphforge-bindings-py/tests/multi_ontology.py","symbol":"test_cancellation","kind":"python_test","markers":["cancel_before_start","GF_CANCELLED"]},
+      "node":{"path":"crates/graphforge-bindings-node/tests/multi-ontology.test.mjs","symbol":"cancellation","kind":"node_test","markers":["cancelBeforeStart","GF_CANCELLED"]},
+      "cli":{"path":"crates/graphforge-cli/tests/multi_ontology.rs","symbol":"cancelled_adoption_publishes_no_authority","kind":"rust_test","markers":["--cancel-before-start","before.stdout"]}
+    },
+    "idempotent_replay": {
+      "rust":{"path":"crates/graphforge-api/src/multi_ontology.rs","symbol":"conformance_idempotent_replay","kind":"rust_test","markers":["operation_uuid","IdempotentReplay"]},
+      "python":{"path":"crates/graphforge-bindings-py/tests/multi_ontology.py","symbol":"test_idempotent_replay","kind":"python_test","markers":["operation_uuid","replay_result"]},
+      "node":{"path":"crates/graphforge-bindings-node/tests/multi-ontology.test.mjs","symbol":"idempotent replay","kind":"node_test","markers":["operationUuid","replayResult"]},
+      "cli":{"path":"crates/graphforge-cli/tests/multi_ontology.rs","symbol":"idempotent_replay","kind":"rust_test","markers":["--operation-uuid","idempotent.replay"]}
+    },
+    "no_partial_import_or_authority_change": {
+      "rust":{"path":"crates/graphforge-api/src/multi_ontology.rs","symbol":"conformance_no_partial_import_or_authority_change","kind":"rust_test","markers":["ontology_authority_state","NoAuthorityChange"]},
+      "python":{"path":"crates/graphforge-bindings-py/tests/multi_ontology.py","symbol":"test_no_partial_import_or_authority_change","kind":"python_test","markers":["ontology_authority_state","no_partial_import"]},
+      "node":{"path":"crates/graphforge-bindings-node/tests/multi-ontology.test.mjs","symbol":"no partial import or authority change","kind":"node_test","markers":["ontologyAuthorityState","no_partial_import"]},
+      "cli":{"path":"crates/graphforge-cli/tests/multi_ontology.rs","symbol":"no_partial_import_or_authority_change","kind":"rust_test","markers":["portable","authority"]}
+    },
+    "bounded_structured_diagnostics": {
+      "rust":{"path":"crates/graphforge-api/src/multi_ontology.rs","symbol":"conformance_bounded_structured_diagnostics","kind":"rust_test","markers":["diagnostics","limit"]},
+      "python":{"path":"crates/graphforge-bindings-py/tests/multi_ontology.py","symbol":"test_bounded_structured_diagnostics","kind":"python_test","markers":["diagnostics","limit"]},
+      "node":{"path":"crates/graphforge-bindings-node/tests/multi-ontology.test.mjs","symbol":"bounded structured diagnostics","kind":"node_test","markers":["diagnostics","limit"]},
+      "cli":{"path":"crates/graphforge-cli/tests/multi_ontology.rs","symbol":"bounded_structured_diagnostics","kind":"rust_test","markers":["details","semantic_code"]}
+    },
+    "deterministic_path_free_cli_json": {
+      "rust":{"path":"crates/graphforge-api/src/multi_ontology.rs","symbol":"conformance_deterministic_path_free_serialization","kind":"rust_test","markers":["serde_json","project_generation_uuid"]},
+      "python":{"path":"crates/graphforge-bindings-py/tests/multi_ontology.py","symbol":"test_deterministic_path_free_serialization","kind":"python_test","markers":["json.dumps","project_generation_uuid"]},
+      "node":{"path":"crates/graphforge-bindings-node/tests/multi-ontology.test.mjs","symbol":"deterministic path free serialization","kind":"node_test","markers":["JSON.stringify","project_generation_uuid"]},
+      "cli":{"path":"crates/graphforge-cli/tests/multi_ontology.rs","symbol":"inventory_json_and_errors_are_deterministic_path_free_and_semantic","kind":"rust_test","markers":["semantic_code","project.path().display()"]}
+    },
+    "packaged_clean_install": {
+      "rust":{"path":"crates/graphforge-api/src/multi_ontology.rs","symbol":"conformance_packaged_rust_surface","kind":"rust_test","markers":["ontology_modules","portable_ontology_staging"]},
+      "python":{"path":"crates/graphforge-bindings-py/tests/multi_ontology.py","symbol":"test_packaged_clean_install","kind":"python_test","markers":["graphforge.__file__","ontology_modules"]},
+      "node":{"path":"crates/graphforge-bindings-node/tests/multi-ontology.test.mjs","symbol":"packaged clean install","kind":"node_test","markers":["graphforge/package.json","ontologyModules"]},
+      "cli":{"path":"crates/graphforge-cli/tests/multi_ontology.rs","symbol":"packaged_clean_install","kind":"rust_test","markers":["CARGO_BIN_EXE_gf","ontology module list"]}
+    }
+  },
+  "packaged_artifacts": {
+    "python_wheel":{"workflow":".github/workflows/test.yml","oracle":"crates/graphforge-bindings-py/tests/multi_ontology.py","workflow_markers":["maturin build","uv pip install --python /tmp/gf-native/bin/python","crates/graphforge-bindings-py/tests/multi_ontology.py"],"oracle_markers":["import graphforge","ontology_modules"]},
+    "node_package":{"workflow":".github/workflows/binding-release-candidate.yml","oracle":"scripts/ci/multi-ontology-packaged-smoke.mjs","workflow_markers":["npm pack . --ignore-scripts","npm install","multi-ontology-packaged-smoke.mjs"],"oracle_markers":["@curatelabs/graphforge","ontologyModules"]},
+    "cli_binary":{"workflow":".github/workflows/binding-release-candidate.yml","oracle":"scripts/ci/multi-ontology-packaged-smoke.mjs","workflow_markers":["packages/cli\" pack","npm install","multi-ontology-packaged-smoke.mjs"],"oracle_markers":["@curatelabs/graphforge-cli","ontology\", \"module\", \"list"]}
+  }
+}

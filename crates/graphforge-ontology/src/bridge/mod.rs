@@ -12,7 +12,7 @@ mod validate;
 pub use store::{
     BridgeDeletePreview, BridgeExportFormat, BridgeImportFormatHint, BridgeInspect,
     BridgeInventory, BridgeListEntry, BridgeMutationReceipt, BridgeSelector, BridgeSnapshot,
-    BridgeUpdatePreview, ModuleSymbolTable,
+    BridgeUpdatePreview, ModuleSymbolTable, SnapshotBridge, SnapshotModuleSymbols,
 };
 pub use types::{
     BridgeAssertion, BridgeDocument, BridgeLifecycleStatus, BridgePredicate, BridgeProvenance,

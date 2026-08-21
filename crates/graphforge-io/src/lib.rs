@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[cfg(test)]
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::cell::Cell;
 
 use arrow::datatypes::SchemaRef;
 use arrow::ipc::writer::StreamWriter;
@@ -21,7 +21,9 @@ use parquet::file::properties::WriterProperties;
 use thiserror::Error;
 
 #[cfg(test)]
-static FAIL_WRITE_AFTER_BATCHES: AtomicU64 = AtomicU64::new(u64::MAX);
+thread_local! {
+    static FAIL_WRITE_AFTER_BATCHES: Cell<u64> = const { Cell::new(u64::MAX) };
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 /// On-disk representation for a streamed query result.
@@ -231,7 +233,7 @@ where
             ));
         }
         #[cfg(test)]
-        if batches >= FAIL_WRITE_AFTER_BATCHES.load(Ordering::Relaxed) {
+        if FAIL_WRITE_AFTER_BATCHES.with(|limit| batches >= limit.get()) {
             return Err(failure(
                 started,
                 "write",
@@ -541,7 +543,7 @@ mod tests {
 
         let disk_full = root.path().join("disk-full.parquet");
         let (schema, batches) = fixture();
-        FAIL_WRITE_AFTER_BATCHES.store(1, Ordering::Relaxed);
+        FAIL_WRITE_AFTER_BATCHES.set(1);
         let error = futures::executor::block_on(sink_record_batch_stream(
             boxed(batches),
             schema,
@@ -551,7 +553,7 @@ mod tests {
             || false,
         ))
         .unwrap_err();
-        FAIL_WRITE_AFTER_BATCHES.store(u64::MAX, Ordering::Relaxed);
+        FAIL_WRITE_AFTER_BATCHES.set(u64::MAX);
         assert_eq!(error.phase, "write");
         assert_eq!(error.rows, 2);
         assert!(!disk_full.exists());
