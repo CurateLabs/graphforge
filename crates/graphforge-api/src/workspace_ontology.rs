@@ -3,7 +3,10 @@
 use std::path::PathBuf;
 
 use graphforge_core::{GfError, OntologyMode};
-use graphforge_ontology::{OntologyCompiler, OntologyHandle, OntologyLoader};
+use graphforge_ontology::{
+    ActivationMode, CompositionLimits, OntologyCompiler, OntologyHandle, OntologyLoader,
+    compile_legacy_single_ontology,
+};
 use graphforge_storage::{
     GraphDirectedness, ProjectCapability, ProjectGenerationRequest, ProjectParticipant,
     ProjectParticipantEncoding, ProjectStageOutcome, WorkspaceConfiguration, WorkspaceOntology,
@@ -76,6 +79,7 @@ impl GraphForge {
         directedness: Option<GraphDirectedness>,
     ) -> Result<(), GfError> {
         let ontology = self.workspace_ontology()?;
+        let composition = self.workspace_ontology_composition()?;
         let mut configuration = current_configuration(self)?;
         configuration.graph_directedness = directedness;
         publish_workspace_records(
@@ -84,6 +88,7 @@ impl GraphForge {
             context.actor_uuid,
             &ontology,
             &configuration,
+            composition.as_ref(),
         )
     }
 
@@ -111,6 +116,20 @@ impl GraphForge {
             .map_err(|error| GfError::Ontology(format!("failed to load ontology: {error}")))?;
         let runtime = OntologyCompiler::compile(&document)
             .map_err(|error| GfError::Ontology(format!("failed to compile ontology: {error}")))?;
+        let compiled_composition =
+            compile_legacy_single_ontology(&document, false, CompositionLimits::default())
+                .map_err(|error| {
+                    GfError::Ontology(format!("failed to compile ontology composition: {error}"))
+                })?;
+        let mut composition = graphforge_storage::WorkspaceOntologyComposition::from_compiled(
+            &compiled_composition,
+            Vec::new(),
+        );
+        composition.profile_default = match requested_mode {
+            OntologyMode::Exploratory => ActivationMode::Exploratory,
+            OntologyMode::Advisory => ActivationMode::Advisory,
+            OntologyMode::Strict => ActivationMode::Strict,
+        };
         let canonical_ontology = serde_json::to_value(&document)
             .map_err(|error| GfError::Ontology(format!("failed to encode ontology: {error}")))?;
         let canonical_bytes = serde_json::to_vec(&canonical_ontology)
@@ -130,6 +149,7 @@ impl GraphForge {
             context.actor_uuid,
             &record,
             &configuration,
+            Some(&composition),
         )?;
         self.ontology = Some(OntologyHandle::new(runtime));
         self.ontology_document = Some(document);
@@ -168,6 +188,7 @@ impl GraphForge {
             context.actor_uuid,
             &WorkspaceOntology::none(),
             &configuration,
+            None,
         )?;
         self.ontology = None;
         self.ontology_document = None;
@@ -190,12 +211,13 @@ fn current_configuration(graph: &GraphForge) -> Result<WorkspaceConfiguration, G
     WorkspaceConfiguration::from_canonical_json(&snapshot.bytes)
 }
 
-fn publish_workspace_records(
+pub(crate) fn publish_workspace_records(
     graph: &mut GraphForge,
     operation_uuid: uuid::Uuid,
     actor_uuid: Option<uuid::Uuid>,
     ontology: &WorkspaceOntology,
     configuration: &WorkspaceConfiguration,
+    composition: Option<&graphforge_storage::WorkspaceOntologyComposition>,
 ) -> Result<(), GfError> {
     let root = graph.resolved_generation.container_root().to_path_buf();
     let parent = graphforge_storage::resolve_project_generation(&root)?;
@@ -218,6 +240,7 @@ fn publish_workspace_records(
                     snapshot.record_family_id.as_str(),
                     graphforge_storage::WORKSPACE_ONTOLOGY_FAMILY
                         | graphforge_storage::WORKSPACE_CONFIGURATION_FAMILY
+                        | graphforge_storage::WORKSPACE_ONTOLOGY_COMPOSITION_FAMILY
                 ))
         })
         .map(snapshot_to_participant)
@@ -226,6 +249,9 @@ fn publish_workspace_records(
         graphforge_storage::WORKSPACE_ONTOLOGY_FAMILY,
         ontology.to_canonical_json()?,
     ));
+    if let Some(composition) = composition {
+        participants.push(composition.to_project_participant()?);
+    }
     participants.push(workspace_participant(
         graphforge_storage::WORKSPACE_CONFIGURATION_FAMILY,
         configuration.to_canonical_json()?,
@@ -274,6 +300,7 @@ fn validate_workspace_record_inventory(
 ) -> Result<(), GfError> {
     let mut ontology_count = 0;
     let mut configuration_count = 0;
+    let mut composition_count = 0;
     for entry in metadata
         .iter()
         .filter(|entry| entry.capability_id == graphforge_storage::WORKSPACE_CAPABILITY_ID)
@@ -281,10 +308,11 @@ fn validate_workspace_record_inventory(
         match entry.record_family_id.as_str() {
             graphforge_storage::WORKSPACE_ONTOLOGY_FAMILY => ontology_count += 1,
             graphforge_storage::WORKSPACE_CONFIGURATION_FAMILY => configuration_count += 1,
+            graphforge_storage::WORKSPACE_ONTOLOGY_COMPOSITION_FAMILY => composition_count += 1,
             _ => {}
         }
     }
-    if ontology_count != 1 || configuration_count != 1 {
+    if ontology_count != 1 || configuration_count != 1 || composition_count > 1 {
         return Err(GfError::Validation(
             "workspace generation must contain exactly one ontology and one configuration".into(),
         ));

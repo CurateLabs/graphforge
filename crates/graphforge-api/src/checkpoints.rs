@@ -1090,6 +1090,11 @@ fn logical_records(
                         &snapshot.bytes,
                     )?;
                 }
+                graphforge_storage::WORKSPACE_ONTOLOGY_COMPOSITION_FAMILY => {
+                    graphforge_storage::WorkspaceOntologyComposition::from_canonical_json(
+                        &snapshot.bytes,
+                    )?;
+                }
                 graphforge_storage::WORKSPACE_REPOSITORY_SNAPSHOT_FAMILY => {
                     graphforge_storage::WorkspaceRepositorySnapshot::from_canonical_json(
                         &snapshot.bytes,
