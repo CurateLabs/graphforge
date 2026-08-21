@@ -3,9 +3,11 @@
 use std::fmt;
 
 use super::identity::OntologyModuleId;
+use serde::{Deserialize, Serialize};
 
 /// Contract phase for a composition failure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CompositionPhase {
     /// Inventory membership / identity problems.
     Inventory,
@@ -94,7 +96,8 @@ impl DiagnosticCode {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::InventoryDuplicate => "inventory.duplicate",
-            Self::InventoryNotFound | Self::InventoryMalformed => "inventory.not_found",
+            Self::InventoryNotFound => "inventory.not_found",
+            Self::InventoryMalformed => "inventory.malformed",
             Self::InventoryGenerationConflict => "inventory.generation_conflict",
             Self::DependencyMissing => "dependency.missing",
             Self::DependencyCycle => "dependency.cycle",
@@ -148,6 +151,75 @@ impl DiagnosticCode {
     }
 }
 
+impl Serialize for DiagnosticCode {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for DiagnosticCode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let token = String::deserialize(deserializer)?;
+        match token.as_str() {
+            "inventory.duplicate" => Ok(Self::InventoryDuplicate),
+            "inventory.not_found" => Ok(Self::InventoryNotFound),
+            "inventory.malformed" => Ok(Self::InventoryMalformed),
+            "inventory.generation_conflict" => Ok(Self::InventoryGenerationConflict),
+            "dependency.missing" => Ok(Self::DependencyMissing),
+            "dependency.cycle" => Ok(Self::DependencyCycle),
+            "dependency.in_use" => Ok(Self::DependencyInUse),
+            "collision.qualified_duplicate" => Ok(Self::CollisionQualifiedDuplicate),
+            "bridge.endpoint_missing" => Ok(Self::BridgeEndpointMissing),
+            "bridge.contradiction" => Ok(Self::BridgeContradiction),
+            "bridge.provenance_missing" => Ok(Self::BridgeProvenanceMissing),
+            "resource.modules" => Ok(Self::ResourceModules),
+            "resource.bridges" => Ok(Self::ResourceBridges),
+            "resource.symbols" => Ok(Self::ResourceSymbols),
+            "resource.diagnostics" => Ok(Self::ResourceDiagnostics),
+            "lifecycle.cancelled" => Ok(Self::LifecycleCancelled),
+            "lifecycle.invalid_transition" => Ok(Self::LifecycleInvalidTransition),
+            "resolution.ambiguous" => Ok(Self::ResolutionAmbiguous),
+            "resolution.not_found" => Ok(Self::ResolutionNotFound),
+            "resolution.kind_mismatch" => Ok(Self::ResolutionKindMismatch),
+            "interchange.integrity" => Ok(Self::InterchangeIntegrity),
+            "collision.metadata" => Ok(Self::CollisionMetadata),
+            _ => Err(serde::de::Error::unknown_variant(
+                &token,
+                &[
+                    "inventory.duplicate",
+                    "inventory.not_found",
+                    "inventory.malformed",
+                    "inventory.generation_conflict",
+                    "dependency.missing",
+                    "dependency.cycle",
+                    "dependency.in_use",
+                    "collision.qualified_duplicate",
+                    "bridge.endpoint_missing",
+                    "bridge.contradiction",
+                    "bridge.provenance_missing",
+                    "resource.modules",
+                    "resource.bridges",
+                    "resource.symbols",
+                    "resource.diagnostics",
+                    "lifecycle.cancelled",
+                    "lifecycle.invalid_transition",
+                    "resolution.ambiguous",
+                    "resolution.not_found",
+                    "resolution.kind_mismatch",
+                    "interchange.integrity",
+                    "collision.metadata",
+                ],
+            )),
+        }
+    }
+}
+
 impl fmt::Display for DiagnosticCode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
@@ -155,7 +227,7 @@ impl fmt::Display for DiagnosticCode {
 }
 
 /// Default and caller-supplied caps for diagnostic candidate lists.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiagnosticLimit {
     /// Maximum subjects / candidates retained in one diagnostic.
     pub max_candidates: usize,
@@ -168,7 +240,7 @@ impl Default for DiagnosticLimit {
 }
 
 /// One bounded composition diagnostic.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompositionDiagnostic {
     /// Stable code.
     pub code: DiagnosticCode,
@@ -268,3 +340,32 @@ impl fmt::Display for CompositionError {
 }
 
 impl std::error::Error for CompositionError {}
+
+#[cfg(test)]
+mod tests {
+    use super::DiagnosticCode;
+
+    #[test]
+    fn diagnostic_code_wire_tokens_are_stable_and_round_trip() {
+        let cases = [
+            (DiagnosticCode::InventoryMalformed, "inventory.malformed"),
+            (DiagnosticCode::DependencyInUse, "dependency.in_use"),
+            (DiagnosticCode::ResolutionAmbiguous, "resolution.ambiguous"),
+            (
+                DiagnosticCode::InterchangeIntegrity,
+                "interchange.integrity",
+            ),
+        ];
+        for (code, token) in cases {
+            assert_eq!(
+                serde_json::to_string(&code).unwrap(),
+                format!("\"{token}\"")
+            );
+            assert_eq!(
+                serde_json::from_str::<DiagnosticCode>(&format!("\"{token}\"")).unwrap(),
+                code
+            );
+        }
+        assert!(serde_json::from_str::<DiagnosticCode>("\"inventory_malformed\"").is_err());
+    }
+}

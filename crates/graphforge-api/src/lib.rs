@@ -36,6 +36,11 @@ use graphforge_ir::{
     BindError, Binder, CompositionBindingContext, CompositionBindingLimits, GraphOp, GraphPlan,
     IrExpr, ProcedureRegistry, RuntimeCatalog,
 };
+pub use graphforge_ontology::{
+    ActivationMode, ActivationRecord, ActivationScope, BridgeDocument, BridgeExportFormat,
+    BridgeImportFormatHint, BridgeSelector, BridgeSetId, ExportFormat, ImportFormatHint,
+    ModuleSelector, OntologyModuleId, SymbolKind,
+};
 use graphforge_ontology::{OntologyCompiler, OntologyHandle, OntologyLoader};
 use graphforge_storage::GraphCatalog;
 use graphforge_storage::ResolvedProjectGeneration;
@@ -83,6 +88,15 @@ mod import_session;
 mod invocation_descriptor;
 mod knowledge;
 mod maintenance;
+mod multi_ontology;
+pub use multi_ontology::{
+    ActivationProfileChangeRequest, BridgeAdoptionRequest, BridgeCandidate, BridgeDeleteRequest,
+    BridgeUpdateRequest, CompositionValidationReceipt, ModuleAdoptionRequest, ModuleCandidate,
+    ModuleDeleteRequest, ModuleUpdateRequest, MultiOntologyCaseResult, MultiOntologyDiagnostic,
+    MultiOntologyError, MultiOntologyMutationReceipt, MultiOntologyParityReport,
+    MultiOntologyValidationReceipt, OntologyAuthorityExpectation, OntologyAuthorityState,
+    ResolutionExplainRequest, ResolutionExplanation,
+};
 #[cfg(test)]
 mod multi_process_publication_tests;
 mod node_selector;
@@ -130,6 +144,7 @@ pub use graphforge_storage::{
     PortableV2Representation, PortableV2SelectionEntry, PortableV2SelectionPlan,
     PortableV2SelectionProfile, PortableV2SelectionReason, PortableV2SelectionRequest,
     PortableV2SubsetClosure, PortableV2SubsetPlan, PortableV2SubsetRequest,
+    WorkspaceOntologyComposition, WorkspacePortableOntologyStaging,
 };
 pub use portable::{
     PortableExportRequest, PortableExportResult, PortableImportRequest, PortableImportResult,

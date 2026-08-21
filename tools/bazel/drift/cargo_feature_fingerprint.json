@@ -1,6 +1,6 @@
 {
   "schema": "graphforge.cargo-feature-fingerprint.v1",
-  "sha256": "be204b37c02a9087f84e342bfaac26409a76ad86299b6699229f6662845507bd",
+  "sha256": "edd8d33316e934f85aadce419ed4aae07daa7930004a8899727c83570776a882",
   "entries": [
     {
       "name": "graphforge-api",
@@ -386,6 +386,17 @@
           "target": null
         },
         {
+          "name": "serde",
+          "req": "^1",
+          "features": [
+            "derive"
+          ],
+          "optional": false,
+          "uses_default_features": true,
+          "kind": null,
+          "target": null
+        },
+        {
           "name": "serde_json",
           "req": "^1",
           "features": [],
@@ -466,6 +477,17 @@
           "target": null
         },
         {
+          "name": "serde",
+          "req": "^1",
+          "features": [
+            "derive"
+          ],
+          "optional": false,
+          "uses_default_features": true,
+          "kind": null,
+          "target": null
+        },
+        {
           "name": "serde_json",
           "req": "^1",
           "features": [],
@@ -526,6 +548,15 @@
           "target": null
         },
         {
+          "name": "graphforge-storage",
+          "req": "^0.5.2",
+          "features": [],
+          "optional": false,
+          "uses_default_features": true,
+          "kind": "dev",
+          "target": null
+        },
+        {
           "name": "parquet",
           "req": "^58",
           "features": [],
@@ -552,6 +583,24 @@
           "optional": false,
           "uses_default_features": true,
           "kind": null,
+          "target": null
+        },
+        {
+          "name": "serde_yaml_ng",
+          "req": "^0.9",
+          "features": [],
+          "optional": false,
+          "uses_default_features": true,
+          "kind": null,
+          "target": null
+        },
+        {
+          "name": "sha2",
+          "req": "^0.11",
+          "features": [],
+          "optional": false,
+          "uses_default_features": true,
+          "kind": "dev",
           "target": null
         },
         {

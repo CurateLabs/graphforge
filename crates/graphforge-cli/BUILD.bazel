@@ -18,7 +18,10 @@ exports_files(["Cargo.toml"])
 package(default_visibility = ["//visibility:public"])
 
 _CLI_DEPS = [
+    "@crates//:serde_yaml",
+    "@crates//:sha2",
     "//crates/graphforge-api:graphforge_api",
+    "//crates/graphforge-storage:graphforge_storage",
 ]
 
 _CONTRACT_FIXTURES = [
@@ -31,6 +34,10 @@ _GEOARROW_FIXTURE = [
 
 _TEMPORAL_FIXTURE = [
     "//tests/contracts:temporal-interchange-v1.json",
+]
+
+_MULTI_ONTOLOGY_FIXTURE = [
+    "//tests/contracts:multi-ontology-surface-v1.json",
 ]
 
 # Skill bundle stays at the workspace root (`//:project_skills_bundle`) so
@@ -121,6 +128,18 @@ gf_rust_integration_test(
 )
 
 gf_rust_integration_test(
+    name = "multi_ontology",
+    srcs = ["tests/multi_ontology.rs"],
+    crate = ":graphforge_cli",
+    compile_data = _MULTI_ONTOLOGY_FIXTURE,
+    data = _CLI_TEST_DATA,
+    rustc_env = _CLI_BIN_ENV,
+    size = "large",
+    timeout = "long",
+    deps = _CLI_DEPS,
+)
+
+gf_rust_integration_test(
     name = "portable",
     srcs = ["tests/portable.rs"],
     crate = ":graphforge_cli",
@@ -149,6 +168,7 @@ test_suite(
         ":checkpoints",
         ":filesystem_admission",
         ":graphforge_cli_test",
+        ":multi_ontology",
         ":portable",
         ":repository",
     ],

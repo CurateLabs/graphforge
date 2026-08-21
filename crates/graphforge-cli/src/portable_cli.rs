@@ -17,20 +17,8 @@ use uuid::Uuid;
 
 use crate::canonical_uuid;
 
-fn map_portable(error: &PortableV2Error) -> graphforge_api::GfError {
-    // Preserve the typed portable code in the message and map to the matching
-    // GfError fault domain so CLI exit codes distinguish IO/execution/validation.
-    let message = format!("{:?}: {error}", error.code);
-    match error.code {
-        graphforge_api::PortableV2ErrorCode::Io => graphforge_api::GfError::Storage(message),
-        graphforge_api::PortableV2ErrorCode::Cancelled
-        | graphforge_api::PortableV2ErrorCode::LimitExceeded
-        | graphforge_api::PortableV2ErrorCode::DigestMismatch
-        | graphforge_api::PortableV2ErrorCode::ConcurrentMutation => {
-            graphforge_api::GfError::Execution(message)
-        }
-        _ => graphforge_api::GfError::Validation(message),
-    }
+fn map_portable(error: PortableV2Error) -> crate::CliRuntimeError {
+    graphforge_api::MultiOntologyError::from(error).into()
 }
 
 fn write_json(
@@ -69,6 +57,19 @@ pub(crate) enum PortableCommand {
     PublishOci(PortablePublishOciArgs),
     /// Pull and verify a digest-pinned package from an OCI registry.
     PullOci(PortablePullOciArgs),
+    /// Inspect or explicitly adopt durable non-authoritative ontology staging.
+    Staging {
+        #[command(subcommand)]
+        command: PortableStagingCommand,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum PortableStagingCommand {
+    /// Inspect path-free semantic staging identity.
+    Inspect,
+    /// Explicitly adopt staged authority with exact optimistic identities.
+    Adopt(crate::ontology_cli::AuthorityArgs),
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -211,12 +212,12 @@ fn oci_credential() -> Option<String> {
     reason = "CLI dispatch keeps preview/export in one portable command table"
 )]
 pub(crate) fn run_portable(
-    graph: &GraphForge,
+    graph: &mut GraphForge,
     project_root: &std::path::Path,
     command: PortableCommand,
     json: bool,
     output: &mut dyn Write,
-) -> Result<(), graphforge_api::GfError> {
+) -> Result<(), crate::CliRuntimeError> {
     match command {
         PortableCommand::Preview(args) => {
             let plan = graph
@@ -228,7 +229,7 @@ pub(crate) fn run_portable(
                     },
                     limits: PortableV2Limits::default(),
                 })
-                .map_err(|error| map_portable(&error))?;
+                .map_err(map_portable)?;
             if json {
                 write_json(&plan, output)?;
             } else {
@@ -265,9 +266,23 @@ pub(crate) fn run_portable(
                         }
                     },
                 )
-                .map_err(|error| map_portable(&error))?;
+                .map_err(map_portable)?;
             if json {
-                write_json(&result, output)?;
+                write_json(
+                    &serde_json::json!({
+                        "contract": result.contract,
+                        "source": result.source,
+                        "checkpoint": result.checkpoint,
+                        "generation_uuid": result.generation_uuid,
+                        "package_digest": result.package_digest,
+                        "transport_digest": result.transport_digest,
+                        "entry_count": result.entry_count,
+                        "payload_bytes": result.payload_bytes,
+                        "representation": result.representation,
+                        "selection_fingerprint": result.selection_fingerprint,
+                    }),
+                    output,
+                )?;
             } else {
                 writeln!(
                     output,
@@ -277,6 +292,14 @@ pub(crate) fn run_portable(
                 .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
             }
         }
+        PortableCommand::Staging { command } => match command {
+            PortableStagingCommand::Inspect => {
+                crate::ontology_cli::run_portable_staging_inspect(graph, json, output)?;
+            }
+            PortableStagingCommand::Adopt(args) => {
+                crate::ontology_cli::run_portable_staging_adopt(graph, &args, json, output)?;
+            }
+        },
         command => {
             return run_portable_without_graph(project_root, command, json, output);
         }
@@ -294,13 +317,14 @@ pub(crate) fn run_portable_without_graph(
     command: PortableCommand,
     json: bool,
     output: &mut dyn Write,
-) -> Result<(), graphforge_api::GfError> {
+) -> Result<(), crate::CliRuntimeError> {
     match command {
-        PortableCommand::Preview(_) | PortableCommand::Export(_) => {
-            Err(graphforge_api::GfError::Validation(
-                "preview/export require an open project handle".into(),
-            ))
-        }
+        PortableCommand::Preview(_)
+        | PortableCommand::Export(_)
+        | PortableCommand::Staging { .. } => Err(graphforge_api::GfError::Validation(
+            "preview/export require an open project handle".into(),
+        )
+        .into()),
         PortableCommand::Verify(args) => {
             let report = verify_portable_v2(
                 &PortableVerifyRequest {
@@ -310,7 +334,7 @@ pub(crate) fn run_portable_without_graph(
                 },
                 None,
             )
-            .map_err(|error| map_portable(&error))?;
+            .map_err(map_portable)?;
             if json {
                 write_json(&report, output)?;
             } else {
@@ -333,7 +357,7 @@ pub(crate) fn run_portable_without_graph(
                 },
                 None,
             )
-            .map_err(|error| map_portable(&error))?;
+            .map_err(map_portable)?;
             if json {
                 write_json(
                     &serde_json::json!({
@@ -370,7 +394,7 @@ pub(crate) fn run_portable_without_graph(
                 },
                 None,
             )
-            .map_err(|error| map_portable(&error))?;
+            .map_err(map_portable)?;
             if json {
                 write_json(
                     &serde_json::json!({
@@ -408,14 +432,13 @@ pub(crate) fn run_portable_without_graph(
                 },
                 None,
             )
-            .map_err(|error| map_portable(&error))?;
+            .map_err(map_portable)?;
             if json {
                 write_json(
                     &serde_json::json!({
                         "contract": "graphforge-portable-oci-pull/2",
                         "oci_manifest_digest": receipt.reference.oci_manifest_digest,
                         "package_digest": receipt.reference.package_digest,
-                        "destination": receipt.destination,
                     }),
                     output,
                 )?;

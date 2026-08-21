@@ -1,0 +1,72 @@
+{
+  "contract": "graphforge-multi-ontology-binding-parity/1",
+  "modules": {
+    "base": {
+      "ontology_id": "urn:graphforge:parity:base",
+      "version": "1.0.0",
+      "entity_types": [{"name": "Person", "abstract": false}],
+      "relation_types": [],
+      "properties": [],
+      "constraints": [],
+      "migrations": []
+    },
+    "dependent": {
+      "ontology_id": "urn:graphforge:parity:dependent",
+      "version": "1.0.0",
+      "entity_types": [{"name": "Person", "abstract": false}, {"name": "Evidence", "abstract": false}],
+      "relation_types": [],
+      "properties": [],
+      "constraints": [],
+      "migrations": []
+    },
+    "dependent_update": {
+      "ontology_id": "urn:graphforge:parity:dependent",
+      "version": "2.0.0",
+      "entity_types": [{"name": "Person", "abstract": false}, {"name": "Evidence", "abstract": false}],
+      "relation_types": [],
+      "properties": [],
+      "constraints": [],
+      "migrations": []
+    }
+  },
+  "bridge": {
+    "bridge_id": "urn:graphforge:parity:bridge",
+    "authored_version": "1.0.0",
+    "source_modules": ["$base"],
+    "target_modules": ["$dependent"],
+    "dependencies": [],
+    "shared_surfaces": ["evidence"],
+    "assertions": [{
+      "source": {"module": "$base", "kind": "entity", "local_id": "Person"},
+      "target": {"module": "$dependent", "kind": "entity", "local_id": "Person"},
+      "predicate": "related",
+      "directional": true,
+      "provenance": {"method": "authored", "justification": "binding parity oracle", "evidence_refs": ["urn:evidence:parity"]}
+    }],
+    "enforcement": "advisory"
+  },
+  "expected": {
+    "module_order": ["urn:graphforge:parity:base", "urn:graphforge:parity:dependent"],
+    "bridge_order": ["urn:graphforge:parity:bridge"],
+    "ambiguous_code": "resolution.ambiguous",
+    "dependency_blocked_code": "GF_ONTOLOGY_DIAGNOSTIC",
+    "dependency_blocked_diagnostic": "dependency.in_use",
+    "idempotency_conflict_code": "GF_IDEMPOTENCY_CONFLICT",
+    "cancelled_code": "GF_CANCELLED",
+    "unsupported_future_code": "GF_UNSUPPORTED_FUTURE",
+    "unsupported_future_diagnostic": "interchange.unsupported_future",
+    "max_diagnostics": 2
+  },
+  "cases": [
+    {"id": "positive_crud_import_export", "preserves_authority": false},
+    {"id": "exact_identity_and_ambiguity", "preserves_authority": true},
+    {"id": "dependency_blocked_deletion", "preserves_authority": true},
+    {"id": "unsupported_future_portability", "preserves_authority": true},
+    {"id": "cancellation", "preserves_authority": true},
+    {"id": "idempotent_replay", "preserves_authority": false},
+    {"id": "no_partial_import_or_authority_change", "preserves_authority": true},
+    {"id": "bounded_structured_diagnostics", "preserves_authority": true},
+    {"id": "deterministic_path_free_cli_json", "preserves_authority": true},
+    {"id": "packaged_clean_install", "preserves_authority": true}
+  ]
+}

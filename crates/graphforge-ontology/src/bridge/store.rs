@@ -68,7 +68,7 @@ pub enum BridgeImportFormatHint {
 }
 
 /// List row returned in identity order.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BridgeListEntry {
     /// Exact bridge identity.
     pub id: BridgeSetId,
@@ -83,7 +83,7 @@ pub struct BridgeListEntry {
 }
 
 /// Detailed inspect receipt.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BridgeInspect {
     /// List metadata.
     pub entry: BridgeListEntry,
@@ -94,7 +94,7 @@ pub struct BridgeInspect {
 }
 
 /// Non-mutating update impact preview.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BridgeUpdatePreview {
     /// Source generation.
     pub source_generation: u64,
@@ -109,7 +109,7 @@ pub struct BridgeUpdatePreview {
 }
 
 /// Non-mutating delete impact preview.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BridgeDeletePreview {
     /// Source generation.
     pub source_generation: u64,

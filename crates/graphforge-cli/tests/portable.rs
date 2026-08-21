@@ -70,7 +70,10 @@ fn current_export_and_import_round_trip_with_stable_json() {
     assert_eq!(exported["contract"], "graphforge-portable-export/1");
     assert_eq!(exported["source"], "current");
     assert!(exported["checkpoint"].is_null());
-    assert_eq!(exported["output"], envelope.to_str().unwrap());
+    assert!(
+        exported.get("output").is_none(),
+        "JSON must not expose host paths"
+    );
     assert_eq!(exported["envelope_sha256"].as_str().unwrap().len(), 64);
     assert!(exported["participant_count"].as_u64().unwrap() > 0);
 
@@ -256,6 +259,10 @@ fn portable_v2_export_verify_and_import_round_trip() {
     ));
     assert_eq!(exported["contract"], "graphforge-portable-export/2");
     assert_eq!(exported["representation"], "bundle");
+    assert!(
+        exported.get("output").is_none(),
+        "JSON must not expose host paths"
+    );
     let package_digest = exported["package_digest"].as_str().unwrap().to_owned();
     assert!(package_digest.starts_with("sha256:"));
 

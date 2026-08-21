@@ -2203,6 +2203,7 @@ dependencies = [
  "napi",
  "napi-build",
  "napi-derive",
+ "serde",
  "serde_json",
  "uuid",
 ]
@@ -2216,6 +2217,7 @@ dependencies = [
  "graphforge-api",
  "graphforge-cli",
  "pyo3",
+ "serde",
  "serde_json",
  "uuid",
 ]
@@ -2227,9 +2229,12 @@ dependencies = [
  "arrow",
  "clap",
  "graphforge-api",
+ "graphforge-storage",
  "parquet",
  "serde",
  "serde_json",
+ "serde_yaml_ng",
+ "sha2",
  "tempfile",
  "uuid",
 ]

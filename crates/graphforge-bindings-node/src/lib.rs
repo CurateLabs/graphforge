@@ -51,6 +51,7 @@ use napi_derive::napi;
 mod composite;
 mod error;
 mod import_session;
+mod multi_ontology;
 mod portable;
 mod transaction;
 use composite::CompositeTransactionInput;
