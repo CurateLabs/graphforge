@@ -917,6 +917,7 @@ pub fn require_atomic_legacy_migration(graph_root: &Path) -> Result<(), GfError>
             if path.extension().and_then(|value| value.to_str()) != Some("parquet") {
                 continue;
             }
+            preflight_parquet_footer(&path)?;
             let metadata = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
                 File::open(&path)
                     .map_err(|_| corrupt("legacy migration Parquet cannot be opened"))?,
@@ -1632,6 +1633,13 @@ mod tests {
         );
         let bindings = SemanticStorageBindings::project(&composition, None).unwrap();
         let error = bindings.validate_physical_routes(dir.path()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("metadata exceeds admission limit"),
+            "{error:?}"
+        );
+        let error = require_atomic_legacy_migration(dir.path()).unwrap_err();
         assert!(
             error
                 .to_string()
