@@ -2465,6 +2465,99 @@ mod tests {
     }
 
     #[test]
+    fn tck_evidence_changes_package_identity_without_changing_composition_identity() {
+        let (_project, generation) = graph_generation_with_composition(true);
+        let limits = PortableV2ExportLimits::default();
+        let base = plan_complete_portable_v2(&generation, limits).unwrap();
+        let base_manifest: serde_json::Value = serde_json::from_slice(&base.manifest).unwrap();
+        let composition = base
+            .files
+            .iter()
+            .find(|file| file.path == crate::project_portable_v2::ONTOLOGY_COMPOSITION_PATH);
+        let PlannedSource::Control(composition_bytes) = &composition.unwrap().source else {
+            panic!("composition must be inline")
+        };
+        let composition: PortableV2OntologyComposition =
+            serde_json::from_slice(composition_bytes).unwrap();
+
+        let evidence_bytes = canonical_json(&serde_json::json!({
+            "contract": "graphforge-tck-evidence/1",
+            "passed": 3897,
+            "total": 3897
+        }))
+        .unwrap();
+        let evidence_digest: [u8; 32] = Sha256::digest(&evidence_bytes).into();
+        let evidence_id = "tck-certification-evidence";
+        let evidence_path = "data/components/evidence/tck-certification-evidence/report.json";
+        let mut with_evidence = base.clone();
+        with_evidence.payload_bytes += evidence_bytes.len() as u64;
+        with_evidence.files.push(PlannedFile {
+            source: PlannedSource::Control(evidence_bytes.clone()),
+            path: evidence_path.into(),
+            length: evidence_bytes.len() as u64,
+            digest: evidence_digest,
+        });
+        with_evidence
+            .files
+            .sort_by(|left, right| left.path.as_bytes().cmp(right.path.as_bytes()));
+
+        let mut manifest = base_manifest.clone();
+        manifest["selection"]["roots"]
+            .as_array_mut()
+            .unwrap()
+            .push(evidence_id.into());
+        manifest["selection"]["roots"]
+            .as_array_mut()
+            .unwrap()
+            .sort_by(|left, right| left.as_str().cmp(&right.as_str()));
+        manifest["components"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "kind": "evidence",
+                "participant_id": evidence_id,
+                "required_dependencies": [],
+                "files": [{
+                    "media_type": "application/json",
+                    "path": evidence_path,
+                    "length": evidence_bytes.len(),
+                    "sha256": hex(evidence_digest)
+                }]
+            }));
+        manifest["components"]
+            .as_array_mut()
+            .unwrap()
+            .sort_by(|left, right| {
+                (left["kind"].as_str(), left["participant_id"].as_str())
+                    .cmp(&(right["kind"].as_str(), right["participant_id"].as_str()))
+            });
+        with_evidence.manifest = canonical_json(&manifest).unwrap();
+        resign_test_manifest(&mut with_evidence);
+        assert_ne!(base.package_digest, with_evidence.package_digest);
+
+        let output = tempfile::tempdir().unwrap();
+        let (expanded, bundle) = write_test_representations(&with_evidence, output.path());
+        let expanded_report =
+            verify_portable_v2(&expanded, PortableV2Mode::Full, limits, None).unwrap();
+        let bundle_report =
+            verify_portable_v2(&bundle, PortableV2Mode::Full, limits, None).unwrap();
+        assert_eq!(expanded_report.package_digest, bundle_report.package_digest);
+        assert_eq!(
+            expanded_report.ontology_composition,
+            Some(composition.clone())
+        );
+        assert_eq!(
+            bundle_report.ontology_composition,
+            Some(composition.clone())
+        );
+        assert!(
+            !serde_json::to_string(&composition)
+                .unwrap()
+                .contains("tck-certification-evidence")
+        );
+    }
+
+    #[test]
     fn semantic_tamper_and_future_feature_precede_payload() {
         let (_project, generation) = graph_generation_with_composition(true);
         let limits = PortableV2ExportLimits::default();
