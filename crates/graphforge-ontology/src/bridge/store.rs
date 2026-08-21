@@ -606,6 +606,24 @@ impl BridgeInventory {
         ids
     }
 
+    /// Adopted bridge documents in deterministic identity order.
+    ///
+    /// Consumers use these immutable documents to compile binding behavior;
+    /// candidate and validated staging records are deliberately excluded.
+    #[must_use]
+    pub fn adopted_documents(&self) -> Vec<BridgeDocument> {
+        let mut records: Vec<_> = self
+            .adopted
+            .values()
+            .filter(|record| record.status == BridgeLifecycleStatus::Adopted)
+            .collect();
+        records.sort_by_key(|record| record.id.sort_key());
+        records
+            .into_iter()
+            .map(|record| record.doc.clone())
+            .collect()
+    }
+
     /// Serialize durable authority (staging excluded).
     #[must_use]
     pub fn snapshot(&self) -> BridgeSnapshot {

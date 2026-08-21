@@ -33,7 +33,8 @@ pub use graphforge_io::{
     ResultSinkFormat, ResultSinkOptions, ResultSinkProgress, ResultSinkReceipt,
 };
 use graphforge_ir::{
-    BindError, Binder, GraphOp, GraphPlan, IrExpr, ProcedureRegistry, RuntimeCatalog,
+    BindError, Binder, CompositionBindingContext, GraphOp, GraphPlan, IrExpr, ProcedureRegistry,
+    RuntimeCatalog,
 };
 use graphforge_ontology::{OntologyCompiler, OntologyHandle, OntologyLoader};
 use graphforge_storage::GraphCatalog;
@@ -57,6 +58,8 @@ mod composite_receipt;
 mod composite_recovery_tests;
 mod composite_transaction;
 mod composite_validation;
+#[cfg(test)]
+mod composition_binding_tests;
 /// Hidden writer-hold helpers for native binding concurrency probes.
 #[doc(hidden)]
 pub mod concurrency_test_support;
@@ -903,6 +906,23 @@ impl GraphForge {
         self.run_query(cypher, params)
     }
 
+    /// Execute a query using exact compiled multi-ontology binding authority.
+    ///
+    /// The composition is consumed by the same parse, bind, lower, and execute
+    /// path as [`execute`](Self::execute). Its fingerprint and deterministic
+    /// binding receipts are retained in the plan; runtime-catalog observations
+    /// are published only after the complete bind succeeds.
+    ///
+    /// # Errors
+    /// As [`execute`](Self::execute), including scoped composition diagnostics.
+    pub fn execute_with_composition(
+        &self,
+        cypher: &str,
+        composition: Arc<CompositionBindingContext>,
+    ) -> Result<ExecutionResult, GfError> {
+        self.run_query_with_composition(cypher, &HashMap::new(), composition, true)
+    }
+
     fn run_query(
         &self,
         cypher: &str,
@@ -926,6 +946,26 @@ impl GraphForge {
         &self,
         cypher: &str,
         params: &HashMap<String, IrLiteral>,
+        publish: bool,
+    ) -> Result<ExecutionResult, GfError> {
+        self.run_query_with_optional_composition(cypher, params, None, publish)
+    }
+
+    fn run_query_with_composition(
+        &self,
+        cypher: &str,
+        params: &HashMap<String, IrLiteral>,
+        composition: Arc<CompositionBindingContext>,
+        publish: bool,
+    ) -> Result<ExecutionResult, GfError> {
+        self.run_query_with_optional_composition(cypher, params, Some(composition), publish)
+    }
+
+    fn run_query_with_optional_composition(
+        &self,
+        cypher: &str,
+        params: &HashMap<String, IrLiteral>,
+        composition: Option<Arc<CompositionBindingContext>>,
         publish: bool,
     ) -> Result<ExecutionResult, GfError> {
         let _admission = self.admit_heavy_query()?;
@@ -956,12 +996,15 @@ impl GraphForge {
         // Bind against the shared runtime catalog so newly observed types/props
         // persist across queries in this instance.
         let plan = {
-            let binder = Binder::new(
+            let mut binder = Binder::new(
                 self.ontology.clone(),
                 self.runtime_catalog.clone(),
                 self.ontology_mode,
             )
             .with_procedures(self.procedure_snapshot());
+            if let Some(composition) = composition {
+                binder = binder.with_composition(composition);
+            }
             binder
                 .bind(&ast)
                 .map_err(|errs| bind_errors_to_gferror(&errs))?
