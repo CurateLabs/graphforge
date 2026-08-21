@@ -955,6 +955,8 @@ pub struct GraphCreateNode {
     pub dir: PathBuf,
     /// Ontology mode (drives writer edge / property routing).
     pub mode: OntologyMode,
+    /// Exact composition fingerprint authenticating opaque storage routes.
+    pub semantic_composition_fingerprint: Option<String>,
     /// Output schema: the one-row write summary in summary mode, or the
     /// created-entity row schema in emit-rows mode (#814).
     schema: DFSchemaRef,
@@ -996,6 +998,7 @@ impl GraphCreateNode {
             edges,
             dir,
             mode,
+            semantic_composition_fingerprint: None,
             schema,
             emit_rows: false,
         }
@@ -1022,6 +1025,7 @@ impl GraphCreateNode {
             edges,
             dir,
             mode,
+            semantic_composition_fingerprint: None,
             schema: output_schema,
             emit_rows: true,
         }
@@ -1032,6 +1036,13 @@ impl GraphCreateNode {
     #[must_use]
     pub fn emits_rows(&self) -> bool {
         self.emit_rows
+    }
+
+    /// Attach exact semantic storage authentication to this write node.
+    #[must_use]
+    pub fn with_semantic_composition_fingerprint(mut self, fingerprint: Option<&str>) -> Self {
+        self.semantic_composition_fingerprint = fingerprint.map(str::to_owned);
+        self
     }
 }
 
@@ -1050,6 +1061,7 @@ impl PartialEq for GraphCreateNode {
             && self.edges == other.edges
             && self.dir == other.dir
             && self.mode == other.mode
+            && self.semantic_composition_fingerprint == other.semantic_composition_fingerprint
             && self.emit_rows == other.emit_rows
     }
 }
@@ -1256,6 +1268,7 @@ impl Hash for GraphCreateNode {
         }
         self.dir.hash(state);
         self.mode.hash(state);
+        self.semantic_composition_fingerprint.hash(state);
         self.emit_rows.hash(state);
     }
 }

@@ -1215,6 +1215,7 @@ pub struct GraphWriter {
     /// Edges created since the last commit, captured during `flush_edges` for
     /// the adjacency delta segment (#765). Drained by `flush`/`take_pending_delta`.
     pending_delta: Vec<crate::adjacency_delta::DeltaEdge>,
+    semantic_composition_fingerprint: Option<String>,
 }
 
 impl GraphWriter {
@@ -1257,7 +1258,16 @@ impl GraphWriter {
             properties: HashMap::new(),
             edge_properties: HashMap::new(),
             pending_delta: Vec::new(),
+            semantic_composition_fingerprint: None,
         })
+    }
+
+    /// Attach the exact composition fingerprint used to authenticate opaque
+    /// semantic routes written by this writer.
+    #[must_use]
+    pub fn with_semantic_composition_fingerprint(mut self, fingerprint: Option<String>) -> Self {
+        self.semantic_composition_fingerprint = fingerprint;
+        self
     }
 
     /// Buffer a new node and return its assigned `node_id` surrogate.
@@ -1886,6 +1896,7 @@ impl GraphWriter {
             } else {
                 TYPED_EDGE_SCHEMA.clone()
             };
+            let schema = self.authenticated_route_schema(schema, &stem);
             let batch = self.edge_batch(&rows, &schema, exploratory)?;
             // Merge with this stem's existing file so appends accumulate (#733);
             // stems not in this buffer are never opened, so they are untouched.
@@ -1954,7 +1965,15 @@ impl GraphWriter {
             let mut rows = decode_property_rows(&existing)?;
             rows.extend(new_rows);
             let (schema, cols) = build_property_columns(&stem, &rows)?;
-            stage_property_file(staged, &self.dir, "properties", &stem, schema, cols)?;
+            let schema = self.authenticated_route_schema(Arc::new(schema), &stem);
+            stage_property_file(
+                staged,
+                &self.dir,
+                "properties",
+                &stem,
+                schema.as_ref().clone(),
+                cols,
+            )?;
         }
         Ok(())
     }
@@ -1977,7 +1996,15 @@ impl GraphWriter {
                 &stem,
                 &rows,
             )?;
-            stage_property_file(staged, &self.dir, "edge_properties", &stem, schema, cols)?;
+            let schema = self.authenticated_route_schema(Arc::new(schema), &stem);
+            stage_property_file(
+                staged,
+                &self.dir,
+                "edge_properties",
+                &stem,
+                schema.as_ref().clone(),
+                cols,
+            )?;
         }
         Ok(())
     }
@@ -1985,6 +2012,20 @@ impl GraphWriter {
     fn timestamp_array(&self, n: usize) -> TimestampMicrosecondArray {
         TimestampMicrosecondArray::from(vec![self.now_micros; n])
             .with_timezone_opt(Some(Arc::from("UTC")))
+    }
+
+    fn authenticated_route_schema(&self, schema: SchemaRef, stem: &str) -> SchemaRef {
+        match (
+            &self.semantic_composition_fingerprint,
+            stem.starts_with("s-"),
+        ) {
+            (Some(fingerprint), true) => Arc::new(crate::schemas::with_semantic_route_metadata(
+                schema.as_ref(),
+                stem,
+                fingerprint,
+            )),
+            _ => schema,
+        }
     }
 }
 

@@ -1586,6 +1586,12 @@ pub struct GraphCatalog {
     /// [`graphforge_ir::runtime_entity_type_id`] before merging them with
     /// ontology TypeIds (#702 / #889).
     label_names: HashMap<u32, String>,
+    semantic_rel_routes: HashMap<u32, String>,
+    semantic_label_routes: HashMap<u32, String>,
+    semantic_label_names: HashMap<u32, String>,
+    semantic_composition_fingerprint: Option<String>,
+    semantic_edge_tables: HashMap<u32, Arc<dyn TableProvider>>,
+    semantic_edge_property_tables: HashMap<u32, Arc<dyn TableProvider>>,
 }
 
 impl fmt::Debug for GraphCatalog {
@@ -1611,6 +1617,17 @@ impl GraphCatalog {
         ontology: Option<&OntologyHandle>,
         runtime_catalog: &RuntimeCatalog,
     ) -> Result<Self, DataFusionError> {
+        Self::open_with_semantic_bindings(dir, ontology, runtime_catalog, None)
+    }
+
+    /// Open with exact generation-pinned qualified storage bindings.
+    #[allow(clippy::too_many_lines)] // registration must build one internally consistent catalog
+    pub fn open_with_semantic_bindings(
+        dir: &Path,
+        ontology: Option<&OntologyHandle>,
+        runtime_catalog: &RuntimeCatalog,
+        semantic: Option<&crate::SemanticStorageBindings>,
+    ) -> Result<Self, DataFusionError> {
         let mut schema = GraphSchema::new();
 
         // ---- topology nodes ----
@@ -1621,7 +1638,16 @@ impl GraphCatalog {
         );
 
         // ---- typed edge tables ----
-        if let Some(handle) = ontology {
+        if let Some(bindings) = semantic {
+            for binding in &bindings.bindings {
+                if binding.route_kind == crate::SemanticRouteKind::Relation {
+                    schema.register(
+                        format!("edges_{}", binding.route),
+                        Arc::new(TypedEdgeTable::open(dir, &binding.route)),
+                    );
+                }
+            }
+        } else if let Some(handle) = ontology {
             for rel_name in handle.relation_type_names() {
                 schema.register(
                     format!("edges_{rel_name}"),
@@ -1664,18 +1690,95 @@ impl GraphCatalog {
         }
 
         // ---- property tables ----
-        register_property_tables(dir, ontology, &mut schema);
+        if let Some(bindings) = semantic {
+            let mut node_routes = std::collections::BTreeSet::new();
+            for binding in &bindings.bindings {
+                match binding.route_kind {
+                    crate::SemanticRouteKind::NodeProperty
+                        if node_routes.insert(binding.route.clone()) =>
+                    {
+                        schema.register(
+                            format!("properties_{}", binding.route),
+                            Arc::new(PropertyTable::open_discovered(dir, &binding.route)),
+                        );
+                    }
+                    crate::SemanticRouteKind::EdgeProperty => {
+                        schema.register(
+                            format!("edge_properties_{}", binding.route),
+                            Arc::new(EdgePropertyTable::open_discovered(dir, &binding.route)),
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        } else {
+            register_property_tables(dir, ontology, &mut schema);
+        }
 
         // ---- name maps (for read-path property + relation resolution) ----
-        let prop_names = build_prop_names(ontology, runtime_catalog);
+        let mut prop_names = build_prop_names(ontology, runtime_catalog);
         let rel_names = build_rel_names(runtime_catalog);
         let label_names = build_label_names(runtime_catalog);
+        let mut semantic_rel_routes = HashMap::new();
+        let mut semantic_label_routes = HashMap::new();
+        let mut semantic_label_names = HashMap::new();
+        let mut semantic_edge_tables: HashMap<u32, Arc<dyn TableProvider>> = HashMap::new();
+        let mut semantic_edge_property_tables: HashMap<u32, Arc<dyn TableProvider>> =
+            HashMap::new();
+        if let Some(bindings) = semantic {
+            for binding in &bindings.bindings {
+                match binding.route_kind {
+                    crate::SemanticRouteKind::Entity => {
+                        semantic_label_routes.insert(binding.storage_id, binding.route.clone());
+                        semantic_label_names.insert(binding.storage_id, binding.symbol.display());
+                    }
+                    crate::SemanticRouteKind::Relation => {
+                        semantic_rel_routes.insert(binding.storage_id, binding.route.clone());
+                        semantic_edge_tables.insert(
+                            binding.storage_id,
+                            Arc::new(TypedEdgeTable::open(dir, &binding.route)),
+                        );
+                    }
+                    crate::SemanticRouteKind::NodeProperty
+                    | crate::SemanticRouteKind::EdgeProperty => {
+                        let name = binding
+                            .symbol
+                            .local_id
+                            .split_once(':')
+                            .map_or(binding.symbol.local_id.as_str(), |(_, name)| name);
+                        prop_names.insert(binding.storage_id, name.to_owned());
+                    }
+                }
+            }
+            for relation in bindings
+                .bindings
+                .iter()
+                .filter(|binding| binding.route_kind == crate::SemanticRouteKind::Relation)
+            {
+                if bindings.bindings.iter().any(|binding| {
+                    binding.route_kind == crate::SemanticRouteKind::EdgeProperty
+                        && binding.owner.as_ref() == Some(&relation.symbol)
+                }) {
+                    semantic_edge_property_tables.insert(
+                        relation.storage_id,
+                        Arc::new(EdgePropertyTable::open_discovered(dir, &relation.route)),
+                    );
+                }
+            }
+        }
 
         Ok(Self {
             schema: Arc::new(schema),
             prop_names,
             rel_names,
             label_names,
+            semantic_rel_routes,
+            semantic_label_routes,
+            semantic_label_names,
+            semantic_composition_fingerprint: semantic
+                .map(|bindings| bindings.composition_fingerprint.clone()),
+            semantic_edge_tables,
+            semantic_edge_property_tables,
         })
     }
 
@@ -1701,6 +1804,42 @@ impl GraphCatalog {
     #[must_use]
     pub fn label_names(&self) -> &HashMap<u32, String> {
         &self.label_names
+    }
+
+    /// Generation-pinned semantic relation ID to opaque physical route.
+    #[must_use]
+    pub fn semantic_rel_routes(&self) -> &HashMap<u32, String> {
+        &self.semantic_rel_routes
+    }
+
+    /// Generation-pinned semantic entity ID to opaque property route.
+    #[must_use]
+    pub fn semantic_label_routes(&self) -> &HashMap<u32, String> {
+        &self.semantic_label_routes
+    }
+
+    /// Generation-pinned semantic entity ID to exact qualified display name.
+    #[must_use]
+    pub fn semantic_label_names(&self) -> &HashMap<u32, String> {
+        &self.semantic_label_names
+    }
+
+    /// Exact composition fingerprint authenticating semantic routes.
+    #[must_use]
+    pub fn semantic_composition_fingerprint(&self) -> Option<&str> {
+        self.semantic_composition_fingerprint.as_deref()
+    }
+
+    /// Registered authenticated provider for one semantic relation ID.
+    #[must_use]
+    pub fn semantic_edge_table(&self, id: u32) -> Option<Arc<dyn TableProvider>> {
+        self.semantic_edge_tables.get(&id).cloned()
+    }
+
+    /// Registered authenticated property provider for one semantic relation ID.
+    #[must_use]
+    pub fn semantic_edge_property_table(&self, id: u32) -> Option<Arc<dyn TableProvider>> {
+        self.semantic_edge_property_tables.get(&id).cloned()
     }
 }
 

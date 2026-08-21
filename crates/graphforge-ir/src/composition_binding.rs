@@ -1,6 +1,6 @@
 //! Deterministic symbol binding over a compiled ontology composition.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use graphforge_ontology::{
@@ -127,6 +127,7 @@ pub struct CompositionBindingContext {
     composition: Arc<CompiledComposition>,
     bridges: Vec<BridgeDocument>,
     limits: CompositionBindingLimits,
+    storage_ids: HashMap<QualifiedSymbol, u32>,
 }
 
 impl CompositionBindingContext {
@@ -145,13 +146,42 @@ impl CompositionBindingContext {
             composition,
             bridges,
             limits,
+            storage_ids: HashMap::new(),
         }
+    }
+
+    /// Attach generation-pinned storage IDs. The caller must authenticate the
+    /// mapping against this context's exact composition before construction.
+    #[must_use]
+    pub fn with_storage_ids(
+        mut self,
+        storage_ids: impl IntoIterator<Item = (QualifiedSymbol, u32)>,
+    ) -> Self {
+        self.storage_ids = storage_ids.into_iter().collect();
+        self
     }
 
     /// Exact composition fingerprint.
     #[must_use]
     pub fn fingerprint(&self) -> &str {
         &self.composition.fingerprint
+    }
+
+    /// Exact compiled authority used for storage-binding authentication.
+    #[must_use]
+    pub fn composition(&self) -> &Arc<CompiledComposition> {
+        &self.composition
+    }
+
+    /// Return a copy carrying authenticated generation storage IDs.
+    #[must_use]
+    pub fn with_generation_storage_ids(
+        &self,
+        storage_ids: impl IntoIterator<Item = (QualifiedSymbol, u32)>,
+    ) -> Self {
+        let mut value = self.clone();
+        value.storage_ids = storage_ids.into_iter().collect();
+        value
     }
 
     /// Deterministic composition-local semantic ID for a qualified symbol.
@@ -161,6 +191,9 @@ impl CompositionBindingContext {
     /// catalog ID.
     #[must_use]
     pub fn semantic_id(&self, symbol: &QualifiedSymbol) -> u32 {
+        if let Some(id) = self.storage_ids.get(symbol) {
+            return *id;
+        }
         let mut symbols = self
             .composition
             .modules

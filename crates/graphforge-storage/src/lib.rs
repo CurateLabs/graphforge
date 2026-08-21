@@ -37,6 +37,14 @@ pub use graph_files::{
     stage_graph_tree, verify_graph_tree,
 };
 
+pub mod semantic_bindings;
+pub use semantic_bindings::{
+    GRAPH_SEMANTIC_BINDINGS_FAMILY, GRAPH_SEMANTIC_BINDINGS_VERSION, LegacySemanticProjection,
+    MAX_SEMANTIC_BINDING_BYTES, MAX_SEMANTIC_BINDINGS, SEMANTIC_COMPOSITION_METADATA_KEY,
+    SEMANTIC_ROUTE_METADATA_KEY, SemanticRouteKind, SemanticStorageBinding,
+    SemanticStorageBindings, require_atomic_legacy_migration, semantic_storage_bindings,
+};
+
 pub mod graph_delta_journal;
 pub use graph_delta_journal::{
     GRAPH_DELTA_DIR, GRAPH_DELTA_RECORD_VERSION, GRAPH_DELTA_RUN_EXTENSION,

@@ -416,6 +416,12 @@ pub struct GraphForge {
     ontology_document: Option<OntologyDoc>,
     /// Shared runtime catalog (grown by the binder during `execute`).
     runtime_catalog: Arc<Mutex<RuntimeCatalog>>,
+    /// Exact generation-bound qualified storage authority, when adopted.
+    semantic_storage_bindings: Arc<Mutex<Option<graphforge_storage::SemanticStorageBindings>>>,
+    /// Generation-hydrated compiled composition used by ordinary query/write
+    /// entry points. The #840 composition participant loader installs this
+    /// only after compiling and authenticating the exact persisted closure.
+    default_composition_context: Arc<Mutex<Option<Arc<CompositionBindingContext>>>>,
     /// Procedures available to `CALL` clauses on this engine instance.
     procedures: Arc<Mutex<ProcedureRegistry>>,
     /// Effective ontology enforcement mode.
@@ -587,6 +593,8 @@ impl GraphForge {
             ontology,
             ontology_document,
             runtime_catalog: Arc::new(Mutex::new(RuntimeCatalog::new())),
+            semantic_storage_bindings: Arc::new(Mutex::new(None)),
+            default_composition_context: Arc::new(Mutex::new(None)),
             procedures: Arc::new(Mutex::new(ProcedureRegistry::new())),
             ontology_mode,
             runtime: build_runtime(&resource_policy)?,
@@ -683,6 +691,19 @@ impl GraphForge {
             hydrate_graph_workspace(&resolved_generation, read_only)?;
 
         let runtime_catalog = load_runtime_catalog(&dir)?;
+        let semantic_storage_bindings =
+            graphforge_storage::semantic_storage_bindings(&resolved_generation)?;
+        if semantic_storage_bindings.is_none()
+            && resolved_generation
+                .participant_snapshot("workspace", "ontology_composition")?
+                .is_some()
+        {
+            graphforge_storage::require_atomic_legacy_migration(&dir)?;
+        }
+        if let Some(bindings) = &semantic_storage_bindings {
+            let inventory = resolved_generation.graph_files_inventory()?;
+            bindings.validate_physical_routes_with_inventory(&dir, inventory.as_ref())?;
+        }
         if read_only {
             graphforge_storage::validate_runtime_entity_label_ids(
                 &dir,
@@ -739,6 +760,8 @@ impl GraphForge {
             ontology,
             ontology_document,
             runtime_catalog: Arc::new(Mutex::new(runtime_catalog)),
+            semantic_storage_bindings: Arc::new(Mutex::new(semantic_storage_bindings)),
+            default_composition_context: Arc::new(Mutex::new(None)),
             procedures: Arc::new(Mutex::new(ProcedureRegistry::new())),
             ontology_mode,
             runtime,
@@ -948,7 +971,44 @@ impl GraphForge {
         params: &HashMap<String, IrLiteral>,
         publish: bool,
     ) -> Result<ExecutionResult, GfError> {
-        self.run_query_with_optional_composition(cypher, params, None, publish)
+        let composition = self
+            .default_composition_context
+            .lock()
+            .expect("default composition context lock poisoned")
+            .clone();
+        self.run_query_with_optional_composition(cypher, params, composition, publish)
+    }
+
+    /// Install the exact compiled context reconstructed from the persisted
+    /// composition participant. This is the narrow atomic hydration seam used
+    /// by the composition lifecycle; ordinary execution consumes it by default.
+    #[allow(dead_code)] // consumed by the generation composition publisher added by issue #840
+    pub(crate) fn install_generation_composition_context(
+        &self,
+        context: &Arc<CompositionBindingContext>,
+    ) -> Result<(), GfError> {
+        let bindings = self
+            .semantic_storage_bindings
+            .lock()
+            .expect("semantic storage binding lock poisoned")
+            .clone()
+            .ok_or_else(|| {
+                GfError::Validation(
+                    "persisted composition has no generation storage binding authority".into(),
+                )
+            })?;
+        bindings.validate_against(context.composition())?;
+        let context = context.with_generation_storage_ids(
+            bindings
+                .bindings
+                .iter()
+                .map(|binding| (binding.symbol.clone(), binding.storage_id)),
+        );
+        *self
+            .default_composition_context
+            .lock()
+            .expect("default composition context lock poisoned") = Some(Arc::new(context));
+        Ok(())
     }
 
     fn run_query_with_composition(
@@ -969,6 +1029,9 @@ impl GraphForge {
         publish: bool,
     ) -> Result<ExecutionResult, GfError> {
         let _admission = self.admit_heavy_query()?;
+        let composition = composition
+            .map(|context| self.bind_generation_storage(&context))
+            .transpose()?;
         if cypher.trim().is_empty() {
             return Err(GfError::Validation("empty query".into()));
         }
@@ -1002,8 +1065,8 @@ impl GraphForge {
                 self.ontology_mode,
             )
             .with_procedures(self.procedure_snapshot());
-            if let Some(composition) = composition {
-                binder = binder.with_composition(composition);
+            if let Some((composition, _)) = &composition {
+                binder = binder.with_composition(Arc::clone(composition));
             }
             binder
                 .bind(&ast)
@@ -1012,11 +1075,54 @@ impl GraphForge {
 
         validate_call_params(&plan, params)?;
 
-        let result = self
-            .run_plan_with_publish(&plan, params, publish)
-            .map_err(publicize_query_error)?;
+        let candidate = composition.as_ref().map(|(_, candidate)| candidate);
+        let composition_mode =
+            composition
+                .as_ref()
+                .map(|(context, _)| match context.composition().profile_default {
+                    graphforge_ontology::ActivationMode::Exploratory => OntologyMode::Exploratory,
+                    graphforge_ontology::ActivationMode::Advisory => OntologyMode::Advisory,
+                    graphforge_ontology::ActivationMode::Strict => OntologyMode::Strict,
+                });
+        let result = self.run_plan_with_publish_and_bindings(
+            &plan,
+            params,
+            publish,
+            candidate,
+            composition_mode,
+        );
+        let result = result.map_err(publicize_query_error)?;
         shape_result(result, self.ontology_mode, self.ontology.as_ref())
             .map_err(publicize_query_error)
+    }
+
+    fn bind_generation_storage(
+        &self,
+        context: &Arc<CompositionBindingContext>,
+    ) -> Result<
+        (
+            Arc<CompositionBindingContext>,
+            graphforge_storage::SemanticStorageBindings,
+        ),
+        GfError,
+    > {
+        let current = self
+            .semantic_storage_bindings
+            .lock()
+            .expect("semantic storage binding lock poisoned");
+        let projected = graphforge_storage::SemanticStorageBindings::project(
+            context.composition(),
+            current.as_ref(),
+        )?;
+        projected.validate_against(context.composition())?;
+        let context = context.with_generation_storage_ids(
+            projected
+                .bindings
+                .iter()
+                .map(|binding| (binding.symbol.clone(), binding.storage_id)),
+        );
+        drop(current);
+        Ok((Arc::new(context), projected))
     }
 
     /// Build a session reflecting the current runtime catalog and run `plan`,
@@ -1035,6 +1141,18 @@ impl GraphForge {
         plan: &GraphPlan,
         params: &HashMap<String, IrLiteral>,
         publish: bool,
+    ) -> Result<ExecutionResult, GfError> {
+        self.run_plan_with_publish_and_bindings(plan, params, publish, None, None)
+    }
+
+    #[allow(clippy::too_many_lines)] // one visibility lock spans execution and publication
+    fn run_plan_with_publish_and_bindings(
+        &self,
+        plan: &GraphPlan,
+        params: &HashMap<String, IrLiteral>,
+        publish: bool,
+        candidate_bindings: Option<&graphforge_storage::SemanticStorageBindings>,
+        composition_mode: Option<OntologyMode>,
     ) -> Result<ExecutionResult, GfError> {
         use graphforge_exec::ExecutionSession;
 
@@ -1085,15 +1203,36 @@ impl GraphForge {
                 .runtime_catalog
                 .lock()
                 .expect("runtime catalog poisoned");
-            GraphCatalog::open(&self.dir, self.ontology.as_ref(), &rc)
-                .map_err(|e| GfError::Storage(e.to_string()))?
+            let installed = self
+                .semantic_storage_bindings
+                .lock()
+                .expect("semantic storage binding lock poisoned");
+            GraphCatalog::open_with_semantic_bindings(
+                &self.dir,
+                self.ontology.as_ref(),
+                &rc,
+                candidate_bindings.or(installed.as_ref()),
+            )
+            .map_err(|e| GfError::Storage(e.to_string()))?
+        };
+        // A compiled composition is explicit typed authority even when the
+        // legacy workspace ontology profile remains exploratory. Its writes
+        // must never fall back to `_untyped` host routing.
+        let execution_mode = composition_mode.unwrap_or(self.ontology_mode);
+        let adjacency_provider = if execution_mode == self.ontology_mode {
+            Arc::clone(&self.adjacency_provider)
+        } else {
+            Arc::new(graphforge_exec::PersistentAdjacencyProvider::new(
+                self.dir.clone(),
+                execution_mode,
+            ))
         };
         let session = ExecutionSession::new_with_target_provider_and_resources(
             catalog,
             self.ontology.clone(),
             self.dir.clone(),
-            self.ontology_mode,
-            Arc::clone(&self.adjacency_provider),
+            execution_mode,
+            adjacency_provider,
             &self.session_resource_config(),
         )?;
 
@@ -1127,7 +1266,9 @@ impl GraphForge {
             let rollback_generation = rollback_generation
                 .as_ref()
                 .expect("write path resolved a rollback generation");
-            if let Err(error) = self.publish_graph_mutation(receipt) {
+            if let Err(error) =
+                self.publish_graph_mutation_with_bindings(receipt, candidate_bindings)
+            {
                 let still_prior = *self
                     .current_generation_uuid
                     .lock()
@@ -1138,6 +1279,14 @@ impl GraphForge {
                     self.adjacency_provider.invalidate();
                 }
                 return Err(error);
+            }
+            if let Some(candidate) = candidate_bindings {
+                // The write visibility lock still covers this swap, so an
+                // older request can never overwrite a newer publication.
+                *self
+                    .semantic_storage_bindings
+                    .lock()
+                    .expect("semantic storage binding lock poisoned") = Some(candidate.clone());
             }
         }
         if is_write
@@ -1155,9 +1304,23 @@ impl GraphForge {
         &self,
         receipt: &graphforge_exec::MutationReceipt,
     ) -> Result<(), GfError> {
+        self.publish_graph_mutation_with_bindings(receipt, None)
+    }
+
+    fn publish_graph_mutation_with_bindings(
+        &self,
+        receipt: &graphforge_exec::MutationReceipt,
+        candidate_bindings: Option<&graphforge_storage::SemanticStorageBindings>,
+    ) -> Result<(), GfError> {
         let operation_uuid = uuid::Uuid::now_v7();
         let recorded_at_micros = (self.clock.lock().expect("clock lock poisoned"))()?;
-        self.publish_graph_mutation_with_context(receipt, operation_uuid, None, recorded_at_micros)
+        self.publish_graph_mutation_with_context_and_bindings(
+            receipt,
+            operation_uuid,
+            None,
+            recorded_at_micros,
+            candidate_bindings,
+        )
     }
 
     pub(crate) fn publish_graph_mutation_with_context(
@@ -1166,6 +1329,23 @@ impl GraphForge {
         operation_uuid: uuid::Uuid,
         actor_uuid: Option<uuid::Uuid>,
         recorded_at_micros: i64,
+    ) -> Result<(), GfError> {
+        self.publish_graph_mutation_with_context_and_bindings(
+            receipt,
+            operation_uuid,
+            actor_uuid,
+            recorded_at_micros,
+            None,
+        )
+    }
+
+    fn publish_graph_mutation_with_context_and_bindings(
+        &self,
+        receipt: &graphforge_exec::MutationReceipt,
+        operation_uuid: uuid::Uuid,
+        actor_uuid: Option<uuid::Uuid>,
+        recorded_at_micros: i64,
+        candidate_bindings: Option<&graphforge_storage::SemanticStorageBindings>,
     ) -> Result<(), GfError> {
         use graphforge_storage::{
             ProjectCapability, ProjectGenerationRequest, ProjectStageOutcome,
@@ -1192,15 +1372,21 @@ impl GraphForge {
         }
         let graph = graphforge_storage::capture_graph_files(&self.dir)?.1;
         let provenance_enabled = parent.capability("provenance")?.is_some();
+        let installed_bindings = self
+            .semantic_storage_bindings
+            .lock()
+            .expect("semantic storage binding lock poisoned");
         let participants = graph_publication_participants(
             &parent,
             graph,
+            candidate_bindings.or(installed_bindings.as_ref()),
             provenance_enabled,
             receipt,
             operation_uuid,
             actor_uuid,
             recorded_at_micros,
         )?;
+        drop(installed_bindings);
         let capabilities = parent
             .capabilities()
             .into_iter()
@@ -1289,6 +1475,10 @@ impl GraphForge {
         let participants = graph_publication_participants(
             &parent,
             graph,
+            self.semantic_storage_bindings
+                .lock()
+                .expect("semantic storage binding lock poisoned")
+                .as_ref(),
             provenance_enabled,
             receipt,
             operation_uuid,
@@ -3694,9 +3884,11 @@ fn participant_encoding(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // participant assembly carries authenticated audit context
 fn graph_publication_participants(
     parent: &graphforge_storage::ResolvedProjectGeneration,
     graph: graphforge_storage::ProjectParticipant,
+    semantic_bindings: Option<&graphforge_storage::SemanticStorageBindings>,
     provenance_enabled: bool,
     receipt: &graphforge_exec::MutationReceipt,
     operation_uuid: uuid::Uuid,
@@ -3708,7 +3900,10 @@ fn graph_publication_participants(
         .into_iter()
         .filter(|snapshot| {
             !(snapshot.capability_id == "graph"
-                && matches!(snapshot.record_family_id.as_str(), "snapshot" | "files")
+                && matches!(
+                    snapshot.record_family_id.as_str(),
+                    "snapshot" | "files" | graphforge_storage::GRAPH_SEMANTIC_BINDINGS_FAMILY
+                )
                 || provenance_enabled
                     && snapshot.capability_id == "provenance"
                     && matches!(snapshot.record_family_id.as_str(), "events" | "lineage"))
@@ -3727,6 +3922,31 @@ fn graph_publication_participants(
         })
         .collect::<Result<Vec<_>, GfError>>()?;
     participants.push(graph);
+    if let Some(bindings) = semantic_bindings {
+        participants.push(bindings.to_project_participant()?);
+        let composition = participants
+            .iter()
+            .find(|participant| {
+                participant.capability_id == "workspace"
+                    && participant.record_family_id == "ontology_composition"
+            })
+            .ok_or_else(|| {
+                GfError::Validation(
+                    "semantic graph publication requires persisted composition authority".into(),
+                )
+            })?;
+        let value: serde_json::Value = serde_json::from_slice(&composition.bytes)
+            .map_err(|_| GfError::Validation("persisted composition is malformed".into()))?;
+        if value
+            .get("composition_fingerprint")
+            .and_then(serde_json::Value::as_str)
+            != Some(bindings.composition_fingerprint.as_str())
+        {
+            return Err(GfError::Validation(
+                "semantic bindings and composition must publish at one fingerprint".into(),
+            ));
+        }
+    }
     if provenance_enabled {
         participants.extend(provenance::merged_participants(
             parent,
