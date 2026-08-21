@@ -38,6 +38,7 @@ _TEMPORAL_FIXTURE = [
 
 _MULTI_ONTOLOGY_FIXTURE = [
     "//tests/contracts:multi-ontology-surface-v1.json",
+    "//tests/fixtures/multi-ontology-v1:binding-parity-v1.json",
 ]
 
 # Skill bundle stays at the workspace root (`//:project_skills_bundle`) so
