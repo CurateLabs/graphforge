@@ -190,7 +190,10 @@ gf_rust_integration_test(
 gf_rust_integration_test(
     name = "scale_g500_ladder",
     srcs = ["tests/scale_g500_ladder.rs"],
-    compile_data = ["tests/fixtures/scale_g500_ladder.v1.json"],
+    compile_data = [
+        "tests/fixtures/scale_g500_certification.v1.json",
+        "tests/fixtures/scale_g500_ladder.v1.json",
+    ],
     crate = ":graphforge_api",
     data = _API_TEST_DATA,
     size = "large",

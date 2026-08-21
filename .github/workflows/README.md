@@ -137,6 +137,16 @@ open/recovery/commit/GC/compaction use CodSpeed's isolated bare-metal
 compaction peak-RSS artifacts while CodSpeed memory mode is unavailable for
 this project.
 
+### `g500-certification.yml` — Billion-edge certification
+
+This protected, manual-only workflow checks out an exact commit on a
+maintainer-approved ephemeral Linux scale host. It never provisions or spends.
+It runs the bounded target-live SCALE-26 lifecycle, writes an atomic typed phase
+journal, validates sanitized evidence, and uploads only the evidence JSON and
+journal. Provider, SKU, runner registration, cost approval, and teardown remain
+explicit maintainer decisions; see the
+[certification runbook](../../docs/development/g500-certification.md).
+
 ### CodeRabbit
 
 CodeRabbit automatic review is disabled to preserve its limited quota. After

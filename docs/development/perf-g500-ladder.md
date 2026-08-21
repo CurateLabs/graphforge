@@ -140,3 +140,8 @@ Graph500 runs **must not** be wired into normal GitHub Actions. Only the S10 CI
 rung runs in `test.yml`. SCALE-20+ / #745 certification must run on an
 **approved dedicated Linux cloud evidence job** (or equivalent provisioned host)
 tracked with #745 — not on developer laptops.
+
+The target-live SCALE-26 lifecycle, protected dispatch policy, typed phase
+journal, and sanitized evidence contract are defined in the
+[billion-live-edge certification runbook](g500-certification.md). The ladder is
+preflight evidence only; it cannot substitute for that exact-SHA lifecycle.

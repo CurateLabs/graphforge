@@ -111,6 +111,7 @@ const PAGES = [
   'development/contributing.md',
   'development/workflow.md',
   'development/testing.md',
+  'development/g500-certification.md',
   'development/release-load-matrix.md',
   'development/release-process.md',
   'development/publication-order.md',
