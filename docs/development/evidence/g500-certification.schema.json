@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://graphforge.dev/schemas/g500-certification-evidence-1.json",
+  "title": "GraphForge billion-live-edge certification evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "git_sha", "profile_sha256", "run", "host", "tools", "counts", "identities", "package", "authority", "equivalence", "phases", "envelope", "result", "first_failure"],
+  "properties": {
+    "schema": { "const": "graphforge-billion-edge-certification-evidence/1" },
+    "git_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "profile_sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "run": { "type": "object", "additionalProperties": false, "required": ["command", "scale", "edgefactor", "seed", "directionality", "self_loops", "duplicates"], "properties": { "command": { "const": "cargo test -p graphforge-api --release --test scale_g500_ladder certification_target_live_full_lifecycle_evidence -- --ignored --exact --nocapture --test-threads=1" }, "scale": { "const": 26 }, "edgefactor": { "const": 16 }, "seed": { "const": 1 }, "directionality": { "const": "undirected" }, "self_loops": { "const": "drop" }, "duplicates": { "const": "drop" } } },
+    "host": {
+      "type": "object", "additionalProperties": false,
+      "required": ["provider", "sku", "os", "kernel", "filesystem", "memory_bytes", "nvme_bytes"],
+      "properties": {
+        "provider": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "sku": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "os": { "type": "string", "pattern": "^Linux" },
+        "kernel": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "filesystem": { "enum": ["ext4", "xfs", "btrfs"] },
+        "memory_bytes": { "type": "integer", "minimum": 137438953472 },
+        "nvme_bytes": { "type": "integer", "minimum": 1099511627776 }
+      }
+    },
+    "tools": { "type": "object", "additionalProperties": { "type": "string", "maxLength": 128 } },
+    "counts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["raw_attempts", "self_loops_rejected", "duplicates_rejected", "live_unique_edges", "source_nodes", "source_edges", "imported_nodes", "imported_edges"],
+      "properties": {
+        "raw_attempts": { "type": "integer", "minimum": 1000000000 },
+        "self_loops_rejected": { "type": "integer", "minimum": 0 },
+        "duplicates_rejected": { "type": "integer", "minimum": 0 },
+        "live_unique_edges": { "type": "integer", "minimum": 1000000000 },
+        "source_nodes": { "const": 67108864 }, "source_edges": { "type": "integer", "minimum": 1000000000 },
+        "imported_nodes": { "const": 67108864 }, "imported_edges": { "type": "integer", "minimum": 1000000000 }
+      }
+    },
+    "identities": {
+      "type": "object", "additionalProperties": false,
+      "required": ["source_generation", "package", "transport", "imported_generation"],
+      "properties": {
+        "source_generation": { "$ref": "#/$defs/nonSecretIdentity" },
+        "package": { "$ref": "#/$defs/sha256" }, "transport": { "$ref": "#/$defs/sha256" },
+        "imported_generation": { "$ref": "#/$defs/nonSecretIdentity" }
+      }
+    },
+    "package": { "type": "object", "additionalProperties": false, "required": ["contract", "format", "class", "integrity", "compatibility", "policy"], "properties": { "contract": { "const": "graphforge-portable-verify/2" }, "format": { "const": "portable-project-v2-bundle" }, "class": { "const": "complete" }, "integrity": { "const": "verified" }, "compatibility": { "const": "supported" }, "policy": { "const": "complete-current-generation" } } },
+    "authority": { "type": "object", "required": ["source_fingerprint", "imported_fingerprint"], "properties": { "source_fingerprint": { "$ref": "#/$defs/sha256" }, "imported_fingerprint": { "$ref": "#/$defs/sha256" } }, "additionalProperties": false },
+    "equivalence": { "type": "object", "additionalProperties": false, "required": ["source_project_fingerprint", "imported_project_fingerprint"], "properties": { "source_project_fingerprint": { "$ref": "#/$defs/sha256" }, "imported_project_fingerprint": { "$ref": "#/$defs/sha256" } } },
+    "phases": { "type": "array", "minItems": 17, "maxItems": 32, "items": { "$ref": "#/$defs/phase" } },
+    "envelope": { "type": "object", "required": ["peak_rss_bytes", "peak_disk_bytes", "wall_time_s"], "properties": { "peak_rss_bytes": { "type": "integer", "maximum": 137438953472 }, "peak_disk_bytes": { "type": "integer", "maximum": 1099511627776 }, "wall_time_s": { "type": "number", "maximum": 14400 } }, "additionalProperties": false },
+    "result": { "enum": ["pass", "fail"] },
+    "first_failure": { "type": ["object", "null"] }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "nonSecretIdentity": { "type": "string", "pattern": "^[0-9a-f-]{32,64}$" },
+    "phase": { "type": "object", "additionalProperties": false, "required": ["id", "status", "elapsed_ms", "rss_peak_bytes", "disk_peak_bytes"], "properties": { "id": { "type": "string", "pattern": "^[a-z0-9_-]+$" }, "status": { "enum": ["pass", "fail", "cancelled"] }, "elapsed_ms": { "type": "integer", "minimum": 0 }, "rss_peak_bytes": { "type": "integer", "minimum": 0 }, "disk_peak_bytes": { "type": "integer", "minimum": 0 }, "fingerprint": { "anyOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] }, "failure_code": { "type": ["string", "null"], "maxLength": 96 } } }
+  }
+}

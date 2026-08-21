@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+"""Fail-closed semantic validator for sanitized #745 evidence."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import re
+from typing import Any
+
+REQUIRED_PHASES = (
+    "preflight",
+    "generate",
+    "ingest",
+    "csr",
+    "source_reopen",
+    "source_query_1hop",
+    "source_query_2hop",
+    "export",
+    "verify",
+    "import",
+    "imported_reopen",
+    "imported_query_1hop",
+    "imported_query_2hop",
+    "drill_corruption",
+    "drill_cancellation",
+    "drill_resource_limit",
+    "drill_interrupted_finalization",
+)
+FORBIDDEN_KEY = re.compile(r"(secret|credential|token|password|host_path|absolute_path)", re.I)
+ABSOLUTE_PATH = re.compile(r"(?:^|[\s=:])(?:/|[A-Za-z]:[\\/])")
+ROOT = Path(__file__).resolve().parents[2]
+PROFILE = ROOT / "crates/graphforge-api/tests/fixtures/scale_g500_certification.v1.json"
+RUN_COMMAND = (
+    "cargo test -p graphforge-api --release --test scale_g500_ladder "
+    "certification_target_live_full_lifecycle_evidence -- --ignored --exact "
+    "--nocapture --test-threads=1"
+)
+
+
+class EvidenceError(ValueError):
+    pass
+
+
+def reject_sensitive(value: Any, trail: str = "$") -> None:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if FORBIDDEN_KEY.search(key):
+                raise EvidenceError(f"forbidden sensitive field at {trail}.{key}")
+            reject_sensitive(child, f"{trail}.{key}")
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            reject_sensitive(child, f"{trail}[{index}]")
+    elif isinstance(value, str) and ABSOLUTE_PATH.search(value):
+        raise EvidenceError(f"absolute host path at {trail}")
+
+
+def validate(evidence: dict[str, Any], expected_sha: str | None) -> None:
+    reject_sensitive(evidence)
+    if evidence.get("schema") != "graphforge-billion-edge-certification-evidence/1":
+        raise EvidenceError("unsupported evidence schema")
+    if expected_sha and evidence.get("git_sha") != expected_sha:
+        raise EvidenceError("evidence git_sha does not match dispatched commit")
+    expected_profile = "sha256:" + hashlib.sha256(PROFILE.read_bytes()).hexdigest()
+    if evidence.get("profile_sha256") != expected_profile:
+        raise EvidenceError("evidence profile does not match the committed certification profile")
+    expected_run = {
+        "command": RUN_COMMAND,
+        "scale": 26,
+        "edgefactor": 16,
+        "seed": 1,
+        "directionality": "undirected",
+        "self_loops": "drop",
+        "duplicates": "drop",
+    }
+    if evidence.get("run") != expected_run:
+        raise EvidenceError("run command/profile is not the approved target-live contract")
+    counts = evidence.get("counts", {})
+    raw = counts.get("raw_attempts")
+    loops = counts.get("self_loops_rejected")
+    dupes = counts.get("duplicates_rejected")
+    live = counts.get("live_unique_edges")
+    if not all(isinstance(item, int) and item >= 0 for item in (raw, loops, dupes, live)):
+        raise EvidenceError("counts must be non-negative integers")
+    if raw != live + loops + dupes:
+        raise EvidenceError("generator counts do not reconcile")
+    if live < 1_000_000_000:
+        raise EvidenceError("certification requires at least one billion live edges")
+    if any(counts.get(key) != live for key in ("source_edges", "imported_edges")):
+        raise EvidenceError("source/imported edge counts differ")
+    if counts.get("source_nodes") != counts.get("imported_nodes"):
+        raise EvidenceError("source/imported node counts differ")
+
+    identities = evidence.get("identities", {})
+    if identities.get("source_generation") == identities.get("imported_generation"):
+        raise EvidenceError("source and imported generations must be distinct")
+    if len({identities.get("package"), identities.get("transport")}) != 2:
+        raise EvidenceError("semantic package and transport identities must be distinct")
+    package = evidence.get("package", {})
+    expected_package = {
+        "contract": "graphforge-portable-verify/2",
+        "format": "portable-project-v2-bundle",
+        "class": "complete",
+        "integrity": "verified",
+        "compatibility": "supported",
+        "policy": "complete-current-generation",
+    }
+    if package != expected_package:
+        raise EvidenceError("portable-v2 package contract is incomplete or incompatible")
+    authority = evidence.get("authority", {})
+    if authority.get("source_fingerprint") != authority.get("imported_fingerprint"):
+        raise EvidenceError("ontology/capability authority changed across import")
+    equivalence = evidence.get("equivalence", {})
+    if equivalence.get("source_project_fingerprint") != equivalence.get(
+        "imported_project_fingerprint"
+    ):
+        raise EvidenceError("source/imported project fingerprints differ")
+
+    phases = evidence.get("phases")
+    if not isinstance(phases, list):
+        raise EvidenceError("phases must be an array")
+    by_id = {phase.get("id"): phase for phase in phases if isinstance(phase, dict)}
+    missing = [phase for phase in REQUIRED_PHASES if phase not in by_id]
+    if missing:
+        raise EvidenceError("missing phases: " + ", ".join(missing))
+    failed = [phase for phase in phases if phase.get("status") != "pass"]
+    if evidence.get("result") == "pass" and failed:
+        raise EvidenceError("passing evidence contains non-passing phases")
+    for query in ("source_query_1hop", "source_query_2hop"):
+        imported = query.replace("source_", "imported_")
+        if by_id[query].get("fingerprint") != by_id[imported].get("fingerprint"):
+            raise EvidenceError(f"query fingerprint mismatch: {query}")
+    envelope = evidence.get("envelope", {})
+    if envelope.get("peak_rss_bytes", 2**64) > 137_438_953_472:
+        raise EvidenceError("RSS envelope exceeded")
+    if envelope.get("peak_disk_bytes", 2**64) > 1_099_511_627_776:
+        raise EvidenceError("disk envelope exceeded")
+    if envelope.get("wall_time_s", 2**64) > 14_400:
+        raise EvidenceError("wall-time envelope exceeded")
+    host = evidence.get("host", {})
+    if not str(host.get("os", "")).startswith("Linux"):
+        raise EvidenceError("certification host must be Linux")
+    if str(host.get("provider", "")).lower() in {"local", "localhost", "developer"}:
+        raise EvidenceError("certification provider must identify provisioned infrastructure")
+    if (
+        host.get("memory_bytes", 0) < 137_438_953_472
+        or host.get("nvme_bytes", 0) < 1_099_511_627_776
+    ):
+        raise EvidenceError("host does not meet declared capacity")
+    if evidence.get("result") != "pass" or evidence.get("first_failure") is not None:
+        raise EvidenceError("certification evidence is not a pass")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("evidence", type=Path)
+    parser.add_argument("--expected-sha")
+    args = parser.parse_args()
+    value = json.loads(args.evidence.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise EvidenceError("evidence root must be an object")
+    validate(value, args.expected_sha)
+    print(f"valid #745 evidence: {args.evidence}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

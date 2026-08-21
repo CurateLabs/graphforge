@@ -97,6 +97,7 @@ EXPECTED_ARTIFACT_UPLOADS = Counter(
         "native-oracle-macos-${{ github.sha }}": 1,
         "native-durability-aggregate-${{ github.sha }}": 1,
         "m6-memory-${{ github.sha }}-blacksmith-4vcpu-ubuntu-2404": 1,
+        "g500-certification-${{ inputs.commit_sha }}": 1,
     }
 )
 EXPECTED_ARTIFACT_DOWNLOADS = Counter(
@@ -263,6 +264,7 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
                 "native-oracle-windows-",
                 "native-oracle-macos-",
                 "native-durability-aggregate-",
+                "g500-certification-",
             )
         )
         expected_retention = "30" if publication else "14" if certification else "1"
@@ -302,6 +304,10 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
             "${{ runner.temp }}/durability-certification-evidence",
             "native/native-durability-aggregate.json",
             "replay-memory.txt\ncompaction-memory.txt",
+            (
+                "${{ runner.temp }}/g500-certification-evidence.json\n"
+                "${{ runner.temp }}/g500-certification-phase-journal.json"
+            ),
         }, f"artifact upload contains unapproved bytes: {path}"
         uploaded.append(name)
     for step in action_steps(text, "actions/download-artifact@"):
@@ -385,6 +391,30 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
                 )
         downloaded.append(selector)
     return uploaded, downloaded
+
+
+def validate_g500_artifact_negative_fixtures() -> None:
+    text = (WORKFLOWS / "g500-certification.yml").read_text()
+    artifact_contracts(text)
+    mutations = (
+        text.replace(
+            "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1",
+            "actions/upload-artifact@65f0bc87b66c8c4f1891f20b5c7a8028c9d7c796 # v4.6.2",
+            1,
+        ),
+        text.replace("retention-days: 14", "retention-days: 30", 1),
+        text.replace(
+            "            ${{ runner.temp }}/g500-certification-phase-journal.json",
+            "            ${{ runner.temp }}/project.gfpb",
+            1,
+        ),
+    )
+    for mutation in mutations:
+        try:
+            artifact_contracts(mutation)
+        except AssertionError:
+            continue
+        raise AssertionError("G500 artifact policy accepted an unsafe mutation")
 
 
 def cache_contracts(text: str) -> tuple[list[str], list[str]]:
@@ -614,6 +644,7 @@ def main() -> None:
     test_suite = texts[WORKFLOWS / "test.yml"]
     validate_test_suite_trigger(test_suite)
     validate_required_run_negative_fixtures()
+    validate_g500_artifact_negative_fixtures()
     validate_ci_gate_cutover(test_suite)
     jobs = workflow_jobs(test_suite)
     for job_id, runner in (

@@ -23,11 +23,18 @@ use std::io::{BufReader, BufWriter, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use arrow::array::{Array, FixedSizeBinaryArray, Int64Array, StringArray, UInt64Array};
 use arrow::record_batch::RecordBatch;
-use graphforge_api::{GraphForge, OperationId, bulk_edge_input_schema, bulk_node_input_schema};
+use graphforge_api::{
+    CancellationToken, GraphForge, OperationId, PortableSelection, PortableV2ExportRequest,
+    PortableV2ImportRequest, PortableV2Limits, PortableV2Mode, PortableV2Output,
+    PortableV2SelectionProfile, PortableVerifyRequest, bulk_edge_input_schema,
+    bulk_node_input_schema, verify_portable_v2,
+};
 use graphforge_core::uuid::Uuid;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -99,9 +106,28 @@ struct Rung {
 /// The profile is embedded at compile time so the runner is hermetic under both
 /// Cargo and Bazel (no runtime `CARGO_MANIFEST_DIR` path dependency).
 const PROFILE_JSON: &str = include_str!("fixtures/scale_g500_ladder.v1.json");
+const CERTIFICATION_PROFILE_JSON: &str = include_str!("fixtures/scale_g500_certification.v1.json");
+
+#[derive(Debug, Deserialize)]
+struct CertificationProfile {
+    schema: String,
+    scale: u32,
+    edgefactor: u32,
+    target_live_edges: u64,
+    seed: u64,
+    initiator: Initiator,
+    envelope: Envelope,
+    preflight_scale: u32,
+    provider_decision: String,
+    runner_label: String,
+}
 
 fn load_profile() -> ScaleProfile {
     serde_json::from_str(PROFILE_JSON).expect("parse ladder profile fixture")
+}
+
+fn load_certification_profile() -> CertificationProfile {
+    serde_json::from_str(CERTIFICATION_PROFILE_JSON).expect("parse certification profile fixture")
 }
 
 // ---------------------------------------------------------------------------
@@ -303,6 +329,51 @@ fn bounded_generation(
         input_fingerprint: format!("sha256:{}", hex_encode(hasher.finalize())),
     };
     (summary, edges)
+}
+
+/// Append deterministic, independently seeded attempt windows until a complete
+/// external merge proves the requested live-edge floor. Every window remains
+/// on disk and the final merge deduplicates across window boundaries, so the
+/// stopping decision never relies on a probabilistic estimate.
+fn generate_target_live_runs(
+    scale: u32,
+    edge_factor: u32,
+    initiator: Initiator,
+    seed: u64,
+    buffer_edges: usize,
+    target_live_edges: u64,
+    work: &Path,
+) -> (SpillRuns, MergeCounts) {
+    let mut combined = SpillRuns {
+        runs: Vec::new(),
+        raw_attempts: 0,
+        self_loops_rejected: 0,
+        peak_buffer_len: 0,
+    };
+    for window in 0u64.. {
+        let window_dir = work.join(format!("window-{window:04}"));
+        fs::create_dir_all(&window_dir).expect("target-live window directory");
+        let window_seed = seed.wrapping_add(window.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        let generated = generate_spill_runs(
+            scale,
+            edge_factor,
+            initiator,
+            window_seed,
+            buffer_edges,
+            &window_dir,
+        );
+        combined.raw_attempts = combined.raw_attempts.saturating_add(generated.raw_attempts);
+        combined.self_loops_rejected = combined
+            .self_loops_rejected
+            .saturating_add(generated.self_loops_rejected);
+        combined.peak_buffer_len = combined.peak_buffer_len.max(generated.peak_buffer_len);
+        combined.runs.extend(generated.runs);
+        let counts = merge_runs(&combined.runs, |_, _| {});
+        if counts.live_unique_edges >= target_live_edges {
+            return (combined, counts);
+        }
+    }
+    unreachable!("unbounded deterministic window iterator")
 }
 
 // ---------------------------------------------------------------------------
@@ -1195,4 +1266,721 @@ fn ladder_public_facade_first_fail_evidence() {
             "an evaluated rung must reconcile; got {rec}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// #745 integrated certification lifecycle. The small test proves that the
+// journaled public-facade path is executable in ordinary CI. The provisioned
+// entry point below uses the same phases after target-live generation.
+// ---------------------------------------------------------------------------
+
+const CERTIFICATION_PHASES: [&str; 17] = [
+    "preflight",
+    "generate",
+    "ingest",
+    "csr",
+    "source_reopen",
+    "source_query_1hop",
+    "source_query_2hop",
+    "export",
+    "verify",
+    "import",
+    "imported_reopen",
+    "imported_query_1hop",
+    "imported_query_2hop",
+    "drill_corruption",
+    "drill_cancellation",
+    "drill_resource_limit",
+    "drill_interrupted_finalization",
+];
+
+struct PhaseJournal {
+    path: PathBuf,
+    phases: Vec<Value>,
+    monitor: ResourceMonitor,
+}
+
+impl PhaseJournal {
+    fn new(path: PathBuf, workspace: &Path, envelope: Envelope) -> Self {
+        Self {
+            path,
+            phases: Vec::new(),
+            monitor: ResourceMonitor::start(workspace.to_path_buf(), envelope),
+        }
+    }
+
+    fn pass(&mut self, id: &str, started: Instant, fingerprint: Option<String>) {
+        let fingerprint = fingerprint.map_or(Value::Null, Value::String);
+        self.monitor.sample_disk();
+        if let Some(code) = self.monitor.failure_code() {
+            self.phases.push(json!({
+                "id": id, "status": "fail",
+                "elapsed_ms": u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                "rss_peak_bytes": self.monitor.peak_rss.load(Ordering::Relaxed),
+                "disk_peak_bytes": self.monitor.peak_disk.load(Ordering::Relaxed),
+                "fingerprint": fingerprint, "failure_code": code,
+            }));
+            self.flush();
+            panic!("certification resource watchdog stopped phase {id}: {code}");
+        }
+        let rss_peak_bytes = self.monitor.peak_rss.swap(0, Ordering::SeqCst);
+        let disk_peak_bytes = self.monitor.peak_disk.swap(0, Ordering::SeqCst);
+        self.phases.push(json!({
+            "id": id, "status": "pass",
+            "elapsed_ms": u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            "rss_peak_bytes": rss_peak_bytes,
+            "disk_peak_bytes": disk_peak_bytes,
+            "fingerprint": fingerprint,
+            "failure_code": null,
+        }));
+        self.flush();
+    }
+
+    fn cancellation(&self) -> &AtomicBool {
+        self.monitor.cancellation.flag()
+    }
+
+    fn cancellation_token(&self) -> CancellationToken {
+        self.monitor.cancellation.clone()
+    }
+
+    fn flush(&self) {
+        let staged = self.path.with_extension("json.tmp");
+        fs::write(
+            &staged,
+            serde_json::to_vec_pretty(&self.phases).expect("phase journal JSON"),
+        )
+        .expect("write staged phase journal");
+        fs::rename(staged, &self.path).expect("publish phase journal atomically");
+    }
+}
+
+impl Drop for PhaseJournal {
+    fn drop(&mut self) {
+        let already_failed = self
+            .phases
+            .last()
+            .is_some_and(|phase| phase["status"] != "pass");
+        if already_failed || self.phases.len() >= CERTIFICATION_PHASES.len() {
+            return;
+        }
+        let failure_code = self
+            .monitor
+            .failure_code()
+            .or_else(|| std::thread::panicking().then_some("operation_failed"));
+        if let Some(code) = failure_code {
+            self.monitor.sample_disk();
+            self.phases.push(json!({
+                "id": CERTIFICATION_PHASES[self.phases.len()], "status": "fail",
+                "elapsed_ms": 0,
+                "rss_peak_bytes": self.monitor.peak_rss.load(Ordering::Relaxed),
+                "disk_peak_bytes": self.monitor.peak_disk.load(Ordering::Relaxed),
+                "fingerprint": null, "failure_code": code,
+            }));
+            self.flush();
+        }
+    }
+}
+
+struct ResourceMonitor {
+    workspace: PathBuf,
+    cancellation: CancellationToken,
+    stop: Arc<AtomicBool>,
+    peak_rss: Arc<AtomicU64>,
+    peak_disk: Arc<AtomicU64>,
+    failure: Arc<AtomicU64>,
+    envelope: Envelope,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl ResourceMonitor {
+    fn start(workspace: PathBuf, envelope: Envelope) -> Self {
+        let cancellation = CancellationToken::new();
+        let stop = Arc::new(AtomicBool::new(false));
+        let peak_rss = Arc::new(AtomicU64::new(0));
+        let peak_disk = Arc::new(AtomicU64::new(0));
+        let failure = Arc::new(AtomicU64::new(0));
+        let worker_cancellation = cancellation.clone();
+        let worker_stop = Arc::clone(&stop);
+        let worker_peak_rss = Arc::clone(&peak_rss);
+        let worker_peak_disk = Arc::clone(&peak_disk);
+        let worker_failure = Arc::clone(&failure);
+        let worker_workspace = workspace.clone();
+        let started = Instant::now();
+        let worker = thread::spawn(move || {
+            let mut samples = 0_u8;
+            while !worker_stop.load(Ordering::Relaxed) {
+                let rss = current_rss_bytes();
+                worker_peak_rss.fetch_max(rss, Ordering::Relaxed);
+                let mut code = if rss > envelope.rss_bytes {
+                    1
+                } else if started.elapsed().as_secs() > envelope.timeout_s {
+                    3
+                } else {
+                    0
+                };
+                if samples == 0 {
+                    let disk = allocated_bytes(&worker_workspace);
+                    worker_peak_disk.fetch_max(disk, Ordering::Relaxed);
+                    if disk > envelope.disk_bytes {
+                        code = 2;
+                    }
+                }
+                if code != 0 {
+                    worker_failure
+                        .compare_exchange(0, code, Ordering::SeqCst, Ordering::Relaxed)
+                        .ok();
+                    worker_cancellation.cancel();
+                    break;
+                }
+                samples = (samples + 1) % 20;
+                thread::sleep(Duration::from_millis(250));
+            }
+        });
+        Self {
+            workspace,
+            cancellation,
+            stop,
+            peak_rss,
+            peak_disk,
+            failure,
+            envelope,
+            worker: Some(worker),
+        }
+    }
+
+    fn sample_disk(&self) {
+        let disk = allocated_bytes(&self.workspace);
+        self.peak_disk.fetch_max(disk, Ordering::Relaxed);
+        if disk > self.envelope.disk_bytes {
+            self.failure
+                .compare_exchange(0, 2, Ordering::SeqCst, Ordering::Relaxed)
+                .ok();
+            self.cancellation.cancel();
+        }
+    }
+
+    fn failure_code(&self) -> Option<&'static str> {
+        match self.failure.load(Ordering::SeqCst) {
+            1 => Some("rss_limit_exceeded"),
+            2 => Some("disk_limit_exceeded"),
+            3 => Some("wall_time_limit_exceeded"),
+            _ => None,
+        }
+    }
+}
+
+fn current_rss_bytes() -> u64 {
+    fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|text| {
+            text.lines()
+                .find(|line| line.starts_with("VmRSS:"))?
+                .split_whitespace()
+                .nth(1)?
+                .parse::<u64>()
+                .ok()
+        })
+        .map_or_else(
+            || peak_rss().map_or(0, |value| value.0),
+            |kibibytes| kibibytes.saturating_mul(1024),
+        )
+}
+
+impl Drop for ResourceMonitor {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(worker) = self.worker.take() {
+            worker.join().expect("resource watchdog thread");
+        }
+    }
+}
+
+fn allocated_bytes(path: &Path) -> u64 {
+    let output = Command::new("du").arg("-sk").arg(path).output();
+    output
+        .ok()
+        .filter(|out| out.status.success())
+        .and_then(|out| {
+            String::from_utf8(out.stdout)
+                .ok()?
+                .split_whitespace()
+                .next()?
+                .parse::<u64>()
+                .ok()
+        })
+        .unwrap_or(0)
+        .saturating_mul(1024)
+}
+
+fn result_fingerprint(result: &graphforge_api::ExecutionResult) -> String {
+    let mut hasher = Sha256::new();
+    for batch in &result.batches {
+        hasher.update(batch.num_rows().to_le_bytes());
+        hasher.update(batch.num_columns().to_le_bytes());
+        for column in batch.columns() {
+            hasher.update(format!("{:?}", column.data_type()).as_bytes());
+            hasher.update(format!("{column:?}").as_bytes());
+        }
+    }
+    format!("sha256:{}", hex_encode(hasher.finalize()))
+}
+
+#[allow(clippy::too_many_lines)]
+fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value {
+    let source = root.join("source");
+    let imported = root.join("imported");
+    let package = root.join("project.gfpb");
+    fs::create_dir_all(&source).expect("source project directory");
+    let journal_path = std::env::var("GF_G500_CERT_JOURNAL_OUT")
+        .map_or_else(|_| root.join("phase-journal.json"), PathBuf::from);
+    let certification_profile = load_certification_profile();
+    assert_eq!(
+        certification_profile.schema,
+        "graphforge-billion-edge-certification-profile/1"
+    );
+    assert_eq!(
+        certification_profile.provider_decision,
+        "required-at-dispatch"
+    );
+    assert_eq!(certification_profile.runner_label, "required-at-dispatch");
+    let certification_envelope = certification_profile.envelope;
+    let mut journal = PhaseJournal::new(journal_path, root, certification_envelope);
+    let limits = PortableV2Limits::default();
+    let phase = Instant::now();
+    journal.pass("preflight", phase, None);
+
+    let phase = Instant::now();
+    let scale = if target_live.is_some() {
+        certification_profile.scale
+    } else {
+        certification_profile.preflight_scale
+    };
+    let edge_factor = if target_live.is_some() {
+        certification_profile.edgefactor
+    } else {
+        4
+    };
+    let initiator = if target_live.is_some() {
+        certification_profile.initiator
+    } else {
+        load_profile().initiator
+    };
+    let seed = if target_live.is_some() {
+        certification_profile.seed
+    } else {
+        load_profile().seed
+    };
+    let spill_root = root.join("spill");
+    fs::create_dir_all(&spill_root).expect("certification spill root");
+    let (spills, generated_counts) = target_live
+        .map(|target| {
+            generate_target_live_runs(
+                scale,
+                edge_factor,
+                initiator,
+                seed,
+                if scale == 26 { 16_777_216 } else { 512 },
+                target,
+                &spill_root,
+            )
+        })
+        .unzip();
+    let (summary, edges) = if target_live.is_none() {
+        let (summary, edges) = bounded_generation(scale, edge_factor, initiator, seed, 512);
+        assert!(summary.reconciles());
+        (Some(summary), Some(edges))
+    } else {
+        (None, None)
+    };
+    let generation_fingerprint = summary.as_ref().map_or_else(
+        || {
+            format!(
+                "sha256:{}",
+                hex_encode(Sha256::digest(b"target-live-window-set"))
+            )
+        },
+        |value| value.input_fingerprint.clone(),
+    );
+    journal.pass("generate", phase, Some(generation_fingerprint));
+
+    let phase = Instant::now();
+    let graph = GraphForge::new(source.to_str()).expect("open certification source");
+    publish_nodes(&graph, 1u64 << scale);
+    let mut sink = EdgeSink::new(&graph);
+    if let Some(edges) = edges {
+        for (src, dst) in edges {
+            sink.push(src, dst);
+        }
+    } else {
+        merge_runs(&spills.as_ref().expect("target spills").runs, |src, dst| {
+            sink.push(src, dst);
+        });
+    }
+    sink.flush();
+    let input_fingerprint = format!("sha256:{}", sink.finish());
+    journal.pass("ingest", phase, Some(input_fingerprint));
+
+    let phase = Instant::now();
+    let csr = graph
+        .rebuild_adjacency(Some(journal.cancellation_token()))
+        .expect("build certification CSR");
+    journal.pass(
+        "csr",
+        phase,
+        csr.artifact_fingerprint
+            .map(|value| format!("sha256:{value}")),
+    );
+    drop(graph);
+
+    let phase = Instant::now();
+    let graph = GraphForge::new(source.to_str()).expect("reopen source");
+    let source_nodes = graph.node_count(NODE_LABEL).expect("source nodes");
+    let source_edges = scalar_count(&graph.execute(COUNT_EDGES).expect("source edges"));
+    journal.pass("source_reopen", phase, None);
+    let phase = Instant::now();
+    let source_1hop = result_fingerprint(&graph.execute(ONE_HOP).expect("source 1hop"));
+    journal.pass("source_query_1hop", phase, Some(source_1hop.clone()));
+    let phase = Instant::now();
+    let source_2hop = result_fingerprint(&graph.execute(TWO_HOP).expect("source 2hop"));
+    journal.pass("source_query_2hop", phase, Some(source_2hop.clone()));
+
+    let phase = Instant::now();
+    let exported = graph
+        .export_portable_v2(
+            &PortableV2ExportRequest {
+                selection: PortableSelection::Current,
+                output_path: package.clone(),
+                representation: PortableV2Output::Bundle,
+                profile: PortableV2SelectionProfile::Complete,
+                subset: None,
+                limits,
+            },
+            Some(journal.cancellation()),
+            |_| {},
+        )
+        .expect("portable-v2 export");
+    journal.pass("export", phase, Some(exported.package_digest.clone()));
+    let phase = Instant::now();
+    let verified = verify_portable_v2(
+        &PortableVerifyRequest {
+            input: package.clone(),
+            mode: PortableV2Mode::Full,
+            limits,
+        },
+        Some(journal.cancellation()),
+    )
+    .expect("full portable-v2 verification");
+    assert_eq!(verified.package_digest, exported.package_digest);
+    assert_eq!(verified.contract, "graphforge-portable-verify/2");
+    journal.pass("verify", phase, Some(verified.package_digest.clone()));
+
+    let phase = Instant::now();
+    let imported_receipt = GraphForge::import_portable_v2(
+        &imported,
+        &PortableV2ImportRequest {
+            input: package.clone(),
+            operation_id: OperationId(uuidv7(0x745)),
+            limits,
+        },
+        Some(journal.cancellation()),
+    )
+    .expect("atomic portable-v2 import");
+    assert_ne!(exported.generation_uuid, imported_receipt.generation_uuid);
+    journal.pass(
+        "import",
+        phase,
+        Some(imported_receipt.package_digest.clone()),
+    );
+    let phase = Instant::now();
+    let imported_graph = GraphForge::new(imported.to_str()).expect("reopen import");
+    let imported_nodes = imported_graph
+        .node_count(NODE_LABEL)
+        .expect("imported nodes");
+    let imported_edges =
+        scalar_count(&imported_graph.execute(COUNT_EDGES).expect("imported edges"));
+    assert_eq!(
+        (source_nodes, source_edges),
+        (imported_nodes, imported_edges)
+    );
+    journal.pass("imported_reopen", phase, None);
+    let phase = Instant::now();
+    let imported_1hop = result_fingerprint(&imported_graph.execute(ONE_HOP).expect("import 1hop"));
+    assert_eq!(source_1hop, imported_1hop);
+    journal.pass("imported_query_1hop", phase, Some(imported_1hop.clone()));
+    let phase = Instant::now();
+    let imported_2hop = result_fingerprint(&imported_graph.execute(TWO_HOP).expect("import 2hop"));
+    assert_eq!(source_2hop, imported_2hop);
+    journal.pass("imported_query_2hop", phase, Some(imported_2hop.clone()));
+
+    // Representative drills use the same verifier/import boundaries but never
+    // repeat the billion-edge payload.
+    let phase = Instant::now();
+    let corrupt = root.join("corrupt.gfpb");
+    fs::copy(&package, &corrupt).expect("copy corrupt drill");
+    let mut file = fs::OpenOptions::new().append(true).open(&corrupt).unwrap();
+    file.write_all(b"corruption").unwrap();
+    assert!(
+        verify_portable_v2(
+            &PortableVerifyRequest {
+                input: corrupt,
+                mode: PortableV2Mode::Full,
+                limits
+            },
+            None
+        )
+        .is_err()
+    );
+    journal.pass("drill_corruption", phase, None);
+    let phase = Instant::now();
+    let cancelled = AtomicBool::new(true);
+    assert!(
+        verify_portable_v2(
+            &PortableVerifyRequest {
+                input: package.clone(),
+                mode: PortableV2Mode::Full,
+                limits
+            },
+            Some(&cancelled)
+        )
+        .is_err()
+    );
+    journal.pass("drill_cancellation", phase, None);
+    let phase = Instant::now();
+    let tiny = PortableV2Limits {
+        max_entries: 1,
+        ..limits
+    };
+    assert!(
+        verify_portable_v2(
+            &PortableVerifyRequest {
+                input: package.clone(),
+                mode: PortableV2Mode::Full,
+                limits: tiny
+            },
+            None
+        )
+        .is_err()
+    );
+    journal.pass("drill_resource_limit", phase, None);
+    let phase = Instant::now();
+    let interrupted = root.join("interrupted-target");
+    assert!(
+        GraphForge::import_portable_v2(
+            &interrupted,
+            &PortableV2ImportRequest {
+                input: package,
+                operation_id: OperationId(uuidv7(0x746)),
+                limits,
+            },
+            Some(&AtomicBool::new(true))
+        )
+        .is_err()
+    );
+    assert!(!interrupted.join("CURRENT").exists());
+    journal.pass("drill_interrupted_finalization", phase, None);
+
+    assert_eq!(journal.phases.len(), CERTIFICATION_PHASES.len());
+    let project_fingerprint = |nodes: u64, edges: u64, one_hop: &str, two_hop: &str| {
+        let mut digest = Sha256::new();
+        digest.update(nodes.to_le_bytes());
+        digest.update(edges.to_le_bytes());
+        digest.update(one_hop.as_bytes());
+        digest.update(two_hop.as_bytes());
+        format!("sha256:{}", hex_encode(digest.finalize()))
+    };
+    json!({
+        "source_generation": exported.generation_uuid.to_string(),
+        "package": exported.package_digest, "transport": exported.transport_digest,
+        "imported_generation": imported_receipt.generation_uuid.to_string(),
+        "raw_attempts": spills.as_ref().map_or_else(|| summary.as_ref().unwrap().raw_attempts, |value| value.raw_attempts),
+        "self_loops_rejected": spills.as_ref().map_or_else(|| summary.as_ref().unwrap().self_loops_rejected, |value| value.self_loops_rejected),
+        "duplicates_rejected": generated_counts.as_ref().map_or_else(|| summary.as_ref().unwrap().duplicates_rejected, |value| value.duplicates_rejected),
+        "source_nodes": source_nodes, "source_edges": source_edges,
+        "imported_nodes": imported_nodes, "imported_edges": imported_edges,
+        "source_project_fingerprint": project_fingerprint(source_nodes, source_edges, &source_1hop, &source_2hop),
+        "imported_project_fingerprint": project_fingerprint(imported_nodes, imported_edges, &imported_1hop, &imported_2hop),
+        "portable_contract": verified.contract,
+        "package_class": serde_json::to_value(verified.package_class).expect("package class JSON"),
+        "integrity": serde_json::to_value(verified.integrity).expect("integrity JSON"),
+        "compatibility": serde_json::to_value(verified.compatibility).expect("compatibility JSON"),
+        "phases": journal.phases,
+    })
+}
+
+#[test]
+fn certification_lifecycle_journals_equivalent_round_trip_and_drills() {
+    let root = TempDir::new().expect("certification smoke root");
+    let evidence = run_integrated_certification(root.path(), None);
+    assert_eq!(evidence["source_edges"], evidence["imported_edges"]);
+    assert_ne!(
+        evidence["source_generation"],
+        evidence["imported_generation"]
+    );
+}
+
+#[test]
+fn certification_watchdog_persists_typed_first_failure() {
+    let root = TempDir::new().expect("watchdog root");
+    fs::write(root.path().join("allocated.bin"), [0_u8; 4096]).expect("allocated fixture");
+    let journal_path = root.path().join("journal.json");
+    let mut journal = PhaseJournal::new(
+        journal_path.clone(),
+        root.path(),
+        Envelope {
+            rss_bytes: u64::MAX,
+            disk_bytes: 0,
+            timeout_s: u64::MAX,
+        },
+    );
+    let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        journal.pass("resource_probe", Instant::now(), None);
+    }));
+    assert!(failure.is_err());
+    assert!(journal.cancellation().load(Ordering::SeqCst));
+    let persisted: Vec<Value> =
+        serde_json::from_slice(&fs::read(journal_path).expect("persisted failure journal"))
+            .expect("failure journal JSON");
+    assert_eq!(persisted[0]["status"], "fail");
+    assert_eq!(persisted[0]["failure_code"], "disk_limit_exceeded");
+}
+
+#[test]
+fn target_live_windows_are_deterministic_bounded_and_reconciled() {
+    let profile = load_profile();
+    let first = TempDir::new().unwrap();
+    let second = TempDir::new().unwrap();
+    let run = |root: &Path| {
+        let (spills, counts) =
+            generate_target_live_runs(10, 1, profile.initiator, profile.seed, 128, 1_000, root);
+        let mut digest = Sha256::new();
+        let replay = merge_runs(&spills.runs, |src, dst| {
+            digest.update(src.to_le_bytes());
+            digest.update(dst.to_le_bytes());
+        });
+        assert_eq!(counts.live_unique_edges, replay.live_unique_edges);
+        assert_eq!(
+            spills.raw_attempts,
+            counts.live_unique_edges + spills.self_loops_rejected + counts.duplicates_rejected
+        );
+        assert!(counts.live_unique_edges >= 1_000);
+        assert!(spills.peak_buffer_len <= 128);
+        (counts.live_unique_edges, hex_encode(digest.finalize()))
+    };
+    assert_eq!(run(first.path()), run(second.path()));
+}
+
+#[test]
+#[ignore = "requires approved 128 GiB / 1 TiB Linux certification host"]
+fn certification_target_live_full_lifecycle_evidence() {
+    let started = Instant::now();
+    let profile = load_certification_profile();
+    let root = TempDir::new().expect("certification workspace");
+    let lifecycle = run_integrated_certification(root.path(), Some(profile.target_live_edges));
+    let phases = lifecycle["phases"].as_array().expect("phase array");
+    let peak_rss = phases
+        .iter()
+        .filter_map(|p| p["rss_peak_bytes"].as_u64())
+        .max()
+        .unwrap_or(0);
+    let peak_disk = phases
+        .iter()
+        .filter_map(|p| p["disk_peak_bytes"].as_u64())
+        .max()
+        .unwrap_or(0);
+    let source_edges = lifecycle["source_edges"].as_u64().unwrap();
+    assert!(source_edges >= 1_000_000_000);
+    let profile_digest = format!(
+        "sha256:{}",
+        hex_encode(Sha256::digest(include_bytes!(
+            "fixtures/scale_g500_certification.v1.json"
+        )))
+    );
+    let empty_authority = format!(
+        "sha256:{}",
+        hex_encode(Sha256::digest(
+            b"graphforge-empty-ontology-capability-authority/1"
+        ))
+    );
+    let evidence = json!({
+        "schema": "graphforge-billion-edge-certification-evidence/1",
+        "git_sha": std::env::var("GF_G500_CERT_EXPECTED_SHA").unwrap_or_else(|_| git_sha().as_str().unwrap_or("unknown").to_owned()),
+        "profile_sha256": profile_digest,
+        "run": {
+            "command": "cargo test -p graphforge-api --release --test scale_g500_ladder certification_target_live_full_lifecycle_evidence -- --ignored --exact --nocapture --test-threads=1",
+            "scale": profile.scale, "edgefactor": profile.edgefactor, "seed": profile.seed,
+            "directionality": "undirected", "self_loops": "drop", "duplicates": "drop"
+        },
+        "host": {
+            "provider": std::env::var("GF_G500_CERT_PROVIDER").expect("approved provider input"),
+            "sku": std::env::var("GF_G500_CERT_SKU").expect("approved SKU input"),
+            "os": format!("Linux {}", command_text("uname", &["-r"])),
+            "kernel": command_text("uname", &["-r"]),
+            "filesystem": normalized_filesystem(root.path()),
+            "memory_bytes": linux_memory_bytes(),
+            "nvme_bytes": filesystem_capacity_bytes(root.path()),
+        },
+        "tools": { "rustc": command_text("rustc", &["--version"]), "cargo": command_text("cargo", &["--version"]) },
+        "counts": {
+            "raw_attempts": lifecycle["raw_attempts"], "self_loops_rejected": lifecycle["self_loops_rejected"],
+            "duplicates_rejected": lifecycle["duplicates_rejected"], "live_unique_edges": source_edges,
+            "source_nodes": lifecycle["source_nodes"], "source_edges": source_edges,
+            "imported_nodes": lifecycle["imported_nodes"], "imported_edges": lifecycle["imported_edges"],
+        },
+        "identities": { "source_generation": lifecycle["source_generation"], "package": lifecycle["package"], "transport": lifecycle["transport"], "imported_generation": lifecycle["imported_generation"] },
+        "package": {
+            "contract": lifecycle["portable_contract"], "format": "portable-project-v2-bundle",
+            "class": lifecycle["package_class"], "integrity": lifecycle["integrity"],
+            "compatibility": lifecycle["compatibility"],
+            "policy": "complete-current-generation"
+        },
+        "equivalence": { "source_project_fingerprint": lifecycle["source_project_fingerprint"], "imported_project_fingerprint": lifecycle["imported_project_fingerprint"] },
+        "authority": { "source_fingerprint": empty_authority.clone(), "imported_fingerprint": empty_authority },
+        "phases": phases,
+        "envelope": { "peak_rss_bytes": peak_rss, "peak_disk_bytes": peak_disk, "wall_time_s": started.elapsed().as_secs_f64() },
+        "result": "pass", "first_failure": null,
+    });
+    let out = PathBuf::from(std::env::var("GF_G500_CERT_EVIDENCE_OUT").expect("evidence output"));
+    fs::write(out, serde_json::to_vec_pretty(&evidence).unwrap())
+        .expect("write certification evidence");
+}
+
+fn normalized_filesystem(path: &Path) -> String {
+    match command_text("stat", &["-f", "-c", "%T", path.to_str().unwrap()]).as_str() {
+        "ext2/ext3" => "ext4".to_owned(),
+        value => value.to_owned(),
+    }
+}
+
+fn command_text(program: &str, args: &[&str]) -> String {
+    let output = Command::new(program)
+        .args(args)
+        .output()
+        .expect("host attestation command");
+    assert!(output.status.success(), "host attestation command failed");
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+fn linux_memory_bytes() -> u64 {
+    fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|text| {
+            text.lines()
+                .find(|line| line.starts_with("MemTotal:"))?
+                .split_whitespace()
+                .nth(1)?
+                .parse::<u64>()
+                .ok()
+        })
+        .unwrap_or(0)
+        .saturating_mul(1024)
+}
+
+fn filesystem_capacity_bytes(path: &Path) -> u64 {
+    command_text("df", &["-k", "--output=size", path.to_str().unwrap()])
+        .lines()
+        .last()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(0)
+        .saturating_mul(1024)
 }
