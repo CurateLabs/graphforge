@@ -58,6 +58,7 @@ export default defineConfig({
             },
             { label: 'Cypher Query Language', slug: 'guide/cypher-guide' },
             { label: 'Graph Construction', slug: 'guide/graph-construction' },
+            { label: 'Move portable projects', slug: 'guide/portable-projects' },
             { label: 'Analytics Integration', slug: 'guide/analytics-integration' },
             { label: 'Visualization examples', slug: 'guide/visualization' },
             { label: 'Exploratory Analyst', slug: 'guide/exploratory-analyst' },
