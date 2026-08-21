@@ -527,6 +527,7 @@ pub struct GraphCreateExec {
     in_df_schema: DFSchemaRef,
     dir: PathBuf,
     mode: OntologyMode,
+    semantic_composition_fingerprint: Option<String>,
     schema: SchemaRef,
     /// `true` when this node emits created-entity rows (write-result RETURN);
     /// `false` for the one-row write summary (#814).
@@ -673,6 +674,7 @@ impl GraphCreateExec {
             in_df_schema: in_schema.clone(),
             dir: node.dir.clone(),
             mode: node.mode,
+            semantic_composition_fingerprint: node.semantic_composition_fingerprint.clone(),
             schema,
             emit_rows,
             effects: Arc::new(std::sync::Mutex::new(CreateTally::default())),
@@ -702,6 +704,7 @@ impl GraphCreateExec {
             in_df_schema: self.in_df_schema.clone(),
             dir: self.dir.clone(),
             mode: self.mode,
+            semantic_composition_fingerprint: self.semantic_composition_fingerprint.clone(),
             out_schema: self.schema.clone(),
         }
     }
@@ -758,6 +761,7 @@ impl ExecutionPlan for GraphCreateExec {
             in_df_schema: self.in_df_schema.clone(),
             dir: self.dir.clone(),
             mode: self.mode,
+            semantic_composition_fingerprint: self.semantic_composition_fingerprint.clone(),
             schema: self.schema.clone(),
             emit_rows: self.emit_rows,
             // Share the SAME tally so `execute_create` can read counts back after
@@ -801,8 +805,11 @@ impl ExecutionPlan for GraphCreateExec {
                 .then(|| persisted_node_ids(&cfg.dir))
                 .transpose()
                 .map_err(to_df_err)?;
-            let mut writer =
-                graphforge_storage::GraphWriter::open(&cfg.dir, cfg.mode).map_err(to_df_err)?;
+            let mut writer = graphforge_storage::GraphWriter::open(&cfg.dir, cfg.mode)
+                .map_err(to_df_err)?
+                .with_semantic_composition_fingerprint(
+                    cfg.semantic_composition_fingerprint.clone(),
+                );
             let mut tally = CreateTally::default();
             let mut emitted: Vec<RecordBatch> = Vec::new();
 
@@ -882,6 +889,7 @@ pub(crate) struct CreateConfig {
     pub(crate) in_df_schema: DFSchemaRef,
     dir: PathBuf,
     mode: OntologyMode,
+    semantic_composition_fingerprint: Option<String>,
     out_schema: SchemaRef,
 }
 
@@ -4377,6 +4385,8 @@ pub struct ExecutionSession {
     dir: PathBuf,
     /// Ontology mode driving write routing.
     mode: OntologyMode,
+    /// Exact composition fingerprint authenticating semantic write routes.
+    semantic_composition_fingerprint: Option<String>,
     /// The session's adjacency provider (also registered as a SessionConfig
     /// extension for the planner). Held concretely so successful writes can
     /// invalidate its memoized state and loaded views — a same-session
@@ -4532,6 +4542,9 @@ impl ExecutionSession {
             .with_physical_optimizer_rule(Arc::new(demand::FixedHopDemandRule))
             .build();
         let ctx = SessionContext::new_with_state(state);
+        let semantic_composition_fingerprint = catalog
+            .semantic_composition_fingerprint()
+            .map(str::to_owned);
         let catalog = Arc::new(catalog);
         ctx.register_catalog("graph", catalog.clone());
         Self {
@@ -4540,6 +4553,7 @@ impl ExecutionSession {
             ontology,
             dir,
             mode,
+            semantic_composition_fingerprint,
             adjacency_provider,
             relational_fixed_hop_reference: false,
         }
@@ -4786,7 +4800,8 @@ impl ExecutionSession {
             params,
             type_map: lowerer.entity_name_map(),
         };
-        let mut wctx = write_driver::StatementWriteContext::new(&self.dir, self.mode)?;
+        let mut wctx = write_driver::StatementWriteContext::new(&self.dir, self.mode)?
+            .with_semantic_composition_fingerprint(self.semantic_composition_fingerprint.clone());
         let create_retention =
             write_driver::create_retention_by_write(&plan.ops, &plan.exprs, &split);
         let mut cursor = split.prefix_len;
@@ -5459,6 +5474,7 @@ mod tests {
             computed_properties: vec![],
         };
         let cfg = CreateConfig {
+            semantic_composition_fingerprint: None,
             nodes: nodes.clone(),
             edges: vec![edge.clone()],
             ref_cols: vec![],
@@ -5495,6 +5511,7 @@ mod tests {
         assert_eq!(persisted_node_ids(dir.path()).unwrap().len(), 4);
 
         let invalid_untyped = CreateConfig {
+            semantic_composition_fingerprint: None,
             nodes: nodes.clone(),
             edges: vec![ResolvedEdgeSpec {
                 rel_type_id: None,
@@ -5514,6 +5531,7 @@ mod tests {
                 .contains("relationship type")
         );
         let invalid_undirected = CreateConfig {
+            semantic_composition_fingerprint: None,
             nodes,
             edges: vec![ResolvedEdgeSpec {
                 direction: graphforge_ir::Direction::Undirected,
@@ -5659,6 +5677,7 @@ mod tests {
             graphforge_storage::GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, 1)
                 .unwrap();
         let cfg = CreateConfig {
+            semantic_composition_fingerprint: None,
             nodes: vec![reference.clone()],
             edges: vec![],
             ref_cols: vec![],
@@ -5733,6 +5752,7 @@ mod tests {
             computed_properties: vec![],
         };
         let mut edge_cfg = CreateConfig {
+            semantic_composition_fingerprint: None,
             nodes: vec![],
             edges: vec![edge.clone()],
             ref_cols: vec![],
@@ -5851,6 +5871,7 @@ mod tests {
             arrow::datatypes::Field::new("name", arrow::datatypes::DataType::Utf8, false),
         ]));
         let cfg = CreateConfig {
+            semantic_composition_fingerprint: None,
             nodes: vec![ResolvedNodeSpec {
                 var: 1,
                 label_ids: vec![7],

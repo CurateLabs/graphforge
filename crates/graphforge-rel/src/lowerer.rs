@@ -180,6 +180,7 @@ impl<'a> GraphPlanLowerer<'a> {
         // resolve through a colliding ontology ID.
         let mut type_id_to_rel_name = build_type_id_map(ontology);
         if let Some(c) = catalog {
+            type_id_to_rel_name.extend(c.semantic_rel_routes().clone());
             for (id, name) in c.rel_names() {
                 let plan_id =
                     graphforge_ir::runtime_relation_type_id(graphforge_ir::RuntimeTypeId(*id));
@@ -194,7 +195,13 @@ impl<'a> GraphPlanLowerer<'a> {
             // an exploratory node's properties live in `_untyped` (not a
             // per-label table). The runtime-catalog labels are merged in
             // separately for node-value rendering only — see `expr_lowerer`.
-            type_id_to_entity_name: build_entity_id_map(ontology),
+            type_id_to_entity_name: {
+                let mut names = build_entity_id_map(ontology);
+                if let Some(c) = catalog {
+                    names.extend(c.semantic_label_routes().clone());
+                }
+                names
+            },
             write_target,
             read_dir,
             node_shapes: std::sync::RwLock::new(HashMap::new()),
@@ -251,6 +258,7 @@ impl<'a> GraphPlanLowerer<'a> {
         // label name without colliding with ontology type 0 (#702).
         let mut node_label_names = self.type_id_to_entity_name.clone();
         if let Some(c) = self.catalog {
+            node_label_names.extend(c.semantic_label_names().clone());
             for (id, name) in c.label_names() {
                 let plan_id =
                     graphforge_ir::runtime_entity_type_id(graphforge_ir::RuntimeTypeId(*id));
@@ -2067,13 +2075,21 @@ impl<'a> GraphPlanLowerer<'a> {
                 dir.to_path_buf(),
                 mode,
                 out_schema,
+            )
+            .with_semantic_composition_fingerprint(
+                self.catalog
+                    .and_then(GraphCatalog::semantic_composition_fingerprint),
             );
             return Ok(LogicalPlan::Extension(Extension {
                 node: Arc::new(node),
             }));
         }
 
-        let node = GraphCreateNode::new(Arc::new(input), nodes, edges, dir.to_path_buf(), mode);
+        let node = GraphCreateNode::new(Arc::new(input), nodes, edges, dir.to_path_buf(), mode)
+            .with_semantic_composition_fingerprint(
+                self.catalog
+                    .and_then(GraphCatalog::semantic_composition_fingerprint),
+            );
         Ok(LogicalPlan::Extension(Extension {
             node: Arc::new(node),
         }))
@@ -3151,6 +3167,28 @@ fn lower_typed_edge_scan(
         ))
     })?;
 
+    // Generation-bound semantic relations must consume the exact provider
+    // authenticated and registered by GraphCatalog. Reconstructing a provider
+    // from a string route loses that authority and must never fall back to the
+    // exploratory relation-name filter.
+    if catalog.is_some_and(|catalog| catalog.semantic_rel_routes().contains_key(&rel_ty.0)) {
+        let provider = catalog
+            .and_then(|catalog| catalog.semantic_edge_table(rel_ty.0))
+            .ok_or_else(|| {
+                LoweringError::UnsupportedExpr(format!(
+                    "semantic relation TypeId({}) has no authenticated catalog provider",
+                    rel_ty.0
+                ))
+            })?;
+        return LogicalPlanBuilder::scan(
+            alias,
+            datafusion::datasource::provider_as_source(provider),
+            None,
+        )
+        .and_then(LogicalPlanBuilder::build)
+        .map_unsupported_expr();
+    }
+
     // Check if the catalog has a typed edge table for this relation.
     let use_exploratory = catalog
         .and_then(|c| c.schema("graph"))
@@ -4061,7 +4099,14 @@ fn expand_single_dir(
     // Enrich the edge scan with its persisted properties (#784) so a downstream
     // `RETURN r.<prop>` resolves to a real column. A wildcard edge scan
     // (`rel_ty == None`) has no single relation file, so no property join.
-    let edge_plan = join_edge_properties(&edge_alias, rel_ty, type_id_to_rel_name, dir, edge_plan)?;
+    let edge_plan = join_edge_properties(
+        &edge_alias,
+        rel_ty,
+        type_id_to_rel_name,
+        catalog,
+        dir,
+        edge_plan,
+    )?;
 
     // Join input (has src) with edge scan.
     let src_col = col(format!("{src_alias}.node_id"));
@@ -4196,6 +4241,7 @@ fn join_edge_properties(
     edge_alias: &str,
     rel_ty: Option<TypeId>,
     type_id_to_rel_name: &HashMap<u32, String>,
+    catalog: Option<&GraphCatalog>,
     dir: Option<&Path>,
     scan: LogicalPlan,
 ) -> Result<LogicalPlan, LoweringError> {
@@ -4218,33 +4264,39 @@ fn join_edge_properties(
     let mut prop_sources = Vec::new();
     let mut prop_order = Vec::new();
     let mut seen_props = HashSet::new();
-    let mut push_source = |stem: String| {
-        let table = graphforge_storage::EdgePropertyTable::open_discovered(dir, &stem);
-        let prop_cols: Vec<String> = table
-            .schema_ref()
-            .fields()
-            .iter()
-            .map(|f| f.name().clone())
-            .filter(|n| !base_cols.contains(n))
-            .collect();
-        if prop_cols.is_empty() {
-            return;
-        }
-        for name in &prop_cols {
-            if seen_props.insert(name.clone()) {
-                prop_order.push(name.clone());
+    let mut push_source =
+        |stem: String, registered: Option<Arc<dyn datafusion::datasource::TableProvider>>| {
+            let table = registered.unwrap_or_else(|| {
+                Arc::new(graphforge_storage::EdgePropertyTable::open_discovered(
+                    dir, &stem,
+                ))
+            });
+            let prop_cols: Vec<String> = table
+                .schema()
+                .fields()
+                .iter()
+                .map(|f| f.name().clone())
+                .filter(|n| !base_cols.contains(n))
+                .collect();
+            if prop_cols.is_empty() {
+                return;
             }
-        }
-        prop_sources.push((stem, table, prop_cols));
-    };
+            for name in &prop_cols {
+                if seen_props.insert(name.clone()) {
+                    prop_order.push(name.clone());
+                }
+            }
+            prop_sources.push((stem, table, prop_cols));
+        };
     if let Some(rel_ty) = rel_ty {
         let Some(rel_name) = type_id_to_rel_name.get(&rel_ty.0) else {
             return Ok(scan); // unknown relation name: nothing to resolve
         };
-        push_source(rel_name.clone());
+        let registered = catalog.and_then(|catalog| catalog.semantic_edge_property_table(rel_ty.0));
+        push_source(rel_name.clone(), registered);
     } else {
         for stem in graphforge_storage::list_edge_property_stems(dir) {
-            push_source(stem);
+            push_source(stem, None);
         }
     }
     if prop_sources.is_empty() {
@@ -4256,7 +4308,7 @@ fn join_edge_properties(
     let mut prop_refs: StdHashMap<String, Vec<DfExpr>> = StdHashMap::new();
     for (idx, (stem, prop_table, prop_cols)) in prop_sources.into_iter().enumerate() {
         let prop_alias = format!("{edge_alias}__eprops_{idx}");
-        let prop_src = datafusion::datasource::provider_as_source(Arc::new(prop_table));
+        let prop_src = datafusion::datasource::provider_as_source(prop_table);
         let prop_scan = LogicalPlanBuilder::scan(prop_alias.clone(), prop_src, None)
             .and_then(LogicalPlanBuilder::build)
             .map_unsupported_expr()?;

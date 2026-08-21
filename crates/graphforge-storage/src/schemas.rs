@@ -386,6 +386,25 @@ pub fn property_schema(entity_type: &str, property_defs: &[PropertyDef]) -> Sche
     Schema::new(fields).with_metadata(meta)
 }
 
+/// Attach authenticated generation-bound semantic routing metadata.
+#[must_use]
+pub fn with_semantic_route_metadata(
+    schema: &Schema,
+    route: &str,
+    composition_fingerprint: &str,
+) -> Schema {
+    let mut metadata = schema.metadata().clone();
+    metadata.insert(
+        crate::SEMANTIC_ROUTE_METADATA_KEY.to_owned(),
+        route.to_owned(),
+    );
+    metadata.insert(
+        crate::SEMANTIC_COMPOSITION_METADATA_KEY.to_owned(),
+        composition_fingerprint.to_owned(),
+    );
+    Schema::new_with_metadata(schema.fields().clone(), metadata)
+}
+
 /// Build a query result schema with GraphForge pipeline metadata attached.
 ///
 /// The metadata keys `graphforge.query_id`, `graphforge.ontology_version`, and

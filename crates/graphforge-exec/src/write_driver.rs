@@ -321,6 +321,17 @@ impl StatementWriteContext {
         })
     }
 
+    #[must_use]
+    pub(crate) fn with_semantic_composition_fingerprint(
+        mut self,
+        fingerprint: Option<String>,
+    ) -> Self {
+        self.writer = self
+            .writer
+            .with_semantic_composition_fingerprint(fingerprint);
+        self
+    }
+
     fn record_mutation_input(
         &mut self,
         kind: crate::MutationKind,
@@ -1580,6 +1591,7 @@ fn run_create_phase(
         in_df_schema: Arc::new(frontier.df_schema.clone()),
         dir: env.dir.to_path_buf(),
         mode: env.mode,
+        semantic_composition_fingerprint: None,
         out_schema: graphforge_plan::GraphCreateNode::summary_schema(),
     };
     validate_edge_specs(&cfg)?;

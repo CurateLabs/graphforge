@@ -266,6 +266,8 @@ impl GraphForge {
             ontology: self.ontology.clone(),
             ontology_document: self.ontology_document.clone(),
             runtime_catalog: Arc::clone(&self.runtime_catalog),
+            semantic_storage_bindings: Arc::clone(&self.semantic_storage_bindings),
+            default_composition_context: Arc::clone(&self.default_composition_context),
             procedures: Arc::clone(&self.procedures),
             ontology_mode: self.ontology_mode,
             adjacency_provider: Arc::clone(&self.adjacency_provider),

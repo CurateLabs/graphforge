@@ -37,6 +37,15 @@ pub use graph_files::{
     stage_graph_tree, verify_graph_tree,
 };
 
+pub mod semantic_bindings;
+pub use semantic_bindings::{
+    GRAPH_SEMANTIC_BINDINGS_FAMILY, GRAPH_SEMANTIC_BINDINGS_VERSION, LegacyRouteMigration,
+    LegacySemanticProjection, MAX_SEMANTIC_BINDING_BYTES, MAX_SEMANTIC_BINDINGS,
+    SEMANTIC_COMPOSITION_METADATA_KEY, SEMANTIC_ROUTE_METADATA_KEY, SemanticRouteKind,
+    SemanticStorageBinding, SemanticStorageBindings, apply_legacy_route_moves,
+    require_atomic_legacy_migration, semantic_storage_bindings,
+};
+
 pub mod graph_delta_journal;
 pub use graph_delta_journal::{
     GRAPH_DELTA_DIR, GRAPH_DELTA_RECORD_VERSION, GRAPH_DELTA_RUN_EXTENSION,
@@ -178,9 +187,11 @@ pub use workspace_participants::{
     GraphDirectedness, MAX_WORKSPACE_REPOSITORY_SNAPSHOT_BYTES,
     MAX_WORKSPACE_REPOSITORY_SNAPSHOT_ENTRIES, MAX_WORKSPACE_REPOSITORY_SNAPSHOT_ID_BYTES,
     WORKSPACE_CAPABILITY_ID, WORKSPACE_CAPABILITY_VERSION, WORKSPACE_CONFIGURATION_FAMILY,
+    WORKSPACE_ONTOLOGY_COMPOSITION_FAMILY, WORKSPACE_ONTOLOGY_COMPOSITION_VERSION,
     WORKSPACE_ONTOLOGY_FAMILY, WORKSPACE_REPOSITORY_SNAPSHOT_FAMILY,
-    WORKSPACE_REPOSITORY_SNAPSHOT_VERSION, WorkspaceConfiguration, WorkspaceOntology,
-    WorkspaceOntologyMode, WorkspaceOntologySourceFormat, WorkspaceRepositoryDefinitionDigest,
+    WORKSPACE_REPOSITORY_SNAPSHOT_VERSION, WorkspaceCompositionModule, WorkspaceConfiguration,
+    WorkspaceOntology, WorkspaceOntologyComposition, WorkspaceOntologyMode,
+    WorkspaceOntologySourceFormat, WorkspaceRepositoryDefinitionDigest,
     WorkspaceRepositoryGitProvenance, WorkspaceRepositorySnapshot, WorkspaceRepositorySourceDigest,
     empty_workspace_participants,
 };

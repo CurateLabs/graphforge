@@ -304,6 +304,10 @@ impl GraphForge {
         let participants = super::graph_publication_participants(
             &parent,
             graph_files,
+            self.semantic_storage_bindings
+                .lock()
+                .expect("semantic storage binding lock poisoned")
+                .as_ref(),
             parent.capability("provenance")?.is_some(),
             &receipt,
             operation_uuid,
