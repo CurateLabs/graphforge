@@ -75,6 +75,7 @@ def _validate(surface: str, report: dict[str, Any]) -> list[str]:
     expected_cases = {
         "authority_reopened": {"composition_fingerprint": report.get("composition_after")},
         "bridge_set_retained": {"bridge_ids": report.get("bridge_ids")},
+        "migration_receipt": {"plan_digest": report.get("migration_plan_digest")},
         "module_set_retained": {"module_ids": report.get("module_ids")},
         "retained_data_query": report.get("retained_data"),
     }
@@ -84,6 +85,21 @@ def _validate(surface: str, report: dict[str, Any]) -> list[str]:
             "and retained-query observations"
         )
     return errors
+
+
+def _semantic_outcome(report: dict[str, Any]) -> dict[str, Any]:
+    """Exclude exact source-inventory identity from cross-project parity."""
+    outcome = {
+        key: value
+        for key, value in report.items()
+        if key not in {"surface", "migration_plan_digest", "cases"}
+    }
+    cases = report.get("cases")
+    if isinstance(cases, dict):
+        outcome["cases"] = {
+            key: value for key, value in cases.items() if key != "migration_receipt"
+        }
+    return outcome
 
 
 def compare(paths: dict[str, Path]) -> list[str]:
@@ -100,12 +116,12 @@ def compare(paths: dict[str, Path]) -> list[str]:
 
     rust = reports.get("rust")
     if rust is not None:
-        authority = {key: value for key, value in rust.items() if key != "surface"}
+        authority = _semantic_outcome(rust)
         for surface in SURFACES[1:]:
             report = reports.get(surface)
             if report is None:
                 continue
-            candidate = {key: value for key, value in report.items() if key != "surface"}
+            candidate = _semantic_outcome(report)
             if candidate != authority:
                 errors.append(f"{surface}: certification outcome differs from Rust authority")
     return errors
