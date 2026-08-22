@@ -521,6 +521,83 @@ fn rss_value() -> Value {
     peak_rss().map_or(Value::Null, |(bytes, _)| json!(bytes))
 }
 
+fn linux_process_memory() -> Value {
+    let Ok(contents) = fs::read_to_string("/proc/self/status") else {
+        return Value::Null;
+    };
+    let read_bytes = |name: &str| {
+        contents.lines().find_map(|line| {
+            line.strip_prefix(name).and_then(|value| {
+                value
+                    .trim()
+                    .trim_end_matches(" kB")
+                    .trim()
+                    .parse::<u64>()
+                    .ok()
+                    .map(|kb| kb.saturating_mul(1024))
+            })
+        })
+    };
+    json!({
+        "vmhwm_bytes": read_bytes("VmHWM:"),
+        "vmrss_bytes": read_bytes("VmRSS:"),
+        "rss_anon_bytes": read_bytes("RssAnon:"),
+        "rss_file_bytes": read_bytes("RssFile:"),
+    })
+}
+
+fn phase_journal_value(
+    profile: &ScaleProfile,
+    rung: &Rung,
+    completed_rungs: &[Value],
+    phase: &str,
+    state: &str,
+    steps: &[Value],
+) -> Value {
+    json!({
+        "schema": EVIDENCE_SCHEMA,
+        "schema_version": SCHEMA_VERSION,
+        "profile_schema": profile.schema,
+        "run_state": state,
+        "active_rung": rung.id,
+        "active_scale": rung.scale,
+        "active_phase": phase,
+        "process_memory": linux_process_memory(),
+        "completed_rungs": completed_rungs,
+        "active_steps": steps,
+    })
+}
+
+fn write_json_atomically(path: &Path, value: &Value) {
+    let parent = path.parent().expect("journal parent");
+    fs::create_dir_all(parent).expect("journal parent");
+    let temporary = path.with_extension("json.tmp");
+    let mut file = fs::File::create(&temporary).expect("create journal temporary");
+    serde_json::to_writer_pretty(&mut file, value).expect("serialize journal");
+    use std::io::Write;
+    file.write_all(b"\n").expect("terminate journal");
+    file.sync_all().expect("sync journal temporary");
+    fs::rename(&temporary, &path).expect("publish journal");
+    fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .expect("sync journal parent");
+}
+
+fn persist_phase_journal(
+    profile: &ScaleProfile,
+    rung: &Rung,
+    completed_rungs: &[Value],
+    phase: &str,
+    state: &str,
+    steps: &[Value],
+) {
+    let Ok(path) = std::env::var("GF_G500_LADDER_JOURNAL_OUT") else {
+        return;
+    };
+    let value = phase_journal_value(profile, rung, completed_rungs, phase, state, steps);
+    write_json_atomically(&PathBuf::from(path), &value);
+}
+
 #[allow(clippy::too_many_lines)]
 fn run_rung(
     profile: &ScaleProfile,
@@ -528,6 +605,7 @@ fn run_rung(
     env: RunEnvelope,
     edge_factor: u32,
     ladder_started: Instant,
+    completed_rungs: &[Value],
 ) -> RungOutcome {
     let started = Instant::now();
     let workspace = TempDir::new().expect("rung workspace");
@@ -541,6 +619,14 @@ fn run_rung(
     let mut error_class: Option<&'static str> = None;
 
     // ---- generate ----
+    persist_phase_journal(
+        profile,
+        rung,
+        completed_rungs,
+        "generate",
+        "running",
+        &steps,
+    );
     let gen_started = Instant::now();
     let spill = generate_spill_runs(
         rung.scale,
@@ -570,6 +656,14 @@ fn run_rung(
             "run_count": spill.runs.len(),
         }
     }));
+    persist_phase_journal(
+        profile,
+        rung,
+        completed_rungs,
+        "generate",
+        "phase_completed",
+        &steps,
+    );
 
     // ---- ingest (merge + publish through the public facade) ----
     let mut live_unique_edges = 0u64;
@@ -577,6 +671,7 @@ fn run_rung(
     let mut input_fingerprint = String::from("sha256:");
     let mut ingest_ran = false;
     if first_failing_phase.is_none() {
+        persist_phase_journal(profile, rung, completed_rungs, "ingest", "running", &steps);
         let ingest_started = Instant::now();
         let graph = GraphForge::new(Some(project.to_str().expect("utf8 project")))
             .expect("open GraphForge for ingest");
@@ -610,6 +705,14 @@ fn run_rung(
                 "input_fingerprint": input_fingerprint,
             }
         }));
+        persist_phase_journal(
+            profile,
+            rung,
+            completed_rungs,
+            "ingest",
+            "phase_completed",
+            &steps,
+        );
     }
 
     // ---- reopen + recount ----
@@ -617,6 +720,7 @@ fn run_rung(
     let mut edge_count = 0u64;
     let mut gsi = String::new();
     if first_failing_phase.is_none() {
+        persist_phase_journal(profile, rung, completed_rungs, "reopen", "running", &steps);
         let reopen_started = Instant::now();
         let graph = GraphForge::new(Some(project.to_str().expect("utf8 project")))
             .expect("reopen GraphForge");
@@ -631,9 +735,18 @@ fn run_rung(
             "rss_peak_bytes": rss_value(),
             "detail": { "node_count": node_count, "edge_count": edge_count, "gsi": gsi }
         }));
+        persist_phase_journal(
+            profile,
+            rung,
+            completed_rungs,
+            "reopen",
+            "phase_completed",
+            &steps,
+        );
 
         // ---- deterministic LIMIT queries ----
         let hop1_started = Instant::now();
+        persist_phase_journal(profile, rung, completed_rungs, "query", "running", &steps);
         let hop1 = graph.execute(ONE_HOP).expect("one-hop LIMIT");
         let hop1_rows = row_count(&hop1);
         steps.push(json!({
@@ -657,6 +770,14 @@ fn run_rung(
             first_failing_phase = Some("query");
             error_class = Some(class);
         }
+        persist_phase_journal(
+            profile,
+            rung,
+            completed_rungs,
+            "query",
+            "phase_completed",
+            &steps,
+        );
     }
 
     let disk_used_bytes =
@@ -733,9 +854,17 @@ fn run_ladder(profile: &ScaleProfile, env: RunEnvelope, rungs: &[Rung]) -> Vec<V
     let ladder_started = Instant::now();
     let mut evidence = Vec::new();
     for rung in rungs {
-        let outcome = run_rung(profile, rung, env, profile.edgefactor, ladder_started);
+        let outcome = run_rung(
+            profile,
+            rung,
+            env,
+            profile.edgefactor,
+            ladder_started,
+            &evidence,
+        );
         let passed = outcome.passed;
         evidence.push(outcome.evidence);
+        persist_phase_journal(profile, rung, &evidence, "rung", "rung_completed", &[]);
         if !passed {
             break;
         }
@@ -1274,6 +1403,7 @@ fn first_fail_stops_at_envelope_violation() {
         tiny_env,
         profile.edgefactor,
         Instant::now(),
+        &[],
     );
     assert!(!outcome.passed, "a violated envelope must not pass");
     assert_eq!(outcome.evidence["first_failing_phase"], "generate");
@@ -1305,6 +1435,7 @@ fn ci_rung_public_facade_engineering_green() {
         profile.envelope.into(),
         profile.edgefactor,
         Instant::now(),
+        &[],
     );
     assert!(outcome.passed, "CI rung must pass: {:#}", outcome.evidence);
     let ev = &outcome.evidence;
@@ -1387,6 +1518,33 @@ fn provisioned_max_scale_excludes_larger_rungs() {
     assert!(selected.iter().all(|rung| rung.scale != 26));
     assert!(provisioned_rungs_through(&profile, 10).is_err());
     assert!(provisioned_rungs_through(&profile, 23).is_err());
+}
+
+#[test]
+fn phase_journal_atomically_preserves_completed_rungs_and_active_state() {
+    let profile = load_profile();
+    let rung = profile
+        .rungs
+        .iter()
+        .find(|rung| rung.scale == 22)
+        .expect("S22 rung");
+    let completed = vec![json!({"rung": "S20", "pass": true})];
+    let steps = vec![json!({"id": "generate", "pass": true})];
+    let journal = phase_journal_value(&profile, rung, &completed, "ingest", "running", &steps);
+    assert_eq!(journal["completed_rungs"], json!(completed));
+    assert_eq!(journal["active_rung"], "S22");
+    assert_eq!(journal["active_phase"], "ingest");
+    assert_eq!(journal["run_state"], "running");
+
+    let directory = TempDir::new().expect("journal directory");
+    let path = directory.path().join("journal.json");
+    write_json_atomically(&path, &journal);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&fs::read(&path).expect("read journal"))
+            .expect("valid journal"),
+        journal
+    );
+    assert!(!path.with_extension("json.tmp").exists());
 }
 
 // ---------------------------------------------------------------------------
