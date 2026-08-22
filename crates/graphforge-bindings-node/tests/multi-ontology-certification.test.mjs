@@ -23,16 +23,22 @@ function authority(forge, operationUuid = randomUUID()) {
 function substitute(value, identities) {
   if (typeof value === "string" && identities[value])
     return structuredClone(identities[value]);
-  if (Array.isArray(value)) return value.map((item) => substitute(item, identities));
+  if (Array.isArray(value))
+    return value.map((item) => substitute(item, identities));
   if (value && typeof value === "object")
     return Object.fromEntries(
-      Object.entries(value).map(([key, item]) => [key, substitute(item, identities)]),
+      Object.entries(value).map(([key, item]) => [
+        key,
+        substitute(item, identities),
+      ]),
     );
   return value;
 }
 
 async function certify() {
-  const manifest = JSON.parse(readFileSync(join(FIXTURE, "certification.json"), "utf8"));
+  const manifest = JSON.parse(
+    readFileSync(join(FIXTURE, "certification.json"), "utf8"),
+  );
   const root = mkdtempSync(join(tmpdir(), "graphforge-certification-node-"));
   const project = join(root, "project");
   mkdirSync(project);
@@ -44,7 +50,9 @@ async function certify() {
     await forge.adoptOntologyModule({ authority: authority(forge), candidate });
     identities[`$${document.ontology_id.split("/").at(-1)}`] = candidate.id;
     if (filename === "genealogy-v1.json")
-      forge.execute("CREATE (:Person {full_name: 'Ada Lovelace', birth_year: 1815})");
+      forge.execute(
+        "CREATE (:Person {full_name: 'Ada Lovelace', birth_year: 1815})",
+      );
   }
   for (const filename of manifest.bridges) {
     const document = substitute(
@@ -56,7 +64,9 @@ async function certify() {
   }
 
   const before = forge.ontologyAuthorityState().composition_fingerprint;
-  const target = JSON.parse(readFileSync(join(FIXTURE, manifest.migration_target), "utf8"));
+  const target = JSON.parse(
+    readFileSync(join(FIXTURE, manifest.migration_target), "utf8"),
+  );
   const migrationAuthority = authority(forge);
   const request = {
     authority: migrationAuthority,

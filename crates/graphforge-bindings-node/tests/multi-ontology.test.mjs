@@ -185,9 +185,9 @@ async function runSemantics() {
     });
     stage = "dependent replay";
     const replayReceipt = await forge.adoptOntologyModule({
-        authority: replayAuthority,
-        candidate: dependentCandidate,
-      });
+      authority: replayAuthority,
+      candidate: dependentCandidate,
+    });
     assert.deepEqual(replayReceipt, replayResult);
     const conflict = forge.createOntologyModule({
       document: oracle.modules.dependent_update,
@@ -399,7 +399,11 @@ async function runSemantics() {
           error_code: unsupported.code,
           diagnostic_code: unsupported.diagnostics[0].code,
         },
-        cancellation: { error_code: cancelled.code, before_modules: cancellationBeforeModules, after_modules: cancellationAfterModules },
+        cancellation: {
+          error_code: cancelled.code,
+          before_modules: cancellationBeforeModules,
+          after_modules: cancellationAfterModules,
+        },
         idempotent_replay: {
           first_receipt: replayResult,
           replay_receipt: replayReceipt,
@@ -424,7 +428,13 @@ async function runSemantics() {
           second_serialized: secondInventory,
           forbidden_path: subject.root,
         },
-        packaged_clean_install: { package_origin: fileURLToPath(new URL("../index.js", import.meta.url)), operation: "ontology_modules", module_count: installedModules.length },
+        packaged_clean_install: {
+          package_origin: fileURLToPath(
+            new URL("../index.js", import.meta.url),
+          ),
+          operation: "ontology_modules",
+          module_count: installedModules.length,
+        },
       },
     };
     const reportPath = process.env.GRAPHFORGE_MULTI_ONTOLOGY_PARITY_REPORT;
@@ -541,7 +551,8 @@ test("no partial import or authority change", async () => {
     (await semantics()).unsupported.code,
     oracle.expected.unsupported_future_code,
   );
-  const observed = (await semantics()).report.cases.no_partial_import_or_authority_change;
+  const observed = (await semantics()).report.cases
+    .no_partial_import_or_authority_change;
   assert.deepEqual(observed.before_entries, observed.after_entries);
   assert.deepEqual(observed.authority_before, observed.authority_after);
   assert.ok(ontologyAuthorityState && no_partial_import);
@@ -562,7 +573,8 @@ test("deterministic path free serialization", async () => {
   const serialized = JSON.stringify((await semantics()).replayResult);
   assert.ok(serialized.includes(project_generation_uuid));
   assert.ok(!serialized.includes(tmpdir()));
-  const observed = (await semantics()).report.cases.deterministic_path_free_cli_json;
+  const observed = (await semantics()).report.cases
+    .deterministic_path_free_cli_json;
   assert.equal(observed.first_serialized, observed.second_serialized);
   assert.ok(!observed.first_serialized.includes(observed.forbidden_path));
 });
