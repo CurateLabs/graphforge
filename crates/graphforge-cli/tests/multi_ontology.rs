@@ -878,6 +878,152 @@ fn emit_authenticated_parity_report() {
     fs::write(path, serde_json::to_vec(&report).unwrap()).unwrap();
 }
 
+#[test]
+fn emit_retained_data_certification_report() {
+    let Some(path) = std::env::var_os("GRAPHFORGE_MULTI_ONTOLOGY_CERTIFICATION_REPORT") else {
+        return;
+    };
+    let report = observed_cli_certification_report();
+    fs::write(path, serde_json::to_vec(&report).unwrap()).unwrap();
+}
+
+#[allow(clippy::too_many_lines)]
+fn observed_cli_certification_report() -> Value {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/multi-ontology-v1/certification-v1");
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(fixture.join("certification.json")).unwrap()).unwrap();
+    let project = initialized_project();
+    let mut identities = std::collections::BTreeMap::new();
+    for (index, filename) in manifest["modules"].as_array().unwrap().iter().enumerate() {
+        let filename = filename.as_str().unwrap();
+        let input = project.path().join(filename);
+        fs::copy(fixture.join(filename), &input).unwrap();
+        let document: Value = serde_json::from_slice(&fs::read(&input).unwrap()).unwrap();
+        let id = candidate_id(project.path(), &input);
+        let operation = format!("00000000-0000-0000-0000-00000000{:04}", 8600 + index);
+        let adopted = adopt_module(project.path(), &input, &operation, None);
+        assert!(
+            adopted.status.success(),
+            "{}",
+            String::from_utf8_lossy(&adopted.stderr)
+        );
+        let key = format!(
+            "${}",
+            document["ontology_id"]
+                .as_str()
+                .unwrap()
+                .rsplit('/')
+                .next()
+                .unwrap()
+        );
+        identities.insert(key, id);
+        if filename == "genealogy-v1.json" {
+            let graph =
+                graphforge_api::GraphForge::new(Some(project.path().to_str().unwrap())).unwrap();
+            graph
+                .execute("CREATE (:Person {full_name: 'Ada Lovelace', birth_year: 1815})")
+                .unwrap();
+        }
+    }
+    let replacements = identities
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.clone()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    for (index, filename) in manifest["bridges"].as_array().unwrap().iter().enumerate() {
+        let filename = filename.as_str().unwrap();
+        let document: Value = serde_json::from_slice(&fs::read(fixture.join(filename)).unwrap())
+            .map(|value| substitute(&value, &replacements))
+            .unwrap();
+        let input = write_module(project.path(), filename, &document);
+        let operation = format!("00000000-0000-0000-0000-00000000{:04}", 8700 + index);
+        let adopted = adopt_bridge(project.path(), &input, &operation);
+        assert!(
+            adopted.status.success(),
+            "{}",
+            String::from_utf8_lossy(&adopted.stderr)
+        );
+    }
+
+    let graph = graphforge_api::GraphForge::new(Some(project.path().to_str().unwrap())).unwrap();
+    let before_state = graph.ontology_authority_state().unwrap();
+    let before = before_state.composition_fingerprint.unwrap();
+    let genealogy = &identities["$genealogy"];
+    let target = fixture.join(manifest["migration_target"].as_str().unwrap());
+    let operation = "00000000-0000-0000-0000-000000008800";
+    let selector = vec![
+        "--ontology-id".into(),
+        genealogy["ontology_id"].as_str().unwrap().into(),
+        "--authored-version".into(),
+        genealogy["authored_version"].as_str().unwrap().into(),
+        "--canonical-digest".into(),
+        genealogy["canonical_digest"].as_str().unwrap().into(),
+        "--input".into(),
+        target.to_str().unwrap().into(),
+        "--operation-uuid".into(),
+        operation.into(),
+        "--expected-generation".into(),
+        before_state.project_generation_uuid.to_string(),
+        "--expected-composition-fingerprint".into(),
+        before.clone(),
+    ];
+    drop(graph);
+    let mut preview_args = vec![
+        "--json".into(),
+        "ontology".into(),
+        "module".into(),
+        "preview-migrate".into(),
+    ];
+    preview_args.extend(selector.clone());
+    let preview_output = gf_owned(project.path(), &preview_args);
+    assert!(
+        preview_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&preview_output.stderr)
+    );
+    let preview = parse_json(&preview_output.stdout);
+    let preview_path = write_module(project.path(), "migration-preview.json", &preview);
+    let mut migrate_args = vec![
+        "--json".into(),
+        "ontology".into(),
+        "module".into(),
+        "migrate".into(),
+    ];
+    migrate_args.extend(selector);
+    migrate_args.extend(["--preview".into(), preview_path.to_str().unwrap().into()]);
+    let migrate_output = gf_owned(project.path(), &migrate_args);
+    assert!(
+        migrate_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&migrate_output.stderr)
+    );
+    let receipt = parse_json(&migrate_output.stdout);
+    let report_output = gf(
+        project.path(),
+        &[
+            "--json",
+            "ontology",
+            "composition",
+            "certification-report",
+            "--composition-before",
+            &before,
+            "--migration-plan-digest",
+            receipt["plan_digest"].as_str().unwrap(),
+            "--rows-scanned",
+            &receipt["retained_rows_scanned"].to_string(),
+        ],
+    );
+    assert!(
+        report_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&report_output.stderr)
+    );
+    let report = parse_json(&report_output.stdout);
+    assert_eq!(report["surface"], "cli");
+    assert_eq!(report["retained_data"]["name"], "Ada Lovelace");
+    report
+}
+
 #[allow(clippy::too_many_lines)]
 fn observed_cli_parity_report() -> Value {
     let oracle = parity_oracle();

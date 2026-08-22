@@ -10,9 +10,10 @@ use graphforge_api::{
     BridgeDeleteRequest, BridgeDocument, BridgeExportFormat, BridgeImportFormatHint,
     BridgeSelector, BridgeSetId, BridgeUpdateRequest, CancellationToken, CompositionChangeRequest,
     CompositionDataDisposition, GraphForge, ImportFormatHint, ModuleAdoptionRequest,
-    ModuleDeleteRequest, ModuleSelector, ModuleUpdateRequest, OntologyAuthorityExpectation,
-    OntologyDoc, OntologyModuleId, OperationId, PortableV2Limits, ResolutionExplainRequest,
-    SymbolKind, WorkspaceOntologyComposition, WriteContext,
+    ModuleDeleteRequest, ModuleMigrationPreview, ModuleMigrationRequest, ModuleSelector,
+    ModuleUpdateRequest, OntologyAuthorityExpectation, OntologyDoc, OntologyModuleId, OperationId,
+    PortableV2Limits, ResolutionExplainRequest, SymbolKind, WorkspaceOntologyComposition,
+    WriteContext,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -97,6 +98,8 @@ pub(crate) enum ModuleCommand {
     Adopt(ModuleMutationArgs),
     PreviewUpdate(ModulePreviewUpdateArgs),
     Update(ModuleUpdateArgs),
+    PreviewMigrate(ModuleUpdateArgs),
+    Migrate(ModuleMigrateArgs),
     PreviewDelete(ModuleSelectorArgs),
     Delete(ModuleDeleteArgs),
     Export(ModuleExportArgs),
@@ -132,6 +135,7 @@ pub(crate) enum CompositionCommand {
     Validate(DocumentArgs),
     Preflight(CompositionPreflightArgs),
     ExplainResolution(ResolutionArgs),
+    CertificationReport(CertificationReportArgs),
 }
 
 #[derive(Args)]
@@ -277,6 +281,15 @@ pub(crate) struct ModuleUpdateArgs {
 }
 
 #[derive(Args)]
+pub(crate) struct ModuleMigrateArgs {
+    #[command(flatten)]
+    update: ModuleUpdateArgs,
+    /// Exact JSON preview produced by `preview-migrate`.
+    #[arg(long)]
+    preview: PathBuf,
+}
+
+#[derive(Args)]
 pub(crate) struct ModuleDeleteArgs {
     #[command(flatten)]
     selector: ModuleSelectorArgs,
@@ -398,6 +411,16 @@ pub(crate) struct ResolutionArgs {
     max_candidates: usize,
 }
 
+#[derive(Args)]
+pub(crate) struct CertificationReportArgs {
+    #[arg(long)]
+    composition_before: String,
+    #[arg(long)]
+    migration_plan_digest: String,
+    #[arg(long)]
+    rows_scanned: u64,
+}
+
 pub(crate) fn run_ontology(
     graph: &mut GraphForge,
     command: OntologyCommand,
@@ -483,6 +506,39 @@ fn run_module(
                     dependencies: candidate.dependencies,
                     enforcement: candidate.enforcement,
                 },
+                Some(&token),
+            )?;
+            emit(&receipt, json_output, output)
+        }
+        ModuleCommand::PreviewMigrate(args) => {
+            let candidate = module_candidate_from_args(graph, &args.preview.candidate, true)?;
+            let (authority, _) = authority(&args.authority)?;
+            emit(
+                &graph.preview_migrate_ontology_module(&ModuleMigrationRequest {
+                    authority,
+                    selector: module_selector(&args.preview.selector)?,
+                    document: candidate.document,
+                    dependencies: candidate.dependencies,
+                    enforcement: candidate.enforcement,
+                })?,
+                json_output,
+                output,
+            )
+        }
+        ModuleCommand::Migrate(args) => {
+            let preview: ModuleMigrationPreview = read_json(&args.preview)?;
+            let candidate =
+                module_candidate_from_args(graph, &args.update.preview.candidate, true)?;
+            let (authority, token) = authority(&args.update.authority)?;
+            let receipt = graph.migrate_ontology_module(
+                &ModuleMigrationRequest {
+                    authority,
+                    selector: module_selector(&args.update.preview.selector)?,
+                    document: candidate.document,
+                    dependencies: candidate.dependencies,
+                    enforcement: candidate.enforcement,
+                },
+                &preview,
                 Some(&token),
             )?;
             emit(&receipt, json_output, output)
@@ -704,6 +760,16 @@ fn run_composition(
                 output,
             )
         }
+        CompositionCommand::CertificationReport(args) => emit(
+            &graph.multi_ontology_certification_report(
+                "cli",
+                &args.composition_before,
+                &args.migration_plan_digest,
+                args.rows_scanned,
+            )?,
+            json_output,
+            output,
+        ),
     }
 }
 

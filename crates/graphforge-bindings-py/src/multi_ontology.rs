@@ -9,9 +9,9 @@ use graphforge_api::{
     BridgeCandidate, BridgeDeleteRequest, BridgeDocument, BridgeExportFormat,
     BridgeImportFormatHint, BridgeSelector, BridgeUpdateRequest, CompositionChangeRequest,
     CompositionDataDisposition, GfError, ImportFormatHint, ModuleAdoptionRequest, ModuleCandidate,
-    ModuleDeleteRequest, ModuleSelector, ModuleUpdateRequest, OntologyAuthorityExpectation,
-    OntologyDoc, OntologyModuleId, ResolutionExplainRequest, SymbolKind,
-    WorkspaceOntologyComposition, WriteContext,
+    ModuleDeleteRequest, ModuleMigrationPreview, ModuleMigrationRequest, ModuleSelector,
+    ModuleUpdateRequest, OntologyAuthorityExpectation, OntologyDoc, OntologyModuleId,
+    ResolutionExplainRequest, SymbolKind, WorkspaceOntologyComposition, WriteContext,
 };
 use pyo3::prelude::*;
 use serde::Serialize;
@@ -343,6 +343,105 @@ pub(crate) fn preview_delete_module(
     let result = py
         .detach(|| forge.inner.preview_delete_ontology_module(&selector))
         .map_err(|e| to_multi_ontology_pyerr(py, &e))?;
+    to_python(py, &result)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn preview_migrate_module(
+    forge: &GraphForge,
+    py: Python<'_>,
+    ontology_id: &str,
+    authored_version: Option<&str>,
+    canonical_digest: Option<&str>,
+    document: &Bound<'_, PyAny>,
+    dependencies: &Bound<'_, PyAny>,
+    enforcement: Option<&str>,
+    expected_generation: &str,
+    expected_fingerprint: Option<&str>,
+    operation_uuid: &str,
+    actor_uuid: Option<&str>,
+) -> PyResult<Py<PyAny>> {
+    forge.ensure_open()?;
+    let request = ModuleMigrationRequest {
+        authority: authority(
+            py,
+            expected_generation,
+            expected_fingerprint,
+            operation_uuid,
+            actor_uuid,
+        )?,
+        selector: module_selector(py, ontology_id, authored_version, canonical_digest)?,
+        document: from_python(py, document)?,
+        dependencies: from_python(py, dependencies)?,
+        enforcement: enforcement.map(|value| mode(py, value)).transpose()?,
+    };
+    let result = py
+        .detach(|| forge.inner.preview_migrate_ontology_module(&request))
+        .map_err(|error| to_multi_ontology_pyerr(py, &error))?;
+    to_python(py, &result)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn migrate_module(
+    forge: &mut GraphForge,
+    py: Python<'_>,
+    ontology_id: &str,
+    authored_version: Option<&str>,
+    canonical_digest: Option<&str>,
+    document: &Bound<'_, PyAny>,
+    dependencies: &Bound<'_, PyAny>,
+    enforcement: Option<&str>,
+    expected_generation: &str,
+    expected_fingerprint: Option<&str>,
+    operation_uuid: &str,
+    actor_uuid: Option<&str>,
+    preview: &Bound<'_, PyAny>,
+    cancel: Option<&PyCancellationToken>,
+) -> PyResult<Py<PyAny>> {
+    forge.ensure_open()?;
+    let request = ModuleMigrationRequest {
+        authority: authority(
+            py,
+            expected_generation,
+            expected_fingerprint,
+            operation_uuid,
+            actor_uuid,
+        )?,
+        selector: module_selector(py, ontology_id, authored_version, canonical_digest)?,
+        document: from_python(py, document)?,
+        dependencies: from_python(py, dependencies)?,
+        enforcement: enforcement.map(|value| mode(py, value)).transpose()?,
+    };
+    let preview: ModuleMigrationPreview = from_python(py, preview)?;
+    let cancel = cancellation(cancel);
+    let result = py
+        .detach(|| {
+            forge
+                .inner
+                .migrate_ontology_module(&request, &preview, cancel.as_ref())
+        })
+        .map_err(|error| to_multi_ontology_pyerr(py, &error))?;
+    to_python(py, &result)
+}
+
+pub(crate) fn certification_report(
+    forge: &GraphForge,
+    py: Python<'_>,
+    composition_before: &str,
+    migration_plan_digest: &str,
+    rows_scanned: u64,
+) -> PyResult<Py<PyAny>> {
+    forge.ensure_open()?;
+    let result = py
+        .detach(|| {
+            forge.inner.multi_ontology_certification_report(
+                "python",
+                composition_before,
+                migration_plan_digest,
+                rows_scanned,
+            )
+        })
+        .map_err(|error| to_multi_ontology_pyerr(py, &error))?;
     to_python(py, &result)
 }
 

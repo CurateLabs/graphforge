@@ -863,6 +863,29 @@ jobs:
             --node "$report_root/node.json" \
             --cli "$report_root/cli.json"
 
+      - name: Certify retained-data migration across all public surfaces
+        shell: bash
+        run: |
+          report_root="${{ runner.temp }}/multi-ontology-certification"
+          mkdir -p "$report_root"
+          GRAPHFORGE_MULTI_ONTOLOGY_CERTIFICATION_REPORT="$report_root/rust.json" \
+            cargo test -q -p graphforge-api --test multi_ontology_certification \
+              retained_data_migrates_atomically_and_exact_identity_reopens
+          GRAPHFORGE_MULTI_ONTOLOGY_CERTIFICATION_REPORT="$report_root/cli.json" \
+            cargo test -q -p graphforge-cli --test multi_ontology \
+              emit_retained_data_certification_report
+          GRAPHFORGE_MULTI_ONTOLOGY_CERTIFICATION_REPORT="$report_root/python.json" \
+            /tmp/gf-concurrency/bin/python \
+              crates/graphforge-bindings-py/tests/multi_ontology_certification.py
+          GRAPHFORGE_MULTI_ONTOLOGY_CERTIFICATION_REPORT="$report_root/node.json" \
+            node --test \
+              crates/graphforge-bindings-node/tests/multi-ontology-certification.test.mjs
+          python3 scripts/ci/compare-multi-ontology-certification.py \
+            --rust "$report_root/rust.json" \
+            --python "$report_root/python.json" \
+            --node "$report_root/node.json" \
+            --cli "$report_root/cli.json"
+
       - name: Run required short concurrency matrix
         shell: bash
         run: >-

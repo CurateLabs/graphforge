@@ -6,8 +6,8 @@ use graphforge_api::{
     ActivationProfileChangeRequest, BridgeAdoptionRequest, BridgeDeleteRequest,
     BridgeUpdateRequest, CancellationToken, CompositionChangeRequest, CompositionDataDisposition,
     GfError, GraphForge as ApiGraphForge, ModuleAdoptionRequest, ModuleDeleteRequest,
-    ModuleUpdateRequest, MultiOntologyError, OntologyAuthorityExpectation,
-    ResolutionExplainRequest, WriteContext,
+    ModuleMigrationPreview, ModuleMigrationRequest, ModuleUpdateRequest, MultiOntologyError,
+    OntologyAuthorityExpectation, ResolutionExplainRequest, WriteContext,
 };
 use napi::Env;
 use napi::Task;
@@ -67,6 +67,25 @@ pub struct ModuleMutationInput {
     pub dependencies: Option<Vec<Value>>,
     /// Optional activation override.
     pub enforcement: Option<String>,
+    /// Optional standard cancellation signal.
+    pub signal: Option<AbortSignal>,
+}
+
+#[napi(object, object_to_js = false)]
+/// Owned retained-data module migration input.
+pub struct ModuleMigrationInput {
+    /// Exact authority expectation.
+    pub authority: AuthorityInput,
+    /// Exact or uniquely resolving current module selector.
+    pub selector: Value,
+    /// Authored target ontology document.
+    pub document: Value,
+    /// Exact target dependencies.
+    pub dependencies: Option<Vec<Value>>,
+    /// Optional target activation override.
+    pub enforcement: Option<String>,
+    /// Exact Rust preview returned by `previewMigrateOntologyModule`.
+    pub preview: Option<Value>,
     /// Optional standard cancellation signal.
     pub signal: Option<AbortSignal>,
 }
@@ -316,6 +335,40 @@ pub struct MultiOntologyMutationTask {
     cancellation: CancellationToken,
 }
 
+/// Deferred Rust-owned retained-data migration.
+pub struct ModuleMigrationTask {
+    engine: Arc<RwLock<ApiGraphForge>>,
+    request: Option<ModuleMigrationRequest>,
+    preview: Option<ModuleMigrationPreview>,
+    cancellation: CancellationToken,
+}
+
+impl Task for ModuleMigrationTask {
+    type Output = std::result::Result<graphforge_api::ModuleMigrationReceipt, MultiOntologyError>;
+    type JsValue = Unknown<'static>;
+
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        let mut graph = self
+            .engine
+            .write()
+            .map_err(|_| napi::Error::from_reason("GraphForge lock poisoned"))?;
+        let request = self
+            .request
+            .take()
+            .ok_or_else(|| napi::Error::from_reason("module migration already consumed"))?;
+        let preview = self
+            .preview
+            .take()
+            .ok_or_else(|| napi::Error::from_reason("module migration preview already consumed"))?;
+        Ok(graph.migrate_ontology_module(&request, &preview, Some(&self.cancellation)))
+    }
+
+    fn resolve(&mut self, env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        let receipt = output.map_err(|error| to_multi_deferred_err(env, &error))?;
+        env.to_js_value(&receipt)
+    }
+}
+
 impl Task for MultiOntologyMutationTask {
     type Output =
         std::result::Result<graphforge_api::MultiOntologyMutationReceipt, MultiOntologyError>;
@@ -528,6 +581,61 @@ impl GraphForge {
                 .transpose()?,
         };
         mutation_task(self, Mutation::UpdateModule(request), input.signal.take())
+    }
+
+    #[napi]
+    /// Preview an atomic retained-data module migration.
+    pub fn preview_migrate_ontology_module(&self, input: ModuleMigrationInput) -> Result<Value> {
+        let (request, _, _) = module_migration_request(input)?;
+        encode(
+            self.open_guard()?
+                .preview_migrate_ontology_module(&request)
+                .map_err(|error| to_multi_napi_err(&error))?,
+            "ontology module migration preview",
+        )
+    }
+
+    #[napi]
+    /// Re-derive and atomically publish a retained-data module migration.
+    pub fn migrate_ontology_module(
+        &self,
+        input: ModuleMigrationInput,
+    ) -> Result<AsyncTask<ModuleMigrationTask>> {
+        self.ensure_open()?;
+        let (request, preview, signal) = module_migration_request(input)?;
+        let preview = decode(
+            preview.ok_or_else(|| {
+                to_napi_err(&GfError::Validation("migration preview is required".into()))
+            })?,
+            "ontology module migration preview",
+        )?;
+        Ok(AsyncTask::new(ModuleMigrationTask {
+            engine: Arc::clone(&self.inner),
+            request: Some(request),
+            preview: Some(preview),
+            cancellation: bind_signal(signal),
+        }))
+    }
+
+    #[napi]
+    /// Return the Rust-owned certification report unchanged.
+    pub fn multi_ontology_certification_report(
+        &self,
+        composition_before: String,
+        migration_plan_digest: String,
+        rows_scanned: u32,
+    ) -> Result<Value> {
+        encode(
+            self.open_guard()?
+                .multi_ontology_certification_report(
+                    "node",
+                    &composition_before,
+                    &migration_plan_digest,
+                    u64::from(rows_scanned),
+                )
+                .map_err(|error| to_multi_napi_err(&error))?,
+            "multi-ontology certification report",
+        )
     }
 
     #[napi]
@@ -832,4 +940,33 @@ impl GraphForge {
             signal,
         )
     }
+}
+
+fn module_migration_request(
+    input: ModuleMigrationInput,
+) -> Result<(ModuleMigrationRequest, Option<Value>, Option<AbortSignal>)> {
+    let ModuleMigrationInput {
+        authority: authority_input,
+        selector,
+        document,
+        dependencies,
+        enforcement,
+        preview,
+        signal,
+    } = input;
+    Ok((
+        ModuleMigrationRequest {
+            authority: authority(authority_input)?,
+            selector: module_selector(selector)?,
+            document: decode(document, "ontology module document")?,
+            dependencies: dependencies
+                .unwrap_or_default()
+                .into_iter()
+                .map(|value| decode(value, "ontology module dependency"))
+                .collect::<Result<Vec<_>>>()?,
+            enforcement: enforcement.as_deref().map(activation_mode).transpose()?,
+        },
+        preview,
+        signal,
+    ))
 }

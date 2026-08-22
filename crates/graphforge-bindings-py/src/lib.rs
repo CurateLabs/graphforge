@@ -4872,6 +4872,90 @@ impl GraphForge {
         )
     }
 
+    #[pyo3(signature = (ontology_id, document, dependencies, *, authored_version=None, canonical_digest=None, enforcement=None, expected_project_generation_uuid, expected_composition_fingerprint, operation_uuid, actor_uuid=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn preview_migrate_ontology_module(
+        &self,
+        py: Python<'_>,
+        ontology_id: &str,
+        document: &Bound<'_, PyAny>,
+        dependencies: &Bound<'_, PyAny>,
+        authored_version: Option<&str>,
+        canonical_digest: Option<&str>,
+        enforcement: Option<&str>,
+        expected_project_generation_uuid: &str,
+        expected_composition_fingerprint: Option<&str>,
+        operation_uuid: &str,
+        actor_uuid: Option<&str>,
+    ) -> PyResult<Py<PyAny>> {
+        multi_ontology::preview_migrate_module(
+            self,
+            py,
+            ontology_id,
+            authored_version,
+            canonical_digest,
+            document,
+            dependencies,
+            enforcement,
+            expected_project_generation_uuid,
+            expected_composition_fingerprint,
+            operation_uuid,
+            actor_uuid,
+        )
+    }
+
+    #[pyo3(signature = (ontology_id, document, dependencies, preview, *, authored_version=None, canonical_digest=None, enforcement=None, expected_project_generation_uuid, expected_composition_fingerprint, operation_uuid, actor_uuid=None, cancellation=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn migrate_ontology_module(
+        &mut self,
+        py: Python<'_>,
+        ontology_id: &str,
+        document: &Bound<'_, PyAny>,
+        dependencies: &Bound<'_, PyAny>,
+        preview: &Bound<'_, PyAny>,
+        authored_version: Option<&str>,
+        canonical_digest: Option<&str>,
+        enforcement: Option<&str>,
+        expected_project_generation_uuid: &str,
+        expected_composition_fingerprint: Option<&str>,
+        operation_uuid: &str,
+        actor_uuid: Option<&str>,
+        cancellation: Option<&PyCancellationToken>,
+    ) -> PyResult<Py<PyAny>> {
+        multi_ontology::migrate_module(
+            self,
+            py,
+            ontology_id,
+            authored_version,
+            canonical_digest,
+            document,
+            dependencies,
+            enforcement,
+            expected_project_generation_uuid,
+            expected_composition_fingerprint,
+            operation_uuid,
+            actor_uuid,
+            preview,
+            cancellation,
+        )
+    }
+
+    fn multi_ontology_certification_report(
+        &self,
+        py: Python<'_>,
+        composition_before: &str,
+        migration_plan_digest: &str,
+        rows_scanned: u64,
+    ) -> PyResult<Py<PyAny>> {
+        multi_ontology::certification_report(
+            self,
+            py,
+            composition_before,
+            migration_plan_digest,
+            rows_scanned,
+        )
+    }
+
     #[pyo3(signature = (ontology_id, *, authored_version=None, canonical_digest=None))]
     fn preview_delete_ontology_module(
         &self,
