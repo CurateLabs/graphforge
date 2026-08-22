@@ -3,8 +3,9 @@
 //! The probe is deliberately independent of project contents. It operates in
 //! one private sibling below the canonical target parent and proves the same
 //! replacement primitive used by durable publication. Resolution opens and
-//! retains the project parent as the storage boundary, then uses
-//! handle-relative, no-follow access for the project root and durable children.
+//! retains the project parent as the storage boundary. Unix uses
+//! handle-relative, no-follow access for the project root and durable children;
+//! Windows retains identities and rejects reparse points around named opens.
 //!
 //! This admission check is a capability probe, not a sandbox boundary against
 //! another process already running as the same OS principal. Private directory
