@@ -6,6 +6,29 @@ provisioned Linux evidence host. The workflow is manual, protected by the
 A maintainer must approve the provider, exact SKU, ephemeral runner label, cost,
 and teardown before dispatch.
 
+The approved SUT record is immutable for a run. Separate evidence fields record
+provider, region, SKU, and the full Linux image identity with resolved version
+(never a moving `latest` alias); observed fields record OS, kernel, filesystem,
+memory, and local-NVMe capacity. The private provisioning record also retains
+vCPU/NVMe inventory, runner version, and pinned GraphForge toolchain versions.
+Neither record adds absolute host paths or mutable cloud resource identifiers.
+
+## No-spend readiness gate
+
+All checks before explicit cost approval are read-only: confirm the authenticated
+subscription, role, provider-registration state, regional SKU restrictions,
+regional vCPU quota, current on-demand price, GitHub environment policy, and
+unique runner-label availability. Do not register a provider, request quota,
+create resources, generate a runner registration token, or dispatch the workflow
+during this gate.
+
+The approval record names the exact provider/region/SKU/image version,
+on-demand price estimate, hard total spend ceiling, five-hour infrastructure
+TTL, teardown owner, and permission to register required providers and destroy
+the exact ephemeral resources. Spot/low-priority capacity is not valid: an
+uncontrolled eviction cannot be distinguished from the required cancellation
+and interrupted-finalization drills.
+
 The committed profile fixes SCALE 26, seed 1, the Graph500/R-MAT initiator,
 undirected canonicalization, and a **target-live** stopping rule. Deterministic
 attempt windows are externally sorted and merged until a complete merge proves
@@ -16,17 +39,35 @@ unique edges.
 ## Dispatch and abort policy
 
 1. Freeze the exact commit after normal PR CI is green.
-2. Provision a fresh Linux host with at least 128 GiB RAM and 1 TiB local NVMe
-   formatted as ext4, XFS, or Btrfs. Register it with one unique runner label.
-3. Configure required reviewers on the `scale-certification` environment.
-4. Dispatch `Billion-edge certification` with the exact 40-character SHA,
-   runner label, provider, and SKU. Branch names and moving refs are rejected.
-5. Do not retry an unchanged failing tree. Preserve the partial phase journal,
+2. After approval, provision a fresh Linux host with more than 128 GiB
+   advertised RAM (so guest `MemTotal` still clears 128 GiB) and at least 1 TiB
+   local NVMe. Format one local NVMe filesystem as XFS and mount it for the
+   runner's temp and work roots. Durable managed data disks are not substitutes.
+3. Configure the runner service so process `TMPDIR` and GitHub `RUNNER_TEMP`
+   resolve to directories on that same filesystem. Before registration, prove
+   resolved filesystem type, device identity, capacity, and a write/fsync probe;
+   retain paths only in the private provisioning log, never evidence.
+4. Register a repository-scoped ephemeral runner with one unique label. Do not
+   reuse a runner work directory, label, or cloud disk from another attempt.
+5. Configure required reviewers on the `scale-certification` environment.
+6. Dispatch `Billion-edge certification` with the exact 40-character SHA,
+   runner label, provider, region, SKU, and exact OS image identity. Branch
+   names, moving refs, and moving image aliases are rejected.
+7. Do not retry an unchanged failing tree. Preserve the partial phase journal,
    identify the first failed phase, repair the root cause, and certify a new SHA.
-6. Deregister and destroy the host after artifacts are uploaded. Never retain
+8. After both sanitized artifacts upload and validate, deregister the runner and
+   destroy the exact VM, OS disk, NIC, public IP, and resource group created for
+   the run. The independent five-hour TTL is a backstop, not a substitute for
+   immediate teardown. Never retain
    the project, portable bundle, credentials, registry tokens, or spill files.
 
-The workflow has a four-hour outer timeout. An in-process watchdog samples Linux
+The workflow has a four-hour outer timeout, and measured certification wall time
+must remain at or below the same 14,400-second product envelope. Both test
+commands, including compilation, share that window and therefore need explicit
+headroom. Provisioning happens before dispatch but remains inside the separately
+approved five-hour billed-resource TTL.
+
+An in-process watchdog samples Linux
 resident memory every 250 ms and allocated workspace bytes every five seconds,
 sets the shared cooperative-cancellation token on the first RSS, disk, or time
 breach, and records a typed failure at the affected phase. The Rust journal is
@@ -42,6 +83,21 @@ portable-v2 bundle export, full verification, atomic import, imported reopen and
 matching observations, plus representative corruption, cancellation, resource
 limit, and interrupted-finalization drills. Source generation, semantic package,
 transport, and imported generation identities remain distinct and reconciled.
+
+Negative drills use representative bounded data, not a second billion-edge
+payload. Each records its own elapsed/RSS/disk observation and typed outcome:
+corruption is rejected before import mutation; cancellation leaves no published
+partial generation; a resource limit stops at the first breach; and interrupted
+finalization recovers only the last acknowledged durable generation. No partial
+candidate may be addressable, and the last complete atomic journal entry remains
+valid.
+
+Fingerprint reconciliation is explicit: source and imported durable generation
+IDs are distinct; semantic package and transport digests are distinct;
+ontology/capability authority fingerprints match; canonical source/imported
+project fingerprints match; and source/imported 1-hop and 2-hop query
+fingerprints match. Integrity and compatibility verification occurs before any
+clean-import mutation.
 
 Only the sanitized JSON evidence and phase journal may be downloaded and checked
 in. The schema and semantic validator reject missing phases, count or authority

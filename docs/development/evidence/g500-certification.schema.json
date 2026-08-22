@@ -12,13 +12,15 @@
     "run": { "type": "object", "additionalProperties": false, "required": ["command", "scale", "edgefactor", "seed", "directionality", "self_loops", "duplicates"], "properties": { "command": { "const": "cargo test -p graphforge-api --release --test scale_g500_ladder certification_target_live_full_lifecycle_evidence -- --ignored --exact --nocapture --test-threads=1" }, "scale": { "const": 26 }, "edgefactor": { "const": 16 }, "seed": { "const": 1 }, "directionality": { "const": "undirected" }, "self_loops": { "const": "drop" }, "duplicates": { "const": "drop" } } },
     "host": {
       "type": "object", "additionalProperties": false,
-      "required": ["provider", "sku", "os", "kernel", "filesystem", "memory_bytes", "nvme_bytes"],
+      "required": ["provider", "region", "sku", "os_image", "os", "kernel", "filesystem", "memory_bytes", "nvme_bytes"],
       "properties": {
-        "provider": { "type": "string", "minLength": 1, "maxLength": 64 },
-        "sku": { "type": "string", "minLength": 1, "maxLength": 128 },
-        "os": { "type": "string", "pattern": "^Linux" },
+        "provider": { "type": "string", "minLength": 1, "maxLength": 64, "description": "Provisioned cloud provider; never local or a mutable resource identifier." },
+        "region": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9._-]+$", "description": "Exact provider region approved for this run." },
+        "sku": { "type": "string", "minLength": 1, "maxLength": 128, "description": "Exact provisioned machine SKU approved for this run." },
+        "os_image": { "type": "string", "minLength": 1, "maxLength": 256, "description": "Immutable Linux image identity including its resolved version; moving aliases are invalid." },
+        "os": { "type": "string", "pattern": "^Linux", "description": "Observed Linux OS family from the provisioned host." },
         "kernel": { "type": "string", "minLength": 1, "maxLength": 128 },
-        "filesystem": { "enum": ["ext4", "xfs", "btrfs"] },
+        "filesystem": { "enum": ["ext4", "xfs", "btrfs"], "description": "Filesystem of the Rust process temp workspace; provisioning proves it is the same local-NVMe device as RUNNER_TEMP." },
         "memory_bytes": { "type": "integer", "minimum": 137438953472 },
         "nvme_bytes": { "type": "integer", "minimum": 1099511627776 }
       }
