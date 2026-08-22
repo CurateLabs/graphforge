@@ -56,6 +56,7 @@ const ONE_HOP: &str = "MATCH (a)-[r]->(b) RETURN b.node_uuid AS id ORDER BY id L
 const TWO_HOP: &str =
     "MATCH (a)-[r1]->(b)-[r2]->(c) RETURN c.node_uuid AS id ORDER BY id LIMIT 1000";
 const COUNT_EDGES: &str = "MATCH ()-[r:LINK]->() RETURN count(r) AS total";
+static JOURNAL_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 // ---------------------------------------------------------------------------
 // Versioned profile (single source of truth for the ladder).
@@ -521,6 +522,95 @@ fn rss_value() -> Value {
     peak_rss().map_or(Value::Null, |(bytes, _)| json!(bytes))
 }
 
+fn linux_process_memory() -> Value {
+    let Ok(contents) = fs::read_to_string("/proc/self/status") else {
+        return Value::Null;
+    };
+    let read_bytes = |name: &str| {
+        contents.lines().find_map(|line| {
+            line.strip_prefix(name).and_then(|value| {
+                value
+                    .trim()
+                    .trim_end_matches(" kB")
+                    .trim()
+                    .parse::<u64>()
+                    .ok()
+                    .map(|kb| kb.saturating_mul(1024))
+            })
+        })
+    };
+    json!({
+        "vmhwm_bytes": read_bytes("VmHWM:"),
+        "vmrss_bytes": read_bytes("VmRSS:"),
+        "rss_anon_bytes": read_bytes("RssAnon:"),
+        "rss_file_bytes": read_bytes("RssFile:"),
+    })
+}
+
+fn phase_journal_value(
+    profile: &ScaleProfile,
+    rung: &Rung,
+    completed_rungs: &[Value],
+    phase: &str,
+    state: &str,
+    steps: &[Value],
+    failure: Option<(&str, &str)>,
+) -> Value {
+    json!({
+        "schema": EVIDENCE_SCHEMA,
+        "schema_version": SCHEMA_VERSION,
+        "profile_schema": profile.schema,
+        "run_state": state,
+        "active_rung": rung.id,
+        "active_scale": rung.scale,
+        "active_phase": phase,
+        "process_memory": linux_process_memory(),
+        "completed_rungs": completed_rungs,
+        "active_steps": steps,
+        "first_failing_phase": failure.map(|(phase, _)| phase),
+        "error_class": failure.map(|(_, class)| class),
+    })
+}
+
+fn write_json_atomically(path: &Path, value: &Value) {
+    let parent = path.parent().expect("journal parent");
+    fs::create_dir_all(parent).expect("journal parent");
+    let sequence = JOURNAL_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let file_name = path
+        .file_name()
+        .expect("journal file name")
+        .to_string_lossy();
+    let temporary = parent.join(format!(
+        ".{file_name}.{}.{}.tmp",
+        std::process::id(),
+        sequence
+    ));
+    let mut file = fs::File::create(&temporary).expect("create journal temporary");
+    serde_json::to_writer_pretty(&mut file, value).expect("serialize journal");
+    file.write_all(b"\n").expect("terminate journal");
+    file.sync_all().expect("sync journal temporary");
+    fs::rename(&temporary, path).expect("publish journal");
+    fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .expect("sync journal parent");
+}
+
+fn persist_phase_journal(
+    profile: &ScaleProfile,
+    rung: &Rung,
+    completed_rungs: &[Value],
+    phase: &str,
+    state: &str,
+    steps: &[Value],
+    failure: Option<(&str, &str)>,
+) {
+    let Ok(path) = std::env::var("GF_G500_LADDER_JOURNAL_OUT") else {
+        return;
+    };
+    let value = phase_journal_value(profile, rung, completed_rungs, phase, state, steps, failure);
+    write_json_atomically(&PathBuf::from(path), &value);
+}
+
 #[allow(clippy::too_many_lines)]
 fn run_rung(
     profile: &ScaleProfile,
@@ -528,6 +618,7 @@ fn run_rung(
     env: RunEnvelope,
     edge_factor: u32,
     ladder_started: Instant,
+    completed_rungs: &[Value],
 ) -> RungOutcome {
     let started = Instant::now();
     let workspace = TempDir::new().expect("rung workspace");
@@ -541,6 +632,15 @@ fn run_rung(
     let mut error_class: Option<&'static str> = None;
 
     // ---- generate ----
+    persist_phase_journal(
+        profile,
+        rung,
+        completed_rungs,
+        "generate",
+        "running",
+        &steps,
+        None,
+    );
     let gen_started = Instant::now();
     let spill = generate_spill_runs(
         rung.scale,
@@ -570,6 +670,19 @@ fn run_rung(
             "run_count": spill.runs.len(),
         }
     }));
+    persist_phase_journal(
+        profile,
+        rung,
+        completed_rungs,
+        "generate",
+        if gen_violation.is_some() {
+            "phase_failed"
+        } else {
+            "phase_completed"
+        },
+        &steps,
+        first_failing_phase.zip(error_class),
+    );
 
     // ---- ingest (merge + publish through the public facade) ----
     let mut live_unique_edges = 0u64;
@@ -577,6 +690,15 @@ fn run_rung(
     let mut input_fingerprint = String::from("sha256:");
     let mut ingest_ran = false;
     if first_failing_phase.is_none() {
+        persist_phase_journal(
+            profile,
+            rung,
+            completed_rungs,
+            "ingest",
+            "running",
+            &steps,
+            None,
+        );
         let ingest_started = Instant::now();
         let graph = GraphForge::new(Some(project.to_str().expect("utf8 project")))
             .expect("open GraphForge for ingest");
@@ -610,6 +732,19 @@ fn run_rung(
                 "input_fingerprint": input_fingerprint,
             }
         }));
+        persist_phase_journal(
+            profile,
+            rung,
+            completed_rungs,
+            "ingest",
+            if ingest_violation.is_some() {
+                "phase_failed"
+            } else {
+                "phase_completed"
+            },
+            &steps,
+            first_failing_phase.zip(error_class),
+        );
     }
 
     // ---- reopen + recount ----
@@ -617,6 +752,15 @@ fn run_rung(
     let mut edge_count = 0u64;
     let mut gsi = String::new();
     if first_failing_phase.is_none() {
+        persist_phase_journal(
+            profile,
+            rung,
+            completed_rungs,
+            "reopen",
+            "running",
+            &steps,
+            None,
+        );
         let reopen_started = Instant::now();
         let graph = GraphForge::new(Some(project.to_str().expect("utf8 project")))
             .expect("reopen GraphForge");
@@ -624,39 +768,82 @@ fn run_rung(
         edge_count = scalar_count(&graph.execute(COUNT_EDGES).expect("edge count"));
         let reopen_s = reopen_started.elapsed().as_secs_f64();
         gsi = gsi_undirected(node_count, edge_count);
+        let reopen_violation = envelope_violation(&env, ladder_started, &project, &spill_dir);
+        if let Some(class) = reopen_violation {
+            first_failing_phase = Some("reopen");
+            error_class = Some(class);
+        }
         steps.push(json!({
             "id": "reopen",
-            "pass": true,
+            "pass": reopen_violation.is_none(),
             "wall_time_s": reopen_s,
             "rss_peak_bytes": rss_value(),
             "detail": { "node_count": node_count, "edge_count": edge_count, "gsi": gsi }
         }));
+        persist_phase_journal(
+            profile,
+            rung,
+            completed_rungs,
+            "reopen",
+            if reopen_violation.is_some() {
+                "phase_failed"
+            } else {
+                "phase_completed"
+            },
+            &steps,
+            first_failing_phase.zip(error_class),
+        );
 
         // ---- deterministic LIMIT queries ----
-        let hop1_started = Instant::now();
-        let hop1 = graph.execute(ONE_HOP).expect("one-hop LIMIT");
-        let hop1_rows = row_count(&hop1);
-        steps.push(json!({
-            "id": "cypher_limit_1hop",
-            "pass": hop1_rows <= 1_000,
-            "wall_time_s": hop1_started.elapsed().as_secs_f64(),
-            "detail": { "rows": hop1_rows }
-        }));
+        if first_failing_phase.is_none() {
+            let hop1_started = Instant::now();
+            persist_phase_journal(
+                profile,
+                rung,
+                completed_rungs,
+                "query",
+                "running",
+                &steps,
+                None,
+            );
+            let hop1 = graph.execute(ONE_HOP).expect("one-hop LIMIT");
+            let hop1_rows = row_count(&hop1);
+            steps.push(json!({
+                "id": "cypher_limit_1hop",
+                "pass": hop1_rows <= 1_000,
+                "wall_time_s": hop1_started.elapsed().as_secs_f64(),
+                "detail": { "rows": hop1_rows }
+            }));
 
-        let hop2_started = Instant::now();
-        let hop2 = graph.execute(TWO_HOP).expect("two-hop LIMIT");
-        let hop2_rows = row_count(&hop2);
-        steps.push(json!({
-            "id": "cypher_limit_2hop",
-            "pass": hop2_rows <= 1_000,
-            "wall_time_s": hop2_started.elapsed().as_secs_f64(),
-            "detail": { "rows": hop2_rows }
-        }));
-        drop(graph);
-        if let Some(class) = envelope_violation(&env, ladder_started, &project, &spill_dir) {
-            first_failing_phase = Some("query");
-            error_class = Some(class);
+            let hop2_started = Instant::now();
+            let hop2 = graph.execute(TWO_HOP).expect("two-hop LIMIT");
+            let hop2_rows = row_count(&hop2);
+            steps.push(json!({
+                "id": "cypher_limit_2hop",
+                "pass": hop2_rows <= 1_000,
+                "wall_time_s": hop2_started.elapsed().as_secs_f64(),
+                "detail": { "rows": hop2_rows }
+            }));
+            let query_violation = envelope_violation(&env, ladder_started, &project, &spill_dir);
+            if let Some(class) = query_violation {
+                first_failing_phase = Some("query");
+                error_class = Some(class);
+            }
+            persist_phase_journal(
+                profile,
+                rung,
+                completed_rungs,
+                "query",
+                if query_violation.is_some() {
+                    "phase_failed"
+                } else {
+                    "phase_completed"
+                },
+                &steps,
+                first_failing_phase.zip(error_class),
+            );
         }
+        drop(graph);
     }
 
     let disk_used_bytes =
@@ -733,9 +920,31 @@ fn run_ladder(profile: &ScaleProfile, env: RunEnvelope, rungs: &[Rung]) -> Vec<V
     let ladder_started = Instant::now();
     let mut evidence = Vec::new();
     for rung in rungs {
-        let outcome = run_rung(profile, rung, env, profile.edgefactor, ladder_started);
+        let outcome = run_rung(
+            profile,
+            rung,
+            env,
+            profile.edgefactor,
+            ladder_started,
+            &evidence,
+        );
         let passed = outcome.passed;
         evidence.push(outcome.evidence);
+        let first_failing_phase = evidence
+            .last()
+            .and_then(|rung| rung["first_failing_phase"].as_str());
+        let error_class = evidence
+            .last()
+            .and_then(|rung| rung["error_class"].as_str());
+        persist_phase_journal(
+            profile,
+            rung,
+            &evidence,
+            "rung",
+            "rung_completed",
+            &[],
+            first_failing_phase.zip(error_class),
+        );
         if !passed {
             break;
         }
@@ -1274,6 +1483,7 @@ fn first_fail_stops_at_envelope_violation() {
         tiny_env,
         profile.edgefactor,
         Instant::now(),
+        &[],
     );
     assert!(!outcome.passed, "a violated envelope must not pass");
     assert_eq!(outcome.evidence["first_failing_phase"], "generate");
@@ -1305,6 +1515,7 @@ fn ci_rung_public_facade_engineering_green() {
         profile.envelope.into(),
         profile.edgefactor,
         Instant::now(),
+        &[],
     );
     assert!(outcome.passed, "CI rung must pass: {:#}", outcome.evidence);
     let ev = &outcome.evidence;
@@ -1387,6 +1598,49 @@ fn provisioned_max_scale_excludes_larger_rungs() {
     assert!(selected.iter().all(|rung| rung.scale != 26));
     assert!(provisioned_rungs_through(&profile, 10).is_err());
     assert!(provisioned_rungs_through(&profile, 23).is_err());
+}
+
+#[test]
+fn phase_journal_atomically_preserves_completed_rungs_and_active_state() {
+    let profile = load_profile();
+    let rung = profile
+        .rungs
+        .iter()
+        .find(|rung| rung.scale == 22)
+        .expect("S22 rung");
+    let completed = vec![json!({"rung": "S20", "pass": true})];
+    let steps = vec![json!({"id": "generate", "pass": true})];
+    let journal = phase_journal_value(
+        &profile,
+        rung,
+        &completed,
+        "ingest",
+        "phase_failed",
+        &steps,
+        Some(("ingest", "disk_limit")),
+    );
+    assert_eq!(journal["completed_rungs"], json!(completed));
+    assert_eq!(journal["active_rung"], "S22");
+    assert_eq!(journal["active_phase"], "ingest");
+    assert_eq!(journal["run_state"], "phase_failed");
+    assert_eq!(journal["first_failing_phase"], "ingest");
+    assert_eq!(journal["error_class"], "disk_limit");
+
+    let directory = TempDir::new().expect("journal directory");
+    let path = directory.path().join("journal.json");
+    write_json_atomically(&path, &journal);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&fs::read(&path).expect("read journal"))
+            .expect("valid journal"),
+        journal
+    );
+    assert_eq!(
+        fs::read_dir(directory.path())
+            .expect("list journal directory")
+            .count(),
+        1,
+        "atomic publication must not leave a temporary file"
+    );
 }
 
 // ---------------------------------------------------------------------------

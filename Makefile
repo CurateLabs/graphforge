@@ -322,6 +322,7 @@ bench-g500-scale20:  ## Official-parameter SCALE-20 public-facade engineering gr
 bench-g500-ladder:  ## Bounded billion-edge scale ladder S20-S26 first-fail evidence (#736; ignored, provisioned scale-host)
 	@test -n "$$GF_G500_LADDER_MAX_SCALE" || (echo "GF_G500_LADDER_MAX_SCALE is required" && exit 2)
 	GF_G500_LADDER_EVIDENCE_OUT="$(CURDIR)/docs/development/g500-ladder-evidence.json" \
+	GF_G500_LADDER_JOURNAL_OUT="$(CURDIR)/build/g500-ladder-journal.json" \
 	GF_G500_LADDER_MAX_SCALE="$$GF_G500_LADDER_MAX_SCALE" \
 	cargo test -p graphforge-api --release --test scale_g500_ladder ladder_public_facade_first_fail_evidence -- --ignored --nocapture --test-threads=1
 

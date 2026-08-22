@@ -139,6 +139,13 @@ runs S20, S22, S24, and S25, and excludes S26 even when every smaller rung
 passes.
 
 Default evidence path: `docs/development/g500-ladder-evidence.json`.
+The runner also atomically updates `build/g500-ladder-journal.json` before and
+after every phase and after every rung. Retrieve the journal after an OOM,
+ENOSPC, timeout, or operator safety stop; `completed_rungs` remain valid, while
+`active_rung`, `active_phase`, and `run_state` describe the interrupted work and
+must not be presented as a pass. On Linux, each journal observation separates
+process `VmHWM`, current RSS, anonymous RSS, and file-backed RSS so filesystem
+cache is not mistaken for GraphForge heap growth.
 
 ## Evidence JSON
 
