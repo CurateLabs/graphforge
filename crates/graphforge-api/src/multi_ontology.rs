@@ -388,20 +388,23 @@ impl GraphForge {
     ) -> Result<ModuleMigrationPreview, GfError> {
         let (candidate, previous_module, next_module, affected_bridges) =
             self.module_migration_candidate(request)?;
-        let previous = self.required_composition()?;
+        let parent = graphforge_storage::resolve_generation_by_uuid(
+            self.resolved_generation.container_root(),
+            request.authority.expected_project_generation_uuid,
+        )
+        .map_err(MultiOntologyError::from)?;
+        let previous = composition_from_generation(&parent)?
+            .ok_or_else(|| GfError::Validation("migration parent composition is missing"))?;
         let previous_compiled = previous.compile().map_err(MultiOntologyError::from)?;
         let next_compiled = candidate.compile().map_err(MultiOntologyError::from)?;
-        let bindings = self
-            .semantic_storage_bindings
-            .lock()
-            .expect("semantic storage binding lock poisoned")
-            .clone()
+        let bindings = graphforge_storage::semantic_storage_bindings(&parent)
+            .map_err(MultiOntologyError::from)?
             .ok_or_else(|| GfError::Validation("semantic storage bindings are missing"))?;
         let plan = graphforge_storage::SemanticStorageBindings::plan_retained_data_migration(
             &previous_compiled,
             &next_compiled,
             &bindings,
-            &self.resolved_generation.graph_tree_root(),
+            &parent.graph_tree_root(),
         )
         .map_err(MultiOntologyError::from)?;
         Ok(ModuleMigrationPreview {
@@ -413,13 +416,20 @@ impl GraphForge {
     }
 
     /// Re-derive and atomically publish an authored retained-data migration.
+    #[allow(clippy::too_many_lines)] // replay authentication, private staging, and publication are one transaction
     pub fn migrate_ontology_module(
         &mut self,
         request: &ModuleMigrationRequest,
         preview: &ModuleMigrationPreview,
         cancellation: Option<&CancellationToken>,
     ) -> Result<ModuleMigrationReceipt, GfError> {
-        let expected_generation = migration_generation_uuid(request, preview);
+        let fresh = self.preview_migrate_ontology_module(request)?;
+        if &fresh != preview {
+            return Err(GfError::Validation(
+                "module migration preview does not match exact parent",
+            ));
+        }
+        let expected_generation = migration_generation_uuid(request, &fresh);
         if let Some(published) = graphforge_storage::published_project_transaction(
             self.resolved_generation.container_root(),
             request.authority.context.operation_uuid.0,
@@ -435,17 +445,11 @@ impl GraphForge {
             }
             return Ok(ModuleMigrationReceipt {
                 project_generation_uuid: published.generation_uuid,
-                composition_fingerprint: preview.plan.to_composition_fingerprint.clone(),
-                plan_digest: preview.plan.plan_digest.clone(),
-                retained_rows_scanned: preview.plan.retained_rows_scanned,
+                composition_fingerprint: fresh.plan.to_composition_fingerprint,
+                plan_digest: fresh.plan.plan_digest,
+                retained_rows_scanned: fresh.plan.retained_rows_scanned,
                 operation_uuid: request.authority.context.operation_uuid.0,
             });
-        }
-        let fresh = self.preview_migrate_ontology_module(request)?;
-        if &fresh != preview {
-            return Err(GfError::Validation(
-                "module migration preview does not match exact parent",
-            ));
         }
         cancellation.map_or(Ok(()), CancellationToken::checkpoint)?;
         let (candidate, _, _, _) = self.module_migration_candidate(request)?;
@@ -591,32 +595,32 @@ impl GraphForge {
             .ok_or_else(|| GfError::Validation("retained birth_year column is missing"))?;
         let birth_year_text = arrow::util::display::array_value_to_string(birth_year_column, 0)
             .map_err(|_| GfError::Validation("retained birth_year cannot be rendered"))?;
-        let birth_year = if let Ok(value) = birth_year_text.parse::<i64>() {
-            value
-        } else {
-            let value = birth_year_text.parse::<f64>().map_err(|_| {
-                GfError::Validation(format!(
-                    "retained birth_year must be an integer: {birth_year_text}"
-                ))
-            })?;
-            if value.fract() != 0.0 || value < i64::MIN as f64 || value > i64::MAX as f64 {
-                return Err(GfError::Validation(
-                    "retained birth_year must be an integer",
-                ));
-            }
-            value as i64
+        let birth_year = birth_year_text
+            .parse::<i64>()
+            .map_err(|_| GfError::Validation("retained birth_year must be an integer"))?;
+        let retained_data = MultiOntologyRetainedDataReport {
+            rows_scanned,
+            name,
+            birth_year,
         };
         let mut cases = std::collections::BTreeMap::new();
-        cases.insert("authority_reopened".into(), serde_json::json!(true));
+        cases.insert(
+            "authority_reopened".into(),
+            serde_json::json!({"composition_fingerprint": composition.composition_fingerprint.clone()}),
+        );
         cases.insert(
             "bridge_set_retained".into(),
-            serde_json::json!(bridge_ids.len() == 3),
+            serde_json::json!({"bridge_ids": bridge_ids.clone()}),
         );
         cases.insert(
             "module_set_retained".into(),
-            serde_json::json!(module_ids.len() == 6),
+            serde_json::json!({"module_ids": module_ids.clone()}),
         );
-        cases.insert("retained_data_query".into(), serde_json::json!(true));
+        cases.insert(
+            "retained_data_query".into(),
+            serde_json::to_value(&retained_data)
+                .map_err(|_| GfError::Validation("retained report cannot be encoded"))?,
+        );
         Ok(MultiOntologyCertificationReport {
             contract: "graphforge-multi-ontology-certification-result/1".into(),
             surface: surface.into(),
@@ -625,11 +629,7 @@ impl GraphForge {
             migration_plan_digest: migration_plan_digest.to_owned(),
             module_ids,
             bridge_ids,
-            retained_data: MultiOntologyRetainedDataReport {
-                rows_scanned,
-                name,
-                birth_year,
-            },
+            retained_data,
             cases,
         })
     }

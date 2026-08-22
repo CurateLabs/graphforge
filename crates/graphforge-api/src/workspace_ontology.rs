@@ -301,7 +301,7 @@ pub(crate) fn publish_workspace_records_with_graph_tree(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn publish_workspace_records_inner(
     graph: &mut GraphForge,
     operation_uuid: uuid::Uuid,

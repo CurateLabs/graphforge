@@ -3,10 +3,10 @@
 use std::collections::BTreeMap;
 
 use graphforge_api::{
-    BridgeAdoptionRequest, BridgeDocument, BridgeExportFormat, BridgeSelector, GraphForge,
-    ModuleAdoptionRequest, ModuleMigrationRequest, ModuleSelector, OntologyAuthorityExpectation,
-    OntologyModuleId, ResolutionExplainRequest, SemanticMigrationOperation, SymbolKind,
-    WriteContext,
+    ActivationMode, ActivationProfileChangeRequest, BridgeAdoptionRequest, BridgeDocument,
+    BridgeExportFormat, BridgeSelector, CancellationToken, GraphForge, ModuleAdoptionRequest,
+    ModuleMigrationRequest, ModuleSelector, OntologyAuthorityExpectation, OntologyModuleId,
+    ResolutionExplainRequest, SemanticMigrationOperation, SymbolKind, WriteContext,
 };
 use graphforge_ontology::OntologyDoc;
 use serde::Deserialize;
@@ -322,6 +322,24 @@ fn retained_data_migrates_atomically_and_exact_identity_reopens() {
             SemanticMigrationOperation::RenameProperty { .. }
         ))
     );
+    let before_cancel = graph
+        .ontology_authority_state()
+        .expect("authority before cancellation");
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    assert_eq!(
+        graph
+            .migrate_ontology_module(&request, &preview, Some(&cancelled))
+            .expect_err("cancelled migration must fail")
+            .code(),
+        "GF_CANCELLED"
+    );
+    assert_eq!(
+        graph
+            .ontology_authority_state()
+            .expect("authority after cancellation"),
+        before_cancel
+    );
     let receipt = graph
         .migrate_ontology_module(&request, &preview, None)
         .expect("publish retained-data migration");
@@ -329,6 +347,28 @@ fn retained_data_migrates_atomically_and_exact_identity_reopens() {
         .migrate_ontology_module(&request, &preview, None)
         .expect("exact idempotent replay");
     assert_eq!(replay, receipt);
+    let mut forged = preview.clone();
+    forged.plan.to_composition_fingerprint = "forged-composition".into();
+    forged.plan.retained_rows_scanned = u64::MAX;
+    assert_eq!(
+        graph
+            .migrate_ontology_module(&request, &forged, None)
+            .expect_err("forged replay preview must fail")
+            .code(),
+        "GF_VALIDATION"
+    );
+    let mut changed = request.clone();
+    changed.enforcement = Some(graphforge_api::ActivationMode::Advisory);
+    let changed_preview = graph
+        .preview_migrate_ontology_module(&changed)
+        .expect("preview changed-content replay against exact parent");
+    assert_eq!(
+        graph
+            .migrate_ontology_module(&changed, &changed_preview, None)
+            .expect_err("changed content must conflict with published operation")
+            .code(),
+        "GF_IDEMPOTENCY_CONFLICT"
+    );
     drop(graph);
 
     let reopened = GraphForge::new(Some(path)).expect("reopen migrated project");
@@ -355,4 +395,78 @@ fn retained_data_migrates_atomically_and_exact_identity_reopens() {
     if let Some(path) = std::env::var_os("GRAPHFORGE_MULTI_ONTOLOGY_CERTIFICATION_REPORT") {
         std::fs::write(path, serde_json::to_vec(&report).unwrap()).unwrap();
     }
+}
+
+#[test]
+fn stale_parent_race_preserves_competing_current_and_retained_data() {
+    let project = tempfile::tempdir().expect("durable stale-parent project");
+    let path = project.path().to_str().expect("UTF-8 project path");
+    let mut migration = GraphForge::new(Some(path)).expect("open migration facade");
+    let candidate = migration
+        .create_ontology_module(fixture_document("genealogy-v1.json"), Vec::new(), None)
+        .expect("validate genealogy v1");
+    migration
+        .adopt_ontology_module(
+            &ModuleAdoptionRequest {
+                authority: expectation(&migration, 843_400),
+                candidate: candidate.clone(),
+            },
+            None,
+        )
+        .expect("adopt genealogy v1");
+    migration
+        .execute("CREATE (:Person {full_name: 'Race Safe', birth_year: 1900})")
+        .expect("create retained race row");
+    let request = ModuleMigrationRequest {
+        authority: expectation(&migration, 843_401),
+        selector: ModuleSelector::Exact(candidate.id),
+        document: fixture_document("genealogy-v2.json"),
+        dependencies: Vec::new(),
+        enforcement: None,
+    };
+    let preview = migration
+        .preview_migrate_ontology_module(&request)
+        .expect("preview migration before race");
+
+    let mut competitor = GraphForge::new(Some(path)).expect("open competing facade");
+    competitor
+        .change_ontology_activation_profile(
+            &ActivationProfileChangeRequest {
+                authority: expectation(&competitor, 843_402),
+                profile_default: ActivationMode::Advisory,
+                activation: Vec::new(),
+            },
+            None,
+        )
+        .expect("publish competing authority");
+    let competing = competitor
+        .ontology_authority_state()
+        .expect("competing authority");
+    drop(competitor);
+
+    assert!(
+        migration
+            .migrate_ontology_module(&request, &preview, None)
+            .is_err()
+    );
+    drop(migration);
+    let reopened = GraphForge::new(Some(path)).expect("reopen competing CURRENT");
+    assert_eq!(
+        reopened
+            .ontology_authority_state()
+            .expect("authority after stale race"),
+        competing
+    );
+    let retained = reopened
+        .execute("MATCH (person:Person) RETURN person.full_name AS name")
+        .expect("query retained pre-migration row");
+    assert_eq!(retained.batches[0].num_rows(), 1);
+    assert_eq!(
+        arrow::util::display::array_value_to_string(
+            retained.batches[0].column_by_name("name").expect("name"),
+            0,
+        )
+        .expect("render retained name"),
+        "Race Safe"
+    );
 }
