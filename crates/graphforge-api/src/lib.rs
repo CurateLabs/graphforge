@@ -1144,8 +1144,8 @@ impl GraphForge {
                 // must retain that typed route even under an exploratory profile;
                 // advisory mode still permits binder-approved runtime fallbacks
                 // without collapsing resolved ontology data into `_untyped`.
-                graphforge_ontology::ActivationMode::Exploratory => OntologyMode::Advisory,
-                graphforge_ontology::ActivationMode::Advisory => OntologyMode::Advisory,
+                graphforge_ontology::ActivationMode::Exploratory
+                | graphforge_ontology::ActivationMode::Advisory => OntologyMode::Advisory,
                 graphforge_ontology::ActivationMode::Strict => OntologyMode::Strict,
             }
         });
