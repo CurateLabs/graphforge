@@ -231,6 +231,53 @@ class FakeFly:
         return argparse.Namespace(returncode=0, stdout="", stderr="")
 
 
+def test_machine_exec_receives_acknowledgement_as_one_remote_command(tmp_path, monkeypatch):
+    fake = FakeFly()
+    fake_json_responses = iter(
+        [
+            [],
+            {"id": "volume-internal"},
+        ]
+    )
+    fake.json = lambda _command: next(fake_json_responses)
+    machine = {
+        "id": "machine-internal",
+        "region": "den",
+        "image_ref": {"digest": "sha256:" + "b" * 64},
+        "config": {
+            "auto_destroy": True,
+            "restart": {"policy": "no"},
+            "guest": {"cpu_kind": "performance", "cpus": 2, "memory_mb": 4096},
+            "mounts": [{"path": "/work"}],
+            "services": [],
+        },
+    }
+    monkeypatch.setattr(controller, "create_machine", lambda *_args: machine)
+    monkeypatch.setattr(controller.time, "monotonic", lambda: 0)
+
+    original_run = fake.run
+
+    def run(command, check=True):
+        result = original_run(command, check)
+        if command[:4] == ["ssh", "sftp", "get", "/work/fly-qualification-evidence.json"]:
+            Path(command[4]).write_text(json.dumps(evidence()) + "\n", encoding="utf-8")
+        return result
+
+    fake.run = run
+    output = tmp_path / "evidence.json"
+    controller.execute(args(evidence_out=output), fake, "sha256:" + "b" * 64)
+
+    assert [
+        "machine",
+        "exec",
+        "machine-internal",
+        "--app",
+        "gf-qual-app",
+        "touch /work/controller-ack",
+    ] in fake.calls
+    assert output.is_file()
+
+
 def test_teardown_is_child_first_and_idempotent():
     fake = FakeFly()
     controller.cleanup(fake, "gf-qual-app", "machine-internal", "volume-internal")
