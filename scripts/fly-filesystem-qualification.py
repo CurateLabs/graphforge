@@ -255,8 +255,7 @@ def execute(args: argparse.Namespace, fly: Flyctl, digest: str) -> None:
                     machine_id,
                     "--app",
                     args.app_name,
-                    "touch",
-                    "/work/controller-ack",
+                    "touch /work/controller-ack",
                 ]
             )
             if evidence["result"] != "qualified":
