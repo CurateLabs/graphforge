@@ -743,6 +743,24 @@ fn run_ladder(profile: &ScaleProfile, env: RunEnvelope, rungs: &[Rung]) -> Vec<V
     evidence
 }
 
+fn provisioned_rungs_through(profile: &ScaleProfile, max_scale: u32) -> Result<Vec<Rung>, String> {
+    let is_provisioned_max = profile
+        .rungs
+        .iter()
+        .any(|rung| rung.scale == max_scale && rung.tier == "provisioned");
+    if !is_provisioned_max {
+        return Err(format!(
+            "GF_G500_LADDER_MAX_SCALE={max_scale} is not a provisioned profile rung"
+        ));
+    }
+    Ok(profile
+        .rungs
+        .iter()
+        .filter(|rung| rung.tier == "provisioned" && rung.scale <= max_scale)
+        .cloned()
+        .collect())
+}
+
 // ---------------------------------------------------------------------------
 // Streaming edge publisher (bounded by EDGE_PUBLISH_ROWS).
 // ---------------------------------------------------------------------------
@@ -1314,12 +1332,12 @@ fn ci_rung_public_facade_engineering_green() {
 #[ignore = "Provisioned billion-edge scale ladder; make bench-g500-ladder"]
 fn ladder_public_facade_first_fail_evidence() {
     let profile = load_profile();
-    let provisioned: Vec<Rung> = profile
-        .rungs
-        .iter()
-        .filter(|r| r.tier == "provisioned")
-        .cloned()
-        .collect();
+    let max_scale = std::env::var("GF_G500_LADDER_MAX_SCALE")
+        .expect("GF_G500_LADDER_MAX_SCALE must explicitly cap the authorized ladder")
+        .parse::<u32>()
+        .expect("GF_G500_LADDER_MAX_SCALE must be an integer");
+    let provisioned =
+        provisioned_rungs_through(&profile, max_scale).unwrap_or_else(|error| panic!("{error}"));
     let evidence = run_ladder(&profile, profile.envelope.into(), &provisioned);
     assert!(
         !evidence.is_empty(),
@@ -1339,6 +1357,7 @@ fn ladder_public_facade_first_fail_evidence() {
             "schema": EVIDENCE_SCHEMA,
             "schema_version": SCHEMA_VERSION,
             "profile_schema": profile.schema,
+            "authorized_max_scale": max_scale,
             "rungs": evidence,
         }))
         .expect("serialize ladder evidence"),
@@ -1355,6 +1374,19 @@ fn ladder_public_facade_first_fail_evidence() {
             "an evaluated rung must reconcile; got {rec}"
         );
     }
+}
+
+#[test]
+fn provisioned_max_scale_excludes_larger_rungs() {
+    let profile = load_profile();
+    let selected = provisioned_rungs_through(&profile, 25).expect("S25 is provisioned");
+    assert_eq!(
+        selected.iter().map(|rung| rung.scale).collect::<Vec<_>>(),
+        vec![20, 22, 24, 25]
+    );
+    assert!(selected.iter().all(|rung| rung.scale != 26));
+    assert!(provisioned_rungs_through(&profile, 10).is_err());
+    assert!(provisioned_rungs_through(&profile, 23).is_err());
 }
 
 // ---------------------------------------------------------------------------
