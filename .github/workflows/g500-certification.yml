@@ -103,6 +103,7 @@ jobs:
           GF_G500_CERT_OS_IMAGE: ${{ inputs.os_image }}
           GF_G500_CERT_EXPECTED_SHA: ${{ inputs.commit_sha }}
         run: |
+          export GF_G500_CERT_STARTED_EPOCH_S="$(date +%s)"
           cargo test -p graphforge-api --release --test scale_g500_ladder certification_lifecycle_journals_equivalent_round_trip_and_drills -- --exact --nocapture
           cargo test -p graphforge-api --release --test scale_g500_ladder certification_target_live_full_lifecycle_evidence -- --ignored --exact --nocapture --test-threads=1
       - name: Validate sanitized durable evidence

@@ -61,11 +61,12 @@ unique edges.
    immediate teardown. Never retain
    the project, portable bundle, credentials, registry tokens, or spill files.
 
-The workflow has a four-hour outer timeout, and measured certification wall time
-must remain at or below the same 14,400-second product envelope. Both test
-commands, including compilation, share that window and therefore need explicit
-headroom. Provisioning happens before dispatch but remains inside the separately
-approved five-hour billed-resource TTL.
+The workflow records one start timestamp before either test command. The bounded
+preflight and full SCALE26 lifecycle share the 14,400-second product envelope;
+the Rust watchdog includes time already spent in preflight. The job has a
+270-minute outer timeout, leaving 30 minutes after the product fail-safe for
+validation and artifact upload. Provisioning happens before dispatch but remains
+inside the separately approved five-hour billed-resource TTL.
 
 An in-process watchdog samples Linux
 resident memory every 250 ms and allocated workspace bytes every five seconds,

@@ -25,7 +25,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use arrow::array::{Array, FixedSizeBinaryArray, Int64Array, StringArray, UInt64Array};
 use arrow::record_batch::RecordBatch;
@@ -1499,6 +1499,7 @@ impl ResourceMonitor {
         let worker_failure = Arc::clone(&failure);
         let worker_workspace = workspace.clone();
         let started = Instant::now();
+        let elapsed_before_process = certification_elapsed_before_process();
         let worker = thread::spawn(move || {
             let mut samples = 0_u8;
             while !worker_stop.load(Ordering::Relaxed) {
@@ -1506,7 +1507,11 @@ impl ResourceMonitor {
                 worker_peak_rss.fetch_max(rss, Ordering::Relaxed);
                 let mut code = if rss > envelope.rss_bytes {
                     1
-                } else if started.elapsed().as_secs() > envelope.timeout_s {
+                } else if elapsed_before_process
+                    .saturating_add(started.elapsed())
+                    .as_secs()
+                    > envelope.timeout_s
+                {
                     3
                 } else {
                     0
@@ -1561,6 +1566,20 @@ impl ResourceMonitor {
             _ => None,
         }
     }
+}
+
+fn certification_elapsed_before_process() -> Duration {
+    let Ok(value) = std::env::var("GF_G500_CERT_STARTED_EPOCH_S") else {
+        return Duration::ZERO;
+    };
+    let started = value
+        .parse::<u64>()
+        .expect("GF_G500_CERT_STARTED_EPOCH_S must be Unix seconds");
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock must be after Unix epoch")
+        .as_secs();
+    Duration::from_secs(now.saturating_sub(started))
 }
 
 fn current_rss_bytes() -> Result<u64, &'static str> {
@@ -2153,6 +2172,7 @@ fn cancellation_stops_merge_and_publication_before_more_work_is_committed() {
 #[test]
 #[ignore = "requires approved 128 GiB / 1 TiB Linux certification host"]
 fn certification_target_live_full_lifecycle_evidence() {
+    let elapsed_before_process = certification_elapsed_before_process();
     let started = Instant::now();
     let profile = load_certification_profile();
     let root = TempDir::new().expect("certification workspace");
@@ -2215,7 +2235,7 @@ fn certification_target_live_full_lifecycle_evidence() {
         "equivalence": { "source_project_fingerprint": lifecycle["source_project_fingerprint"], "imported_project_fingerprint": lifecycle["imported_project_fingerprint"] },
         "authority": { "source_fingerprint": lifecycle["source_authority_fingerprint"], "imported_fingerprint": lifecycle["imported_authority_fingerprint"] },
         "phases": phases,
-        "envelope": { "peak_rss_bytes": peak_rss, "peak_disk_bytes": peak_disk, "wall_time_s": started.elapsed().as_secs_f64() },
+        "envelope": { "peak_rss_bytes": peak_rss, "peak_disk_bytes": peak_disk, "wall_time_s": elapsed_before_process.saturating_add(started.elapsed()).as_secs_f64() },
         "result": "pass", "first_failure": null,
     });
     let out = PathBuf::from(std::env::var("GF_G500_CERT_EVIDENCE_OUT").expect("evidence output"));
