@@ -2727,9 +2727,14 @@ mod tests {
         cases.insert("unsupported_future_portability".into(), serde_json::json!({"error_code": unsupported.code, "diagnostic_code": unsupported.diagnostics[0].code}));
 
         let mut cancelled_graph = GraphForge::new(None).unwrap();
-        let cancellation_before = cancelled_graph.ontology_authority_state().unwrap();
+        let (cancel_base, _) = adopt_parity_pair(&mut cancelled_graph, 9_108);
+        let cancellation_before = cancelled_graph.ontology_modules().unwrap();
         let cancel_candidate = cancelled_graph
-            .create_ontology_module(parity_document("base"), Vec::new(), None)
+            .create_ontology_module(
+                parity_document("dependent_update"),
+                vec![cancel_base.id],
+                None,
+            )
             .unwrap();
         let token = CancellationToken::new();
         token.cancel();
@@ -2742,7 +2747,15 @@ mod tests {
                 Some(&token),
             )
             .unwrap_err();
-        cases.insert("cancellation".into(), serde_json::json!({"error_code": cancelled.code, "authority_unchanged": cancelled_graph.ontology_authority_state().unwrap() == cancellation_before}));
+        let cancellation_after = cancelled_graph.ontology_modules().unwrap();
+        cases.insert(
+            "cancellation".into(),
+            serde_json::json!({
+                "error_code": cancelled.code,
+                "before_modules": cancellation_before,
+                "after_modules": cancellation_after
+            }),
+        );
 
         let mut replay_graph = GraphForge::new(None).unwrap();
         let replay_candidate = replay_graph
@@ -2755,10 +2768,9 @@ mod tests {
         let first = replay_graph
             .adopt_ontology_module(&replay_request, None)
             .unwrap();
-        let same_receipt = replay_graph
+        let replay_receipt = replay_graph
             .adopt_ontology_module(&replay_request, None)
-            .unwrap()
-            == first;
+            .unwrap();
         let mut conflict = replay_request;
         conflict.authority.context.actor_uuid = Some(Uuid::from_u128(1));
         let conflict_code = replay_graph
@@ -2767,15 +2779,25 @@ mod tests {
             .code;
         cases.insert(
             "idempotent_replay".into(),
-            serde_json::json!({"same_receipt": same_receipt, "conflict_code": conflict_code}),
+            serde_json::json!({
+                "first_receipt": first,
+                "replay_receipt": replay_receipt,
+                "conflict_code": conflict_code
+            }),
         );
 
         let project = tempfile::tempdir().unwrap();
         let durable = GraphForge::new(Some(project.path().to_str().unwrap())).unwrap();
         let import_before = durable.ontology_authority_state().unwrap();
         drop(durable);
-        let invalid = project.path().join("invalid.gfpb");
+        let import_source = tempfile::tempdir().unwrap();
+        let invalid = import_source.path().join("invalid.gfpb");
         std::fs::write(&invalid, b"invalid").unwrap();
+        let mut before_entries = std::fs::read_dir(project.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        before_entries.sort();
         assert!(
             GraphForge::import_portable_v2(
                 project.path(),
@@ -2789,17 +2811,47 @@ mod tests {
             .is_err()
         );
         let durable = GraphForge::new(Some(project.path().to_str().unwrap())).unwrap();
-        let unchanged = durable.ontology_authority_state().unwrap() == import_before;
+        let import_after = durable.ontology_authority_state().unwrap();
+        let mut after_entries = std::fs::read_dir(project.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        after_entries.sort();
         cases.insert(
             "no_partial_import_or_authority_change".into(),
-            serde_json::json!({"target_unchanged": unchanged, "authority_unchanged": unchanged}),
+            serde_json::json!({
+                "before_entries": before_entries,
+                "after_entries": after_entries,
+                "authority_before": import_before,
+                "authority_after": import_after
+            }),
         );
 
         let bounded = dependency_blocked_error(&blocked);
         let bounded_json = serde_json::to_string(&bounded).unwrap();
         cases.insert("bounded_structured_diagnostics".into(), serde_json::json!({"outer_code": bounded.code, "diagnostic_code": bounded.diagnostics[0].code, "bounded": bounded.diagnostics.len() <= MAX_ERROR_DIAGNOSTICS, "path_free": !bounded_json.contains("/Users/")}));
-        cases.insert("deterministic_path_free_cli_json".into(), serde_json::json!({"deterministic": bounded_json == serde_json::to_string(&bounded).unwrap(), "path_free": !bounded_json.contains("/Users/")}));
-        cases.insert("packaged_clean_install".into(), serde_json::json!({"semantic_smoke": GraphForge::new(None).unwrap().ontology_modules().is_ok()}));
+        let deterministic_first =
+            serde_json::to_string(&graph.ontology_modules().unwrap()).unwrap();
+        let deterministic_second =
+            serde_json::to_string(&graph.ontology_modules().unwrap()).unwrap();
+        cases.insert(
+            "deterministic_path_free_cli_json".into(),
+            serde_json::json!({
+                "first_serialized": deterministic_first,
+                "second_serialized": deterministic_second,
+                "forbidden_path": graph.dir.to_string_lossy()
+            }),
+        );
+        let packaged = GraphForge::new(None).unwrap();
+        let packaged_modules = packaged.ontology_modules().unwrap();
+        cases.insert(
+            "packaged_clean_install".into(),
+            serde_json::json!({
+                "package_origin": env!("CARGO_PKG_NAME"),
+                "operation": "ontology_modules",
+                "module_count": packaged_modules.len()
+            }),
+        );
 
         let report = MultiOntologyParityReport {
             contract: "graphforge-multi-ontology-parity-result/1".into(),
