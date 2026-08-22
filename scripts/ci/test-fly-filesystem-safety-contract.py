@@ -63,11 +63,11 @@ def validate_contract(root: Path) -> None:
     if match:
         raise ContractError(f"Fly qualification may not expose a public service: {match.group(0)}")
 
-    if "machine" not in controller or "run" not in controller:
+    if "api.machines.dev" not in controller or 'method="POST"' not in controller:
         raise ContractError("controller must create the disposable Fly Machine explicitly")
     if "@" not in controller or "sha256:" not in controller or "{64}" not in controller:
         raise ContractError("controller must require a full immutable image digest")
-    if "--restart" not in controller or "--rm" not in controller:
+    if '"restart": {"policy": "no"}' not in controller or '"auto_destroy": True' not in controller:
         raise ContractError("machine must be non-restarting and disposable")
 
     if "finally" not in controller:

@@ -137,14 +137,38 @@ def test_refuses_dirty_or_non_exact_source(monkeypatch):
 
 
 def test_launch_has_private_disposable_exact_resources():
-    command = controller.launch_args(args(), "internal-volume-id", "sha256:" + "b" * 64)
-    assert command[2].endswith("@sha256:" + "b" * 64)
-    assert [
-        command[command.index(flag) + 1]
-        for flag in ("--region", "--restart", "--autostop", "--vm-cpu-kind", "--vm-memory")
-    ] == ["den", "no", "off", "performance", "4096"]
-    assert "--rm" in command and "--skip-dns-registration" in command
-    assert not any(flag in command for flag in ("--port", "--http-service", "--public-ip"))
+    payload = controller.machine_create_payload(args(), "internal-volume-id", "sha256:" + "b" * 64)
+    assert payload["region"] == "den"
+    assert payload["skip_launch"] is False
+    assert payload["skip_service_registration"] is True
+    config = payload["config"]
+    assert config["image"].endswith("@sha256:" + "b" * 64)
+    assert config["auto_destroy"] is True
+    assert config["restart"] == {"policy": "no"}
+    assert config["guest"] == {"cpu_kind": "performance", "cpus": 2, "memory_mb": 4096}
+    assert config["mounts"] == [{"volume": "internal-volume-id", "path": "/work"}]
+    assert config["services"] == []
+
+
+def test_machine_api_uses_memory_only_token_and_sanitizes_http_failure(monkeypatch):
+    class TokenFly:
+        def run(self, command, check=True):
+            assert command == ["auth", "token"]
+            return argparse.Namespace(stdout="super-secret-token\n")
+
+    def reject(request, timeout):
+        assert timeout == 120
+        assert request.full_url.endswith("/apps/gf-qual-app/machines")
+        assert request.headers["Authorization"] == "Bearer super-secret-token"
+        raise controller.urllib.error.HTTPError(
+            request.full_url, 422, "response body must not leak", {}, None
+        )
+
+    monkeypatch.setattr(controller.urllib.request, "urlopen", reject)
+    with pytest.raises(controller.QualificationError, match="HTTP 422") as failure:
+        controller.create_machine(args(), TokenFly(), "internal-volume-id", "sha256:" + "b" * 64)
+    assert "super-secret-token" not in str(failure.value)
+    assert "response body" not in str(failure.value)
 
 
 def test_observed_config_rejects_service_or_wrong_mount():
