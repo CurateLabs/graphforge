@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
 import time
 from typing import Any
@@ -58,7 +59,7 @@ def check_source(expected_sha: str) -> None:
         raise QualificationError("source tree is not clean")
 
 
-def launch_args(args: argparse.Namespace, volume_id: str) -> list[str]:
+def launch_args(args: argparse.Namespace, volume_id: str, digest: str) -> list[str]:
     return [
         "machine",
         "run",
@@ -74,7 +75,7 @@ def launch_args(args: argparse.Namespace, volume_id: str) -> list[str]:
         "--env",
         f"GF_FLY_QUALIFICATION_GIT_SHA={args.expected_sha}",
         "--env",
-        f"GF_FLY_QUALIFICATION_IMAGE_DIGEST={DIGEST_REF.fullmatch(args.image).group('digest')}",
+        f"GF_FLY_QUALIFICATION_IMAGE_DIGEST={digest}",
         "--env",
         f"GF_FLY_QUALIFICATION_REGION={args.region}",
         "--vm-cpu-kind",
@@ -113,6 +114,8 @@ def validate_inputs(args: argparse.Namespace) -> str:
         raise QualificationError("qualification volume must be small (1..20 GiB)")
     if not 60 <= args.retrieve_timeout_s <= 1800:
         raise QualificationError("evidence retrieval timeout must be in 60..1800 seconds")
+    if not args.evidence_out.parent.is_dir():
+        raise QualificationError("evidence output parent directory does not exist")
     if args.execute and not args.confirm_disposable:
         raise QualificationError("--execute requires --confirm-disposable")
     return match.group("digest")
@@ -143,11 +146,17 @@ def assert_machine_config(machine: dict[str, Any], args: argparse.Namespace, dig
 
 def cleanup(fly: Flyctl, app: str, machine_id: str | None, volume_id: str | None) -> None:
     # Child-before-parent cleanup is idempotent; already-absent resources are success.
+    operations = []
     if machine_id:
-        fly.run(["machine", "destroy", machine_id, "--app", app, "--force"], check=False)
+        operations.append(["machine", "destroy", machine_id, "--app", app, "--force"])
     if volume_id:
-        fly.run(["volumes", "destroy", volume_id, "--app", app, "--yes"], check=False)
-    fly.run(["apps", "destroy", app, "--yes"], check=False)
+        operations.append(["volumes", "destroy", volume_id, "--app", app, "--yes"])
+    operations.append(["apps", "destroy", app, "--yes"])
+    for operation in operations:
+        try:
+            fly.run(operation, check=False)
+        except subprocess.SubprocessError:  # noqa: PERF203 - every cleanup must run
+            continue
 
 
 def execute(args: argparse.Namespace, fly: Flyctl, digest: str) -> None:
@@ -178,7 +187,7 @@ def execute(args: argparse.Namespace, fly: Flyctl, digest: str) -> None:
             ]
         )
         volume_id = volume["id"]
-        fly.run(launch_args(args, volume_id))
+        fly.run(launch_args(args, volume_id, digest))
         machines = fly.json(["machine", "list", "--app", args.app_name])
         selected = [item for item in machines if item.get("name") == args.machine_name]
         if len(selected) != 1:
@@ -191,20 +200,23 @@ def execute(args: argparse.Namespace, fly: Flyctl, digest: str) -> None:
             local = Path(directory) / "evidence.json"
             deadline = time.monotonic() + args.retrieve_timeout_s
             while time.monotonic() < deadline:
-                result = fly.run(
-                    [
-                        "ssh",
-                        "sftp",
-                        "get",
-                        "/work/fly-qualification-evidence.json",
-                        str(local),
-                        "--app",
-                        args.app_name,
-                        "--machine",
-                        machine_id,
-                    ],
-                    check=False,
-                )
+                try:
+                    result = fly.run(
+                        [
+                            "ssh",
+                            "sftp",
+                            "get",
+                            "/work/fly-qualification-evidence.json",
+                            str(local),
+                            "--app",
+                            args.app_name,
+                            "--machine",
+                            machine_id,
+                        ],
+                        check=False,
+                    )
+                except subprocess.TimeoutExpired:
+                    continue
                 if result.returncode == 0 and local.is_file():
                     break
                 time.sleep(2)
@@ -297,7 +309,8 @@ def main() -> int:
         KeyError,
         ValueError,
     ) as error:
-        parser().error(str(error))
+        print(f"fly filesystem qualification failed: {error}", file=sys.stderr)
+        return 1
     return 0
 
 

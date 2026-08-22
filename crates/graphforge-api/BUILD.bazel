@@ -606,3 +606,10 @@ gf_rust_binary(
     srcs = ["src/bin/graphforge-fly-filesystem-smoke.rs"],
     deps = _API_DEPS + [":graphforge_api"],
 )
+
+gf_rust_integration_test(
+    name = "graphforge_fly_filesystem_smoke_test",
+    srcs = ["src/bin/graphforge-fly-filesystem-smoke.rs"],
+    crate = ":graphforge_api",
+    deps = _API_DEPS,
+)

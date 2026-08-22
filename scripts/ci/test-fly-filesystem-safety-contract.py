@@ -111,9 +111,9 @@ class FlySafetyContractTests(unittest.TestCase):
                 "public_port": (ENTRYPOINT, "\npython3 -m http.server 8080 --bind 0.0.0.0\n"),
                 "mutable_image": (CONTROLLER, "sha256:"),
                 "missing_cleanup": (CONTROLLER, "finally"),
-                "missing_machine_cleanup": (CONTROLLER, 'fly.run(["machine", "destroy"'),
-                "missing_volume_cleanup": (CONTROLLER, 'fly.run(["volumes", "destroy"'),
-                "missing_app_cleanup": (CONTROLLER, 'fly.run(["apps", "destroy"'),
+                "missing_machine_cleanup": (CONTROLLER, '["machine", "destroy"'),
+                "missing_volume_cleanup": (CONTROLLER, '["volumes", "destroy"'),
+                "missing_app_cleanup": (CONTROLLER, '["apps", "destroy"'),
                 "leaked_id": (
                     SCHEMA,
                     '"properties": {',

@@ -37,6 +37,7 @@ struct Evidence {
     region: String,
     host: Host,
     volume: Volume,
+    phase_peak_rss_bytes: PhasePeakRss,
     admission: Admission,
     result: &'static str,
     full_run_authorized: bool,
@@ -46,13 +47,21 @@ struct Evidence {
 struct Host {
     os: &'static str,
     filesystem: String,
-    memory_bytes: u64,
+    memory_bytes: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
 struct Volume {
     mount_role: &'static str,
-    capacity_bytes: u64,
+    capacity_bytes: Option<u64>,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct PhasePeakRss {
+    filesystem_admission: Option<u64>,
+    durable_reopen: Option<u64>,
+    portable_verify: Option<u64>,
+    portable_import_reopen: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -80,9 +89,16 @@ fn main() {
     std::thread::spawn(move || {
         let _ = sender.send(qualify(&config));
     });
-    let evidence = receiver
-        .recv_timeout(timeout)
-        .unwrap_or_else(|_| failed(metadata, "unproven", 1, 1, "GF_RESOURCE_LIMIT", "timeout"));
+    let evidence = receiver.recv_timeout(timeout).unwrap_or_else(|_| {
+        failed(
+            metadata,
+            "unproven",
+            None,
+            None,
+            "GF_RESOURCE_LIMIT",
+            "timeout",
+        )
+    });
     let encoded = serde_json::to_vec(&evidence).expect("serialize evidence");
     if write_evidence(&output, &encoded).is_err() {
         eprintln!("qualification evidence write failed");
@@ -184,8 +200,9 @@ fn qualify(config: &Config) -> Evidence {
     let imported = config
         .work_root
         .join(".graphforge-fly-filesystem-qualification-imported");
-    let memory = linux_memory_bytes().unwrap_or(1);
-    let capacity = filesystem_capacity_bytes(&config.work_root).unwrap_or(1);
+    let memory = linux_memory_bytes();
+    let capacity = filesystem_capacity_bytes(&config.work_root);
+    let mut phase_peak_rss = PhasePeakRss::default();
     if project.exists() || package.exists() || imported.exists() {
         return failure(
             config,
@@ -201,6 +218,7 @@ fn qualify(config: &Config) -> Evidence {
             Ok(value) => value.filesystem_class,
             Err(error) => return gf_failure(config, "unproven", memory, capacity, &error),
         };
+    phase_peak_rss.filesystem_admission = linux_peak_rss_bytes();
     let graph = match GraphForge::new(project.to_str()) {
         Ok(graph) => graph,
         Err(error) => return gf_failure(config, &filesystem, memory, capacity, &error),
@@ -229,6 +247,7 @@ fn qualify(config: &Config) -> Evidence {
         Err(error) => return gf_failure(config, &filesystem, memory, capacity, &error),
     }
     drop(reopened);
+    phase_peak_rss.durable_reopen = linux_peak_rss_bytes();
     let limits = PortableV2Limits::default();
     let source = match GraphForge::new(project.to_str()) {
         Ok(graph) => graph,
@@ -278,6 +297,7 @@ fn qualify(config: &Config) -> Evidence {
             "portable_verify_failed",
         );
     }
+    phase_peak_rss.portable_verify = linux_peak_rss_bytes();
     if GraphForge::import_portable_v2(
         &imported,
         &PortableV2ImportRequest {
@@ -313,10 +333,11 @@ fn qualify(config: &Config) -> Evidence {
         );
     }
     drop(imported_graph);
-    if fs::remove_dir_all(project).is_err()
-        || fs::remove_dir_all(imported).is_err()
-        || fs::remove_file(package).is_err()
-    {
+    phase_peak_rss.portable_import_reopen = linux_peak_rss_bytes();
+    let project_removed = fs::remove_dir_all(project).is_ok();
+    let imported_removed = fs::remove_dir_all(imported).is_ok();
+    let package_removed = fs::remove_file(package).is_ok();
+    if !(project_removed && imported_removed && package_removed) {
         return failure(
             config,
             &filesystem,
@@ -341,6 +362,7 @@ fn qualify(config: &Config) -> Evidence {
             mount_role: "process_work_root",
             capacity_bytes: capacity,
         },
+        phase_peak_rss_bytes: phase_peak_rss,
         admission: Admission {
             status: "accepted",
             code: None,
@@ -351,7 +373,13 @@ fn qualify(config: &Config) -> Evidence {
     }
 }
 
-fn gf_failure(config: &Config, fs: &str, memory: u64, capacity: u64, error: &GfError) -> Evidence {
+fn gf_failure(
+    config: &Config,
+    fs: &str,
+    memory: Option<u64>,
+    capacity: Option<u64>,
+    error: &GfError,
+) -> Evidence {
     let cause = match error {
         GfError::Project { message, .. } => safe_cause(message).unwrap_or("project_failure"),
         _ => "public_facade_failure",
@@ -376,8 +404,8 @@ fn safe_cause(message: &str) -> Option<&str> {
 fn failure(
     config: &Config,
     fs: &str,
-    memory: u64,
-    capacity: u64,
+    memory: Option<u64>,
+    capacity: Option<u64>,
     code: &str,
     cause: &str,
 ) -> Evidence {
@@ -398,8 +426,8 @@ fn failure(
 fn failed(
     meta: (String, String, String),
     fs: &str,
-    memory: u64,
-    capacity: u64,
+    memory: Option<u64>,
+    capacity: Option<u64>,
     code: &str,
     cause: &str,
 ) -> Evidence {
@@ -418,6 +446,7 @@ fn failed(
             mount_role: "process_work_root",
             capacity_bytes: capacity,
         },
+        phase_peak_rss_bytes: PhasePeakRss::default(),
         admission: Admission {
             status: "rejected",
             code: Some(code.into()),
@@ -440,6 +469,18 @@ fn linux_memory_bytes() -> Option<u64> {
                 .ok()
                 .map(|kib| kib.saturating_mul(1024))
         })
+}
+
+fn linux_peak_rss_bytes() -> Option<u64> {
+    fs::read_to_string("/proc/self/status")
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix("VmHWM:"))?
+        .split_whitespace()
+        .next()?
+        .parse::<u64>()
+        .ok()?
+        .checked_mul(1024)
 }
 
 fn filesystem_capacity_bytes(path: &Path) -> Option<u64> {
@@ -466,6 +507,11 @@ fn write_evidence(path: &Path, encoded: &[u8]) -> std::io::Result<()> {
     }
     let name = path.file_name().ok_or(std::io::ErrorKind::InvalidInput)?;
     let temporary = path.with_file_name(format!(".{}.tmp", name.to_string_lossy()));
+    match fs::remove_file(&temporary) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -489,8 +535,8 @@ mod tests {
                 "iad".into(),
             ),
             "unproven",
-            1,
-            1,
+            Some(1),
+            Some(1),
             "GF_UNSUPPORTED_FILESYSTEM",
             "ancestor_cross_volume",
         ))
@@ -516,5 +562,14 @@ mod tests {
         let path = directory.path().join("evidence.json");
         write_evidence(&path, b"{}").unwrap();
         assert!(write_evidence(&path, b"changed").is_err());
+    }
+
+    #[test]
+    fn atomic_evidence_write_recovers_from_stale_temporary_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("evidence.json");
+        std::fs::write(directory.path().join(".evidence.json.tmp"), b"stale").unwrap();
+        write_evidence(&path, b"fresh").unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), b"fresh");
     }
 }

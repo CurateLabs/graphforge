@@ -14,7 +14,7 @@ from jsonschema import Draft202012Validator
 ROOT = Path(__file__).resolve().parents[2]
 SCHEMA = ROOT / "docs/development/evidence/fly-filesystem-qualification.schema.json"
 FORBIDDEN_KEY = re.compile(r"(?:^|_)(?:id|token|secret|credential|password|path|name)(?:$|_)", re.I)
-ABSOLUTE_PATH = re.compile(r"^(?:/|[A-Za-z]:[\\/])")
+ABSOLUTE_PATH = re.compile(r"^(?:/|\\|[A-Za-z]:[\\/])")
 
 
 class EvidenceError(ValueError):

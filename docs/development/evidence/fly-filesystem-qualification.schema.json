@@ -3,7 +3,7 @@
   "$id": "https://graphforge.dev/evidence/fly-filesystem-qualification.schema.json",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "git_sha", "image_digest", "provider", "region", "host", "volume", "admission", "result", "full_run_authorized"],
+  "required": ["schema", "git_sha", "image_digest", "provider", "region", "host", "volume", "phase_peak_rss_bytes", "admission", "result", "full_run_authorized"],
   "properties": {
     "schema": {"const": "graphforge-fly-filesystem-qualification/1"},
     "git_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
@@ -16,7 +16,7 @@
       "properties": {
         "os": {"const": "Linux"},
         "filesystem": {"type": "string", "pattern": "^[a-z0-9_-]{2,32}$"},
-        "memory_bytes": {"type": "integer", "minimum": 1}
+        "memory_bytes": {"type": ["integer", "null"], "minimum": 1}
       }
     },
     "volume": {
@@ -24,7 +24,17 @@
       "required": ["mount_role", "capacity_bytes"],
       "properties": {
         "mount_role": {"const": "process_work_root"},
-        "capacity_bytes": {"type": "integer", "minimum": 1}
+        "capacity_bytes": {"type": ["integer", "null"], "minimum": 1}
+      }
+    },
+    "phase_peak_rss_bytes": {
+      "type": "object", "additionalProperties": false,
+      "required": ["filesystem_admission", "durable_reopen", "portable_verify", "portable_import_reopen"],
+      "properties": {
+        "filesystem_admission": {"type": ["integer", "null"], "minimum": 1},
+        "durable_reopen": {"type": ["integer", "null"], "minimum": 1},
+        "portable_verify": {"type": ["integer", "null"], "minimum": 1},
+        "portable_import_reopen": {"type": ["integer", "null"], "minimum": 1}
       }
     },
     "admission": {

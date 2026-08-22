@@ -5,6 +5,7 @@ import argparse
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -53,6 +54,12 @@ def evidence(**changes):
         "region": "den",
         "host": {"os": "Linux", "filesystem": "ext4", "memory_bytes": 4_000_000_000},
         "volume": {"mount_role": "process_work_root", "capacity_bytes": 10_000_000_000},
+        "phase_peak_rss_bytes": {
+            "filesystem_admission": 100_000_000,
+            "durable_reopen": 110_000_000,
+            "portable_verify": 120_000_000,
+            "portable_import_reopen": 125_000_000,
+        },
         "admission": {"status": "accepted", "code": None, "cause": None},
         "result": "qualified",
         "full_run_authorized": False,
@@ -81,6 +88,11 @@ def test_refuses_out_of_bounds_machine_and_timeout_values(change, message):
         controller.validate_inputs(args(**change))
 
 
+def test_refuses_missing_evidence_output_parent(tmp_path):
+    with pytest.raises(controller.QualificationError, match="parent directory"):
+        controller.validate_inputs(args(evidence_out=tmp_path / "missing" / "evidence.json"))
+
+
 def test_refuses_dirty_or_non_exact_source(monkeypatch):
     responses = iter(
         [
@@ -103,7 +115,7 @@ def test_refuses_dirty_or_non_exact_source(monkeypatch):
 
 
 def test_launch_has_private_disposable_exact_resources():
-    command = controller.launch_args(args(), "internal-volume-id")
+    command = controller.launch_args(args(), "internal-volume-id", "sha256:" + "b" * 64)
     assert command[2].endswith("@sha256:" + "b" * 64)
     assert [
         command[command.index(flag) + 1]
@@ -126,6 +138,10 @@ def test_observed_config_rejects_service_or_wrong_mount():
         },
     }
     controller.assert_machine_config(machine, args(), "sha256:" + "b" * 64)
+    machine["config"]["mounts"] = [{"path": "/not-work"}]
+    with pytest.raises(controller.QualificationError, match="mounted"):
+        controller.assert_machine_config(machine, args(), "sha256:" + "b" * 64)
+    machine["config"]["mounts"] = [{"path": "/work"}]
     machine["config"]["services"] = [{"ports": [443]}]
     with pytest.raises(controller.QualificationError, match="service"):
         controller.assert_machine_config(machine, args(), "sha256:" + "b" * 64)
@@ -140,6 +156,9 @@ def test_validator_accepts_sanitized_evidence_and_rejects_leakage():
     leaked["host"]["filesystem"] = "/dev/vdc"
     with pytest.raises(validator.EvidenceError):
         validator.validate(leaked, sha="a" * 40, digest="sha256:" + "b" * 64, region="den")
+    for windows_path in (r"\\server\share", r"\rooted\path"):
+        with pytest.raises(validator.EvidenceError, match="absolute path"):
+            validator.reject_sensitive(windows_path)
 
 
 def test_rejection_is_typed_and_never_authorizes_full_run():
@@ -176,6 +195,21 @@ def test_teardown_is_child_first_and_idempotent():
         ["apps", "destroy"],
     ]
     assert fake.calls[-1][:2] == ["apps", "destroy"]
+
+
+def test_teardown_continues_after_each_timeout():
+    class TimingOutFly(FakeFly):
+        def run(self, command, check=True):
+            self.calls.append(command)
+            raise subprocess.TimeoutExpired(command, 120)
+
+    fake = TimingOutFly()
+    controller.cleanup(fake, "gf-qual-app", "machine-internal", "volume-internal")
+    assert [call[:2] for call in fake.calls] == [
+        ["machine", "destroy"],
+        ["volumes", "destroy"],
+        ["apps", "destroy"],
+    ]
 
 
 def test_schema_is_closed_and_committed():
