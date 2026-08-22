@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "945ee1c62666775b5371e469c6db18461de7e57bdbf0afe4d36e4fe9a8a3e3a8",
+  "public_method_digest": "2d86746c592716a79fe12cb5471f1c9b90ce8e91bfca772b19110cdfafa468d1",
   "method_policy": {
     "receiver_defaults": {
       "GraphForge": "release-tested",
@@ -120,6 +120,8 @@
         "GraphForge.import_ontology_module",
         "GraphForge.inspect_ontology_bridge",
         "GraphForge.inspect_ontology_module",
+        "GraphForge.migrate_ontology_module",
+        "GraphForge.multi_ontology_certification_report",
         "GraphForge.ontology_activation_profile",
         "GraphForge.ontology_authority_state",
         "GraphForge.ontology_bridges",
@@ -128,6 +130,7 @@
         "GraphForge.preflight_ontology_composition",
         "GraphForge.preview_delete_ontology_bridge",
         "GraphForge.preview_delete_ontology_module",
+        "GraphForge.preview_migrate_ontology_module",
         "GraphForge.preview_update_ontology_bridge",
         "GraphForge.preview_update_ontology_module",
         "GraphForge.update_ontology_bridge",
@@ -140,6 +143,10 @@
         {
           "path": "crates/graphforge-api/src/multi_ontology.rs",
           "symbol": "multi_ontology_public_facade_inventory_is_runtime_covered"
+        },
+        {
+          "path": "crates/graphforge-api/tests/multi_ontology_certification.rs",
+          "symbol": "retained_data_migrates_atomically_and_exact_identity_reopens"
         }
       ]
     },
