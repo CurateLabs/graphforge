@@ -14,7 +14,7 @@ python3 scripts/fly-filesystem-qualification.py \
   --image "registry.example/graphforge@sha256:<64-hex-digest>" \
   --region den --org curatelabs \
   --app-name gf-fs-qual-<suffix> \
-  --volume-name gf-fs-vol-<suffix> \
+  --volume-name gf_fs_vol_<suffix> \
   --machine-name gf-fs-machine-<suffix>
 ```
 
