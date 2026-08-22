@@ -25,7 +25,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use arrow::array::{Array, FixedSizeBinaryArray, Int64Array, StringArray, UInt64Array};
 use arrow::record_batch::RecordBatch;
@@ -253,7 +253,11 @@ struct MergeCounts {
 /// K-way merge of sorted runs. Emits each unique undirected pair exactly once
 /// in canonical sorted order and counts every dropped duplicate. Memory is
 /// `O(number_of_runs)`, not `O(total_edges)`.
-fn merge_runs<F: FnMut(u32, u32)>(runs: &[PathBuf], mut emit: F) -> MergeCounts {
+fn merge_runs<F: FnMut(u32, u32)>(
+    runs: &[PathBuf],
+    cancellation: Option<&AtomicBool>,
+    mut emit: F,
+) -> Result<MergeCounts, &'static str> {
     let mut readers: Vec<RunReader> = runs.iter().map(|p| RunReader::open(p)).collect();
     let mut heap: BinaryHeap<Reverse<(u32, u32, usize)>> = BinaryHeap::new();
     for (idx, reader) in readers.iter_mut().enumerate() {
@@ -266,6 +270,9 @@ fn merge_runs<F: FnMut(u32, u32)>(runs: &[PathBuf], mut emit: F) -> MergeCounts 
     let mut duplicates_rejected = 0u64;
     let mut last: Option<(u32, u32)> = None;
     while let Some(Reverse((src, dst, idx))) = heap.pop() {
+        if cancellation.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+            return Err("merge_cancelled");
+        }
         let pair = (src, dst);
         if Some(pair) == last {
             duplicates_rejected += 1;
@@ -279,10 +286,10 @@ fn merge_runs<F: FnMut(u32, u32)>(runs: &[PathBuf], mut emit: F) -> MergeCounts 
         }
     }
 
-    MergeCounts {
+    Ok(MergeCounts {
         live_unique_edges,
         duplicates_rejected,
-    }
+    })
 }
 
 /// Full reconciled generation summary for a rung.
@@ -323,11 +330,12 @@ fn bounded_generation(
     );
     let mut edges = Vec::new();
     let mut hasher = Sha256::new();
-    let merge = merge_runs(&spill.runs, |src, dst| {
+    let merge = merge_runs(&spill.runs, None, |src, dst| {
         hasher.update(src.to_le_bytes());
         hasher.update(dst.to_le_bytes());
         edges.push((src, dst));
-    });
+    })
+    .expect("bounded merge");
     let summary = GenSummary {
         raw_attempts: spill.raw_attempts,
         self_loops_rejected: spill.self_loops_rejected,
@@ -399,14 +407,15 @@ fn generate_target_live_runs(
         let compact_path = work.join(format!("accumulated-{window:04}.bin"));
         let mut writer = BufWriter::new(File::create(&compact_path).expect("create compact run"));
         let mut digest = Sha256::new();
-        let counts = merge_runs(&combined.runs, |src, dst| {
+        let counts = merge_runs(&combined.runs, Some(cancelled), |src, dst| {
             let src = src.to_le_bytes();
             let dst = dst.to_le_bytes();
             writer.write_all(&src).expect("write compact src");
             writer.write_all(&dst).expect("write compact dst");
             digest.update(src);
             digest.update(dst);
-        });
+        })
+        .expect("target-live merge was cancelled");
         writer.flush().expect("flush compact run");
         drop(writer);
         for obsolete in &combined.runs {
@@ -571,9 +580,10 @@ fn run_rung(
         let ingest_started = Instant::now();
         let graph = GraphForge::new(Some(project.to_str().expect("utf8 project")))
             .expect("open GraphForge for ingest");
-        publish_nodes(&graph, 1u64 << rung.scale);
-        let mut sink = EdgeSink::new(&graph);
-        let merge = merge_runs(&spill.runs, |src, dst| sink.push(src, dst));
+        publish_nodes(&graph, 1u64 << rung.scale, None);
+        let mut sink = EdgeSink::new(&graph, None);
+        let merge =
+            merge_runs(&spill.runs, None, |src, dst| sink.push(src, dst)).expect("rung merge");
         sink.flush();
         live_unique_edges = merge.live_unique_edges;
         duplicates_rejected = merge.duplicates_rejected;
@@ -739,15 +749,17 @@ fn run_ladder(profile: &ScaleProfile, env: RunEnvelope, rungs: &[Rung]) -> Vec<V
 
 struct EdgeSink<'a> {
     graph: &'a GraphForge,
+    cancellation: Option<&'a AtomicBool>,
     buf: Vec<(u32, u32)>,
     chunk_index: u128,
     hasher: Sha256,
 }
 
 impl<'a> EdgeSink<'a> {
-    fn new(graph: &'a GraphForge) -> Self {
+    fn new(graph: &'a GraphForge, cancellation: Option<&'a AtomicBool>) -> Self {
         EdgeSink {
             graph,
+            cancellation,
             buf: Vec::with_capacity(EDGE_PUBLISH_ROWS),
             chunk_index: 0,
             hasher: Sha256::new(),
@@ -755,6 +767,7 @@ impl<'a> EdgeSink<'a> {
     }
 
     fn push(&mut self, src: u32, dst: u32) {
+        self.check_cancellation();
         self.hasher.update(src.to_le_bytes());
         self.hasher.update(dst.to_le_bytes());
         self.buf.push((src, dst));
@@ -764,6 +777,7 @@ impl<'a> EdgeSink<'a> {
     }
 
     fn flush(&mut self) {
+        self.check_cancellation();
         if self.buf.is_empty() {
             return;
         }
@@ -771,6 +785,7 @@ impl<'a> EdgeSink<'a> {
         let mut batches = Vec::new();
         let mut offset = 0usize;
         while offset < self.buf.len() {
+            self.check_cancellation();
             let end = (offset + BATCH_ROWS).min(self.buf.len());
             let slice = &self.buf[offset..end];
             let mut edge_ids = Vec::with_capacity(slice.len());
@@ -814,6 +829,15 @@ impl<'a> EdgeSink<'a> {
         self.buf.clear();
     }
 
+    fn check_cancellation(&self) {
+        assert!(
+            !self
+                .cancellation
+                .is_some_and(|flag| flag.load(Ordering::SeqCst)),
+            "edge publication cancelled"
+        );
+    }
+
     fn finish(mut self) -> String {
         // Any residual edges must already be flushed by the caller.
         debug_assert!(self.buf.is_empty());
@@ -821,15 +845,23 @@ impl<'a> EdgeSink<'a> {
     }
 }
 
-fn publish_nodes(graph: &GraphForge, vertex_count: u64) {
+fn publish_nodes(graph: &GraphForge, vertex_count: u64, cancellation: Option<&AtomicBool>) {
     let total = usize::try_from(vertex_count).expect("vertex count fits usize");
     let schema = bulk_node_input_schema(Vec::new()).expect("node schema");
     let mut offset = 0usize;
     while offset < total {
+        assert!(
+            !cancellation.is_some_and(|flag| flag.load(Ordering::SeqCst)),
+            "node publication cancelled"
+        );
         let chunk_end = (offset + EDGE_PUBLISH_ROWS).min(total);
         let mut batches = Vec::new();
         let mut inner = offset;
         while inner < chunk_end {
+            assert!(
+                !cancellation.is_some_and(|flag| flag.load(Ordering::SeqCst)),
+                "node publication cancelled"
+            );
             let end = (inner + BATCH_ROWS).min(chunk_end);
             let count = end - inner;
             let ids = (inner..end)
@@ -1467,6 +1499,7 @@ impl ResourceMonitor {
         let worker_failure = Arc::clone(&failure);
         let worker_workspace = workspace.clone();
         let started = Instant::now();
+        let elapsed_before_process = certification_elapsed_before_process();
         let worker = thread::spawn(move || {
             let mut samples = 0_u8;
             while !worker_stop.load(Ordering::Relaxed) {
@@ -1474,7 +1507,11 @@ impl ResourceMonitor {
                 worker_peak_rss.fetch_max(rss, Ordering::Relaxed);
                 let mut code = if rss > envelope.rss_bytes {
                     1
-                } else if started.elapsed().as_secs() > envelope.timeout_s {
+                } else if elapsed_before_process
+                    .saturating_add(started.elapsed())
+                    .as_secs()
+                    > envelope.timeout_s
+                {
                     3
                 } else {
                     0
@@ -1529,6 +1566,20 @@ impl ResourceMonitor {
             _ => None,
         }
     }
+}
+
+fn certification_elapsed_before_process() -> Duration {
+    let Ok(value) = std::env::var("GF_G500_CERT_STARTED_EPOCH_S") else {
+        return Duration::ZERO;
+    };
+    let started = value
+        .parse::<u64>()
+        .expect("GF_G500_CERT_STARTED_EPOCH_S must be Unix seconds");
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock must be after Unix epoch")
+        .as_secs();
+    Duration::from_secs(now.saturating_sub(started))
 }
 
 fn current_rss_bytes() -> Result<u64, &'static str> {
@@ -1633,6 +1684,51 @@ fn authority_fingerprint(graph: &GraphForge) -> String {
     format!("sha256:{}", hex_encode(hasher.finalize()))
 }
 
+fn current_generation_uuid(graph: &GraphForge) -> Uuid {
+    let capabilities = graph.project_capabilities().expect("project capabilities");
+    let batch = capabilities
+        .batches
+        .first()
+        .expect("project capabilities contain a generation identity");
+    let generations = batch
+        .column(4)
+        .as_any()
+        .downcast_ref::<FixedSizeBinaryArray>()
+        .expect("generation_uuid capability column");
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(generations.value(0));
+    Uuid::from_bytes(bytes)
+}
+
+fn create_bounded_drill_package(root: &Path, limits: PortableV2Limits) -> (PathBuf, String) {
+    let project = root.join("drill-source");
+    let package = root.join("drill.gfpb");
+    fs::create_dir_all(&project).expect("bounded drill project");
+    let graph = GraphForge::new(project.to_str()).expect("open bounded drill project");
+    publish_nodes(&graph, 8, None);
+    let mut sink = EdgeSink::new(&graph, None);
+    for edge in [(0, 1), (1, 2), (2, 3), (3, 4)] {
+        sink.push(edge.0, edge.1);
+    }
+    sink.flush();
+    let _ = sink.finish();
+    let receipt = graph
+        .export_portable_v2(
+            &PortableV2ExportRequest {
+                selection: PortableSelection::Current,
+                output_path: package.clone(),
+                representation: PortableV2Output::Bundle,
+                profile: PortableV2SelectionProfile::Complete,
+                subset: None,
+                limits,
+            },
+            None,
+            |_| {},
+        )
+        .expect("export bounded drill package");
+    (package, receipt.package_digest)
+}
+
 #[allow(clippy::too_many_lines)]
 fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value {
     let source = root.join("source");
@@ -1709,23 +1805,27 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
         || target_live_fingerprint.expect("target-live payload fingerprint"),
         |value| value.input_fingerprint.clone(),
     );
-    journal.pass("generate", phase, Some(generation_fingerprint));
+    journal.pass("generate", phase, Some(generation_fingerprint.clone()));
 
     let phase = Instant::now();
     let graph = GraphForge::new(source.to_str()).expect("open certification source");
-    publish_nodes(&graph, 1u64 << scale);
-    let mut sink = EdgeSink::new(&graph);
+    publish_nodes(&graph, 1u64 << scale, Some(journal.cancellation()));
+    let mut sink = EdgeSink::new(&graph, Some(journal.cancellation()));
     if let Some(edges) = edges {
         for (src, dst) in edges {
             sink.push(src, dst);
         }
     } else {
-        merge_runs(&spills.as_ref().expect("target spills").runs, |src, dst| {
-            sink.push(src, dst);
-        });
+        merge_runs(
+            &spills.as_ref().expect("target spills").runs,
+            Some(journal.cancellation()),
+            |src, dst| sink.push(src, dst),
+        )
+        .expect("certification merge was cancelled");
     }
     sink.flush();
     let input_fingerprint = format!("sha256:{}", sink.finish());
+    assert_eq!(input_fingerprint, generation_fingerprint);
     journal.pass("ingest", phase, Some(input_fingerprint));
 
     let phase = Instant::now();
@@ -1744,6 +1844,16 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
     let graph = GraphForge::new(source.to_str()).expect("reopen source");
     let source_nodes = graph.node_count(NODE_LABEL).expect("source nodes");
     let source_edges = scalar_count(&graph.execute(COUNT_EDGES).expect("source edges"));
+    let expected_live_edges = generated_counts.as_ref().map_or_else(
+        || {
+            summary
+                .as_ref()
+                .expect("bounded generation summary")
+                .live_unique_edges
+        },
+        |counts| counts.live_unique_edges,
+    );
+    assert_eq!(source_edges, expected_live_edges);
     journal.pass("source_reopen", phase, None);
     let phase = Instant::now();
     let source_1hop = result_fingerprint(&graph.execute(ONE_HOP).expect("source 1hop"));
@@ -1751,6 +1861,7 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
     let phase = Instant::now();
     let source_2hop = result_fingerprint(&graph.execute(TWO_HOP).expect("source 2hop"));
     let source_authority_fingerprint = authority_fingerprint(&graph);
+    let source_generation = current_generation_uuid(&graph);
     journal.pass("source_query_2hop", phase, Some(source_2hop.clone()));
 
     let phase = Instant::now();
@@ -1768,6 +1879,7 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
             |_| {},
         )
         .expect("portable-v2 export");
+    assert_eq!(source_generation, exported.generation_uuid);
     journal.pass("export", phase, Some(exported.package_digest.clone()));
     let phase = Instant::now();
     let verified = verify_portable_v2(
@@ -1819,6 +1931,10 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
     let phase = Instant::now();
     let imported_2hop = result_fingerprint(&imported_graph.execute(TWO_HOP).expect("import 2hop"));
     let imported_authority_fingerprint = authority_fingerprint(&imported_graph);
+    assert_eq!(
+        current_generation_uuid(&imported_graph),
+        imported_receipt.generation_uuid
+    );
     assert_eq!(source_2hop, imported_2hop);
     assert_eq!(source_authority_fingerprint, imported_authority_fingerprint);
     journal.pass("imported_query_2hop", phase, Some(imported_2hop.clone()));
@@ -1826,8 +1942,19 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
     // Representative drills use the same verifier/import boundaries but never
     // repeat the billion-edge payload.
     let phase = Instant::now();
+    let (drill_package, drill_digest) = create_bounded_drill_package(root, limits);
+    let drill_verified = verify_portable_v2(
+        &PortableVerifyRequest {
+            input: drill_package.clone(),
+            mode: PortableV2Mode::Full,
+            limits,
+        },
+        None,
+    )
+    .expect("bounded drill package verifies before mutation");
+    assert_eq!(drill_verified.package_digest, drill_digest);
     let corrupt = root.join("corrupt.gfpb");
-    fs::copy(&package, &corrupt).expect("copy corrupt drill");
+    fs::copy(&drill_package, &corrupt).expect("copy bounded corrupt drill");
     {
         let mut file = fs::OpenOptions::new()
             .append(true)
@@ -1853,7 +1980,7 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
     assert!(
         verify_portable_v2(
             &PortableVerifyRequest {
-                input: package.clone(),
+                input: drill_package.clone(),
                 mode: PortableV2Mode::Full,
                 limits
             },
@@ -1870,7 +1997,7 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
     assert!(
         verify_portable_v2(
             &PortableVerifyRequest {
-                input: package.clone(),
+                input: drill_package.clone(),
                 mode: PortableV2Mode::Full,
                 limits: tiny
             },
@@ -1885,7 +2012,7 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
         GraphForge::import_portable_v2(
             &interrupted,
             &PortableV2ImportRequest {
-                input: package,
+                input: drill_package,
                 operation_id: OperationId(uuidv7(0x746)),
                 limits,
             },
@@ -1984,10 +2111,11 @@ fn target_live_windows_are_deterministic_bounded_and_reconciled() {
             &cancelled,
         );
         let mut digest = Sha256::new();
-        let replay = merge_runs(&spills.runs, |src, dst| {
+        let replay = merge_runs(&spills.runs, Some(&cancelled), |src, dst| {
             digest.update(src.to_le_bytes());
             digest.update(dst.to_le_bytes());
-        });
+        })
+        .expect("replay merge");
         assert_eq!(counts.live_unique_edges, replay.live_unique_edges);
         assert_eq!(
             spills.raw_attempts,
@@ -2005,8 +2133,46 @@ fn target_live_windows_are_deterministic_bounded_and_reconciled() {
 }
 
 #[test]
+fn cancellation_stops_merge_and_publication_before_more_work_is_committed() {
+    let profile = load_profile();
+    let spill_root = TempDir::new().expect("cancellation spill root");
+    let spill = generate_spill_runs(
+        8,
+        4,
+        profile.initiator,
+        profile.seed,
+        64,
+        spill_root.path(),
+        None,
+    );
+    let cancelled = AtomicBool::new(true);
+    let mut emitted = 0_u64;
+    assert!(matches!(
+        merge_runs(&spill.runs, Some(&cancelled), |_, _| emitted += 1),
+        Err("merge_cancelled")
+    ));
+    assert_eq!(emitted, 0);
+
+    let project = TempDir::new().expect("cancelled publication project");
+    let graph = GraphForge::new(project.path().to_str()).expect("open publication project");
+    let before = current_generation_uuid(&graph);
+    let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        publish_nodes(&graph, 8, Some(&cancelled));
+    }));
+    assert!(stopped.is_err());
+    assert_eq!(current_generation_uuid(&graph), before);
+    assert_eq!(
+        graph
+            .node_count(NODE_LABEL)
+            .expect("node count after cancellation"),
+        0
+    );
+}
+
+#[test]
 #[ignore = "requires approved 128 GiB / 1 TiB Linux certification host"]
 fn certification_target_live_full_lifecycle_evidence() {
+    let elapsed_before_process = certification_elapsed_before_process();
     let started = Instant::now();
     let profile = load_certification_profile();
     let root = TempDir::new().expect("certification workspace");
@@ -2043,7 +2209,9 @@ fn certification_target_live_full_lifecycle_evidence() {
         },
         "host": {
             "provider": std::env::var("GF_G500_CERT_PROVIDER").expect("approved provider input"),
+            "region": std::env::var("GF_G500_CERT_REGION").expect("approved region input"),
             "sku": std::env::var("GF_G500_CERT_SKU").expect("approved SKU input"),
+            "os_image": std::env::var("GF_G500_CERT_OS_IMAGE").expect("approved OS image input"),
             "os": command_text("uname", &["-s"]),
             "kernel": command_text("uname", &["-r"]),
             "filesystem": normalized_filesystem(root.path()),
@@ -2067,7 +2235,7 @@ fn certification_target_live_full_lifecycle_evidence() {
         "equivalence": { "source_project_fingerprint": lifecycle["source_project_fingerprint"], "imported_project_fingerprint": lifecycle["imported_project_fingerprint"] },
         "authority": { "source_fingerprint": lifecycle["source_authority_fingerprint"], "imported_fingerprint": lifecycle["imported_authority_fingerprint"] },
         "phases": phases,
-        "envelope": { "peak_rss_bytes": peak_rss, "peak_disk_bytes": peak_disk, "wall_time_s": started.elapsed().as_secs_f64() },
+        "envelope": { "peak_rss_bytes": peak_rss, "peak_disk_bytes": peak_disk, "wall_time_s": elapsed_before_process.saturating_add(started.elapsed()).as_secs_f64() },
         "result": "pass", "first_failure": null,
     });
     let out = PathBuf::from(std::env::var("GF_G500_CERT_EVIDENCE_OUT").expect("evidence output"));

@@ -15,8 +15,16 @@ on:
         description: Provisioned provider recorded in evidence
         required: true
         type: string
+      region:
+        description: Exact provisioned provider region recorded in evidence
+        required: true
+        type: string
       sku:
         description: Provisioned SKU recorded in evidence
+        required: true
+        type: string
+      os_image:
+        description: Immutable resolved OS image identity recorded in evidence
         required: true
         type: string
 
@@ -32,17 +40,35 @@ jobs:
     name: SCALE26 target-live certification
     environment: scale-certification
     runs-on: ${{ inputs.runner_label }}
-    timeout-minutes: 240
+    # The Rust watchdog owns the 240-minute product fail-safe. Keep 30 minutes
+    # of job headroom so failure evidence can still be validated and uploaded.
+    timeout-minutes: 270
     steps:
       - name: Reject branch names and malformed SHAs
         env:
           COMMIT_SHA: ${{ inputs.commit_sha }}
+          PROVIDER: ${{ inputs.provider }}
+          REGION: ${{ inputs.region }}
+          SKU: ${{ inputs.sku }}
+          OS_IMAGE: ${{ inputs.os_image }}
         run: |
           case "$COMMIT_SHA" in
             (????????????????????????????????????????) ;;
             (*) echo "commit_sha must contain exactly 40 characters" >&2; exit 2 ;;
           esac
           case "$COMMIT_SHA" in (*[!0-9a-f]*) echo "commit_sha must be lowercase hex" >&2; exit 2 ;; esac
+          case "$(printf '%s' "$PROVIDER" | tr '[:upper:]' '[:lower:]')" in
+            (""|local|localhost|developer|example|test|unknown) echo "provider must name provisioned cloud infrastructure" >&2; exit 2 ;;
+          esac
+          case "$(printf '%s' "$REGION" | tr '[:upper:]' '[:lower:]')" in
+            (""|local|localhost|default|example|global|test|unknown) echo "region must name the exact provisioned region" >&2; exit 2 ;;
+          esac
+          case "$(printf '%s' "$SKU" | tr '[:upper:]' '[:lower:]')" in
+            (""|local|default|example|generic|test|unknown) echo "sku must name the exact provisioned machine SKU" >&2; exit 2 ;;
+          esac
+          case "$(printf '%s' "$OS_IMAGE" | tr '[:upper:]' '[:lower:]')" in
+            (""|local|default|example|generic|latest|test|unknown|*:latest) echo "os_image must be an immutable resolved image identity" >&2; exit 2 ;;
+          esac
       - name: Checkout exact commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -52,29 +78,43 @@ jobs:
         env:
           COMMIT_SHA: ${{ inputs.commit_sha }}
         run: |
+          mkdir -p "$RUNNER_TEMP/g500-sut-temp"
           test "$(git rev-parse HEAD)" = "$COMMIT_SHA"
           test "$(uname -s)" = Linux
           test "$(awk '/MemTotal/ {print $2 * 1024}' /proc/meminfo)" -ge 137438953472
-          test "$(df --output=size -B1 "$RUNNER_TEMP" | tail -1 | tr -d ' ')" -ge 1099511627776
-          case "$(stat -f -c %T "$RUNNER_TEMP")" in ext2/ext3|xfs|btrfs) ;; (*) exit 2 ;; esac
+          test "$(df --output=size -B1 "$RUNNER_TEMP/g500-sut-temp" | tail -1 | tr -d ' ')" -ge 1099511627776
+          case "$(stat -f -c %T "$RUNNER_TEMP/g500-sut-temp")" in ext2/ext3|xfs|btrfs) ;; (*) exit 2 ;; esac
       - name: Install pinned Rust toolchain
         run: rustup show active-toolchain
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      - name: Prepare pinned evidence validator
+        run: uv run --isolated --no-project --with jsonschema==4.26.0 python -c "import jsonschema"
       - name: Run bounded preflight and provisioned certification
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-g500-certification
+          # tempfile::TempDir follows TMPDIR. This binds the source project,
+          # spills, bundle, and clean import to the exact attested volume.
+          TMPDIR: ${{ runner.temp }}/g500-sut-temp
           GF_G500_CERT_EVIDENCE_OUT: ${{ runner.temp }}/g500-certification-evidence.json
           GF_G500_CERT_JOURNAL_OUT: ${{ runner.temp }}/g500-certification-phase-journal.json
           GF_G500_CERT_PROVIDER: ${{ inputs.provider }}
+          GF_G500_CERT_REGION: ${{ inputs.region }}
           GF_G500_CERT_SKU: ${{ inputs.sku }}
+          GF_G500_CERT_OS_IMAGE: ${{ inputs.os_image }}
           GF_G500_CERT_EXPECTED_SHA: ${{ inputs.commit_sha }}
         run: |
+          export GF_G500_CERT_STARTED_EPOCH_S="$(date +%s)"
           cargo test -p graphforge-api --release --test scale_g500_ladder certification_lifecycle_journals_equivalent_round_trip_and_drills -- --exact --nocapture
           cargo test -p graphforge-api --release --test scale_g500_ladder certification_target_live_full_lifecycle_evidence -- --ignored --exact --nocapture --test-threads=1
       - name: Validate sanitized durable evidence
         if: always()
         env:
           COMMIT_SHA: ${{ inputs.commit_sha }}
-        run: python3 scripts/ci/validate-g500-certification.py "$RUNNER_TEMP/g500-certification-evidence.json" --expected-sha "$COMMIT_SHA"
+        run: >-
+          uv run --isolated --no-project --with jsonschema==4.26.0 python
+          scripts/ci/validate-g500-certification.py
+          "$RUNNER_TEMP/g500-certification-evidence.json"
+          --expected-sha "$COMMIT_SHA"
       - name: Upload evidence without project payload
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

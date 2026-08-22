@@ -66,11 +66,32 @@ hard-code rungs elsewhere.
 | Host capacity | **128 GiB** peak RSS, **1 TiB** local NVMe (declared **Linux cloud** SKU) |
 | Wall-clock fail-safe | **4 h** (`timeout_s: 14400`) end-to-end on that SKU — provisional #745 budget, not a laptop or “overnight is fine” product claim |
 
+Before any provisioned rung, complete the read-only/no-spend checks from the
+[certification runbook](g500-certification.md): subscription and role, provider
+registration state, regional SKU restrictions and quota, current on-demand
+price, protected environment, and unique runner-label availability. Provider
+registration, quota requests, runner-token generation, provisioning, and
+dispatch require recorded resource and spend authorization.
+
+The declared certification filesystem is the filesystem the Rust process
+actually uses. Configure process `TMPDIR` and GitHub `RUNNER_TEMP` on the same
+local-NVMe XFS mount and verify their resolved filesystem/device identity before
+dispatch. Merely attaching NVMe or checking a different runner directory is not
+capacity evidence. Absolute paths stay in the private provisioning log and are
+excluded from sanitized evidence.
+
 The **S10** rung runs in normal CI and deliberately sets `buffer_edges` below
 its own edge count, so the spill/merge path is exercised on every run. S20–S26
 are `#[ignore]` and opt-in on **provisioned Linux cloud / evidence hosts**
 only. Developer laptops (including macOS Air-class machines) must not be used
 as #745 certification SUTs; local runs are dry-runs at best.
+
+Record the full provider/region/SKU and immutable Linux image version for every
+provisioned observation. Use on-demand capacity with a unique ephemeral runner;
+an eviction-prone Spot/low-priority host cannot provide controlled cancellation
+or wall-time evidence. A five-hour infrastructure TTL bounds billing and
+cleanup, while the product certification must still finish within 14,400
+seconds.
 
 ## First-fail ladder
 

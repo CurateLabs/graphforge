@@ -15,9 +15,43 @@
   "envelope": {
     "rss_bytes": 137438953472,
     "disk_bytes": 1099511627776,
-    "timeout_s": 14400
+    "timeout_s": 14400,
+    "dispatch_timeout_s": 14400,
+    "provisioning_ttl_s": 18000,
+    "timeout_headroom_note": "The four-hour product envelope includes both certification test commands. Provisioning and runner registration happen before dispatch and are bounded separately by the five-hour infrastructure TTL; they are never excluded from billed-cost approval."
   },
   "preflight_scale": 10,
   "provider_decision": "required-at-dispatch",
-  "runner_label": "required-at-dispatch"
+  "runner_label": "required-at-dispatch",
+  "sut": {
+    "provider": "required-at-dispatch",
+    "region": "required-at-dispatch",
+    "sku": "required-at-dispatch",
+    "os_image": "required-at-dispatch-exact-image-identity",
+    "filesystem": "xfs",
+    "workspace_binding": "process TMPDIR and GitHub RUNNER_TEMP must resolve to the same local-NVMe filesystem",
+    "runner_lifecycle": "unique ephemeral repository runner; deregister and destroy after evidence upload"
+  },
+  "authorization": {
+    "preflight_mode": "read-only-no-spend",
+    "required_before_provisioning": [
+      "explicit provider registration authorization",
+      "explicit resource creation and spend ceiling",
+      "approved exact provider, region, SKU, image version, runner label, and teardown owner"
+    ]
+  },
+  "negative_drills": {
+    "scale": "representative-bounded",
+    "required": ["corruption-before-import", "cooperative-cancellation", "resource-limit", "interrupted-finalization"],
+    "invariant": "no partial publication, no addressable partial candidate, and the last complete atomic phase journal remains valid"
+  },
+  "identity_reconciliation": {
+    "source_generation": "distinct durable source generation identity",
+    "semantic_package": "portable-v2 semantic package digest",
+    "transport": "bundle transport digest distinct from semantic package digest",
+    "imported_generation": "distinct durable imported generation identity",
+    "authority": "source and imported ontology/capability fingerprints must match",
+    "project": "source and imported canonical project fingerprints must match",
+    "queries": "source and imported 1-hop and 2-hop observation fingerprints must match"
+  }
 }
