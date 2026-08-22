@@ -61,12 +61,15 @@ The platform-native namespace durability barrier is POSIX directory `fsync(2)`
 or the NTFS write-through handle rename specified by ADR 0020. Windows
 directory `FlushFileBuffers` and `ReplaceFileW` are not durability authority.
 
-The implementation identifies the backing filesystem/volume and runs a
-create-lock-flush-replace-flush probe in a private sibling under the proposed
-project parent. Network, userspace, removable, cross-device, or unknown
-filesystems are rejected unless they are explicitly added to the tested
-allowlist. Missing semantics return `GF_UNSUPPORTED_FILESYSTEM` before the
-project root or `CURRENT` is changed. There is no best-effort mode.
+The implementation identifies the filesystem containing the project parent and
+runs a create-lock-flush-replace-flush probe in a private sibling under that
+parent. The project parent may be a persistent volume mounted beneath a
+different container or VM root filesystem. The project root and its durable
+contents must remain on that one admitted filesystem. Network, userspace,
+removable, or unknown project filesystems are rejected unless explicitly added
+to the tested allowlist. Missing semantics return
+`GF_UNSUPPORTED_FILESYSTEM` before the project root or `CURRENT` is changed.
+There is no best-effort mode.
 
 ### On-disk layout
 

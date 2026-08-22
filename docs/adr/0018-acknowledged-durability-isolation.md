@@ -82,9 +82,12 @@ with `fcntl`/`flock`, same-filesystem `rename(2)`, and file plus directory
 `FILE_FLAG_WRITE_THROUGH` staging handles, and same-handle
 `SetFileInformationByHandle` rename. ReFS is unsupported/unproven.
 
-Network, userspace, removable, cross-device, symlink-mediated, or unknown
-filesystems are rejected with `GF_UNSUPPORTED_FILESYSTEM` before the project
-root or `CURRENT` changes. There is no best-effort durability mode.
+The project parent may be a persistent filesystem mounted beneath a different
+container or VM root filesystem. The project root and all durable publication
+paths must remain on that admitted filesystem. Network, userspace, removable,
+symlink-mediated, or unknown project filesystems are rejected with
+`GF_UNSUPPORTED_FILESYSTEM` before the project root or `CURRENT` changes. There
+is no best-effort durability mode.
 
 ### Recovery authority
 
