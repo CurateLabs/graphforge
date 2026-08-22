@@ -617,6 +617,10 @@ impl GraphForge {
             serde_json::json!({"module_ids": module_ids.clone()}),
         );
         cases.insert(
+            "migration_receipt".into(),
+            serde_json::json!({"plan_digest": migration_plan_digest}),
+        );
+        cases.insert(
             "retained_data_query".into(),
             serde_json::to_value(&retained_data)
                 .map_err(|_| GfError::Validation("retained report cannot be encoded"))?,

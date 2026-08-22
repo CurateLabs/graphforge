@@ -392,6 +392,10 @@ fn retained_data_migrates_atomically_and_exact_identity_reopens() {
     assert_eq!(report.retained_data.birth_year, 1815);
     assert_eq!(report.composition_after, receipt.composition_fingerprint);
     assert_ne!(report.composition_before, report.composition_after);
+    assert_eq!(
+        report.cases["migration_receipt"]["plan_digest"],
+        report.migration_plan_digest
+    );
     if let Some(path) = std::env::var_os("GRAPHFORGE_MULTI_ONTOLOGY_CERTIFICATION_REPORT") {
         std::fs::write(path, serde_json::to_vec(&report).unwrap()).unwrap();
     }
