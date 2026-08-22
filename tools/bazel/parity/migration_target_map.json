@@ -1,7 +1,7 @@
 {
   "schema": "graphforge.bazel-migration-target-map.v1",
   "issue": 6,
-  "cargo_target_count": 112,
+  "cargo_target_count": 113,
   "targets": [
     {
       "package": "graphforge-api",
@@ -432,6 +432,16 @@
       "bazel_label": "//crates/graphforge-api:provider_session",
       "exception_id": null,
       "notes": "#8"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "graphforge-fly-filesystem-smoke",
+      "class": "bin",
+      "source": "crates/graphforge-api/src/bin/graphforge-fly-filesystem-smoke.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:graphforge-fly-filesystem-smoke",
+      "exception_id": null,
+      "notes": "#882 exact-path Fly filesystem qualification"
     },
     {
       "package": "graphforge-api",

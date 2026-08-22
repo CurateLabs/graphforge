@@ -600,3 +600,16 @@ build_test(
     name = "api_example_bins",
     targets = [":%s" % name for name in _EXAMPLE_NAMES],
 )
+
+gf_rust_binary(
+    name = "graphforge-fly-filesystem-smoke",
+    srcs = ["src/bin/graphforge-fly-filesystem-smoke.rs"],
+    deps = _API_DEPS + [":graphforge_api"],
+)
+
+gf_rust_integration_test(
+    name = "graphforge_fly_filesystem_smoke_test",
+    srcs = ["src/bin/graphforge-fly-filesystem-smoke.rs"],
+    crate = ":graphforge_api",
+    deps = _API_DEPS,
+)

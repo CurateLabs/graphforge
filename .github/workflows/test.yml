@@ -77,6 +77,9 @@ jobs:
       - name: Test CodSpeed nightly policy
         run: python3 scripts/ci/test-codspeed-nightly.py
 
+      - name: Test Fly qualification safety contract
+        run: python3 scripts/ci/test-fly-filesystem-safety-contract.py
+
       - name: Test Repository Policy suite classifier
         run: scripts/ci/test-classify-policy-suites.sh
 

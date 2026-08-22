@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://graphforge.dev/evidence/fly-filesystem-qualification.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "git_sha", "image_digest", "provider", "region", "host", "volume", "phase_peak_rss_bytes", "admission", "result", "full_run_authorized"],
+  "properties": {
+    "schema": {"const": "graphforge-fly-filesystem-qualification/1"},
+    "git_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "image_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "provider": {"const": "fly.io"},
+    "region": {"type": "string", "pattern": "^[a-z0-9-]{2,20}$"},
+    "host": {
+      "type": "object", "additionalProperties": false,
+      "required": ["os", "filesystem", "memory_bytes"],
+      "properties": {
+        "os": {"const": "Linux"},
+        "filesystem": {"type": "string", "pattern": "^[a-z0-9_-]{2,32}$"},
+        "memory_bytes": {"type": ["integer", "null"], "minimum": 1}
+      }
+    },
+    "volume": {
+      "type": "object", "additionalProperties": false,
+      "required": ["mount_role", "capacity_bytes"],
+      "properties": {
+        "mount_role": {"const": "process_work_root"},
+        "capacity_bytes": {"type": ["integer", "null"], "minimum": 1}
+      }
+    },
+    "phase_peak_rss_bytes": {
+      "type": "object", "additionalProperties": false,
+      "required": ["filesystem_admission", "durable_reopen", "portable_verify", "portable_import_reopen"],
+      "properties": {
+        "filesystem_admission": {"type": ["integer", "null"], "minimum": 1},
+        "durable_reopen": {"type": ["integer", "null"], "minimum": 1},
+        "portable_verify": {"type": ["integer", "null"], "minimum": 1},
+        "portable_import_reopen": {"type": ["integer", "null"], "minimum": 1}
+      }
+    },
+    "admission": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "code", "cause"],
+      "properties": {
+        "status": {"enum": ["accepted", "rejected"]},
+        "code": {"type": ["string", "null"], "pattern": "^[A-Z0-9_]{2,80}$"},
+        "cause": {"type": ["string", "null"], "pattern": "^[a-z0-9_]{2,80}$"}
+      }
+    },
+    "result": {"enum": ["qualified", "disqualified", "failed"]},
+    "full_run_authorized": {"const": false}
+  }
+}

@@ -1,0 +1,12 @@
+.git
+.venv
+target
+bazel-*
+build
+dist
+node_modules
+*.env
+.env*
+*.pem
+*.key
+fly-qualification-evidence.json

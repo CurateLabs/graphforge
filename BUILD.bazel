@@ -166,7 +166,10 @@ build_test(
 # Deterministic CI target groups (#8 / #1 step 5).
 test_suite(
     name = "unit_tests",
-    tests = [":first_party_lib_tests"],
+    tests = [
+        ":first_party_lib_tests",
+        "//crates/graphforge-api:graphforge_fly_filesystem_smoke_test",
+    ],
 )
 
 test_suite(
