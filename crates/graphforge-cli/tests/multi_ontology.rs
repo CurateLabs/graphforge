@@ -918,13 +918,6 @@ fn observed_cli_certification_report() -> Value {
                 .unwrap()
         );
         identities.insert(key, id);
-        if filename == "genealogy-v1.json" {
-            let graph =
-                graphforge_api::GraphForge::new(Some(project.path().to_str().unwrap())).unwrap();
-            graph
-                .execute("CREATE (:Person {full_name: 'Ada Lovelace', birth_year: 1815})")
-                .unwrap();
-        }
     }
     let replacements = identities
         .iter()
@@ -946,6 +939,12 @@ fn observed_cli_certification_report() -> Value {
     }
 
     let graph = graphforge_api::GraphForge::new(Some(project.path().to_str().unwrap())).unwrap();
+    // Retained rows belong to the fully assembled source composition. Creating
+    // them while module adoption is still changing authority would correctly
+    // leave their physical route metadata pinned to that earlier composition.
+    graph
+        .execute("CREATE (:`genealogy:Person` {full_name: 'Ada Lovelace', birth_year: 1815})")
+        .unwrap();
     let before_state = graph.ontology_authority_state().unwrap();
     let before = before_state.composition_fingerprint.unwrap();
     let genealogy = &identities["$genealogy"];
