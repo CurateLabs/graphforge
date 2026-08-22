@@ -16,7 +16,7 @@ SPEC.loader.exec_module(MODULE)
 
 
 def report(surface: str) -> dict[str, object]:
-    return {
+    value: dict[str, object] = {
         "contract": MODULE.CONTRACT,
         "surface": surface,
         "composition_before": "1" * 64,
@@ -25,11 +25,15 @@ def report(surface: str) -> dict[str, object]:
         "module_ids": ["urn:graphforge:evidence@v1", "urn:graphforge:research@v1"],
         "bridge_ids": ["urn:graphforge:research-evidence@v1"],
         "retained_data": {"rows_scanned": 1, "name": "Ada", "birth_year": 1815},
-        "cases": {
-            "retained_data_migration": {"outcome": "migrated", "atomic": True},
-            "portable_complete": {"outcome": "round_trip"},
-        },
+        "cases": {},
     }
+    value["cases"] = {
+        "authority_reopened": {"composition_fingerprint": value["composition_after"]},
+        "bridge_set_retained": {"bridge_ids": value["bridge_ids"]},
+        "module_set_retained": {"module_ids": value["module_ids"]},
+        "retained_data_query": value["retained_data"],
+    }
+    return value
 
 
 def compare(values: dict[str, dict[str, object]]) -> list[str]:
@@ -48,11 +52,8 @@ def main() -> None:
     assert compare(baseline) == []
 
     mutated = {surface: report(surface) for surface in MODULE.SURFACES}
-    mutated["node"]["cases"] = {
-        "retained_data_migration": {"outcome": "migrated", "atomic": False},
-        "portable_complete": {"outcome": "round_trip"},
-    }
-    assert any("node: certification outcome differs" in error for error in compare(mutated))
+    mutated["node"]["cases"] = {"authority_reopened": True}
+    assert any("node: cases must bind exact" in error for error in compare(mutated))
 
     mutated = {surface: report(surface) for surface in MODULE.SURFACES}
     mutated["python"]["retained_data"] = {"rows_scanned": 0, "name": "", "birth_year": True}

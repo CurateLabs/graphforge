@@ -72,10 +72,17 @@ def _validate(surface: str, report: dict[str, Any]) -> list[str]:
     ):
         errors.append(f"{surface}: retained_data values are invalid")
     cases = report.get("cases")
-    if not isinstance(cases, dict) or not cases:
-        errors.append(f"{surface}: cases must contain real structured outcomes")
-    elif any(not isinstance(key, str) or not key or value is None for key, value in cases.items()):
-        errors.append(f"{surface}: cases contain an invalid outcome")
+    expected_cases = {
+        "authority_reopened": {"composition_fingerprint": report.get("composition_after")},
+        "bridge_set_retained": {"bridge_ids": report.get("bridge_ids")},
+        "module_set_retained": {"module_ids": report.get("module_ids")},
+        "retained_data_query": report.get("retained_data"),
+    }
+    if cases != expected_cases:
+        errors.append(
+            f"{surface}: cases must bind exact authority, inventory, "
+            "and retained-query observations"
+        )
     return errors
 
 

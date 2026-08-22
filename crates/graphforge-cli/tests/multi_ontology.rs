@@ -1303,7 +1303,10 @@ fn observed_cli_parity_report() -> Value {
     let target_parent = TempDir::new().unwrap();
     let target = target_parent.path().join("target");
     fs::create_dir(&target).unwrap();
-    let target_before = fs::read_dir(&target).unwrap().count();
+    let target_before = fs::read_dir(&target)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
     let authority_before = graphforge_api::GraphForge::new(Some(project.path().to_str().unwrap()))
         .unwrap()
         .ontology_authority_state()
@@ -1325,13 +1328,20 @@ fn observed_cli_parity_report() -> Value {
         .unwrap()
         .ontology_authority_state()
         .unwrap();
+    let target_after = fs::read_dir(&target)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
 
     let listed_again = gf(project.path(), &["--json", "ontology", "module", "list"]);
     let blocked_text = String::from_utf8_lossy(&blocked.stderr);
-    let packaged = Command::new(env!("CARGO_BIN_EXE_gf"))
-        .args(["ontology", "module", "list", "--help"])
-        .output()
-        .unwrap();
+    let packaged_project = TempDir::new().unwrap();
+    let packaged = gf(
+        packaged_project.path(),
+        &["--json", "ontology", "module", "list"],
+    );
+    assert!(packaged.status.success());
+    let packaged_modules = parse_json(&packaged.stdout);
     serde_json::json!({
         "contract":"graphforge-multi-ontology-parity-result/1",
         "cases":{
@@ -1339,12 +1349,12 @@ fn observed_cli_parity_report() -> Value {
             "exact_identity_and_ambiguity":{"exact_match":exact_match,"diagnostic_code":ambiguity_code},
             "dependency_blocked_deletion":{"safe":preview_json["safe"],"diagnostic_code":blocked_diagnostic["code"]},
             "unsupported_future_portability":{"error_code":unsupported_json["error"]["code"],"diagnostic_code":unsupported_json["error"]["diagnostics"][0]["code"]},
-            "cancellation":{"error_code":cancelled_json["error"]["code"],"authority_unchanged":cancel_before.stdout == cancel_after.stdout},
-            "idempotent_replay":{"same_receipt":first.stdout == replay.stdout,"conflict_code":conflict_json["error"]["code"]},
-            "no_partial_import_or_authority_change":{"target_unchanged":fs::read_dir(&target).unwrap().count() == target_before,"authority_unchanged":authority_after == authority_before},
+            "cancellation":{"error_code":cancelled_json["error"]["code"],"before_modules":parse_json(&cancel_before.stdout),"after_modules":parse_json(&cancel_after.stdout)},
+            "idempotent_replay":{"first_receipt":parse_json(&first.stdout),"replay_receipt":parse_json(&replay.stdout),"conflict_code":conflict_json["error"]["code"]},
+            "no_partial_import_or_authority_change":{"before_entries":target_before,"after_entries":target_after,"authority_before":authority_before,"authority_after":authority_after},
             "bounded_structured_diagnostics":{"outer_code":blocked_json["error"]["code"],"diagnostic_code":blocked_diagnostic["code"],"bounded":blocked_json["error"]["diagnostics"].as_array().unwrap().len() <= blocked_diagnostic["limit"].as_u64().unwrap() as usize,"path_free":!blocked_text.contains(&project.path().display().to_string())},
-            "deterministic_path_free_cli_json":{"deterministic":listed.stdout == listed_again.stdout,"path_free":!String::from_utf8_lossy(&listed.stdout).contains(&project.path().display().to_string())},
-            "packaged_clean_install":{"semantic_smoke":packaged.status.success()}
+            "deterministic_path_free_cli_json":{"first_serialized":String::from_utf8(listed.stdout).unwrap(),"second_serialized":String::from_utf8(listed_again.stdout).unwrap(),"forbidden_path":project.path().display().to_string()},
+            "packaged_clean_install":{"package_origin":env!("CARGO_BIN_EXE_gf"),"operation":"ontology_modules","module_count":packaged_modules.as_array().unwrap().len()}
         }
     })
 }
