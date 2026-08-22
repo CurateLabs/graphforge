@@ -128,10 +128,15 @@ Provisioned full ladder (long; isolate the target dir; **Linux cloud scale-host*
 matching the declared SKU — not a developer laptop for #745 evidence):
 
 ```bash
-CARGO_TARGET_DIR=/tmp/cargo-g500-ladder make bench-g500-ladder
+GF_G500_LADDER_MAX_SCALE=25 CARGO_TARGET_DIR=/tmp/cargo-g500-ladder make bench-g500-ladder
 # override the evidence path:
-GF_G500_LADDER_EVIDENCE_OUT=build/g500-ladder-evidence.json make bench-g500-ladder
+GF_G500_LADDER_MAX_SCALE=25 GF_G500_LADDER_EVIDENCE_OUT=build/g500-ladder-evidence.json make bench-g500-ladder
 ```
+
+`GF_G500_LADDER_MAX_SCALE` is mandatory and must name a provisioned rung in the
+profile. It is an authorization ceiling, not a performance hint: selecting 25
+runs S20, S22, S24, and S25, and excludes S26 even when every smaller rung
+passes.
 
 Default evidence path: `docs/development/g500-ladder-evidence.json`.
 
