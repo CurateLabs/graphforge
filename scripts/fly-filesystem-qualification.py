@@ -19,7 +19,8 @@ ROOT = Path(__file__).resolve().parents[1]
 VALIDATOR_PATH = ROOT / "scripts/ci/validate-fly-filesystem-qualification.py"
 SHA = re.compile(r"^[0-9a-f]{40}$")
 DIGEST_REF = re.compile(r"^[^\s@]+@(?P<digest>sha256:[0-9a-f]{64})$")
-SAFE_NAME = re.compile(r"^[a-z][a-z0-9-]{2,62}$")
+SAFE_APP_MACHINE_NAME = re.compile(r"^[a-z][a-z0-9-]{2,62}$")
+SAFE_VOLUME_NAME = re.compile(r"^[a-z][a-z0-9_]{0,29}$")
 SAFE_REGION = re.compile(r"^[a-z0-9-]{2,20}$")
 
 
@@ -95,6 +96,22 @@ def launch_args(args: argparse.Namespace, volume_id: str, digest: str) -> list[s
     ]
 
 
+def volume_create_args(args: argparse.Namespace) -> list[str]:
+    return [
+        "volumes",
+        "create",
+        args.volume_name,
+        "--app",
+        args.app_name,
+        "--region",
+        args.region,
+        "--size",
+        str(args.volume_size_gb),
+        "--scheduled-snapshots=false",
+        "--yes",
+    ]
+
+
 def validate_inputs(args: argparse.Namespace) -> str:
     match = DIGEST_REF.fullmatch(args.image)
     if not match:
@@ -103,9 +120,13 @@ def validate_inputs(args: argparse.Namespace) -> str:
         raise QualificationError("--expected-sha must be exact lowercase 40-hex")
     if not SAFE_REGION.fullmatch(args.region):
         raise QualificationError("invalid fixed region")
-    for value in (args.app_name, args.volume_name, args.machine_name):
-        if not SAFE_NAME.fullmatch(value):
-            raise QualificationError("resource names must be explicit safe lowercase names")
+    for value in (args.app_name, args.machine_name):
+        if not SAFE_APP_MACHINE_NAME.fullmatch(value):
+            raise QualificationError("app and Machine names must be safe lowercase names")
+    if not SAFE_VOLUME_NAME.fullmatch(args.volume_name):
+        raise QualificationError(
+            "volume name must be 1..30 lowercase alphanumeric/underscore characters"
+        )
     if not 1 <= args.cpus <= 16:
         raise QualificationError("qualification CPU count must be in 1..16")
     if not 1024 <= args.memory_mb <= 131072:
@@ -171,21 +192,7 @@ def execute(args: argparse.Namespace, fly: Flyctl, digest: str) -> None:
             raise QualificationError("refusing to reuse a non-empty app name")
         app_created = True
         fly.run(["apps", "create", args.app_name, "--org", args.org])
-        volume = fly.json(
-            [
-                "volumes",
-                "create",
-                args.volume_name,
-                "--app",
-                args.app_name,
-                "--region",
-                args.region,
-                "--size",
-                str(args.volume_size_gb),
-                "--scheduled-snapshots=false",
-                "--yes",
-            ]
-        )
+        volume = fly.json(volume_create_args(args))
         volume_id = volume["id"]
         fly.run(launch_args(args, volume_id, digest))
         machines = fly.json(["machine", "list", "--app", args.app_name])

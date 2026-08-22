@@ -31,7 +31,7 @@ def args(**changes):
         "region": "den",
         "org": "curate",
         "app_name": "gf-qual-app",
-        "volume_name": "gf-qual-vol",
+        "volume_name": "gf_qual_vol",
         "machine_name": "gf-qual-machine",
         "cpus": 2,
         "memory_mb": 4096,
@@ -73,6 +73,28 @@ def test_refuses_mutable_image_and_execute_without_confirmation():
         controller.validate_inputs(args(image="registry.example/graphforge:latest"))
     with pytest.raises(controller.QualificationError, match="confirm-disposable"):
         controller.validate_inputs(args(execute=True))
+
+
+@pytest.mark.parametrize("volume_name", ["v", "v" + "0" * 29, "gf_qual_vol"])
+def test_accepts_fly_valid_volume_names(volume_name):
+    controller.validate_inputs(args(volume_name=volume_name))
+
+
+@pytest.mark.parametrize(
+    "volume_name",
+    ["gf-qual-vol", "GF_QUAL_VOL", "_gf_qual_vol", "v" + "0" * 30],
+)
+def test_refuses_fly_invalid_volume_names(volume_name):
+    with pytest.raises(controller.QualificationError, match="volume name"):
+        controller.validate_inputs(args(volume_name=volume_name))
+
+
+def test_volume_create_command_uses_valid_name_and_exact_resources():
+    command = controller.volume_create_args(args())
+    assert command[:3] == ["volumes", "create", "gf_qual_vol"]
+    assert command[command.index("--region") + 1] == "den"
+    assert command[command.index("--size") + 1] == "10"
+    assert "--scheduled-snapshots=false" in command
 
 
 @pytest.mark.parametrize(
