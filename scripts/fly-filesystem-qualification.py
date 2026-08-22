@@ -29,9 +29,7 @@ class QualificationError(RuntimeError):
 class Flyctl:
     """Small injectable flyctl transport; stdout is never copied to evidence."""
 
-    def run(
-        self, args: Sequence[str], *, check: bool = True
-    ) -> subprocess.CompletedProcess[str]:
+    def run(self, args: Sequence[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["flyctl", *args],
             cwd=ROOT,

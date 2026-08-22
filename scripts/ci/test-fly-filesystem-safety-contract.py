@@ -10,7 +10,6 @@ import shutil
 import tempfile
 import unittest
 
-
 ROOT = Path(__file__).resolve().parents[2]
 CONTROLLER = Path("scripts/fly-filesystem-qualification.py")
 VALIDATOR = Path("scripts/ci/validate-fly-filesystem-qualification.py")
@@ -83,7 +82,9 @@ def validate_contract(root: Path) -> None:
         raise ContractError(f"invalid qualification evidence schema: {error}") from error
     if schema.get("additionalProperties") is not False:
         raise ContractError("evidence root must reject additional properties")
-    unsafe = sorted({name for name in property_names(schema) if FORBIDDEN_EVIDENCE_KEY.search(name)})
+    unsafe = sorted(
+        {name for name in property_names(schema) if FORBIDDEN_EVIDENCE_KEY.search(name)}
+    )
     if unsafe:
         raise ContractError("evidence schema exposes resource IDs or paths: " + ", ".join(unsafe))
     if "additionalProperties" not in read(root, SCHEMA):
@@ -113,7 +114,11 @@ class FlySafetyContractTests(unittest.TestCase):
                 "missing_machine_cleanup": (CONTROLLER, 'fly.run(["machine", "destroy"'),
                 "missing_volume_cleanup": (CONTROLLER, 'fly.run(["volumes", "destroy"'),
                 "missing_app_cleanup": (CONTROLLER, 'fly.run(["apps", "destroy"'),
-                "leaked_id": (SCHEMA, '"properties": {', '"properties": {"machine_id": {"type": "string"},'),
+                "leaked_id": (
+                    SCHEMA,
+                    '"properties": {',
+                    '"properties": {"machine_id": {"type": "string"},',
+                ),
             }
             for name, mutation in mutations.items():
                 with self.subTest(name=name):
@@ -122,7 +127,9 @@ class FlySafetyContractTests(unittest.TestCase):
                     if name == "public_port":
                         target.write_text(original + mutation[1], encoding="utf-8")
                     elif name == "leaked_id":
-                        target.write_text(original.replace(mutation[1], mutation[2], 1), encoding="utf-8")
+                        target.write_text(
+                            original.replace(mutation[1], mutation[2], 1), encoding="utf-8"
+                        )
                     else:
                         self.assertIn(mutation[1], original)
                         target.write_text(original.replace(mutation[1], ""), encoding="utf-8")

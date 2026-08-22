@@ -88,9 +88,7 @@ def test_refuses_dirty_or_non_exact_source(monkeypatch):
             argparse.Namespace(stdout=""),
         ]
     )
-    monkeypatch.setattr(
-        controller.subprocess, "run", lambda *_args, **_kwargs: next(responses)
-    )
+    monkeypatch.setattr(controller.subprocess, "run", lambda *_args, **_kwargs: next(responses))
     with pytest.raises(controller.QualificationError, match="not the checked-out HEAD"):
         controller.check_source("a" * 40)
 
