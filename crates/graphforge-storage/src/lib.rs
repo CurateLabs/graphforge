@@ -42,9 +42,10 @@ pub use semantic_bindings::{
     GRAPH_SEMANTIC_BINDINGS_FAMILY, GRAPH_SEMANTIC_BINDINGS_VERSION, LegacyRouteMigration,
     LegacySemanticProjection, MAX_SEMANTIC_BINDING_BYTES, MAX_SEMANTIC_BINDINGS,
     SEMANTIC_COMPOSITION_METADATA_KEY, SEMANTIC_ROUTE_METADATA_KEY, SemanticMigrationEvidence,
-    SemanticMigrationLimits, SemanticMigrationOperation, SemanticMigrationPlan, SemanticRouteKind,
-    SemanticStorageBinding, SemanticStorageBindings, apply_legacy_route_moves,
-    materialize_semantic_migration, require_atomic_legacy_migration, semantic_storage_bindings,
+    SemanticMigrationLimits, SemanticMigrationOperation, SemanticMigrationPlan,
+    SemanticMigrationPropertySchema, SemanticRouteKind, SemanticStorageBinding,
+    SemanticStorageBindings, apply_legacy_route_moves, materialize_semantic_migration,
+    require_atomic_legacy_migration, semantic_storage_bindings,
 };
 
 pub mod graph_delta_journal;
