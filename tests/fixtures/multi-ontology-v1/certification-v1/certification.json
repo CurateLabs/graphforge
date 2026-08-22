@@ -1,0 +1,17 @@
+{
+  "contract": "graphforge-multi-ontology-certification/1",
+  "modules": ["research.json", "document.json", "genealogy-v1.json", "scientific.json", "provenance.json", "evidence.json"],
+  "shared_module": "evidence.json",
+  "bridges": ["research-document-bridge.json", "scientific-provenance-bridge.json", "genealogy-provenance-bridge.json"],
+  "migration_target": "genealogy-v2.json",
+  "expected": {
+    "module_count": 6,
+    "bridge_count": 3,
+    "bridge_ids": ["https://graphforge.dev/bridge/genealogy-provenance", "https://graphforge.dev/bridge/research-document", "https://graphforge.dev/bridge/scientific-provenance"],
+    "ambiguous_symbol": "Person",
+    "ambiguous_candidates": ["genealogy:Person", "provenance:Person"],
+    "qualified_symbol": "https://graphforge.dev/ontology/genealogy:entity:Person",
+    "migration_steps": ["rename_type:Person->Human", "rename_property:Human|full_name->display_name"],
+    "migration_data_impacts": ["entity_label:Person->Human", "property:Human.full_name->display_name"]
+  }
+}

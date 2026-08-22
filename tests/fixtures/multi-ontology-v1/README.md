@@ -13,6 +13,13 @@ contract fixtures for implementation issues #836-#843, not a second runtime.
 content-derived identities returned by Rust before constructing the bridge.
 Its ten cases are the required cross-surface conformance matrix.
 
+`certification-v1/` is the reproducible six-domain #843 project. It contains
+authored ontology documents and deterministic expectations, never graph source
+data, generated runtime identifiers, filesystem paths, or host values. The
+genealogy v1 to v2 route deliberately renames both a retained entity label and
+a retained property so certification cannot pass through a version-only or
+empty-data shortcut.
+
 Validate deterministically from the repository root:
 
 ```bash

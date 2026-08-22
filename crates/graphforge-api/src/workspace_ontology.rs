@@ -258,6 +258,62 @@ pub(crate) fn publish_workspace_records(
     generation_uuid_override: Option<uuid::Uuid>,
     cancellation: Option<&crate::CancellationToken>,
 ) -> Result<(), GfError> {
+    publish_workspace_records_inner(
+        graph,
+        operation_uuid,
+        actor_uuid,
+        ontology,
+        configuration,
+        composition,
+        semantic_bindings,
+        generation_uuid_override,
+        None,
+        cancellation,
+    )
+}
+
+/// Publish workspace authority and one already materialized private graph tree
+/// in the same immutable generation.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn publish_workspace_records_with_graph_tree(
+    graph: &mut GraphForge,
+    operation_uuid: uuid::Uuid,
+    actor_uuid: Option<uuid::Uuid>,
+    ontology: &WorkspaceOntology,
+    configuration: &WorkspaceConfiguration,
+    composition: &graphforge_storage::WorkspaceOntologyComposition,
+    semantic_bindings: &graphforge_storage::SemanticStorageBindings,
+    generation_uuid_override: uuid::Uuid,
+    candidate_graph_root: &std::path::Path,
+    cancellation: Option<&crate::CancellationToken>,
+) -> Result<(), GfError> {
+    publish_workspace_records_inner(
+        graph,
+        operation_uuid,
+        actor_uuid,
+        ontology,
+        configuration,
+        Some(composition),
+        Some(semantic_bindings),
+        Some(generation_uuid_override),
+        Some(candidate_graph_root),
+        cancellation,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn publish_workspace_records_inner(
+    graph: &mut GraphForge,
+    operation_uuid: uuid::Uuid,
+    actor_uuid: Option<uuid::Uuid>,
+    ontology: &WorkspaceOntology,
+    configuration: &WorkspaceConfiguration,
+    composition: Option<&graphforge_storage::WorkspaceOntologyComposition>,
+    semantic_bindings: Option<&graphforge_storage::SemanticStorageBindings>,
+    generation_uuid_override: Option<uuid::Uuid>,
+    candidate_graph_root: Option<&std::path::Path>,
+    cancellation: Option<&crate::CancellationToken>,
+) -> Result<(), GfError> {
     if let Some(token) = cancellation {
         token.checkpoint()?;
     }
@@ -293,7 +349,10 @@ pub(crate) fn publish_workspace_records(
                 || semantic_bindings.is_some()
                     && snapshot.capability_id == graphforge_storage::GRAPH_CAPABILITY_ID
                     && snapshot.record_family_id
-                        == graphforge_storage::GRAPH_SEMANTIC_BINDINGS_FAMILY)
+                        == graphforge_storage::GRAPH_SEMANTIC_BINDINGS_FAMILY
+                || candidate_graph_root.is_some()
+                    && snapshot.capability_id == graphforge_storage::GRAPH_CAPABILITY_ID
+                    && snapshot.record_family_id == graphforge_storage::GRAPH_FILES_FAMILY)
         })
         .map(snapshot_to_participant)
         .collect::<Result<Vec<_>, _>>()?;
@@ -306,6 +365,9 @@ pub(crate) fn publish_workspace_records(
     }
     if let Some(bindings) = semantic_bindings {
         participants.push(bindings.to_project_participant()?);
+    }
+    if let Some(candidate_graph_root) = candidate_graph_root {
+        participants.push(graphforge_storage::capture_graph_files(candidate_graph_root)?.1);
     }
     participants.push(workspace_participant(
         graphforge_storage::WORKSPACE_CONFIGURATION_FAMILY,
@@ -330,12 +392,13 @@ pub(crate) fn publish_workspace_records(
             .collect(),
         participants,
     };
+    let selected_graph_root = candidate_graph_root
+        .map(std::path::Path::to_path_buf)
+        .or_else(|| carries_graph_tree.then(|| parent.graph_tree_root()));
     let receipt = match graphforge_storage::stage_project_generation_with_graph_tree_mode(
         &root,
         &request,
-        carries_graph_tree
-            .then(|| parent.graph_tree_root())
-            .as_deref(),
+        selected_graph_root.as_deref(),
         graph.lifecycle_mode,
     )? {
         ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
