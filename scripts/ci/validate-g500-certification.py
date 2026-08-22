@@ -10,6 +10,9 @@ from pathlib import Path
 import re
 from typing import Any
 
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError, ValidationError
+
 REQUIRED_PHASES = (
     "preflight",
     "generate",
@@ -33,6 +36,7 @@ FORBIDDEN_KEY = re.compile(r"(secret|credential|token|password|host_path|absolut
 ABSOLUTE_PATH = re.compile(r"(?:^|[\s=:])(?:/|[A-Za-z]:[\\/])")
 ROOT = Path(__file__).resolve().parents[2]
 PROFILE = ROOT / "crates/graphforge-api/tests/fixtures/scale_g500_certification.v1.json"
+SCHEMA = ROOT / "docs/development/evidence/g500-certification.schema.json"
 RUN_COMMAND = (
     "cargo test -p graphforge-api --release --test scale_g500_ladder "
     "certification_target_live_full_lifecycle_evidence -- --ignored --exact "
@@ -42,6 +46,18 @@ RUN_COMMAND = (
 
 class EvidenceError(ValueError):
     pass
+
+
+def validate_schema(evidence: dict[str, Any]) -> None:
+    try:
+        contract = json.loads(SCHEMA.read_text(encoding="utf-8"))
+        Draft202012Validator.check_schema(contract)
+        Draft202012Validator(contract).validate(evidence)
+    except (OSError, json.JSONDecodeError, SchemaError) as error:
+        raise EvidenceError(f"committed evidence schema is invalid: {error}") from error
+    except ValidationError as error:
+        location = ".".join(str(item) for item in error.absolute_path) or "$"
+        raise EvidenceError(f"evidence schema violation at {location}: {error.message}") from error
 
 
 def require_mapping(evidence: dict[str, Any], key: str, fields: tuple[str, ...]) -> dict[str, Any]:
@@ -68,6 +84,7 @@ def reject_sensitive(value: Any, trail: str = "$") -> None:
 
 
 def validate(evidence: dict[str, Any], expected_sha: str | None) -> None:
+    validate_schema(evidence)
     reject_sensitive(evidence)
     if evidence.get("schema") != "graphforge-billion-edge-certification-evidence/1":
         raise EvidenceError("unsupported evidence schema")
@@ -154,6 +171,16 @@ def validate(evidence: dict[str, Any], expected_sha: str | None) -> None:
     phases = evidence.get("phases")
     if not isinstance(phases, list):
         raise EvidenceError("phases must be an array")
+    phase_ids = [phase.get("id") for phase in phases if isinstance(phase, dict)]
+    if len(phase_ids) != len(phases):
+        raise EvidenceError("every phase must be an object with an id")
+    if len(set(phase_ids)) != len(phase_ids):
+        raise EvidenceError("duplicate phase ids are forbidden")
+    extras = [phase for phase in phase_ids if phase not in REQUIRED_PHASES]
+    if extras:
+        raise EvidenceError("unexpected phases: " + ", ".join(str(phase) for phase in extras))
+    if tuple(phase_ids) != REQUIRED_PHASES:
+        raise EvidenceError("phases must use the required lifecycle order")
     by_id = {phase.get("id"): phase for phase in phases if isinstance(phase, dict)}
     missing = [phase for phase in REQUIRED_PHASES if phase not in by_id]
     if missing:
@@ -173,10 +200,39 @@ def validate(evidence: dict[str, Any], expected_sha: str | None) -> None:
     if envelope.get("wall_time_s", 2**64) > 14_400:
         raise EvidenceError("wall-time envelope exceeded")
     host = evidence.get("host", {})
-    if not str(host.get("os", "")).startswith("Linux"):
+    if host.get("os") != "Linux":
         raise EvidenceError("certification host must be Linux")
-    if str(host.get("provider", "")).lower() in {"local", "localhost", "developer"}:
+    provider = str(host.get("provider", "")).strip()
+    region = str(host.get("region", "")).strip()
+    sku = str(host.get("sku", "")).strip()
+    os_image = str(host.get("os_image", "")).strip()
+    placeholders = {"", "local", "localhost", "developer", "example", "generic", "test", "unknown"}
+    if provider.casefold() in placeholders:
         raise EvidenceError("certification provider must identify provisioned infrastructure")
+    if region.casefold() in placeholders | {"default", "global"}:
+        raise EvidenceError("certification region must identify the exact provisioned region")
+    if sku.casefold() in placeholders or sku.casefold() == "default":
+        raise EvidenceError("certification SKU must identify the exact provisioned machine class")
+    if os_image.casefold() in placeholders | {"default", "latest"} or os_image.casefold().endswith(
+        ":latest"
+    ):
+        raise EvidenceError("certification OS image must be an immutable resolved identity")
+    declared = (provider, region, sku, os_image)
+    observed = tuple(host.get(key) for key in ("provider", "region", "sku", "os_image"))
+    if declared != observed:
+        raise EvidenceError(
+            "provider, region, SKU, and OS image must not contain surrounding whitespace"
+        )
+    if re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z ._+:/()-]*", provider) is None:
+        raise EvidenceError("certification provider contains unsupported characters")
+    if re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z._+-]*", region) is None:
+        raise EvidenceError("certification region contains unsupported characters")
+    if re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z ._+:/()-]*", sku) is None:
+        raise EvidenceError("certification SKU contains unsupported characters")
+    if re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z ._+:/()@-]*", os_image) is None:
+        raise EvidenceError("certification OS image contains unsupported characters")
+    if re.fullmatch(r"[0-9A-Za-z._+-]+", str(host.get("kernel", ""))) is None:
+        raise EvidenceError("host kernel release is malformed")
     if (
         host.get("memory_bytes", 0) < 137_438_953_472
         or host.get("nvme_bytes", 0) < 1_099_511_627_776

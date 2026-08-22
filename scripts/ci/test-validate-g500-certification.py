@@ -47,8 +47,10 @@ def evidence():
             "duplicates": "drop",
         },
         "host": {
-            "provider": "example",
-            "sku": "cert",
+            "provider": "Microsoft Azure",
+            "region": "eastus",
+            "sku": "Standard_L64s_v3",
+            "os_image": "Canonical:ubuntu-24_04-lts:server:24.04.202608010",
             "os": "Linux",
             "kernel": "6",
             "filesystem": "xfs",
@@ -121,6 +123,15 @@ def test_accepts_complete_sanitized_evidence():
         "capacity",
         "failed_result",
         "missing_node_count",
+        "extra_top_level",
+        "duplicate_phase",
+        "extra_phase",
+        "out_of_order_phase",
+        "placeholder_sku",
+        "placeholder_region",
+        "mutable_os_image",
+        "provider_whitespace",
+        "malformed_kernel",
     ],
 )
 def test_rejects_incomplete_or_unsafe_evidence(mutation):
@@ -163,6 +174,33 @@ def test_rejects_incomplete_or_unsafe_evidence(mutation):
         value["first_failure"] = "generate"
     if mutation == "missing_node_count":
         value["counts"].pop("source_nodes")
+    if mutation == "extra_top_level":
+        value["unexpected"] = True
+    if mutation == "duplicate_phase":
+        value["phases"][-1]["id"] = value["phases"][-2]["id"]
+    if mutation == "extra_phase":
+        value["phases"].append(
+            {
+                "id": "surprise",
+                "status": "pass",
+                "elapsed_ms": 1,
+                "rss_peak_bytes": 1,
+                "disk_peak_bytes": 1,
+                "fingerprint": DIGEST_A,
+            }
+        )
+    if mutation == "out_of_order_phase":
+        value["phases"][0], value["phases"][1] = value["phases"][1], value["phases"][0]
+    if mutation == "placeholder_sku":
+        value["host"]["sku"] = "default"
+    if mutation == "placeholder_region":
+        value["host"]["region"] = "global"
+    if mutation == "mutable_os_image":
+        value["host"]["os_image"] = "Canonical:ubuntu:server:latest"
+    if mutation == "provider_whitespace":
+        value["host"]["provider"] = " Microsoft Azure"
+    if mutation == "malformed_kernel":
+        value["host"]["kernel"] = "6.8.0\nforged"
     with pytest.raises(VALIDATOR.EvidenceError):
         VALIDATOR.validate(value, SHA)
 
