@@ -6,7 +6,10 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use graphforge_core::{GfError, ProjectErrorCode};
-use graphforge_ontology::{CompiledComposition, OntologyModuleId, QualifiedSymbol, SymbolKind};
+use graphforge_ontology::{
+    CompiledComposition, MigrationEngine, OntologyModuleId, QualifiedSymbol, SymbolKind,
+    TransformKind,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -82,7 +85,448 @@ pub struct LegacySemanticProjection {
     pub max_topology_batch_rows: usize,
 }
 
+/// One deterministic physical consequence of an authored ontology migration.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SemanticMigrationOperation {
+    /// Preserve a physical identity while its qualified authority is unchanged.
+    Carry {
+        /// Prior qualified symbol.
+        from: QualifiedSymbol,
+        /// New qualified symbol (normally only the module version changes).
+        to: QualifiedSymbol,
+        /// Prior qualified owner for property routes.
+        from_owner: Option<QualifiedSymbol>,
+        /// New qualified owner for property routes.
+        to_owner: Option<QualifiedSymbol>,
+        /// Stable physical identity.
+        storage_id: u32,
+    },
+    /// Rename an entity while preserving every retained topology ID.
+    RenameEntity {
+        /// Prior qualified entity.
+        from: QualifiedSymbol,
+        /// New qualified entity.
+        to: QualifiedSymbol,
+        /// Stable physical identity.
+        storage_id: u32,
+    },
+    /// Rename a property column and, when its owner changes, its opaque table route.
+    RenameProperty {
+        /// Prior qualified property.
+        from: QualifiedSymbol,
+        /// New qualified property.
+        to: QualifiedSymbol,
+        /// Prior qualified owner.
+        from_owner: QualifiedSymbol,
+        /// New qualified owner.
+        to_owner: QualifiedSymbol,
+        /// Stable physical identity.
+        storage_id: u32,
+    },
+    /// Add a binding that has no retained values in the pinned parent.
+    AddEmpty {
+        /// New qualified symbol.
+        symbol: QualifiedSymbol,
+        /// Newly allocated physical identity.
+        storage_id: u32,
+    },
+    /// Remove a binding after a pinned scan proved it has no retained values.
+    RemoveEmpty {
+        /// Removed qualified symbol.
+        symbol: QualifiedSymbol,
+        /// Retired physical identity (never reassigned by this plan).
+        storage_id: u32,
+    },
+}
+
+/// Target property schema authenticated by a migration plan.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SemanticMigrationPropertySchema {
+    /// Qualified target property.
+    pub symbol: QualifiedSymbol,
+    /// Arrow data type debug identity produced by the Rust schema authority.
+    pub arrow_data_type: String,
+    /// Required Arrow field nullability.
+    pub nullable: bool,
+}
+
+/// Canonical Rust-derived plan for an atomic retained-data ontology migration.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SemanticMigrationPlan {
+    /// Exact pinned parent composition.
+    pub from_composition_fingerprint: String,
+    /// Exact requested composition.
+    pub to_composition_fingerprint: String,
+    /// Complete post-migration bindings.
+    pub bindings: SemanticStorageBindings,
+    /// Canonically ordered physical consequences.
+    pub operations: Vec<SemanticMigrationOperation>,
+    /// Rows inspected from the exact pinned parent while deriving data impact.
+    pub retained_rows_scanned: u64,
+    /// SHA-256 of the exact canonical pinned graph inventory.
+    pub source_inventory_sha256: String,
+    /// Canonical target property field contracts.
+    pub target_property_schemas: Vec<SemanticMigrationPropertySchema>,
+    /// SHA-256 of the canonical plan fields above.
+    pub plan_digest: String,
+}
+
+/// Finite resource bounds for private retained-data migration materialization.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SemanticMigrationLimits {
+    /// Maximum source files admitted.
+    pub max_files: u64,
+    /// Maximum aggregate source bytes admitted.
+    pub max_input_bytes: u64,
+    /// Maximum rows rewritten across Parquet files.
+    pub max_rows: u64,
+    /// Fixed maximum Arrow record batch size.
+    pub batch_rows: usize,
+}
+
+impl Default for SemanticMigrationLimits {
+    fn default() -> Self {
+        Self {
+            max_files: 100_000,
+            max_input_bytes: 64 * 1024 * 1024 * 1024,
+            max_rows: 1_000_000_000,
+            batch_rows: 8_192,
+        }
+    }
+}
+
+/// Deterministic evidence from a fully materialized private candidate tree.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SemanticMigrationEvidence {
+    /// Exact plan applied.
+    pub plan_digest: String,
+    /// Files copied or rewritten.
+    pub files_materialized: u64,
+    /// Parquet rows rewritten in bounded batches.
+    pub rows_rewritten: u64,
+    /// Largest resident record batch.
+    pub max_batch_rows: usize,
+    /// Authenticated inventory digest of the complete candidate tree.
+    pub candidate_inventory_sha256: String,
+}
+
 impl SemanticStorageBindings {
+    /// Derive a complete retained-data migration plan from authored module
+    /// migrations in `next`. The pinned graph is inspected for every removal;
+    /// unknown transforms and undeclared version changes fail closed.
+    ///
+    /// Repeating this method against the same exact parent produces the same
+    /// `plan_digest`, allowing preview and publication to compare authority.
+    #[allow(clippy::too_many_lines)] // one canonical derivation keeps digest inputs co-located
+    pub fn plan_retained_data_migration(
+        previous_composition: &CompiledComposition,
+        next: &CompiledComposition,
+        previous: &Self,
+        pinned_graph_root: &Path,
+    ) -> Result<SemanticMigrationPlan, GfError> {
+        previous.validate_against(previous_composition)?;
+        let (source_inventory, _) = crate::capture_graph_files(pinned_graph_root)?;
+        let source_inventory_sha256 =
+            hex(Sha256::digest(crate::encode_inventory(&source_inventory)?).into());
+        let retained_rows_scanned = scan_retained_migration_rows(pinned_graph_root)?;
+        let mut projected = Self::project(next, None)?;
+        let mut target_property_schemas = next
+            .modules
+            .iter()
+            .flat_map(|module| {
+                module.doc.properties.iter().map(|property| {
+                    let symbol = QualifiedSymbol {
+                        module: module.id.clone(),
+                        kind: SymbolKind::Property,
+                        local_id: format!("{}:{}", property.owner, property.name),
+                    };
+                    SemanticMigrationPropertySchema {
+                        symbol,
+                        arrow_data_type: format!(
+                            "{:?}",
+                            crate::schemas::property_type_to_arrow(&property.value_type)
+                        ),
+                        nullable: property.nullable,
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        target_property_schemas.sort_by_key(|schema| schema.symbol.display());
+        let mut matched_next = BTreeSet::new();
+        let mut operations = Vec::new();
+        let mut assigned = BTreeMap::<(u8, u32), usize>::new();
+
+        for prior in &previous.bindings {
+            let old_module = previous_composition
+                .modules
+                .iter()
+                .find(|module| module.id == prior.symbol.module)
+                .ok_or_else(|| corrupt("migration source binding module is absent"))?;
+            let next_module = next
+                .modules
+                .iter()
+                .find(|module| module.id.ontology_id == prior.symbol.module.ontology_id);
+            let Some(next_module) = next_module else {
+                if binding_has_retained_data(prior, pinned_graph_root)? {
+                    return Err(corrupt("module removal would orphan retained data"));
+                }
+                operations.push(SemanticMigrationOperation::RemoveEmpty {
+                    symbol: prior.symbol.clone(),
+                    storage_id: prior.storage_id,
+                });
+                continue;
+            };
+            let steps = MigrationEngine::plan(
+                &old_module.id.authored_version,
+                &next_module.id.authored_version,
+                &next_module.doc.migrations,
+            )
+            .map_err(|error| corrupt(&format!("authored migration path is invalid: {error}")))?;
+            let mut local_id = prior.symbol.local_id.clone();
+            let mut owner = prior.owner.as_ref().map(|value| value.local_id.clone());
+            let mut renamed_entity = false;
+            let mut renamed_property = false;
+            for step in &steps {
+                match &step.transform_kind {
+                    TransformKind::RenameType { old_name, new_name } => {
+                        if prior.symbol.kind == SymbolKind::Entity && local_id == *old_name {
+                            local_id.clone_from(new_name);
+                            renamed_entity = true;
+                        }
+                        if owner.as_deref() == Some(old_name) {
+                            owner = Some(new_name.clone());
+                            if prior.symbol.kind == SymbolKind::Property {
+                                let property = local_id
+                                    .split_once(':')
+                                    .map(|(_, property)| property)
+                                    .ok_or_else(|| corrupt("migration property is malformed"))?;
+                                local_id = format!("{new_name}:{property}");
+                                renamed_property = true;
+                            }
+                        }
+                    }
+                    TransformKind::RenameProperty {
+                        owner: step_owner,
+                        old_name,
+                        new_name,
+                    } => {
+                        let current_owner = owner.as_deref();
+                        if prior.symbol.kind == SymbolKind::Property
+                            && current_owner == Some(step_owner)
+                            && local_id
+                                .split_once(':')
+                                .is_some_and(|(_, name)| name == old_name)
+                        {
+                            local_id = format!("{step_owner}:{new_name}");
+                            renamed_property = true;
+                        }
+                    }
+                    TransformKind::RemoveProperty {
+                        owner: step_owner,
+                        name,
+                    } if prior.symbol.kind == SymbolKind::Property
+                        && owner.as_deref() == Some(step_owner)
+                        && local_id
+                            .split_once(':')
+                            .is_some_and(|(_, value)| value == name) =>
+                    {
+                        local_id.clear();
+                    }
+                    TransformKind::RemoveType { name }
+                        if (prior.symbol.kind == SymbolKind::Entity && local_id == *name)
+                            || owner.as_deref() == Some(name) =>
+                    {
+                        local_id.clear();
+                    }
+                    TransformKind::AddProperty { .. }
+                    | TransformKind::AddType { .. }
+                    | TransformKind::RemoveProperty { .. }
+                    | TransformKind::RemoveType { .. } => {}
+                    TransformKind::Unknown { raw } => {
+                        return Err(corrupt(&format!(
+                            "unsupported authored migration transform `{raw}`"
+                        )));
+                    }
+                }
+            }
+            let next_index = (!local_id.is_empty())
+                .then(|| {
+                    projected.bindings.iter().position(|candidate| {
+                        candidate.route_kind == prior.route_kind
+                            && candidate.symbol.module == next_module.id
+                            && candidate.symbol.local_id == local_id
+                            && candidate
+                                .owner
+                                .as_ref()
+                                .map(|value| value.local_id.as_str())
+                                == owner.as_deref()
+                    })
+                })
+                .flatten();
+            let Some(next_index) = next_index else {
+                if binding_has_retained_data(prior, pinned_graph_root)? {
+                    return Err(corrupt("migration removal would orphan retained data"));
+                }
+                operations.push(SemanticMigrationOperation::RemoveEmpty {
+                    symbol: prior.symbol.clone(),
+                    storage_id: prior.storage_id,
+                });
+                continue;
+            };
+            if !matched_next.insert(next_index)
+                || assigned
+                    .insert(
+                        (id_namespace(prior.route_kind), prior.storage_id),
+                        next_index,
+                    )
+                    .is_some()
+            {
+                return Err(corrupt(
+                    "authored migration maps multiple bindings ambiguously",
+                ));
+            }
+            projected.bindings[next_index].storage_id = prior.storage_id;
+            let target = &projected.bindings[next_index];
+            let operation = if renamed_entity {
+                SemanticMigrationOperation::RenameEntity {
+                    from: prior.symbol.clone(),
+                    to: target.symbol.clone(),
+                    storage_id: prior.storage_id,
+                }
+            } else if renamed_property {
+                SemanticMigrationOperation::RenameProperty {
+                    from: prior.symbol.clone(),
+                    to: target.symbol.clone(),
+                    from_owner: prior
+                        .owner
+                        .clone()
+                        .ok_or_else(|| corrupt("property owner absent"))?,
+                    to_owner: target
+                        .owner
+                        .clone()
+                        .ok_or_else(|| corrupt("property owner absent"))?,
+                    storage_id: prior.storage_id,
+                }
+            } else {
+                SemanticMigrationOperation::Carry {
+                    from: prior.symbol.clone(),
+                    to: target.symbol.clone(),
+                    from_owner: prior.owner.clone(),
+                    to_owner: target.owner.clone(),
+                    storage_id: prior.storage_id,
+                }
+            };
+            operations.push(operation);
+        }
+
+        let mut used = previous.bindings.iter().fold(
+            BTreeMap::<u8, BTreeSet<u32>>::new(),
+            |mut map, binding| {
+                map.entry(id_namespace(binding.route_kind))
+                    .or_default()
+                    .insert(binding.storage_id);
+                map
+            },
+        );
+        for (index, binding) in projected.bindings.iter_mut().enumerate() {
+            if matched_next.contains(&index) {
+                continue;
+            }
+            if binding.symbol.kind == SymbolKind::Property {
+                let target_module = next
+                    .modules
+                    .iter()
+                    .find(|module| module.id == binding.symbol.module)
+                    .ok_or_else(|| corrupt("added property module is absent"))?;
+                let (owner_name, property_name) = binding
+                    .symbol
+                    .local_id
+                    .split_once(':')
+                    .ok_or_else(|| corrupt("added property identity is malformed"))?;
+                let property = target_module
+                    .doc
+                    .properties
+                    .iter()
+                    .find(|property| property.owner == owner_name && property.name == property_name)
+                    .ok_or_else(|| corrupt("added property definition is absent"))?;
+                if !property.nullable {
+                    let owner = binding
+                        .owner
+                        .as_ref()
+                        .ok_or_else(|| corrupt("added property owner is absent"))?;
+                    let owner_kind = if owner.kind == SymbolKind::Entity {
+                        SemanticRouteKind::Entity
+                    } else {
+                        SemanticRouteKind::Relation
+                    };
+                    let target_owner_id = operations.iter().find_map(|operation| match operation {
+                        SemanticMigrationOperation::Carry { to, storage_id, .. }
+                        | SemanticMigrationOperation::RenameEntity { to, storage_id, .. }
+                            if to == owner =>
+                        {
+                            Some(*storage_id)
+                        }
+                        _ => None,
+                    });
+                    let prior_owner = previous.bindings.iter().find(|candidate| {
+                        candidate.route_kind == owner_kind
+                            && Some(candidate.storage_id) == target_owner_id
+                    });
+                    if let Some(prior_owner) = prior_owner
+                        && binding_has_retained_data(prior_owner, pinned_graph_root)?
+                    {
+                        return Err(corrupt(
+                            "non-null property addition requires a deterministic typed retained-data backfill",
+                        ));
+                    }
+                }
+            }
+            let ids = used.entry(id_namespace(binding.route_kind)).or_default();
+            let mut id = ids.iter().next_back().copied().unwrap_or(0);
+            loop {
+                id = id
+                    .checked_add(1)
+                    .ok_or_else(|| corrupt("migration id space exhausted"))?;
+                if id & ((1 << 30) | (1 << 31)) != 0 {
+                    return Err(corrupt("migration id space reached reserved runtime tags"));
+                }
+                if ids.insert(id) {
+                    break;
+                }
+            }
+            binding.storage_id = id;
+            operations.push(SemanticMigrationOperation::AddEmpty {
+                symbol: binding.symbol.clone(),
+                storage_id: id,
+            });
+        }
+        projected.bindings.sort_by_key(binding_key);
+        projected.validate_against(next)?;
+        operations.sort_by_key(|operation| serde_json::to_vec(operation).unwrap_or_default());
+        let canonical = serde_json::to_vec(&(
+            &previous_composition.fingerprint,
+            &next.fingerprint,
+            &projected,
+            &operations,
+            retained_rows_scanned,
+            &source_inventory_sha256,
+            &target_property_schemas,
+        ))
+        .map_err(|_| corrupt("migration plan cannot be encoded"))?;
+        let plan_digest = hex(Sha256::digest(canonical).into());
+        Ok(SemanticMigrationPlan {
+            from_composition_fingerprint: previous_composition.fingerprint.clone(),
+            to_composition_fingerprint: next.fingerprint.clone(),
+            bindings: projected,
+            operations,
+            retained_rows_scanned,
+            source_inventory_sha256,
+            target_property_schemas,
+            plan_digest,
+        })
+    }
+
     /// Whether one exact generation binding has retained physical rows or
     /// non-null property values in the pinned materialized graph.
     ///
@@ -1093,6 +1537,353 @@ pub fn apply_legacy_route_moves(
     })
 }
 
+/// Materialize a complete private candidate graph tree without touching the
+/// pinned source. Every Parquet file is rewritten to authenticate the target
+/// composition; renamed owner routes and property columns are changed in the
+/// same bounded pass. Any error or cancellation removes the candidate.
+#[allow(clippy::too_many_lines)] // one bounded pass keeps candidate cleanup fail-closed
+pub fn materialize_semantic_migration(
+    plan: &SemanticMigrationPlan,
+    source_graph_root: &Path,
+    destination_graph_root: &Path,
+    limits: SemanticMigrationLimits,
+    mut checkpoint: impl FnMut() -> Result<(), GfError>,
+) -> Result<SemanticMigrationEvidence, GfError> {
+    if destination_graph_root.exists() {
+        return Err(corrupt("semantic migration candidate already exists"));
+    }
+    if limits.batch_rows == 0 || limits.batch_rows > 1_000_000 {
+        return Err(corrupt("semantic migration batch bound is invalid"));
+    }
+    let (inventory, _) = crate::capture_graph_files(source_graph_root)?;
+    let inventory_sha256 = hex(Sha256::digest(crate::encode_inventory(&inventory)?).into());
+    if inventory_sha256 != plan.source_inventory_sha256 {
+        return Err(corrupt(
+            "semantic migration source inventory differs from the planned pinned graph",
+        ));
+    }
+    if inventory.file_count > limits.max_files
+        || inventory.total_byte_length > limits.max_input_bytes
+    {
+        return Err(corrupt("semantic migration source exceeds resource limits"));
+    }
+    checkpoint()?;
+
+    let mut route_moves = BTreeMap::<String, String>::new();
+    let mut property_renames = BTreeMap::<String, BTreeMap<String, String>>::new();
+    let mut target_field_nullability = BTreeMap::<(String, String), bool>::new();
+    for schema in &plan.target_property_schemas {
+        let binding = plan
+            .bindings
+            .bindings
+            .iter()
+            .find(|binding| binding.symbol == schema.symbol)
+            .ok_or_else(|| corrupt("migration target property schema has no binding"))?;
+        let name = schema
+            .symbol
+            .local_id
+            .split_once(':')
+            .map(|(_, name)| name)
+            .ok_or_else(|| corrupt("migration target property identity is malformed"))?;
+        target_field_nullability.insert((binding.route.clone(), name.into()), schema.nullable);
+    }
+    for operation in &plan.operations {
+        let (from, to, from_owner, to_owner) = match operation {
+            SemanticMigrationOperation::Carry {
+                from,
+                to,
+                from_owner,
+                to_owner,
+                ..
+            } => (from, to, from_owner.as_ref(), to_owner.as_ref()),
+            SemanticMigrationOperation::RenameProperty {
+                from,
+                to,
+                from_owner,
+                to_owner,
+                ..
+            } => (from, to, Some(from_owner), Some(to_owner)),
+            SemanticMigrationOperation::RenameEntity { from, to, .. } => (from, to, None, None),
+            SemanticMigrationOperation::AddEmpty { .. }
+            | SemanticMigrationOperation::RemoveEmpty { .. } => continue,
+        };
+        let route_kind = match (from.kind, from_owner.map(|owner| owner.kind)) {
+            (SymbolKind::Entity, _) => SemanticRouteKind::Entity,
+            (SymbolKind::Relation, _) => SemanticRouteKind::Relation,
+            (SymbolKind::Property, Some(SymbolKind::Entity)) => SemanticRouteKind::NodeProperty,
+            (SymbolKind::Property, Some(SymbolKind::Relation)) => SemanticRouteKind::EdgeProperty,
+            _ => return Err(corrupt("migration operation has invalid symbol ownership")),
+        };
+        let old_route = SemanticStorageBindings::opaque_route(route_kind, from, from_owner);
+        let new_route = SemanticStorageBindings::opaque_route(route_kind, to, to_owner);
+        if route_moves
+            .insert(old_route.clone(), new_route.clone())
+            .is_some_and(|prior| prior != new_route)
+        {
+            return Err(corrupt("migration route mapping is ambiguous"));
+        }
+        if from.kind == SymbolKind::Property {
+            let old_name = from
+                .local_id
+                .split_once(':')
+                .map(|(_, name)| name)
+                .ok_or_else(|| corrupt("migration source property is malformed"))?;
+            let new_name = to
+                .local_id
+                .split_once(':')
+                .map(|(_, name)| name)
+                .ok_or_else(|| corrupt("migration target property is malformed"))?;
+            if old_name != new_name {
+                property_renames
+                    .entry(old_route)
+                    .or_default()
+                    .insert(old_name.to_owned(), new_name.to_owned());
+            }
+        }
+    }
+
+    let destination_parent = destination_graph_root
+        .parent()
+        .ok_or_else(|| corrupt("semantic migration destination has no parent"))?;
+    let staging_graph_root = destination_parent.join(format!(
+        ".semantic-migration-{}",
+        graphforge_core::uuid::new_v7()
+    ));
+    std::fs::create_dir_all(&staging_graph_root)
+        .map_err(|_| corrupt("semantic migration candidate cannot be created"))?;
+    let result = (|| {
+        let mut files_materialized = 0_u64;
+        let mut rows_rewritten = 0_u64;
+        let mut max_batch_rows = 0_usize;
+        for entry in &inventory.files {
+            checkpoint()?;
+            let source = source_graph_root.join(&entry.relative_path);
+            let relative = PathBuf::from(&entry.relative_path);
+            let old_route = source
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .filter(|stem| stem.starts_with("s-"));
+            let target_relative = if let Some(old_route) = old_route {
+                if let Some(new_route) = route_moves.get(old_route) {
+                    relative.with_file_name(format!("{new_route}.parquet"))
+                } else {
+                    relative.clone()
+                }
+            } else {
+                relative.clone()
+            };
+            let target = staging_graph_root.join(target_relative);
+            std::fs::create_dir_all(
+                target
+                    .parent()
+                    .ok_or_else(|| corrupt("migration destination has no parent"))?,
+            )
+            .map_err(|_| corrupt("migration destination parent cannot be created"))?;
+            if source.extension().and_then(|value| value.to_str()) != Some("parquet") {
+                std::fs::copy(&source, &target)
+                    .map_err(|_| corrupt("migration source file cannot be copied"))?;
+                files_materialized += 1;
+                continue;
+            }
+            preflight_parquet_footer(&source)?;
+            let builder = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+                File::open(&source).map_err(|_| corrupt("migration Parquet cannot be opened"))?,
+            )
+            .map_err(|_| corrupt("migration Parquet metadata is invalid"))?;
+            if builder.schema().fields().len() > MAX_SEMANTIC_PARQUET_COLUMNS {
+                return Err(corrupt("migration Parquet column count exceeds limit"));
+            }
+            let schema_metadata = builder.schema().metadata().clone();
+            let authenticated_old_route = schema_metadata
+                .get(SEMANTIC_ROUTE_METADATA_KEY)
+                .map(String::as_str)
+                .or(old_route);
+            if let (Some(path_route), Some(metadata_route)) = (old_route, authenticated_old_route)
+                && path_route != metadata_route
+            {
+                return Err(corrupt(
+                    "migration Parquet route metadata disagrees with path",
+                ));
+            }
+            let new_route = authenticated_old_route
+                .and_then(|route| route_moves.get(route))
+                .cloned();
+            let renames = authenticated_old_route.and_then(|route| property_renames.get(route));
+            let target_route = new_route.as_deref().or(authenticated_old_route);
+            let fields = builder
+                .schema()
+                .fields()
+                .iter()
+                .map(|field| {
+                    let target_field = renames
+                        .and_then(|values| values.get(field.name()))
+                        .map_or_else(
+                            || field.as_ref().clone(),
+                            |name| field.as_ref().clone().with_name(name),
+                        );
+                    let nullable = target_route
+                        .and_then(|route| {
+                            target_field_nullability
+                                .get(&(route.to_owned(), target_field.name().to_owned()))
+                        })
+                        .copied();
+                    nullable.map_or(target_field.clone(), |value| {
+                        target_field.with_nullable(value)
+                    })
+                })
+                .collect::<Vec<_>>();
+            let mut metadata = schema_metadata;
+            metadata.insert(
+                SEMANTIC_COMPOSITION_METADATA_KEY.into(),
+                plan.to_composition_fingerprint.clone(),
+            );
+            if let Some(route) = new_route {
+                metadata.insert(SEMANTIC_ROUTE_METADATA_KEY.into(), route);
+            }
+            let schema = std::sync::Arc::new(arrow::datatypes::Schema::new_with_metadata(
+                fields, metadata,
+            ));
+            let mut writer = parquet::arrow::ArrowWriter::try_new(
+                File::create(&target).map_err(|_| corrupt("migration output cannot be opened"))?,
+                schema.clone(),
+                None,
+            )
+            .map_err(|_| corrupt("migration writer cannot be built"))?;
+            for batch in builder
+                .with_batch_size(limits.batch_rows)
+                .build()
+                .map_err(|_| corrupt("migration reader cannot be built"))?
+            {
+                checkpoint()?;
+                let batch = batch.map_err(|_| corrupt("migration Parquet batch is invalid"))?;
+                rows_rewritten = rows_rewritten
+                    .checked_add(batch.num_rows() as u64)
+                    .ok_or_else(|| corrupt("migration row count overflows"))?;
+                if rows_rewritten > limits.max_rows {
+                    return Err(corrupt("semantic migration row limit exceeded"));
+                }
+                max_batch_rows = max_batch_rows.max(batch.num_rows());
+                let target_batch = arrow::record_batch::RecordBatch::try_new(
+                    schema.clone(),
+                    batch.columns().to_vec(),
+                )
+                .map_err(|_| corrupt("migration renamed batch schema is invalid"))?;
+                writer
+                    .write(&target_batch)
+                    .map_err(|_| corrupt("migration batch cannot be written"))?;
+            }
+            writer
+                .close()
+                .map_err(|_| corrupt("migration output cannot close"))?;
+            files_materialized += 1;
+        }
+        let (verified_source, _) = crate::capture_graph_files(source_graph_root)?;
+        if hex(Sha256::digest(crate::encode_inventory(&verified_source)?).into())
+            != plan.source_inventory_sha256
+        {
+            return Err(corrupt(
+                "semantic migration source changed while materializing the private candidate",
+            ));
+        }
+        plan.bindings
+            .validate_physical_routes(&staging_graph_root)?;
+        for property in &plan.target_property_schemas {
+            let binding = plan
+                .bindings
+                .bindings
+                .iter()
+                .find(|binding| binding.symbol == property.symbol)
+                .ok_or_else(|| corrupt("migration target property binding is absent"))?;
+            let path = binding
+                .physical_path(&staging_graph_root)
+                .ok_or_else(|| corrupt("migration target property route is absent"))?;
+            if !path.exists() {
+                continue;
+            }
+            let builder = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+                File::open(path)
+                    .map_err(|_| corrupt("migration target property table cannot be opened"))?,
+            )
+            .map_err(|_| corrupt("migration target property schema is invalid"))?;
+            let property_name = property
+                .symbol
+                .local_id
+                .split_once(':')
+                .map(|(_, name)| name)
+                .ok_or_else(|| corrupt("migration target property identity is malformed"))?;
+            if let Ok(field) = builder.schema().field_with_name(property_name)
+                && (format!("{:?}", field.data_type()) != property.arrow_data_type
+                    || field.is_nullable() != property.nullable)
+            {
+                return Err(corrupt(
+                    "migration target property column type or nullability disagrees",
+                ));
+            }
+        }
+        let (candidate, _) = crate::capture_graph_files(&staging_graph_root)?;
+        let candidate_bytes = crate::encode_inventory(&candidate)?;
+        Ok(SemanticMigrationEvidence {
+            plan_digest: plan.plan_digest.clone(),
+            files_materialized,
+            rows_rewritten,
+            max_batch_rows,
+            candidate_inventory_sha256: hex(Sha256::digest(candidate_bytes).into()),
+        })
+    })();
+    let evidence = match result {
+        Ok(evidence) => evidence,
+        Err(error) => {
+            return match std::fs::remove_dir_all(&staging_graph_root) {
+                Ok(()) => Err(error),
+                Err(cleanup) => Err(corrupt(&format!(
+                    "semantic migration failed and private staging cleanup failed: {error}; {cleanup}"
+                ))),
+            };
+        }
+    };
+    std::fs::rename(&staging_graph_root, destination_graph_root).map_err(|publish| {
+        match std::fs::remove_dir_all(&staging_graph_root) {
+            Ok(()) => corrupt(&format!(
+                "semantic migration candidate publication failed: {publish}"
+            )),
+            Err(cleanup) => corrupt(&format!(
+                "semantic migration candidate publication and cleanup failed: {publish}; {cleanup}"
+            )),
+        }
+    })?;
+    Ok(evidence)
+}
+
+fn scan_retained_migration_rows(graph_root: &Path) -> Result<u64, GfError> {
+    let (inventory, _) = crate::capture_graph_files(graph_root)?;
+    let mut rows = 0_u64;
+    for entry in inventory.files {
+        if Path::new(&entry.relative_path)
+            .extension()
+            .and_then(|value| value.to_str())
+            != Some("parquet")
+        {
+            continue;
+        }
+        let path = graph_root.join(entry.relative_path);
+        preflight_parquet_footer(&path)?;
+        let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+            File::open(path).map_err(|_| corrupt("migration impact Parquet cannot be opened"))?,
+        )
+        .map_err(|_| corrupt("migration impact Parquet metadata is invalid"))?
+        .with_batch_size(8_192)
+        .build()
+        .map_err(|_| corrupt("migration impact reader cannot be built"))?;
+        for batch in reader {
+            let batch = batch.map_err(|_| corrupt("migration impact batch is invalid"))?;
+            rows = rows
+                .checked_add(batch.num_rows() as u64)
+                .ok_or_else(|| corrupt("migration impact row count overflows"))?;
+        }
+    }
+    Ok(rows)
+}
+
 fn corrupt(message: &str) -> GfError {
     GfError::Project {
         code: ProjectErrorCode::ProjectCorrupt,
@@ -1416,6 +2207,14 @@ mod tests {
                     default_json: None,
                 },
                 PropertyDef {
+                    owner: "Person".into(),
+                    name: "birth_year".into(),
+                    value_type: PropertyValueType::Int64,
+                    nullable: true,
+                    multivalued: false,
+                    default_json: None,
+                },
+                PropertyDef {
                     owner: "KNOWS".into(),
                     name: "since".into(),
                     value_type: PropertyValueType::Int64,
@@ -1462,6 +2261,298 @@ mod tests {
 
     fn compiled(version: &str) -> CompiledComposition {
         compiled_with(version, true, true)
+    }
+
+    fn renamed_compiled() -> CompiledComposition {
+        let mut doc = compiled_with("1", false, true).modules.remove(0).doc;
+        doc.version = "2".into();
+        doc.entity_types[0].name = "Human".into();
+        doc.relation_types[0].src = "Human".into();
+        doc.relation_types[0].dst = "Human".into();
+        for property in &mut doc.properties {
+            if property.owner == "Person" {
+                property.owner = "Human".into();
+            }
+        }
+        doc.properties[0].name = "display_name".into();
+        doc.migrations = vec![
+            MigrationDef {
+                from_version: "1".into(),
+                to_version: "1.5".into(),
+                transform_kind: "rename_type:Person->Human".into(),
+                script_ref: None,
+                checksum: None,
+            },
+            MigrationDef {
+                from_version: "1.5".into(),
+                to_version: "2".into(),
+                transform_kind: "rename_property:Human|name->display_name".into(),
+                script_ref: None,
+                checksum: None,
+            },
+        ];
+        let authored = AuthoredModule {
+            id: OntologyModuleId {
+                ontology_id: doc.ontology_id.clone(),
+                authored_version: doc.version.clone(),
+                canonical_digest: module_document_digest(&doc).unwrap(),
+            },
+            dependencies: vec![],
+            doc,
+            allow_projected_identity: false,
+        };
+        compile_inventory(InventoryCompileRequest {
+            modules: &[authored],
+            bridges: &[],
+            activation: &[],
+            profile_default: ActivationMode::Strict,
+            limits: CompositionLimits::default(),
+            cancelled: None,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn retained_entity_and_property_rename_materializes_deterministically() {
+        use std::collections::HashMap;
+
+        let old = compiled_with("1", false, true);
+        let old_bindings = SemanticStorageBindings::project(&old, None).unwrap();
+        let entity = old_bindings
+            .bindings
+            .iter()
+            .find(|binding| binding.route_kind == SemanticRouteKind::Entity)
+            .unwrap();
+        let source = tempfile::TempDir::new().unwrap();
+        let mut writer =
+            crate::GraphWriter::open_at(source.path(), graphforge_core::OntologyMode::Strict, 1)
+                .unwrap()
+                .with_semantic_composition_fingerprint(Some(old.fingerprint.clone()));
+        let node = graphforge_core::uuid::new_v7();
+        writer
+            .create_node(node, graphforge_core::TypeId(entity.storage_id))
+            .unwrap();
+        writer
+            .set_properties(
+                &node,
+                Some(&entity.route),
+                HashMap::from([
+                    ("name".into(), graphforge_ir::IrLiteral::Str("Ada".into())),
+                    ("birth_year".into(), graphforge_ir::IrLiteral::Int(1815)),
+                ]),
+            )
+            .unwrap();
+        writer.flush().unwrap();
+
+        let next = renamed_compiled();
+        let first = SemanticStorageBindings::plan_retained_data_migration(
+            &old,
+            &next,
+            &old_bindings,
+            source.path(),
+        )
+        .unwrap();
+        let second = SemanticStorageBindings::plan_retained_data_migration(
+            &old,
+            &next,
+            &old_bindings,
+            source.path(),
+        )
+        .unwrap();
+        assert_eq!(first, second);
+        assert!(first.retained_rows_scanned > 0);
+        let renamed_entity = first
+            .bindings
+            .bindings
+            .iter()
+            .find(|binding| binding.symbol.local_id == "Human")
+            .unwrap();
+        assert_eq!(renamed_entity.storage_id, entity.storage_id);
+
+        let parent = tempfile::TempDir::new().unwrap();
+        let candidate = parent.path().join("candidate");
+        let evidence = materialize_semantic_migration(
+            &first,
+            source.path(),
+            &candidate,
+            SemanticMigrationLimits::default(),
+            || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(evidence.plan_digest, first.plan_digest);
+        first.bindings.validate_physical_routes(&candidate).unwrap();
+        let path = candidate
+            .join("properties")
+            .join(format!("{}.parquet", renamed_entity.route));
+        let schema = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+            File::open(path).unwrap(),
+        )
+        .unwrap()
+        .schema()
+        .clone();
+        assert!(schema.field_with_name("display_name").is_ok());
+        assert!(schema.field_with_name("birth_year").is_ok());
+        assert!(schema.field_with_name("name").is_err());
+        let mut reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+            File::open(
+                candidate
+                    .join("properties")
+                    .join(format!("{}.parquet", renamed_entity.route)),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+        let batch = reader.next().unwrap().unwrap();
+        let birth_year = batch
+            .column_by_name("birth_year")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .unwrap();
+        assert_eq!(birth_year.value(0), 1815);
+    }
+
+    #[test]
+    fn cancelled_materialization_removes_private_candidate() {
+        let old = compiled_with("1", false, true);
+        let bindings = SemanticStorageBindings::project(&old, None).unwrap();
+        let source = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(source.path().join("catalog")).unwrap();
+        std::fs::write(source.path().join("catalog/state.json"), b"{}\n").unwrap();
+        let next = renamed_compiled();
+        let plan = SemanticStorageBindings::plan_retained_data_migration(
+            &old,
+            &next,
+            &bindings,
+            source.path(),
+        )
+        .unwrap();
+        let parent = tempfile::TempDir::new().unwrap();
+        let candidate = parent.path().join("candidate");
+        let mut checkpoints = 0;
+        let error = materialize_semantic_migration(
+            &plan,
+            source.path(),
+            &candidate,
+            SemanticMigrationLimits::default(),
+            || {
+                checkpoints += 1;
+                if checkpoints == 2 {
+                    Err(GfError::Validation("cancelled".into()))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("cancelled"));
+        assert!(!candidate.exists());
+        assert!(std::fs::read_dir(parent.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".semantic-migration-")
+        }));
+    }
+
+    #[test]
+    fn materializer_rejects_graph_inventory_drift_from_preview() {
+        let old = compiled_with("1", false, true);
+        let bindings = SemanticStorageBindings::project(&old, None).unwrap();
+        let source = tempfile::TempDir::new().unwrap();
+        let next = renamed_compiled();
+        let plan = SemanticStorageBindings::plan_retained_data_migration(
+            &old,
+            &next,
+            &bindings,
+            source.path(),
+        )
+        .unwrap();
+        std::fs::create_dir_all(source.path().join("catalog")).unwrap();
+        std::fs::write(source.path().join("catalog/drift.json"), b"{}\n").unwrap();
+        let parent = tempfile::TempDir::new().unwrap();
+        let candidate = parent.path().join("candidate");
+        let error = materialize_semantic_migration(
+            &plan,
+            source.path(),
+            &candidate,
+            SemanticMigrationLimits::default(),
+            || Ok(()),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("differs from the planned"));
+        assert!(!candidate.exists());
+    }
+
+    #[test]
+    fn non_null_property_addition_rejects_retained_owner_without_backfill() {
+        let old = compiled_with("1", false, true);
+        let bindings = SemanticStorageBindings::project(&old, None).unwrap();
+        let entity = bindings
+            .bindings
+            .iter()
+            .find(|binding| binding.route_kind == SemanticRouteKind::Entity)
+            .unwrap();
+        let source = tempfile::TempDir::new().unwrap();
+        let mut writer =
+            crate::GraphWriter::open_at(source.path(), graphforge_core::OntologyMode::Strict, 1)
+                .unwrap()
+                .with_semantic_composition_fingerprint(Some(old.fingerprint.clone()));
+        writer
+            .create_node(
+                graphforge_core::uuid::new_v7(),
+                graphforge_core::TypeId(entity.storage_id),
+            )
+            .unwrap();
+        writer.flush().unwrap();
+
+        let mut doc = compiled_with("1", false, true).modules.remove(0).doc;
+        doc.version = "2".into();
+        doc.properties.push(PropertyDef {
+            owner: "Person".into(),
+            name: "required_code".into(),
+            value_type: PropertyValueType::Utf8,
+            nullable: false,
+            multivalued: false,
+            default_json: Some("\"unknown\"".into()),
+        });
+        doc.migrations.push(MigrationDef {
+            from_version: "1".into(),
+            to_version: "2".into(),
+            transform_kind: "add_property:Person|required_code|utf8|false".into(),
+            script_ref: None,
+            checksum: None,
+        });
+        let authored = AuthoredModule {
+            id: OntologyModuleId {
+                ontology_id: doc.ontology_id.clone(),
+                authored_version: doc.version.clone(),
+                canonical_digest: module_document_digest(&doc).unwrap(),
+            },
+            dependencies: vec![],
+            doc,
+            allow_projected_identity: false,
+        };
+        let next = compile_inventory(InventoryCompileRequest {
+            modules: &[authored],
+            bridges: &[],
+            activation: &[],
+            profile_default: ActivationMode::Strict,
+            limits: CompositionLimits::default(),
+            cancelled: None,
+        })
+        .unwrap();
+        let error = SemanticStorageBindings::plan_retained_data_migration(
+            &old,
+            &next,
+            &bindings,
+            source.path(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("typed retained-data backfill"));
     }
 
     #[test]

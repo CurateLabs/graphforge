@@ -785,6 +785,42 @@ class GraphForge:
         actor_uuid: str | None = None,
         cancellation: CancellationToken | None = None,
     ) -> dict[str, Any]: ...
+    def preview_migrate_ontology_module(
+        self,
+        ontology_id: str,
+        document: dict[str, Any],
+        dependencies: list[dict[str, Any]],
+        *,
+        authored_version: str | None = None,
+        canonical_digest: str | None = None,
+        enforcement: Literal["exploratory", "advisory", "strict"] | None = None,
+        expected_project_generation_uuid: str,
+        expected_composition_fingerprint: str | None,
+        operation_uuid: str,
+        actor_uuid: str | None = None,
+    ) -> dict[str, Any]: ...
+    def migrate_ontology_module(
+        self,
+        ontology_id: str,
+        document: dict[str, Any],
+        dependencies: list[dict[str, Any]],
+        preview: dict[str, Any],
+        *,
+        authored_version: str | None = None,
+        canonical_digest: str | None = None,
+        enforcement: Literal["exploratory", "advisory", "strict"] | None = None,
+        expected_project_generation_uuid: str,
+        expected_composition_fingerprint: str | None,
+        operation_uuid: str,
+        actor_uuid: str | None = None,
+        cancellation: CancellationToken | None = None,
+    ) -> dict[str, Any]: ...
+    def multi_ontology_certification_report(
+        self,
+        composition_before: str,
+        migration_plan_digest: str,
+        rows_scanned: int,
+    ) -> dict[str, Any]: ...
     def preview_delete_ontology_module(
         self,
         ontology_id: str,

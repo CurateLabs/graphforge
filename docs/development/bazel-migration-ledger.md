@@ -82,6 +82,7 @@ Authoritative machine-readable map: `tools/bazel/parity/migration_target_map.jso
 | `graphforge-api` | `inference_provenance` | `integration-test` | `crates/graphforge-api/tests/inference_provenance.rs` | `//crates/graphforge-api:inference_provenance` | `mapped` | #8 |
 | `graphforge-api` | `knowledge_isolation` | `integration-test` | `crates/graphforge-api/tests/knowledge_isolation.rs` | `//crates/graphforge-api:knowledge_isolation` | `mapped` | #8 |
 | `graphforge-api` | `list_semantics` | `integration-test` | `crates/graphforge-api/tests/list_semantics.rs` | `//crates/graphforge-api:list_semantics` | `mapped` | #8 |
+| `graphforge-api` | `multi_ontology_certification` | `integration-test` | `crates/graphforge-api/tests/multi_ontology_certification.rs` | `//crates/graphforge-api:multi_ontology_certification` | `mapped` | #843 retained multi-ontology migration certification |
 | `graphforge-api` | `algorithm_public_surface` | `integration-test` | `crates/graphforge-api/tests/algorithm_public_surface.rs` | `//crates/graphforge-api:algorithm_public_surface` | `mapped` | #8 |
 | `graphforge-api` | `search_public_surface` | `integration-test` | `crates/graphforge-api/tests/search_public_surface.rs` | `//crates/graphforge-api:search_public_surface` | `mapped` | #8 |
 | `graphforge-api` | `scale_g500_scale20` | `integration-test` | `crates/graphforge-api/tests/scale_g500_scale20.rs` | `//crates/graphforge-api:scale_g500_scale20` | `mapped` | #710 |

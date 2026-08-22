@@ -92,10 +92,12 @@ mod multi_ontology;
 pub use multi_ontology::{
     ActivationProfileChangeRequest, BridgeAdoptionRequest, BridgeCandidate, BridgeDeleteRequest,
     BridgeUpdateRequest, CompositionValidationReceipt, ModuleAdoptionRequest, ModuleCandidate,
-    ModuleDeleteRequest, ModuleUpdateRequest, MultiOntologyCaseResult, MultiOntologyDiagnostic,
-    MultiOntologyError, MultiOntologyMutationReceipt, MultiOntologyParityReport,
-    MultiOntologyValidationReceipt, OntologyAuthorityExpectation, OntologyAuthorityState,
-    ResolutionExplainRequest, ResolutionExplanation,
+    ModuleDeleteRequest, ModuleMigrationPreview, ModuleMigrationReceipt, ModuleMigrationRequest,
+    ModuleUpdateRequest, MultiOntologyCaseResult, MultiOntologyCertificationReport,
+    MultiOntologyDiagnostic, MultiOntologyError, MultiOntologyMutationReceipt,
+    MultiOntologyParityReport, MultiOntologyRetainedDataReport, MultiOntologyValidationReceipt,
+    OntologyAuthorityExpectation, OntologyAuthorityState, ResolutionExplainRequest,
+    ResolutionExplanation,
 };
 #[cfg(test)]
 mod multi_process_publication_tests;
@@ -144,7 +146,7 @@ pub use graphforge_storage::{
     PortableV2Representation, PortableV2SelectionEntry, PortableV2SelectionPlan,
     PortableV2SelectionProfile, PortableV2SelectionReason, PortableV2SelectionRequest,
     PortableV2SubsetClosure, PortableV2SubsetPlan, PortableV2SubsetRequest,
-    WorkspaceOntologyComposition, WorkspacePortableOntologyStaging,
+    SemanticMigrationOperation, WorkspaceOntologyComposition, WorkspacePortableOntologyStaging,
 };
 pub use portable::{
     PortableExportRequest, PortableExportResult, PortableImportRequest, PortableImportResult,
@@ -1137,8 +1139,13 @@ impl GraphForge {
         let legacy_route_moves = composition.as_ref().map(|(_, _, moves)| moves.as_slice());
         let composition_mode = composition.as_ref().map(|(context, _, _)| {
             match context.composition().profile_default {
-                graphforge_ontology::ActivationMode::Exploratory => OntologyMode::Exploratory,
-                graphforge_ontology::ActivationMode::Advisory => OntologyMode::Advisory,
+                // Composition fallback policy is enforced by the binder. Once a
+                // symbol resolved to authenticated generation storage, the writer
+                // must retain that typed route even under an exploratory profile;
+                // advisory mode still permits binder-approved runtime fallbacks
+                // without collapsing resolved ontology data into `_untyped`.
+                graphforge_ontology::ActivationMode::Exploratory
+                | graphforge_ontology::ActivationMode::Advisory => OntologyMode::Advisory,
                 graphforge_ontology::ActivationMode::Strict => OntologyMode::Strict,
             }
         });

@@ -184,13 +184,11 @@ async function runSemantics() {
       candidate: dependentCandidate,
     });
     stage = "dependent replay";
-    assert.deepEqual(
-      await forge.adoptOntologyModule({
-        authority: replayAuthority,
-        candidate: dependentCandidate,
-      }),
-      replayResult,
-    );
+    const replayReceipt = await forge.adoptOntologyModule({
+      authority: replayAuthority,
+      candidate: dependentCandidate,
+    });
+    assert.deepEqual(replayReceipt, replayResult);
     const conflict = forge.createOntologyModule({
       document: oracle.modules.dependent_update,
       dependencies: [base.id],
@@ -325,6 +323,7 @@ async function runSemantics() {
     );
 
     const beforeCancel = forge.ontologyAuthorityState();
+    const cancellationBeforeModules = forge.ontologyModules();
     stage = "cancellation";
     const cancelBeforeStart = new AbortController();
     const cancellationPromise = forge.changeOntologyActivationProfile({
@@ -337,6 +336,7 @@ async function runSemantics() {
     const cancelled = await nativeAsyncFailure(() => cancellationPromise);
     assert.equal(cancelled.code, "GF_CANCELLED");
     assert.deepEqual(forge.ontologyAuthorityState(), beforeCancel);
+    const cancellationAfterModules = forge.ontologyModules();
 
     const malformed = nativeFailure(() =>
       forge.importOntologyModule({ text: "{", format: "json" }),
@@ -361,6 +361,7 @@ async function runSemantics() {
     const failedImportRoot = join(subject.root, "failed-import");
     mkdirSync(failedImportRoot);
     const beforeEntries = readdirSync(failedImportRoot);
+    const importAuthorityBefore = forge.ontologyAuthorityState();
     const importFailure = await portableFailure(() =>
       GraphForge.importPortableV2({
         projectRoot: failedImportRoot,
@@ -370,7 +371,13 @@ async function runSemantics() {
     );
     assert.equal(importFailure.code, oracle.expected.unsupported_future_code);
     assert.deepEqual(readdirSync(failedImportRoot), beforeEntries);
-    assert.deepEqual(forge.ontologyAuthorityState(), beforeCancel);
+    const importAuthorityAfter = forge.ontologyAuthorityState();
+    assert.deepEqual(importAuthorityAfter, importAuthorityBefore);
+    const firstInventory = canonical(forge.ontologyModules());
+    const secondInventory = canonical(forge.ontologyModules());
+    const installed = new GraphForge();
+    const installedModules = installed.ontologyModules();
+    installed.close();
     const report = {
       contract: "graphforge-multi-ontology-parity-result/1",
       cases: {
@@ -392,14 +399,21 @@ async function runSemantics() {
           error_code: unsupported.code,
           diagnostic_code: unsupported.diagnostics[0].code,
         },
-        cancellation: { error_code: cancelled.code, authority_unchanged: true },
+        cancellation: {
+          error_code: cancelled.code,
+          before_modules: cancellationBeforeModules,
+          after_modules: cancellationAfterModules,
+        },
         idempotent_replay: {
-          same_receipt: true,
+          first_receipt: replayResult,
+          replay_receipt: replayReceipt,
           conflict_code: replayConflict.code,
         },
         no_partial_import_or_authority_change: {
-          target_unchanged: beforeEntries.length === 0,
-          authority_unchanged: true,
+          before_entries: beforeEntries,
+          after_entries: readdirSync(failedImportRoot),
+          authority_before: importAuthorityBefore,
+          authority_after: importAuthorityAfter,
         },
         bounded_structured_diagnostics: {
           outer_code: blocked.code,
@@ -410,12 +424,17 @@ async function runSemantics() {
           path_free: !JSON.stringify(blocked).includes(subject.root),
         },
         deterministic_path_free_cli_json: {
-          deterministic:
-            canonical(forge.ontologyModules()) ===
-            canonical(forge.ontologyModules()),
-          path_free: !canonical(replayResult).includes(subject.root),
+          first_serialized: firstInventory,
+          second_serialized: secondInventory,
+          forbidden_path: subject.root,
         },
-        packaged_clean_install: { semantic_smoke: true },
+        packaged_clean_install: {
+          package_origin: fileURLToPath(
+            new URL("../index.js", import.meta.url),
+          ),
+          operation: "ontology_modules",
+          module_count: installedModules.length,
+        },
       },
     };
     const reportPath = process.env.GRAPHFORGE_MULTI_ONTOLOGY_PARITY_REPORT;
@@ -511,10 +530,8 @@ test("cancellation", async () => {
   const cancelBeforeStart = true;
   const GF_CANCELLED = "GF_CANCELLED";
   assert.equal((await semantics()).cancelled.code, GF_CANCELLED);
-  assert.equal(
-    (await semantics()).report.cases.cancellation.authority_unchanged,
-    true,
-  );
+  const observed = (await semantics()).report.cases.cancellation;
+  assert.deepEqual(observed.before_modules, observed.after_modules);
   assert.ok(cancelBeforeStart);
 });
 
@@ -522,10 +539,8 @@ test("idempotent replay", async () => {
   const operationUuid = randomUUID();
   const replayResult = (await semantics()).replayResult;
   assert.match(replayResult.operation_uuid, /^[0-9a-f-]{36}$/);
-  assert.equal(
-    (await semantics()).report.cases.idempotent_replay.same_receipt,
-    true,
-  );
+  const observed = (await semantics()).report.cases.idempotent_replay;
+  assert.deepEqual(observed.first_receipt, observed.replay_receipt);
   assert.ok(operationUuid);
 });
 
@@ -536,11 +551,10 @@ test("no partial import or authority change", async () => {
     (await semantics()).unsupported.code,
     oracle.expected.unsupported_future_code,
   );
-  assert.equal(
-    (await semantics()).report.cases.no_partial_import_or_authority_change
-      .target_unchanged,
-    true,
-  );
+  const observed = (await semantics()).report.cases
+    .no_partial_import_or_authority_change;
+  assert.deepEqual(observed.before_entries, observed.after_entries);
+  assert.deepEqual(observed.authority_before, observed.authority_after);
   assert.ok(ontologyAuthorityState && no_partial_import);
 });
 
@@ -559,10 +573,10 @@ test("deterministic path free serialization", async () => {
   const serialized = JSON.stringify((await semantics()).replayResult);
   assert.ok(serialized.includes(project_generation_uuid));
   assert.ok(!serialized.includes(tmpdir()));
-  assert.deepEqual(
-    (await semantics()).report.cases.deterministic_path_free_cli_json,
-    { deterministic: true, path_free: true },
-  );
+  const observed = (await semantics()).report.cases
+    .deterministic_path_free_cli_json;
+  assert.equal(observed.first_serialized, observed.second_serialized);
+  assert.ok(!observed.first_serialized.includes(observed.forbidden_path));
 });
 
 test("packaged clean install", async () => {
@@ -583,8 +597,8 @@ test("packaged clean install", async () => {
     packaged.close();
   }
   assert.ok(packagedManifest);
-  assert.equal(
-    (await semantics()).report.cases.packaged_clean_install.semantic_smoke,
-    true,
-  );
+  const observed = (await semantics()).report.cases.packaged_clean_install;
+  assert.equal(observed.operation, "ontology_modules");
+  assert.equal(observed.module_count, 0);
+  assert.ok(observed.package_origin.endsWith("index.js"));
 });

@@ -95,6 +95,40 @@ pub struct MultiOntologyParityReport {
     pub cases: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
+/// Retained graph evidence derived by the Rust certification query.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MultiOntologyRetainedDataReport {
+    /// Bounded rows scanned while constructing the migration plan.
+    pub rows_scanned: u64,
+    /// Exact retained name after the authored property rename.
+    pub name: String,
+    /// Exact retained birth year after migration.
+    pub birth_year: i64,
+}
+
+/// Canonical lifecycle certification report returned unchanged by thin hosts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MultiOntologyCertificationReport {
+    /// `graphforge-multi-ontology-certification-result/1`.
+    pub contract: String,
+    /// Public surface producing this report.
+    pub surface: String,
+    /// Exact authority before the migration.
+    pub composition_before: String,
+    /// Exact current authority after the migration and reopen.
+    pub composition_after: String,
+    /// Rust-derived semantic migration plan identity.
+    pub migration_plan_digest: String,
+    /// Sorted exact content-derived module identities.
+    pub module_ids: Vec<String>,
+    /// Sorted exact content-derived bridge identities.
+    pub bridge_ids: Vec<String>,
+    /// Real retained-data query evidence.
+    pub retained_data: MultiOntologyRetainedDataReport,
+    /// Rust-derived lifecycle outcomes; portable/TCK evidence remains separate.
+    pub cases: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
 impl MultiOntologyError {
     #[allow(non_snake_case)]
     fn Validation(message: impl AsRef<str>) -> Self {
@@ -208,6 +242,49 @@ pub struct ModuleUpdateRequest {
     pub enforcement: Option<ActivationMode>,
 }
 
+/// Retained-data module migration bound to exact current authority.
+#[derive(Debug, Clone)]
+pub struct ModuleMigrationRequest {
+    /// Exact authority expectation.
+    pub authority: OntologyAuthorityExpectation,
+    /// Exact current module selector.
+    pub selector: ModuleSelector,
+    /// Authored target document containing the complete migration route.
+    pub document: OntologyDoc,
+    /// Exact target dependencies.
+    pub dependencies: Vec<OntologyModuleId>,
+    /// Optional target activation override.
+    pub enforcement: Option<ActivationMode>,
+}
+
+/// Deterministic retained-data migration preview.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModuleMigrationPreview {
+    /// Exact module identity being replaced.
+    pub previous_module: OntologyModuleId,
+    /// Exact target module identity.
+    pub next_module: OntologyModuleId,
+    /// Bridges whose exact endpoint identity is rewritten.
+    pub affected_bridges: Vec<String>,
+    /// Rust-owned physical migration plan.
+    pub plan: graphforge_storage::SemanticMigrationPlan,
+}
+
+/// Atomic retained-data migration publication receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModuleMigrationReceipt {
+    /// Published project generation.
+    pub project_generation_uuid: Uuid,
+    /// Exact target composition.
+    pub composition_fingerprint: String,
+    /// Exact Rust-owned plan identity.
+    pub plan_digest: String,
+    /// Rows inspected by the deterministic pinned-parent plan.
+    pub retained_rows_scanned: u64,
+    /// Caller operation identity.
+    pub operation_uuid: Uuid,
+}
+
 /// Safe module deletion request.
 #[derive(Debug, Clone)]
 pub struct ModuleDeleteRequest {
@@ -304,6 +381,263 @@ pub struct ResolutionExplanation {
 }
 
 impl GraphForge {
+    /// Preview an authored module migration against the pinned graph without mutation.
+    pub fn preview_migrate_ontology_module(
+        &self,
+        request: &ModuleMigrationRequest,
+    ) -> Result<ModuleMigrationPreview, GfError> {
+        let (candidate, previous_module, next_module, affected_bridges) =
+            self.module_migration_candidate(request)?;
+        let parent = graphforge_storage::resolve_generation_by_uuid(
+            self.resolved_generation.container_root(),
+            request.authority.expected_project_generation_uuid,
+        )
+        .map_err(MultiOntologyError::from)?;
+        let previous = composition_from_generation(&parent)?
+            .ok_or_else(|| GfError::Validation("migration parent composition is missing"))?;
+        let previous_compiled = previous.compile().map_err(MultiOntologyError::from)?;
+        let next_compiled = candidate.compile().map_err(MultiOntologyError::from)?;
+        let bindings = graphforge_storage::semantic_storage_bindings(&parent)
+            .map_err(MultiOntologyError::from)?
+            .ok_or_else(|| GfError::Validation("semantic storage bindings are missing"))?;
+        let plan = graphforge_storage::SemanticStorageBindings::plan_retained_data_migration(
+            &previous_compiled,
+            &next_compiled,
+            &bindings,
+            &parent.graph_tree_root(),
+        )
+        .map_err(MultiOntologyError::from)?;
+        Ok(ModuleMigrationPreview {
+            previous_module,
+            next_module,
+            affected_bridges,
+            plan,
+        })
+    }
+
+    /// Re-derive and atomically publish an authored retained-data migration.
+    #[allow(clippy::too_many_lines)] // replay authentication, private staging, and publication are one transaction
+    pub fn migrate_ontology_module(
+        &mut self,
+        request: &ModuleMigrationRequest,
+        preview: &ModuleMigrationPreview,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<ModuleMigrationReceipt, GfError> {
+        let fresh = self.preview_migrate_ontology_module(request)?;
+        if &fresh != preview {
+            return Err(GfError::Validation(
+                "module migration preview does not match exact parent",
+            ));
+        }
+        let expected_generation = migration_generation_uuid(request, &fresh);
+        if let Some(published) = graphforge_storage::published_project_transaction(
+            self.resolved_generation.container_root(),
+            request.authority.context.operation_uuid.0,
+        )
+        .map_err(MultiOntologyError::from)?
+        {
+            if published.generation_uuid != expected_generation {
+                return Err(MultiOntologyError {
+                    code: "GF_IDEMPOTENCY_CONFLICT".into(),
+                    message: "migration operation UUID was reused with different content".into(),
+                    diagnostics: Vec::new(),
+                });
+            }
+            return Ok(ModuleMigrationReceipt {
+                project_generation_uuid: published.generation_uuid,
+                composition_fingerprint: fresh.plan.to_composition_fingerprint,
+                plan_digest: fresh.plan.plan_digest,
+                retained_rows_scanned: fresh.plan.retained_rows_scanned,
+                operation_uuid: request.authority.context.operation_uuid.0,
+            });
+        }
+        cancellation.map_or(Ok(()), CancellationToken::checkpoint)?;
+        let (candidate, _, _, _) = self.module_migration_candidate(request)?;
+        let private = tempfile::tempdir().map_err(|_| {
+            GfError::Validation("module migration private staging cannot be created")
+        })?;
+        let candidate_graph = private.path().join("graph");
+        let evidence = graphforge_storage::materialize_semantic_migration(
+            &preview.plan,
+            &self.resolved_generation.graph_tree_root(),
+            &candidate_graph,
+            graphforge_storage::SemanticMigrationLimits::default(),
+            || cancellation.map_or(Ok(()), CancellationToken::checkpoint),
+        )
+        .map_err(MultiOntologyError::from)?;
+        if evidence.plan_digest != preview.plan.plan_digest {
+            return Err(GfError::Validation(
+                "materialized migration evidence does not match preview plan",
+            ));
+        }
+        cancellation.map_or(Ok(()), CancellationToken::checkpoint)?;
+        let ontology = self
+            .workspace_ontology()
+            .map_err(MultiOntologyError::from)?;
+        let mut configuration = self
+            .workspace_configuration()
+            .map_err(MultiOntologyError::from)?;
+        configuration.ontology_mode = match candidate.profile_default {
+            ActivationMode::Exploratory => graphforge_storage::WorkspaceOntologyMode::None,
+            ActivationMode::Advisory => graphforge_storage::WorkspaceOntologyMode::Advisory,
+            ActivationMode::Strict => graphforge_storage::WorkspaceOntologyMode::Strict,
+        };
+        crate::workspace_ontology::publish_workspace_records_with_graph_tree(
+            self,
+            request.authority.context.operation_uuid.0,
+            request.authority.context.actor_uuid,
+            &ontology,
+            &configuration,
+            &candidate,
+            &preview.plan.bindings,
+            expected_generation,
+            &candidate_graph,
+            cancellation,
+        )
+        .map_err(MultiOntologyError::from)?;
+        crate::rematerialize_graph_workspace(&self.resolved_generation, &self.dir)
+            .map_err(MultiOntologyError::from)?;
+        *self
+            .semantic_storage_bindings
+            .lock()
+            .expect("semantic storage binding lock poisoned") = Some(preview.plan.bindings.clone());
+        let compiled = candidate.compile().map_err(MultiOntologyError::from)?;
+        let binding = graphforge_ir::CompositionBindingContext::new(
+            std::sync::Arc::new(compiled),
+            candidate.bridges.clone(),
+            graphforge_ir::CompositionBindingLimits::default(),
+        )
+        .with_generation_storage_ids(
+            preview
+                .plan
+                .bindings
+                .bindings
+                .iter()
+                .map(|binding| (binding.symbol.clone(), binding.storage_id)),
+        );
+        *self
+            .default_composition_context
+            .lock()
+            .expect("composition binding lock poisoned") = Some(std::sync::Arc::new(binding));
+        self.ontology_mode = configuration.ontology_mode.execution_mode();
+        *self
+            .runtime_catalog
+            .lock()
+            .expect("runtime catalog poisoned") =
+            crate::load_runtime_catalog(&self.dir).map_err(MultiOntologyError::from)?;
+        self.adjacency_provider.invalidate();
+        Ok(ModuleMigrationReceipt {
+            project_generation_uuid: expected_generation,
+            composition_fingerprint: preview.plan.to_composition_fingerprint.clone(),
+            plan_digest: preview.plan.plan_digest.clone(),
+            retained_rows_scanned: preview.plan.retained_rows_scanned,
+            operation_uuid: request.authority.context.operation_uuid.0,
+        })
+    }
+
+    /// Produce the canonical post-migration report from current Rust authority
+    /// and a real query over retained data. Hosts serialize this value unchanged.
+    pub fn multi_ontology_certification_report(
+        &self,
+        surface: &str,
+        composition_before: &str,
+        migration_plan_digest: &str,
+        rows_scanned: u64,
+    ) -> Result<MultiOntologyCertificationReport, GfError> {
+        if !matches!(surface, "rust" | "python" | "node" | "cli") {
+            return Err(GfError::Validation(
+                "certification surface must be rust, python, node, or cli",
+            ));
+        }
+
+        let composition = self.required_composition()?;
+        let mut module_ids = composition
+            .modules
+            .iter()
+            .map(|module| module.id.display_ref())
+            .collect::<Vec<_>>();
+        module_ids.sort();
+        module_ids.dedup();
+        let mut bridge_ids = composition
+            .bridges
+            .iter()
+            .map(bridge_id)
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|id| id.display_ref())
+            .collect::<Vec<_>>();
+        bridge_ids.sort();
+        bridge_ids.dedup();
+        if module_ids.len() != 6 || bridge_ids.len() != 3 {
+            return Err(GfError::Validation(
+                "certification requires exact six-module, three-bridge authority",
+            ));
+        }
+        let result = self
+            .execute(
+                "MATCH (person:Human) RETURN person.display_name AS name, \
+                 person.birth_year AS birth_year",
+            )
+            .map_err(MultiOntologyError::from)?;
+        if result.batches.len() != 1 || result.batches[0].num_rows() != 1 {
+            return Err(GfError::Validation(
+                "certification requires exactly one retained Human row",
+            ));
+        }
+        let batch = &result.batches[0];
+        let name_column = batch
+            .column_by_name("name")
+            .ok_or_else(|| GfError::Validation("retained name column is missing"))?;
+        let name = arrow::util::display::array_value_to_string(name_column, 0)
+            .map_err(|_| GfError::Validation("retained name cannot be rendered"))?;
+        let birth_year_column = batch
+            .column_by_name("birth_year")
+            .ok_or_else(|| GfError::Validation("retained birth_year column is missing"))?;
+        let birth_year_text = arrow::util::display::array_value_to_string(birth_year_column, 0)
+            .map_err(|_| GfError::Validation("retained birth_year cannot be rendered"))?;
+        let birth_year = birth_year_text
+            .parse::<i64>()
+            .map_err(|_| GfError::Validation("retained birth_year must be an integer"))?;
+        let retained_data = MultiOntologyRetainedDataReport {
+            rows_scanned,
+            name,
+            birth_year,
+        };
+        let mut cases = std::collections::BTreeMap::new();
+        cases.insert(
+            "authority_reopened".into(),
+            serde_json::json!({"composition_fingerprint": composition.composition_fingerprint.clone()}),
+        );
+        cases.insert(
+            "bridge_set_retained".into(),
+            serde_json::json!({"bridge_ids": bridge_ids.clone()}),
+        );
+        cases.insert(
+            "module_set_retained".into(),
+            serde_json::json!({"module_ids": module_ids.clone()}),
+        );
+        cases.insert(
+            "migration_receipt".into(),
+            serde_json::json!({"plan_digest": migration_plan_digest}),
+        );
+        cases.insert(
+            "retained_data_query".into(),
+            serde_json::to_value(&retained_data)
+                .map_err(|_| GfError::Validation("retained report cannot be encoded"))?,
+        );
+        Ok(MultiOntologyCertificationReport {
+            contract: "graphforge-multi-ontology-certification-result/1".into(),
+            surface: surface.into(),
+            composition_before: composition_before.to_owned(),
+            composition_after: composition.composition_fingerprint,
+            migration_plan_digest: migration_plan_digest.to_owned(),
+            module_ids,
+            bridge_ids,
+            retained_data,
+            cases,
+        })
+    }
+
     /// Inspect exact authority identities for a subsequent mutation request.
     pub fn ontology_authority_state(&self) -> Result<OntologyAuthorityState, GfError> {
         Ok(OntologyAuthorityState {
@@ -492,6 +826,67 @@ impl GraphForge {
             operation,
             cancellation,
         )
+    }
+
+    fn module_migration_candidate(
+        &self,
+        request: &ModuleMigrationRequest,
+    ) -> Result<
+        (
+            WorkspaceOntologyComposition,
+            OntologyModuleId,
+            OntologyModuleId,
+            Vec<String>,
+        ),
+        GfError,
+    > {
+        let mut candidate = self.checked_candidate(&request.authority)?;
+        let index = resolve_module_index(&candidate, &request.selector)?;
+        let previous_module = candidate.modules[index].id.clone();
+        if request.document.ontology_id != previous_module.ontology_id {
+            return Err(GfError::Validation(
+                "module migration must retain ontology_id",
+            ));
+        }
+        let mut inventory = module_inventory(&candidate)?;
+        let next_module = inventory
+            .create_register(
+                request.document.clone(),
+                request.dependencies.clone(),
+                request.enforcement,
+                "migration-validation",
+            )
+            .map_err(composition_error)?;
+        candidate.modules[index] = WorkspaceCompositionModule {
+            id: next_module.clone(),
+            dependencies: request.dependencies.clone(),
+            document: request.document.clone(),
+            allow_projected_identity: false,
+        };
+        let mut affected_bridges = candidate
+            .bridges
+            .iter()
+            .filter(|bridge| {
+                bridge.source_modules.contains(&previous_module)
+                    || bridge.target_modules.contains(&previous_module)
+            })
+            .map(bridge_id)
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|id| id.display_ref())
+            .collect::<Vec<_>>();
+        affected_bridges.sort();
+        rewrite_bridge_symbols_for_migration(
+            &mut candidate,
+            &previous_module,
+            &next_module,
+            &request.document,
+        )?;
+        rewrite_module_identity(&mut candidate, &previous_module, &next_module)?;
+        set_module_activation(&mut candidate, &next_module, request.enforcement);
+        let compiled = compile_candidate(&candidate)?;
+        candidate = WorkspaceOntologyComposition::from_compiled(&compiled, candidate.bridges);
+        Ok((candidate, previous_module, next_module, affected_bridges))
     }
 
     /// Preview safe module deletion, including dependency/activation blockers.
@@ -1147,6 +1542,72 @@ fn bridge_id(document: &BridgeDocument) -> Result<BridgeSetId, GfError> {
         canonical_digest: graphforge_ontology::bridge_document_digest(document)
             .map_err(GfError::Validation)?,
     })
+}
+
+fn migration_generation_uuid(
+    request: &ModuleMigrationRequest,
+    preview: &ModuleMigrationPreview,
+) -> Uuid {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"graphforge-retained-data-migration-generation/1");
+    hasher.update(request.authority.context.operation_uuid.0.as_bytes());
+    hasher.update(preview.plan.plan_digest.as_bytes());
+    hasher.update(preview.next_module.display_ref().as_bytes());
+    graphforge_core::canonical::uuid_v8(hasher.finalize().into())
+}
+
+fn rewrite_bridge_symbols_for_migration(
+    candidate: &mut WorkspaceOntologyComposition,
+    previous: &OntologyModuleId,
+    next: &OntologyModuleId,
+    document: &OntologyDoc,
+) -> Result<(), GfError> {
+    let steps = graphforge_ontology::MigrationEngine::plan(
+        &previous.authored_version,
+        &next.authored_version,
+        &document.migrations,
+    )
+    .map_err(|error| GfError::Validation(error.to_string()))?;
+    for bridge in &mut candidate.bridges {
+        for assertion in &mut bridge.assertions {
+            for symbol in [&mut assertion.source, &mut assertion.target] {
+                if symbol.module != *previous {
+                    continue;
+                }
+                for step in &steps {
+                    match &step.transform_kind {
+                        graphforge_ontology::TransformKind::RenameType { old_name, new_name }
+                            if symbol.kind == SymbolKind::Entity
+                                && symbol.local_id == *old_name =>
+                        {
+                            symbol.local_id.clone_from(new_name);
+                        }
+                        graphforge_ontology::TransformKind::RenameProperty {
+                            owner,
+                            old_name,
+                            new_name,
+                        } if symbol.kind == SymbolKind::Property
+                            && symbol.local_id == format!("{owner}:{old_name}") =>
+                        {
+                            symbol.local_id = format!("{owner}:{new_name}");
+                        }
+                        graphforge_ontology::TransformKind::RenameType { old_name, new_name }
+                            if symbol.kind == SymbolKind::Property
+                                && symbol.local_id.starts_with(&format!("{old_name}:")) =>
+                        {
+                            symbol.local_id = format!(
+                                "{new_name}:{}",
+                                symbol.local_id.split_once(':').map_or("", |(_, name)| name)
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn composition_error(error: graphforge_ontology::CompositionError) -> GfError {
@@ -2270,9 +2731,14 @@ mod tests {
         cases.insert("unsupported_future_portability".into(), serde_json::json!({"error_code": unsupported.code, "diagnostic_code": unsupported.diagnostics[0].code}));
 
         let mut cancelled_graph = GraphForge::new(None).unwrap();
-        let cancellation_before = cancelled_graph.ontology_authority_state().unwrap();
+        let (cancel_base, _) = adopt_parity_pair(&mut cancelled_graph, 9_108);
+        let cancellation_before = cancelled_graph.ontology_modules().unwrap();
         let cancel_candidate = cancelled_graph
-            .create_ontology_module(parity_document("base"), Vec::new(), None)
+            .create_ontology_module(
+                parity_document("dependent_update"),
+                vec![cancel_base.id],
+                None,
+            )
             .unwrap();
         let token = CancellationToken::new();
         token.cancel();
@@ -2285,7 +2751,15 @@ mod tests {
                 Some(&token),
             )
             .unwrap_err();
-        cases.insert("cancellation".into(), serde_json::json!({"error_code": cancelled.code, "authority_unchanged": cancelled_graph.ontology_authority_state().unwrap() == cancellation_before}));
+        let cancellation_after = cancelled_graph.ontology_modules().unwrap();
+        cases.insert(
+            "cancellation".into(),
+            serde_json::json!({
+                "error_code": cancelled.code,
+                "before_modules": cancellation_before,
+                "after_modules": cancellation_after
+            }),
+        );
 
         let mut replay_graph = GraphForge::new(None).unwrap();
         let replay_candidate = replay_graph
@@ -2298,10 +2772,9 @@ mod tests {
         let first = replay_graph
             .adopt_ontology_module(&replay_request, None)
             .unwrap();
-        let same_receipt = replay_graph
+        let replay_receipt = replay_graph
             .adopt_ontology_module(&replay_request, None)
-            .unwrap()
-            == first;
+            .unwrap();
         let mut conflict = replay_request;
         conflict.authority.context.actor_uuid = Some(Uuid::from_u128(1));
         let conflict_code = replay_graph
@@ -2310,15 +2783,25 @@ mod tests {
             .code;
         cases.insert(
             "idempotent_replay".into(),
-            serde_json::json!({"same_receipt": same_receipt, "conflict_code": conflict_code}),
+            serde_json::json!({
+                "first_receipt": first,
+                "replay_receipt": replay_receipt,
+                "conflict_code": conflict_code
+            }),
         );
 
         let project = tempfile::tempdir().unwrap();
         let durable = GraphForge::new(Some(project.path().to_str().unwrap())).unwrap();
         let import_before = durable.ontology_authority_state().unwrap();
         drop(durable);
-        let invalid = project.path().join("invalid.gfpb");
+        let import_source = tempfile::tempdir().unwrap();
+        let invalid = import_source.path().join("invalid.gfpb");
         std::fs::write(&invalid, b"invalid").unwrap();
+        let mut before_entries = std::fs::read_dir(project.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        before_entries.sort();
         assert!(
             GraphForge::import_portable_v2(
                 project.path(),
@@ -2332,17 +2815,47 @@ mod tests {
             .is_err()
         );
         let durable = GraphForge::new(Some(project.path().to_str().unwrap())).unwrap();
-        let unchanged = durable.ontology_authority_state().unwrap() == import_before;
+        let import_after = durable.ontology_authority_state().unwrap();
+        let mut after_entries = std::fs::read_dir(project.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        after_entries.sort();
         cases.insert(
             "no_partial_import_or_authority_change".into(),
-            serde_json::json!({"target_unchanged": unchanged, "authority_unchanged": unchanged}),
+            serde_json::json!({
+                "before_entries": before_entries,
+                "after_entries": after_entries,
+                "authority_before": import_before,
+                "authority_after": import_after
+            }),
         );
 
         let bounded = dependency_blocked_error(&blocked);
         let bounded_json = serde_json::to_string(&bounded).unwrap();
         cases.insert("bounded_structured_diagnostics".into(), serde_json::json!({"outer_code": bounded.code, "diagnostic_code": bounded.diagnostics[0].code, "bounded": bounded.diagnostics.len() <= MAX_ERROR_DIAGNOSTICS, "path_free": !bounded_json.contains("/Users/")}));
-        cases.insert("deterministic_path_free_cli_json".into(), serde_json::json!({"deterministic": bounded_json == serde_json::to_string(&bounded).unwrap(), "path_free": !bounded_json.contains("/Users/")}));
-        cases.insert("packaged_clean_install".into(), serde_json::json!({"semantic_smoke": GraphForge::new(None).unwrap().ontology_modules().is_ok()}));
+        let deterministic_first =
+            serde_json::to_string(&graph.ontology_modules().unwrap()).unwrap();
+        let deterministic_second =
+            serde_json::to_string(&graph.ontology_modules().unwrap()).unwrap();
+        cases.insert(
+            "deterministic_path_free_cli_json".into(),
+            serde_json::json!({
+                "first_serialized": deterministic_first,
+                "second_serialized": deterministic_second,
+                "forbidden_path": graph.dir.to_string_lossy()
+            }),
+        );
+        let packaged = GraphForge::new(None).unwrap();
+        let packaged_modules = packaged.ontology_modules().unwrap();
+        cases.insert(
+            "packaged_clean_install".into(),
+            serde_json::json!({
+                "package_origin": env!("CARGO_PKG_NAME"),
+                "operation": "ontology_modules",
+                "module_count": packaged_modules.len()
+            }),
+        );
 
         let report = MultiOntologyParityReport {
             contract: "graphforge-multi-ontology-parity-result/1".into(),

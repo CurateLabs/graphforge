@@ -212,6 +212,7 @@ pre-push-fast:  ## Run fast checks only — format, lint, type, security, docstr
 	@python3 scripts/ci/test-multi-ontology-surface-gate.py
 	@python3 scripts/ci/multi-ontology-surface-gate.py
 	@python3 scripts/ci/test-compare-multi-ontology-parity.py
+	@python3 scripts/ci/test-compare-multi-ontology-certification.py
 	@echo "━━━ Format check ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@$(MAKE) format-check
 	@echo "━━━ Lint ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

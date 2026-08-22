@@ -1,0 +1,1 @@
+{"ontology_id":"https://graphforge.dev/ontology/document","version":"1.0.0","entity_types":[{"name":"Document","abstract":false}],"relation_types":[],"properties":[{"owner":"Document","name":"title","type":"utf8","nullable":false},{"owner":"Document","name":"doi","type":"utf8","nullable":true}],"constraints":[],"migrations":[]}

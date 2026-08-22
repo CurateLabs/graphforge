@@ -878,6 +878,151 @@ fn emit_authenticated_parity_report() {
     fs::write(path, serde_json::to_vec(&report).unwrap()).unwrap();
 }
 
+#[test]
+fn emit_retained_data_certification_report() {
+    let Some(path) = std::env::var_os("GRAPHFORGE_MULTI_ONTOLOGY_CERTIFICATION_REPORT") else {
+        return;
+    };
+    let report = observed_cli_certification_report();
+    fs::write(path, serde_json::to_vec(&report).unwrap()).unwrap();
+}
+
+#[allow(clippy::too_many_lines)]
+fn observed_cli_certification_report() -> Value {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/multi-ontology-v1/certification-v1");
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(fixture.join("certification.json")).unwrap()).unwrap();
+    let project = initialized_project();
+    let mut identities = std::collections::BTreeMap::new();
+    for (index, filename) in manifest["modules"].as_array().unwrap().iter().enumerate() {
+        let filename = filename.as_str().unwrap();
+        let input = project.path().join(filename);
+        fs::copy(fixture.join(filename), &input).unwrap();
+        let document: Value = serde_json::from_slice(&fs::read(&input).unwrap()).unwrap();
+        let id = candidate_id(project.path(), &input);
+        let operation = format!("00000000-0000-0000-0000-00000000{:04}", 8600 + index);
+        let adopted = adopt_module(project.path(), &input, &operation, None);
+        assert!(
+            adopted.status.success(),
+            "{}",
+            String::from_utf8_lossy(&adopted.stderr)
+        );
+        let key = format!(
+            "${}",
+            document["ontology_id"]
+                .as_str()
+                .unwrap()
+                .rsplit('/')
+                .next()
+                .unwrap()
+        );
+        identities.insert(key, id);
+    }
+    let replacements = identities
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.clone()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    for (index, filename) in manifest["bridges"].as_array().unwrap().iter().enumerate() {
+        let filename = filename.as_str().unwrap();
+        let document: Value = serde_json::from_slice(&fs::read(fixture.join(filename)).unwrap())
+            .map(|value| substitute(&value, &replacements))
+            .unwrap();
+        let input = write_module(project.path(), filename, &document);
+        let operation = format!("00000000-0000-0000-0000-00000000{:04}", 8700 + index);
+        let adopted = adopt_bridge(project.path(), &input, &operation);
+        assert!(
+            adopted.status.success(),
+            "{}",
+            String::from_utf8_lossy(&adopted.stderr)
+        );
+    }
+
+    let graph = graphforge_api::GraphForge::new(Some(project.path().to_str().unwrap())).unwrap();
+    // Retained rows belong to the fully assembled source composition. Creating
+    // them while module adoption is still changing authority would correctly
+    // leave their physical route metadata pinned to that earlier composition.
+    graph
+        .execute("CREATE (:`genealogy:Person` {full_name: 'Ada Lovelace', birth_year: 1815})")
+        .unwrap();
+    let before_state = graph.ontology_authority_state().unwrap();
+    let before = before_state.composition_fingerprint.unwrap();
+    let genealogy = &identities["$genealogy"];
+    let target = fixture.join(manifest["migration_target"].as_str().unwrap());
+    let operation = "00000000-0000-0000-0000-000000008800";
+    let selector = vec![
+        "--ontology-id".into(),
+        genealogy["ontology_id"].as_str().unwrap().into(),
+        "--authored-version".into(),
+        genealogy["authored_version"].as_str().unwrap().into(),
+        "--canonical-digest".into(),
+        genealogy["canonical_digest"].as_str().unwrap().into(),
+        "--input".into(),
+        target.to_str().unwrap().into(),
+        "--operation-uuid".into(),
+        operation.into(),
+        "--expected-generation".into(),
+        before_state.project_generation_uuid.to_string(),
+        "--expected-composition-fingerprint".into(),
+        before.clone(),
+    ];
+    drop(graph);
+    let mut preview_args = vec![
+        "--json".into(),
+        "ontology".into(),
+        "module".into(),
+        "preview-migrate".into(),
+    ];
+    preview_args.extend(selector.clone());
+    let preview_output = gf_owned(project.path(), &preview_args);
+    assert!(
+        preview_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&preview_output.stderr)
+    );
+    let preview = parse_json(&preview_output.stdout);
+    let preview_path = write_module(project.path(), "migration-preview.json", &preview);
+    let mut migrate_args = vec![
+        "--json".into(),
+        "ontology".into(),
+        "module".into(),
+        "migrate".into(),
+    ];
+    migrate_args.extend(selector);
+    migrate_args.extend(["--preview".into(), preview_path.to_str().unwrap().into()]);
+    let migrate_output = gf_owned(project.path(), &migrate_args);
+    assert!(
+        migrate_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&migrate_output.stderr)
+    );
+    let receipt = parse_json(&migrate_output.stdout);
+    let report_output = gf(
+        project.path(),
+        &[
+            "--json",
+            "ontology",
+            "composition",
+            "certification-report",
+            "--composition-before",
+            &before,
+            "--migration-plan-digest",
+            receipt["plan_digest"].as_str().unwrap(),
+            "--rows-scanned",
+            &receipt["retained_rows_scanned"].to_string(),
+        ],
+    );
+    assert!(
+        report_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&report_output.stderr)
+    );
+    let report = parse_json(&report_output.stdout);
+    assert_eq!(report["surface"], "cli");
+    assert_eq!(report["retained_data"]["name"], "Ada Lovelace");
+    report
+}
+
 #[allow(clippy::too_many_lines)]
 fn observed_cli_parity_report() -> Value {
     let oracle = parity_oracle();
@@ -1157,7 +1302,10 @@ fn observed_cli_parity_report() -> Value {
     let target_parent = TempDir::new().unwrap();
     let target = target_parent.path().join("target");
     fs::create_dir(&target).unwrap();
-    let target_before = fs::read_dir(&target).unwrap().count();
+    let target_before = fs::read_dir(&target)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
     let authority_before = graphforge_api::GraphForge::new(Some(project.path().to_str().unwrap()))
         .unwrap()
         .ontology_authority_state()
@@ -1179,13 +1327,20 @@ fn observed_cli_parity_report() -> Value {
         .unwrap()
         .ontology_authority_state()
         .unwrap();
+    let target_after = fs::read_dir(&target)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
 
     let listed_again = gf(project.path(), &["--json", "ontology", "module", "list"]);
     let blocked_text = String::from_utf8_lossy(&blocked.stderr);
-    let packaged = Command::new(env!("CARGO_BIN_EXE_gf"))
-        .args(["ontology", "module", "list", "--help"])
-        .output()
-        .unwrap();
+    let packaged_project = TempDir::new().unwrap();
+    let packaged = gf(
+        packaged_project.path(),
+        &["--json", "ontology", "module", "list"],
+    );
+    assert!(packaged.status.success());
+    let packaged_modules = parse_json(&packaged.stdout);
     serde_json::json!({
         "contract":"graphforge-multi-ontology-parity-result/1",
         "cases":{
@@ -1193,12 +1348,12 @@ fn observed_cli_parity_report() -> Value {
             "exact_identity_and_ambiguity":{"exact_match":exact_match,"diagnostic_code":ambiguity_code},
             "dependency_blocked_deletion":{"safe":preview_json["safe"],"diagnostic_code":blocked_diagnostic["code"]},
             "unsupported_future_portability":{"error_code":unsupported_json["error"]["code"],"diagnostic_code":unsupported_json["error"]["diagnostics"][0]["code"]},
-            "cancellation":{"error_code":cancelled_json["error"]["code"],"authority_unchanged":cancel_before.stdout == cancel_after.stdout},
-            "idempotent_replay":{"same_receipt":first.stdout == replay.stdout,"conflict_code":conflict_json["error"]["code"]},
-            "no_partial_import_or_authority_change":{"target_unchanged":fs::read_dir(&target).unwrap().count() == target_before,"authority_unchanged":authority_after == authority_before},
+            "cancellation":{"error_code":cancelled_json["error"]["code"],"before_modules":parse_json(&cancel_before.stdout),"after_modules":parse_json(&cancel_after.stdout)},
+            "idempotent_replay":{"first_receipt":parse_json(&first.stdout),"replay_receipt":parse_json(&replay.stdout),"conflict_code":conflict_json["error"]["code"]},
+            "no_partial_import_or_authority_change":{"before_entries":target_before,"after_entries":target_after,"authority_before":authority_before,"authority_after":authority_after},
             "bounded_structured_diagnostics":{"outer_code":blocked_json["error"]["code"],"diagnostic_code":blocked_diagnostic["code"],"bounded":blocked_json["error"]["diagnostics"].as_array().unwrap().len() <= blocked_diagnostic["limit"].as_u64().unwrap() as usize,"path_free":!blocked_text.contains(&project.path().display().to_string())},
-            "deterministic_path_free_cli_json":{"deterministic":listed.stdout == listed_again.stdout,"path_free":!String::from_utf8_lossy(&listed.stdout).contains(&project.path().display().to_string())},
-            "packaged_clean_install":{"semantic_smoke":packaged.status.success()}
+            "deterministic_path_free_cli_json":{"first_serialized":String::from_utf8(listed.stdout).unwrap(),"second_serialized":String::from_utf8(listed_again.stdout).unwrap(),"forbidden_path":project.path().display().to_string()},
+            "packaged_clean_install":{"package_origin":env!("CARGO_BIN_EXE_gf"),"operation":"ontology_modules","module_count":packaged_modules.as_array().unwrap().len()}
         }
     })
 }

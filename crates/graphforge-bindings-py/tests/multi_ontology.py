@@ -160,7 +160,8 @@ def _run_four_surface_operation_conformance() -> dict[str, object]:
         assert imported["id"] == created["id"]
         adopt = authority(forge, 2)
         receipt = forge.adopt_ontology_module(imported, **adopt)
-        assert forge.adopt_ontology_module(imported, **adopt) == receipt
+        replay_receipt = forge.adopt_ontology_module(imported, **adopt)
+        assert replay_receipt == receipt
         conflicting = copy.deepcopy(created)
         conflicting["status"] = "conflict"
         assert (
@@ -203,6 +204,7 @@ def _run_four_surface_operation_conformance() -> dict[str, object]:
         assert forge.inspect_ontology_bridge(**bridge_row["id"])["doc"] == bridge_doc
 
         before = forge.ontology_authority_state()
+        cancellation_before_modules = forge.ontology_modules()
         preview_delete = forge.preview_delete_ontology_module(**base["id"])
         assert not preview_delete["safe"] and preview_delete["dependent_modules"]
         blocked_code, blocked_diagnostics = failure(
@@ -213,6 +215,7 @@ def _run_four_surface_operation_conformance() -> dict[str, object]:
         assert blocked_diagnostics[0]["phase"] == "inventory"
         assert len(blocked_diagnostics[0]["subjects"]) <= blocked_diagnostics[0]["limit"]
         assert forge.ontology_authority_state() == before
+        cancellation_after_modules = forge.ontology_modules()
 
         ambiguous = forge.explain_ontology_resolution("entity", "Person", max_candidates=2)
         assert ambiguous["outcome"] is None
@@ -286,6 +289,7 @@ def _run_four_surface_operation_conformance() -> dict[str, object]:
         target = root / "failed-import-target"
         target.mkdir()
         before_entries = list(target.iterdir())
+        import_authority_before = forge.ontology_authority_state()
         import_code, import_diagnostics = failure(
             lambda: g.GraphForge.import_portable_v2(
                 str(target), input=str(expanded_path), operation_id=op(10)
@@ -294,7 +298,8 @@ def _run_four_surface_operation_conformance() -> dict[str, object]:
         assert import_code == oracle["expected"]["unsupported_future_code"]
         assert import_diagnostics[0]["code"] == oracle["expected"]["unsupported_future_diagnostic"]
         assert list(target.iterdir()) == before_entries
-        assert forge.ontology_authority_state() == before
+        import_authority_after = forge.ontology_authority_state()
+        assert import_authority_after == import_authority_before
         assert forge.portable_ontology_staging() is None
 
         preview = forge.preview_update_ontology_module(
@@ -316,6 +321,13 @@ def _run_four_surface_operation_conformance() -> dict[str, object]:
             json.loads(forge.export_ontology_module(**updated["id"], format="json"))
             == oracle["modules"]["dependent_update"]
         )
+        first_inventory = forge.ontology_modules()
+        second_inventory = forge.ontology_modules()
+        first_inventory_json = json.dumps(first_inventory, sort_keys=True, separators=(",", ":"))
+        second_inventory_json = json.dumps(second_inventory, sort_keys=True, separators=(",", ":"))
+        installed = g.GraphForge()
+        installed_modules = installed.ontology_modules()
+        installed.close()
         semantic = {
             "positive_crud_import_export": oracle["expected"]["module_order"],
             "exact_identity_and_ambiguity": ambiguous["diagnostics"][0]["code"],
@@ -351,15 +363,19 @@ def _run_four_surface_operation_conformance() -> dict[str, object]:
                 },
                 "cancellation": {
                     "error_code": oracle["expected"]["cancelled_code"],
-                    "authority_unchanged": True,
+                    "before_modules": cancellation_before_modules,
+                    "after_modules": cancellation_after_modules,
                 },
                 "idempotent_replay": {
-                    "same_receipt": True,
+                    "first_receipt": receipt,
+                    "replay_receipt": replay_receipt,
                     "conflict_code": oracle["expected"]["idempotency_conflict_code"],
                 },
                 "no_partial_import_or_authority_change": {
-                    "target_unchanged": True,
-                    "authority_unchanged": True,
+                    "before_entries": [path.name for path in before_entries],
+                    "after_entries": [path.name for path in target.iterdir()],
+                    "authority_before": import_authority_before,
+                    "authority_after": import_authority_after,
                 },
                 "bounded_structured_diagnostics": {
                     "outer_code": blocked_code,
@@ -369,11 +385,15 @@ def _run_four_surface_operation_conformance() -> dict[str, object]:
                     "path_free": str(root) not in json.dumps(blocked_diagnostics, sort_keys=True),
                 },
                 "deterministic_path_free_cli_json": {
-                    "deterministic": json.dumps(receipt, sort_keys=True)
-                    == json.dumps(receipt, sort_keys=True),
-                    "path_free": str(root) not in json.dumps(receipt, sort_keys=True),
+                    "first_serialized": first_inventory_json,
+                    "second_serialized": second_inventory_json,
+                    "forbidden_path": str(root),
                 },
-                "packaged_clean_install": {"semantic_smoke": True},
+                "packaged_clean_install": {
+                    "package_origin": str(Path(g.__file__).resolve()),
+                    "operation": "ontology_modules",
+                    "module_count": len(installed_modules),
+                },
             },
         }
         report_path = os.environ.get("GRAPHFORGE_MULTI_ONTOLOGY_PARITY_REPORT")

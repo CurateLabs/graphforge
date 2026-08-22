@@ -3,3 +3,8 @@
 package(default_visibility = ["//visibility:public"])
 
 exports_files(glob(["*"], exclude = ["BUILD.bazel"]))
+
+filegroup(
+    name = "certification_files",
+    srcs = glob(["certification-v1/**"]),
+)

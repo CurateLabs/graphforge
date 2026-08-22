@@ -39,6 +39,7 @@ _TEMPORAL_FIXTURE = [
 _MULTI_ONTOLOGY_FIXTURE = [
     "//tests/contracts:multi-ontology-surface-v1.json",
     "//tests/fixtures/multi-ontology-v1:binding-parity-v1.json",
+    "//tests/fixtures/multi-ontology-v1:certification_files",
 ]
 
 # Skill bundle stays at the workspace root (`//:project_skills_bundle`) so
@@ -133,7 +134,7 @@ gf_rust_integration_test(
     srcs = ["tests/multi_ontology.rs"],
     crate = ":graphforge_cli",
     compile_data = _MULTI_ONTOLOGY_FIXTURE,
-    data = _CLI_TEST_DATA,
+    data = _CLI_TEST_DATA + ["//tests/fixtures/multi-ontology-v1:certification_files"],
     rustc_env = _CLI_BIN_ENV,
     size = "large",
     timeout = "long",

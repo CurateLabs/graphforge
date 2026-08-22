@@ -449,6 +449,19 @@ gf_rust_integration_test(
 )
 
 gf_rust_integration_test(
+    name = "multi_ontology_certification",
+    srcs = ["tests/multi_ontology_certification.rs"],
+    crate = ":graphforge_api",
+    data = _API_TEST_DATA + ["//tests/fixtures/multi-ontology-v1:certification_files"],
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "crates/graphforge-api",
+    },
+    size = "large",
+    timeout = "long",
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
     name = "with_aggregation",
     srcs = ["tests/with_aggregation.rs"],
     crate = ":graphforge_api",
@@ -516,6 +529,7 @@ test_suite(
         ":minimum_k_spanning_tree",
         ":modularity",
         ":multi_label_scaling",
+        ":multi_ontology_certification",
         ":pattern_comprehension",
         ":percentile_aggregates",
         ":provider_session",

@@ -1,8 +1,8 @@
 {
   "contractVersion": 1,
   "rustManifest": "../../../tests/contracts/non-cypher-rust-surface.json",
-  "releaseSurfaceCount": 244,
-  "releaseSurfaceDigest": "158d34aaf86b09739624d74cbeafc5b011fd482b71eff15311db4306458cd202",
+  "releaseSurfaceCount": 247,
+  "releaseSurfaceDigest": "fa31f90944981d9e850cb115e70beb0c987ba36cedd71c681a51b122d59954fb",
   "requiredEquivalent": [
     "GraphForge.adopt_ontology",
     "GraphForge.clear_ontology",
@@ -52,6 +52,8 @@
       "GraphForge.import_ontology_module",
       "GraphForge.inspect_ontology_bridge",
       "GraphForge.inspect_ontology_module",
+      "GraphForge.migrate_ontology_module",
+      "GraphForge.multi_ontology_certification_report",
       "GraphForge.ontology_activation_profile",
       "GraphForge.ontology_authority_state",
       "GraphForge.ontology_bridges",
@@ -60,6 +62,7 @@
       "GraphForge.preflight_ontology_composition",
       "GraphForge.preview_delete_ontology_bridge",
       "GraphForge.preview_delete_ontology_module",
+      "GraphForge.preview_migrate_ontology_module",
       "GraphForge.preview_update_ontology_bridge",
       "GraphForge.preview_update_ontology_module",
       "GraphForge.update_ontology_bridge",
@@ -296,6 +299,9 @@
   },
   "evidence": {
     "multiOntology": {
+      "multi-ontology-certification.test.mjs": [
+        "retained-data certification uses Rust authority"
+      ],
       "multi-ontology.test.mjs": [
         "positive CRUD import export",
         "exact identity and ambiguity",

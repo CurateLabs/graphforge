@@ -17,6 +17,24 @@ behavior. Python, Node, and the CLI are thin projections of the same operations
 and return the same package identity, selection receipt, state classification,
 progress, and typed failures.
 
+## Keep the five identities separate
+
+A portable multi-ontology workflow has five intentionally different identity
+domains. Do not copy a value from one domain into another:
+
+| Identity | What it names | Stable across expanded and bundle forms? |
+| --- | --- | --- |
+| module identity | one authored ontology document: URI, opaque version, and canonical digest | yes |
+| composition identity | the exact ordered module, bridge, and activation authority | yes |
+| package identity | the selected logical portable content | yes |
+| runtime catalog identity | a project-local exploratory observation | no; it is not portable authority |
+| evidence identity | a TCK report, validation transcript, or benchmark attached as provenance | only as ordinary selected evidence content |
+
+The project generation pins authority at a publication boundary, but it is not
+an ontology, composition, or package identity. Likewise, a package digest does
+not authorize its ontology modules. Verification establishes package integrity
+and compatibility; adoption is a separate explicit authority change.
+
 ## Choose the package you intend to share
 
 Preview before exporting. A preview is content-free: it reports the package
@@ -47,6 +65,14 @@ checkpoint. For inspectable directory form, use `--format expanded` and a
 transport digests but verify to the same semantic package digest and selection
 receipt.
 
+For graph subsets, first pin the graph selector and its deterministic closure,
+then preview the resulting ontology closure. A graph subset always carries the
+exact module, bridge, activation, and schema authority needed to interpret its
+selected data. An ontology-only package carries that authority without graph
+data. A component-selective package is accepted only when its declared closure
+is complete; strict selection never fills a missing authority dependency
+implicitly.
+
 ## Verify before use
 
 Full verification is required before import or promotion:
@@ -70,6 +96,13 @@ Package identity (`package_digest`) describes selected logical content;
 transport identity describes exact bundle bytes or an OCI manifest. Neither is
 the source generation or the imported project's new generation.
 
+Older portable-v2 readers must reject an M9 package as
+`unsupported_future` when they encounter the required
+`ontology-composition@1` capability. An M9-aware reader additionally rejects a
+malformed control document, unsupported required feature, missing closure, or
+digest mismatch before materializing staging. Inspect and verify never adopt,
+replace, remove, activate, deactivate, or clear ontology authority.
+
 ## Import a complete package
 
 Import only into a new, empty, or pristine initialized destination, using a
@@ -86,6 +119,22 @@ reopens it. Corruption, cancellation, resource failure, or a crash leaves the
 old-or-new authoritative state and no partially published project. Retrying the
 same operation identity is safe. Complete import rejects selective packages
 without mutating the destination.
+
+Portable operations use finite component, manifest-byte, and copy-buffer
+limits. Cancellation is observed while parsing and between streaming buffers.
+On any failure GraphForge removes private staging residue and keeps the previous
+generation and composition authority unchanged. Re-exporting the same pinned
+selection is deterministic; host paths, runtime catalog IDs, session state, and
+machine configuration cannot enter the semantic package identity.
+
+## Carry TCK results as evidence
+
+TCK results describe how an engine behaved; they do not define an ontology or
+change query authority. Store a TCK report as an `evidence` or `provenance`
+component. The ontology-composition component must not depend on it, and its
+digest must not enter the composition fingerprint. Selecting or omitting the
+evidence may change the package digest because package content changed, but the
+module and composition identities remain exact and unchanged.
 
 ## Local and air-gapped transfer
 
