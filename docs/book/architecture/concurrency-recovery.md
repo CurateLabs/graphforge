@@ -37,9 +37,12 @@ staging handle and renames through that same handle with
 durability barrier, and ReFS remains unsupported/unproven. See
 [ADR 0020](../../adr/0020-ntfs-write-through-namespace-durability.md).
 
-Network, userspace, removable, cross-device, symlink-mediated, ReFS, and unknown
-filesystems return `GF_UNSUPPORTED_FILESYSTEM` before the project root or
-`CURRENT` changes. There is no best-effort durability mode.
+A persistent project filesystem may be mounted beneath a different container or
+VM root filesystem. GraphForge admits the project parent as its storage
+boundary and requires the project root and durable contents to remain on that
+filesystem. Network, userspace, removable, symlink-mediated, ReFS, and unknown
+project filesystems return `GF_UNSUPPORTED_FILESYSTEM` before the project root
+or `CURRENT` changes. There is no best-effort durability mode.
 
 Every durable lifecycle enters one Rust-owned parent-scoped admission before
 project mutation. A deterministic sibling lock file persists across unlock and

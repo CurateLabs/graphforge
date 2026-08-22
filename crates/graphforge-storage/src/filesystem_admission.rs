@@ -2,10 +2,9 @@
 //!
 //! The probe is deliberately independent of project contents. It operates in
 //! one private sibling below the canonical target parent and proves the same
-//! replacement primitive used by durable publication. Resolution retains
-//! every opened ancestor and uses handle-relative, no-follow traversal on
-//! Unix; Windows holds non-delete-shared ancestor handles while opening each
-//! reparse point itself.
+//! replacement primitive used by durable publication. Resolution opens and
+//! retains the project parent as the storage boundary, then uses
+//! handle-relative, no-follow access for the project root and durable children.
 //!
 //! This admission check is a capability probe, not a sandbox boundary against
 //! another process already running as the same OS principal. Private directory
@@ -476,7 +475,7 @@ impl LifecycleDirectory {
         directory.revalidate(phase, cause)?;
         parent.revalidate(phase, "ancestor_identity_changed")?;
         if directory.identity.volume_serial != parent.identity.volume_serial {
-            return Err(unsupported(phase, "ancestor_cross_volume"));
+            return Err(unsupported(phase, "child_cross_volume"));
         }
         Ok(directory)
     }
@@ -708,10 +707,12 @@ fn open_lifecycle_lock_file(_parent: &LifecycleDirectory, _name: &str) -> std::i
 /// local publication primitives.
 ///
 /// The target itself is never created or mutated. The nearest parent must
-/// already exist. Caller-controlled final-component links, ancestor aliases,
-/// and traversal components are rejected while the parent is opened one
-/// component at a time. The fixed macOS `/var` and `/tmp` system aliases are
-/// normalized to `/private/var` and `/private/tmp` first.
+/// already exist. Caller-controlled final-component links and traversal
+/// components are rejected. Namespace above the project parent is outside the
+/// GraphForge storage contract, so the parent may be a mounted persistent
+/// volume beneath a different process-root filesystem. The fixed macOS `/var`
+/// and `/tmp` system aliases are normalized to `/private/var` and
+/// `/private/tmp` first.
 ///
 /// # Errors
 /// Every inability to prove the contract returns
@@ -876,7 +877,40 @@ fn lock_probe_parent(
 }
 
 fn resolve_project_path(root: &Path) -> Result<ResolvedProjectPath, GfError> {
-    resolve_project_path_with_hook(root, |_, _| {})
+    let target_name = validate_plain_path(root)?;
+    let absolute = if root.is_absolute() {
+        #[cfg(target_os = "macos")]
+        let root = normalize_trusted_system_alias(root)?;
+        #[cfg(not(target_os = "macos"))]
+        let root = root.to_path_buf();
+        root
+    } else {
+        std::env::current_dir()
+            .map_err(|_| unsupported("CLASSIFY", "working_directory_unavailable"))?
+            .join(root)
+    };
+    let parent_path = absolute
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| unsupported("CLASSIFY", "parent_unavailable"))?;
+
+    // The durable-storage boundary begins at the project parent. Container and
+    // VM deployments routinely mount that directory on a different filesystem
+    // from the process root; namespace ancestors above it are not mutated by
+    // GraphForge and are therefore outside the durability contract.
+    let parent = LifecycleDirectory::open(parent_path, "CLASSIFY", "parent_identity_unavailable")?;
+    let root = parent.path.join(&target_name);
+    if let Ok(metadata) = child_metadata(&parent, &target_name)
+        && is_link_or_reparse(&metadata)
+    {
+        return Err(unsupported("CLASSIFY", "target_link"));
+    }
+    parent.revalidate("CLASSIFY", "parent_identity_changed")?;
+    Ok(ResolvedProjectPath {
+        parent,
+        target_name,
+        root,
+    })
 }
 
 fn validate_plain_path(root: &Path) -> Result<std::ffi::OsString, GfError> {
@@ -920,149 +954,6 @@ fn normalize_trusted_system_alias(path: &Path) -> Result<PathBuf, GfError> {
         return Err(unsupported("CLASSIFY", "system_alias_changed"));
     }
     Ok(replacement.join(path.strip_prefix(alias).expect("prefix was checked")))
-}
-
-#[cfg(unix)]
-fn resolve_project_path_with_hook(
-    root: &Path,
-    mut before_child_open: impl FnMut(&LifecycleDirectory, &std::ffi::OsStr),
-) -> Result<ResolvedProjectPath, GfError> {
-    let target_name = validate_plain_path(root)?;
-    let supplied_parent = root
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-
-    let (mut parent, components) = if root.is_absolute() {
-        #[cfg(target_os = "macos")]
-        let normalized_root = normalize_trusted_system_alias(root)?;
-        #[cfg(not(target_os = "macos"))]
-        let normalized_root = root.to_path_buf();
-        let normalized_parent = normalized_root
-            .parent()
-            .ok_or_else(|| unsupported("CLASSIFY", "parent_unavailable"))?;
-        let anchor =
-            LifecycleDirectory::open(Path::new("/"), "CLASSIFY", "ancestor_root_unavailable")?;
-        (
-            anchor,
-            normalized_parent
-                .components()
-                .filter_map(|component| match component {
-                    std::path::Component::Normal(name) => Some(name.to_owned()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>(),
-        )
-    } else {
-        let cwd = std::env::current_dir()
-            .map_err(|_| unsupported("CLASSIFY", "working_directory_unavailable"))?;
-        let handle = open_directory_handle(Path::new("."))
-            .map_err(|_| unsupported("CLASSIFY", "working_directory_unavailable"))?;
-        let anchor = LifecycleDirectory::from_handle(
-            cwd,
-            handle,
-            "CLASSIFY",
-            "working_directory_identity_changed",
-        )?;
-        (
-            anchor,
-            supplied_parent
-                .components()
-                .filter_map(|component| match component {
-                    std::path::Component::Normal(name) => Some(name.to_owned()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>(),
-        )
-    };
-
-    for name in components {
-        before_child_open(&parent, &name);
-        let child_path = parent.path.join(&name);
-        parent = LifecycleDirectory::open_child(
-            &parent,
-            &name,
-            &child_path,
-            "CLASSIFY",
-            "ancestor_link_or_special",
-        )?;
-    }
-
-    let root = parent.path.join(&target_name);
-    if let Ok(metadata) = child_metadata(&parent, &target_name)
-        && is_link_or_reparse(&metadata)
-    {
-        return Err(unsupported("CLASSIFY", "target_link"));
-    }
-    parent.revalidate("CLASSIFY", "parent_identity_changed")?;
-    Ok(ResolvedProjectPath {
-        parent,
-        target_name,
-        root,
-    })
-}
-
-#[cfg(windows)]
-fn resolve_project_path_with_hook(
-    root: &Path,
-    mut before_child_open: impl FnMut(&LifecycleDirectory, &std::ffi::OsStr),
-) -> Result<ResolvedProjectPath, GfError> {
-    let target_name = validate_plain_path(root)?;
-    let absolute = if root.is_absolute() {
-        root.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map_err(|_| unsupported("CLASSIFY", "working_directory_unavailable"))?
-            .join(root)
-    };
-    let supplied_parent = absolute
-        .parent()
-        .ok_or_else(|| unsupported("CLASSIFY", "parent_unavailable"))?;
-    let mut anchor = PathBuf::new();
-    let mut names = Vec::new();
-    for component in supplied_parent.components() {
-        match component {
-            std::path::Component::Prefix(_) | std::path::Component::RootDir => {
-                anchor.push(component.as_os_str());
-            }
-            std::path::Component::Normal(name) => names.push(name.to_owned()),
-            std::path::Component::CurDir | std::path::Component::ParentDir => {
-                return Err(unsupported("CLASSIFY", "path_traversal"));
-            }
-        }
-    }
-    let mut parent = LifecycleDirectory::open(&anchor, "CLASSIFY", "ancestor_root_unavailable")?;
-    for name in names {
-        before_child_open(&parent, &name);
-        let child_path = parent.path.join(&name);
-        parent = LifecycleDirectory::open_child(
-            &parent,
-            &name,
-            &child_path,
-            "CLASSIFY",
-            "ancestor_link_or_special",
-        )?;
-    }
-    let root = parent.path.join(&target_name);
-    if let Ok(metadata) = child_metadata(&parent, &target_name)
-        && is_link_or_reparse(&metadata)
-    {
-        return Err(unsupported("CLASSIFY", "target_link"));
-    }
-    parent.revalidate("CLASSIFY", "parent_identity_changed")?;
-    Ok(ResolvedProjectPath {
-        parent,
-        target_name,
-        root,
-    })
-}
-
-#[cfg(all(not(unix), not(windows)))]
-fn resolve_project_path_with_hook(
-    _root: &Path,
-    _before_child_open: impl FnMut(&LifecycleDirectory, &std::ffi::OsStr),
-) -> Result<ResolvedProjectPath, GfError> {
-    Err(unsupported("CLASSIFY", "platform_unsupported"))
 }
 
 fn classify_supported_local_volume(parent: &LifecycleDirectory) -> Result<String, GfError> {
@@ -2298,88 +2189,21 @@ mod tests {
         assert_eq!(std::fs::read_dir(&destination).unwrap().count(), 0);
     }
 
-    #[cfg(unix)]
     #[test]
-    fn retained_ancestor_handle_rejects_deterministic_namespace_substitution() {
-        use std::os::unix::fs::symlink;
+    fn project_parent_is_the_durable_namespace_boundary() {
+        let base = canonical_tempdir();
+        let storage_parent = base.path().join("container/mounted-volume/projects");
+        std::fs::create_dir_all(&storage_parent).unwrap();
+        let target = storage_parent.join("project");
 
-        let parent = canonical_tempdir();
-        let stable = parent.path().join("stable");
-        let moved = parent.path().join("moved");
-        let destination = parent.path().join("destination");
-        std::fs::create_dir(&stable).unwrap();
-        std::fs::create_dir(stable.join("inner")).unwrap();
-        std::fs::create_dir(&destination).unwrap();
-        let target = stable.join("inner/project");
-        let mut substituted = false;
+        let resolved = resolve_project_path(&target).unwrap();
 
-        let error = resolve_project_path_with_hook(&target, |opened_parent, next_name| {
-            if !substituted && next_name == "inner" {
-                assert_eq!(opened_parent.path, stable);
-                std::fs::rename(&stable, &moved).unwrap();
-                symlink(&destination, &stable).unwrap();
-                substituted = true;
-            }
-        })
-        .unwrap_err();
-
-        assert!(substituted);
-        assert_eq!(error.code(), "GF_UNSUPPORTED_FILESYSTEM");
+        assert_eq!(resolved.parent.path, storage_parent);
         assert!(
-            error.to_string().contains("ancestor_identity_changed")
-                || error.to_string().contains("ancestor_link_or_special"),
-            "{error}"
+            resolved.parent.ancestors.is_empty(),
+            "namespace above the storage parent is outside GraphForge's contract"
         );
-        assert_eq!(std::fs::read_dir(&destination).unwrap().count(), 0);
-        assert!(moved.join("inner").is_dir());
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn retained_ancestor_handles_prevent_deterministic_namespace_substitution() {
-        let parent = canonical_tempdir();
-        let stable = parent.path().join("stable");
-        let moved = parent.path().join("moved");
-        std::fs::create_dir(&stable).unwrap();
-        std::fs::create_dir(stable.join("inner")).unwrap();
-        let target = stable.join("inner/project");
-        let mut replacement_was_blocked = false;
-
-        let resolved = resolve_project_path_with_hook(&target, |opened_parent, next_name| {
-            if next_name == "inner" {
-                assert_eq!(opened_parent.path, stable);
-                replacement_was_blocked = std::fs::rename(&stable, &moved).is_err();
-            }
-        })
-        .unwrap();
-
-        assert!(replacement_was_blocked);
-        assert_eq!(resolved.parent.path, stable.join("inner"));
-        resolved
-            .parent
-            .revalidate("TEST", "ancestor_identity_changed")
-            .unwrap();
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn ancestor_junction_is_rejected_without_touching_its_destination() {
-        let parent = canonical_tempdir();
-        let destination = parent.path().join("destination");
-        let junction = parent.path().join("junction");
-        std::fs::create_dir(&destination).unwrap();
-        let status = std::process::Command::new("cmd")
-            .args(["/C", "mklink", "/J"])
-            .arg(&junction)
-            .arg(&destination)
-            .status()
-            .unwrap();
-        assert!(status.success());
-
-        let error = filesystem_durability_preflight(junction.join("project")).unwrap_err();
-        assert_eq!(error.code(), "GF_UNSUPPORTED_FILESYSTEM");
-        assert!(error.to_string().contains("ancestor_link_or_special"));
-        assert_eq!(std::fs::read_dir(&destination).unwrap().count(), 0);
+        assert_eq!(resolved.root, target);
     }
 
     #[cfg(windows)]
