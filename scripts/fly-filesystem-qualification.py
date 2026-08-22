@@ -14,6 +14,8 @@ import sys
 import tempfile
 import time
 from typing import Any
+import urllib.error
+import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 VALIDATOR_PATH = ROOT / "scripts/ci/validate-fly-filesystem-qualification.py"
@@ -60,40 +62,51 @@ def check_source(expected_sha: str) -> None:
         raise QualificationError("source tree is not clean")
 
 
-def launch_args(args: argparse.Namespace, volume_id: str, digest: str) -> list[str]:
-    return [
-        "machine",
-        "run",
-        args.image,
-        "--app",
-        args.app_name,
-        "--region",
-        args.region,
-        "--name",
-        args.machine_name,
-        "--volume",
-        f"{volume_id}:/work",
-        "--env",
-        f"GF_FLY_QUALIFICATION_GIT_SHA={args.expected_sha}",
-        "--env",
-        f"GF_FLY_QUALIFICATION_IMAGE_DIGEST={digest}",
-        "--env",
-        f"GF_FLY_QUALIFICATION_REGION={args.region}",
-        "--vm-cpu-kind",
-        "performance",
-        "--vm-cpus",
-        str(args.cpus),
-        "--vm-memory",
-        str(args.memory_mb),
-        "--restart",
-        "no",
-        "--rm",
-        "--autostop",
-        "off",
-        "--autostart=false",
-        "--skip-dns-registration",
-        "--detach",
-    ]
+def machine_create_payload(args: argparse.Namespace, volume_id: str, digest: str) -> dict[str, Any]:
+    return {
+        "name": args.machine_name,
+        "region": args.region,
+        "skip_launch": False,
+        "skip_service_registration": True,
+        "config": {
+            "image": args.image,
+            "auto_destroy": True,
+            "restart": {"policy": "no"},
+            "guest": {
+                "cpu_kind": "performance",
+                "cpus": args.cpus,
+                "memory_mb": args.memory_mb,
+            },
+            "mounts": [{"volume": volume_id, "path": "/work"}],
+            "services": [],
+            "env": {
+                "GF_FLY_QUALIFICATION_GIT_SHA": args.expected_sha,
+                "GF_FLY_QUALIFICATION_IMAGE_DIGEST": digest,
+                "GF_FLY_QUALIFICATION_REGION": args.region,
+            },
+        },
+    }
+
+
+def create_machine(args: argparse.Namespace, fly: Flyctl, volume_id: str, digest: str) -> Any:
+    token = fly.run(["auth", "token"]).stdout.strip()
+    if not token:
+        raise QualificationError("Fly authentication token is unavailable")
+    request = urllib.request.Request(
+        f"https://api.machines.dev/v1/apps/{args.app_name}/machines",
+        data=json.dumps(machine_create_payload(args, volume_id, digest)).encode(),
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as error:
+        raise QualificationError(
+            f"Fly Machines API rejected creation with HTTP {error.code}"
+        ) from None
+    except urllib.error.URLError:
+        raise QualificationError("Fly Machines API connection failed") from None
 
 
 def volume_create_args(args: argparse.Namespace) -> list[str]:
@@ -194,12 +207,7 @@ def execute(args: argparse.Namespace, fly: Flyctl, digest: str) -> None:
         fly.run(["apps", "create", args.app_name, "--org", args.org])
         volume = fly.json(volume_create_args(args))
         volume_id = volume["id"]
-        fly.run(launch_args(args, volume_id, digest))
-        machines = fly.json(["machine", "list", "--app", args.app_name])
-        selected = [item for item in machines if item.get("name") == args.machine_name]
-        if len(selected) != 1:
-            raise QualificationError("could not identify exactly one qualification Machine")
-        machine = selected[0]
+        machine = create_machine(args, fly, volume_id, digest)
         machine_id = machine["id"]
         assert_machine_config(machine, args, digest)
 
