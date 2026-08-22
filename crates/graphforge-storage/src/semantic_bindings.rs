@@ -1571,6 +1571,22 @@ pub fn materialize_semantic_migration(
 
     let mut route_moves = BTreeMap::<String, String>::new();
     let mut property_renames = BTreeMap::<String, BTreeMap<String, String>>::new();
+    let mut target_field_nullability = BTreeMap::<(String, String), bool>::new();
+    for schema in &plan.target_property_schemas {
+        let binding = plan
+            .bindings
+            .bindings
+            .iter()
+            .find(|binding| binding.symbol == schema.symbol)
+            .ok_or_else(|| corrupt("migration target property schema has no binding"))?;
+        let name = schema
+            .symbol
+            .local_id
+            .split_once(':')
+            .map(|(_, name)| name)
+            .ok_or_else(|| corrupt("migration target property identity is malformed"))?;
+        target_field_nullability.insert((binding.route.clone(), name.into()), schema.nullable);
+    }
     for operation in &plan.operations {
         let (from, to, from_owner, to_owner) = match operation {
             SemanticMigrationOperation::Carry {
@@ -1693,17 +1709,27 @@ pub fn materialize_semantic_migration(
                 .and_then(|route| route_moves.get(route))
                 .cloned();
             let renames = authenticated_old_route.and_then(|route| property_renames.get(route));
+            let target_route = new_route.as_deref().or(authenticated_old_route);
             let fields = builder
                 .schema()
                 .fields()
                 .iter()
                 .map(|field| {
-                    renames
+                    let target_field = renames
                         .and_then(|values| values.get(field.name()))
                         .map_or_else(
                             || field.as_ref().clone(),
                             |name| field.as_ref().clone().with_name(name),
-                        )
+                        );
+                    let nullable = target_route
+                        .and_then(|route| {
+                            target_field_nullability
+                                .get(&(route.to_owned(), target_field.name().to_owned()))
+                        })
+                        .copied();
+                    nullable.map_or(target_field.clone(), |value| {
+                        target_field.with_nullable(value)
+                    })
                 })
                 .collect::<Vec<_>>();
             let mut metadata = schema_metadata;

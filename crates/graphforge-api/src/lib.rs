@@ -1139,7 +1139,12 @@ impl GraphForge {
         let legacy_route_moves = composition.as_ref().map(|(_, _, moves)| moves.as_slice());
         let composition_mode = composition.as_ref().map(|(context, _, _)| {
             match context.composition().profile_default {
-                graphforge_ontology::ActivationMode::Exploratory => OntologyMode::Exploratory,
+                // Composition fallback policy is enforced by the binder. Once a
+                // symbol resolved to authenticated generation storage, the writer
+                // must retain that typed route even under an exploratory profile;
+                // advisory mode still permits binder-approved runtime fallbacks
+                // without collapsing resolved ontology data into `_untyped`.
+                graphforge_ontology::ActivationMode::Exploratory => OntologyMode::Advisory,
                 graphforge_ontology::ActivationMode::Advisory => OntologyMode::Advisory,
                 graphforge_ontology::ActivationMode::Strict => OntologyMode::Strict,
             }
