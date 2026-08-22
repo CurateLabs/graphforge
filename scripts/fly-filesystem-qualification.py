@@ -107,8 +107,14 @@ def validate_inputs(args: argparse.Namespace) -> str:
     for value in (args.app_name, args.volume_name, args.machine_name):
         if not SAFE_NAME.fullmatch(value):
             raise QualificationError("resource names must be explicit safe lowercase names")
+    if not 1 <= args.cpus <= 16:
+        raise QualificationError("qualification CPU count must be in 1..16")
+    if not 1024 <= args.memory_mb <= 131072:
+        raise QualificationError("qualification memory must be in 1024..131072 MiB")
     if not 1 <= args.volume_size_gb <= 20:
         raise QualificationError("qualification volume must be small (1..20 GiB)")
+    if not 60 <= args.retrieve_timeout_s <= 1800:
+        raise QualificationError("evidence retrieval timeout must be in 60..1800 seconds")
     if args.execute and not args.confirm_disposable:
         raise QualificationError("--execute requires --confirm-disposable")
     return match.group("digest")
@@ -246,10 +252,10 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--app-name", required=True)
     result.add_argument("--volume-name", required=True)
     result.add_argument("--machine-name", required=True)
-    result.add_argument("--cpus", type=int, default=2, choices=range(1, 17))
-    result.add_argument("--memory-mb", type=int, default=4096, choices=range(1024, 131073))
+    result.add_argument("--cpus", type=int, default=2)
+    result.add_argument("--memory-mb", type=int, default=4096)
     result.add_argument("--volume-size-gb", type=int, default=10)
-    result.add_argument("--retrieve-timeout-s", type=int, default=1200, choices=range(60, 1801))
+    result.add_argument("--retrieve-timeout-s", type=int, default=1200)
     result.add_argument(
         "--evidence-out", type=Path, default=Path("fly-qualification-evidence.json")
     )

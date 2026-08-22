@@ -68,6 +68,19 @@ def test_refuses_mutable_image_and_execute_without_confirmation():
         controller.validate_inputs(args(execute=True))
 
 
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ({"cpus": 0}, "CPU count"),
+        ({"memory_mb": 131073}, "memory"),
+        ({"retrieve_timeout_s": 59}, "retrieval timeout"),
+    ],
+)
+def test_refuses_out_of_bounds_machine_and_timeout_values(change, message):
+    with pytest.raises(controller.QualificationError, match=message):
+        controller.validate_inputs(args(**change))
+
+
 def test_refuses_dirty_or_non_exact_source(monkeypatch):
     responses = iter(
         [
