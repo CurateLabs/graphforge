@@ -1625,8 +1625,8 @@ mod tests {
             release_tx.send(()).unwrap();
 
             let built = builder.join().unwrap().unwrap();
-            let waited = waiter.join().unwrap().unwrap();
-            assert!(Arc::ptr_eq(&built, &waited));
+            let waiter_view = waiter.join().unwrap().unwrap();
+            assert!(Arc::ptr_eq(&built, &waiter_view));
         });
     }
 

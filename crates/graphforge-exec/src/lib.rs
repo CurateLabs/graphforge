@@ -3378,7 +3378,7 @@ impl ExecutionPlan for ExpandExec {
                 None,
                 batch_size,
                 initial_batch_goal,
-                demand::OperatorActivity::expand(),
+                demand::OperatorActivity::expand(self.edge_var),
             ),
             |(
                 mut input_stream,
@@ -5084,7 +5084,14 @@ impl ExecutionSession {
 
         let _sort_activity = demand::sort_activity(&physical);
         let collected = collect(Arc::clone(&physical), self.ctx.task_ctx()).await;
-        demand::record_plan_after(&physical, self.ctx.runtime_env().memory_pool.reserved());
+        let returned_batch_bytes = collected.as_ref().map_or(0, |batches| {
+            batches.iter().map(RecordBatch::get_array_memory_size).sum()
+        });
+        demand::record_plan_after(
+            &physical,
+            self.ctx.runtime_env().memory_pool.reserved(),
+            returned_batch_bytes,
+        );
         let mut batches = collected.map_err(|e| GfError::Execution(e.to_string()))?;
 
         // DataFusion's collect may return zero batches for an empty stream.

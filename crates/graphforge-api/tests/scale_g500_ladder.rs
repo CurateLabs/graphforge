@@ -61,7 +61,20 @@ static JOURNAL_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static INGEST_SUBPHASE: AtomicU64 = AtomicU64::new(0);
 static INGEST_CHUNK_INDEX: AtomicU64 = AtomicU64::new(0);
 
-fn query_operator_evidence(snapshot: &demand::DemandSnapshot) -> Value {
+fn query_operator_evidence(snapshot: &demand::DemandSnapshot, memory_budget_bytes: u64) -> Value {
+    let lifetime = |rss: &demand::RssLifetimeSnapshot| {
+        let working_set_bytes = rss.peak_bytes.saturating_sub(rss.before_bytes);
+        json!({
+            "before_bytes": rss.before_bytes,
+            "peak_bytes": rss.peak_bytes,
+            "current_bytes": rss.current_bytes,
+            "after_bytes": rss.after_bytes,
+            "working_set_bytes": working_set_bytes,
+            "budget_bytes": memory_budget_bytes,
+            "headroom_bytes": memory_budget_bytes.saturating_sub(working_set_bytes),
+            "within_budget": working_set_bytes <= memory_budget_bytes,
+        })
+    };
     json!({
         "expands": snapshot.hops.iter().map(|(edge_var, hop)| json!({
             "edge_var": edge_var,
@@ -84,13 +97,58 @@ fn query_operator_evidence(snapshot: &demand::DemandSnapshot) -> Value {
         })).collect::<Vec<_>>(),
         "memory_reserved_before": snapshot.memory_reserved_before,
         "memory_reserved_after": snapshot.memory_reserved_after,
+        "returned_batch_bytes": snapshot.returned_batch_bytes,
+        "operator_memory_quiescent": snapshot.memory_reserved_after
+            .saturating_sub(snapshot.memory_reserved_before) <= snapshot.returned_batch_bytes,
         "operator_rss": {
             "expand_peak_bytes": snapshot.operator_rss.expand_peak_bytes,
             "expand_current_bytes": snapshot.operator_rss.expand_current_bytes,
             "sort_peak_bytes": snapshot.operator_rss.sort_peak_bytes,
             "sort_current_bytes": snapshot.operator_rss.sort_current_bytes,
+            "expand_by_hop": snapshot.operator_rss.expand_by_hop.iter().map(|(edge_var, rss)| {
+                let mut value = lifetime(rss);
+                value["edge_var"] = json!(edge_var);
+                value
+            }).collect::<Vec<_>>(),
+            "sort_exclusive": lifetime(&snapshot.operator_rss.sort_exclusive),
         },
     })
+}
+
+fn operator_rss_within_budgets(
+    snapshot: &demand::DemandSnapshot,
+    expected_hops: usize,
+    memory_budget_bytes: u64,
+    process_budget_bytes: u64,
+) -> bool {
+    snapshot.operator_rss.expand_by_hop.len() == expected_hops
+        && snapshot
+            .operator_rss
+            .expand_by_hop
+            .values()
+            .chain(std::iter::once(&snapshot.operator_rss.sort_exclusive))
+            .all(|rss| {
+                rss.peak_bytes <= process_budget_bytes
+                    && rss.peak_bytes.saturating_sub(rss.before_bytes) <= memory_budget_bytes
+                    && (rss.before_bytes > 0 || !cfg!(target_os = "linux"))
+                    && (rss.after_bytes > 0 || !cfg!(target_os = "linux"))
+            })
+}
+
+fn max_operator_working_set(steps: &[Value]) -> u64 {
+    steps
+        .iter()
+        .filter_map(|step| step["detail"]["operators"]["operator_rss"].as_object())
+        .flat_map(|rss| {
+            rss["expand_by_hop"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .chain(std::iter::once(&rss["sort_exclusive"]))
+        })
+        .filter_map(|lifetime| lifetime["working_set_bytes"].as_u64())
+        .max()
+        .unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -912,6 +970,7 @@ fn run_rung(
     let mut node_count = 0u64;
     let mut edge_count = 0u64;
     let mut gsi = String::new();
+    let mut query_memory_budget_bytes = 0;
     if first_failing_phase.is_none() {
         persist_phase_journal(
             profile,
@@ -923,6 +982,7 @@ fn run_rung(
             None,
         );
         let reopen_started = Instant::now();
+        let reopen_rss_before = linux_memory_bytes();
         let graph = GraphForge::new(Some(project.to_str().expect("utf8 project")))
             .expect("reopen GraphForge");
         let reopen_s = reopen_started.elapsed().as_secs_f64();
@@ -937,7 +997,11 @@ fn run_rung(
             "wall_time_s": reopen_s,
             "rss_peak_bytes": rss_value(),
             "process_memory": linux_process_memory(),
-            "detail": {}
+            "detail": {
+                "rss_before_bytes": reopen_rss_before,
+                "rss_after_bytes": linux_memory_bytes(),
+                "retention_contract": "instance_workspace_bounded_by_process_envelope"
+            }
         }));
         persist_phase_journal(
             profile,
@@ -968,6 +1032,7 @@ fn run_rung(
                 None,
             );
             let phase_started = Instant::now();
+            let rss_before = linux_memory_bytes();
             node_count = graph.node_count(NODE_LABEL).expect("node_count");
             let expected_nodes = 1u64 << rung.scale;
             let mut violation = envelope_violation(&env, ladder_started, &project, &spill_dir);
@@ -984,7 +1049,13 @@ fn run_rung(
                 "wall_time_s": phase_started.elapsed().as_secs_f64(),
                 "rss_peak_bytes": rss_value(),
                 "process_memory": linux_process_memory(),
-                "detail": { "node_count": node_count, "expected": expected_nodes }
+                "detail": {
+                    "node_count": node_count,
+                    "expected": expected_nodes,
+                    "rss_before_bytes": rss_before,
+                    "rss_after_bytes": linux_memory_bytes(),
+                    "retention_contract": "no_session_memory_pool_reservation"
+                }
             }));
             persist_phase_journal(
                 profile,
@@ -1012,11 +1083,21 @@ fn run_rung(
                 None,
             );
             let phase_started = Instant::now();
-            edge_count = scalar_count(&graph.execute(COUNT_EDGES).expect("edge count"));
+            let rss_before = linux_memory_bytes();
+            let observed_count = graph.execute_observed(COUNT_EDGES);
+            edge_count = scalar_count(observed_count.result.as_ref().expect("edge count"));
             gsi = gsi_undirected(node_count, edge_count);
             let mut violation = envelope_violation(&env, ladder_started, &project, &spill_dir);
             if edge_count != live_unique_edges {
                 violation = Some("result_mismatch");
+            }
+            if observed_count
+                .evidence
+                .memory_reserved_after
+                .saturating_sub(observed_count.evidence.memory_reserved_before)
+                > observed_count.evidence.returned_batch_bytes
+            {
+                violation = Some("memory_limit");
             }
             if let Some(class) = violation {
                 first_failing_phase = Some("edge_count");
@@ -1028,7 +1109,19 @@ fn run_rung(
                 "wall_time_s": phase_started.elapsed().as_secs_f64(),
                 "rss_peak_bytes": rss_value(),
                 "process_memory": linux_process_memory(),
-                "detail": { "edge_count": edge_count, "expected": live_unique_edges, "gsi": gsi }
+                "detail": {
+                    "edge_count": edge_count,
+                    "expected": live_unique_edges,
+                    "gsi": gsi,
+                    "rss_before_bytes": rss_before,
+                    "rss_after_bytes": linux_memory_bytes(),
+                    "memory_reserved_before": observed_count.evidence.memory_reserved_before,
+                    "memory_reserved_after": observed_count.evidence.memory_reserved_after,
+                    "returned_batch_bytes": observed_count.evidence.returned_batch_bytes,
+                    "memory_quiescent": observed_count.evidence.memory_reserved_after
+                        .saturating_sub(observed_count.evidence.memory_reserved_before)
+                        <= observed_count.evidence.returned_batch_bytes
+                }
             }));
             persist_phase_journal(
                 profile,
@@ -1057,7 +1150,9 @@ fn run_rung(
             );
             let hop1_started = Instant::now();
             let hop1 = graph.execute_observed(ONE_HOP);
-            let hop1_operators = query_operator_evidence(&hop1.evidence);
+            let memory_budget = graph.resource_policy().memory_budget_bytes;
+            query_memory_budget_bytes = memory_budget;
+            let hop1_operators = query_operator_evidence(&hop1.evidence, memory_budget);
             let hop1_failure = hop1.result.as_ref().err().map(ToString::to_string);
             let hop1_rows = hop1.result.as_ref().map_or(0, row_count);
             let mut violation = envelope_violation(&env, ladder_started, &project, &spill_dir);
@@ -1066,6 +1161,9 @@ fn run_rung(
             }
             if hop1_rows != 1_000 {
                 violation = Some("result_mismatch");
+            }
+            if !operator_rss_within_budgets(&hop1.evidence, 1, memory_budget, env.rss_bytes) {
+                violation = Some("memory_limit");
             }
             if let Some(class) = violation {
                 first_failing_phase = Some("one_hop");
@@ -1106,7 +1204,9 @@ fn run_rung(
             );
             let hop2_started = Instant::now();
             let hop2 = graph.execute_observed(TWO_HOP);
-            let hop2_operators = query_operator_evidence(&hop2.evidence);
+            let memory_budget = graph.resource_policy().memory_budget_bytes;
+            query_memory_budget_bytes = memory_budget;
+            let hop2_operators = query_operator_evidence(&hop2.evidence, memory_budget);
             let hop2_failure = hop2.result.as_ref().err().map(ToString::to_string);
             let hop2_rows = hop2.result.as_ref().map_or(0, row_count);
             let mut violation = envelope_violation(&env, ladder_started, &project, &spill_dir);
@@ -1115,6 +1215,9 @@ fn run_rung(
             }
             if hop2_rows != 1_000 {
                 violation = Some("result_mismatch");
+            }
+            if !operator_rss_within_budgets(&hop2.evidence, 2, memory_budget, env.rss_bytes) {
+                violation = Some("memory_limit");
             }
             if let Some(class) = violation {
                 first_failing_phase = Some("two_hop");
@@ -1162,6 +1265,12 @@ fn run_rung(
         None => (Value::Null, Value::Null),
     };
 
+    let max_operator_working_set_bytes = max_operator_working_set(&steps);
+    let lower_rungs_within_same_budget = completed_rungs.iter().all(|completed| {
+        completed["operator_memory_contract"]["max_working_set_bytes"]
+            .as_u64()
+            .is_none_or(|bytes| bytes <= query_memory_budget_bytes)
+    });
     let evidence = json!({
         "schema": EVIDENCE_SCHEMA,
         "schema_version": SCHEMA_VERSION,
@@ -1209,6 +1318,16 @@ fn run_rung(
         "teps": null,
         "notes": "Bounded-memory engineering green. NOT Official-track, NOT TEPS. Certification of one billion live edges is #745, not this profile.",
         "steps": steps,
+        "operator_memory_contract": {
+            "classification": "bounded_plateau",
+            "budget_source": "GraphForge.resource_policy.memory_budget_bytes",
+            "budget_bytes": query_memory_budget_bytes,
+            "max_working_set_bytes": max_operator_working_set_bytes,
+            "headroom_bytes": query_memory_budget_bytes.saturating_sub(max_operator_working_set_bytes),
+            "lower_rungs_within_same_budget": lower_rungs_within_same_budget,
+            "pass": max_operator_working_set_bytes <= query_memory_budget_bytes
+                && lower_rungs_within_same_budget,
+        },
     });
 
     RungOutcome { passed, evidence }
@@ -2032,6 +2151,16 @@ impl PhaseJournal {
     }
 
     fn pass(&mut self, id: &str, started: Instant, fingerprint: Option<String>) {
+        self.pass_with_evidence(id, started, fingerprint, &Value::Null);
+    }
+
+    fn pass_with_evidence(
+        &mut self,
+        id: &str,
+        started: Instant,
+        fingerprint: Option<String>,
+        operator_evidence: &Value,
+    ) {
         let fingerprint = fingerprint.map_or(Value::Null, Value::String);
         self.monitor.sample_disk();
         if let Some(code) = self.monitor.failure_code() {
@@ -2041,6 +2170,7 @@ impl PhaseJournal {
                 "rss_peak_bytes": self.monitor.peak_rss.load(Ordering::Relaxed),
                 "disk_peak_bytes": self.monitor.peak_disk.load(Ordering::Relaxed),
                 "fingerprint": fingerprint, "failure_code": code,
+                "operator_evidence": operator_evidence,
             }));
             self.flush();
             panic!("certification resource watchdog stopped phase {id}: {code}");
@@ -2054,6 +2184,7 @@ impl PhaseJournal {
             "disk_peak_bytes": disk_peak_bytes,
             "fingerprint": fingerprint,
             "failure_code": null,
+            "operator_evidence": operator_evidence,
         }));
         self.flush();
     }
@@ -2363,7 +2494,15 @@ fn create_bounded_drill_package(root: &Path, limits: PortableV2Limits) -> (PathB
 }
 
 #[allow(clippy::too_many_lines)]
-fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value {
+#[derive(Clone, Copy)]
+enum IntegratedRun<'a> {
+    Preflight,
+    ProfileRung(&'a Rung),
+    TargetLive(u64),
+}
+
+#[allow(clippy::too_many_lines)] // the ordered 17-phase certification transaction is intentionally linear
+fn run_integrated_certification(root: &Path, run: IntegratedRun<'_>) -> Value {
     let source = root.join("source");
     let imported = root.join("imported");
     let package = root.join("project.gfpb");
@@ -2387,30 +2526,28 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
     journal.pass("preflight", phase, None);
 
     let phase = Instant::now();
-    let scale = if target_live.is_some() {
-        certification_profile.scale
-    } else {
-        certification_profile.preflight_scale
+    let scale = match run {
+        IntegratedRun::Preflight => certification_profile.preflight_scale,
+        IntegratedRun::ProfileRung(rung) => rung.scale,
+        IntegratedRun::TargetLive(_) => certification_profile.scale,
     };
-    let edge_factor = if target_live.is_some() {
-        certification_profile.edgefactor
-    } else {
-        4
+    let edge_factor = match run {
+        IntegratedRun::Preflight => 4,
+        IntegratedRun::ProfileRung(_) => load_profile().edgefactor,
+        IntegratedRun::TargetLive(_) => certification_profile.edgefactor,
     };
-    let initiator = if target_live.is_some() {
-        certification_profile.initiator
-    } else {
-        load_profile().initiator
+    let initiator = match run {
+        IntegratedRun::TargetLive(_) => certification_profile.initiator,
+        IntegratedRun::Preflight | IntegratedRun::ProfileRung(_) => load_profile().initiator,
     };
-    let seed = if target_live.is_some() {
-        certification_profile.seed
-    } else {
-        load_profile().seed
+    let seed = match run {
+        IntegratedRun::TargetLive(_) => certification_profile.seed,
+        IntegratedRun::Preflight | IntegratedRun::ProfileRung(_) => load_profile().seed,
     };
     let spill_root = root.join("spill");
     fs::create_dir_all(&spill_root).expect("certification spill root");
-    let generated = target_live.map(|target| {
-        generate_target_live_runs(
+    let generated = match run {
+        IntegratedRun::TargetLive(target) => Some(generate_target_live_runs(
             &TargetLiveGeneration {
                 scale,
                 edge_factor,
@@ -2421,44 +2558,67 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
             },
             &spill_root,
             journal.cancellation(),
-        )
-    });
+        )),
+        IntegratedRun::Preflight | IntegratedRun::ProfileRung(_) => None,
+    };
+    let rung_spills = match run {
+        IntegratedRun::ProfileRung(rung) => Some(generate_spill_runs(
+            scale,
+            edge_factor,
+            initiator,
+            seed,
+            rung.buffer_edges,
+            &spill_root,
+            Some(journal.cancellation()),
+        )),
+        IntegratedRun::Preflight | IntegratedRun::TargetLive(_) => None,
+    };
     let (spills, generated_counts, target_live_fingerprint) = generated
         .map_or((None, None, None), |(spills, counts, fingerprint)| {
             (Some(spills), Some(counts), Some(fingerprint))
         });
-    let (summary, edges) = if target_live.is_none() {
+    let (summary, edges) = if matches!(run, IntegratedRun::Preflight) {
         let (summary, edges) = bounded_generation(scale, edge_factor, initiator, seed, 512);
         assert!(summary.reconciles());
         (Some(summary), Some(edges))
     } else {
         (None, None)
     };
-    let generation_fingerprint = summary.as_ref().map_or_else(
-        || target_live_fingerprint.expect("target-live payload fingerprint"),
-        |value| value.input_fingerprint.clone(),
-    );
-    journal.pass("generate", phase, Some(generation_fingerprint.clone()));
+    let generation_fingerprint = summary
+        .as_ref()
+        .map(|value| value.input_fingerprint.clone())
+        .or(target_live_fingerprint);
+    journal.pass("generate", phase, generation_fingerprint.clone());
 
     let phase = Instant::now();
     let graph = GraphForge::new(source.to_str()).expect("open certification source");
     publish_nodes(&graph, 1u64 << scale, Some(journal.cancellation()));
     let mut sink = EdgeSink::new(&graph, Some(journal.cancellation()));
+    let mut rung_merge_counts = None;
     if let Some(edges) = edges {
         for (src, dst) in edges {
             sink.push(src, dst);
         }
     } else {
-        merge_runs(
-            &spills.as_ref().expect("target spills").runs,
+        let active_spills = spills
+            .as_ref()
+            .or(rung_spills.as_ref())
+            .expect("spill runs");
+        let counts = merge_runs(
+            &active_spills.runs,
             Some(journal.cancellation()),
             |src, dst| sink.push(src, dst),
         )
         .expect("certification merge was cancelled");
+        if rung_spills.is_some() {
+            rung_merge_counts = Some(counts);
+        }
     }
     sink.flush();
     let input_fingerprint = format!("sha256:{}", sink.finish());
-    assert_eq!(input_fingerprint, generation_fingerprint);
+    if let Some(expected) = generation_fingerprint {
+        assert_eq!(input_fingerprint, expected);
+    }
     journal.pass("ingest", phase, Some(input_fingerprint));
 
     let phase = Instant::now();
@@ -2477,25 +2637,48 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
     let graph = GraphForge::new(source.to_str()).expect("reopen source");
     let source_nodes = graph.node_count(NODE_LABEL).expect("source nodes");
     let source_edges = scalar_count(&graph.execute(COUNT_EDGES).expect("source edges"));
-    let expected_live_edges = generated_counts.as_ref().map_or_else(
-        || {
-            summary
-                .as_ref()
-                .expect("bounded generation summary")
-                .live_unique_edges
-        },
-        |counts| counts.live_unique_edges,
-    );
+    let expected_live_edges = generated_counts
+        .as_ref()
+        .or(rung_merge_counts.as_ref())
+        .map_or_else(
+            || {
+                summary
+                    .as_ref()
+                    .expect("bounded generation summary")
+                    .live_unique_edges
+            },
+            |counts| counts.live_unique_edges,
+        );
     assert_eq!(source_edges, expected_live_edges);
     journal.pass("source_reopen", phase, None);
     let phase = Instant::now();
-    let source_1hop = result_fingerprint(&graph.execute(ONE_HOP).expect("source 1hop"));
-    journal.pass("source_query_1hop", phase, Some(source_1hop.clone()));
+    let source_1hop_observed = graph.execute_observed(ONE_HOP);
+    let source_1hop =
+        result_fingerprint(source_1hop_observed.result.as_ref().expect("source 1hop"));
+    journal.pass_with_evidence(
+        "source_query_1hop",
+        phase,
+        Some(source_1hop.clone()),
+        &query_operator_evidence(
+            &source_1hop_observed.evidence,
+            graph.resource_policy().memory_budget_bytes,
+        ),
+    );
     let phase = Instant::now();
-    let source_2hop = result_fingerprint(&graph.execute(TWO_HOP).expect("source 2hop"));
+    let source_2hop_observed = graph.execute_observed(TWO_HOP);
+    let source_2hop =
+        result_fingerprint(source_2hop_observed.result.as_ref().expect("source 2hop"));
     let source_authority_fingerprint = authority_fingerprint(&graph);
     let source_generation = current_generation_uuid(&graph);
-    journal.pass("source_query_2hop", phase, Some(source_2hop.clone()));
+    journal.pass_with_evidence(
+        "source_query_2hop",
+        phase,
+        Some(source_2hop.clone()),
+        &query_operator_evidence(
+            &source_2hop_observed.evidence,
+            graph.resource_policy().memory_budget_bytes,
+        ),
+    );
 
     let phase = Instant::now();
     let exported = graph
@@ -2558,11 +2741,23 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
     );
     journal.pass("imported_reopen", phase, None);
     let phase = Instant::now();
-    let imported_1hop = result_fingerprint(&imported_graph.execute(ONE_HOP).expect("import 1hop"));
+    let imported_1hop_observed = imported_graph.execute_observed(ONE_HOP);
+    let imported_1hop =
+        result_fingerprint(imported_1hop_observed.result.as_ref().expect("import 1hop"));
     assert_eq!(source_1hop, imported_1hop);
-    journal.pass("imported_query_1hop", phase, Some(imported_1hop.clone()));
+    journal.pass_with_evidence(
+        "imported_query_1hop",
+        phase,
+        Some(imported_1hop.clone()),
+        &query_operator_evidence(
+            &imported_1hop_observed.evidence,
+            imported_graph.resource_policy().memory_budget_bytes,
+        ),
+    );
     let phase = Instant::now();
-    let imported_2hop = result_fingerprint(&imported_graph.execute(TWO_HOP).expect("import 2hop"));
+    let imported_2hop_observed = imported_graph.execute_observed(TWO_HOP);
+    let imported_2hop =
+        result_fingerprint(imported_2hop_observed.result.as_ref().expect("import 2hop"));
     let imported_authority_fingerprint = authority_fingerprint(&imported_graph);
     assert_eq!(
         current_generation_uuid(&imported_graph),
@@ -2570,7 +2765,15 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
     );
     assert_eq!(source_2hop, imported_2hop);
     assert_eq!(source_authority_fingerprint, imported_authority_fingerprint);
-    journal.pass("imported_query_2hop", phase, Some(imported_2hop.clone()));
+    journal.pass_with_evidence(
+        "imported_query_2hop",
+        phase,
+        Some(imported_2hop.clone()),
+        &query_operator_evidence(
+            &imported_2hop_observed.evidence,
+            imported_graph.resource_policy().memory_budget_bytes,
+        ),
+    );
 
     // Representative drills use the same verifier/import boundaries but never
     // repeat the billion-edge payload.
@@ -2669,10 +2872,10 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
         "source_generation": exported.generation_uuid.to_string(),
         "package": exported.package_digest, "transport": exported.transport_digest,
         "imported_generation": imported_receipt.generation_uuid.to_string(),
-        "raw_attempts": spills.as_ref().map_or_else(|| summary.as_ref().unwrap().raw_attempts, |value| value.raw_attempts),
-        "self_loops_rejected": spills.as_ref().map_or_else(|| summary.as_ref().unwrap().self_loops_rejected, |value| value.self_loops_rejected),
-        "duplicates_rejected": generated_counts.as_ref().map_or_else(|| summary.as_ref().unwrap().duplicates_rejected, |value| value.duplicates_rejected),
-        "generated_live_unique_edges": generated_counts.as_ref().map_or_else(|| summary.as_ref().unwrap().live_unique_edges, |value| value.live_unique_edges),
+        "raw_attempts": spills.as_ref().or(rung_spills.as_ref()).map_or_else(|| summary.as_ref().unwrap().raw_attempts, |value| value.raw_attempts),
+        "self_loops_rejected": spills.as_ref().or(rung_spills.as_ref()).map_or_else(|| summary.as_ref().unwrap().self_loops_rejected, |value| value.self_loops_rejected),
+        "duplicates_rejected": generated_counts.as_ref().or(rung_merge_counts.as_ref()).map_or_else(|| summary.as_ref().unwrap().duplicates_rejected, |value| value.duplicates_rejected),
+        "generated_live_unique_edges": expected_live_edges,
         "source_nodes": source_nodes, "source_edges": source_edges,
         "imported_nodes": imported_nodes, "imported_edges": imported_edges,
         "source_project_fingerprint": project_fingerprint(source_nodes, source_edges, &source_1hop, &source_2hop),
@@ -2690,12 +2893,38 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
 #[test]
 fn certification_lifecycle_journals_equivalent_round_trip_and_drills() {
     let root = TempDir::new().expect("certification smoke root");
-    let evidence = run_integrated_certification(root.path(), None);
+    let evidence = run_integrated_certification(root.path(), IntegratedRun::Preflight);
     assert_eq!(evidence["source_edges"], evidence["imported_edges"]);
     assert_ne!(
         evidence["source_generation"],
         evidence["imported_generation"]
     );
+    let phases = evidence["phases"]
+        .as_array()
+        .expect("integrated lifecycle phases");
+    assert_eq!(
+        phases
+            .iter()
+            .map(|phase| phase["id"].as_str().expect("phase id"))
+            .collect::<Vec<_>>(),
+        CERTIFICATION_PHASES,
+        "every integrated rung must execute the full source/export/verify/clean-import lifecycle"
+    );
+    assert!(phases.iter().all(|phase| phase["status"] == "pass"));
+}
+
+#[test]
+fn s20_integrated_entry_uses_the_versioned_profile_rung() {
+    let profile = load_profile();
+    let rung = profile
+        .rungs
+        .iter()
+        .find(|rung| rung.id == "S20")
+        .expect("versioned S20 rung");
+    assert_eq!(rung.scale, 20);
+    assert_eq!(rung.tier, "provisioned");
+    assert_eq!(rung.buffer_edges, 8_388_608);
+    assert_eq!(profile.edgefactor, 16);
 }
 
 #[test]
@@ -2809,7 +3038,10 @@ fn certification_target_live_full_lifecycle_evidence() {
     let started = Instant::now();
     let profile = load_certification_profile();
     let root = TempDir::new().expect("certification workspace");
-    let lifecycle = run_integrated_certification(root.path(), Some(profile.target_live_edges));
+    let lifecycle = run_integrated_certification(
+        root.path(),
+        IntegratedRun::TargetLive(profile.target_live_edges),
+    );
     let phases = lifecycle["phases"].as_array().expect("phase array");
     let peak_rss = phases
         .iter()
@@ -2874,6 +3106,65 @@ fn certification_target_live_full_lifecycle_evidence() {
     let out = PathBuf::from(std::env::var("GF_G500_CERT_EVIDENCE_OUT").expect("evidence output"));
     fs::write(out, serde_json::to_vec_pretty(&evidence).unwrap())
         .expect("write certification evidence");
+}
+
+#[test]
+#[ignore = "provisioned S20 full lifecycle; requires explicit work and evidence paths"]
+fn s20_integrated_full_lifecycle_evidence() {
+    let profile = load_profile();
+    let rung = profile
+        .rungs
+        .iter()
+        .find(|rung| rung.id == "S20" && rung.scale == 20 && rung.tier == "provisioned")
+        .expect("versioned provisioned S20 rung");
+    let work_root = PathBuf::from(
+        std::env::var("GF_G500_S20_WORK_ROOT").expect("GF_G500_S20_WORK_ROOT is required"),
+    );
+    assert!(
+        !work_root.exists(),
+        "S20 work root must be absent so import proves a clean destination"
+    );
+    let journal_out = PathBuf::from(
+        std::env::var("GF_G500_CERT_JOURNAL_OUT").expect("GF_G500_CERT_JOURNAL_OUT is required"),
+    );
+    assert!(
+        !journal_out.exists(),
+        "S20 phase journal output must not reuse prior evidence"
+    );
+    fs::create_dir(&work_root).expect("create fresh S20 work root");
+    let lifecycle = run_integrated_certification(&work_root, IntegratedRun::ProfileRung(rung));
+    let phases = lifecycle["phases"].as_array().expect("S20 phase array");
+    assert_eq!(
+        phases
+            .iter()
+            .map(|phase| phase["id"].as_str().expect("phase id"))
+            .collect::<Vec<_>>(),
+        CERTIFICATION_PHASES
+    );
+    assert!(phases.iter().all(|phase| phase["status"] == "pass"));
+    assert_eq!(lifecycle["source_edges"], lifecycle["imported_edges"]);
+    assert_eq!(
+        lifecycle["source_project_fingerprint"],
+        lifecycle["imported_project_fingerprint"]
+    );
+    let evidence = json!({
+        "schema": "graphforge-s20-integrated-lifecycle-evidence/1",
+        "git_sha": std::env::var("GF_G500_S20_EXPECTED_SHA")
+            .unwrap_or_else(|_| git_sha().as_str().unwrap_or("unknown").to_owned()),
+        "profile_schema": profile.schema,
+        "rung": rung.id,
+        "scale": rung.scale,
+        "edgefactor": profile.edgefactor,
+        "seed": profile.seed,
+        "buffer_edges": rung.buffer_edges,
+        "lifecycle": lifecycle,
+        "result": "pass",
+        "first_failure": null,
+    });
+    let out = PathBuf::from(
+        std::env::var("GF_G500_S20_EVIDENCE_OUT").expect("GF_G500_S20_EVIDENCE_OUT is required"),
+    );
+    write_json_atomically(&out, &evidence);
 }
 
 fn normalized_filesystem(path: &Path) -> String {

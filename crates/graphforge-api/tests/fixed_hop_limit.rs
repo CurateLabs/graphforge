@@ -235,6 +235,11 @@ fn assert_indexed_limit_io(io: &io_stats::IoSnapshot) {
 
 fn assert_bounded_demand(snapshot: &DemandSnapshot, expected_hops: usize, required: u64) {
     assert_eq!(snapshot.hops.len(), expected_hops, "{snapshot:#?}");
+    assert_eq!(
+        snapshot.operator_rss.expand_by_hop.len(),
+        expected_hops,
+        "every fixed hop needs a distinct RSS lifetime: {snapshot:#?}"
+    );
     assert!(snapshot.cancellations >= 1, "{snapshot:#?}");
     assert!(snapshot.max_in_flight_reads <= 1, "{snapshot:#?}");
     for hop in snapshot.hops.values() {
@@ -521,9 +526,12 @@ fn fixed_hop_limit_preserves_skip_parameters_filters_and_blockers() {
     );
     assert_eq!(sort.spilled_bytes, 0, "{ordered_metrics:#?}");
     assert_eq!(sort.memory_used_after, 0, "{ordered_metrics:#?}");
-    assert_eq!(
-        ordered_metrics.memory_reserved_after, ordered_metrics.memory_reserved_before,
-        "query memory reservations must quiesce: {ordered_metrics:#?}"
+    assert!(
+        ordered_metrics
+            .memory_reserved_after
+            .saturating_sub(ordered_metrics.memory_reserved_before)
+            <= ordered_metrics.returned_batch_bytes,
+        "only returned Arrow batches may remain reserved: {ordered_metrics:#?}"
     );
 
     let distinct = forge
@@ -571,8 +579,20 @@ fn ordered_limit_topk_state_is_cardinality_independent_and_released() {
         assert_eq!(sort.spill_count, 0, "{snapshot:#?}");
         assert_eq!(sort.spilled_bytes, 0, "{snapshot:#?}");
         assert_eq!(sort.memory_used_after, 0, "{snapshot:#?}");
-        assert_eq!(
-            snapshot.memory_reserved_after, snapshot.memory_reserved_before,
+        assert!(
+            snapshot
+                .memory_reserved_after
+                .saturating_sub(snapshot.memory_reserved_before)
+                <= snapshot.returned_batch_bytes,
+            "{snapshot:#?}"
+        );
+        let sort_rss = &snapshot.operator_rss.sort_exclusive;
+        assert!(
+            sort_rss.before_bytes > 0 || !cfg!(target_os = "linux"),
+            "{snapshot:#?}"
+        );
+        assert!(
+            sort_rss.after_bytes > 0 || !cfg!(target_os = "linux"),
             "{snapshot:#?}"
         );
     }

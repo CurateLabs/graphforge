@@ -152,6 +152,73 @@ first-fail unit tests):
 cargo test -p graphforge-api --test scale_g500_ladder
 ```
 
+Provisioned S20 full lifecycle (the work root must not already exist):
+
+```bash
+GF_G500_S20_WORK_ROOT=/mounted-work/s20 \
+GF_G500_S20_EVIDENCE_OUT=/mounted-work/s20-evidence.json \
+GF_G500_CERT_JOURNAL_OUT=/mounted-work/s20-journal.json \
+GF_G500_S20_EXPECTED_SHA="$(git rev-parse HEAD)" \
+make bench-g500-s20-lifecycle
+```
+
+This is distinct from the first-fail ladder entry. It uses the versioned S20
+profile values and runs all 17 integrated lifecycle phases: source generation,
+ingest, CSR, reopen and queries; portable export and full verification; import
+into a previously absent destination; imported reopen and equivalent queries;
+and the four bounded negative drills. Its evidence is not a pass unless every
+phase is present and successful and the source/import fingerprints match.
+
+### Disposable Fly S20 controller
+
+The checked-in Fly harness is
+[`scripts/fly-g500-s20.py`](../../scripts/fly-g500-s20.py), with its immutable
+runtime image under
+[`containers/fly-g500-s20/`](../../containers/fly-g500-s20/). Build and push
+the image for the final clean commit as Linux/amd64. A Fly registry namespace
+requires its empty disposable app to exist before the push; execution accepts
+only that exact empty app and owns its final destruction. Resolve the
+**platform-child** manifest digest after pushing (an OCI index digest is
+rejected):
+
+```bash
+SHA="$(git rev-parse HEAD)"
+APP="gf-s20-${SHA%????????????????????????????????}"
+flyctl apps create "$APP" --org personal
+docker buildx build --platform linux/amd64 --provenance=false --push \
+  -f containers/fly-g500-s20/Dockerfile \
+  -t "registry.fly.io/${APP}:${SHA}" .
+docker buildx imagetools inspect --raw "registry.fly.io/${APP}:${SHA}"
+```
+
+Run the controller without `--execute` against the resolved child digest before
+execution. This creates no Machine or volume. It fetches the current official
+Fly pricing page, extracts the fixed `dfw` performance-2x/4GB and volume rates,
+and refuses a projected 4h30 maximum that exceeds the approved $10 ceiling. A
+$1 reserve covers unpriced registry/rootfs/network variance. The controller
+fixes 2 performance CPUs, 4096 MiB RAM, one 50 GB volume, no services, restart
+`no`, auto-destroy, and a 16,200-second hard controller deadline.
+
+```bash
+python3 scripts/fly-g500-s20.py \
+  --expected-sha "$SHA" \
+  --image "registry.fly.io/${APP}@sha256:<linux-amd64-child>" \
+  --org personal --app-name "$APP" \
+  --machine-name "${APP}-machine" --volume-name gf_s20_volume
+```
+
+Only after inspecting that dry-run, add `--execute --confirm-disposable`. Live
+execution additionally requires the exact clean checkout, re-resolves the child
+manifest, keeps the Fly token only in process memory, retrieves and validates
+the journal/evidence, acknowledges retrieval, and destroys and verifies absence
+of the Machine, volume, and app in `finally`. Do not use pricing fixtures with
+execution; `--pricing-html` and `--manifest-json` exist only for deterministic
+dry-run tests.
+
+```bash
+python3 scripts/ci/test-fly-g500-s20.py
+```
+
 Provisioned full ladder (long; isolate the target dir; **Linux cloud scale-host**
 matching the declared SKU — not a developer laptop for #745 evidence):
 

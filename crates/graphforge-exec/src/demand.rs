@@ -121,6 +121,8 @@ pub struct DemandSnapshot {
     pub memory_reserved_before: u64,
     /// Query memory-pool reservation after every stream/operator was dropped.
     pub memory_reserved_after: u64,
+    /// Arrow bytes retained by returned batches at the post-operator boundary.
+    pub returned_batch_bytes: u64,
     /// Process RSS attributed to operator lifetimes by the query sampler.
     pub operator_rss: OperatorRssSnapshot,
 }
@@ -136,6 +138,24 @@ pub struct OperatorRssSnapshot {
     pub sort_peak_bytes: u64,
     /// Last RSS sample while a plan containing a sort was collecting.
     pub sort_current_bytes: u64,
+    /// Per-hop RSS lifetime evidence keyed by edge variable.
+    pub expand_by_hop: BTreeMap<u32, RssLifetimeSnapshot>,
+    /// RSS sampled while sort collection was active and no expansion stream
+    /// was active. This is the non-overlapping ordered-operator attribution.
+    pub sort_exclusive: RssLifetimeSnapshot,
+}
+
+/// Process RSS at the boundaries and peak of one operator lifetime.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RssLifetimeSnapshot {
+    /// RSS when the first matching operator became active.
+    pub before_bytes: u64,
+    /// Highest RSS sampled while the operator was active.
+    pub peak_bytes: u64,
+    /// Last RSS sampled while the operator was active.
+    pub current_bytes: u64,
+    /// RSS after the last matching operator was dropped.
+    pub after_bytes: u64,
 }
 
 /// Authoritative post-execution DataFusion metrics for one ordered operator.
@@ -167,6 +187,8 @@ struct QueryCapture {
     expand_current: AtomicU64,
     sort_peak: AtomicU64,
     sort_current: AtomicU64,
+    expand_lifetimes: Mutex<BTreeMap<u32, ActiveRssLifetime>>,
+    sort_exclusive: Mutex<ActiveRssLifetime>,
     stop: AtomicBool,
 }
 
@@ -180,7 +202,29 @@ impl QueryCapture {
             expand_current: AtomicU64::new(0),
             sort_peak: AtomicU64::new(0),
             sort_current: AtomicU64::new(0),
+            expand_lifetimes: Mutex::new(BTreeMap::new()),
+            sort_exclusive: Mutex::new(ActiveRssLifetime::default()),
             stop: AtomicBool::new(false),
+        }
+    }
+}
+
+#[derive(Default)]
+struct ActiveRssLifetime {
+    active: usize,
+    before_bytes: u64,
+    peak_bytes: u64,
+    current_bytes: u64,
+    after_bytes: u64,
+}
+
+impl ActiveRssLifetime {
+    fn snapshot(&self) -> RssLifetimeSnapshot {
+        RssLifetimeSnapshot {
+            before_bytes: self.before_bytes,
+            peak_bytes: self.peak_bytes,
+            current_bytes: self.current_bytes,
+            after_bytes: self.after_bytes,
         }
     }
 }
@@ -202,6 +246,18 @@ pub async fn observe<F: std::future::Future>(future: F) -> (F::Output, DemandSna
         expand_current_bytes: capture.expand_current.load(Ordering::Acquire),
         sort_peak_bytes: capture.sort_peak.load(Ordering::Acquire),
         sort_current_bytes: capture.sort_current.load(Ordering::Acquire),
+        expand_by_hop: capture
+            .expand_lifetimes
+            .lock()
+            .expect("expand RSS lifetime lock")
+            .iter()
+            .map(|(edge_var, lifetime)| (*edge_var, lifetime.snapshot()))
+            .collect(),
+        sort_exclusive: capture
+            .sort_exclusive
+            .lock()
+            .expect("sort RSS lifetime lock")
+            .snapshot(),
     };
     (output, snapshot)
 }
@@ -251,10 +307,28 @@ fn sample_rss(capture: &QueryCapture) {
             if capture.expand_active.load(Ordering::Acquire) > 0 {
                 capture.expand_current.store(rss, Ordering::Release);
                 capture.expand_peak.fetch_max(rss, Ordering::AcqRel);
+                for lifetime in capture
+                    .expand_lifetimes
+                    .lock()
+                    .expect("expand RSS lifetime lock")
+                    .values_mut()
+                    .filter(|lifetime| lifetime.active > 0)
+                {
+                    lifetime.current_bytes = rss;
+                    lifetime.peak_bytes = lifetime.peak_bytes.max(rss);
+                }
             }
             if capture.sort_active.load(Ordering::Acquire) > 0 {
                 capture.sort_current.store(rss, Ordering::Release);
                 capture.sort_peak.fetch_max(rss, Ordering::AcqRel);
+                if capture.expand_active.load(Ordering::Acquire) == 0 {
+                    let mut lifetime = capture
+                        .sort_exclusive
+                        .lock()
+                        .expect("sort RSS lifetime lock");
+                    lifetime.current_bytes = rss;
+                    lifetime.peak_bytes = lifetime.peak_bytes.max(rss);
+                }
             }
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -268,12 +342,12 @@ pub(crate) struct OperatorActivity {
     capture: Option<Arc<QueryCapture>>,
 }
 enum OperatorKind {
-    Expand,
+    Expand(u32),
     Sort,
 }
 impl OperatorActivity {
-    pub(crate) fn expand() -> Self {
-        Self::new(OperatorKind::Expand)
+    pub(crate) fn expand(edge_var: u32) -> Self {
+        Self::new(OperatorKind::Expand(edge_var))
     }
     fn sort() -> Self {
         Self::new(OperatorKind::Sort)
@@ -282,10 +356,34 @@ impl OperatorActivity {
         let capture = ACTIVE_CAPTURE.try_with(Arc::clone).ok();
         if let Some(capture) = &capture {
             match kind {
-                OperatorKind::Expand => &capture.expand_active,
+                OperatorKind::Expand(_) => &capture.expand_active,
                 OperatorKind::Sort => &capture.sort_active,
             }
             .fetch_add(1, Ordering::AcqRel);
+            let rss = current_rss_bytes().unwrap_or(0);
+            match kind {
+                OperatorKind::Expand(edge_var) => {
+                    let mut lifetimes = capture
+                        .expand_lifetimes
+                        .lock()
+                        .expect("expand RSS lifetime lock");
+                    let lifetime = lifetimes.entry(edge_var).or_default();
+                    if lifetime.active == 0 {
+                        lifetime.before_bytes = rss;
+                    }
+                    lifetime.active += 1;
+                }
+                OperatorKind::Sort => {
+                    let mut lifetime = capture
+                        .sort_exclusive
+                        .lock()
+                        .expect("sort RSS lifetime lock");
+                    if lifetime.active == 0 {
+                        lifetime.before_bytes = rss;
+                    }
+                    lifetime.active += 1;
+                }
+            }
         }
         Self { kind, capture }
     }
@@ -301,10 +399,34 @@ impl Drop for OperatorActivity {
     fn drop(&mut self) {
         if let Some(capture) = &self.capture {
             match self.kind {
-                OperatorKind::Expand => &capture.expand_active,
+                OperatorKind::Expand(_) => &capture.expand_active,
                 OperatorKind::Sort => &capture.sort_active,
             }
             .fetch_sub(1, Ordering::AcqRel);
+            let rss = current_rss_bytes().unwrap_or(0);
+            match self.kind {
+                OperatorKind::Expand(edge_var) => {
+                    let mut lifetimes = capture
+                        .expand_lifetimes
+                        .lock()
+                        .expect("expand RSS lifetime lock");
+                    let lifetime = lifetimes.entry(edge_var).or_default();
+                    lifetime.active = lifetime.active.saturating_sub(1);
+                    if lifetime.active == 0 {
+                        lifetime.after_bytes = rss;
+                    }
+                }
+                OperatorKind::Sort => {
+                    let mut lifetime = capture
+                        .sort_exclusive
+                        .lock()
+                        .expect("sort RSS lifetime lock");
+                    lifetime.active = lifetime.active.saturating_sub(1);
+                    if lifetime.active == 0 {
+                        lifetime.after_bytes = rss;
+                    }
+                }
+            }
         }
     }
 }
@@ -320,7 +442,11 @@ pub(crate) fn record_memory_before(bytes: usize) {
 }
 
 /// Capture metrics only after collection has dropped every operator stream.
-pub(crate) fn record_plan_after(plan: &Arc<dyn ExecutionPlan>, memory_reserved_after: usize) {
+pub(crate) fn record_plan_after(
+    plan: &Arc<dyn ExecutionPlan>,
+    memory_reserved_after: usize,
+    returned_batch_bytes: usize,
+) {
     fn value(metrics: &datafusion::physical_plan::metrics::MetricsSet, name: &str) -> u64 {
         metrics
             .sum(|metric| metric.value().name() == name)
@@ -349,6 +475,7 @@ pub(crate) fn record_plan_after(plan: &Arc<dyn ExecutionPlan>, memory_reserved_a
         snapshot.sorts.clear();
         visit(plan, &mut snapshot.sorts);
         snapshot.memory_reserved_after = memory_reserved_after as u64;
+        snapshot.returned_batch_bytes = returned_batch_bytes as u64;
     });
 }
 
@@ -1028,7 +1155,7 @@ mod tests {
             let (_, nested) = observe(async { record_input(2, 3) }).await;
             assert_eq!(nested.hops[&2].input_rows, 3);
             let plan: Arc<dyn ExecutionPlan> = Arc::new(EmptyExec::new(Arc::new(Schema::empty())));
-            record_plan_after(&plan, 0);
+            record_plan_after(&plan, 0, 0);
             Err::<(), _>("typed failure")
         });
         let right = observe(async { record_input(7, 5) });
@@ -1061,6 +1188,45 @@ mod tests {
         });
         assert!(panicked.await.unwrap_err().is_panic());
         assert_eq!(ACTIVE_SAMPLERS.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn rss_lifetimes_separate_each_expand_from_sort_only_work() {
+        let _guard = OBSERVATION_TEST_LOCK.lock().unwrap();
+        let (_, snapshot) = observe(async {
+            let sort = OperatorActivity::sort();
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            {
+                let _first = OperatorActivity::expand(11);
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+            {
+                let _second = OperatorActivity::expand(22);
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            drop(sort);
+        })
+        .await;
+
+        assert_eq!(
+            snapshot
+                .operator_rss
+                .expand_by_hop
+                .keys()
+                .copied()
+                .collect::<Vec<_>>(),
+            [11, 22]
+        );
+        for lifetime in snapshot.operator_rss.expand_by_hop.values() {
+            assert!(lifetime.before_bytes > 0 || !cfg!(target_os = "linux"));
+            assert!(lifetime.after_bytes > 0 || !cfg!(target_os = "linux"));
+            assert!(lifetime.peak_bytes >= lifetime.current_bytes);
+        }
+        let sort = &snapshot.operator_rss.sort_exclusive;
+        assert!(sort.before_bytes > 0 || !cfg!(target_os = "linux"));
+        assert!(sort.after_bytes > 0 || !cfg!(target_os = "linux"));
+        assert!(sort.peak_bytes >= sort.current_bytes);
     }
 
     #[test]

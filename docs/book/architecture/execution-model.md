@@ -325,10 +325,13 @@ Observed execution is query scoped. `GraphForge::execute_observed` returns the
 typed query outcome, including an execution error, together with demand, sort,
 memory-pool, and sampled process-RSS evidence. Ordinary execution has no
 observer overhead or mutable global capture state. Expand RSS is sampled for
-the lifetime of each `ExpandExec` stream; sort RSS covers physical collection
-when the plan contains a sort. The lifetimes may overlap, so both peaks
-intentionally attribute shared process RSS rather than claiming an exclusive
-per-operator partition of process memory.
+the lifetime of each `ExpandExec` stream and reported separately for every hop.
+Sort RSS includes its physical collection lifetime plus a `sort_exclusive`
+measurement sampled only while no expansion is active. This preserves the real
+nested lifetime while providing non-overlapping attribution. Memory quiescence
+compares post-operator pool reservations with the pre-query baseline plus Arrow
+bytes intentionally retained by returned batches; sort operator retained memory
+must independently reach zero.
 
 Query-result files use the same demand-driven `RecordBatch` stream. Parquet and
 Arrow IPC sinks request one batch only after the preceding batch has been

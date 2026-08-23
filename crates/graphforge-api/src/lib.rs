@@ -4562,7 +4562,7 @@ mod tests {
         let default_policy = ExecutionResourcePolicy::default().normalize().unwrap();
 
         let default_cache = create_adjacency_cache(admitted.path(), &default_policy).unwrap();
-        let default_path = default_cache.path();
+        let default_path = default_cache.path().to_path_buf();
         assert_eq!(default_path.parent(), Some(admitted.path()));
         drop(default_cache);
         assert!(!default_path.exists());
@@ -4570,7 +4570,7 @@ mod tests {
         let mut spill_policy = default_policy;
         spill_policy.spill_directory = Some(spill.path().to_path_buf());
         let spill_cache = create_adjacency_cache(admitted.path(), &spill_policy).unwrap();
-        let spill_path = spill_cache.path();
+        let spill_path = spill_cache.path().to_path_buf();
         assert_eq!(spill_path.parent(), Some(spill.path()));
         drop(spill_cache);
         assert!(!spill_path.exists());
@@ -7179,6 +7179,19 @@ mod tests {
             )
             .expect("parameterized query");
         assert_eq!(result.stats.rows_produced, 2);
+
+        let observed = gf.execute_with_params_observed(
+            "MATCH (n:Person) WHERE n.age > $min RETURN n.node_uuid",
+            &params,
+        );
+        let result = observed.result.expect("parameterized query");
+        assert_eq!(result.stats.rows_produced, 2);
+
+        let observed = gf.execute_observed("MATCH (n:Person) RETURN n.node_uuid LIMIT 1");
+        assert_eq!(
+            observed.result.expect("observed query").stats.rows_produced,
+            1
+        );
     }
 
     #[test]
