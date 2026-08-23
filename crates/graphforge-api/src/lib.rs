@@ -738,7 +738,10 @@ impl GraphForge {
         // or alongside explicitly configured spill. It must not use OS /tmp:
         // billion-edge qualification is disk-bound and the container root may
         // have a much smaller ephemeral capacity than the data volume.
-        let adjacency_cache = Arc::new(create_adjacency_cache(&container_dir, &resource_policy)?);
+        let adjacency_cache = Arc::new(create_persistent_adjacency_cache(
+            &container_dir,
+            &resource_policy,
+        )?);
 
         let runtime_catalog = load_runtime_catalog(&dir)?;
         let semantic_storage_bindings =
@@ -3942,6 +3945,27 @@ fn create_adjacency_cache(
         .map_err(|error| GfError::Storage(format!("failed to create adjacency cache: {error}")))
 }
 
+fn create_persistent_adjacency_cache(
+    project_root: &std::path::Path,
+    policy: &resource_policy::NormalizedResourcePolicy,
+) -> Result<tempfile::TempDir, GfError> {
+    // A facade open must not add runtime state to the project namespace. In
+    // particular, failed imports authenticate that the target entry set is
+    // unchanged even while the reopened facade is alive. Durable project
+    // admission already fail-closes unless the project and its parent have the
+    // same native volume identity, so a sibling remains on the admitted data
+    // volume without becoming project or generation state. Explicit spill
+    // configuration continues to override this default in
+    // `create_adjacency_cache`.
+    let data_volume_root = project_root
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| {
+            GfError::Storage("persistent project root has no admitted parent volume".to_owned())
+        })?;
+    create_adjacency_cache(data_volume_root, policy)
+}
+
 fn hydrate_graph_workspace(
     generation: &ResolvedProjectGeneration,
     read_only: bool,
@@ -4574,6 +4598,33 @@ mod tests {
         assert_eq!(spill_path.parent(), Some(spill.path()));
         drop(spill_cache);
         assert!(!spill_path.exists());
+    }
+
+    #[test]
+    fn persistent_open_keeps_derived_adjacency_cache_outside_project_namespace() {
+        let parent = tempfile::tempdir().unwrap();
+        let project = parent.path().join("project");
+        drop(GraphForge::new(Some(project.to_str().unwrap())).unwrap());
+        let before = std::fs::read_dir(&project)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<std::collections::HashSet<_>>();
+        let graph = GraphForge::new(Some(project.to_str().unwrap())).unwrap();
+
+        let entries = std::fs::read_dir(&project)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<std::collections::HashSet<_>>();
+        assert!(
+            !entries
+                .iter()
+                .any(|name| { name.to_string_lossy().starts_with(".graphforge-adjacency-") })
+        );
+        assert_eq!(entries, before);
+        let cache_path = graph.adjacency_cache_guard.path().to_path_buf();
+        assert_eq!(cache_path.parent(), Some(parent.path()));
+        drop(graph);
+        assert!(!cache_path.exists());
     }
 
     fn spawn_absent_target_child(parent: &Path, child_id: &str) -> Child {
