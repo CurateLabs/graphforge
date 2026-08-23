@@ -983,8 +983,6 @@ pub fn read_nodes_filtered_observed(
 /// # Errors
 /// Propagates Parquet / Arrow errors encountered while reading an edge file.
 pub(crate) fn max_edge_id(dir: &Path) -> Result<u64, DataFusionError> {
-    use arrow::array::{Array, UInt64Array};
-
     let edges_dir = dir.join("topology").join("edges");
     let entries = match std::fs::read_dir(&edges_dir) {
         Ok(rd) => rd,
@@ -998,19 +996,51 @@ pub(crate) fn max_edge_id(dir: &Path) -> Result<u64, DataFusionError> {
         if path.extension().and_then(|s| s.to_str()) != Some("parquet") {
             continue;
         }
-        // The `edge_id` column exists in both the typed and exploratory edge
-        // schemas, so the on-disk file schema (discovered) reads it either way.
-        let Some(schema) = discover_parquet_schema(&path) else {
-            continue;
-        };
-        for batch in read_parquet_or_empty(&path, schema)? {
-            if let Some(col) = batch.column_by_name("edge_id")
-                && let Some(ids) = col.as_any().downcast_ref::<UInt64Array>()
-            {
-                for i in 0..ids.len() {
-                    if !ids.is_null(i) {
-                        max = max.max(ids.value(i));
-                    }
+        // Preserve discovery semantics: unrelated/corrupt edge artifacts are
+        // ignored here and rejected by the normal catalog validation path.
+        // Surrogate recovery must still inspect every readable relation stem.
+        if let Ok(candidate) = max_ordered_u64_tail(&path, "edge_id") {
+            max = max.max(candidate);
+        }
+    }
+    Ok(max)
+}
+
+/// Return the largest canonical node surrogate without decoding the complete
+/// node table. Canonical topology keeps surrogate ids strictly increasing, so
+/// only the final bounded Parquet row group is needed.
+pub(crate) fn max_node_id(dir: &Path) -> Result<u64, DataFusionError> {
+    max_ordered_u64_tail(&dir.join("topology/nodes.parquet"), "node_id")
+}
+
+fn max_ordered_u64_tail(path: &Path, column: &str) -> Result<u64, DataFusionError> {
+    use arrow::array::{Array, UInt64Array};
+
+    let input = match File::open(path) {
+        Ok(input) => input,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(io_err(&error)),
+    };
+    let builder = ParquetRecordBatchReaderBuilder::try_new(input).map_err(parquet_err)?;
+    let row_groups = builder.metadata().num_row_groups();
+    if row_groups == 0 {
+        return Ok(0);
+    }
+    let reader = builder
+        .with_row_groups(vec![row_groups - 1])
+        .with_batch_size(8_192)
+        .build()
+        .map_err(parquet_err)?;
+    let mut max = 0_u64;
+    for batch in reader {
+        let batch = batch.map_err(parquet_err)?;
+        if let Some(values) = batch
+            .column_by_name(column)
+            .and_then(|value| value.as_any().downcast_ref::<UInt64Array>())
+        {
+            for row in 0..values.len() {
+                if !values.is_null(row) {
+                    max = max.max(values.value(row));
                 }
             }
         }

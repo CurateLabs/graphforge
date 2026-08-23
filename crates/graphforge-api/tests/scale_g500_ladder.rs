@@ -57,6 +57,8 @@ const TWO_HOP: &str =
     "MATCH (a)-[r1]->(b)-[r2]->(c) RETURN c.node_uuid AS id ORDER BY id LIMIT 1000";
 const COUNT_EDGES: &str = "MATCH ()-[r:LINK]->() RETURN count(r) AS total";
 static JOURNAL_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static INGEST_SUBPHASE: AtomicU64 = AtomicU64::new(0);
+static INGEST_CHUNK_INDEX: AtomicU64 = AtomicU64::new(0);
 
 // ---------------------------------------------------------------------------
 // Versioned profile (single source of truth for the ladder).
@@ -611,6 +613,119 @@ fn persist_phase_journal(
     write_json_atomically(&PathBuf::from(path), &value);
 }
 
+fn ingest_subphase() -> &'static str {
+    match INGEST_SUBPHASE.load(Ordering::Relaxed) {
+        1 => "publish_nodes",
+        2 => "merge_edges",
+        3 => "publish_edge_chunk",
+        4 => "edge_chunk_committed",
+        _ => "idle",
+    }
+}
+
+fn storage_io_value() -> Value {
+    let io = graphforge_storage::io_stats::snapshot();
+    json!({
+        "node_full_reads": io.node_full_reads,
+        "node_full_rows": io.node_full_rows,
+        "edge_full_reads": io.edge_full_reads,
+        "edge_full_rows": io.edge_full_rows,
+        "rewrite_commits": io.rewrite_commits,
+        "topology_rewrite_existing_rows": io.topology_rewrite_existing_rows,
+        "topology_rewrite_new_rows": io.topology_rewrite_new_rows,
+        "topology_rewrite_output_rows": io.topology_rewrite_output_rows,
+        "topology_rewrite_peak_batch_rows": io.topology_rewrite_peak_batch_rows,
+    })
+}
+
+struct IngestHeartbeat {
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl IngestHeartbeat {
+    fn start(
+        profile: &ScaleProfile,
+        rung: &Rung,
+        completed_rungs: &[Value],
+        steps: &[Value],
+        project: &Path,
+        spill: &Path,
+    ) -> Self {
+        let Ok(path) = std::env::var("GF_G500_LADDER_JOURNAL_OUT") else {
+            return Self {
+                stop: Arc::new(AtomicBool::new(true)),
+                handle: None,
+            };
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let path = PathBuf::from(path);
+        let profile_schema = profile.schema.clone();
+        let rung_id = rung.id.clone();
+        let scale = rung.scale;
+        let completed_rungs = completed_rungs.to_vec();
+        let steps = steps.to_vec();
+        let project = project.to_path_buf();
+        let spill = spill.to_path_buf();
+        let handle = thread::spawn(move || {
+            loop {
+                let value = json!({
+                    "schema": EVIDENCE_SCHEMA,
+                    "schema_version": SCHEMA_VERSION,
+                    "profile_schema": profile_schema,
+                    "run_state": "ingest_heartbeat",
+                    "active_rung": rung_id,
+                    "active_scale": scale,
+                    "active_phase": "ingest",
+                    "active_subphase": ingest_subphase(),
+                    "active_chunk_index": INGEST_CHUNK_INDEX.load(Ordering::Relaxed),
+                    "process_memory": linux_process_memory(),
+                    "storage_io": storage_io_value(),
+                    "disk_used_bytes": directory_bytes(&project).unwrap_or(0)
+                        .saturating_add(directory_bytes(&spill).unwrap_or(0)),
+                    "completed_rungs": completed_rungs,
+                    "active_steps": steps,
+                    "first_failing_phase": null,
+                    "error_class": null,
+                });
+                write_json_atomically(&path, &value);
+                if thread_stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                thread::park_timeout(Duration::from_secs(2));
+                if thread_stop.load(Ordering::Relaxed) {
+                    break;
+                }
+            }
+        });
+        Self {
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    fn shutdown(&mut self) -> Option<thread::Result<()>> {
+        self.stop.store(true, Ordering::Relaxed);
+        self.handle.take().map(|handle| {
+            handle.thread().unpark();
+            handle.join()
+        })
+    }
+
+    fn stop(mut self) {
+        if let Some(result) = self.shutdown() {
+            result.expect("ingest heartbeat");
+        }
+    }
+}
+
+impl Drop for IngestHeartbeat {
+    fn drop(&mut self) {
+        let _ = self.shutdown();
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 fn run_rung(
     profile: &ScaleProfile,
@@ -702,7 +817,13 @@ fn run_rung(
         let ingest_started = Instant::now();
         let graph = GraphForge::new(Some(project.to_str().expect("utf8 project")))
             .expect("open GraphForge for ingest");
+        graphforge_storage::io_stats::reset();
+        INGEST_CHUNK_INDEX.store(0, Ordering::Relaxed);
+        INGEST_SUBPHASE.store(1, Ordering::Relaxed);
+        let heartbeat =
+            IngestHeartbeat::start(profile, rung, completed_rungs, &steps, &project, &spill_dir);
         publish_nodes(&graph, 1u64 << rung.scale, None);
+        INGEST_SUBPHASE.store(2, Ordering::Relaxed);
         let mut sink = EdgeSink::new(&graph, None);
         let merge =
             merge_runs(&spill.runs, None, |src, dst| sink.push(src, dst)).expect("rung merge");
@@ -710,6 +831,8 @@ fn run_rung(
         live_unique_edges = merge.live_unique_edges;
         duplicates_rejected = merge.duplicates_rejected;
         input_fingerprint = format!("sha256:{}", hex_encode(sink.finish()));
+        INGEST_SUBPHASE.store(0, Ordering::Relaxed);
+        heartbeat.stop();
         drop(graph);
         ingest_ran = true;
         let ingest_s = ingest_started.elapsed().as_secs_f64();
@@ -1049,9 +1172,15 @@ impl<'a> EdgeSink<'a> {
             batches.push(batch);
             offset = end;
         }
+        INGEST_CHUNK_INDEX.store(
+            u64::try_from(self.chunk_index).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        INGEST_SUBPHASE.store(3, Ordering::Relaxed);
         self.graph
             .publish_bulk_edges(OperationId(uuidv7(0xB100 + self.chunk_index)), &batches)
             .expect("publish_bulk_edges");
+        INGEST_SUBPHASE.store(4, Ordering::Relaxed);
         self.chunk_index += 1;
         self.buf.clear();
     }

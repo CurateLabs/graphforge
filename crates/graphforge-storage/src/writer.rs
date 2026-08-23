@@ -98,26 +98,6 @@ fn pq_err(e: impl fmt::Display) -> GfError {
     GfError::Storage(e.to_string())
 }
 
-/// Largest value of a `UInt64` column named `col` across `batches`, or `0` if
-/// the column is absent/empty. Used to continue surrogate id assignment from
-/// the on-disk maximum.
-fn max_u64_column(batches: &[RecordBatch], col: &str) -> u64 {
-    use arrow::array::Array;
-    let mut max = 0u64;
-    for batch in batches {
-        if let Some(c) = batch.column_by_name(col)
-            && let Some(ids) = c.as_any().downcast_ref::<UInt64Array>()
-        {
-            for i in 0..ids.len() {
-                if !ids.is_null(i) {
-                    max = max.max(ids.value(i));
-                }
-            }
-        }
-    }
-    max
-}
-
 // ---------------------------------------------------------------------------
 // Buffered rows
 // ---------------------------------------------------------------------------
@@ -1243,8 +1223,7 @@ impl GraphWriter {
         // Continue surrogate assignment from the on-disk maximum so a writer
         // opened on an existing project appends rather than colliding with /
         // overwriting prior rows. Absent files → max 0 → start at 1.
-        let max_node_id =
-            max_u64_column(&crate::catalog::read_nodes(dir).map_err(pq_err)?, "node_id");
+        let max_node_id = crate::catalog::max_node_id(dir).map_err(pq_err)?;
         let max_edge_id = crate::catalog::max_edge_id(dir).map_err(pq_err)?;
         Ok(Self {
             dir: dir.to_path_buf(),
@@ -1852,16 +1831,19 @@ impl GraphWriter {
         // accumulate (#733) rather than overwriting. The schema is fixed, so a
         // concat of [existing, new] always succeeds.
         let path = topology.join("nodes.parquet");
-        let read_path = staged
-            .staged_temp(&path)
-            .map_or_else(|| path.clone(), Path::to_path_buf);
-        let existing = crate::catalog::normalize_topology_nodes(
-            crate::catalog::read_parquet_or_empty(&read_path, TOPOLOGY_NODES_SCHEMA.clone())
-                .map_err(pq_err)?,
-        )
-        .map_err(pq_err)?;
-        let merged = concat_with_existing(&TOPOLOGY_NODES_SCHEMA, existing, batch)?;
-        staged.restage(&path, TOPOLOGY_NODES_SCHEMA.clone(), &merged)?;
+        let existing_rows = staged.restage_append_with(
+            &path,
+            TOPOLOGY_NODES_SCHEMA.clone(),
+            &batch,
+            |existing| {
+                crate::catalog::normalize_topology_nodes(vec![existing])
+                    .map_err(pq_err)?
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| GfError::Storage("node normalization returned no batch".into()))
+            },
+        )?;
+        crate::io_stats::record_topology_rewrite(existing_rows, batch.num_rows() as u64);
         self.nodes.clear();
         Ok(())
     }
@@ -1901,13 +1883,8 @@ impl GraphWriter {
             // Merge with this stem's existing file so appends accumulate (#733);
             // stems not in this buffer are never opened, so they are untouched.
             let path = edges_dir.join(format!("{stem}.parquet"));
-            let read_path = staged
-                .staged_temp(&path)
-                .map_or_else(|| path.clone(), Path::to_path_buf);
-            let existing = crate::catalog::read_parquet_or_empty(&read_path, schema.clone())
-                .map_err(pq_err)?;
-            let merged = concat_with_existing(&schema, existing, batch)?;
-            staged.restage(&path, schema, &merged)?;
+            let existing_rows = staged.restage_append(&path, schema, &batch)?;
+            crate::io_stats::record_topology_rewrite(existing_rows, batch.num_rows() as u64);
         }
         Ok(())
     }
@@ -3930,20 +3907,6 @@ fn read_props_through(staged: &RewriteBatch, path: &Path) -> Result<Vec<RecordBa
 
 use crate::staging::RewriteBatch;
 
-/// Concatenate already-on-disk `existing` batches with the freshly-built `new`
-/// batch under a fixed `schema` (used for the node + typed/exploratory edge
-/// files, whose schema never varies). Zero-row placeholder batches from an
-/// absent file concat harmlessly.
-fn concat_with_existing(
-    schema: &SchemaRef,
-    existing: Vec<RecordBatch>,
-    new: RecordBatch,
-) -> Result<RecordBatch, GfError> {
-    let mut all = existing;
-    all.push(new);
-    arrow::compute::concat_batches(schema, &all).map_err(pq_err)
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -3993,6 +3956,92 @@ mod tests {
         assert_eq!(w.create_node(new_v7(), TypeId(0)).unwrap(), 1);
         assert_eq!(w.create_node(new_v7(), TypeId(0)).unwrap(), 2);
         assert_eq!(w.create_node(new_v7(), TypeId(0)).unwrap(), 3);
+    }
+
+    #[test]
+    fn reopen_recovers_surrogate_tails_without_full_topology_reads() {
+        let dir = TempDir::new().unwrap();
+        let first_node = new_v7();
+        let second_node = new_v7();
+        let mut first = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
+        assert_eq!(first.create_node(first_node, TypeId(0)).unwrap(), 1);
+        assert_eq!(first.create_node(second_node, TypeId(0)).unwrap(), 2);
+        assert_eq!(
+            first
+                .create_edge(new_v7(), "KNOWS", &first_node, &second_node)
+                .unwrap(),
+            1
+        );
+        first.flush().unwrap();
+
+        crate::io_stats::reset();
+        let mut reopened = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
+        assert_eq!(reopened.create_node(new_v7(), TypeId(0)).unwrap(), 3);
+        reopened.register_existing_node(first_node, 1);
+        reopened.register_existing_node(second_node, 2);
+        assert_eq!(
+            reopened
+                .create_edge(new_v7(), "KNOWS", &first_node, &second_node)
+                .unwrap(),
+            2
+        );
+        let io = crate::io_stats::snapshot();
+        assert_eq!(
+            io.node_full_reads, 0,
+            "writer reopen must use bounded tails"
+        );
+        assert_eq!(
+            io.edge_full_reads, 0,
+            "writer reopen must use bounded tails"
+        );
+    }
+
+    #[test]
+    fn streaming_node_append_normalizes_legacy_scalar_labels() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("topology")).unwrap();
+        let legacy_schema = Arc::new(Schema::new(vec![
+            uuid_field("node_uuid"),
+            crate::schemas::id_field("node_id"),
+            Field::new("type_id", DataType::UInt32, false),
+            crate::schemas::ts_field("created_at"),
+            crate::schemas::ts_field("updated_at"),
+        ]));
+        let uuid = FixedSizeBinaryArray::try_from_iter([vec![1_u8; 16]].into_iter()).unwrap();
+        let ts = TimestampMicrosecondArray::from(vec![TS])
+            .with_timezone_opt(Some(Arc::<str>::from("UTC")));
+        let legacy = RecordBatch::try_new(
+            legacy_schema,
+            vec![
+                Arc::new(uuid),
+                Arc::new(UInt64Array::from(vec![1_u64])),
+                Arc::new(UInt32Array::from(vec![7_u32])),
+                Arc::new(ts.clone()),
+                Arc::new(ts),
+            ],
+        )
+        .unwrap();
+        let file = File::create(dir.path().join("topology/nodes.parquet")).unwrap();
+        let mut parquet =
+            parquet::arrow::ArrowWriter::try_new(file, legacy.schema(), None).unwrap();
+        parquet.write(&legacy).unwrap();
+        parquet.close().unwrap();
+
+        let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
+        assert_eq!(writer.create_node(new_v7(), TypeId(9)).unwrap(), 2);
+        writer.flush().unwrap();
+
+        let nodes = crate::catalog::read_nodes(dir.path()).unwrap();
+        assert_eq!(nodes.iter().map(RecordBatch::num_rows).sum::<usize>(), 2);
+        let labels = nodes[0]
+            .column_by_name("type_ids")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::ListArray>()
+            .unwrap();
+        let first = labels.value(0);
+        let first = first.as_any().downcast_ref::<UInt32Array>().unwrap();
+        assert_eq!(first.values(), &[7]);
     }
 
     #[test]
