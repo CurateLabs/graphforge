@@ -669,7 +669,7 @@ impl IngestHeartbeat {
         let project = project.to_path_buf();
         let spill = spill.to_path_buf();
         let handle = thread::spawn(move || {
-            while !thread_stop.load(Ordering::Relaxed) {
+            loop {
                 let value = json!({
                     "schema": EVIDENCE_SCHEMA,
                     "schema_version": SCHEMA_VERSION,
@@ -690,7 +690,13 @@ impl IngestHeartbeat {
                     "error_class": null,
                 });
                 write_json_atomically(&path, &value);
+                if thread_stop.load(Ordering::Relaxed) {
+                    break;
+                }
                 thread::park_timeout(Duration::from_secs(2));
+                if thread_stop.load(Ordering::Relaxed) {
+                    break;
+                }
             }
         });
         Self {
@@ -699,12 +705,24 @@ impl IngestHeartbeat {
         }
     }
 
-    fn stop(mut self) {
+    fn shutdown(&mut self) -> Option<thread::Result<()>> {
         self.stop.store(true, Ordering::Relaxed);
-        if let Some(handle) = self.handle.take() {
+        self.handle.take().map(|handle| {
             handle.thread().unpark();
-            handle.join().expect("ingest heartbeat");
+            handle.join()
+        })
+    }
+
+    fn stop(mut self) {
+        if let Some(result) = self.shutdown() {
+            result.expect("ingest heartbeat");
         }
+    }
+}
+
+impl Drop for IngestHeartbeat {
+    fn drop(&mut self) {
+        let _ = self.shutdown();
     }
 }
 
@@ -800,9 +818,10 @@ fn run_rung(
         let graph = GraphForge::new(Some(project.to_str().expect("utf8 project")))
             .expect("open GraphForge for ingest");
         graphforge_storage::io_stats::reset();
+        INGEST_CHUNK_INDEX.store(0, Ordering::Relaxed);
+        INGEST_SUBPHASE.store(1, Ordering::Relaxed);
         let heartbeat =
             IngestHeartbeat::start(profile, rung, completed_rungs, &steps, &project, &spill_dir);
-        INGEST_SUBPHASE.store(1, Ordering::Relaxed);
         publish_nodes(&graph, 1u64 << rung.scale, None);
         INGEST_SUBPHASE.store(2, Ordering::Relaxed);
         let mut sink = EdgeSink::new(&graph, None);
