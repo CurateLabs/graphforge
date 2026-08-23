@@ -15,6 +15,10 @@ pub(crate) struct PyTelemetryRuntime {
 impl PyTelemetryRuntime {
     #[new]
     #[pyo3(signature = (mode="disabled", endpoint=None, headers=None, queue_capacity=256, batch_size=64, export_timeout_ms=3000, lifecycle_timeout_ms=5000, max_retries=2))]
+    // PyO3 expands this explicit keyword-compatible constructor into the
+    // stable Python ABI; grouping these values would replace it with an
+    // opaque native config object and diverge from the Node projection.
+    #[allow(clippy::too_many_arguments)]
     fn new(
         mode: &str,
         endpoint: Option<String>,
