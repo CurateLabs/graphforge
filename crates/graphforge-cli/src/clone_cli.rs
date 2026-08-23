@@ -41,13 +41,62 @@ struct CloneResult<'a> {
     generation_uuid: Uuid,
 }
 
+trait CloneTransport {
+    fn get_bounded(&self, url: &Url, max: usize) -> Result<Vec<u8>, &'static str>;
+    fn download_object(
+        &self,
+        locations: &[String],
+        output: &Path,
+        length: u64,
+        digest: &str,
+    ) -> Result<(), &'static str>;
+}
+
+struct UreqTransport {
+    agent: ureq::Agent,
+}
+
+impl UreqTransport {
+    fn new() -> Self {
+        let config = ureq::Agent::config_builder()
+            .https_only(true)
+            .max_redirects(0)
+            .timeout_global(Some(Duration::from_mins(1)))
+            .build();
+        Self {
+            agent: ureq::Agent::with_parts(
+                config,
+                ureq::unversioned::transport::DefaultConnector::new(),
+                PublicResolver,
+            ),
+        }
+    }
+}
+
+impl CloneTransport for UreqTransport {
+    fn get_bounded(&self, url: &Url, max: usize) -> Result<Vec<u8>, &'static str> {
+        get_bounded(&self.agent, url.clone(), max)
+    }
+
+    fn download_object(
+        &self,
+        locations: &[String],
+        output: &Path,
+        length: u64,
+        digest: &str,
+    ) -> Result<(), &'static str> {
+        download_object(&self.agent, locations, output, length, digest)
+    }
+}
+
 pub(crate) fn run_clone(
     args: CloneArgs,
     json: bool,
     output: &mut dyn Write,
 ) -> Result<(), crate::CliRuntimeError> {
     let started = Instant::now();
-    let result = run_clone_inner(args, json, output, started);
+    let transport = UreqTransport::new();
+    let result = run_clone_inner(args, json, output, started, &transport);
     if let Err(crate::CliRuntimeError::Core(error)) = &result {
         emit_clone_metric(
             0,
@@ -65,6 +114,7 @@ fn run_clone_inner(
     json: bool,
     output: &mut dyn Write,
     started: Instant,
+    transport: &dyn CloneTransport,
 ) -> Result<(), crate::CliRuntimeError> {
     let (repository, base) = resolve_source(&args.source).map_err(failure)?;
     let destination = args
@@ -72,23 +122,15 @@ fn run_clone_inner(
         .unwrap_or_else(|| PathBuf::from(&repository.repository));
     ensure_new_destination(&destination).map_err(failure)?;
 
-    let config = ureq::Agent::config_builder()
-        .https_only(true)
-        // Redirects are followed below so every hop is re-admitted by host policy.
-        .max_redirects(0)
-        .timeout_global(Some(Duration::from_mins(1)))
-        .build();
-    let agent = ureq::Agent::with_parts(
-        config,
-        ureq::unversioned::transport::DefaultConnector::new(),
-        PublicResolver,
-    );
     let limits = DiscoveryLimits::default();
     let manifest_url = protocol_url(&base, "manifest");
     let refs_url = protocol_url(&base, "refs");
-    let manifest_json =
-        get_bounded(&agent, manifest_url, limits.max_response_bytes).map_err(failure)?;
-    let refs_json = get_bounded(&agent, refs_url, limits.max_response_bytes).map_err(failure)?;
+    let manifest_json = transport
+        .get_bounded(&manifest_url, limits.max_response_bytes)
+        .map_err(failure)?;
+    let refs_json = transport
+        .get_bounded(&refs_url, limits.max_response_bytes)
+        .map_err(failure)?;
 
     // All discovery semantics and the requested identity are admitted before object I/O.
     let manifest = DiscoveryManifest::from_json(&manifest_json, limits)
@@ -109,14 +151,9 @@ fn run_clone_inner(
     let staging = staging_path(&destination).map_err(failure)?;
     fs::create_dir_all(&staging).map_err(|_| failure("clone.staging_failed"))?;
     let package = staging.join("package.part");
-    download_object(
-        &agent,
-        &object.locations,
-        &package,
-        object.length,
-        &object.digest.0,
-    )
-    .map_err(failure)?;
+    transport
+        .download_object(&object.locations, &package, object.length, &object.digest.0)
+        .map_err(failure)?;
 
     let verified = verify_discovered_portable_v2(&DiscoveryPortableV2Request {
         manifest_json: &manifest_json,
@@ -692,8 +729,165 @@ fn emit_clone_metric(bytes: u64, duration: Duration, result: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use graphforge_api::{PortableSelection, PortableV2ExportRequest};
+    use graphforge_discovery::{
+        DISCOVERY_FORMAT, ObjectDescriptor, PORTABLE_V2_FORMAT, PORTABLE_V2_MEDIA_TYPE,
+        PortablePackageReference, ProtocolVersion, RepositoryRef, Sha256Digest,
+    };
+    use graphforge_storage::{PortableV2Output, PortableV2SelectionProfile};
+    use std::collections::{BTreeMap, HashMap};
     use std::net::TcpListener;
+    use std::sync::Mutex;
     use std::thread;
+
+    struct LocalHttpTransport {
+        agent: ureq::Agent,
+        origin: String,
+        requested: Mutex<Vec<String>>,
+    }
+
+    impl LocalHttpTransport {
+        fn new(address: std::net::SocketAddr) -> Self {
+            Self {
+                agent: ureq::Agent::config_builder()
+                    .https_only(false)
+                    .max_redirects(0)
+                    .timeout_global(Some(Duration::from_secs(5)))
+                    .build()
+                    .into(),
+                origin: format!("http://{address}"),
+                requested: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn mapped(&self, url: &Url) -> String {
+            self.requested.lock().unwrap().push(url.to_string());
+            format!("{}{}", self.origin, url.path())
+        }
+    }
+
+    impl CloneTransport for LocalHttpTransport {
+        fn get_bounded(&self, url: &Url, max: usize) -> Result<Vec<u8>, &'static str> {
+            let mapped = self.mapped(url);
+            let mut response = self
+                .agent
+                .get(&mapped)
+                .call()
+                .map_err(|_| "clone.transport_failed")?;
+            let mut bytes = Vec::new();
+            response
+                .body_mut()
+                .as_reader()
+                .take((max + 1) as u64)
+                .read_to_end(&mut bytes)
+                .map_err(|_| "clone.transport_failed")?;
+            if bytes.len() > max {
+                return Err("clone.response_too_large");
+            }
+            Ok(bytes)
+        }
+
+        fn download_object(
+            &self,
+            locations: &[String],
+            output: &Path,
+            length: u64,
+            digest: &str,
+        ) -> Result<(), &'static str> {
+            let logical = Url::parse(locations.first().ok_or("clone.object_missing")?)
+                .map_err(|_| "clone.location_unsafe")?;
+            let mapped = self.mapped(&logical);
+            download_one(&self.agent, &mapped, output, length, digest, true)
+        }
+    }
+
+    fn serve_routes(
+        routes: HashMap<String, Vec<u8>>,
+        request_count: usize,
+    ) -> (std::net::SocketAddr, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            for _ in 0..request_count {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 4096];
+                let read = stream.read(&mut request).unwrap();
+                let first = String::from_utf8_lossy(&request[..read]);
+                let path = first
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap();
+                let body = routes.get(path).unwrap();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nETag: \"fixture-1\"\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(body).unwrap();
+            }
+        });
+        (address, handle)
+    }
+
+    fn digest(bytes: &[u8]) -> String {
+        Sha256::digest(bytes)
+            .iter()
+            .fold(String::from("sha256:"), |mut output, byte| {
+                use std::fmt::Write as _;
+                write!(output, "{byte:02x}").unwrap();
+                output
+            })
+    }
+
+    fn discovery_documents(
+        package: &[u8],
+        package_digest: &str,
+        version: ProtocolVersion,
+    ) -> (Vec<u8>, Vec<u8>) {
+        let repository = RepositoryIdentity::parse("acme/demo").unwrap();
+        let immutable = Sha256Digest(format!("sha256:{}", "a".repeat(64)));
+        let object_digest = Sha256Digest(digest(package));
+        let manifest = DiscoveryManifest {
+            format: DISCOVERY_FORMAT.to_owned(),
+            version,
+            repository: repository.clone(),
+            default_ref: "main".to_owned(),
+            resolved_ref: "main".to_owned(),
+            immutable_version: immutable.clone(),
+            package: PortablePackageReference {
+                format: PORTABLE_V2_FORMAT.to_owned(),
+                package_digest: Sha256Digest(package_digest.to_owned()),
+                object_digest: object_digest.clone(),
+            },
+            requirements: Vec::new(),
+            capabilities: Vec::new(),
+            objects: vec![ObjectDescriptor {
+                digest: object_digest,
+                length: package.len() as u64,
+                media_type: PORTABLE_V2_MEDIA_TYPE.to_owned(),
+                locations: vec!["https://objects.test/object".to_owned()],
+            }],
+            extensions: BTreeMap::new(),
+        };
+        let refs = RefSet {
+            format: DISCOVERY_FORMAT.to_owned(),
+            version,
+            repository,
+            default_ref: "main".to_owned(),
+            refs: vec![RepositoryRef {
+                name: "main".to_owned(),
+                target: immutable,
+                validator: Sha256Digest(format!("sha256:{}", "b".repeat(64))),
+            }],
+            extensions: BTreeMap::new(),
+        };
+        (
+            serde_json::to_vec(&manifest).unwrap(),
+            serde_json::to_vec(&refs).unwrap(),
+        )
+    }
 
     #[test]
     fn resolves_short_and_canonical_sources() {
@@ -888,5 +1082,108 @@ mod tests {
         .unwrap();
         assert_eq!(fs::read(output).unwrap(), bytes);
         server.join().unwrap();
+    }
+
+    #[test]
+    fn integrated_clone_imports_and_reopens_while_failures_publish_no_destination() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        fs::create_dir(&source).unwrap();
+        let graph = GraphForge::new(source.to_str()).unwrap();
+        let bundle = root.path().join("source.gfpb");
+        let exported = graph
+            .export_portable_v2(
+                &PortableV2ExportRequest {
+                    selection: PortableSelection::Current,
+                    output_path: bundle.clone(),
+                    representation: PortableV2Output::Bundle,
+                    profile: PortableV2SelectionProfile::Complete,
+                    subset: None,
+                    limits: PortableV2Limits::default(),
+                },
+                None,
+                |_| {},
+            )
+            .unwrap();
+        let package = fs::read(bundle).unwrap();
+        let (manifest, refs) =
+            discovery_documents(&package, &exported.package_digest, ProtocolVersion::CURRENT);
+
+        let mut routes = HashMap::new();
+        routes.insert("/acme/demo/.gf/manifest".to_owned(), manifest.clone());
+        routes.insert("/acme/demo/.gf/refs".to_owned(), refs.clone());
+        routes.insert("/object".to_owned(), package.clone());
+        let (address, server) = serve_routes(routes, 3);
+        let transport = LocalHttpTransport::new(address);
+        let destination = root.path().join("clone");
+        let mut output = Vec::new();
+        let result = run_clone_inner(
+            CloneArgs {
+                source: "https://hub.test/acme/demo".to_owned(),
+                destination: Some(destination.clone()),
+            },
+            true,
+            &mut output,
+            Instant::now(),
+            &transport,
+        );
+        assert!(result.is_ok());
+        server.join().unwrap();
+        let receipt: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        let _reopened = GraphForge::new(destination.to_str()).unwrap();
+        assert!(receipt["generation_uuid"].as_str().is_some());
+        let requested = transport.requested.lock().unwrap();
+        assert_eq!(requested[0], "https://hub.test/acme/demo/.gf/manifest");
+        assert_eq!(requested[1], "https://hub.test/acme/demo/.gf/refs");
+        assert_eq!(requested[2], "https://objects.test/object");
+
+        let mut corrupt_routes = HashMap::new();
+        corrupt_routes.insert("/acme/demo/.gf/manifest".to_owned(), manifest);
+        corrupt_routes.insert("/acme/demo/.gf/refs".to_owned(), refs);
+        corrupt_routes.insert("/object".to_owned(), vec![0_u8; package.len()]);
+        let (address, server) = serve_routes(corrupt_routes, 3);
+        let corrupt_destination = root.path().join("corrupt-clone");
+        let result = run_clone_inner(
+            CloneArgs {
+                source: "https://hub.test/acme/demo".to_owned(),
+                destination: Some(corrupt_destination.clone()),
+            },
+            true,
+            &mut Vec::new(),
+            Instant::now(),
+            &LocalHttpTransport::new(address),
+        );
+        assert!(result.is_err());
+        server.join().unwrap();
+        assert!(!corrupt_destination.exists());
+
+        let (future_manifest, future_refs) = discovery_documents(
+            &package,
+            &exported.package_digest,
+            ProtocolVersion {
+                major: 99,
+                minor: 0,
+            },
+        );
+        let mut future_routes = HashMap::new();
+        future_routes.insert("/acme/demo/.gf/manifest".to_owned(), future_manifest);
+        future_routes.insert("/acme/demo/.gf/refs".to_owned(), future_refs);
+        let (address, server) = serve_routes(future_routes, 2);
+        let future_transport = LocalHttpTransport::new(address);
+        let future_destination = root.path().join("future-clone");
+        let result = run_clone_inner(
+            CloneArgs {
+                source: "https://hub.test/acme/demo".to_owned(),
+                destination: Some(future_destination.clone()),
+            },
+            true,
+            &mut Vec::new(),
+            Instant::now(),
+            &future_transport,
+        );
+        assert!(result.is_err());
+        server.join().unwrap();
+        assert_eq!(future_transport.requested.lock().unwrap().len(), 2);
+        assert!(!future_destination.exists());
     }
 }
