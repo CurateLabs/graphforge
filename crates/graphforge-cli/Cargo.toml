@@ -17,6 +17,7 @@ graphforge-api = { version = "0.5.2", path = "../graphforge-api" }
 graphforge-discovery = { version = "0.5.2", path = "../graphforge-discovery" }
 graphforge-storage = { version = "0.5.2", path = "../graphforge-storage" }
 clap = { workspace = true }
+fs4 = "1.1"
 uuid = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
