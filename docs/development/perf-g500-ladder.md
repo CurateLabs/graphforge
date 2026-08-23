@@ -96,9 +96,11 @@ seconds.
 ## First-fail ladder
 
 `run_ladder` walks the provisioned rungs in increasing scale and, after each
-phase (`generate`, `ingest`, `reopen`, `query`), compares peak RSS / disk /
+phase (`generate`, `ingest`, `reopen`, `node_count`, `edge_count`, `one_hop`,
+`two_hop`), compares peak RSS / disk /
 elapsed time against the envelope. On the **first** violation it records the
-failing phase and `error_class` (`oom` | `disk_exhaustion` | `timeout`) and
+failing phase and `error_class` (`oom` | `disk_exhaustion` | `timeout` | `execution_failure` |
+`result_mismatch`) and
 stops — no larger rung is attempted and no SCALE-26 pass is claimed.
 
 > RSS fidelity: peak RSS is read from `/proc/self/status` `VmHWM` on Linux
@@ -118,6 +120,28 @@ stops — no larger rung is attempted and no SCALE-26 pass is claimed.
 > publication failure, not a generator-memory regression. Append-only linear-I/O
 > construction is tracked separately by #901 and remains required before the
 > billion-edge close gate.
+
+### S20 Fly baseline and interpretation
+
+The exact-merge `eccb6e06726d05cdef9e5242cad885be80565eee` S20 attempt ran on
+a Fly performance Machine with 2 vCPUs, 4 GiB RAM, and an attached NVMe volume.
+Ingest completed at approximately **688 MB peak RSS**. Reopen/recount later
+reached approximately **3.33 GB RSS**, and the kernel killed the process during
+fixed-hop query execution at approximately **3.80 GB anonymous RSS** (exit
+137). The volume was only **52% used**. These observations diagnose a
+GraphForge reopen/query execution-memory defect, not disk exhaustion, Fly page
+cache, or bounded-generator growth. They are a historical failing baseline,
+not a current pass or a universal memory requirement; S20 must be rerun at the
+fix's exact merge SHA before this gate can be called green.
+
+The journal now publishes a separate atomic `running` and completed/failed
+boundary for node count, edge count, one-hop, and two-hop execution. Every
+normal completion includes both high-water RSS and current Linux process-memory
+components. A process-level OOM or `SIGKILL` cannot execute Rust cleanup code;
+in that case the last durable `running` boundary identifies the interrupted
+phase, while the external Machine event/exit status supplies the typed `oom`.
+The journal deliberately leaves `error_class` null rather than inventing a
+cause when no typed in-process failure was observed.
 
 ## Commands
 
@@ -144,7 +168,8 @@ passes.
 
 Default evidence path: `docs/development/g500-ladder-evidence.json`.
 The runner also atomically updates `build/g500-ladder-journal.json` before and
-after every phase and after every rung. Retrieve the journal after an OOM,
+after every phase—including separate count and hop phases—and after every rung.
+Retrieve the journal after an OOM,
 ENOSPC, timeout, or operator safety stop; `completed_rungs` remain valid, while
 `active_rung`, `active_phase`, and `run_state` describe the interrupted work and
 must not be presented as a pass. On Linux, each journal observation separates
@@ -165,6 +190,22 @@ One object per attempted rung (schema
   `rss_peak_bytes`, `disk_used_bytes`, `wall_time_s`, per-phase `steps`.
 - `machine_envelope` (128 GiB / 1 TiB / 4 h fail-safe), `sut`, `generator`.
 - `track` and `teps` are always `null`.
+
+The `reopen`, `node_count`, `edge_count`, `cypher_limit_1hop`, and
+`cypher_limit_2hop` steps each carry `rss_peak_bytes` plus `process_memory`
+(`vmrss_bytes`, `rss_anon_bytes`, and `rss_file_bytes` on Linux), rather than a
+single aggregate query observation.
+
+Each hop step also carries aggregate-only `operators` evidence. Expansion
+records input batches/rows, generated candidates, emitted rows, selective
+edge/node scan rows, and maximum concurrent reads per edge binding. Ordered
+operators record the physical TopK row bound, output rows/batches, actual spill
+count/bytes, and their post-execution memory gauge. Query-level DataFusion
+memory-pool reservations are sampled before execution and after all operator
+streams have been dropped; equality proves reservation quiescence. These are
+engine metrics, not estimated heap sizes. Global `ORDER BY` remains a semantic
+barrier: terminal cancellation is never pushed through the sort, while
+`SortExec: TopK(fetch=N)` bounds retained sort state to the requested limit.
 
 Wall-clock and RSS numbers are hardware-specific observations, never CI
 millisecond gates. For #745, `sut` must name the cloud SKU; laptop SUTs are

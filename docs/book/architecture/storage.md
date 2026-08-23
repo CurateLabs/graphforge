@@ -287,7 +287,8 @@ Conventions:
   `ShardedCsrIndex` on a persisted hit and materialize only the requested logical row
   from its bounded shard fragments. Legacy single-batch `.csr` files remain readable
   and migrate on rebuild.
-  Scan-build fallback still materializes a hash map for oracle parity.
+  The standalone scan-build provider remains a test/oracle implementation; ordinary
+  project execution never selects its graph-cardinality-sized hash map.
 
 ### Rebuild and versioning semantics
 
@@ -305,11 +306,19 @@ Conventions:
 - **Staleness detection.** The provider compares the manifest's topology counter
   with the current counter and validates any required bounded delta chain. A
   corrupt accelerator is never served as a hit.
-- **Fallback.** On mismatch (or absent index), the provider scans the typed edge tables and
-  builds the adjacency in memory — yielding identical results, only slower. A stale or missing
-  index can therefore never cause incorrect output.
-- **Rebuild triggers.** Lazy on first traversal when the `indexes/adjacency/` capability is
-  present, or explicit via `forge.index("adjacency", ...)`. Append-only commits
+- **Bounded recovery.** On mismatch, corruption, an absent index, or relation coverage
+  missing while a delta chain is present, the persistent provider runs the external-sort
+  builder into an instance-private, per-provider cache and serves the resulting sharded
+  CSR. Lazy query repair never mutates an immutable generation or its authenticated
+  graph/files inventory. The cache uses the admitted project volume by default, honors
+  an explicitly configured spill directory, and is removed on instance teardown. A
+  complete current manifest with no row and no deltas proves that relation is empty.
+  Ordinary traversal never diverts into the
+  O(E)-memory scan-build oracle. A build or load failure fails closed with a typed
+  execution error rather than risking OOM.
+- **Rebuild triggers.** Lazy on the first traversal, including when the
+  `indexes/adjacency/` capability is absent, or explicit via
+  `forge.index("adjacency", ...)`. Append-only commits
   publish bounded delta segments; a full rebuild compacts them into sharded bases.
 - **Determinism (R-ADJ-2).** Full rebuild streams each typed edge file once; `out` entries
   sort by `(src_id, edge_id)` and `in` entries by `(dst_id, edge_id)` — the `edge_id`
@@ -330,13 +339,12 @@ Conventions:
 - **Loader semantics** (`graphforge_exec::PersistentAdjacencyProvider`).
   Freshness requires a non-empty manifest whose topology generation is current
   directly or through a complete bounded delta chain. Fresh + row present ⇒ load
-  (`adjacency=hit`); stale or torn ⇒ lazy rebuild, then serve; fresh but **no
-  row** for the requested relation ⇒ scan-build *without* rebuild (rebuilding
-  cannot add an unknown relation — prevents a rebuild-per-query loop); a
-  corrupt accelerator ⇒ always-stale scan-build; capability absent ⇒ scan-build
-  (`adjacency=building`). Typed-mode `"*"` bypasses the index entirely
-  (reported as `building`, never a false miss). A build or load failure never
-  fails the query — only its speed.
+  (`adjacency=hit`); stale, torn, absent, or missing a requested relation row
+  while deltas exist ⇒ bounded lazy rebuild, then serve. A complete current
+  manifest with no delta chain and no such row proves the relation is empty.
+  Build/load failure is an execution error. The standalone
+  `ScanBuildAdjacencyProvider` is retained only for
+  explicit oracle and foreign-session uses, not the project facade.
 - **Direction.** `out` and `in` CSRs are stored separately; undirected traversal unions them.
   In exploratory mode, `_exploratory.parquet` rows are routed by their `rel_type_name` column.
 

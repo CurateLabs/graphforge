@@ -13,7 +13,7 @@ use arrow::array::{FixedSizeBinaryArray, Int64Array, UInt64Array};
 use graphforge_api::GraphForge;
 use graphforge_core::uuid::{Uuid, new_v7};
 use graphforge_core::{OntologyMode, TypeId};
-use graphforge_exec::demand::{self, DemandSnapshot};
+use graphforge_exec::demand::DemandSnapshot;
 use graphforge_ir::IrLiteral;
 use graphforge_storage::adjacency::build_adjacency_index;
 use graphforge_storage::{GraphWriter, io_stats};
@@ -165,13 +165,12 @@ fn run_measured(
     query: &str,
 ) -> (Duration, io_stats::IoSnapshot, DemandSnapshot) {
     io_stats::reset();
-    demand::reset();
     let started = Instant::now();
-    let result = forge.execute(query).unwrap();
+    let observed = forge.execute_observed(query);
+    let result = observed.result.unwrap();
     let elapsed = started.elapsed();
-    demand::disable();
     assert_eq!(result.stats.rows_produced, LIMIT as u64, "{query}");
-    (elapsed, io_stats::snapshot(), demand::snapshot())
+    (elapsed, io_stats::snapshot(), observed.evidence)
 }
 
 #[derive(Debug)]
@@ -300,13 +299,12 @@ fn run_scattered_destination_scale(
     let edges = generate_scattered_destinations(dir.path(), nodes, 4, 1_500);
     let forge = open_forge(dir.path());
     io_stats::reset();
-    demand::reset();
-    let result = forge.execute(ONE_HOP).unwrap();
-    demand::disable();
+    let observed = forge.execute_observed(ONE_HOP);
+    let result = observed.result.unwrap();
     assert_eq!(result.stats.rows_produced, LIMIT as u64);
     let mut values = fixed_binary_values(&result, "id");
     values.sort_unstable();
-    (values, io_stats::snapshot(), demand::snapshot(), edges)
+    (values, io_stats::snapshot(), observed.evidence, edges)
 }
 
 #[test]
@@ -361,13 +359,12 @@ fn limits_sweep_bounded_multi_hop_work_and_repartition() {
         assert!(!plan.contains("RoundRobinBatch"), "{plan}");
 
         io_stats::reset();
-        demand::reset();
-        let result = forge.execute(&query).unwrap();
-        demand::disable();
+        let observed = forge.execute_observed(&query);
+        let result = observed.result.unwrap();
         assert_eq!(result.stats.rows_produced, limit);
         let io = io_stats::snapshot();
         assert_indexed_limit_io(&io);
-        assert_bounded_demand(&demand::snapshot(), 2, limit);
+        assert_bounded_demand(&observed.evidence, 2, limit);
     }
 }
 
@@ -380,11 +377,10 @@ fn selective_filter_tops_up_without_crossing_blockers() {
 
     let selective = "MATCH (a)-[r1]->(b)-[r2]->(c) \
                      WHERE c.node_id = 64 RETURN c.node_id AS id LIMIT 10";
-    demand::reset();
-    let result = forge.execute(selective).unwrap();
-    demand::disable();
+    let observed = forge.execute_observed(selective);
+    let result = observed.result.unwrap();
     assert_eq!(result.stats.rows_produced, 10);
-    let snapshot = demand::snapshot();
+    let snapshot = observed.evidence;
     assert_bounded_demand(&snapshot, 2, 10);
     assert!(
         snapshot
@@ -501,13 +497,34 @@ fn fixed_hop_limit_preserves_skip_parameters_filters_and_blockers() {
         "post-filter LIMIT returned unexpected IDs: {filtered_ids:?}"
     );
 
-    let ordered = forge
-        .execute(
-            "MATCH ()-[r]->(b) RETURN b.node_id AS id \
-             ORDER BY id DESC LIMIT 5",
-        )
+    let ordered_plan = forge
+        .explain("MATCH ()-[r]->(b) RETURN b.node_id AS id ORDER BY id DESC LIMIT 5")
         .unwrap();
+    assert!(
+        ordered_plan.contains("SortExec: TopK(fetch=5)"),
+        "ordered LIMIT must physically select bounded TopK: {ordered_plan}"
+    );
+    let observed = forge.execute_observed(
+        "MATCH ()-[r]->(b) RETURN b.node_id AS id \
+             ORDER BY id DESC LIMIT 5",
+    );
+    let ordered = observed.result.unwrap();
     assert_eq!(uint64_values(&ordered, "id"), [64, 64, 64, 64, 63]);
+    let ordered_metrics = observed.evidence;
+    assert_eq!(ordered_metrics.sorts.len(), 1, "{ordered_metrics:#?}");
+    let sort = &ordered_metrics.sorts[0];
+    assert_eq!(sort.fetch, Some(5), "{ordered_metrics:#?}");
+    assert_eq!(sort.output_rows, 5, "{ordered_metrics:#?}");
+    assert_eq!(
+        sort.spill_count, 0,
+        "TopK does not spill: {ordered_metrics:#?}"
+    );
+    assert_eq!(sort.spilled_bytes, 0, "{ordered_metrics:#?}");
+    assert_eq!(sort.memory_used_after, 0, "{ordered_metrics:#?}");
+    assert_eq!(
+        ordered_metrics.memory_reserved_after, ordered_metrics.memory_reserved_before,
+        "query memory reservations must quiesce: {ordered_metrics:#?}"
+    );
 
     let distinct = forge
         .execute(
@@ -528,6 +545,37 @@ fn fixed_hop_limit_preserves_skip_parameters_filters_and_blockers() {
         .unwrap()
         .value(0);
     assert_eq!(total, 256, "aggregation must consume the complete hop");
+}
+
+#[test]
+fn ordered_limit_topk_state_is_cardinality_independent_and_released() {
+    let _guard = IO_GUARD.lock().unwrap();
+    let mut snapshots = Vec::new();
+    for nodes in [4_096, 40_960] {
+        let dir = TempDir::new().unwrap();
+        generate_graph(dir.path(), nodes, FAN_OUT);
+        let forge = open_forge(dir.path());
+        let observed = forge.execute_observed(
+            "MATCH ()-[r]->(b) RETURN b.node_id AS id ORDER BY id DESC LIMIT 100",
+        );
+        let result = observed.result.unwrap();
+        assert_eq!(result.stats.rows_produced, 100);
+        snapshots.push(observed.evidence);
+    }
+
+    for snapshot in &snapshots {
+        assert_eq!(snapshot.sorts.len(), 1, "{snapshot:#?}");
+        let sort = &snapshot.sorts[0];
+        assert_eq!(sort.fetch, Some(100), "{snapshot:#?}");
+        assert_eq!(sort.output_rows, 100, "{snapshot:#?}");
+        assert_eq!(sort.spill_count, 0, "{snapshot:#?}");
+        assert_eq!(sort.spilled_bytes, 0, "{snapshot:#?}");
+        assert_eq!(sort.memory_used_after, 0, "{snapshot:#?}");
+        assert_eq!(
+            snapshot.memory_reserved_after, snapshot.memory_reserved_before,
+            "{snapshot:#?}"
+        );
+    }
 }
 
 fn env_usize(key: &str, default: usize) -> usize {
@@ -568,18 +616,17 @@ fn physical_plan_only(explain: &str) -> &str {
 
 fn livejournal_sample(forge: &GraphForge, query: &str, limit: usize) -> LiveJournalSample {
     io_stats::reset();
-    demand::reset();
     let started = Instant::now();
-    let result = forge
-        .execute(query)
+    let observed = forge.execute_observed(query);
+    let result = observed
+        .result
         .unwrap_or_else(|error| panic!("LiveJournal traversal execution failed: {error}"));
     let elapsed = started.elapsed();
-    demand::disable();
     assert_eq!(result.stats.rows_produced, limit as u64);
     LiveJournalSample {
         elapsed,
         io: io_stats::snapshot(),
-        demand: demand::snapshot(),
+        demand: observed.evidence,
     }
 }
 

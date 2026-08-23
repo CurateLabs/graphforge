@@ -260,6 +260,7 @@ impl GraphForge {
             )),
             dir: self.dir.clone(),
             workspace_guard: Arc::clone(&self.workspace_guard),
+            adjacency_cache_guard: Arc::clone(&self.adjacency_cache_guard),
             graph_open_evidence: self.graph_open_evidence.clone(),
             project_open_recovery: self.project_open_recovery.clone(),
             tempdir: self.tempdir.clone(),

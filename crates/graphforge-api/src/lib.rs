@@ -204,7 +204,9 @@ pub use generation_diff::{
     GenerationDiffRequest, GenerationGraphDiff, GraphChangeStream, ReloadRequiredReason,
 };
 pub use graphforge_exec::validate_embedding_options;
-pub use graphforge_exec::{ExecutionResult, ExecutionStats, SendableRecordBatchStream};
+pub use graphforge_exec::{
+    ExecutionResult, ExecutionStats, ObservedExecution, SendableRecordBatchStream,
+};
 pub use graphforge_storage::{
     GraphDirectedness, WorkspaceConfiguration, WorkspaceOntology, WorkspaceOntologyMode,
     WorkspaceOntologySourceFormat,
@@ -433,6 +435,8 @@ pub struct GraphForge {
     dir: PathBuf,
     /// Keeps the private mutable graph workspace alive for the engine's life.
     workspace_guard: Arc<tempfile::TempDir>,
+    /// Keeps query-built derived adjacency artifacts outside graph generations.
+    adjacency_cache_guard: Arc<tempfile::TempDir>,
     /// Structural evidence for how the graph workspace was opened.
     graph_open_evidence: graphforge_storage::GraphFilesOpenEvidence,
     /// Safe recovery-on-open summary (cleanup, deferral, or checkpoint skip).
@@ -589,6 +593,7 @@ impl GraphForge {
             load_workspace_ontology(&resolved_generation)?;
         let (dir, workspace, graph_open_evidence) =
             hydrate_graph_workspace(&resolved_generation, false)?;
+        let adjacency_cache = Arc::new(create_adjacency_cache(tmp.path(), &resource_policy)?);
         Ok(Self {
             identity: GraphIdentity::new(),
             path: None,
@@ -599,10 +604,13 @@ impl GraphForge {
             current_generation_uuid: Arc::new(Mutex::new(generation_uuid)),
             uuid_membership_index: Mutex::new(None),
             clock: Mutex::new(Arc::new(system_time_micros)),
-            adjacency_provider: Arc::new(graphforge_exec::PersistentAdjacencyProvider::new(
-                dir.clone(),
-                ontology_mode,
-            )),
+            adjacency_provider: Arc::new(
+                graphforge_exec::PersistentAdjacencyProvider::new_with_cache(
+                    dir.clone(),
+                    adjacency_cache.path(),
+                    ontology_mode,
+                ),
+            ),
             adjacency_visibility: Arc::new(std::sync::RwLock::new(())),
             embedding_refresh_scheduler: Arc::new(Mutex::new(
                 embedding_refresh::initialize_embedding_refresh_scheduler(&dir)?,
@@ -622,6 +630,7 @@ impl GraphForge {
             provider_find_runtimes: Arc::new(Mutex::new(Vec::new())),
             dir,
             workspace_guard: workspace,
+            adjacency_cache_guard: adjacency_cache,
             graph_open_evidence,
             project_open_recovery,
             tempdir: Some(Arc::new(tmp)),
@@ -725,6 +734,11 @@ impl GraphForge {
             load_workspace_ontology(&resolved_generation)?;
         let (dir, workspace, graph_open_evidence) =
             hydrate_graph_workspace(&resolved_generation, read_only)?;
+        // Keep query-derived CSR on the admitted project volume by default,
+        // or alongside explicitly configured spill. It must not use OS /tmp:
+        // billion-edge qualification is disk-bound and the container root may
+        // have a much smaller ephemeral capacity than the data volume.
+        let adjacency_cache = Arc::new(create_adjacency_cache(&container_dir, &resource_policy)?);
 
         let runtime_catalog = load_runtime_catalog(&dir)?;
         let semantic_storage_bindings =
@@ -800,10 +814,13 @@ impl GraphForge {
             current_generation_uuid: Arc::new(Mutex::new(generation_uuid)),
             uuid_membership_index: Mutex::new(None),
             clock: Mutex::new(Arc::new(system_time_micros)),
-            adjacency_provider: Arc::new(graphforge_exec::PersistentAdjacencyProvider::new(
-                dir.clone(),
-                ontology_mode,
-            )),
+            adjacency_provider: Arc::new(
+                graphforge_exec::PersistentAdjacencyProvider::new_with_cache(
+                    dir.clone(),
+                    adjacency_cache.path(),
+                    ontology_mode,
+                ),
+            ),
             adjacency_visibility: Arc::new(std::sync::RwLock::new(())),
             embedding_refresh_scheduler: Arc::new(Mutex::new(
                 embedding_refresh::initialize_embedding_refresh_scheduler(&dir)?,
@@ -820,6 +837,7 @@ impl GraphForge {
             provider_find_runtimes: Arc::new(Mutex::new(Vec::new())),
             dir,
             workspace_guard: workspace,
+            adjacency_cache_guard: adjacency_cache,
             graph_open_evidence,
             project_open_recovery,
             tempdir: None,
@@ -948,6 +966,148 @@ impl GraphForge {
     /// [`GfError::Execution`] on lowering / execution failures.
     pub fn execute(&self, cypher: &str) -> Result<ExecutionResult, GfError> {
         self.execute_with_params(cypher, &HashMap::new())
+    }
+
+    /// Execute a read query and return query-isolated operator evidence on success or failure.
+    pub fn execute_observed(&self, cypher: &str) -> ObservedExecution {
+        self.execute_with_params_observed(cypher, &HashMap::new())
+    }
+
+    /// Parameterized form of [`execute_observed`](Self::execute_observed).
+    pub fn execute_with_params_observed(
+        &self,
+        cypher: &str,
+        params: &HashMap<String, IrLiteral>,
+    ) -> ObservedExecution {
+        let result = self.prepare_observed_read(cypher, params);
+        match result {
+            Ok(observed) => observed,
+            Err(error) => ObservedExecution {
+                result: Err(publicize_query_error(error)),
+                evidence: graphforge_exec::demand::DemandSnapshot::default(),
+            },
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn prepare_observed_read(
+        &self,
+        cypher: &str,
+        params: &HashMap<String, IrLiteral>,
+    ) -> Result<ObservedExecution, GfError> {
+        let _admission = self.admit_heavy_query()?;
+        let composition = self
+            .default_composition_context
+            .lock()
+            .expect("default composition context lock poisoned")
+            .clone()
+            .map(|context| self.bind_generation_storage(&context))
+            .transpose()?;
+        if cypher.trim().is_empty() {
+            return Err(GfError::Validation("empty query".into()));
+        }
+        let ast = graphforge_cypher::parse(cypher).map_err(|e| GfError::Parse {
+            msg: e.message,
+            span: e.span,
+        })?;
+        if ast.clauses.is_empty() {
+            return Err(GfError::Validation("empty query".into()));
+        }
+        validate_typed_parameter_binding(
+            &ast,
+            params,
+            self.ontology.clone(),
+            &self.runtime_catalog,
+            self.ontology_mode,
+            self.procedure_snapshot(),
+        )?;
+        let mut binder = Binder::new(
+            self.ontology.clone(),
+            self.runtime_catalog.clone(),
+            self.ontology_mode,
+        )
+        .with_procedures(self.procedure_snapshot());
+        if let Some((context, _, _)) = &composition {
+            binder = binder.with_composition(Arc::clone(context));
+        }
+        let plan = binder
+            .bind(&ast)
+            .map_err(|errors| bind_errors_to_gferror(&errors))?;
+        validate_call_params(&plan, params)?;
+        if plan.ops.iter().any(|op| {
+            matches!(
+                op,
+                GraphOp::Create { .. }
+                    | GraphOp::Merge { .. }
+                    | GraphOp::Delete { .. }
+                    | GraphOp::Set { .. }
+                    | GraphOp::Remove { .. }
+            )
+        }) {
+            return Err(GfError::Validation(
+                "observed execution accepts read queries only".into(),
+            ));
+        }
+        let plan = materialize_row_count_params(&plan, params)?;
+        let _visibility = self.graph_visibility.read()?;
+        let catalog = {
+            let rc = self
+                .runtime_catalog
+                .lock()
+                .expect("runtime catalog poisoned");
+            let bindings = self
+                .semantic_storage_bindings
+                .lock()
+                .expect("semantic storage binding lock poisoned");
+            GraphCatalog::open_with_semantic_bindings(
+                &self.dir,
+                self.ontology.as_ref(),
+                &rc,
+                composition
+                    .as_ref()
+                    .map(|(_, candidate, _)| candidate)
+                    .or(bindings.as_ref()),
+            )
+            .map_err(|error| GfError::Storage(error.to_string()))?
+        };
+        let execution_mode = composition
+            .as_ref()
+            .map_or(self.ontology_mode, |(context, _, _)| {
+                match context.composition().profile_default {
+                    graphforge_ontology::ActivationMode::Strict => OntologyMode::Strict,
+                    graphforge_ontology::ActivationMode::Exploratory
+                    | graphforge_ontology::ActivationMode::Advisory => OntologyMode::Advisory,
+                }
+            });
+        let adjacency_provider = if execution_mode == self.ontology_mode {
+            Arc::clone(&self.adjacency_provider)
+        } else {
+            Arc::new(
+                graphforge_exec::PersistentAdjacencyProvider::new_with_cache(
+                    self.dir.clone(),
+                    self.adjacency_cache_guard.path(),
+                    execution_mode,
+                ),
+            )
+        };
+        let session = graphforge_exec::ExecutionSession::new_with_target_provider_and_resources(
+            catalog,
+            self.ontology.clone(),
+            self.dir.clone(),
+            execution_mode,
+            adjacency_provider,
+            &self.session_resource_config(),
+        )?;
+        let mut observed = self.block_on(async {
+            Ok(session
+                .execute_plan_with_params_observed(&plan, params)
+                .await)
+        })?;
+        observed.result = observed
+            .result
+            .and_then(|result| shape_result(result, self.ontology_mode, self.ontology.as_ref()))
+            .map_err(publicize_query_error);
+        Ok(observed)
     }
 
     /// Register or replace a deterministic procedure available to `CALL`.
@@ -1318,10 +1478,13 @@ impl GraphForge {
         let adjacency_provider = if execution_mode == self.ontology_mode {
             Arc::clone(&self.adjacency_provider)
         } else {
-            Arc::new(graphforge_exec::PersistentAdjacencyProvider::new(
-                self.dir.clone(),
-                execution_mode,
-            ))
+            Arc::new(
+                graphforge_exec::PersistentAdjacencyProvider::new_with_cache(
+                    self.dir.clone(),
+                    self.adjacency_cache_guard.path(),
+                    execution_mode,
+                ),
+            )
         };
         let session = ExecutionSession::new_with_target_provider_and_resources(
             catalog,
@@ -3127,7 +3290,31 @@ impl GraphForge {
     /// Returns a structured project, execution, or schema error if the committed
     /// graph generation cannot be inspected.
     pub fn node_count(&self, label: &str) -> Result<u64, GfError> {
-        Ok(self.inspect_graph()?.node_count(label))
+        const COUNT_BATCH_ROWS: usize = 65_536;
+
+        let type_id = if label.is_empty() {
+            None
+        } else if let Some(type_id) = self
+            .ontology
+            .as_ref()
+            .and_then(|ontology| ontology.entity_type_id(label))
+        {
+            Some(type_id)
+        } else {
+            let catalog = self
+                .runtime_catalog
+                .lock()
+                .map_err(|_| GfError::Storage("runtime catalog lock poisoned".into()))?;
+            let Some((runtime_id, _)) = catalog
+                .entity_type_names_with_ids()
+                .find(|(_, name)| *name == label)
+            else {
+                return Ok(0);
+            };
+            Some(graphforge_ir::runtime_entity_type_id(runtime_id))
+        };
+        graphforge_storage::count_nodes_batched(&self.dir, type_id, COUNT_BATCH_ROWS)
+            .map_err(|error| GfError::Storage(error.to_string()))
     }
 
     /// Return a human-readable explanation of every compiler stage for `cypher`:
@@ -3266,10 +3453,13 @@ impl GraphForge {
             // reads by it (exploratory `_exploratory.parquet` vs typed
             // `topology/edges/<REL>.parquet`); rebuild it so the adjacency path
             // matches the new mode.
-            self.adjacency_provider = Arc::new(graphforge_exec::PersistentAdjacencyProvider::new(
-                self.dir.clone(),
-                self.ontology_mode,
-            ));
+            self.adjacency_provider = Arc::new(
+                graphforge_exec::PersistentAdjacencyProvider::new_with_cache(
+                    self.dir.clone(),
+                    self.adjacency_cache_guard.path(),
+                    self.ontology_mode,
+                ),
+            );
         }
         Ok(())
     }
@@ -3736,6 +3926,20 @@ fn build_runtime(
     policy
         .build_tokio_runtime()
         .map(|rt| Arc::new(OwnedRuntime(Some(rt))))
+}
+
+fn create_adjacency_cache(
+    admitted_data_root: &std::path::Path,
+    policy: &resource_policy::NormalizedResourcePolicy,
+) -> Result<tempfile::TempDir, GfError> {
+    let parent = policy
+        .spill_directory
+        .as_deref()
+        .unwrap_or(admitted_data_root);
+    tempfile::Builder::new()
+        .prefix(".graphforge-adjacency-")
+        .tempdir_in(parent)
+        .map_err(|error| GfError::Storage(format!("failed to create adjacency cache: {error}")))
 }
 
 fn hydrate_graph_workspace(
@@ -4351,6 +4555,27 @@ mod tests {
     const ABSENT_TARGET_COOKIE: &str = "graphforge-absent-target-open-v1";
     const ABSENT_TARGET_DEADLINE: Duration = Duration::from_secs(10);
 
+    #[test]
+    fn adjacency_cache_uses_admitted_or_configured_spill_volume_and_cleans_up() {
+        let admitted = tempfile::tempdir().unwrap();
+        let spill = tempfile::tempdir().unwrap();
+        let default_policy = ExecutionResourcePolicy::default().normalize().unwrap();
+
+        let default_cache = create_adjacency_cache(admitted.path(), &default_policy).unwrap();
+        let default_path = default_cache.path();
+        assert_eq!(default_path.parent(), Some(admitted.path()));
+        drop(default_cache);
+        assert!(!default_path.exists());
+
+        let mut spill_policy = default_policy;
+        spill_policy.spill_directory = Some(spill.path().to_path_buf());
+        let spill_cache = create_adjacency_cache(admitted.path(), &spill_policy).unwrap();
+        let spill_path = spill_cache.path();
+        assert_eq!(spill_path.parent(), Some(spill.path()));
+        drop(spill_cache);
+        assert!(!spill_path.exists());
+    }
+
     fn spawn_absent_target_child(parent: &Path, child_id: &str) -> Child {
         Command::new(std::env::current_exe().expect("absent-target current test executable"))
             .args(["--exact", ABSENT_TARGET_CHILD, "--nocapture"])
@@ -4500,6 +4725,19 @@ mod tests {
         drop(persistent);
         let reopened = GraphForge::new(directory.path().to_str()).unwrap();
         assert_eq!(reopened.node_count("Person").unwrap(), 1);
+    }
+
+    #[test]
+    fn node_count_does_not_read_relationship_inventory() {
+        let graph = GraphForge::new(None).unwrap();
+        graph.add_node("Person", &HashMap::new()).unwrap();
+        let edges = graph.dir.join("topology/edges");
+        std::fs::create_dir_all(&edges).unwrap();
+        std::fs::write(edges.join("BROKEN.parquet"), b"not parquet").unwrap();
+
+        assert_eq!(graph.node_count("Person").unwrap(), 1);
+        assert_eq!(graph.node_count("").unwrap(), 1);
+        assert_eq!(graph.node_count("Missing").unwrap(), 0);
     }
 
     fn degree_options(directed: bool, via: Option<&str>) -> RankOptions {

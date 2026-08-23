@@ -1165,6 +1165,77 @@ where
     Ok(())
 }
 
+/// Count canonical node rows, optionally restricted to one exact persisted
+/// entity [`TypeId`](graphforge_core::TypeId), without materializing the node
+/// table or unrelated graph inventory.
+///
+/// The scan is bounded by `batch_size` and applies the same legacy scalar-label
+/// normalization as [`read_nodes`]. A node carrying the requested type in its
+/// complete `type_ids` set contributes exactly once.
+///
+/// # Errors
+/// Propagates Parquet / Arrow errors and rejects a count that exceeds `u64`.
+pub fn count_nodes_batched(
+    dir: &Path,
+    type_id: Option<graphforge_core::TypeId>,
+    batch_size: usize,
+) -> Result<u64, DataFusionError> {
+    use arrow::array::{Array, ListArray, UInt32Array};
+
+    let mut count = 0_u64;
+    visit_nodes_batched(dir, batch_size, |batch| {
+        let increment = if let Some(type_id) = type_id {
+            let labels = batch
+                .column_by_name("type_ids")
+                .and_then(|column| column.as_any().downcast_ref::<ListArray>())
+                .ok_or_else(|| {
+                    DataFusionError::Execution(
+                        "canonical node topology type_ids is not List<UInt32>".into(),
+                    )
+                })?;
+            let values = labels
+                .values()
+                .as_any()
+                .downcast_ref::<UInt32Array>()
+                .ok_or_else(|| {
+                    DataFusionError::Execution(
+                        "canonical node topology type_ids values are not UInt32".into(),
+                    )
+                })?;
+            let mut matched = 0_u64;
+            for row in 0..batch.num_rows() {
+                if labels.is_null(row) {
+                    return Err(DataFusionError::Execution(
+                        "canonical node topology type_ids row is null".into(),
+                    ));
+                }
+                let offsets = labels.value_offsets();
+                let start = usize::try_from(offsets[row]).map_err(|_| {
+                    DataFusionError::Execution("type_ids start offset exceeds usize".into())
+                })?;
+                let end = usize::try_from(offsets[row + 1]).map_err(|_| {
+                    DataFusionError::Execution("type_ids end offset exceeds usize".into())
+                })?;
+                if (start..end).any(|index| values.value(index) == type_id.0) {
+                    matched = matched.checked_add(1).ok_or_else(|| {
+                        DataFusionError::Execution("node count exceeds UInt64".into())
+                    })?;
+                }
+            }
+            matched
+        } else {
+            u64::try_from(batch.num_rows()).map_err(|_| {
+                DataFusionError::Execution("node batch row count exceeds UInt64".into())
+            })?
+        };
+        count = count
+            .checked_add(increment)
+            .ok_or_else(|| DataFusionError::Execution("node count exceeds UInt64".into()))?;
+        Ok(true)
+    })?;
+    Ok(count)
+}
+
 /// Edge analogue of [`read_properties`]: read `edge_properties/<stem>.parquet`
 /// (keyed by `edge_uuid`), discovering its dynamic schema from the file. Returns
 /// an **empty `Vec`** when the file is absent.
@@ -2025,15 +2096,33 @@ mod tests {
     }
 
     fn write_nodes_parquet(path: &Path) {
-        let uuid_bytes: Vec<u8> = vec![1u8; 16];
-        let uuid_arr =
-            FixedSizeBinaryArray::try_from_iter(std::iter::once(uuid_bytes.clone())).unwrap();
-        let ts =
-            TimestampMicrosecondArray::from(vec![0i64]).with_timezone_opt(Some(Arc::from("UTC")));
+        write_nodes_with_labels(path, &[vec![0]]);
+    }
+
+    fn write_nodes_with_labels(path: &Path, row_labels: &[Vec<u32>]) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let uuid_arr = FixedSizeBinaryArray::try_from_iter(
+            (0..row_labels.len()).map(|index| (index as u128 + 1).to_be_bytes()),
+        )
+        .unwrap();
+        let ts = TimestampMicrosecondArray::from(vec![0i64; row_labels.len()])
+            .with_timezone_opt(Some(Arc::from("UTC")));
+        let offsets = row_labels
+            .iter()
+            .scan(0_i32, |offset, labels| {
+                let current = *offset;
+                *offset += i32::try_from(labels.len()).unwrap();
+                Some(current)
+            })
+            .chain(std::iter::once(
+                i32::try_from(row_labels.iter().map(Vec::len).sum::<usize>()).unwrap(),
+            ))
+            .collect::<Vec<_>>();
+        let values = row_labels.iter().flatten().copied().collect::<Vec<_>>();
         let labels = arrow::array::ListArray::new(
             Arc::new(Field::new("item", DataType::UInt32, false)),
-            OffsetBuffer::new(vec![0, 1].into()),
-            Arc::new(UInt32Array::from(vec![0u32])),
+            OffsetBuffer::new(offsets.into()),
+            Arc::new(UInt32Array::from(values)),
             None,
         );
 
@@ -2041,8 +2130,15 @@ mod tests {
             TOPOLOGY_NODES_SCHEMA.clone(),
             vec![
                 Arc::new(uuid_arr),
-                Arc::new(UInt64Array::from(vec![1u64])),
-                Arc::new(UInt32Array::from(vec![0u32])),
+                Arc::new(UInt64Array::from_iter_values(
+                    1..=u64::try_from(row_labels.len()).unwrap(),
+                )),
+                Arc::new(UInt32Array::from(
+                    row_labels
+                        .iter()
+                        .map(|labels| labels[0])
+                        .collect::<Vec<_>>(),
+                )),
                 Arc::new(labels),
                 Arc::new(ts.clone()),
                 Arc::new(ts),
@@ -2601,6 +2697,23 @@ mod tests {
         let batches = read_nodes(dir.path()).unwrap();
         assert_eq!(row_count(&batches), 1);
         assert_eq!(batches[0].schema(), TOPOLOGY_NODES_SCHEMA.clone());
+    }
+
+    #[test]
+    fn count_nodes_batched_counts_complete_label_sets_without_materializing_inventory() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("topology/nodes.parquet");
+        write_nodes_with_labels(&path, &[vec![7, 9], vec![9], vec![11]]);
+
+        assert_eq!(count_nodes_batched(dir.path(), None, 1).unwrap(), 3);
+        assert_eq!(
+            count_nodes_batched(dir.path(), Some(graphforge_core::TypeId(9)), 1).unwrap(),
+            2
+        );
+        assert_eq!(
+            count_nodes_batched(dir.path(), Some(graphforge_core::TypeId(42)), 1).unwrap(),
+            0
+        );
     }
 
     #[test]

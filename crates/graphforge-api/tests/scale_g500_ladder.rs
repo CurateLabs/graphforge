@@ -36,6 +36,7 @@ use graphforge_api::{
     bulk_node_input_schema, verify_portable_v2,
 };
 use graphforge_core::uuid::Uuid;
+use graphforge_exec::demand;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -59,6 +60,38 @@ const COUNT_EDGES: &str = "MATCH ()-[r:LINK]->() RETURN count(r) AS total";
 static JOURNAL_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static INGEST_SUBPHASE: AtomicU64 = AtomicU64::new(0);
 static INGEST_CHUNK_INDEX: AtomicU64 = AtomicU64::new(0);
+
+fn query_operator_evidence(snapshot: &demand::DemandSnapshot) -> Value {
+    json!({
+        "expands": snapshot.hops.iter().map(|(edge_var, hop)| json!({
+            "edge_var": edge_var,
+            "input_batches": hop.input_batches,
+            "input_rows": hop.input_rows,
+            "candidates_generated": hop.candidates_generated,
+            "rows_emitted": hop.rows_emitted,
+            "edge_rows_scanned": hop.edge_rows_scanned,
+            "node_rows_scanned": hop.node_rows_scanned,
+            "max_in_flight_reads": snapshot.max_in_flight_reads,
+        })).collect::<Vec<_>>(),
+        "sorts": snapshot.sorts.iter().map(|sort| json!({
+            "ordinal": sort.ordinal,
+            "top_k_rows": sort.fetch,
+            "output_rows": sort.output_rows,
+            "output_batches": sort.output_batches,
+            "spill_count": sort.spill_count,
+            "spilled_bytes": sort.spilled_bytes,
+            "memory_used_after": sort.memory_used_after,
+        })).collect::<Vec<_>>(),
+        "memory_reserved_before": snapshot.memory_reserved_before,
+        "memory_reserved_after": snapshot.memory_reserved_after,
+        "operator_rss": {
+            "expand_peak_bytes": snapshot.operator_rss.expand_peak_bytes,
+            "expand_current_bytes": snapshot.operator_rss.expand_current_bytes,
+            "sort_peak_bytes": snapshot.operator_rss.sort_peak_bytes,
+            "sort_current_bytes": snapshot.operator_rss.sort_current_bytes,
+        },
+    })
+}
 
 // ---------------------------------------------------------------------------
 // Versioned profile (single source of truth for the ladder).
@@ -571,6 +604,11 @@ fn phase_journal_value(
         "active_steps": steps,
         "first_failing_phase": failure.map(|(phase, _)| phase),
         "error_class": failure.map(|(_, class)| class),
+        "interruption_semantics": {
+            "last_atomic_boundary": format!("{phase}:{state}"),
+            "typed_failure_recorded": failure.is_some(),
+            "running_without_typed_failure": state == "running" && failure.is_none(),
+        },
     })
 }
 
@@ -870,7 +908,7 @@ fn run_rung(
         );
     }
 
-    // ---- reopen + recount ----
+    // ---- reopen + individually journaled recount/query phases ----
     let mut node_count = 0u64;
     let mut edge_count = 0u64;
     let mut gsi = String::new();
@@ -887,10 +925,7 @@ fn run_rung(
         let reopen_started = Instant::now();
         let graph = GraphForge::new(Some(project.to_str().expect("utf8 project")))
             .expect("reopen GraphForge");
-        node_count = graph.node_count(NODE_LABEL).expect("node_count");
-        edge_count = scalar_count(&graph.execute(COUNT_EDGES).expect("edge count"));
         let reopen_s = reopen_started.elapsed().as_secs_f64();
-        gsi = gsi_undirected(node_count, edge_count);
         let reopen_violation = envelope_violation(&env, ladder_started, &project, &spill_dir);
         if let Some(class) = reopen_violation {
             first_failing_phase = Some("reopen");
@@ -901,7 +936,8 @@ fn run_rung(
             "pass": reopen_violation.is_none(),
             "wall_time_s": reopen_s,
             "rss_peak_bytes": rss_value(),
-            "detail": { "node_count": node_count, "edge_count": edge_count, "gsi": gsi }
+            "process_memory": linux_process_memory(),
+            "detail": {}
         }));
         persist_phase_journal(
             profile,
@@ -917,47 +953,187 @@ fn run_rung(
             first_failing_phase.zip(error_class),
         );
 
-        // ---- deterministic LIMIT queries ----
+        // Each potentially large operation has its own durable before/after
+        // boundary. If the kernel kills the process, the last atomic journal
+        // identifies the interrupted operation; a normal return records its
+        // current and high-water RSS independently from the other operations.
         if first_failing_phase.is_none() {
-            let hop1_started = Instant::now();
             persist_phase_journal(
                 profile,
                 rung,
                 completed_rungs,
-                "query",
+                "node_count",
                 "running",
                 &steps,
                 None,
             );
-            let hop1 = graph.execute(ONE_HOP).expect("one-hop LIMIT");
-            let hop1_rows = row_count(&hop1);
-            steps.push(json!({
-                "id": "cypher_limit_1hop",
-                "pass": hop1_rows <= 1_000,
-                "wall_time_s": hop1_started.elapsed().as_secs_f64(),
-                "detail": { "rows": hop1_rows }
-            }));
-
-            let hop2_started = Instant::now();
-            let hop2 = graph.execute(TWO_HOP).expect("two-hop LIMIT");
-            let hop2_rows = row_count(&hop2);
-            steps.push(json!({
-                "id": "cypher_limit_2hop",
-                "pass": hop2_rows <= 1_000,
-                "wall_time_s": hop2_started.elapsed().as_secs_f64(),
-                "detail": { "rows": hop2_rows }
-            }));
-            let query_violation = envelope_violation(&env, ladder_started, &project, &spill_dir);
-            if let Some(class) = query_violation {
-                first_failing_phase = Some("query");
+            let phase_started = Instant::now();
+            node_count = graph.node_count(NODE_LABEL).expect("node_count");
+            let expected_nodes = 1u64 << rung.scale;
+            let mut violation = envelope_violation(&env, ladder_started, &project, &spill_dir);
+            if node_count != expected_nodes {
+                violation = Some("result_mismatch");
+            }
+            if let Some(class) = violation {
+                first_failing_phase = Some("node_count");
                 error_class = Some(class);
             }
+            steps.push(json!({
+                "id": "node_count",
+                "pass": violation.is_none(),
+                "wall_time_s": phase_started.elapsed().as_secs_f64(),
+                "rss_peak_bytes": rss_value(),
+                "process_memory": linux_process_memory(),
+                "detail": { "node_count": node_count, "expected": expected_nodes }
+            }));
             persist_phase_journal(
                 profile,
                 rung,
                 completed_rungs,
-                "query",
-                if query_violation.is_some() {
+                "node_count",
+                if violation.is_some() {
+                    "phase_failed"
+                } else {
+                    "phase_completed"
+                },
+                &steps,
+                first_failing_phase.zip(error_class),
+            );
+        }
+
+        if first_failing_phase.is_none() {
+            persist_phase_journal(
+                profile,
+                rung,
+                completed_rungs,
+                "edge_count",
+                "running",
+                &steps,
+                None,
+            );
+            let phase_started = Instant::now();
+            edge_count = scalar_count(&graph.execute(COUNT_EDGES).expect("edge count"));
+            gsi = gsi_undirected(node_count, edge_count);
+            let mut violation = envelope_violation(&env, ladder_started, &project, &spill_dir);
+            if edge_count != live_unique_edges {
+                violation = Some("result_mismatch");
+            }
+            if let Some(class) = violation {
+                first_failing_phase = Some("edge_count");
+                error_class = Some(class);
+            }
+            steps.push(json!({
+                "id": "edge_count",
+                "pass": violation.is_none(),
+                "wall_time_s": phase_started.elapsed().as_secs_f64(),
+                "rss_peak_bytes": rss_value(),
+                "process_memory": linux_process_memory(),
+                "detail": { "edge_count": edge_count, "expected": live_unique_edges, "gsi": gsi }
+            }));
+            persist_phase_journal(
+                profile,
+                rung,
+                completed_rungs,
+                "edge_count",
+                if violation.is_some() {
+                    "phase_failed"
+                } else {
+                    "phase_completed"
+                },
+                &steps,
+                first_failing_phase.zip(error_class),
+            );
+        }
+
+        if first_failing_phase.is_none() {
+            persist_phase_journal(
+                profile,
+                rung,
+                completed_rungs,
+                "one_hop",
+                "running",
+                &steps,
+                None,
+            );
+            let hop1_started = Instant::now();
+            let hop1 = graph.execute_observed(ONE_HOP);
+            let hop1_operators = query_operator_evidence(&hop1.evidence);
+            let hop1_failure = hop1.result.as_ref().err().map(ToString::to_string);
+            let hop1_rows = hop1.result.as_ref().map_or(0, row_count);
+            let mut violation = envelope_violation(&env, ladder_started, &project, &spill_dir);
+            if hop1_failure.is_some() {
+                violation = Some("execution_failure");
+            }
+            if hop1_rows != 1_000 {
+                violation = Some("result_mismatch");
+            }
+            if let Some(class) = violation {
+                first_failing_phase = Some("one_hop");
+                error_class = Some(class);
+            }
+            steps.push(json!({
+                "id": "cypher_limit_1hop",
+                "pass": violation.is_none(),
+                "wall_time_s": hop1_started.elapsed().as_secs_f64(),
+                "rss_peak_bytes": rss_value(),
+                "process_memory": linux_process_memory(),
+                "detail": { "rows": hop1_rows, "operators": hop1_operators, "execution_failure": hop1_failure }
+            }));
+            persist_phase_journal(
+                profile,
+                rung,
+                completed_rungs,
+                "one_hop",
+                if violation.is_some() {
+                    "phase_failed"
+                } else {
+                    "phase_completed"
+                },
+                &steps,
+                first_failing_phase.zip(error_class),
+            );
+        }
+
+        if first_failing_phase.is_none() {
+            persist_phase_journal(
+                profile,
+                rung,
+                completed_rungs,
+                "two_hop",
+                "running",
+                &steps,
+                None,
+            );
+            let hop2_started = Instant::now();
+            let hop2 = graph.execute_observed(TWO_HOP);
+            let hop2_operators = query_operator_evidence(&hop2.evidence);
+            let hop2_failure = hop2.result.as_ref().err().map(ToString::to_string);
+            let hop2_rows = hop2.result.as_ref().map_or(0, row_count);
+            let mut violation = envelope_violation(&env, ladder_started, &project, &spill_dir);
+            if hop2_failure.is_some() {
+                violation = Some("execution_failure");
+            }
+            if hop2_rows != 1_000 {
+                violation = Some("result_mismatch");
+            }
+            if let Some(class) = violation {
+                first_failing_phase = Some("two_hop");
+                error_class = Some(class);
+            }
+            steps.push(json!({
+                "id": "cypher_limit_2hop",
+                "pass": violation.is_none(),
+                "wall_time_s": hop2_started.elapsed().as_secs_f64(),
+                "rss_peak_bytes": rss_value(),
+                "process_memory": linux_process_memory(),
+                "detail": { "rows": hop2_rows, "operators": hop2_operators, "execution_failure": hop2_failure }
+            }));
+            persist_phase_journal(
+                profile,
+                rung,
+                completed_rungs,
+                "two_hop",
+                if violation.is_some() {
                     "phase_failed"
                 } else {
                     "phase_completed"
@@ -1661,6 +1837,31 @@ fn ci_rung_public_facade_engineering_green() {
         1u64 << ci_rung.scale
     );
     assert!(live > 0, "CI rung must persist a non-empty graph");
+    let step_ids = ev["steps"]
+        .as_array()
+        .expect("steps")
+        .iter()
+        .map(|step| step["id"].as_str().expect("step id"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        step_ids,
+        [
+            "generate",
+            "ingest",
+            "reopen",
+            "node_count",
+            "edge_count",
+            "cypher_limit_1hop",
+            "cypher_limit_2hop",
+        ],
+        "every S20-relevant operation needs an independent evidence boundary"
+    );
+    for step in &ev["steps"].as_array().expect("steps")[2..] {
+        assert!(
+            step.get("rss_peak_bytes").is_some() && step.get("process_memory").is_some(),
+            "reopen/count/query phases must carry peak and current RSS: {step}"
+        );
+    }
 }
 
 /// Provisioned full ladder (SCALE-20 → SCALE-26). Opt-in via
@@ -1754,6 +1955,23 @@ fn phase_journal_atomically_preserves_completed_rungs_and_active_state() {
     assert_eq!(journal["run_state"], "phase_failed");
     assert_eq!(journal["first_failing_phase"], "ingest");
     assert_eq!(journal["error_class"], "disk_limit");
+    assert_eq!(
+        journal["interruption_semantics"]["last_atomic_boundary"],
+        "ingest:phase_failed"
+    );
+    assert_eq!(
+        journal["interruption_semantics"]["typed_failure_recorded"],
+        true
+    );
+    let interrupted = phase_journal_value(
+        &profile, rung, &completed, "two_hop", "running", &steps, None,
+    );
+    assert_eq!(interrupted["active_phase"], "two_hop");
+    assert!(interrupted["error_class"].is_null());
+    assert_eq!(
+        interrupted["interruption_semantics"]["running_without_typed_failure"], true,
+        "an OOM-safe journal identifies the interrupted phase without inventing a cause"
+    );
 
     let directory = TempDir::new().expect("journal directory");
     let path = directory.path().join("journal.json");

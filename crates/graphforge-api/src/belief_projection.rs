@@ -434,10 +434,13 @@ impl GraphForge {
                 .expect("runtime catalog poisoned")
                 .clone(),
         ));
-        projected.adjacency_provider = Arc::new(graphforge_exec::PersistentAdjacencyProvider::new(
-            projected.dir.clone(),
-            projected.ontology_mode,
-        ));
+        projected.adjacency_provider = Arc::new(
+            graphforge_exec::PersistentAdjacencyProvider::new_with_cache(
+                projected.dir.clone(),
+                projected.adjacency_cache_guard.path(),
+                projected.ontology_mode,
+            ),
+        );
         let current = self.generation_for_read()?;
         if current.generation_uuid() != source_generation_uuid {
             return Err(transaction_conflict(

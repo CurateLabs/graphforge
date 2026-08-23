@@ -419,6 +419,15 @@ pub struct ExecutionResult {
     pub mutation_receipt: Option<MutationReceipt>,
 }
 
+/// One query outcome together with evidence isolated to that query.
+#[derive(Debug)]
+pub struct ObservedExecution {
+    /// Typed execution outcome; failures do not discard the evidence.
+    pub result: Result<ExecutionResult, GfError>,
+    /// Demand, operator, memory-pool, and process-RSS evidence for this query.
+    pub evidence: demand::DemandSnapshot,
+}
+
 impl SideEffects {
     /// Read a single-write summary batch (`GraphCreateExec` / `GraphDeleteExec`
     /// / `GraphSetExec` / `GraphRemoveExec`) into a ledger by column name, so one
@@ -3369,6 +3378,7 @@ impl ExecutionPlan for ExpandExec {
                 None,
                 batch_size,
                 initial_batch_goal,
+                demand::OperatorActivity::expand(),
             ),
             |(
                 mut input_stream,
@@ -3377,6 +3387,7 @@ impl ExecutionPlan for ExpandExec {
                 mut pending,
                 batch_size,
                 mut next_batch_goal,
+                activity,
             )| async move {
                 loop {
                     if remaining == Some(0)
@@ -3414,6 +3425,7 @@ impl ExecutionPlan for ExpandExec {
                                 pending,
                                 batch_size,
                                 next_batch_goal,
+                                activity,
                             ),
                         )));
                     }
@@ -5031,6 +5043,22 @@ impl ExecutionSession {
         self.execute_plan_with_params(plan, &HashMap::new()).await
     }
 
+    /// Execute a read plan with evidence scoped to this query and returned on failure.
+    pub async fn execute_plan_observed(&self, plan: &GraphPlan) -> ObservedExecution {
+        self.execute_plan_with_params_observed(plan, &HashMap::new())
+            .await
+    }
+
+    /// Execute a parameterized read plan with query-scoped evidence.
+    pub async fn execute_plan_with_params_observed(
+        &self,
+        plan: &GraphPlan,
+        params: &HashMap<String, graphforge_ir::IrLiteral>,
+    ) -> ObservedExecution {
+        let (result, evidence) = demand::observe(self.execute_plan_with_params(plan, params)).await;
+        ObservedExecution { result, evidence }
+    }
+
     /// Execute a read [`GraphPlan`], substituting `$name` placeholders with the
     /// supplied parameter values, and return the result.
     ///
@@ -5052,9 +5080,12 @@ impl ExecutionSession {
         let resolved_plan = self.resolve_row_count_expressions(plan, params).await?;
         let (physical, fallback_schema) = self.plan_physical(&resolved_plan, params).await?;
 
-        let mut batches = collect(Arc::clone(&physical), self.ctx.task_ctx())
-            .await
-            .map_err(|e| GfError::Execution(e.to_string()))?;
+        demand::record_memory_before(self.ctx.runtime_env().memory_pool.reserved());
+
+        let _sort_activity = demand::sort_activity(&physical);
+        let collected = collect(Arc::clone(&physical), self.ctx.task_ctx()).await;
+        demand::record_plan_after(&physical, self.ctx.runtime_env().memory_pool.reserved());
+        let mut batches = collected.map_err(|e| GfError::Execution(e.to_string()))?;
 
         // DataFusion's collect may return zero batches for an empty stream.
         // Public callers (and DF54-era optimistic publish tests) index

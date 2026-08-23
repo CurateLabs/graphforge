@@ -119,18 +119,28 @@ adjacency-backed physical node when the provider covers the relation type + dire
 back to the DataFusion hash-join path otherwise. Both paths produce identical results; only
 speed differs.
 
-The index is **optional and never authoritative**: a stale or missing index
-falls back to scan-and-build with identical output. The pinned v0.5
-project-generation UUID and graph source fingerprint detect staleness; the
-committed Parquet graph participant is always the source of truth.
+The index is **derived and never authoritative**: a stale, corrupt, or missing
+index is reconstructed from committed Parquet by the bounded external-sort
+builder. The pinned v0.5 project-generation UUID and graph source fingerprint
+detect staleness; committed Parquet remains the source of truth. If bounded
+reconstruction cannot complete, execution fails closed; the project facade
+does not substitute an O(E)-memory scan-built hash map.
+
+Query-triggered reconstruction publishes into an instance-private derived
+cache, never into the immutable generation graph tree. The cache lives on the
+admitted project volume by default, or under the explicitly configured spill
+directory, and is removed with the instance. Each provider has its own child
+namespace so projected and alternate-mode providers cannot race the builder's
+fixed staging paths.
 
 Fresh index hits serve a **CSR-native** adjacency view (#340): validated
 offsets with parallel edge/neighbor columns and O(1) row lookup. Undirected
 requests keep separate out/in CSRs and merge per accessed row (out before in
 on equal `edge_id`) without materializing a full merged hash map. Delta
 overlays attach a bounded replacement map over touched keys only — they do
-not copy the complete valid base CSR. Scan-built fallback retains the
-historical hash-map representation for oracle parity. Analyst
+not copy the complete valid base CSR. The standalone scan-build provider
+retains the historical hash-map representation solely for oracle and
+foreign-session use. Analyst
 `export_adjacency` projects selected nodes into a flat CSR of algorithm
 edges rather than duplicating the full graph into per-node heap vectors.
 
@@ -310,6 +320,15 @@ Arrow is used as the internal execution currency:
 - **C Data Interface** — zero-copy in-process sharing across Rust and Python
 - **C Stream Interface** — batch readers for streaming results
 - **Arrow IPC** — serialized stream for cross-process use (Node today; future UniFFI consumers)
+
+Observed execution is query scoped. `GraphForge::execute_observed` returns the
+typed query outcome, including an execution error, together with demand, sort,
+memory-pool, and sampled process-RSS evidence. Ordinary execution has no
+observer overhead or mutable global capture state. Expand RSS is sampled for
+the lifetime of each `ExpandExec` stream; sort RSS covers physical collection
+when the plan contains a sort. The lifetimes may overlap, so both peaks
+intentionally attribute shared process RSS rather than claiming an exclusive
+per-operator partition of process memory.
 
 Query-result files use the same demand-driven `RecordBatch` stream. Parquet and
 Arrow IPC sinks request one batch only after the preceding batch has been

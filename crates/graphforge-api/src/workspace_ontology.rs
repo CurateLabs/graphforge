@@ -193,7 +193,11 @@ impl GraphForge {
             )?;
         }
         self.adjacency_provider = std::sync::Arc::new(
-            graphforge_exec::PersistentAdjacencyProvider::new(self.dir.clone(), self.ontology_mode),
+            graphforge_exec::PersistentAdjacencyProvider::new_with_cache(
+                self.dir.clone(),
+                self.adjacency_cache_guard.path(),
+                self.ontology_mode,
+            ),
         );
         Ok(())
     }
@@ -229,7 +233,11 @@ impl GraphForge {
         self.ontology_document = None;
         self.ontology_mode = OntologyMode::Exploratory;
         self.adjacency_provider = std::sync::Arc::new(
-            graphforge_exec::PersistentAdjacencyProvider::new(self.dir.clone(), self.ontology_mode),
+            graphforge_exec::PersistentAdjacencyProvider::new_with_cache(
+                self.dir.clone(),
+                self.adjacency_cache_guard.path(),
+                self.ontology_mode,
+            ),
         );
         Ok(())
     }

@@ -486,7 +486,11 @@ impl GraphForge {
             Some(std::sync::Arc::new(published_binding));
         self.ontology_mode = configuration.ontology_mode.execution_mode();
         self.adjacency_provider = std::sync::Arc::new(
-            graphforge_exec::PersistentAdjacencyProvider::new(self.dir.clone(), self.ontology_mode),
+            graphforge_exec::PersistentAdjacencyProvider::new_with_cache(
+                self.dir.clone(),
+                self.adjacency_cache_guard.path(),
+                self.ontology_mode,
+            ),
         );
         Ok(CompositionChangeReceipt {
             project_generation_uuid: *self

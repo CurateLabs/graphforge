@@ -296,11 +296,13 @@ pub static ADJACENCY_CSR_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
 ///
 /// One row per CSR file. `topology_generation` records the topology counter
 /// the CSR was built from; a mismatch against the project's current counter
-/// marks the index stale. `relation_type` is a relation type name or the
-/// reserved `_all` stem for the union index.
+/// marks the index stale. `relation_type` is a fixed path-safe relation key or
+/// the reserved `_all` stem; nullable `relation_name` binds an exact key to its
+/// original UTF-8 name and is absent only for the wildcard union.
 pub static ADJACENCY_MANIFEST_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
     Arc::new(Schema::new(vec![
         Field::new("relation_type", DataType::Utf8, false),
+        Field::new("relation_name", DataType::Utf8, true),
         Field::new("direction", DataType::Utf8, false),
         Field::new("topology_generation", DataType::UInt64, false),
         ts_field("built_at"),
@@ -681,6 +683,7 @@ mod tests {
             names,
             [
                 "relation_type",
+                "relation_name",
                 "direction",
                 "topology_generation",
                 "built_at",
@@ -688,7 +691,7 @@ mod tests {
                 "edge_count"
             ]
         );
-        for name in ["relation_type", "direction"] {
+        for name in ["relation_type", "relation_name", "direction"] {
             let f = s.field_with_name(name).unwrap();
             assert_eq!(f.data_type(), &DataType::Utf8);
         }
@@ -700,7 +703,13 @@ mod tests {
             s.field_with_name("built_at").unwrap().data_type(),
             &DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()))
         );
-        assert!(s.fields().iter().all(|f| !f.is_nullable()));
+        assert!(s.field_with_name("relation_name").unwrap().is_nullable());
+        assert!(
+            s.fields()
+                .iter()
+                .filter(|field| field.name() != "relation_name")
+                .all(|field| !field.is_nullable())
+        );
     }
 
     #[test]

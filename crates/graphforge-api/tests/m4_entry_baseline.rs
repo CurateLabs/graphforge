@@ -24,7 +24,6 @@ use graphforge_api::{
 use graphforge_core::algorithms::{
     AnalyzeAlgorithm, PathAlgorithm, RankAlgorithm, SimilarAlgorithm,
 };
-use graphforge_exec::demand;
 use graphforge_storage::io_stats;
 use sha2::{Digest, Sha256};
 
@@ -1230,18 +1229,14 @@ fn run_node2vec(gf: &GraphForge) -> WorkloadEvidence {
 fn assert_fixed_hop_demand(gf: &GraphForge) {
     let _guard = IO_GUARD.lock().expect("io guard");
     io_stats::reset();
-    demand::reset();
     let plan = gf.explain(FIXED_HOP_LIMIT).expect("explain fixed-hop");
     assert!(
         !plan.contains("RoundRobinBatch"),
         "entry harness must not introduce eager repartitioning: {plan}"
     );
-    let result = gf.execute(FIXED_HOP_LIMIT).expect("fixed-hop execute");
-    let demand_snap = {
-        let snap = demand::snapshot();
-        demand::disable();
-        snap
-    };
+    let observed = gf.execute_observed(FIXED_HOP_LIMIT);
+    let result = observed.result.expect("fixed-hop execute");
+    let demand_snap = observed.evidence;
     let io = io_stats::snapshot();
     assert_eq!(result.stats.rows_produced, 3);
     // Small fixture may not cancel upstream reads; still require demand/plan surface.

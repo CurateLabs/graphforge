@@ -61,6 +61,22 @@ use crate::staging::RewriteBatch;
 /// relation types (matching the `_exploratory.parquet` convention).
 pub const ALL_RELATIONS_STEM: &str = "_all";
 
+/// Fixed-size, path-safe persistent key for one exact UTF-8 relation name.
+/// Identity is additionally bound and validated through the manifest's exact
+/// `relation_name`; the digest alone is never accepted as proof of identity.
+#[must_use]
+pub fn adjacency_relation_key(relation_type_name: &str) -> String {
+    format!("rel-{}", sha256_hex(relation_type_name.as_bytes()))
+}
+
+/// Whether `value` is a structurally valid exact-relation key.
+#[must_use]
+pub fn is_adjacency_relation_key(value: &str) -> bool {
+    value.len() == 68
+        && value.starts_with("rel-")
+        && value.as_bytes()[4..].iter().all(u8::is_ascii_hexdigit)
+}
+
 /// File name of the adjacency index manifest within `indexes/adjacency/`.
 pub const MANIFEST_FILE: &str = "index_manifest.parquet";
 
@@ -682,6 +698,8 @@ impl<'a> CsrRow<'a> {
 pub struct AdjacencyManifestRow {
     /// Relation type name, or [`ALL_RELATIONS_STEM`] for the union index.
     pub relation_type: String,
+    /// Exact original relation name; `None` only for the wildcard union row.
+    pub relation_name: Option<String>,
     /// Direction the CSR file is keyed by.
     pub direction: Direction,
     /// Project topology generation the CSR was built from.
@@ -785,7 +803,12 @@ pub fn adjacency_dir(project_dir: &Path) -> PathBuf {
 /// `indexes/adjacency/<REL_TYPE>.<dir>.csr`.
 #[must_use]
 pub fn csr_path(project_dir: &Path, relation_type: &str, direction: Direction) -> PathBuf {
-    adjacency_dir(project_dir).join(format!("{relation_type}.{}.csr", direction.as_str()))
+    let key = if relation_type == ALL_RELATIONS_STEM || is_adjacency_relation_key(relation_type) {
+        relation_type.to_owned()
+    } else {
+        adjacency_relation_key(relation_type)
+    };
+    adjacency_dir(project_dir).join(format!("{key}.{}.csr", direction.as_str()))
 }
 
 /// Path of `index_manifest.parquet` within `project_dir`.
@@ -991,6 +1014,7 @@ pub fn write_manifest(project_dir: &Path, rows: &[AdjacencyManifestRow]) -> Resu
         .map(|r| Some(r.relation_type.as_str()))
         .collect();
     let directions: StringArray = rows.iter().map(|r| Some(r.direction.as_str())).collect();
+    let relation_names: StringArray = rows.iter().map(|r| r.relation_name.as_deref()).collect();
     let generations: Vec<u64> = rows.iter().map(|r| r.topology_generation).collect();
     let built_ats: Vec<i64> = rows.iter().map(|r| r.built_at_micros).collect();
     let node_counts: Vec<u64> = rows.iter().map(|r| r.node_count).collect();
@@ -999,6 +1023,7 @@ pub fn write_manifest(project_dir: &Path, rows: &[AdjacencyManifestRow]) -> Resu
         Arc::clone(&ADJACENCY_MANIFEST_SCHEMA),
         vec![
             Arc::new(relation_types),
+            Arc::new(relation_names),
             Arc::new(directions),
             Arc::new(UInt64Array::from(generations)),
             Arc::new(TimestampMicrosecondArray::from(built_ats).with_timezone("UTC")),
@@ -1047,20 +1072,23 @@ pub fn read_manifest(project_dir: &Path) -> Result<Vec<AdjacencyManifestRow>, Gf
             )));
         }
         let relation_types = string_column(batch.column(0), "relation_type")?;
-        let directions = string_column(batch.column(1), "direction")?;
-        let generations = uint64_column(batch.column(2), "topology_generation")?;
+        let relation_names = string_column(batch.column(1), "relation_name")?;
+        let directions = string_column(batch.column(2), "direction")?;
+        let generations = uint64_column(batch.column(3), "topology_generation")?;
         let built_ats = batch
-            .column(3)
+            .column(4)
             .as_any()
             .downcast_ref::<TimestampMicrosecondArray>()
             .ok_or_else(|| {
                 GfError::Storage("adjacency manifest: built_at is not a timestamp".to_owned())
             })?;
-        let node_counts = uint64_column(batch.column(4), "node_count")?;
-        let edge_counts = uint64_column(batch.column(5), "edge_count")?;
+        let node_counts = uint64_column(batch.column(5), "node_count")?;
+        let edge_counts = uint64_column(batch.column(6), "edge_count")?;
         for i in 0..batch.num_rows() {
             rows.push(AdjacencyManifestRow {
                 relation_type: relation_types.value(i).to_owned(),
+                relation_name: (!relation_names.is_null(i))
+                    .then(|| relation_names.value(i).to_owned()),
                 direction: Direction::parse(directions.value(i))?,
                 topology_generation: generations.value(i),
                 built_at_micros: built_ats.value(i),
@@ -1186,10 +1214,9 @@ fn resource_limit(message: impl Into<String>) -> GfError {
 ///
 /// Mode-agnostic: `_exploratory.parquet` rows are grouped by their
 /// `rel_type_name` column; every other file is a typed edge table keyed by its
-/// file stem. Relation names that are not usable as a file stem (path
-/// separators, `..`, empty) or that collide with the reserved
-/// [`ALL_RELATIONS_STEM`] are skipped — those relations are served by
-/// scan-build forever, but their rows still flow into the union index.
+/// file stem. Every exact relation name is mapped through
+/// [`adjacency_relation_key`], so path-unsafe names and the literal `_all` are
+/// independently addressable without colliding with the wildcard union.
 ///
 /// The project `topology_generation` is read **before** any edge scan and
 /// stamped into the manifest: a concurrent topology write mid-build bumps the
@@ -1315,6 +1342,7 @@ pub fn build_adjacency_index_into_with_metrics(
                 metrics.peak_shard_nodes = metrics.peak_shard_nodes.max(outcome.peak_shard_nodes);
                 manifest.push(AdjacencyManifestRow {
                     relation_type: stem.to_owned(),
+                    relation_name: group.relation_name.clone(),
                     direction,
                     topology_generation: generation,
                     built_at_micros,
@@ -1455,12 +1483,21 @@ struct EntryGroup {
     out_runs: Vec<PathBuf>,
     in_runs: Vec<PathBuf>,
     label: String,
+    relation_name: Option<String>,
 }
 
 impl EntryGroup {
     fn with_label(label: impl Into<String>) -> Self {
         Self {
             label: label.into(),
+            ..Self::default()
+        }
+    }
+
+    fn for_relation(label: impl Into<String>, relation_name: &str) -> Self {
+        Self {
+            label: label.into(),
+            relation_name: Some(relation_name.to_owned()),
             ..Self::default()
         }
     }
@@ -1840,17 +1877,22 @@ fn stream_build_groups(
                     .expect("union group")
                     .push(entry, options.chunk_rows, spill, checkpoint)?;
                 let rel = rel_names.map_or(stem, |names| names.value(i));
-                if usable_stem(rel) {
-                    if !groups.contains_key(rel) {
-                        groups.insert(rel.to_owned(), EntryGroup::with_label(rel));
+                let key = adjacency_relation_key(rel);
+                if let Some(existing) = groups.get(&key) {
+                    if existing.relation_name.as_deref() != Some(rel) {
+                        return Err(GfError::Storage(
+                            "adjacency relation-key collision between distinct exact names".into(),
+                        ));
                     }
-                    groups.get_mut(rel).expect("rel group").push(
-                        entry,
-                        options.chunk_rows,
-                        spill,
-                        checkpoint,
-                    )?;
+                } else {
+                    groups.insert(key.clone(), EntryGroup::for_relation(&key, rel));
                 }
+                groups.get_mut(&key).expect("rel group").push(
+                    entry,
+                    options.chunk_rows,
+                    spill,
+                    checkpoint,
+                )?;
             }
             Ok(())
         },
@@ -1942,8 +1984,7 @@ pub(crate) fn stream_projected_parquet_batches(
 }
 
 /// Scan `topology/edges/` and group every edge occurrence by relation type:
-/// per-relation entries (stems unusable as file names are skipped, see
-/// [`build_adjacency_index`]) plus the full union. Shared by the validator and
+/// collision-safe encoded per-relation entries plus the full union. Shared by the validator and
 /// inspector. Uses the projected streaming reader so validation/inspection
 /// cannot hit the full-file UUID concat ceiling (#336).
 #[allow(clippy::type_complexity)]
@@ -1989,10 +2030,8 @@ fn collect_adjacency_groups_with_batch_size(
         for i in 0..batch.num_rows() {
             let entry = (src_ids.value(i), edge_ids.value(i), dst_ids.value(i));
             union_out.push(entry);
-            let rel = rel_names.map_or(stem, |names| names.value(i));
-            if usable_stem(rel) {
-                groups.entry(rel.to_owned()).or_default().push(entry);
-            }
+            let rel = adjacency_relation_key(rel_names.map_or(stem, |names| names.value(i)));
+            groups.entry(rel).or_default().push(entry);
         }
         Ok(())
     })?;
@@ -2403,17 +2442,6 @@ pub(crate) fn csr_from_entries(entries: &[BuildEntry], direction: Direction) -> 
         csr.offsets.push(csr.edge_count());
     }
     csr
-}
-
-/// Whether `rel` is usable as a CSR file stem: a single plain path component
-/// (no separators, no `..`, non-empty — the same rule `read_edges` applies to
-/// typed file names) and not the reserved [`ALL_RELATIONS_STEM`].
-pub(crate) fn usable_stem(rel: &str) -> bool {
-    if rel == ALL_RELATIONS_STEM {
-        return false;
-    }
-    let mut comps = Path::new(rel).components();
-    matches!(comps.next(), Some(std::path::Component::Normal(_))) && comps.next().is_none()
 }
 
 /// Borrow a column by name, erroring on absence.
@@ -2874,6 +2902,7 @@ mod tests {
         let rows = vec![
             AdjacencyManifestRow {
                 relation_type: "WORKS_AT".to_owned(),
+                relation_name: Some("WORKS_AT".to_owned()),
                 direction: Direction::Out,
                 topology_generation: 7,
                 built_at_micros: TS,
@@ -2882,6 +2911,7 @@ mod tests {
             },
             AdjacencyManifestRow {
                 relation_type: "WORKS_AT".to_owned(),
+                relation_name: Some("WORKS_AT".to_owned()),
                 direction: Direction::In,
                 topology_generation: 7,
                 built_at_micros: TS,
@@ -2890,6 +2920,7 @@ mod tests {
             },
             AdjacencyManifestRow {
                 relation_type: "OWNS".to_owned(),
+                relation_name: Some("OWNS".to_owned()),
                 direction: Direction::Out,
                 topology_generation: 7,
                 built_at_micros: TS + 1,
@@ -2898,6 +2929,7 @@ mod tests {
             },
             AdjacencyManifestRow {
                 relation_type: ALL_RELATIONS_STEM.to_owned(),
+                relation_name: None,
                 direction: Direction::Out,
                 topology_generation: 7,
                 built_at_micros: TS + 2,
@@ -2920,6 +2952,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let first = vec![AdjacencyManifestRow {
             relation_type: "KNOWS".to_owned(),
+            relation_name: Some("KNOWS".to_owned()),
             direction: Direction::Out,
             topology_generation: 1,
             built_at_micros: 0,
@@ -2930,6 +2963,7 @@ mod tests {
 
         let second = vec![AdjacencyManifestRow {
             relation_type: "KNOWS".to_owned(),
+            relation_name: Some("KNOWS".to_owned()),
             direction: Direction::Out,
             topology_generation: 2,
             built_at_micros: 1,
@@ -3047,7 +3081,9 @@ mod tests {
         let knows_manifest = read_manifest(dir.path())
             .unwrap()
             .into_iter()
-            .find(|r| r.relation_type == "KNOWS" && r.direction == Direction::Out)
+            .find(|r| {
+                r.relation_type == adjacency_relation_key("KNOWS") && r.direction == Direction::Out
+            })
             .unwrap();
         assert_eq!(knows_manifest.node_count, csr.node_count());
         assert_eq!(knows_manifest.edge_count, 6);
@@ -3159,32 +3195,43 @@ mod tests {
     }
 
     #[test]
-    fn hostile_and_reserved_stems_are_skipped_but_counted_in_union() {
+    fn unsafe_and_reserved_relation_names_get_distinct_persistent_keys() {
         let dir = TempDir::new().unwrap();
         let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, BUILD_TS).unwrap();
-        let (a, b, c) = (new_v7(), new_v7(), new_v7());
-        for u in [a, b, c] {
+        let (a, b, c, d) = (new_v7(), new_v7(), new_v7(), new_v7());
+        for u in [a, b, c, d] {
             w.create_node(u, TypeId(0)).unwrap();
         }
+        let long_name = "x".repeat(1_024);
         w.create_edge(new_v7(), "a/b", &a, &b).unwrap();
         w.create_edge(new_v7(), ALL_RELATIONS_STEM, &a, &c).unwrap();
+        w.create_edge(new_v7(), &long_name, &a, &d).unwrap();
         w.flush().unwrap();
 
         let rows = build_adjacency_index(dir.path(), BUILD_TS).unwrap();
-        // Only the union pair: both rel names are unusable as stems.
-        assert!(rows.iter().all(|r| r.relation_type == ALL_RELATIONS_STEM));
-        assert_eq!(rows.len(), 2);
+        let unsafe_key = adjacency_relation_key("a/b");
+        let literal_all_key = adjacency_relation_key(ALL_RELATIONS_STEM);
+        assert_ne!(unsafe_key, literal_all_key);
+        assert_ne!(literal_all_key, ALL_RELATIONS_STEM);
+        assert!(rows.iter().any(|r| r.relation_type == unsafe_key));
+        assert!(rows.iter().any(|r| r.relation_type == literal_all_key));
+        assert_eq!(rows.len(), 8, "three exact pairs plus the wildcard pair");
         let all = read_csr(&csr_path(dir.path(), ALL_RELATIONS_STEM, Direction::Out)).unwrap();
+        assert_eq!(all.edge_count(), 3, "exact rels still flow into the union");
+        let unsafe_exact = read_csr(&csr_path(dir.path(), "a/b", Direction::Out)).unwrap();
+        assert_eq!(unsafe_exact.edge_count(), 1);
+        let literal_all =
+            read_csr(&csr_path(dir.path(), ALL_RELATIONS_STEM, Direction::Out)).unwrap();
+        assert_eq!(literal_all.edge_count(), 3, "reserved path means wildcard");
+        let literal_all_exact =
+            read_csr(&csr_path(dir.path(), &literal_all_key, Direction::Out)).unwrap();
+        assert_eq!(literal_all_exact.edge_count(), 1);
+        let long_exact = read_csr(&csr_path(dir.path(), &long_name, Direction::Out)).unwrap();
         assert_eq!(
-            all.edge_count(),
-            2,
-            "skipped rels still flow into the union"
+            long_exact.edge_count(),
+            1,
+            "fixed digest stays below NAME_MAX"
         );
-        assert!(
-            !csr_path(dir.path(), "a/b", Direction::Out).exists(),
-            "no nested path written for the separator-bearing rel name"
-        );
-        assert!(!csr_path(dir.path(), "a", Direction::Out).exists());
     }
 
     #[test]

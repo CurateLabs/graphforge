@@ -30,8 +30,8 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use graphforge_core::GfError;
 
 use crate::adjacency::{
-    ALL_RELATIONS_STEM, BuildEntry, CsrIndex, CsrRow, Direction, adjacency_dir, csr_from_entries,
-    usable_stem,
+    ALL_RELATIONS_STEM, BuildEntry, CsrIndex, CsrRow, Direction, adjacency_dir,
+    adjacency_relation_key, csr_from_entries,
 };
 use crate::schemas::ADJACENCY_DELTA_SCHEMA;
 use crate::staging::RewriteBatch;
@@ -236,7 +236,7 @@ pub fn prune_delta_segments(project_dir: &Path, up_to: u64) {
 /// plus the chain's, for `stem`.
 ///
 /// `stem == _all` takes every delta edge; a per-relation `stem` takes edges
-/// whose `rel_type_name == stem` (and `usable_stem`, matching the builder, so a
+/// whose exact relation key matches `stem` (matching the builder, so a
 /// hostile relation name can never be materialized at a per-relation path).
 ///
 /// Implementation: reconstruct the base `(src, edge, dst)` entries from the CSR,
@@ -256,7 +256,7 @@ pub fn apply_delta_segments(
     let take_all = stem == ALL_RELATIONS_STEM;
     for seg in chain {
         for e in &seg.edges {
-            if take_all || (e.rel_type_name == stem && usable_stem(&e.rel_type_name)) {
+            if take_all || adjacency_relation_key(&e.rel_type_name) == stem {
                 entries.push((e.src_id, e.edge_id, e.dst_id));
             }
         }
@@ -350,7 +350,7 @@ pub fn overlay_delta_segments(
     let mut saw_key = false;
     for seg in chain {
         for e in &seg.edges {
-            if take_all || (e.rel_type_name == stem && usable_stem(&e.rel_type_name)) {
+            if take_all || adjacency_relation_key(&e.rel_type_name) == stem {
                 let (key, neighbor) = match direction {
                     Direction::Out => (e.src_id, e.dst_id),
                     Direction::In => (e.dst_id, e.src_id),

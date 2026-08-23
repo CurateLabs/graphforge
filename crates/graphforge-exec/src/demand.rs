@@ -9,8 +9,8 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use arrow::datatypes::SchemaRef;
@@ -24,6 +24,7 @@ use datafusion::physical_plan::filter::FilterExec;
 use datafusion::physical_plan::limit::{GlobalLimitExec, LocalLimitExec};
 use datafusion::physical_plan::projection::ProjectionExec;
 use datafusion::physical_plan::repartition::RepartitionExec;
+use datafusion::physical_plan::sorts::sort::SortExec;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties, RecordBatchStream,
     SendableRecordBatchStream,
@@ -114,42 +115,255 @@ pub struct DemandSnapshot {
     pub cancellations: u64,
     /// Maximum simultaneous filtered-read calls.
     pub max_in_flight_reads: u64,
+    /// Blocking ordered operators, in stable top-down plan order.
+    pub sorts: Vec<SortSnapshot>,
+    /// Query memory-pool reservation before physical execution.
+    pub memory_reserved_before: u64,
+    /// Query memory-pool reservation after every stream/operator was dropped.
+    pub memory_reserved_after: u64,
+    /// Process RSS attributed to operator lifetimes by the query sampler.
+    pub operator_rss: OperatorRssSnapshot,
 }
 
-static CAPTURE_ENABLED: AtomicBool = AtomicBool::new(false);
-static CAPTURE: LazyLock<Mutex<DemandSnapshot>> =
-    LazyLock::new(|| Mutex::new(DemandSnapshot::default()));
-
-/// Reset and enable fixed-hop demand capture.
-#[doc(hidden)]
-pub fn reset() {
-    *CAPTURE.lock().expect("demand stats lock") = DemandSnapshot::default();
-    CAPTURE_ENABLED.store(true, Ordering::SeqCst);
+/// Process-memory evidence sampled while blocking operators were alive.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OperatorRssSnapshot {
+    /// Highest RSS sample while at least one expand stream was alive.
+    pub expand_peak_bytes: u64,
+    /// Last RSS sample while an expand stream was alive.
+    pub expand_current_bytes: u64,
+    /// Highest RSS sample while a plan containing a sort was collecting.
+    pub sort_peak_bytes: u64,
+    /// Last RSS sample while a plan containing a sort was collecting.
+    pub sort_current_bytes: u64,
 }
 
-/// Disable demand capture without discarding the last snapshot.
-#[doc(hidden)]
-pub fn disable() {
-    CAPTURE_ENABLED.store(false, Ordering::SeqCst);
+/// Authoritative post-execution DataFusion metrics for one ordered operator.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SortSnapshot {
+    /// Stable top-down ordinal in the physical plan.
+    pub ordinal: usize,
+    /// Hard TopK row bound. `None` means the spillable external sorter path.
+    pub fetch: Option<usize>,
+    /// Rows emitted by this sort.
+    pub output_rows: u64,
+    /// Output record batches emitted by this sort.
+    pub output_batches: u64,
+    /// External-sort spill count (zero for TopK).
+    pub spill_count: u64,
+    /// External-sort bytes spilled (zero for TopK).
+    pub spilled_bytes: u64,
+    /// Memory still reserved when execution completed; this must quiesce to zero.
+    pub memory_used_after: u64,
 }
 
-/// Copy the current fixed-hop demand counters.
-#[must_use]
-#[doc(hidden)]
-pub fn snapshot() -> DemandSnapshot {
-    CAPTURE.lock().expect("demand stats lock").clone()
+tokio::task_local! { static ACTIVE_CAPTURE: Arc<QueryCapture>; }
+
+struct QueryCapture {
+    snapshot: Mutex<DemandSnapshot>,
+    expand_active: AtomicUsize,
+    sort_active: AtomicUsize,
+    expand_peak: AtomicU64,
+    expand_current: AtomicU64,
+    sort_peak: AtomicU64,
+    sort_current: AtomicU64,
+    stop: AtomicBool,
+}
+
+impl QueryCapture {
+    fn new() -> Self {
+        Self {
+            snapshot: Mutex::new(DemandSnapshot::default()),
+            expand_active: AtomicUsize::new(0),
+            sort_active: AtomicUsize::new(0),
+            expand_peak: AtomicU64::new(0),
+            expand_current: AtomicU64::new(0),
+            sort_peak: AtomicU64::new(0),
+            sort_current: AtomicU64::new(0),
+            stop: AtomicBool::new(false),
+        }
+    }
+}
+
+/// Run one future with isolated, task-scoped query evidence.
+pub async fn observe<F: std::future::Future>(future: F) -> (F::Output, DemandSnapshot) {
+    let capture = Arc::new(QueryCapture::new());
+    let sampler_capture = Arc::clone(&capture);
+    let sampler = std::thread::spawn(move || sample_rss(&sampler_capture));
+    let guard = SamplerGuard {
+        capture: Arc::clone(&capture),
+        sampler: Some(sampler),
+    };
+    let output = ACTIVE_CAPTURE.scope(Arc::clone(&capture), future).await;
+    drop(guard);
+    let mut snapshot = capture.snapshot.lock().expect("query capture lock").clone();
+    snapshot.operator_rss = OperatorRssSnapshot {
+        expand_peak_bytes: capture.expand_peak.load(Ordering::Acquire),
+        expand_current_bytes: capture.expand_current.load(Ordering::Acquire),
+        sort_peak_bytes: capture.sort_peak.load(Ordering::Acquire),
+        sort_current_bytes: capture.sort_current.load(Ordering::Acquire),
+    };
+    (output, snapshot)
+}
+
+struct SamplerGuard {
+    capture: Arc<QueryCapture>,
+    sampler: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for SamplerGuard {
+    fn drop(&mut self) {
+        self.capture.stop.store(true, Ordering::Release);
+        if let Some(sampler) = self.sampler.take() {
+            let _ = sampler.join();
+        }
+    }
+}
+
+#[cfg(test)]
+static ACTIVE_SAMPLERS: AtomicUsize = AtomicUsize::new(0);
+
+fn with_capture(update: impl FnOnce(&QueryCapture)) {
+    let _ = ACTIVE_CAPTURE.try_with(|capture| update(capture));
 }
 
 pub(crate) fn capture_enabled() -> bool {
-    CAPTURE_ENABLED.load(Ordering::Relaxed)
+    ACTIVE_CAPTURE.try_with(|_| ()).is_ok()
+}
+
+fn current_rss_bytes() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let kib = status
+        .lines()
+        .find(|line| line.starts_with("VmRSS:"))?
+        .split_whitespace()
+        .nth(1)?
+        .parse::<u64>()
+        .ok()?;
+    Some(kib.saturating_mul(1024))
+}
+
+fn sample_rss(capture: &QueryCapture) {
+    #[cfg(test)]
+    ACTIVE_SAMPLERS.fetch_add(1, Ordering::AcqRel);
+    while !capture.stop.load(Ordering::Acquire) {
+        if let Some(rss) = current_rss_bytes() {
+            if capture.expand_active.load(Ordering::Acquire) > 0 {
+                capture.expand_current.store(rss, Ordering::Release);
+                capture.expand_peak.fetch_max(rss, Ordering::AcqRel);
+            }
+            if capture.sort_active.load(Ordering::Acquire) > 0 {
+                capture.sort_current.store(rss, Ordering::Release);
+                capture.sort_peak.fetch_max(rss, Ordering::AcqRel);
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    #[cfg(test)]
+    ACTIVE_SAMPLERS.fetch_sub(1, Ordering::AcqRel);
+}
+
+pub(crate) struct OperatorActivity {
+    kind: OperatorKind,
+    capture: Option<Arc<QueryCapture>>,
+}
+enum OperatorKind {
+    Expand,
+    Sort,
+}
+impl OperatorActivity {
+    pub(crate) fn expand() -> Self {
+        Self::new(OperatorKind::Expand)
+    }
+    fn sort() -> Self {
+        Self::new(OperatorKind::Sort)
+    }
+    fn new(kind: OperatorKind) -> Self {
+        let capture = ACTIVE_CAPTURE.try_with(Arc::clone).ok();
+        if let Some(capture) = &capture {
+            match kind {
+                OperatorKind::Expand => &capture.expand_active,
+                OperatorKind::Sort => &capture.sort_active,
+            }
+            .fetch_add(1, Ordering::AcqRel);
+        }
+        Self { kind, capture }
+    }
+}
+
+pub(crate) fn sort_activity(plan: &Arc<dyn ExecutionPlan>) -> Option<OperatorActivity> {
+    fn contains(plan: &Arc<dyn ExecutionPlan>) -> bool {
+        plan.is::<SortExec>() || plan.children().into_iter().any(contains)
+    }
+    contains(plan).then(OperatorActivity::sort)
+}
+impl Drop for OperatorActivity {
+    fn drop(&mut self) {
+        if let Some(capture) = &self.capture {
+            match self.kind {
+                OperatorKind::Expand => &capture.expand_active,
+                OperatorKind::Sort => &capture.sort_active,
+            }
+            .fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+}
+
+pub(crate) fn record_memory_before(bytes: usize) {
+    with_capture(|capture| {
+        capture
+            .snapshot
+            .lock()
+            .expect("query capture lock")
+            .memory_reserved_before = bytes as u64;
+    });
+}
+
+/// Capture metrics only after collection has dropped every operator stream.
+pub(crate) fn record_plan_after(plan: &Arc<dyn ExecutionPlan>, memory_reserved_after: usize) {
+    fn value(metrics: &datafusion::physical_plan::metrics::MetricsSet, name: &str) -> u64 {
+        metrics
+            .sum(|metric| metric.value().name() == name)
+            .map_or(0, |metric| metric.as_usize() as u64)
+    }
+    fn visit(plan: &Arc<dyn ExecutionPlan>, sorts: &mut Vec<SortSnapshot>) {
+        if plan.is::<SortExec>() {
+            let metrics = plan.metrics().unwrap_or_default();
+            sorts.push(SortSnapshot {
+                ordinal: sorts.len(),
+                fetch: plan.fetch(),
+                output_rows: metrics.output_rows().map_or(0, |rows| rows as u64),
+                output_batches: value(&metrics, "output_batches"),
+                spill_count: metrics.spill_count().map_or(0, |count| count as u64),
+                spilled_bytes: metrics.spilled_bytes().map_or(0, |bytes| bytes as u64),
+                memory_used_after: value(&metrics, "mem_used"),
+            });
+        }
+        for child in plan.children() {
+            visit(child, sorts);
+        }
+    }
+
+    with_capture(|capture| {
+        let mut snapshot = capture.snapshot.lock().expect("query capture lock");
+        snapshot.sorts.clear();
+        visit(plan, &mut snapshot.sorts);
+        snapshot.memory_reserved_after = memory_reserved_after as u64;
+    });
 }
 
 fn with_hop(edge_var: u32, update: impl FnOnce(&mut HopSnapshot)) {
-    if !capture_enabled() {
-        return;
-    }
-    let mut capture = CAPTURE.lock().expect("demand stats lock");
-    update(capture.hops.entry(edge_var).or_default());
+    with_capture(|capture| {
+        update(
+            capture
+                .snapshot
+                .lock()
+                .expect("query capture lock")
+                .hops
+                .entry(edge_var)
+                .or_default(),
+        );
+    });
 }
 
 pub(crate) fn record_input(edge_var: u32, rows: usize) {
@@ -168,20 +382,19 @@ pub(crate) fn record_emitted(edge_var: u32, rows: usize) {
 }
 
 fn record_filter(ordinal: usize, uniqueness: bool, input: bool, rows: usize) {
-    if !capture_enabled() {
-        return;
-    }
-    let mut capture = CAPTURE.lock().expect("demand stats lock");
-    let filter = capture.filters.entry(ordinal).or_insert(FilterSnapshot {
-        ordinal,
-        relationship_uniqueness: uniqueness,
-        ..FilterSnapshot::default()
+    with_capture(|capture| {
+        let mut snapshot = capture.snapshot.lock().expect("query capture lock");
+        let filter = snapshot.filters.entry(ordinal).or_insert(FilterSnapshot {
+            ordinal,
+            relationship_uniqueness: uniqueness,
+            ..FilterSnapshot::default()
+        });
+        if input {
+            filter.input_rows += rows as u64;
+        } else {
+            filter.output_rows += rows as u64;
+        }
     });
-    if input {
-        filter.input_rows += rows as u64;
-    } else {
-        filter.output_rows += rows as u64;
-    }
 }
 
 /// Shared state attached to every fixed hop in one bounded physical plan.
@@ -210,7 +423,13 @@ impl QueryDemand {
 
     fn cancel(&self) {
         if !self.cancelled.swap(true, Ordering::AcqRel) && capture_enabled() {
-            CAPTURE.lock().expect("demand stats lock").cancellations += 1;
+            with_capture(|capture| {
+                capture
+                    .snapshot
+                    .lock()
+                    .expect("query capture lock")
+                    .cancellations += 1;
+            });
         }
     }
 
@@ -228,8 +447,10 @@ impl QueryDemand {
         self.max_in_flight_reads
             .fetch_max(current, Ordering::AcqRel);
         if capture_enabled() {
-            let mut capture = CAPTURE.lock().expect("demand stats lock");
-            capture.max_in_flight_reads = capture.max_in_flight_reads.max(current as u64);
+            with_capture(|capture| {
+                let mut snapshot = capture.snapshot.lock().expect("query capture lock");
+                snapshot.max_in_flight_reads = snapshot.max_in_flight_reads.max(current as u64);
+            });
         }
         if self.is_cancelled() {
             self.finish_read();
@@ -784,7 +1005,7 @@ impl RecordBatchStream for DemandGuardStream {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, LazyLock};
     use std::task::Context;
 
     use arrow::datatypes::Schema;
@@ -795,135 +1016,51 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn capture_accounts_for_every_hop_filter_and_storage_outcome() {
-        use graphforge_storage::io_stats::{
-            FilteredReadObserver, FilteredReadPruning, FilteredReadStrategy, FilteredReadTable,
-        };
+    static OBSERVATION_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
-        // Process-global capture must not interleave with other capture users.
-        static CAPTURE_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-        let _guard = CAPTURE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+    #[tokio::test]
+    async fn capture_is_task_scoped_for_overlapping_nested_error_and_unobserved_work() {
+        let _guard = OBSERVATION_TEST_LOCK.lock().unwrap();
+        record_input(99, 1);
+        let left = observe(async {
+            record_memory_before(17);
+            record_input(1, 2);
+            let (_, nested) = observe(async { record_input(2, 3) }).await;
+            assert_eq!(nested.hops[&2].input_rows, 3);
+            let plan: Arc<dyn ExecutionPlan> = Arc::new(EmptyExec::new(Arc::new(Schema::empty())));
+            record_plan_after(&plan, 0);
+            Err::<(), _>("typed failure")
+        });
+        let right = observe(async { record_input(7, 5) });
+        let ((left_result, left), (_, right)) = tokio::join!(left, right);
+        assert_eq!(left_result, Err("typed failure"));
+        assert_eq!(left.hops.len(), 1);
+        assert_eq!(left.hops[&1].input_rows, 2);
+        assert_eq!(
+            (left.memory_reserved_before, left.memory_reserved_after),
+            (17, 0)
+        );
+        assert_eq!(right.hops.len(), 1);
+        assert_eq!(right.hops[&7].input_rows, 5);
+        assert!(!left.hops.contains_key(&99));
+    }
 
-        reset();
-        record_input(12, 3);
-        record_candidates(12, 7);
-        record_emitted(12, 2);
-        record_filter(4, true, true, 7);
-        record_filter(4, true, false, 2);
+    #[tokio::test]
+    async fn sampler_is_reaped_when_observation_is_aborted_or_panics() {
+        let _guard = OBSERVATION_TEST_LOCK.lock().unwrap();
+        let aborted = tokio::spawn(async {
+            observe(std::future::pending::<()>()).await;
+        });
+        tokio::task::yield_now().await;
+        aborted.abort();
+        assert!(aborted.await.unwrap_err().is_cancelled());
+        assert_eq!(ACTIVE_SAMPLERS.load(Ordering::Acquire), 0);
 
-        let observer = HopReadObserver::new(12);
-        for table in [FilteredReadTable::Edge, FilteredReadTable::Node] {
-            observer.read_started(table);
-            observer.rows_scanned(table, 11);
-            observer.read_completed(table, 5, true);
-            observer.read_failed(table);
-        }
-        for strategy in [
-            FilteredReadStrategy::DenseRowSelection,
-            FilteredReadStrategy::RowGroupPredicate,
-            FilteredReadStrategy::FullFallback,
-        ] {
-            observer.pruning(
-                FilteredReadTable::Node,
-                FilteredReadPruning {
-                    strategy,
-                    row_groups_considered: 9,
-                    row_groups_selected: 4,
-                    pages_considered: 8,
-                    pages_selected: 3,
-                    exact_rows_selected: 2,
-                    metadata_fallbacks: 1,
-                    validation_fallbacks: 1,
-                },
-            );
-        }
-        observer.pruning(
-            FilteredReadTable::Edge,
-            FilteredReadPruning {
-                strategy: FilteredReadStrategy::DenseRowSelection,
-                row_groups_considered: 99,
-                row_groups_selected: 99,
-                pages_considered: 99,
-                pages_selected: 99,
-                exact_rows_selected: 99,
-                metadata_fallbacks: 99,
-                validation_fallbacks: 99,
-            },
-        );
-
-        let captured = snapshot();
-        let hop = &captured.hops[&12];
-        assert_eq!((hop.input_batches, hop.input_rows), (1, 3));
-        assert_eq!((hop.candidates_generated, hop.rows_emitted), (7, 2));
-        assert_eq!(
-            (
-                hop.edge_reads_started,
-                hop.edge_reads_completed,
-                hop.edge_reads_failed
-            ),
-            (1, 1, 1)
-        );
-        assert_eq!(
-            (
-                hop.node_reads_started,
-                hop.node_reads_completed,
-                hop.node_reads_failed
-            ),
-            (1, 1, 1)
-        );
-        assert_eq!(
-            (
-                hop.edge_rows_scanned,
-                hop.edge_rows_returned,
-                hop.edge_full_reads
-            ),
-            (11, 5, 1)
-        );
-        assert_eq!(
-            (
-                hop.node_rows_scanned,
-                hop.node_rows_returned,
-                hop.node_full_reads
-            ),
-            (11, 5, 1)
-        );
-        assert_eq!(
-            (
-                hop.node_dense_row_selection_reads,
-                hop.node_row_group_predicate_reads
-            ),
-            (1, 1)
-        );
-        assert_eq!(
-            (hop.node_row_groups_considered, hop.node_row_groups_selected),
-            (27, 12)
-        );
-        assert_eq!(
-            (hop.node_pages_considered, hop.node_pages_selected),
-            (24, 9)
-        );
-        assert_eq!(
-            (
-                hop.node_exact_rows_selected,
-                hop.node_metadata_fallbacks,
-                hop.node_validation_fallbacks
-            ),
-            (6, 3, 3)
-        );
-        assert_eq!(
-            (
-                captured.filters[&4].input_rows,
-                captured.filters[&4].output_rows
-            ),
-            (7, 2)
-        );
-
-        disable();
-        record_input(12, 100);
-        assert_eq!(snapshot(), captured);
+        let panicked = tokio::spawn(async {
+            observe(async { panic!("observed future panic") }).await;
+        });
+        assert!(panicked.await.unwrap_err().is_panic());
+        assert_eq!(ACTIVE_SAMPLERS.load(Ordering::Acquire), 0);
     }
 
     #[test]
