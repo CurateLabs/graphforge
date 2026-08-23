@@ -43,6 +43,9 @@
       "crate.composite_receipt_schema": "introspection",
       "crate.grade_gsi": "introspection",
       "crate.hold_writer": "internal-helper",
+      "crate.parse_hub_manifest": "designed-only",
+      "crate.parse_hub_refs": "designed-only",
+      "crate.parse_hub_repository_identity": "designed-only",
       "crate.verify_portable_v2": "designed-only",
       "GraphForge.new": "introspection",
       "GraphForge.new_with_options": "introspection",
@@ -103,23 +106,6 @@
     }
   },
   "method_evidence_groups": {
-    "hub-discovery-protocol": {
-      "ids": [
-        "crate.parse_hub_manifest",
-        "crate.parse_hub_refs",
-        "crate.parse_hub_repository_identity"
-      ],
-      "test_refs": [
-        {
-          "path": "crates/graphforge-api/src/hub_protocol.rs",
-          "symbol": "complete_conformance_corpus_has_expected_dispositions"
-        },
-        {
-          "path": "crates/graphforge-api/src/hub_protocol.rs",
-          "symbol": "identity_parser_rejects_unicode_and_noncanonical_case"
-        }
-      ]
-    },
     "multi-ontology-lifecycle": {
       "ids": [
         "GraphForge.adopt_ontology_bridge",
