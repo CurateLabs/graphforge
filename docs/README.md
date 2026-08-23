@@ -43,7 +43,7 @@ extension documents are eligible for publication.
 
 | Journey | Start here |
 | --- | --- |
-| Get started | [`guide/installation.md`](guide/installation.md), [`guide/quickstart.md`](guide/quickstart.md), [`guide/tutorial.md`](guide/tutorial.md) |
+| Get started | [`guide/installation.md`](guide/installation.md), [`guide/quickstart.md`](guide/quickstart.md), [`guide/clone.md`](guide/clone.md), [`guide/tutorial.md`](guide/tutorial.md) |
 | Use every day | [`guide/overview.md`](guide/overview.md), Cypher / construction / analytics / [`guide/datasets/`](guide/datasets/overview.md) |
 | Understand | [`book/README.md`](book/README.md), architecture / use cases / research |
 | Reference | [`reference/api.md`](reference/api.md) and siblings |
@@ -59,6 +59,7 @@ extension documents are eligible for publication.
 | --- | --- |
 | [`guide/installation.md`](guide/installation.md) | Install via pip or uv |
 | [`guide/quickstart.md`](guide/quickstart.md) | First graph in minutes |
+| [`guide/clone.md`](guide/clone.md) | Clone a public Hub repository safely |
 | [`guide/tutorial.md`](guide/tutorial.md) | Guided walkthrough |
 | [`guide/overview.md`](guide/overview.md) | Everyday workflows index |
 | [`guide/cypher-guide.md`](guide/cypher-guide.md) | openCypher language guide |

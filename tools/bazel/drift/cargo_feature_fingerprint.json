@@ -1,6 +1,6 @@
 {
   "schema": "graphforge.cargo-feature-fingerprint.v1",
-  "sha256": "8f9db8617daadff92274ffbfc67ccefb2abe6f337f9f0eaccdeb1b580577f0af",
+  "sha256": "da9bdcc37eefa454691f04075252312f822700d6243f9468148f6a7c77c03aa2",
   "entries": [
     {
       "name": "graphforge-api",
@@ -548,12 +548,21 @@
           "target": null
         },
         {
+          "name": "graphforge-discovery",
+          "req": "^0.5.2",
+          "features": [],
+          "optional": false,
+          "uses_default_features": true,
+          "kind": null,
+          "target": null
+        },
+        {
           "name": "graphforge-storage",
           "req": "^0.5.2",
           "features": [],
           "optional": false,
           "uses_default_features": true,
-          "kind": "dev",
+          "kind": null,
           "target": null
         },
         {
@@ -600,7 +609,7 @@
           "features": [],
           "optional": false,
           "uses_default_features": true,
-          "kind": "dev",
+          "kind": null,
           "target": null
         },
         {
@@ -609,7 +618,29 @@
           "features": [],
           "optional": false,
           "uses_default_features": true,
-          "kind": "dev",
+          "kind": null,
+          "target": null
+        },
+        {
+          "name": "ureq",
+          "req": "=3.4.0",
+          "features": [
+            "rustls"
+          ],
+          "optional": false,
+          "uses_default_features": false,
+          "kind": null,
+          "target": null
+        },
+        {
+          "name": "url",
+          "req": "^2",
+          "features": [
+            "serde"
+          ],
+          "optional": false,
+          "uses_default_features": true,
+          "kind": null,
           "target": null
         },
         {

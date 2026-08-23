@@ -2229,6 +2229,7 @@ dependencies = [
  "arrow",
  "clap",
  "graphforge-api",
+ "graphforge-discovery",
  "graphforge-storage",
  "parquet",
  "serde",
@@ -2236,6 +2237,8 @@ dependencies = [
  "serde_yaml_ng",
  "sha2",
  "tempfile",
+ "ureq",
+ "url",
  "uuid",
 ]
 
