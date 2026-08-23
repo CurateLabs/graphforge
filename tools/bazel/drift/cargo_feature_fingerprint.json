@@ -1,6 +1,6 @@
 {
   "schema": "graphforge.cargo-feature-fingerprint.v1",
-  "sha256": "f9b0a833ae4231a55e4494ea9b14c7bb85a72fab496189b01851da6937e08067",
+  "sha256": "b8c16c3bcebb47a73f06ccbbe43b78a76e7ab42c4fb862d7156fe0fcad95b617",
   "entries": [
     {
       "name": "graphforge-api",
@@ -533,6 +533,15 @@
           "features": [
             "derive"
           ],
+          "optional": false,
+          "uses_default_features": true,
+          "kind": null,
+          "target": null
+        },
+        {
+          "name": "fs4",
+          "req": "^1.1",
+          "features": [],
           "optional": false,
           "uses_default_features": true,
           "kind": null,

@@ -1,6 +1,7 @@
 //! Verification-first Hub clone orchestration.
 
 use clap::Args;
+use fs4::{FileExt, TryLockError};
 use graphforge_api::{GraphForge, OperationId, PortableV2ImportRequest};
 use graphforge_discovery::{
     DiscoveryError, DiscoveryErrorCode, DiscoveryLimits, DiscoveryManifest, RefSet,
@@ -148,8 +149,7 @@ fn run_clone_inner(
         return Err(failure("clone.object_too_large").into());
     }
 
-    let staging = staging_path(&destination).map_err(failure)?;
-    fs::create_dir_all(&staging).map_err(|_| failure("clone.staging_failed"))?;
+    let (staging, staging_lock) = acquire_staging(&destination).map_err(failure)?;
     let package = staging.join("package.part");
     transport
         .download_object(&object.locations, &package, object.length, &object.digest.0)
@@ -176,7 +176,10 @@ fn run_clone_inner(
         None,
     )
     .map_err(|_| failure("clone.import_failed"))?;
-    fs::remove_dir_all(&staging).map_err(|_| failure("clone.staging_cleanup_failed"))?;
+    drop(staging_lock);
+    // Publication is already complete. A stale private staging directory is
+    // resumable/auditable cleanup state, never a reason to report clone failure.
+    let _ = fs::remove_dir_all(&staging);
 
     let name = repository.canonical_name();
     let result = CloneResult {
@@ -281,6 +284,97 @@ fn staging_path(destination: &Path) -> Result<PathBuf, &'static str> {
         .filter(|name| !name.is_empty())
         .ok_or("clone.destination_invalid")?;
     Ok(destination_parent(destination).join(format!(".{name}.graphforge-clone")))
+}
+
+fn acquire_staging(destination: &Path) -> Result<(PathBuf, File), &'static str> {
+    let staging = staging_path(destination)?;
+    match fs::symlink_metadata(&staging) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err("clone.staging_unsafe");
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            create_private_directory(&staging)?;
+        }
+        Err(_) => return Err("clone.staging_failed"),
+    }
+    let metadata = fs::symlink_metadata(&staging).map_err(|_| "clone.staging_failed")?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err("clone.staging_unsafe");
+    }
+    make_staging_private(&staging)?;
+
+    let lock_path = staging.join("clone.lock");
+    if fs::symlink_metadata(&lock_path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err("clone.staging_unsafe");
+    }
+    let lock = open_private_lock(&lock_path)?;
+    match FileExt::try_lock(&lock) {
+        Ok(()) => {}
+        Err(TryLockError::WouldBlock) => return Err("clone.concurrent_clone"),
+        Err(TryLockError::Error(_)) => return Err("clone.staging_failed"),
+    }
+    Ok((staging, lock))
+}
+
+#[cfg(unix)]
+fn create_private_directory(path: &Path) -> Result<(), &'static str> {
+    use std::os::unix::fs::DirBuilderExt;
+    let mut builder = fs::DirBuilder::new();
+    builder.mode(0o700);
+    builder.create(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            "clone.staging_unsafe"
+        } else {
+            "clone.staging_failed"
+        }
+    })
+}
+
+#[cfg(unix)]
+fn make_staging_private(path: &Path) -> Result<(), &'static str> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|_| "clone.staging_failed")
+}
+
+#[cfg(not(unix))]
+fn make_staging_private(_path: &Path) -> Result<(), &'static str> {
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn create_private_directory(path: &Path) -> Result<(), &'static str> {
+    fs::create_dir(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            "clone.staging_unsafe"
+        } else {
+            "clone.staging_failed"
+        }
+    })
+}
+
+#[cfg(unix)]
+fn open_private_lock(path: &Path) -> Result<File, &'static str> {
+    use std::os::unix::fs::OpenOptionsExt;
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(path)
+        .map_err(|_| "clone.staging_failed")
+}
+
+#[cfg(not(unix))]
+fn open_private_lock(path: &Path) -> Result<File, &'static str> {
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .map_err(|_| "clone.staging_failed")
 }
 
 fn resolve_source(source: &str) -> Result<(RepositoryIdentity, Url), &'static str> {
@@ -899,6 +993,56 @@ mod tests {
             protocol_url(&full_url, "manifest").as_str(),
             "https://graphforge.sh/openalex/openalex/.gf/manifest"
         );
+    }
+
+    #[test]
+    fn staging_lock_rejects_a_concurrent_clone_and_releases_on_drop() {
+        let root = tempfile::tempdir().unwrap();
+        let destination = root.path().join("clone");
+        let (_, first) = acquire_staging(&destination).unwrap();
+        assert_eq!(
+            acquire_staging(&destination).unwrap_err(),
+            "clone.concurrent_clone"
+        );
+        drop(first);
+        assert!(acquire_staging(&destination).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staging_rejects_precreated_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let destination = root.path().join("clone");
+        let staging = staging_path(&destination).unwrap();
+        let redirect = root.path().join("redirect");
+        fs::create_dir(&redirect).unwrap();
+        symlink(&redirect, &staging).unwrap();
+        assert_eq!(
+            acquire_staging(&destination).unwrap_err(),
+            "clone.staging_unsafe"
+        );
+        assert!(fs::read_dir(redirect).unwrap().next().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staging_rejects_symlinked_lock_file() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let destination = root.path().join("clone");
+        let staging = staging_path(&destination).unwrap();
+        fs::create_dir(&staging).unwrap();
+        let redirect = root.path().join("redirect");
+        fs::write(&redirect, b"untouched").unwrap();
+        symlink(&redirect, staging.join("clone.lock")).unwrap();
+        assert_eq!(
+            acquire_staging(&destination).unwrap_err(),
+            "clone.staging_unsafe"
+        );
+        assert_eq!(fs::read(redirect).unwrap(), b"untouched");
     }
 
     #[test]

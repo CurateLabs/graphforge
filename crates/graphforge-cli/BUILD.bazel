@@ -18,6 +18,7 @@ exports_files(["Cargo.toml"])
 package(default_visibility = ["//visibility:public"])
 
 _CLI_DEPS = [
+    "@crates//:fs4",
     "@crates//:serde_yaml",
     "@crates//:sha2",
     "@crates//:tempfile",

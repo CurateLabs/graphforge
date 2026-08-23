@@ -2228,6 +2228,7 @@ version = "0.5.2"
 dependencies = [
  "arrow",
  "clap",
+ "fs4 1.1.0",
  "graphforge-api",
  "graphforge-discovery",
  "graphforge-storage",
