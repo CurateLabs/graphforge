@@ -238,7 +238,11 @@ semantic_enum!(Operation {
 });
 semantic_enum!(Stage {
     Parse => "parse", Bind => "bind", Plan => "plan", Execute => "execute",
-    Commit => "commit", Transfer => "transfer", Recover => "recover"
+    Commit => "commit", Transfer => "transfer", Recover => "recover",
+    IdentityValidation => "identity_validation", RefsDiscovery => "refs_discovery",
+    ManifestDiscovery => "manifest_discovery", Download => "download",
+    PortableVerification => "portable_verification", AtomicImport => "atomic_import",
+    Reopen => "reopen", Cleanup => "cleanup", Orchestration => "orchestration"
 });
 semantic_enum!(Outcome { Ok => "ok", Denied => "denied", Cancelled => "cancelled", Failed => "failed" });
 semantic_enum!(Failure {
@@ -290,6 +294,8 @@ pub struct JobStage {
     pub attempt: u32,
     /// Exact byte count, when the operation already knows it.
     pub bytes: Option<u64>,
+    /// Bytes already present before this attempt, when the operation knows it.
+    pub resumed_bytes: Option<u64>,
     /// Exact record count, when the operation already knows it.
     pub records: Option<u64>,
     /// Normalized stage outcome.
@@ -299,6 +305,8 @@ pub struct JobStage {
 /// One ordered handoff between components actually used by a job.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub struct ComponentHandoff {
+    /// Offset from job start where the boundary was observed.
+    pub start_offset_ns: u64,
     /// Calling component.
     pub from: ComponentKind,
     /// Receiving component.
@@ -328,6 +336,8 @@ pub struct JobSnapshot {
     pub finished_ns: u64,
     /// Normalized job outcome.
     pub outcome: Outcome,
+    /// Normalized failure class; raw provider or engine errors are never retained.
+    pub failure: Option<Failure>,
     /// Non-overlapping active intervals in chronological order.
     pub stages: Vec<JobStage>,
     /// Ordered component transfers actually observed.
@@ -364,8 +374,14 @@ impl JobSnapshot {
             return Err(InvalidJobSnapshot);
         }
         if self.handoffs.iter().any(|handoff| {
-            handoff.from == handoff.to || handoff.wait_duration_ns > handoff.duration_ns
-        }) {
+            handoff.from == handoff.to
+                || handoff.start_offset_ns > active
+                || handoff.wait_duration_ns > handoff.duration_ns
+        }) || self
+            .handoffs
+            .windows(2)
+            .any(|pair| pair[0].start_offset_ns > pair[1].start_offset_ns)
+        {
             return Err(InvalidJobSnapshot);
         }
         Ok(())
@@ -1004,6 +1020,9 @@ fn trace_spans(record: &Snapshot, sequence: u64, index: usize, exported_at: u128
         otel_int("graphforge.job.stage_count", job.stages.len() as u64),
         otel_int("graphforge.job.handoff_count", job.handoffs.len() as u64),
     ];
+    if let Some(failure) = job.failure {
+        root_attributes.push(otel_string("graphforge.failure", failure.as_str()));
+    }
     root_attributes.extend(otel_attributes(record.attributes));
     let events = job
         .handoffs
@@ -1020,7 +1039,7 @@ fn trace_spans(record: &Snapshot, sequence: u64, index: usize, exported_at: u128
             ];
             push_optional_int(&mut attributes, "graphforge.handoff.bytes", handoff.bytes);
             push_optional_int(&mut attributes, "graphforge.handoff.records", handoff.records);
-            json!({"timeUnixNano":active_start.to_string(),"name":"graphforge.component.handoff","attributes":attributes})
+            json!({"timeUnixNano":(active_start + u128::from(handoff.start_offset_ns)).to_string(),"name":"graphforge.component.handoff","attributes":attributes})
         })
         .collect::<Vec<_>>();
     let mut spans = vec![json!({
@@ -1055,6 +1074,11 @@ fn trace_spans(record: &Snapshot, sequence: u64, index: usize, exported_at: u128
             attributes.push(otel_string("graphforge.stage.wait_reason", reason.as_str()));
         }
         push_optional_int(&mut attributes, "graphforge.stage.bytes", stage.bytes);
+        push_optional_int(
+            &mut attributes,
+            "graphforge.stage.resumed_bytes",
+            stage.resumed_bytes,
+        );
         push_optional_int(&mut attributes, "graphforge.stage.records", stage.records);
         json!({
             "traceId": trace_id,
@@ -1384,6 +1408,7 @@ mod tests {
             started_ns: 125,
             finished_ns: 225,
             outcome: Outcome::Ok,
+            failure: None,
             stages: vec![
                 JobStage {
                     stage: Stage::Transfer,
@@ -1395,6 +1420,7 @@ mod tests {
                     wait_reason: Some(WaitReason::Network),
                     attempt: 2,
                     bytes: Some(4096),
+                    resumed_bytes: Some(1024),
                     records: None,
                     outcome: Outcome::Ok,
                 },
@@ -1408,11 +1434,13 @@ mod tests {
                     wait_reason: None,
                     attempt: 1,
                     bytes: Some(4096),
+                    resumed_bytes: None,
                     records: Some(8),
                     outcome: Outcome::Ok,
                 },
             ],
             handoffs: vec![ComponentHandoff {
+                start_offset_ns: 70,
                 from: ComponentKind::NetworkTransport,
                 to: ComponentKind::Storage,
                 kind: HandoffKind::Write,
@@ -1423,6 +1451,11 @@ mod tests {
             }],
         };
         job.validate().unwrap();
+        let mut reversed = job.clone();
+        let mut earlier = reversed.handoffs[0];
+        earlier.start_offset_ns = 60;
+        reversed.handoffs.push(earlier);
+        assert_eq!(reversed.validate(), Err(InvalidJobSnapshot));
         assert_eq!(
             job.queue_delay_ns() + job.active_duration_ns(),
             job.total_duration_ns()
@@ -1453,6 +1486,7 @@ mod tests {
             wait_reason: None,
             attempt: 1,
             bytes: None,
+            resumed_bytes: None,
             records: None,
             outcome: Outcome::Ok,
         };
@@ -1462,6 +1496,7 @@ mod tests {
             started_ns: 10,
             finished_ns: 50,
             outcome: Outcome::Ok,
+            failure: None,
             stages: vec![stage(ComponentKind::Executor, ComponentRole::Compute, 40)],
             handoffs: vec![],
         };
@@ -1471,6 +1506,7 @@ mod tests {
             started_ns: 10,
             finished_ns: 100,
             outcome: Outcome::Ok,
+            failure: None,
             stages: vec![stage(
                 ComponentKind::Publication,
                 ComponentRole::Persistence,
@@ -1496,6 +1532,7 @@ mod tests {
             started_ns: 0,
             finished_ns: 10,
             outcome: Outcome::Ok,
+            failure: None,
             stages: vec![JobStage {
                 stage: Stage::Execute,
                 component: ComponentKind::Executor,
@@ -1506,6 +1543,7 @@ mod tests {
                 wait_reason: None,
                 attempt: 1,
                 bytes: None,
+                resumed_bytes: None,
                 records: None,
                 outcome: Outcome::Ok,
             }],
@@ -1528,6 +1566,7 @@ mod tests {
                 started_ns: 20,
                 finished_ns: 70,
                 outcome: Outcome::Ok,
+                failure: None,
                 stages: vec![JobStage {
                     stage: Stage::Transfer,
                     component: ComponentKind::NetworkTransport,
@@ -1538,10 +1577,12 @@ mod tests {
                     wait_reason: Some(WaitReason::Network),
                     attempt: 1,
                     bytes: Some(128),
+                    resumed_bytes: Some(64),
                     records: Some(2),
                     outcome: Outcome::Ok,
                 }],
                 handoffs: vec![ComponentHandoff {
+                    start_offset_ns: 50,
                     from: ComponentKind::NetworkTransport,
                     to: ComponentKind::Storage,
                     kind: HandoffKind::Write,
@@ -1558,6 +1599,11 @@ mod tests {
             .as_array()
             .unwrap();
         assert_eq!(spans.len(), 2);
+        let stage_attributes = spans[1]["attributes"].as_array().unwrap();
+        assert!(stage_attributes.iter().any(|attribute| {
+            attribute["key"] == "graphforge.stage.resumed_bytes"
+                && attribute["value"]["intValue"] == "64"
+        }));
         assert_eq!(spans[0]["traceId"].as_str().unwrap().len(), 32);
         assert_eq!(spans[0]["spanId"].as_str().unwrap().len(), 16);
         assert_eq!(spans[1]["spanId"].as_str().unwrap().len(), 16);

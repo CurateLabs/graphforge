@@ -1351,7 +1351,7 @@ fn observed_cli_parity_report() -> Value {
             "cancellation":{"error_code":cancelled_json["error"]["code"],"before_modules":parse_json(&cancel_before.stdout),"after_modules":parse_json(&cancel_after.stdout)},
             "idempotent_replay":{"first_receipt":parse_json(&first.stdout),"replay_receipt":parse_json(&replay.stdout),"conflict_code":conflict_json["error"]["code"]},
             "no_partial_import_or_authority_change":{"before_entries":target_before,"after_entries":target_after,"authority_before":authority_before,"authority_after":authority_after},
-            "bounded_structured_diagnostics":{"outer_code":blocked_json["error"]["code"],"diagnostic_code":blocked_diagnostic["code"],"bounded":blocked_json["error"]["diagnostics"].as_array().unwrap().len() <= blocked_diagnostic["limit"].as_u64().unwrap() as usize,"path_free":!blocked_text.contains(&project.path().display().to_string())},
+            "bounded_structured_diagnostics":{"outer_code":blocked_json["error"]["code"],"diagnostic_code":blocked_diagnostic["code"],"bounded":u64::try_from(blocked_json["error"]["diagnostics"].as_array().unwrap().len()).unwrap() <= blocked_diagnostic["limit"].as_u64().unwrap(),"path_free":!blocked_text.contains(&project.path().display().to_string())},
             "deterministic_path_free_cli_json":{"first_serialized":String::from_utf8(listed.stdout).unwrap(),"second_serialized":String::from_utf8(listed_again.stdout).unwrap(),"forbidden_path":project.path().display().to_string()},
             "packaged_clean_install":{"package_origin":env!("CARGO_BIN_EXE_gf"),"operation":"ontology_modules","module_count":packaged_modules.as_array().unwrap().len()}
         }

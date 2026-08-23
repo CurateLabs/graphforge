@@ -2,6 +2,11 @@
 
 use clap::Args;
 use fs4::{FileExt, TryLockError};
+use graphforge_api::telemetry::{
+    ComponentHandoff, ComponentKind, ComponentRole, Failure, HandoffKind, JobFamily, JobSnapshot,
+    JobStage, OtlpConfig, Outcome, Stage, TelemetryConfig, TelemetryMode, TelemetryRuntime,
+    WaitReason,
+};
 use graphforge_api::{
     GraphForge, OperationId, PortableV2ImportRequest, PortableV2Limits, PortableV2Mode,
 };
@@ -15,6 +20,7 @@ use graphforge_storage::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
+use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::fmt::Write as _;
 use std::fs::{File, OpenOptions};
@@ -23,7 +29,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use ureq::unversioned::resolver::{DefaultResolver, ResolvedSocketAddrs, Resolver};
 use ureq::unversioned::transport::DefaultConnector;
 use url::Url;
@@ -39,6 +45,189 @@ pub(crate) struct CloneArgs {
     pub repository: String,
     /// New project directory; defaults to the repository name.
     pub destination: Option<PathBuf>,
+    /// Explicit local OTLP collector base URL. Clone telemetry is otherwise disabled.
+    #[arg(long)]
+    pub telemetry_endpoint: Option<String>,
+}
+
+struct CloneProfile<'a> {
+    runtime: &'a TelemetryRuntime,
+    started: Option<Instant>,
+    cursor_ns: u64,
+    stages: Vec<JobStage>,
+    handoffs: Vec<ComponentHandoff>,
+}
+
+impl<'a> CloneProfile<'a> {
+    fn new(runtime: &'a TelemetryRuntime) -> Self {
+        Self {
+            runtime,
+            started: None,
+            cursor_ns: 0,
+            stages: Vec::new(),
+            handoffs: Vec::new(),
+        }
+    }
+
+    fn handoff(
+        &mut self,
+        from: ComponentKind,
+        to: ComponentKind,
+        kind: HandoffKind,
+        bytes: Option<u64>,
+    ) {
+        self.handoffs.push(ComponentHandoff {
+            start_offset_ns: self.cursor_ns,
+            from,
+            to,
+            kind,
+            duration_ns: 0,
+            wait_duration_ns: 0,
+            bytes,
+            records: None,
+        });
+    }
+
+    fn stage<T>(
+        &mut self,
+        stage: Stage,
+        component: ComponentKind,
+        role: ComponentRole,
+        wait_reason: Option<WaitReason>,
+        attempt: u32,
+        operation: impl FnOnce() -> Result<(T, Option<u64>, Option<u64>), graphforge_api::GfError>,
+    ) -> Result<T, graphforge_api::GfError> {
+        let origin = *self.started.get_or_insert_with(Instant::now);
+        let operation_start_ns = u64::try_from(origin.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        if !self.stages.is_empty() && operation_start_ns > self.cursor_ns {
+            let duration_ns = operation_start_ns - self.cursor_ns;
+            self.stages.push(JobStage {
+                stage: Stage::Orchestration,
+                component: ComponentKind::Cli,
+                component_role: ComponentRole::Coordination,
+                start_offset_ns: self.cursor_ns,
+                duration_ns,
+                wait_duration_ns: 0,
+                wait_reason: None,
+                attempt: 1,
+                bytes: None,
+                resumed_bytes: None,
+                records: None,
+                outcome: Outcome::Ok,
+            });
+            self.cursor_ns = operation_start_ns;
+        }
+        let started = Instant::now();
+        let result = operation();
+        let duration_ns = u64::try_from(started.elapsed().as_nanos())
+            .unwrap_or(u64::MAX)
+            .max(1);
+        let (bytes, records) = result
+            .as_ref()
+            .map_or((None, None), |(_, bytes, records)| (*bytes, *records));
+        self.stages.push(JobStage {
+            stage,
+            component,
+            component_role: role,
+            start_offset_ns: self.cursor_ns,
+            duration_ns,
+            wait_duration_ns: wait_reason.map_or(0, |_| duration_ns),
+            wait_reason,
+            attempt,
+            bytes,
+            resumed_bytes: None,
+            records,
+            outcome: if result.is_ok() {
+                Outcome::Ok
+            } else {
+                Outcome::Failed
+            },
+        });
+        self.cursor_ns = self.cursor_ns.saturating_add(duration_ns);
+        result.map(|(value, _, _)| value)
+    }
+
+    fn finish(mut self, result: &Result<(), graphforge_api::GfError>) {
+        let elapsed_ns = self.started.map_or(0, |started| {
+            u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
+        });
+        if elapsed_ns > self.cursor_ns {
+            let duration_ns = elapsed_ns - self.cursor_ns;
+            self.stages.push(JobStage {
+                stage: Stage::Orchestration,
+                component: ComponentKind::Cli,
+                component_role: ComponentRole::Coordination,
+                start_offset_ns: self.cursor_ns,
+                duration_ns,
+                wait_duration_ns: 0,
+                wait_reason: None,
+                attempt: 1,
+                bytes: None,
+                resumed_bytes: None,
+                records: None,
+                outcome: if result.is_ok() {
+                    Outcome::Ok
+                } else {
+                    Outcome::Failed
+                },
+            });
+            self.cursor_ns = elapsed_ns;
+        }
+        let failure = result.as_ref().err().map(classify_failure);
+        let _ = self.runtime.record_job(JobSnapshot {
+            family: JobFamily::Clone,
+            enqueued_ns: 0,
+            started_ns: 0,
+            finished_ns: self.cursor_ns,
+            outcome: if result.is_ok() {
+                Outcome::Ok
+            } else {
+                Outcome::Failed
+            },
+            failure,
+            stages: self.stages,
+            handoffs: self.handoffs,
+        });
+    }
+}
+
+fn classify_failure(error: &graphforge_api::GfError) -> Failure {
+    let detail = match error {
+        graphforge_api::GfError::Validation(detail) | graphforge_api::GfError::Storage(detail) => {
+            detail.as_str()
+        }
+        _ => return Failure::Internal,
+    };
+    let code = detail.split_once(':').map_or(detail, |(code, _)| code);
+    match code {
+        "hub.network" | "hub.unsafe_location" => Failure::Network,
+        "hub.limit_exceeded" | "hub.package.limit_exceeded" => Failure::ResourceLimit,
+        "hub.invalid_identity"
+        | "hub.malformed_response"
+        | "hub.unsupported_future"
+        | "hub.missing_ref"
+        | "hub.missing_object"
+        | "hub.duplicate"
+        | "hub.destination_conflict"
+        | "hub.concurrent_clone"
+        | "hub.interrupted"
+        | "hub.package.cancelled"
+        | "hub.package.unsupported_future"
+        | "hub.package.incompatible"
+        | "hub.integrity"
+        | "hub.integrity_failure"
+        | "hub.package.repository_mismatch"
+        | "hub.package.immutable_version_mismatch"
+        | "hub.package.package_digest_mismatch"
+        | "hub.package.invalid_structure"
+        | "hub.package.invalid_path"
+        | "hub.package.duplicate_entry"
+        | "hub.package.digest_mismatch"
+        | "hub.package.concurrent_mutation" => Failure::InvalidInput,
+        "hub.package.io" => Failure::Storage,
+        _ if matches!(error, graphforge_api::GfError::Storage(_)) => Failure::Storage,
+        _ => Failure::Internal,
+    }
 }
 
 #[derive(Serialize)]
@@ -236,6 +425,7 @@ fn validate_url(url: &Url) -> Result<(), graphforge_api::GfError> {
     Ok(())
 }
 
+#[cfg(test)]
 fn fetch(
     transport: &dyn Transport,
     start: &Url,
@@ -243,9 +433,22 @@ fn fetch(
     if_range: Option<&str>,
     limit: u64,
 ) -> Result<HttpResponse, graphforge_api::GfError> {
+    let mut attempts = 0;
+    fetch_with_attempts(transport, start, range, if_range, limit, &mut attempts)
+}
+
+fn fetch_with_attempts(
+    transport: &dyn Transport,
+    start: &Url,
+    range: Option<u64>,
+    if_range: Option<&str>,
+    limit: u64,
+    attempts: &mut u32,
+) -> Result<HttpResponse, graphforge_api::GfError> {
     let mut url = start.clone();
     for hop in 0..=MAX_REDIRECTS {
         transport.validate(&url)?;
+        *attempts = attempts.saturating_add(1);
         let response = transport.get(&url, range, if_range, limit)?;
         if matches!(response.status, 301 | 302 | 303 | 307 | 308) {
             if hop == MAX_REDIRECTS {
@@ -541,11 +744,23 @@ fn read_resume(checkpoint: &Path) -> Result<Option<ResumeState>, graphforge_api:
     }
 }
 
+#[allow(clippy::too_many_lines)]
+#[cfg(test)]
 fn download(
     transport: &dyn Transport,
     object: &ObjectDescriptor,
     partial: &Path,
-) -> Result<u64, graphforge_api::GfError> {
+) -> Result<DownloadReport, graphforge_api::GfError> {
+    download_with_progress(transport, object, partial, &mut DownloadReport::default())
+}
+
+#[allow(clippy::too_many_lines)]
+fn download_with_progress(
+    transport: &dyn Transport,
+    object: &ObjectDescriptor,
+    partial: &Path,
+    progress: &mut DownloadReport,
+) -> Result<DownloadReport, graphforge_api::GfError> {
     let checkpoint = partial.with_extension("resume.json");
     if object.length > MAX_BUNDLE_BYTES {
         return Err(limit_error("portable bundle exceeds clone byte bound"));
@@ -581,13 +796,16 @@ fn download(
     if resumed > 0 && validator.is_none() {
         resumed = 0;
     }
+    progress.resumed_bytes = resumed;
+    let mut transferred = 0_u64;
     if resumed < object.length {
-        let mut response = fetch(
+        let mut response = fetch_with_attempts(
             transport,
             &url,
             (resumed > 0).then_some(resumed),
             validator,
             object.length.saturating_sub(resumed),
+            &mut progress.attempts,
         )?;
         let expected_range = format!("bytes {resumed}-{}/{}", object.length - 1, object.length);
         let append = resumed > 0
@@ -620,6 +838,8 @@ fn download(
             copied = copied
                 .checked_add(read as u64)
                 .ok_or_else(|| limit_error("object exceeds byte bound"))?;
+            transferred = copied;
+            progress.transferred_bytes = transferred;
             if copied > object.length.saturating_sub(resumed) {
                 return Err(limit_error("object exceeds declared size"));
             }
@@ -642,7 +862,18 @@ fn download(
         let _ = std::fs::remove_file(&checkpoint);
         return Err(validation("hub.integrity", "download digest mismatch"));
     }
-    Ok(resumed)
+    Ok(DownloadReport {
+        resumed_bytes: resumed,
+        transferred_bytes: transferred,
+        attempts: progress.attempts,
+    })
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct DownloadReport {
+    resumed_bytes: u64,
+    transferred_bytes: u64,
+    attempts: u32,
 }
 
 #[cfg(unix)]
@@ -707,69 +938,245 @@ pub(crate) fn run_clone(
     json: bool,
     output: &mut dyn Write,
 ) -> Result<(), graphforge_api::GfError> {
-    run_clone_with(&HttpTransport::new(), args, json, output)
+    let runtime = clone_telemetry_runtime(args.telemetry_endpoint.as_deref());
+    let result = run_clone_profiled(&HttpTransport::new(), args, json, output, &runtime);
+    let _ = runtime.shutdown();
+    result
 }
 
+fn clone_telemetry_runtime(endpoint: Option<&str>) -> TelemetryRuntime {
+    let Some(endpoint) = endpoint else {
+        return TelemetryRuntime::default();
+    };
+    TelemetryRuntime::new(TelemetryConfig {
+        mode: TelemetryMode::OtlpHttpJson,
+        otlp: Some(OtlpConfig {
+            endpoint: endpoint.to_owned(),
+            headers: BTreeMap::default(),
+        }),
+        ..TelemetryConfig::default()
+    })
+    .unwrap_or_default()
+}
+
+#[cfg(test)]
 fn run_clone_with(
     transport: &dyn Transport,
     args: CloneArgs,
     json: bool,
     output: &mut dyn Write,
 ) -> Result<(), graphforge_api::GfError> {
-    let (identity, base) = parse_input(&args.repository)?;
-    let destination = args
-        .destination
-        .unwrap_or_else(|| PathBuf::from(&identity.repository));
-    ensure_destination_absent(&destination)?;
-    let refs_bytes = read_bounded(
-        fetch(
-            transport,
-            &endpoint(&base, "refs"),
-            None,
-            None,
-            MAX_METADATA_BYTES as u64,
-        )?,
-        MAX_METADATA_BYTES,
+    run_clone_profiled(transport, args, json, output, &TelemetryRuntime::default())
+}
+
+fn run_clone_profiled(
+    transport: &dyn Transport,
+    args: CloneArgs,
+    json: bool,
+    output: &mut dyn Write,
+    runtime: &TelemetryRuntime,
+) -> Result<(), graphforge_api::GfError> {
+    run_clone_profiled_with_delays(
+        transport,
+        args,
+        json,
+        output,
+        runtime,
+        CloneDelays::default(),
+    )
+}
+
+#[derive(Clone, Copy, Default)]
+struct CloneDelays {
+    verification: Duration,
+    import: Duration,
+    reopen: Duration,
+}
+
+fn run_clone_profiled_with_delays(
+    transport: &dyn Transport,
+    args: CloneArgs,
+    json: bool,
+    output: &mut dyn Write,
+    runtime: &TelemetryRuntime,
+    delays: CloneDelays,
+) -> Result<(), graphforge_api::GfError> {
+    let mut profile = CloneProfile::new(runtime);
+    let result = run_clone_job(transport, args, &mut profile, delays)
+        .and_then(|result| write_clone_result(&result, json, output));
+    profile.finish(&result);
+    result
+}
+
+#[allow(clippy::too_many_lines)]
+fn run_clone_job(
+    transport: &dyn Transport,
+    args: CloneArgs,
+    profile: &mut CloneProfile<'_>,
+    delays: CloneDelays,
+) -> Result<CloneResult, graphforge_api::GfError> {
+    let (identity, base, destination) = profile.stage(
+        Stage::IdentityValidation,
+        ComponentKind::Cli,
+        ComponentRole::Facade,
+        None,
+        1,
+        || {
+            let (identity, base) = parse_input(&args.repository)?;
+            let destination = args
+                .destination
+                .unwrap_or_else(|| PathBuf::from(&identity.repository));
+            ensure_destination_absent(&destination)?;
+            Ok(((identity, base, destination), None, None))
+        },
     )?;
-    let manifest_bytes = read_bounded(
-        fetch(
-            transport,
-            &endpoint(&base, "manifest"),
-            None,
-            None,
-            MAX_METADATA_BYTES as u64,
-        )?,
-        MAX_METADATA_BYTES,
-    )?;
+    profile.handoff(
+        ComponentKind::Cli,
+        ComponentKind::NetworkTransport,
+        HandoffKind::Call,
+        None,
+    );
+    let mut refs_attempts = 0;
+    let refs_result = profile.stage(
+        Stage::RefsDiscovery,
+        ComponentKind::NetworkTransport,
+        ComponentRole::Transfer,
+        Some(WaitReason::Network),
+        1,
+        || {
+            let bytes = read_bounded(
+                fetch_with_attempts(
+                    transport,
+                    &endpoint(&base, "refs"),
+                    None,
+                    None,
+                    MAX_METADATA_BYTES as u64,
+                    &mut refs_attempts,
+                )?,
+                MAX_METADATA_BYTES,
+            )?;
+            let length = bytes.len() as u64;
+            Ok((bytes, Some(length), None))
+        },
+    );
+    if let Some(stage) = profile.stages.last_mut() {
+        stage.attempt = refs_attempts.max(1);
+    }
+    let refs_bytes = refs_result?;
+    let mut manifest_attempts = 0;
+    let manifest_result = profile.stage(
+        Stage::ManifestDiscovery,
+        ComponentKind::NetworkTransport,
+        ComponentRole::Transfer,
+        Some(WaitReason::Network),
+        1,
+        || {
+            let bytes = read_bounded(
+                fetch_with_attempts(
+                    transport,
+                    &endpoint(&base, "manifest"),
+                    None,
+                    None,
+                    MAX_METADATA_BYTES as u64,
+                    &mut manifest_attempts,
+                )?,
+                MAX_METADATA_BYTES,
+            )?;
+            let length = bytes.len() as u64;
+            Ok((bytes, Some(length), None))
+        },
+    );
+    if let Some(stage) = profile.stages.last_mut() {
+        stage.attempt = manifest_attempts.max(1);
+    }
+    let manifest_bytes = manifest_result?;
     let limits = DiscoveryLimits {
         max_response_bytes: MAX_METADATA_BYTES,
         max_cumulative_object_bytes: MAX_BUNDLE_BYTES,
         ..DiscoveryLimits::default()
     };
-    let refs = RefSet::from_json(&refs_bytes, limits).map_err(|error| protocol_error(&error))?;
-    let manifest = DiscoveryManifest::from_json(&manifest_bytes, limits)
-        .map_err(|error| protocol_error(&error))?;
-    if refs.repository != identity || manifest.repository != identity {
-        return Err(validation("hub.integrity", "discovery repository mismatch"));
-    }
-    refs.validate_manifest(&manifest)
-        .map_err(|error| protocol_error(&error))?;
+    profile.handoff(
+        ComponentKind::NetworkTransport,
+        ComponentKind::Discovery,
+        HandoffKind::Return,
+        Some((refs_bytes.len() + manifest_bytes.len()) as u64),
+    );
+    let (manifest, staging) = profile.stage(
+        Stage::ManifestDiscovery,
+        ComponentKind::Discovery,
+        ComponentRole::Verification,
+        None,
+        1,
+        || {
+            let refs =
+                RefSet::from_json(&refs_bytes, limits).map_err(|error| protocol_error(&error))?;
+            let manifest = DiscoveryManifest::from_json(&manifest_bytes, limits)
+                .map_err(|error| protocol_error(&error))?;
+            if refs.repository != identity || manifest.repository != identity {
+                return Err(validation("hub.integrity", "discovery repository mismatch"));
+            }
+            refs.validate_manifest(&manifest)
+                .map_err(|error| protocol_error(&error))?;
+            let staging = acquire_staging(&destination)?;
+            Ok(((manifest, staging), None, None))
+        },
+    )?;
     let object = select_bundle(&manifest)?;
-    let staging = acquire_staging(&destination)?;
     let partial = staging.partial.clone();
-    let resumed_bytes = download(transport, object, &partial)?;
+    profile.handoff(
+        ComponentKind::Discovery,
+        ComponentKind::NetworkTransport,
+        HandoffKind::Call,
+        None,
+    );
+    let mut download_progress = DownloadReport::default();
+    let download_result = profile.stage(
+        Stage::Download,
+        ComponentKind::NetworkTransport,
+        ComponentRole::Transfer,
+        Some(WaitReason::Network),
+        1,
+        || {
+            let report =
+                download_with_progress(transport, object, &partial, &mut download_progress)?;
+            Ok((report, Some(report.transferred_bytes), None))
+        },
+    );
+    if let Some(stage) = profile.stages.last_mut() {
+        stage.attempt = download_progress.attempts.max(1);
+        stage.bytes = Some(download_progress.transferred_bytes);
+        stage.resumed_bytes = Some(download_progress.resumed_bytes);
+    }
+    let download = download_result?;
     let portable_limits = PortableV2Limits::default();
-    let verified = verify_discovered_portable_v2(&DiscoveryPortableV2Request {
-        manifest_json: &manifest_bytes,
-        refs_json: &refs_bytes,
-        expected_repository: &identity,
-        package: &partial,
-        discovery_limits: limits,
-        portable_limits,
-        mode: PortableV2Mode::Full,
-        cancelled: None,
-    })
-    .map_err(portable_error)?;
+    profile.handoff(
+        ComponentKind::NetworkTransport,
+        ComponentKind::PortableVerify,
+        HandoffKind::Transfer,
+        Some(download.resumed_bytes + download.transferred_bytes),
+    );
+    let verified = profile.stage(
+        Stage::PortableVerification,
+        ComponentKind::PortableVerify,
+        ComponentRole::Verification,
+        None,
+        1,
+        || {
+            std::thread::sleep(delays.verification);
+            verify_discovered_portable_v2(&DiscoveryPortableV2Request {
+                manifest_json: &manifest_bytes,
+                refs_json: &refs_bytes,
+                expected_repository: &identity,
+                package: &partial,
+                discovery_limits: limits,
+                portable_limits,
+                mode: PortableV2Mode::Full,
+                cancelled: None,
+            })
+            .map_err(portable_error)
+            .map(|verified| (verified, Some(object.length), None))
+        },
+    )?;
     let operation_id = OperationId(uuid::Uuid::new_v5(
         &uuid::Uuid::NAMESPACE_URL,
         format!(
@@ -779,30 +1186,114 @@ fn run_clone_with(
         )
         .as_bytes(),
     ));
-    let imported = GraphForge::import_portable_v2(
-        &destination,
-        &PortableV2ImportRequest {
-            input: partial.clone(),
-            operation_id,
-            limits: portable_limits,
-        },
+    profile.handoff(
+        ComponentKind::PortableVerify,
+        ComponentKind::Api,
+        HandoffKind::Call,
+        Some(object.length),
+    );
+    profile.handoff(
+        ComponentKind::Api,
+        ComponentKind::PortableImport,
+        HandoffKind::Call,
+        Some(object.length),
+    );
+    let imported = profile.stage(
+        Stage::AtomicImport,
+        ComponentKind::PortableImport,
+        ComponentRole::Persistence,
         None,
-    )
-    .map_err(|_| validation("hub.integrity", "portable project import failed"))?;
+        1,
+        || {
+            std::thread::sleep(delays.import);
+            GraphForge::import_portable_v2(
+                &destination,
+                &PortableV2ImportRequest {
+                    input: partial.clone(),
+                    operation_id,
+                    limits: portable_limits,
+                },
+                None,
+            )
+            .map_err(|_| validation("hub.integrity", "portable project import failed"))
+            .map(|imported| (imported, Some(object.length), None))
+        },
+    )?;
+    profile.handoff(
+        ComponentKind::PortableImport,
+        ComponentKind::Storage,
+        HandoffKind::Write,
+        Some(object.length),
+    );
+    profile.handoff(
+        ComponentKind::Storage,
+        ComponentKind::Publication,
+        HandoffKind::Write,
+        Some(object.length),
+    );
+    profile.handoff(
+        ComponentKind::Publication,
+        ComponentKind::Api,
+        HandoffKind::Return,
+        None,
+    );
+    profile.handoff(
+        ComponentKind::Api,
+        ComponentKind::Recovery,
+        HandoffKind::Return,
+        None,
+    );
+    profile.stage(
+        Stage::Reopen,
+        ComponentKind::Recovery,
+        ComponentRole::Verification,
+        None,
+        1,
+        || {
+            std::thread::sleep(delays.reopen);
+            let destination = destination.to_str().ok_or_else(|| {
+                validation("hub.destination_conflict", "destination must be UTF-8")
+            })?;
+            GraphForge::new(Some(destination)).map(|graph| (graph, None, None))
+        },
+    )?;
+    profile.handoff(
+        ComponentKind::Recovery,
+        ComponentKind::Storage,
+        HandoffKind::Call,
+        None,
+    );
     let staging_root = staging.root.clone();
     drop(staging);
     // The destination is already atomically published; cleanup cannot turn
     // success into a reported failure.
-    let _ = std::fs::remove_dir_all(staging_root);
-    let result = CloneResult {
+    profile.stage(
+        Stage::Cleanup,
+        ComponentKind::Storage,
+        ComponentRole::Persistence,
+        None,
+        1,
+        || {
+            let _ = std::fs::remove_dir_all(staging_root);
+            Ok(((), None, None))
+        },
+    )?;
+    Ok(CloneResult {
         contract: "graphforge-hub-clone/1",
         repository: canonical_name(&identity),
         destination: destination.display().to_string(),
         immutable_version: verified.immutable_version,
         package_digest: imported.package_digest,
         generation_uuid: imported.generation_uuid.to_string(),
-        resumed_bytes,
-    };
+        resumed_bytes: download.resumed_bytes,
+    })
+}
+
+fn write_clone_result(
+    result: &CloneResult,
+    json: bool,
+    output: &mut dyn Write,
+) -> Result<(), graphforge_api::GfError> {
     if json {
         serde_json::to_writer(&mut *output, &result)
             .map_err(|e| graphforge_api::GfError::Execution(e.to_string()))?;
@@ -916,6 +1407,12 @@ mod tests {
         fn remaining(&self) -> usize {
             self.0.lock().unwrap().len()
         }
+
+        fn replace_last(&self, response: HttpResponse) {
+            let mut responses = self.0.lock().unwrap();
+            responses.pop_back().unwrap();
+            responses.push_back(response);
+        }
     }
 
     impl Transport for Scripted {
@@ -927,6 +1424,34 @@ mod tests {
             _limit: u64,
         ) -> Result<HttpResponse, graphforge_api::GfError> {
             Ok(self.0.lock().unwrap().pop_front().unwrap())
+        }
+    }
+
+    struct DelayedTransport {
+        inner: Scripted,
+        discovery: Duration,
+        download: Duration,
+    }
+
+    impl Transport for DelayedTransport {
+        fn get(
+            &self,
+            url: &Url,
+            range: Option<u64>,
+            if_range: Option<&str>,
+            limit: u64,
+        ) -> Result<HttpResponse, graphforge_api::GfError> {
+            let delay = if url.path().contains("/.gf/objects/")
+                || std::path::Path::new(url.path())
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("gfpb"))
+            {
+                self.download
+            } else {
+                self.discovery
+            };
+            std::thread::sleep(delay);
+            self.inner.get(url, range, if_range, limit)
         }
     }
 
@@ -1039,9 +1564,8 @@ mod tests {
         redirect.location = Some("https://127.0.0.1/private".into());
         let transport = Scripted::new(vec![redirect, response(200, None, b"secret")]);
         let start = Url::parse("https://hub.example/repository/.gf/manifest").unwrap();
-        let error = match fetch(&transport, &start, None, None, 1024) {
-            Ok(_) => panic!("private redirect unexpectedly succeeded"),
-            Err(error) => error,
+        let Err(error) = fetch(&transport, &start, None, None, 1024) else {
+            panic!("private redirect unexpectedly succeeded");
         };
         assert!(error.to_string().contains("hub.unsafe_location"));
         assert_eq!(
@@ -1049,6 +1573,19 @@ mod tests {
             1,
             "private target was never requested"
         );
+    }
+
+    #[test]
+    fn redirect_attempts_count_each_transport_request() {
+        let mut redirect = response(302, None, b"");
+        redirect.location = Some("https://objects.example/final".into());
+        let transport = Scripted::new(vec![redirect, response(200, None, b"ok")]);
+        let start = Url::parse("https://hub.example/start").unwrap();
+        let mut attempts = 0;
+        let response =
+            fetch_with_attempts(&transport, &start, None, None, 1024, &mut attempts).unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(attempts, 2);
     }
 
     #[test]
@@ -1062,7 +1599,14 @@ mod tests {
         assert!(error.to_string().contains("hub.interrupted"));
         let range = format!("bytes 8-{}/{}", bytes.len() - 1, bytes.len());
         let second = Scripted::new(vec![response(206, Some(&range), &bytes[8..])]);
-        assert_eq!(download(&second, &descriptor, &destination).unwrap(), 8);
+        assert_eq!(
+            download(&second, &descriptor, &destination).unwrap(),
+            DownloadReport {
+                resumed_bytes: 8,
+                transferred_bytes: (bytes.len() - 8) as u64,
+                attempts: 1,
+            }
+        );
     }
 
     #[test]
@@ -1074,7 +1618,14 @@ mod tests {
         std::fs::write(&partial, &bytes[..8]).unwrap();
         std::fs::write(partial.with_extension("resume.json"), b"{torn").unwrap();
         let transport = Scripted::new(vec![response(200, None, bytes)]);
-        assert_eq!(download(&transport, &descriptor, &partial).unwrap(), 0);
+        assert_eq!(
+            download(&transport, &descriptor, &partial).unwrap(),
+            DownloadReport {
+                resumed_bytes: 0,
+                transferred_bytes: bytes.len() as u64,
+                attempts: 1,
+            }
+        );
         assert_eq!(std::fs::read(partial).unwrap(), bytes);
     }
 
@@ -1151,7 +1702,14 @@ mod tests {
         let destination = root.path().join("project");
         let transport = LoopbackTransport::new();
         assert!(download(&transport, &descriptor, &destination).is_err());
-        assert_eq!(download(&transport, &descriptor, &destination).unwrap(), 8);
+        assert_eq!(
+            download(&transport, &descriptor, &destination).unwrap(),
+            DownloadReport {
+                resumed_bytes: 8,
+                transferred_bytes: (bytes.len() - 8) as u64,
+                attempts: 1,
+            }
+        );
         server.join().unwrap();
     }
 
@@ -1200,6 +1758,7 @@ mod tests {
             CloneArgs {
                 repository: "openalex/openalex".into(),
                 destination: Some(destination),
+                telemetry_endpoint: None,
             },
             false,
             &mut Vec::new(),
@@ -1289,6 +1848,7 @@ mod tests {
             CloneArgs {
                 repository: "openalex/openalex".into(),
                 destination: Some(root.path().join("project")),
+                telemetry_endpoint: None,
             },
             true,
             &mut Vec::new(),
@@ -1332,6 +1892,167 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_clone_retains_resumed_and_transferred_bytes_once() {
+        let bundle = b"0123456789abcdef";
+        let package_digest = format!("sha256:{}", "b".repeat(64));
+        let transport = clone_script(bundle, &package_digest);
+        let range = format!("bytes 8-{}/{}", bundle.len() - 1, bundle.len());
+        transport.replace_last(response(206, Some(&range), &bundle[8..12]));
+        let root = tempfile::tempdir().unwrap();
+        let destination = root.path().join("clone");
+        let staging = staging_path(&destination).unwrap();
+        std::fs::create_dir(&staging).unwrap();
+        let partial = staging.join("package.part");
+        std::fs::write(&partial, &bundle[..8]).unwrap();
+        let digest = hash_reader(&mut std::io::Cursor::new(bundle)).unwrap();
+        std::fs::write(
+            partial.with_extension("resume.json"),
+            serde_json::to_vec(&ResumeState {
+                digest,
+                length: bundle.len() as u64,
+                location: "https://objects.example/project.gfpb".into(),
+                etag: "\"fixture-1\"".into(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let runtime = TelemetryRuntime::new(TelemetryConfig {
+            mode: TelemetryMode::InMemory,
+            ..TelemetryConfig::default()
+        })
+        .unwrap();
+        let error = run_clone_profiled(
+            &transport,
+            CloneArgs {
+                repository: "openalex/openalex".into(),
+                destination: Some(destination),
+                telemetry_endpoint: None,
+            },
+            true,
+            &mut Vec::new(),
+            &runtime,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("hub.interrupted"));
+        assert_eq!(
+            runtime.force_flush(),
+            graphforge_api::telemetry::LifecycleStatus::Complete
+        );
+        let snapshots = runtime.snapshots();
+        assert_eq!(snapshots.len(), 1);
+        let job = snapshots[0].job.as_ref().unwrap();
+        assert_eq!(job.outcome, Outcome::Failed);
+        let stage = job
+            .stages
+            .iter()
+            .find(|stage| stage.stage == Stage::Download)
+            .unwrap();
+        assert_eq!(stage.resumed_bytes, Some(8));
+        assert_eq!(stage.bytes, Some(4));
+        assert_eq!(stage.attempt, 1);
+        assert!(!job.handoffs.iter().any(|handoff| {
+            matches!(
+                handoff.to,
+                ComponentKind::PortableVerify | ComponentKind::PortableImport
+            )
+        }));
+    }
+
+    #[test]
+    fn disabled_and_failed_exporters_do_not_change_clone_stage_results() {
+        let execute = |runtime: &TelemetryRuntime| {
+            let mut profile = CloneProfile::new(runtime);
+            let value = profile
+                .stage(
+                    Stage::IdentityValidation,
+                    ComponentKind::Cli,
+                    ComponentRole::Facade,
+                    None,
+                    1,
+                    || Ok((42_u8, None, None)),
+                )
+                .unwrap();
+            profile.finish(&Ok(()));
+            value
+        };
+        let disabled = TelemetryRuntime::default();
+        let failed = TelemetryRuntime::new(TelemetryConfig {
+            mode: TelemetryMode::OtlpHttpJson,
+            export_timeout: Duration::from_millis(5),
+            lifecycle_timeout: Duration::from_millis(20),
+            max_retries: 0,
+            otlp: Some(OtlpConfig {
+                endpoint: "http://127.0.0.1:1/".into(),
+                headers: BTreeMap::default(),
+            }),
+            ..TelemetryConfig::default()
+        })
+        .unwrap();
+        assert_eq!(execute(&disabled), execute(&failed));
+        assert!(matches!(
+            failed.force_flush(),
+            graphforge_api::telemetry::LifecycleStatus::ExportFailed
+                | graphforge_api::telemetry::LifecycleStatus::TimedOut
+        ));
+    }
+
+    #[test]
+    fn invalid_clone_emits_one_normalized_terminal_without_identity() {
+        let runtime = TelemetryRuntime::new(TelemetryConfig {
+            mode: TelemetryMode::InMemory,
+            ..TelemetryConfig::default()
+        })
+        .unwrap();
+        let canary = "not/a/valid/repository-secret-canary";
+        let error = run_clone_profiled(
+            &Scripted::new(vec![]),
+            CloneArgs {
+                repository: canary.into(),
+                destination: None,
+                telemetry_endpoint: None,
+            },
+            true,
+            &mut Vec::new(),
+            &runtime,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("hub.invalid_identity"));
+        assert_eq!(
+            runtime.force_flush(),
+            graphforge_api::telemetry::LifecycleStatus::Complete
+        );
+        let snapshots = runtime.snapshots();
+        assert_eq!(snapshots.len(), 1);
+        let job = snapshots[0].job.as_ref().unwrap();
+        assert_eq!(job.outcome, Outcome::Failed);
+        assert_eq!(job.failure, Some(Failure::InvalidInput));
+        assert_eq!(job.stages[0].stage, Stage::IdentityValidation);
+        assert!(!serde_json::to_string(&snapshots).unwrap().contains(canary));
+    }
+
+    #[test]
+    fn hub_failure_codes_map_through_a_finite_matrix() {
+        for (code, expected) in [
+            ("hub.invalid_identity", Failure::InvalidInput),
+            ("hub.destination_conflict", Failure::InvalidInput),
+            ("hub.unsupported_future", Failure::InvalidInput),
+            ("hub.integrity", Failure::InvalidInput),
+            ("hub.limit_exceeded", Failure::ResourceLimit),
+            ("hub.unsafe_location", Failure::Network),
+            ("hub.network", Failure::Network),
+            ("hub.package.io", Failure::Storage),
+        ] {
+            assert_eq!(classify_failure(&validation(code, "redacted")), expected);
+        }
+        assert_eq!(
+            classify_failure(&validation("hub.unknown", "redacted")),
+            Failure::Internal
+        );
+        assert_eq!(classify_failure(&storage("redacted")), Failure::Storage);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
     fn both_identity_forms_import_and_reopen_the_same_real_project() {
         let root = tempfile::tempdir().unwrap();
         let source = root.path().join("source");
@@ -1359,29 +2080,176 @@ mod tests {
         )
         .unwrap();
 
+        let mut fail_open_results = Vec::new();
+        let mut fail_open_elapsed = Vec::new();
+        let mut delayed_jobs = Vec::new();
         for (index, input) in [
             "openalex/openalex",
             "https://graphforge.sh/openalex/openalex",
+            "openalex/openalex",
+            "openalex/openalex",
+            "openalex/openalex",
+            "openalex/openalex",
+            "openalex/openalex",
+            "openalex/openalex",
+            "openalex/openalex",
         ]
         .into_iter()
         .enumerate()
         {
             let destination = root.path().join(format!("clone-{index}"));
             let mut output = Vec::new();
-            run_clone_with(
-                &clone_script(&bundle, &report.package_digest),
+            let runtime = match index {
+                2 => TelemetryRuntime::default(),
+                3 => TelemetryRuntime::new(TelemetryConfig {
+                    mode: TelemetryMode::OtlpHttpJson,
+                    export_timeout: Duration::from_millis(5),
+                    lifecycle_timeout: Duration::from_millis(20),
+                    max_retries: 0,
+                    otlp: Some(OtlpConfig {
+                        endpoint: "http://127.0.0.1:1/".into(),
+                        headers: BTreeMap::default(),
+                    }),
+                    ..TelemetryConfig::default()
+                })
+                .unwrap(),
+                _ => TelemetryRuntime::new(TelemetryConfig {
+                    mode: TelemetryMode::InMemory,
+                    ..TelemetryConfig::default()
+                })
+                .unwrap(),
+            };
+            let transport = DelayedTransport {
+                inner: clone_script(&bundle, &report.package_digest),
+                discovery: if index == 4 {
+                    Duration::from_secs(2)
+                } else {
+                    Duration::ZERO
+                },
+                download: if index == 5 {
+                    Duration::from_secs(2)
+                } else {
+                    Duration::ZERO
+                },
+            };
+            let delays = CloneDelays {
+                verification: if index == 6 {
+                    Duration::from_secs(2)
+                } else {
+                    Duration::ZERO
+                },
+                import: if index == 7 {
+                    Duration::from_secs(2)
+                } else {
+                    Duration::ZERO
+                },
+                reopen: if index == 8 {
+                    Duration::from_secs(2)
+                } else {
+                    Duration::ZERO
+                },
+            };
+            let clone_started = Instant::now();
+            run_clone_profiled_with_delays(
+                &transport,
                 CloneArgs {
                     repository: input.into(),
                     destination: Some(destination.clone()),
+                    telemetry_endpoint: None,
                 },
                 true,
                 &mut output,
+                &runtime,
+                delays,
             )
             .unwrap();
-            let result: serde_json::Value = serde_json::from_slice(&output).unwrap();
+            let clone_elapsed = clone_started.elapsed();
+            let lifecycle = runtime.force_flush();
+            if !(2..4).contains(&index) {
+                assert_eq!(
+                    lifecycle,
+                    graphforge_api::telemetry::LifecycleStatus::Complete
+                );
+            }
+            let snapshots = runtime.snapshots();
+            if !(2..4).contains(&index) {
+                assert_eq!(snapshots.len(), 1);
+                let job = snapshots[0].job.as_ref().unwrap();
+                assert_eq!(job.family, JobFamily::Clone);
+                assert_eq!(job.outcome, Outcome::Ok);
+                assert_eq!(job.stages.first().unwrap().stage, Stage::IdentityValidation);
+                assert!(job.stages.iter().any(|stage| stage.stage == Stage::Cleanup));
+                assert!(job.stages.iter().any(|stage| stage.stage == Stage::Reopen));
+                assert!(
+                    job.handoffs
+                        .windows(2)
+                        .all(|pair| { pair[0].start_offset_ns <= pair[1].start_offset_ns })
+                );
+                assert!(job.handoffs.iter().any(|handoff| {
+                    handoff.from == ComponentKind::NetworkTransport
+                        && handoff.to == ComponentKind::PortableVerify
+                        && handoff.kind == HandoffKind::Transfer
+                        && handoff.bytes == Some(bundle.len() as u64)
+                }));
+                let path: Vec<_> = job
+                    .handoffs
+                    .iter()
+                    .map(|handoff| (handoff.from, handoff.to))
+                    .collect();
+                assert_eq!(
+                    path,
+                    vec![
+                        (ComponentKind::Cli, ComponentKind::NetworkTransport),
+                        (ComponentKind::NetworkTransport, ComponentKind::Discovery),
+                        (ComponentKind::Discovery, ComponentKind::NetworkTransport),
+                        (
+                            ComponentKind::NetworkTransport,
+                            ComponentKind::PortableVerify
+                        ),
+                        (ComponentKind::PortableVerify, ComponentKind::Api),
+                        (ComponentKind::Api, ComponentKind::PortableImport),
+                        (ComponentKind::PortableImport, ComponentKind::Storage),
+                        (ComponentKind::Storage, ComponentKind::Publication),
+                        (ComponentKind::Publication, ComponentKind::Api),
+                        (ComponentKind::Api, ComponentKind::Recovery),
+                        (ComponentKind::Recovery, ComponentKind::Storage),
+                    ]
+                );
+                if index >= 4 {
+                    delayed_jobs.push(job.clone());
+                }
+            }
+            let serialized = serde_json::to_string(&snapshots).unwrap();
+            for canary in [input, destination.to_str().unwrap(), &report.package_digest] {
+                assert!(!serialized.contains(canary));
+            }
+            let mut result: serde_json::Value = serde_json::from_slice(&output).unwrap();
             assert_eq!(result["contract"], "graphforge-hub-clone/1");
             assert_eq!(result["package_digest"], report.package_digest);
             GraphForge::new(destination.to_str()).expect("cloned project reopens through facade");
+            if (2..=3).contains(&index) {
+                result.as_object_mut().unwrap().remove("destination");
+                fail_open_results.push(result);
+                fail_open_elapsed.push(clone_elapsed);
+            }
+        }
+        assert_eq!(fail_open_results[0], fail_open_results[1]);
+        assert!(fail_open_elapsed[1] <= fail_open_elapsed[0] + Duration::from_secs(1));
+        assert_eq!(delayed_jobs.len(), 5);
+        for (job, expected) in delayed_jobs.iter().zip([
+            ComponentKind::NetworkTransport,
+            ComponentKind::NetworkTransport,
+            ComponentKind::PortableVerify,
+            ComponentKind::PortableImport,
+            ComponentKind::Recovery,
+        ]) {
+            let dominant = job
+                .stages
+                .iter()
+                .filter(|stage| stage.stage != Stage::Orchestration)
+                .max_by_key(|stage| stage.duration_ns)
+                .unwrap();
+            assert_eq!(dominant.component, expected);
         }
     }
 }
