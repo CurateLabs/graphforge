@@ -2471,6 +2471,22 @@ fn push_filter_through_expands(
     predicate: DfExpr,
     input: LogicalPlan,
 ) -> Result<LogicalPlan, LoweringError> {
+    // Fixed-hop relationship-isomorphism is itself a Filter between adjacent
+    // Expand nodes. Deterministic filters commute, so let the later source
+    // predicate cross it; a volatile filter is an evaluation boundary.
+    if let LogicalPlan::Filter(existing) = &input {
+        if predicate.is_volatile() || existing.predicate.is_volatile() {
+            return LogicalPlanBuilder::from(input)
+                .filter(predicate)
+                .and_then(LogicalPlanBuilder::build)
+                .map_unsupported_expr();
+        }
+        let rewritten = push_filter_through_expands(predicate, (*existing.input).clone())?;
+        return LogicalPlanBuilder::from(rewritten)
+            .filter(existing.predicate.clone())
+            .and_then(LogicalPlanBuilder::build)
+            .map_unsupported_expr();
+    }
     let LogicalPlan::Extension(extension) = input else {
         return LogicalPlanBuilder::from(input)
             .filter(predicate)
@@ -6274,14 +6290,21 @@ mod tests {
                 min_hops: 1,
                 max_hops: Some(1),
             })
+            .push_op(GraphOp::RelationshipUnique {
+                edge: VarId(3),
+                prior_edges: vec![VarId(1)],
+            })
             .build();
         let lowerer =
             GraphPlanLowerer::new_with_dir(Some(&catalog), None, tmp.path(), OntologyMode::Strict);
         let lowered = lowerer.lower_plan(&plan).unwrap();
         let rewritten = push_filter_through_expands(uuid_filter(0), lowered).unwrap();
 
-        let DfLogicalPlan::Extension(second) = rewritten else {
-            panic!("source filter must move below the second Expand");
+        let DfLogicalPlan::Filter(relationship_unique) = rewritten else {
+            panic!("relationship uniqueness must remain above the second Expand");
+        };
+        let DfLogicalPlan::Extension(second) = relationship_unique.input.as_ref() else {
+            panic!("source filter must cross relationship uniqueness");
         };
         let DfLogicalPlan::Extension(first) = second.node.inputs()[0] else {
             panic!("source filter must move below the first Expand");
