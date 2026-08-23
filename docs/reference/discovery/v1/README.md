@@ -24,3 +24,6 @@ adapter. It must not transcribe the schema as hand-written TypeScript protocol
 types or reimplement validation semantics. Rust remains the authority; generated
 TypeScript declarations, if needed, must be treated as disposable build output
 derived from these versioned artifacts.
+
+See [portable-v2-integration.md](portable-v2-integration.md) for the normative
+validation order and the boundary between discovery and package verification.

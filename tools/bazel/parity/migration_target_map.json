@@ -1,7 +1,7 @@
 {
   "schema": "graphforge.bazel-migration-target-map.v1",
   "issue": 6,
-  "cargo_target_count": 115,
+  "cargo_target_count": 116,
   "targets": [
     {
       "package": "graphforge-api",
@@ -1092,6 +1092,16 @@
       "bazel_label": "//crates/graphforge-storage:adjacency_delta_write",
       "exception_id": null,
       "notes": "#8"
+    },
+    {
+      "package": "graphforge-storage",
+      "target": "discovery_portable_v2",
+      "class": "integration-test",
+      "source": "crates/graphforge-storage/tests/discovery_portable_v2.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-storage:discovery_portable_v2",
+      "exception_id": null,
+      "notes": "#909; discovery reference to storage verifier boundary"
     },
     {
       "package": "graphforge-storage",

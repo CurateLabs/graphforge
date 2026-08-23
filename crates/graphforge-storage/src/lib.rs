@@ -161,6 +161,12 @@ pub use project_portable_v2::{
     materialize_verified_portable_v2, verify_portable_v2,
 };
 
+pub mod discovery_portable_v2;
+pub use discovery_portable_v2::{
+    DiscoveredPortableV2, DiscoveryPortableV2Error, DiscoveryPortableV2Mismatch,
+    DiscoveryPortableV2Request, verify_discovered_portable_v2,
+};
+
 mod project_portable_v2_selection;
 pub use project_portable_v2_selection::{
     PortableV2ParticipantId, PortableV2ProjectedSelectionEntry, PortableV2SelectionEntry,
