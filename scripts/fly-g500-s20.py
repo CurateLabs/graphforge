@@ -42,20 +42,21 @@ PHASES = [
     "drill_interrupted_finalization",
 ]
 # Phase ceilings are operational stop conditions, not performance pass criteria.
-# They include measured Fly S20 headroom while ensuring a bad workload or plan
-# cannot consume the entire four-hour certification envelope without a useful
-# typed diagnosis. The outer hard TTL remains authoritative.
+# They include measured Fly S20 headroom and observed shared-host I/O variance
+# while ensuring a bad workload or plan cannot consume the entire four-hour
+# certification envelope without a useful typed diagnosis. The outer hard TTL
+# remains authoritative.
 PHASE_TIMEOUT_S = {
     "preflight": 15 * 60,
     "generate": 15 * 60,
-    "ingest": 60 * 60,
+    "ingest": 90 * 60,
     "csr": 20 * 60,
     "source_reopen": 15 * 60,
     "source_query_1hop": 15 * 60,
     "source_query_2hop": 15 * 60,
     "export": 45 * 60,
     "verify": 30 * 60,
-    "import": 60 * 60,
+    "import": 90 * 60,
     "imported_reopen": 15 * 60,
     "imported_query_1hop": 15 * 60,
     "imported_query_2hop": 15 * 60,

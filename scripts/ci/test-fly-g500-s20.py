@@ -169,7 +169,8 @@ def main() -> None:
         assert plan["mode"] == "dry-run" and plan["hard_ttl_s"] == 16200
         assert plan["volume_gb"] == 50 and plan["public_services"] == 0
         assert plan["heartbeat_interval_s"] == 60
-        assert plan["phase_timeout_s"]["ingest"] == 3600
+        assert plan["phase_timeout_s"]["ingest"] == 5400
+        assert plan["phase_timeout_s"]["import"] == 5400
         assert plan["phase_timeout_s"]["source_query_2hop"] == 900
 
     source = CONTROLLER.read_text()

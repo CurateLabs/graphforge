@@ -237,6 +237,14 @@ runaway spend and silence. They do not turn a partial lifecycle into a pass:
 success still requires the exact 17-phase journal and equivalent source/import
 evidence described above. The dry-run plan prints the complete timeout table.
 
+Ingest and clean import each have a 90-minute ceiling. A Fly S20 ingest remained
+responsive and made progress but crossed the former 60-minute boundary by 18
+seconds, with no OOM or disk failure; the Machine, volume, and app then tore down
+cleanly. The additional allowance accounts for empirically observed shared-host
+storage-I/O variance. It does not weaken correctness: the 4h30 hard run limit,
+all other phase ceilings, typed failure handling, exact phase sequence, and
+source/import equivalence requirements remain unchanged.
+
 ```bash
 python3 scripts/ci/test-fly-g500-s20.py
 ```
