@@ -5,6 +5,9 @@
 //! authentication, billing, or portable-project verifier. A discovery manifest
 //! names a portable-v2 package; `graphforge-storage` remains the authority that
 //! verifies the downloaded package's integrity, compatibility, and authenticity.
+//! Redirect bounds, HTTPS retention across redirects, and caller-configured host
+//! policy belong to the transport/client adapter. This crate only admits each
+//! protocol-visible location as an absolute, credential-free HTTPS URL.
 
 use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -74,6 +77,29 @@ pub enum DiscoveryErrorCode {
     Duplicate,
 }
 
+/// Semantic surface associated with structured version diagnostics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiscoveryVersionSubject {
+    /// Discovery response protocol version.
+    Protocol,
+    /// Referenced portable package format version.
+    PortablePackage,
+    /// Required protocol capability version.
+    Capability,
+}
+
+/// Sanitized supported/requested version metadata for compatibility failures.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct DiscoveryVersionDetails {
+    /// Versioned semantic surface that failed negotiation.
+    pub subject: DiscoveryVersionSubject,
+    /// Supported major version, or `None` when the semantic itself is unknown.
+    pub supported_major: Option<u16>,
+    /// Major version requested by the response.
+    pub requested_major: u16,
+}
+
 /// Sanitized discovery error suitable for CLI, Hub, and telemetry projection.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct DiscoveryError {
@@ -81,6 +107,9 @@ pub struct DiscoveryError {
     pub code: DiscoveryErrorCode,
     /// Stable schema field associated with the failure, when applicable.
     pub field: Option<&'static str>,
+    /// Structured version negotiation details, when the failure is versioned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<DiscoveryVersionDetails>,
     #[serde(skip)]
     detail: &'static str,
 }
@@ -90,8 +119,14 @@ impl DiscoveryError {
         Self {
             code,
             field,
+            version: None,
             detail,
         }
+    }
+
+    fn with_version(mut self, version: DiscoveryVersionDetails) -> Self {
+        self.version = Some(version);
+        self
     }
 
     /// Sanitized, non-input-bearing diagnostic text.
@@ -189,7 +224,12 @@ impl ProtocolVersion {
                 DiscoveryErrorCode::UnsupportedFuture,
                 Some("version.major"),
                 "protocol major version is unsupported",
-            ));
+            )
+            .with_version(DiscoveryVersionDetails {
+                subject: DiscoveryVersionSubject::Protocol,
+                supported_major: Some(Self::CURRENT.major),
+                requested_major: self.major,
+            }));
         }
         Ok(())
     }
@@ -307,8 +347,11 @@ pub struct RepositoryRef {
     pub name: String,
     /// Immutable repository version selected by this ref snapshot.
     pub target: Sha256Digest,
-    /// Quoted strong ETag for the ref representation.
-    pub etag: String,
+    /// HTTP-independent immutable revision validator.
+    ///
+    /// An HTTP adapter may map this digest to a quoted strong ETag; HTTP syntax
+    /// is deliberately not part of the discovery response contract.
+    pub validator: Sha256Digest,
 }
 
 /// Validated immutable snapshot of repository refs.
@@ -346,11 +389,21 @@ impl DiscoveryManifest {
         validate_ref_name(&self.resolved_ref, limits)?;
         self.immutable_version.validate()?;
         if self.package.format != PORTABLE_V2_FORMAT {
-            return Err(DiscoveryError::new(
+            let error = DiscoveryError::new(
                 DiscoveryErrorCode::UnsupportedFuture,
                 Some("package.format"),
                 "portable package format is unsupported",
-            ));
+            );
+            return Err(
+                match format_major(&self.package.format, "graphforge-project") {
+                    Some(requested_major) => error.with_version(DiscoveryVersionDetails {
+                        subject: DiscoveryVersionSubject::PortablePackage,
+                        supported_major: Some(2),
+                        requested_major,
+                    }),
+                    None => error,
+                },
+            );
         }
         self.package.package_digest.validate()?;
         validate_semantics(&self.requirements, &self.capabilities, limits)?;
@@ -399,13 +452,7 @@ impl RefSet {
         for reference in &self.refs {
             validate_ref_name(&reference.name, limits)?;
             reference.target.validate()?;
-            if !valid_strong_etag(&reference.etag, limits.max_string_bytes) {
-                return Err(DiscoveryError::new(
-                    DiscoveryErrorCode::IntegrityFailure,
-                    Some("refs.etag"),
-                    "ref validator is not a strong ETag",
-                ));
-            }
+            reference.validator.validate()?;
             if prior.is_some_and(|name: &str| name >= reference.name.as_str()) {
                 return Err(DiscoveryError::new(
                     DiscoveryErrorCode::Duplicate,
@@ -470,15 +517,30 @@ fn validate_header(
     limits: DiscoveryLimits,
 ) -> Result<(), DiscoveryError> {
     if format != DISCOVERY_FORMAT {
-        return Err(DiscoveryError::new(
+        let error = DiscoveryError::new(
             DiscoveryErrorCode::UnsupportedFuture,
             Some("format"),
             "discovery format is unsupported",
-        ));
+        );
+        return Err(match format_major(format, "graphforge-discovery") {
+            Some(requested_major) => error.with_version(DiscoveryVersionDetails {
+                subject: DiscoveryVersionSubject::Protocol,
+                supported_major: Some(ProtocolVersion::CURRENT.major),
+                requested_major,
+            }),
+            None => error,
+        });
     }
     version.validate()?;
     repository.validate()?;
     check_string(format, "format", limits)
+}
+
+fn format_major(format: &str, expected_name: &str) -> Option<u16> {
+    let (name, major) = format.rsplit_once('/')?;
+    (name == expected_name)
+        .then(|| major.parse().ok())
+        .flatten()
 }
 
 fn validate_semantics(
@@ -509,7 +571,12 @@ fn validate_semantics(
                 DiscoveryErrorCode::UnsupportedFuture,
                 Some("requirements"),
                 "required capability is unsupported",
-            ));
+            )
+            .with_version(DiscoveryVersionDetails {
+                subject: DiscoveryVersionSubject::Capability,
+                supported_major: (requirement.capability == "portable-v2").then_some(1),
+                requested_major: requirement.major,
+            }));
         }
     }
     let mut prior: Option<(&str, u16)> = None;
@@ -661,17 +728,6 @@ fn validate_ref_name(value: &str, limits: DiscoveryLimits) -> Result<(), Discove
         ));
     }
     Ok(())
-}
-
-fn valid_strong_etag(value: &str, max: usize) -> bool {
-    value.len() >= 2
-        && value.len() <= max
-        && !value.starts_with("W/")
-        && value.starts_with('"')
-        && value.ends_with('"')
-        && value[1..value.len() - 1]
-            .bytes()
-            .all(|byte| byte == 0x21 || (0x23..=0x7e).contains(&byte))
 }
 
 fn validate_extensions(
@@ -958,6 +1014,46 @@ mod tests {
         let error = candidate.validate(DiscoveryLimits::default()).unwrap_err();
         assert_eq!(error.code, DiscoveryErrorCode::UnsupportedFuture);
         assert_eq!(error.field, Some("requirements"));
+        assert_eq!(
+            error.version,
+            Some(DiscoveryVersionDetails {
+                subject: DiscoveryVersionSubject::Capability,
+                supported_major: None,
+                requested_major: 1,
+            })
+        );
+
+        let mut future_protocol = manifest();
+        future_protocol.version.major = 2;
+        let error = future_protocol
+            .validate(DiscoveryLimits::default())
+            .unwrap_err();
+        assert_eq!(
+            error.version,
+            Some(DiscoveryVersionDetails {
+                subject: DiscoveryVersionSubject::Protocol,
+                supported_major: Some(1),
+                requested_major: 2,
+            })
+        );
+        assert_eq!(
+            serde_json::to_string(&error).unwrap(),
+            r#"{"code":"unsupported_future","field":"version.major","version":{"subject":"protocol","supported_major":1,"requested_major":2}}"#
+        );
+
+        let mut future_package = manifest();
+        future_package.package.format = "graphforge-project/3".to_owned();
+        let error = future_package
+            .validate(DiscoveryLimits::default())
+            .unwrap_err();
+        assert_eq!(
+            error.version,
+            Some(DiscoveryVersionDetails {
+                subject: DiscoveryVersionSubject::PortablePackage,
+                supported_major: Some(2),
+                requested_major: 3,
+            })
+        );
     }
 
     #[test]
@@ -999,7 +1095,7 @@ mod tests {
     }
 
     #[test]
-    fn refs_are_sorted_unique_strong_and_consistent_with_manifest() {
+    fn refs_use_protocol_validators_and_are_consistent_with_manifest() {
         let refs = RefSet {
             format: DISCOVERY_FORMAT.to_owned(),
             version: ProtocolVersion::CURRENT,
@@ -1008,16 +1104,19 @@ mod tests {
             refs: vec![RepositoryRef {
                 name: "main".to_owned(),
                 target: digest('a'),
-                etag: "\"sha256:aaaaaaaa\"".to_owned(),
+                validator: digest('d'),
             }],
             extensions: BTreeMap::new(),
         };
         refs.validate(DiscoveryLimits::default()).unwrap();
         refs.validate_manifest(&manifest()).unwrap();
-        let mut weak = refs.clone();
-        weak.refs[0].etag = "W/\"weak\"".to_owned();
+        let mut invalid = refs.clone();
+        invalid.refs[0].validator = Sha256Digest("W/\"weak\"".to_owned());
         assert_eq!(
-            weak.validate(DiscoveryLimits::default()).unwrap_err().code,
+            invalid
+                .validate(DiscoveryLimits::default())
+                .unwrap_err()
+                .code,
             DiscoveryErrorCode::IntegrityFailure
         );
         let mut missing = refs;
