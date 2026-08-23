@@ -34,6 +34,7 @@ use datafusion::functions_aggregate::count::count_all;
 use datafusion::functions_aggregate::expr_fn::{
     array_agg, avg, avg_distinct, count, count_distinct, max, min, sum, sum_distinct,
 };
+use datafusion::logical_expr::utils::{conjunction, split_conjunction_owned};
 use datafusion::logical_expr::{
     Expr as DfExpr, ExprFunctionExt, ExprSchemable, Extension, JoinType, LogicalPlanBuilder,
     SortExpr, logical_plan::LogicalTableSource,
@@ -2454,10 +2455,82 @@ fn lower_filter(
     lowerer: &ExprLowerer<'_>,
 ) -> Result<LogicalPlan, LoweringError> {
     let df_pred = lowerer.lower(predicate)?;
-    LogicalPlanBuilder::from(input)
-        .filter(df_pred)
-        .and_then(LogicalPlanBuilder::build)
-        .map_unsupported_expr()
+    push_filter_through_expands(df_pred, input)
+}
+
+/// Push source-only filter conjuncts below provider-backed expansions.
+///
+/// DataFusion's generic extension-node hook identifies blocked columns by
+/// *unqualified name*. That cannot safely distinguish `var_0.node_uuid` (the
+/// source) from `var_2.node_uuid` (the destination), so `ExpandNode` keeps the
+/// conservative default and this graph-aware rewrite uses the full qualified
+/// [`Column`](datafusion::common::Column) instead. A source predicate commutes
+/// with expansion and should restrict the frontier before any adjacency I/O;
+/// predicates on newly produced edge/destination columns stay above it.
+fn push_filter_through_expands(
+    predicate: DfExpr,
+    input: LogicalPlan,
+) -> Result<LogicalPlan, LoweringError> {
+    let LogicalPlan::Extension(extension) = input else {
+        return LogicalPlanBuilder::from(input)
+            .filter(predicate)
+            .and_then(LogicalPlanBuilder::build)
+            .map_unsupported_expr();
+    };
+    let is_expand = extension.node.as_any().is::<graphforge_plan::ExpandNode>()
+        || extension.node.as_any().is::<VarLenExpandNode>();
+    let Some(child) = extension
+        .node
+        .inputs()
+        .first()
+        .map(|child| (*child).clone())
+    else {
+        return LogicalPlanBuilder::from(LogicalPlan::Extension(extension))
+            .filter(predicate)
+            .and_then(LogicalPlanBuilder::build)
+            .map_unsupported_expr();
+    };
+    if !is_expand {
+        return LogicalPlanBuilder::from(LogicalPlan::Extension(extension))
+            .filter(predicate)
+            .and_then(LogicalPlanBuilder::build)
+            .map_unsupported_expr();
+    }
+
+    let (push, keep): (Vec<_>, Vec<_>) =
+        split_conjunction_owned(predicate)
+            .into_iter()
+            .partition(|expr| {
+                !expr.is_volatile()
+                    && expr
+                        .column_refs()
+                        .iter()
+                        .all(|column| child.schema().has_column(column))
+            });
+    let Some(push) = conjunction(push) else {
+        return LogicalPlanBuilder::from(LogicalPlan::Extension(extension))
+            .filter(conjunction(keep).expect("a non-empty predicate has a kept conjunct"))
+            .and_then(LogicalPlanBuilder::build)
+            .map_unsupported_expr();
+    };
+
+    // Recurse so a predicate on the original source crosses every hop in a
+    // fixed-hop chain, not merely the last Expand.
+    let rewritten_child = push_filter_through_expands(push, child)?;
+    let rewritten_node = extension
+        .node
+        .with_exprs_and_inputs(extension.node.expressions(), vec![rewritten_child])
+        .map_unsupported_expr()?;
+    let rewritten_expand = LogicalPlan::Extension(Extension {
+        node: rewritten_node,
+    });
+    match conjunction(keep) {
+        Some(keep) => LogicalPlanBuilder::from(rewritten_expand)
+            .filter(keep)
+            .and_then(LogicalPlanBuilder::build)
+            .map_unsupported_expr(),
+        None => Ok(rewritten_expand),
+    }
 }
 
 fn lower_project(
@@ -6160,6 +6233,109 @@ mod tests {
             })
             .build();
         (tmp, catalog, plan)
+    }
+
+    fn uuid_filter(var: u32) -> DfExpr {
+        datafusion::logical_expr::col(format!("var_{var}.node_uuid")).eq(
+            datafusion::logical_expr::lit(datafusion::common::ScalarValue::FixedSizeBinary(
+                16,
+                Some(vec![var as u8; 16]),
+            )),
+        )
+    }
+
+    #[test]
+    fn source_filter_is_pushed_below_every_expand_by_qualified_identity() {
+        let (tmp, catalog, single_hop) = typed_single_hop_fixture(Direction::Out);
+        let rel_ty = match single_hop.ops[1] {
+            GraphOp::Expand { rel_ty, .. } => rel_ty,
+            ref other => panic!("expected Expand, got {other:?}"),
+        };
+        let plan = GraphPlan::builder("openCypher")
+            .push_op(GraphOp::NodeScan {
+                var: VarId(0),
+                ty: None,
+            })
+            .push_op(GraphOp::Expand {
+                src: VarId(0),
+                edge: VarId(1),
+                dst: VarId(2),
+                rel_ty,
+                dir: Direction::Out,
+                min_hops: 1,
+                max_hops: Some(1),
+            })
+            .push_op(GraphOp::Expand {
+                src: VarId(2),
+                edge: VarId(3),
+                dst: VarId(4),
+                rel_ty,
+                dir: Direction::Out,
+                min_hops: 1,
+                max_hops: Some(1),
+            })
+            .build();
+        let lowerer =
+            GraphPlanLowerer::new_with_dir(Some(&catalog), None, tmp.path(), OntologyMode::Strict);
+        let lowered = lowerer.lower_plan(&plan).unwrap();
+        let rewritten = push_filter_through_expands(uuid_filter(0), lowered).unwrap();
+
+        let DfLogicalPlan::Extension(second) = rewritten else {
+            panic!("source filter must move below the second Expand");
+        };
+        let DfLogicalPlan::Extension(first) = second.node.inputs()[0] else {
+            panic!("source filter must move below the first Expand");
+        };
+        let DfLogicalPlan::Filter(root_filter) = first.node.inputs()[0] else {
+            panic!("source filter must sit directly above the source scan");
+        };
+        assert!(
+            root_filter
+                .predicate
+                .to_string()
+                .contains("var_0.node_uuid"),
+            "{}",
+            root_filter.predicate
+        );
+    }
+
+    #[test]
+    fn destination_filter_stays_above_expand_despite_identity_name_collision() {
+        let (tmp, catalog, plan) = typed_single_hop_fixture(Direction::Out);
+        let lowerer =
+            GraphPlanLowerer::new_with_dir(Some(&catalog), None, tmp.path(), OntologyMode::Strict);
+        let lowered = lowerer.lower_plan(&plan).unwrap();
+        let rewritten = push_filter_through_expands(uuid_filter(2), lowered).unwrap();
+
+        let DfLogicalPlan::Filter(filter) = rewritten else {
+            panic!("destination filter must stay above Expand");
+        };
+        assert!(matches!(filter.input.as_ref(), DfLogicalPlan::Extension(_)));
+        assert!(filter.predicate.to_string().contains("var_2.node_uuid"));
+    }
+
+    #[test]
+    fn mixed_filter_pushes_only_the_source_conjunct() {
+        let (tmp, catalog, plan) = typed_single_hop_fixture(Direction::Out);
+        let lowerer =
+            GraphPlanLowerer::new_with_dir(Some(&catalog), None, tmp.path(), OntologyMode::Strict);
+        let lowered = lowerer.lower_plan(&plan).unwrap();
+        let rewritten =
+            push_filter_through_expands(uuid_filter(0).and(uuid_filter(2)), lowered).unwrap();
+
+        let DfLogicalPlan::Filter(residual) = rewritten else {
+            panic!("destination conjunct must remain above Expand");
+        };
+        assert!(residual.predicate.to_string().contains("var_2.node_uuid"));
+        assert!(!residual.predicate.to_string().contains("var_0.node_uuid"));
+        let DfLogicalPlan::Extension(expand) = residual.input.as_ref() else {
+            panic!("residual filter must wrap Expand");
+        };
+        let DfLogicalPlan::Filter(root) = expand.node.inputs()[0] else {
+            panic!("source conjunct must move below Expand");
+        };
+        assert!(root.predicate.to_string().contains("var_0.node_uuid"));
+        assert!(!root.predicate.to_string().contains("var_2.node_uuid"));
     }
 
     #[test]
