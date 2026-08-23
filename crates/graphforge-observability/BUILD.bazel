@@ -1,0 +1,10 @@
+"""Rust-owned GraphForge telemetry runtime."""
+
+load("//tools/bazel:gf_rust.bzl", "gf_rust_integration_test", "gf_rust_library", "gf_rust_test")
+
+exports_files(["Cargo.toml"])
+package(default_visibility = ["//visibility:public"])
+
+gf_rust_library(name = "graphforge_observability")
+gf_rust_test(name = "graphforge_observability_test", crate = ":graphforge_observability")
+gf_rust_integration_test(name = "disabled_allocations", srcs = ["tests/disabled_allocations.rs"], crate = ":graphforge_observability")

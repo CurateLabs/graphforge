@@ -18,6 +18,7 @@ graphforge-rel = { version = "0.5.2", path = "../graphforge-rel" }
 graphforge-storage = { version = "0.5.2", path = "../graphforge-storage" }
 graphforge-exec = { version = "0.5.2", path = "../graphforge-exec" }
 graphforge-io = { version = "0.5.2", path = "../graphforge-io" }
+graphforge-observability = { version = "0.5.2", path = "../graphforge-observability" }
 graphforge-search = { version = "0.5.2", path = "../graphforge-search" }
 arrow = { workspace = true }
 datafusion = { workspace = true }

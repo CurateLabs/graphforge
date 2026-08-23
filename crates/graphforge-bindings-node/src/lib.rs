@@ -53,6 +53,7 @@ mod error;
 mod import_session;
 mod multi_ontology;
 mod portable;
+mod telemetry;
 mod transaction;
 use composite::CompositeTransactionInput;
 use error::{NodeError, to_napi_err, type_error};

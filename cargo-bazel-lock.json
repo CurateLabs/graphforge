@@ -1,5 +1,5 @@
 {
-  "checksum": "10e1011f9eb994967497ecfe3f699d445bd5df1cfdc0d7e617894095cccedaee",
+  "checksum": "b21d3280c7ad6cd450e752d4bd6e74303ecf1c990af629ad88bd4f9b6fb2a933",
   "crates": {
     "adler2 2.0.1": {
       "name": "adler2",
@@ -12897,6 +12897,10 @@
               "target": "clap"
             },
             {
+              "id": "libc 0.2.189",
+              "target": "libc"
+            },
+            {
               "id": "serde 1.0.228",
               "target": "serde"
             },
@@ -12908,6 +12912,22 @@
               "id": "serde_yaml_ng 0.9.36",
               "target": "serde_yaml_ng",
               "alias": "serde_yaml"
+            },
+            {
+              "id": "sha2 0.11.0",
+              "target": "sha2"
+            },
+            {
+              "id": "tempfile 3.27.0",
+              "target": "tempfile"
+            },
+            {
+              "id": "ureq 3.4.0",
+              "target": "ureq"
+            },
+            {
+              "id": "url 2.5.8",
+              "target": "url"
             },
             {
               "id": "uuid 1.24.1",
@@ -12927,14 +12947,6 @@
             {
               "id": "parquet 58.3.0",
               "target": "parquet"
-            },
-            {
-              "id": "sha2 0.11.0",
-              "target": "sha2"
-            },
-            {
-              "id": "tempfile 3.27.0",
-              "target": "tempfile"
             }
           ],
           "selects": {}
@@ -13467,6 +13479,64 @@
             {
               "id": "uuid 1.24.1",
               "target": "uuid"
+            }
+          ],
+          "selects": {}
+        },
+        "edition": "2024",
+        "version": "0.5.2"
+      },
+      "license": "Apache-2.0",
+      "license_ids": [
+        "Apache-2.0"
+      ],
+      "license_file": "../../LICENSE"
+    },
+    "graphforge-observability 0.5.2": {
+      "name": "graphforge-observability",
+      "version": "0.5.2",
+      "package_url": "https://github.com/CurateLabs/graphforge",
+      "repository": null,
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "graphforge_observability",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "graphforge_observability",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "deps": {
+          "common": [
+            {
+              "id": "serde 1.0.228",
+              "target": "serde"
+            },
+            {
+              "id": "serde_json 1.0.151",
+              "target": "serde_json"
+            },
+            {
+              "id": "thiserror 2.0.20",
+              "target": "thiserror"
+            },
+            {
+              "id": "ureq 3.4.0",
+              "target": "ureq"
+            },
+            {
+              "id": "url 2.5.8",
+              "target": "url"
             }
           ],
           "selects": {}
@@ -34043,6 +34113,7 @@
     "graphforge-io 0.5.2": "crates/graphforge-io",
     "graphforge-ir 0.5.2": "crates/graphforge-ir",
     "graphforge-knowledge 0.5.2": "crates/graphforge-knowledge",
+    "graphforge-observability 0.5.2": "crates/graphforge-observability",
     "graphforge-ontology 0.5.2": "crates/graphforge-ontology",
     "graphforge-plan 0.5.2": "crates/graphforge-plan",
     "graphforge-provenance 0.5.2": "crates/graphforge-provenance",

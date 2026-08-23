@@ -39,6 +39,9 @@ Embedded library use does not define availability SLOs for a network endpoint.
 
 ## Telemetry design
 
+The executable Rust-owned telemetry configuration, semantic registry, privacy
+policy, and lifecycle contract are documented in [TELEMETRY.md](TELEMETRY.md).
+
 - **Events:** CI gate results, release dry-run outcomes, contract inventory digests — not
   end-user product analytics by default.
 - **Logs:** structured GraphForge / adapter error codes; local diagnostics suitable for

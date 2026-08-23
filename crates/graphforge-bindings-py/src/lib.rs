@@ -6,6 +6,7 @@ mod composite;
 mod import_session;
 mod multi_ontology;
 mod portable;
+mod telemetry;
 mod transaction;
 
 use std::collections::{BTreeMap, HashMap};
@@ -6987,6 +6988,7 @@ fn _graphforge_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<import_session::PyGraphImportSession>()?;
     m.add_class::<PyCheckpointView>()?;
     m.add_class::<PyCancellationToken>()?;
+    m.add_class::<telemetry::PyTelemetryRuntime>()?;
     m.add_class::<PyNodeHandle>()?;
     m.add_class::<PyEdgeHandle>()?;
     m.add_class::<PyInvocationDescriptor>()?;

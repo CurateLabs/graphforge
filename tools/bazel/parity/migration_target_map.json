@@ -1,7 +1,7 @@
 {
   "schema": "graphforge.bazel-migration-target-map.v1",
   "issue": 6,
-  "cargo_target_count": 116,
+  "cargo_target_count": 118,
   "targets": [
     {
       "package": "graphforge-api",
@@ -562,6 +562,26 @@
       "bazel_label": "//crates/graphforge-api:xor_scaling",
       "exception_id": null,
       "notes": "#8"
+    },
+    {
+      "package": "graphforge-observability",
+      "target": "disabled_allocations",
+      "class": "integration-test",
+      "source": "crates/graphforge-observability/tests/disabled_allocations.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-observability:disabled_allocations",
+      "exception_id": null,
+      "notes": "#886; disabled telemetry allocation proof"
+    },
+    {
+      "package": "graphforge-observability",
+      "target": "graphforge_observability",
+      "class": "lib",
+      "source": "crates/graphforge-observability/src/lib.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-observability:graphforge_observability",
+      "exception_id": null,
+      "notes": "#886; unit tests //crates/graphforge-observability:graphforge_observability_test"
     },
     {
       "package": "graphforge-ast",
