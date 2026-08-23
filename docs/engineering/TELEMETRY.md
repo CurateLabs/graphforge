@@ -97,3 +97,24 @@ duration, then read the ordered stage and handoff list. The largest stage owns
 the attributable wall time; its wait reason distinguishes blocked time from
 compute. Usage accounting, automatic activation, hosted collection, billing,
 and dashboards are deliberately outside this foundation.
+
+### Hub clone
+
+`gf clone OWNER/REPOSITORY --telemetry-endpoint http://127.0.0.1:4318/`
+emits one `clone` job to an explicitly selected local collector. Without that
+flag clone remains telemetry-disabled. Read the ordered finite stages from
+identity validation through refs/manifest discovery, download, portable
+verification, atomic import, reopen, and cleanup. Network-backed discovery and
+download stages report network wait; `bytes` on download means bytes newly
+received in this run. The separate `resumed_bytes` stage attribute means prior
+partial state and is never added to current transferred bytes. Finite
+`orchestration` intervals account for local time between named operations;
+formatting the already-completed result and bounded exporter shutdown are
+outside the workspace job.
+
+Compare stage durations to locate the bottleneck: a delayed object response is
+owned by `network_transport`/`download`, while CPU or storage verification is
+owned by `portable_verify`/`portable_verification`. Component handoffs include
+only components actually reached. Failed clones end once with `failed` plus a
+finite failure class; raw `hub.*` text and repository, endpoint, destination,
+manifest, digest, UUID, and graph content never enter telemetry.
