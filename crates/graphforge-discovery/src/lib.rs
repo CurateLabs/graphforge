@@ -22,6 +22,8 @@ use url::Url;
 pub const DISCOVERY_FORMAT: &str = "graphforge-discovery/1";
 /// Portable project format referenced by discovery v1.
 pub const PORTABLE_V2_FORMAT: &str = "graphforge-project/2";
+/// Media type of the immutable portable-v2 package object selected by discovery.
+pub const PORTABLE_V2_MEDIA_TYPE: &str = "application/vnd.graphforge.project";
 
 /// Explicit resource bounds for untrusted discovery responses.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -294,6 +296,11 @@ pub struct PortablePackageReference {
     pub format: String,
     /// Portable semantic package identity, distinct from transport/object identities.
     pub package_digest: Sha256Digest,
+    /// Transport object digest selecting exactly one entry from `objects`.
+    ///
+    /// This is the digest of downloaded bytes, not the semantic portable-v2
+    /// package digest above.
+    pub object_digest: Sha256Digest,
 }
 
 /// One immutable directly downloadable object.
@@ -406,9 +413,37 @@ impl DiscoveryManifest {
             );
         }
         self.package.package_digest.validate()?;
+        self.package.object_digest.validate()?;
         validate_semantics(&self.requirements, &self.capabilities, limits)?;
         validate_extensions(&self.extensions, limits)?;
-        validate_objects(&self.objects, limits)
+        validate_objects(&self.objects, limits)?;
+        self.package_object().map(|_| ())
+    }
+
+    /// Return the uniquely selected portable-v2 transport object.
+    ///
+    /// Callers use this only after manifest validation and therefore never
+    /// guess by inventory position, location host, or media type.
+    pub fn package_object(&self) -> Result<&ObjectDescriptor, DiscoveryError> {
+        let object = self
+            .objects
+            .iter()
+            .find(|object| object.digest == self.package.object_digest)
+            .ok_or_else(|| {
+                DiscoveryError::new(
+                    DiscoveryErrorCode::MissingObject,
+                    Some("package.object_digest"),
+                    "portable package object is absent",
+                )
+            })?;
+        if object.media_type != PORTABLE_V2_MEDIA_TYPE {
+            return Err(DiscoveryError::new(
+                DiscoveryErrorCode::MalformedResponse,
+                Some("package.object_digest"),
+                "portable package object media type is incompatible",
+            ));
+        }
+        Ok(object)
     }
 
     /// Encode deterministic compact JSON with recursively sorted extension keys.
@@ -944,6 +979,7 @@ mod tests {
             package: PortablePackageReference {
                 format: PORTABLE_V2_FORMAT.to_owned(),
                 package_digest: digest('b'),
+                object_digest: digest('c'),
             },
             requirements: vec![ProtocolRequirement {
                 capability: "portable-v2".to_owned(),
@@ -1001,6 +1037,27 @@ mod tests {
         );
         let encoded = String::from_utf8(first.to_canonical_json().unwrap()).unwrap();
         assert!(encoded.contains("\"x-example\":{\"a\":[true,\"ok\"],\"z\":1}"));
+    }
+
+    #[test]
+    fn package_object_is_explicit_among_multiple_transport_objects() {
+        let mut candidate = manifest();
+        candidate.objects.insert(
+            0,
+            ObjectDescriptor {
+                digest: digest('b'),
+                length: 7,
+                media_type: "application/octet-stream".to_owned(),
+                locations: vec!["https://data.graphforge.sh/objects/sha256/bbbb".to_owned()],
+            },
+        );
+        candidate.validate(DiscoveryLimits::default()).unwrap();
+        assert_eq!(candidate.package_object().unwrap().digest, digest('c'));
+
+        candidate.package.object_digest = digest('d');
+        let error = candidate.validate(DiscoveryLimits::default()).unwrap_err();
+        assert_eq!(error.code, DiscoveryErrorCode::MissingObject);
+        assert_eq!(error.field, Some("package.object_digest"));
     }
 
     #[test]

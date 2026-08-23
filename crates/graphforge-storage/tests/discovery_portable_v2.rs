@@ -89,6 +89,7 @@ fn discovery(package_digest: String) -> (DiscoveryManifest, RefSet, RepositoryId
         package: PortablePackageReference {
             format: PORTABLE_V2_FORMAT.into(),
             package_digest: Sha256Digest(package_digest),
+            object_digest: digest('c'),
         },
         requirements: vec![ProtocolRequirement {
             capability: "portable-v2".into(),

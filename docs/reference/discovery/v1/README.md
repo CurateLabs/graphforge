@@ -25,5 +25,10 @@ types or reimplement validation semantics. Rust remains the authority; generated
 TypeScript declarations, if needed, must be treated as disposable build output
 derived from these versioned artifacts.
 
+There is intentionally no checked-in hand-written TypeScript discovery model.
+Schema-derived Hub artifacts consume the required `package.object_digest` field
+from `manifest.schema.json`; regenerating the Rust-owned artifacts updates that
+versioned input and the conformance cases together.
+
 See [portable-v2-integration.md](portable-v2-integration.md) for the normative
 validation order and the boundary between discovery and package verification.

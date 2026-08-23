@@ -147,13 +147,17 @@
         "format": {
           "const": "graphforge-project/2"
         },
+        "object_digest": {
+          "$ref": "#/$defs/digest"
+        },
         "package_digest": {
           "$ref": "#/$defs/digest"
         }
       },
       "required": [
         "format",
-        "package_digest"
+        "package_digest",
+        "object_digest"
       ],
       "type": "object"
     },
