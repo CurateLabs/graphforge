@@ -87,7 +87,7 @@ skills are declared via root `//:project_skills_bundle` / `//:project-skills/man
 
 | Class | Count | Status after #8 |
 | --- | ---: | --- |
-| Ordinary `lib` mapped | 16 | foundation + runtime + CLI |
+| Ordinary `lib` mapped | 17 | foundation + discovery + runtime + CLI |
 | Binding cdylibs mapped | 2 | PyO3 + napi-rs (#7) |
 | Integration-test mapped | 59 | `//:integration_tests` (+ BDD harness) |
 | CLI `bin` mapped | 1 | `//crates/graphforge-cli:gf` |

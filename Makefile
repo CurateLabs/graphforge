@@ -38,7 +38,7 @@ publish-dry-run-docs:  ## Docs preview build (pnpm docs:build)
 	python3 scripts/publish_dry_run.py --surface docs
 publish-dry-run-python:  ## Local maturin sdist packaging check (not TestPyPI upload)
 	python3 scripts/publish_dry_run.py --surface python
-publish-dry-run-cargo:  ## cargo package --list for all 16 crates.io packages in plan order
+publish-dry-run-cargo:  ## cargo package --list for all 17 crates.io packages in plan order
 	python3 scripts/publish_dry_run.py --surface cargo-package
 
 record-release-artifacts:  ## Hash artifacts in DIST_DIR into a release record JSON
