@@ -23,10 +23,22 @@ CHILD_IMAGE = re.compile(r"^[^\s@]+@(?P<digest>sha256:[0-9a-f]{64})$")
 SAFE_NAME = re.compile(r"^[a-z][a-z0-9-]{2,62}$")
 SAFE_VOLUME = re.compile(r"^[a-z][a-z0-9_]{0,29}$")
 PHASES = [
-    "preflight", "generate", "ingest", "csr", "source_reopen",
-    "source_query_1hop", "source_query_2hop", "export", "verify", "import",
-    "imported_reopen", "imported_query_1hop", "imported_query_2hop",
-    "drill_corruption", "drill_cancellation", "drill_resource_limit",
+    "preflight",
+    "generate",
+    "ingest",
+    "csr",
+    "source_reopen",
+    "source_query_1hop",
+    "source_query_2hop",
+    "export",
+    "verify",
+    "import",
+    "imported_reopen",
+    "imported_query_1hop",
+    "imported_query_2hop",
+    "drill_corruption",
+    "drill_cancellation",
+    "drill_resource_limit",
     "drill_interrupted_finalization",
 ]
 HARD_TTL_S = 4 * 3600 + 30 * 60
@@ -42,8 +54,12 @@ class ControllerError(RuntimeError):
 class Flyctl:
     def run(self, args: Sequence[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            ["flyctl", *args], cwd=ROOT, check=check, capture_output=True,
-            text=True, timeout=120,
+            ["flyctl", *args],
+            cwd=ROOT,
+            check=check,
+            capture_output=True,
+            text=True,
+            timeout=120,
         )
 
     def json(self, args: Sequence[str]) -> Any:
@@ -51,7 +67,9 @@ class Flyctl:
 
 
 def fetch_pricing() -> str:
-    request = urllib.request.Request(PRICING_URL, headers={"User-Agent": "graphforge-s20-controller/1"})
+    request = urllib.request.Request(
+        PRICING_URL, headers={"User-Agent": "graphforge-s20-controller/1"}
+    )
     with urllib.request.urlopen(request, timeout=30) as response:
         if response.geturl() != PRICING_URL:
             raise ControllerError("official pricing request redirected")
@@ -61,14 +79,16 @@ def fetch_pricing() -> str:
 def parse_live_rates(html: str, region: str) -> dict[str, float]:
     matrix = re.search(
         rf'id="started-machines-pricing-matrix-{re.escape(region)}".*?</table>',
-        html, re.DOTALL,
+        html,
+        re.DOTALL,
     )
     if not matrix:
         raise ControllerError(f"official pricing has no region {region}")
     row = re.search(
         r"performance-2x.*?2 performance.*?4GB.*?"
         r"\$(?P<second>[0-9.]+).*?\$(?P<hour>[0-9.]+)",
-        matrix.group(), re.DOTALL,
+        matrix.group(),
+        re.DOTALL,
     )
     volume = re.search(r"\$(?P<rate>[0-9.]+)/GB per month of provisioned capacity", html)
     if not row or not volume:
@@ -86,11 +106,14 @@ def cost_plan(rates: dict[str, float], ceiling: float, reserve: float) -> dict[s
     volume = rates["volume_gb_month_usd"] * VOLUME_GB * 5 / (30 * 24)
     projected = compute + volume + reserve
     if projected > ceiling:
-        raise ControllerError(
-            f"projected maximum ${projected:.4f} exceeds ${ceiling:.2f} ceiling"
-        )
-    return {"compute_usd": compute, "volume_usd": volume, "unpriced_reserve_usd": reserve,
-            "projected_max_usd": projected, "ceiling_usd": ceiling}
+        raise ControllerError(f"projected maximum ${projected:.4f} exceeds ${ceiling:.2f} ceiling")
+    return {
+        "compute_usd": compute,
+        "volume_usd": volume,
+        "unpriced_reserve_usd": reserve,
+        "projected_max_usd": projected,
+        "ceiling_usd": ceiling,
+    }
 
 
 def validate_args(args: argparse.Namespace) -> str:
@@ -116,12 +139,18 @@ def validate_args(args: argparse.Namespace) -> str:
 
 def check_source(expected_sha: str) -> None:
     head = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=ROOT, check=True,
-        capture_output=True, text=True,
+        ["git", "rev-parse", "HEAD"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
     ).stdout.strip()
     dirty = subprocess.run(
-        ["git", "status", "--porcelain"], cwd=ROOT, check=True,
-        capture_output=True, text=True,
+        ["git", "status", "--porcelain"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
     ).stdout
     if head != expected_sha or dirty:
         raise ControllerError("execution requires the exact clean checked-out source SHA")
@@ -131,7 +160,11 @@ def assert_platform_child(image: str, manifest_json: str | None = None) -> None:
     if manifest_json is None:
         result = subprocess.run(
             ["docker", "buildx", "imagetools", "inspect", "--raw", image],
-            cwd=ROOT, check=True, capture_output=True, text=True, timeout=120,
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=120,
         )
         manifest_json = result.stdout
     manifest = json.loads(manifest_json)
@@ -144,12 +177,17 @@ def assert_platform_child(image: str, manifest_json: str | None = None) -> None:
 
 def machine_payload(args: argparse.Namespace, volume_id: str) -> dict[str, Any]:
     return {
-        "name": args.machine_name, "region": args.region,
-        "skip_launch": False, "skip_service_registration": True,
+        "name": args.machine_name,
+        "region": args.region,
+        "skip_launch": False,
+        "skip_service_registration": True,
         "config": {
-            "image": args.image, "auto_destroy": True, "restart": {"policy": "no"},
+            "image": args.image,
+            "auto_destroy": True,
+            "restart": {"policy": "no"},
             "guest": {"cpu_kind": "performance", "cpus": CPUS, "memory_mb": MEMORY_MB},
-            "mounts": [{"volume": volume_id, "path": "/work"}], "services": [],
+            "mounts": [{"volume": volume_id, "path": "/work"}],
+            "services": [],
             "env": {"GF_G500_S20_EXPECTED_SHA": args.expected_sha},
         },
     }
@@ -180,7 +218,9 @@ def assert_machine(machine: dict[str, Any], args: argparse.Namespace, digest: st
     if config.get("auto_destroy") is not True or config.get("restart") != {"policy": "no"}:
         raise ControllerError("observed Machine is not disposable")
     if config.get("services") not in (None, []) or guest != {
-        "cpu_kind": "performance", "cpus": CPUS, "memory_mb": MEMORY_MB
+        "cpu_kind": "performance",
+        "cpus": CPUS,
+        "memory_mb": MEMORY_MB,
     }:
         raise ControllerError("observed Machine resources/services differ from plan")
     mounts = config.get("mounts", [])
@@ -210,7 +250,9 @@ def validate_evidence(evidence: dict[str, Any], journal: list[dict[str, Any]], s
             raise ControllerError(f"S20 lifecycle mismatch: {left}/{right}")
 
 
-def destroy_and_verify(fly: Flyctl, app: str, machine_id: str | None, volume_id: str | None) -> None:
+def destroy_and_verify(
+    fly: Flyctl, app: str, machine_id: str | None, volume_id: str | None
+) -> None:
     if machine_id:
         fly.run(["machine", "destroy", machine_id, "--app", app, "--force"], check=False)
     if volume_id:
@@ -218,7 +260,9 @@ def destroy_and_verify(fly: Flyctl, app: str, machine_id: str | None, volume_id:
     for _ in range(10):
         machines = fly.json(["machines", "list", "--app", app])
         volumes = fly.json(["volumes", "list", "--app", app])
-        machine_absent = not machine_id or not any(item.get("id") == machine_id for item in machines)
+        machine_absent = not machine_id or not any(
+            item.get("id") == machine_id for item in machines
+        )
         volume_absent = not volume_id or not any(item.get("id") == volume_id for item in volumes)
         if machine_absent and volume_absent:
             break
@@ -260,11 +304,21 @@ def execute(args: argparse.Namespace, fly: Flyctl, digest: str) -> None:
             app_created = True
             fly.run(["apps", "create", args.app_name, "--org", args.org])
         app_created = True
-        volume = fly.json([
-            "volumes", "create", args.volume_name, "--app", args.app_name,
-            "--region", args.region, "--size", str(VOLUME_GB),
-            "--scheduled-snapshots=false", "--yes",
-        ])
+        volume = fly.json(
+            [
+                "volumes",
+                "create",
+                args.volume_name,
+                "--app",
+                args.app_name,
+                "--region",
+                args.region,
+                "--size",
+                str(VOLUME_GB),
+                "--scheduled-snapshots=false",
+                "--yes",
+            ]
+        )
         volume_id = volume["id"]
         machine = create_machine(args, fly, volume_id)
         machine_id = machine["id"]
@@ -274,7 +328,9 @@ def execute(args: argparse.Namespace, fly: Flyctl, digest: str) -> None:
             evidence_path = Path(directory) / "evidence.json"
             while time.monotonic() < deadline:
                 retrieve(fly, args.app_name, machine_id, "/work/s20-journal.json", journal_path)
-                if retrieve(fly, args.app_name, machine_id, "/work/s20-evidence.json", evidence_path):
+                if retrieve(
+                    fly, args.app_name, machine_id, "/work/s20-evidence.json", evidence_path
+                ):
                     break
                 time.sleep(5)
             else:
@@ -284,10 +340,16 @@ def execute(args: argparse.Namespace, fly: Flyctl, digest: str) -> None:
             validate_evidence(evidence, journal, args.expected_sha)
             args.evidence_out.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
             args.journal_out.write_text(json.dumps(journal, indent=2, sort_keys=True) + "\n")
-            fly.run([
-                "machine", "exec", machine_id, "--app", args.app_name,
-                "touch /work/controller-ack",
-            ])
+            fly.run(
+                [
+                    "machine",
+                    "exec",
+                    machine_id,
+                    "--app",
+                    args.app_name,
+                    "touch /work/controller-ack",
+                ]
+            )
     finally:
         if app_created:
             destroy_and_verify(fly, args.app_name, machine_id, volume_id)
@@ -329,11 +391,18 @@ def main() -> int:
         plan = {
             "mode": "execute" if args.execute else "dry-run",
             "checked_at": datetime.now(timezone.utc).isoformat(),
-            "pricing_source": PRICING_URL, "rates": rates, "cost": costs,
-            "git_sha": args.expected_sha, "image_digest": digest, "region": args.region,
+            "pricing_source": PRICING_URL,
+            "rates": rates,
+            "cost": costs,
+            "git_sha": args.expected_sha,
+            "image_digest": digest,
+            "region": args.region,
             "machine": {"cpu_kind": "performance", "cpus": CPUS, "memory_mb": MEMORY_MB},
-            "volume_gb": VOLUME_GB, "public_services": 0, "restart": "no",
-            "auto_destroy": True, "hard_ttl_s": HARD_TTL_S,
+            "volume_gb": VOLUME_GB,
+            "public_services": 0,
+            "restart": "no",
+            "auto_destroy": True,
+            "hard_ttl_s": HARD_TTL_S,
         }
         print(json.dumps(plan, indent=2, sort_keys=True))
         if args.execute:
