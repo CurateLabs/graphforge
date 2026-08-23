@@ -1,7 +1,7 @@
 {
   "schema": "graphforge.bazel-migration-target-map.v1",
   "issue": 6,
-  "cargo_target_count": 114,
+  "cargo_target_count": 115,
   "targets": [
     {
       "package": "graphforge-api",
@@ -762,6 +762,16 @@
       "bazel_label": "//crates/graphforge-discovery:graphforge_discovery",
       "exception_id": null,
       "notes": "#908; unit tests `//crates/graphforge-discovery:graphforge_discovery_test`"
+    },
+    {
+      "package": "graphforge-discovery",
+      "target": "contract_artifacts",
+      "class": "integration-test",
+      "source": "crates/graphforge-discovery/tests/contract_artifacts.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-discovery:contract_artifacts",
+      "exception_id": null,
+      "notes": "#910; deterministic schema and conformance fixture parity"
     },
     {
       "package": "graphforge-exec",

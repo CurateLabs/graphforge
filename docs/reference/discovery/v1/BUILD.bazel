@@ -1,0 +1,10 @@
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "artifacts",
+    srcs = [
+        "conformance.json",
+        "manifest.schema.json",
+        "refs.schema.json",
+    ],
+)
