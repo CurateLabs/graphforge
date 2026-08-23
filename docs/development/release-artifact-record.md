@@ -172,7 +172,7 @@ Historical v0.5.0 records remain immutable.
 ## Sequential recovery proof
 
 `scripts/ci/release_rehearsal.py` also produces a stable reconciliation report
-for all 25 public nodes. Its sequential simulator accepts only actions emitted
+for all 27 public nodes. Its sequential simulator accepts only actions emitted
 by the pure recovery planner, applies one supplied live observation at a time,
 and re-plans from the updated registry truth. This proves dependency order and
 partial recovery before workflow parallelism is introduced.

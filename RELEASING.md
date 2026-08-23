@@ -41,7 +41,7 @@ prepare one coordinated later GraphForge version.
 
 ## Verification
 
-- Confirm the final reconciliation reports all 25 public nodes as verified.
+- Confirm the final reconciliation reports all 27 public nodes as verified.
 - Exercise clean consumers from crates.io, PyPI, and npm.
 - Confirm the GitHub Release notes and public documentation resolve.
 - Close the human release tracker only after the public state is complete.

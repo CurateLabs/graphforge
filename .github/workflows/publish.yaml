@@ -642,7 +642,7 @@ jobs:
           done < <(python3 scripts/ci/crate-publish-plan.py list)
 
   reconcile:
-    name: Always reconcile all 25 public nodes
+    name: Always reconcile all 27 public nodes
     if: always()
     needs:
       - candidate-preflight
