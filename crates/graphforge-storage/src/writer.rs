@@ -3974,6 +3974,7 @@ mod tests {
         );
         first.flush().unwrap();
 
+        let _measurement = crate::io_stats::test_measurement_guard();
         crate::io_stats::reset();
         let mut reopened = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
         assert_eq!(reopened.create_node(new_v7(), TypeId(0)).unwrap(), 3);

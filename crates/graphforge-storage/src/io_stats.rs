@@ -36,6 +36,17 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(test)]
+static TEST_MEASUREMENT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Serialize tests that reset and assert the process-global counters.
+#[cfg(test)]
+pub(crate) fn test_measurement_guard() -> std::sync::MutexGuard<'static, ()> {
+    TEST_MEASUREMENT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Table family involved in one filtered topology read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[doc(hidden)]
