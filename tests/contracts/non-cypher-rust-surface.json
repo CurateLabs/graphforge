@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "2d86746c592716a79fe12cb5471f1c9b90ce8e91bfca772b19110cdfafa468d1",
+  "public_method_digest": "261f99ebab8e9d69a3a3607705d96fd4ad9e00f5102b5062440fa4bcd07ebc44",
   "method_policy": {
     "receiver_defaults": {
       "GraphForge": "release-tested",
@@ -43,6 +43,9 @@
       "crate.composite_receipt_schema": "introspection",
       "crate.grade_gsi": "introspection",
       "crate.hold_writer": "internal-helper",
+      "crate.parse_hub_manifest": "designed-only",
+      "crate.parse_hub_refs": "designed-only",
+      "crate.parse_hub_repository_identity": "designed-only",
       "crate.verify_portable_v2": "designed-only",
       "GraphForge.new": "introspection",
       "GraphForge.new_with_options": "introspection",
@@ -773,6 +776,7 @@
       "ids": [
         "GraphForge.clear",
         "GraphForge.execute",
+        "GraphForge.execute_observed",
         "GraphForge.execute_with_composition",
         "GraphForge.execute_stream",
         "GraphForge.execute_stream_owned",
@@ -782,6 +786,7 @@
         "GraphForge.execute_to_parquet_stream_with_params",
         "GraphForge.execute_to_parquet_with_params",
         "GraphForge.execute_with_params",
+        "GraphForge.execute_with_params_observed",
         "GraphForge.explain",
         "GraphForge.register_procedure",
         "GraphForge.runtime_catalog",
