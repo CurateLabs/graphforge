@@ -1,6 +1,6 @@
 """Bazel targets for the Rust-owned GraphForge Hub discovery contract."""
 
-load("//tools/bazel:gf_rust.bzl", "gf_rust_library", "gf_rust_test")
+load("//tools/bazel:gf_rust.bzl", "gf_rust_integration_test", "gf_rust_library", "gf_rust_test")
 
 exports_files(["Cargo.toml"])
 
@@ -13,4 +13,19 @@ gf_rust_library(
 gf_rust_test(
     name = "graphforge_discovery_test",
     crate = ":graphforge_discovery",
+)
+
+gf_rust_integration_test(
+    name = "contract_artifacts",
+    srcs = ["tests/contract_artifacts.rs"],
+    crate = ":graphforge_discovery",
+    compile_data = ["//docs/reference/discovery/v1:artifacts"],
+)
+
+test_suite(
+    name = "discovery_tests",
+    tests = [
+        ":contract_artifacts",
+        ":graphforge_discovery_test",
+    ],
 )

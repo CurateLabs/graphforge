@@ -127,6 +127,7 @@ Authoritative machine-readable map: `tools/bazel/parity/migration_target_map.jso
 | `graphforge-cypher` | `corpus` | `integration-test` | `crates/graphforge-cypher/tests/corpus.rs` | `//crates/graphforge-cypher:corpus` | `mapped` | #8 |
 | `graphforge-cypher` | `compile` | `bench` | `crates/graphforge-cypher/benches/compile.rs` | — | `exception` | RT-codspeed-bench; CodSpeed divan benchmark |
 | `graphforge-discovery` | `graphforge_discovery` | `lib` | `crates/graphforge-discovery/src/lib.rs` | `//crates/graphforge-discovery:graphforge_discovery` | `mapped` | #908; unit tests `//crates/graphforge-discovery:graphforge_discovery_test` |
+| `graphforge-discovery` | `contract_artifacts` | `integration-test` | `crates/graphforge-discovery/tests/contract_artifacts.rs` | `//crates/graphforge-discovery:contract_artifacts` | `mapped` | #910; deterministic schema and conformance fixture parity |
 | `graphforge-exec` | `graphforge_exec` | `lib` | `crates/graphforge-exec/src/lib.rs` | `//crates/graphforge-exec:graphforge_exec` | `mapped` | #9; unit tests `//crates/graphforge-exec:graphforge_exec_test` |
 | `graphforge-exec` | `adjacency_expand` | `integration-test` | `crates/graphforge-exec/tests/adjacency_expand.rs` | `//crates/graphforge-exec:adjacency_expand` | `mapped` | #8 |
 | `graphforge-exec` | `bench_traversal_scaling` | `integration-test` | `crates/graphforge-exec/tests/bench_traversal_scaling.rs` | `//crates/graphforge-exec:bench_traversal_scaling` | `mapped` | #8 |

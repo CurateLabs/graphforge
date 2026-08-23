@@ -1,0 +1,259 @@
+{
+  "format": "graphforge-discovery-conformance/1",
+  "cases": [
+    {
+      "name": "manifest-minor-compatible-and-canonical",
+      "document": "manifest",
+      "json": "{\"capabilities\":[{\"capability\":\"range-requests\",\"major\":1}],\"default_ref\":\"main\",\"extensions\":{\"x-example\":{\"a\":true,\"z\":1}},\"format\":\"graphforge-discovery/1\",\"immutable_version\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"objects\":[{\"digest\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"length\":42,\"locations\":[\"https://data.graphforge.sh/objects/c\"],\"media_type\":\"application/vnd.graphforge.project\"}],\"package\":{\"format\":\"graphforge-project/2\",\"package_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"repository\":{\"owner\":\"openalex\",\"repository\":\"openalex\"},\"requirements\":[{\"capability\":\"portable-v2\",\"major\":1}],\"resolved_ref\":\"main\",\"version\":{\"major\":1,\"minor\":99}}",
+      "expected": {
+        "result": "valid",
+        "canonical_json": "{\"capabilities\":[{\"capability\":\"range-requests\",\"major\":1}],\"default_ref\":\"main\",\"extensions\":{\"x-example\":{\"a\":true,\"z\":1}},\"format\":\"graphforge-discovery/1\",\"immutable_version\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"objects\":[{\"digest\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"length\":42,\"locations\":[\"https://data.graphforge.sh/objects/c\"],\"media_type\":\"application/vnd.graphforge.project\"}],\"package\":{\"format\":\"graphforge-project/2\",\"package_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"repository\":{\"owner\":\"openalex\",\"repository\":\"openalex\"},\"requirements\":[{\"capability\":\"portable-v2\",\"major\":1}],\"resolved_ref\":\"main\",\"version\":{\"major\":1,\"minor\":99}}"
+      }
+    },
+    {
+      "name": "refs-canonical",
+      "document": "refs",
+      "json": "{\"default_ref\":\"main\",\"format\":\"graphforge-discovery/1\",\"refs\":[{\"name\":\"main\",\"target\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"validator\":\"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"}],\"repository\":{\"owner\":\"openalex\",\"repository\":\"openalex\"},\"version\":{\"major\":1,\"minor\":0}}",
+      "expected": {
+        "result": "valid",
+        "canonical_json": "{\"default_ref\":\"main\",\"format\":\"graphforge-discovery/1\",\"refs\":[{\"name\":\"main\",\"target\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"validator\":\"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"}],\"repository\":{\"owner\":\"openalex\",\"repository\":\"openalex\"},\"version\":{\"major\":1,\"minor\":0}}"
+      }
+    },
+    {
+      "name": "future-protocol",
+      "document": "manifest",
+      "json": "{\"capabilities\":[{\"capability\":\"range-requests\",\"major\":1}],\"default_ref\":\"main\",\"extensions\":{\"x-example\":{\"a\":true,\"z\":1}},\"format\":\"graphforge-discovery/1\",\"immutable_version\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"objects\":[{\"digest\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"length\":42,\"locations\":[\"https://data.graphforge.sh/objects/c\"],\"media_type\":\"application/vnd.graphforge.project\"}],\"package\":{\"format\":\"graphforge-project/2\",\"package_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"repository\":{\"owner\":\"openalex\",\"repository\":\"openalex\"},\"requirements\":[{\"capability\":\"portable-v2\",\"major\":1}],\"resolved_ref\":\"main\",\"version\":{\"major\":2,\"minor\":0}}",
+      "expected": {
+        "result": "invalid",
+        "code": "unsupported_future",
+        "field": "version.major",
+        "version": {
+          "requested_major": 2,
+          "subject": "protocol",
+          "supported_major": 1
+        }
+      }
+    },
+    {
+      "name": "future-package",
+      "document": "manifest",
+      "json": "{\"capabilities\":[{\"capability\":\"range-requests\",\"major\":1}],\"default_ref\":\"main\",\"extensions\":{\"x-example\":{\"a\":true,\"z\":1}},\"format\":\"graphforge-discovery/1\",\"immutable_version\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"objects\":[{\"digest\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"length\":42,\"locations\":[\"https://data.graphforge.sh/objects/c\"],\"media_type\":\"application/vnd.graphforge.project\"}],\"package\":{\"format\":\"graphforge-project/3\",\"package_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"repository\":{\"owner\":\"openalex\",\"repository\":\"openalex\"},\"requirements\":[{\"capability\":\"portable-v2\",\"major\":1}],\"resolved_ref\":\"main\",\"version\":{\"major\":1,\"minor\":0}}",
+      "expected": {
+        "result": "invalid",
+        "code": "unsupported_future",
+        "field": "package.format",
+        "version": {
+          "requested_major": 3,
+          "subject": "portable_package",
+          "supported_major": 2
+        }
+      }
+    },
+    {
+      "name": "unknown-required-capability",
+      "document": "manifest",
+      "json": "{\"capabilities\":[{\"capability\":\"range-requests\",\"major\":1}],\"default_ref\":\"main\",\"extensions\":{\"x-example\":{\"a\":true,\"z\":1}},\"format\":\"graphforge-discovery/1\",\"immutable_version\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"objects\":[{\"digest\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"length\":42,\"locations\":[\"https://data.graphforge.sh/objects/c\"],\"media_type\":\"application/vnd.graphforge.project\"}],\"package\":{\"format\":\"graphforge-project/2\",\"package_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"repository\":{\"owner\":\"openalex\",\"repository\":\"openalex\"},\"requirements\":[{\"capability\":\"future-fetch\",\"major\":1}],\"resolved_ref\":\"main\",\"version\":{\"major\":1,\"minor\":0}}",
+      "expected": {
+        "result": "invalid",
+        "code": "unsupported_future",
+        "field": "requirements",
+        "version": {
+          "requested_major": 1,
+          "subject": "capability",
+          "supported_major": null
+        }
+      }
+    },
+    {
+      "name": "unknown-optional-capability",
+      "document": "manifest",
+      "json": "{\"capabilities\":[{\"capability\":\"future-fetch\",\"major\":1}],\"default_ref\":\"main\",\"extensions\":{\"x-example\":{\"a\":true,\"z\":1}},\"format\":\"graphforge-discovery/1\",\"immutable_version\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"objects\":[{\"digest\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"length\":42,\"locations\":[\"https://data.graphforge.sh/objects/c\"],\"media_type\":\"application/vnd.graphforge.project\"}],\"package\":{\"format\":\"graphforge-project/2\",\"package_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"repository\":{\"owner\":\"openalex\",\"repository\":\"openalex\"},\"requirements\":[{\"capability\":\"portable-v2\",\"major\":1}],\"resolved_ref\":\"main\",\"version\":{\"major\":1,\"minor\":0}}",
+      "expected": {
+        "result": "valid",
+        "canonical_json": "{\"capabilities\":[{\"capability\":\"future-fetch\",\"major\":1}],\"default_ref\":\"main\",\"extensions\":{\"x-example\":{\"a\":true,\"z\":1}},\"format\":\"graphforge-discovery/1\",\"immutable_version\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"objects\":[{\"digest\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"length\":42,\"locations\":[\"https://data.graphforge.sh/objects/c\"],\"media_type\":\"application/vnd.graphforge.project\"}],\"package\":{\"format\":\"graphforge-project/2\",\"package_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"repository\":{\"owner\":\"openalex\",\"repository\":\"openalex\"},\"requirements\":[{\"capability\":\"portable-v2\",\"major\":1}],\"resolved_ref\":\"main\",\"version\":{\"major\":1,\"minor\":0}}"
+      }
+    },
+    {
+      "name": "invalid-identity",
+      "document": "manifest",
+      "json": "{\"capabilities\":[{\"capability\":\"range-requests\",\"major\":1}],\"default_ref\":\"main\",\"extensions\":{\"x-example\":{\"a\":true,\"z\":1}},\"format\":\"graphforge-discovery/1\",\"immutable_version\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"objects\":[{\"digest\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"length\":42,\"locations\":[\"https://data.graphforge.sh/objects/c\"],\"media_type\":\"application/vnd.graphforge.project\"}],\"package\":{\"format\":\"graphforge-project/2\",\"package_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"repository\":{\"owner\":\"OpenAlex\",\"repository\":\"openalex\"},\"requirements\":[{\"capability\":\"portable-v2\",\"major\":1}],\"resolved_ref\":\"main\",\"version\":{\"major\":1,\"minor\":0}}",
+      "expected": {
+        "result": "invalid",
+        "code": "invalid_identity",
+        "field": "repository"
+      }
+    },
+    {
+      "name": "invalid-digest",
+      "document": "manifest",
+      "json": "{\"capabilities\":[{\"capability\":\"range-requests\",\"major\":1}],\"default_ref\":\"main\",\"extensions\":{\"x-example\":{\"a\":true,\"z\":1}},\"format\":\"graphforge-discovery/1\",\"immutable_version\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"objects\":[{\"digest\":\"sha256:ABC\",\"length\":42,\"locations\":[\"https://data.graphforge.sh/objects/c\"],\"media_type\":\"application/vnd.graphforge.project\"}],\"package\":{\"format\":\"graphforge-project/2\",\"package_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"repository\":{\"owner\":\"openalex\",\"repository\":\"openalex\"},\"requirements\":[{\"capability\":\"portable-v2\",\"major\":1}],\"resolved_ref\":\"main\",\"version\":{\"major\":1,\"minor\":0}}",
+      "expected": {
+        "result": "invalid",
+        "code": "integrity_failure",
+        "field": "digest"
+      }
+    },
+    {
+      "name": "unsafe-http-url",
+      "document": "manifest",
+      "json": "{\"capabilities\":[{\"capability\":\"range-requests\",\"major\":1}],\"default_ref\":\"main\",\"extensions\":{\"x-example\":{\"a\":true,\"z\":1}},\"format\":\"graphforge-discovery/1\",\"immutable_version\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"objects\":[{\"digest\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"length\":42,\"locations\":[\"http://data.graphforge.sh/object\"],\"media_type\":\"application/vnd.graphforge.project\"}],\"package\":{\"format\":\"graphforge-project/2\",\"package_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"repository\":{\"owner\":\"openalex\",\"repository\":\"openalex\"},\"requirements\":[{\"capability\":\"portable-v2\",\"major\":1}],\"resolved_ref\":\"main\",\"version\":{\"major\":1,\"minor\":0}}",
+      "expected": {
+        "result": "invalid",
+        "code": "unsafe_location",
+        "field": "objects.locations"
+      }
+    },
+    {
+      "name": "credentialed-url",
+      "document": "manifest",
+      "json": "{\"capabilities\":[{\"capability\":\"range-requests\",\"major\":1}],\"default_ref\":\"main\",\"extensions\":{\"x-example\":{\"a\":true,\"z\":1}},\"format\":\"graphforge-discovery/1\",\"immutable_version\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"objects\":[{\"digest\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"length\":42,\"locations\":[\"https://user:secret@data.graphforge.sh/object\"],\"media_type\":\"application/vnd.graphforge.project\"}],\"package\":{\"format\":\"graphforge-project/2\",\"package_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"repository\":{\"owner\":\"openalex\",\"repository\":\"openalex\"},\"requirements\":[{\"capability\":\"portable-v2\",\"major\":1}],\"resolved_ref\":\"main\",\"version\":{\"major\":1,\"minor\":0}}",
+      "expected": {
+        "result": "invalid",
+        "code": "unsafe_location",
+        "field": "objects.locations"
+      }
+    },
+    {
+      "name": "query-url",
+      "document": "manifest",
+      "json": "{\"capabilities\":[{\"capability\":\"range-requests\",\"major\":1}],\"default_ref\":\"main\",\"extensions\":{\"x-example\":{\"a\":true,\"z\":1}},\"format\":\"graphforge-discovery/1\",\"immutable_version\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"objects\":[{\"digest\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"length\":42,\"locations\":[\"https://data.graphforge.sh/object?token=secret\"],\"media_type\":\"application/vnd.graphforge.project\"}],\"package\":{\"format\":\"graphforge-project/2\",\"package_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"repository\":{\"owner\":\"openalex\",\"repository\":\"openalex\"},\"requirements\":[{\"capability\":\"portable-v2\",\"major\":1}],\"resolved_ref\":\"main\",\"version\":{\"major\":1,\"minor\":0}}",
+      "expected": {
+        "result": "invalid",
+        "code": "unsafe_location",
+        "field": "objects.locations"
+      }
+    },
+    {
+      "name": "duplicate-object",
+      "document": "manifest",
+      "json": "{\"capabilities\":[{\"capability\":\"range-requests\",\"major\":1}],\"default_ref\":\"main\",\"extensions\":{\"x-example\":{\"a\":true,\"z\":1}},\"format\":\"graphforge-discovery/1\",\"immutable_version\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"objects\":[{\"digest\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"length\":42,\"locations\":[\"https://data.graphforge.sh/objects/c\"],\"media_type\":\"application/vnd.graphforge.project\"},{\"digest\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"length\":42,\"locations\":[\"https://data.graphforge.sh/objects/c\"],\"media_type\":\"application/vnd.graphforge.project\"}],\"package\":{\"format\":\"graphforge-project/2\",\"package_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"repository\":{\"owner\":\"openalex\",\"repository\":\"openalex\"},\"requirements\":[{\"capability\":\"portable-v2\",\"major\":1}],\"resolved_ref\":\"main\",\"version\":{\"major\":1,\"minor\":0}}",
+      "expected": {
+        "result": "invalid",
+        "code": "duplicate",
+        "field": "objects.digest"
+      }
+    },
+    {
+      "name": "missing-object",
+      "document": "manifest",
+      "json": "{\"capabilities\":[{\"capability\":\"range-requests\",\"major\":1}],\"default_ref\":\"main\",\"extensions\":{\"x-example\":{\"a\":true,\"z\":1}},\"format\":\"graphforge-discovery/1\",\"immutable_version\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"objects\":[],\"package\":{\"format\":\"graphforge-project/2\",\"package_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"repository\":{\"owner\":\"openalex\",\"repository\":\"openalex\"},\"requirements\":[{\"capability\":\"portable-v2\",\"major\":1}],\"resolved_ref\":\"main\",\"version\":{\"major\":1,\"minor\":0}}",
+      "expected": {
+        "result": "invalid",
+        "code": "missing_object",
+        "field": "objects"
+      }
+    },
+    {
+      "name": "noncanonical-requirements",
+      "document": "manifest",
+      "json": "{\"capabilities\":[{\"capability\":\"range-requests\",\"major\":1}],\"default_ref\":\"main\",\"extensions\":{\"x-example\":{\"a\":true,\"z\":1}},\"format\":\"graphforge-discovery/1\",\"immutable_version\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"objects\":[{\"digest\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"length\":42,\"locations\":[\"https://data.graphforge.sh/objects/c\"],\"media_type\":\"application/vnd.graphforge.project\"}],\"package\":{\"format\":\"graphforge-project/2\",\"package_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"repository\":{\"owner\":\"openalex\",\"repository\":\"openalex\"},\"requirements\":[{\"capability\":\"portable-v2\",\"major\":1},{\"capability\":\"portable-v2\",\"major\":1}],\"resolved_ref\":\"main\",\"version\":{\"major\":1,\"minor\":0}}",
+      "expected": {
+        "result": "invalid",
+        "code": "duplicate",
+        "field": "requirements"
+      }
+    },
+    {
+      "name": "invalid-ref-name",
+      "document": "refs",
+      "json": "{\"default_ref\":\"main\",\"format\":\"graphforge-discovery/1\",\"refs\":[{\"name\":\"bad..ref\",\"target\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"validator\":\"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"}],\"repository\":{\"owner\":\"openalex\",\"repository\":\"openalex\"},\"version\":{\"major\":1,\"minor\":0}}",
+      "expected": {
+        "result": "invalid",
+        "code": "malformed_response",
+        "field": "ref"
+      }
+    },
+    {
+      "name": "missing-default-ref",
+      "document": "refs",
+      "json": "{\"default_ref\":\"trunk\",\"format\":\"graphforge-discovery/1\",\"refs\":[{\"name\":\"main\",\"target\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"validator\":\"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"}],\"repository\":{\"owner\":\"openalex\",\"repository\":\"openalex\"},\"version\":{\"major\":1,\"minor\":0}}",
+      "expected": {
+        "result": "invalid",
+        "code": "missing_ref",
+        "field": "default_ref"
+      }
+    },
+    {
+      "name": "invalid-validator",
+      "document": "refs",
+      "json": "{\"default_ref\":\"main\",\"format\":\"graphforge-discovery/1\",\"refs\":[{\"name\":\"main\",\"target\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"validator\":\"W/\\\"weak\\\"\"}],\"repository\":{\"owner\":\"openalex\",\"repository\":\"openalex\"},\"version\":{\"major\":1,\"minor\":0}}",
+      "expected": {
+        "result": "invalid",
+        "code": "integrity_failure",
+        "field": "digest"
+      }
+    },
+    {
+      "name": "duplicate-ref",
+      "document": "refs",
+      "json": "{\"default_ref\":\"main\",\"format\":\"graphforge-discovery/1\",\"refs\":[{\"name\":\"main\",\"target\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"validator\":\"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},{\"name\":\"main\",\"target\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"validator\":\"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"}],\"repository\":{\"owner\":\"openalex\",\"repository\":\"openalex\"},\"version\":{\"major\":1,\"minor\":0}}",
+      "expected": {
+        "result": "invalid",
+        "code": "duplicate",
+        "field": "refs.name"
+      }
+    },
+    {
+      "name": "response-byte-bound",
+      "document": "manifest",
+      "json": "{\"capabilities\":[{\"capability\":\"range-requests\",\"major\":1}],\"default_ref\":\"main\",\"extensions\":{\"x-example\":{\"a\":true,\"z\":1}},\"format\":\"graphforge-discovery/1\",\"immutable_version\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"objects\":[{\"digest\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"length\":42,\"locations\":[\"https://data.graphforge.sh/objects/c\"],\"media_type\":\"application/vnd.graphforge.project\"}],\"package\":{\"format\":\"graphforge-project/2\",\"package_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"repository\":{\"owner\":\"openalex\",\"repository\":\"openalex\"},\"requirements\":[{\"capability\":\"portable-v2\",\"major\":1}],\"resolved_ref\":\"main\",\"version\":{\"major\":1,\"minor\":0}}",
+      "limits": {
+        "max_response_bytes": 1
+      },
+      "expected": {
+        "result": "invalid",
+        "code": "limit_exceeded",
+        "field": "response"
+      }
+    },
+    {
+      "name": "location-count-bound",
+      "document": "manifest",
+      "json": "{\"capabilities\":[{\"capability\":\"range-requests\",\"major\":1}],\"default_ref\":\"main\",\"extensions\":{\"x-example\":{\"a\":true,\"z\":1}},\"format\":\"graphforge-discovery/1\",\"immutable_version\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"objects\":[{\"digest\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"length\":42,\"locations\":[\"https://a.example/o\",\"https://b.example/o\"],\"media_type\":\"application/vnd.graphforge.project\"}],\"package\":{\"format\":\"graphforge-project/2\",\"package_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"repository\":{\"owner\":\"openalex\",\"repository\":\"openalex\"},\"requirements\":[{\"capability\":\"portable-v2\",\"major\":1}],\"resolved_ref\":\"main\",\"version\":{\"major\":1,\"minor\":0}}",
+      "limits": {
+        "max_locations_per_object": 1
+      },
+      "expected": {
+        "result": "invalid",
+        "code": "limit_exceeded",
+        "field": "objects.locations"
+      }
+    },
+    {
+      "name": "cumulative-byte-bound",
+      "document": "manifest",
+      "json": "{\"capabilities\":[{\"capability\":\"range-requests\",\"major\":1}],\"default_ref\":\"main\",\"extensions\":{\"x-example\":{\"a\":true,\"z\":1}},\"format\":\"graphforge-discovery/1\",\"immutable_version\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"objects\":[{\"digest\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"length\":42,\"locations\":[\"https://data.graphforge.sh/objects/c\"],\"media_type\":\"application/vnd.graphforge.project\"}],\"package\":{\"format\":\"graphforge-project/2\",\"package_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"repository\":{\"owner\":\"openalex\",\"repository\":\"openalex\"},\"requirements\":[{\"capability\":\"portable-v2\",\"major\":1}],\"resolved_ref\":\"main\",\"version\":{\"major\":1,\"minor\":0}}",
+      "limits": {
+        "max_cumulative_object_bytes": 41
+      },
+      "expected": {
+        "result": "invalid",
+        "code": "limit_exceeded",
+        "field": "objects.length"
+      }
+    },
+    {
+      "name": "ref-count-bound",
+      "document": "refs",
+      "json": "{\"default_ref\":\"main\",\"format\":\"graphforge-discovery/1\",\"refs\":[{\"name\":\"main\",\"target\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"validator\":\"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"}],\"repository\":{\"owner\":\"openalex\",\"repository\":\"openalex\"},\"version\":{\"major\":1,\"minor\":0}}",
+      "limits": {
+        "max_refs": 0
+      },
+      "expected": {
+        "result": "invalid",
+        "code": "limit_exceeded",
+        "field": "refs"
+      }
+    },
+    {
+      "name": "duplicate-json-member",
+      "document": "refs",
+      "json": "{\"format\":\"graphforge-discovery/1\",\"format\":\"graphforge-discovery/1\"}",
+      "expected": {
+        "result": "invalid",
+        "code": "malformed_response",
+        "field": null
+      }
+    }
+  ]
+}

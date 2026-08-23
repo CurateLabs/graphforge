@@ -1,0 +1,193 @@
+{
+  "$defs": {
+    "digest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "extensions": {
+      "maxProperties": 256,
+      "propertyNames": {
+        "pattern": "^x-[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$"
+      },
+      "type": "object"
+    },
+    "identity": {
+      "additionalProperties": false,
+      "properties": {
+        "owner": {
+          "$ref": "#/$defs/slug"
+        },
+        "repository": {
+          "$ref": "#/$defs/slug"
+        }
+      },
+      "required": [
+        "owner",
+        "repository"
+      ],
+      "type": "object"
+    },
+    "object": {
+      "additionalProperties": false,
+      "properties": {
+        "digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "length": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "locations": {
+          "items": {
+            "format": "uri",
+            "pattern": "^https://",
+            "type": "string"
+          },
+          "maxItems": 8,
+          "minItems": 1,
+          "type": "array"
+        },
+        "media_type": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "digest",
+        "length",
+        "media_type",
+        "locations"
+      ],
+      "type": "object"
+    },
+    "semantic": {
+      "additionalProperties": false,
+      "properties": {
+        "capability": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "major": {
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "capability",
+        "major"
+      ],
+      "type": "object"
+    },
+    "slug": {
+      "maxLength": 100,
+      "minLength": 1,
+      "pattern": "^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$",
+      "type": "string"
+    },
+    "version": {
+      "additionalProperties": false,
+      "properties": {
+        "major": {
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "minor": {
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "major",
+        "minor"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://graphforge.sh/schemas/discovery/v1/manifest.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "capabilities": {
+      "items": {
+        "$ref": "#/$defs/semantic"
+      },
+      "maxItems": 256,
+      "type": "array"
+    },
+    "default_ref": {
+      "maxLength": 4096,
+      "minLength": 1,
+      "type": "string"
+    },
+    "extensions": {
+      "$ref": "#/$defs/extensions"
+    },
+    "format": {
+      "const": "graphforge-discovery/1"
+    },
+    "immutable_version": {
+      "$ref": "#/$defs/digest"
+    },
+    "objects": {
+      "items": {
+        "$ref": "#/$defs/object"
+      },
+      "maxItems": 1000000,
+      "minItems": 1,
+      "type": "array"
+    },
+    "package": {
+      "additionalProperties": false,
+      "properties": {
+        "format": {
+          "const": "graphforge-project/2"
+        },
+        "package_digest": {
+          "$ref": "#/$defs/digest"
+        }
+      },
+      "required": [
+        "format",
+        "package_digest"
+      ],
+      "type": "object"
+    },
+    "repository": {
+      "$ref": "#/$defs/identity"
+    },
+    "requirements": {
+      "items": {
+        "$ref": "#/$defs/semantic"
+      },
+      "maxItems": 256,
+      "type": "array"
+    },
+    "resolved_ref": {
+      "maxLength": 4096,
+      "minLength": 1,
+      "type": "string"
+    },
+    "version": {
+      "$ref": "#/$defs/version"
+    }
+  },
+  "required": [
+    "format",
+    "version",
+    "repository",
+    "default_ref",
+    "resolved_ref",
+    "immutable_version",
+    "package",
+    "requirements",
+    "capabilities",
+    "objects"
+  ],
+  "title": "manifest",
+  "type": "object"
+}

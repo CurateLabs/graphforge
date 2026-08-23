@@ -183,6 +183,7 @@ test_suite(
         "//crates/graphforge-cli:portable",
         "//crates/graphforge-cli:repository",
         "//crates/graphforge-cypher:corpus",
+        "//crates/graphforge-discovery:contract_artifacts",
         "//crates/graphforge-exec:exec_integration_tests",
         "//crates/graphforge-ir:golden",
         "//crates/graphforge-ontology:integration",
