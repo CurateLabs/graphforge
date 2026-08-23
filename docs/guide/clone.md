@@ -16,12 +16,19 @@ page and any particular storage provider are not part of the object protocol.
 Clone rejects an existing destination. It streams the object through finite
 byte and time bounds, verifies its transport length and SHA-256 digest, and then
 delegates portable-v2 compatibility, semantic integrity, and materialization to
-the Rust storage/API authorities. Temporary download state is removed on failure;
-the destination is published only by the atomic portable import path.
+the Rust storage/API authorities. An interrupted transfer leaves only a hidden,
+versioned `.<destination>.graphforge-clone` checkpoint. A later invocation uses
+a strong HTTP validator and a checked `Range`/`Content-Range` exchange to resume;
+if the server does not support ranges or the validator is stale, it safely starts
+the object again. The checkpoint is never a project and is removed after import.
+The destination is published only by the atomic portable import path.
 
 Redirects are bounded and must retain HTTPS. Credentials in URLs, loopback and
-private IP literals, and local hostnames are rejected. Authentication and private
-repositories are intentionally not part of this public-clone command.
+non-public resolved addresses, query/fragment redirect hops, and local hostnames
+are rejected. DNS is resolved through a filtering resolver and only the admitted
+public socket addresses are handed to the connector, preventing a second DNS
+lookup from rebinding the request. Authentication and private repositories are
+intentionally not part of this public-clone command.
 
 ## Observability
 

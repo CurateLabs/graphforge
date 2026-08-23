@@ -2,11 +2,15 @@
 
 use clap::Args;
 use graphforge_api::{GraphForge, OperationId, PortableV2ImportRequest};
-use graphforge_discovery::{DiscoveryLimits, DiscoveryManifest, RefSet, RepositoryIdentity};
-use graphforge_storage::{
-    DiscoveryPortableV2Request, PortableV2Limits, PortableV2Mode, verify_discovered_portable_v2,
+use graphforge_discovery::{
+    DiscoveryError, DiscoveryErrorCode, DiscoveryLimits, DiscoveryManifest, RefSet,
+    RepositoryIdentity,
 };
-use serde::Serialize;
+use graphforge_storage::{
+    DiscoveryPortableV2Error, DiscoveryPortableV2Mismatch, DiscoveryPortableV2Request,
+    PortableV2ErrorCode, PortableV2Limits, PortableV2Mode, verify_discovered_portable_v2,
+};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
@@ -43,19 +47,42 @@ pub(crate) fn run_clone(
     output: &mut dyn Write,
 ) -> Result<(), crate::CliRuntimeError> {
     let started = Instant::now();
+    let result = run_clone_inner(args, json, output, started);
+    if let Err(crate::CliRuntimeError::Core(error)) = &result {
+        emit_clone_metric(
+            0,
+            started.elapsed(),
+            crate::stable_semantic_code(error).unwrap_or("error"),
+        );
+    } else if result.is_err() {
+        emit_clone_metric(0, started.elapsed(), "error");
+    }
+    result
+}
+
+fn run_clone_inner(
+    args: CloneArgs,
+    json: bool,
+    output: &mut dyn Write,
+    started: Instant,
+) -> Result<(), crate::CliRuntimeError> {
     let (repository, base) = resolve_source(&args.source).map_err(failure)?;
     let destination = args
         .destination
         .unwrap_or_else(|| PathBuf::from(&repository.repository));
     ensure_new_destination(&destination).map_err(failure)?;
 
-    let agent: ureq::Agent = ureq::Agent::config_builder()
+    let config = ureq::Agent::config_builder()
         .https_only(true)
         // Redirects are followed below so every hop is re-admitted by host policy.
         .max_redirects(0)
         .timeout_global(Some(Duration::from_mins(1)))
-        .build()
-        .into();
+        .build();
+    let agent = ureq::Agent::with_parts(
+        config,
+        ureq::unversioned::transport::DefaultConnector::new(),
+        PublicResolver,
+    );
     let limits = DiscoveryLimits::default();
     let manifest_url = protocol_url(&base, "manifest");
     let refs_url = protocol_url(&base, "refs");
@@ -65,27 +92,23 @@ pub(crate) fn run_clone(
 
     // All discovery semantics and the requested identity are admitted before object I/O.
     let manifest = DiscoveryManifest::from_json(&manifest_json, limits)
-        .map_err(|_| failure("clone.discovery_invalid"))?;
-    let refs =
-        RefSet::from_json(&refs_json, limits).map_err(|_| failure("clone.discovery_invalid"))?;
+        .map_err(|error| discovery_failure(&error))?;
+    let refs = RefSet::from_json(&refs_json, limits).map_err(|error| discovery_failure(&error))?;
     if manifest.repository != repository || refs.repository != repository {
         return Err(failure("clone.repository_mismatch").into());
     }
     refs.validate_manifest(&manifest)
-        .map_err(|_| failure("clone.discovery_mismatch"))?;
+        .map_err(|error| discovery_failure(&error))?;
     let object = manifest
         .package_object()
-        .map_err(|_| failure("clone.object_missing"))?;
+        .map_err(|error| discovery_failure(&error))?;
     if object.length > MAX_OBJECT_BYTES {
         return Err(failure("clone.object_too_large").into());
     }
 
-    let parent = destination_parent(&destination);
-    let staging = tempfile::Builder::new()
-        .prefix(".graphforge-clone-")
-        .tempdir_in(parent)
-        .map_err(|_| failure("clone.staging_failed"))?;
-    let package = staging.path().join("package.gfpb");
+    let staging = staging_path(&destination).map_err(failure)?;
+    fs::create_dir_all(&staging).map_err(|_| failure("clone.staging_failed"))?;
+    let package = staging.join("package.part");
     download_object(
         &agent,
         &object.locations,
@@ -105,7 +128,7 @@ pub(crate) fn run_clone(
         mode: PortableV2Mode::Full,
         cancelled: None,
     })
-    .map_err(|_| failure("clone.package_invalid"))?;
+    .map_err(portable_failure)?;
     let imported = GraphForge::import_portable_v2(
         &destination,
         &PortableV2ImportRequest {
@@ -116,6 +139,7 @@ pub(crate) fn run_clone(
         None,
     )
     .map_err(|_| failure("clone.import_failed"))?;
+    fs::remove_dir_all(&staging).map_err(|_| failure("clone.staging_cleanup_failed"))?;
 
     let name = repository.canonical_name();
     let result = CloneResult {
@@ -141,6 +165,61 @@ fn failure(code: &'static str) -> graphforge_api::GfError {
     graphforge_api::GfError::Storage(format!("{code}: clone failed"))
 }
 
+fn discovery_failure(error: &DiscoveryError) -> graphforge_api::GfError {
+    let suffix = match error.code {
+        DiscoveryErrorCode::InvalidIdentity => "invalid_identity",
+        DiscoveryErrorCode::MalformedResponse => "malformed_response",
+        DiscoveryErrorCode::UnsupportedFuture => "unsupported_future",
+        DiscoveryErrorCode::MissingRef => "missing_ref",
+        DiscoveryErrorCode::MissingObject => "missing_object",
+        DiscoveryErrorCode::IntegrityFailure => "integrity_failure",
+        DiscoveryErrorCode::UnsafeLocation => "unsafe_location",
+        DiscoveryErrorCode::LimitExceeded => "limit_exceeded",
+        DiscoveryErrorCode::Duplicate => "duplicate",
+    };
+    let version = error.version.map_or_else(String::new, |version| {
+        format!(
+            " supported_major={} requested_major={}",
+            version
+                .supported_major
+                .map_or_else(|| "none".to_owned(), |value| value.to_string()),
+            version.requested_major
+        )
+    });
+    graphforge_api::GfError::Storage(format!(
+        "clone.discovery.{suffix}: {}{version}",
+        error.detail()
+    ))
+}
+
+fn portable_failure(error: DiscoveryPortableV2Error) -> graphforge_api::GfError {
+    match error {
+        DiscoveryPortableV2Error::Discovery(error) => discovery_failure(&error),
+        DiscoveryPortableV2Error::ReferenceMismatch(mismatch) => failure(match mismatch {
+            DiscoveryPortableV2Mismatch::Repository => "clone.package.repository_mismatch",
+            DiscoveryPortableV2Mismatch::ImmutableVersion => {
+                "clone.package.immutable_version_mismatch"
+            }
+            DiscoveryPortableV2Mismatch::PackageDigest => "clone.package.package_digest_mismatch",
+        }),
+        DiscoveryPortableV2Error::Portable(error) => {
+            let code = match error.code {
+                PortableV2ErrorCode::Cancelled => "clone.package.cancelled",
+                PortableV2ErrorCode::LimitExceeded => "clone.package.limit_exceeded",
+                PortableV2ErrorCode::Io => "clone.package.io",
+                PortableV2ErrorCode::InvalidStructure => "clone.package.invalid_structure",
+                PortableV2ErrorCode::InvalidPath => "clone.package.invalid_path",
+                PortableV2ErrorCode::DuplicateEntry => "clone.package.duplicate_entry",
+                PortableV2ErrorCode::UnsupportedFuture => "clone.package.unsupported_future",
+                PortableV2ErrorCode::Incompatible => "clone.package.incompatible",
+                PortableV2ErrorCode::DigestMismatch => "clone.package.digest_mismatch",
+                PortableV2ErrorCode::ConcurrentMutation => "clone.package.concurrent_mutation",
+            };
+            failure(code)
+        }
+    }
+}
+
 fn ensure_new_destination(path: &Path) -> Result<(), &'static str> {
     if path.as_os_str().is_empty() || path.exists() {
         return Err("clone.destination_exists");
@@ -156,6 +235,15 @@ fn destination_parent(path: &Path) -> &Path {
     path.parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."))
+}
+
+fn staging_path(destination: &Path) -> Result<PathBuf, &'static str> {
+    let name = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .ok_or("clone.destination_invalid")?;
+    Ok(destination_parent(destination).join(format!(".{name}.graphforge-clone")))
 }
 
 fn resolve_source(source: &str) -> Result<(RepositoryIdentity, Url), &'static str> {
@@ -196,28 +284,66 @@ fn validate_public_host(url: &Url) -> Result<(), &'static str> {
     {
         return Err("clone.source_unsafe");
     }
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        let unsafe_ip = match ip {
-            IpAddr::V4(ip) => {
-                ip.is_private()
-                    || ip.is_loopback()
-                    || ip.is_link_local()
-                    || ip.is_unspecified()
-                    || ip.is_multicast()
-            }
-            IpAddr::V6(ip) => {
-                ip.is_loopback()
-                    || ip.is_unspecified()
-                    || ip.is_multicast()
-                    || ip.is_unique_local()
-                    || ip.is_unicast_link_local()
-            }
-        };
-        if unsafe_ip {
-            return Err("clone.source_unsafe");
-        }
+    if let Ok(ip) = host.parse::<IpAddr>()
+        && !is_public_ip(ip)
+    {
+        return Err("clone.source_unsafe");
     }
     Ok(())
+}
+
+fn is_public_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            let [a, b, c, _] = ip.octets();
+            !(ip.is_private()
+                || ip.is_loopback()
+                || ip.is_link_local()
+                || ip.is_unspecified()
+                || ip.is_multicast()
+                || ip.is_broadcast()
+                || a == 0
+                || (a == 100 && (64..=127).contains(&b))
+                || (a == 192 && b == 0 && c == 2)
+                || (a == 198 && (b == 18 || b == 19 || b == 51))
+                || (a == 203 && b == 0 && c == 113)
+                || a >= 240)
+        }
+        IpAddr::V6(ip) => {
+            !(ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_multicast()
+                || ip.is_unique_local()
+                || ip.is_unicast_link_local()
+                || ip.segments()[0] == 0x2001 && ip.segments()[1] == 0x0db8)
+        }
+    }
+}
+
+#[derive(Debug)]
+struct PublicResolver;
+
+impl ureq::unversioned::resolver::Resolver for PublicResolver {
+    fn resolve(
+        &self,
+        uri: &ureq::http::Uri,
+        config: &ureq::config::Config,
+        timeout: ureq::unversioned::transport::NextTimeout,
+    ) -> Result<ureq::unversioned::resolver::ResolvedSocketAddrs, ureq::Error> {
+        use ureq::unversioned::resolver::{DefaultResolver, Resolver};
+        let resolved = Resolver::resolve(&DefaultResolver::default(), uri, config, timeout)?;
+        let mut admitted = self.empty();
+        for &address in &resolved {
+            if is_public_ip(address.ip()) {
+                admitted.push(address);
+            }
+        }
+        if admitted.is_empty() {
+            Err(ureq::Error::HostNotFound)
+        } else {
+            Ok(admitted)
+        }
+    }
 }
 
 fn protocol_url(base: &Url, leaf: &str) -> Url {
@@ -227,7 +353,7 @@ fn protocol_url(base: &Url, leaf: &str) -> Url {
 }
 
 fn get_bounded(agent: &ureq::Agent, url: Url, max: usize) -> Result<Vec<u8>, &'static str> {
-    let mut response = get_with_safe_redirects(agent, url)?;
+    let mut response = get_with_safe_redirects(agent, url, None)?;
     let mut bytes = Vec::new();
     response
         .body_mut()
@@ -244,13 +370,20 @@ fn get_bounded(agent: &ureq::Agent, url: Url, max: usize) -> Result<Vec<u8>, &'s
 fn get_with_safe_redirects(
     agent: &ureq::Agent,
     mut url: Url,
+    range: Option<(u64, &str)>,
 ) -> Result<ureq::http::Response<ureq::Body>, &'static str> {
     for redirects in 0..=3 {
         validate_public_host(&url)?;
-        let response = agent
-            .get(url.as_str())
-            .call()
-            .map_err(|_| "clone.transport_failed")?;
+        let request = agent.get(url.as_str());
+        let response = if let Some((offset, validator)) = range {
+            request
+                .header("Range", format!("bytes={offset}-"))
+                .header("If-Range", validator)
+                .call()
+        } else {
+            request.call()
+        }
+        .map_err(|_| "clone.transport_failed")?;
         if !response.status().is_redirection() {
             return Ok(response);
         }
@@ -264,6 +397,9 @@ fn get_with_safe_redirects(
             .ok_or("clone.redirect_invalid")?;
         let next = url.join(location).map_err(|_| "clone.redirect_invalid")?;
         if next.scheme() != "https" || !next.username().is_empty() || next.password().is_some() {
+            return Err("clone.redirect_unsafe");
+        }
+        if next.query().is_some() || next.fragment().is_some() {
             return Err("clone.redirect_unsafe");
         }
         validate_public_host(&next)?;
@@ -285,11 +421,20 @@ fn download_object(
             Ok(()) => return Ok(()),
             Err(error) => {
                 last = error;
-                let _ = fs::remove_file(output);
             }
         }
     }
     Err(last)
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ResumeState {
+    version: u8,
+    object_digest: String,
+    object_length: u64,
+    location: String,
+    etag: Option<String>,
 }
 
 fn download_one(
@@ -304,21 +449,164 @@ fn download_one(
         return Err("clone.location_unsafe");
     }
     validate_public_host(&url)?;
-    let mut response = get_with_safe_redirects(agent, url)?;
+    let checkpoint = output.with_extension("resume.json");
+    let saved = read_resume_state(&checkpoint);
+    let mut offset = fs::metadata(output).map_or(0, |metadata| metadata.len());
+    let validator = saved.as_ref().and_then(|state| {
+        (state.version == 1
+            && state.object_digest == expected_digest
+            && state.object_length == expected_length
+            && state.location == location
+            && offset < expected_length)
+            .then_some(state.etag.as_deref())
+            .flatten()
+    });
+    if offset > 0 && validator.is_none() {
+        offset = 0;
+    }
+    let mut response = get_with_safe_redirects(agent, url, validator.map(|value| (offset, value)))?;
+    let resumed = offset > 0 && response.status() == ureq::http::StatusCode::PARTIAL_CONTENT;
+    if resumed {
+        let expected_range = format!("bytes {offset}-{}/{expected_length}", expected_length - 1);
+        let actual_range = response
+            .headers()
+            .get(ureq::http::header::CONTENT_RANGE)
+            .and_then(|value| value.to_str().ok())
+            .ok_or("clone.range_invalid")?;
+        if actual_range != expected_range {
+            return Err("clone.range_invalid");
+        }
+    } else {
+        offset = 0;
+    }
+    let remaining = expected_length - offset;
     if response
         .body()
         .content_length()
-        .is_some_and(|value| value != expected_length)
+        .is_some_and(|value| value != remaining)
     {
         return Err("clone.length_mismatch");
     }
+    let etag = response
+        .headers()
+        .get(ureq::http::header::ETAG)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.starts_with("W/") && value.starts_with('"') && value.ends_with('"'))
+        .map(str::to_owned);
+    write_resume_state(
+        &checkpoint,
+        &ResumeState {
+            version: 1,
+            object_digest: expected_digest.to_owned(),
+            object_length: expected_length,
+            location: location.to_owned(),
+            etag,
+        },
+    )?;
+    let mut hasher = Sha256::new();
+    if offset > 0 {
+        let mut existing = File::open(output).map_err(|_| "clone.staging_failed")?;
+        std::io::copy(&mut existing, &mut DigestWriter(&mut hasher))
+            .map_err(|_| "clone.staging_failed")?;
+    }
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .append(resumed)
+        .truncate(!resumed)
+        .open(output)
+        .map_err(|_| "clone.staging_failed")?;
     let mut reader = response.body_mut().as_reader();
-    let mut file = File::create(output).map_err(|_| "clone.staging_failed")?;
-    copy_verified(&mut reader, &mut file, expected_length, expected_digest)?;
+    copy_resumed_verified(
+        &mut reader,
+        &mut file,
+        &mut hasher,
+        offset,
+        expected_length,
+        expected_digest,
+    )?;
     file.sync_all().map_err(|_| "clone.staging_failed")?;
+    let _ = fs::remove_file(checkpoint);
     Ok(())
 }
 
+struct DigestWriter<'a>(&'a mut Sha256);
+
+impl Write for DigestWriter<'_> {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.0.update(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn read_resume_state(path: &Path) -> Option<ResumeState> {
+    let bytes = fs::read(path).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn write_resume_state(path: &Path, state: &ResumeState) -> Result<(), &'static str> {
+    let temporary = path.with_extension("resume.json.tmp");
+    let bytes = serde_json::to_vec(state).map_err(|_| "clone.staging_failed")?;
+    fs::write(&temporary, bytes).map_err(|_| "clone.staging_failed")?;
+    fs::rename(temporary, path).map_err(|_| "clone.staging_failed")
+}
+
+fn copy_resumed_verified(
+    reader: &mut dyn Read,
+    output: &mut dyn Write,
+    hasher: &mut Sha256,
+    initial_length: u64,
+    expected_length: u64,
+    expected_digest: &str,
+) -> Result<(), &'static str> {
+    let mut total = initial_length;
+    let mut buffer = vec![0_u8; 64 * 1024];
+    loop {
+        let count = reader
+            .read(&mut buffer)
+            .map_err(|_| "clone.transport_failed")?;
+        if count == 0 {
+            break;
+        }
+        total = total
+            .checked_add(count as u64)
+            .ok_or("clone.object_too_large")?;
+        if total > expected_length {
+            return Err("clone.length_mismatch");
+        }
+        output
+            .write_all(&buffer[..count])
+            .map_err(|_| "clone.staging_failed")?;
+        hasher.update(&buffer[..count]);
+    }
+    if total != expected_length {
+        return Err("clone.length_mismatch");
+    }
+    validate_digest(hasher, expected_digest)
+}
+
+fn validate_digest(hasher: &mut Sha256, expected_digest: &str) -> Result<(), &'static str> {
+    let actual =
+        hasher
+            .clone()
+            .finalize()
+            .iter()
+            .fold(String::from("sha256:"), |mut output, byte| {
+                use std::fmt::Write as _;
+                write!(output, "{byte:02x}").expect("writing to String cannot fail");
+                output
+            });
+    if actual != expected_digest {
+        return Err("clone.digest_mismatch");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 fn copy_verified(
     reader: &mut dyn Read,
     output: &mut dyn Write,
@@ -365,7 +653,7 @@ fn copy_verified(
 
 /// Best-effort OTel-exporter handoff. Values deliberately exclude source,
 /// repository, host, URL, ref, digest, destination, user, and credentials.
-fn emit_clone_metric(bytes: u64, duration: Duration, result: &'static str) {
+fn emit_clone_metric(bytes: u64, duration: Duration, result: &str) {
     let Ok(path) = std::env::var("GRAPHFORGE_OTEL_JSONL") else {
         return;
     };
@@ -408,6 +696,9 @@ mod tests {
             resolve_source("https://127.0.0.1/a/b").unwrap_err(),
             "clone.source_unsafe"
         );
+        assert!(!is_public_ip("169.254.169.254".parse().unwrap()));
+        assert!(!is_public_ip("fd00::1".parse().unwrap()));
+        assert!(is_public_ip("1.1.1.1".parse().unwrap()));
         let temp = tempfile::tempdir().unwrap();
         assert_eq!(
             ensure_new_destination(temp.path()).unwrap_err(),
@@ -450,6 +741,51 @@ mod tests {
             )
             .unwrap_err(),
             "clone.digest_mismatch"
+        );
+    }
+
+    #[test]
+    fn resumed_stream_hashes_the_existing_prefix() {
+        let prefix = b"portable ";
+        let suffix = b"bytes";
+        let complete = [prefix.as_slice(), suffix.as_slice()].concat();
+        let digest =
+            Sha256::digest(&complete)
+                .iter()
+                .fold(String::from("sha256:"), |mut output, byte| {
+                    use std::fmt::Write as _;
+                    write!(output, "{byte:02x}").unwrap();
+                    output
+                });
+        let mut hasher = Sha256::new();
+        hasher.update(prefix);
+        let mut output = prefix.to_vec();
+        copy_resumed_verified(
+            &mut suffix.as_slice(),
+            &mut output,
+            &mut hasher,
+            prefix.len() as u64,
+            complete.len() as u64,
+            &digest,
+        )
+        .unwrap();
+        assert_eq!(output, complete);
+    }
+
+    #[test]
+    fn json_and_text_failures_keep_stable_clone_codes() {
+        let json = crate::execute(["gf", "--json", "clone", "http://graphforge.sh/a/b"]);
+        assert_ne!(json.exit_code, 0);
+        let envelope: serde_json::Value = serde_json::from_slice(&json.stderr).unwrap();
+        assert_eq!(
+            envelope["error"]["details"]["semantic_code"],
+            "clone.source_unsafe"
+        );
+        let text = crate::execute(["gf", "clone", "http://graphforge.sh/a/b"]);
+        assert!(
+            String::from_utf8(text.stderr)
+                .unwrap()
+                .contains("clone.source_unsafe")
         );
     }
 }
