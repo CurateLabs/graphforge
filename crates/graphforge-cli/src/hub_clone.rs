@@ -468,7 +468,77 @@ fn save_resume(
         location: location.to_owned(),
         etag: etag.to_owned(),
     };
-    std::fs::write(checkpoint, serde_json::to_vec(&state).map_err(storage)?).map_err(storage)
+    reject_unsafe_state_path(checkpoint)?;
+    let temporary = checkpoint.with_extension("resume.json.tmp");
+    reject_unsafe_state_path(&temporary)?;
+    let bytes = serde_json::to_vec(&state).map_err(storage)?;
+    let mut file = open_private_checkpoint(&temporary)?;
+    file.write_all(&bytes).map_err(storage)?;
+    file.sync_all().map_err(storage)?;
+    drop(file);
+    std::fs::rename(&temporary, checkpoint).map_err(storage)?;
+    if let Some(parent) = checkpoint.parent() {
+        let _ = File::open(parent).and_then(|directory| directory.sync_all());
+    }
+    Ok(())
+}
+
+fn reject_unsafe_state_path(path: &Path) -> Result<(), graphforge_api::GfError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            Err(validation(
+                "hub.destination_conflict",
+                "resume checkpoint path is unsafe",
+            ))
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(storage(error)),
+    }
+}
+
+#[cfg(unix)]
+fn open_private_checkpoint(path: &Path) -> Result<File, graphforge_api::GfError> {
+    OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(storage)
+}
+
+#[cfg(not(unix))]
+fn open_private_checkpoint(path: &Path) -> Result<File, graphforge_api::GfError> {
+    reject_unsafe_state_path(path)?;
+    OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+        .map_err(storage)
+}
+
+fn read_resume(checkpoint: &Path) -> Result<Option<ResumeState>, graphforge_api::GfError> {
+    match std::fs::symlink_metadata(checkpoint) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            Err(validation(
+                "hub.destination_conflict",
+                "resume checkpoint path is unsafe",
+            ))
+        }
+        Ok(_) => {
+            let file = open_read_nofollow(checkpoint).map_err(storage)?;
+            let mut bytes = Vec::new();
+            file.take(64 * 1024)
+                .read_to_end(&mut bytes)
+                .map_err(storage)?;
+            Ok(serde_json::from_slice(&bytes).ok())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(storage(error)),
+    }
 }
 
 fn download(
@@ -501,9 +571,7 @@ fn download(
         .ok_or_else(|| validation("hub.missing_object", "portable bundle has no location"))?;
     let url = Url::parse(location)
         .map_err(|_| validation("hub.unsafe_location", "invalid object URL"))?;
-    let saved: Option<ResumeState> = std::fs::read(&checkpoint)
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok());
+    let saved = read_resume(&checkpoint)?;
     let validator = saved
         .as_ref()
         .filter(|s| {
@@ -995,6 +1063,37 @@ mod tests {
         let range = format!("bytes 8-{}/{}", bytes.len() - 1, bytes.len());
         let second = Scripted::new(vec![response(206, Some(&range), &bytes[8..])]);
         assert_eq!(download(&second, &descriptor, &destination).unwrap(), 8);
+    }
+
+    #[test]
+    fn torn_checkpoint_restarts_without_range() {
+        let bytes = b"verified portable bytes";
+        let descriptor = object(bytes);
+        let root = tempfile::tempdir().unwrap();
+        let partial = root.path().join("package.part");
+        std::fs::write(&partial, &bytes[..8]).unwrap();
+        std::fs::write(partial.with_extension("resume.json"), b"{torn").unwrap();
+        let transport = Scripted::new(vec![response(200, None, bytes)]);
+        assert_eq!(download(&transport, &descriptor, &partial).unwrap(), 0);
+        assert_eq!(std::fs::read(partial).unwrap(), bytes);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checkpoint_symlink_is_rejected_without_touching_target() {
+        use std::os::unix::fs::symlink;
+        let bytes = b"verified portable bytes";
+        let descriptor = object(bytes);
+        let root = tempfile::tempdir().unwrap();
+        let partial = root.path().join("package.part");
+        std::fs::write(&partial, &bytes[..8]).unwrap();
+        let victim = root.path().join("victim");
+        std::fs::write(&victim, b"untouched").unwrap();
+        symlink(&victim, partial.with_extension("resume.json")).unwrap();
+        let transport = Scripted::new(vec![response(200, None, bytes)]);
+        let error = download(&transport, &descriptor, &partial).unwrap_err();
+        assert!(error.to_string().contains("hub.destination_conflict"));
+        assert_eq!(std::fs::read(victim).unwrap(), b"untouched");
     }
 
     #[test]
