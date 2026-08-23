@@ -98,24 +98,18 @@ pub struct HubRepositoryIdentity {
     pub name: String,
 }
 
-impl HubRepositoryIdentity {
-    /// Parse `owner/repository` without consulting a network provider.
-    pub fn parse(value: &str) -> Result<Self, HubProtocolError> {
-        let (owner, name) = value.split_once('/').ok_or_else(invalid_identity)?;
-        if name.contains('/') || !valid_slug(owner) || !valid_slug(name) {
-            return Err(invalid_identity());
-        }
-        Ok(Self {
-            owner: owner.to_owned(),
-            name: name.to_owned(),
-        })
+/// Parse `owner/repository` without consulting a network provider.
+pub fn parse_hub_repository_identity(
+    value: &str,
+) -> Result<HubRepositoryIdentity, HubProtocolError> {
+    let (owner, name) = value.split_once('/').ok_or_else(invalid_identity)?;
+    if name.contains('/') || !valid_slug(owner) || !valid_slug(name) {
+        return Err(invalid_identity());
     }
-
-    /// Stable human and protocol identity.
-    #[must_use]
-    pub fn canonical_name(&self) -> String {
-        format!("{}/{}", self.owner, self.name)
-    }
+    Ok(HubRepositoryIdentity {
+        owner: owner.to_owned(),
+        name: name.to_owned(),
+    })
 }
 
 /// A required discovery capability and its major version.
@@ -587,7 +581,8 @@ mod tests {
     #[test]
     fn conformance_fixture_accepts_current_manifest() {
         let manifest = parse_hub_manifest(VALID, HubProtocolLimits::default()).unwrap();
-        assert_eq!(manifest.repository.canonical_name(), "openalex/openalex");
+        assert_eq!(manifest.repository.owner, "openalex");
+        assert_eq!(manifest.repository.name, "openalex");
         assert_eq!(manifest.version.package.format, PORTABLE_FORMAT);
     }
 
@@ -634,9 +629,9 @@ mod tests {
 
     #[test]
     fn identity_parser_rejects_unicode_and_noncanonical_case() {
-        assert!(HubRepositoryIdentity::parse("openalex/openalex").is_ok());
-        assert!(HubRepositoryIdentity::parse("OpenAlex/openalex").is_err());
-        assert!(HubRepositoryIdentity::parse("øpenalex/openalex").is_err());
+        assert!(parse_hub_repository_identity("openalex/openalex").is_ok());
+        assert!(parse_hub_repository_identity("OpenAlex/openalex").is_err());
+        assert!(parse_hub_repository_identity("øpenalex/openalex").is_err());
     }
 
     #[test]

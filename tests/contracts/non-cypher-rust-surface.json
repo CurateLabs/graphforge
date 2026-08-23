@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "2d86746c592716a79fe12cb5471f1c9b90ce8e91bfca772b19110cdfafa468d1",
+  "public_method_digest": "4c833e09745ec89f2d808e379ee82e0e81d74c92a2bb760450c9eadeef2d5e60",
   "method_policy": {
     "receiver_defaults": {
       "GraphForge": "release-tested",
@@ -103,6 +103,23 @@
     }
   },
   "method_evidence_groups": {
+    "hub-discovery-protocol": {
+      "ids": [
+        "crate.parse_hub_manifest",
+        "crate.parse_hub_refs",
+        "crate.parse_hub_repository_identity"
+      ],
+      "test_refs": [
+        {
+          "path": "crates/graphforge-api/src/hub_protocol.rs",
+          "symbol": "complete_conformance_corpus_has_expected_dispositions"
+        },
+        {
+          "path": "crates/graphforge-api/src/hub_protocol.rs",
+          "symbol": "identity_parser_rejects_unicode_and_noncanonical_case"
+        }
+      ]
+    },
     "multi-ontology-lifecycle": {
       "ids": [
         "GraphForge.adopt_ontology_bridge",
