@@ -391,6 +391,7 @@ mod tests {
 
     #[test]
     fn append_rewrite_copies_existing_topology_in_bounded_batches() {
+        let _measurement = crate::io_stats::test_measurement_guard();
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("topology/nodes.parquet");
         let initial_values = (0..(ROW_GROUP_SIZE * 2 + 17))
