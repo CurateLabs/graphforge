@@ -113,7 +113,7 @@ fn manifest_schema() -> Value {
             "format":{"const":"graphforge-discovery/1"}, "version":{"$ref":"#/$defs/version"},
             "repository":{"$ref":"#/$defs/identity"}, "default_ref":{"type":"string","minLength":1,"maxLength":4096},
             "resolved_ref":{"type":"string","minLength":1,"maxLength":4096}, "immutable_version":{"$ref":"#/$defs/digest"},
-            "package":{"type":"object","additionalProperties":false,"required":["format","package_digest"],"properties":{"format":{"const":"graphforge-project/2"},"package_digest":{"$ref":"#/$defs/digest"}}},
+            "package":{"type":"object","additionalProperties":false,"required":["format","package_digest","object_digest"],"properties":{"format":{"const":"graphforge-project/2"},"package_digest":{"$ref":"#/$defs/digest"},"object_digest":{"$ref":"#/$defs/digest"}}},
             "requirements":{"type":"array","maxItems":256,"items":{"$ref":"#/$defs/semantic"}},
             "capabilities":{"type":"array","maxItems":256,"items":{"$ref":"#/$defs/semantic"}},
             "objects":{"type":"array","minItems":1,"maxItems":1_000_000,"items":{"$ref":"#/$defs/object"}},
@@ -154,7 +154,7 @@ fn base_manifest() -> Value {
     json!({
         "format":"graphforge-discovery/1","version":{"major":1,"minor":0},"repository":{"owner":"openalex","repository":"openalex"},
         "default_ref":"main","resolved_ref":"main","immutable_version":digest('a'),
-        "package":{"format":"graphforge-project/2","package_digest":digest('b')},
+        "package":{"format":"graphforge-project/2","package_digest":digest('b'),"object_digest":digest('c')},
         "requirements":[{"capability":"portable-v2","major":1}],"capabilities":[{"capability":"range-requests","major":1}],
         "objects":[{"digest":digest('c'),"length":42,"media_type":"application/vnd.graphforge.project","locations":["https://data.graphforge.sh/objects/c"]}],
         "extensions":{"x-example":{"z":1,"a":true}}
@@ -289,7 +289,41 @@ fn corpus() -> Corpus {
         v["capabilities"][0]["capability"] = json!("future-fetch");
         v
     }));
+    cases.push(valid("multiple-objects-select-explicit-package", Document::Manifest, {
+        let mut v = base_manifest();
+        v["objects"] = json!([
+            {"digest":digest('a'),"length":7,"media_type":"application/octet-stream","locations":["https://data.graphforge.sh/objects/a"]},
+            {"digest":digest('c'),"length":42,"media_type":"application/vnd.graphforge.project","locations":["https://data.graphforge.sh/objects/c"]}
+        ]);
+        v
+    }));
     let mutations: &[(&str, Document, &str, Option<&str>, fn(&mut Value))] = &[
+        (
+            "older-package-reference-without-object",
+            Document::Manifest,
+            "malformed_response",
+            None,
+            |v| {
+                v["package"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("object_digest");
+            },
+        ),
+        (
+            "missing-package-object",
+            Document::Manifest,
+            "missing_object",
+            Some("package.object_digest"),
+            |v| v["package"]["object_digest"] = json!(digest('d')),
+        ),
+        (
+            "incompatible-package-object-media-type",
+            Document::Manifest,
+            "malformed_response",
+            Some("package.object_digest"),
+            |v| v["objects"][0]["media_type"] = json!("application/octet-stream"),
+        ),
         (
             "invalid-identity",
             Document::Manifest,

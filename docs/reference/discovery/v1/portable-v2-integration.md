@@ -11,18 +11,23 @@ downloaded portable-v2 package.
    caller.
 3. Bind `resolved_ref` through the refs snapshot and require its target to equal
    the manifest's `immutable_version`.
-4. Download the selected object using a caller-owned HTTP transport. Redirect,
+4. Select the inventory entry whose transport `digest` equals
+   `package.object_digest`. The reference MUST resolve to exactly one object and
+   that object MUST use `application/vnd.graphforge.project`; clients never
+   select the first object or guess by media type.
+5. Download that selected object using a caller-owned HTTP transport. Redirect,
    host, and credential policy remain transport responsibilities.
-5. Pass the complete local package to `graphforge-storage`'s portable-v2
+6. Pass the complete local package to `graphforge-storage`'s portable-v2
    verifier. Only that verifier decides package integrity, compatibility, and
    authenticity.
-6. Require the verifier's semantic `package_digest` to equal the discovery
+7. Require the verifier's semantic `package_digest` to equal the discovery
    manifest's `package.package_digest` before returning an accepted selection.
 
 Failure at any step MUST return no accepted repository/package result. Discovery
-object digests protect downloaded object bytes; they do not replace the
-portable-v2 semantic package digest. Likewise, an immutable repository version
-identifies a repository snapshot and is not a portable package identity.
+`package.object_digest` and inventory object digests protect downloaded object
+bytes; they do not replace `package.package_digest`, the portable-v2 semantic
+identity established by the storage verifier. Likewise, an immutable repository
+version identifies a repository snapshot and is not a portable package identity.
 
 `graphforge-storage::verify_discovered_portable_v2` implements this sequence.
 It does not publish or materialize a project, so a failed cross-contract check
