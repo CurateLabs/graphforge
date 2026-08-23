@@ -1,5 +1,5 @@
 {
-  "checksum": "fb283564fd3498c1dd8968a3a7ec2bbebf603eb6f6e3d401bac7af43302d9def",
+  "checksum": "10e1011f9eb994967497ecfe3f699d445bd5df1cfdc0d7e617894095cccedaee",
   "crates": {
     "adler2 2.0.1": {
       "name": "adler2",
@@ -13071,6 +13071,60 @@
               "id": "codspeed-divan-compat 5.0.1",
               "target": "codspeed_divan_compat",
               "alias": "divan"
+            }
+          ],
+          "selects": {}
+        },
+        "edition": "2024",
+        "version": "0.5.2"
+      },
+      "license": "Apache-2.0",
+      "license_ids": [
+        "Apache-2.0"
+      ],
+      "license_file": "../../LICENSE"
+    },
+    "graphforge-discovery 0.5.2": {
+      "name": "graphforge-discovery",
+      "version": "0.5.2",
+      "package_url": "https://github.com/CurateLabs/graphforge",
+      "repository": null,
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "graphforge_discovery",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "graphforge_discovery",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "deps": {
+          "common": [
+            {
+              "id": "serde 1.0.228",
+              "target": "serde"
+            },
+            {
+              "id": "serde_json 1.0.151",
+              "target": "serde_json"
+            },
+            {
+              "id": "sha2 0.11.0",
+              "target": "sha2"
+            },
+            {
+              "id": "url 2.5.8",
+              "target": "url"
             }
           ],
           "selects": {}
@@ -29083,6 +29137,7 @@
         "crate_features": {
           "common": [
             "default",
+            "serde",
             "std"
           ],
           "selects": {}
@@ -29100,11 +29155,24 @@
             {
               "id": "percent-encoding 2.3.2",
               "target": "percent_encoding"
+            },
+            {
+              "id": "serde 1.0.228",
+              "target": "serde"
             }
           ],
           "selects": {}
         },
         "edition": "2018",
+        "proc_macro_deps": {
+          "common": [
+            {
+              "id": "serde_derive 1.0.228",
+              "target": "serde_derive"
+            }
+          ],
+          "selects": {}
+        },
         "version": "2.5.8"
       },
       "license": "MIT OR Apache-2.0",
@@ -33969,6 +34037,7 @@
     "graphforge-cli 0.5.2": "crates/graphforge-cli",
     "graphforge-core 0.5.2": "crates/graphforge-core",
     "graphforge-cypher 0.5.2": "crates/graphforge-cypher",
+    "graphforge-discovery 0.5.2": "crates/graphforge-discovery",
     "graphforge-exec 0.5.2": "crates/graphforge-exec",
     "graphforge-filesystem 0.5.2": "crates/graphforge-filesystem",
     "graphforge-io 0.5.2": "crates/graphforge-io",
@@ -34209,6 +34278,7 @@
     "tokio 1.53.1",
     "unicode-normalization 0.1.25",
     "ureq 3.4.0",
+    "url 2.5.8",
     "uuid 1.24.1",
     "windows-sys 0.61.2"
   ],

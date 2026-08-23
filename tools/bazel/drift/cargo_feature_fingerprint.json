@@ -1,6 +1,6 @@
 {
   "schema": "graphforge.cargo-feature-fingerprint.v1",
-  "sha256": "edd8d33316e934f85aadce419ed4aae07daa7930004a8899727c83570776a882",
+  "sha256": "dc5a6c4e923296113ebb09cecb4b107d10022ab2318c941540c0986be6f1b377",
   "entries": [
     {
       "name": "graphforge-api",
@@ -757,6 +757,53 @@
           "name": "thiserror",
           "req": "^2",
           "features": [],
+          "optional": false,
+          "uses_default_features": true,
+          "kind": null,
+          "target": null
+        }
+      ]
+    },
+    {
+      "name": "graphforge-discovery",
+      "version": "0.5.2",
+      "features": [],
+      "dependencies": [
+        {
+          "name": "serde",
+          "req": "^1",
+          "features": [
+            "derive"
+          ],
+          "optional": false,
+          "uses_default_features": true,
+          "kind": null,
+          "target": null
+        },
+        {
+          "name": "serde_json",
+          "req": "^1",
+          "features": [],
+          "optional": false,
+          "uses_default_features": true,
+          "kind": null,
+          "target": null
+        },
+        {
+          "name": "sha2",
+          "req": "^0.11",
+          "features": [],
+          "optional": false,
+          "uses_default_features": true,
+          "kind": null,
+          "target": null
+        },
+        {
+          "name": "url",
+          "req": "^2",
+          "features": [
+            "serde"
+          ],
           "optional": false,
           "uses_default_features": true,
           "kind": null,

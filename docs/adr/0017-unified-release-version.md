@@ -50,7 +50,7 @@ into independently versioned products.
 Every first-party artifact in one GraphForge release uses the same exact
 Semantic Version:
 
-- all 16 public `graphforge-*` crates on crates.io;
+- all 17 public `graphforge-*` crates on crates.io;
 - `graphforge` on PyPI;
 - `@curatelabs/graphforge` and its five native npm platform packages;
 - `@curatelabs/graphforge-cli`;

@@ -1,7 +1,7 @@
 {
   "schema": "graphforge.bazel-migration-target-map.v1",
   "issue": 6,
-  "cargo_target_count": 113,
+  "cargo_target_count": 114,
   "targets": [
     {
       "package": "graphforge-api",
@@ -752,6 +752,16 @@
       "bazel_label": null,
       "exception_id": "RT-codspeed-bench",
       "notes": "CodSpeed divan benchmark; Cargo diagnostics surface"
+    },
+    {
+      "package": "graphforge-discovery",
+      "target": "graphforge_discovery",
+      "class": "lib",
+      "source": "crates/graphforge-discovery/src/lib.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-discovery:graphforge_discovery",
+      "exception_id": null,
+      "notes": "#908; unit tests `//crates/graphforge-discovery:graphforge_discovery_test`"
     },
     {
       "package": "graphforge-exec",

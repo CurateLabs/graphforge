@@ -66,6 +66,7 @@ assert names[0] == "graphforge-core", names
 assert names[-1] == "graphforge-cli", names
 assert "graphforge-bindings-py" not in names
 assert "graphforge-cli" in names
+assert "graphforge-discovery" in names
 # Relative order samples
 assert names.index("graphforge-ast") < names.index("graphforge-ir")
 assert names.index("graphforge-filesystem") < names.index("graphforge-storage")
@@ -73,12 +74,12 @@ assert names.index("graphforge-storage") < names.index("graphforge-api")
 
 checked = run("check")
 assert checked.returncode == 0, checked.stderr
-assert "16 crates" in checked.stdout
+assert "17 crates" in checked.stdout
 
 dry = run("dry-run-commands")
 assert dry.returncode == 0, dry.stderr
 commands = [line for line in dry.stdout.splitlines() if line]
-assert len(commands) == 16, commands
+assert len(commands) == 17, commands
 assert commands[0].startswith("cargo publish -p graphforge-core ")
 assert commands[-1].startswith("cargo publish -p graphforge-cli ")
 
