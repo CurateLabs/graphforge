@@ -353,7 +353,7 @@ fn protocol_url(base: &Url, leaf: &str) -> Url {
 }
 
 fn get_bounded(agent: &ureq::Agent, url: Url, max: usize) -> Result<Vec<u8>, &'static str> {
-    let mut response = get_with_safe_redirects(agent, url, None)?;
+    let mut response = get_with_safe_redirects(agent, url, None, false)?;
     let mut bytes = Vec::new();
     response
         .body_mut()
@@ -371,9 +371,12 @@ fn get_with_safe_redirects(
     agent: &ureq::Agent,
     mut url: Url,
     range: Option<(u64, &str)>,
+    allow_http_test_transport: bool,
 ) -> Result<ureq::http::Response<ureq::Body>, &'static str> {
     for redirects in 0..=3 {
-        validate_public_host(&url)?;
+        if !allow_http_test_transport {
+            validate_public_host(&url)?;
+        }
         let request = agent.get(url.as_str());
         let response = if let Some((offset, validator)) = range {
             request
@@ -396,13 +399,18 @@ fn get_with_safe_redirects(
             .and_then(|value| value.to_str().ok())
             .ok_or("clone.redirect_invalid")?;
         let next = url.join(location).map_err(|_| "clone.redirect_invalid")?;
-        if next.scheme() != "https" || !next.username().is_empty() || next.password().is_some() {
+        if (!allow_http_test_transport && next.scheme() != "https")
+            || !next.username().is_empty()
+            || next.password().is_some()
+        {
             return Err("clone.redirect_unsafe");
         }
         if next.query().is_some() || next.fragment().is_some() {
             return Err("clone.redirect_unsafe");
         }
-        validate_public_host(&next)?;
+        if !allow_http_test_transport {
+            validate_public_host(&next)?;
+        }
         url = next;
     }
     Err("clone.redirect_limit")
@@ -417,7 +425,7 @@ fn download_object(
 ) -> Result<(), &'static str> {
     let mut last = "clone.transport_failed";
     for location in locations {
-        match download_one(agent, location, output, length, digest) {
+        match download_one(agent, location, output, length, digest, false) {
             Ok(()) => return Ok(()),
             Err(error) => {
                 last = error;
@@ -443,12 +451,18 @@ fn download_one(
     output: &Path,
     expected_length: u64,
     expected_digest: &str,
+    allow_http_test_transport: bool,
 ) -> Result<(), &'static str> {
     let url = Url::parse(location).map_err(|_| "clone.location_unsafe")?;
-    if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
+    if (!allow_http_test_transport && url.scheme() != "https")
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
         return Err("clone.location_unsafe");
     }
-    validate_public_host(&url)?;
+    if !allow_http_test_transport {
+        validate_public_host(&url)?;
+    }
     let checkpoint = output.with_extension("resume.json");
     let saved = read_resume_state(&checkpoint);
     let mut offset = fs::metadata(output).map_or(0, |metadata| metadata.len());
@@ -464,7 +478,12 @@ fn download_one(
     if offset > 0 && validator.is_none() {
         offset = 0;
     }
-    let mut response = get_with_safe_redirects(agent, url, validator.map(|value| (offset, value)))?;
+    let mut response = get_with_safe_redirects(
+        agent,
+        url,
+        validator.map(|value| (offset, value)),
+        allow_http_test_transport,
+    )?;
     let resumed = offset > 0 && response.status() == ureq::http::StatusCode::PARTIAL_CONTENT;
     if resumed {
         let expected_range = format!("bytes {offset}-{}/{expected_length}", expected_length - 1);
@@ -673,6 +692,8 @@ fn emit_clone_metric(bytes: u64, duration: Duration, result: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::TcpListener;
+    use std::thread;
 
     #[test]
     fn resolves_short_and_canonical_sources() {
@@ -787,5 +808,85 @@ mod tests {
                 .unwrap()
                 .contains("clone.source_unsafe")
         );
+    }
+
+    #[test]
+    fn local_http_interruption_resumes_with_validated_range() {
+        let bytes = b"portable package bytes".to_vec();
+        let digest =
+            Sha256::digest(&bytes)
+                .iter()
+                .fold(String::from("sha256:"), |mut output, byte| {
+                    use std::fmt::Write as _;
+                    write!(output, "{byte:02x}").unwrap();
+                    output
+                });
+        let prefix_len = 9_usize;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let served = bytes.clone();
+        let server = thread::spawn(move || {
+            for request_number in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 4096];
+                let read = stream.read(&mut request).unwrap();
+                let request = String::from_utf8_lossy(&request[..read]);
+                if request_number == 0 {
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nETag: \"immutable-1\"\r\nConnection: close\r\n\r\n",
+                        served.len()
+                    )
+                    .unwrap();
+                    stream.write_all(&served[..prefix_len]).unwrap();
+                } else {
+                    let request = request.to_ascii_lowercase();
+                    assert!(request.contains(&format!("range: bytes={prefix_len}-")));
+                    assert!(request.contains("if-range: \"immutable-1\""));
+                    write!(
+                        stream,
+                        "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {prefix_len}-{}/{}\r\nETag: \"immutable-1\"\r\nConnection: close\r\n\r\n",
+                        served.len() - prefix_len,
+                        served.len() - 1,
+                        served.len()
+                    )
+                    .unwrap();
+                    stream.write_all(&served[prefix_len..]).unwrap();
+                }
+            }
+        });
+        let config = ureq::Agent::config_builder()
+            .https_only(false)
+            .max_redirects(0)
+            .timeout_global(Some(Duration::from_secs(5)))
+            .build();
+        let agent: ureq::Agent = config.into();
+        let root = tempfile::tempdir().unwrap();
+        let output = root.path().join("package.part");
+        let location = format!("http://{address}/object");
+        assert_eq!(
+            download_one(
+                &agent,
+                &location,
+                &output,
+                bytes.len() as u64,
+                &digest,
+                true,
+            )
+            .unwrap_err(),
+            "clone.transport_failed"
+        );
+        assert_eq!(fs::metadata(&output).unwrap().len(), prefix_len as u64);
+        download_one(
+            &agent,
+            &location,
+            &output,
+            bytes.len() as u64,
+            &digest,
+            true,
+        )
+        .unwrap();
+        assert_eq!(fs::read(output).unwrap(), bytes);
+        server.join().unwrap();
     }
 }
