@@ -107,13 +107,17 @@ stops — no larger rung is attempted and no SCALE-26 pass is claimed.
 > (`vmhwm` | `ps_sampled`) so a `ps_sampled` value is read as a floor. Run
 > provisioned certification rungs on **Linux**.
 
-> Ingest-phase attribution: `publish_bulk_nodes` / `publish_bulk_edges` build an
-> in-memory set of existing identities per call (`bulk_construction.rs`), so RSS
-> during the `ingest` phase grows with the persisted graph, not just the
-> generator buffer. Per-phase `rss_peak_bytes` is recorded on each step, and an
-> `oom` with `first_failing_phase: "ingest"` reflects that upstream
-> bulk-publication cost — **not** a generator-memory regression. Reducing that
-> cost is upstream storage work (a non-goal here), tracked toward #745.
+> Ingest-phase attribution: `publish_bulk_nodes` / `publish_bulk_edges` retain
+> request-sized normalization, identity, endpoint, writer, delta, and receipt
+> state. Existing fixed-schema Parquet is copied through bounded 64K-row batches,
+> and writer reopen reads only final row-group surrogate tails; neither operation
+> materializes accumulated topology. While ingest runs, the atomic journal is
+> refreshed every two seconds with the current subphase, edge-chunk index,
+> anonymous/file RSS, disk usage, and aggregate topology rewrite counters. An
+> `oom` with `first_failing_phase: "ingest"` therefore remains an upstream
+> publication failure, not a generator-memory regression. Append-only linear-I/O
+> construction is tracked separately by #901 and remains required before the
+> billion-edge close gate.
 
 ## Commands
 

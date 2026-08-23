@@ -124,6 +124,10 @@ static NODE_EXACT_ROWS_SELECTED: AtomicU64 = AtomicU64::new(0);
 static NODE_METADATA_FALLBACKS: AtomicU64 = AtomicU64::new(0);
 static NODE_VALIDATION_FALLBACKS: AtomicU64 = AtomicU64::new(0);
 static REWRITE_COMMITS: AtomicU64 = AtomicU64::new(0);
+static TOPOLOGY_REWRITE_EXISTING_ROWS: AtomicU64 = AtomicU64::new(0);
+static TOPOLOGY_REWRITE_NEW_ROWS: AtomicU64 = AtomicU64::new(0);
+static TOPOLOGY_REWRITE_OUTPUT_ROWS: AtomicU64 = AtomicU64::new(0);
+static TOPOLOGY_REWRITE_PEAK_BATCH_ROWS: AtomicU64 = AtomicU64::new(0);
 
 /// A point-in-time copy of the process-global I/O counters. Difference two
 /// snapshots — or [`reset`] then [`snapshot`] — to attribute work to a region.
@@ -174,6 +178,14 @@ pub struct IoSnapshot {
     /// Successful non-empty [`RewriteBatch`](crate::RewriteBatch) commits.
     /// This counts persistence cycles, not the number of files in a batch.
     pub rewrite_commits: u64,
+    /// Existing topology rows decoded and copied by append-style rewrites.
+    pub topology_rewrite_existing_rows: u64,
+    /// New topology rows supplied to append-style rewrites.
+    pub topology_rewrite_new_rows: u64,
+    /// Total topology rows materialized as rewrite outputs.
+    pub topology_rewrite_output_rows: u64,
+    /// Largest decoded or newly supplied batch held by a topology rewrite.
+    pub topology_rewrite_peak_batch_rows: u64,
 }
 
 /// Capture the current process-global counters.
@@ -200,6 +212,10 @@ pub fn snapshot() -> IoSnapshot {
         node_metadata_fallbacks: NODE_METADATA_FALLBACKS.load(Ordering::Relaxed),
         node_validation_fallbacks: NODE_VALIDATION_FALLBACKS.load(Ordering::Relaxed),
         rewrite_commits: REWRITE_COMMITS.load(Ordering::Relaxed),
+        topology_rewrite_existing_rows: TOPOLOGY_REWRITE_EXISTING_ROWS.load(Ordering::Relaxed),
+        topology_rewrite_new_rows: TOPOLOGY_REWRITE_NEW_ROWS.load(Ordering::Relaxed),
+        topology_rewrite_output_rows: TOPOLOGY_REWRITE_OUTPUT_ROWS.load(Ordering::Relaxed),
+        topology_rewrite_peak_batch_rows: TOPOLOGY_REWRITE_PEAK_BATCH_ROWS.load(Ordering::Relaxed),
     }
 }
 
@@ -226,6 +242,10 @@ pub fn reset() {
         &NODE_METADATA_FALLBACKS,
         &NODE_VALIDATION_FALLBACKS,
         &REWRITE_COMMITS,
+        &TOPOLOGY_REWRITE_EXISTING_ROWS,
+        &TOPOLOGY_REWRITE_NEW_ROWS,
+        &TOPOLOGY_REWRITE_OUTPUT_ROWS,
+        &TOPOLOGY_REWRITE_PEAK_BATCH_ROWS,
     ] {
         c.store(0, Ordering::Relaxed);
     }
@@ -280,4 +300,26 @@ pub(crate) fn record_node_pruning(pruning: FilteredReadPruning) {
 
 pub(crate) fn record_rewrite_commit() {
     REWRITE_COMMITS.fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn record_topology_rewrite(existing_rows: u64, new_rows: u64) {
+    TOPOLOGY_REWRITE_EXISTING_ROWS.fetch_add(existing_rows, Ordering::Relaxed);
+    TOPOLOGY_REWRITE_NEW_ROWS.fetch_add(new_rows, Ordering::Relaxed);
+    TOPOLOGY_REWRITE_OUTPUT_ROWS
+        .fetch_add(existing_rows.saturating_add(new_rows), Ordering::Relaxed);
+}
+
+pub(crate) fn record_topology_rewrite_batch(rows: u64) {
+    let mut prior = TOPOLOGY_REWRITE_PEAK_BATCH_ROWS.load(Ordering::Relaxed);
+    while rows > prior {
+        match TOPOLOGY_REWRITE_PEAK_BATCH_ROWS.compare_exchange_weak(
+            prior,
+            rows,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => break,
+            Err(actual) => prior = actual,
+        }
+    }
 }

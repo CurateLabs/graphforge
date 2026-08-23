@@ -22,6 +22,14 @@ Every completed batch advances the versioned manifest. If a process stops
 between the graph flush and manifest replacement, resume recognizes the fully
 present batch as an idempotent replay.
 
+Fixed-schema topology rewrites stream prior Parquet through bounded 64K-row
+batches rather than concatenating the complete accumulated table in Arrow.
+Opening a writer recovers node and edge surrogate maxima from only each file's
+final bounded row group. These bounds prevent resident topology state from
+growing with earlier batches. The current private staging tree still recopies
+prior rows while appending; append-only/shard-staged linear I/O and disk growth
+is the separate #901 close gate and must not be inferred from the memory bound.
+
 `commit` requires every source to be validated. It pins the original generation,
 captures the staged graph, runtime catalog, and UUID indexes, and publishes them
 through one recoverable project-generation transition. Cancellation before

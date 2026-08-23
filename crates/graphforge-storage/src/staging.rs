@@ -33,6 +33,7 @@ use std::path::{Path, PathBuf};
 use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use parquet::arrow::ArrowWriter;
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::file::properties::WriterProperties;
 use tempfile::NamedTempFile;
 
@@ -172,6 +173,84 @@ impl RewriteBatch {
         Ok(())
     }
 
+    /// Stage a fixed-schema append without materializing the existing Parquet
+    /// file. Existing row groups are decoded and re-encoded one bounded batch
+    /// at a time, followed by `batch`.
+    ///
+    /// Returns the number of existing rows copied into the replacement.
+    ///
+    /// # Errors
+    /// Returns [`GfError`] on I/O, decode, schema, or encode failure. The prior
+    /// destination remains untouched.
+    pub fn restage_append(
+        &mut self,
+        final_path: &Path,
+        schema: SchemaRef,
+        batch: &RecordBatch,
+    ) -> Result<u64, GfError> {
+        self.restage_append_with(final_path, schema, batch, Ok)
+    }
+
+    /// Like [`Self::restage_append`], applying `normalize` to each bounded
+    /// existing batch before it is written under the destination schema.
+    pub fn restage_append_with(
+        &mut self,
+        final_path: &Path,
+        schema: SchemaRef,
+        batch: &RecordBatch,
+        mut normalize: impl FnMut(RecordBatch) -> Result<RecordBatch, GfError>,
+    ) -> Result<u64, GfError> {
+        let read_path = self
+            .staged_temp(final_path)
+            .map_or_else(|| final_path.to_path_buf(), Path::to_path_buf);
+        let parent = final_path.parent().ok_or_else(|| {
+            GfError::Storage(format!(
+                "staged path {} has no parent directory",
+                final_path.display()
+            ))
+        })?;
+        std::fs::create_dir_all(parent).map_err(|error| io_err(&error))?;
+        let file_name = final_path.file_name().map_or_else(
+            || "staged".to_owned(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        let tmp = tempfile::Builder::new()
+            .prefix(&format!("{file_name}."))
+            .suffix(".tmp")
+            .tempfile_in(parent)
+            .map_err(|error| io_err(&error))?;
+        let properties = WriterProperties::builder()
+            .set_max_row_group_row_count(Some(ROW_GROUP_SIZE))
+            .build();
+        let mut writer =
+            ArrowWriter::try_new(tmp.as_file(), schema, Some(properties)).map_err(pq_err)?;
+        let mut existing_rows = 0_u64;
+        if read_path.exists() {
+            let input = std::fs::File::open(&read_path).map_err(|error| io_err(&error))?;
+            let reader = ParquetRecordBatchReaderBuilder::try_new(input)
+                .map_err(pq_err)?
+                .with_batch_size(ROW_GROUP_SIZE)
+                .build()
+                .map_err(pq_err)?;
+            for existing in reader {
+                let existing = existing.map_err(pq_err)?;
+                existing_rows = existing_rows.saturating_add(existing.num_rows() as u64);
+                crate::io_stats::record_topology_rewrite_batch(existing.num_rows() as u64);
+                let existing = normalize(existing)?;
+                writer.write(&existing).map_err(pq_err)?;
+            }
+        }
+        crate::io_stats::record_topology_rewrite_batch(batch.num_rows() as u64);
+        writer.write(batch).map_err(pq_err)?;
+        writer.close().map_err(pq_err)?;
+        if let Some(entry) = self.staged.iter_mut().find(|(_, path)| path == final_path) {
+            entry.0 = tmp;
+        } else {
+            self.staged.push((tmp, final_path.to_path_buf()));
+        }
+        Ok(existing_rows)
+    }
+
     /// The staged temp file currently holding `final_path`'s replacement
     /// content, if any. Readers that must see this statement's
     /// already-staged effects (rather than the committed file) read through
@@ -308,6 +387,37 @@ mod tests {
             .filter_map(Result::ok)
             .filter(|e| e.path().extension().is_some_and(|x| x == "tmp"))
             .count()
+    }
+
+    #[test]
+    fn append_rewrite_copies_existing_topology_in_bounded_batches() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("topology/nodes.parquet");
+        let initial_values = (0..(ROW_GROUP_SIZE * 2 + 17))
+            .map(|value| i64::try_from(value).unwrap())
+            .collect::<Vec<_>>();
+        let (schema, initial) = int_batch(&initial_values);
+        let mut first = RewriteBatch::new();
+        first.stage(&path, Arc::clone(&schema), &initial).unwrap();
+        first.commit().unwrap();
+
+        crate::io_stats::reset();
+        let (_, appended) = int_batch(&[900_001, 900_002, 900_003]);
+        let mut rewrite = RewriteBatch::new();
+        let existing = rewrite
+            .restage_append(&path, Arc::clone(&schema), &appended)
+            .unwrap();
+        rewrite.commit().unwrap();
+
+        assert_eq!(existing, initial_values.len() as u64);
+        let io = crate::io_stats::snapshot();
+        assert_eq!(io.topology_rewrite_peak_batch_rows, ROW_GROUP_SIZE as u64);
+        let values = read_values(&path);
+        assert_eq!(&values[..initial_values.len()], initial_values.as_slice());
+        assert_eq!(
+            &values[initial_values.len()..],
+            &[900_001, 900_002, 900_003]
+        );
     }
 
     #[test]
