@@ -2265,6 +2265,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "graphforge-discovery"
+version = "0.5.2"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "url",
+]
+
+[[package]]
 name = "graphforge-exec"
 version = "0.5.2"
 dependencies = [
@@ -4773,6 +4783,7 @@ dependencies = [
  "idna",
  "percent-encoding",
  "serde",
+ "serde_derive",
 ]
 
 [[package]]
