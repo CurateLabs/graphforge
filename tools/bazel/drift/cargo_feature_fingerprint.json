@@ -1,6 +1,6 @@
 {
   "schema": "graphforge.cargo-feature-fingerprint.v1",
-  "sha256": "6bd46b262dcc95fdb3de2d8fc3945ddee6032426f0e137afcb19728c1c5480d0",
+  "sha256": "feb208adea6ed174312b3f9be6ae85fbbeafc9863d85bc30a82b0e94fd2be794",
   "entries": [
     {
       "name": "graphforge-api",
@@ -110,6 +110,15 @@
         },
         {
           "name": "graphforge-knowledge",
+          "req": "^0.5.2",
+          "features": [],
+          "optional": false,
+          "uses_default_features": true,
+          "kind": null,
+          "target": null
+        },
+        {
+          "name": "graphforge-observability",
           "req": "^0.5.2",
           "features": [],
           "optional": false,
@@ -539,7 +548,25 @@
           "target": null
         },
         {
+          "name": "fs4",
+          "req": "^1.1",
+          "features": [],
+          "optional": false,
+          "uses_default_features": true,
+          "kind": null,
+          "target": null
+        },
+        {
           "name": "graphforge-api",
+          "req": "^0.5.2",
+          "features": [],
+          "optional": false,
+          "uses_default_features": true,
+          "kind": null,
+          "target": null
+        },
+        {
+          "name": "graphforge-discovery",
           "req": "^0.5.2",
           "features": [],
           "optional": false,
@@ -553,7 +580,16 @@
           "features": [],
           "optional": false,
           "uses_default_features": true,
-          "kind": "dev",
+          "kind": null,
+          "target": null
+        },
+        {
+          "name": "libc",
+          "req": "^0.2",
+          "features": [],
+          "optional": false,
+          "uses_default_features": true,
+          "kind": null,
           "target": null
         },
         {
@@ -600,7 +636,7 @@
           "features": [],
           "optional": false,
           "uses_default_features": true,
-          "kind": "dev",
+          "kind": null,
           "target": null
         },
         {
@@ -609,7 +645,29 @@
           "features": [],
           "optional": false,
           "uses_default_features": true,
-          "kind": "dev",
+          "kind": null,
+          "target": null
+        },
+        {
+          "name": "ureq",
+          "req": "=3.4.0",
+          "features": [
+            "rustls"
+          ],
+          "optional": false,
+          "uses_default_features": false,
+          "kind": null,
+          "target": null
+        },
+        {
+          "name": "url",
+          "req": "^2",
+          "features": [
+            "serde"
+          ],
+          "optional": false,
+          "uses_default_features": true,
+          "kind": null,
           "target": null
         },
         {
@@ -1282,6 +1340,64 @@
             "serde",
             "v5",
             "v7"
+          ],
+          "optional": false,
+          "uses_default_features": true,
+          "kind": null,
+          "target": null
+        }
+      ]
+    },
+    {
+      "name": "graphforge-observability",
+      "version": "0.5.2",
+      "features": [],
+      "dependencies": [
+        {
+          "name": "serde",
+          "req": "^1",
+          "features": [
+            "derive"
+          ],
+          "optional": false,
+          "uses_default_features": true,
+          "kind": null,
+          "target": null
+        },
+        {
+          "name": "serde_json",
+          "req": "^1",
+          "features": [],
+          "optional": false,
+          "uses_default_features": true,
+          "kind": null,
+          "target": null
+        },
+        {
+          "name": "thiserror",
+          "req": "^2",
+          "features": [],
+          "optional": false,
+          "uses_default_features": true,
+          "kind": null,
+          "target": null
+        },
+        {
+          "name": "ureq",
+          "req": "=3.4.0",
+          "features": [
+            "rustls"
+          ],
+          "optional": false,
+          "uses_default_features": false,
+          "kind": null,
+          "target": null
+        },
+        {
+          "name": "url",
+          "req": "^2",
+          "features": [
+            "serde"
           ],
           "optional": false,
           "uses_default_features": true,

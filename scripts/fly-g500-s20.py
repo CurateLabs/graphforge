@@ -379,9 +379,7 @@ def execute(args: argparse.Namespace, fly: Flyctl, digest: str) -> None:
             next_heartbeat = phase_started
             while time.monotonic() < deadline:
                 now = time.monotonic()
-                if retrieve(
-                    fly, args.app_name, machine_id, "/work/s20-journal.json", journal_path
-                ):
+                if retrieve(fly, args.app_name, machine_id, "/work/s20-journal.json", journal_path):
                     journal = json.loads(journal_path.read_text())
                     try:
                         observed_completed, observed_active = journal_progress(journal)

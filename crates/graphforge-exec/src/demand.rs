@@ -365,6 +365,7 @@ enum OperatorKind {
     Sort,
 }
 impl OperatorActivity {
+    #[cfg(test)]
     pub(crate) fn expand(edge_var: u32) -> Self {
         Self::new(OperatorKind::Expand(edge_var))
     }
@@ -504,6 +505,7 @@ pub(crate) fn record_plan_after(
     });
 }
 
+#[cfg(test)]
 fn with_hop(edge_var: u32, update: impl FnOnce(&mut HopSnapshot)) {
     with_hop_handle(None, edge_var, update);
 }
@@ -526,6 +528,7 @@ fn with_hop_handle(
     });
 }
 
+#[cfg(test)]
 pub(crate) fn record_input(edge_var: u32, rows: usize) {
     record_input_with_capture(None, edge_var, rows);
 }
@@ -547,7 +550,7 @@ pub(crate) fn record_candidates_with_capture(
     rows: usize,
 ) {
     with_hop_handle(capture, edge_var, |hop| {
-        hop.candidates_generated += rows as u64
+        hop.candidates_generated += rows as u64;
     });
 }
 
@@ -621,7 +624,7 @@ impl QueryDemand {
     pub(crate) fn begin_read(self: &Arc<Self>, edge_var: u32) -> Option<ReadPermit> {
         if self.is_cancelled() {
             with_hop_handle(self.capture.as_ref(), edge_var, |hop| {
-                hop.reads_after_cancel += 1
+                hop.reads_after_cancel += 1;
             });
             return None;
         }
@@ -637,7 +640,7 @@ impl QueryDemand {
         if self.is_cancelled() {
             self.finish_read();
             with_hop_handle(self.capture.as_ref(), edge_var, |hop| {
-                hop.reads_after_cancel += 1
+                hop.reads_after_cancel += 1;
             });
             return None;
         }
