@@ -10,8 +10,10 @@ names, credentials, and object locations do not participate in repository
 identity. Object bytes are fetched from each validated `location`, never from
 the human HTML route.
 
-`graphforge-hub/1` manifests reference a `graphforge-project/2` semantic package
-digest. Discovery validation establishes repository, version, transport object,
+`graphforge-hub/1` manifests reference both a `graphforge-project/2` semantic
+package digest and the transport digest of its canonical portable-v2 bundle.
+The bundle descriptor must use `application/vnd.graphforge.project.v2+tar`.
+Discovery validation establishes repository, version, transport object,
 and reader-capability metadata only. The portable-v2 verifier remains the sole
 authority for package integrity, semantic compatibility, and authenticity.
 

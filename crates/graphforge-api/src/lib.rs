@@ -86,10 +86,11 @@ mod gsi_profiler;
 mod hub_protocol;
 mod hypotheses;
 pub use hub_protocol::{
-    HUB_DISCOVERY_MANIFEST_MEDIA_TYPE, HUB_PROTOCOL, HUB_REFS_MEDIA_TYPE, HubCapability,
-    HubDiscoveryManifest, HubObjectDescriptor, HubPackageIdentity, HubProtocolError,
-    HubProtocolErrorCode, HubProtocolLimits, HubRefs, HubRepositoryIdentity, HubVersionIdentity,
-    parse_hub_manifest, parse_hub_refs, parse_hub_repository_identity,
+    HUB_DISCOVERY_MANIFEST_MEDIA_TYPE, HUB_PACKAGE_BUNDLE_MEDIA_TYPE, HUB_PROTOCOL,
+    HUB_REFS_MEDIA_TYPE, HubCapability, HubDiscoveryManifest, HubObjectDescriptor,
+    HubPackageIdentity, HubProtocolError, HubProtocolErrorCode, HubProtocolLimits, HubRefs,
+    HubRepositoryIdentity, HubVersionIdentity, parse_hub_manifest, parse_hub_refs,
+    parse_hub_repository_identity,
 };
 mod import_session;
 mod invocation_descriptor;

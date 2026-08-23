@@ -18,10 +18,11 @@
         "package": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["format", "digest"],
+          "required": ["format", "digest", "object_digest"],
           "properties": {
             "format": {"const": "graphforge-project/2"},
-            "digest": {"$ref": "#/$defs/digest"}
+            "digest": {"$ref": "#/$defs/digest"},
+            "object_digest": {"$ref": "#/$defs/digest"}
           }
         }
       }

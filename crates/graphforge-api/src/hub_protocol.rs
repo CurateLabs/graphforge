@@ -10,6 +10,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::net::IpAddr;
 
 /// Current repository discovery protocol identifier.
 pub const HUB_PROTOCOL: &str = "graphforge-hub/1";
@@ -18,6 +19,8 @@ pub const HUB_DISCOVERY_MANIFEST_MEDIA_TYPE: &str =
     "application/vnd.graphforge.hub-manifest.v1+json";
 /// Media type for `/{owner}/{repo}/.gf/refs`.
 pub const HUB_REFS_MEDIA_TYPE: &str = "application/vnd.graphforge.hub-refs.v1+json";
+/// Media type for the canonical portable-v2 bundle selected for import.
+pub const HUB_PACKAGE_BUNDLE_MEDIA_TYPE: &str = "application/vnd.graphforge.project.v2+tar";
 
 const PORTABLE_FORMAT: &str = "graphforge-project/2";
 const SUPPORTED_CAPABILITIES: &[(&str, u32)] = &[("portable-v2", 2), ("sha256", 1)];
@@ -130,6 +133,8 @@ pub struct HubPackageIdentity {
     pub format: String,
     /// Portable-v2 semantic package digest.
     pub digest: String,
+    /// Transport digest of the canonical portable-v2 bundle object.
+    pub object_digest: String,
 }
 
 /// Immutable Hub version projected onto one portable package.
@@ -212,6 +217,22 @@ pub fn parse_hub_manifest(
                 "hub.discovery.duplicate_object",
             ));
         }
+    }
+    let package_object = manifest
+        .objects
+        .iter()
+        .find(|object| object.digest == manifest.version.package.object_digest)
+        .ok_or_else(|| {
+            HubProtocolError::new(
+                HubProtocolErrorCode::MissingObject,
+                "hub.discovery.missing_package_object",
+            )
+        })?;
+    if package_object.media_type != HUB_PACKAGE_BUNDLE_MEDIA_TYPE {
+        return Err(HubProtocolError::new(
+            HubProtocolErrorCode::MalformedResponse,
+            "hub.discovery.invalid_package_object",
+        ));
     }
     Ok(manifest)
 }
@@ -305,6 +326,7 @@ fn validate_version(
         ));
     }
     validate_digest(&version.package.digest)
+        .and_then(|()| validate_digest(&version.package.object_digest))
 }
 
 fn validate_capabilities(
@@ -373,18 +395,24 @@ fn validate_https_location(
         .split(['/', '?', '#'])
         .next()
         .unwrap_or_default();
-    let host = authority
+    let (host, port) = authority
         .split_once(':')
-        .map_or(authority, |(host, _)| host);
+        .map_or((authority, None), |(host, port)| (host, Some(port)));
     if authority.is_empty()
         || authority.contains('@')
         || authority.matches(':').count() > 1
+        || port.is_some_and(|port| port.parse::<u16>().is_err())
+        || host.parse::<IpAddr>().is_ok()
         || !host.contains('.')
-        || host.starts_with('.')
-        || host.ends_with('.')
-        || !host
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+        || host.split('.').any(|label| {
+            label.is_empty()
+                || label.len() > 63
+                || !label.as_bytes()[0].is_ascii_alphanumeric()
+                || !label.as_bytes()[label.len() - 1].is_ascii_alphanumeric()
+                || !label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
         || location.contains('?')
         || location.contains('#')
     {
@@ -602,6 +630,22 @@ mod tests {
     fn unsafe_locations_are_rejected() {
         let error = parse_hub_manifest(UNSAFE, HubProtocolLimits::default()).unwrap_err();
         assert_eq!(error.code, HubProtocolErrorCode::UnsafeLocation);
+        let mut manifest = parse_hub_manifest(VALID, HubProtocolLimits::default()).unwrap();
+        for location in [
+            "https://127.0.0.1/object",
+            "https://data.graphforge.sh:invalid/object",
+            "https://data.graphforge.sh:70000/object",
+            "https://-data.graphforge.sh/object",
+            "https://data..graphforge.sh/object",
+        ] {
+            manifest.objects[0].location = location.into();
+            let error = parse_hub_manifest(
+                &serde_json::to_vec(&manifest).unwrap(),
+                HubProtocolLimits::default(),
+            )
+            .unwrap_err();
+            assert_eq!(error.code, HubProtocolErrorCode::UnsafeLocation);
+        }
     }
 
     #[test]
@@ -646,6 +690,23 @@ mod tests {
         );
         let refs = parse_hub_refs(REFS, HubProtocolLimits::default()).unwrap();
         assert_eq!(refs.refs.get("main").map(String::as_str), Some("v1"));
+    }
+
+    #[test]
+    fn package_bundle_object_is_explicit_and_must_exist() {
+        let mut manifest = parse_hub_manifest(VALID, HubProtocolLimits::default()).unwrap();
+        assert_eq!(
+            manifest.version.package.object_digest,
+            manifest.objects[0].digest
+        );
+        manifest.version.package.object_digest =
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into();
+        let error = parse_hub_manifest(
+            &serde_json::to_vec(&manifest).unwrap(),
+            HubProtocolLimits::default(),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, HubProtocolErrorCode::MissingObject);
     }
 
     #[test]
