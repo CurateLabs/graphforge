@@ -377,7 +377,11 @@ impl JobSnapshot {
             handoff.from == handoff.to
                 || handoff.start_offset_ns > active
                 || handoff.wait_duration_ns > handoff.duration_ns
-        }) {
+        }) || self
+            .handoffs
+            .windows(2)
+            .any(|pair| pair[0].start_offset_ns > pair[1].start_offset_ns)
+        {
             return Err(InvalidJobSnapshot);
         }
         Ok(())
@@ -1447,6 +1451,11 @@ mod tests {
             }],
         };
         job.validate().unwrap();
+        let mut reversed = job.clone();
+        let mut earlier = reversed.handoffs[0];
+        earlier.start_offset_ns = 60;
+        reversed.handoffs.push(earlier);
+        assert_eq!(reversed.validate(), Err(InvalidJobSnapshot));
         assert_eq!(
             job.queue_delay_ns() + job.active_duration_ns(),
             job.total_duration_ns()

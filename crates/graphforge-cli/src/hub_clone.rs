@@ -432,9 +432,22 @@ fn fetch(
     if_range: Option<&str>,
     limit: u64,
 ) -> Result<HttpResponse, graphforge_api::GfError> {
+    let mut attempts = 0;
+    fetch_with_attempts(transport, start, range, if_range, limit, &mut attempts)
+}
+
+fn fetch_with_attempts(
+    transport: &dyn Transport,
+    start: &Url,
+    range: Option<u64>,
+    if_range: Option<&str>,
+    limit: u64,
+    attempts: &mut u32,
+) -> Result<HttpResponse, graphforge_api::GfError> {
     let mut url = start.clone();
     for hop in 0..=MAX_REDIRECTS {
         transport.validate(&url)?;
+        *attempts = attempts.saturating_add(1);
         let response = transport.get(&url, range, if_range, limit)?;
         if matches!(response.status, 301 | 302 | 303 | 307 | 308) {
             if hop == MAX_REDIRECTS {
@@ -784,16 +797,14 @@ fn download_with_progress(
     }
     progress.resumed_bytes = resumed;
     let mut transferred = 0_u64;
-    let mut attempts = 0_u32;
     if resumed < object.length {
-        attempts = 1;
-        progress.attempts = attempts;
-        let mut response = fetch(
+        let mut response = fetch_with_attempts(
             transport,
             &url,
             (resumed > 0).then_some(resumed),
             validator,
             object.length.saturating_sub(resumed),
+            &mut progress.attempts,
         )?;
         let expected_range = format!("bytes {resumed}-{}/{}", object.length - 1, object.length);
         let append = resumed > 0
@@ -853,7 +864,7 @@ fn download_with_progress(
     Ok(DownloadReport {
         resumed_bytes: resumed,
         transferred_bytes: transferred,
-        attempts,
+        attempts: progress.attempts,
     })
 }
 
@@ -1024,7 +1035,8 @@ fn run_clone_job(
         HandoffKind::Call,
         None,
     );
-    let refs_bytes = profile.stage(
+    let mut refs_attempts = 0;
+    let refs_result = profile.stage(
         Stage::RefsDiscovery,
         ComponentKind::NetworkTransport,
         ComponentRole::Transfer,
@@ -1032,20 +1044,26 @@ fn run_clone_job(
         1,
         || {
             let bytes = read_bounded(
-                fetch(
+                fetch_with_attempts(
                     transport,
                     &endpoint(&base, "refs"),
                     None,
                     None,
                     MAX_METADATA_BYTES as u64,
+                    &mut refs_attempts,
                 )?,
                 MAX_METADATA_BYTES,
             )?;
             let length = bytes.len() as u64;
             Ok((bytes, Some(length), None))
         },
-    )?;
-    let manifest_bytes = profile.stage(
+    );
+    if let Some(stage) = profile.stages.last_mut() {
+        stage.attempt = refs_attempts.max(1);
+    }
+    let refs_bytes = refs_result?;
+    let mut manifest_attempts = 0;
+    let manifest_result = profile.stage(
         Stage::ManifestDiscovery,
         ComponentKind::NetworkTransport,
         ComponentRole::Transfer,
@@ -1053,19 +1071,24 @@ fn run_clone_job(
         1,
         || {
             let bytes = read_bounded(
-                fetch(
+                fetch_with_attempts(
                     transport,
                     &endpoint(&base, "manifest"),
                     None,
                     None,
                     MAX_METADATA_BYTES as u64,
+                    &mut manifest_attempts,
                 )?,
                 MAX_METADATA_BYTES,
             )?;
             let length = bytes.len() as u64;
             Ok((bytes, Some(length), None))
         },
-    )?;
+    );
+    if let Some(stage) = profile.stages.last_mut() {
+        stage.attempt = manifest_attempts.max(1);
+    }
+    let manifest_bytes = manifest_result?;
     let limits = DiscoveryLimits {
         max_response_bytes: MAX_METADATA_BYTES,
         max_cumulative_object_bytes: MAX_BUNDLE_BYTES,
@@ -1164,8 +1187,14 @@ fn run_clone_job(
     ));
     profile.handoff(
         ComponentKind::PortableVerify,
+        ComponentKind::Api,
+        HandoffKind::Call,
+        Some(object.length),
+    );
+    profile.handoff(
+        ComponentKind::Api,
         ComponentKind::PortableImport,
-        HandoffKind::Transfer,
+        HandoffKind::Call,
         Some(object.length),
     );
     let imported = profile.stage(
@@ -1191,9 +1220,27 @@ fn run_clone_job(
     )?;
     profile.handoff(
         ComponentKind::PortableImport,
+        ComponentKind::Storage,
+        HandoffKind::Write,
+        Some(object.length),
+    );
+    profile.handoff(
+        ComponentKind::Storage,
+        ComponentKind::Publication,
+        HandoffKind::Write,
+        Some(object.length),
+    );
+    profile.handoff(
+        ComponentKind::Publication,
+        ComponentKind::Api,
+        HandoffKind::Return,
+        None,
+    );
+    profile.handoff(
+        ComponentKind::Api,
         ComponentKind::Recovery,
         HandoffKind::Return,
-        Some(object.length),
+        None,
     );
     profile.stage(
         Stage::Reopen,
@@ -1524,6 +1571,19 @@ mod tests {
     }
 
     #[test]
+    fn redirect_attempts_count_each_transport_request() {
+        let mut redirect = response(302, None, b"");
+        redirect.location = Some("https://objects.example/final".into());
+        let transport = Scripted::new(vec![redirect, response(200, None, b"ok")]);
+        let start = Url::parse("https://hub.example/start").unwrap();
+        let mut attempts = 0;
+        let response =
+            fetch_with_attempts(&transport, &start, None, None, 1024, &mut attempts).unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(attempts, 2);
+    }
+
+    #[test]
     fn interrupted_download_resumes_with_exact_range() {
         let bytes = b"verified portable bytes";
         let descriptor = object(bytes);
@@ -1826,80 +1886,6 @@ mod tests {
         ])
     }
 
-    fn delayed_profile(download_delay: Duration, verify_delay: Duration) -> JobSnapshot {
-        let runtime = TelemetryRuntime::new(TelemetryConfig {
-            mode: TelemetryMode::InMemory,
-            ..TelemetryConfig::default()
-        })
-        .unwrap();
-        let mut profile = CloneProfile::new(&runtime);
-        profile
-            .stage(
-                Stage::Download,
-                ComponentKind::NetworkTransport,
-                ComponentRole::Transfer,
-                Some(WaitReason::Network),
-                1,
-                || {
-                    std::thread::sleep(download_delay);
-                    Ok(((), Some(64), None))
-                },
-            )
-            .unwrap();
-        profile
-            .stage(
-                Stage::PortableVerification,
-                ComponentKind::PortableVerify,
-                ComponentRole::Verification,
-                None,
-                1,
-                || {
-                    std::thread::sleep(verify_delay);
-                    Ok(((), Some(64), None))
-                },
-            )
-            .unwrap();
-        profile.finish(&Ok(()));
-        assert_eq!(
-            runtime.force_flush(),
-            graphforge_api::telemetry::LifecycleStatus::Complete
-        );
-        runtime.snapshots().remove(0).job.unwrap()
-    }
-
-    #[test]
-    fn delayed_fixtures_attribute_the_dominant_clone_component() {
-        let slow_download = delayed_profile(Duration::from_millis(15), Duration::from_millis(1));
-        let download_ns = slow_download
-            .stages
-            .iter()
-            .find(|stage| stage.stage == Stage::Download)
-            .unwrap()
-            .duration_ns;
-        let verify_ns = slow_download
-            .stages
-            .iter()
-            .find(|stage| stage.stage == Stage::PortableVerification)
-            .unwrap()
-            .duration_ns;
-        assert!(download_ns > verify_ns);
-        let slow_verify = delayed_profile(Duration::from_millis(1), Duration::from_millis(15));
-        let download_ns = slow_verify
-            .stages
-            .iter()
-            .find(|stage| stage.stage == Stage::Download)
-            .unwrap()
-            .duration_ns;
-        let verify_ns = slow_verify
-            .stages
-            .iter()
-            .find(|stage| stage.stage == Stage::PortableVerification)
-            .unwrap()
-            .duration_ns;
-        assert!(verify_ns > download_ns);
-        assert!(slow_download.handoffs.is_empty());
-    }
-
     #[test]
     fn interrupted_clone_retains_resumed_and_transferred_bytes_once() {
         let bundle = b"0123456789abcdef";
@@ -2130,29 +2116,29 @@ mod tests {
             let transport = DelayedTransport {
                 inner: clone_script(&bundle, &report.package_digest),
                 discovery: if index == 4 {
-                    Duration::from_millis(20)
+                    Duration::from_secs(2)
                 } else {
                     Duration::ZERO
                 },
                 download: if index == 5 {
-                    Duration::from_millis(20)
+                    Duration::from_secs(2)
                 } else {
                     Duration::ZERO
                 },
             };
             let delays = CloneDelays {
                 verification: if index == 6 {
-                    Duration::from_millis(20)
+                    Duration::from_secs(2)
                 } else {
                     Duration::ZERO
                 },
                 import: if index == 7 {
-                    Duration::from_millis(20)
+                    Duration::from_secs(2)
                 } else {
                     Duration::ZERO
                 },
                 reopen: if index == 8 {
-                    Duration::from_millis(20)
+                    Duration::from_secs(2)
                 } else {
                     Duration::ZERO
                 },
@@ -2180,7 +2166,7 @@ mod tests {
                 );
             }
             let snapshots = runtime.snapshots();
-            if index < 2 {
+            if index < 2 || index >= 4 {
                 assert_eq!(snapshots.len(), 1);
                 let job = snapshots[0].job.as_ref().unwrap();
                 assert_eq!(job.family, JobFamily::Clone);
@@ -2199,6 +2185,30 @@ mod tests {
                         && handoff.kind == HandoffKind::Transfer
                         && handoff.bytes == Some(bundle.len() as u64)
                 }));
+                let path: Vec<_> = job
+                    .handoffs
+                    .iter()
+                    .map(|handoff| (handoff.from, handoff.to))
+                    .collect();
+                assert_eq!(
+                    path,
+                    vec![
+                        (ComponentKind::Cli, ComponentKind::NetworkTransport),
+                        (ComponentKind::NetworkTransport, ComponentKind::Discovery),
+                        (ComponentKind::Discovery, ComponentKind::NetworkTransport),
+                        (
+                            ComponentKind::NetworkTransport,
+                            ComponentKind::PortableVerify
+                        ),
+                        (ComponentKind::PortableVerify, ComponentKind::Api),
+                        (ComponentKind::Api, ComponentKind::PortableImport),
+                        (ComponentKind::PortableImport, ComponentKind::Storage),
+                        (ComponentKind::Storage, ComponentKind::Publication),
+                        (ComponentKind::Publication, ComponentKind::Api),
+                        (ComponentKind::Api, ComponentKind::Recovery),
+                        (ComponentKind::Recovery, ComponentKind::Storage),
+                    ]
+                );
                 if index >= 4 {
                     delayed_jobs.push(job.clone());
                 }
@@ -2219,6 +2229,7 @@ mod tests {
         }
         assert_eq!(fail_open_results[0], fail_open_results[1]);
         assert!(fail_open_elapsed[1] <= fail_open_elapsed[0] + Duration::from_secs(1));
+        assert_eq!(delayed_jobs.len(), 5);
         for (job, expected) in delayed_jobs.iter().zip([
             ComponentKind::NetworkTransport,
             ComponentKind::NetworkTransport,
