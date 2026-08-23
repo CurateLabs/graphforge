@@ -169,6 +169,17 @@ into a previously absent destination; imported reopen and equivalent queries;
 and the four bounded negative drills. Its evidence is not a pass unless every
 phase is present and successful and the source/import fingerprints match.
 
+The one-hop and two-hop observations are rooted at the deterministic published
+node for Graph500 vertex 15, then apply global `ORDER BY ... LIMIT 1000` within
+that neighborhood. Vertex 15 is present at every configured rung and gives the
+pinned S10 seed a non-empty one-hop and two-hop probe without selecting the
+generator's pathological highest-degree vertex. This is an ordinary
+parameterized Rust-facade query, not a benchmark-only execution path. The root
+bound is part of the workload contract: an unrooted two-hop TopK must enumerate
+the complete graph's two-hop path result to preserve exact ordering, making
+runtime proportional to path cardinality rather than providing a bounded
+neighborhood traversal signal.
+
 ### Disposable Fly S20 controller
 
 The checked-in Fly harness is
@@ -214,6 +225,17 @@ the journal/evidence, acknowledges retrieval, and destroys and verifies absence
 of the Machine, volume, and app in `finally`. Do not use pricing fixtures with
 execution; `--pricing-html` and `--manifest-json` exist only for deterministic
 dry-run tests.
+
+During execution the controller prints sanitized JSON progress: every completed
+phase, the next phase start, and a heartbeat once per minute. It also writes
+each valid journal prefix to `--journal-out`, so an operator stop or timeout
+does not discard completed evidence. Phase-aware operational ceilings stop a
+stalled or pathologically broad phase with `phase_timeout` before it can consume
+the entire 4h30 outer envelope; a journaled product failure stops immediately
+with `phase_failed` and its recorded failure code. These ceilings only prevent
+runaway spend and silence. They do not turn a partial lifecycle into a pass:
+success still requires the exact 17-phase journal and equivalent source/import
+evidence described above. The dry-run plan prints the complete timeout table.
 
 ```bash
 python3 scripts/ci/test-fly-g500-s20.py

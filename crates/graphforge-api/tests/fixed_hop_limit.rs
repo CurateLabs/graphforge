@@ -347,6 +347,60 @@ fn scattered_node_hydration_is_neighborhood_proportional() {
 }
 
 #[test]
+fn parameterized_rooted_ordered_hops_retain_query_scoped_evidence() {
+    let _guard = IO_GUARD.lock().unwrap();
+    let dir = TempDir::new().unwrap();
+    generate_scattered_destinations(dir.path(), 4_096, 4, 64);
+    let forge = open_forge(dir.path());
+    let params = HashMap::from([(
+        "root".to_owned(),
+        IrLiteral::Uuid(*stable_fixture_uuid(1, 0).as_bytes()),
+    )]);
+
+    for (query, expected_hops) in [
+        (
+            "MATCH (a)-[r]->(b) WHERE a.node_uuid = $root \
+             RETURN b.node_uuid AS id ORDER BY id LIMIT 1000",
+            1,
+        ),
+        (
+            "MATCH (a)-[r1]->(b)-[r2]->(c) WHERE a.node_uuid = $root \
+             RETURN c.node_uuid AS id ORDER BY id LIMIT 1000",
+            2,
+        ),
+    ] {
+        let observed = forge.execute_with_params_observed(query, &params);
+        let result = observed.result.unwrap();
+        assert!(result.stats.rows_produced > 0, "{query}");
+        assert_eq!(observed.evidence.hops.len(), expected_hops, "{query}");
+        assert_eq!(
+            observed.evidence.operator_rss.expand_by_hop.len(),
+            expected_hops,
+            "{query}"
+        );
+        assert_eq!(
+            observed
+                .evidence
+                .hops
+                .values()
+                .map(|hop| hop.input_rows)
+                .min(),
+            Some(1),
+            "the first expansion must receive only the selected root: {query}"
+        );
+        for hop in observed.evidence.hops.values() {
+            assert!(hop.input_rows > 0, "{query}: {:#?}", observed.evidence);
+            assert!(
+                hop.candidates_generated > 0,
+                "{query}: {:#?}",
+                observed.evidence
+            );
+            assert!(hop.rows_emitted > 0, "{query}: {:#?}", observed.evidence);
+        }
+    }
+}
+
+#[test]
 fn limits_sweep_bounded_multi_hop_work_and_repartition() {
     let _guard = IO_GUARD.lock().unwrap();
     let dir = TempDir::new().unwrap();

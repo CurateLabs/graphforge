@@ -41,6 +41,31 @@ PHASES = [
     "drill_resource_limit",
     "drill_interrupted_finalization",
 ]
+# Phase ceilings are operational stop conditions, not performance pass criteria.
+# They include measured Fly S20 headroom while ensuring a bad workload or plan
+# cannot consume the entire four-hour certification envelope without a useful
+# typed diagnosis. The outer hard TTL remains authoritative.
+PHASE_TIMEOUT_S = {
+    "preflight": 15 * 60,
+    "generate": 15 * 60,
+    "ingest": 60 * 60,
+    "csr": 20 * 60,
+    "source_reopen": 15 * 60,
+    "source_query_1hop": 15 * 60,
+    "source_query_2hop": 15 * 60,
+    "export": 45 * 60,
+    "verify": 30 * 60,
+    "import": 60 * 60,
+    "imported_reopen": 15 * 60,
+    "imported_query_1hop": 15 * 60,
+    "imported_query_2hop": 15 * 60,
+    "drill_corruption": 15 * 60,
+    "drill_cancellation": 15 * 60,
+    "drill_resource_limit": 15 * 60,
+    "drill_interrupted_finalization": 15 * 60,
+}
+POLL_INTERVAL_S = 15
+HEARTBEAT_INTERVAL_S = 60
 HARD_TTL_S = 4 * 3600 + 30 * 60
 VOLUME_GB = 50
 MEMORY_MB = 4096
@@ -49,6 +74,28 @@ CPUS = 2
 
 class ControllerError(RuntimeError):
     pass
+
+
+def emit_progress(event: str, **fields: Any) -> None:
+    """Emit one sanitized, machine-readable operator update."""
+    print(json.dumps({"event": event, **fields}, sort_keys=True), flush=True)
+
+
+def journal_progress(journal: Any) -> tuple[int, str | None]:
+    """Validate an atomic journal snapshot and identify the active phase."""
+    if not isinstance(journal, list) or len(journal) > len(PHASES):
+        raise ControllerError("journal_invalid invalid phase collection")
+    for index, phase in enumerate(journal):
+        if not isinstance(phase, dict) or phase.get("id") != PHASES[index]:
+            raise ControllerError("journal_invalid phases are not the required ordered prefix")
+        status = phase.get("status")
+        if status == "fail":
+            code = phase.get("failure_code") or "operation_failed"
+            raise ControllerError(f"phase_failed phase={PHASES[index]} failure_code={code}")
+        if status != "pass":
+            raise ControllerError("journal_invalid completed phase has unknown status")
+    active = PHASES[len(journal)] if len(journal) < len(PHASES) else None
+    return len(journal), active
 
 
 class Flyctl:
@@ -326,15 +373,70 @@ def execute(args: argparse.Namespace, fly: Flyctl, digest: str) -> None:
         with tempfile.TemporaryDirectory(prefix="graphforge-fly-s20-") as directory:
             journal_path = Path(directory) / "journal.json"
             evidence_path = Path(directory) / "evidence.json"
+            completed = 0
+            active_phase = PHASES[0]
+            phase_started = time.monotonic()
+            next_heartbeat = phase_started
             while time.monotonic() < deadline:
-                retrieve(fly, args.app_name, machine_id, "/work/s20-journal.json", journal_path)
+                now = time.monotonic()
+                if retrieve(
+                    fly, args.app_name, machine_id, "/work/s20-journal.json", journal_path
+                ):
+                    journal = json.loads(journal_path.read_text())
+                    try:
+                        observed_completed, observed_active = journal_progress(journal)
+                    except ControllerError as error:
+                        if str(error).startswith("phase_failed "):
+                            args.journal_out.write_text(
+                                json.dumps(journal, indent=2, sort_keys=True) + "\n"
+                            )
+                        raise
+                    if observed_completed < completed:
+                        raise ControllerError("journal_invalid completed phase count regressed")
+                    if observed_completed > completed:
+                        for phase in journal[completed:observed_completed]:
+                            emit_progress(
+                                "phase_complete",
+                                phase=phase["id"],
+                                elapsed_ms=phase.get("elapsed_ms"),
+                                rss_peak_bytes=phase.get("rss_peak_bytes"),
+                                disk_peak_bytes=phase.get("disk_peak_bytes"),
+                            )
+                        completed = observed_completed
+                        active_phase = observed_active
+                        phase_started = now
+                        next_heartbeat = now
+                        if active_phase is not None:
+                            emit_progress("phase_start", phase=active_phase)
+                    # Preserve the last valid incomplete journal even when a
+                    # controller deadline stops and destroys the Machine.
+                    args.journal_out.write_text(
+                        json.dumps(journal, indent=2, sort_keys=True) + "\n"
+                    )
                 if retrieve(
                     fly, args.app_name, machine_id, "/work/s20-evidence.json", evidence_path
                 ):
                     break
-                time.sleep(5)
+                if active_phase is not None:
+                    phase_elapsed = now - phase_started
+                    if phase_elapsed >= PHASE_TIMEOUT_S[active_phase]:
+                        raise ControllerError(
+                            f"phase_timeout phase={active_phase} "
+                            f"elapsed_s={int(phase_elapsed)} "
+                            f"limit_s={PHASE_TIMEOUT_S[active_phase]}"
+                        )
+                    if now >= next_heartbeat:
+                        emit_progress(
+                            "phase_heartbeat",
+                            phase=active_phase,
+                            elapsed_s=int(phase_elapsed),
+                            limit_s=PHASE_TIMEOUT_S[active_phase],
+                            completed_phases=completed,
+                        )
+                        next_heartbeat = now + HEARTBEAT_INTERVAL_S
+                time.sleep(POLL_INTERVAL_S)
             else:
-                raise ControllerError("4h30 hard deadline reached before S20 evidence")
+                raise ControllerError("run_timeout 4h30 hard deadline reached before S20 evidence")
             evidence = json.loads(evidence_path.read_text())
             journal = json.loads(journal_path.read_text())
             validate_evidence(evidence, journal, args.expected_sha)
@@ -403,6 +505,8 @@ def main() -> int:
             "restart": "no",
             "auto_destroy": True,
             "hard_ttl_s": HARD_TTL_S,
+            "phase_timeout_s": PHASE_TIMEOUT_S,
+            "heartbeat_interval_s": HEARTBEAT_INTERVAL_S,
         }
         print(json.dumps(plan, indent=2, sort_keys=True))
         if args.execute:

@@ -115,6 +115,21 @@ def main() -> None:
         else:
             raise AssertionError("non-equivalent import must be refused")
 
+        assert controller.journal_progress(phases[:3]) == (3, "csr")
+        failed = [*phases[:2], {"id": "ingest", "status": "fail", "failure_code": "oom"}]
+        try:
+            controller.journal_progress(failed)
+        except controller.ControllerError as error:
+            assert str(error) == "phase_failed phase=ingest failure_code=oom"
+        else:
+            raise AssertionError("typed phase failure must stop the controller")
+        try:
+            controller.journal_progress([{"id": "generate", "status": "pass"}])
+        except controller.ControllerError as error:
+            assert str(error).startswith("journal_invalid")
+        else:
+            raise AssertionError("out-of-order journal must be refused")
+
         (root / "pricing.html").write_text(pricing_html())
         (root / "manifest.json").write_text(child)
         # Main dry-run exercises argument/config/rate/manifest validation without Fly.
@@ -153,6 +168,9 @@ def main() -> None:
         plan = json.loads(result.stdout)
         assert plan["mode"] == "dry-run" and plan["hard_ttl_s"] == 16200
         assert plan["volume_gb"] == 50 and plan["public_services"] == 0
+        assert plan["heartbeat_interval_s"] == 60
+        assert plan["phase_timeout_s"]["ingest"] == 3600
+        assert plan["phase_timeout_s"]["source_query_2hop"] == 900
 
     source = CONTROLLER.read_text()
     assert "Authorization" in source and '["auth", "token"]' in source

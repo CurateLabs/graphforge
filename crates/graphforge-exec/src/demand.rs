@@ -283,6 +283,25 @@ fn with_capture(update: impl FnOnce(&QueryCapture)) {
     let _ = ACTIVE_CAPTURE.try_with(|capture| update(capture));
 }
 
+/// Explicit query-capture context for physical operators whose streams may be
+/// polled by DataFusion tasks that do not inherit Tokio task locals.
+#[derive(Clone)]
+pub(crate) struct CaptureHandle(Arc<QueryCapture>);
+
+pub(crate) fn capture_handle() -> Option<CaptureHandle> {
+    ACTIVE_CAPTURE
+        .try_with(|capture| CaptureHandle(Arc::clone(capture)))
+        .ok()
+}
+
+fn with_handle(handle: Option<&CaptureHandle>, update: impl FnOnce(&QueryCapture)) {
+    if let Some(handle) = handle {
+        update(&handle.0);
+    } else {
+        with_capture(update);
+    }
+}
+
 pub(crate) fn capture_enabled() -> bool {
     ACTIVE_CAPTURE.try_with(|_| ()).is_ok()
 }
@@ -349,11 +368,17 @@ impl OperatorActivity {
     pub(crate) fn expand(edge_var: u32) -> Self {
         Self::new(OperatorKind::Expand(edge_var))
     }
+    pub(crate) fn expand_with_capture(edge_var: u32, capture: Option<CaptureHandle>) -> Self {
+        Self::new_with_capture(OperatorKind::Expand(edge_var), capture)
+    }
     fn sort() -> Self {
         Self::new(OperatorKind::Sort)
     }
     fn new(kind: OperatorKind) -> Self {
-        let capture = ACTIVE_CAPTURE.try_with(Arc::clone).ok();
+        Self::new_with_capture(kind, capture_handle())
+    }
+    fn new_with_capture(kind: OperatorKind, capture: Option<CaptureHandle>) -> Self {
+        let capture = capture.map(|handle| handle.0);
         if let Some(capture) = &capture {
             match kind {
                 OperatorKind::Expand(_) => &capture.expand_active,
@@ -480,7 +505,15 @@ pub(crate) fn record_plan_after(
 }
 
 fn with_hop(edge_var: u32, update: impl FnOnce(&mut HopSnapshot)) {
-    with_capture(|capture| {
+    with_hop_handle(None, edge_var, update);
+}
+
+fn with_hop_handle(
+    handle: Option<&CaptureHandle>,
+    edge_var: u32,
+    update: impl FnOnce(&mut HopSnapshot),
+) {
+    with_handle(handle, |capture| {
         update(
             capture
                 .snapshot
@@ -494,18 +527,36 @@ fn with_hop(edge_var: u32, update: impl FnOnce(&mut HopSnapshot)) {
 }
 
 pub(crate) fn record_input(edge_var: u32, rows: usize) {
-    with_hop(edge_var, |hop| {
+    record_input_with_capture(None, edge_var, rows);
+}
+
+pub(crate) fn record_input_with_capture(
+    capture: Option<&CaptureHandle>,
+    edge_var: u32,
+    rows: usize,
+) {
+    with_hop_handle(capture, edge_var, |hop| {
         hop.input_batches += 1;
         hop.input_rows += rows as u64;
     });
 }
 
-pub(crate) fn record_candidates(edge_var: u32, rows: usize) {
-    with_hop(edge_var, |hop| hop.candidates_generated += rows as u64);
+pub(crate) fn record_candidates_with_capture(
+    capture: Option<&CaptureHandle>,
+    edge_var: u32,
+    rows: usize,
+) {
+    with_hop_handle(capture, edge_var, |hop| {
+        hop.candidates_generated += rows as u64
+    });
 }
 
-pub(crate) fn record_emitted(edge_var: u32, rows: usize) {
-    with_hop(edge_var, |hop| hop.rows_emitted += rows as u64);
+pub(crate) fn record_emitted_with_capture(
+    capture: Option<&CaptureHandle>,
+    edge_var: u32,
+    rows: usize,
+) {
+    with_hop_handle(capture, edge_var, |hop| hop.rows_emitted += rows as u64);
 }
 
 fn record_filter(ordinal: usize, uniqueness: bool, input: bool, rows: usize) {
@@ -531,6 +582,7 @@ pub(crate) struct QueryDemand {
     max_in_flight_reads: AtomicUsize,
     produced_rows: AtomicUsize,
     quiescent_waker: AtomicWaker,
+    capture: Option<CaptureHandle>,
 }
 
 impl QueryDemand {
@@ -541,6 +593,7 @@ impl QueryDemand {
             max_in_flight_reads: AtomicUsize::new(0),
             produced_rows: AtomicUsize::new(0),
             quiescent_waker: AtomicWaker::new(),
+            capture: capture_handle(),
         }
     }
 
@@ -549,8 +602,8 @@ impl QueryDemand {
     }
 
     fn cancel(&self) {
-        if !self.cancelled.swap(true, Ordering::AcqRel) && capture_enabled() {
-            with_capture(|capture| {
+        if !self.cancelled.swap(true, Ordering::AcqRel) && self.capture.is_some() {
+            with_handle(self.capture.as_ref(), |capture| {
                 capture
                     .snapshot
                     .lock()
@@ -567,21 +620,25 @@ impl QueryDemand {
 
     pub(crate) fn begin_read(self: &Arc<Self>, edge_var: u32) -> Option<ReadPermit> {
         if self.is_cancelled() {
-            with_hop(edge_var, |hop| hop.reads_after_cancel += 1);
+            with_hop_handle(self.capture.as_ref(), edge_var, |hop| {
+                hop.reads_after_cancel += 1
+            });
             return None;
         }
         let current = self.in_flight_reads.fetch_add(1, Ordering::AcqRel) + 1;
         self.max_in_flight_reads
             .fetch_max(current, Ordering::AcqRel);
-        if capture_enabled() {
-            with_capture(|capture| {
+        if self.capture.is_some() {
+            with_handle(self.capture.as_ref(), |capture| {
                 let mut snapshot = capture.snapshot.lock().expect("query capture lock");
                 snapshot.max_in_flight_reads = snapshot.max_in_flight_reads.max(current as u64);
             });
         }
         if self.is_cancelled() {
             self.finish_read();
-            with_hop(edge_var, |hop| hop.reads_after_cancel += 1);
+            with_hop_handle(self.capture.as_ref(), edge_var, |hop| {
+                hop.reads_after_cancel += 1
+            });
             return None;
         }
         Some(ReadPermit {
@@ -621,24 +678,25 @@ impl Drop for ReadPermit {
 /// Attributes storage observer events to one fixed-hop edge binding.
 pub(crate) struct HopReadObserver {
     edge_var: u32,
+    capture: Option<CaptureHandle>,
 }
 
 impl HopReadObserver {
-    pub(crate) fn new(edge_var: u32) -> Self {
-        Self { edge_var }
+    pub(crate) fn with_capture(edge_var: u32, capture: Option<CaptureHandle>) -> Self {
+        Self { edge_var, capture }
     }
 }
 
 impl graphforge_storage::io_stats::FilteredReadObserver for HopReadObserver {
     fn read_started(&self, table: graphforge_storage::io_stats::FilteredReadTable) {
-        with_hop(self.edge_var, |hop| match table {
+        with_hop_handle(self.capture.as_ref(), self.edge_var, |hop| match table {
             graphforge_storage::io_stats::FilteredReadTable::Edge => hop.edge_reads_started += 1,
             graphforge_storage::io_stats::FilteredReadTable::Node => hop.node_reads_started += 1,
         });
     }
 
     fn rows_scanned(&self, table: graphforge_storage::io_stats::FilteredReadTable, rows: u64) {
-        with_hop(self.edge_var, |hop| match table {
+        with_hop_handle(self.capture.as_ref(), self.edge_var, |hop| match table {
             graphforge_storage::io_stats::FilteredReadTable::Edge => hop.edge_rows_scanned += rows,
             graphforge_storage::io_stats::FilteredReadTable::Node => hop.node_rows_scanned += rows,
         });
@@ -650,7 +708,7 @@ impl graphforge_storage::io_stats::FilteredReadObserver for HopReadObserver {
         rows: u64,
         full: bool,
     ) {
-        with_hop(self.edge_var, |hop| match table {
+        with_hop_handle(self.capture.as_ref(), self.edge_var, |hop| match table {
             graphforge_storage::io_stats::FilteredReadTable::Edge => {
                 hop.edge_reads_completed += 1;
                 hop.edge_rows_returned += rows;
@@ -665,7 +723,7 @@ impl graphforge_storage::io_stats::FilteredReadObserver for HopReadObserver {
     }
 
     fn read_failed(&self, table: graphforge_storage::io_stats::FilteredReadTable) {
-        with_hop(self.edge_var, |hop| match table {
+        with_hop_handle(self.capture.as_ref(), self.edge_var, |hop| match table {
             graphforge_storage::io_stats::FilteredReadTable::Edge => hop.edge_reads_failed += 1,
             graphforge_storage::io_stats::FilteredReadTable::Node => hop.node_reads_failed += 1,
         });
@@ -679,7 +737,7 @@ impl graphforge_storage::io_stats::FilteredReadObserver for HopReadObserver {
         if table != graphforge_storage::io_stats::FilteredReadTable::Node {
             return;
         }
-        with_hop(self.edge_var, |hop| {
+        with_hop_handle(self.capture.as_ref(), self.edge_var, |hop| {
             match pruning.strategy {
                 graphforge_storage::io_stats::FilteredReadStrategy::DenseRowSelection => {
                     hop.node_dense_row_selection_reads += 1;
@@ -1170,6 +1228,28 @@ mod tests {
         assert_eq!(right.hops.len(), 1);
         assert_eq!(right.hops[&7].input_rows, 5);
         assert!(!left.hops.contains_key(&99));
+    }
+
+    #[tokio::test]
+    async fn explicit_capture_handle_survives_spawned_operator_task() {
+        let _guard = OBSERVATION_TEST_LOCK.lock().unwrap();
+        let (_, snapshot) = observe(async {
+            let capture = capture_handle().expect("active query capture");
+            tokio::spawn(async move {
+                record_input_with_capture(Some(&capture), 41, 3);
+                record_candidates_with_capture(Some(&capture), 41, 5);
+                record_emitted_with_capture(Some(&capture), 41, 5);
+                let _activity = OperatorActivity::expand_with_capture(41, Some(capture));
+            })
+            .await
+            .unwrap();
+        })
+        .await;
+
+        assert_eq!(snapshot.hops[&41].input_rows, 3);
+        assert_eq!(snapshot.hops[&41].candidates_generated, 5);
+        assert_eq!(snapshot.hops[&41].rows_emitted, 5);
+        assert!(snapshot.operator_rss.expand_by_hop.contains_key(&41));
     }
 
     #[tokio::test]

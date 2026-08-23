@@ -3163,6 +3163,7 @@ pub struct ExpandExec {
     demand_batch: Option<usize>,
     /// Query-scoped terminal cancellation shared by the bounded hop chain.
     demand: Option<Arc<demand::QueryDemand>>,
+    capture: Option<demand::CaptureHandle>,
 }
 
 impl ExpandExec {
@@ -3203,6 +3204,7 @@ impl ExpandExec {
             edge_var: node.edge_var,
             demand_batch: None,
             demand: None,
+            capture: demand::capture_handle(),
         }
     }
 
@@ -3227,6 +3229,7 @@ impl ExpandExec {
             edge_var: self.edge_var,
             demand_batch: Some(batch_goal),
             demand: Some(demand),
+            capture: self.capture.clone(),
         })
     }
 }
@@ -3305,6 +3308,7 @@ impl ExecutionPlan for ExpandExec {
             edge_var: self.edge_var,
             demand_batch: self.demand_batch,
             demand: self.demand.clone(),
+            capture: self.capture.clone(),
         }))
     }
 
@@ -3325,6 +3329,7 @@ impl ExecutionPlan for ExpandExec {
             edge_var: self.edge_var,
             demand_batch: self.demand_batch,
             demand: self.demand.clone(),
+            capture: self.capture.clone(),
         }))
     }
 
@@ -3362,6 +3367,7 @@ impl ExecutionPlan for ExpandExec {
             provider: self.provider.clone(),
             edge_var: self.edge_var,
             demand: self.demand.clone(),
+            capture: self.capture.clone(),
         };
         let schema = self.schema.clone();
         let batch_size = context.session_config().batch_size();
@@ -3378,7 +3384,7 @@ impl ExecutionPlan for ExpandExec {
                 None,
                 batch_size,
                 initial_batch_goal,
-                demand::OperatorActivity::expand(self.edge_var),
+                demand::OperatorActivity::expand_with_capture(self.edge_var, self.capture.clone()),
             ),
             |(
                 mut input_stream,
@@ -3433,7 +3439,11 @@ impl ExecutionPlan for ExpandExec {
                         return Ok(None);
                     };
                     let input_batch = input_batch?;
-                    demand::record_input(cfg.edge_var, input_batch.num_rows());
+                    demand::record_input_with_capture(
+                        cfg.capture.as_ref(),
+                        cfg.edge_var,
+                        input_batch.num_rows(),
+                    );
                     pending = Some((input_batch, SingleHopPosition::default()));
                 }
             },
@@ -3456,6 +3466,7 @@ struct SingleHopConfig {
     provider: Arc<dyn AdjacencyProvider>,
     edge_var: u32,
     demand: Option<Arc<demand::QueryDemand>>,
+    capture: Option<demand::CaptureHandle>,
 }
 
 /// Resumable position within one input batch. Keeping the raw adjacency offset
@@ -3542,7 +3553,7 @@ fn expand_single_hop_chunk(
     if triples.is_empty() {
         return Ok(RecordBatch::new_empty(cfg.out_schema.clone()));
     }
-    demand::record_candidates(cfg.edge_var, triples.len());
+    demand::record_candidates_with_capture(cfg.capture.as_ref(), cfg.edge_var, triples.len());
 
     // Edge rows keyed by edge_id, for the edge topology columns — read
     // lazily for the traversed ids only.
@@ -3553,9 +3564,11 @@ fn expand_single_hop_chunk(
     if cfg.demand.is_some() && edge_permit.is_none() {
         return Ok(RecordBatch::new_empty(cfg.out_schema.clone()));
     }
-    let edge_observer = demand::capture_enabled().then(|| {
-        Arc::new(demand::HopReadObserver::new(cfg.edge_var))
-            as Arc<dyn graphforge_storage::io_stats::FilteredReadObserver>
+    let edge_observer = (cfg.capture.is_some() || demand::capture_enabled()).then(|| {
+        Arc::new(demand::HopReadObserver::with_capture(
+            cfg.edge_var,
+            cfg.capture.clone(),
+        )) as Arc<dyn graphforge_storage::io_stats::FilteredReadObserver>
     });
     let edge_batches = graphforge_storage::read_edges_filtered_observed(
         &cfg.dir,
@@ -3592,9 +3605,11 @@ fn expand_single_hop_chunk(
     if cfg.demand.is_some() && node_permit.is_none() {
         return Ok(RecordBatch::new_empty(cfg.out_schema.clone()));
     }
-    let node_observer = demand::capture_enabled().then(|| {
-        Arc::new(demand::HopReadObserver::new(cfg.edge_var))
-            as Arc<dyn graphforge_storage::io_stats::FilteredReadObserver>
+    let node_observer = (cfg.capture.is_some() || demand::capture_enabled()).then(|| {
+        Arc::new(demand::HopReadObserver::with_capture(
+            cfg.edge_var,
+            cfg.capture.clone(),
+        )) as Arc<dyn graphforge_storage::io_stats::FilteredReadObserver>
     });
     let node_batches = graphforge_storage::read_nodes_filtered_observed(
         &cfg.dir,
@@ -3680,7 +3695,7 @@ fn expand_single_hop_chunk(
     }
     let output = RecordBatch::try_new(cfg.out_schema.clone(), columns)
         .map_err(|e| exec_err(e.to_string()))?;
-    demand::record_emitted(cfg.edge_var, output.num_rows());
+    demand::record_emitted_with_capture(cfg.capture.as_ref(), cfg.edge_var, output.num_rows());
     Ok(output)
 }
 
