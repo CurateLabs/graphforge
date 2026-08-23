@@ -18,9 +18,16 @@ exports_files(["Cargo.toml"])
 package(default_visibility = ["//visibility:public"])
 
 _CLI_DEPS = [
+    "@crates//:libc",
+    "@crates//:serde",
+    "@crates//:serde_json",
     "@crates//:serde_yaml",
     "@crates//:sha2",
+    "@crates//:tempfile",
+    "@crates//:ureq",
+    "@crates//:url",
     "//crates/graphforge-api:graphforge_api",
+    "//crates/graphforge-discovery:graphforge_discovery",
     "//crates/graphforge-storage:graphforge_storage",
 ]
 
