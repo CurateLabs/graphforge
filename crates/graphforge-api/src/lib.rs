@@ -19,7 +19,13 @@
 //!   JOINs.
 //! - #719 — [`GraphForge::new`]/[`GraphForge::execute`] wired into the real
 //!   parse → bind → lower → execute pipeline, returning Arrow results.
+//!
+//! Telemetry configuration and lifecycle remain Rust-owned and are projected
+//! through [`telemetry`].
 #![forbid(unsafe_code)]
+
+/// Rust-owned OpenTelemetry-compatible configuration and lifecycle contract.
+pub use graphforge_observability as telemetry;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

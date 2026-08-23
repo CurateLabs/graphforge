@@ -172,7 +172,7 @@ Historical v0.5.0 records remain immutable.
 ## Sequential recovery proof
 
 `scripts/ci/release_rehearsal.py` also produces a stable reconciliation report
-for all 25 public nodes. Its sequential simulator accepts only actions emitted
+for all 27 public nodes. Its sequential simulator accepts only actions emitted
 by the pure recovery planner, applies one supplied live observation at a time,
 and re-plans from the updated registry truth. This proves dependency order and
 partial recovery before workflow parallelism is introduced.
@@ -200,7 +200,7 @@ Before a write the lane persists a sanitized immutable attempt record; after a
 successful registry response it persists an accepted receipt and performs one
 public observation. Later recovery runs load both, so cancellation, timeout,
 or propagation delay cannot become permission for a second write. There is no polling loop. The `always()`
-reconciliation job then observes all 25 nodes and combines those states with
+reconciliation job then observes all 27 nodes and combines those states with
 job conclusions for operator context. See
 [`publication-order.md`](publication-order.md) for the recovery and human stop
 decisions.

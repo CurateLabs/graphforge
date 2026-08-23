@@ -16,6 +16,7 @@ members = [
   "crates/graphforge-knowledge",
   "crates/graphforge-ontology",
   "crates/graphforge-plan",
+  "crates/graphforge-observability",
   "crates/graphforge-api",
   "crates/graphforge-bindings-py",
   "crates/graphforge-bindings-node",

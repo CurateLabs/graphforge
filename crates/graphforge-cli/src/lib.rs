@@ -1,8 +1,10 @@
 //! Reusable GraphForge command-line interface.
 #![forbid(unsafe_code)]
 
+use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use arrow::datatypes::DataType;
 use arrow::ipc::writer::StreamWriter;
@@ -242,6 +244,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Validate and exercise the Rust-owned telemetry lifecycle.
+    Telemetry(TelemetryArgs),
     /// Clone a verified portable project from GraphForge Hub.
     Clone(hub_clone::CloneArgs),
     /// Initialize repository-local GraphForge definitions and state.
@@ -305,6 +309,84 @@ enum Command {
     },
     /// Emit safe recovery-on-open evidence for the project.
     Recovery,
+}
+
+#[derive(Args)]
+struct TelemetryArgs {
+    /// disabled, in_memory, or otlp_http_json.
+    #[arg(long, default_value = "disabled")]
+    mode: String,
+    /// Explicit OTLP/HTTP collector base URL.
+    #[arg(long)]
+    endpoint: Option<String>,
+    /// OTLP header as lowercase-name=value; values are never printed.
+    #[arg(long = "header")]
+    headers: Vec<String>,
+    #[arg(long, default_value_t = 256)]
+    queue_capacity: usize,
+    #[arg(long, default_value_t = 64)]
+    batch_size: usize,
+    #[arg(long, default_value_t = 3_000)]
+    export_timeout_ms: u64,
+    #[arg(long, default_value_t = 5_000)]
+    lifecycle_timeout_ms: u64,
+    #[arg(long, default_value_t = 2)]
+    max_retries: u8,
+}
+
+fn run_telemetry(
+    args: TelemetryArgs,
+    output: &mut dyn Write,
+) -> Result<i32, graphforge_api::GfError> {
+    use graphforge_api::telemetry::{OtlpConfig, TelemetryConfig, TelemetryMode, TelemetryRuntime};
+    let mode = match args.mode.as_str() {
+        "disabled" => TelemetryMode::Disabled,
+        "in_memory" => TelemetryMode::InMemory,
+        "otlp_http_json" => TelemetryMode::OtlpHttpJson,
+        _ => {
+            return Err(graphforge_api::GfError::Validation(
+                "GF_TELEMETRY_INVALID_MODE".into(),
+            ));
+        }
+    };
+    let mut headers = BTreeMap::new();
+    for header in args.headers {
+        let Some((name, value)) = header.split_once('=') else {
+            return Err(graphforge_api::GfError::Validation(
+                "GF_TELEMETRY_INVALID_HEADER".into(),
+            ));
+        };
+        headers.insert(name.to_owned(), value.to_owned());
+    }
+    let otlp = args
+        .endpoint
+        .map(|endpoint| OtlpConfig { endpoint, headers });
+    let runtime = TelemetryRuntime::new(TelemetryConfig {
+        mode,
+        queue_capacity: args.queue_capacity,
+        batch_size: args.batch_size,
+        export_timeout: Duration::from_millis(args.export_timeout_ms),
+        lifecycle_timeout: Duration::from_millis(args.lifecycle_timeout_ms),
+        max_retries: args.max_retries,
+        otlp,
+        ..TelemetryConfig::default()
+    })
+    .map_err(|error| graphforge_api::GfError::Validation(error.code.as_str().to_owned()))?;
+    let flush = runtime.force_flush();
+    let shutdown = runtime.shutdown();
+    writeln!(
+        output,
+        "{}",
+        serde_json::json!({
+            "semantic_contract_version": graphforge_api::telemetry::SEMANTIC_CONTRACT_VERSION,
+            "scope": graphforge_api::telemetry::INSTRUMENTATION_SCOPE,
+            "mode": args.mode,
+            "flush": flush.as_str(),
+            "shutdown": shutdown.as_str()
+        })
+    )
+    .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
+    Ok(0)
 }
 
 #[derive(Args)]
@@ -1093,6 +1175,10 @@ fn run(cli: Cli, output: &mut dyn Write) -> Result<i32, CliRuntimeError> {
             .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
         return Ok(0);
     };
+    let command = match command {
+        Command::Telemetry(args) => return run_telemetry(args, output).map_err(Into::into),
+        command => command,
+    };
     if is_repository_command(&command) {
         return run_repository_with_bundle(
             command,
@@ -1716,6 +1802,19 @@ mod tests {
                 .unwrap()
                 .starts_with("GF_")
         );
+    }
+
+    #[test]
+    fn telemetry_command_projects_the_rust_owned_disabled_lifecycle() {
+        let execution = execute(["gf", "telemetry"]);
+        assert_eq!(execution.exit_code, 0);
+        assert!(execution.stderr.is_empty());
+        let output: serde_json::Value = serde_json::from_slice(&execution.stdout).unwrap();
+        assert_eq!(output["semantic_contract_version"], 1);
+        assert_eq!(output["scope"], "io.graphforge.engine");
+        assert_eq!(output["mode"], "disabled");
+        assert_eq!(output["flush"], "disabled");
+        assert_eq!(output["shutdown"], "disabled");
     }
 
     #[test]

@@ -68,7 +68,7 @@ Publication is planner-driven:
 - Crates publish in their checked dependency order.
 - Every lane re-observes public registry truth immediately before a write.
 - Accepted or ambiguous write attempts never authorize a duplicate write.
-- The final reconciliation always runs and covers all 25 public nodes.
+- The final reconciliation always runs and covers all 27 public nodes.
 
 Job history is operator context only. Recovery state comes from the immutable
 candidate, durable write evidence, retained artifacts, and live registry truth.

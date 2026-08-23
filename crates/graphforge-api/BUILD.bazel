@@ -29,6 +29,7 @@ _API_DEPS = [
     "//crates/graphforge-io:graphforge_io",
     "//crates/graphforge-knowledge:graphforge_knowledge",
     "//crates/graphforge-ontology:graphforge_ontology",
+    "//crates/graphforge-observability:graphforge_observability",
     "//crates/graphforge-provenance:graphforge_provenance",
     "//crates/graphforge-rel:graphforge_rel",
     "//crates/graphforge-search:graphforge_search",
