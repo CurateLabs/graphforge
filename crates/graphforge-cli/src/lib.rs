@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 include!(concat!(env!("OUT_DIR"), "/project_skills.rs"));
 
+mod hub_clone;
 mod maintenance_cli;
 mod ontology_cli;
 mod portable_cli;
@@ -241,6 +242,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Clone a verified portable project from GraphForge Hub.
+    Clone(hub_clone::CloneArgs),
     /// Initialize repository-local GraphForge definitions and state.
     Init(InitArgs),
     /// Compare or reconcile declared definitions and source digests without ingesting data.
@@ -1099,6 +1102,11 @@ fn run(cli: Cli, output: &mut dyn Write) -> Result<i32, CliRuntimeError> {
             output,
         )
         .map_err(Into::into);
+    }
+    if let Command::Clone(args) = command {
+        return hub_clone::run_clone(args, cli.json, output)
+            .map(|()| 0)
+            .map_err(Into::into);
     }
     // Repository-independent portable commands must not call RepositoryContext::discover.
     if let Command::Portable { command } = command {
