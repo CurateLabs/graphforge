@@ -213,8 +213,8 @@ fn classify_failure(error: &graphforge_api::GfError) -> Failure {
         | "hub.interrupted"
         | "hub.package.cancelled"
         | "hub.package.unsupported_future"
-        | "hub.package.incompatible" => Failure::InvalidInput,
-        "hub.integrity"
+        | "hub.package.incompatible"
+        | "hub.integrity"
         | "hub.integrity_failure"
         | "hub.package.repository_mismatch"
         | "hub.package.immutable_version_mismatch"
@@ -425,6 +425,7 @@ fn validate_url(url: &Url) -> Result<(), graphforge_api::GfError> {
     Ok(())
 }
 
+#[cfg(test)]
 fn fetch(
     transport: &dyn Transport,
     start: &Url,
@@ -1440,7 +1441,11 @@ mod tests {
             if_range: Option<&str>,
             limit: u64,
         ) -> Result<HttpResponse, graphforge_api::GfError> {
-            let delay = if url.path().contains("/.gf/objects/") || url.path().ends_with(".gfpb") {
+            let delay = if url.path().contains("/.gf/objects/")
+                || std::path::Path::new(url.path())
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("gfpb"))
+            {
                 self.download
             } else {
                 self.discovery
@@ -2047,6 +2052,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn both_identity_forms_import_and_reopen_the_same_real_project() {
         let root = tempfile::tempdir().unwrap();
         let source = root.path().join("source");
@@ -2159,14 +2165,14 @@ mod tests {
             .unwrap();
             let clone_elapsed = clone_started.elapsed();
             let lifecycle = runtime.force_flush();
-            if index < 2 || index >= 4 {
+            if !(2..4).contains(&index) {
                 assert_eq!(
                     lifecycle,
                     graphforge_api::telemetry::LifecycleStatus::Complete
                 );
             }
             let snapshots = runtime.snapshots();
-            if index < 2 || index >= 4 {
+            if !(2..4).contains(&index) {
                 assert_eq!(snapshots.len(), 1);
                 let job = snapshots[0].job.as_ref().unwrap();
                 assert_eq!(job.family, JobFamily::Clone);
