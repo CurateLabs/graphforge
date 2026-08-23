@@ -1,0 +1,6 @@
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "v1",
+    srcs = glob(["v1/*.json"]),
+)
