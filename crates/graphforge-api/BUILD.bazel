@@ -16,9 +16,12 @@ package(default_visibility = ["//visibility:public"])
 # Unit tests include_str! contract fixtures from docs/contracts/examples.
 _API_COMPILE_DATA = [
     "//docs/contracts/examples:fixtures",
+    "//docs/contracts:graphforge-hub-manifest-v1.schema.json",
+    "//docs/contracts:graphforge-hub-refs-v1.schema.json",
     "//tests/contracts:multi-ontology-surface-v1.json",
     "//tests/fixtures/multi-ontology-v1:binding-parity-v1.json",
     "//tests/fixtures/portable-v2:ontology-only.manifest.json",
+    "//tests/fixtures/hub-protocol:v1",
 ]
 
 _API_DEPS = [

@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://graphforge.sh/schemas/hub-refs-v1.json",
+  "title": "GraphForge Hub refs v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol", "repository", "refs"],
+  "properties": {
+    "protocol": {"const": "graphforge-hub/1"},
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["owner", "name"],
+      "properties": {
+        "owner": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,98}[a-z0-9]$|^[a-z]$"},
+        "name": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,98}[a-z0-9]$|^[a-z]$"}
+      }
+    },
+    "refs": {
+      "type": "object",
+      "maxProperties": 100000,
+      "additionalProperties": {"type": "string", "minLength": 1, "maxLength": 4096}
+    }
+  }
+}
