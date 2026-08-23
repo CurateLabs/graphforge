@@ -1,5 +1,12 @@
 # Discovery v1 contract artifacts
 
+This directory and the `graphforge-discovery` crate are the single discovery
+wire authority. GraphForge API, CLI, and Hub adapters consume these types and
+artifacts; they must not define a second manifest/refs model, media-type table,
+or error taxonomy. The older `graphforge-hub/1` API-local draft and its fixtures
+were removed because their different field names and semantics could not be a
+compatible projection of this contract.
+
 These checked-in JSON Schemas describe the wire shape of GraphForge discovery
 manifest and refs responses. `conformance.json` supplies valid and invalid
 examples with stable Rust error results. Semantic rules that JSON Schema cannot

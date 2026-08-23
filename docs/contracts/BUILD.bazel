@@ -1,6 +1,1 @@
 package(default_visibility = ["//visibility:public"])
-
-exports_files([
-    "graphforge-hub-manifest-v1.schema.json",
-    "graphforge-hub-refs-v1.schema.json",
-])
