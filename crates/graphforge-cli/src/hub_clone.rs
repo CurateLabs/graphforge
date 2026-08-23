@@ -1,6 +1,7 @@
 //! Secure Hub discovery, download, and atomic portable-v2 import.
 
 use clap::Args;
+use fs4::{FileExt, TryLockError};
 use graphforge_api::{
     GraphForge, OperationId, PortableV2ImportRequest, PortableV2Limits, PortableV2Mode,
 };
@@ -8,14 +9,19 @@ use graphforge_discovery::{
     DiscoveryError, DiscoveryErrorCode, DiscoveryLimits, DiscoveryManifest, ObjectDescriptor,
     RefSet, RepositoryIdentity,
 };
-use graphforge_storage::{DiscoveryPortableV2Request, verify_discovered_portable_v2};
-use serde::Serialize;
+use graphforge_storage::{
+    DiscoveryPortableV2Error, DiscoveryPortableV2Mismatch, DiscoveryPortableV2Request,
+    PortableV2ErrorCode, verify_discovered_portable_v2,
+};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::fmt::Debug;
 use std::fmt::Write as _;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use ureq::unversioned::resolver::{DefaultResolver, ResolvedSocketAddrs, Resolver};
@@ -124,6 +130,7 @@ struct HttpResponse {
     status: u16,
     location: Option<String>,
     content_range: Option<String>,
+    etag: Option<String>,
     body: Box<dyn Read + Send>,
 }
 
@@ -136,6 +143,7 @@ trait Transport {
         &self,
         url: &Url,
         range: Option<u64>,
+        if_range: Option<&str>,
         limit: u64,
     ) -> Result<HttpResponse, graphforge_api::GfError>;
 }
@@ -169,11 +177,15 @@ impl Transport for HttpTransport {
         &self,
         url: &Url,
         range: Option<u64>,
+        if_range: Option<&str>,
         limit: u64,
     ) -> Result<HttpResponse, graphforge_api::GfError> {
         let mut request = self.agent.get(url.as_str());
         if let Some(offset) = range {
             request = request.header("Range", format!("bytes={offset}-"));
+        }
+        if let Some(validator) = if_range {
+            request = request.header("If-Range", validator);
         }
         let response = request.call().map_err(|_| network("request failed"))?;
         let status = response.status().as_u16();
@@ -187,11 +199,17 @@ impl Transport for HttpTransport {
             .get("content-range")
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned);
+        let etag = response
+            .headers()
+            .get("etag")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
         let (_, body) = response.into_parts();
         Ok(HttpResponse {
             status,
             location,
             content_range,
+            etag,
             body: Box::new(body.into_reader().take(limit.saturating_add(1))),
         })
     }
@@ -202,6 +220,7 @@ fn validate_url(url: &Url) -> Result<(), graphforge_api::GfError> {
         || url.username() != ""
         || url.password().is_some()
         || url.host_str().is_none()
+        || url.query().is_some()
         || url.fragment().is_some()
     {
         return Err(validation(
@@ -221,12 +240,13 @@ fn fetch(
     transport: &dyn Transport,
     start: &Url,
     range: Option<u64>,
+    if_range: Option<&str>,
     limit: u64,
 ) -> Result<HttpResponse, graphforge_api::GfError> {
     let mut url = start.clone();
     for hop in 0..=MAX_REDIRECTS {
         transport.validate(&url)?;
-        let response = transport.get(&url, range, limit)?;
+        let response = transport.get(&url, range, if_range, limit)?;
         if matches!(response.status, 301 | 302 | 303 | 307 | 308) {
             if hop == MAX_REDIRECTS {
                 return Err(network("redirect limit exceeded"));
@@ -309,7 +329,7 @@ fn select_bundle(
         .map_err(|error| protocol_error(&error))
 }
 
-fn partial_path(destination: &Path, digest: &str) -> Result<PathBuf, graphforge_api::GfError> {
+fn staging_path(destination: &Path) -> Result<PathBuf, graphforge_api::GfError> {
     let parent = destination.parent().unwrap_or_else(|| Path::new("."));
     let name = destination
         .file_name()
@@ -320,22 +340,147 @@ fn partial_path(destination: &Path, digest: &str) -> Result<PathBuf, graphforge_
                 "destination must have a UTF-8 name",
             )
         })?;
-    Ok(parent.join(format!(
-        ".{name}.gfclone-{}.partial",
-        digest.trim_start_matches("sha256:")
-    )))
+    Ok(parent.join(format!(".{name}.graphforge-clone")))
+}
+
+#[derive(Debug)]
+struct CloneStaging {
+    root: PathBuf,
+    partial: PathBuf,
+    _lock: File,
+}
+
+#[cfg(unix)]
+fn acquire_staging(destination: &Path) -> Result<CloneStaging, graphforge_api::GfError> {
+    use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+    let root = staging_path(destination)?;
+    match std::fs::symlink_metadata(&root) {
+        Ok(m) if m.file_type().is_symlink() || !m.is_dir() => {
+            return Err(validation(
+                "hub.destination_conflict",
+                "staging path is unsafe",
+            ));
+        }
+        Ok(_) => std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+            .map_err(storage)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let mut b = std::fs::DirBuilder::new();
+            b.mode(0o700);
+            b.create(&root).map_err(storage)?;
+        }
+        Err(e) => return Err(storage(e)),
+    }
+    let lock_path = root.join("clone.lock");
+    if std::fs::symlink_metadata(&lock_path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(validation(
+            "hub.destination_conflict",
+            "staging lock is unsafe",
+        ));
+    }
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(lock_path)
+        .map_err(storage)?;
+    match FileExt::try_lock(&lock) {
+        Ok(()) => {}
+        Err(TryLockError::WouldBlock) => {
+            return Err(validation(
+                "hub.concurrent_clone",
+                "clone already in progress",
+            ));
+        }
+        Err(TryLockError::Error(e)) => return Err(storage(e)),
+    }
+    Ok(CloneStaging {
+        partial: root.join("package.part"),
+        root,
+        _lock: lock,
+    })
+}
+
+#[cfg(not(unix))]
+fn acquire_staging(destination: &Path) -> Result<CloneStaging, graphforge_api::GfError> {
+    let root = staging_path(destination)?;
+    match std::fs::symlink_metadata(&root) {
+        Ok(m) if !m.is_dir() => {
+            return Err(validation(
+                "hub.destination_conflict",
+                "staging path is unsafe",
+            ));
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir(&root).map_err(storage)?
+        }
+        Err(e) => return Err(storage(e)),
+    }
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(root.join("clone.lock"))
+        .map_err(storage)?;
+    match FileExt::try_lock(&lock) {
+        Ok(()) => {}
+        Err(TryLockError::WouldBlock) => {
+            return Err(validation(
+                "hub.concurrent_clone",
+                "clone already in progress",
+            ));
+        }
+        Err(TryLockError::Error(e)) => return Err(storage(e)),
+    }
+    Ok(CloneStaging {
+        partial: root.join("package.part"),
+        root,
+        _lock: lock,
+    })
+}
+
+#[derive(Serialize, Deserialize)]
+struct ResumeState {
+    digest: String,
+    length: u64,
+    location: String,
+    etag: String,
+}
+
+fn save_resume(
+    checkpoint: &Path,
+    object: &ObjectDescriptor,
+    location: &str,
+    response: &HttpResponse,
+) -> Result<(), graphforge_api::GfError> {
+    let etag = response
+        .etag
+        .as_deref()
+        .filter(|v| v.starts_with('"') && !v.starts_with("W/"))
+        .ok_or_else(|| validation("hub.integrity", "object response requires a strong ETag"))?;
+    let state = ResumeState {
+        digest: object.digest.0.clone(),
+        length: object.length,
+        location: location.to_owned(),
+        etag: etag.to_owned(),
+    };
+    std::fs::write(checkpoint, serde_json::to_vec(&state).map_err(storage)?).map_err(storage)
 }
 
 fn download(
     transport: &dyn Transport,
     object: &ObjectDescriptor,
-    destination: &Path,
+    partial: &Path,
 ) -> Result<u64, graphforge_api::GfError> {
-    let partial = partial_path(destination, &object.digest.0)?;
+    let checkpoint = partial.with_extension("resume.json");
     if object.length > MAX_BUNDLE_BYTES {
         return Err(limit_error("portable bundle exceeds clone byte bound"));
     }
-    let mut resumed = match std::fs::symlink_metadata(&partial) {
+    let mut resumed = match std::fs::symlink_metadata(partial) {
         Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => metadata.len(),
         Ok(_) => {
             return Err(validation(
@@ -347,7 +492,7 @@ fn download(
         Err(error) => return Err(storage(error)),
     };
     if resumed > object.length {
-        open_partial_nofollow(&partial, false).map_err(storage)?;
+        open_partial_nofollow(partial, false).map_err(storage)?;
         resumed = 0;
     }
     let location = object
@@ -356,11 +501,24 @@ fn download(
         .ok_or_else(|| validation("hub.missing_object", "portable bundle has no location"))?;
     let url = Url::parse(location)
         .map_err(|_| validation("hub.unsafe_location", "invalid object URL"))?;
+    let saved: Option<ResumeState> = std::fs::read(&checkpoint)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok());
+    let validator = saved
+        .as_ref()
+        .filter(|s| {
+            s.digest == object.digest.0 && s.length == object.length && s.location == *location
+        })
+        .map(|s| s.etag.as_str());
+    if resumed > 0 && validator.is_none() {
+        resumed = 0;
+    }
     if resumed < object.length {
         let mut response = fetch(
             transport,
             &url,
             (resumed > 0).then_some(resumed),
+            validator,
             object.length.saturating_sub(resumed),
         )?;
         let expected_range = format!("bytes {resumed}-{}/{}", object.length - 1, object.length);
@@ -368,7 +526,7 @@ fn download(
             && response.status == 206
             && response.content_range.as_deref() == Some(expected_range.as_str());
         if resumed > 0 && response.status == 206 && !append {
-            let _ = std::fs::remove_file(&partial);
+            let _ = std::fs::remove_file(partial);
             return Err(validation(
                 "hub.integrity",
                 "range response does not match the requested object",
@@ -377,7 +535,10 @@ fn download(
         if resumed > 0 && !append {
             resumed = 0;
         }
-        let mut file = open_partial_nofollow(&partial, append).map_err(storage)?;
+        if resumed == 0 {
+            save_resume(&checkpoint, object, location, &response)?;
+        }
+        let mut file = open_partial_nofollow(partial, append).map_err(storage)?;
         let mut copied = 0_u64;
         let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
         loop {
@@ -398,7 +559,7 @@ fn download(
         }
         file.sync_all().map_err(storage)?;
     }
-    let mut file = open_read_nofollow(&partial).map_err(storage)?;
+    let mut file = open_read_nofollow(partial).map_err(storage)?;
     let length = file.metadata().map_err(storage)?.len();
     if length != object.length {
         return Err(validation(
@@ -409,7 +570,8 @@ fn download(
     file.seek(SeekFrom::Start(0)).map_err(storage)?;
     let actual = hash_reader(&mut file)?;
     if actual != object.digest.0 {
-        let _ = std::fs::remove_file(&partial);
+        let _ = std::fs::remove_file(partial);
+        let _ = std::fs::remove_file(&checkpoint);
         return Err(validation("hub.integrity", "download digest mismatch"));
     }
     Ok(resumed)
@@ -496,6 +658,7 @@ fn run_clone_with(
             transport,
             &endpoint(&base, "refs"),
             None,
+            None,
             MAX_METADATA_BYTES as u64,
         )?,
         MAX_METADATA_BYTES,
@@ -504,6 +667,7 @@ fn run_clone_with(
         fetch(
             transport,
             &endpoint(&base, "manifest"),
+            None,
             None,
             MAX_METADATA_BYTES as u64,
         )?,
@@ -523,8 +687,9 @@ fn run_clone_with(
     refs.validate_manifest(&manifest)
         .map_err(|error| protocol_error(&error))?;
     let object = select_bundle(&manifest)?;
-    let partial = partial_path(&destination, &object.digest.0)?;
-    let resumed_bytes = download(transport, object, &destination)?;
+    let staging = acquire_staging(&destination)?;
+    let partial = staging.partial.clone();
+    let resumed_bytes = download(transport, object, &partial)?;
     let portable_limits = PortableV2Limits::default();
     let verified = verify_discovered_portable_v2(&DiscoveryPortableV2Request {
         manifest_json: &manifest_bytes,
@@ -536,7 +701,7 @@ fn run_clone_with(
         mode: PortableV2Mode::Full,
         cancelled: None,
     })
-    .map_err(|_| validation("hub.integrity", "portable project verification failed"))?;
+    .map_err(portable_error)?;
     let operation_id = OperationId(uuid::Uuid::new_v5(
         &uuid::Uuid::NAMESPACE_URL,
         format!(
@@ -556,7 +721,11 @@ fn run_clone_with(
         None,
     )
     .map_err(|_| validation("hub.integrity", "portable project import failed"))?;
-    std::fs::remove_file(&partial).map_err(storage)?;
+    let staging_root = staging.root.clone();
+    drop(staging);
+    // The destination is already atomically published; cleanup cannot turn
+    // success into a reported failure.
+    let _ = std::fs::remove_dir_all(staging_root);
     let result = CloneResult {
         contract: "graphforge-hub-clone/1",
         repository: canonical_name(&identity),
@@ -600,6 +769,36 @@ fn protocol_error(error: &DiscoveryError) -> graphforge_api::GfError {
         DiscoveryErrorCode::Duplicate => "hub.duplicate",
     };
     validation(code, error.detail())
+}
+fn portable_error(error: DiscoveryPortableV2Error) -> graphforge_api::GfError {
+    match error {
+        DiscoveryPortableV2Error::Discovery(error) => protocol_error(&error),
+        DiscoveryPortableV2Error::ReferenceMismatch(mismatch) => validation(
+            match mismatch {
+                DiscoveryPortableV2Mismatch::Repository => "hub.package.repository_mismatch",
+                DiscoveryPortableV2Mismatch::ImmutableVersion => {
+                    "hub.package.immutable_version_mismatch"
+                }
+                DiscoveryPortableV2Mismatch::PackageDigest => "hub.package.package_digest_mismatch",
+            },
+            "portable discovery reference mismatch",
+        ),
+        DiscoveryPortableV2Error::Portable(error) => validation(
+            match error.code {
+                PortableV2ErrorCode::Cancelled => "hub.package.cancelled",
+                PortableV2ErrorCode::LimitExceeded => "hub.package.limit_exceeded",
+                PortableV2ErrorCode::Io => "hub.package.io",
+                PortableV2ErrorCode::InvalidStructure => "hub.package.invalid_structure",
+                PortableV2ErrorCode::InvalidPath => "hub.package.invalid_path",
+                PortableV2ErrorCode::DuplicateEntry => "hub.package.duplicate_entry",
+                PortableV2ErrorCode::UnsupportedFuture => "hub.package.unsupported_future",
+                PortableV2ErrorCode::Incompatible => "hub.package.incompatible",
+                PortableV2ErrorCode::DigestMismatch => "hub.package.digest_mismatch",
+                PortableV2ErrorCode::ConcurrentMutation => "hub.package.concurrent_mutation",
+            },
+            "portable project verification failed",
+        ),
+    }
 }
 fn network(message: &str) -> graphforge_api::GfError {
     graphforge_api::GfError::Storage(format!("hub.network: {message}"))
@@ -656,6 +855,7 @@ mod tests {
             &self,
             _url: &Url,
             _range: Option<u64>,
+            _if_range: Option<&str>,
             _limit: u64,
         ) -> Result<HttpResponse, graphforge_api::GfError> {
             Ok(self.0.lock().unwrap().pop_front().unwrap())
@@ -704,9 +904,10 @@ mod tests {
             &self,
             url: &Url,
             range: Option<u64>,
+            if_range: Option<&str>,
             limit: u64,
         ) -> Result<HttpResponse, graphforge_api::GfError> {
-            self.0.get(url, range, limit)
+            self.0.get(url, range, if_range, limit)
         }
     }
 
@@ -715,6 +916,7 @@ mod tests {
             status,
             location: None,
             content_range: content_range.map(str::to_owned),
+            etag: Some("\"fixture-1\"".to_owned()),
             body: Box::new(std::io::Cursor::new(body.to_vec())),
         }
     }
@@ -769,7 +971,7 @@ mod tests {
         redirect.location = Some("https://127.0.0.1/private".into());
         let transport = Scripted::new(vec![redirect, response(200, None, b"secret")]);
         let start = Url::parse("https://hub.example/repository/.gf/manifest").unwrap();
-        let error = match fetch(&transport, &start, None, 1024) {
+        let error = match fetch(&transport, &start, None, None, 1024) {
             Ok(_) => panic!("private redirect unexpectedly succeeded"),
             Err(error) => error,
         };
@@ -817,7 +1019,7 @@ mod tests {
                 if attempt == 0 {
                     write!(
                         stream,
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nETag: \"fixture-1\"\r\nConnection: close\r\n\r\n",
                         server_bytes.len()
                     )
                     .unwrap();
@@ -827,9 +1029,14 @@ mod tests {
                         request.to_ascii_lowercase().contains("range: bytes=8-"),
                         "{request}"
                     );
+                    assert!(
+                        request.contains("if-range: \"fixture-1\"")
+                            || request.contains("If-Range: \"fixture-1\""),
+                        "{request}"
+                    );
                     write!(
                         stream,
-                        "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes 8-{}/{}\r\nConnection: close\r\n\r\n",
+                        "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes 8-{}/{}\r\nETag: \"fixture-1\"\r\nConnection: close\r\n\r\n",
                         server_bytes.len() - 8,
                         server_bytes.len() - 1,
                         server_bytes.len()
@@ -858,11 +1065,7 @@ mod tests {
         let error = download(&transport, &descriptor, &destination).unwrap_err();
         assert!(error.to_string().contains("hub.integrity"));
         assert!(!destination.exists());
-        assert!(
-            !partial_path(&destination, &descriptor.digest.0)
-                .unwrap()
-                .exists()
-        );
+        assert!(!destination.exists());
     }
 
     #[cfg(unix)]
@@ -876,11 +1079,7 @@ mod tests {
         let destination = root.path().join("project");
         let victim = root.path().join("victim");
         std::fs::write(&victim, b"keep me").unwrap();
-        symlink(
-            &victim,
-            partial_path(&destination, &descriptor.digest.0).unwrap(),
-        )
-        .unwrap();
+        symlink(&victim, &destination).unwrap();
         let transport = Scripted::new(vec![response(200, None, bytes)]);
         let error = download(&transport, &descriptor, &destination).unwrap_err();
         assert!(error.to_string().contains("hub.destination_conflict"));
@@ -918,6 +1117,39 @@ mod tests {
             endpoint(&base, "refs").as_str(),
             "https://graphforge.sh/openalex/openalex/.gf/refs"
         );
+    }
+
+    #[test]
+    fn staging_lock_is_exclusive_and_crash_releasing() {
+        let root = tempfile::tempdir().unwrap();
+        let destination = root.path().join("project");
+        let first = acquire_staging(&destination).unwrap();
+        assert!(
+            acquire_staging(&destination)
+                .unwrap_err()
+                .to_string()
+                .contains("hub.concurrent_clone")
+        );
+        drop(first);
+        assert!(acquire_staging(&destination).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staging_directory_symlink_is_rejected() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let destination = root.path().join("project");
+        let victim = root.path().join("victim");
+        std::fs::create_dir(&victim).unwrap();
+        symlink(&victim, staging_path(&destination).unwrap()).unwrap();
+        assert!(
+            acquire_staging(&destination)
+                .unwrap_err()
+                .to_string()
+                .contains("hub.destination_conflict")
+        );
+        assert!(std::fs::read_dir(victim).unwrap().next().is_none());
     }
 
     #[test]

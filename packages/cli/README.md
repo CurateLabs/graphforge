@@ -47,9 +47,10 @@ identity; package bytes come only from the content-addressed HTTPS location in
 the validated manifest. Existing destinations are never overwritten.
 
 Downloads use finite response, object, redirect, connection, and operation
-limits. An interrupted download leaves only a digest-named partial file beside
-the requested destination and a retry resumes it when the server returns an
-exact matching range. A complete destination is published only after transport
+limits. An interrupted download remains in an owner-private, symlink-safe
+staging directory protected by an exclusive process lock. A retry uses a
+strong ETag with `Range`/`If-Range`, resumes only an exact matching `206`
+response, and otherwise restarts safely. A complete destination is published only after transport
 size and SHA-256 checks, full portable-v2 verification, semantic package
 identity comparison, atomic import, and reopen through the GraphForge facade.
 Redirects and DNS answers are rechecked against the public-network-only policy;
