@@ -142,7 +142,7 @@ fn absent_capability_dir_is_building_and_scan_builds() {
 }
 
 #[test]
-fn absent_index_scan_build_is_cached_across_stream_batches() {
+fn lazily_built_private_csr_is_reused_across_queries() {
     let dir = TempDir::new().unwrap();
     write_diamond(dir.path());
     let provider = persistent(dir.path(), OntologyMode::Strict);
@@ -151,13 +151,13 @@ fn absent_index_scan_build_is_cached_across_stream_batches() {
     let second = provider.adjacency("KNOWS", Direction::Out).unwrap();
     assert!(
         Arc::ptr_eq(&first, &second),
-        "scan-build must be reused instead of rescanning per input batch"
+        "bounded CSR must be reused instead of rebuilding per input batch"
     );
     provider.revalidate();
     let next_query = provider.adjacency("KNOWS", Direction::Out).unwrap();
     assert!(
-        !Arc::ptr_eq(&first, &next_query),
-        "an absent-index cache must not survive the next query"
+        Arc::ptr_eq(&first, &next_query),
+        "a generation-bound private CSR should survive the next query"
     );
 }
 
@@ -207,11 +207,11 @@ fn fresh_index_with_unknown_rel_scan_builds_without_rebuild() {
 }
 
 // ---------------------------------------------------------------------------
-// Corrupt artifacts degrade, never fail
+// Corrupt source identity fails closed
 // ---------------------------------------------------------------------------
 
 #[test]
-fn corrupt_generation_counter_is_miss_without_rebuild() {
+fn corrupt_generation_counter_returns_typed_bounded_build_failure() {
     let dir = TempDir::new().unwrap();
     write_diamond(dir.path());
     build_adjacency_index(dir.path(), TS).unwrap();
@@ -226,13 +226,14 @@ fn corrupt_generation_counter_is_miss_without_rebuild() {
         provider.status("KNOWS", Direction::Out),
         AdjacencyStatus::Miss
     );
-    // Scan-build fallback still serves correct results; no rebuild was
-    // attempted (stamping a manifest requires a readable counter).
-    assert_eq!(
-        provider.adjacency("KNOWS", Direction::Out).unwrap(),
-        scan(dir.path(), OntologyMode::Strict)
-            .adjacency("KNOWS", Direction::Out)
-            .unwrap()
+    let error = provider
+        .adjacency("KNOWS", Direction::Out)
+        .expect_err("an unreadable source generation cannot safely stamp a rebuilt CSR");
+    assert!(
+        matches!(error, graphforge_core::GfError::Execution(ref message)
+            if message.contains("bounded adjacency index build failed")
+                && message.contains("generation.json")),
+        "unexpected typed failure: {error:?}"
     );
 }
 
@@ -586,8 +587,8 @@ async fn zero_hop_traversal_on_hit_never_opens_edge_files() {
 // ---------------------------------------------------------------------------
 
 /// A warm shared provider serves repeat queries from its view cache: after
-/// the first load, even deleting every index file does not affect the second
-/// query (nothing is re-read).
+/// the first load, deleting the authoritative index files does not affect the
+/// second query (nothing is re-read while source identity is unchanged).
 #[test]
 fn shared_provider_serves_second_query_from_cache() {
     let dir = TempDir::new().unwrap();
@@ -597,9 +598,11 @@ fn shared_provider_serves_second_query_from_cache() {
     let provider = persistent(dir.path(), OntologyMode::Strict);
     let first = provider.adjacency("KNOWS", Direction::Out).unwrap();
 
-    // Remove the whole index AND the edge files; cache must still serve.
+    // Remove the whole index; cache must still serve. Removing topology files
+    // without advancing the generation is a source-identity transition and is
+    // deliberately detected by revalidate, so it is not part of this cache
+    // amortization contract.
     std::fs::remove_dir_all(dir.path().join("indexes")).unwrap();
-    std::fs::remove_dir_all(dir.path().join("topology").join("edges")).unwrap();
     let second = provider.adjacency("KNOWS", Direction::Out).unwrap();
     assert_eq!(first, second);
 

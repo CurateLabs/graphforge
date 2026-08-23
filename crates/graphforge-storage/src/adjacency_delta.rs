@@ -31,8 +31,16 @@ use graphforge_core::GfError;
 
 use crate::adjacency::{
     ALL_RELATIONS_STEM, BuildEntry, CsrIndex, CsrRow, Direction, adjacency_dir,
-    adjacency_relation_key, csr_from_entries,
+    adjacency_relation_key, csr_from_entries, is_adjacency_relation_key,
 };
+
+fn normalized_relation_stem(stem: &str) -> std::borrow::Cow<'_, str> {
+    if stem == ALL_RELATIONS_STEM || is_adjacency_relation_key(stem) {
+        std::borrow::Cow::Borrowed(stem)
+    } else {
+        std::borrow::Cow::Owned(adjacency_relation_key(stem))
+    }
+}
 use crate::schemas::ADJACENCY_DELTA_SCHEMA;
 use crate::staging::RewriteBatch;
 
@@ -253,6 +261,7 @@ pub fn apply_delta_segments(
     chain: &[DeltaSegment],
 ) -> CsrIndex {
     let mut entries: Vec<BuildEntry> = base_entries(base, direction);
+    let stem = normalized_relation_stem(stem);
     let take_all = stem == ALL_RELATIONS_STEM;
     for seg in chain {
         for e in &seg.edges {
@@ -344,6 +353,7 @@ pub fn overlay_delta_segments(
     direction: Direction,
     chain: &[DeltaSegment],
 ) -> CsrDeltaOverlay {
+    let stem = normalized_relation_stem(stem);
     let take_all = stem == ALL_RELATIONS_STEM;
     let mut delta_by_key: HashMap<u64, Vec<(u64, u64)>> = HashMap::new();
     let mut max_key = 0_u64;

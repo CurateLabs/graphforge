@@ -2144,6 +2144,11 @@ pub fn validate_adjacency_index_against(
 
     let (groups, union_out) = collect_adjacency_groups(source_project_dir)?;
     for row in &manifest {
+        let relation_label = row
+            .relation_name
+            .as_deref()
+            .unwrap_or(&row.relation_type)
+            .to_owned();
         let expected_entries: &[BuildEntry] = if row.relation_type == ALL_RELATIONS_STEM {
             &union_out
         } else {
@@ -2155,7 +2160,7 @@ pub fn validate_adjacency_index_against(
         let path = csr_path(artifact_project_dir, &row.relation_type, row.direction);
         if !csr_artifact_exists(&path) {
             issues.push(AdjacencyValidationIssue::MissingCsr {
-                rel: row.relation_type.clone(),
+                rel: relation_label.clone(),
                 direction: row.direction,
             });
             continue;
@@ -2176,13 +2181,13 @@ pub fn validate_adjacency_index_against(
                 };
                 if actual != expected {
                     issues.push(AdjacencyValidationIssue::Mismatch {
-                        rel: row.relation_type.clone(),
+                        rel: relation_label.clone(),
                         direction: row.direction,
                     });
                 }
             }
             Err(e) => issues.push(AdjacencyValidationIssue::UnreadableCsr {
-                rel: row.relation_type.clone(),
+                rel: relation_label,
                 direction: row.direction,
                 error: e.to_string(),
             }),
@@ -3014,7 +3019,11 @@ mod tests {
     #[test]
     fn csr_path_layout() {
         let p = csr_path(Path::new("/proj"), "WORKS_AT", Direction::In);
-        assert_eq!(p, Path::new("/proj/indexes/adjacency/WORKS_AT.in.csr"));
+        let key = adjacency_relation_key("WORKS_AT");
+        assert_eq!(
+            p,
+            Path::new("/proj/indexes/adjacency").join(format!("{key}.in.csr"))
+        );
         assert_eq!(
             manifest_path(Path::new("/proj")),
             Path::new("/proj/indexes/adjacency/index_manifest.parquet")
@@ -3752,8 +3761,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_diamond(dir.path());
         let (groups, union) = collect_adjacency_groups(dir.path()).unwrap();
-        let expected_knows_out = csr_from_entries(groups.get("KNOWS").unwrap(), Direction::Out);
-        let expected_knows_in = csr_from_entries(groups.get("KNOWS").unwrap(), Direction::In);
+        let knows_key = adjacency_relation_key("KNOWS");
+        let expected_knows_out = csr_from_entries(groups.get(&knows_key).unwrap(), Direction::Out);
+        let expected_knows_in = csr_from_entries(groups.get(&knows_key).unwrap(), Direction::In);
         let expected_all_out = csr_from_entries(&union, Direction::Out);
         let expected_all_in = csr_from_entries(&union, Direction::In);
 

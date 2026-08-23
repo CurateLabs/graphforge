@@ -607,6 +607,10 @@ enum IndexState {
         /// read — what [`PersistentAdjacencyProvider::revalidate`] compares
         /// against for cheap cross-query freshness (#832).
         generation: u64,
+        /// Cheap identity of the counter/topology namespace. This distinguishes
+        /// a fixture/import that replaces the graph and resets the counter to
+        /// the same numeric generation from the graph previously cached here.
+        source_stamp: SourceStamp,
         /// The manifest rows.
         rows: Vec<AdjacencyManifestRow>,
         /// The delta chain (#765) overlaid on the base CSRs to reach
@@ -614,6 +618,36 @@ enum IndexState {
         /// Loaded eagerly so `status()` and `adjacency()` agree on one snapshot.
         deltas: Arc<Vec<DeltaSegment>>,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SourceStamp {
+    generation: u64,
+    counter_modified_ns: Option<u128>,
+    counter_len: Option<u64>,
+    topology_modified_ns: Option<u128>,
+}
+
+fn modified_ns(metadata: &std::fs::Metadata) -> Option<u128> {
+    metadata
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_nanos())
+}
+
+fn source_stamp(project_dir: &std::path::Path) -> Result<SourceStamp, GfError> {
+    let generation = read_topology_generation(project_dir)?;
+    let counter =
+        std::fs::metadata(graphforge_storage::generation::generation_path(project_dir)).ok();
+    let topology = std::fs::metadata(project_dir.join("topology")).ok();
+    Ok(SourceStamp {
+        generation,
+        counter_modified_ns: counter.as_ref().and_then(modified_ns),
+        counter_len: counter.as_ref().map(std::fs::Metadata::len),
+        topology_modified_ns: topology.as_ref().and_then(modified_ns),
+    })
 }
 
 /// Provider over the on-disk CSR index (#761): serves `Hit`s from
@@ -637,6 +671,10 @@ pub struct PersistentAdjacencyProvider {
     state: Mutex<Option<IndexState>>,
     /// Loaded views per `(stem, direction)`.
     cache: Mutex<HashMap<(String, Direction), Arc<Adjacency>>>,
+    /// Source identity of a private derived publication. Kept independently
+    /// from query state so a later `clear()` can reject it even when an
+    /// intervening write already invalidated the memoized state.
+    publication_stamp: Mutex<Option<SourceStamp>>,
 }
 
 impl PersistentAdjacencyProvider {
@@ -673,6 +711,7 @@ impl PersistentAdjacencyProvider {
             rebuild: Mutex::new(()),
             state: Mutex::new(None),
             cache: Mutex::new(HashMap::new()),
+            publication_stamp: Mutex::new(None),
         }
     }
 
@@ -705,9 +744,10 @@ impl PersistentAdjacencyProvider {
         if !csr::adjacency_dir(artifact_dir).exists() {
             return IndexState::Absent;
         }
-        let Ok(generation) = read_topology_generation(source_dir) else {
+        let Ok(source_stamp) = source_stamp(source_dir) else {
             return IndexState::Unreadable;
         };
+        let generation = source_stamp.generation;
         let Ok(rows) = csr::read_manifest(artifact_dir) else {
             return IndexState::Unreadable;
         };
@@ -744,6 +784,7 @@ impl PersistentAdjacencyProvider {
         IndexState::Ready {
             fresh,
             generation,
+            source_stamp,
             rows,
             deltas: Arc::new(deltas),
         }
@@ -907,6 +948,7 @@ impl PersistentAdjacencyProvider {
         if let IndexState::Ready {
             fresh: true,
             generation,
+            source_stamp: _,
             rows,
             deltas,
         } = Self::read_state(&self.dir, &active_artifact)
@@ -925,6 +967,12 @@ impl PersistentAdjacencyProvider {
                 *self.state.lock().expect("adjacency state lock") = Some(IndexState::Ready {
                     fresh: true,
                     generation,
+                    source_stamp: source_stamp(&self.dir).unwrap_or(SourceStamp {
+                        generation,
+                        counter_modified_ns: None,
+                        counter_len: None,
+                        topology_modified_ns: None,
+                    }),
                     rows,
                     deltas,
                 });
@@ -984,9 +1032,20 @@ impl PersistentAdjacencyProvider {
             *self.state.lock().expect("adjacency state lock") = Some(IndexState::Ready {
                 fresh: true,
                 generation: current_generation,
+                source_stamp: source_stamp(&self.dir).map_err(|error| {
+                    GfError::Execution(format!(
+                        "cannot fingerprint bounded adjacency build source: {error}"
+                    ))
+                })?,
                 rows,
                 deltas: Arc::new(deltas),
             });
+            if self.cache_dir != self.dir {
+                *self
+                    .publication_stamp
+                    .lock()
+                    .expect("adjacency publication stamp lock") = source_stamp(&self.dir).ok();
+            }
             if let Some(view) = view {
                 return Ok(self.cache_view(&stem, direction, view));
             }
@@ -1003,8 +1062,46 @@ impl PersistentAdjacencyProvider {
     /// the generation), and read again would otherwise serve the pre-write
     /// view from cache.
     pub fn invalidate(&self) {
-        *self.state.lock().expect("adjacency state lock") = None;
+        let _rebuild = self.rebuild.lock().expect("adjacency rebuild lock");
+        let mut state = self.state.lock().expect("adjacency state lock");
+        let private_stamp = self
+            .publication_stamp
+            .lock()
+            .expect("adjacency publication stamp lock")
+            .as_ref()
+            .copied()
+            .or_else(|| match state.as_ref() {
+                Some(IndexState::Ready { source_stamp, .. }) => Some(*source_stamp),
+                _ => None,
+            });
+        let discard_private_publication = self.cache_dir != self.dir
+            && match (private_stamp, source_stamp(&self.dir)) {
+                (Some(stored), Ok(current)) => {
+                    current.generation < stored.generation
+                        || (current.generation == stored.generation && current != stored)
+                }
+                // A private derived publication has no authority while its
+                // source identity is unreadable. In particular, `clear()`
+                // removes topology before the replacement graph recreates its
+                // counter; retaining the old CSR through that interval could
+                // make it appear fresh again at the same small generation.
+                (Some(_), Err(_)) => true,
+                (None, _) => false,
+            };
+        *state = None;
+        drop(state);
         self.cache.lock().expect("adjacency cache lock").clear();
+        if discard_private_publication {
+            // `GraphForge::clear` and fixture/import replacement can reset the
+            // counter. A private artifact from the previous graph must not be
+            // reconsidered fresh merely because the next graph reaches the
+            // same small generation number.
+            let _ = std::fs::remove_dir_all(csr::adjacency_dir(&self.cache_dir));
+            *self
+                .publication_stamp
+                .lock()
+                .expect("adjacency publication stamp lock") = None;
+        }
         *self.artifact_dir.lock().expect("adjacency artifact lock") =
             if csr::adjacency_dir(&self.dir).exists() {
                 self.dir.clone()
@@ -1024,14 +1121,24 @@ impl PersistentAdjacencyProvider {
     /// (scan-built views are query-scoped), or the observed generation no
     /// longer matches the counter.
     pub fn revalidate(&self) {
+        let _rebuild = self.rebuild.lock().expect("adjacency rebuild lock");
         let mut state = self.state.lock().expect("adjacency state lock");
+        let mut replaced_at_same_generation = false;
         let drop_state = match state.as_ref() {
             None => false,
             Some(IndexState::Ready {
                 fresh: true,
                 generation,
+                source_stamp: stored_stamp,
                 ..
-            }) => !read_topology_generation(&self.dir).is_ok_and(|g| g == *generation),
+            }) => match source_stamp(&self.dir) {
+                Ok(current) if current == *stored_stamp => false,
+                Ok(current) => {
+                    replaced_at_same_generation = current.generation == *generation;
+                    true
+                }
+                Err(_) => true,
+            },
             // Non-serving states — always retry (a cheap manifest re-read, not
             // a rebuild). For a stale `fresh: false` index this matters: it may
             // have been repaired in place at the *same* topology generation (an
@@ -1048,6 +1155,16 @@ impl PersistentAdjacencyProvider {
         if drop_state {
             *state = None;
             self.cache.lock().expect("adjacency cache lock").clear();
+            if replaced_at_same_generation
+                && self.cache_dir != self.dir
+                && *self.artifact_dir.lock().expect("adjacency artifact lock") == self.cache_dir
+            {
+                // A pooled fixture/import may replace topology and reset its
+                // numeric counter. Its private derived cache has no authority
+                // across that source-identity transition; remove only that
+                // disposable publication so the next query rebuilds it.
+                let _ = std::fs::remove_dir_all(csr::adjacency_dir(&self.cache_dir));
+            }
         }
     }
 
@@ -1473,6 +1590,69 @@ mod tests {
             provider.status("KNOWS", Direction::Out),
             AdjacencyStatus::Hit
         );
+    }
+
+    #[test]
+    fn private_cache_is_rebuilt_when_source_is_replaced_at_same_generation() {
+        let dir = TempDir::new().unwrap();
+        let cache = TempDir::new().unwrap();
+        let [old_a, ..] = write_diamond(dir.path());
+        let provider = PersistentAdjacencyProvider::new_with_cache(
+            dir.path().to_path_buf(),
+            cache.path(),
+            OntologyMode::Strict,
+        );
+        assert_eq!(
+            provider
+                .adjacency("KNOWS", Direction::Out)
+                .unwrap()
+                .neighbors(old_a)
+                .len(),
+            3
+        );
+        let original_generation = read_topology_generation(dir.path()).unwrap();
+
+        // An ordinary forward write invalidates query state but deliberately
+        // retains the private base publication for its delta chain. The source
+        // stamp must survive that state reset so the subsequent graph clear is
+        // still distinguishable.
+        let mut forward = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
+        let extra = new_v7();
+        forward.create_node(extra, TypeId(0)).unwrap();
+        forward
+            .create_edge(new_v7(), "KNOWS", &extra, &extra)
+            .unwrap();
+        forward.flush().unwrap();
+        provider.invalidate();
+
+        std::fs::write(
+            graphforge_storage::generation::generation_path(dir.path()),
+            "not json",
+        )
+        .unwrap();
+        provider.invalidate();
+        assert!(
+            !csr::adjacency_dir(&provider.cache_dir).exists(),
+            "the prior private publication is discarded while source identity is unreadable"
+        );
+        std::fs::remove_dir_all(dir.path().join("topology")).unwrap();
+        provider.invalidate();
+        let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
+        let (new_a, new_b) = (new_v7(), new_v7());
+        let new_a_id = writer.create_node(new_a, TypeId(0)).unwrap();
+        let new_b_id = writer.create_node(new_b, TypeId(0)).unwrap();
+        writer
+            .create_edge(new_v7(), "KNOWS", &new_a, &new_b)
+            .unwrap();
+        writer.flush().unwrap();
+        assert_eq!(
+            read_topology_generation(dir.path()).unwrap(),
+            original_generation,
+            "fixture replacement deliberately reuses the numeric generation"
+        );
+
+        let rebuilt = provider.adjacency("KNOWS", Direction::Out).unwrap();
+        assert_eq!(rebuilt.neighbors(new_a_id).to_vec(), vec![(1, new_b_id)]);
     }
 
     #[test]

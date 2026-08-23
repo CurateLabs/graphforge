@@ -118,8 +118,8 @@ async fn explain_shows_stable_expand_exec_across_index_states() {
         .await
         .unwrap();
     assert!(
-        without.contains("ExpandExec") && without.contains("adjacency=building"),
-        "no index: scan-build ExpandExec expected, got:\n{without}"
+        without.contains("ExpandExec") && without.contains("adjacency=hit"),
+        "no index: bounded lazy build must be reflected as a hit, got:\n{without}"
     );
 
     build_adjacency_index(dir.path(), TS).unwrap();
