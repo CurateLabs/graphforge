@@ -305,6 +305,8 @@ pub struct JobStage {
 /// One ordered handoff between components actually used by a job.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub struct ComponentHandoff {
+    /// Offset from job start where the boundary was observed.
+    pub start_offset_ns: u64,
     /// Calling component.
     pub from: ComponentKind,
     /// Receiving component.
@@ -372,7 +374,9 @@ impl JobSnapshot {
             return Err(InvalidJobSnapshot);
         }
         if self.handoffs.iter().any(|handoff| {
-            handoff.from == handoff.to || handoff.wait_duration_ns > handoff.duration_ns
+            handoff.from == handoff.to
+                || handoff.start_offset_ns > active
+                || handoff.wait_duration_ns > handoff.duration_ns
         }) {
             return Err(InvalidJobSnapshot);
         }
@@ -1031,7 +1035,7 @@ fn trace_spans(record: &Snapshot, sequence: u64, index: usize, exported_at: u128
             ];
             push_optional_int(&mut attributes, "graphforge.handoff.bytes", handoff.bytes);
             push_optional_int(&mut attributes, "graphforge.handoff.records", handoff.records);
-            json!({"timeUnixNano":active_start.to_string(),"name":"graphforge.component.handoff","attributes":attributes})
+            json!({"timeUnixNano":(active_start + u128::from(handoff.start_offset_ns)).to_string(),"name":"graphforge.component.handoff","attributes":attributes})
         })
         .collect::<Vec<_>>();
     let mut spans = vec![json!({
@@ -1432,6 +1436,7 @@ mod tests {
                 },
             ],
             handoffs: vec![ComponentHandoff {
+                start_offset_ns: 70,
                 from: ComponentKind::NetworkTransport,
                 to: ComponentKind::Storage,
                 kind: HandoffKind::Write,
@@ -1568,6 +1573,7 @@ mod tests {
                     outcome: Outcome::Ok,
                 }],
                 handoffs: vec![ComponentHandoff {
+                    start_offset_ns: 50,
                     from: ComponentKind::NetworkTransport,
                     to: ComponentKind::Storage,
                     kind: HandoffKind::Write,

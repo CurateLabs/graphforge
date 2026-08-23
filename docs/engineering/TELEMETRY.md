@@ -115,6 +115,7 @@ outside the workspace job.
 Compare stage durations to locate the bottleneck: a delayed object response is
 owned by `network_transport`/`download`, while CPU or storage verification is
 owned by `portable_verify`/`portable_verification`. Component handoffs include
-only components actually reached. Failed clones end once with `failed` plus a
+only boundaries actually reached, carry their monotonic job offset, and attach
+byte counts only where a known payload crosses the boundary. Failed clones end once with `failed` plus a
 finite failure class; raw `hub.*` text and repository, endpoint, destination,
 manifest, digest, UUID, and graph content never enter telemetry.
