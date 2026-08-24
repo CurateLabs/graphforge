@@ -4276,6 +4276,42 @@ mod tests {
     }
 
     #[test]
+    fn construction_snapshot_streams_live_uuid_authority_in_order() {
+        let (dir, nodes, edges) = fixture();
+        rebuild_uuid_membership_indexes(dir.path(), UuidIndexBuildLimits::default()).unwrap();
+        let mut streamed = Vec::new();
+        let (snapshot, work) = open_uuid_construction_snapshot(dir.path(), 0, |identity| {
+            streamed.push(identity);
+            Ok(())
+        })
+        .unwrap();
+
+        let mut expected = nodes
+            .iter()
+            .copied()
+            .zip(1_u64..)
+            .map(|(uuid, surrogate)| ConstructionUuidIdentity {
+                uuid,
+                kind: UuidIndexKind::Node,
+                surrogate,
+            })
+            .chain(edges.iter().copied().map(|uuid| ConstructionUuidIdentity {
+                uuid,
+                kind: UuidIndexKind::Edge,
+                surrogate: 0,
+            }))
+            .collect::<Vec<_>>();
+        expected.sort_by_key(|identity| identity.uuid);
+        assert_eq!(streamed, expected);
+        assert_eq!(work.live_nodes, nodes.len() as u64);
+        assert_eq!(work.live_edges, edges.len() as u64);
+        assert_eq!(work.max_node_surrogate, nodes.len() as u64);
+        assert!(work.authentication_bytes > 0);
+        assert!(work.authentication_blocks > 0);
+        snapshot.revalidate().unwrap();
+    }
+
+    #[test]
     fn forced_rebuild_receipt_binds_newly_staged_manifest() {
         let (dir, _, _) = fixture();
         rebuild_uuid_membership_indexes(dir.path(), UuidIndexBuildLimits::default()).unwrap();
