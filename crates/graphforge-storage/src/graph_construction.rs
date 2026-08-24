@@ -680,7 +680,7 @@ impl GraphConstructionSession {
         transaction_uuid: Uuid,
     ) -> Result<ConstructionPublicationIntent, GfError> {
         self.revalidate_authority()?;
-        recover_publication(&self.root, &mut self.checkpoint)?;
+        recover_publication(&self.project_path, &self.root, &mut self.checkpoint)?;
         if self.checkpoint.publication_state == Some(ConstructionPublicationState::Publishing) {
             let intent = read_publication_intent(&self.root, &self.checkpoint)?;
             if intent.target_generation_uuid == target_generation_uuid
@@ -738,9 +738,10 @@ impl GraphConstructionSession {
         target_generation_uuid: Uuid,
         target_generation_manifest_sha256: &str,
     ) -> Result<ConstructionPublicationReceipt, GfError> {
-        recover_publication(&self.root, &mut self.checkpoint)?;
+        recover_publication(&self.project_path, &self.root, &mut self.checkpoint)?;
         if self.checkpoint.publication_state == Some(ConstructionPublicationState::Published) {
             let receipt = read_publication_receipt(&self.root, &self.checkpoint)?;
+            authenticate_published_target(&self.project_path, &self.checkpoint, &receipt)?;
             if receipt.target_generation_uuid == target_generation_uuid
                 && receipt.target_generation_manifest_sha256 == target_generation_manifest_sha256
             {
@@ -759,7 +760,7 @@ impl GraphConstructionSession {
         if intent.target_generation_uuid != target_generation_uuid {
             return Err(storage("published target differs from durable intent"));
         }
-        let receipt = ConstructionPublicationReceipt {
+        let provisional = ConstructionPublicationReceipt {
             operation_uuid: self.checkpoint.operation_uuid,
             project_identity: self.checkpoint.project_identity.clone(),
             session_identity: self.checkpoint.session_identity.clone(),
@@ -767,6 +768,8 @@ impl GraphConstructionSession {
             target_generation_uuid,
             target_generation_manifest_sha256: target_generation_manifest_sha256.to_owned(),
         };
+        authenticate_published_target(&self.project_path, &self.checkpoint, &provisional)?;
+        let receipt = provisional;
         install_control(&self.root, PUBLICATION_RECEIPT, &receipt)?;
         self.checkpoint.publication_state = Some(ConstructionPublicationState::Published);
         replace_control(&self.root, CHECKPOINT, &self.checkpoint)?;
@@ -942,7 +945,7 @@ impl GraphConstructionSession {
             {
                 return Err(storage("checkpoint private authority changed"));
             }
-            recover_publication(&root, checkpoint)?;
+            recover_publication(project_dir, &root, checkpoint)?;
         }
         let (parent_generation_uuid, parent_generation_manifest_sha256) =
             match recovered_checkpoint.as_ref() {
@@ -2528,11 +2531,7 @@ fn recover_shape_intent(
         if shape.ontology_mode != checkpoint.ontology_mode
             || shape.semantic_authority_sha256 != checkpoint.semantic_authority_sha256
             || shape.runtime_catalog_now_micros != checkpoint.session_now_micros
-            || shape.runtime_catalog_inputs_sha256.len() != 64
-            || !shape
-                .runtime_catalog_inputs_sha256
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit())
+            || !is_canonical_sha256(&shape.runtime_catalog_inputs_sha256)
             || std::iter::once(&shape.identities)
                 .chain(shape.node_details.iter())
                 .chain(shape.edge_details.iter())
@@ -2617,16 +2616,33 @@ fn control_sha256(value: &impl Serialize) -> Result<String, GfError> {
 }
 
 fn validate_sha256(value: &str, label: &str) -> Result<(), GfError> {
-    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if !is_canonical_sha256(value) {
         return Err(storage(format!("{label} digest is invalid")));
     }
     Ok(())
+}
+
+fn is_canonical_sha256(value: &str) -> bool {
+    is_canonical_lower_hex(value, 64)
+}
+
+fn is_canonical_lower_hex(value: &str, length: usize) -> bool {
+    value.len() == length
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn validate_publication_intent(
     intent: &ConstructionPublicationIntent,
     checkpoint: &Checkpoint,
 ) -> Result<(), GfError> {
+    validate_sha256(
+        &intent.parent_generation_manifest_sha256,
+        "parent generation manifest",
+    )?;
+    validate_sha256(&intent.shape_authority_sha256, "shape authority")?;
+    validate_sha256(&intent.encoding_inventory_sha256, "encoding inventory")?;
     if intent.format_version != FORMAT_VERSION
         || intent.operation_uuid != checkpoint.operation_uuid
         || intent.project_identity != checkpoint.project_identity
@@ -2648,12 +2664,7 @@ fn validate_publication_intent(
     {
         return Err(storage("publication intent authority changed"));
     }
-    validate_sha256(
-        &intent.parent_generation_manifest_sha256,
-        "parent generation manifest",
-    )?;
-    validate_sha256(&intent.shape_authority_sha256, "shape authority")?;
-    validate_sha256(&intent.encoding_inventory_sha256, "encoding inventory")
+    Ok(())
 }
 
 fn read_publication_intent(
@@ -2692,7 +2703,44 @@ fn read_publication_receipt(
     Ok(receipt)
 }
 
-fn recover_publication(root: &StableDirectory, checkpoint: &mut Checkpoint) -> Result<(), GfError> {
+fn authenticate_published_target(
+    project_dir: &Path,
+    checkpoint: &Checkpoint,
+    receipt: &ConstructionPublicationReceipt,
+) -> Result<(), GfError> {
+    let target = crate::resolve_generation_by_uuid(project_dir, receipt.target_generation_uuid)
+        .map_err(|error| storage(format!("published target cannot be authenticated: {error}")))?;
+    let actual_manifest = hex(&target.manifest_sha256());
+    if actual_manifest != receipt.target_generation_manifest_sha256 {
+        return Err(storage(
+            "published target manifest differs from durable receipt",
+        ));
+    }
+    if target.parent_generation_uuid() != Some(checkpoint.parent_generation_uuid) {
+        return Err(storage(
+            "published target is not a child of the pinned parent generation",
+        ));
+    }
+    let current = crate::resolve_project_generation(project_dir).map_err(|error| {
+        storage(format!(
+            "published CURRENT cannot be authenticated: {error}"
+        ))
+    })?;
+    if current.generation_uuid() != target.generation_uuid()
+        || current.manifest_sha256() != target.manifest_sha256()
+    {
+        return Err(storage(
+            "published target is not the exact committed CURRENT generation",
+        ));
+    }
+    Ok(())
+}
+
+fn recover_publication(
+    project_dir: &Path,
+    root: &StableDirectory,
+    checkpoint: &mut Checkpoint,
+) -> Result<(), GfError> {
     let intent = match root.open_child_file(OsStr::new(PUBLICATION_INTENT)) {
         Ok(mut file) => {
             let intent: ConstructionPublicationIntent = decode_bounded(&mut file)?;
@@ -2717,7 +2765,8 @@ fn recover_publication(root: &StableDirectory, checkpoint: &mut Checkpoint) -> R
         Err(error) => return Err(storage(error)),
     };
     if receipt_exists {
-        let _ = read_publication_receipt(root, checkpoint)?;
+        let receipt = read_publication_receipt(root, checkpoint)?;
+        authenticate_published_target(project_dir, checkpoint, &receipt)?;
         if checkpoint.publication_state == Some(ConstructionPublicationState::Publishing) {
             checkpoint.publication_state = Some(ConstructionPublicationState::Published);
             replace_control(root, CHECKPOINT, checkpoint)?;
@@ -2893,7 +2942,7 @@ fn is_shape_artifact_name(name: &str) -> bool {
         return body.len() == 66
             && matches!(body.as_bytes().first(), Some(b'0' | b'1'))
             && body.as_bytes().get(1) == Some(&b'-')
-            && body[2..].bytes().all(|byte| byte.is_ascii_hexdigit());
+            && is_canonical_sha256(&body[2..]);
     }
     if let Some(body) = name
         .strip_prefix("merge-rows-")
@@ -2904,7 +2953,7 @@ fn is_shape_artifact_name(name: &str) -> bool {
         let level_group = parts.next().unwrap_or_default();
         return parts.next().is_none()
             && namespace.len() == 16
-            && namespace.bytes().all(|byte| byte.is_ascii_hexdigit())
+            && is_canonical_lower_hex(namespace, 16)
             && level_group.split_once("-g").is_some_and(|(level, group)| {
                 level.len() == 3
                     && level.bytes().all(|byte| byte.is_ascii_digit())
@@ -4587,14 +4636,8 @@ fn validate_artifact_name(receipt: &ArtifactReceipt) -> Result<(), GfError> {
         || receipt.name.starts_with('.')
         || receipt.name.contains('/')
         || receipt.name.contains('\\')
-        || receipt.sha256.len() != 64
-        || !receipt.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
-        || receipt.identity.file_id.len() != 32
-        || !receipt
-            .identity
-            .file_id
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
+        || !is_canonical_sha256(&receipt.sha256)
+        || !is_canonical_lower_hex(&receipt.identity.file_id, 32)
         || receipt.bytes == 0
         || receipt.write_operations == 0
         || receipt.fsync_operations == 0
@@ -4671,16 +4714,8 @@ fn validate_receipt_semantics(
         || receipt.input_bytes > budgets.max_batch_bytes as u64
         || receipt.run_records > budgets.max_run_records as u64
         || receipt.accounted_live_bytes == 0
-        || receipt.input_sha256.len() != 64
-        || receipt.schema_sha256.len() != 64
-        || !receipt
-            .schema_sha256
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
-        || !receipt
-            .input_sha256
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
+        || !is_canonical_sha256(&receipt.input_sha256)
+        || !is_canonical_sha256(&receipt.schema_sha256)
         || receipt.parquet.name != format!("{}.parquet", artifact_stem(sequence, receipt.kind))
         || receipt.identities.name
             != format!("{}.identities.run", artifact_stem(sequence, receipt.kind))
@@ -4834,16 +4869,8 @@ fn validate_intent(intent: &ChunkIntent, checkpoint: &Checkpoint) -> Result<(), 
         || intent.run_records > checkpoint.budgets.max_run_records as u64
         || intent.accounted_live_bytes > 0 && intent.accounted_live_bytes < intent.input_bytes
         || intent.run_records != expected_run_records
-        || intent.input_sha256.len() != 64
-        || intent.schema_sha256.len() != 64
-        || !intent
-            .schema_sha256
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
-        || !intent
-            .input_sha256
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
+        || !is_canonical_sha256(&intent.input_sha256)
+        || !is_canonical_sha256(&intent.schema_sha256)
         || intent
             .parquet
             .as_ref()
@@ -4918,9 +4945,7 @@ fn validate_checkpoint(
         || checkpoint
             .semantic_authority_sha256
             .as_ref()
-            .is_some_and(|digest| {
-                digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
-            })
+            .is_some_and(|digest| !is_canonical_sha256(digest))
         || checkpoint.session_now_micros <= 0
         || checkpoint.budgets != budgets
         || checkpoint.has_base_snapshot != (generation != 0)
@@ -4928,29 +4953,21 @@ fn validate_checkpoint(
         || checkpoint
             .parent_catalog_sha256
             .as_ref()
-            .is_some_and(|digest| {
-                digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
-            })
+            .is_some_and(|digest| !is_canonical_sha256(digest))
         || checkpoint.next_sequence > budgets.max_chunks
         || checkpoint.last_receipt_sha256.is_some() != (checkpoint.next_sequence != 0)
         || checkpoint
             .last_receipt_sha256
             .as_ref()
-            .is_some_and(|digest| {
-                digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
-            })
+            .is_some_and(|digest| !is_canonical_sha256(digest))
         || checkpoint
             .shape_authority_sha256
             .as_ref()
-            .is_some_and(|digest| {
-                digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
-            })
+            .is_some_and(|digest| !is_canonical_sha256(digest))
         || checkpoint
             .encoding_inventory_sha256
             .as_ref()
-            .is_some_and(|digest| {
-                digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
-            })
+            .is_some_and(|digest| !is_canonical_sha256(digest))
         || checkpoint.encoding_inventory_sha256.is_some()
             && checkpoint.shape_authority_sha256.is_none()
         || match checkpoint.state {
@@ -4975,11 +4992,11 @@ fn validate_checkpoint(
         || checkpoint
             .node_schema_sha256
             .iter()
-            .any(|digest| digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_hexdigit()))
+            .any(|digest| !is_canonical_sha256(digest))
         || checkpoint
             .edge_schema_sha256
             .iter()
-            .any(|digest| digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_hexdigit()))
+            .any(|digest| !is_canonical_sha256(digest))
         || checkpoint
             .node_schema_sha256
             .len()
@@ -7966,6 +7983,7 @@ mod tests {
     }
 
     fn encoded_publication_session(root: &TempDir, operation: Uuid) -> GraphConstructionSession {
+        crate::open_or_initialize_project(root.path()).unwrap();
         let mut session = GraphConstructionSession::open(
             root.path(),
             operation,
@@ -7980,6 +7998,32 @@ mod tests {
         let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
         session.encode_canonical(&shape, 1).unwrap();
         session
+    }
+
+    fn publish_empty_generation(
+        root: &TempDir,
+        target: Uuid,
+        transaction: Uuid,
+    ) -> crate::ProjectPublicationReceipt {
+        let request = crate::ProjectGenerationRequest {
+            transaction_uuid: transaction,
+            generation_uuid: target,
+            capabilities: vec![crate::ProjectCapability {
+                capability_id: "graph".into(),
+                capability_version: 1,
+            }],
+            participants: vec![],
+        };
+        let crate::ProjectStageOutcome::Staged(staged) =
+            crate::stage_project_generation(root.path(), &request).unwrap()
+        else {
+            panic!("new publication unexpectedly replayed");
+        };
+        staged
+            .validate(|_| Ok(()), |_, _| Ok(()))
+            .unwrap()
+            .publish()
+            .unwrap()
     }
 
     #[test]
@@ -8005,7 +8049,8 @@ mod tests {
                 .to_string()
                 .contains("target changed")
         );
-        let digest = "ab".repeat(32);
+        let published = publish_empty_generation(&root, target, transaction);
+        let digest = hex(&published.generation_manifest_sha256);
         let receipt = session.finish_publication(target, &digest).unwrap();
         assert_eq!(
             session.checkpoint.publication_state,
@@ -8047,12 +8092,7 @@ mod tests {
         session.checkpoint.publication_state = Some(ConstructionPublicationState::Sealed);
         replace_control(&session.root, CHECKPOINT, &session.checkpoint).unwrap();
         drop(session);
-        std::fs::create_dir_all(root.path().join("topology")).unwrap();
-        std::fs::write(
-            root.path().join("topology/generation.json"),
-            br#"{"topology_generation":99,"search_generation":0}"#,
-        )
-        .unwrap();
+        let published = publish_empty_generation(&root, target, transaction);
         let mut reopened = GraphConstructionSession::open(
             root.path(),
             operation,
@@ -8065,7 +8105,7 @@ mod tests {
             Some(ConstructionPublicationState::Publishing)
         );
         reopened
-            .finish_publication(target, &"ef".repeat(32))
+            .finish_publication(target, &hex(&published.generation_manifest_sha256))
             .unwrap();
         reopened.checkpoint.publication_state = Some(ConstructionPublicationState::Publishing);
         replace_control(&reopened.root, CHECKPOINT, &reopened.checkpoint).unwrap();
@@ -8115,5 +8155,124 @@ mod tests {
                 .to_string()
                 .contains("publication intent authority changed")
         );
+    }
+
+    #[test]
+    fn publication_finish_rejects_wrong_target_parent_and_current() {
+        let wrong_target_root = TempDir::new().unwrap();
+        let operation = Uuid::from_u128(9_430);
+        let intended = Uuid::from_u128(9_431);
+        let transaction = Uuid::from_u128(9_432);
+        let mut session = encoded_publication_session(&wrong_target_root, operation);
+        session.begin_publication(intended, transaction).unwrap();
+        let other = publish_empty_generation(
+            &wrong_target_root,
+            Uuid::from_u128(9_433),
+            Uuid::from_u128(9_434),
+        );
+        assert!(
+            session
+                .finish_publication(intended, &hex(&other.generation_manifest_sha256))
+                .unwrap_err()
+                .to_string()
+                .contains("target cannot be authenticated")
+        );
+
+        let wrong_parent_root = TempDir::new().unwrap();
+        let mut session = encoded_publication_session(&wrong_parent_root, Uuid::from_u128(9_440));
+        let first = publish_empty_generation(
+            &wrong_parent_root,
+            Uuid::from_u128(9_441),
+            Uuid::from_u128(9_442),
+        );
+        let target = Uuid::from_u128(9_443);
+        let transaction = Uuid::from_u128(9_444);
+        session.begin_publication(target, transaction).unwrap();
+        let second = publish_empty_generation(&wrong_parent_root, target, transaction);
+        assert_ne!(first.generation_uuid, second.generation_uuid);
+        assert!(
+            session
+                .finish_publication(target, &hex(&second.generation_manifest_sha256))
+                .unwrap_err()
+                .to_string()
+                .contains("not a child of the pinned parent")
+        );
+
+        let wrong_current_root = TempDir::new().unwrap();
+        let mut session = encoded_publication_session(&wrong_current_root, Uuid::from_u128(9_450));
+        let target = Uuid::from_u128(9_451);
+        let transaction = Uuid::from_u128(9_452);
+        session.begin_publication(target, transaction).unwrap();
+        let target_receipt = publish_empty_generation(&wrong_current_root, target, transaction);
+        session
+            .finish_publication(target, &hex(&target_receipt.generation_manifest_sha256))
+            .unwrap();
+        drop(session);
+        publish_empty_generation(
+            &wrong_current_root,
+            Uuid::from_u128(9_453),
+            Uuid::from_u128(9_454),
+        );
+        let error = match GraphConstructionSession::open(
+            wrong_current_root.path(),
+            Uuid::from_u128(9_450),
+            0,
+            GraphConstructionBudgets::default(),
+        ) {
+            Ok(_) => panic!("published recovery accepted a different CURRENT"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("not the exact committed CURRENT")
+        );
+    }
+
+    #[test]
+    fn persisted_authority_digests_reject_uppercase_hex() {
+        let root = TempDir::new().unwrap();
+        let operation = Uuid::from_u128(9_460);
+        let target = Uuid::from_u128(9_461);
+        let transaction = Uuid::from_u128(9_462);
+        let mut session = encoded_publication_session(&root, operation);
+        session.begin_publication(target, transaction).unwrap();
+        let published = publish_empty_generation(&root, target, transaction);
+        assert!(
+            session
+                .finish_publication(
+                    target,
+                    &hex(&published.generation_manifest_sha256).to_ascii_uppercase(),
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("digest is invalid")
+        );
+
+        let intent_path = root
+            .path()
+            .join(PRIVATE_ROOT)
+            .join(operation.simple().to_string())
+            .join(PUBLICATION_INTENT);
+        let mut intent: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&intent_path).unwrap()).unwrap();
+        intent["shape_authority_sha256"] = serde_json::Value::String(
+            intent["shape_authority_sha256"]
+                .as_str()
+                .unwrap()
+                .to_ascii_uppercase(),
+        );
+        std::fs::write(&intent_path, serde_json::to_vec(&intent).unwrap()).unwrap();
+        drop(session);
+        let error = match GraphConstructionSession::open(
+            root.path(),
+            operation,
+            0,
+            GraphConstructionBudgets::default(),
+        ) {
+            Ok(_) => panic!("uppercase persisted authority was accepted"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("digest is invalid"));
     }
 }
