@@ -42,9 +42,33 @@ pub struct AuxiliaryReceipt {
     pub bytes: u64,
 }
 
+/// Authoritative rewrite state exposed to an auxiliary participant while the
+/// admitted project rewrite lock is held.
+pub struct ParticipantPreparationContext<'a> {
+    /// Exact generation pair that this transaction will publish.
+    pub next: GenerationPair,
+    /// Retained, admitted project directory capability.
+    pub project: &'a StableDirectory,
+    /// Canonical admitted project root.
+    pub project_root: &'a Path,
+}
+
+/// One-shot participant preparation executed inside the retained rewrite
+/// critical section.
+pub type RewriteParticipantPreparer<'a> = Box<
+    dyn FnOnce(
+            ParticipantPreparationContext<'_>,
+            &mut RewriteBatch,
+        ) -> Result<Option<AuxiliaryReceipt>, GfError>
+        + 'a,
+>;
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub(crate) struct GenerationPair {
+/// Topology and search authorities selected for one durable rewrite.
+pub struct GenerationPair {
+    /// Topology generation published by the transaction.
     pub topology: u64,
+    /// Search generation published by the transaction.
     pub search: u64,
 }
 
@@ -591,6 +615,17 @@ pub(crate) fn commit(
     bump_search: bool,
     auxiliary: Option<AuxiliaryReceipt>,
 ) -> Result<GenerationPair, GfError> {
+    commit_with_participant(batch, root, bump_topology, bump_search, auxiliary, None)
+}
+
+pub(crate) fn commit_with_participant(
+    mut batch: RewriteBatch,
+    root: &Path,
+    bump_topology: bool,
+    bump_search: bool,
+    auxiliary: Option<AuxiliaryReceipt>,
+    participant: Option<RewriteParticipantPreparer<'_>>,
+) -> Result<GenerationPair, GfError> {
     let guard = acquire(root)?;
     guard.revalidate()?;
     let prior_state = crate::generation::read_generation_state_raw(root)?;
@@ -622,6 +657,22 @@ pub(crate) fn commit(
             prior.search
         },
     };
+    let participant_auxiliary = if let Some(prepare) = participant {
+        prepare(
+            ParticipantPreparationContext {
+                next,
+                project: &guard.directory,
+                project_root: root,
+            },
+            &mut batch,
+        )?
+    } else {
+        None
+    };
+    if auxiliary.is_some() && participant_auxiliary.is_some() {
+        return Err(storage("rewrite has multiple auxiliary participants"));
+    }
+    let auxiliary = participant_auxiliary.or(auxiliary);
     let generation_bytes = crate::generation::encode_generation_state(next.topology, next.search)?;
     guard.revalidate()?;
     let transaction = Uuid::now_v7().simple().to_string();
