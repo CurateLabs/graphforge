@@ -350,6 +350,7 @@ pub(crate) fn node_parquet_files(dir: &Path) -> Result<Vec<std::path::PathBuf>, 
         Err(error) => return Err(io_err(&error)),
     };
     let mut shard_paths = Vec::new();
+    let mut prior_end = None;
     for entry in entries {
         let entry = entry.map_err(|error| io_err(&error))?;
         let file_type = entry.file_type().map_err(|error| io_err(&error))?;
@@ -362,11 +363,42 @@ pub(crate) fn node_parquet_files(dir: &Path) -> Result<Vec<std::path::PathBuf>, 
         if file_type.is_file()
             && path.extension().and_then(|value| value.to_str()) == Some("parquet")
         {
-            shard_paths.push(path);
+            let stem = path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .ok_or_else(|| GfError::Storage("node shard name is not canonical UTF-8".into()))?;
+            let (first, last) = stem.split_once('-').ok_or_else(|| {
+                GfError::Storage("node shard name lacks a surrogate range".into())
+            })?;
+            if first.len() != 20
+                || last.len() != 20
+                || !first.bytes().all(|byte| byte.is_ascii_digit())
+                || !last.bytes().all(|byte| byte.is_ascii_digit())
+            {
+                return Err(GfError::Storage(
+                    "node shard name is not a canonical padded range".into(),
+                ));
+            }
+            let first = first
+                .parse::<u64>()
+                .map_err(|error| GfError::Storage(error.to_string()))?;
+            let last = last
+                .parse::<u64>()
+                .map_err(|error| GfError::Storage(error.to_string()))?;
+            if first == 0 || first > last {
+                return Err(GfError::Storage("node shard range is invalid".into()));
+            }
+            shard_paths.push((first, last, path));
         }
     }
-    shard_paths.sort();
-    out.extend(shard_paths);
+    shard_paths.sort_by_key(|(first, _, _)| *first);
+    for (first, last, path) in shard_paths {
+        if prior_end.is_some_and(|end| first <= end) {
+            return Err(GfError::Storage("node shard ranges overlap".into()));
+        }
+        prior_end = Some(last);
+        out.push(path);
+    }
     Ok(out)
 }
 
@@ -466,11 +498,11 @@ pub fn stage_delete_nodes_authenticated<S: BuildHasher>(
             node_uuids,
         )?;
     }
-    stage_rewrite_nodes_dropping(
-        staged,
-        &dir.join("topology").join("nodes.parquet"),
-        node_uuids,
-    )
+    let mut removed = 0_u64;
+    for path in node_parquet_files(dir)? {
+        removed = removed.saturating_add(stage_rewrite_nodes_dropping(staged, &path, node_uuids)?);
+    }
+    Ok(removed)
 }
 
 /// Stage the deletion of the given edges into `staged`: every
@@ -559,18 +591,22 @@ pub fn delete_nodes<S: BuildHasher>(
 ) -> Result<u64, GfError> {
     let mut staged = RewriteBatch::new();
     let removed = stage_delete_nodes(&mut staged, dir, node_uuids)?;
-    let prepared = prepare_deletion_index(
-        &mut staged,
+    let mut snapshot = None;
+    if let Some(g) = crate::uuid_membership::commit_uuid_topology_rewrite(
         dir,
-        node_uuids,
-        &HashSet::<[u8; 16]>::new(),
-        removed,
-        0,
-    )?;
-    let auxiliary = prepared.as_ref().map(|value| value.auxiliary_receipt());
-    if let Some(g) =
-        crate::generation::commit_topology_aware_with_auxiliary(staged, dir, auxiliary)?
-    {
+        staged,
+        crate::uuid_membership::UuidTopologyDelta {
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            deleted_nodes: if removed == 0 {
+                Vec::new()
+            } else {
+                node_uuids.iter().copied().map(Uuid::from_bytes).collect()
+            },
+            deleted_edges: Vec::new(),
+        },
+        &mut snapshot,
+    )? {
         crate::adjacency_delta::discard_segment(dir, g); // delete writes no segment
     }
     Ok(removed)
@@ -591,18 +627,22 @@ pub fn delete_edges<S: BuildHasher>(
 ) -> Result<u64, GfError> {
     let mut staged = RewriteBatch::new();
     let removed = stage_delete_edges(&mut staged, dir, edge_uuids)?;
-    let prepared = prepare_deletion_index(
-        &mut staged,
+    let mut snapshot = None;
+    if let Some(g) = crate::uuid_membership::commit_uuid_topology_rewrite(
         dir,
-        &HashSet::<[u8; 16]>::new(),
-        edge_uuids,
-        0,
-        removed,
-    )?;
-    let auxiliary = prepared.as_ref().map(|value| value.auxiliary_receipt());
-    if let Some(g) =
-        crate::generation::commit_topology_aware_with_auxiliary(staged, dir, auxiliary)?
-    {
+        staged,
+        crate::uuid_membership::UuidTopologyDelta {
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            deleted_nodes: Vec::new(),
+            deleted_edges: if removed == 0 {
+                Vec::new()
+            } else {
+                edge_uuids.iter().copied().map(Uuid::from_bytes).collect()
+            },
+        },
+        &mut snapshot,
+    )? {
         crate::adjacency_delta::discard_segment(dir, g); // delete writes no segment
     }
     Ok(removed)
@@ -629,79 +669,29 @@ pub fn delete_nodes_and_edges<S: BuildHasher>(
     let mut staged = RewriteBatch::new();
     let edges_removed = stage_delete_edges(&mut staged, dir, edge_uuids)?;
     let nodes_removed = stage_delete_nodes(&mut staged, dir, node_uuids)?;
-    let prepared = prepare_deletion_index(
-        &mut staged,
+    let mut snapshot = None;
+    if let Some(g) = crate::uuid_membership::commit_uuid_topology_rewrite(
         dir,
-        node_uuids,
-        edge_uuids,
-        nodes_removed,
-        edges_removed,
-    )?;
-    let auxiliary = prepared.as_ref().map(|value| value.auxiliary_receipt());
-    if let Some(g) =
-        crate::generation::commit_topology_aware_with_auxiliary(staged, dir, auxiliary)?
-    {
+        staged,
+        crate::uuid_membership::UuidTopologyDelta {
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            deleted_nodes: if nodes_removed == 0 {
+                Vec::new()
+            } else {
+                node_uuids.iter().copied().map(Uuid::from_bytes).collect()
+            },
+            deleted_edges: if edges_removed == 0 {
+                Vec::new()
+            } else {
+                edge_uuids.iter().copied().map(Uuid::from_bytes).collect()
+            },
+        },
+        &mut snapshot,
+    )? {
         crate::adjacency_delta::discard_segment(dir, g); // delete writes no segment
     }
     Ok((nodes_removed, edges_removed))
-}
-
-fn prepare_deletion_index<NS: BuildHasher, ES: BuildHasher>(
-    staged: &mut RewriteBatch,
-    dir: &Path,
-    node_uuids: &HashSet<[u8; 16], NS>,
-    edge_uuids: &HashSet<[u8; 16], ES>,
-    nodes_removed: u64,
-    edges_removed: u64,
-) -> Result<Option<crate::uuid_membership::PreparedUuidIndexDelta>, GfError> {
-    if nodes_removed == 0 && edges_removed == 0 {
-        return Ok(None);
-    }
-    if !crate::uuid_membership_index_present(dir) {
-        crate::rebuild_uuid_membership_indexes(dir, crate::UuidIndexBuildLimits::default())?;
-    }
-    if !crate::uuid_membership_index_is_fresh(dir)? {
-        return Err(GfError::Storage(
-            "UUID membership index is stale before deletion".into(),
-        ));
-    }
-    let generation = crate::read_topology_generation(dir)?.saturating_add(1);
-    let mut index = crate::UuidMembershipIndex::open(dir)?;
-    let requested_nodes = node_uuids
-        .iter()
-        .map(|bytes| Uuid::from_bytes(*bytes))
-        .collect::<Vec<_>>();
-    let (surrogates, _) = index.lookup_node_surrogates(&requested_nodes)?;
-    let deleted_nodes = requested_nodes
-        .into_iter()
-        .zip(surrogates)
-        .filter_map(|(uuid, surrogate)| surrogate.map(|id| (uuid, id)))
-        .collect::<Vec<_>>();
-    let requested_edges = edge_uuids
-        .iter()
-        .map(|bytes| Uuid::from_bytes(*bytes))
-        .collect::<Vec<_>>();
-    let (present, _) = index.probe(crate::UuidIndexKind::Edge, &requested_edges)?;
-    let deleted_edges = requested_edges
-        .into_iter()
-        .zip(present)
-        .filter_map(|(uuid, present)| present.then_some(uuid))
-        .collect::<Vec<_>>();
-    let mut snapshot = crate::AuthenticatedUuidIndexSnapshot::open_at_generation(
-        dir,
-        generation.saturating_sub(1),
-    )?;
-    crate::uuid_membership::prepare_uuid_membership_delta(
-        dir,
-        generation.saturating_sub(1),
-        generation,
-        Some(&mut snapshot),
-        staged,
-        &[],
-        &[],
-        &deleted_nodes,
-        &deleted_edges,
-    )
 }
 
 /// Return the `edge_uuid`s of every edge incident to any of `node_uuids`
@@ -867,6 +857,25 @@ mod tests {
         assert_eq!(row_count(dir.path(), "topology/nodes.parquet"), 2);
         // delete_nodes does not touch edges — that's the caller's job (DETACH).
         assert_eq!(row_count(dir.path(), "topology/edges/KNOWS.parquet"), 2);
+    }
+
+    #[test]
+    fn delete_nodes_rewrites_shard_only_matches() {
+        let dir = TempDir::new().unwrap();
+        let (legacy, sharded) = (new_v7(), new_v7());
+        let mut first = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
+        first.create_node(legacy, TypeId(0)).unwrap();
+        first.flush().unwrap();
+        let mut second =
+            GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS + 1).unwrap();
+        second.create_node(sharded, TypeId(0)).unwrap();
+        second.flush().unwrap();
+        assert_eq!(
+            delete_nodes(dir.path(), &HashSet::from([to_bytes(&sharded)])).unwrap(),
+            1
+        );
+        let nodes = crate::read_nodes(dir.path()).unwrap();
+        assert_eq!(nodes.iter().map(RecordBatch::num_rows).sum::<usize>(), 1);
     }
 
     #[test]

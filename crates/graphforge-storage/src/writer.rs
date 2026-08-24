@@ -1903,7 +1903,6 @@ pub struct GraphWriter {
     pending_delta: Vec<crate::adjacency_delta::DeltaEdge>,
     pending_index_nodes: Vec<(Uuid, u64)>,
     pending_index_edges: Vec<Uuid>,
-    prepared_index: Option<crate::uuid_membership::PreparedUuidIndexDelta>,
     uuid_index_snapshot: Option<crate::AuthenticatedUuidIndexSnapshot>,
     limits: GraphWriterLimits,
     charged_topology_bytes: usize,
@@ -1959,7 +1958,6 @@ impl GraphWriter {
             pending_delta: Vec::new(),
             pending_index_nodes: Vec::new(),
             pending_index_edges: Vec::new(),
-            prepared_index: None,
             uuid_index_snapshot: None,
             limits: GraphWriterLimits::default(),
             charged_topology_bytes: 0,
@@ -2815,77 +2813,6 @@ impl GraphWriter {
         edges
     }
 
-    fn build_uuid_index_delta(
-        &mut self,
-        generation: u64,
-        staged: &mut RewriteBatch,
-        deleted_nodes: &[Uuid],
-        deleted_edges: &[Uuid],
-    ) -> Result<Option<crate::uuid_membership::PreparedUuidIndexDelta>, GfError> {
-        if self.pending_index_nodes.is_empty()
-            && self.pending_index_edges.is_empty()
-            && deleted_nodes.is_empty()
-            && deleted_edges.is_empty()
-        {
-            return Ok(None);
-        }
-        let (deleted_nodes, deleted_edges) = if deleted_nodes.is_empty() && deleted_edges.is_empty()
-        {
-            (Vec::new(), Vec::new())
-        } else {
-            if self.uuid_index_snapshot.as_ref().is_none_or(|snapshot| {
-                snapshot.topology_generation() != generation.saturating_sub(1)
-            }) {
-                self.uuid_index_snapshot =
-                    Some(crate::AuthenticatedUuidIndexSnapshot::open_at_generation(
-                        &self.dir,
-                        generation.saturating_sub(1),
-                    )?);
-            }
-            let index = self
-                .uuid_index_snapshot
-                .as_mut()
-                .expect("snapshot was installed");
-            let (surrogates, _) = index.lookup_node_surrogates(deleted_nodes)?;
-            let nodes = deleted_nodes
-                .iter()
-                .copied()
-                .zip(surrogates)
-                .filter_map(|(uuid, surrogate)| surrogate.map(|id| (uuid, id)))
-                .collect();
-            let (present_edges, _) = index.probe(crate::UuidIndexKind::Edge, deleted_edges)?;
-            let edges = deleted_edges
-                .iter()
-                .copied()
-                .zip(present_edges)
-                .filter_map(|(uuid, present)| present.then_some(uuid))
-                .collect();
-            (nodes, edges)
-        };
-        let current = generation.saturating_sub(1);
-        if current != 0
-            && self
-                .uuid_index_snapshot
-                .as_ref()
-                .is_none_or(|snapshot| snapshot.topology_generation() != current)
-        {
-            self.uuid_index_snapshot = Some(
-                crate::AuthenticatedUuidIndexSnapshot::open_at_generation(&self.dir, current)?,
-            );
-        }
-        crate::uuid_membership::prepare_uuid_membership_delta(
-            &self.dir,
-            current,
-            generation,
-            self.uuid_index_snapshot.as_mut(),
-            staged,
-            &self.pending_index_nodes,
-            &self.pending_index_edges,
-            &deleted_nodes,
-            &deleted_edges,
-        )
-    }
-
     /// Commit topology and its UUID-index participant as one sealed durable rewrite.
     pub fn commit_topology_aware_with_uuid_index(
         &mut self,
@@ -2893,91 +2820,23 @@ impl GraphWriter {
         deleted_nodes: Vec<Uuid>,
         deleted_edges: Vec<Uuid>,
     ) -> Result<Option<u64>, GfError> {
-        let prepared = std::rc::Rc::new(std::cell::RefCell::new(None));
-        let prepared_from_callback = std::rc::Rc::clone(&prepared);
-        let generations = std::rc::Rc::new(std::cell::Cell::new(None));
-        let generations_from_callback = std::rc::Rc::clone(&generations);
-        let dir = self.dir.clone();
-        let expected_dir = dir.clone();
-        let participant: crate::durable_rewrite::RewriteParticipantPreparer<'_> =
-            Box::new(|context, staged| {
-                if context.project_root != expected_dir {
-                    return Err(GfError::Storage(
-                        "rewrite participant project root changed".into(),
-                    ));
-                }
-                context
-                    .project
-                    .revalidate_named()
-                    .map_err(|error| GfError::Storage(error.to_string()))?;
-                generations_from_callback.set(Some((context.prior, context.next)));
-                let token = self.build_uuid_index_delta(
-                    context.next.topology,
-                    staged,
-                    &deleted_nodes,
-                    &deleted_edges,
-                )?;
-                let receipt = token
-                    .as_ref()
-                    .map(crate::uuid_membership::PreparedUuidIndexDelta::auxiliary_receipt);
-                *prepared_from_callback.borrow_mut() = token;
-                Ok(receipt)
-            });
-        let commit =
-            crate::generation::commit_topology_aware_with_participant(staged, &dir, participant);
-        self.prepared_index = prepared.borrow_mut().take();
-        let committed = match commit {
-            Ok(committed) => committed,
-            Err(error) => {
-                let Some(token) = self.prepared_index.as_ref() else {
-                    return Err(error);
-                };
-                let Some((prior, next)) = generations.get() else {
-                    return Err(error);
-                };
-                match crate::durable_rewrite::reconcile_auxiliary(
-                    &dir,
-                    prior,
-                    next,
-                    &token.auxiliary_receipt(),
-                )? {
-                    crate::durable_rewrite::AuxiliaryReconcileOutcome::Committed => {
-                        Some(next.topology)
-                    }
-                    crate::durable_rewrite::AuxiliaryReconcileOutcome::NotCommitted => {
-                        self.prepared_index = None;
-                        return Err(error);
-                    }
-                }
-            }
-        };
+        let committed = crate::uuid_membership::commit_uuid_topology_rewrite(
+            &self.dir,
+            staged,
+            crate::uuid_membership::UuidTopologyDelta {
+                nodes: self.pending_index_nodes.clone(),
+                edges: self.pending_index_edges.clone(),
+                deleted_nodes,
+                deleted_edges,
+            },
+            &mut self.uuid_index_snapshot,
+        )?;
         if let Some(generation) = committed {
-            if self.prepared_index.is_some() {
-                self.finalize_uuid_index_delta(generation)?;
-            }
+            let _ = generation;
+            self.pending_index_nodes.clear();
+            self.pending_index_edges.clear();
         }
         Ok(committed)
-    }
-
-    /// Finalize a prepared UUID delta after the topology commit succeeds.
-    fn finalize_uuid_index_delta(&mut self, generation: u64) -> Result<(), GfError> {
-        let prepared = self
-            .prepared_index
-            .as_ref()
-            .ok_or_else(|| GfError::Storage("UUID index delta was not prepared".into()))?;
-        prepared.verify_generation(generation)?;
-        let _uuid_index_work = prepared.metrics();
-        if let Some(snapshot) = self.uuid_index_snapshot.as_mut() {
-            prepared.advance_snapshot(snapshot)?;
-        } else {
-            self.uuid_index_snapshot = Some(
-                crate::AuthenticatedUuidIndexSnapshot::open_at_generation(&self.dir, generation)?,
-            );
-        }
-        self.prepared_index = None;
-        self.pending_index_nodes.clear();
-        self.pending_index_edges.clear();
-        Ok(())
     }
 
     /// Best-effort write of the delta segment for `generation` — only when the
@@ -8139,7 +7998,8 @@ mod tests {
             .sum();
         assert_eq!(pre, 2);
 
-        staged.commit().unwrap();
+        w.commit_topology_aware_with_uuid_index(staged, vec![a], Vec::new())
+            .unwrap();
         let nodes = crate::catalog::read_nodes(dir.path()).unwrap();
         let total: usize = nodes.iter().map(RecordBatch::num_rows).sum();
         assert_eq!(total, 2, "b survives, a deleted, d created");
