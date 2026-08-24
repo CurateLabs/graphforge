@@ -187,11 +187,15 @@ pub fn read_edges(
         OntologyMode::Exploratory => ("_exploratory", EXPLORATORY_EDGE_SCHEMA.clone()),
         OntologyMode::Advisory | OntologyMode::Strict => (rel_name, TYPED_EDGE_SCHEMA.clone()),
     };
-    let path = dir
-        .join("topology")
-        .join("edges")
-        .join(format!("{stem}.parquet"));
-    let batches = read_parquet_or_empty(&path, schema)?;
+    let mut batches = Vec::new();
+    for (_, path) in crate::mutator::edge_parquet_files(dir, Some(stem))
+        .map_err(|error| DataFusionError::Execution(error.to_string()))?
+    {
+        batches.extend(read_parquet_or_empty(&path, schema.clone())?);
+    }
+    if batches.is_empty() {
+        batches.push(RecordBatch::new_empty(schema));
+    }
     crate::io_stats::record_edge_full_read(total_rows(&batches));
     Ok(batches)
 }
@@ -253,18 +257,23 @@ pub fn read_edges_filtered_observed(
         OntologyMode::Exploratory => ("_exploratory", EXPLORATORY_EDGE_SCHEMA.clone()),
         OntologyMode::Advisory | OntologyMode::Strict => (rel_name, TYPED_EDGE_SCHEMA.clone()),
     };
-    let path = dir
-        .join("topology")
-        .join("edges")
-        .join(format!("{stem}.parquet"));
-    read_parquet_filtered_u64(
-        &path,
-        schema,
-        "edge_id",
-        edge_ids,
-        FilteredReadKind::Edge,
-        observer,
-    )
+    let mut batches = Vec::new();
+    for (_, path) in crate::mutator::edge_parquet_files(dir, Some(stem))
+        .map_err(|error| DataFusionError::Execution(error.to_string()))?
+    {
+        batches.extend(read_parquet_filtered_u64(
+            &path,
+            schema.clone(),
+            "edge_id",
+            edge_ids,
+            FilteredReadKind::Edge,
+            observer,
+        )?);
+    }
+    if batches.is_empty() {
+        batches.push(RecordBatch::new_empty(schema));
+    }
+    Ok(batches)
 }
 
 /// Read the union of every relation's edges (#823): the "all relation types"
@@ -280,16 +289,10 @@ fn read_edges_union(
     edge_ids: Option<&std::collections::HashSet<u64>>,
     observer: Option<&std::sync::Arc<dyn crate::io_stats::FilteredReadObserver>>,
 ) -> Result<Vec<RecordBatch>, DataFusionError> {
-    let mut files = crate::mutator::parquet_files_in(dir, "topology/edges")
-        .map_err(|e| DataFusionError::Execution(e.to_string()))?;
-    files.sort();
     let mut out = Vec::new();
-    for path in files {
-        let stem = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or_default()
-            .to_owned();
+    for (stem, path) in crate::mutator::edge_parquet_files(dir, None)
+        .map_err(|error| DataFusionError::Execution(error.to_string()))?
+    {
         let schema = discover_parquet_schema(&path).unwrap_or_else(|| TYPED_EDGE_SCHEMA.clone());
         let batches = if let Some(ids) = edge_ids {
             read_parquet_filtered_u64(
@@ -1292,7 +1295,8 @@ impl TopologyNodeTable {
         Self { paths: vec![path] }
     }
 
-    fn open_project(dir: &Path) -> Result<Self, DataFusionError> {
+    /// Open every canonical node topology fragment in deterministic order.
+    pub fn open_project(dir: &Path) -> Result<Self, DataFusionError> {
         Ok(Self {
             paths: crate::mutator::node_parquet_files(dir)
                 .map_err(|error| DataFusionError::Execution(error.to_string()))?,
@@ -1341,7 +1345,8 @@ impl TableProvider for TopologyNodeTable {
 /// [`TableProvider`] for `topology/edges/TYPENAME.parquet`.
 #[derive(Debug, Clone)]
 pub struct TypedEdgeTable {
-    path: PathBuf,
+    dir: PathBuf,
+    rel_type_name: String,
     schema: SchemaRef,
 }
 
@@ -1352,16 +1357,16 @@ impl TypedEdgeTable {
     /// - any other name → [`TYPED_EDGE_SCHEMA`]
     #[must_use]
     pub fn open(dir: &Path, rel_type_name: &str) -> Self {
-        let path = dir
-            .join("topology")
-            .join("edges")
-            .join(format!("{rel_type_name}.parquet"));
         let schema = if rel_type_name == "_exploratory" {
             EXPLORATORY_EDGE_SCHEMA.clone()
         } else {
             TYPED_EDGE_SCHEMA.clone()
         };
-        Self { path, schema }
+        Self {
+            dir: dir.to_path_buf(),
+            rel_type_name: rel_type_name.to_owned(),
+            schema,
+        }
     }
 }
 
@@ -1382,10 +1387,14 @@ impl TableProvider for TypedEdgeTable {
         _filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
-        let fragment = ParquetFragment::for_path(self.path.clone(), false);
+        let fragments = crate::mutator::edge_parquet_files(&self.dir, Some(&self.rel_type_name))
+            .map_err(|error| DataFusionError::Execution(error.to_string()))?
+            .into_iter()
+            .map(|(_, path)| ParquetFragment::for_path(path, false))
+            .collect();
         scan_fragments(
             self.schema.clone(),
-            vec![fragment],
+            fragments,
             projection,
             limit,
             state.config().batch_size(),
@@ -1435,20 +1444,10 @@ impl TableProvider for UnionEdgeTable {
         _filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
-        // Directory listing only — stem order matches `read_edges_union`.
-        let mut files = crate::mutator::parquet_files_in(&self.dir, "topology/edges")
-            .map_err(|e| DataFusionError::Execution(e.to_string()))?;
-        files.sort();
-        let fragments: Vec<ParquetFragment> = files
+        let fragments: Vec<ParquetFragment> = crate::mutator::edge_parquet_files(&self.dir, None)
+            .map_err(|error| DataFusionError::Execution(error.to_string()))?
             .into_iter()
-            .map(|path| {
-                let stem = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or_default()
-                    .to_owned();
-                ParquetFragment::for_union_edge(path, stem)
-            })
+            .map(|(stem, path)| ParquetFragment::for_union_edge(path, stem))
             .collect();
         scan_fragments(
             EXPLORATORY_EDGE_SCHEMA.clone(),
