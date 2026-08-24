@@ -2466,7 +2466,7 @@ fn publish_atomic_bytes_in(
         let _namespace_guard = namespace_lock
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        directory.replace_child(&temp_name, target_name)?;
+        directory.replace_child(&temp_name, temp_identity, target_name)?;
         crate::file_lock::unlock(&temp)?;
         Ok(())
     };

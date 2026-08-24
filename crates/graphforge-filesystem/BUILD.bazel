@@ -8,6 +8,7 @@ package(default_visibility = ["//visibility:public"])
 
 gf_rust_library(
     name = "graphforge_filesystem",
+    deps = ["@crates//:fs4"],
 )
 
 gf_rust_test(
