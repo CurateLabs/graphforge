@@ -219,10 +219,10 @@ pub fn commit_topology_aware_with_auxiliary(
 /// Commit a rewrite whose auxiliary participant is prepared only after
 /// recovery and authoritative next-generation derivation, while the retained
 /// project rewrite lock remains held.
-pub fn commit_topology_aware_with_participant(
+pub(crate) fn commit_topology_aware_with_participant(
     staged: RewriteBatch,
     project_dir: &Path,
-    participant: crate::RewriteParticipantPreparer<'_>,
+    participant: crate::durable_rewrite::RewriteParticipantPreparer<'_>,
 ) -> Result<Option<u64>, GfError> {
     let topology = touches_topology(&staged, project_dir);
     let search = touches_search_source(&staged, project_dir);

@@ -44,7 +44,7 @@ pub struct AuxiliaryReceipt {
 
 /// Authoritative rewrite state exposed to an auxiliary participant while the
 /// admitted project rewrite lock is held.
-pub struct ParticipantPreparationContext<'a> {
+pub(crate) struct ParticipantPreparationContext<'a> {
     /// Exact recovered generation pair preceding this transaction.
     pub prior: GenerationPair,
     /// Exact generation pair that this transaction will publish.
@@ -57,7 +57,7 @@ pub struct ParticipantPreparationContext<'a> {
 
 /// One-shot participant preparation executed inside the retained rewrite
 /// critical section.
-pub type RewriteParticipantPreparer<'a> = Box<
+pub(crate) type RewriteParticipantPreparer<'a> = Box<
     dyn FnOnce(
             ParticipantPreparationContext<'_>,
             &mut RewriteBatch,
@@ -67,7 +67,7 @@ pub type RewriteParticipantPreparer<'a> = Box<
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 /// Topology and search authorities selected for one durable rewrite.
-pub struct GenerationPair {
+pub(crate) struct GenerationPair {
     /// Topology generation published by the transaction.
     pub topology: u64,
     /// Search generation published by the transaction.
