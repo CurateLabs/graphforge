@@ -178,6 +178,11 @@ pub struct UuidMembershipIndex {
 impl UuidMembershipIndex {
     /// Open and fully authenticate the current immutable index snapshot.
     pub fn open(project_dir: &Path) -> Result<Self, GfError> {
+        let generation = crate::read_topology_generation(project_dir)?;
+        Self::open_at_generation(project_dir, generation)
+    }
+
+    pub(crate) fn open_at_generation(project_dir: &Path, generation: u64) -> Result<Self, GfError> {
         let root = project_dir.join(INDEX_DIR);
         let body = fs::read(root.join(MANIFEST)).map_err(storage_err)?;
         let manifest: Manifest = serde_json::from_slice(&body).map_err(storage_err)?;
@@ -187,7 +192,6 @@ impl UuidMembershipIndex {
                 manifest.format_version
             )));
         }
-        let generation = crate::read_topology_generation(project_dir)?;
         if manifest.current_generation != generation {
             return Err(storage_err(format!(
                 "stale index generation {} (graph generation {generation})",
@@ -352,6 +356,7 @@ pub(crate) struct PreparedUuidIndexDelta {
 /// caller's generation-last topology rewrite transaction.
 pub(crate) fn prepare_uuid_membership_delta(
     project_dir: &Path,
+    current: u64,
     generation: u64,
     batch: &mut crate::staging::RewriteBatch,
     nodes: &[(Uuid, u64)],
@@ -359,7 +364,6 @@ pub(crate) fn prepare_uuid_membership_delta(
     deleted_nodes: &[(Uuid, u64)],
     deleted_edges: &[Uuid],
 ) -> Result<Option<PreparedUuidIndexDelta>, GfError> {
-    let current = crate::read_topology_generation(project_dir)?;
     if generation != current.saturating_add(1) {
         return Err(storage_err(
             "prepared UUID delta generation is not the next generation",
@@ -367,7 +371,9 @@ pub(crate) fn prepare_uuid_membership_delta(
     }
     let source_root = project_dir.join(INDEX_DIR);
     if current != 0 && !source_root.join(MANIFEST).is_file() {
-        return Ok(None);
+        return Err(storage_err(
+            "UUID membership index migration is required before topology mutation",
+        ));
     }
     fs::create_dir_all(&source_root).map_err(storage_err)?;
     let parent = project_dir
