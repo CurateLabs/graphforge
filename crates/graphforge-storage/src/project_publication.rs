@@ -2665,8 +2665,9 @@ mod tests {
         )
         .unwrap();
         let mut live = std::collections::BTreeMap::new();
+        let lease = crate::begin_graph_object_publication(root.path()).unwrap();
         let (files_root, _) = crate::append_graph_files_v2(
-            root.path(),
+            &lease,
             workspace.path(),
             None,
             &mut live,
@@ -2678,6 +2679,7 @@ mod tests {
             crate::graph_files_root_participant(&files_root).unwrap(),
         ]);
         publish(root.path(), request);
+        drop(lease);
 
         let reopened = resolve_project_generation(root.path()).unwrap();
         let inventory = reopened.graph_files_inventory().unwrap().unwrap();

@@ -25,6 +25,7 @@ const BUFFER_BYTES: usize = 64 * 1024;
 
 /// Kernel-visible lease protecting CAS objects installed by one publication.
 pub struct GraphObjectPublicationLease {
+    root: PathBuf,
     path: PathBuf,
     file: File,
 }
@@ -53,7 +54,11 @@ pub fn begin_graph_object_publication(root: &Path) -> Result<GraphObjectPublicat
     file.sync_all()
         .map_err(|error| storage("sync graph object publication lease", &path, error))?;
     sync_directory(&active)?;
-    Ok(GraphObjectPublicationLease { path, file })
+    Ok(GraphObjectPublicationLease {
+        root: root.to_path_buf(),
+        path,
+        file,
+    })
 }
 
 /// Return true when any live CAS publication lease prevents safe sweeping.
@@ -242,13 +247,14 @@ pub fn gc_graph_objects(
 
 /// Seal only changed logical files into a structurally shared radix manifest.
 pub fn append_graph_files_v2(
-    root: &Path,
+    lease: &GraphObjectPublicationLease,
     workspace: &Path,
     previous_root: Option<&GraphFilesRootV2>,
     live_entries: &mut BTreeMap<String, crate::GraphFileEntry>,
     sealed_paths: &[PathBuf],
     tombstones: &[String],
 ) -> Result<(GraphFilesRootV2, GraphFilesAppendEvidence), GfError> {
+    let root = &lease.root;
     let mut additions = Vec::with_capacity(sealed_paths.len());
     let mut evidence = GraphFilesAppendEvidence::default();
     let mut logical_byte_length = previous_root.map_or(0, |root| root.logical_byte_length);
@@ -345,10 +351,11 @@ pub fn append_graph_files_v2(
 
 /// Import a verified v1 graph tree into a self-contained v2 radix root.
 pub fn migrate_graph_files_v1_to_v2(
-    root: &Path,
+    lease: &GraphObjectPublicationLease,
     graph_root: &Path,
     inventory: &GraphFilesInventory,
 ) -> Result<(GraphFilesRootV2, GraphFilesMigrationEvidence), GfError> {
+    let root = &lease.root;
     let mut evidence = GraphFilesMigrationEvidence::default();
     for entry in &inventory.files {
         let installed = install_graph_object_file(
@@ -949,8 +956,9 @@ mod tests {
         )
         .unwrap();
         let (inventory, _) = crate::capture_graph_files(graph.path()).unwrap();
+        let lease = begin_graph_object_publication(container.path()).unwrap();
         let (root, evidence) =
-            migrate_graph_files_v1_to_v2(container.path(), graph.path(), &inventory).unwrap();
+            migrate_graph_files_v1_to_v2(&lease, graph.path(), &inventory).unwrap();
         assert_eq!(evidence.payload_objects, 1);
         assert_eq!(evidence.payload_bytes_hashed, 4);
         let (files, _) =
@@ -965,6 +973,7 @@ mod tests {
     fn repeated_v2_appends_examine_only_changed_descriptors() {
         let container = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
+        let lease = begin_graph_object_publication(container.path()).unwrap();
         let mut live = BTreeMap::new();
         let mut previous = None;
         for ordinal in 0_u8..8 {
@@ -975,7 +984,7 @@ mod tests {
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(&path, [ordinal]).unwrap();
             let (root, evidence) = append_graph_files_v2(
-                container.path(),
+                &lease,
                 workspace.path(),
                 previous.as_ref(),
                 &mut live,
@@ -998,7 +1007,7 @@ mod tests {
 
         let deleted = "topology/edges/knows/00000000000000000003-00000000000000000003.parquet";
         let (root, delete_evidence) = append_graph_files_v2(
-            container.path(),
+            &lease,
             workspace.path(),
             Some(&root),
             &mut live,
@@ -1034,9 +1043,10 @@ mod tests {
         }
 
         let first = tempfile::tempdir().unwrap();
+        let first_lease = begin_graph_object_publication(first.path()).unwrap();
         let mut first_live = BTreeMap::new();
         let (first_root, _) = append_graph_files_v2(
-            first.path(),
+            &first_lease,
             workspace.path(),
             None,
             &mut first_live,
@@ -1046,11 +1056,12 @@ mod tests {
         .unwrap();
 
         let second = tempfile::tempdir().unwrap();
+        let second_lease = begin_graph_object_publication(second.path()).unwrap();
         let mut reversed = paths.clone();
         reversed.reverse();
         let mut second_live = BTreeMap::new();
         let (second_root, _) = append_graph_files_v2(
-            second.path(),
+            &second_lease,
             workspace.path(),
             None,
             &mut second_live,
@@ -1065,20 +1076,15 @@ mod tests {
     fn gc_traces_segment_and_payload_roots_before_sweeping() {
         let container = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
+        let lease = begin_graph_object_publication(container.path()).unwrap();
         let relative = PathBuf::from("topology/nodes/1-1.parquet");
         let source = workspace.path().join(&relative);
         fs::create_dir_all(source.parent().unwrap()).unwrap();
         fs::write(&source, b"node").unwrap();
         let mut live = BTreeMap::new();
-        let (root, _) = append_graph_files_v2(
-            container.path(),
-            workspace.path(),
-            None,
-            &mut live,
-            &[relative],
-            &[],
-        )
-        .unwrap();
+        let (root, _) =
+            append_graph_files_v2(&lease, workspace.path(), None, &mut live, &[relative], &[])
+                .unwrap();
         let (orphan, _) = install_graph_object_bytes(container.path(), b"orphan").unwrap();
         let evidence = gc_graph_objects(
             container.path(),
