@@ -584,6 +584,57 @@ fn validate_inventory_contract(inventory: &GraphFilesInventory) -> Result<(), Gf
 }
 
 fn collect_source_files(directory: &Path, paths: &mut Vec<PathBuf>) -> Result<(), GfError> {
+    collect_source_files_from(directory, directory, paths)
+}
+
+/// Operational files that may legitimately coexist with the graph workspace
+/// but are never generation data.  Keep this list structural and exact: a
+/// basename suffix/prefix rule would let an unauthenticated Parquet fragment
+/// disappear from inventory reconciliation while topology readers consume it.
+fn is_graph_operational_file(relative: &Path) -> bool {
+    let components = relative
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(value) => value.to_str(),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    match components.as_slice() {
+        [".graphforge-rewrite.lock"]
+        | ["embeddings", ".catalog.lock" | ".refresh.lock"]
+        | ["graph-objects", "lifecycle.lock"]
+        | ["indexes", "search", .., ".writer.lock"] => true,
+        ["embeddings", name]
+            if name
+                .strip_prefix(".writer-")
+                .and_then(|value| value.strip_suffix(".lock"))
+                .is_some_and(|value| {
+                    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+                }) =>
+        {
+            true
+        }
+        ["embeddings", "spaces", identity, ".writer.lock"]
+            if identity.len() == 64 && identity.bytes().all(|byte| byte.is_ascii_hexdigit()) =>
+        {
+            true
+        }
+        ["graph-objects", "active", lease]
+            if lease
+                .strip_suffix(".lock")
+                .is_some_and(|value| uuid::Uuid::parse_str(value).is_ok()) =>
+        {
+            true
+        }
+        _ => false,
+    }
+}
+
+fn collect_source_files_from(
+    root: &Path,
+    directory: &Path,
+    paths: &mut Vec<PathBuf>,
+) -> Result<(), GfError> {
     let mut entries = directory
         .read_dir()
         .map_err(|error| storage("read graph workspace", directory, error))?
@@ -599,11 +650,12 @@ fn collect_source_files(directory: &Path, paths: &mut Vec<PathBuf>) -> Result<()
             return Err(validation("graph workspace contains a symbolic link"));
         }
         if file_type.is_dir() {
-            collect_source_files(&path, paths)?;
+            collect_source_files_from(root, &path, paths)?;
         } else if file_type.is_file() {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if name.ends_with(".lock") || name.starts_with(".gf-stage-") {
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|_| validation("graph workspace path escaped root"))?;
+            if is_graph_operational_file(relative) {
                 continue;
             }
             paths.push(path);
@@ -636,14 +688,12 @@ fn collect_regular_files(
         if file_type.is_dir() {
             collect_regular_files(root, &path, observed)?;
         } else if file_type.is_file() {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if name.ends_with(".lock") || name.starts_with(".gf-stage-") {
-                continue;
-            }
             let relative = path
                 .strip_prefix(root)
                 .map_err(|_| corrupt("generation graph path escaped tree"))?;
+            if is_graph_operational_file(relative) {
+                continue;
+            }
             validate_relative_path(relative)?;
             let key = path_text(relative)?;
             if observed.insert(key, path).is_some() {
@@ -827,7 +877,7 @@ mod tests {
         fs::create_dir_all(source.path().join("topology/edges")).unwrap();
         fs::write(source.path().join("topology/nodes.parquet"), b"nodes").unwrap();
         fs::write(source.path().join("topology/edges/knows.parquet"), b"edges").unwrap();
-        fs::write(source.path().join("writer.lock"), b"ignored").unwrap();
+        fs::write(source.path().join(".graphforge-rewrite.lock"), b"ignored").unwrap();
 
         let (inventory, participant) = capture_graph_files(source.path()).unwrap();
         assert_eq!(inventory.file_count, 2);
@@ -839,6 +889,34 @@ mod tests {
         assert_eq!(inventory.files[1].role, GraphFileRole::Topology);
         assert_eq!(participant.record_family_id, GRAPH_FILES_FAMILY);
         assert_eq!(decode_inventory(&participant.bytes).unwrap(), inventory);
+    }
+
+    #[test]
+    fn staging_like_parquet_name_is_authenticated_and_tamper_detected() {
+        let source = tempfile::tempdir().unwrap();
+        let edge_dir = source.path().join("topology/edges/KNOWS");
+        fs::create_dir_all(&edge_dir).unwrap();
+        let injected = edge_dir.join(".gf-stage-injected.parquet");
+        fs::write(&injected, b"untrusted-edge-bytes").unwrap();
+
+        let (inventory, _) = capture_graph_files(source.path()).unwrap();
+        assert!(inventory.files.iter().any(|entry| {
+            entry.relative_path == "topology/edges/KNOWS/.gf-stage-injected.parquet"
+        }));
+        assert!(
+            crate::mutator::edge_parquet_files(source.path(), None).is_err(),
+            "non-canonical staged-looking names are authenticated but never topology"
+        );
+
+        let generation = tempfile::tempdir().unwrap();
+        stage_graph_tree(source.path(), generation.path(), &inventory).unwrap();
+        let graph_root = graph_tree_root(generation.path());
+        fs::write(
+            graph_root.join("topology/edges/KNOWS/.gf-stage-late.parquet"),
+            b"late injection",
+        )
+        .unwrap();
+        assert!(verify_graph_tree(&graph_root, &inventory).is_err());
     }
 
     #[test]

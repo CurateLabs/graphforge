@@ -1958,20 +1958,9 @@ fn binding_has_retained_data(
 ) -> Result<bool, GfError> {
     if binding.route_kind == SemanticRouteKind::Entity {
         use arrow::array::{Array, ListArray, UInt32Array};
-        let path = graph_root.join("topology/nodes.parquet");
-        if !path.exists() {
-            return Ok(false);
-        }
-        preflight_parquet_footer(&path)?;
-        let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
-            File::open(path).map_err(|_| corrupt("removal topology cannot be opened"))?,
-        )
-        .map_err(|_| corrupt("removal topology metadata is invalid"))?
-        .with_batch_size(8192)
-        .build()
-        .map_err(|_| corrupt("removal topology reader cannot be built"))?;
-        for batch in reader {
-            let batch = batch.map_err(|_| corrupt("removal topology batch is invalid"))?;
+        for batch in crate::catalog::read_nodes(graph_root)
+            .map_err(|_| corrupt("removal topology cannot be read"))?
+        {
             let values = batch
                 .column_by_name("type_ids")
                 .and_then(|array| array.as_any().downcast_ref::<ListArray>())
@@ -1992,51 +1981,67 @@ fn binding_has_retained_data(
         }
         return Ok(false);
     }
-    let Some(path) = binding.physical_path(graph_root) else {
-        return Ok(false);
+    let paths = match binding.route_kind {
+        SemanticRouteKind::Relation => {
+            crate::mutator::edge_parquet_files(graph_root, Some(&binding.route))?
+                .into_iter()
+                .map(|(_, path)| path)
+                .collect()
+        }
+        SemanticRouteKind::NodeProperty => {
+            crate::mutator::property_parquet_files(graph_root, "properties", &binding.route)?
+        }
+        SemanticRouteKind::EdgeProperty => {
+            crate::mutator::property_parquet_files(graph_root, "edge_properties", &binding.route)?
+        }
+        SemanticRouteKind::Entity => unreachable!("entity handled above"),
     };
-    if !path.exists() {
-        return Ok(false);
-    }
-    preflight_parquet_footer(&path)?;
-    let builder = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
-        File::open(path).map_err(|_| corrupt("removal route cannot be opened"))?,
-    )
-    .map_err(|_| corrupt("removal route metadata is invalid"))?;
-    if matches!(
+    let property_column = matches!(
         binding.route_kind,
         SemanticRouteKind::NodeProperty | SemanticRouteKind::EdgeProperty
-    ) {
-        let column = binding
+    )
+    .then(|| {
+        binding
             .symbol
             .local_id
             .split_once(':')
             .map(|(_, property)| property)
-            .ok_or_else(|| corrupt("removal property has no qualified column"))?;
-        if !builder
-            .schema()
-            .fields()
-            .iter()
-            .any(|field| field.name() == column)
-        {
-            return Ok(false);
-        }
-        for batch in builder
-            .with_batch_size(8192)
-            .build()
-            .map_err(|_| corrupt("removal property reader cannot be built"))?
-        {
-            let batch = batch.map_err(|_| corrupt("removal property batch is invalid"))?;
-            let values = batch
-                .column_by_name(column)
-                .ok_or_else(|| corrupt("removal property column disappeared"))?;
-            if values.null_count() < values.len() {
-                return Ok(true);
+            .ok_or_else(|| corrupt("removal property has no qualified column"))
+    })
+    .transpose()?;
+    for path in paths {
+        preflight_parquet_footer(&path)?;
+        let builder = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+            File::open(path).map_err(|_| corrupt("removal route cannot be opened"))?,
+        )
+        .map_err(|_| corrupt("removal route metadata is invalid"))?;
+        if let Some(column) = property_column {
+            if !builder
+                .schema()
+                .fields()
+                .iter()
+                .any(|field| field.name() == column)
+            {
+                continue;
             }
+            for batch in builder
+                .with_batch_size(8192)
+                .build()
+                .map_err(|_| corrupt("removal property reader cannot be built"))?
+            {
+                let batch = batch.map_err(|_| corrupt("removal property batch is invalid"))?;
+                let values = batch
+                    .column_by_name(column)
+                    .ok_or_else(|| corrupt("removal property column disappeared"))?;
+                if values.null_count() < values.len() {
+                    return Ok(true);
+                }
+            }
+        } else if builder.metadata().file_metadata().num_rows() > 0 {
+            return Ok(true);
         }
-        return Ok(false);
     }
-    Ok(builder.metadata().file_metadata().num_rows() > 0)
+    Ok(false)
 }
 
 fn binding_key(
@@ -2695,6 +2700,43 @@ mod tests {
                 retained.path(),
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn retained_entity_scan_includes_immutable_node_shards() {
+        let composition = compiled("1");
+        let bindings = SemanticStorageBindings::project(&composition, None).unwrap();
+        let entity = bindings
+            .bindings
+            .iter()
+            .find(|binding| binding.route_kind == SemanticRouteKind::Entity)
+            .unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut first =
+            crate::GraphWriter::open_at(dir.path(), graphforge_core::OntologyMode::Strict, 1)
+                .unwrap();
+        first
+            .create_node(
+                graphforge_core::uuid::new_v7(),
+                graphforge_core::TypeId(999),
+            )
+            .unwrap();
+        first.flush().unwrap();
+        let mut second =
+            crate::GraphWriter::open_at(dir.path(), graphforge_core::OntologyMode::Strict, 2)
+                .unwrap();
+        second
+            .create_node(
+                graphforge_core::uuid::new_v7(),
+                graphforge_core::TypeId(entity.storage_id),
+            )
+            .unwrap();
+        second.flush().unwrap();
+
+        assert!(
+            SemanticStorageBindings::binding_has_retained_data(entity, dir.path()).unwrap(),
+            "a binding used only by an immutable node shard must remain protected"
         );
     }
 

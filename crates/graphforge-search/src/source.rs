@@ -129,11 +129,11 @@ fn select_eligible_nodes<C>(
 where
     C: FnMut() -> Result<(), SearchArtifactError>,
 {
-    add_source_bytes(
-        &project_dir.join("topology").join("nodes.parquet"),
-        source_bytes,
-        limits,
-    )?;
+    for path in graphforge_storage::topology_node_files(project_dir)
+        .map_err(|error| source(error.to_string()))?
+    {
+        add_source_bytes(&path, source_bytes, limits)?;
+    }
     let batches = read_nodes(project_dir).map_err(|error| source(error.to_string()))?;
     let mut eligible = BTreeSet::new();
     let mut seen_topology = BTreeSet::new();
@@ -409,6 +409,28 @@ mod tests {
         constrained.source_bytes = 3;
         assert!(matches!(
             add_source_bytes(&source, &mut 0, constrained),
+            Err(SearchArtifactError::ResourceExhausted {
+                resource: "text_source_bytes",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn source_byte_limit_counts_every_immutable_node_shard() {
+        let dir = TempDir::new().unwrap();
+        let mut first = GraphWriter::open_at(dir.path(), OntologyMode::Strict, 1).unwrap();
+        first.create_node(uuid(1), TypeId(9)).unwrap();
+        first.flush().unwrap();
+        let mut second = GraphWriter::open_at(dir.path(), OntologyMode::Strict, 2).unwrap();
+        second.create_node(uuid(2), TypeId(9)).unwrap();
+        second.flush().unwrap();
+        let paths = graphforge_storage::topology_node_files(dir.path()).unwrap();
+        assert_eq!(paths.len(), 2);
+        let mut limits = TextSearchLimits::default();
+        limits.source_bytes = std::fs::metadata(&paths[0]).unwrap().len();
+        assert!(matches!(
+            project_text_source(dir.path(), 9, None, limits, || Ok(())),
             Err(SearchArtifactError::ResourceExhausted {
                 resource: "text_source_bytes",
                 ..
