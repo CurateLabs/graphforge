@@ -1170,7 +1170,7 @@ fn link_materialized_object(
                 let linked = rustix::fs::openat(
                     &directory,
                     component,
-                    OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                    OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
                     Mode::empty(),
                 )
                 .map_err(|error| {

@@ -325,6 +325,7 @@ fn stable_open_child_file(
     } else {
         OFlags::RDONLY
     } | OFlags::NOFOLLOW
+        | OFlags::NONBLOCK
         | OFlags::CLOEXEC;
     rustix::fs::openat(parent, name, flags, Mode::from_bits_truncate(0o600))
         .map(File::from)
@@ -346,7 +347,7 @@ fn stable_open_or_create_child_file(parent: &File, _path: &Path, name: &OsStr) -
     rustix::fs::openat(
         parent,
         name,
-        OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
         Mode::from_bits_truncate(0o600),
     )
     .map(File::from)
@@ -399,11 +400,14 @@ fn stable_unlink_child_if_identity(
     let opened = rustix::fs::openat(
         parent,
         name,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
         Mode::empty(),
     )
     .map(File::from)
     .map_err(io::Error::from)?;
+    if !opened.metadata()?.is_file() {
+        return Err(io::Error::other("child is not a regular file"));
+    }
     if file_identity(&opened)? != expected {
         return Err(io::Error::other("child identity changed before unlink"));
     }
@@ -828,7 +832,7 @@ fn replace_file_platform(
     let source = openat(
         directory,
         source_name,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
         Mode::empty(),
     )
     .map(File::from)
@@ -837,7 +841,7 @@ fn replace_file_platform(
     let target = openat(
         directory,
         target_name,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
         Mode::empty(),
     )
     .map(File::from)
@@ -859,11 +863,17 @@ fn replace_file_platform(
     let replaced = openat(
         directory,
         target_name,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
         Mode::empty(),
     )
     .map(File::from)
     .map_err(io::Error::from)
+    .map_err(ReplaceFileError::StateUnknown)?;
+    verify_regular_metadata(
+        &replaced
+            .metadata()
+            .map_err(ReplaceFileError::StateUnknown)?,
+    )
     .map_err(ReplaceFileError::StateUnknown)?;
     if unix_identity(&replaced).map_err(ReplaceFileError::StateUnknown)? != source_identity
         || statat(directory, source_name, AtFlags::SYMLINK_NOFOLLOW).is_ok()
@@ -952,7 +962,7 @@ fn install_new_file_platform(
     let source = openat(
         directory,
         source_name,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
         Mode::empty(),
     )
     .map(File::from)
@@ -975,11 +985,12 @@ fn install_new_file_platform(
     let installed = openat(
         directory,
         target_name,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
         Mode::empty(),
     )
     .map(File::from)
     .map_err(io::Error::from)?;
+    verify_regular_metadata(&installed.metadata()?)?;
     if unix_identity(&installed)? != source_identity {
         return Err(io::Error::other("atomic creation state did not reconcile"));
     }
@@ -1979,6 +1990,12 @@ mod windows {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    const FIFO_CHILD_ENV: &str = "GRAPHFORGE_FILESYSTEM_FIFO_CHILD";
+
+    #[cfg(unix)]
+    const FIFO_ROOT_ENV: &str = "GRAPHFORGE_FILESYSTEM_FIFO_ROOT";
+
     pub(super) fn directory_handle(path: &Path) -> File {
         #[cfg(unix)]
         return File::open(path).unwrap();
@@ -1996,6 +2013,133 @@ mod tests {
                 .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
                 .open(path)
                 .unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn peerless_fifo_child() {
+        let Ok(operation) = std::env::var(FIFO_CHILD_ENV) else {
+            return;
+        };
+        let root = PathBuf::from(std::env::var_os(FIFO_ROOT_ENV).expect("FIFO test root"));
+        let stable = StableDirectory::open(&root).unwrap();
+        let fifo_identity = path_identity(&root.join("fifo")).unwrap();
+        let regular_identity = path_identity(&root.join("regular")).unwrap();
+        let result = match operation.as_str() {
+            "open" => stable.open_child_file(OsStr::new("fifo")).map(drop),
+            "open-or-create" => stable
+                .open_or_create_child_file(OsStr::new("fifo"))
+                .map(drop),
+            "unlink" => stable.unlink_child_if_identity(OsStr::new("fifo"), fifo_identity),
+            "replace-source" => {
+                stable.replace_child(OsStr::new("fifo"), fifo_identity, OsStr::new("regular"))
+            }
+            "replace-target" => {
+                stable.replace_child(OsStr::new("regular"), regular_identity, OsStr::new("fifo"))
+            }
+            "native-replace-source" => replace_file(
+                &directory_handle(&root),
+                OsStr::new("fifo"),
+                OsStr::new("regular"),
+            )
+            .map_err(|error| io::Error::other(error.to_string())),
+            "native-replace-target" => replace_file(
+                &directory_handle(&root),
+                OsStr::new("regular"),
+                OsStr::new("fifo"),
+            )
+            .map_err(|error| io::Error::other(error.to_string())),
+            "native-install-source" => install_new_file(
+                &directory_handle(&root),
+                OsStr::new("fifo"),
+                OsStr::new("absent"),
+            ),
+            other => panic!("unknown FIFO operation {other}"),
+        };
+        assert!(
+            result.is_err(),
+            "peerless FIFO must fail closed: {operation}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn every_regular_child_operation_rejects_peerless_fifo_without_blocking() {
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+
+        for operation in [
+            "open",
+            "open-or-create",
+            "unlink",
+            "replace-source",
+            "replace-target",
+            "native-replace-source",
+            "native-replace-target",
+            "native-install-source",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            std::fs::write(root.path().join("regular"), b"regular").unwrap();
+            let status = Command::new("mkfifo")
+                .arg(root.path().join("fifo"))
+                .status()
+                .unwrap();
+            assert!(status.success(), "mkfifo failed for {operation}");
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "tests::peerless_fifo_child", "--nocapture"])
+                .env(FIFO_CHILD_ENV, operation)
+                .env(FIFO_ROOT_ENV, root.path())
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let started = Instant::now();
+            loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    assert!(
+                        status.success(),
+                        "FIFO child failed for {operation}: {status}"
+                    );
+                    break;
+                }
+                if started.elapsed() >= Duration::from_secs(2) {
+                    child.kill().unwrap();
+                    let _ = child.wait();
+                    panic!("regular-child operation blocked on peerless FIFO: {operation}");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn regular_child_operations_reject_symlinks_and_unix_sockets() {
+        use std::os::unix::fs::symlink;
+        use std::os::unix::net::UnixDatagram;
+
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("regular"), b"regular").unwrap();
+        symlink("regular", root.path().join("linked")).unwrap();
+        let _socket = UnixDatagram::bind(root.path().join("socket")).unwrap();
+        let stable = StableDirectory::open(root.path()).unwrap();
+
+        for special in ["linked", "socket"] {
+            assert!(stable.open_child_file(OsStr::new(special)).is_err());
+            assert!(
+                stable
+                    .open_or_create_child_file(OsStr::new(special))
+                    .is_err()
+            );
+            let identity = path_identity(&root.path().join(special)).unwrap();
+            assert!(
+                stable
+                    .unlink_child_if_identity(OsStr::new(special), identity)
+                    .is_err()
+            );
+            assert!(root.path().join(special).exists());
         }
     }
 

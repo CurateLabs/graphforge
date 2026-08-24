@@ -1317,7 +1317,7 @@ fn read_regular_bounded(path: &Path, max: u64) -> Result<Vec<u8>, GfError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW);
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
     let file = options.open(path).map_err(|_| {
         registry_corrupt("checkpoint registry file could not be opened without following links")
