@@ -862,7 +862,8 @@ impl PreparedUuidIndexDelta {
 }
 
 /// Publish one committed topology batch as an immutable authenticated v3 run.
-pub fn append_uuid_membership_delta(
+#[cfg(test)]
+pub(crate) fn append_uuid_membership_delta(
     project_dir: &Path,
     generation: u64,
     nodes: &[(Uuid, u64)],
@@ -871,7 +872,8 @@ pub fn append_uuid_membership_delta(
     append_uuid_membership_delta_with_tombstones(project_dir, generation, nodes, edges, &[], &[])
 }
 
-pub(crate) fn append_uuid_membership_delta_with_tombstones(
+#[cfg(test)]
+fn append_uuid_membership_delta_with_tombstones(
     project_dir: &Path,
     generation: u64,
     nodes: &[(Uuid, u64)],
