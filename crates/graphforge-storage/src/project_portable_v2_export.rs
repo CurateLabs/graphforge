@@ -1137,8 +1137,16 @@ pub fn repack_verified_expanded_portable_v2(
     limits: PortableV2ExportLimits,
     cancelled: &AtomicBool,
 ) -> Result<PortableV2ExportReceipt, ExportError> {
-    let source = source.as_ref();
-    let report = verify_portable_v2(source, PortableV2Mode::Full, limits, Some(cancelled))?;
+    let snapshot = tempfile::tempdir().map_err(storage)?;
+    let snapshot_root = snapshot.path().join("verified");
+    copy_expanded_snapshot(source.as_ref(), &snapshot_root, cancelled)?;
+    let report = crate::verify_portable_v2(
+        &snapshot_root,
+        crate::PortableV2Mode::Full,
+        limits,
+        Some(cancelled),
+    )?;
+    let source = snapshot_root.as_path();
     let manifest = fs::read(source.join("data/graphforge-project.json")).map_err(storage)?;
     let value: serde_json::Value = serde_json::from_slice(&manifest).map_err(storage)?;
     let generation_uuid = value
@@ -1201,6 +1209,43 @@ pub fn repack_verified_expanded_portable_v2(
         cancelled,
         |_| {},
     )
+}
+
+fn copy_expanded_snapshot(
+    source: &Path,
+    destination: &Path,
+    cancelled: &AtomicBool,
+) -> Result<(), ExportError> {
+    fs::create_dir(destination).map_err(storage)?;
+    let mut pending = vec![(source.to_path_buf(), destination.to_path_buf())];
+    while let Some((input, output)) = pending.pop() {
+        for entry in fs::read_dir(&input).map_err(storage)? {
+            if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(err("GF_CANCELLED", "portable export cancelled"));
+            }
+            let entry = entry.map_err(storage)?;
+            let metadata = fs::symlink_metadata(entry.path()).map_err(storage)?;
+            let target = output.join(entry.file_name());
+            if metadata.file_type().is_symlink() {
+                return Err(err(
+                    "GF_UNSUPPORTED_ENTRY_TYPE",
+                    "expanded portable source contains a symlink",
+                ));
+            }
+            if metadata.is_dir() {
+                fs::create_dir(&target).map_err(storage)?;
+                pending.push((entry.path(), target));
+            } else if metadata.is_file() {
+                fs::copy(entry.path(), target).map_err(storage)?;
+            } else {
+                return Err(err(
+                    "GF_UNSUPPORTED_ENTRY_TYPE",
+                    "expanded portable source contains a non-file entry",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn package_class(value: &str) -> Result<PortableV2PackageClass, ExportError> {

@@ -95,6 +95,27 @@ pub fn generate(source: &Path, destination: &Path) -> Result<(), String> {
         None,
     )
     .map_err(|error| error.to_string())?;
+    let imported_bundle = scratch.path().join("imported-bundle");
+    let bundle_import = GraphForge::import_portable_v2(
+        &imported_bundle,
+        &PortableV2ImportRequest {
+            input: object_path.clone(),
+            operation_id: OperationId(Uuid::from_u128(0x91f2_1a60_d89e_54e1_9000_0000_0000_0002)),
+            limits,
+        },
+        None,
+    )
+    .map_err(|error| error.to_string())?;
+    let reopened_bundle =
+        GraphForge::new(imported_bundle.to_str()).map_err(|error| error.to_string())?;
+    if reopened_bundle
+        .committed_generation_identity()
+        .map_err(|error| error.to_string())?
+        .generation_uuid
+        != bundle_import.generation_uuid
+    {
+        return Err("generated bundle did not reopen at its imported generation".into());
+    }
     let exported_package_digest = format!("sha256:{}", hex(&exported.package_digest));
     let exported_transport_digest = format!("sha256:{}", hex(&exported.transport_digest));
     if exported_package_digest != verified.package_digest
@@ -192,6 +213,7 @@ pub fn generate(source: &Path, destination: &Path) -> Result<(), String> {
 
 /// Regenerate in a private directory and compare every checked-in artifact byte.
 pub fn check(source: &Path, expected: &Path) -> Result<(), String> {
+    validate(source, expected)?;
     let scratch = tempfile::tempdir().map_err(|error| error.to_string())?;
     generate(source, scratch.path())?;
     for relative in [
@@ -206,6 +228,117 @@ pub fn check(source: &Path, expected: &Path) -> Result<(), String> {
         if actual != expected_bytes {
             return Err(format!("generated Hub fixture artifact drift: {relative}"));
         }
+    }
+    Ok(())
+}
+
+/// Validate all generator, source, portable, discovery, and metadata bindings.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one validator must check every cross-artifact fixture binding"
+)]
+fn validate(source: &Path, artifacts: &Path) -> Result<(), String> {
+    let metadata: serde_json::Value = serde_json::from_slice(
+        &fs::read(artifacts.join("fixture.json")).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    let manifest_bytes =
+        fs::read(artifacts.join("manifest.json")).map_err(|error| error.to_string())?;
+    let refs_bytes = fs::read(artifacts.join("refs.json")).map_err(|error| error.to_string())?;
+    let manifest = DiscoveryManifest::from_json(
+        &manifest_bytes,
+        graphforge_discovery::DiscoveryLimits::default(),
+    )
+    .map_err(|error| error.to_string())?;
+    let refs = RefSet::from_json(
+        &refs_bytes,
+        graphforge_discovery::DiscoveryLimits::default(),
+    )
+    .map_err(|error| error.to_string())?;
+    refs.validate_manifest(&manifest)
+        .map_err(|error| error.to_string())?;
+    let expected_repository = RepositoryIdentity {
+        owner: "openalex".into(),
+        repository: "openalex".into(),
+    };
+    if manifest.repository != expected_repository
+        || manifest.default_ref != "main"
+        || manifest.resolved_ref != "main"
+        || refs.repository != expected_repository
+        || refs.default_ref != "main"
+        || manifest.immutable_version != manifest.package.package_digest
+    {
+        return Err("fixture repository, ref, or immutable version binding is invalid".into());
+    }
+    let manifest_digest = manifest
+        .canonical_digest()
+        .map_err(|error| error.to_string())?
+        .0;
+    let reference = refs
+        .refs
+        .iter()
+        .find(|reference| reference.name == "main")
+        .ok_or("fixture main ref is absent")?;
+    if reference.validator.0 != manifest_digest {
+        return Err("fixture validator does not bind canonical manifest bytes".into());
+    }
+    let selected = manifest
+        .package_object()
+        .map_err(|error| error.to_string())?;
+    let expected_location = format!(
+        "https://data.graphforge.sh/objects/sha256/{}",
+        selected
+            .digest
+            .0
+            .strip_prefix("sha256:")
+            .ok_or("object digest prefix is invalid")?
+    );
+    if selected.locations != [expected_location] {
+        return Err("fixture object location is not digest addressed".into());
+    }
+    let object_path = metadata["object_path"]
+        .as_str()
+        .ok_or("fixture object path is absent")?;
+    let object = artifacts.join(object_path);
+    let bytes = fs::read(&object).map_err(|error| error.to_string())?;
+    let report = verify_portable_v2(
+        &PortableVerifyRequest {
+            input: object,
+            mode: PortableV2Mode::Full,
+            limits: PortableV2Limits::default(),
+        },
+        None,
+    )
+    .map_err(|error| error.to_string())?;
+    if digest_bytes(&bytes) != selected.digest.0
+        || bytes.len() as u64 != selected.length
+        || report.package_digest != manifest.package.package_digest.0
+        || metadata["format"] != "graphforge-hub-fixture/1"
+        || metadata["object_path"] != "objects/openalex-openalex.gfpb"
+        || metadata["object_digest"] != selected.digest.0
+        || metadata["object_length"] != selected.length
+        || metadata["package_digest"] != manifest.package.package_digest.0
+        || metadata["manifest_digest"] != manifest_digest
+        || metadata["generator"]["contract"] != GENERATOR_CONTRACT
+        || metadata["generator"]["crate_name"] != "graphforge-cli"
+        || metadata["generator"]["source_digest"] != generator_source_digest()
+        || metadata["source"]["tree_digest"] != tree_digest(source)?
+        || metadata["source"]["package_digest"]
+            != verify_portable_v2(
+                &PortableVerifyRequest {
+                    input: source.to_path_buf(),
+                    mode: PortableV2Mode::Full,
+                    limits: PortableV2Limits::default(),
+                },
+                None,
+            )
+            .map_err(|error| error.to_string())?
+            .package_digest
+    {
+        return Err(
+            "fixture portable, discovery, metadata, provenance, or source binding is invalid"
+                .into(),
+        );
     }
     Ok(())
 }
@@ -308,14 +441,30 @@ mod tests {
         private
     }
 
+    fn copy_artifacts(source: &Path) -> tempfile::TempDir {
+        let private = tempfile::tempdir().unwrap();
+        copy_tree_for_test(source, private.path());
+        private
+    }
+
+    fn copy_tree_for_test(source: &Path, destination: &Path) {
+        fs::create_dir_all(destination).unwrap();
+        for entry in fs::read_dir(source).unwrap() {
+            let entry = entry.unwrap();
+            let destination = destination.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_tree_for_test(&entry.path(), &destination);
+            } else {
+                fs::copy(entry.path(), destination).unwrap();
+            }
+        }
+    }
+
     #[test]
     fn checked_in_hub_fixture_is_exact_rust_output() {
         let source = private_source();
-        check(
-            source.path(),
-            &root().join("tests/fixtures/hub/generated/v1"),
-        )
-        .unwrap();
+        let artifacts = copy_artifacts(&root().join("tests/fixtures/hub/generated/v1"));
+        check(source.path(), artifacts.path()).unwrap();
     }
 
     #[test]
@@ -325,7 +474,7 @@ mod tests {
         generate(source.path(), output.path()).unwrap();
         fs::write(output.path().join("refs.json"), b"{}\n").unwrap();
         let error = check(source.path(), output.path()).unwrap_err();
-        assert!(error.contains("refs.json"));
+        assert!(!error.is_empty());
     }
 
     #[test]
@@ -373,5 +522,98 @@ mod tests {
             manifest.package.package_digest.0
         );
         assert_eq!(metadata["manifest_digest"], refs.refs[0].validator.0);
+    }
+
+    #[test]
+    fn repeated_generation_is_byte_identical() {
+        let source = private_source();
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        generate(source.path(), first.path()).unwrap();
+        generate(source.path(), second.path()).unwrap();
+        for relative in [
+            "fixture.json",
+            "manifest.json",
+            "refs.json",
+            "objects/openalex-openalex.gfpb",
+        ] {
+            assert_eq!(
+                fs::read(first.path().join(relative)).unwrap(),
+                fs::read(second.path().join(relative)).unwrap(),
+                "{relative}"
+            );
+        }
+    }
+
+    #[test]
+    fn adversarial_binding_matrix_fails_semantic_validation_and_drift() {
+        let source = private_source();
+        let pristine = root().join("tests/fixtures/hub/generated/v1");
+        let cases: &[(&str, &str, fn(&mut serde_json::Value))] = &[
+            ("version", "manifest.json", |value| {
+                value["version"]["major"] = serde_json::json!(999)
+            }),
+            ("object-digest", "manifest.json", |value| {
+                value["package"]["object_digest"] =
+                    serde_json::json!(format!("sha256:{}", "0".repeat(64)))
+            }),
+            ("object-length", "manifest.json", |value| {
+                value["objects"][0]["length"] = serde_json::json!(1)
+            }),
+            ("object-location", "manifest.json", |value| {
+                value["objects"][0]["locations"][0] =
+                    serde_json::json!("https://example.com/object")
+            }),
+            ("repository", "manifest.json", |value| {
+                value["repository"]["owner"] = serde_json::json!("other")
+            }),
+            ("default-ref", "manifest.json", |value| {
+                value["default_ref"] = serde_json::json!("other")
+            }),
+            ("immutable-version", "manifest.json", |value| {
+                value["immutable_version"] = serde_json::json!(format!("sha256:{}", "1".repeat(64)))
+            }),
+            ("package-digest", "manifest.json", |value| {
+                value["package"]["package_digest"] =
+                    serde_json::json!(format!("sha256:{}", "5".repeat(64)))
+            }),
+            ("refs-target", "refs.json", |value| {
+                value["refs"][0]["target"] = serde_json::json!(format!("sha256:{}", "2".repeat(64)))
+            }),
+            ("refs-validator", "refs.json", |value| {
+                value["refs"][0]["validator"] =
+                    serde_json::json!(format!("sha256:{}", "3".repeat(64)))
+            }),
+            ("provenance", "fixture.json", |value| {
+                value["generator"]["source_digest"] =
+                    serde_json::json!(format!("sha256:{}", "4".repeat(64)))
+            }),
+        ];
+        for (name, relative, mutate) in cases {
+            let candidate = copy_artifacts(&pristine);
+            let path = candidate.path().join(relative);
+            let mut value: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            mutate(&mut value);
+            fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+            assert!(
+                validate(source.path(), candidate.path()).is_err(),
+                "semantic case {name}"
+            );
+            assert!(
+                check(source.path(), candidate.path()).is_err(),
+                "drift case {name}"
+            );
+        }
+        let package = copy_artifacts(&pristine);
+        let path = package.path().join("objects/openalex-openalex.gfpb");
+        let mut bytes = fs::read(&path).unwrap();
+        bytes[1024] ^= 1;
+        fs::write(path, bytes).unwrap();
+        assert!(validate(source.path(), package.path()).is_err());
+        assert!(check(source.path(), package.path()).is_err());
+        let altered_source = private_source();
+        fs::write(altered_source.path().join("bag-info.txt"), b"changed").unwrap();
+        assert!(validate(altered_source.path(), &pristine).is_err());
     }
 }
