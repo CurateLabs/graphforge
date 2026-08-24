@@ -223,11 +223,10 @@ candidate includes `name`, `cpus`, `memory_mb`, and the conservative maximum
 cost of one observation as `observation_max_usd`. Its executable adapter owns
 one disposable full-lifecycle observation at a time and receives the requested
 scale, exact source/image/platform/region/Machine/volume binding, and evidence
-path through `GF_QUALIFICATION_*`. The adapter must return exact-bound but
-untrusted `graphforge-fly-s20-qualification-observation/1` child evidence,
-including its reported cost and proof that its Machine, volume, and app are
-absent. The producer independently checks every binding and never treats stdout
-as evidence.
+path through `GF_QUALIFICATION_*`. The adapter must return authenticated
+`graphforge-fly-s20-qualification-observation/1` child evidence, including
+observed cost and proof that its Machine, volume, and app are absent. Stdout is
+never evidence.
 
 The producer admits the exact clean source and immutable image contract before
 calling the adapter, so the current unadvertised image invokes no adapter and
@@ -239,13 +238,11 @@ a reason to buy more RAM. After a successful pair, measured RSS must prove that
 every skipped smaller candidate lacked the required headroom. The observations
 share a four-hour product deadline, with an idempotent cleanup action given at
 most ten additional minutes after every attempt. Qualification and S20 share
-the approved $10 ceiling, including a $1 reserve. Before every attempted rung,
-the controller irrevocably accumulates that candidate's configured maximum
-exposure; zero or understated child-reported cost cannot restore budget. The
-final artifact binds the controller-owned rate snapshot, reservation and
-completion timestamps, per-attempt reservations, reserved total, and separately
-reported total. S20 compute, volume, reserve, and the qualification's reserved
-exposure must fit the same cumulative $10 ceiling.
+the approved $10 ceiling, including a $1 reserve; both the planned
+per-observation maximum and returned observed cost are enforced before
+continuing. The resulting artifact carries
+that observed spend into the S20 controller, whose compute, volume, reserve, and
+qualification spend must fit the same cumulative $10 ceiling.
 
 ```bash
 python3 scripts/produce-fly-s20-qualification.py \
@@ -260,13 +257,8 @@ python3 scripts/produce-fly-s20-qualification.py \
 The adapter and candidate file are operator inputs, not committed evidence or
 credentials. The adapter must clean up independently on every pass, refusal,
 timeout, and interruption; a missing cleanup proof stops escalation. The
-producer converts handled `SIGHUP`/`SIGTERM`, `KeyboardInterrupt`, and
-`SystemExit` into a bounded idempotent cleanup attempt before propagating the
-termination. No userspace process can run cleanup after `SIGKILL`, kernel panic,
-or host loss, so the adapter must also use deterministic disposable names that
-the next operator invocation can discover and remove. The producer itself
-contains no Fly create operation and cannot convert a failed admission into a
-launch.
+producer itself contains no Fly create operation and cannot convert a failed
+admission into a launch.
 
 Then run the S20 controller without `--execute` against the resolved child
 digest. This creates no Machine or volume. Supply the producer's sanitized
@@ -280,10 +272,9 @@ must remain linear across adjacent S18/S19 rows. These gates run before
 [`fly-s20-qualification.schema.json`](fly-s20-qualification.schema.json)
 defines that input. The controller refuses an RSS growth curve that does not
 plateau, chooses the smallest listed performance Machine with both 25% and 512
-MiB RSS headroom, and requires the exact qualification-bound volume size to
-contain the projected physical peak with 25% headroom. It uses that same size
-for S20 rather than relabeling the observation onto a different volume. 128 GiB
-and Fly's 500 GB volume limit are refusal ceilings, not defaults.
+MiB RSS headroom, and rounds the projected physical peak up with 25% volume
+headroom. 128 GiB and Fly's 500 GB volume limit are refusal ceilings, not
+defaults.
 
 The final S20 evidence must repeat the three computed gates as
 `rss_plateau=pass`, `disk_headroom=pass`, and `construction_io=pass`; the

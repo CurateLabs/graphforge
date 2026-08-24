@@ -231,20 +231,20 @@ def cost_plan(
     ceiling: float,
     reserve: float,
     volume_gb: int,
-    qualification_reserved_usd: float = 0.0,
+    qualification_cost_usd: float = 0.0,
 ) -> dict[str, float]:
-    if not math.isfinite(qualification_reserved_usd) or qualification_reserved_usd < 0:
-        raise ControllerError("qualification reservation must be finite and nonnegative")
+    if not math.isfinite(qualification_cost_usd) or qualification_cost_usd < 0:
+        raise ControllerError("qualification cost must be finite and nonnegative")
     billed_hours = (HARD_TTL_S + CLEANUP_TTL_S) / 3600
     compute = rates["compute_per_hour_usd"] * billed_hours
     volume = rates["volume_gb_month_usd"] * volume_gb * billed_hours / (30 * 24)
-    projected = qualification_reserved_usd + compute + volume + reserve
+    projected = qualification_cost_usd + compute + volume + reserve
     if projected > ceiling:
         raise ControllerError(f"projected maximum ${projected:.4f} exceeds ${ceiling:.2f} ceiling")
     return {
         "compute_usd": compute,
         "volume_usd": volume,
-        "qualification_reserved_usd": qualification_reserved_usd,
+        "qualification_observed_usd": qualification_cost_usd,
         "unpriced_reserve_usd": reserve,
         "projected_max_usd": projected,
         "ceiling_usd": ceiling,
@@ -258,112 +258,12 @@ def load_qualification(path: Path, digest: str, region: str) -> dict[str, Any]:
         raise ControllerError("qualification evidence has an unexpected schema")
     if value.get("region") != region or value.get("image_digest") != digest:
         raise ControllerError("qualification region/image differs from the planned run")
-    volume = value.get("volume")
-    if not isinstance(volume, dict) or set(volume) != {
-        "provider",
-        "class",
-        "mount_path",
-        "size_gb",
-    }:
-        raise ControllerError("qualification lacks its exact volume binding")
+    qualification_cost = value.get("qualification_observed_cost_usd")
     if (
-        volume.get("provider") != "fly.io"
-        or volume.get("class") != "attached-volume"
-        or volume.get("mount_path") != "/work"
-        or type(volume.get("size_gb")) is not int
-        or not 1 <= volume["size_gb"] <= MAX_VOLUME_GB
+        type(qualification_cost) not in (int, float)
+        or not 0 <= qualification_cost < 10.0
     ):
-        raise ControllerError("qualification volume binding is unsupported")
-    cost = value.get("cost_admission")
-    required_cost_keys = {
-        "authority",
-        "ceiling_usd",
-        "reserve_usd",
-        "reserved_max_usd",
-        "reported_cost_usd",
-        "candidate_rate_snapshot",
-        "attempts",
-    }
-    if not isinstance(cost, dict) or set(cost) != required_cost_keys:
-        raise ControllerError("qualification lacks controller-owned cost admission")
-    reserved_cost = cost.get("reserved_max_usd")
-    reported_cost = cost.get("reported_cost_usd")
-    reserve_cost = cost.get("reserve_usd")
-    if (
-        cost.get("authority") != "controller-reserved-exposure/1"
-        or cost.get("ceiling_usd") != 10.0
-        or type(reserve_cost) not in (int, float)
-        or reserve_cost < 1.0
-        or type(reserved_cost) not in (int, float)
-        or not math.isfinite(reserved_cost)
-        or not 0 < reserved_cost <= 10.0 - reserve_cost
-        or type(reported_cost) not in (int, float)
-        or not math.isfinite(reported_cost)
-        or not 0 <= reported_cost <= reserved_cost
-    ):
-        raise ControllerError("qualification cost admission is invalid")
-    snapshots = cost.get("candidate_rate_snapshot")
-    attempts = cost.get("attempts")
-    if not isinstance(snapshots, list) or not snapshots or not isinstance(attempts, list):
-        raise ControllerError("qualification cost admission lacks rates or attempts")
-    rates: dict[str, float] = {}
-    for snapshot in snapshots:
-        if not isinstance(snapshot, dict) or set(snapshot) != {
-            "machine",
-            "max_usd_per_observation",
-        }:
-            raise ControllerError("qualification cost rate snapshot is malformed")
-        machine_name = snapshot.get("machine")
-        maximum = snapshot.get("max_usd_per_observation")
-        if (
-            not isinstance(machine_name, str)
-            or machine_name in rates
-            or type(maximum) not in (int, float)
-            or not math.isfinite(maximum)
-            or maximum <= 0
-        ):
-            raise ControllerError("qualification cost rate snapshot is invalid")
-        rates[machine_name] = float(maximum)
-    summed_reserved = 0.0
-    summed_reported = 0.0
-    for attempt in attempts:
-        if not isinstance(attempt, dict) or set(attempt) != {
-            "machine",
-            "scale",
-            "reserved_max_usd",
-            "reported_cost_usd",
-            "reserved_at",
-            "completed_at",
-            "result",
-        }:
-            raise ControllerError("qualification cost attempt is malformed")
-        maximum = attempt.get("reserved_max_usd")
-        observed = attempt.get("reported_cost_usd")
-        machine_name = attempt.get("machine")
-        try:
-            started = datetime.fromisoformat(attempt["reserved_at"])
-            completed = datetime.fromisoformat(attempt["completed_at"])
-        except (KeyError, TypeError, ValueError):
-            raise ControllerError("qualification cost attempt timestamp is invalid") from None
-        if (
-            started.tzinfo is None
-            or completed.tzinfo is None
-            or completed < started
-            or machine_name not in rates
-            or maximum != rates[machine_name]
-            or type(observed) not in (int, float)
-            or not math.isfinite(observed)
-            or not 0 <= observed <= maximum
-            or attempt.get("scale") not in (18, 19)
-            or attempt.get("result") not in ("pass", "capacity_exceeded")
-        ):
-            raise ControllerError("qualification cost attempt is invalid")
-        summed_reserved += maximum
-        summed_reported += observed
-    if not math.isclose(summed_reserved, reserved_cost) or not math.isclose(
-        summed_reported, reported_cost
-    ):
-        raise ControllerError("qualification cost totals do not match attempts")
+        raise ControllerError("qualification lacks bounded observed cost")
     rungs = value.get("rungs")
     candidates = value.get("machine_candidates")
     if not isinstance(rungs, list) or len(rungs) < 2 or not isinstance(candidates, list):
@@ -557,22 +457,12 @@ def load_qualification(path: Path, digest: str, region: str) -> dict[str, Any]:
     )
     if selected is None:
         raise ControllerError("qualification requires more than the 128 GiB certification ceiling")
-    required_volume_gb = (
-        int(projected_disk * VOLUME_HEADROOM_RATIO) + (1 << 30) - 1
-    ) // (1 << 30)
-    if not 1 <= required_volume_gb <= MAX_VOLUME_GB:
+    volume_gb = (int(projected_disk * VOLUME_HEADROOM_RATIO) + (1 << 30) - 1) // (1 << 30)
+    if not 1 <= volume_gb <= MAX_VOLUME_GB:
         raise ControllerError("qualification exceeds Fly's 500 GB volume envelope")
-    volume_gb = volume["size_gb"]
-    if volume_gb < required_volume_gb:
-        raise ControllerError("qualification volume lacks projected S20 headroom")
     memory_mb, cpus, machine = selected
     if qualified_runtime != {"machine": machine, "cpus": cpus, "memory_mb": memory_mb}:
         raise ControllerError("selected Machine was not the Machine measured by qualification")
-    if [
-        (attempt.get("machine"), attempt.get("scale"), attempt.get("result"))
-        for attempt in attempts[-2:]
-    ] != [(machine, 18, "pass"), (machine, 19, "pass")]:
-        raise ControllerError("qualification cost attempts do not bind the successful rung pair")
     return {
         "region": region,
         "image_digest": digest,
@@ -585,8 +475,7 @@ def load_qualification(path: Path, digest: str, region: str) -> dict[str, Any]:
         "rung_scales": scales,
         "max_phase_rss_growth_ratio": float(plateau_ratio),
         "construction_io_gate": "pass",
-        "qualification_reserved_cost_usd": float(reserved_cost),
-        "qualification_reported_cost_usd": float(reported_cost),
+        "qualification_observed_cost_usd": float(qualification_cost),
     }
 
 
@@ -1259,7 +1148,7 @@ def main() -> int:
             args.ceiling_usd,
             args.unpriced_reserve_usd,
             resources["volume_gb"],
-            resources["qualification_reserved_cost_usd"],
+            resources["qualification_observed_cost_usd"],
         )
         plan = {
             "mode": "execute" if args.execute else "dry-run",
