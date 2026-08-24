@@ -3785,7 +3785,7 @@ pub fn set_edge_properties_rewrite(
 ) -> Result<u64, GfError> {
     let mut staged = RewriteBatch::new();
     let touched = stage_set_edge_properties(&mut staged, dir, rel_stem, updates)?;
-    staged.commit()?;
+    crate::generation::commit_topology_aware(staged, dir)?;
     Ok(touched)
 }
 
@@ -3802,7 +3802,7 @@ pub fn remove_edge_properties(
 ) -> Result<u64, GfError> {
     let mut staged = RewriteBatch::new();
     let touched = stage_remove_edge_properties(&mut staged, dir, rel_stem, removals)?;
-    staged.commit()?;
+    crate::generation::commit_topology_aware(staged, dir)?;
     Ok(touched)
 }
 
