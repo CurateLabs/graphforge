@@ -614,10 +614,9 @@ impl SemanticStorageBindings {
             .filter(|binding| binding.route_kind == SemanticRouteKind::Entity)
             .map(|binding| binding.storage_id)
             .collect::<BTreeSet<_>>();
-        let topology_path = graph_root.join("topology/nodes.parquet");
         let mut topology_rows_scanned = 0_u64;
         let mut max_topology_batch_rows = 0_usize;
-        if topology_path.exists() {
+        for topology_path in crate::mutator::node_parquet_files(graph_root)? {
             use arrow::array::{Array, ListArray, UInt32Array};
             use arrow::datatypes::DataType;
             preflight_parquet_footer(&topology_path)?;
@@ -1027,55 +1026,56 @@ impl SemanticStorageBindings {
     fn validate_topology_ids(&self, graph_root: &Path) -> Result<(), GfError> {
         use arrow::array::{Array, ListArray, UInt32Array};
 
-        let path = graph_root.join("topology/nodes.parquet");
-        if !path.exists() {
-            return Ok(());
-        }
         let entity_ids = self
             .bindings
             .iter()
             .filter(|binding| binding.route_kind == SemanticRouteKind::Entity)
             .map(|binding| binding.storage_id)
             .collect::<BTreeSet<_>>();
-        preflight_parquet_footer(&path)?;
-        let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
-            File::open(path).map_err(|_| corrupt("semantic topology cannot be opened"))?,
-        )
-        .map_err(|_| corrupt("semantic topology metadata is invalid"))?
-        .with_batch_size(8192)
-        .build()
-        .map_err(|_| corrupt("semantic topology reader cannot be built"))?;
-        for batch in reader {
-            let batch = batch.map_err(|_| corrupt("semantic topology batch is invalid"))?;
-            let primary = batch
-                .column_by_name("type_id")
-                .and_then(|array| array.as_any().downcast_ref::<UInt32Array>())
-                .ok_or_else(|| corrupt("semantic topology type_id is missing or malformed"))?;
-            let type_ids = batch
-                .column_by_name("type_ids")
-                .and_then(|array| array.as_any().downcast_ref::<ListArray>())
-                .ok_or_else(|| corrupt("semantic topology type_ids is missing or malformed"))?;
-            for row in 0..type_ids.len() {
-                if type_ids.is_null(row) {
-                    return Err(corrupt("semantic topology type_ids is null"));
-                }
-                let values = type_ids.value(row);
-                let values = values
-                    .as_any()
-                    .downcast_ref::<UInt32Array>()
-                    .ok_or_else(|| corrupt("semantic topology type_ids has wrong element type"))?;
-                let primary_id = primary.value(row);
-                if !values.values().contains(&primary_id) {
-                    return Err(corrupt(
-                        "semantic topology scalar type_id is absent from normalized type_ids",
-                    ));
-                }
-                for id in values.values() {
-                    let runtime = id & ((1 << 30) | (1 << 31)) != 0;
-                    if !runtime && !entity_ids.contains(id) {
+        for path in crate::mutator::node_parquet_files(graph_root)? {
+            preflight_parquet_footer(&path)?;
+            let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+                File::open(path).map_err(|_| corrupt("semantic topology cannot be opened"))?,
+            )
+            .map_err(|_| corrupt("semantic topology metadata is invalid"))?
+            .with_batch_size(8192)
+            .build()
+            .map_err(|_| corrupt("semantic topology reader cannot be built"))?;
+            for batch in reader {
+                let batch = batch.map_err(|_| corrupt("semantic topology batch is invalid"))?;
+                let primary = batch
+                    .column_by_name("type_id")
+                    .and_then(|array| array.as_any().downcast_ref::<UInt32Array>())
+                    .ok_or_else(|| corrupt("semantic topology type_id is missing or malformed"))?;
+                let type_ids = batch
+                    .column_by_name("type_ids")
+                    .and_then(|array| array.as_any().downcast_ref::<ListArray>())
+                    .ok_or_else(|| corrupt("semantic topology type_ids is missing or malformed"))?;
+                for row in 0..type_ids.len() {
+                    if type_ids.is_null(row) {
+                        return Err(corrupt("semantic topology type_ids is null"));
+                    }
+                    let values = type_ids.value(row);
+                    let values =
+                        values
+                            .as_any()
+                            .downcast_ref::<UInt32Array>()
+                            .ok_or_else(|| {
+                                corrupt("semantic topology type_ids has wrong element type")
+                            })?;
+                    let primary_id = primary.value(row);
+                    if !values.values().contains(&primary_id) {
                         return Err(corrupt(
-                            "semantic topology contains an unbound ontology entity id",
+                            "semantic topology scalar type_id is absent from normalized type_ids",
                         ));
+                    }
+                    for id in values.values() {
+                        let runtime = id & ((1 << 30) | (1 << 31)) != 0;
+                        if !runtime && !entity_ids.contains(id) {
+                            return Err(corrupt(
+                                "semantic topology contains an unbound ontology entity id",
+                            ));
+                        }
                     }
                 }
             }

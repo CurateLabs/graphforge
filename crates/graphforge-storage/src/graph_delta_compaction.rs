@@ -621,7 +621,7 @@ fn canonical_topology_rows(
     cancel: Option<&AtomicBool>,
 ) -> Result<u64, GfError> {
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-    let mut paths = vec![root.join("topology/nodes.parquet")];
+    let mut paths = crate::mutator::node_parquet_files(root)?;
     let edges = root.join("topology/edges");
     if edges.exists() {
         for entry in fs::read_dir(&edges)

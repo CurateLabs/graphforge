@@ -926,11 +926,50 @@ fn record_pruning(
 /// # Errors
 /// Propagates Parquet / Arrow errors encountered while reading.
 pub fn read_nodes(dir: &Path) -> Result<Vec<RecordBatch>, DataFusionError> {
-    let path = dir.join("topology").join("nodes.parquet");
-    let batches =
-        normalize_topology_nodes(read_parquet_or_empty(&path, TOPOLOGY_NODES_SCHEMA.clone())?)?;
+    let paths = crate::mutator::node_parquet_files(dir)
+        .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+    let mut batches = Vec::new();
+    for path in paths {
+        batches.extend(normalize_topology_nodes(read_parquet_or_empty(
+            &path,
+            TOPOLOGY_NODES_SCHEMA.clone(),
+        )?)?);
+    }
+    if batches.is_empty() {
+        batches.push(RecordBatch::new_empty(TOPOLOGY_NODES_SCHEMA.clone()));
+    }
+    let mut uuids = std::collections::HashSet::new();
+    let mut surrogates = std::collections::HashSet::new();
+    for batch in &batches {
+        let uuid = batch
+            .column_by_name("node_uuid")
+            .and_then(|array| {
+                array
+                    .as_any()
+                    .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
+            })
+            .ok_or_else(|| DataFusionError::Execution("node_uuid is not fixed binary".into()))?;
+        let surrogate = batch
+            .column_by_name("node_id")
+            .and_then(|array| array.as_any().downcast_ref::<arrow::array::UInt64Array>())
+            .ok_or_else(|| DataFusionError::Execution("node_id is not UInt64".into()))?;
+        for row in 0..batch.num_rows() {
+            if !uuids.insert(uuid.value(row).to_vec()) || !surrogates.insert(surrogate.value(row)) {
+                return Err(DataFusionError::Execution(
+                    "canonical node shards contain a duplicate UUID or surrogate".into(),
+                ));
+            }
+        }
+    }
     crate::io_stats::record_node_full_read(total_rows(&batches));
     Ok(batches)
+}
+
+/// Whether at least one canonical legacy or sharded node file exists.
+pub fn node_topology_present(dir: &Path) -> Result<bool, DataFusionError> {
+    Ok(!crate::mutator::node_parquet_files(dir)
+        .map_err(|error| DataFusionError::Execution(error.to_string()))?
+        .is_empty())
 }
 
 /// Like [`read_nodes`] but returns only rows whose `node_id` is in `node_ids` —
@@ -962,15 +1001,23 @@ pub fn read_nodes_filtered_observed(
     node_ids: &std::collections::HashSet<u64>,
     observer: Option<&std::sync::Arc<dyn crate::io_stats::FilteredReadObserver>>,
 ) -> Result<Vec<RecordBatch>, DataFusionError> {
-    let path = dir.join("topology").join("nodes.parquet");
-    normalize_topology_nodes(read_parquet_filtered_u64(
-        &path,
-        TOPOLOGY_NODES_SCHEMA.clone(),
-        "node_id",
-        node_ids,
-        FilteredReadKind::Node,
-        observer,
-    )?)
+    let paths = crate::mutator::node_parquet_files(dir)
+        .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+    let mut batches = Vec::new();
+    for path in paths {
+        batches.extend(normalize_topology_nodes(read_parquet_filtered_u64(
+            &path,
+            TOPOLOGY_NODES_SCHEMA.clone(),
+            "node_id",
+            node_ids,
+            FilteredReadKind::Node,
+            observer,
+        )?)?);
+    }
+    if batches.is_empty() {
+        batches.push(RecordBatch::new_empty(TOPOLOGY_NODES_SCHEMA.clone()));
+    }
+    Ok(batches)
 }
 
 /// Return the largest `edge_id` surrogate across every edge file under
@@ -999,7 +1046,13 @@ pub(crate) fn max_edge_id(dir: &Path) -> Result<u64, DataFusionError> {
 /// node table. Canonical topology keeps surrogate ids strictly increasing, so
 /// only the final bounded Parquet row group is needed.
 pub(crate) fn max_node_id(dir: &Path) -> Result<u64, DataFusionError> {
-    max_ordered_u64_tail(&dir.join("topology/nodes.parquet"), "node_id")
+    let mut max = 0;
+    for path in crate::mutator::node_parquet_files(dir)
+        .map_err(|error| DataFusionError::Execution(error.to_string()))?
+    {
+        max = max.max(max_ordered_u64_tail(&path, "node_id")?);
+    }
+    Ok(max)
 }
 
 fn max_ordered_u64_tail(path: &Path, column: &str) -> Result<u64, DataFusionError> {
@@ -1133,24 +1186,28 @@ pub fn visit_nodes_batched<F>(
 where
     F: FnMut(&RecordBatch) -> Result<bool, DataFusionError>,
 {
-    let path = dir.join("topology").join("nodes.parquet");
-    if !path.exists() {
+    let paths = crate::mutator::node_parquet_files(dir)
+        .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+    if paths.is_empty() {
         let empty = RecordBatch::new_empty(TOPOLOGY_NODES_SCHEMA.clone());
         let _ = visit(&empty)?;
         return Ok(());
     }
-    let file = File::open(&path).map_err(|e| io_err(&e))?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(parquet_err)?;
-    let builder = builder.with_batch_size(batch_size.max(1));
-    let reader = builder.build().map_err(parquet_err)?;
     let mut any = false;
-    for batch in reader {
-        any = true;
-        let batch = batch.map_err(parquet_err)?;
-        let normalized = normalize_topology_nodes(vec![batch])?;
-        for b in &normalized {
-            if !visit(b)? {
-                return Ok(());
+    for path in paths {
+        let file = File::open(&path).map_err(|e| io_err(&e))?;
+        let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+            .map_err(parquet_err)?
+            .with_batch_size(batch_size.max(1))
+            .build()
+            .map_err(parquet_err)?;
+        for batch in reader {
+            any = true;
+            let normalized = normalize_topology_nodes(vec![batch.map_err(parquet_err)?])?;
+            for b in &normalized {
+                if !visit(b)? {
+                    return Ok(());
+                }
             }
         }
     }
@@ -1225,14 +1282,21 @@ fn list_parquet_stems(dir: &Path) -> Vec<String> {
 /// [`TableProvider`] for `topology/nodes.parquet`.
 #[derive(Debug, Clone)]
 pub struct TopologyNodeTable {
-    path: PathBuf,
+    paths: Vec<PathBuf>,
 }
 
 impl TopologyNodeTable {
     /// Create a table backed by the given Parquet file path.
     #[must_use]
     pub fn new(path: PathBuf) -> Self {
-        Self { path }
+        Self { paths: vec![path] }
+    }
+
+    fn open_project(dir: &Path) -> Result<Self, DataFusionError> {
+        Ok(Self {
+            paths: crate::mutator::node_parquet_files(dir)
+                .map_err(|error| DataFusionError::Execution(error.to_string()))?,
+        })
     }
 }
 
@@ -1254,10 +1318,15 @@ impl TableProvider for TopologyNodeTable {
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
         // Existence only — no Parquet decode during planning (#339).
-        let fragment = ParquetFragment::for_path(self.path.clone(), true);
+        let fragments = self
+            .paths
+            .iter()
+            .cloned()
+            .map(|path| ParquetFragment::for_path(path, true))
+            .collect();
         scan_fragments(
             TOPOLOGY_NODES_SCHEMA.clone(),
-            vec![fragment],
+            fragments,
             projection,
             limit,
             state.config().batch_size(),
@@ -1723,10 +1792,9 @@ impl GraphCatalog {
         let mut schema = GraphSchema::new();
 
         // ---- topology nodes ----
-        let nodes_path = dir.join("topology").join("nodes.parquet");
         schema.register(
             "topology_nodes",
-            Arc::new(TopologyNodeTable::new(nodes_path)),
+            Arc::new(TopologyNodeTable::open_project(dir)?),
         );
 
         // ---- typed edge tables ----
@@ -2087,7 +2155,12 @@ mod tests {
     }
 
     fn write_nodes_parquet(path: &Path) {
-        let uuid_bytes: Vec<u8> = vec![1u8; 16];
+        write_nodes_parquet_value(path, 1, 1);
+    }
+
+    fn write_nodes_parquet_value(path: &Path, uuid_byte: u8, node_id: u64) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let uuid_bytes: Vec<u8> = vec![uuid_byte; 16];
         let uuid_arr =
             FixedSizeBinaryArray::try_from_iter(std::iter::once(uuid_bytes.clone())).unwrap();
         let ts =
@@ -2103,7 +2176,7 @@ mod tests {
             TOPOLOGY_NODES_SCHEMA.clone(),
             vec![
                 Arc::new(uuid_arr),
-                Arc::new(UInt64Array::from(vec![1u64])),
+                Arc::new(UInt64Array::from(vec![node_id])),
                 Arc::new(UInt32Array::from(vec![0u32])),
                 Arc::new(labels),
                 Arc::new(ts.clone()),
@@ -2121,6 +2194,36 @@ mod tests {
         .unwrap();
         writer.write(&batch).unwrap();
         writer.close().unwrap();
+    }
+
+    #[test]
+    fn ordinary_node_readers_union_legacy_and_canonical_shards() {
+        let dir = TempDir::new().unwrap();
+        write_nodes_parquet_value(&dir.path().join("topology/nodes.parquet"), 1, 1);
+        write_nodes_parquet_value(
+            &dir.path()
+                .join("topology/nodes/00000000000000000002-00000000000000000002.parquet"),
+            2,
+            2,
+        );
+        let batches = read_nodes(dir.path()).unwrap();
+        assert_eq!(total_rows(&batches), 2);
+        assert_eq!(max_node_id(dir.path()).unwrap(), 2);
+        let filtered =
+            read_nodes_filtered(dir.path(), &std::collections::HashSet::from([2])).unwrap();
+        assert_eq!(total_rows(&filtered), 1);
+        let mut visited = 0;
+        visit_nodes_batched(dir.path(), 1, |batch| {
+            visited += batch.num_rows();
+            Ok(true)
+        })
+        .unwrap();
+        assert_eq!(visited, 2);
+
+        std::fs::remove_file(dir.path().join("topology/nodes.parquet")).unwrap();
+        let shard_only = read_nodes(dir.path()).unwrap();
+        assert_eq!(total_rows(&shard_only), 1);
+        assert_eq!(max_node_id(dir.path()).unwrap(), 2);
     }
 
     #[test]
@@ -2213,6 +2316,29 @@ mod tests {
         let batches = df.collect().await.unwrap();
         let total: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total, 1);
+    }
+
+    #[tokio::test]
+    async fn topology_node_table_scan_unions_mixed_layout() {
+        let dir = TempDir::new().unwrap();
+        write_nodes_parquet_value(&dir.path().join("topology/nodes.parquet"), 1, 1);
+        write_nodes_parquet_value(
+            &dir.path()
+                .join("topology/nodes/00000000000000000002-00000000000000000002.parquet"),
+            2,
+            2,
+        );
+        let table = TopologyNodeTable::open_project(dir.path()).unwrap();
+        let ctx = SessionContext::new();
+        ctx.register_table("nodes", Arc::new(table)).unwrap();
+        let batches = ctx
+            .sql("SELECT node_id FROM nodes ORDER BY node_id")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 2);
     }
 
     #[tokio::test]

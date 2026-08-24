@@ -103,8 +103,8 @@ fn materialize_graph_projection_with_options(
     validate_distinct_paths(source, target)?;
     validate_graph_empty_target(target)?;
 
-    let nodes_path = source.join("topology/nodes.parquet");
-    let node_ids = uuid_rows(&nodes_path, "node_uuid")?;
+    let node_paths = crate::mutator::node_parquet_files(source).map_err(storage)?;
+    let node_ids = uuid_rows_files(&node_paths, "node_uuid")?;
     require_present(&selection.node_uuids, &node_ids, "node")?;
 
     let edge_files = sorted_parquet_files(&source.join("topology/edges"))?;
@@ -121,13 +121,16 @@ fn materialize_graph_projection_with_options(
 
     clear_graph_empty_target(target)?;
     fs::create_dir_all(target).map_err(storage)?;
-    project_parquet_file(
-        &nodes_path,
-        &target.join("topology/nodes.parquet"),
-        "node_uuid",
-        &selected_nodes,
-        &selection.exclude_properties,
-    )?;
+    for path in node_paths {
+        let relative = path.strip_prefix(source).map_err(storage)?;
+        project_parquet_file(
+            &path,
+            &target.join(relative),
+            "node_uuid",
+            &selected_nodes,
+            &selection.exclude_properties,
+        )?;
+    }
     project_parquet_directory(
         &source.join("topology/edges"),
         &target.join("topology/edges"),
@@ -236,6 +239,18 @@ fn uuid_rows(path: &Path, column: &str) -> Result<BTreeSet<GraphUuid>, GfError> 
         let values = uuid_column(&batch, column)?;
         for row in 0..batch.num_rows() {
             if !rows.insert(uuid_at(values, row)?) {
+                return Err(validation(format!("graph contains a duplicate {column}")));
+            }
+        }
+    }
+    Ok(rows)
+}
+
+fn uuid_rows_files(paths: &[PathBuf], column: &str) -> Result<BTreeSet<GraphUuid>, GfError> {
+    let mut rows = BTreeSet::new();
+    for path in paths {
+        for value in uuid_rows(path, column)? {
+            if !rows.insert(value) {
                 return Err(validation(format!("graph contains a duplicate {column}")));
             }
         }
@@ -356,8 +371,7 @@ fn copy_runtime_catalog(source: &Path, target: &Path) -> Result<(), GfError> {
 )]
 fn selected_catalog_rows(target: &Path, catalog: &RecordBatch) -> Result<Vec<usize>, GfError> {
     let mut type_ids = BTreeSet::new();
-    let nodes = target.join("topology/nodes.parquet");
-    if nodes.exists() {
+    for nodes in crate::mutator::node_parquet_files(target).map_err(storage)? {
         for batch in read_parquet(&nodes)? {
             if let Some(column) = batch.column_by_name("type_id") {
                 let values = column
@@ -531,10 +545,7 @@ pub(crate) fn write_parquet(path: &Path, batch: &RecordBatch) -> Result<(), GfEr
 
 pub(crate) fn projected_graph_fingerprint(root: &Path) -> Result<[u8; 32], GfError> {
     let mut paths = Vec::new();
-    let nodes = root.join("topology/nodes.parquet");
-    if nodes.exists() {
-        paths.push(nodes);
-    }
+    paths.extend(crate::mutator::node_parquet_files(root).map_err(storage)?);
     for directory in ["topology/edges", "properties", "edge_properties"] {
         paths.extend(sorted_parquet_files(&root.join(directory))?);
     }
@@ -551,10 +562,7 @@ pub(crate) fn projected_graph_fingerprint(root: &Path) -> Result<[u8; 32], GfErr
 pub(crate) fn portable_graph_data_fingerprint(root: &Path) -> Result<[u8; 32], GfError> {
     let runtime_entity_names = portable_runtime_entity_names(root)?;
     let mut paths = Vec::new();
-    let nodes = root.join("topology/nodes.parquet");
-    if nodes.exists() {
-        paths.push(nodes);
-    }
+    paths.extend(crate::mutator::node_parquet_files(root).map_err(storage)?);
     for directory in ["topology/edges", "properties", "edge_properties"] {
         paths.extend(sorted_parquet_files(&root.join(directory))?);
     }
@@ -571,11 +579,37 @@ fn fingerprint_graph_paths_with_runtime_names(
     paths: Vec<PathBuf>,
     runtime_entity_names: Option<&BTreeMap<u32, String>>,
 ) -> Result<[u8; 32], GfError> {
+    let (node_paths, paths): (Vec<_>, Vec<_>) = paths.into_iter().partition(|path| {
+        path.strip_prefix(root).is_ok_and(|relative| {
+            relative == Path::new("topology/nodes.parquet")
+                || relative.starts_with("topology/nodes")
+        })
+    });
     let mut writer = CanonicalWriter::new();
     writer.raw(b"GFGP1").map_err(canonical_error)?;
     writer
-        .u32(exact_u32(paths.len(), "graph table count")?)
+        .u32(exact_u32(
+            paths.len() + usize::from(!node_paths.is_empty()),
+            "graph table count",
+        )?)
         .map_err(canonical_error)?;
+    if !node_paths.is_empty() {
+        writer
+            .text("topology/nodes.parquet")
+            .map_err(canonical_error)?;
+        let mut batches = Vec::new();
+        for path in node_paths {
+            batches.extend(read_parquet(&path)?);
+        }
+        let schema = batches
+            .first()
+            .map(RecordBatch::schema)
+            .ok_or_else(|| validation("graph projection node table has no schema"))?;
+        let batch = concat_batches(&schema, &batches).map_err(storage)?;
+        let logical =
+            logical_fingerprint_batch("topology/nodes.parquet", &batch, runtime_entity_names)?;
+        encode_table(&mut writer, &logical)?;
+    }
     for path in paths {
         let relative = path
             .strip_prefix(root)
@@ -1518,6 +1552,40 @@ mod tests {
         ] {
             assert!(!target.path().join(excluded).exists());
         }
+    }
+
+    #[test]
+    fn projection_exports_and_reopens_mixed_node_shards() {
+        let (source, nodes, _) = fixture();
+        let appended = uuid(4);
+        let mut writer =
+            GraphWriter::open_at(source.path(), OntologyMode::Exploratory, TS + 1).unwrap();
+        writer.create_node(appended, TypeId(10)).unwrap();
+        writer.flush().unwrap();
+        let target = TempDir::new().unwrap();
+        let mut selected = nodes
+            .iter()
+            .map(|uuid| *uuid.as_bytes())
+            .collect::<BTreeSet<_>>();
+        selected.insert(*appended.as_bytes());
+        materialize_graph_projection(
+            source.path(),
+            target.path(),
+            &GraphProjectionSelection {
+                node_uuids: selected,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            read_nodes(target.path())
+                .unwrap()
+                .iter()
+                .map(RecordBatch::num_rows)
+                .sum::<usize>(),
+            4
+        );
+        assert!(target.path().join("topology/nodes").is_dir());
     }
 
     #[test]

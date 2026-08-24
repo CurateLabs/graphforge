@@ -1983,7 +1983,13 @@ fn open_membership_index(
         *cached = None;
     }
     if !graphforge_storage::uuid_membership_index_present(&graph.dir) {
-        let has_nodes = graph.dir.join("topology/nodes.parquet").exists();
+        let has_nodes = graphforge_storage::node_topology_present(&graph.dir).map_err(|error| {
+            contract_error(
+                input_kind,
+                BulkValidationReason::ProjectState,
+                &error.to_string(),
+            )
+        })?;
         let has_edges = std::fs::read_dir(graph.dir.join("topology/edges"))
             .ok()
             .is_some_and(|mut entries| entries.any(|entry| entry.is_ok()));

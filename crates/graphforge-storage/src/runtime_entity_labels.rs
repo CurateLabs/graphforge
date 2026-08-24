@@ -424,14 +424,22 @@ fn reconcile_inner(
                      read-only open cannot rewrite topology",
                 ));
             }
-            let (rewritten, remapped) = remap_batches(batches, &remap)?;
-            remapped_label_values = remapped;
+            let mut staged = RewriteBatch::new();
+            for path in crate::mutator::node_parquet_files(dir)? {
+                let source = normalize_topology_nodes(
+                    crate::catalog::read_parquet_or_empty(&path, TOPOLOGY_NODES_SCHEMA.clone())
+                        .map_err(pq_err)?,
+                )
+                .map_err(pq_err)?;
+                let (rewritten, remapped) = remap_batches(source, &remap)?;
+                remapped_label_values = remapped_label_values.saturating_add(remapped);
+                if remapped > 0 {
+                    let merged = arrow::compute::concat_batches(&TOPOLOGY_NODES_SCHEMA, &rewritten)
+                        .map_err(|e| storage_err(e.to_string()))?;
+                    staged.restage(&path, TOPOLOGY_NODES_SCHEMA.clone(), &merged)?;
+                }
+            }
             if remapped_label_values > 0 {
-                let path = dir.join("topology").join("nodes.parquet");
-                let merged = arrow::compute::concat_batches(&TOPOLOGY_NODES_SCHEMA, &rewritten)
-                    .map_err(|e| storage_err(e.to_string()))?;
-                let mut staged = RewriteBatch::new();
-                staged.restage(&path, TOPOLOGY_NODES_SCHEMA.clone(), &merged)?;
                 commit_topology_aware(staged, dir)?;
             }
         }
