@@ -335,12 +335,12 @@ pub use uuid_membership::{
 
 pub mod catalog;
 pub use catalog::{
-    EdgePropertyTable, GraphCatalog, PropertyTable, TopologyNodeTable, TypedEdgeTable,
-    UnionEdgeTable, list_edge_property_stems, list_property_stems, node_property_files,
-    node_property_source_files, node_property_source_fragments, node_topology_present,
-    read_edge_properties, read_edges, read_edges_filtered, read_edges_filtered_observed,
-    read_nodes, read_nodes_filtered, read_nodes_filtered_observed, read_properties,
-    read_properties_batched, topology_node_files, visit_node_fragments_admitted,
+    AdmittedSourceFile, EdgePropertyTable, GraphCatalog, PropertyTable, TopologyNodeTable,
+    TypedEdgeTable, UnionEdgeTable, list_edge_property_stems, list_property_stems,
+    node_property_files, node_property_source_files, node_property_source_fragments,
+    node_topology_present, read_edge_properties, read_edges, read_edges_filtered,
+    read_edges_filtered_observed, read_nodes, read_nodes_filtered, read_nodes_filtered_observed,
+    read_properties, read_properties_batched, topology_node_files, visit_node_fragments_admitted,
     visit_nodes_batched, visit_properties_batched, visit_property_fragments_admitted,
 };
 

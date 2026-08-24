@@ -8,6 +8,9 @@ use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 
 use graphforge_core::GfError;
+use sha2::{Digest as _, Sha256};
+
+use crate::catalog::AdmittedSourceFile;
 
 /// Search manifest format implemented by this release.
 pub const SEARCH_MANIFEST_VERSION: u32 = 1;
@@ -308,6 +311,52 @@ pub struct SearchSourceSnapshot {
 }
 
 impl SearchSourceSnapshot {
+    /// Read the lightweight committed search-generation authority without
+    /// reopening graph payloads.
+    pub fn generation(project_dir: &Path) -> Result<u64, SearchArtifactError> {
+        crate::generation::read_search_generation(project_dir).map_err(|error| {
+            SearchArtifactError::SourceSnapshot {
+                reason: error.to_string(),
+            }
+        })
+    }
+
+    /// Bind evidence captured from the exact handles used for decode to one
+    /// unchanged committed search generation.
+    pub fn from_admitted_files(
+        project_dir: &Path,
+        expected_generation: u64,
+        files: &[AdmittedSourceFile],
+    ) -> Result<Self, SearchArtifactError> {
+        let generation = Self::generation(project_dir)?;
+        if generation != expected_generation {
+            return Err(SearchArtifactError::ConcurrentMutation);
+        }
+        let mut ordered = files.to_vec();
+        ordered.sort_unstable_by(|left, right| left.name.as_bytes().cmp(right.name.as_bytes()));
+        for pair in ordered.windows(2) {
+            if pair[0].name == pair[1].name {
+                return Err(invalid(
+                    "source fingerprint",
+                    format!("duplicate source part {:?}", pair[0].name),
+                ));
+            }
+        }
+        let mut digest = Sha256::new();
+        digest.update(b"graphforge-admitted-source-v1\0");
+        for file in ordered {
+            let name = normalize_source_name(&file.name)?;
+            digest.update((name.len() as u64).to_le_bytes());
+            digest.update(name.as_bytes());
+            digest.update(file.byte_length.to_le_bytes());
+            digest.update(file.sha256);
+        }
+        Ok(Self {
+            generation,
+            fingerprint: format!("gf-sha256-files-v1:{}", hex(&digest.finalize())),
+        })
+    }
+
     /// Capture the current search generation and fingerprint the supplied
     /// logical source parts.
     ///
@@ -559,7 +608,7 @@ impl SearchManifest {
         if !canonical_fingerprint(&source.fingerprint) {
             return Err(invalid(
                 "source_fingerprint",
-                "must be gf-fnv1a256 followed by 64 lowercase hexadecimal digits",
+                "must use a supported 256-bit lowercase source-fingerprint encoding",
             ));
         }
         match (key.kind, dimension) {
@@ -836,12 +885,15 @@ fn normalize_version(field: &'static str, value: &str) -> Result<String, SearchA
 }
 
 fn canonical_fingerprint(value: &str) -> bool {
-    value.strip_prefix("gf-fnv1a256:").is_some_and(|digest| {
-        digest.len() == 64
-            && digest
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    })
+    value
+        .strip_prefix("gf-fnv1a256:")
+        .or_else(|| value.strip_prefix("gf-sha256-files-v1:"))
+        .is_some_and(|digest| {
+            digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
 }
 
 fn encode_sequence(values: &[String]) -> Vec<u8> {
