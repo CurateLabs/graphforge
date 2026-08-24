@@ -2310,6 +2310,7 @@ dependencies = [
 name = "graphforge-filesystem"
 version = "0.5.2"
 dependencies = [
+ "fs4 1.1.0",
  "rustix 1.1.4",
  "tempfile",
  "windows-sys 0.61.2",

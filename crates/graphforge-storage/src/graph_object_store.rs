@@ -143,6 +143,7 @@ impl CasRoot {
 impl Drop for GraphObjectGcGuard {
     fn drop(&mut self) {
         let _ = crate::file_lock::unlock(&self.cas.lifecycle);
+        let _ = self.cas.objects.unlock();
     }
 }
 
@@ -154,6 +155,7 @@ impl Drop for GraphObjectPublicationLease {
             .active
             .unlink_child_if_identity(&self.lease_name, self.lease_identity);
         let _ = crate::file_lock::unlock(&self.cas.lifecycle);
+        let _ = self.cas.objects.unlock();
     }
 }
 
@@ -181,7 +183,13 @@ impl GraphObjectPublicationLease {
 /// Begin a CAS installation attempt and hold its lease through CURRENT.
 pub fn begin_graph_object_publication(root: &Path) -> Result<GraphObjectPublicationLease, GfError> {
     let cas = CasRoot::open(root)?;
+    cas.objects
+        .lock_shared()
+        .map_err(|error| storage("lock graph object directory for publication", root, error))?;
     crate::file_lock::lock_shared(&cas.lifecycle)
+        .inspect_err(|_| {
+            let _ = cas.objects.unlock();
+        })
         .map_err(|error| storage("lock graph object publication lifecycle", root, error))?;
     cas.revalidate_named()?;
     let lease_name = std::ffi::OsString::from(format!("{}.lock", Uuid::new_v4().hyphenated()));
@@ -314,7 +322,13 @@ pub fn gc_graph_objects(
 #[cfg(test)]
 pub(crate) fn begin_graph_object_gc(root: &Path) -> Result<GraphObjectGcGuard, GfError> {
     let cas = CasRoot::open(root)?;
+    cas.objects
+        .lock_exclusive()
+        .map_err(|error| storage("lock graph object directory for GC", root, error))?;
     crate::file_lock::lock_exclusive(&cas.lifecycle)
+        .inspect_err(|_| {
+            let _ = cas.objects.unlock();
+        })
         .map_err(|error| storage("lock graph object GC lifecycle", root, error))?;
     cas.revalidate_named()?;
     Ok(GraphObjectGcGuard { cas })
@@ -324,9 +338,17 @@ pub(crate) fn try_begin_graph_object_gc(
     root: &Path,
 ) -> Result<Option<GraphObjectGcGuard>, GfError> {
     let cas = CasRoot::open(root)?;
+    if !cas
+        .objects
+        .try_lock_exclusive()
+        .map_err(|error| storage("try graph object directory for GC", root, error))?
+    {
+        return Ok(None);
+    }
     if !crate::file_lock::try_lock_exclusive(&cas.lifecycle)
         .map_err(|error| storage("try graph object GC lifecycle", root, error))?
     {
+        let _ = cas.objects.unlock();
         return Ok(None);
     }
     cas.revalidate_named()?;
@@ -1721,10 +1743,7 @@ mod tests {
         fs::write(object_root.join(LIFECYCLE_LOCK), b"").unwrap();
 
         assert!(lease.revalidate_for_publish().is_err());
-        assert!(matches!(
-            try_begin_graph_object_gc(root.path()),
-            Ok(Some(_))
-        ));
+        assert!(matches!(try_begin_graph_object_gc(root.path()), Ok(None)));
 
         let other_root = tempfile::tempdir().unwrap();
         let lease = begin_graph_object_publication(other_root.path()).unwrap();

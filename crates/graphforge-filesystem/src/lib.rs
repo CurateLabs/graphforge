@@ -27,6 +27,30 @@ pub struct StableDirectory {
 }
 
 impl StableDirectory {
+    /// Acquire a cooperative shared lock on this retained directory inode.
+    pub fn lock_shared(&self) -> io::Result<()> {
+        <File as fs4::FileExt>::lock_shared(&self.file)
+    }
+
+    /// Acquire a cooperative exclusive lock on this retained directory inode.
+    pub fn lock_exclusive(&self) -> io::Result<()> {
+        <File as fs4::FileExt>::lock(&self.file)
+    }
+
+    /// Try to acquire a cooperative exclusive lock on this retained directory inode.
+    pub fn try_lock_exclusive(&self) -> io::Result<bool> {
+        match <File as fs4::FileExt>::try_lock(&self.file) {
+            Ok(()) => Ok(true),
+            Err(fs4::TryLockError::WouldBlock) => Ok(false),
+            Err(fs4::TryLockError::Error(error)) => Err(error),
+        }
+    }
+
+    /// Release this retained directory inode's cooperative lock.
+    pub fn unlock(&self) -> io::Result<()> {
+        <File as fs4::FileExt>::unlock(&self.file)
+    }
+
     /// Open and retain a real directory at `path`.
     pub fn open(path: &Path) -> io::Result<Self> {
         let file = stable_open_directory(path)?;

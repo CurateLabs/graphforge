@@ -7,6 +7,9 @@ license.workspace = true
 license-file.workspace = true
 repository.workspace = true
 
+[dependencies]
+fs4 = "1.1"
+
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1.1", features = ["fs"] }
 
