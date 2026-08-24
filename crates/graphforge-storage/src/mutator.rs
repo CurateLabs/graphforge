@@ -269,6 +269,142 @@ pub(crate) fn parquet_files_in(
     Ok(out)
 }
 
+/// Enumerate canonical edge Parquet fragments, including the legacy flat
+/// `<relation>.parquet` layout and append-only `<relation>/<range>.parquet`
+/// shards. The returned relation is authoritative for typed fragments.
+pub(crate) fn edge_parquet_files(
+    dir: &Path,
+    relation: Option<&str>,
+) -> Result<Vec<(String, std::path::PathBuf)>, GfError> {
+    let root = dir.join("topology/edges");
+    let entries = match fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(io_err(&error)),
+    };
+    let mut out = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| io_err(&error))?;
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|error| io_err(&error))?;
+        if file_type.is_symlink() {
+            return Err(GfError::Storage(
+                "edge topology contains a symbolic link".into(),
+            ));
+        }
+        if file_type.is_file()
+            && path.extension().and_then(|value| value.to_str()) == Some("parquet")
+        {
+            let stem = path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .ok_or_else(|| GfError::Storage("edge topology file stem is not UTF-8".into()))?;
+            if relation.is_none_or(|expected| expected == stem) {
+                out.push((stem.to_owned(), path));
+            }
+            continue;
+        }
+        if !file_type.is_dir() {
+            continue;
+        }
+        let stem = entry.file_name().into_string().map_err(|_| {
+            GfError::Storage("edge topology relation directory is not UTF-8".into())
+        })?;
+        if relation.is_some_and(|expected| expected != stem) {
+            continue;
+        }
+        for shard in fs::read_dir(&path).map_err(|error| io_err(&error))? {
+            let shard = shard.map_err(|error| io_err(&error))?;
+            let shard_type = shard.file_type().map_err(|error| io_err(&error))?;
+            if shard_type.is_symlink() || shard_type.is_dir() {
+                return Err(GfError::Storage(
+                    "edge shard directory contains a linked or nested entry".into(),
+                ));
+            }
+            let shard_path = shard.path();
+            if shard_type.is_file()
+                && shard_path.extension().and_then(|value| value.to_str()) == Some("parquet")
+            {
+                out.push((stem.clone(), shard_path));
+            }
+        }
+    }
+    out.sort_by(|left, right| left.1.cmp(&right.1));
+    Ok(out)
+}
+
+/// Enumerate the legacy flat node file plus immutable range shards.
+pub(crate) fn node_parquet_files(dir: &Path) -> Result<Vec<std::path::PathBuf>, GfError> {
+    let topology = dir.join("topology");
+    let mut out = Vec::new();
+    let legacy = topology.join("nodes.parquet");
+    if legacy.exists() {
+        out.push(legacy);
+    }
+    let shards = topology.join("nodes");
+    let entries = match fs::read_dir(&shards) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Err(error) => return Err(io_err(&error)),
+    };
+    let mut shard_paths = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| io_err(&error))?;
+        let file_type = entry.file_type().map_err(|error| io_err(&error))?;
+        if file_type.is_symlink() || file_type.is_dir() {
+            return Err(GfError::Storage(
+                "node shard directory contains a linked or nested entry".into(),
+            ));
+        }
+        let path = entry.path();
+        if file_type.is_file()
+            && path.extension().and_then(|value| value.to_str()) == Some("parquet")
+        {
+            shard_paths.push(path);
+        }
+    }
+    shard_paths.sort();
+    out.extend(shard_paths);
+    Ok(out)
+}
+
+/// Enumerate a legacy flat property file plus immutable construction shards.
+pub(crate) fn property_parquet_files(
+    dir: &Path,
+    subdir: &str,
+    stem: &str,
+) -> Result<Vec<std::path::PathBuf>, GfError> {
+    let root = dir.join(subdir);
+    let mut out = Vec::new();
+    let legacy = root.join(format!("{stem}.parquet"));
+    if legacy.exists() {
+        out.push(legacy);
+    }
+    let shards = root.join(stem);
+    let entries = match fs::read_dir(&shards) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Err(error) => return Err(io_err(&error)),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|error| io_err(&error))?;
+        let file_type = entry.file_type().map_err(|error| io_err(&error))?;
+        if file_type.is_symlink() || file_type.is_dir() {
+            return Err(GfError::Storage(
+                "property shard directory contains a linked or nested entry".into(),
+            ));
+        }
+        let path = entry.path();
+        if file_type.is_file()
+            && path.extension().and_then(|value| value.to_str()) == Some("parquet")
+        {
+            out.push(path);
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
 /// Stage the deletion of the given nodes into `staged`: every
 /// `properties/*.parquet` first, then `topology/nodes.parquet` **last** — the
 /// authoritative existence record commits only after everything that refers
@@ -286,9 +422,11 @@ pub fn stage_delete_nodes<S: BuildHasher>(
         return Ok(0);
     }
     // Drop the deleted nodes' property rows so they don't dangle.
-    for path in parquet_files_in(dir, "properties")? {
-        if let Some(schema) = discover_parquet_schema(&path) {
-            stage_rewrite_dropping(staged, &path, schema, "node_uuid", node_uuids)?;
+    for stem in crate::catalog::list_property_stems(dir) {
+        for path in property_parquet_files(dir, "properties", &stem)? {
+            if let Some(schema) = discover_parquet_schema(&path) {
+                stage_rewrite_dropping(staged, &path, schema, "node_uuid", node_uuids)?;
+            }
         }
     }
     stage_rewrite_nodes_dropping(
@@ -321,9 +459,11 @@ pub fn stage_delete_edges<S: BuildHasher>(
     }
     // Drop edge-property rows (the `edge_properties/` dir exists once edge
     // properties have been written, #784).
-    for path in parquet_files_in(dir, "edge_properties")? {
-        if let Some(schema) = discover_parquet_schema(&path) {
-            stage_rewrite_dropping(staged, &path, schema, "edge_uuid", edge_uuids)?;
+    for stem in crate::catalog::list_edge_property_stems(dir) {
+        for path in property_parquet_files(dir, "edge_properties", &stem)? {
+            if let Some(schema) = discover_parquet_schema(&path) {
+                stage_rewrite_dropping(staged, &path, schema, "edge_uuid", edge_uuids)?;
+            }
         }
     }
     Ok(removed)
