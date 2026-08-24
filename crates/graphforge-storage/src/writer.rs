@@ -11,8 +11,8 @@
 //!
 //! | | edges | node properties |
 //! |---|---|---|
-//! | Strict / Advisory | `topology/edges/TYPENAME.parquet` ([`TYPED_EDGE_SCHEMA`]) | `properties/TYPENAME.parquet` |
-//! | Exploratory | `topology/edges/_exploratory.parquet` ([`EXPLORATORY_EDGE_SCHEMA`]) | `properties/_untyped.parquet` |
+//! | Strict / Advisory | `topology/edges/TYPENAME/<id-range>.parquet` ([`TYPED_EDGE_SCHEMA`]) | `properties/TYPENAME.parquet` |
+//! | Exploratory | `topology/edges/_exploratory/<id-range>.parquet` ([`EXPLORATORY_EDGE_SCHEMA`]) | `properties/_untyped.parquet` |
 //!
 //! Edge properties (#784) are written separately under
 //! `edge_properties/REL_TYPE.parquet`, keyed by `edge_uuid` and routed by
@@ -415,26 +415,14 @@ fn stream_replay_edges(
     nodes: &ReplayNodeAuthority,
 ) -> Result<(), GfError> {
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-    let source_dir = source.join("topology/edges");
     let target_dir = target.join("topology/edges");
     fs::create_dir_all(&target_dir).map_err(|error| io_err(&error))?;
     let mut relations = std::collections::BTreeSet::new();
-    if source_dir.exists() {
-        for entry in fs::read_dir(&source_dir).map_err(|error| io_err(&error))? {
-            let entry = entry.map_err(|error| io_err(&error))?;
-            let path = entry.path();
-            if path
-                .extension()
-                .is_some_and(|extension| extension == "parquet")
-            {
-                let stem = path
-                    .file_stem()
-                    .and_then(std::ffi::OsStr::to_str)
-                    .ok_or_else(|| pq_err("edge Parquet stem is not UTF-8"))?;
-                relations.insert(stem.to_owned());
-            }
-        }
-    }
+    relations.extend(
+        crate::mutator::edge_parquet_files(source, None)?
+            .into_iter()
+            .map(|(relation, _)| relation),
+    );
     relations.extend(
         overlay
             .edges
@@ -443,12 +431,15 @@ fn stream_replay_edges(
             .map(|edge| edge.rel_type.clone()),
     );
     for relation in relations {
-        let source_path = source_dir.join(format!("{relation}.parquet"));
+        let source_paths = crate::mutator::edge_parquet_files(source, Some(&relation))?
+            .into_iter()
+            .map(|(_, path)| path)
+            .collect::<Vec<_>>();
         let target_path = target_dir.join(format!("{relation}.parquet"));
         let mut existing_overlay = HashSet::new();
         let mut base_max = 0_u64;
-        if source_path.exists() {
-            let input = fs::File::open(&source_path).map_err(|error| io_err(&error))?;
+        for source_path in &source_paths {
+            let input = fs::File::open(source_path).map_err(|error| io_err(&error))?;
             let reader = ParquetRecordBatchReaderBuilder::try_new(input)
                 .map_err(pq_err)?
                 .with_batch_size(limits.max_batch_rows)
@@ -509,8 +500,8 @@ fn stream_replay_edges(
         let mut writer =
             parquet::arrow::ArrowWriter::try_new(output, TYPED_EDGE_SCHEMA.clone(), None)
                 .map_err(pq_err)?;
-        if source_path.exists() {
-            let input = fs::File::open(&source_path).map_err(|error| io_err(&error))?;
+        for source_path in &source_paths {
+            let input = fs::File::open(source_path).map_err(|error| io_err(&error))?;
             let reader = ParquetRecordBatchReaderBuilder::try_new(input)
                 .map_err(pq_err)?
                 .with_batch_size(limits.max_batch_rows)
@@ -1170,6 +1161,15 @@ impl PropRowLike for EdgePropRow {
 // GraphWriter
 // ---------------------------------------------------------------------------
 
+/// Exact topology construction work performed by one writer session.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TopologyWriteWork {
+    /// Prior topology rows decoded and re-encoded.
+    pub existing_rows_rewritten: u64,
+    /// Newly accepted topology rows encoded.
+    pub new_rows_written: u64,
+}
+
 /// Buffered Parquet writer for graph topology and properties.
 ///
 /// See the [module docs](self) for routing rules and limitations.
@@ -1196,6 +1196,8 @@ pub struct GraphWriter {
     /// the adjacency delta segment (#765). Drained by `flush`/`take_pending_delta`.
     pending_delta: Vec<crate::adjacency_delta::DeltaEdge>,
     semantic_composition_fingerprint: Option<String>,
+    topology_work: TopologyWriteWork,
+    sealed_files: Vec<PathBuf>,
 }
 
 impl GraphWriter {
@@ -1238,7 +1240,21 @@ impl GraphWriter {
             edge_properties: HashMap::new(),
             pending_delta: Vec::new(),
             semantic_composition_fingerprint: None,
+            topology_work: TopologyWriteWork::default(),
+            sealed_files: Vec::new(),
         })
+    }
+
+    /// Aggregate topology construction work for this writer session.
+    #[must_use]
+    pub const fn topology_write_work(&self) -> TopologyWriteWork {
+        self.topology_work
+    }
+
+    /// Project-relative files sealed or replaced by the most recent flush.
+    #[must_use]
+    pub fn sealed_files(&self) -> &[PathBuf] {
+        &self.sealed_files
     }
 
     /// Attach the exact composition fingerprint used to authenticate opaque
@@ -1758,6 +1774,10 @@ impl GraphWriter {
     pub fn flush(&mut self) -> Result<(), GfError> {
         let mut staged = RewriteBatch::new();
         self.flush_into(&mut staged)?;
+        self.sealed_files = staged
+            .staged_paths()
+            .filter_map(|path| path.strip_prefix(&self.dir).ok().map(Path::to_path_buf))
+            .collect();
         let pending = self.take_pending_delta();
         if let Some(generation) = crate::generation::commit_topology_aware(staged, &self.dir)? {
             // A pure-append flush (only CREATEs reach `GraphWriter`): record the
@@ -1827,23 +1847,22 @@ impl GraphWriter {
 
         let batch = self.pending_nodes_batch()?;
 
-        // Merge with any rows already on disk so separate write sessions
-        // accumulate (#733) rather than overwriting. The schema is fixed, so a
-        // concat of [existing, new] always succeeds.
-        let path = topology.join("nodes.parquet");
-        let existing_rows = staged.restage_append_with(
-            &path,
-            TOPOLOGY_NODES_SCHEMA.clone(),
-            &batch,
-            |existing| {
-                crate::catalog::normalize_topology_nodes(vec![existing])
-                    .map_err(pq_err)?
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| GfError::Storage("node normalization returned no batch".into()))
-            },
-        )?;
-        crate::io_stats::record_topology_rewrite(existing_rows, batch.num_rows() as u64);
+        let legacy = topology.join("nodes.parquet");
+        let path = if !legacy.exists() && !topology.join("nodes").exists() {
+            legacy
+        } else {
+            let first = self.nodes.first().map_or(0, |row| row.node_id);
+            let last = self.nodes.last().map_or(first, |row| row.node_id);
+            topology
+                .join("nodes")
+                .join(format!("{first:020}-{last:020}.parquet"))
+        };
+        staged.stage(&path, TOPOLOGY_NODES_SCHEMA.clone(), &batch)?;
+        crate::io_stats::record_topology_rewrite(0, batch.num_rows() as u64);
+        self.topology_work.new_rows_written = self
+            .topology_work
+            .new_rows_written
+            .saturating_add(batch.num_rows() as u64);
         self.nodes.clear();
         Ok(())
     }
@@ -1880,11 +1899,34 @@ impl GraphWriter {
             };
             let schema = self.authenticated_route_schema(schema, &stem);
             let batch = self.edge_batch(&rows, &schema, exploratory)?;
-            // Merge with this stem's existing file so appends accumulate (#733);
-            // stems not in this buffer are never opened, so they are untouched.
-            let path = edges_dir.join(format!("{stem}.parquet"));
-            let existing_rows = staged.restage_append(&path, schema, &batch)?;
-            crate::io_stats::record_topology_rewrite(existing_rows, batch.num_rows() as u64);
+            // Every append becomes one immutable bounded fragment. Existing
+            // fragments are neither decoded nor re-encoded, so aggregate
+            // topology work is linear in accepted edge rows (#901). The
+            // surrogate range makes the name deterministic and collision-safe
+            // for monotonic writer sessions.
+            let first = rows.first().map_or(0, |row| row.edge_id);
+            let last = rows.last().map_or(first, |row| row.edge_id);
+            let existing = crate::mutator::edge_parquet_files(&self.dir, Some(&stem))?;
+            let path = if existing.is_empty() {
+                // Retain the v1 flat route for the first fragment so existing
+                // projects and external readers remain forward-compatible.
+                edges_dir.join(format!("{stem}.parquet"))
+            } else {
+                edges_dir
+                    .join(&stem)
+                    .join(format!("{first:020}-{last:020}.parquet"))
+            };
+            if path.exists() || staged.staged_temp(&path).is_some() {
+                return Err(GfError::Storage(
+                    "edge shard surrogate range already exists".into(),
+                ));
+            }
+            staged.stage(&path, schema, &batch)?;
+            crate::io_stats::record_topology_rewrite(0, batch.num_rows() as u64);
+            self.topology_work.new_rows_written = self
+                .topology_work
+                .new_rows_written
+                .saturating_add(batch.num_rows() as u64);
         }
         Ok(())
     }
@@ -3995,6 +4037,66 @@ mod tests {
             io.edge_full_reads, 0,
             "writer reopen must use bounded tails"
         );
+    }
+
+    #[test]
+    fn edge_appends_create_immutable_shards_without_prior_row_replay() {
+        let dir = TempDir::new().unwrap();
+        let left = new_v7();
+        let right = new_v7();
+        let mut first = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
+        first.create_node(left, TypeId(0)).unwrap();
+        first.create_node(right, TypeId(0)).unwrap();
+        first.create_edge(new_v7(), "KNOWS", &left, &right).unwrap();
+        first.flush().unwrap();
+
+        let mut second = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
+        second.register_existing_node(left, 1);
+        second.register_existing_node(right, 2);
+        second
+            .create_edge(new_v7(), "KNOWS", &right, &left)
+            .unwrap();
+        second.flush().unwrap();
+
+        let fragments = crate::mutator::edge_parquet_files(dir.path(), Some("KNOWS")).unwrap();
+        assert_eq!(fragments.len(), 2);
+        assert!(fragments.iter().any(|(_, path)| {
+            path.parent().and_then(Path::file_name) == Some(std::ffi::OsStr::new("KNOWS"))
+        }));
+        let work = second.topology_write_work();
+        assert_eq!(work.existing_rows_rewritten, 0);
+        assert_eq!(work.new_rows_written, 1);
+        let rows = crate::catalog::read_edges(dir.path(), "KNOWS", OntologyMode::Strict)
+            .unwrap()
+            .into_iter()
+            .map(|batch| batch.num_rows())
+            .sum::<usize>();
+        assert_eq!(rows, 2, "ordinary direct reader must union all fragments");
+    }
+
+    #[test]
+    fn node_appends_create_immutable_shards_without_prior_row_replay() {
+        let dir = TempDir::new().unwrap();
+        let mut first = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
+        first.create_node(new_v7(), TypeId(0)).unwrap();
+        first.flush().unwrap();
+
+        let mut second = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
+        second.create_node(new_v7(), TypeId(0)).unwrap();
+        second.flush().unwrap();
+
+        let fragments = crate::mutator::node_parquet_files(dir.path()).unwrap();
+        assert_eq!(fragments.len(), 2);
+        assert_eq!(second.topology_write_work().existing_rows_rewritten, 0);
+        assert_eq!(second.topology_write_work().new_rows_written, 1);
+        let rows = crate::catalog::read_nodes(dir.path())
+            .unwrap()
+            .into_iter()
+            .map(|batch| batch.num_rows())
+            .sum::<usize>();
+        assert_eq!(rows, 2);
+        let mut third = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
+        assert_eq!(third.create_node(new_v7(), TypeId(0)).unwrap(), 3);
     }
 
     #[test]
