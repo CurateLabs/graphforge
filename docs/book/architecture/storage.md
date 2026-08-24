@@ -137,7 +137,16 @@ data. New publications store graph workspace files under the generation-owned
 `graph/` tree with a `graph`/`files` inventory participant; legacy
 `graph`/`snapshot` Arrow envelopes remain readable. Root YAML/JSON and
 environment settings are inputs only and cannot override the selected
-generation. Authoritative small-write delta runs, when present, live under
+generation. Version 2 of `graph`/`files` replaces the expanded per-generation
+inventory with a compact authenticated radix root. Immutable payload and
+manifest objects are addressed by SHA-256 in the project object store, so an
+update writes only changed payloads and the bounded root path while unchanged
+objects are reused byte-for-byte. Open resolves the bounded manifest and
+verifies every selected payload before exposing the generation. Version 1
+expanded inventories remain readable and can be migrated without changing
+`CURRENT` until the complete version-2 generation is durable.
+
+Authoritative small-write delta runs, when present, live under
 `graph/deltas/` inside the same generation and are inventory-verified
 ([ADR 0019](../../adr/0019-authoritative-graph-delta-journal.md)). Compaction
 and ordinary opens decode the compact base from these canonical Parquet files;

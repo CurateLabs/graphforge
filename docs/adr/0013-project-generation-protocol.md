@@ -367,6 +367,21 @@ does not rewrite participant or manifest bytes.
 
 ### Retention and garbage collection
 
+Graph inventory participants may use the compact version-2 authenticated root.
+Its immutable payloads and fixed-depth manifest nodes live in the project
+content-addressed object store, while the generation stores only the root
+digest and logical totals. Publication resolves the entire bounded manifest
+and verifies all payload digests before the atomic `CURRENT` transition.
+Interrupted installation therefore leaves the prior generation authoritative;
+an acknowledged transition survives reopen without copying unchanged objects.
+
+Object collection runs only after generation reachability is established. It
+marks roots from every remaining generation, including checkpoint-retained and
+live-lease-retained generations, and defers while a publication attempt or
+object-installation lease is active. Marking and validation finish before any
+object deletion. Malformed, cyclic, oversized, duplicate-reference, traversal,
+and wrong-digest manifests fail closed and do not grant deletion authority.
+
 The current generation is always reachable. The default retention set also
 contains its two most recent valid ancestors, determined only from verified
 `parent_generation_uuid` links. A configured larger finite retention count may
