@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plan or run one disposable Fly 4 GiB S20 full-lifecycle Machine."""
+"""Plan or run one qualification-sized disposable Fly S20 Machine."""
 
 from __future__ import annotations
 
@@ -67,12 +67,26 @@ PHASE_TIMEOUT_S = {
 }
 POLL_INTERVAL_S = 15
 HEARTBEAT_INTERVAL_S = 60
-HARD_TTL_S = 4 * 3600 + 30 * 60
-VOLUME_GB = 50
-MEMORY_MB = 4096
-CPUS = 2
+HARD_TTL_S = 4 * 3600
+CLEANUP_TTL_S = 10 * 60
+MAX_MEMORY_MB = 128 * 1024
+MAX_VOLUME_GB = 500
+MIN_MEMORY_HEADROOM_BYTES = 512 * 1024 * 1024
+MEMORY_HEADROOM_RATIO = 1.25
+VOLUME_HEADROOM_RATIO = 1.25
 MAX_DIAGNOSTIC_EVENTS = 20
-SENSITIVE_KEY = re.compile(r"(?:auth|credential|password|secret|token)", re.IGNORECASE)
+SENSITIVE_KEYS = {
+    "authorization",
+    "credential",
+    "credentials",
+    "password",
+    "password_hint",
+    "secret",
+    "token",
+}
+REQUIRED_IMAGE_CONTRACT = "graphforge-s20-runtime/2"
+REQUIRED_MEASUREMENT_CONTRACT = "graphforge-s20-phase-measurement/1"
+REQUIRED_CONSTRUCTION_CONTRACT = "graphforge-storage-construction-session/1"
 DIAGNOSTIC_EVENT_KEYS = {
     "created_at",
     "exit_code",
@@ -103,7 +117,7 @@ def sanitize_artifact(value: Any, *, depth: int = 0) -> Any:
     if isinstance(value, dict):
         return {
             str(key): "<redacted>"
-            if SENSITIVE_KEY.search(str(key))
+            if str(key).casefold() in SENSITIVE_KEYS
             else sanitize_artifact(item, depth=depth + 1)
             for key, item in list(value.items())[:1000]
         }
@@ -138,18 +152,20 @@ def journal_progress(journal: Any) -> tuple[int, str | None]:
 
 
 class Flyctl:
-    def run(self, args: Sequence[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
+    def run(
+        self, args: Sequence[str], *, check: bool = True, timeout: float = 120
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["flyctl", *args],
             cwd=ROOT,
             check=check,
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=timeout,
         )
 
-    def json(self, args: Sequence[str]) -> Any:
-        return json.loads(self.run([*args, "--json"]).stdout)
+    def json(self, args: Sequence[str], *, timeout: float = 120) -> Any:
+        return json.loads(self.run([*args, "--json"], timeout=timeout).stdout)
 
 
 def fetch_pricing() -> str:
@@ -162,7 +178,9 @@ def fetch_pricing() -> str:
         return response.read().decode("utf-8")
 
 
-def parse_live_rates(html: str, region: str) -> dict[str, float]:
+def parse_live_rates(
+    html: str, region: str, machine: str, cpus: int, memory_mb: int
+) -> dict[str, float]:
     matrix = re.search(
         rf'id="started-machines-pricing-matrix-{re.escape(region)}".*?</table>',
         html,
@@ -170,8 +188,10 @@ def parse_live_rates(html: str, region: str) -> dict[str, float]:
     )
     if not matrix:
         raise ControllerError(f"official pricing has no region {region}")
+    if memory_mb % 1024:
+        raise ControllerError("selected Machine memory must be whole GiB for price verification")
     row = re.search(
-        r"performance-2x.*?2 performance.*?4GB.*?"
+        rf"{re.escape(machine)}.*?{cpus} performance.*?{memory_mb // 1024}GB.*?"
         r"\$(?P<second>[0-9.]+).*?\$(?P<hour>[0-9.]+)",
         matrix.group(),
         re.DOTALL,
@@ -186,10 +206,12 @@ def parse_live_rates(html: str, region: str) -> dict[str, float]:
     return {"compute_per_hour_usd": per_hour, "volume_gb_month_usd": float(volume.group("rate"))}
 
 
-def cost_plan(rates: dict[str, float], ceiling: float, reserve: float) -> dict[str, float]:
-    compute = rates["compute_per_hour_usd"] * HARD_TTL_S / 3600
-    # Volume billing is hourly; conservatively charge a full five hours.
-    volume = rates["volume_gb_month_usd"] * VOLUME_GB * 5 / (30 * 24)
+def cost_plan(
+    rates: dict[str, float], ceiling: float, reserve: float, volume_gb: int
+) -> dict[str, float]:
+    billed_hours = (HARD_TTL_S + CLEANUP_TTL_S) / 3600
+    compute = rates["compute_per_hour_usd"] * billed_hours
+    volume = rates["volume_gb_month_usd"] * volume_gb * billed_hours / (30 * 24)
     projected = compute + volume + reserve
     if projected > ceiling:
         raise ControllerError(f"projected maximum ${projected:.4f} exceeds ${ceiling:.2f} ceiling")
@@ -199,6 +221,177 @@ def cost_plan(rates: dict[str, float], ceiling: float, reserve: float) -> dict[s
         "unpriced_reserve_usd": reserve,
         "projected_max_usd": projected,
         "ceiling_usd": ceiling,
+    }
+
+
+def load_qualification(path: Path, digest: str, region: str) -> dict[str, Any]:
+    """Validate lower-rung observations and derive the smallest safe resources."""
+    value = json.loads(path.read_text())
+    if value.get("schema") != "graphforge-fly-s20-qualification/1":
+        raise ControllerError("qualification evidence has an unexpected schema")
+    if value.get("region") != region or value.get("image_digest") != digest:
+        raise ControllerError("qualification region/image differs from the planned run")
+    rungs = value.get("rungs")
+    candidates = value.get("machine_candidates")
+    if not isinstance(rungs, list) or len(rungs) < 2 or not isinstance(candidates, list):
+        raise ControllerError("qualification requires at least two rungs and Machine candidates")
+    scales: list[int] = []
+    physical_peaks: list[int] = []
+    phase_peaks: dict[str, list[int]] = {}
+    projected_disk = 0
+    common_budgets: dict[str, Any] | None = None
+    qualified_runtime: dict[str, Any] | None = None
+    for rung in rungs:
+        if not isinstance(rung, dict) or rung.get("result") != "pass":
+            raise ControllerError("qualification contains a non-pass rung")
+        scale = rung.get("scale")
+        phases = rung.get("phases")
+        if not isinstance(scale, int) or not isinstance(phases, list) or not phases:
+            raise ControllerError("qualification rung is incomplete")
+        scales.append(scale)
+        budgets = rung.get("budgets")
+        runtime = rung.get("runtime")
+        construction = rung.get("construction")
+        if not isinstance(budgets, dict) or not budgets or any(
+            not isinstance(value, int) or value <= 0 for value in budgets.values()
+        ):
+            raise ControllerError("qualification lacks positive identical operator budgets")
+        if common_budgets is None:
+            common_budgets = budgets
+        elif budgets != common_budgets:
+            raise ControllerError("qualification rungs used different operator budgets")
+        if not isinstance(runtime, dict) or not all(
+            isinstance(runtime.get(key), (str, int))
+            for key in ("machine", "cpus", "memory_mb")
+        ):
+            raise ControllerError("qualification lacks its observed Machine runtime")
+        if qualified_runtime is None:
+            qualified_runtime = runtime
+        elif runtime != qualified_runtime:
+            raise ControllerError("qualification rungs used different Machine resources")
+        if construction != {
+            "contract": REQUIRED_CONSTRUCTION_CONTRACT,
+            "source_current_transitions": 1,
+            "import_current_transitions": 1,
+        }:
+            raise ControllerError("qualification did not use one storage construction session")
+        physical_peak = rung.get("physical_volume_peak_bytes")
+        projection = rung.get("s20_projected_physical_peak_bytes")
+        if not isinstance(physical_peak, int) or physical_peak <= 0:
+            raise ControllerError("qualification lacks physical volume peak")
+        if not isinstance(projection, int) or projection < physical_peak:
+            raise ControllerError("qualification lacks a defensible S20 disk projection")
+        projected_disk = max(projected_disk, projection)
+        physical_peaks.append(physical_peak)
+        if [phase.get("id") for phase in phases if isinstance(phase, dict)] != PHASES:
+            raise ControllerError("qualification must measure the exact lifecycle phase set")
+        for phase in phases:
+            if not isinstance(phase, dict) or not isinstance(phase.get("id"), str):
+                raise ControllerError("qualification phase is malformed")
+            memory = phase.get("memory")
+            io = phase.get("io")
+            if not isinstance(memory, dict) or not all(
+                isinstance(memory.get(key), int) and memory[key] >= 0
+                for key in (
+                    "cgroup_current_before_bytes",
+                    "cgroup_peak_bytes",
+                    "cgroup_current_after_bytes",
+                    "smaps_rss_bytes",
+                    "smaps_anon_bytes",
+                    "smaps_file_bytes",
+                )
+            ):
+                raise ControllerError("qualification lacks phase-local cgroup/smaps evidence")
+            if not isinstance(io, dict) or not all(
+                isinstance(io.get(key), int) and io[key] >= 0
+                for key in (
+                    "read_bytes",
+                    "write_bytes",
+                    "read_syscalls",
+                    "write_syscalls",
+                    "blocks",
+                    "batches",
+                    "shards",
+                )
+            ):
+                raise ControllerError("qualification lacks block/batch/shard I/O evidence")
+            elapsed_ms = phase.get("elapsed_ms")
+            if not isinstance(elapsed_ms, int) or elapsed_ms <= 0:
+                raise ControllerError("qualification phase lacks positive elapsed time")
+            peak = memory["cgroup_peak_bytes"]
+            if peak < max(
+                memory["cgroup_current_before_bytes"],
+                memory["cgroup_current_after_bytes"],
+                memory["smaps_rss_bytes"],
+            ) or memory["smaps_anon_bytes"] + memory["smaps_file_bytes"] > memory["smaps_rss_bytes"]:
+                raise ControllerError("qualification memory counters are internally inconsistent")
+            phase_peaks.setdefault(phase["id"], []).append(memory["cgroup_peak_bytes"])
+    if scales != sorted(set(scales)):
+        raise ControllerError("qualification rungs must be unique and increasing")
+    if scales[-2:] != [18, 19]:
+        raise ControllerError("qualification requires adjacent S18 and S19 observations")
+    if physical_peaks != sorted(physical_peaks):
+        raise ControllerError("qualification physical peaks regress across rungs")
+    linear_edge_projection = physical_peaks[-1] * (1 << max(0, 20 - scales[-1]))
+    if projected_disk < linear_edge_projection:
+        raise ControllerError("S20 disk projection is below the observed linear edge bound")
+    plateau_ratio = value.get("max_phase_rss_growth_ratio", 1.20)
+    if not isinstance(plateau_ratio, (int, float)) or not 1.0 <= plateau_ratio <= 1.5:
+        raise ControllerError("qualification RSS plateau bound is invalid")
+    for phase, peaks in phase_peaks.items():
+        if len(peaks) != len(rungs):
+            raise ControllerError(f"qualification phase {phase} is absent from a rung")
+        if peaks[-1] > max(peaks[:-1]) * plateau_ratio:
+            raise ControllerError(f"qualification RSS does not plateau for phase {phase}")
+    peak_rss = max(max(peaks) for peaks in phase_peaks.values())
+    required_memory = max(
+        peak_rss + MIN_MEMORY_HEADROOM_BYTES,
+        int(peak_rss * MEMORY_HEADROOM_RATIO),
+    )
+    valid_candidates = []
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        name = candidate.get("name")
+        cpus = candidate.get("cpus")
+        memory_mb = candidate.get("memory_mb")
+        if (
+            isinstance(name, str)
+            and SAFE_NAME.fullmatch(name)
+            and isinstance(cpus, int)
+            and cpus > 0
+            and isinstance(memory_mb, int)
+            and 0 < memory_mb <= MAX_MEMORY_MB
+        ):
+            valid_candidates.append((memory_mb, cpus, name))
+    valid_candidates.sort()
+    selected = next(
+        (
+            candidate
+            for candidate in valid_candidates
+            if candidate[0] * 1024 * 1024 >= required_memory
+        ),
+        None,
+    )
+    if selected is None:
+        raise ControllerError("qualification requires more than the 128 GiB certification ceiling")
+    volume_gb = (int(projected_disk * VOLUME_HEADROOM_RATIO) + (1 << 30) - 1) // (1 << 30)
+    if not 1 <= volume_gb <= MAX_VOLUME_GB:
+        raise ControllerError("qualification exceeds Fly's 500 GB volume envelope")
+    memory_mb, cpus, machine = selected
+    if qualified_runtime != {"machine": machine, "cpus": cpus, "memory_mb": memory_mb}:
+        raise ControllerError("selected Machine was not the Machine measured by qualification")
+    return {
+        "region": region,
+        "image_digest": digest,
+        "machine": machine,
+        "cpus": cpus,
+        "memory_mb": memory_mb,
+        "volume_gb": volume_gb,
+        "qualified_peak_rss_bytes": peak_rss,
+        "projected_physical_peak_bytes": projected_disk,
+        "rung_scales": scales,
+        "max_phase_rss_growth_ratio": float(plateau_ratio),
     }
 
 
@@ -216,7 +409,12 @@ def validate_args(args: argparse.Namespace) -> str:
         raise ControllerError("unsafe volume name")
     if args.ceiling_usd != 10.0 or args.unpriced_reserve_usd < 1.0:
         raise ControllerError("controller requires the approved $10 ceiling and >=$1 reserve")
-    if args.execute and (not args.confirm_disposable or args.pricing_html or args.manifest_json):
+    if args.execute and (
+        not args.confirm_disposable
+        or args.pricing_html
+        or args.manifest_json
+        or args.image_contract_json
+    ):
         raise ControllerError("execution requires confirmation and live official pricing")
     if (
         not args.evidence_out.parent.is_dir()
@@ -246,7 +444,12 @@ def check_source(expected_sha: str) -> None:
         raise ControllerError("execution requires the exact clean checked-out source SHA")
 
 
-def assert_platform_child(image: str, manifest_json: str | None = None) -> None:
+def assert_platform_child(
+    image: str,
+    expected_sha: str,
+    manifest_json: str | None = None,
+    image_contract_json: str | None = None,
+) -> None:
     if manifest_json is None:
         result = subprocess.run(
             ["docker", "buildx", "imagetools", "inspect", "--raw", image],
@@ -263,9 +466,41 @@ def assert_platform_child(image: str, manifest_json: str | None = None) -> None:
     media_type = manifest.get("mediaType", "")
     if "manifest" not in media_type:
         raise ControllerError("image digest did not resolve to an OCI/Docker child manifest")
+    if image_contract_json is None:
+        result = subprocess.run(
+            [
+                "docker",
+                "buildx",
+                "imagetools",
+                "inspect",
+                "--format",
+                "{{json .Image}}",
+                image,
+            ],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        image_contract_json = result.stdout
+    config = json.loads(image_contract_json)
+    labels = config.get("config", {}).get("Labels", {})
+    if config.get("architecture") != "amd64" or config.get("os") != "linux":
+        raise ControllerError("image child is not linux/amd64")
+    expected = {
+        "org.opencontainers.image.revision": expected_sha,
+        "dev.graphforge.s20.runtime": REQUIRED_IMAGE_CONTRACT,
+        "dev.graphforge.s20.measurement": REQUIRED_MEASUREMENT_CONTRACT,
+        "dev.graphforge.s20.construction": REQUIRED_CONSTRUCTION_CONTRACT,
+    }
+    if not isinstance(labels, dict) or any(labels.get(key) != value for key, value in expected.items()):
+        raise ControllerError("image lacks the exact S20 measurement/construction contract")
 
 
-def machine_payload(args: argparse.Namespace, volume_id: str) -> dict[str, Any]:
+def machine_payload(
+    args: argparse.Namespace, volume_id: str, resources: dict[str, Any]
+) -> dict[str, Any]:
     return {
         "name": args.machine_name,
         "region": args.region,
@@ -275,21 +510,40 @@ def machine_payload(args: argparse.Namespace, volume_id: str) -> dict[str, Any]:
             "image": args.image,
             "auto_destroy": True,
             "restart": {"policy": "no"},
-            "guest": {"cpu_kind": "performance", "cpus": CPUS, "memory_mb": MEMORY_MB},
+            "guest": {
+                "cpu_kind": "performance",
+                "cpus": resources["cpus"],
+                "memory_mb": resources["memory_mb"],
+            },
             "mounts": [{"volume": volume_id, "path": "/work"}],
             "services": [],
-            "env": {"GF_G500_S20_EXPECTED_SHA": args.expected_sha},
+            "env": {
+                "GF_G500_S20_EXPECTED_SHA": args.expected_sha,
+                "GF_G500_S20_REGION": args.region,
+                "GF_G500_S20_IMAGE_DIGEST": resources["image_digest"],
+                "GF_G500_S20_MACHINE": resources["machine"],
+                "GF_G500_S20_CPUS": str(resources["cpus"]),
+                "GF_G500_S20_MEMORY_MB": str(resources["memory_mb"]),
+                "GF_G500_S20_VOLUME_GB": str(resources["volume_gb"]),
+                "GF_G500_S20_PUBLIC_SERVICES": "0",
+                "GF_G500_S20_RESTART": "no",
+            },
         },
     }
 
 
-def create_machine(args: argparse.Namespace, fly: Flyctl, volume_id: str) -> dict[str, Any]:
+def create_machine(
+    args: argparse.Namespace,
+    fly: Flyctl,
+    volume_id: str,
+    resources: dict[str, Any],
+) -> dict[str, Any]:
     token = fly.run(["auth", "token"]).stdout.strip()
     if not token:
         raise ControllerError("Fly authentication token is unavailable")
     request = urllib.request.Request(
         f"https://api.machines.dev/v1/apps/{args.app_name}/machines",
-        data=json.dumps(machine_payload(args, volume_id)).encode(),
+        data=json.dumps(machine_payload(args, volume_id, resources)).encode(),
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
         method="POST",
     )
@@ -300,7 +554,12 @@ def create_machine(args: argparse.Namespace, fly: Flyctl, volume_id: str) -> dic
         raise ControllerError("Fly Machines API rejected creation") from None
 
 
-def assert_machine(machine: dict[str, Any], args: argparse.Namespace, digest: str) -> None:
+def assert_machine(
+    machine: dict[str, Any],
+    args: argparse.Namespace,
+    digest: str,
+    resources: dict[str, Any],
+) -> None:
     config = machine.get("config", {})
     guest = config.get("guest", {})
     if machine.get("region") != args.region or machine.get("image_ref", {}).get("digest") != digest:
@@ -309,8 +568,8 @@ def assert_machine(machine: dict[str, Any], args: argparse.Namespace, digest: st
         raise ControllerError("observed Machine is not disposable")
     if config.get("services") not in (None, []) or guest != {
         "cpu_kind": "performance",
-        "cpus": CPUS,
-        "memory_mb": MEMORY_MB,
+        "cpus": resources["cpus"],
+        "memory_mb": resources["memory_mb"],
     }:
         raise ControllerError("observed Machine resources/services differ from plan")
     mounts = config.get("mounts", [])
@@ -318,11 +577,99 @@ def assert_machine(machine: dict[str, Any], args: argparse.Namespace, digest: st
         raise ControllerError("observed work-root volume differs from plan")
 
 
-def validate_evidence(evidence: dict[str, Any], journal: list[dict[str, Any]], sha: str) -> None:
+def validate_phase_measurement(phase: dict[str, Any]) -> None:
+    memory = phase.get("memory")
+    io = phase.get("io")
+    filesystem = phase.get("filesystem")
+    if not isinstance(memory, dict) or not all(
+        isinstance(memory.get(key), int) and memory[key] >= 0
+        for key in (
+            "cgroup_current_before_bytes",
+            "cgroup_peak_bytes",
+            "cgroup_current_after_bytes",
+            "smaps_rss_before_bytes",
+            "smaps_rss_after_bytes",
+            "smaps_anon_before_bytes",
+            "smaps_anon_after_bytes",
+            "smaps_file_before_bytes",
+            "smaps_file_after_bytes",
+        )
+    ):
+        raise ControllerError("S20 phase lacks boundary cgroup/smaps memory evidence")
+    if not isinstance(io, dict) or not all(
+        isinstance(io.get(key), int) and io[key] >= 0
+        for key in (
+            "proc_read_bytes",
+            "proc_write_bytes",
+            "proc_read_syscalls",
+            "proc_write_syscalls",
+            "storage_sequential_bytes",
+            "storage_blocks",
+            "arrow_batches",
+            "max_arrow_batch_rows",
+            "shards",
+            "row_groups",
+            "random_seeks",
+            "fsyncs",
+            "topology_rows",
+        )
+    ):
+        raise ControllerError("S20 phase lacks process and storage I/O evidence")
+    if not isinstance(filesystem, dict) or not all(
+        isinstance(filesystem.get(key), int) and filesystem[key] >= 0
+        for key in (
+            "total_bytes",
+            "free_before_bytes",
+            "free_after_bytes",
+            "available_before_bytes",
+            "available_after_bytes",
+            "allocated_before_bytes",
+            "allocated_after_bytes",
+        )
+    ):
+        raise ControllerError("S20 phase lacks statvfs/allocated-volume boundaries")
+    memory_limit = phase.get("memory_limit_bytes")
+    if (
+        not isinstance(memory_limit, int)
+        or memory_limit <= 0
+        or memory["cgroup_peak_bytes"] > memory_limit
+        or memory["cgroup_peak_bytes"]
+        < max(memory["cgroup_current_before_bytes"], memory["cgroup_current_after_bytes"])
+        or memory["smaps_anon_before_bytes"] + memory["smaps_file_before_bytes"]
+        > memory["smaps_rss_before_bytes"]
+        or memory["smaps_anon_after_bytes"] + memory["smaps_file_after_bytes"]
+        > memory["smaps_rss_after_bytes"]
+    ):
+        raise ControllerError("S20 phase memory evidence is inconsistent")
+    if (
+        filesystem["total_bytes"] <= 0
+        or max(
+            filesystem["free_before_bytes"],
+            filesystem["free_after_bytes"],
+            filesystem["available_before_bytes"],
+            filesystem["available_after_bytes"],
+        )
+        > filesystem["total_bytes"]
+        or io["max_arrow_batch_rows"] > 65_536
+        or io["random_seeks"] > io["storage_blocks"]
+    ):
+        raise ControllerError("S20 phase filesystem/I/O evidence is inconsistent")
+
+
+def validate_evidence(
+    evidence: dict[str, Any],
+    journal: list[dict[str, Any]],
+    sha: str,
+    resources: dict[str, Any] | None = None,
+) -> None:
     if evidence.get("schema") != "graphforge-s20-integrated-lifecycle-evidence/1":
         raise ControllerError("unexpected S20 evidence schema")
     if evidence.get("git_sha") != sha or evidence.get("result") != "pass":
         raise ControllerError("S20 evidence SHA/result mismatch")
+    if evidence.get("measurement_contract") != REQUIRED_MEASUREMENT_CONTRACT or evidence.get(
+        "construction_contract"
+    ) != REQUIRED_CONSTRUCTION_CONTRACT:
+        raise ControllerError("S20 evidence lacks the executable measurement/construction contract")
     lifecycle = evidence.get("lifecycle", {})
     observed = [phase.get("id") for phase in lifecycle.get("phases", [])]
     if observed != PHASES or [phase.get("id") for phase in journal] != PHASES:
@@ -331,6 +678,47 @@ def validate_evidence(evidence: dict[str, Any], journal: list[dict[str, Any]], s
         phase.get("status") != "pass" for phase in lifecycle.get("phases", [])
     ):
         raise ControllerError("S20 evidence or journal contains a non-pass phase")
+    if resources is not None:
+        run = evidence.get("run_environment")
+        expected = {
+            "region": resources["region"],
+            "image_digest": resources["image_digest"],
+            "machine": resources["machine"],
+            "cpus": resources["cpus"],
+            "memory_mb": resources["memory_mb"],
+            "volume_gb": resources["volume_gb"],
+            "public_services": 0,
+            "restart": "no",
+        }
+        if not isinstance(run, dict) or any(
+            run.get(key) != value for key, value in expected.items()
+        ):
+            raise ControllerError("S20 evidence does not bind the observed disposable resources")
+        if lifecycle.get("current_transitions") != {"source": 1, "clean_import": 1}:
+            raise ControllerError("S20 lifecycle must publish exactly once per constructed project")
+        for phase in lifecycle.get("phases", []):
+            validate_phase_measurement(phase)
+            if phase["memory_limit_bytes"] != resources["memory_mb"] * 1024 * 1024:
+                raise ControllerError("S20 cgroup memory limit differs from selected Machine")
+        phases = {phase["id"]: phase for phase in lifecycle["phases"]}
+        for phase_id in ("ingest", "import"):
+            io = phases[phase_id]["io"]
+            if (
+                io["storage_blocks"] <= 0
+                or io["arrow_batches"] <= 0
+                or io["topology_rows"] <= 0
+                or io["proc_read_syscalls"] + io["proc_write_syscalls"] >= io["topology_rows"]
+            ):
+                raise ControllerError("construction I/O scales with rows instead of blocks/batches")
+        volume_bytes = resources["volume_gb"] * (1 << 30)
+        if any(
+            phase["filesystem"]["total_bytes"] > volume_bytes
+            or phase["filesystem"]["total_bytes"] < int(volume_bytes * 0.90)
+            or phase["filesystem"]["available_after_bytes"]
+            < phase["filesystem"]["total_bytes"] // 5
+            for phase in lifecycle["phases"]
+        ):
+            raise ControllerError("S20 observed volume or disk headroom differs from qualification")
     for left, right in (
         ("source_edges", "imported_edges"),
         ("source_project_fingerprint", "imported_project_fingerprint"),
@@ -346,39 +734,76 @@ def preserve_and_validate_evidence(
     sha: str,
     evidence_out: Path,
     journal_out: Path,
+    resources: dict[str, Any] | None = None,
 ) -> None:
     """Persist failure evidence before applying the success-only contract."""
     write_sanitized_json(evidence_out, evidence)
     write_sanitized_json(journal_out, journal)
-    validate_evidence(evidence, journal, sha)
+    validate_evidence(evidence, journal, sha, resources)
 
 
 def destroy_and_verify(
     fly: Flyctl, app: str, machine_id: str | None, volume_id: str | None
 ) -> None:
-    if machine_id:
-        fly.run(["machine", "destroy", machine_id, "--app", app, "--force"], check=False)
-    if volume_id:
-        fly.run(["volumes", "destroy", volume_id, "--app", app, "--yes"], check=False)
-    for _ in range(10):
-        machines = fly.json(["machines", "list", "--app", app])
-        volumes = fly.json(["volumes", "list", "--app", app])
-        machine_absent = not machine_id or not any(
-            item.get("id") == machine_id for item in machines
-        )
-        volume_absent = not volume_id or not any(item.get("id") == volume_id for item in volumes)
-        if machine_absent and volume_absent:
-            break
-        time.sleep(2)
-    else:
-        raise ControllerError("cleanup verification found a Machine or volume still present")
-    fly.run(["apps", "destroy", app, "--yes"], check=False)
-    for _ in range(10):
-        apps = fly.json(["apps", "list"])
-        if not any(item.get("Name") == app or item.get("name") == app for item in apps):
+    """Attempt every teardown target independently under one short deadline."""
+    deadline = time.monotonic() + CLEANUP_TTL_S
+    failures: list[str] = []
+
+    def attempt(kind: str, arguments: list[str]) -> None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            failures.append(f"{kind}:deadline")
             return
+        try:
+            fly.run(arguments, check=False, timeout=min(30, remaining))
+        except (OSError, subprocess.SubprocessError) as error:
+            failures.append(f"{kind}:{type(error).__name__}")
+
+    if machine_id:
+        attempt("machine", ["machine", "destroy", machine_id, "--app", app, "--force"])
+    if volume_id:
+        attempt("volume", ["volumes", "destroy", volume_id, "--app", app, "--yes"])
+    attempt("app", ["apps", "destroy", app, "--yes"])
+    while time.monotonic() < deadline:
+        machine_absent = machine_id is None
+        volume_absent = volume_id is None
+        app_absent = False
+        try:
+            query_timeout = min(15, max(0.1, deadline - time.monotonic()))
+            apps = fly.json(["apps", "list"], timeout=query_timeout)
+            app_absent = not any(item.get("Name") == app or item.get("name") == app for item in apps)
+            if not app_absent:
+                machines = fly.json(
+                    ["machines", "list", "--app", app],
+                    timeout=min(15, max(0.1, deadline - time.monotonic())),
+                )
+                volumes = fly.json(
+                    ["volumes", "list", "--app", app],
+                    timeout=min(15, max(0.1, deadline - time.monotonic())),
+                )
+                machine_absent = machine_id is None or not any(
+                    item.get("id") == machine_id for item in machines
+                )
+                volume_absent = volume_id is None or not any(
+                    item.get("id") == volume_id for item in volumes
+                )
+            else:
+                machine_absent = volume_absent = True
+        except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+            pass
+        if app_absent and machine_absent and volume_absent:
+            return
+        if machine_id:
+            attempt("machine", ["machine", "destroy", machine_id, "--app", app, "--force"])
+        if volume_id:
+            attempt("volume", ["volumes", "destroy", volume_id, "--app", app, "--yes"])
+        attempt("app", ["apps", "destroy", app, "--yes"])
         time.sleep(2)
-    raise ControllerError("cleanup verification found the disposable app still present")
+    raise ControllerError(
+        "cleanup deadline left unresolved "
+        f"app={app} machine={machine_id or 'none'} volume={volume_id or 'none'} "
+        f"attempt_failures={','.join(failures) or 'none'}"
+    )
 
 
 def retrieve(fly: Flyctl, app: str, machine: str, remote: str, local: Path) -> bool:
@@ -411,7 +836,7 @@ def machine_diagnostic(fly: Flyctl, app: str, machine: str) -> dict[str, Any]:
     }
 
 
-def execute(args: argparse.Namespace, fly: Flyctl, digest: str) -> None:
+def execute(args: argparse.Namespace, fly: Flyctl, digest: str, resources: dict[str, Any]) -> None:
     app_created = False
     machine_id = volume_id = None
     deadline = time.monotonic() + HARD_TTL_S
@@ -439,15 +864,20 @@ def execute(args: argparse.Namespace, fly: Flyctl, digest: str) -> None:
                 "--region",
                 args.region,
                 "--size",
-                str(VOLUME_GB),
+                str(resources["volume_gb"]),
                 "--scheduled-snapshots=false",
                 "--yes",
             ]
         )
         volume_id = volume["id"]
-        machine = create_machine(args, fly, volume_id)
+        if volume.get("size_gb") != resources["volume_gb"] or volume.get("region") not in (
+            None,
+            args.region,
+        ):
+            raise ControllerError("observed volume size or region differs from qualification")
+        machine = create_machine(args, fly, volume_id, resources)
         machine_id = machine["id"]
-        assert_machine(machine, args, digest)
+        assert_machine(machine, args, digest, resources)
         with tempfile.TemporaryDirectory(prefix="graphforge-fly-s20-") as directory:
             journal_path = Path(directory) / "journal.json"
             evidence_path = Path(directory) / "evidence.json"
@@ -508,7 +938,7 @@ def execute(args: argparse.Namespace, fly: Flyctl, digest: str) -> None:
                         next_heartbeat = now + HEARTBEAT_INTERVAL_S
                 time.sleep(POLL_INTERVAL_S)
             else:
-                raise ControllerError("run_timeout 4h30 hard deadline reached before S20 evidence")
+                raise ControllerError("run_timeout 4h hard deadline reached before S20 evidence")
             evidence = json.loads(evidence_path.read_text())
             journal = json.loads(journal_path.read_text())
             preserve_and_validate_evidence(
@@ -517,6 +947,7 @@ def execute(args: argparse.Namespace, fly: Flyctl, digest: str) -> None:
                 args.expected_sha,
                 args.evidence_out,
                 args.journal_out,
+                resources,
             )
             fly.run(
                 [
@@ -560,6 +991,8 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--unpriced-reserve-usd", type=float, default=1.0)
     result.add_argument("--pricing-html", type=Path, help="dry-run test fixture only")
     result.add_argument("--manifest-json", type=Path, help="dry-run manifest fixture only")
+    result.add_argument("--image-contract-json", type=Path, help="dry-run image config fixture only")
+    result.add_argument("--qualification-evidence", type=Path, required=True)
     result.add_argument("--evidence-out", type=Path, default=Path("s20-evidence.json"))
     result.add_argument("--journal-out", type=Path, default=Path("s20-journal.json"))
     result.add_argument("--diagnostic-out", type=Path, default=Path("s20-diagnostic.json"))
@@ -576,11 +1009,23 @@ def main() -> int:
             check_source(args.expected_sha)
         assert_platform_child(
             args.image,
+            args.expected_sha,
             args.manifest_json.read_text() if args.manifest_json else None,
+            args.image_contract_json.read_text() if args.image_contract_json else None,
         )
         html = args.pricing_html.read_text() if args.pricing_html else fetch_pricing()
-        rates = parse_live_rates(html, args.region)
-        costs = cost_plan(rates, args.ceiling_usd, args.unpriced_reserve_usd)
+        resources = load_qualification(args.qualification_evidence, digest, args.region)
+        resources.update({"region": args.region, "image_digest": digest})
+        rates = parse_live_rates(
+            html,
+            args.region,
+            resources["machine"],
+            resources["cpus"],
+            resources["memory_mb"],
+        )
+        costs = cost_plan(
+            rates, args.ceiling_usd, args.unpriced_reserve_usd, resources["volume_gb"]
+        )
         plan = {
             "mode": "execute" if args.execute else "dry-run",
             "checked_at": datetime.now(timezone.utc).isoformat(),
@@ -590,8 +1035,14 @@ def main() -> int:
             "git_sha": args.expected_sha,
             "image_digest": digest,
             "region": args.region,
-            "machine": {"cpu_kind": "performance", "cpus": CPUS, "memory_mb": MEMORY_MB},
-            "volume_gb": VOLUME_GB,
+            "qualification": resources,
+            "machine": {
+                "name": resources["machine"],
+                "cpu_kind": "performance",
+                "cpus": resources["cpus"],
+                "memory_mb": resources["memory_mb"],
+            },
+            "volume_gb": resources["volume_gb"],
             "public_services": 0,
             "restart": "no",
             "auto_destroy": True,
@@ -601,7 +1052,7 @@ def main() -> int:
         }
         print(json.dumps(plan, indent=2, sort_keys=True))
         if args.execute:
-            execute(args, Flyctl(), digest)
+            execute(args, Flyctl(), digest, resources)
     except (ControllerError, OSError, subprocess.SubprocessError, json.JSONDecodeError) as error:
         print(f"Fly S20 controller refused: {error}", file=__import__("sys").stderr)
         return 1

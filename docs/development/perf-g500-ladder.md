@@ -34,8 +34,11 @@ This ladder replaces that with **external sort + spill + k-way merge**:
 3. K-way merge the sorted runs, emitting each unique undirected pair once.
 
 Peak resident edges never exceed `buffer_edges`, **independent of total edge
-count**. Live edges stream straight into `publish_bulk_edges` during the merge,
-so ingest is bounded too.
+count**. The merge decodes fixed 1 MiB blocks into Arrow batches of at most
+65,536 rows and submits them to one storage-owned construction session. That
+session writes immutable runs, performs one bounded final merge and private
+seal, and publishes `CURRENT` exactly once. Pair-at-a-time callbacks and
+repeated `publish_bulk_edges` generations are not valid S20 evidence.
 
 ## Counts always reconcile
 
@@ -103,11 +106,12 @@ failing phase and `error_class` (`oom` | `disk_exhaustion` | `timeout` | `execut
 `result_mismatch`) and
 stops — no larger rung is attempted and no SCALE-26 pass is claimed.
 
-> RSS fidelity: peak RSS is read from `/proc/self/status` `VmHWM` on Linux
-> (a true high-water mark) and falls back to sampled `ps` RSS otherwise (an
-> *instantaneous lower bound*, not a peak). Evidence records `rss_source`
-> (`vmhwm` | `ps_sampled`) so a `ps_sampled` value is read as a floor. Run
-> provisioned certification rungs on **Linux**.
+> RSS fidelity: provisioned evidence samples cgroup `memory.current` and
+> `memory.peak` plus `/proc/self/smaps_rollup` RSS, anonymous, and file-backed
+> values at every phase/window boundary. `VmHWM` is retained only as a run-level
+> backstop; it is never reused as a phase peak. Lower rungs must demonstrate a
+> phase-local plateau. Continued material RSS growth with edge count is an
+> architecture failure, not permission to select a larger Machine.
 
 > Ingest-phase attribution: `publish_bulk_nodes` / `publish_bulk_edges` retain
 > request-sized normalization, identity, endpoint, writer, delta, and receipt
@@ -203,19 +207,32 @@ docker buildx imagetools inspect --raw "registry.fly.io/${APP}:${SHA}"
 ```
 
 Run the controller without `--execute` against the resolved child digest before
-execution. This creates no Machine or volume. It fetches the current official
-Fly pricing page, extracts the fixed `dfw` performance-2x/4GB and volume rates,
-and refuses a projected 4h30 maximum that exceeds the approved $10 ceiling. A
-$1 reserve covers unpriced registry/rootfs/network variance. The controller
-fixes 2 performance CPUs, 4096 MiB RAM, one 50 GB volume, no services, restart
-`no`, auto-destroy, and a 16,200-second hard controller deadline.
+execution. This creates no Machine or volume. Supply a sanitized qualification
+artifact from at least two lower rungs under identical budgets. It binds the
+fixed region and immutable image digest, records phase-local cgroup/smaps and
+block/batch/shard I/O observations, and contains an S20 physical-storage
+projection. The checked-in
+[`fly-s20-qualification.schema.json`](fly-s20-qualification.schema.json)
+defines that input. The controller refuses an RSS growth curve that does not
+plateau, chooses the smallest listed performance Machine with both 25% and 512
+MiB RSS headroom, and rounds the projected physical peak up with 25% volume
+headroom. 128 GiB and Fly's 500 GB volume limit are refusal ceilings, not
+defaults.
+
+The current official rate for the selected Machine and derived volume is priced
+for the four-hour product clock plus bounded cleanup. The total, including a $1
+unpriced reserve, must remain at or below the approved $10 ceiling. The Machine
+has no service, restart policy `no`, auto-destroy enabled, one attached volume,
+and the recorded fixed region/digest. The historical 2-vCPU/4-GiB/50-GB run is
+useful qualification input, never a universal resource requirement.
 
 ```bash
 python3 scripts/fly-g500-s20.py \
   --expected-sha "$SHA" \
   --image "registry.fly.io/${APP}@sha256:<linux-amd64-child>" \
   --org personal --app-name "$APP" \
-  --machine-name "${APP}-machine" --volume-name gf_s20_volume
+  --machine-name "${APP}-machine" --volume-name gf_s20_volume \
+  --qualification-evidence build/s20-fly-qualification.json
 ```
 
 Only after inspecting that dry-run, add `--execute --confirm-disposable`. Live
@@ -226,14 +243,24 @@ of the Machine, volume, and app in `finally`. Do not use pricing fixtures with
 execution; `--pricing-html` and `--manifest-json` exist only for deterministic
 dry-run tests.
 
-During execution the controller prints sanitized JSON progress: every completed
+Before any Fly resource is created, the controller reads the pinned child image
+configuration and requires Linux/AMD64, the exact source revision, the
+phase-measurement contract, and the storage-owned construction-session contract.
+The legacy `EdgeSink`/repeated-publication executable deliberately does not
+advertise that contract and is refused before paid launch. A Docker label is
+evidence only when the image build itself runs the contract regression; it must
+never be added merely to bypass this admission gate.
+
+Admission and the full lifecycle share one 14,400-second product clock; the
+S20 subprocess receives only the time remaining after admission. During
+execution the controller prints sanitized JSON progress: every completed
 phase, the next phase start, and a heartbeat once per minute. It also writes
 each valid journal prefix to `--journal-out`, so an operator stop or timeout
 does not discard completed evidence. Phase-aware operational ceilings stop a
 stalled or pathologically broad phase with `phase_timeout` before it can consume
-the entire 4h30 outer envelope; a journaled product failure stops immediately
-with `phase_failed` and its recorded failure code. These ceilings only prevent
-runaway spend and silence. They do not turn a partial lifecycle into a pass:
+the entire four-hour outer envelope; a journaled product failure stops
+immediately with `phase_failed` and its recorded failure code. These ceilings
+only prevent runaway spend and silence. They do not turn a partial lifecycle into a pass:
 success still requires the exact 17-phase journal and equivalent source/import
 evidence described above. The dry-run plan prints the complete timeout table.
 
@@ -246,13 +273,11 @@ records the controller error plus an allowlisted Machine state and at most 20
 exit/status events captured before teardown. Raw Fly logs, environment values,
 network addresses, and unrecognized event fields are never retained.
 
-Ingest and clean import each have a 90-minute ceiling. A Fly S20 ingest remained
-responsive and made progress but crossed the former 60-minute boundary by 18
-seconds, with no OOM or disk failure; the Machine, volume, and app then tore down
-cleanly. The additional allowance accounts for empirically observed shared-host
-storage-I/O variance. It does not weaken correctness: the 4h30 hard run limit,
-all other phase ceilings, typed failure handling, exact phase sequence, and
-source/import equivalence requirements remain unchanged.
+Phase timeouts are safety stops, not performance allowances. Ingest/import
+limits must be interpreted with observed block throughput and storage-owned
+counters; they do not rationalize record-at-a-time or repeated-publication
+work. Teardown independently attempts the exact Machine, volume, and app under
+one ten-minute deadline and reports every unresolved ID.
 
 ```bash
 python3 scripts/ci/test-fly-g500-s20.py
@@ -293,14 +318,26 @@ One object per attempted rung (schema
   `live_unique_edges`).
 - `first_failing_phase`, `error_class`, `pass`, `reconciles`.
 - `input_fingerprint` (deterministic SHA-256 of the sorted live edge set),
-  `rss_peak_bytes`, `disk_used_bytes`, `wall_time_s`, per-phase `steps`.
+  `wall_time_s`, and per-phase/window boundary observations.
 - `machine_envelope` (128 GiB / 1 TiB / 4 h fail-safe), `sut`, `generator`.
 - `track` and `teps` are always `null`.
 
-The `reopen`, `node_count`, `edge_count`, `cypher_limit_1hop`, and
-`cypher_limit_2hop` steps each carry `rss_peak_bytes` plus `process_memory`
-(`vmrss_bytes`, `rss_anon_bytes`, and `rss_file_bytes` on Linux), rather than a
-single aggregate query observation.
+Every phase/window carries cgroup current-before/peak/current-after; smaps RSS,
+anonymous, and file values before/after; `/proc/self/io` byte and syscall
+deltas; storage sequential bytes, 1 MiB blocks, Arrow batches and maximum batch
+rows, shards/row groups, random seeks, fsyncs, and construction/index counters.
+Filesystem boundaries use `statvfs` capacity/free/available values and explicit
+allocated project/spill/package/import counters. A recursive project-tree `du`
+watchdog is prohibited because its work scales with shard count and perturbs
+the measured I/O.
+
+The final evidence binds the actual selected Machine, CPUs, memory, volume,
+region, immutable child digest, no-service/restart settings, passing disk and
+RSS-plateau gates, and exactly one `CURRENT` transition for source construction
+and one for clean import. It must prove source export, full verification, import
+into an absent destination, imported reopen, counts/queries, and equivalent
+project/authority fingerprints. Partial evidence remains a diagnosis, not a
+pass.
 
 Each hop step also carries aggregate-only `operators` evidence. Expansion
 records input batches/rows, generated candidates, emitted rows, selective

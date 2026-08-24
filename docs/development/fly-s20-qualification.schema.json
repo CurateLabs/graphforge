@@ -1,0 +1,143 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://graphforge.dev/schemas/fly-s20-qualification-v1.json",
+  "title": "GraphForge Fly S20 qualification evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "region",
+    "image_digest",
+    "max_phase_rss_growth_ratio",
+    "machine_candidates",
+    "rungs"
+  ],
+  "properties": {
+    "schema": { "const": "graphforge-fly-s20-qualification/1" },
+    "region": { "type": "string", "pattern": "^[a-z0-9]{3}$" },
+    "image_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "max_phase_rss_growth_ratio": { "type": "number", "minimum": 1, "maximum": 1.5 },
+    "machine_candidates": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "cpus", "memory_mb"],
+        "properties": {
+          "name": { "type": "string", "pattern": "^[a-z][a-z0-9-]{2,62}$" },
+          "cpus": { "type": "integer", "minimum": 1 },
+          "memory_mb": { "type": "integer", "minimum": 1, "maximum": 131072 }
+        }
+      }
+    },
+    "rungs": {
+      "type": "array",
+      "minItems": 2,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "scale",
+          "result",
+          "physical_volume_peak_bytes",
+          "s20_projected_physical_peak_bytes",
+          "budgets",
+          "runtime",
+          "construction",
+          "phases"
+        ],
+        "properties": {
+          "scale": { "type": "integer", "minimum": 1, "maximum": 19 },
+          "result": { "const": "pass" },
+          "physical_volume_peak_bytes": { "type": "integer", "minimum": 1 },
+          "s20_projected_physical_peak_bytes": { "type": "integer", "minimum": 1 },
+          "budgets": {
+            "type": "object",
+            "minProperties": 1,
+            "additionalProperties": { "type": "integer", "minimum": 1 }
+          },
+          "runtime": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["machine", "cpus", "memory_mb"],
+            "properties": {
+              "machine": { "type": "string" },
+              "cpus": { "type": "integer", "minimum": 1 },
+              "memory_mb": { "type": "integer", "minimum": 1 }
+            }
+          },
+          "construction": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["contract", "source_current_transitions", "import_current_transitions"],
+            "properties": {
+              "contract": { "const": "graphforge-storage-construction-session/1" },
+              "source_current_transitions": { "const": 1 },
+              "import_current_transitions": { "const": 1 }
+            }
+          },
+          "phases": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "$ref": "#/$defs/phase" }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "nonnegative": { "type": "integer", "minimum": 0 },
+    "phase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "elapsed_ms", "memory", "io"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "elapsed_ms": { "type": "integer", "minimum": 1 },
+        "memory": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "cgroup_current_before_bytes",
+            "cgroup_peak_bytes",
+            "cgroup_current_after_bytes",
+            "smaps_rss_bytes",
+            "smaps_anon_bytes",
+            "smaps_file_bytes"
+          ],
+          "properties": {
+            "cgroup_current_before_bytes": { "$ref": "#/$defs/nonnegative" },
+            "cgroup_peak_bytes": { "$ref": "#/$defs/nonnegative" },
+            "cgroup_current_after_bytes": { "$ref": "#/$defs/nonnegative" },
+            "smaps_rss_bytes": { "$ref": "#/$defs/nonnegative" },
+            "smaps_anon_bytes": { "$ref": "#/$defs/nonnegative" },
+            "smaps_file_bytes": { "$ref": "#/$defs/nonnegative" }
+          }
+        },
+        "io": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "read_bytes",
+            "write_bytes",
+            "read_syscalls",
+            "write_syscalls",
+            "blocks",
+            "batches",
+            "shards"
+          ],
+          "properties": {
+            "read_bytes": { "$ref": "#/$defs/nonnegative" },
+            "write_bytes": { "$ref": "#/$defs/nonnegative" },
+            "read_syscalls": { "$ref": "#/$defs/nonnegative" },
+            "write_syscalls": { "$ref": "#/$defs/nonnegative" },
+            "blocks": { "$ref": "#/$defs/nonnegative" },
+            "batches": { "$ref": "#/$defs/nonnegative" },
+            "shards": { "$ref": "#/$defs/nonnegative" }
+          }
+        }
+      }
+    }
+  }
+}

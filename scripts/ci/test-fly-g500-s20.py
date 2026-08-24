@@ -18,11 +18,16 @@ controller = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(controller)
 
 
-def pricing_html(hour: str = "0.1076") -> str:
+def pricing_html(
+    hour: str = "0.1076",
+    machine: str = "performance-2x",
+    cpus: int = 2,
+    memory_gb: int = 4,
+) -> str:
     second = f"{float(hour) / 3600:.8f}"
     return f"""
       <div id="started-machines-pricing-matrix-dfw"><table><tr>
-      <th>performance-2x</th><td>2 performance</td><td>4GB</td>
+      <th>{machine}</th><td>{cpus} performance</td><td>{memory_gb}GB</td>
       <td>${second}</td><td>${hour}</td></tr></table></div>
       <p>$0.15/GB per month of provisioned capacity</p>
     """
@@ -41,6 +46,8 @@ def args(root: Path) -> argparse.Namespace:
         unpriced_reserve_usd=1.0,
         pricing_html=root / "pricing.html",
         manifest_json=root / "manifest.json",
+        image_contract_json=root / "image-contract.json",
+        qualification_evidence=root / "qualification.json",
         evidence_out=root / "evidence.json",
         journal_out=root / "journal.json",
         diagnostic_out=root / "diagnostic.json",
@@ -49,16 +56,85 @@ def args(root: Path) -> argparse.Namespace:
     )
 
 
+def qualification(digest: str, *, growth: float = 1.1, disk_gib: int = 20) -> dict:
+    def phase(identifier: str, peak: int) -> dict:
+        return {
+            "id": identifier,
+            "elapsed_ms": 1,
+            "memory": {
+                "cgroup_current_before_bytes": peak // 2,
+                "cgroup_peak_bytes": peak,
+                "cgroup_current_after_bytes": peak // 2,
+                "smaps_rss_bytes": peak // 2,
+                "smaps_anon_bytes": peak // 3,
+                "smaps_file_bytes": peak // 6,
+            },
+            "io": {
+                "read_bytes": 1_048_576,
+                "write_bytes": 1_048_576,
+                "read_syscalls": 1,
+                "write_syscalls": 1,
+                "blocks": 1,
+                "batches": 1,
+                "shards": 1,
+            },
+        }
+
+    base = 2 * 1024**3
+    return {
+        "schema": "graphforge-fly-s20-qualification/1",
+        "region": "dfw",
+        "image_digest": digest,
+        "max_phase_rss_growth_ratio": 1.2,
+        "machine_candidates": [
+            {"name": "performance-2x", "cpus": 2, "memory_mb": 4096},
+            {"name": "performance-4x", "cpus": 4, "memory_mb": 8192},
+        ],
+        "rungs": [
+            {
+                "scale": 18,
+                "result": "pass",
+                "physical_volume_peak_bytes": 1024**3,
+                "s20_projected_physical_peak_bytes": disk_gib * 1024**3,
+                "budgets": {"memory_bytes": 3 * 1024**3, "batch_rows": 65_536},
+                "runtime": {"machine": "performance-2x", "cpus": 2, "memory_mb": 4096},
+                "construction": {
+                    "contract": controller.REQUIRED_CONSTRUCTION_CONTRACT,
+                    "source_current_transitions": 1,
+                    "import_current_transitions": 1,
+                },
+                "phases": [phase(identifier, base) for identifier in controller.PHASES],
+            },
+            {
+                "scale": 19,
+                "result": "pass",
+                "physical_volume_peak_bytes": 2 * 1024**3,
+                "s20_projected_physical_peak_bytes": disk_gib * 1024**3,
+                "budgets": {"memory_bytes": 3 * 1024**3, "batch_rows": 65_536},
+                "runtime": {"machine": "performance-2x", "cpus": 2, "memory_mb": 4096},
+                "construction": {
+                    "contract": controller.REQUIRED_CONSTRUCTION_CONTRACT,
+                    "source_current_transitions": 1,
+                    "import_current_transitions": 1,
+                },
+                "phases": [
+                    phase(identifier, int(base * growth)) for identifier in controller.PHASES
+                ],
+            },
+        ],
+    }
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
-        parsed = controller.parse_live_rates(pricing_html(), "dfw")
+        parsed = controller.parse_live_rates(pricing_html(), "dfw", "performance-2x", 2, 4096)
         assert parsed == {"compute_per_hour_usd": 0.1076, "volume_gb_month_usd": 0.15}
-        cost = controller.cost_plan(parsed, 10.0, 1.0)
+        cost = controller.cost_plan(parsed, 10.0, 1.0, 25)
         assert cost["projected_max_usd"] < 10.0
         try:
             controller.cost_plan(
-                {"compute_per_hour_usd": 3.0, "volume_gb_month_usd": 1.0}, 10.0, 1.0
+                {"compute_per_hour_usd": 3.0, "volume_gb_month_usd": 1.0}, 10.0, 1.0, 25
             )
         except controller.ControllerError:
             pass
@@ -68,13 +144,39 @@ def main() -> None:
         child = json.dumps(
             {"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json"}
         )
-        controller.assert_platform_child("unused", child)
+        image_contract = json.dumps(
+            {
+                "architecture": "amd64",
+                "os": "linux",
+                "config": {
+                    "Labels": {
+                        "org.opencontainers.image.revision": "a" * 40,
+                        "dev.graphforge.s20.runtime": controller.REQUIRED_IMAGE_CONTRACT,
+                        "dev.graphforge.s20.measurement": controller.REQUIRED_MEASUREMENT_CONTRACT,
+                        "dev.graphforge.s20.construction": controller.REQUIRED_CONSTRUCTION_CONTRACT,
+                    }
+                },
+            }
+        )
+        controller.assert_platform_child("unused", "a" * 40, child, image_contract)
+        wrong_platform = json.loads(image_contract)
+        wrong_platform["architecture"] = "arm64"
+        try:
+            controller.assert_platform_child(
+                "unused", "a" * 40, child, json.dumps(wrong_platform)
+            )
+        except controller.ControllerError as error:
+            assert "linux/amd64" in str(error)
+        else:
+            raise AssertionError("wrong-platform child must be refused")
         try:
             controller.assert_platform_child(
                 "unused",
+                "a" * 40,
                 json.dumps(
                     {"mediaType": "application/vnd.oci.image.index.v1+json", "manifests": []}
                 ),
+                image_contract,
             )
         except controller.ControllerError:
             pass
@@ -84,13 +186,46 @@ def main() -> None:
         options = args(root)
         digest = controller.validate_args(options)
         assert digest == "sha256:" + "b" * 64
-        payload = controller.machine_payload(options, "vol_test")
+        options.qualification_evidence.write_text(json.dumps(qualification(digest)))
+
+        options.qualification_evidence.write_text(json.dumps(qualification(digest, disk_gib=500)))
+        try:
+            controller.load_qualification(options.qualification_evidence, digest, "dfw")
+        except controller.ControllerError as error:
+            assert "500 GB" in str(error)
+        else:
+            raise AssertionError("Fly volume overflow must be refused before execution")
+        options.qualification_evidence.write_text(json.dumps(qualification(digest)))
+        resources = controller.load_qualification(options.qualification_evidence, digest, "dfw")
+        assert resources["machine"] == "performance-2x"
+        assert resources["memory_mb"] == 4096
+        assert resources["volume_gb"] == 25
+        inconsistent = qualification(digest)
+        inconsistent["rungs"][1]["budgets"]["batch_rows"] = 32_768
+        options.qualification_evidence.write_text(json.dumps(inconsistent))
+        try:
+            controller.load_qualification(options.qualification_evidence, digest, "dfw")
+        except controller.ControllerError as error:
+            assert "different operator budgets" in str(error)
+        else:
+            raise AssertionError("different lower-rung budgets must be refused")
+        options.qualification_evidence.write_text(json.dumps(qualification(digest)))
+        payload = controller.machine_payload(options, "vol_test", resources)
         config = payload["config"]
         assert config["services"] == []
         assert config["restart"] == {"policy": "no"}
         assert config["auto_destroy"] is True
         assert config["guest"] == {"cpu_kind": "performance", "cpus": 2, "memory_mb": 4096}
         assert config["mounts"] == [{"volume": "vol_test", "path": "/work"}]
+
+        options.qualification_evidence.write_text(json.dumps(qualification(digest, growth=1.3)))
+        try:
+            controller.load_qualification(options.qualification_evidence, digest, "dfw")
+        except controller.ControllerError as error:
+            assert "does not plateau" in str(error)
+        else:
+            raise AssertionError("material phase RSS growth must be refused")
+        options.qualification_evidence.write_text(json.dumps(qualification(digest)))
 
         phases = [{"id": phase, "status": "pass"} for phase in controller.PHASES]
         lifecycle = {
@@ -104,11 +239,79 @@ def main() -> None:
         }
         evidence = {
             "schema": "graphforge-s20-integrated-lifecycle-evidence/1",
+            "measurement_contract": controller.REQUIRED_MEASUREMENT_CONTRACT,
+            "construction_contract": controller.REQUIRED_CONSTRUCTION_CONTRACT,
             "git_sha": "a" * 40,
             "result": "pass",
             "lifecycle": lifecycle,
         }
         controller.validate_evidence(evidence, phases, "a" * 40)
+        measured_phases = []
+        for phase in phases:
+            measured_phases.append(
+                {
+                    **phase,
+                    "memory": {
+                        "cgroup_current_before_bytes": 1,
+                        "cgroup_peak_bytes": 2,
+                        "cgroup_current_after_bytes": 1,
+                        "smaps_rss_before_bytes": 1,
+                        "smaps_rss_after_bytes": 1,
+                        "smaps_anon_before_bytes": 1,
+                        "smaps_anon_after_bytes": 1,
+                        "smaps_file_before_bytes": 0,
+                        "smaps_file_after_bytes": 0,
+                    },
+                    "io": {
+                        "proc_read_bytes": 1,
+                        "proc_write_bytes": 1,
+                        "proc_read_syscalls": 1,
+                        "proc_write_syscalls": 1,
+                        "storage_sequential_bytes": 1,
+                        "storage_blocks": 1,
+                        "arrow_batches": 1,
+                        "max_arrow_batch_rows": 1,
+                        "shards": 1,
+                        "row_groups": 1,
+                        "random_seeks": 0,
+                        "fsyncs": 1,
+                        "topology_rows": 100,
+                    },
+                    "filesystem": {
+                        "total_bytes": resources["volume_gb"] * 1024**3,
+                        "free_before_bytes": resources["volume_gb"] * 1024**3 - 10,
+                        "free_after_bytes": resources["volume_gb"] * 1024**3 - 11,
+                        "available_before_bytes": resources["volume_gb"] * 1024**3 - 10,
+                        "available_after_bytes": resources["volume_gb"] * 1024**3 - 11,
+                        "allocated_before_bytes": 10,
+                        "allocated_after_bytes": 11,
+                    },
+                    "memory_limit_bytes": resources["memory_mb"] * 1024**2,
+                }
+            )
+        measured = json.loads(json.dumps(evidence))
+        measured["lifecycle"]["phases"] = measured_phases
+        measured["lifecycle"]["current_transitions"] = {"source": 1, "clean_import": 1}
+        measured["run_environment"] = {
+            "region": "dfw",
+            "image_digest": digest,
+            "machine": resources["machine"],
+            "cpus": resources["cpus"],
+            "memory_mb": resources["memory_mb"],
+            "volume_gb": resources["volume_gb"],
+            "public_services": 0,
+            "restart": "no",
+        }
+        measured["resource_gates"] = {"rss_plateau": "pass", "disk_headroom": "pass"}
+        bound_resources = {**resources, "region": "dfw", "image_digest": digest}
+        controller.validate_evidence(measured, measured_phases, "a" * 40, bound_resources)
+        measured["lifecycle"]["phases"][0]["io"].pop("storage_blocks")
+        try:
+            controller.validate_evidence(measured, measured_phases, "a" * 40, bound_resources)
+        except controller.ControllerError as error:
+            assert "storage I/O evidence" in str(error)
+        else:
+            raise AssertionError("missing block I/O evidence must be refused")
         evidence["lifecycle"]["imported_edges"] = 2
         try:
             controller.validate_evidence(evidence, phases, "a" * 40)
@@ -142,6 +345,11 @@ def main() -> None:
         assert preserved["schema"] == "incomplete"
         assert preserved["token"] == "<redacted>"
         assert preserved["nested"]["password_hint"] == "<redacted>"
+        authority = "sha256:not-a-credential"
+        controller.write_sanitized_json(
+            options.evidence_out, {"source_authority_fingerprint": authority}
+        )
+        assert json.loads(options.evidence_out.read_text())["source_authority_fingerprint"] == authority
         try:
             controller.preserve_and_validate_evidence(
                 unsafe,
@@ -189,8 +397,58 @@ def main() -> None:
             "events": [{"type": "exit", "status": "failed", "exit_code": 137}],
         }
 
+        class FakeCleanup:
+            def __init__(self):
+                self.calls = []
+
+            def run(self, arguments, *, check=True, timeout=120):
+                del check
+                del timeout
+                self.calls.append(arguments)
+                return subprocess.CompletedProcess([], 0, "", "")
+
+            def json(self, arguments, *, timeout=120):
+                del timeout
+                self.calls.append(arguments)
+                return []
+
+        cleanup = FakeCleanup()
+        controller.destroy_and_verify(cleanup, "gf-s20-test", "machine-id", "volume-id")
+        assert [
+            "machine",
+            "destroy",
+            "machine-id",
+            "--app",
+            "gf-s20-test",
+            "--force",
+        ] in cleanup.calls
+        assert ["volumes", "destroy", "volume-id", "--app", "gf-s20-test", "--yes"] in cleanup.calls
+        assert ["apps", "destroy", "gf-s20-test", "--yes"] in cleanup.calls
+
+        class FirstDeleteFails(FakeCleanup):
+            def run(self, arguments, *, check=True, timeout=120):
+                if not self.calls:
+                    self.calls.append(arguments)
+                    raise subprocess.TimeoutExpired(arguments, timeout)
+                return super().run(arguments, check=check, timeout=timeout)
+
+        cleanup_after_failure = FirstDeleteFails()
+        controller.destroy_and_verify(
+            cleanup_after_failure, "gf-s20-test", "machine-id", "volume-id"
+        )
+        assert [
+            "volumes",
+            "destroy",
+            "volume-id",
+            "--app",
+            "gf-s20-test",
+            "--yes",
+        ] in cleanup_after_failure.calls
+        assert ["apps", "destroy", "gf-s20-test", "--yes"] in cleanup_after_failure.calls
+
         (root / "pricing.html").write_text(pricing_html())
         (root / "manifest.json").write_text(child)
+        (root / "image-contract.json").write_text(image_contract)
         # Main dry-run exercises argument/config/rate/manifest validation without Fly.
         result = subprocess.run(
             [
@@ -212,6 +470,10 @@ def main() -> None:
                 str(options.pricing_html),
                 "--manifest-json",
                 str(options.manifest_json),
+                "--image-contract-json",
+                str(options.image_contract_json),
+                "--qualification-evidence",
+                str(options.qualification_evidence),
                 "--evidence-out",
                 str(options.evidence_out),
                 "--journal-out",
@@ -225,8 +487,9 @@ def main() -> None:
             text=True,
         )
         plan = json.loads(result.stdout)
-        assert plan["mode"] == "dry-run" and plan["hard_ttl_s"] == 16200
-        assert plan["volume_gb"] == 50 and plan["public_services"] == 0
+        assert plan["mode"] == "dry-run" and plan["hard_ttl_s"] == 14400
+        assert plan["volume_gb"] == 25 and plan["public_services"] == 0
+        assert plan["qualification"]["qualified_peak_rss_bytes"] > 0
         assert plan["heartbeat_interval_s"] == 60
         assert plan["phase_timeout_s"]["ingest"] == 5400
         assert plan["phase_timeout_s"]["import"] == 5400
@@ -236,6 +499,7 @@ def main() -> None:
     assert "Authorization" in source and '["auth", "token"]' in source
     assert "finally:" in source and "destroy_and_verify" in source
     assert "FLY_API_TOKEN" not in source
+    assert "du -" not in source
     print("Fly S20 controller tests passed")
 
 

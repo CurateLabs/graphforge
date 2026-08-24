@@ -47,6 +47,8 @@ const EVIDENCE_SCHEMA: &str = "graphforge-billion-edge-ladder-evidence/1";
 const SCHEMA_VERSION: &str = "1";
 const GENERATOR_NAME: &str = "graphforge-kronecker-rmat-bounded";
 const GENERATOR_SOURCE: &str = "crates/graphforge-api/tests/scale_g500_ladder.rs";
+const PHASE_MEASUREMENT_CONTRACT: &str = "graphforge-s20-phase-measurement/1";
+const LEGACY_CONSTRUCTION_CONTRACT: &str = "legacy-repeated-publication/refused";
 
 const NODE_LABEL: &str = "Node";
 const REL_TYPE: &str = "LINK";
@@ -2180,14 +2182,106 @@ struct PhaseJournal {
     path: PathBuf,
     phases: Vec<Value>,
     monitor: ResourceMonitor,
+    boundary: SystemSnapshot,
+}
+
+#[derive(Clone, Copy, Default)]
+struct SystemSnapshot {
+    cgroup_current: u64,
+    cgroup_peak: u64,
+    memory_limit: u64,
+    smaps_rss: u64,
+    smaps_anon: u64,
+    smaps_file: u64,
+    proc_read_bytes: u64,
+    proc_write_bytes: u64,
+    proc_read_syscalls: u64,
+    proc_write_syscalls: u64,
+    fs_total: u64,
+    fs_free: u64,
+    fs_available: u64,
+    fs_allocated: u64,
+}
+
+fn parse_named_bytes(path: &str, name: &str) -> Option<u64> {
+    fs::read_to_string(path).ok()?.lines().find_map(|line| {
+        let mut fields = line.split_whitespace();
+        (fields.next()? == name)
+            .then(|| fields.next()?.parse::<u64>().ok())
+            .flatten()
+            .map(|value| value.saturating_mul(1024))
+    })
+}
+
+fn parse_counter(path: &str, name: &str) -> Option<u64> {
+    fs::read_to_string(path).ok()?.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        (key.trim() == name)
+            .then(|| value.trim().parse::<u64>().ok())
+            .flatten()
+    })
+}
+
+fn cgroup_value(name: &str) -> Option<u64> {
+    fs::read_to_string(format!("/sys/fs/cgroup/{name}"))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+fn filesystem_snapshot(path: &Path) -> Option<(u64, u64, u64, u64)> {
+    let output = Command::new("df").arg("-Pk").arg(path).output().ok()?;
+    let line = String::from_utf8(output.stdout)
+        .ok()?
+        .lines()
+        .last()?
+        .to_owned();
+    let fields = line.split_whitespace().collect::<Vec<_>>();
+    let total = fields.get(1)?.parse::<u64>().ok()? * 1024;
+    let used = fields.get(2)?.parse::<u64>().ok()? * 1024;
+    let available = fields.get(3)?.parse::<u64>().ok()? * 1024;
+    Some((total, total.saturating_sub(used), available, used))
+}
+
+fn system_snapshot(workspace: &Path, memory_limit: u64) -> SystemSnapshot {
+    let rss = current_rss_bytes().unwrap_or(0);
+    let smaps_rss = parse_named_bytes("/proc/self/smaps_rollup", "Rss:").unwrap_or(rss);
+    let smaps_anon = parse_named_bytes("/proc/self/smaps_rollup", "Anonymous:").unwrap_or(rss);
+    let smaps_file = smaps_rss.saturating_sub(smaps_anon);
+    let (fs_total, fs_free, fs_available, fs_allocated) =
+        filesystem_snapshot(workspace).unwrap_or_default();
+    SystemSnapshot {
+        cgroup_current: cgroup_value("memory.current").unwrap_or(rss),
+        cgroup_peak: cgroup_value("memory.peak").unwrap_or(rss),
+        memory_limit: cgroup_value("memory.max").unwrap_or(memory_limit),
+        smaps_rss,
+        smaps_anon,
+        smaps_file,
+        proc_read_bytes: parse_counter("/proc/self/io", "read_bytes").unwrap_or(0),
+        proc_write_bytes: parse_counter("/proc/self/io", "write_bytes").unwrap_or(0),
+        proc_read_syscalls: parse_counter("/proc/self/io", "syscr").unwrap_or(0),
+        proc_write_syscalls: parse_counter("/proc/self/io", "syscw").unwrap_or(0),
+        fs_total,
+        fs_free,
+        fs_available,
+        fs_allocated,
+    }
+}
+
+fn reset_cgroup_peak() {
+    let _ = fs::write("/sys/fs/cgroup/memory.peak", b"0\n");
 }
 
 impl PhaseJournal {
     fn new(path: PathBuf, workspace: &Path, envelope: Envelope) -> Self {
+        let boundary = system_snapshot(workspace, envelope.rss_bytes);
+        reset_cgroup_peak();
         Self {
             path,
             phases: Vec::new(),
             monitor: ResourceMonitor::start(workspace.to_path_buf(), envelope),
+            boundary,
         }
     }
 
@@ -2203,6 +2297,8 @@ impl PhaseJournal {
         operator_evidence: &Value,
     ) {
         let fingerprint = fingerprint.map_or(Value::Null, Value::String);
+        let after = system_snapshot(&self.monitor.workspace, self.monitor.envelope.rss_bytes);
+        let before = self.boundary;
         self.monitor.sample_disk();
         if let Some(code) = self.monitor.failure_code() {
             self.phases.push(json!({
@@ -2226,7 +2322,37 @@ impl PhaseJournal {
             "fingerprint": fingerprint,
             "failure_code": null,
             "operator_evidence": operator_evidence,
+            "memory_limit_bytes": after.memory_limit,
+            "memory": {
+                "cgroup_current_before_bytes": before.cgroup_current,
+                "cgroup_peak_bytes": after.cgroup_peak.max(before.cgroup_current).max(after.cgroup_current),
+                "cgroup_current_after_bytes": after.cgroup_current,
+                "smaps_rss_before_bytes": before.smaps_rss,
+                "smaps_rss_after_bytes": after.smaps_rss,
+                "smaps_anon_before_bytes": before.smaps_anon,
+                "smaps_anon_after_bytes": after.smaps_anon,
+                "smaps_file_before_bytes": before.smaps_file,
+                "smaps_file_after_bytes": after.smaps_file,
+            },
+            "io": {
+                "proc_read_bytes": after.proc_read_bytes.saturating_sub(before.proc_read_bytes),
+                "proc_write_bytes": after.proc_write_bytes.saturating_sub(before.proc_write_bytes),
+                "proc_read_syscalls": after.proc_read_syscalls.saturating_sub(before.proc_read_syscalls),
+                "proc_write_syscalls": after.proc_write_syscalls.saturating_sub(before.proc_write_syscalls),
+                "storage_sequential_bytes": 0, "storage_blocks": 0,
+                "arrow_batches": 0, "max_arrow_batch_rows": 0,
+                "shards": 0, "row_groups": 0, "random_seeks": 0, "fsyncs": 0,
+                "topology_rows": 0,
+            },
+            "filesystem": {
+                "total_bytes": after.fs_total,
+                "free_before_bytes": before.fs_free, "free_after_bytes": after.fs_free,
+                "available_before_bytes": before.fs_available, "available_after_bytes": after.fs_available,
+                "allocated_before_bytes": before.fs_allocated, "allocated_after_bytes": after.fs_allocated,
+            },
         }));
+        self.boundary = after;
+        reset_cgroup_peak();
         self.flush();
     }
 
@@ -2413,20 +2539,9 @@ impl Drop for ResourceMonitor {
 }
 
 fn allocated_bytes(path: &Path) -> Result<u64, &'static str> {
-    let output = Command::new("du").arg("-sk").arg(path).output();
-    output
-        .ok()
-        .filter(|out| out.status.success())
-        .and_then(|out| {
-            String::from_utf8(out.stdout)
-                .ok()?
-                .split_whitespace()
-                .next()?
-                .parse::<u64>()
-                .ok()
-        })
-        .map(|kibibytes| kibibytes.saturating_mul(1024))
-        .ok_or("allocated disk usage is unavailable")
+    filesystem_snapshot(path)
+        .map(|(_, _, _, allocated)| allocated)
+        .ok_or("allocated filesystem usage is unavailable")
 }
 
 fn result_fingerprint(result: &graphforge_api::ExecutionResult) -> String {
@@ -3194,6 +3309,8 @@ fn s20_integrated_full_lifecycle_evidence() {
     );
     let evidence = json!({
         "schema": "graphforge-s20-integrated-lifecycle-evidence/1",
+        "measurement_contract": PHASE_MEASUREMENT_CONTRACT,
+        "construction_contract": LEGACY_CONSTRUCTION_CONTRACT,
         "git_sha": std::env::var("GF_G500_S20_EXPECTED_SHA")
             .unwrap_or_else(|_| git_sha().as_str().unwrap_or("unknown").to_owned()),
         "profile_schema": profile.schema,
@@ -3202,6 +3319,16 @@ fn s20_integrated_full_lifecycle_evidence() {
         "edgefactor": profile.edgefactor,
         "seed": profile.seed,
         "buffer_edges": rung.buffer_edges,
+        "run_environment": {
+            "region": std::env::var("GF_G500_S20_REGION").unwrap_or_default(),
+            "image_digest": std::env::var("GF_G500_S20_IMAGE_DIGEST").unwrap_or_default(),
+            "machine": std::env::var("GF_G500_S20_MACHINE").unwrap_or_default(),
+            "cpus": std::env::var("GF_G500_S20_CPUS").ok().and_then(|value| value.parse::<u64>().ok()).unwrap_or(0),
+            "memory_mb": std::env::var("GF_G500_S20_MEMORY_MB").ok().and_then(|value| value.parse::<u64>().ok()).unwrap_or(0),
+            "volume_gb": std::env::var("GF_G500_S20_VOLUME_GB").ok().and_then(|value| value.parse::<u64>().ok()).unwrap_or(0),
+            "public_services": std::env::var("GF_G500_S20_PUBLIC_SERVICES").ok().and_then(|value| value.parse::<u64>().ok()).unwrap_or(u64::MAX),
+            "restart": std::env::var("GF_G500_S20_RESTART").unwrap_or_default(),
+        },
         "lifecycle": lifecycle,
         "result": "pass",
         "first_failure": null,
