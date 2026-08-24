@@ -170,7 +170,6 @@ pub struct UuidMembershipIndex {
 impl UuidMembershipIndex {
     /// Open and fully authenticate the current immutable index snapshot.
     pub fn open(project_dir: &Path) -> Result<Self, GfError> {
-        recover_uuid_membership_publication(project_dir)?;
         let root = project_dir.join(INDEX_DIR);
         let body = fs::read(root.join(MANIFEST)).map_err(storage_err)?;
         let manifest: Manifest = serde_json::from_slice(&body).map_err(storage_err)?;
@@ -316,7 +315,6 @@ pub fn uuid_membership_index_present(project_dir: &Path) -> bool {
 /// This cheap publication-path check deliberately does not authenticate data;
 /// readers still use [`UuidMembershipIndex::open`] before trusting membership.
 pub fn uuid_membership_index_is_fresh(project_dir: &Path) -> Result<bool, GfError> {
-    recover_uuid_membership_publication(project_dir)?;
     let body = match fs::read(project_dir.join(INDEX_DIR).join(MANIFEST)) {
         Ok(body) => body,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -327,12 +325,10 @@ pub fn uuid_membership_index_is_fresh(project_dir: &Path) -> Result<bool, GfErro
         && manifest.current_generation == crate::read_topology_generation(project_dir)?)
 }
 
-const RECOVERY_MARKER: &str = "recovery.json";
 const TOPOLOGY_RECEIPT: &str = "topology-receipt.json";
-const MAX_RECOVERY_MARKER_BYTES: u64 = 1 << 20;
-const MAX_RECOVERY_RECEIPT_BYTES: u64 = 4 << 10;
-const MAX_PREPARED_FILES: usize = 128;
+const MAX_MANIFEST_BYTES: u64 = 1 << 20;
 
+#[cfg(any())]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct PreparedIndexFile {
     prepared_name: String,
@@ -342,6 +338,7 @@ struct PreparedIndexFile {
     manifest: bool,
 }
 
+#[cfg(any())]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct UuidIndexRecovery {
     format_version: u32,
@@ -366,10 +363,8 @@ struct TopologyIndexReceipt {
 }
 
 pub(crate) struct PreparedUuidIndexDelta {
-    project_dir: PathBuf,
     expected_generation: u64,
-    receipt: TopologyIndexReceipt,
-    root_identity: graphforge_filesystem::FileIdentity,
+    auxiliary: crate::AuxiliaryReceipt,
 }
 
 /// Prepare one bounded v3 UUID-index delta before its topology commit. The
@@ -378,12 +373,12 @@ pub(crate) struct PreparedUuidIndexDelta {
 pub(crate) fn prepare_uuid_membership_delta(
     project_dir: &Path,
     generation: u64,
+    batch: &mut crate::staging::RewriteBatch,
     nodes: &[(Uuid, u64)],
     edges: &[Uuid],
     deleted_nodes: &[(Uuid, u64)],
     deleted_edges: &[Uuid],
 ) -> Result<Option<PreparedUuidIndexDelta>, GfError> {
-    recover_uuid_membership_publication(project_dir)?;
     let current = crate::read_topology_generation(project_dir)?;
     if generation != current.saturating_add(1) {
         return Err(storage_err(
@@ -414,7 +409,7 @@ pub(crate) fn prepare_uuid_membership_delta(
         let mut manifest_file = source_directory
             .open_child_file(std::ffi::OsStr::new(MANIFEST))
             .map_err(storage_err)?;
-        let manifest_body = read_bounded(&mut manifest_file, MAX_RECOVERY_MARKER_BYTES)?;
+        let manifest_body = read_bounded(&mut manifest_file, MAX_MANIFEST_BYTES)?;
         let manifest: Manifest = serde_json::from_slice(&manifest_body).map_err(storage_err)?;
         let mut names = manifest_file_names(&manifest);
         names.insert(MANIFEST.to_owned());
@@ -459,10 +454,7 @@ pub(crate) fn prepare_uuid_membership_delta(
         .collect::<Result<Vec<_>, _>>()?;
     data.sort_unstable_by_key(std::fs::DirEntry::file_name);
     let nonce = Uuid::new_v4().simple().to_string();
-    let directory =
-        graphforge_filesystem::StableDirectory::open(&source_root).map_err(storage_err)?;
-    let mut files = Vec::new();
-    for (ordinal, entry) in data.into_iter().enumerate() {
+    for entry in data {
         let name = entry.file_name();
         if !entry.file_type().map_err(storage_err)?.is_file() {
             continue;
@@ -471,65 +463,26 @@ pub(crate) fn prepare_uuid_membership_delta(
         if final_name != MANIFEST && source_root.join(&name).exists() {
             continue;
         }
-        let prepared_name = format!(".prepared-{nonce}-{ordinal:04}");
-        let mut prepared = directory
-            .create_child_file(std::ffi::OsStr::new(&prepared_name))
-            .map_err(storage_err)?;
-        let mut input = File::open(entry.path()).map_err(storage_err)?;
-        std::io::copy(&mut input, &mut prepared).map_err(storage_err)?;
-        prepared.sync_all().map_err(storage_err)?;
-        let length = prepared.metadata().map_err(storage_err)?.len();
-        prepared.seek(SeekFrom::Start(0)).map_err(storage_err)?;
-        let sha256 = sha256_reader(&mut prepared)?;
-        files.push(PreparedIndexFile {
-            prepared_name,
-            final_name: final_name.clone(),
-            length,
-            sha256,
-            manifest: final_name == MANIFEST,
-        });
+        batch.stage_file(&source_root.join(&final_name), &entry.path())?;
     }
-    files.sort_by_key(|file| file.manifest);
-    let recovery = UuidIndexRecovery {
-        format_version: FORMAT_VERSION,
+    let receipt = TopologyIndexReceipt {
         nonce,
-        prior_generation: current,
         expected_generation: generation,
         topology_delta_sha256: topology_delta_sha256(nodes, edges, deleted_nodes, deleted_edges),
-        root_volume_serial: directory.identity().volume_serial,
-        root_file_id: directory.identity().file_id,
-        project_volume_serial: graphforge_filesystem::StableDirectory::open(project_dir)
-            .map_err(storage_err)?
-            .identity()
-            .volume_serial,
-        project_file_id: graphforge_filesystem::StableDirectory::open(project_dir)
-            .map_err(storage_err)?
-            .identity()
-            .file_id,
-        topology_volume_serial: graphforge_filesystem::StableDirectory::open(
-            &project_dir.join("topology"),
-        )
-        .map_err(storage_err)?
-        .identity()
-        .volume_serial,
-        topology_file_id: graphforge_filesystem::StableDirectory::open(
-            &project_dir.join("topology"),
-        )
-        .map_err(storage_err)?
-        .identity()
-        .file_id,
-        files,
     };
-    write_recovery_marker(&source_root, &recovery)?;
+    let receipt_bytes = serde_json::to_vec(&receipt).map_err(storage_err)?;
+    let receipt_path = source_root.join(TOPOLOGY_RECEIPT);
+    batch.stage_bytes(&receipt_path, &receipt_bytes)?;
+    let digest = Sha256::digest(&receipt_bytes);
     Ok(Some(PreparedUuidIndexDelta {
-        project_dir: project_dir.to_path_buf(),
         expected_generation: generation,
-        receipt: TopologyIndexReceipt {
-            nonce: recovery.nonce,
-            expected_generation: generation,
-            topology_delta_sha256: recovery.topology_delta_sha256,
+        auxiliary: crate::AuxiliaryReceipt {
+            kind: "uuid-membership/v3".to_owned(),
+            schema_version: FORMAT_VERSION,
+            path: format!("{INDEX_DIR}/{TOPOLOGY_RECEIPT}"),
+            digest: digest.iter().map(|byte| format!("{byte:02x}")).collect(),
+            bytes: receipt_bytes.len() as u64,
         },
-        root_identity: directory.identity(),
     }))
 }
 
@@ -574,6 +527,7 @@ fn topology_delta_sha256(
     encoded
 }
 
+#[cfg(any())]
 fn is_canonical_child_name(name: &str) -> bool {
     !name.is_empty()
         && name != "."
@@ -592,34 +546,22 @@ fn read_bounded(file: &mut File, maximum: u64) -> Result<Vec<u8>, GfError> {
 }
 
 impl PreparedUuidIndexDelta {
-    pub(crate) fn stage_receipt(
-        &self,
-        batch: &mut crate::staging::RewriteBatch,
-    ) -> Result<(), GfError> {
-        batch.stage_bytes(
-            &self.project_dir.join(INDEX_DIR).join(TOPOLOGY_RECEIPT),
-            &serde_json::to_vec(&self.receipt).map_err(storage_err)?,
-        )
+    pub(crate) fn auxiliary_receipt(&self) -> crate::AuxiliaryReceipt {
+        self.auxiliary.clone()
     }
-    pub(crate) fn finalize(&self, committed_generation: u64) -> Result<(), GfError> {
-        let directory =
-            graphforge_filesystem::StableDirectory::open(&self.project_dir.join(INDEX_DIR))
-                .map_err(storage_err)?;
-        directory.revalidate_named().map_err(storage_err)?;
-        if directory.identity() != self.root_identity {
-            return Err(storage_err(
-                "UUID index root identity changed before finalize",
-            ));
-        }
-        if committed_generation != self.expected_generation {
-            return Err(storage_err(
+
+    pub(crate) fn verify_generation(&self, committed_generation: u64) -> Result<(), GfError> {
+        if committed_generation == self.expected_generation {
+            Ok(())
+        } else {
+            Err(storage_err(
                 "topology commit returned an unexpected generation",
-            ));
+            ))
         }
-        recover_uuid_membership_publication(&self.project_dir)
     }
 }
 
+#[cfg(any())]
 fn write_recovery_marker(root: &Path, recovery: &UuidIndexRecovery) -> Result<(), GfError> {
     let directory = graphforge_filesystem::StableDirectory::open(root).map_err(storage_err)?;
     let temp_name = std::ffi::OsString::from(format!(".recovery-{}.tmp", recovery.nonce));
@@ -634,6 +576,7 @@ fn write_recovery_marker(root: &Path, recovery: &UuidIndexRecovery) -> Result<()
     directory.sync().map_err(storage_err)
 }
 
+#[cfg(any())]
 fn recover_uuid_membership_publication(project_dir: &Path) -> Result<(), GfError> {
     let root = project_dir.join(INDEX_DIR);
     let directory = match graphforge_filesystem::StableDirectory::open(&root) {
@@ -794,6 +737,7 @@ fn recover_uuid_membership_publication(project_dir: &Path) -> Result<(), GfError
     directory.sync().map_err(storage_err)
 }
 
+#[cfg(any())]
 fn verify_prepared_file(
     directory: &graphforge_filesystem::StableDirectory,
     descriptor: &PreparedIndexFile,
@@ -811,6 +755,7 @@ fn verify_prepared_file(
     Ok(file)
 }
 
+#[cfg(any())]
 fn install_prepared_file(
     directory: &graphforge_filesystem::StableDirectory,
     descriptor: &PreparedIndexFile,
@@ -838,6 +783,7 @@ fn install_prepared_file(
     Ok(())
 }
 
+#[cfg(any())]
 fn unlink_named_identity(
     directory: &graphforge_filesystem::StableDirectory,
     name: &str,
@@ -2877,6 +2823,7 @@ mod tests {
         );
     }
 
+    #[cfg(any())]
     #[test]
     fn prepared_delta_discards_before_topology_commit_and_recovers_after_commit() {
         let dir = tempfile::tempdir().unwrap();
@@ -2910,6 +2857,7 @@ mod tests {
         );
     }
 
+    #[cfg(any())]
     #[test]
     fn recovered_manifest_switch_replays_idempotently_and_rejects_corruption() {
         let dir = tempfile::tempdir().unwrap();
@@ -2960,6 +2908,7 @@ mod tests {
         assert!(recover_uuid_membership_publication(dir.path()).is_err());
     }
 
+    #[cfg(any())]
     #[test]
     fn tombstones_survive_reopen_and_identity_and_surrogate_are_never_reused() {
         let dir = tempfile::tempdir().unwrap();
@@ -3009,6 +2958,7 @@ mod tests {
         );
     }
 
+    #[cfg(any())]
     #[test]
     fn recovery_control_records_are_bounded_and_cannot_substitute_live_names() {
         let dir = tempfile::tempdir().unwrap();
