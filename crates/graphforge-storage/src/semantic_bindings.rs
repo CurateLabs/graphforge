@@ -2057,28 +2057,40 @@ fn binding_has_retained_data(
 ) -> Result<bool, GfError> {
     if binding.route_kind == SemanticRouteKind::Entity {
         use arrow::array::{Array, ListArray, UInt32Array};
-        for batch in crate::catalog::read_nodes(graph_root)
-            .map_err(|_| corrupt("removal topology cannot be read"))?
-        {
+        for path in crate::catalog::topology_node_files(graph_root)? {
+            preflight_parquet_footer(&path)?;
+        }
+        let mut retained = false;
+        crate::catalog::visit_nodes_batched(graph_root, 8192, |batch| {
             let values = batch
                 .column_by_name("type_ids")
                 .and_then(|array| array.as_any().downcast_ref::<ListArray>())
-                .ok_or_else(|| corrupt("removal topology type_ids is malformed"))?;
+                .ok_or_else(|| {
+                    datafusion::error::DataFusionError::Execution(
+                        "removal topology type_ids is malformed".into(),
+                    )
+                })?;
             for row in 0..values.len() {
                 if values.is_null(row) {
-                    return Err(corrupt("removal topology type_ids is null"));
+                    return Err(datafusion::error::DataFusionError::Execution(
+                        "removal topology type_ids is null".into(),
+                    ));
                 }
                 let ids = values.value(row);
-                let ids = ids
-                    .as_any()
-                    .downcast_ref::<UInt32Array>()
-                    .ok_or_else(|| corrupt("removal topology type_ids has wrong type"))?;
+                let ids = ids.as_any().downcast_ref::<UInt32Array>().ok_or_else(|| {
+                    datafusion::error::DataFusionError::Execution(
+                        "removal topology type_ids has wrong type".into(),
+                    )
+                })?;
                 if ids.values().contains(&binding.storage_id) {
-                    return Ok(true);
+                    retained = true;
+                    return Ok(false);
                 }
             }
-        }
-        return Ok(false);
+            Ok(true)
+        })
+        .map_err(|_| corrupt("removal topology cannot be read"))?;
+        return Ok(retained);
     }
     if matches!(
         binding.route_kind,
@@ -2781,30 +2793,65 @@ mod tests {
             .find(|binding| binding.route_kind == SemanticRouteKind::Entity)
             .unwrap();
         let dir = tempfile::TempDir::new().unwrap();
-        let mut first =
-            crate::GraphWriter::open_at(dir.path(), graphforge_core::OntologyMode::Strict, 1)
-                .unwrap();
-        first
-            .create_node(
-                graphforge_core::uuid::new_v7(),
-                graphforge_core::TypeId(999),
+        for generation in 1_i64..=16 {
+            let mut writer = crate::GraphWriter::open_at(
+                dir.path(),
+                graphforge_core::OntologyMode::Strict,
+                generation,
             )
             .unwrap();
-        first.flush().unwrap();
-        let mut second =
-            crate::GraphWriter::open_at(dir.path(), graphforge_core::OntologyMode::Strict, 2)
+            writer
+                .create_node(
+                    graphforge_core::uuid::new_v7(),
+                    graphforge_core::TypeId(if generation == 16 {
+                        entity.storage_id
+                    } else {
+                        999
+                    }),
+                )
                 .unwrap();
-        second
-            .create_node(
-                graphforge_core::uuid::new_v7(),
-                graphforge_core::TypeId(entity.storage_id),
-            )
-            .unwrap();
-        second.flush().unwrap();
+            writer.flush().unwrap();
+        }
+        assert_eq!(
+            crate::catalog::topology_node_files(dir.path())
+                .unwrap()
+                .len(),
+            16
+        );
 
         assert!(
             SemanticStorageBindings::binding_has_retained_data(entity, dir.path()).unwrap(),
             "a binding used only by an immutable node shard must remain protected"
+        );
+    }
+
+    #[test]
+    fn retained_entity_scan_preflights_every_shard_before_decoding() {
+        use std::io::Write as _;
+
+        let composition = compiled("1");
+        let bindings = SemanticStorageBindings::project(&composition, None).unwrap();
+        let entity = bindings
+            .bindings
+            .iter()
+            .find(|binding| binding.route_kind == SemanticRouteKind::Entity)
+            .unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let shard = dir
+            .path()
+            .join("topology/nodes/00000000000000000001-00000000000000000001.parquet");
+        std::fs::create_dir_all(shard.parent().unwrap()).unwrap();
+        let mut file = File::create(&shard).unwrap();
+        file.write_all(b"PAR1").unwrap();
+        file.write_all(&(u32::MAX).to_le_bytes()).unwrap();
+        file.write_all(b"PAR1").unwrap();
+        drop(file);
+        let error =
+            SemanticStorageBindings::binding_has_retained_data(entity, dir.path()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("metadata exceeds admission limit")
         );
     }
 

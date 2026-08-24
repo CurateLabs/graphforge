@@ -932,6 +932,75 @@ pub fn topology_node_files(dir: &Path) -> Result<Vec<PathBuf>, graphforge_core::
     crate::mutator::node_parquet_files(dir)
 }
 
+/// Enumerate every canonical node-property fragment for `stem`.
+///
+/// This is the storage-owned source-of-truth used by consumers that must charge
+/// or fingerprint the exact same legacy and immutable-shard files that
+/// [`read_properties`] consumes.
+pub fn node_property_files(
+    dir: &Path,
+    stem: &str,
+) -> Result<Vec<PathBuf>, graphforge_core::GfError> {
+    crate::mutator::property_parquet_files(dir, "properties", stem)
+}
+
+/// Enumerate all canonical node-property source fragments, failing closed on
+/// malformed route entries instead of silently omitting them.
+pub fn node_property_source_files(dir: &Path) -> Result<Vec<PathBuf>, graphforge_core::GfError> {
+    let root = dir.join("properties");
+    let entries = match std::fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(graphforge_core::GfError::Storage(error.to_string())),
+    };
+    let mut paths = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| graphforge_core::GfError::Storage(error.to_string()))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| graphforge_core::GfError::Storage(error.to_string()))?;
+        let path = entry.path();
+        if file_type.is_symlink() {
+            return Err(graphforge_core::GfError::Storage(
+                "property source contains a symbolic link".into(),
+            ));
+        }
+        if file_type.is_file() {
+            if path.extension().and_then(|value| value.to_str()) == Some("parquet") {
+                paths.push(path);
+            }
+            continue;
+        }
+        if file_type.is_dir() {
+            let stem = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .ok_or_else(|| {
+                    graphforge_core::GfError::Storage(
+                        "property shard route is not canonical UTF-8".into(),
+                    )
+                })?;
+            if stem.ends_with(".parquet") {
+                return Err(graphforge_core::GfError::Storage(
+                    "property source Parquet path is not a regular file".into(),
+                ));
+            }
+            paths.extend(crate::mutator::property_parquet_files(
+                dir,
+                "properties",
+                stem,
+            )?);
+            continue;
+        }
+        return Err(graphforge_core::GfError::Storage(
+            "property source contains a special file".into(),
+        ));
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
 /// Read all node rows from every canonical topology fragment.
 pub fn read_nodes(dir: &Path) -> Result<Vec<RecordBatch>, DataFusionError> {
     let paths = crate::mutator::node_parquet_files(dir)

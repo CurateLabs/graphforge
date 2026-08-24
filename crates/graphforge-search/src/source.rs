@@ -195,18 +195,18 @@ where
     let mut seen_property_rows = BTreeSet::new();
     let mut observed_properties = BTreeSet::new();
     let mut fields_by_uuid = TextFieldsByUuid::new();
+    for path in graphforge_storage::node_property_source_files(project_dir)
+        .map_err(|error| source(error.to_string()))?
+    {
+        add_source_bytes(&path, source_bytes, limits)?;
+    }
     for stem in list_property_stems(project_dir) {
         checkpoint()?;
-        let path = project_dir
-            .join("properties")
-            .join(format!("{stem}.parquet"));
-        add_source_bytes(&path, source_bytes, limits)?;
         let batches = read_properties(project_dir, &stem)
-            .map_err(|error| source(format!("read {}: {error}", path.display())))?;
+            .map_err(|error| source(format!("read property route {stem}: {error}")))?;
         if batches.is_empty() {
             return Err(source(format!(
-                "{} is not readable Parquet",
-                path.display()
+                "property route {stem} is not readable Parquet"
             )));
         }
         for batch in batches {
@@ -214,7 +214,7 @@ where
             let uuids = batch
                 .column_by_name("node_uuid")
                 .and_then(|column| column.as_any().downcast_ref::<FixedSizeBinaryArray>())
-                .ok_or_else(|| source(format!("{} node_uuid is malformed", path.display())))?;
+                .ok_or_else(|| source(format!("property route {stem} node_uuid is malformed")))?;
             for row in 0..batch.num_rows() {
                 checkpoint()?;
                 property_rows = property_rows.saturating_add(1);
@@ -223,14 +223,12 @@ where
                 }
                 if uuids.is_null(row) {
                     return Err(source(format!(
-                        "{} contains null node_uuid",
-                        path.display()
+                        "property route {stem} contains null node_uuid"
                     )));
                 }
-                let node_uuid: [u8; 16] = uuids
-                    .value(row)
-                    .try_into()
-                    .map_err(|_| source(format!("{} node_uuid is not 16 bytes", path.display())))?;
+                let node_uuid: [u8; 16] = uuids.value(row).try_into().map_err(|_| {
+                    source(format!("property route {stem} node_uuid is not 16 bytes"))
+                })?;
                 if !eligible.contains(&node_uuid) {
                     continue;
                 }
@@ -254,7 +252,7 @@ where
                             .as_any()
                             .downcast_ref::<StringArray>()
                             .ok_or_else(|| {
-                                source(format!("{} field {name:?} is malformed", path.display()))
+                                source(format!("property route {stem} field {name:?} is malformed"))
                             })?;
                     if values.is_null(row) {
                         continue;
@@ -429,6 +427,44 @@ mod tests {
         assert_eq!(paths.len(), 2);
         let mut limits = TextSearchLimits::default();
         limits.source_bytes = std::fs::metadata(&paths[0]).unwrap().len();
+        assert!(matches!(
+            project_text_source(dir.path(), 9, None, limits, || Ok(())),
+            Err(SearchArtifactError::ResourceExhausted {
+                resource: "text_source_bytes",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn source_byte_limit_counts_every_immutable_property_shard() {
+        let dir = TempDir::new().unwrap();
+        for ordinal in 1_u8..=2 {
+            let mut writer =
+                GraphWriter::open_at(dir.path(), OntologyMode::Strict, i64::from(ordinal)).unwrap();
+            let node = uuid(ordinal);
+            writer.create_node(node, TypeId(9)).unwrap();
+            writer
+                .set_properties(
+                    &node,
+                    Some("Person"),
+                    HashMap::from([(
+                        "name".to_owned(),
+                        IrLiteral::Str(format!("person-{ordinal}")),
+                    )]),
+                )
+                .unwrap();
+            writer.flush().unwrap();
+        }
+        let node_bytes = graphforge_storage::topology_node_files(dir.path())
+            .unwrap()
+            .into_iter()
+            .map(|path| std::fs::metadata(path).unwrap().len())
+            .sum::<u64>();
+        let properties = graphforge_storage::node_property_files(dir.path(), "Person").unwrap();
+        assert_eq!(properties.len(), 2);
+        let mut limits = TextSearchLimits::default();
+        limits.source_bytes = node_bytes + std::fs::metadata(&properties[0]).unwrap().len();
         assert!(matches!(
             project_text_source(dir.path(), 9, None, limits, || Ok(())),
             Err(SearchArtifactError::ResourceExhausted {

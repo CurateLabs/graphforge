@@ -975,31 +975,18 @@ fn property_source_paths<C>(
 where
     C: FnMut() -> Result<(), SearchArtifactError>,
 {
-    let directory = project_dir.join("properties");
-    let entries = match std::fs::read_dir(&directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => {
-            return Err(source(format!(
-                "read property source directory {}: {error}",
-                directory.display()
-            )));
-        }
-    };
     let mut paths = Vec::new();
-    for entry in entries {
+    for path in graphforge_storage::node_property_source_files(project_dir)
+        .map_err(|error| source(error.to_string()))?
+    {
         checkpoint()?;
-        let entry =
-            entry.map_err(|error| source(format!("read property source entry: {error}")))?;
-        let path = entry.path();
-        if path.extension().and_then(|value| value.to_str()) != Some("parquet") {
-            continue;
-        }
-        let file_name = path
-            .file_name()
-            .and_then(|value| value.to_str())
-            .ok_or_else(|| source("property source contains a non-UTF-8 Parquet name"))?;
-        paths.push((format!("properties/{file_name}"), path));
+        let relative = path
+            .strip_prefix(project_dir)
+            .map_err(|_| source("property source escaped project root"))?
+            .to_str()
+            .ok_or_else(|| source("property source path is not UTF-8"))?
+            .to_owned();
+        paths.push((relative, path));
     }
     paths.sort_unstable_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
     Ok(paths)
@@ -1394,6 +1381,37 @@ mod tests {
             capture_text_snapshot(dir.path(), TextSearchLimits::default(), || Ok(())).unwrap();
         assert_ne!(before.fingerprint, after.fingerprint);
         assert_eq!(before.generation, after.generation);
+    }
+
+    #[test]
+    fn snapshot_fingerprint_detects_an_immutable_property_shard_change() {
+        let dir = TempDir::new().unwrap();
+        write_person(dir.path(), "Alice");
+        let mut second = GraphWriter::open_at(dir.path(), OntologyMode::Strict, 2).unwrap();
+        second.create_node(uuid(2), TypeId(LABEL_ID)).unwrap();
+        second
+            .set_properties(
+                &uuid(2),
+                Some(LABEL),
+                HashMap::from([("name".to_owned(), IrLiteral::Str("Bob".to_owned()))]),
+            )
+            .unwrap();
+        second.flush().unwrap();
+        let paths = graphforge_storage::node_property_files(dir.path(), LABEL).unwrap();
+        assert_eq!(paths.len(), 2);
+        let before =
+            capture_text_snapshot(dir.path(), TextSearchLimits::default(), || Ok(())).unwrap();
+        use std::io::Write as _;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&paths[1])
+            .unwrap()
+            .write_all(b"property shard changed without a generation bump")
+            .unwrap();
+        let after =
+            capture_text_snapshot(dir.path(), TextSearchLimits::default(), || Ok(())).unwrap();
+        assert_eq!(before.generation, after.generation);
+        assert_ne!(before.fingerprint, after.fingerprint);
     }
 
     #[test]
