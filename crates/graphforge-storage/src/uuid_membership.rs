@@ -12,15 +12,16 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-use arrow::array::{Array, FixedSizeBinaryArray};
+use arrow::array::{Array, FixedSizeBinaryArray, UInt64Array};
 use graphforge_core::GfError;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
 const RECORD_BYTES: u64 = 16;
+const NODE_LOOKUP_RECORD_BYTES: u64 = 24;
 const INDEX_DIR: &str = ".graphforge-cache/uuid-membership";
 const MANIFEST: &str = "manifest.json";
 
@@ -107,6 +108,7 @@ struct Manifest {
     format_version: u32,
     topology_generation: u64,
     nodes: FileRecord,
+    node_surrogates: FileRecord,
     edges: FileRecord,
 }
 
@@ -114,6 +116,7 @@ struct Manifest {
 /// An authenticated node-and-edge index snapshot pinned by one manifest.
 pub struct UuidMembershipIndex {
     node: File,
+    node_surrogates: File,
     edge: File,
     manifest: Manifest,
 }
@@ -137,10 +140,13 @@ impl UuidMembershipIndex {
                 manifest.topology_generation
             )));
         }
-        let node = open_verified(&root, &manifest.nodes)?;
-        let edge = open_verified(&root, &manifest.edges)?;
+        let node = open_verified(&root, &manifest.nodes, RECORD_BYTES)?;
+        let node_surrogates =
+            open_verified(&root, &manifest.node_surrogates, NODE_LOOKUP_RECORD_BYTES)?;
+        let edge = open_verified(&root, &manifest.edges, RECORD_BYTES)?;
         Ok(Self {
             node,
+            node_surrogates,
             edge,
             manifest,
         })
@@ -185,6 +191,35 @@ impl UuidMembershipIndex {
         }
         Ok((requested.iter().map(|u| membership[u]).collect(), metrics))
     }
+
+    /// Resolve node UUIDs to their canonical surrogates without scanning
+    /// topology. Results retain caller order; an absent UUID returns `None`.
+    pub fn lookup_node_surrogates(
+        &mut self,
+        requested: &[Uuid],
+    ) -> Result<(Vec<Option<u64>>, UuidProbeMetrics), GfError> {
+        let mut metrics = UuidProbeMetrics {
+            requested: requested.len() as u64,
+            ..Default::default()
+        };
+        let unique = requested.iter().copied().collect::<BTreeSet<_>>();
+        metrics.unique_requested = unique.len() as u64;
+        let mut resolved = std::collections::BTreeMap::new();
+        for uuid in unique {
+            let surrogate = binary_search_node_surrogate(
+                &mut self.node_surrogates,
+                self.manifest.node_surrogates.count,
+                uuid,
+                &mut metrics.file_seeks,
+            )?;
+            metrics.found += u64::from(surrogate.is_some());
+            resolved.insert(uuid, surrogate);
+        }
+        Ok((
+            requested.iter().map(|uuid| resolved[uuid]).collect(),
+            metrics,
+        ))
+    }
 }
 
 /// Whether a membership manifest exists, without duplicating its private layout.
@@ -207,7 +242,7 @@ pub fn uuid_membership_index_is_fresh(project_dir: &Path) -> Result<bool, GfErro
         && manifest.topology_generation == crate::read_topology_generation(project_dir)?)
 }
 
-fn open_verified(root: &Path, record: &FileRecord) -> Result<File, GfError> {
+fn open_verified(root: &Path, record: &FileRecord, record_bytes: u64) -> Result<File, GfError> {
     if Path::new(&record.name).components().count() != 1 {
         return Err(storage_err("manifest contains a non-local index filename"));
     }
@@ -215,7 +250,7 @@ fn open_verified(root: &Path, record: &FileRecord) -> Result<File, GfError> {
     let mut file = File::open(&path).map_err(storage_err)?;
     let expected_len = record
         .count
-        .checked_mul(RECORD_BYTES)
+        .checked_mul(record_bytes)
         .ok_or_else(|| storage_err("record length overflow"))?;
     if file.metadata().map_err(storage_err)?.len() != expected_len {
         return Err(storage_err(format!(
@@ -232,6 +267,33 @@ fn open_verified(root: &Path, record: &FileRecord) -> Result<File, GfError> {
     }
     file.seek(SeekFrom::Start(0)).map_err(storage_err)?;
     Ok(file)
+}
+
+fn binary_search_node_surrogate(
+    file: &mut File,
+    count: u64,
+    target: Uuid,
+    seeks: &mut u64,
+) -> Result<Option<u64>, GfError> {
+    let mut lo = 0_u64;
+    let mut hi = count;
+    let target = *target.as_bytes();
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        file.seek(SeekFrom::Start(mid * NODE_LOOKUP_RECORD_BYTES))
+            .map_err(storage_err)?;
+        *seeks += 1;
+        let mut current = [0_u8; 16];
+        file.read_exact(&mut current).map_err(storage_err)?;
+        let mut surrogate = [0_u8; 8];
+        file.read_exact(&mut surrogate).map_err(storage_err)?;
+        match current.cmp(&target) {
+            std::cmp::Ordering::Less => lo = mid + 1,
+            std::cmp::Ordering::Greater => hi = mid,
+            std::cmp::Ordering::Equal => return Ok(Some(u64::from_le_bytes(surrogate))),
+        }
+    }
+    Ok(None)
 }
 
 fn binary_search(
@@ -286,6 +348,8 @@ pub fn rebuild_uuid_membership_indexes(
         limits,
         &mut metrics,
     )?;
+    let node_surrogate_runs =
+        scan_node_surrogate_runs(&node_paths, scratch.path(), limits, &mut metrics)?;
     let mut edge_paths = crate::mutator::edge_parquet_files(project_dir, None)
         .map_err(storage_err)?
         .into_iter()
@@ -307,6 +371,12 @@ pub fn rebuild_uuid_membership_indexes(
         limits.merge_fan_in,
         &mut metrics,
     )?;
+    let node_surrogates_tmp = merge_node_surrogate_runs(
+        node_surrogate_runs,
+        scratch.path(),
+        limits.merge_fan_in,
+        &mut metrics,
+    )?;
     let edge_tmp = merge_all(
         edge_runs,
         scratch.path(),
@@ -319,8 +389,17 @@ pub fn rebuild_uuid_membership_indexes(
             "topology generation changed during the index build",
         ));
     }
-    let nodes = publish_data(&node_tmp, &root, staging, "nodes", generation)?;
-    let edges = publish_data(&edge_tmp, &root, staging, "edges", generation)?;
+    reject_cross_kind_identities(&node_tmp, &edge_tmp)?;
+    let nodes = publish_data(&node_tmp, &root, staging, "nodes", generation, RECORD_BYTES)?;
+    let node_surrogates = publish_data(
+        &node_surrogates_tmp,
+        &root,
+        staging,
+        "node-surrogates",
+        generation,
+        NODE_LOOKUP_RECORD_BYTES,
+    )?;
+    let edges = publish_data(&edge_tmp, &root, staging, "edges", generation, RECORD_BYTES)?;
     if crate::read_topology_generation(project_dir)? != generation {
         return Err(storage_err(
             "topology generation changed before index manifest publication",
@@ -332,6 +411,7 @@ pub fn rebuild_uuid_membership_indexes(
         format_version: FORMAT_VERSION,
         topology_generation: generation,
         nodes,
+        node_surrogates,
         edges,
     };
     let mut tmp = tempfile::Builder::new()
@@ -410,7 +490,11 @@ fn flush_run(
     metrics: &mut UuidIndexBuildMetrics,
 ) -> Result<(), GfError> {
     buffer.sort_unstable();
-    buffer.dedup();
+    if buffer.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(storage_err(format!(
+            "duplicate {prefix} UUID in canonical topology"
+        )));
+    }
     let path = scratch.join(format!("{prefix}-{:08}.run", runs.len()));
     let mut out = BufWriter::new(File::create(&path).map_err(storage_err)?);
     for value in buffer.iter() {
@@ -463,16 +547,187 @@ fn merge_runs(inputs: &[PathBuf], output: &Path) -> Result<(), GfError> {
     let mut out = BufWriter::new(File::create(output).map_err(storage_err)?);
     let mut previous = None;
     while let Some(Reverse((value, idx))) = heap.pop() {
-        if previous != Some(value) {
-            out.write_all(&value).map_err(storage_err)?;
-            previous = Some(value);
+        if previous == Some(value) {
+            return Err(storage_err("duplicate UUID across external index runs"));
         }
+        out.write_all(&value).map_err(storage_err)?;
+        previous = Some(value);
         if let Some(next) = read_record(&mut readers[idx])? {
             heap.push(Reverse((next, idx)));
         }
     }
     out.flush().map_err(storage_err)?;
     out.get_ref().sync_all().map_err(storage_err)?;
+    Ok(())
+}
+
+fn scan_node_surrogate_runs(
+    paths: &[PathBuf],
+    scratch: &Path,
+    limits: UuidIndexBuildLimits,
+    metrics: &mut UuidIndexBuildMetrics,
+) -> Result<Vec<PathBuf>, GfError> {
+    let mut buffer = Vec::<([u8; 16], u64)>::with_capacity(limits.run_records);
+    let mut runs = Vec::new();
+    for path in paths {
+        let reader =
+            ParquetRecordBatchReaderBuilder::try_new(File::open(path).map_err(storage_err)?)
+                .map_err(storage_err)?
+                .with_batch_size(limits.scan_batch_rows)
+                .build()
+                .map_err(storage_err)?;
+        for batch in reader {
+            let batch = batch.map_err(storage_err)?;
+            let uuids = batch
+                .column_by_name("node_uuid")
+                .and_then(|column| column.as_any().downcast_ref::<FixedSizeBinaryArray>())
+                .ok_or_else(|| storage_err(format!("{} lacks node_uuid", path.display())))?;
+            let surrogates = batch
+                .column_by_name("node_id")
+                .and_then(|column| column.as_any().downcast_ref::<UInt64Array>())
+                .ok_or_else(|| storage_err(format!("{} lacks node_id", path.display())))?;
+            if uuids.len() != surrogates.len() {
+                return Err(storage_err(
+                    "node UUID and surrogate columns differ in length",
+                ));
+            }
+            for row in 0..uuids.len() {
+                if uuids.is_null(row) || uuids.value(row).len() != 16 || surrogates.is_null(row) {
+                    return Err(storage_err(format!("invalid node identity at row {row}")));
+                }
+                buffer.push((
+                    uuids.value(row).try_into().expect("length checked"),
+                    surrogates.value(row),
+                ));
+                metrics.peak_buffered_records = metrics.peak_buffered_records.max(buffer.len());
+                if buffer.len() == limits.run_records {
+                    flush_node_surrogate_run(&mut buffer, scratch, &mut runs, metrics)?;
+                }
+            }
+        }
+    }
+    if !buffer.is_empty() {
+        flush_node_surrogate_run(&mut buffer, scratch, &mut runs, metrics)?;
+    }
+    if runs.is_empty() {
+        let path = scratch.join("node-surrogates-empty.run");
+        File::create(&path)
+            .map_err(storage_err)?
+            .sync_all()
+            .map_err(storage_err)?;
+        runs.push(path);
+    }
+    Ok(runs)
+}
+
+fn flush_node_surrogate_run(
+    buffer: &mut Vec<([u8; 16], u64)>,
+    scratch: &Path,
+    runs: &mut Vec<PathBuf>,
+    metrics: &mut UuidIndexBuildMetrics,
+) -> Result<(), GfError> {
+    buffer.sort_unstable_by_key(|record| record.0);
+    if buffer.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return Err(storage_err("duplicate node UUID in canonical topology"));
+    }
+    let path = scratch.join(format!("node-surrogates-{:08}.run", runs.len()));
+    let mut out = BufWriter::new(File::create(&path).map_err(storage_err)?);
+    for (uuid, surrogate) in buffer.iter() {
+        out.write_all(uuid).map_err(storage_err)?;
+        out.write_all(&surrogate.to_le_bytes())
+            .map_err(storage_err)?;
+    }
+    out.flush().map_err(storage_err)?;
+    out.get_ref().sync_all().map_err(storage_err)?;
+    buffer.clear();
+    runs.push(path);
+    metrics.temporary_runs += 1;
+    Ok(())
+}
+
+fn merge_node_surrogate_runs(
+    mut runs: Vec<PathBuf>,
+    scratch: &Path,
+    fan_in: usize,
+    metrics: &mut UuidIndexBuildMetrics,
+) -> Result<PathBuf, GfError> {
+    let mut round = 0;
+    while runs.len() > 1 {
+        let mut next = Vec::new();
+        for (group, chunk) in runs.chunks(fan_in).enumerate() {
+            let path = scratch.join(format!("node-surrogates-merge-{round}-{group}.run"));
+            merge_node_surrogate_group(chunk, &path)?;
+            next.push(path);
+            metrics.temporary_runs += 1;
+        }
+        for path in runs {
+            let _ = fs::remove_file(path);
+        }
+        runs = next;
+        round += 1;
+    }
+    Ok(runs.pop().expect("at least one node-surrogate run"))
+}
+
+fn merge_node_surrogate_group(inputs: &[PathBuf], output: &Path) -> Result<(), GfError> {
+    let mut readers = inputs
+        .iter()
+        .map(|path| File::open(path).map(BufReader::new).map_err(storage_err))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut heap = BinaryHeap::<Reverse<(([u8; 16], u64), usize)>>::new();
+    for (index, reader) in readers.iter_mut().enumerate() {
+        if let Some(record) = read_node_surrogate_record(reader)? {
+            heap.push(Reverse((record, index)));
+        }
+    }
+    let mut out = BufWriter::new(File::create(output).map_err(storage_err)?);
+    let mut previous = None;
+    while let Some(Reverse(((uuid, surrogate), index))) = heap.pop() {
+        if previous == Some(uuid) {
+            return Err(storage_err(
+                "duplicate node UUID across external index runs",
+            ));
+        }
+        out.write_all(&uuid).map_err(storage_err)?;
+        out.write_all(&surrogate.to_le_bytes())
+            .map_err(storage_err)?;
+        previous = Some(uuid);
+        if let Some(record) = read_node_surrogate_record(&mut readers[index])? {
+            heap.push(Reverse((record, index)));
+        }
+    }
+    out.flush().map_err(storage_err)?;
+    out.get_ref().sync_all().map_err(storage_err)?;
+    Ok(())
+}
+
+fn read_node_surrogate_record(
+    reader: &mut BufReader<File>,
+) -> Result<Option<([u8; 16], u64)>, GfError> {
+    let Some(uuid) = read_record(reader)? else {
+        return Ok(None);
+    };
+    let mut surrogate = [0_u8; 8];
+    reader.read_exact(&mut surrogate).map_err(storage_err)?;
+    Ok(Some((uuid, u64::from_le_bytes(surrogate))))
+}
+
+fn reject_cross_kind_identities(nodes: &Path, edges: &Path) -> Result<(), GfError> {
+    let mut node_reader = BufReader::new(File::open(nodes).map_err(storage_err)?);
+    let mut edge_reader = BufReader::new(File::open(edges).map_err(storage_err)?);
+    let mut node = read_record(&mut node_reader)?;
+    let mut edge = read_record(&mut edge_reader)?;
+    while let (Some(node_uuid), Some(edge_uuid)) = (node, edge) {
+        match node_uuid.cmp(&edge_uuid) {
+            std::cmp::Ordering::Less => node = read_record(&mut node_reader)?,
+            std::cmp::Ordering::Greater => edge = read_record(&mut edge_reader)?,
+            std::cmp::Ordering::Equal => {
+                return Err(storage_err(
+                    "UUID occurs in both node and edge identity domains",
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -496,10 +751,11 @@ fn publish_data(
     staging: &Path,
     kind: &str,
     generation: u64,
+    record_bytes: u64,
 ) -> Result<FileRecord, GfError> {
     let length = source.metadata().map_err(storage_err)?.len();
-    if length % RECORD_BYTES != 0 {
-        return Err(storage_err("internal run has a partial UUID record"));
+    if length % record_bytes != 0 {
+        return Err(storage_err("internal run has a partial index record"));
     }
     let mut input = File::open(source).map_err(storage_err)?;
     let sha256 = sha256_reader(&mut input)?;
@@ -523,7 +779,7 @@ fn publish_data(
     }
     Ok(FileRecord {
         name,
-        count: length / RECORD_BYTES,
+        count: length / record_bytes,
         sha256,
     })
 }
@@ -561,7 +817,7 @@ fn sha256_reader(reader: &mut impl Read) -> Result<String, GfError> {
 mod tests {
     use std::sync::{Arc, Barrier};
 
-    use arrow::array::FixedSizeBinaryArray;
+    use arrow::array::{FixedSizeBinaryArray, UInt64Array};
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
     use parquet::arrow::ArrowWriter;
@@ -585,19 +841,29 @@ mod tests {
         writer.close().unwrap();
     }
 
+    fn write_node_parquet(path: &Path, values: &[Uuid]) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+            Field::new("node_id", DataType::UInt64, false),
+        ]));
+        let uuids = FixedSizeBinaryArray::try_from_iter(
+            values.iter().map(|value| value.as_bytes().as_slice()),
+        )
+        .unwrap();
+        let ids = UInt64Array::from_iter_values(1..=values.len() as u64);
+        let batch =
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(uuids), Arc::new(ids)]).unwrap();
+        let mut writer = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+    }
+
     fn fixture() -> (tempfile::TempDir, Vec<Uuid>, Vec<Uuid>) {
         let dir = tempfile::tempdir().unwrap();
         let nodes = vec![Uuid::from_u128(3), Uuid::from_u128(1), Uuid::from_u128(2)];
-        let edges = vec![
-            Uuid::from_u128(12),
-            Uuid::from_u128(11),
-            Uuid::from_u128(11),
-        ];
-        write_uuid_parquet(
-            &dir.path().join("topology/nodes.parquet"),
-            "node_uuid",
-            &nodes,
-        );
+        let edges = vec![Uuid::from_u128(12), Uuid::from_u128(11)];
+        write_node_parquet(&dir.path().join("topology/nodes.parquet"), &nodes);
         write_uuid_parquet(
             &dir.path().join("topology/edges/R.parquet"),
             "edge_uuid",
@@ -626,6 +892,11 @@ mod tests {
             .probe(UuidIndexKind::Node, &[nodes[1], missing, nodes[1]])
             .unwrap();
         assert_eq!(found, vec![true, false, true]);
+        let (surrogates, lookup) = index
+            .lookup_node_surrogates(&[nodes[1], missing, nodes[0]])
+            .unwrap();
+        assert_eq!(surrogates, vec![Some(2), None, Some(1)]);
+        assert_eq!(lookup.found, 2);
         assert_eq!(
             (probe.requested, probe.unique_requested, probe.found),
             (3, 2, 1)
@@ -636,11 +907,7 @@ mod tests {
     fn probe_work_is_candidate_logarithmic_not_index_linear() {
         let dir = tempfile::tempdir().unwrap();
         let nodes = (1..=8_192).map(Uuid::from_u128).collect::<Vec<_>>();
-        write_uuid_parquet(
-            &dir.path().join("topology/nodes.parquet"),
-            "node_uuid",
-            &nodes,
-        );
+        write_node_parquet(&dir.path().join("topology/nodes.parquet"), &nodes);
         rebuild_uuid_membership_indexes(dir.path(), UuidIndexBuildLimits::default()).unwrap();
 
         let mut index = UuidMembershipIndex::open(dir.path()).unwrap();
@@ -754,5 +1021,37 @@ mod tests {
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
             .collect::<Vec<_>>();
         assert!(names.iter().all(|name| !name.ends_with(".tmp")));
+    }
+
+    #[test]
+    fn duplicate_and_cross_kind_identities_fail_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let repeated = Uuid::from_u128(7);
+        write_node_parquet(
+            &dir.path().join("topology/nodes.parquet"),
+            &[repeated, repeated],
+        );
+        let duplicate = rebuild_uuid_membership_indexes(
+            dir.path(),
+            UuidIndexBuildLimits {
+                scan_batch_rows: 1,
+                run_records: 1,
+                merge_fan_in: 2,
+            },
+        )
+        .unwrap_err();
+        assert!(duplicate.to_string().contains("duplicate"));
+
+        let dir = tempfile::tempdir().unwrap();
+        write_node_parquet(&dir.path().join("topology/nodes.parquet"), &[repeated]);
+        write_uuid_parquet(
+            &dir.path().join("topology/edges/R.parquet"),
+            "edge_uuid",
+            &[repeated],
+        );
+        let cross_kind =
+            rebuild_uuid_membership_indexes(dir.path(), UuidIndexBuildLimits::default())
+                .unwrap_err();
+        assert!(cross_kind.to_string().contains("both node and edge"));
     }
 }

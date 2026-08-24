@@ -18,14 +18,17 @@ is a **spec + external harness** track — see
 matrix + harness contract) and the [LDBC full suite](../guide/datasets/ldbc.md)
 — not normal GraphForge CI.
 
-Fresh edge construction is append-only at the Parquet-fragment level. Each
-relation retains a legacy-compatible first fragment and immutable bounded
-surrogate-range fragments thereafter. The writer encodes each accepted edge
-once; increasing total edge count must increase aggregate edge encoding and
-physical fragment bytes linearly, not replay prior fragments. Peak construction
-RSS is therefore a batch/shard property. Continued RSS growth proportional to
-retained edge count is a correctness failure, not a reason to raise the M5
-memory ceiling.
+Fresh graph construction is append-only at the Parquet-fragment level. Nodes,
+each edge relation, and node/edge property routes retain a legacy-compatible
+first fragment and immutable bounded fragments thereafter. The writer encodes
+each accepted row once; increasing total row count must increase aggregate
+input rows, rows encoded, shard bytes, and shard count linearly while prior
+rows decoded remains zero. Writer reopen uses one persisted surrogate-tail
+record, and edge endpoint resolution uses logarithmic seeks in the
+authenticated disk UUID-to-surrogate index; neither operation scans retained
+topology. Peak construction RSS is therefore a configured batch/shard-window
+property. Continued RSS growth proportional to retained edge count is a
+correctness failure, not a reason to raise the M5 memory ceiling.
 
 ## Rust 0.5.0 Fixed-Hop LIMIT Contract
 

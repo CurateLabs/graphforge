@@ -433,6 +433,21 @@ label mutation, and deletion operate over the logical union. A localized
 rewrite replaces only the fragment containing a changed row; untouched node
 fragments retain their filesystem identity.
 
+`topology/surrogate_tails.parquet` is a one-row control record containing the
+monotonic maximum node and edge surrogates. It is staged in
+the same commit as every topology append. Writer reopen reads this bounded
+record rather than enumerating or decoding the accumulated topology fragments;
+legacy projects without it use the bounded tail migration path once.
+
+Bulk endpoint resolution uses the derived
+`.graphforge-cache/uuid-membership/` snapshot. Its manifest authenticates the
+topology generation, record counts, lengths, and SHA-256 digests. Nodes have a
+sorted fixed-width `UUID -> node_id` file; edges have a sorted UUID membership
+file. Builds use bounded external sort runs and bounded-fan-in merges. Probes
+perform logarithmic seeks and decode zero topology rows. Duplicate node or edge
+UUIDs, reuse of one UUID across the node and edge domains, stale manifests, and
+missing, truncated, or checksum-mismatched index files fail closed.
+
 New publications use a compact version-2 `graph/files` root. Payloads and
 fixed-depth radix nodes live once in the project content-addressed object
 store; a generation stores only its root reference and logical totals. Updates
@@ -463,14 +478,21 @@ digests, ordering, duplicate references, wrong depth, and corrupt objects.
 
 ### Properties layer (warm path)
 
-**`properties/ENTITY_TYPE.parquet`** (one file per entity type, columns per ontology)
+**`properties/ENTITY_TYPE.parquet`** (legacy first fragment) and
+**`properties/ENTITY_TYPE/<generation>-<ordinal>.parquet`** (immutable construction fragments)
 
 | Column | Arrow type | Notes |
 |---|---|---|
 | `node_uuid` | `FixedSizeBinary(16)` | Join key back to `topology/nodes.parquet` |
 | *(property columns)* | *(per ontology)* | e.g. `name Utf8`, `age Int64`, `email Utf8` |
 
-Property access is a join: `topology/nodes JOIN properties/PERSON ON node_uuid`. DataFusion handles this as a hash join. The separation allows graph traversal to skip property I/O entirely.
+Property access is a join: `topology/nodes JOIN properties/PERSON ON node_uuid`.
+The catalog and direct readers union the flat fragment and all immutable
+fragments. Edge properties use the same layout under `edge_properties/`.
+Construction appends encode only the new
+bounded property window; ordinary mutation rewrites remain localized mutation
+operations rather than construction behavior. The separation allows graph
+traversal to skip property I/O entirely.
 
 ### Provenance and knowledge participants
 
