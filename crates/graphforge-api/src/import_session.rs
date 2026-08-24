@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 use crate::{BulkInputKind, CancellationToken, GraphForge, OperationId};
 
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
 const SESSION_DIR: &str = "import-sessions";
 const MANIFEST: &str = "manifest.json";
 
@@ -107,6 +107,7 @@ impl ImportSourceKind {
 
 /// Content-free durable progress.
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Default)]
+#[serde(default)]
 pub struct ImportProgress {
     /// Rows accepted into durable staging.
     pub rows_accepted: u64,
@@ -124,6 +125,14 @@ pub struct ImportProgress {
     pub peak_batch_rows: u64,
     /// Configured source-reader concurrency bound.
     pub io_concurrency_limit: u64,
+    /// Topology rows physically written while staging accepted windows.
+    pub topology_work_rows: u64,
+    /// Peak topology rows held by one storage write window.
+    pub peak_topology_window_rows: u64,
+    /// Current immutable topology shard-file count in private staging.
+    pub shard_count: u64,
+    /// Allocated bytes under the private durable session root.
+    pub physical_disk_bytes: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -138,6 +147,10 @@ struct SourceRecord {
     batches_staged: u64,
     #[serde(default)]
     inflight_batch: Option<u64>,
+    #[serde(default)]
+    chunk_uuid: Option<Uuid>,
+    #[serde(default)]
+    content_sha256: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -150,6 +163,8 @@ struct SessionManifest {
     limits: ImportSessionLimits,
     progress: ImportProgress,
     sources: Vec<SourceRecord>,
+    #[serde(default)]
+    edge_input_seen: bool,
     #[serde(default)]
     updated_unix_millis: u64,
 }
@@ -201,6 +216,7 @@ impl GraphForge {
                 ..ImportProgress::default()
             },
             sources: Vec::new(),
+            edge_input_seen: false,
             updated_unix_millis: unix_millis()?,
         };
         write_manifest(&root, &manifest)?;
@@ -261,7 +277,11 @@ impl GraphForge {
             manifest.phase = ImportPhase::Aborted;
             manifest.updated_unix_millis = now;
             write_manifest(&root, &manifest)?;
-            for path in [root.join("sources"), root.join("graph")] {
+            for path in [
+                root.join("sources"),
+                root.join("graph"),
+                root.join("endpoint-index"),
+            ] {
                 if path.exists() {
                     fs::remove_dir_all(path).map_err(storage)?;
                 }
@@ -384,26 +404,47 @@ impl GraphImportSession {
         kind: BulkInputKind,
         batches: &[RecordBatch],
     ) -> Result<(), GfError> {
+        let sequence = self.next_sequence()?;
+        self.append_arrow_chunk(
+            kind,
+            OperationId(import_batch_operation(self.manifest.operation_uuid, sequence, 0).0),
+            batches,
+        )
+    }
+
+    /// Append one caller-identified Arrow chunk. Exact UUID/content replay is
+    /// idempotent; UUID reuse with different content fails closed.
+    pub fn append_arrow_chunk(
+        &mut self,
+        kind: BulkInputKind,
+        chunk_uuid: OperationId,
+        batches: &[RecordBatch],
+    ) -> Result<(), GfError> {
         self.ensure_open()?;
         if batches.is_empty() {
             return Ok(());
+        }
+        for batch in batches {
+            if batch.num_rows() > self.manifest.limits.batch_rows {
+                return Err(limit("Arrow batch exceeds import batch_rows"));
+            }
+            if batch.schema() != batches[0].schema() {
+                return Err(validation("Arrow chunk schemas must be identical"));
+            }
         }
         let source_kind = match kind {
             BulkInputKind::Node => ImportSourceKind::ArrowNodes,
             BulkInputKind::Edge => ImportSourceKind::ArrowEdges,
         };
-        let sequence = self.next_sequence()?;
-        let name = format!("{sequence:020}.arrow");
-        let destination = self.root.join("sources").join(&name);
-        let temporary = self.root.join("sources").join(format!(".{name}.tmp"));
+        let temporary = self
+            .root
+            .join("sources")
+            .join(format!(".{}.arrow.tmp", chunk_uuid.0.hyphenated()));
         let file = File::create(&temporary).map_err(storage)?;
         let mut writer = ArrowFileWriter::try_new(BufWriter::new(file), &batches[0].schema())
             .map_err(storage)?;
         let mut rows = 0_u64;
         for batch in batches {
-            if batch.num_rows() > self.manifest.limits.batch_rows {
-                return Err(limit("Arrow batch exceeds import batch_rows"));
-            }
             writer.write(batch).map_err(storage)?;
             rows = rows.saturating_add(batch.num_rows() as u64);
             self.manifest.progress.peak_batch_rows = self
@@ -413,6 +454,26 @@ impl GraphImportSession {
                 .max(batch.num_rows() as u64);
         }
         writer.finish().map_err(storage)?;
+        drop(writer);
+        let digest = file_sha256(&temporary)?;
+        if let Some(existing) = self
+            .manifest
+            .sources
+            .iter()
+            .find(|source| source.chunk_uuid == Some(chunk_uuid.0))
+        {
+            let replay = existing.kind == source_kind
+                && existing.content_sha256 == digest
+                && existing.rows == rows;
+            let _ = fs::remove_file(&temporary);
+            return replay
+                .then_some(())
+                .ok_or_else(|| validation("import chunk UUID conflicts with different content"));
+        }
+        self.ensure_kind_order(kind)?;
+        let sequence = self.next_sequence()?;
+        let name = format!("{sequence:020}.arrow");
+        let destination = self.root.join("sources").join(&name);
         fs::rename(&temporary, &destination).map_err(storage)?;
         sync_file(&destination)?;
         let result = self.register_record(
@@ -420,6 +481,8 @@ impl GraphImportSession {
             name,
             destination.metadata().map_err(storage)?.len(),
             rows,
+            Some(chunk_uuid.0),
+            digest,
         );
         if result.is_err() {
             let _ = fs::remove_file(destination);
@@ -429,6 +492,21 @@ impl GraphImportSession {
 
     /// Register a local Parquet source by copying it into durable session ownership.
     pub fn register_parquet(&mut self, kind: BulkInputKind, source: &Path) -> Result<(), GfError> {
+        let sequence = self.next_sequence()?;
+        self.register_parquet_chunk(
+            kind,
+            OperationId(import_batch_operation(self.manifest.operation_uuid, sequence, 0).0),
+            source,
+        )
+    }
+
+    /// Register one caller-identified Parquet chunk with idempotent replay.
+    pub fn register_parquet_chunk(
+        &mut self,
+        kind: BulkInputKind,
+        chunk_uuid: OperationId,
+        source: &Path,
+    ) -> Result<(), GfError> {
         self.ensure_open()?;
         reject_unsafe_path(source)?;
         let metadata = fs::symlink_metadata(source).map_err(storage)?;
@@ -437,6 +515,24 @@ impl GraphImportSession {
                 "Parquet source must be a regular non-symlink file",
             ));
         }
+        let digest = file_sha256(source)?;
+        let source_kind = match kind {
+            BulkInputKind::Node => ImportSourceKind::ParquetNodes,
+            BulkInputKind::Edge => ImportSourceKind::ParquetEdges,
+        };
+        if let Some(existing) = self
+            .manifest
+            .sources
+            .iter()
+            .find(|record| record.chunk_uuid == Some(chunk_uuid.0))
+        {
+            return (existing.kind == source_kind
+                && existing.content_sha256 == digest
+                && existing.bytes == metadata.len())
+            .then_some(())
+            .ok_or_else(|| validation("import chunk UUID conflicts with different content"));
+        }
+        self.ensure_kind_order(kind)?;
         if self
             .manifest
             .progress
@@ -452,13 +548,12 @@ impl GraphImportSession {
         fs::copy(source, &destination).map_err(storage)?;
         sync_file(&destination)?;
         self.register_record(
-            match kind {
-                BulkInputKind::Node => ImportSourceKind::ParquetNodes,
-                BulkInputKind::Edge => ImportSourceKind::ParquetEdges,
-            },
+            source_kind,
             name,
             metadata.len(),
             0,
+            Some(chunk_uuid.0),
+            digest,
         )
     }
 
@@ -524,21 +619,37 @@ impl GraphImportSession {
                                 stage_edge_batch(graph, &self.root, operation, &batch, recovering)
                             }
                         };
-                        if let Err(error) = staged {
-                            self.manifest.sources[source_index].inflight_batch = None;
-                            let remaining = self
-                                .manifest
-                                .limits
-                                .max_rejected_rows
-                                .saturating_sub(self.manifest.progress.rows_rejected);
-                            self.manifest.progress.rows_rejected = self
-                                .manifest
-                                .progress
-                                .rows_rejected
-                                .saturating_add((batch.num_rows() as u64).min(remaining));
-                            write_manifest(&self.root, &self.manifest)?;
-                            return Err(error);
+                        let work = match staged {
+                            Ok(work) => work,
+                            Err(error) => {
+                                self.manifest.sources[source_index].inflight_batch = None;
+                                let remaining = self
+                                    .manifest
+                                    .limits
+                                    .max_rejected_rows
+                                    .saturating_sub(self.manifest.progress.rows_rejected);
+                                self.manifest.progress.rows_rejected = self
+                                    .manifest
+                                    .progress
+                                    .rows_rejected
+                                    .saturating_add((batch.num_rows() as u64).min(remaining));
+                                write_manifest(&self.root, &self.manifest)?;
+                                return Err(error);
+                            }
+                        };
+                        if work.existing_rows_rewritten != 0 {
+                            return Err(validation("import staging rewrote prior topology rows"));
                         }
+                        self.manifest.progress.topology_work_rows = self
+                            .manifest
+                            .progress
+                            .topology_work_rows
+                            .saturating_add(work.new_rows_written);
+                        self.manifest.progress.peak_topology_window_rows = self
+                            .manifest
+                            .progress
+                            .peak_topology_window_rows
+                            .max(batch.num_rows() as u64);
                         batch_index += 1;
                         self.manifest.sources[source_index].batches_staged = batch_index;
                         self.manifest.sources[source_index].inflight_batch = None;
@@ -562,6 +673,7 @@ impl GraphImportSession {
                 write_manifest(&self.root, &self.manifest)?;
             }
         }
+        self.refresh_physical_progress()?;
         self.manifest.phase = ImportPhase::Validated;
         self.checkpoint()
     }
@@ -574,15 +686,19 @@ impl GraphImportSession {
         self.manifest.phase = ImportPhase::Aborted;
         self.checkpoint()?;
         let progress = self.manifest.progress.clone();
-        let cleanup = [self.root.join("sources"), self.root.join("graph")]
-            .into_iter()
-            .try_for_each(|path| {
-                if path.exists() {
-                    fs::remove_dir_all(path)
-                } else {
-                    Ok(())
-                }
-            });
+        let cleanup = [
+            self.root.join("sources"),
+            self.root.join("graph"),
+            self.root.join("endpoint-index"),
+        ]
+        .into_iter()
+        .try_for_each(|path| {
+            if path.exists() {
+                fs::remove_dir_all(path)
+            } else {
+                Ok(())
+            }
+        });
         match cleanup {
             Ok(()) => Ok(progress),
             Err(error) => {
@@ -659,6 +775,8 @@ impl GraphImportSession {
         name: String,
         bytes: u64,
         rows: u64,
+        chunk_uuid: Option<Uuid>,
+        content_sha256: String,
     ) -> Result<(), GfError> {
         let total = self.manifest.progress.bytes_accepted.saturating_add(bytes);
         if total > self.manifest.limits.max_source_bytes {
@@ -673,13 +791,118 @@ impl GraphImportSession {
             staged: false,
             batches_staged: 0,
             inflight_batch: None,
+            chunk_uuid,
+            content_sha256,
         });
+        if kind.input_kind() == BulkInputKind::Edge {
+            self.manifest.edge_input_seen = true;
+        }
         self.manifest.phase = ImportPhase::Open;
         self.manifest.progress.bytes_accepted = total;
         self.manifest.progress.files_accepted += 1;
         self.manifest.progress.files_pending += 1;
         self.checkpoint().map(|_| ())
     }
+
+    fn ensure_kind_order(&self, kind: BulkInputKind) -> Result<(), GfError> {
+        if kind == BulkInputKind::Node && self.manifest.edge_input_seen {
+            return Err(validation("node chunks must precede edge chunks"));
+        }
+        Ok(())
+    }
+
+    fn refresh_physical_progress(&mut self) -> Result<(), GfError> {
+        self.manifest.progress.shard_count = count_parquet_files(&self.root.join("graph"))?;
+        self.manifest.progress.physical_disk_bytes = allocated_bytes(&self.root)?;
+        Ok(())
+    }
+}
+
+fn file_sha256(path: &Path) -> Result<String, GfError> {
+    let mut file = File::open(path).map_err(storage)?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(storage)?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(format!("sha256:{}", encode_hex(digest.finalize())))
+}
+
+fn encode_hex(bytes: impl AsRef<[u8]>) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let bytes = bytes.as_ref();
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
+fn count_parquet_files(root: &Path) -> Result<u64, GfError> {
+    let mut count = 0_u64;
+    for entry in fs::read_dir(root).map_err(storage)? {
+        let entry = entry.map_err(storage)?;
+        let kind = entry.file_type().map_err(storage)?;
+        if kind.is_symlink() {
+            return Err(validation("import staging contains a symlink"));
+        }
+        if kind.is_dir() {
+            count = count.saturating_add(count_parquet_files(&entry.path())?);
+        } else if kind.is_file()
+            && entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "parquet")
+        {
+            count = count.saturating_add(1);
+        }
+    }
+    Ok(count)
+}
+
+#[cfg(unix)]
+fn allocated_bytes(root: &Path) -> Result<u64, GfError> {
+    let output = std::process::Command::new("du")
+        .args([
+            "-sk",
+            root.to_str()
+                .ok_or_else(|| validation("non-UTF8 import root"))?,
+        ])
+        .output()
+        .map_err(storage)?;
+    if !output.status.success() {
+        return Err(storage("allocated disk probe failed"));
+    }
+    String::from_utf8(output.stdout)
+        .map_err(storage)?
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| storage("allocated disk probe returned no bytes"))?
+        .parse::<u64>()
+        .map(|kib| kib.saturating_mul(1024))
+        .map_err(storage)
+}
+
+#[cfg(not(unix))]
+fn allocated_bytes(root: &Path) -> Result<u64, GfError> {
+    let mut bytes = 0_u64;
+    for entry in fs::read_dir(root).map_err(storage)? {
+        let entry = entry.map_err(storage)?;
+        let kind = entry.file_type().map_err(storage)?;
+        bytes = bytes.saturating_add(if kind.is_dir() {
+            allocated_bytes(&entry.path())?
+        } else if kind.is_file() {
+            entry.metadata().map_err(storage)?.len()
+        } else {
+            0
+        });
+    }
+    Ok(bytes)
 }
 
 fn unix_millis() -> Result<u64, GfError> {
@@ -698,7 +921,7 @@ fn stage_node_batch(
     operation: OperationId,
     batch: &RecordBatch,
     allow_replay: bool,
-) -> Result<(), GfError> {
+) -> Result<graphforge_storage::writer::TopologyWriteWork, GfError> {
     let graph_dir = root.join("graph");
     let normalized = graph
         .normalize_import_nodes(operation, std::slice::from_ref(batch))
@@ -730,7 +953,7 @@ fn stage_node_batch(
         && base_edges.iter().all(|found| !*found)
         && session_edges.iter().all(|found| !*found)
     {
-        return Ok(());
+        return Ok(graphforge_storage::writer::TopologyWriteWork::default());
     }
     if base_nodes
         .iter()
@@ -767,9 +990,10 @@ fn stage_node_batch(
         }
     }
     writer.flush()?;
+    let work = writer.topology_write_work();
     super::persist_runtime_catalog(&graph_dir, &catalog)?;
     merge_session_index(&root.join("nodes.uuidx"), &candidates)?;
-    Ok(())
+    Ok(work)
 }
 
 fn stage_edge_batch(
@@ -778,8 +1002,9 @@ fn stage_edge_batch(
     operation: OperationId,
     batch: &RecordBatch,
     allow_replay: bool,
-) -> Result<(), GfError> {
+) -> Result<graphforge_storage::writer::TopologyWriteWork, GfError> {
     let graph_dir = root.join("graph");
+    let endpoint_index_root = ensure_endpoint_index_snapshot(root, &graph_dir)?;
     let endpoints = batch_endpoint_uuids(batch)?;
     let imported_found = probe_session_index(&root.join("nodes.uuidx"), &endpoints)?;
     let imported_endpoints = endpoints
@@ -817,7 +1042,7 @@ fn stage_edge_batch(
         && base_nodes.iter().all(|found| !*found)
         && session_nodes.iter().all(|found| !*found)
     {
-        return Ok(());
+        return Ok(graphforge_storage::writer::TopologyWriteWork::default());
     }
     if base_edges
         .iter()
@@ -837,7 +1062,9 @@ fn stage_edge_batch(
         .iter()
         .flat_map(|row| [row.source_uuid, row.target_uuid])
         .collect::<BTreeSet<_>>();
-    crate::bulk_construction::register_existing_endpoints(&mut writer, &graph_dir, &endpoints)?;
+    let endpoint_uuids = endpoints.into_iter().collect::<Vec<_>>();
+    let mut endpoint_index = graphforge_storage::UuidMembershipIndex::open(&endpoint_index_root)?;
+    writer.register_existing_endpoints(&mut endpoint_index, &endpoint_uuids)?;
     for row in normalized.rows() {
         catalog.intern_relation_type(&row.rel_type);
         writer.create_edge(
@@ -859,9 +1086,10 @@ fn stage_edge_batch(
         }
     }
     writer.flush()?;
+    let work = writer.topology_write_work();
     super::persist_runtime_catalog(&graph_dir, &catalog)?;
     merge_session_index(&root.join("edges.uuidx"), &candidates)?;
-    Ok(())
+    Ok(work)
 }
 
 fn batch_endpoint_uuids(batch: &RecordBatch) -> Result<Vec<Uuid>, GfError> {
@@ -1083,6 +1311,38 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<(), GfError> {
     Ok(())
 }
 
+/// Freeze the completed node phase's authenticated UUID-to-surrogate index.
+/// Edge shards advance the staged graph generation but cannot change node
+/// surrogates, so every later edge chunk reuses this immutable snapshot.
+fn ensure_endpoint_index_snapshot(root: &Path, graph_dir: &Path) -> Result<PathBuf, GfError> {
+    let destination = root.join("endpoint-index");
+    if destination.exists() {
+        return Ok(destination);
+    }
+    if !graphforge_storage::uuid_membership_index_is_fresh(graph_dir)? {
+        graphforge_storage::rebuild_uuid_membership_indexes(
+            graph_dir,
+            graphforge_storage::UuidIndexBuildLimits::default(),
+        )?;
+    }
+    let temporary = root.join(".endpoint-index.tmp");
+    if temporary.exists() {
+        fs::remove_dir_all(&temporary).map_err(storage)?;
+    }
+    copy_tree(
+        &graph_dir.join(".graphforge-cache/uuid-membership"),
+        &temporary.join(".graphforge-cache/uuid-membership"),
+    )?;
+    fs::create_dir_all(temporary.join("topology")).map_err(storage)?;
+    fs::copy(
+        graph_dir.join("topology/generation.json"),
+        temporary.join("topology/generation.json"),
+    )
+    .map_err(storage)?;
+    fs::rename(temporary, &destination).map_err(storage)?;
+    Ok(destination)
+}
+
 fn sync_file(path: &Path) -> Result<(), GfError> {
     File::open(path)
         .and_then(|file| file.sync_all())
@@ -1167,13 +1427,18 @@ mod tests {
         let (_directory, project, graph) = fixture();
         let node_ids = [Uuid::now_v7(), Uuid::now_v7()];
         let edge_id = Uuid::now_v7();
+        let second_edge_id = Uuid::now_v7();
         let operation = OperationId(Uuid::now_v7());
         let before = *graph.current_generation_uuid.lock().unwrap();
         let mut session = graph
             .begin_import_session(operation, ImportSessionLimits::default())
             .unwrap();
+        let node_chunk = OperationId(Uuid::now_v7());
         session
-            .append_arrow(BulkInputKind::Node, &[nodes(&node_ids)])
+            .append_arrow_chunk(BulkInputKind::Node, node_chunk, &[nodes(&node_ids)])
+            .unwrap();
+        session
+            .append_arrow_chunk(BulkInputKind::Node, node_chunk, &[nodes(&node_ids)])
             .unwrap();
         session.checkpoint().unwrap();
         assert_eq!(session.status().1.files_pending, 1);
@@ -1181,17 +1446,69 @@ mod tests {
         drop(session);
 
         let mut resumed = graph.resume_import_session(session_uuid).unwrap();
+        let edge_chunk = OperationId(Uuid::now_v7());
         resumed
-            .append_arrow(
+            .append_arrow_chunk(
                 BulkInputKind::Edge,
+                edge_chunk,
                 &[edges(edge_id, node_ids[0], node_ids[1])],
             )
             .unwrap();
+        resumed.validate(&graph).unwrap();
+        let endpoint_manifest = fs::read(
+            resumed
+                .root
+                .join("endpoint-index/.graphforge-cache/uuid-membership/manifest.json"),
+        )
+        .unwrap();
+        resumed
+            .append_arrow_chunk(
+                BulkInputKind::Edge,
+                OperationId(Uuid::now_v7()),
+                &[edges(second_edge_id, node_ids[1], node_ids[0])],
+            )
+            .unwrap();
+        resumed
+            .append_arrow_chunk(BulkInputKind::Node, node_chunk, &[nodes(&node_ids)])
+            .expect("exact node replay remains idempotent after edge registration");
+        assert!(
+            resumed
+                .append_arrow_chunk(
+                    BulkInputKind::Node,
+                    OperationId(Uuid::now_v7()),
+                    &[nodes(&[Uuid::now_v7()])],
+                )
+                .is_err(),
+            "nodes must never be accepted after edge input"
+        );
         let progress = resumed.validate(&graph).unwrap();
-        assert_eq!((progress.rows_accepted, progress.files_pending), (3, 0));
+        assert_eq!((progress.rows_accepted, progress.files_pending), (4, 0));
+        assert_eq!(
+            progress.files_accepted, 3,
+            "exact chunk replay adds no file"
+        );
+        assert_eq!(progress.topology_work_rows, 4);
+        assert_eq!(
+            fs::read(
+                resumed
+                    .root
+                    .join("endpoint-index/.graphforge-cache/uuid-membership/manifest.json"),
+            )
+            .unwrap(),
+            endpoint_manifest,
+            "later edge chunks reuse the one node-surrogate snapshot"
+        );
+        assert!(progress.peak_topology_window_rows <= 2);
+        assert!(progress.shard_count > 0);
+        assert!(progress.physical_disk_bytes > 0);
         assert_eq!(*graph.current_generation_uuid.lock().unwrap(), before);
         let committed = resumed.commit(&graph, None).unwrap();
         assert_ne!(committed, before);
+        assert_eq!(
+            resumed.commit(&graph, None).unwrap(),
+            committed,
+            "commit replay must resolve the one published generation"
+        );
 
         drop(graph);
         let reopened = GraphForge::new(project.to_str()).unwrap();
@@ -1204,8 +1521,48 @@ mod tests {
                 .iter()
                 .map(RecordBatch::num_rows)
                 .sum::<usize>(),
-            1
+            2
         );
+    }
+
+    #[test]
+    fn increasing_chunk_totals_have_fixed_windows_and_linear_topology_work() {
+        let uuidv7 = |value: u128| {
+            let mut bytes = value.to_be_bytes();
+            bytes[6] = (bytes[6] & 0x0f) | 0x70;
+            bytes[8] = (bytes[8] & 0x3f) | 0x80;
+            Uuid::from_bytes(bytes)
+        };
+        for rows in [16_usize, 32, 64] {
+            let (_directory, _project, graph) = fixture();
+            let mut session = graph
+                .begin_import_session(
+                    OperationId(Uuid::now_v7()),
+                    ImportSessionLimits {
+                        batch_rows: 8,
+                        ..ImportSessionLimits::default()
+                    },
+                )
+                .unwrap();
+            for chunk in 0..rows / 8 {
+                let ids = (0..8)
+                    .map(|row| uuidv7((chunk * 8 + row + 1) as u128))
+                    .collect::<Vec<_>>();
+                session
+                    .append_arrow_chunk(
+                        BulkInputKind::Node,
+                        OperationId(uuidv7(10_000 + chunk as u128)),
+                        &[nodes(&ids)],
+                    )
+                    .unwrap();
+            }
+            let progress = session.validate(&graph).unwrap();
+            assert_eq!(progress.rows_accepted, rows as u64);
+            assert_eq!(progress.topology_work_rows, rows as u64);
+            assert!(progress.peak_batch_rows <= 8);
+            assert!(progress.peak_topology_window_rows <= 8);
+            session.commit(&graph, None).unwrap();
+        }
     }
 
     #[test]
