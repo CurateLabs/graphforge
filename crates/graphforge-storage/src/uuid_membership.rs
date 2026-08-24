@@ -8,7 +8,7 @@
 //! counts, and SHA-256 before serving bounded binary-search probes.
 
 use std::cmp::Reverse;
-use std::collections::{BTreeSet, BinaryHeap};
+use std::collections::{BTreeSet, BinaryHeap, HashMap};
 use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
@@ -345,6 +345,7 @@ struct TopologyIndexReceipt {
     nonce: String,
     expected_generation: u64,
     topology_delta_sha256: String,
+    manifest_sha256: String,
 }
 
 pub(crate) struct PreparedUuidIndexDelta {
@@ -379,87 +380,31 @@ pub(crate) fn prepare_uuid_membership_delta(
     let parent = project_dir
         .parent()
         .ok_or_else(|| storage_err("project directory has no staging parent"))?;
-    let shadow = tempfile::Builder::new()
-        .prefix("uuid-membership-stage-")
+    let scratch = tempfile::Builder::new()
+        .prefix("uuid-membership-plan-")
         .tempdir_in(parent)
         .map_err(storage_err)?;
-    let shadow_project = shadow.path().join("project");
-    let shadow_root = shadow_project.join(INDEX_DIR);
-    fs::create_dir_all(&shadow_root).map_err(storage_err)?;
-    if current != 0 {
-        let _authenticated = UuidMembershipIndex::open(project_dir)?;
-        let source_directory =
-            graphforge_filesystem::StableDirectory::open(&source_root).map_err(storage_err)?;
-        let shadow_directory =
-            graphforge_filesystem::StableDirectory::open(&shadow_root).map_err(storage_err)?;
-        let mut manifest_file = source_directory
-            .open_child_file(std::ffi::OsStr::new(MANIFEST))
-            .map_err(storage_err)?;
-        let manifest_body = read_bounded(&mut manifest_file, MAX_MANIFEST_BYTES)?;
-        let manifest: Manifest = serde_json::from_slice(&manifest_body).map_err(storage_err)?;
-        let mut names = manifest_file_names(&manifest);
-        names.insert(MANIFEST.to_owned());
-        for name in names {
-            let mut source = source_directory
-                .open_child_file(std::ffi::OsStr::new(&name))
-                .map_err(storage_err)?;
-            let mut destination = shadow_directory
-                .create_child_file(std::ffi::OsStr::new(&name))
-                .map_err(storage_err)?;
-            let mut block = vec![0_u8; BULK_IO_BYTES];
-            loop {
-                let count = source.read(&mut block).map_err(storage_err)?;
-                if count == 0 {
-                    break;
-                }
-                destination
-                    .write_all(&block[..count])
-                    .map_err(storage_err)?;
-            }
-            destination.sync_all().map_err(storage_err)?;
-        }
-        shadow_directory.sync().map_err(storage_err)?;
-    }
-    fs::create_dir_all(shadow_project.join("topology")).map_err(storage_err)?;
-    fs::write(
-        crate::generation::generation_path(&shadow_project),
-        serde_json::to_vec(&serde_json::json!({
-            "topology_generation": generation,
-            "search_generation": generation,
-        }))
-        .map_err(storage_err)?,
-    )
-    .map_err(storage_err)?;
-    append_uuid_membership_delta_with_tombstones(
-        &shadow_project,
+    let (manifest, outputs, _metrics) = plan_uuid_membership_delta(
+        &source_root,
+        current,
         generation,
+        scratch.path(),
         nodes,
         edges,
         deleted_nodes,
         deleted_edges,
     )?;
-
-    let mut data = fs::read_dir(&shadow_root)
-        .map_err(storage_err)?
-        .map(|entry| entry.map_err(storage_err))
-        .collect::<Result<Vec<_>, _>>()?;
-    data.sort_unstable_by_key(std::fs::DirEntry::file_name);
-    let nonce = Uuid::new_v4().simple().to_string();
-    for entry in data {
-        let name = entry.file_name();
-        if !entry.file_type().map_err(storage_err)?.is_file() {
-            continue;
-        }
-        let final_name = name.to_string_lossy().into_owned();
-        if final_name != MANIFEST && source_root.join(&name).exists() {
-            continue;
-        }
-        batch.stage_file(&source_root.join(&final_name), &entry.path())?;
+    for (record, path) in outputs {
+        batch.stage_file(&source_root.join(record.name), &path)?;
     }
+    let manifest_bytes = serde_json::to_vec(&manifest).map_err(storage_err)?;
+    batch.stage_bytes(&source_root.join(MANIFEST), &manifest_bytes)?;
+    let nonce = Uuid::new_v4().simple().to_string();
     let receipt = TopologyIndexReceipt {
         nonce,
         expected_generation: generation,
         topology_delta_sha256: topology_delta_sha256(nodes, edges, deleted_nodes, deleted_edges),
+        manifest_sha256: hex_sha256(&manifest_bytes),
     };
     let receipt_bytes = serde_json::to_vec(&receipt).map_err(storage_err)?;
     let receipt_path = source_root.join(TOPOLOGY_RECEIPT);
@@ -475,6 +420,360 @@ pub(crate) fn prepare_uuid_membership_delta(
             bytes: receipt_bytes.len() as u64,
         },
     }))
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn plan_uuid_membership_delta(
+    root: &Path,
+    current: u64,
+    generation: u64,
+    scratch: &Path,
+    nodes: &[(Uuid, u64)],
+    edges: &[Uuid],
+    deleted_nodes: &[(Uuid, u64)],
+    deleted_edges: &[Uuid],
+) -> Result<(Manifest, Vec<(FileRecord, PathBuf)>, UuidIndexAppendMetrics), GfError> {
+    let mut manifest = if current == 0 {
+        Manifest {
+            format_version: FORMAT_VERSION,
+            base_generation: 0,
+            current_generation: 0,
+            live_node_count: 0,
+            live_edge_count: 0,
+            runs: Vec::new(),
+        }
+    } else {
+        let directory = graphforge_filesystem::StableDirectory::open(root).map_err(storage_err)?;
+        let mut file = directory
+            .open_child_file(std::ffi::OsStr::new(MANIFEST))
+            .map_err(storage_err)?;
+        let bytes = read_bounded(&mut file, MAX_MANIFEST_BYTES)?;
+        let parsed: Manifest = serde_json::from_slice(&bytes).map_err(storage_err)?;
+        if parsed.format_version != FORMAT_VERSION || parsed.current_generation != current {
+            return Err(storage_err("retained manifest generation is stale"));
+        }
+        validate_run_descriptors(&parsed)?;
+        parsed
+    };
+
+    let mut identities = nodes
+        .iter()
+        .map(|(uuid, id)| (*uuid, 0_u8, *id))
+        .chain(edges.iter().map(|uuid| (*uuid, 1_u8, 0)))
+        .chain(deleted_nodes.iter().map(|(uuid, id)| (*uuid, 2_u8, *id)))
+        .chain(deleted_edges.iter().map(|uuid| (*uuid, 3_u8, 0)))
+        .collect::<Vec<_>>();
+    identities.sort_unstable_by_key(|entry| *entry.0.as_bytes());
+    if identities.windows(2).any(|pair| pair[0].0 == pair[1].0)
+        || nodes.iter().any(|(_, id)| *id == 0)
+    {
+        return Err(storage_err(
+            "new identity run contains duplicate/invalid identity",
+        ));
+    }
+    let mut surrogates = nodes
+        .iter()
+        .map(|(uuid, id)| (*id, *uuid))
+        .chain(deleted_nodes.iter().map(|(uuid, id)| (*id, *uuid)))
+        .collect::<Vec<_>>();
+    surrogates.sort_unstable();
+    if surrogates.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return Err(storage_err("new node run contains duplicate surrogate"));
+    }
+
+    let directory = graphforge_filesystem::StableDirectory::open(root).map_err(storage_err)?;
+    let mut probe_metrics = UuidProbeMetrics::default();
+    for run in &manifest.runs {
+        let mut identity_file =
+            open_verified_at(&directory, &run.identities, IDENTITY_RECORD_BYTES)?;
+        for (uuid, kind, surrogate) in &identities {
+            if let Some((present, retained)) = binary_search_identity_state(
+                &mut identity_file,
+                run.identities.count,
+                *uuid,
+                if matches!(kind, 0 | 2) {
+                    UuidIndexKind::Node
+                } else {
+                    UuidIndexKind::Edge
+                },
+                &mut probe_metrics.file_seeks,
+            )? {
+                let deletion_matches = matches!(kind, 2 | 3) && present && retained == *surrogate;
+                if !deletion_matches {
+                    return Err(storage_err(
+                        "UUID already exists in an authenticated retained run",
+                    ));
+                }
+            }
+        }
+        let mut surrogate_file =
+            open_verified_at(&directory, &run.node_surrogates, NODE_LOOKUP_RECORD_BYTES)?;
+        for (surrogate, uuid) in &surrogates {
+            if let Some(retained) = binary_search_surrogate_uuid(
+                &mut surrogate_file,
+                run.node_surrogates.count,
+                *surrogate,
+                &mut probe_metrics.file_seeks,
+            )? && retained != *uuid.as_bytes()
+            {
+                return Err(storage_err(
+                    "node surrogate already exists in an authenticated retained run",
+                ));
+            }
+        }
+    }
+
+    let identity_path = scratch.join("identities-l0.run");
+    let surrogate_path = scratch.join("surrogates-l0.run");
+    write_identity_records(&identity_path, &identities)?;
+    write_surrogate_records(&surrogate_path, &surrogates)?;
+    let identity_record = describe_run(
+        &identity_path,
+        "identities-v3",
+        generation,
+        IDENTITY_RECORD_BYTES,
+    )?;
+    let surrogate_record = describe_run(
+        &surrogate_path,
+        "node-surrogates-v3",
+        generation,
+        NODE_LOOKUP_RECORD_BYTES,
+    )?;
+    let mut sources = HashMap::from([
+        (identity_record.name.clone(), identity_path),
+        (surrogate_record.name.clone(), surrogate_path),
+    ]);
+    if current == 0 {
+        let empty_identity_path = scratch.join("identities-base.run");
+        let empty_surrogate_path = scratch.join("surrogates-base.run");
+        File::create(&empty_identity_path)
+            .and_then(|file| file.sync_all())
+            .map_err(storage_err)?;
+        File::create(&empty_surrogate_path)
+            .and_then(|file| file.sync_all())
+            .map_err(storage_err)?;
+        let base_identities = describe_run(
+            &empty_identity_path,
+            "identities-v3-base",
+            0,
+            IDENTITY_RECORD_BYTES,
+        )?;
+        let base_surrogates = describe_run(
+            &empty_surrogate_path,
+            "node-surrogates-v3-base",
+            0,
+            NODE_LOOKUP_RECORD_BYTES,
+        )?;
+        sources.insert(base_identities.name.clone(), empty_identity_path);
+        sources.insert(base_surrogates.name.clone(), empty_surrogate_path);
+        manifest.runs.push(RunRecord {
+            base: true,
+            level: 0,
+            first_generation: 0,
+            last_generation: 0,
+            identities: base_identities,
+            node_surrogates: base_surrogates,
+            node_count: 0,
+            edge_count: 0,
+            deleted_node_count: 0,
+            deleted_edge_count: 0,
+        });
+    }
+    manifest.runs.push(RunRecord {
+        base: false,
+        level: 0,
+        first_generation: generation,
+        last_generation: generation,
+        identities: identity_record,
+        node_surrogates: surrogate_record,
+        node_count: nodes.len() as u64,
+        edge_count: edges.len() as u64,
+        deleted_node_count: deleted_nodes.len() as u64,
+        deleted_edge_count: deleted_edges.len() as u64,
+    });
+    let mut metrics = UuidIndexAppendMetrics {
+        input_records: identities.len() as u64,
+        physical_bytes_written: identities.len() as u64 * IDENTITY_RECORD_BYTES
+            + surrogates.len() as u64 * NODE_LOOKUP_RECORD_BYTES,
+        write_bytes: identities.len() as u64 * IDENTITY_RECORD_BYTES
+            + surrogates.len() as u64 * NODE_LOOKUP_RECORD_BYTES,
+        write_blocks: (identities.len() as u64 * IDENTITY_RECORD_BYTES)
+            .div_ceil(BULK_IO_BYTES as u64)
+            + (surrogates.len() as u64 * NODE_LOOKUP_RECORD_BYTES).div_ceil(BULK_IO_BYTES as u64),
+        peak_buffered_records: identities.len() + surrogates.len(),
+        peak_buffered_bytes: identities.len() * 32 + surrogates.len() * 24,
+        validation_random_seeks: probe_metrics.file_seeks,
+        ..Default::default()
+    };
+    compact_planned_levels(root, scratch, &mut manifest, &mut sources, &mut metrics)?;
+    manifest.current_generation = generation;
+    manifest.live_node_count = manifest
+        .live_node_count
+        .checked_add(nodes.len() as u64)
+        .and_then(|v| v.checked_sub(deleted_nodes.len() as u64))
+        .ok_or_else(|| storage_err("node live-count delta is invalid"))?;
+    manifest.live_edge_count = manifest
+        .live_edge_count
+        .checked_add(edges.len() as u64)
+        .and_then(|v| v.checked_sub(deleted_edges.len() as u64))
+        .ok_or_else(|| storage_err("edge live-count delta is invalid"))?;
+    manifest
+        .runs
+        .sort_unstable_by_key(|run| run.first_generation);
+    validate_run_descriptors(&manifest)?;
+    let retained = manifest_file_names(&manifest);
+    let mut outputs = sources
+        .into_iter()
+        .filter(|(name, _)| retained.contains(name))
+        .map(|(name, path)| {
+            let record = manifest
+                .runs
+                .iter()
+                .flat_map(|run| [&run.identities, &run.node_surrogates])
+                .find(|record| record.name == name)
+                .expect("planned output is retained")
+                .clone();
+            (record, path)
+        })
+        .collect::<Vec<_>>();
+    outputs.sort_unstable_by(|left, right| left.0.name.cmp(&right.0.name));
+    metrics.retained_runs = manifest.runs.len();
+    Ok((manifest, outputs, metrics))
+}
+
+fn open_verified_at(
+    directory: &graphforge_filesystem::StableDirectory,
+    record: &FileRecord,
+    record_bytes: u64,
+) -> Result<File, GfError> {
+    if Path::new(&record.name).components().count() != 1 {
+        return Err(storage_err("manifest contains a non-local index filename"));
+    }
+    let mut file = directory
+        .open_child_file(std::ffi::OsStr::new(&record.name))
+        .map_err(storage_err)?;
+    let expected = record
+        .count
+        .checked_mul(record_bytes)
+        .ok_or_else(|| storage_err("record length overflow"))?;
+    if file.metadata().map_err(storage_err)?.len() != expected
+        || sha256_reader(&mut file)? != record.sha256
+    {
+        return Err(storage_err("retained run authentication failed"));
+    }
+    file.rewind().map_err(storage_err)?;
+    Ok(file)
+}
+
+fn describe_run(
+    path: &Path,
+    kind: &str,
+    generation: u64,
+    width: u64,
+) -> Result<FileRecord, GfError> {
+    let length = path.metadata().map_err(storage_err)?.len();
+    if length % width != 0 {
+        return Err(storage_err("internal run has a partial index record"));
+    }
+    let sha256 = sha256_reader(&mut File::open(path).map_err(storage_err)?)?;
+    Ok(FileRecord {
+        name: format!("{kind}-{generation}-{}.uuidx", &sha256[..16]),
+        count: length / width,
+        sha256,
+    })
+}
+
+fn planned_source(root: &Path, sources: &HashMap<String, PathBuf>, name: &str) -> PathBuf {
+    sources
+        .get(name)
+        .cloned()
+        .unwrap_or_else(|| root.join(name))
+}
+
+fn compact_planned_levels(
+    root: &Path,
+    scratch: &Path,
+    manifest: &mut Manifest,
+    sources: &mut HashMap<String, PathBuf>,
+    metrics: &mut UuidIndexAppendMetrics,
+) -> Result<(), GfError> {
+    for level in 0..63_u8 {
+        let mut indexes = manifest
+            .runs
+            .iter()
+            .enumerate()
+            .filter(|(_, run)| !run.base && run.level == level)
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        if indexes.len() < 2 {
+            continue;
+        }
+        if indexes.len() != 2 {
+            return Err(storage_err(
+                "manifest has more than one retained run at a level",
+            ));
+        }
+        indexes.sort_unstable_by_key(|index| manifest.runs[*index].first_generation);
+        let right = manifest.runs.remove(indexes[1]);
+        let left = manifest.runs.remove(indexes[0]);
+        if left.last_generation.saturating_add(1) != right.first_generation {
+            return Err(storage_err("equal-level runs are not adjacent"));
+        }
+        let identity_path = scratch.join(format!("identities-level-{}.run", level + 1));
+        let surrogate_path = scratch.join(format!("surrogates-level-{}.run", level + 1));
+        let identity_inputs = [
+            planned_source(root, sources, &left.identities.name),
+            planned_source(root, sources, &right.identities.name),
+        ];
+        let surrogate_inputs = [
+            planned_source(root, sources, &left.node_surrogates.name),
+            planned_source(root, sources, &right.node_surrogates.name),
+        ];
+        merge_identity_v3(&identity_inputs, &identity_path)?;
+        merge_surrogate_runs(&surrogate_inputs, &surrogate_path)?;
+        let identities = describe_run(
+            &identity_path,
+            &format!("identities-v3-l{}", level + 1),
+            right.last_generation,
+            IDENTITY_RECORD_BYTES,
+        )?;
+        let node_surrogates = describe_run(
+            &surrogate_path,
+            &format!("node-surrogates-v3-l{}", level + 1),
+            right.last_generation,
+            NODE_LOOKUP_RECORD_BYTES,
+        )?;
+        let bytes = identities.count * IDENTITY_RECORD_BYTES
+            + node_surrogates.count * NODE_LOOKUP_RECORD_BYTES;
+        metrics.physical_bytes_written = metrics.physical_bytes_written.saturating_add(bytes);
+        metrics.write_bytes = metrics.write_bytes.saturating_add(bytes);
+        metrics.write_blocks = metrics
+            .write_blocks
+            .saturating_add(bytes.div_ceil(BULK_IO_BYTES as u64));
+        let counts = count_identity_states(&identity_path)?;
+        sources.insert(identities.name.clone(), identity_path);
+        sources.insert(node_surrogates.name.clone(), surrogate_path);
+        manifest.runs.push(RunRecord {
+            base: false,
+            level: level + 1,
+            first_generation: left.first_generation,
+            last_generation: right.last_generation,
+            identities,
+            node_surrogates,
+            node_count: counts.0,
+            edge_count: counts.1,
+            deleted_node_count: counts.2,
+            deleted_edge_count: counts.3,
+        });
+    }
+    Ok(())
 }
 
 fn topology_delta_sha256(
@@ -2498,6 +2797,64 @@ mod tests {
         assert_eq!(metrics.validation_random_seeks, 0);
         assert_eq!(metrics.validation_scan_bytes, 40_000 * (32 + 24));
         assert_eq!(metrics.validation_scan_blocks, 3);
+    }
+
+    #[test]
+    fn retained_planner_stages_only_new_and_binary_carry_outputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(INDEX_DIR);
+
+        let mut first = crate::RewriteBatch::new();
+        prepare_uuid_membership_delta(
+            dir.path(),
+            0,
+            1,
+            &mut first,
+            &[(Uuid::from_u128(1), 1)],
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap();
+        // Two empty base files, two L0 files, manifest, and receipt. No copy of
+        // any retained corpus exists on the initial plan.
+        assert_eq!(first.staged_paths().count(), 6);
+        first.commit().unwrap();
+        fs::create_dir_all(dir.path().join("topology")).unwrap();
+        fs::write(
+            crate::generation::generation_path(dir.path()),
+            crate::generation::encode_generation_state(1, 1).unwrap(),
+        )
+        .unwrap();
+        let before = manifest_file_names(
+            &serde_json::from_slice::<Manifest>(&fs::read(root.join(MANIFEST)).unwrap()).unwrap(),
+        );
+
+        let scratch = tempfile::tempdir_in(dir.path()).unwrap();
+        let (planned, outputs, metrics) = plan_uuid_membership_delta(
+            &root,
+            1,
+            2,
+            scratch.path(),
+            &[(Uuid::from_u128(2), 2)],
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap();
+        // Generation two carries L0+L0 into exactly one L1 pair. Retained base
+        // files are descriptor-reused, not copied into planner outputs.
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(planned.runs.iter().filter(|run| !run.base).count(), 1);
+        assert_eq!(planned.runs.iter().find(|run| !run.base).unwrap().level, 1);
+        assert!(
+            before
+                .iter()
+                .all(|name| !outputs.iter().any(|(out, _)| &out.name == name))
+        );
+        assert_eq!(metrics.validation_scan_bytes, 0);
+        assert!(metrics.validation_random_seeks > 0);
+        assert_eq!(metrics.prior_topology_rows_decoded, 0);
     }
 
     #[test]
