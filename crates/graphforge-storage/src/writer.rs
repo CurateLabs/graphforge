@@ -1228,13 +1228,10 @@ pub struct TopologyWriteWork {
     pub peak_flush_scratch_bytes: u64,
 }
 
-/// Explicit capability limits for topology construction state.
-///
-/// Property/literal mutation buffers are intentionally outside this capability:
-/// callers that construct properties must apply their own bounded batch limit.
+/// Explicit capability limits for graph construction state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GraphWriterLimits {
-    /// Maximum buffered node plus edge rows.
+    /// Maximum buffered node, edge, and property rows.
     pub max_buffered_topology_rows: usize,
     /// Maximum conservative charged bytes for retained topology state.
     pub max_buffered_topology_bytes: usize,
@@ -1258,6 +1255,33 @@ const ENDPOINT_ENTRY_CHARGE: usize = 128;
 const ROUTE_ENTRY_CHARGE: usize = 128;
 const NODE_SCRATCH_CHARGE: usize = 96;
 const EDGE_SCRATCH_CHARGE: usize = 160;
+const PROPERTY_ROW_CHARGE: usize = 128;
+const PROPERTY_ENTRY_CHARGE: usize = 96;
+
+fn literal_dynamic_bytes(value: &IrLiteral) -> usize {
+    match value {
+        IrLiteral::Str(value) => value.len(),
+        IrLiteral::ZonedDateTime { zone, .. } => zone.as_ref().map_or(0, String::len),
+        IrLiteral::List(values) => values.iter().fold(0usize, |sum, value| {
+            sum.saturating_add(size_of::<IrLiteral>())
+                .saturating_add(literal_dynamic_bytes(value))
+        }),
+        IrLiteral::Map(entries) => entries.iter().fold(0usize, |sum, (key, value)| {
+            sum.saturating_add(size_of::<(String, IrLiteral)>())
+                .saturating_add(key.len())
+                .saturating_add(literal_dynamic_bytes(value))
+        }),
+        _ => 0,
+    }
+}
+
+fn property_map_charge(props: &HashMap<String, IrLiteral>) -> usize {
+    props.iter().fold(0usize, |sum, (key, value)| {
+        sum.saturating_add(PROPERTY_ENTRY_CHARGE)
+            .saturating_add(key.len())
+            .saturating_add(literal_dynamic_bytes(value))
+    })
+}
 
 /// Buffered Parquet writer for graph topology and properties.
 ///
@@ -1427,14 +1451,39 @@ impl GraphWriter {
             sum.saturating_add(size_of::<crate::adjacency_delta::DeltaEdge>())
                 .saturating_add(edge.rel_type_name.len())
         });
+        let property_bytes = self.properties.iter().fold(0usize, |sum, (route, rows)| {
+            sum.saturating_add(ROUTE_ENTRY_CHARGE)
+                .saturating_add(route.len())
+                .saturating_add(rows.iter().fold(0usize, |rows_sum, row| {
+                    rows_sum
+                        .saturating_add(PROPERTY_ROW_CHARGE)
+                        .saturating_add(property_map_charge(&row.props))
+                }))
+        });
+        let edge_property_bytes = self
+            .edge_properties
+            .iter()
+            .fold(0usize, |sum, (route, rows)| {
+                sum.saturating_add(ROUTE_ENTRY_CHARGE)
+                    .saturating_add(route.len())
+                    .saturating_add(rows.iter().fold(0usize, |rows_sum, row| {
+                        rows_sum
+                            .saturating_add(PROPERTY_ROW_CHARGE)
+                            .saturating_add(property_map_charge(&row.props))
+                    }))
+            });
         self.charged_topology_bytes = node_bytes
             .saturating_add(edge_bytes)
             .saturating_add(endpoint_bytes)
-            .saturating_add(delta_bytes);
+            .saturating_add(delta_bytes)
+            .saturating_add(property_bytes)
+            .saturating_add(edge_property_bytes);
         self.buffered_topology_rows = self
             .nodes
             .len()
-            .saturating_add(self.edges.values().map(Vec::len).sum::<usize>());
+            .saturating_add(self.edges.values().map(Vec::len).sum::<usize>())
+            .saturating_add(self.properties.values().map(Vec::len).sum::<usize>())
+            .saturating_add(self.edge_properties.values().map(Vec::len).sum::<usize>());
         self.flush_scratch_bytes = self
             .nodes
             .iter()
@@ -1445,7 +1494,28 @@ impl GraphWriter {
             .saturating_add(self.edges.values().flatten().fold(0usize, |sum, row| {
                 sum.saturating_add(EDGE_SCRATCH_CHARGE)
                     .saturating_add(row.rel_type_name.as_ref().map_or(0, String::len))
-            }));
+            }))
+            .saturating_add(property_bytes)
+            .saturating_add(edge_property_bytes);
+    }
+
+    fn admit_property_row(
+        &mut self,
+        stem: &str,
+        props: &HashMap<String, IrLiteral>,
+        edge: bool,
+    ) -> Result<(), GfError> {
+        let route_is_new = if edge {
+            !self.edge_properties.contains_key(stem)
+        } else {
+            !self.properties.contains_key(stem)
+        };
+        let route =
+            usize::from(route_is_new).saturating_mul(ROUTE_ENTRY_CHARGE.saturating_add(stem.len()));
+        let retained = PROPERTY_ROW_CHARGE
+            .saturating_add(property_map_charge(props))
+            .saturating_add(route);
+        self.admit_topology(1, retained, retained)
     }
 
     /// Release endpoint registrations after the caller has durably handed off
@@ -1685,6 +1755,7 @@ impl GraphWriter {
             (OntologyMode::Advisory | OntologyMode::Strict, Some(t)) => t.to_owned(),
             _ => UNTYPED_STEM.to_owned(),
         };
+        self.admit_property_row(&stem, &props, false)?;
         self.properties.entry(stem).or_default().push(PropRow {
             node_uuid: to_bytes(node_uuid),
             props,
@@ -1711,6 +1782,7 @@ impl GraphWriter {
         props: HashMap<String, IrLiteral>,
     ) -> Result<(), GfError> {
         let stem = rel_type.unwrap_or(UNTYPED_STEM).to_owned();
+        self.admit_property_row(&stem, &props, true)?;
         self.edge_properties
             .entry(stem)
             .or_default()
@@ -1964,20 +2036,37 @@ impl GraphWriter {
         node_uuid: &[u8; 16],
         entity_type: Option<&str>,
         props: HashMap<String, IrLiteral>,
-    ) {
+    ) -> Result<(), GfError> {
         let stem = match (self.mode, entity_type) {
             (OntologyMode::Advisory | OntologyMode::Strict, Some(t)) => t.to_owned(),
             _ => UNTYPED_STEM.to_owned(),
         };
-        let rows = self.properties.entry(stem).or_default();
-        if let Some(row) = rows.iter_mut().find(|r| &r.node_uuid == node_uuid) {
-            row.props.extend(props);
+        if let Some(current) = self
+            .properties
+            .get(&stem)
+            .and_then(|rows| rows.iter().find(|r| &r.node_uuid == node_uuid))
+        {
+            let mut merged = current.props.clone();
+            merged.extend(props);
+            let retained =
+                property_map_charge(&merged).saturating_sub(property_map_charge(&current.props));
+            self.admit_topology(0, retained, retained)?;
+            self.properties
+                .get_mut(&stem)
+                .expect("property stem remains present")
+                .iter_mut()
+                .find(|r| &r.node_uuid == node_uuid)
+                .expect("property row remains present")
+                .props = merged;
         } else {
+            self.admit_property_row(&stem, &props, false)?;
+            let rows = self.properties.entry(stem).or_default();
             rows.push(PropRow {
                 node_uuid: *node_uuid,
                 props,
             });
         }
+        Ok(())
     }
 
     /// Add labels to a node buffered by this writer, preserving its primary label.
@@ -2020,17 +2109,34 @@ impl GraphWriter {
         edge_uuid: &[u8; 16],
         rel_type: Option<&str>,
         props: HashMap<String, IrLiteral>,
-    ) {
+    ) -> Result<(), GfError> {
         let stem = rel_type.unwrap_or(UNTYPED_STEM).to_owned();
-        let rows = self.edge_properties.entry(stem).or_default();
-        if let Some(row) = rows.iter_mut().find(|r| &r.edge_uuid == edge_uuid) {
-            row.props.extend(props);
+        if let Some(current) = self
+            .edge_properties
+            .get(&stem)
+            .and_then(|rows| rows.iter().find(|r| &r.edge_uuid == edge_uuid))
+        {
+            let mut merged = current.props.clone();
+            merged.extend(props);
+            let retained =
+                property_map_charge(&merged).saturating_sub(property_map_charge(&current.props));
+            self.admit_topology(0, retained, retained)?;
+            self.edge_properties
+                .get_mut(&stem)
+                .expect("edge property stem remains present")
+                .iter_mut()
+                .find(|r| &r.edge_uuid == edge_uuid)
+                .expect("edge property row remains present")
+                .props = merged;
         } else {
+            self.admit_property_row(&stem, &props, true)?;
+            let rows = self.edge_properties.entry(stem).or_default();
             rows.push(EdgePropRow {
                 edge_uuid: *edge_uuid,
                 props,
             });
         }
+        Ok(())
     }
 
     /// Remove `keys` from a pending node's buffered property rows (REMOVE on
@@ -4690,6 +4796,124 @@ mod tests {
     }
 
     #[test]
+    fn property_budget_preadmits_dynamic_values_and_releases_on_cancel() {
+        let dir = TempDir::new().unwrap();
+        let node = new_v7();
+        let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS)
+            .unwrap()
+            .with_limits(GraphWriterLimits {
+                max_buffered_topology_rows: 4,
+                max_buffered_topology_bytes: 2_048,
+                max_flush_scratch_bytes: 2_048,
+            });
+        writer.create_node(node, TypeId(0)).unwrap();
+        let before = writer.charged_topology_bytes;
+        assert!(
+            writer
+                .set_properties(
+                    &node,
+                    Some("Person"),
+                    HashMap::from([("payload".into(), IrLiteral::Str("x".repeat(4_096)))]),
+                )
+                .is_err()
+        );
+        assert!(writer.properties.is_empty());
+        assert_eq!(writer.charged_topology_bytes, before);
+
+        writer
+            .set_properties(
+                &node,
+                Some("Person"),
+                HashMap::from([("name".into(), IrLiteral::Str("Ada".into()))]),
+            )
+            .unwrap();
+        assert!(writer.charged_topology_bytes > before);
+        assert!(writer.flush_scratch_bytes > NODE_SCRATCH_CHARGE);
+        writer.cancel_nodes(&HashSet::from([to_bytes(&node)]));
+        assert!(writer.properties.is_empty());
+        assert_eq!(writer.charged_topology_bytes, 0);
+        assert_eq!(writer.flush_scratch_bytes, 0);
+    }
+
+    #[test]
+    fn cumulative_topology_and_index_work_doubles_with_bounded_windows() {
+        fn run(batches: u64) -> (u64, u64, TopologyWriteWork) {
+            let dir = TempDir::new().unwrap();
+            crate::io_stats::reset();
+            let mut physical = 0_u64;
+            let mut aggregate = TopologyWriteWork::default();
+            for batch in 0..batches {
+                let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS)
+                    .unwrap()
+                    .with_limits(GraphWriterLimits {
+                        max_buffered_topology_rows: 4,
+                        max_buffered_topology_bytes: 8 * 1024,
+                        max_flush_scratch_bytes: 8 * 1024,
+                    });
+                let left = Uuid::from_u128(10_000 + u128::from(batch) * 3);
+                let right = Uuid::from_u128(10_001 + u128::from(batch) * 3);
+                let edge = Uuid::from_u128(10_002 + u128::from(batch) * 3);
+                let left_id = writer.create_node(left, TypeId(0)).unwrap();
+                let right_id = writer.create_node(right, TypeId(0)).unwrap();
+                writer
+                    .set_properties(
+                        &left,
+                        Some("Person"),
+                        HashMap::from([("name".into(), IrLiteral::Str(format!("n{batch}")))]),
+                    )
+                    .unwrap();
+                writer.create_edge(edge, "KNOWS", &left, &right).unwrap();
+                writer.flush().unwrap();
+                let work = writer.topology_write_work();
+                physical = physical.saturating_add(work.output_bytes);
+                aggregate.input_rows += work.input_rows;
+                aggregate.prior_rows_decoded += work.prior_rows_decoded;
+                aggregate.rows_encoded += work.rows_encoded;
+                aggregate.shard_count += work.shard_count;
+                aggregate.output_bytes += work.output_bytes;
+                aggregate.new_rows_written += work.new_rows_written;
+                aggregate.peak_buffered_rows =
+                    aggregate.peak_buffered_rows.max(work.peak_buffered_rows);
+                aggregate.peak_buffered_bytes =
+                    aggregate.peak_buffered_bytes.max(work.peak_buffered_bytes);
+                aggregate.peak_flush_scratch_bytes = aggregate
+                    .peak_flush_scratch_bytes
+                    .max(work.peak_flush_scratch_bytes);
+                let generation = crate::read_topology_generation(dir.path()).unwrap();
+                let index = crate::append_uuid_membership_delta(
+                    dir.path(),
+                    generation,
+                    &[(left, left_id), (right, right_id)],
+                    &[edge],
+                )
+                .unwrap();
+                physical = physical.saturating_add(index.physical_bytes_written);
+            }
+            let io = crate::io_stats::snapshot();
+            (
+                physical,
+                io.node_full_reads + io.node_filtered_reads,
+                aggregate,
+            )
+        }
+
+        let (small_bytes, small_reads, small) = run(8);
+        let (large_bytes, large_reads, large) = run(16);
+        assert_eq!(small_reads, 0);
+        assert_eq!(large_reads, 0);
+        assert_eq!(small.prior_rows_decoded, 0);
+        assert_eq!(large.prior_rows_decoded, 0);
+        assert_eq!(large.input_rows, small.input_rows * 2);
+        assert_eq!(large.rows_encoded, small.rows_encoded * 2);
+        assert!(large_bytes <= small_bytes.saturating_mul(3));
+        assert_eq!(large.peak_buffered_rows, small.peak_buffered_rows);
+        assert!(small.peak_buffered_bytes <= 8 * 1024);
+        assert!(large.peak_buffered_bytes <= 8 * 1024);
+        assert!(small.peak_flush_scratch_bytes <= 8 * 1024);
+        assert!(large.peak_flush_scratch_bytes <= 8 * 1024);
+    }
+
+    #[test]
     fn streaming_node_append_normalizes_legacy_scalar_labels() {
         let dir = TempDir::new().unwrap();
         std::fs::create_dir_all(dir.path().join("topology")).unwrap();
@@ -5483,7 +5707,8 @@ mod tests {
                 ("name".to_owned(), IrLiteral::Str("new".into())),
                 ("city".to_owned(), IrLiteral::Str("Oslo".into())),
             ]),
-        );
+        )
+        .unwrap();
         // REMOVE on the pending node: drop a key; absent keys are no-ops.
         w.remove_pending_node_props(
             &to_bytes(&a),
