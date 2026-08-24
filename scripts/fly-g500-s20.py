@@ -402,9 +402,7 @@ def machine_diagnostic(fly: Flyctl, app: str, machine: str) -> dict[str, Any]:
     safe_events = []
     for event in events[-MAX_DIAGNOSTIC_EVENTS:] if isinstance(events, list) else []:
         if isinstance(event, dict):
-            safe_events.append(
-                {key: event[key] for key in DIAGNOSTIC_EVENT_KEYS if key in event}
-            )
+            safe_events.append({key: event[key] for key in DIAGNOSTIC_EVENT_KEYS if key in event})
     return {
         "available": True,
         "state": status.get("state") if isinstance(status, dict) else None,
@@ -539,9 +537,7 @@ def execute(args: argparse.Namespace, fly: Flyctl, digest: str) -> None:
         }
         if machine_id:
             try:
-                diagnostic["machine"] = machine_diagnostic(
-                    fly, args.app_name, machine_id
-                )
+                diagnostic["machine"] = machine_diagnostic(fly, args.app_name, machine_id)
             except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
                 diagnostic["machine"] = {"available": False, "status_error": "query_failed"}
         write_sanitized_json(args.diagnostic_out, diagnostic)
@@ -566,9 +562,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--manifest-json", type=Path, help="dry-run manifest fixture only")
     result.add_argument("--evidence-out", type=Path, default=Path("s20-evidence.json"))
     result.add_argument("--journal-out", type=Path, default=Path("s20-journal.json"))
-    result.add_argument(
-        "--diagnostic-out", type=Path, default=Path("s20-diagnostic.json")
-    )
+    result.add_argument("--diagnostic-out", type=Path, default=Path("s20-diagnostic.json"))
     result.add_argument("--execute", action="store_true")
     result.add_argument("--confirm-disposable", action="store_true")
     return result

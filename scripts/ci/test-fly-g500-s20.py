@@ -181,9 +181,7 @@ def main() -> None:
                     "",
                 )
 
-        diagnostic = controller.machine_diagnostic(
-            FakeFly(), options.app_name, "machine-id"
-        )
+        diagnostic = controller.machine_diagnostic(FakeFly(), options.app_name, "machine-id")
         assert diagnostic == {
             "available": True,
             "state": "stopped",
