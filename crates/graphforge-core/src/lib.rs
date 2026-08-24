@@ -9,6 +9,7 @@
 pub mod algorithms;
 pub mod canonical;
 pub mod embedding_options;
+pub mod identifier;
 pub mod manifest;
 pub mod uuid;
 

@@ -913,7 +913,8 @@ fn extract_runs(kind: ConstructionChunkKind, batch: &RecordBatch) -> Result<RunA
             detail[..16].copy_from_slice(&edge);
             detail[16..32].copy_from_slice(&uuid_value(src, row)?);
             detail[32..48].copy_from_slice(&uuid_value(dst, row)?);
-            detail[48] = route.len() as u8;
+            detail[48] = u8::try_from(route.len())
+                .map_err(|_| storage("canonical edge route exceeds identifier bound"))?;
             detail[49..49 + route.len()].copy_from_slice(route);
             details.push(detail);
         }
@@ -963,14 +964,11 @@ fn validate_schema(kind: ConstructionChunkKind, batch: &RecordBatch) -> Result<(
             .as_any()
             .downcast_ref::<StringArray>()
             .ok_or_else(|| storage("canonical edge route is not Utf8"))?;
-        if routes.iter().flatten().any(|route| {
-            route.is_empty()
-                || route.len() > 255
-                || route.contains('/')
-                || route.contains('\\')
-                || route == "."
-                || route == ".."
-        }) {
+        if routes
+            .iter()
+            .flatten()
+            .any(|route| !graphforge_core::identifier::is_graph_identifier(route))
+        {
             return Err(storage("invalid canonical edge route"));
         }
     }

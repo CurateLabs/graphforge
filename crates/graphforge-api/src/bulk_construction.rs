@@ -1816,11 +1816,7 @@ fn validate_identifier(
 }
 
 fn validate_identifier_parts(value: &str) -> bool {
-    let mut characters = value.chars();
-    characters
-        .next()
-        .is_some_and(|first| first == '_' || first.is_alphabetic())
-        && characters.all(|character| character == '_' || character.is_alphanumeric())
+    graphforge_core::identifier::is_graph_identifier(value)
 }
 
 fn uuid_column<'a>(
@@ -3528,6 +3524,24 @@ mod tests {
             assert_eq!(field.reason, BulkValidationReason::InvalidIdentifier);
             assert_eq!(field.field.as_deref(), Some(identifier));
         }
+        let at_limit = format!("A{}", "é".repeat(127));
+        let over_limit = format!("A{}x", "é".repeat(127));
+        assert_eq!(at_limit.len(), 255);
+        assert_eq!(over_limit.len(), 256);
+        assert!(validate_identifier(BulkInputKind::Node, 0, "label", &at_limit).is_ok());
+        assert!(validate_property_name(BulkInputKind::Node, &at_limit).is_ok());
+        assert_eq!(
+            validate_identifier(BulkInputKind::Edge, 7, "rel_type", &over_limit)
+                .unwrap_err()
+                .reason,
+            BulkValidationReason::InvalidIdentifier
+        );
+        assert_eq!(
+            validate_property_name(BulkInputKind::Edge, &over_limit)
+                .unwrap_err()
+                .reason,
+            BulkValidationReason::InvalidIdentifier
+        );
 
         let compatible = [
             (PropertyValueType::Utf8, DataType::LargeUtf8),
