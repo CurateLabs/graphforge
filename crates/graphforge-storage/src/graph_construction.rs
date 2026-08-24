@@ -623,6 +623,7 @@ pub(crate) struct ConstructionPublicationReceipt {
     project_identity: IdentityRecord,
     session_identity: IdentityRecord,
     intent_sha256: String,
+    transaction_uuid: Uuid,
     target_generation_uuid: Uuid,
     target_generation_manifest_sha256: String,
 }
@@ -765,6 +766,7 @@ impl GraphConstructionSession {
             project_identity: self.checkpoint.project_identity.clone(),
             session_identity: self.checkpoint.session_identity.clone(),
             intent_sha256: control_sha256(&intent)?,
+            transaction_uuid: intent.transaction_uuid,
             target_generation_uuid,
             target_generation_manifest_sha256: target_generation_manifest_sha256.to_owned(),
         };
@@ -2696,6 +2698,7 @@ fn read_publication_receipt(
         || receipt.operation_uuid != checkpoint.operation_uuid
         || receipt.project_identity != checkpoint.project_identity
         || receipt.session_identity != checkpoint.session_identity
+        || receipt.transaction_uuid != intent.transaction_uuid
         || receipt.target_generation_uuid != intent.target_generation_uuid
     {
         return Err(storage("publication receipt differs from durable intent"));
@@ -2721,16 +2724,15 @@ fn authenticate_published_target(
             "published target is not a child of the pinned parent generation",
         ));
     }
-    let current = crate::resolve_project_generation(project_dir).map_err(|error| {
-        storage(format!(
-            "published CURRENT cannot be authenticated: {error}"
-        ))
-    })?;
-    if current.generation_uuid() != target.generation_uuid()
-        || current.manifest_sha256() != target.manifest_sha256()
+    let journal = crate::published_project_transaction(project_dir, receipt.transaction_uuid)
+        .map_err(|error| storage(format!("project publication journal is invalid: {error}")))?
+        .ok_or_else(|| storage("project publication journal is not published"))?;
+    if journal.transaction_uuid != receipt.transaction_uuid
+        || journal.generation_uuid != receipt.target_generation_uuid
+        || journal.generation_manifest_sha256 != target.manifest_sha256()
     {
         return Err(storage(
-            "published target is not the exact committed CURRENT generation",
+            "project publication journal differs from construction publication authority",
         ));
     }
     Ok(())
@@ -8093,6 +8095,7 @@ mod tests {
         replace_control(&session.root, CHECKPOINT, &session.checkpoint).unwrap();
         drop(session);
         let published = publish_empty_generation(&root, target, transaction);
+        publish_empty_generation(&root, Uuid::from_u128(9_413), Uuid::from_u128(9_414));
         let mut reopened = GraphConstructionSession::open(
             root.path(),
             operation,
@@ -8158,7 +8161,7 @@ mod tests {
     }
 
     #[test]
-    fn publication_finish_rejects_wrong_target_parent_and_current() {
+    fn publication_finish_rejects_wrong_target_and_parent() {
         let wrong_target_root = TempDir::new().unwrap();
         let operation = Uuid::from_u128(9_430);
         let intended = Uuid::from_u128(9_431);
@@ -8197,35 +8200,34 @@ mod tests {
                 .to_string()
                 .contains("not a child of the pinned parent")
         );
+    }
 
-        let wrong_current_root = TempDir::new().unwrap();
-        let mut session = encoded_publication_session(&wrong_current_root, Uuid::from_u128(9_450));
+    #[test]
+    fn published_receipt_reopens_after_later_current_advances() {
+        let root = TempDir::new().unwrap();
+        let operation = Uuid::from_u128(9_450);
+        let mut session = encoded_publication_session(&root, operation);
         let target = Uuid::from_u128(9_451);
         let transaction = Uuid::from_u128(9_452);
         session.begin_publication(target, transaction).unwrap();
-        let target_receipt = publish_empty_generation(&wrong_current_root, target, transaction);
-        session
+        let target_receipt = publish_empty_generation(&root, target, transaction);
+        let construction_receipt = session
             .finish_publication(target, &hex(&target_receipt.generation_manifest_sha256))
             .unwrap();
         drop(session);
-        publish_empty_generation(
-            &wrong_current_root,
-            Uuid::from_u128(9_453),
-            Uuid::from_u128(9_454),
-        );
-        let error = match GraphConstructionSession::open(
-            wrong_current_root.path(),
-            Uuid::from_u128(9_450),
+        publish_empty_generation(&root, Uuid::from_u128(9_453), Uuid::from_u128(9_454));
+        let mut reopened = GraphConstructionSession::open(
+            root.path(),
+            operation,
             0,
             GraphConstructionBudgets::default(),
-        ) {
-            Ok(_) => panic!("published recovery accepted a different CURRENT"),
-            Err(error) => error,
-        };
-        assert!(
-            error
-                .to_string()
-                .contains("not the exact committed CURRENT")
+        )
+        .unwrap();
+        assert_eq!(
+            reopened
+                .finish_publication(target, &hex(&target_receipt.generation_manifest_sha256))
+                .unwrap(),
+            construction_receipt
         );
     }
 
