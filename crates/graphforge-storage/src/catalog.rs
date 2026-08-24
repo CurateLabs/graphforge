@@ -928,6 +928,11 @@ fn record_pruning(
 ///
 /// # Errors
 /// Propagates Parquet / Arrow errors encountered while reading.
+pub fn topology_node_files(dir: &Path) -> Result<Vec<PathBuf>, graphforge_core::GfError> {
+    crate::mutator::node_parquet_files(dir)
+}
+
+/// Read all node rows from every canonical topology fragment.
 pub fn read_nodes(dir: &Path) -> Result<Vec<RecordBatch>, DataFusionError> {
     let paths = crate::mutator::node_parquet_files(dir)
         .map_err(|error| DataFusionError::Execution(error.to_string()))?;

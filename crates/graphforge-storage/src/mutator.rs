@@ -62,71 +62,74 @@ where
     if additions.is_empty() && removals.is_empty() {
         return Ok((0, 0));
     }
-    let path = dir.join("topology").join("nodes.parquet");
-    let read_path = staged
-        .staged_temp(&path)
-        .map_or_else(|| path.clone(), Path::to_path_buf);
-    if !read_path.exists() {
-        return Ok((0, 0));
-    }
-    let batches = normalize_topology_nodes(
-        read_parquet_or_empty(&read_path, TOPOLOGY_NODES_SCHEMA.clone()).map_err(pq_err)?,
-    )
-    .map_err(pq_err)?;
     let mut changed = 0u64;
     let mut removed = 0u64;
-    let mut rebuilt = Vec::with_capacity(batches.len());
-    for batch in batches {
-        let uuids = batch
-            .column_by_name("node_uuid")
-            .and_then(|a| a.as_any().downcast_ref::<FixedSizeBinaryArray>())
-            .ok_or_else(|| GfError::Storage("node topology missing node_uuid".into()))?;
-        let labels = batch
-            .column_by_name("type_ids")
-            .and_then(|a| a.as_any().downcast_ref::<ListArray>())
-            .ok_or_else(|| GfError::Storage("node topology missing type_ids".into()))?;
-        let mut rows = Vec::with_capacity(batch.num_rows());
-        for row in 0..batch.num_rows() {
-            let values = labels.value(row);
-            let values = values
-                .as_any()
-                .downcast_ref::<UInt32Array>()
-                .ok_or_else(|| GfError::Storage("node type_ids are not UInt32".into()))?;
-            let mut merged = values.values().to_vec();
-            if let Some(drop) = removals.get(&uuid_at(uuids, row)) {
-                let before = merged.len();
-                merged.retain(|label| !drop.contains(label));
-                removed += before.saturating_sub(merged.len()) as u64;
+    for path in node_parquet_files(dir)? {
+        let read_path = staged
+            .staged_temp(&path)
+            .map_or_else(|| path.clone(), Path::to_path_buf);
+        let batches = normalize_topology_nodes(
+            read_parquet_or_empty(&read_path, TOPOLOGY_NODES_SCHEMA.clone()).map_err(pq_err)?,
+        )
+        .map_err(pq_err)?;
+        let mut file_changed = 0u64;
+        let mut file_removed = 0u64;
+        let mut rebuilt = Vec::with_capacity(batches.len());
+        for batch in batches {
+            let uuids = batch
+                .column_by_name("node_uuid")
+                .and_then(|a| a.as_any().downcast_ref::<FixedSizeBinaryArray>())
+                .ok_or_else(|| GfError::Storage("node topology missing node_uuid".into()))?;
+            let labels = batch
+                .column_by_name("type_ids")
+                .and_then(|a| a.as_any().downcast_ref::<ListArray>())
+                .ok_or_else(|| GfError::Storage("node topology missing type_ids".into()))?;
+            let mut rows = Vec::with_capacity(batch.num_rows());
+            for row in 0..batch.num_rows() {
+                let values = labels.value(row);
+                let values = values
+                    .as_any()
+                    .downcast_ref::<UInt32Array>()
+                    .ok_or_else(|| GfError::Storage("node type_ids are not UInt32".into()))?;
+                let mut merged = values.values().to_vec();
+                if let Some(drop) = removals.get(&uuid_at(uuids, row)) {
+                    let before = merged.len();
+                    merged.retain(|label| !drop.contains(label));
+                    file_removed += before.saturating_sub(merged.len()) as u64;
+                }
+                if let Some(extra) = additions.get(&uuid_at(uuids, row)) {
+                    let before = merged.len();
+                    merged.extend(extra.iter().copied());
+                    merged.sort_unstable();
+                    merged.dedup();
+                    file_changed += merged.len().saturating_sub(before) as u64;
+                }
+                rows.push(Some(merged.into_iter().map(Some).collect::<Vec<_>>()));
             }
-            if let Some(extra) = additions.get(&uuid_at(uuids, row)) {
-                let before = merged.len();
-                merged.extend(extra.iter().copied());
-                merged.sort_unstable();
-                merged.dedup();
-                changed += merged.len().saturating_sub(before) as u64;
-            }
-            rows.push(Some(merged.into_iter().map(Some).collect::<Vec<_>>()));
+            let nullable =
+                ListArray::from_iter_primitive::<arrow::datatypes::UInt32Type, _, _>(rows);
+            let new_labels = ListArray::new(
+                std::sync::Arc::new(arrow::datatypes::Field::new(
+                    "item",
+                    arrow::datatypes::DataType::UInt32,
+                    false,
+                )),
+                nullable.offsets().clone(),
+                nullable.values().clone(),
+                nullable.nulls().cloned(),
+            );
+            let index = batch.schema().index_of("type_ids").map_err(pq_err)?;
+            let mut columns = batch.columns().to_vec();
+            columns[index] = std::sync::Arc::new(new_labels);
+            rebuilt.push(RecordBatch::try_new(batch.schema(), columns).map_err(pq_err)?);
         }
-        let nullable = ListArray::from_iter_primitive::<arrow::datatypes::UInt32Type, _, _>(rows);
-        let new_labels = ListArray::new(
-            std::sync::Arc::new(arrow::datatypes::Field::new(
-                "item",
-                arrow::datatypes::DataType::UInt32,
-                false,
-            )),
-            nullable.offsets().clone(),
-            nullable.values().clone(),
-            nullable.nulls().cloned(),
-        );
-        let index = batch.schema().index_of("type_ids").map_err(pq_err)?;
-        let mut columns = batch.columns().to_vec();
-        columns[index] = std::sync::Arc::new(new_labels);
-        rebuilt.push(RecordBatch::try_new(batch.schema(), columns).map_err(pq_err)?);
-    }
-    if changed > 0 || removed > 0 {
-        let merged =
-            arrow::compute::concat_batches(&TOPOLOGY_NODES_SCHEMA, &rebuilt).map_err(pq_err)?;
-        staged.restage(&path, TOPOLOGY_NODES_SCHEMA.clone(), &merged)?;
+        if file_changed > 0 || file_removed > 0 {
+            let merged =
+                arrow::compute::concat_batches(&TOPOLOGY_NODES_SCHEMA, &rebuilt).map_err(pq_err)?;
+            staged.restage(&path, TOPOLOGY_NODES_SCHEMA.clone(), &merged)?;
+        }
+        changed = changed.saturating_add(file_changed);
+        removed = removed.saturating_add(file_removed);
     }
     Ok((changed, removed))
 }
@@ -248,29 +251,6 @@ fn stage_rewrite_nodes_dropping<S: BuildHasher>(
     Ok(removed)
 }
 
-/// Every `*.parquet` path directly under `dir/<subdir>`, or an empty list when
-/// the directory is absent. Enumeration order is filesystem-dependent; callers
-/// needing determinism must sort or group the results themselves.
-pub(crate) fn parquet_files_in(
-    dir: &Path,
-    subdir: &str,
-) -> Result<Vec<std::path::PathBuf>, GfError> {
-    let d = dir.join(subdir);
-    let entries = match fs::read_dir(&d) {
-        Ok(rd) => rd,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(io_err(&e)),
-    };
-    let mut out = Vec::new();
-    for entry in entries {
-        let path = entry.map_err(|e| io_err(&e))?.path();
-        if path.extension().and_then(|s| s.to_str()) == Some("parquet") {
-            out.push(path);
-        }
-    }
-    Ok(out)
-}
-
 /// Enumerate canonical edge Parquet fragments, including the legacy flat
 /// `<relation>.parquet` layout and append-only `<relation>/<range>.parquet`
 /// shards. The returned relation is authoritative for typed fragments.
@@ -327,12 +307,59 @@ pub(crate) fn edge_parquet_files(
             if shard_type.is_file()
                 && shard_path.extension().and_then(|value| value.to_str()) == Some("parquet")
             {
+                canonical_topology_shard_range(&shard_path, "edge")?;
                 out.push((stem.clone(), shard_path));
             }
         }
     }
     out.sort_by(|left, right| left.1.cmp(&right.1));
+    let mut prior_end = HashMap::new();
+    for (relation, path) in &out {
+        if path.parent() == Some(root.as_path()) {
+            continue;
+        }
+        let (first, last) = canonical_topology_shard_range(path, "edge")?;
+        if prior_end
+            .insert(relation.clone(), last)
+            .is_some_and(|prior| first <= prior)
+        {
+            return Err(GfError::Storage(
+                "edge shard surrogate ranges overlap or are unordered".into(),
+            ));
+        }
+    }
     Ok(out)
+}
+
+fn canonical_topology_shard_range(path: &Path, kind: &str) -> Result<(u64, u64), GfError> {
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| GfError::Storage(format!("{kind} shard name is not canonical UTF-8")))?;
+    let (first, last) = stem
+        .split_once('-')
+        .ok_or_else(|| GfError::Storage(format!("{kind} shard name lacks a surrogate range")))?;
+    if first.len() != 20
+        || last.len() != 20
+        || !first.bytes().all(|byte| byte.is_ascii_digit())
+        || !last.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(GfError::Storage(format!(
+            "{kind} shard name is not a canonical padded range"
+        )));
+    }
+    let first = first
+        .parse::<u64>()
+        .map_err(|error| GfError::Storage(error.to_string()))?;
+    let last = last
+        .parse::<u64>()
+        .map_err(|error| GfError::Storage(error.to_string()))?;
+    if first == 0 || first > last {
+        return Err(GfError::Storage(format!(
+            "{kind} shard surrogate range is invalid"
+        )));
+    }
+    Ok((first, last))
 }
 
 /// Enumerate the legacy flat node file plus immutable range shards.
@@ -363,31 +390,7 @@ pub(crate) fn node_parquet_files(dir: &Path) -> Result<Vec<std::path::PathBuf>, 
         if file_type.is_file()
             && path.extension().and_then(|value| value.to_str()) == Some("parquet")
         {
-            let stem = path
-                .file_stem()
-                .and_then(|value| value.to_str())
-                .ok_or_else(|| GfError::Storage("node shard name is not canonical UTF-8".into()))?;
-            let (first, last) = stem.split_once('-').ok_or_else(|| {
-                GfError::Storage("node shard name lacks a surrogate range".into())
-            })?;
-            if first.len() != 20
-                || last.len() != 20
-                || !first.bytes().all(|byte| byte.is_ascii_digit())
-                || !last.bytes().all(|byte| byte.is_ascii_digit())
-            {
-                return Err(GfError::Storage(
-                    "node shard name is not a canonical padded range".into(),
-                ));
-            }
-            let first = first
-                .parse::<u64>()
-                .map_err(|error| GfError::Storage(error.to_string()))?;
-            let last = last
-                .parse::<u64>()
-                .map_err(|error| GfError::Storage(error.to_string()))?;
-            if first == 0 || first > last {
-                return Err(GfError::Storage("node shard range is invalid".into()));
-            }
+            let (first, last) = canonical_topology_shard_range(&path, "node")?;
             shard_paths.push((first, last, path));
         }
     }
@@ -521,7 +524,7 @@ pub fn stage_delete_edges<S: BuildHasher>(
         return Ok(0);
     }
     let mut removed = 0u64;
-    for path in parquet_files_in(dir, "topology/edges")? {
+    for (_, path) in edge_parquet_files(dir, None)? {
         if let Some(schema) = discover_parquet_schema(&path) {
             removed += stage_rewrite_dropping(staged, &path, schema, "edge_uuid", edge_uuids)?;
         }
@@ -871,6 +874,81 @@ mod tests {
         let removed = delete_edges(dir.path(), &set(&[e1])).unwrap();
         assert_eq!(removed, 1);
         assert_eq!(row_count(dir.path(), "topology/edges/KNOWS.parquet"), 1);
+    }
+
+    #[test]
+    fn delete_edges_rewrites_relation_shard_matches() {
+        let dir = TempDir::new().unwrap();
+        let (legacy, a, b, edge) = (new_v7(), new_v7(), new_v7(), new_v7());
+        let mut first = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
+        first.create_node(legacy, TypeId(0)).unwrap();
+        first.flush().unwrap();
+        let mut second = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS + 1).unwrap();
+        second.create_node(a, TypeId(0)).unwrap();
+        second.create_node(b, TypeId(0)).unwrap();
+        second.create_edge(edge, "KNOWS", &a, &b).unwrap();
+        second.flush().unwrap();
+
+        assert_eq!(delete_edges(dir.path(), &set(&[edge])).unwrap(), 1);
+        assert_eq!(
+            crate::read_edges(dir.path(), "KNOWS", OntologyMode::Strict)
+                .unwrap()
+                .iter()
+                .map(RecordBatch::num_rows)
+                .sum::<usize>(),
+            0
+        );
+    }
+
+    #[test]
+    fn mutate_labels_rewrites_only_matching_node_shard() {
+        let dir = TempDir::new().unwrap();
+        let (legacy, sharded) = (new_v7(), new_v7());
+        let mut first = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
+        first.create_node(legacy, TypeId(1)).unwrap();
+        first.flush().unwrap();
+        let mut second =
+            GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS + 1).unwrap();
+        second.create_node(sharded, TypeId(1)).unwrap();
+        second.flush().unwrap();
+        let additions = HashMap::from([(to_bytes(&sharded), HashSet::from([2]))]);
+        let removals: HashMap<[u8; 16], HashSet<u32>> = HashMap::new();
+        let mut staged = RewriteBatch::new();
+        assert_eq!(
+            stage_mutate_node_labels(&mut staged, dir.path(), &additions, &removals).unwrap(),
+            (1, 0)
+        );
+        staged.commit().unwrap();
+
+        let mut observed = HashMap::new();
+        for batch in crate::read_nodes(dir.path()).unwrap() {
+            let uuids = batch
+                .column_by_name("node_uuid")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<FixedSizeBinaryArray>()
+                .unwrap();
+            let labels = batch
+                .column_by_name("type_ids")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<ListArray>()
+                .unwrap();
+            for row in 0..batch.num_rows() {
+                let values = labels.value(row);
+                observed.insert(
+                    uuid_at(uuids, row),
+                    values
+                        .as_any()
+                        .downcast_ref::<UInt32Array>()
+                        .unwrap()
+                        .values()
+                        .to_vec(),
+                );
+            }
+        }
+        assert_eq!(observed[&to_bytes(&legacy)], [1]);
+        assert_eq!(observed[&to_bytes(&sharded)], [1, 2]);
     }
 
     #[test]

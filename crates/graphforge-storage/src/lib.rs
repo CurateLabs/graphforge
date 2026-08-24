@@ -364,7 +364,7 @@ pub use catalog::{
     UnionEdgeTable, list_edge_property_stems, list_property_stems, node_topology_present,
     read_edge_properties, read_edges, read_edges_filtered, read_edges_filtered_observed,
     read_nodes, read_nodes_filtered, read_nodes_filtered_observed, read_properties,
-    read_properties_batched, visit_nodes_batched, visit_properties_batched,
+    read_properties_batched, topology_node_files, visit_nodes_batched, visit_properties_batched,
 };
 
 pub mod runtime_entity_labels;
