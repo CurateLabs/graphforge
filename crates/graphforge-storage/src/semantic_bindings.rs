@@ -614,34 +614,32 @@ impl SemanticStorageBindings {
             .filter(|binding| binding.route_kind == SemanticRouteKind::Entity)
             .map(|binding| binding.storage_id)
             .collect::<BTreeSet<_>>();
-        let topology_path = graph_root.join("topology/nodes.parquet");
         let mut topology_rows_scanned = 0_u64;
         let mut max_topology_batch_rows = 0_usize;
-        if topology_path.exists() {
+        {
             use arrow::array::{Array, ListArray, UInt32Array};
             use arrow::datatypes::DataType;
-            preflight_parquet_footer(&topology_path)?;
-            let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
-                File::open(&topology_path)
-                    .map_err(|_| legacy_ambiguous("legacy topology cannot be opened"))?,
-            )
-            .map_err(|_| legacy_ambiguous("legacy topology metadata is invalid"))?
-            .with_batch_size(8192)
-            .build()
-            .map_err(|_| legacy_ambiguous("legacy topology reader cannot be built"))?;
-            for batch in reader {
-                let batch =
-                    batch.map_err(|_| legacy_ambiguous("legacy topology batch is invalid"))?;
+            for path in crate::mutator::node_parquet_files(graph_root)? {
+                preflight_parquet_footer(&path)?;
+            }
+            let mut validation_error = None;
+            crate::catalog::visit_nodes_batched(graph_root, 8_192, |batch| {
                 topology_rows_scanned = topology_rows_scanned
                     .checked_add(batch.num_rows() as u64)
-                    .ok_or_else(|| corrupt("legacy topology row count overflows"))?;
+                    .ok_or_else(|| {
+                        datafusion::error::DataFusionError::Execution(
+                            "legacy topology row count overflows".into(),
+                        )
+                    })?;
                 max_topology_batch_rows = max_topology_batch_rows.max(batch.num_rows());
                 if let Some(type_ids) = batch
                     .column_by_name("type_ids")
                     .and_then(|array| array.as_any().downcast_ref::<ListArray>())
                 {
                     if type_ids.value_type() != DataType::UInt32 {
-                        return Err(legacy_ambiguous("legacy topology type_ids has wrong type"));
+                        validation_error =
+                            Some(legacy_ambiguous("legacy topology type_ids has wrong type"));
+                        return Ok(false);
                     }
                     for row in 0..type_ids.len() {
                         let values = type_ids.value(row);
@@ -651,12 +649,18 @@ impl SemanticStorageBindings {
                             .iter()
                             .any(|id| !valid_entity_ids.contains(id))
                         {
-                            return Err(legacy_ambiguous(
+                            validation_error = Some(legacy_ambiguous(
                                 "legacy topology contains an undeclared entity id",
                             ));
+                            return Ok(false);
                         }
                     }
                 }
+                Ok(true)
+            })
+            .map_err(|error| GfError::Storage(error.to_string()))?;
+            if let Some(error) = validation_error {
+                return Err(error);
             }
         }
 
@@ -1027,8 +1031,12 @@ impl SemanticStorageBindings {
     fn validate_topology_ids(&self, graph_root: &Path) -> Result<(), GfError> {
         use arrow::array::{Array, ListArray, UInt32Array};
 
-        let path = graph_root.join("topology/nodes.parquet");
-        if !path.exists() {
+        for path in crate::mutator::node_parquet_files(graph_root)? {
+            preflight_parquet_footer(&path)?;
+        }
+        let batches = crate::catalog::read_nodes(graph_root)
+            .map_err(|_| corrupt("semantic topology cannot be opened"))?;
+        if batches.iter().all(|batch| batch.num_rows() == 0) {
             return Ok(());
         }
         let entity_ids = self
@@ -1037,16 +1045,7 @@ impl SemanticStorageBindings {
             .filter(|binding| binding.route_kind == SemanticRouteKind::Entity)
             .map(|binding| binding.storage_id)
             .collect::<BTreeSet<_>>();
-        preflight_parquet_footer(&path)?;
-        let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
-            File::open(path).map_err(|_| corrupt("semantic topology cannot be opened"))?,
-        )
-        .map_err(|_| corrupt("semantic topology metadata is invalid"))?
-        .with_batch_size(8192)
-        .build()
-        .map_err(|_| corrupt("semantic topology reader cannot be built"))?;
-        for batch in reader {
-            let batch = batch.map_err(|_| corrupt("semantic topology batch is invalid"))?;
+        for batch in batches {
             let primary = batch
                 .column_by_name("type_id")
                 .and_then(|array| array.as_any().downcast_ref::<UInt32Array>())
@@ -1958,20 +1957,12 @@ fn binding_has_retained_data(
 ) -> Result<bool, GfError> {
     if binding.route_kind == SemanticRouteKind::Entity {
         use arrow::array::{Array, ListArray, UInt32Array};
-        let path = graph_root.join("topology/nodes.parquet");
-        if !path.exists() {
+        let batches = crate::catalog::read_nodes(graph_root)
+            .map_err(|_| corrupt("removal topology cannot be opened"))?;
+        if batches.iter().all(|batch| batch.num_rows() == 0) {
             return Ok(false);
         }
-        preflight_parquet_footer(&path)?;
-        let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
-            File::open(path).map_err(|_| corrupt("removal topology cannot be opened"))?,
-        )
-        .map_err(|_| corrupt("removal topology metadata is invalid"))?
-        .with_batch_size(8192)
-        .build()
-        .map_err(|_| corrupt("removal topology reader cannot be built"))?;
-        for batch in reader {
-            let batch = batch.map_err(|_| corrupt("removal topology batch is invalid"))?;
+        for batch in batches {
             let values = batch
                 .column_by_name("type_ids")
                 .and_then(|array| array.as_any().downcast_ref::<ListArray>())

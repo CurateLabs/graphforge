@@ -18,6 +18,15 @@ is a **spec + external harness** track — see
 matrix + harness contract) and the [LDBC full suite](../guide/datasets/ldbc.md)
 — not normal GraphForge CI.
 
+Fresh edge construction is append-only at the Parquet-fragment level. Each
+relation retains a legacy-compatible first fragment and immutable bounded
+surrogate-range fragments thereafter. The writer encodes each accepted edge
+once; increasing total edge count must increase aggregate edge encoding and
+physical fragment bytes linearly, not replay prior fragments. Peak construction
+RSS is therefore a batch/shard property. Continued RSS growth proportional to
+retained edge count is a correctness failure, not a reason to raise the M5
+memory ceiling.
+
 ## Rust 0.5.0 Fixed-Hop LIMIT Contract
 
 Fixed one- and multi-hop patterns use the adjacency provider in every ontology
@@ -201,7 +210,7 @@ ceilings.
 | Edge counting | Columnar `COUNT(*)` on edge facts / Parquet |
 | Top-N ordering | DataFusion top-N physical node |
 | Bulk ingest | Parquet write via Arrow RecordBatch |
-| Neighborhood expansion | Derived CSR adjacency index under `indexes/adjacency/` |
+| Neighborhood expansion | Derived CSR adjacency cache under `.graphforge-cache/adjacency/` |
 | Memory layout | Compact columnar Parquet, not per-edge Python objects |
 
 ---

@@ -21,7 +21,7 @@ use uuid::Uuid;
 
 const FORMAT_VERSION: u32 = 1;
 const RECORD_BYTES: u64 = 16;
-const INDEX_DIR: &str = "indexes/uuid-membership";
+const INDEX_DIR: &str = ".graphforge-cache/uuid-membership";
 const MANIFEST: &str = "manifest.json";
 
 fn storage_err(error: impl std::fmt::Display) -> GfError {
@@ -277,16 +277,20 @@ pub fn rebuild_uuid_membership_indexes(
         .map_err(storage_err)?;
     let mut metrics = UuidIndexBuildMetrics::default();
     let generation = crate::read_topology_generation(project_dir)?;
+    let node_paths = crate::mutator::node_parquet_files(project_dir).map_err(storage_err)?;
     let node_runs = scan_to_runs(
-        &[project_dir.join("topology/nodes.parquet")],
+        &node_paths,
         "node_uuid",
         scratch.path(),
         "node",
         limits,
         &mut metrics,
     )?;
-    let mut edge_paths =
-        crate::mutator::parquet_files_in(project_dir, "topology/edges").map_err(storage_err)?;
+    let mut edge_paths = crate::mutator::edge_parquet_files(project_dir, None)
+        .map_err(storage_err)?
+        .into_iter()
+        .map(|(_, path)| path)
+        .collect::<Vec<_>>();
     edge_paths.sort();
     let edge_runs = scan_to_runs(
         &edge_paths,

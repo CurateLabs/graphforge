@@ -31,6 +31,7 @@ const PARTICIPANTS_DIR: &str = "participants";
 const LEASE_FILE: &str = "lease.lock";
 const MANIFEST_FILE: &str = "manifest.json";
 const MAX_JOURNAL_BYTES: u64 = 1024 * 1024;
+const MAX_GRAPH_MANIFEST_SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Persisted participant encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -171,6 +172,7 @@ pub struct StagedProjectGeneration {
     generation_uuid: Uuid,
     generation_root: PathBuf,
     requires_promotion: bool,
+    reclaim_before_publish: bool,
     request_fingerprint: String,
     operation_fingerprint: String,
     capabilities: Vec<ProjectCapability>,
@@ -613,6 +615,7 @@ fn stage_project_generation_inner_with_locks(
     graph_tree: Option<&Path>,
     payloads: ParticipantPayloads<'_>,
 ) -> Result<ProjectStageOutcome, GfError> {
+    let reclaim_before_publish = graph_tree.is_some() && revert.is_none();
     validate_request(request)?;
     let (capabilities, participants, request_fingerprint) =
         request_metadata_with_payloads(request, payloads)?;
@@ -698,6 +701,7 @@ fn stage_project_generation_inner_with_locks(
             generation_uuid: request.generation_uuid,
             generation_root,
             requires_promotion,
+            reclaim_before_publish,
             request_fingerprint,
             operation_fingerprint,
             capabilities,
@@ -1021,7 +1025,10 @@ fn stage_optional_graph_tree(
         return Ok(());
     };
     if files_participant.capability_version != crate::GRAPH_CAPABILITY_VERSION
-        || files_participant.record_version != crate::GRAPH_FILES_RECORD_VERSION
+        || !matches!(
+            files_participant.record_version,
+            crate::GRAPH_FILES_RECORD_VERSION | crate::GRAPH_FILES_V2_RECORD_VERSION
+        )
         || files_participant.encoding != ProjectParticipantEncoding::Json.extension()
     {
         return Err(project_error(
@@ -1032,8 +1039,26 @@ fn stage_optional_graph_tree(
     let inventory_path = generation_root
         .join(PARTICIPANTS_DIR)
         .join(&files_participant.relative_path);
-    let inventory =
-        crate::decode_inventory(&std::fs::read(inventory_path).map_err(publication_io)?)?;
+    let inventory_bytes = std::fs::read(inventory_path).map_err(publication_io)?;
+    let decoded = crate::decode_graph_files_participant(&inventory_bytes)?;
+    let inventory = match decoded {
+        crate::GraphFilesParticipant::V2(root) => {
+            if graph_tree.is_some() {
+                return Err(project_error(
+                    ProjectErrorCode::PublicationFailed,
+                    "graph/files v2 root must reference project objects, not a generation graph tree",
+                ));
+            }
+            crate::read_graph_object_by_digest(
+                parent.container_root(),
+                &root.root_node_sha256,
+                MAX_GRAPH_MANIFEST_SEGMENT_BYTES,
+            )?;
+            sync_directory(generation_root)?;
+            return Ok(());
+        }
+        crate::GraphFilesParticipant::V1(inventory) => inventory,
+    };
     let parent_tree = parent.graph_tree_root();
     let source = match graph_tree {
         Some(path) => path,
@@ -1048,7 +1073,17 @@ fn stage_optional_graph_tree(
             ));
         }
     };
-    crate::stage_graph_tree(source, generation_root, &inventory)?;
+    if let Some(parent_inventory) = parent.declared_graph_files_inventory()? {
+        crate::stage_graph_tree_reusing_parent(
+            source,
+            generation_root,
+            &inventory,
+            &parent_tree,
+            &parent_inventory,
+        )?;
+    } else {
+        crate::stage_graph_tree(source, generation_root, &inventory)?;
+    }
     sync_directory(generation_root)?;
     Ok(())
 }
@@ -1056,6 +1091,7 @@ fn stage_optional_graph_tree(
 fn verify_optional_graph_tree(
     generation_root: &Path,
     participants: &[StagedParticipant],
+    parent: Option<&ResolvedProjectGeneration>,
 ) -> Result<(), GfError> {
     let Some(files) = participants.iter().find(|participant| {
         participant.capability_id == crate::GRAPH_CAPABILITY_ID
@@ -1067,8 +1103,37 @@ fn verify_optional_graph_tree(
         .join(PARTICIPANTS_DIR)
         .join(&files.relative_path);
     let bytes = std::fs::read(&path).map_err(publication_io)?;
-    let inventory = crate::decode_inventory(&bytes)?;
-    crate::verify_graph_tree(&crate::graph_tree_root(generation_root), &inventory)
+    let decoded = crate::decode_graph_files_participant(&bytes)?;
+    let inventory = match decoded {
+        crate::GraphFilesParticipant::V2(root) => {
+            let parent = parent.ok_or_else(|| {
+                project_error(
+                    ProjectErrorCode::PublicationFailed,
+                    "graph/files v2 durable validation requires a pinned parent container",
+                )
+            })?;
+            crate::read_graph_object_by_digest(
+                parent.container_root(),
+                &root.root_node_sha256,
+                MAX_GRAPH_MANIFEST_SEGMENT_BYTES,
+            )?;
+            return Ok(());
+        }
+        crate::GraphFilesParticipant::V1(inventory) => inventory,
+    };
+    if let Some(parent) = parent
+        && let Some(parent_inventory) = parent.declared_graph_files_inventory()?
+    {
+        crate::verify_graph_tree_reusing_parent(
+            &crate::graph_tree_root(generation_root),
+            &inventory,
+            &parent.graph_tree_root(),
+            &parent_inventory,
+        )?;
+        Ok(())
+    } else {
+        crate::verify_graph_tree(&crate::graph_tree_root(generation_root), &inventory)
+    }
 }
 
 fn stage_participant_files(
@@ -1185,7 +1250,11 @@ impl StagedProjectGeneration {
                 participant,
             )?;
         }
-        verify_optional_graph_tree(&self.generation_root, &self.participants)?;
+        verify_optional_graph_tree(
+            &self.generation_root,
+            &self.participants,
+            Some(&self.parent),
+        )?;
         domain_validation(&self.participants)?;
         project_failpoint::hit(
             "project.after_domain_validation",
@@ -1269,7 +1338,10 @@ impl ValidatedProjectGeneration {
         } else {
             self.0.admission.revalidate_identity()?;
         }
-        let result = self.publish_inner().map_err(|error| {
+        if self.0.reclaim_before_publish {
+            crate::project_retention::preflight_publication_cleanup(&self.0.root, &self.0.parent)?;
+        }
+        let mut result = self.publish_inner().map_err(|error| {
             if matches!(error, GfError::Project { .. }) {
                 error
             } else {
@@ -1282,6 +1354,22 @@ impl ValidatedProjectGeneration {
                 )
             }
         });
+        if result.is_ok() && self.0.reclaim_before_publish {
+            result = (|| {
+                let selected = resolve_project_generation(&self.0.root)?;
+                crate::project_retention::cleanup_after_publication(&self.0.root, &selected)?;
+                result
+            })()
+            .map_err(|error| {
+                publication_error_from_parts(
+                    self.0.transaction_uuid,
+                    self.0.generation_uuid,
+                    "POST_COMMIT_GC",
+                    true,
+                    &error.to_string(),
+                )
+            });
+        }
         drop(commit_lock);
         drop(lifecycle_admission);
         result
@@ -1408,7 +1496,11 @@ fn make_generation_durable(staged: &StagedProjectGeneration) -> Result<[u8; 32],
             participant,
         )?;
     }
-    verify_optional_graph_tree(&staged.generation_root, &staged.participants)?;
+    verify_optional_graph_tree(
+        &staged.generation_root,
+        &staged.participants,
+        Some(&staged.parent),
+    )?;
     verify_exact_file(&manifest_path, &manifest_bytes)?;
     sync_participant_directories(
         &staged.generation_root.join(PARTICIPANTS_DIR),
@@ -2628,6 +2720,66 @@ mod tests {
             publish(root.path(), request);
             let resolved = resolve_project_generation(root.path()).unwrap();
             assert_eq!(resolved.generation_uuid(), expected);
+        }
+    }
+
+    #[test]
+    fn publishes_and_reopens_compact_graph_files_v2_root() {
+        let root = project();
+        let payload = b"immutable topology payload";
+        let workspace = tempfile::tempdir().unwrap();
+        let relative = std::path::PathBuf::from("topology/edges/knows/1-1.parquet");
+        fs::create_dir_all(workspace.path().join(relative.parent().unwrap())).unwrap();
+        fs::write(workspace.path().join(&relative), payload).unwrap();
+        let mut live = std::collections::BTreeMap::new();
+        let (files_root, _) = crate::append_graph_files_v2(
+            root.path(),
+            workspace.path(),
+            None,
+            &mut live,
+            &[relative],
+            &[],
+        )
+        .unwrap();
+        let request = request(vec![
+            crate::graph_files_root_participant(&files_root).unwrap(),
+        ]);
+        publish(root.path(), request);
+
+        let reopened = resolve_project_generation(root.path()).unwrap();
+        let inventory = reopened.graph_files_inventory().unwrap().unwrap();
+        assert_eq!(inventory.files, live.into_values().collect::<Vec<_>>());
+        assert!(!reopened.graph_tree_root().exists());
+    }
+
+    #[test]
+    fn repeated_publication_reclaims_generations_to_the_default_bound() {
+        let root = project();
+        for ordinal in 0_u8..8 {
+            let graph = tempfile::tempdir().unwrap();
+            fs::write(graph.path().join(format!("marker-{ordinal}")), [ordinal]).unwrap();
+            let (_, files) = crate::capture_graph_files(graph.path()).unwrap();
+            let request = request(vec![files]);
+            let ProjectStageOutcome::Staged(staged) =
+                stage_project_generation_with_graph_tree(root.path(), &request, Some(graph.path()))
+                    .unwrap()
+            else {
+                panic!("new request unexpectedly replayed");
+            };
+            staged
+                .validate(|_| Ok(()), |_, _| Ok(()))
+                .unwrap()
+                .publish()
+                .unwrap();
+            let generation_count = fs::read_dir(root.path().join(GENERATIONS_DIR))
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+                .count();
+            assert!(
+                generation_count <= crate::project_recovery::DEFAULT_RETAINED_ANCESTORS + 1,
+                "CURRENT plus the documented ancestor window is the steady-state bound"
+            );
         }
     }
 

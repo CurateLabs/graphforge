@@ -21,7 +21,7 @@
 //!   parse → bind → lower → execute pipeline, returning Arrow results.
 #![forbid(unsafe_code)]
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
@@ -417,6 +417,9 @@ pub struct GraphForge {
     read_only: bool,
     /// Generation UUID whose graph snapshot was hydrated into `dir`.
     current_generation_uuid: Arc<Mutex<uuid::Uuid>>,
+    /// Compact graph-root authority plus the verified live descriptor cache.
+    /// Publication clones this state and installs it only after CURRENT moves.
+    graph_files_publication: Arc<Mutex<GraphFilesPublicationState>>,
     /// Authenticated UUID index handle cached for one topology generation.
     uuid_membership_index: Mutex<Option<graphforge_storage::UuidMembershipIndex>>,
     /// Injected durable-write UTC microsecond clock.
@@ -493,6 +496,13 @@ pub struct GraphForge {
     /// [`OwnedRuntime`] so dropping a `GraphForge` inside someone else's async
     /// context shuts the runtime down in the background instead of panicking.
     runtime: Arc<OwnedRuntime>,
+}
+
+#[derive(Clone, Default)]
+struct GraphFilesPublicationState {
+    root: Option<graphforge_storage::GraphFilesRootV2>,
+    live_entries: BTreeMap<String, graphforge_storage::GraphFileEntry>,
+    unpublished_v1_migration_lease: Option<Arc<graphforge_storage::GraphObjectPublicationLease>>,
 }
 
 type BoundGenerationStorage = (
@@ -583,6 +593,8 @@ impl GraphForge {
             load_workspace_ontology(&resolved_generation)?;
         let (dir, workspace, graph_open_evidence) =
             hydrate_graph_workspace(&resolved_generation, false)?;
+        let graph_files_publication =
+            initialize_graph_files_publication_state(&resolved_generation, &dir, true)?;
         Ok(Self {
             identity: GraphIdentity::new(),
             path: None,
@@ -591,6 +603,7 @@ impl GraphForge {
             resolved_generation,
             read_only: false,
             current_generation_uuid: Arc::new(Mutex::new(generation_uuid)),
+            graph_files_publication: Arc::new(Mutex::new(graph_files_publication)),
             uuid_membership_index: Mutex::new(None),
             clock: Mutex::new(Arc::new(system_time_micros)),
             adjacency_provider: Arc::new(graphforge_exec::PersistentAdjacencyProvider::new(
@@ -719,6 +732,8 @@ impl GraphForge {
             load_workspace_ontology(&resolved_generation)?;
         let (dir, workspace, graph_open_evidence) =
             hydrate_graph_workspace(&resolved_generation, read_only)?;
+        let graph_files_publication =
+            initialize_graph_files_publication_state(&resolved_generation, &dir, !read_only)?;
 
         let runtime_catalog = load_runtime_catalog(&dir)?;
         let semantic_storage_bindings =
@@ -792,6 +807,7 @@ impl GraphForge {
             resolved_generation,
             read_only,
             current_generation_uuid: Arc::new(Mutex::new(generation_uuid)),
+            graph_files_publication: Arc::new(Mutex::new(graph_files_publication)),
             uuid_membership_index: Mutex::new(None),
             clock: Mutex::new(Arc::new(system_time_micros)),
             adjacency_provider: Arc::new(graphforge_exec::PersistentAdjacencyProvider::new(
@@ -1440,9 +1456,7 @@ impl GraphForge {
         recorded_at_micros: i64,
         candidate_bindings: Option<&graphforge_storage::SemanticStorageBindings>,
     ) -> Result<(), GfError> {
-        use graphforge_storage::{
-            ProjectCapability, ProjectGenerationRequest, ProjectStageOutcome,
-        };
+        use graphforge_storage::{ProjectGenerationRequest, ProjectStageOutcome};
 
         let root = self.resolved_generation.container_root();
         let parent = graphforge_storage::resolve_project_generation(root)?;
@@ -1463,7 +1477,8 @@ impl GraphForge {
                 graphforge_storage::UuidIndexBuildLimits::default(),
             )?;
         }
-        let graph = graphforge_storage::capture_graph_files(&self.dir)?.1;
+        let (graph, candidate_graph_state, sealed_paths, cas_lease) =
+            self.capture_incremental_graph_publication()?;
         let provenance_enabled = parent.capability("provenance")?.is_some();
         let installed_bindings = self
             .semantic_storage_bindings
@@ -1474,33 +1489,29 @@ impl GraphForge {
             graph,
             candidate_bindings.or(installed_bindings.as_ref()),
             provenance_enabled,
-            receipt,
-            operation_uuid,
-            actor_uuid,
-            recorded_at_micros,
+            GraphPublicationContext {
+                receipt,
+                operation_uuid,
+                actor_uuid,
+                recorded_at_micros,
+            },
         )?;
         drop(installed_bindings);
-        let capabilities = parent
-            .capabilities()
-            .into_iter()
-            .map(|capability| ProjectCapability {
-                capability_id: capability.capability_id,
-                capability_version: capability.capability_version,
-            })
-            .collect::<Vec<_>>();
         let generation_uuid = mutation_generation_uuid(operation_uuid, &participants);
         let request = ProjectGenerationRequest {
             transaction_uuid: operation_uuid,
             generation_uuid,
-            capabilities,
+            capabilities: publication_capabilities(&parent),
             participants,
         };
-        let publication = match graphforge_storage::stage_project_generation_with_graph_tree_mode(
+        let staged = graphforge_storage::stage_project_generation_with_graph_tree_mode(
             root,
             &request,
-            Some(self.dir.as_path()),
+            None,
             self.lifecycle_mode,
-        )? {
+        )?;
+        drop(cas_lease);
+        let publication = match staged {
             ProjectStageOutcome::AlreadyPublished(receipt) => Ok(receipt),
             ProjectStageOutcome::Staged(staged) => staged
                 .validate(
@@ -1534,6 +1545,11 @@ impl GraphForge {
             .current_generation_uuid
             .lock()
             .expect("generation UUID lock poisoned") = published.generation_uuid;
+        *self
+            .graph_files_publication
+            .lock()
+            .expect("graph publication lock poisoned") = candidate_graph_state;
+        graphforge_storage::acknowledge_sealed_graph_delta(&self.dir, &sealed_paths)?;
         Ok(())
     }
 
@@ -1563,7 +1579,8 @@ impl GraphForge {
                 graphforge_storage::UuidIndexBuildLimits::default(),
             )?;
         }
-        let graph = graphforge_storage::capture_graph_files(&self.dir)?.1;
+        let (graph, candidate_graph_state, sealed_paths, cas_lease) =
+            self.capture_incremental_graph_publication()?;
         let provenance_enabled = parent.capability("provenance")?.is_some();
         let participants = graph_publication_participants(
             &parent,
@@ -1573,10 +1590,12 @@ impl GraphForge {
                 .expect("semantic storage binding lock poisoned")
                 .as_ref(),
             provenance_enabled,
-            receipt,
-            operation_uuid,
-            None,
-            recorded_at_micros,
+            GraphPublicationContext {
+                receipt,
+                operation_uuid,
+                actor_uuid: None,
+                recorded_at_micros,
+            },
         )?;
         let capabilities = parent
             .capabilities()
@@ -1592,12 +1611,14 @@ impl GraphForge {
             capabilities,
             participants,
         };
-        let publication = match graphforge_storage::stage_project_generation_with_graph_tree_mode(
+        let staged = graphforge_storage::stage_project_generation_with_graph_tree_mode(
             root,
             &request,
-            Some(self.dir.as_path()),
+            None,
             self.lifecycle_mode,
-        )? {
+        )?;
+        drop(cas_lease);
+        let publication = match staged {
             ProjectStageOutcome::AlreadyPublished(receipt) => Ok(receipt),
             ProjectStageOutcome::Staged(staged) => staged
                 .validate(
@@ -1631,7 +1652,46 @@ impl GraphForge {
             .current_generation_uuid
             .lock()
             .expect("generation UUID lock poisoned") = published.generation_uuid;
+        *self
+            .graph_files_publication
+            .lock()
+            .expect("graph publication lock poisoned") = candidate_graph_state;
+        graphforge_storage::acknowledge_sealed_graph_delta(&self.dir, &sealed_paths)?;
         Ok(())
+    }
+
+    fn capture_incremental_graph_publication(
+        &self,
+    ) -> Result<
+        (
+            graphforge_storage::ProjectParticipant,
+            GraphFilesPublicationState,
+            graphforge_storage::PendingGraphFileDelta,
+            graphforge_storage::GraphObjectPublicationLease,
+        ),
+        GfError,
+    > {
+        let sealed_paths = graphforge_storage::pending_graph_file_delta(&self.dir)?;
+        let lease = graphforge_storage::begin_graph_object_publication(
+            self.resolved_generation.container_root(),
+        )?;
+        let mut candidate = self
+            .graph_files_publication
+            .lock()
+            .expect("graph publication lock poisoned")
+            .clone();
+        let (root, _) = graphforge_storage::append_graph_files_v2(
+            self.resolved_generation.container_root(),
+            &self.dir,
+            candidate.root.as_ref(),
+            &mut candidate.live_entries,
+            &sealed_paths.sealed_paths,
+            &sealed_paths.tombstones,
+        )?;
+        let participant = graphforge_storage::graph_files_root_participant(&root)?;
+        candidate.root = Some(root);
+        candidate.unpublished_v1_migration_lease = None;
+        Ok((participant, candidate, sealed_paths, lease))
     }
 
     fn publish_workspace_update(&self) -> Result<(), GfError> {
@@ -3732,6 +3792,7 @@ fn build_runtime(
         .map(|rt| Arc::new(OwnedRuntime(Some(rt))))
 }
 
+#[allow(clippy::too_many_lines)]
 fn hydrate_graph_workspace(
     generation: &ResolvedProjectGeneration,
     read_only: bool,
@@ -3756,14 +3817,64 @@ fn hydrate_graph_workspace(
 
     if let Some(files) = files {
         if files.capability_version != graphforge_storage::GRAPH_CAPABILITY_VERSION
-            || files.record_version != graphforge_storage::GRAPH_FILES_RECORD_VERSION
+            || !matches!(
+                files.record_version,
+                graphforge_storage::GRAPH_FILES_RECORD_VERSION
+                    | graphforge_storage::GRAPH_FILES_V2_RECORD_VERSION
+            )
             || files.encoding != "json"
         {
             return Err(GfError::Validation(
                 "unsupported graph files participant contract".into(),
             ));
         }
-        let inventory = graphforge_storage::decode_inventory(&files.bytes)?;
+        let decoded = graphforge_storage::decode_graph_files_participant(&files.bytes)?;
+        if matches!(decoded, graphforge_storage::GraphFilesParticipant::V2(_)) {
+            let inventory = generation.graph_files_inventory()?.ok_or_else(|| {
+                GfError::Validation("graph/files v2 inventory disappeared".into())
+            })?;
+            let workspace = Arc::new(
+                tempfile::Builder::new()
+                    .prefix("graphforge-graph-cas-")
+                    .tempdir()
+                    .map_err(|error| {
+                        GfError::Storage(format!("failed to create graph CAS workspace: {error}"))
+                    })?,
+            );
+            let evidence = graphforge_storage::materialize_graph_objects(
+                generation.container_root(),
+                &inventory,
+                workspace.path(),
+            )?;
+            let has_authoritative_deltas = !graphforge_storage::list_delta_runs(
+                &inventory,
+                graphforge_storage::GraphDeltaJournalLimits::default(),
+            )?
+            .is_empty();
+            if has_authoritative_deltas {
+                let replayed = Arc::new(
+                    tempfile::Builder::new()
+                        .prefix("graphforge-graph-cas-replay-")
+                        .tempdir()
+                        .map_err(|error| {
+                            GfError::Storage(format!(
+                                "failed to create graph CAS replay workspace: {error}"
+                            ))
+                        })?,
+                );
+                let (replay_evidence, _) = graphforge_storage::materialize_replayed_graph_tree(
+                    workspace.path(),
+                    &inventory,
+                    replayed.path(),
+                    graphforge_storage::GraphDeltaJournalLimits::default(),
+                )?;
+                return Ok((replayed.path().to_path_buf(), replayed, replay_evidence));
+            }
+            return Ok((workspace.path().to_path_buf(), workspace, evidence));
+        }
+        let graphforge_storage::GraphFilesParticipant::V1(inventory) = decoded else {
+            unreachable!("all graph files participant variants handled")
+        };
         let tree = generation.graph_tree_root();
         graphforge_storage::verify_graph_tree(&tree, &inventory)?;
         let has_authoritative_deltas = !graphforge_storage::list_delta_runs(
@@ -3878,11 +3989,22 @@ pub(crate) fn rematerialize_graph_workspace(
         }
     }
     if let Some(inventory) = generation.graph_files_inventory()? {
-        graphforge_storage::materialize_graph_tree(
-            &generation.graph_tree_root(),
-            &inventory,
-            target,
-        )?;
+        if matches!(
+            generation.declared_graph_files_participant()?,
+            Some(graphforge_storage::GraphFilesParticipant::V2(_))
+        ) {
+            graphforge_storage::materialize_graph_objects(
+                generation.container_root(),
+                &inventory,
+                target,
+            )?;
+        } else {
+            graphforge_storage::materialize_graph_tree(
+                &generation.graph_tree_root(),
+                &inventory,
+                target,
+            )?;
+        }
         return Ok(());
     }
     if let Some(snapshot) = generation.participant_snapshot("graph", "snapshot")? {
@@ -4041,16 +4163,90 @@ fn load_composition_binding(
     ))))
 }
 
-#[allow(clippy::too_many_arguments)] // participant assembly carries authenticated audit context
+fn initialize_graph_files_publication_state(
+    generation: &graphforge_storage::ResolvedProjectGeneration,
+    workspace: &Path,
+    writable: bool,
+) -> Result<GraphFilesPublicationState, GfError> {
+    let Some(declared) = generation.declared_graph_files_participant()? else {
+        return Ok(GraphFilesPublicationState::default());
+    };
+    match declared {
+        graphforge_storage::GraphFilesParticipant::V1(inventory) => {
+            let live_entries = inventory
+                .files
+                .iter()
+                .cloned()
+                .map(|entry| (entry.relative_path.clone(), entry))
+                .collect();
+            let migration_lease = writable
+                .then(|| {
+                    graphforge_storage::begin_graph_object_publication(generation.container_root())
+                })
+                .transpose()?;
+            let root = migration_lease
+                .as_ref()
+                .map(|_| {
+                    graphforge_storage::migrate_graph_files_v1_to_v2(
+                        generation.container_root(),
+                        workspace,
+                        &inventory,
+                    )
+                    .map(|(root, _)| root)
+                })
+                .transpose()?;
+            Ok(GraphFilesPublicationState {
+                root,
+                live_entries,
+                unpublished_v1_migration_lease: migration_lease.map(Arc::new),
+            })
+        }
+        graphforge_storage::GraphFilesParticipant::V2(root) => {
+            let inventory = generation.graph_files_inventory()?.ok_or_else(|| {
+                GfError::Validation("v2 graph root did not resolve an inventory".into())
+            })?;
+            let live_entries = inventory
+                .files
+                .into_iter()
+                .map(|entry| (entry.relative_path.clone(), entry))
+                .collect();
+            Ok(GraphFilesPublicationState {
+                root: Some(root),
+                live_entries,
+                unpublished_v1_migration_lease: None,
+            })
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn publication_capabilities(
+    parent: &graphforge_storage::ResolvedProjectGeneration,
+) -> Vec<graphforge_storage::ProjectCapability> {
+    parent
+        .capabilities()
+        .into_iter()
+        .map(|capability| graphforge_storage::ProjectCapability {
+            capability_id: capability.capability_id,
+            capability_version: capability.capability_version,
+        })
+        .collect()
+}
+
+#[derive(Clone, Copy)]
+struct GraphPublicationContext<'a> {
+    receipt: &'a graphforge_exec::MutationReceipt,
+    operation_uuid: uuid::Uuid,
+    actor_uuid: Option<uuid::Uuid>,
+    recorded_at_micros: i64,
+}
+
 fn graph_publication_participants(
     parent: &graphforge_storage::ResolvedProjectGeneration,
     graph: graphforge_storage::ProjectParticipant,
     semantic_bindings: Option<&graphforge_storage::SemanticStorageBindings>,
     provenance_enabled: bool,
-    receipt: &graphforge_exec::MutationReceipt,
-    operation_uuid: uuid::Uuid,
-    actor_uuid: Option<uuid::Uuid>,
-    recorded_at_micros: i64,
+    context: GraphPublicationContext<'_>,
 ) -> Result<Vec<graphforge_storage::ProjectParticipant>, GfError> {
     let mut participants = parent
         .participant_snapshots()?
@@ -4107,10 +4303,10 @@ fn graph_publication_participants(
     if provenance_enabled {
         participants.extend(provenance::merged_participants(
             parent,
-            receipt,
-            operation_uuid,
-            actor_uuid,
-            recorded_at_micros,
+            context.receipt,
+            context.operation_uuid,
+            context.actor_uuid,
+            context.recorded_at_micros,
         )?);
     }
     participants.sort_by(|left, right| {
@@ -4284,16 +4480,35 @@ fn persist_runtime_catalog(dir: &std::path::Path, rc: &RuntimeCatalog) -> Result
         .map_err(|e| GfError::Storage(format!("failed to create {}: {e}", topology.display())))?;
     let batch = rc.to_record_batch();
     let path = topology.join("runtime_catalog.parquet");
-    let file = std::fs::File::create(&path)
-        .map_err(|e| GfError::Storage(format!("failed to write {}: {e}", path.display())))?;
-    let mut writer = ArrowWriter::try_new(file, batch.schema(), None)
+    let mut temporary = tempfile::Builder::new()
+        .prefix("runtime_catalog.parquet.")
+        .suffix(".tmp")
+        .tempfile_in(&topology)
+        .map_err(|e| GfError::Storage(format!("failed to stage {}: {e}", path.display())))?;
+    {
+        let mut writer = ArrowWriter::try_new(temporary.as_file_mut(), batch.schema(), None)
+            .map_err(|e| GfError::Storage(e.to_string()))?;
+        writer
+            .write(&batch)
+            .map_err(|e| GfError::Storage(e.to_string()))?;
+        writer
+            .close()
+            .map_err(|e| GfError::Storage(e.to_string()))?;
+    }
+    temporary
+        .as_file()
+        .sync_all()
         .map_err(|e| GfError::Storage(e.to_string()))?;
-    writer
-        .write(&batch)
-        .map_err(|e| GfError::Storage(e.to_string()))?;
-    writer
-        .close()
-        .map_err(|e| GfError::Storage(e.to_string()))?;
+    graphforge_storage::record_graph_file_descriptors(
+        dir,
+        [graphforge_storage::GraphFileDeltaDescriptor::Sealed {
+            relative_path: PathBuf::from("topology/runtime_catalog.parquet"),
+            revision_uuid: uuid::Uuid::new_v4(),
+        }],
+    )?;
+    temporary.persist(&path).map_err(|e| {
+        GfError::Storage(format!("failed to publish {}: {}", path.display(), e.error))
+    })?;
     // Persisting observed runtime entity labels implies the tagged plan/storage
     // encoding (#702). Mark the project so reopen does not treat ontology type
     // zero as an unmarked legacy collision with the first advisory label.

@@ -307,10 +307,19 @@ impl GraphForge {
             if self.path.is_some() {
                 crate::persist_runtime_catalog(&self.dir, &next_catalog)?;
             }
-            let graph = match prepared_delta.as_ref() {
-                Some(prepared) => prepared.files_participant.clone(),
-                None => graphforge_storage::capture_graph_files(&self.dir)?.1,
-            };
+            let (graph, candidate_graph_state, sealed_paths, cas_lease) =
+                if let Some(prepared) = prepared_delta.as_ref() {
+                    (
+                        prepared.files_participant.clone(),
+                        None,
+                        graphforge_storage::PendingGraphFileDelta::default(),
+                        None,
+                    )
+                } else {
+                    let (participant, state, sealed, lease) =
+                        self.capture_incremental_graph_publication()?;
+                    (participant, Some(state), sealed, Some(lease))
+                };
             let participants = assemble_composite_participants(self, parent, request, graph)?;
             let capabilities = parent
                 .capabilities()
@@ -331,25 +340,22 @@ impl GraphForge {
                     root,
                     &publication,
                     content_fingerprint,
-                    Some(
-                        prepared_delta
-                            .as_ref()
-                            .map_or(self.dir.as_path(), |prepared| prepared.graph_tree_root()),
-                    ),
+                    prepared_delta
+                        .as_ref()
+                        .map(graphforge_storage::PreparedGraphDelta::graph_tree_root),
                     self.lifecycle_mode,
                 )?
             } else {
                 graphforge_storage::stage_project_generation_with_graph_tree_mode(
                     root,
                     &publication,
-                    Some(
-                        prepared_delta
-                            .as_ref()
-                            .map_or(self.dir.as_path(), |prepared| prepared.graph_tree_root()),
-                    ),
+                    prepared_delta
+                        .as_ref()
+                        .map(graphforge_storage::PreparedGraphDelta::graph_tree_root),
                     self.lifecycle_mode,
                 )?
             };
+            drop(cas_lease);
             #[cfg(test)]
             optimistic_publish_barrier_for_test(optimistic);
             let outcome = match staged {
@@ -376,6 +382,13 @@ impl GraphForge {
                 .current_generation_uuid
                 .lock()
                 .expect("generation UUID lock poisoned") = outcome.generation_uuid;
+            if let Some(candidate) = candidate_graph_state {
+                *self
+                    .graph_files_publication
+                    .lock()
+                    .expect("graph publication lock poisoned") = candidate;
+                graphforge_storage::acknowledge_sealed_graph_delta(&self.dir, &sealed_paths)?;
+            }
             Ok(receipt)
         })();
 

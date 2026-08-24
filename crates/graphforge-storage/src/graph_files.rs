@@ -26,6 +26,8 @@ pub const GRAPH_CAPABILITY_VERSION: u32 = 1;
 pub const GRAPH_FILES_FAMILY: &str = "files";
 /// Record contract version for [`GRAPH_FILES_FAMILY`].
 pub const GRAPH_FILES_RECORD_VERSION: u32 = 1;
+/// Record version for compact content-addressed graph roots.
+pub const GRAPH_FILES_V2_RECORD_VERSION: u32 = 2;
 /// Generation-owned directory holding graph workspace files.
 pub const GRAPH_TREE_DIR: &str = "graph";
 
@@ -35,6 +37,8 @@ const MAX_GRAPH_FILES: usize = 100_000;
 const HASH_BUFFER_BYTES: usize = 64 * 1024;
 const GRAPH_FILES_SCHEMA_CANONICAL_BYTES: &[u8] =
     b"graphforge-graph-files/1|relative_path|byte_length|content_sha256|role";
+const GRAPH_FILES_V2_SCHEMA_CANONICAL_BYTES: &[u8] =
+    b"graphforge-graph-files-root/2|root_node_sha256|logical_file_count|logical_byte_length";
 
 /// Logical role inferred from a contained relative workspace path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -82,6 +86,15 @@ pub struct GraphFilesInventory {
     pub total_byte_length: u64,
 }
 
+/// Explicitly decoded `graph/files` participant generation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GraphFilesParticipant {
+    /// Expanded generation-owned v1 inventory.
+    V1(GraphFilesInventory),
+    /// Compact project-object-store v2 manifest root.
+    V2(crate::GraphFilesRootV2),
+}
+
 /// Structural evidence recorded while validating or materializing a graph tree.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GraphFilesOpenEvidence {
@@ -97,6 +110,23 @@ pub struct GraphFilesOpenEvidence {
     pub bytes_copied: u64,
     /// Files opened or mapped in place (no copy).
     pub files_opened_in_place: u64,
+    /// Immutable topology fragments reused through filesystem hard links.
+    pub files_reused: u64,
+    /// Logical bytes represented by reused immutable topology fragments.
+    pub bytes_reused: u64,
+}
+
+/// Exact payload work performed while constructing an inventory.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GraphFilesCaptureEvidence {
+    /// Files read completely to compute a digest.
+    pub files_hashed: u64,
+    /// Payload bytes read to compute digests.
+    pub bytes_hashed: u64,
+    /// Immutable files whose digest was reused from a verified parent inode.
+    pub files_reused: u64,
+    /// Logical payload bytes covered by reused parent digests.
+    pub bytes_reused: u64,
 }
 
 /// Open/materialization strategy for a file-backed graph.
@@ -127,6 +157,32 @@ pub fn capture_graph_files(
     Ok((inventory, participant))
 }
 
+/// Build an inventory while reusing digest metadata for immutable fragments
+/// that are still the exact same filesystem object as a verified parent.
+///
+/// Path, length, and digest text alone are not treated as a cache key. Reuse
+/// requires the source and parent path to have identical filesystem identity,
+/// and the parent inventory remains the authority for the digest.
+pub fn capture_graph_files_reusing_parent(
+    source_root: &Path,
+    parent_root: &Path,
+    parent_inventory: &GraphFilesInventory,
+) -> Result<
+    (
+        GraphFilesInventory,
+        ProjectParticipant,
+        GraphFilesCaptureEvidence,
+    ),
+    GfError,
+> {
+    validate_inventory_contract(parent_inventory)?;
+    let (inventory, evidence) =
+        build_inventory_reusing_parent(source_root, Some((parent_root, parent_inventory)))?;
+    let bytes = encode_inventory(&inventory)?;
+    let participant = inventory_participant(bytes, inventory.file_count)?;
+    Ok((inventory, participant, evidence))
+}
+
 /// Encode inventory bytes as the registered `graph`/`files` participant.
 pub fn inventory_participant(
     bytes: Vec<u8>,
@@ -146,6 +202,27 @@ pub fn inventory_participant(
         .map_err(|error| GfError::Validation(error.to_string()))?,
         row_count: file_count,
         bytes,
+    })
+}
+
+/// Encode a compact v2 root as the registered `graph`/`files` participant.
+pub fn graph_files_root_participant(
+    root: &crate::GraphFilesRootV2,
+) -> Result<ProjectParticipant, GfError> {
+    Ok(ProjectParticipant {
+        capability_id: GRAPH_CAPABILITY_ID.into(),
+        capability_version: GRAPH_CAPABILITY_VERSION,
+        record_family_id: GRAPH_FILES_FAMILY.into(),
+        record_version: GRAPH_FILES_V2_RECORD_VERSION,
+        encoding: ProjectParticipantEncoding::Json,
+        schema_fingerprint: fingerprint(
+            CanonicalDomain::Schema,
+            CANONICAL_CONTRACT_VERSION,
+            GRAPH_FILES_V2_SCHEMA_CANONICAL_BYTES,
+        )
+        .map_err(|error| GfError::Validation(error.to_string()))?,
+        row_count: root.logical_file_count,
+        bytes: crate::encode_graph_files_root_v2(root)?,
     })
 }
 
@@ -175,6 +252,35 @@ pub fn decode_inventory(bytes: &[u8]) -> Result<GraphFilesInventory, GfError> {
     Ok(inventory)
 }
 
+/// Decode either the legacy expanded inventory or compact v2 root.
+/// Unknown format tags and future versions fail closed.
+pub fn decode_graph_files_participant(bytes: &[u8]) -> Result<GraphFilesParticipant, GfError> {
+    let value: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|error| validation(format!("invalid graph files participant JSON: {error}")))?;
+    let format = value
+        .get("format")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| validation("graph files participant format is missing"))?;
+    let version = value
+        .get("format_version")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| validation("graph files participant format_version is missing"))?;
+    match (format, version) {
+        (GRAPH_FILES_FORMAT, version) if version == u64::from(GRAPH_FILES_FORMAT_VERSION) => {
+            decode_inventory(bytes).map(GraphFilesParticipant::V1)
+        }
+        (crate::GRAPH_FILES_V2_FORMAT, version)
+            if version == u64::from(crate::GRAPH_FILES_V2_VERSION) =>
+        {
+            crate::decode_graph_files_root_v2(bytes).map(GraphFilesParticipant::V2)
+        }
+        _ => Err(GfError::Project {
+            code: ProjectErrorCode::UnsupportedProjectFormat,
+            message: format!("unsupported graph files participant {format}/{version}"),
+        }),
+    }
+}
+
 /// Encode inventory as one canonical JSON line ending in LF.
 pub fn encode_inventory(inventory: &GraphFilesInventory) -> Result<Vec<u8>, GfError> {
     validate_inventory_contract(inventory)?;
@@ -201,6 +307,33 @@ pub fn stage_graph_tree(
     generation_root: &Path,
     inventory: &GraphFilesInventory,
 ) -> Result<GraphFilesOpenEvidence, GfError> {
+    stage_graph_tree_internal(source_root, generation_root, inventory, None)
+}
+
+/// Stage a graph tree while reusing verified immutable parent fragments.
+pub fn stage_graph_tree_reusing_parent(
+    source_root: &Path,
+    generation_root: &Path,
+    inventory: &GraphFilesInventory,
+    parent_root: &Path,
+    parent_inventory: &GraphFilesInventory,
+) -> Result<GraphFilesOpenEvidence, GfError> {
+    validate_inventory_contract(parent_inventory)?;
+    stage_graph_tree_internal(
+        source_root,
+        generation_root,
+        inventory,
+        Some((parent_root, parent_inventory)),
+    )
+}
+
+#[allow(clippy::too_many_lines)]
+fn stage_graph_tree_internal(
+    source_root: &Path,
+    generation_root: &Path,
+    inventory: &GraphFilesInventory,
+    parent: Option<(&Path, &GraphFilesInventory)>,
+) -> Result<GraphFilesOpenEvidence, GfError> {
     let destination_root = graph_tree_root(generation_root);
     if destination_root.exists() {
         return Err(publication_failed(
@@ -214,6 +347,15 @@ pub fn stage_graph_tree(
         strategy: GraphFilesOpenStrategy::PrivateMaterialize,
         ..GraphFilesOpenEvidence::default()
     };
+    let parent_entries: BTreeMap<_, _> = parent
+        .map(|(_, inventory)| {
+            inventory
+                .files
+                .iter()
+                .map(|entry| (entry.relative_path.as_str(), entry))
+                .collect()
+        })
+        .unwrap_or_default();
     for entry in &inventory.files {
         let relative = Path::new(&entry.relative_path);
         validate_relative_path(relative)?;
@@ -234,17 +376,46 @@ pub fn stage_graph_tree(
             fs::create_dir_all(parent)
                 .map_err(|error| storage("create graph tree directory", parent, error))?;
         }
-        let digest = copy_regular_file(&source, &destination)?;
-        if hex_digest(digest) != entry.content_sha256 {
-            return Err(validation(
-                "graph tree source digest does not match inventory",
-            ));
-        }
+        let parent_reuse = parent.and_then(|(parent_root, _)| {
+            let prior = parent_entries.get(entry.relative_path.as_str())?;
+            if !immutable_topology_fragment(&entry.relative_path)
+                || prior.byte_length != entry.byte_length
+                || prior.content_sha256 != entry.content_sha256
+            {
+                return None;
+            }
+            let parent_path = parent_root.join(relative);
+            same_file_identity(&source, &parent_path)
+                .ok()
+                .filter(|same| *same)
+                .map(|_| parent_path)
+        });
+        let reused = if parent_reuse.is_some() && fs::hard_link(&source, &destination).is_ok() {
+            sync_file(&destination)?;
+            true
+        } else {
+            let (digest, reused) = materialize_regular_file(
+                &source,
+                &destination,
+                immutable_topology_fragment(&entry.relative_path),
+            )?;
+            if hex_digest(digest) != entry.content_sha256 {
+                return Err(validation(
+                    "graph tree source digest does not match inventory",
+                ));
+            }
+            reused
+        };
         sync_file(&destination)?;
         evidence.files_validated = evidence.files_validated.saturating_add(1);
         evidence.bytes_validated = evidence.bytes_validated.saturating_add(entry.byte_length);
-        evidence.files_copied = evidence.files_copied.saturating_add(1);
-        evidence.bytes_copied = evidence.bytes_copied.saturating_add(entry.byte_length);
+        if reused {
+            evidence.files_reused = evidence.files_reused.saturating_add(1);
+            evidence.bytes_reused = evidence.bytes_reused.saturating_add(entry.byte_length);
+        } else {
+            evidence.files_copied = evidence.files_copied.saturating_add(1);
+            evidence.bytes_copied = evidence.bytes_copied.saturating_add(entry.byte_length);
+        }
         // Fail after at least one graph file is durable so interrupted staging
         // can prove CURRENT remains on the prior complete generation.
         project_failpoint::hit(
@@ -256,7 +427,79 @@ pub fn stage_graph_tree(
         )?;
     }
     sync_directory_tree(&destination_root)?;
-    verify_graph_tree(&destination_root, inventory)?;
+    if let Some((parent_root, parent_inventory)) = parent {
+        verify_graph_tree_reusing_parent(
+            &destination_root,
+            inventory,
+            parent_root,
+            parent_inventory,
+        )?;
+    } else {
+        verify_graph_tree(&destination_root, inventory)?;
+    }
+    Ok(evidence)
+}
+
+/// Verify a tree, reusing parent digests only for identical immutable inodes.
+pub fn verify_graph_tree_reusing_parent(
+    graph_root: &Path,
+    inventory: &GraphFilesInventory,
+    parent_root: &Path,
+    parent_inventory: &GraphFilesInventory,
+) -> Result<GraphFilesCaptureEvidence, GfError> {
+    validate_inventory_contract(inventory)?;
+    validate_inventory_contract(parent_inventory)?;
+    let mut observed = BTreeMap::new();
+    collect_regular_files(graph_root, graph_root, &mut observed)?;
+    let expected: BTreeSet<_> = inventory
+        .files
+        .iter()
+        .map(|e| e.relative_path.clone())
+        .collect();
+    if observed.keys().cloned().collect::<BTreeSet<_>>() != expected {
+        return Err(corrupt(
+            "generation graph tree inventory does not match on-disk files",
+        ));
+    }
+    let parents: BTreeMap<_, _> = parent_inventory
+        .files
+        .iter()
+        .map(|entry| (entry.relative_path.as_str(), entry))
+        .collect();
+    let mut evidence = GraphFilesCaptureEvidence::default();
+    for entry in &inventory.files {
+        let path = graph_root.join(&entry.relative_path);
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| storage("inspect generation graph file", &path, error))?;
+        if !metadata.is_file() || metadata.len() != entry.byte_length {
+            return Err(corrupt(
+                "generation graph file length does not match inventory",
+            ));
+        }
+        let reused = parents
+            .get(entry.relative_path.as_str())
+            .is_some_and(|prior| {
+                immutable_topology_fragment(&entry.relative_path)
+                    && prior.byte_length == entry.byte_length
+                    && prior.content_sha256 == entry.content_sha256
+                    && matches!(
+                        same_file_identity(&path, &parent_root.join(&entry.relative_path)),
+                        Ok(true)
+                    )
+            });
+        if reused {
+            evidence.files_reused = evidence.files_reused.saturating_add(1);
+            evidence.bytes_reused = evidence.bytes_reused.saturating_add(entry.byte_length);
+        } else {
+            if hex_digest(hash_file(&path)?) != entry.content_sha256 {
+                return Err(corrupt(
+                    "generation graph file digest does not match inventory",
+                ));
+            }
+            evidence.files_hashed = evidence.files_hashed.saturating_add(1);
+            evidence.bytes_hashed = evidence.bytes_hashed.saturating_add(entry.byte_length);
+        }
+    }
     Ok(evidence)
 }
 
@@ -347,9 +590,30 @@ pub fn materialize_graph_tree(
             fs::create_dir_all(parent)
                 .map_err(|error| storage("create private graph directory", parent, error))?;
         }
-        copy_regular_file(&source, &destination)?;
-        evidence.files_copied = evidence.files_copied.saturating_add(1);
-        evidence.bytes_copied = evidence.bytes_copied.saturating_add(entry.byte_length);
+        // The complete source tree was cryptographically verified above. A
+        // successful hard link is the same filesystem object, so hashing it a
+        // second time adds payload I/O without adding integrity evidence.
+        let reused = if immutable_topology_fragment(&entry.relative_path)
+            && fs::hard_link(&source, &destination).is_ok()
+        {
+            sync_file(&destination)?;
+            true
+        } else {
+            let digest = copy_regular_file(&source, &destination)?;
+            if hex_digest(digest) != entry.content_sha256 {
+                return Err(corrupt(
+                    "materialized graph file digest does not match inventory",
+                ));
+            }
+            false
+        };
+        if reused {
+            evidence.files_reused = evidence.files_reused.saturating_add(1);
+            evidence.bytes_reused = evidence.bytes_reused.saturating_add(entry.byte_length);
+        } else {
+            evidence.files_copied = evidence.files_copied.saturating_add(1);
+            evidence.bytes_copied = evidence.bytes_copied.saturating_add(entry.byte_length);
+        }
     }
     Ok(evidence)
 }
@@ -364,6 +628,8 @@ pub fn pinned_open_evidence(inventory: &GraphFilesInventory) -> GraphFilesOpenEv
         files_copied: 0,
         bytes_copied: 0,
         files_opened_in_place: u64::try_from(inventory.files.len()).unwrap_or(u64::MAX),
+        files_reused: 0,
+        bytes_reused: 0,
     }
 }
 
@@ -389,6 +655,13 @@ pub fn infer_role(relative: &Path) -> GraphFileRole {
 }
 
 fn build_inventory(source_root: &Path) -> Result<GraphFilesInventory, GfError> {
+    build_inventory_reusing_parent(source_root, None).map(|(inventory, _)| inventory)
+}
+
+fn build_inventory_reusing_parent(
+    source_root: &Path,
+    parent: Option<(&Path, &GraphFilesInventory)>,
+) -> Result<(GraphFilesInventory, GraphFilesCaptureEvidence), GfError> {
     let mut paths = Vec::new();
     collect_source_files(source_root, &mut paths)?;
     paths.sort();
@@ -398,6 +671,16 @@ fn build_inventory(source_root: &Path) -> Result<GraphFilesInventory, GfError> {
     let mut files = Vec::with_capacity(paths.len());
     let mut total = 0_u64;
     let mut seen = HashSet::new();
+    let parent_entries: BTreeMap<_, _> = parent
+        .map(|(_, inventory)| {
+            inventory
+                .files
+                .iter()
+                .map(|entry| (entry.relative_path.as_str(), entry))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut evidence = GraphFilesCaptureEvidence::default();
     for path in paths {
         let relative = path
             .strip_prefix(source_root)
@@ -417,11 +700,30 @@ fn build_inventory(source_root: &Path) -> Result<GraphFilesInventory, GfError> {
         total = total
             .checked_add(byte_length)
             .ok_or_else(|| resource_limit("graph files total size overflow"))?;
-        let digest = hash_file(&path)?;
+        let reused_digest = parent.and_then(|(parent_root, _)| {
+            let prior = parent_entries.get(relative_text.as_str())?;
+            if !immutable_topology_fragment(&relative_text) || prior.byte_length != byte_length {
+                return None;
+            }
+            let parent_path = parent_root.join(relative);
+            same_file_identity(&path, &parent_path)
+                .ok()
+                .filter(|same| *same)
+                .map(|_| prior.content_sha256.clone())
+        });
+        let content_sha256 = if let Some(digest) = reused_digest {
+            evidence.files_reused = evidence.files_reused.saturating_add(1);
+            evidence.bytes_reused = evidence.bytes_reused.saturating_add(byte_length);
+            digest
+        } else {
+            evidence.files_hashed = evidence.files_hashed.saturating_add(1);
+            evidence.bytes_hashed = evidence.bytes_hashed.saturating_add(byte_length);
+            hex_digest(hash_file(&path)?)
+        };
         files.push(GraphFileEntry {
             relative_path: relative_text,
             byte_length,
-            content_sha256: hex_digest(digest),
+            content_sha256,
             role: infer_role(relative),
         });
     }
@@ -433,7 +735,46 @@ fn build_inventory(source_root: &Path) -> Result<GraphFilesInventory, GfError> {
         files,
     };
     validate_inventory_contract(&inventory)?;
+    Ok((inventory, evidence))
+}
+
+pub(crate) fn inventory_from_entries(
+    files: Vec<GraphFileEntry>,
+) -> Result<GraphFilesInventory, GfError> {
+    let total_byte_length = files.iter().try_fold(0_u64, |total, entry| {
+        total
+            .checked_add(entry.byte_length)
+            .ok_or_else(|| validation("graph files total size overflow"))
+    })?;
+    let inventory = GraphFilesInventory {
+        format: GRAPH_FILES_FORMAT.into(),
+        format_version: GRAPH_FILES_FORMAT_VERSION,
+        file_count: u64::try_from(files.len()).unwrap_or(u64::MAX),
+        total_byte_length,
+        files,
+    };
+    validate_inventory_contract(&inventory)?;
     Ok(inventory)
+}
+
+#[cfg(unix)]
+fn same_file_identity(left: &Path, right: &Path) -> Result<bool, GfError> {
+    use std::os::unix::fs::MetadataExt;
+    reject_link(right)?;
+    let left = fs::symlink_metadata(left)
+        .map_err(|error| storage("inspect graph source identity", left, error))?;
+    let right = fs::symlink_metadata(right)
+        .map_err(|error| storage("inspect parent graph identity", right, error))?;
+    Ok(left.is_file()
+        && right.is_file()
+        && left.dev() == right.dev()
+        && left.ino() == right.ino()
+        && left.len() == right.len())
+}
+
+#[cfg(not(unix))]
+fn same_file_identity(_left: &Path, _right: &Path) -> Result<bool, GfError> {
+    Ok(false)
 }
 
 fn validate_inventory_contract(inventory: &GraphFilesInventory) -> Result<(), GfError> {
@@ -503,11 +844,17 @@ fn collect_source_files(directory: &Path, paths: &mut Vec<PathBuf>) -> Result<()
             return Err(validation("graph workspace contains a symbolic link"));
         }
         if file_type.is_dir() {
+            if entry.file_name() == ".graphforge-cache" {
+                continue;
+            }
             collect_source_files(&path, paths)?;
         } else if file_type.is_file() {
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if name.ends_with(".lock") || name.starts_with(".gf-stage-") {
+            if name.ends_with(".lock")
+                || name.starts_with(".gf-stage-")
+                || name.starts_with(".graphforge-sealed-graph-delta.json")
+            {
                 continue;
             }
             paths.push(path);
@@ -587,6 +934,30 @@ fn copy_regular_file(source: &Path, destination: &Path) -> Result<[u8; 32], GfEr
     let digest = hash_file(destination)?;
     sync_file(destination)?;
     Ok(digest)
+}
+
+fn immutable_topology_fragment(relative_path: &str) -> bool {
+    let path = Path::new(relative_path);
+    path.extension().and_then(|value| value.to_str()) == Some("parquet")
+        && path.starts_with("topology/edges")
+}
+
+/// Reuse immutable edge topology on the same filesystem. Graph mutations
+/// replace fragments atomically instead of modifying them in place, so a hard
+/// link pins exact prior bytes for both generation publication and a writable
+/// workspace. Filesystems without hard links fall back to a private copy.
+fn materialize_regular_file(
+    source: &Path,
+    destination: &Path,
+    allow_reuse: bool,
+) -> Result<([u8; 32], bool), GfError> {
+    reject_link(source)?;
+    if allow_reuse && fs::hard_link(source, destination).is_ok() {
+        let digest = hash_file(destination)?;
+        sync_file(destination)?;
+        return Ok((digest, true));
+    }
+    copy_regular_file(source, destination).map(|digest| (digest, false))
 }
 
 fn hash_file(path: &Path) -> Result<[u8; 32], GfError> {
@@ -741,6 +1112,94 @@ mod tests {
     }
 
     #[test]
+    fn rebuildable_cache_tree_is_excluded_from_authoritative_inventory() {
+        let source = tempfile::tempdir().unwrap();
+        fs::create_dir_all(source.path().join(".graphforge-cache/adjacency")).unwrap();
+        fs::write(
+            source
+                .path()
+                .join(".graphforge-cache/adjacency/index_manifest.parquet"),
+            b"derived",
+        )
+        .unwrap();
+        fs::create_dir_all(source.path().join("topology")).unwrap();
+        fs::write(source.path().join("topology/generation.json"), b"{}").unwrap();
+        let (inventory, _) = capture_graph_files(source.path()).unwrap();
+        assert_eq!(inventory.file_count, 1);
+        assert_eq!(inventory.files[0].relative_path, "topology/generation.json");
+    }
+
+    #[test]
+    fn graph_files_participant_decoding_is_explicit_and_future_safe() {
+        let root = crate::GraphFilesRootV2 {
+            format: crate::GRAPH_FILES_V2_FORMAT.into(),
+            format_version: crate::GRAPH_FILES_V2_VERSION,
+            root_node_sha256: crate::graph_object_digest(b"head"),
+            logical_file_count: 0,
+            logical_byte_length: 0,
+        };
+        let encoded = crate::encode_graph_files_root_v2(&root).unwrap();
+        assert_eq!(
+            decode_graph_files_participant(&encoded).unwrap(),
+            GraphFilesParticipant::V2(root)
+        );
+        let future = br#"{"format":"graphforge-graph-files-root","format_version":3}
+"#;
+        assert_eq!(
+            decode_graph_files_participant(future).unwrap_err().code(),
+            "GF_UNSUPPORTED_PROJECT_FORMAT"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repeated_capture_hashes_only_new_immutable_fragment_payload() {
+        let parent = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let prior = "topology/edges/knows/00000000000000000001-00000000000000000001.parquet";
+        let added = "topology/edges/knows/00000000000000000002-00000000000000000002.parquet";
+        fs::create_dir_all(parent.path().join("topology/edges/knows")).unwrap();
+        fs::create_dir_all(workspace.path().join("topology/edges/knows")).unwrap();
+        fs::write(parent.path().join(prior), b"immutable-parent-fragment").unwrap();
+        fs::hard_link(parent.path().join(prior), workspace.path().join(prior)).unwrap();
+        fs::write(workspace.path().join(added), b"new-fragment").unwrap();
+
+        let (parent_inventory, _) = capture_graph_files(parent.path()).unwrap();
+        let (captured, _, evidence) =
+            capture_graph_files_reusing_parent(workspace.path(), parent.path(), &parent_inventory)
+                .unwrap();
+
+        assert_eq!(captured.file_count, 2);
+        assert_eq!(evidence.files_reused, 1);
+        assert_eq!(evidence.bytes_reused, 25);
+        assert_eq!(evidence.files_hashed, 1);
+        assert_eq!(evidence.bytes_hashed, 12);
+        assert_eq!(captured.files[0], parent_inventory.files[0]);
+
+        let generation = tempfile::tempdir().unwrap();
+        let staged = stage_graph_tree_reusing_parent(
+            workspace.path(),
+            generation.path(),
+            &captured,
+            parent.path(),
+            &parent_inventory,
+        )
+        .unwrap();
+        assert_eq!(staged.files_reused, 2);
+        let verified = verify_graph_tree_reusing_parent(
+            &graph_tree_root(generation.path()),
+            &captured,
+            parent.path(),
+            &parent_inventory,
+        )
+        .unwrap();
+        assert_eq!(verified.files_reused, 1);
+        assert_eq!(verified.bytes_reused, 25);
+        assert_eq!(verified.files_hashed, 1);
+        assert_eq!(verified.bytes_hashed, 12);
+    }
+
+    #[test]
     fn stage_and_materialize_never_assembles_one_payload() {
         let source = tempfile::tempdir().unwrap();
         fs::create_dir_all(source.path().join("properties")).unwrap();
@@ -767,6 +1226,57 @@ mod tests {
             b"person"
         );
         assert_eq!(pinned_open_evidence(&inventory).files_opened_in_place, 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn immutable_edge_fragments_are_reused_without_copying_bytes() {
+        use std::os::unix::fs::MetadataExt;
+
+        let source = tempfile::tempdir().unwrap();
+        let relation = source.path().join("topology/edges/KNOWS");
+        fs::create_dir_all(&relation).unwrap();
+        let fragment = relation.join("00000000000000000001-00000000000000000002.parquet");
+        fs::write(&fragment, b"immutable-edge-fragment").unwrap();
+        let (inventory, _) = capture_graph_files(source.path()).unwrap();
+
+        let generation = tempfile::tempdir().unwrap();
+        let staged = stage_graph_tree(source.path(), generation.path(), &inventory).unwrap();
+        assert_eq!(staged.files_reused, 1);
+        assert_eq!(staged.files_copied, 0);
+        let generation_fragment = graph_tree_root(generation.path())
+            .join("topology/edges/KNOWS/00000000000000000001-00000000000000000002.parquet");
+        assert_eq!(
+            fragment.metadata().unwrap().ino(),
+            generation_fragment.metadata().unwrap().ino()
+        );
+
+        let workspace = tempfile::tempdir().unwrap();
+        let opened = materialize_graph_tree(
+            &graph_tree_root(generation.path()),
+            &inventory,
+            workspace.path(),
+        )
+        .unwrap();
+        assert_eq!(opened.files_reused, 1);
+        assert_eq!(opened.files_copied, 0);
+        let workspace_fragment = workspace
+            .path()
+            .join("topology/edges/KNOWS/00000000000000000001-00000000000000000002.parquet");
+        assert_eq!(
+            generation_fragment.metadata().unwrap().ino(),
+            workspace_fragment.metadata().unwrap().ino()
+        );
+
+        // Atomic replacement in the mutable workspace cannot mutate either
+        // immutable generation link.
+        let replacement = workspace_fragment.with_extension("tmp");
+        fs::write(&replacement, b"replacement").unwrap();
+        fs::rename(replacement, &workspace_fragment).unwrap();
+        assert_eq!(
+            fs::read(generation_fragment).unwrap(),
+            b"immutable-edge-fragment"
+        );
     }
 
     #[test]

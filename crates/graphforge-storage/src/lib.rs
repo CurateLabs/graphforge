@@ -19,7 +19,10 @@ pub mod adjacency_delta;
 
 pub mod generation;
 pub use generation::{
-    commit_topology_aware, read_search_generation, read_topology_generation, touches_search_source,
+    GraphFileDeltaDescriptor, PendingGraphFileDelta, acknowledge_sealed_graph_delta,
+    commit_topology_aware, pending_graph_file_delta, read_search_generation,
+    read_topology_generation, record_graph_file_descriptors, sealed_graph_delta,
+    touches_search_source,
 };
 
 pub mod graph_projection;
@@ -31,10 +34,34 @@ pub use graph_projection::{
 pub mod graph_files;
 pub use graph_files::{
     GRAPH_CAPABILITY_ID, GRAPH_CAPABILITY_VERSION, GRAPH_FILES_FAMILY, GRAPH_FILES_RECORD_VERSION,
-    GRAPH_TREE_DIR, GraphFileEntry, GraphFileRole, GraphFilesInventory, GraphFilesOpenEvidence,
-    GraphFilesOpenStrategy, capture_graph_files, decode_inventory, encode_inventory,
-    graph_tree_root, inventory_participant, materialize_graph_tree, pinned_open_evidence,
-    stage_graph_tree, verify_graph_tree,
+    GRAPH_FILES_V2_RECORD_VERSION, GRAPH_TREE_DIR, GraphFileEntry, GraphFileRole,
+    GraphFilesCaptureEvidence, GraphFilesInventory, GraphFilesOpenEvidence, GraphFilesOpenStrategy,
+    GraphFilesParticipant, capture_graph_files, capture_graph_files_reusing_parent,
+    decode_graph_files_participant, decode_inventory, encode_inventory,
+    graph_files_root_participant, graph_tree_root, inventory_participant, materialize_graph_tree,
+    pinned_open_evidence, stage_graph_tree, stage_graph_tree_reusing_parent, verify_graph_tree,
+    verify_graph_tree_reusing_parent,
+};
+
+pub mod graph_manifest;
+pub use graph_manifest::{
+    GRAPH_FILES_V2_FORMAT, GRAPH_FILES_V2_VERSION, GRAPH_MANIFEST_NODE_FORMAT,
+    GRAPH_MANIFEST_NODE_VERSION, GRAPH_RADIX_DEPTH, GraphFilesRootV2, GraphManifestLimits,
+    GraphManifestNode, GraphManifestNodeKind, GraphManifestResolveEvidence,
+    decode_node as decode_graph_manifest_node, decode_root as decode_graph_files_root_v2,
+    encode_node as encode_graph_manifest_node, encode_root as encode_graph_files_root_v2,
+    object_digest as graph_object_digest, resolve_manifest as resolve_graph_manifest,
+    verify_object_bytes as verify_graph_object_bytes,
+};
+
+pub mod graph_object_store;
+pub use graph_object_store::{
+    GRAPH_OBJECTS_DIR, GraphFilesAppendEvidence, GraphFilesMigrationEvidence,
+    GraphObjectGcEvidence, GraphObjectInstallEvidence, GraphObjectPublicationLease,
+    append_graph_files_v2, begin_graph_object_publication, gc_graph_objects, graph_object_path,
+    graph_object_publication_is_live, install_graph_object_bytes, install_graph_object_file,
+    materialize_graph_objects, migrate_graph_files_v1_to_v2, read_graph_object,
+    read_graph_object_by_digest, verify_graph_object,
 };
 
 pub mod semantic_bindings;
@@ -331,11 +358,11 @@ pub use schemas::{
 
 pub mod writer;
 pub use writer::{
-    GraphWriter, count_entity_properties, decode_spatial_property_value, read_entity_properties,
-    read_entity_property_keys, read_node_property_rows, remove_edge_properties,
-    remove_node_properties, set_edge_properties_rewrite, set_node_properties,
-    stage_remove_edge_properties, stage_remove_node_properties, stage_set_edge_properties,
-    stage_set_node_properties,
+    GraphWriter, TopologyWriteWork, count_entity_properties, decode_spatial_property_value,
+    read_entity_properties, read_entity_property_keys, read_node_property_rows,
+    remove_edge_properties, remove_node_properties, set_edge_properties_rewrite,
+    set_node_properties, stage_remove_edge_properties, stage_remove_node_properties,
+    stage_set_edge_properties, stage_set_node_properties,
 };
 
 pub mod mutator;

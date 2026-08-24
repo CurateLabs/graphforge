@@ -58,6 +58,7 @@ fn file_backed_multi_file_fixture_reopens_without_snapshot_envelope() {
         .unwrap()
         .expect("published generation must use graph/files");
     assert_eq!(files.encoding, "json");
+    assert_eq!(files.record_version, 2);
     assert!(
         generation
             .participant_snapshot("graph", "snapshot")
@@ -68,7 +69,7 @@ fn file_backed_multi_file_fixture_reopens_without_snapshot_envelope() {
     let inventory = generation.graph_files_inventory().unwrap().unwrap();
     assert!(inventory.file_count >= 2);
     assert!(inventory.total_byte_length > 0);
-    assert!(generation.graph_tree_root().is_dir());
+    assert!(root.path().join("graph-objects/sha256").is_dir());
 
     let reopened = GraphForge::new(Some(path)).unwrap();
     let evidence = reopened.graph_open_evidence();
@@ -77,10 +78,11 @@ fn file_backed_multi_file_fixture_reopens_without_snapshot_envelope() {
         GraphFilesOpenStrategy::PrivateMaterialize
     );
     assert!(evidence.files_validated >= 2);
-    assert_eq!(evidence.files_copied, evidence.files_validated);
+    assert_eq!(evidence.files_copied, 0);
+    assert_eq!(evidence.files_reused, evidence.files_validated);
     assert_eq!(evidence.files_opened_in_place, 0);
-    assert!(evidence.bytes_copied > 0);
-    assert_eq!(evidence.bytes_copied, evidence.bytes_validated);
+    assert_eq!(evidence.bytes_copied, 0);
+    assert_eq!(evidence.bytes_reused, evidence.bytes_validated);
 
     let result = reopened
         .execute("MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name AS from, b.name AS to")
@@ -89,7 +91,7 @@ fn file_backed_multi_file_fixture_reopens_without_snapshot_envelope() {
 }
 
 #[test]
-fn checkpoint_read_only_open_pins_graph_tree_in_place() {
+fn checkpoint_read_only_open_pins_generation_and_reuses_cas_objects() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().to_str().unwrap();
     let graph = GraphForge::new(Some(path)).unwrap();
@@ -107,11 +109,15 @@ fn checkpoint_read_only_open_pins_graph_tree_in_place() {
 
     let view = graph.open_checkpoint("pinned").unwrap();
     let evidence = view.graph_open_evidence();
-    assert_eq!(evidence.strategy, GraphFilesOpenStrategy::PinnedInPlace);
+    assert_eq!(
+        evidence.strategy,
+        GraphFilesOpenStrategy::PrivateMaterialize
+    );
     assert!(evidence.files_validated >= 2);
     assert_eq!(evidence.files_copied, 0);
     assert_eq!(evidence.bytes_copied, 0);
-    assert_eq!(evidence.files_opened_in_place, evidence.files_validated);
+    assert_eq!(evidence.files_reused, evidence.files_validated);
+    assert_eq!(evidence.files_opened_in_place, 0);
     assert_eq!(
         view.project_open_recovery().kind,
         graphforge_storage::ProjectOpenRecoveryKind::CheckpointView

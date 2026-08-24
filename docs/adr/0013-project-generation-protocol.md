@@ -372,6 +372,31 @@ contains its two most recent valid ancestors, determined only from verified
 `parent_generation_uuid` links. A configured larger finite retention count may
 add ancestors but may not remove the current generation.
 
+Ordinary graph-tree construction preflights cleanup bounds while it owns
+`writer.lock`, installs the child as CURRENT atomically, and only then reclaims
+generations outside the normal two-ancestor steady state. A crash cannot delete
+history before the commit point; recovery recomputes reachability from CURRENT
+and resumes post-commit cleanup. Checkpoint roots and non-blocking live-lease
+checks remain authoritative exceptions. Resource-bound exhaustion or ambiguous
+authority fails before CURRENT changes; a post-commit cleanup error is reported
+with `committed=true` and is safe to resume.
+
+Immutable edge fragments reuse parent inventory digests during construction
+only when filesystem device/inode identity and length match the already
+verified parent file. New or replaced fragments are hashed, and a later reopen
+cryptographically verifies the selected generation. Timestamps and path-only
+metadata are never digest-cache authority.
+
+Version-2 graph authority is a fixed-depth content-addressed radix root. Its
+executable write-family census requires every topology, property, delta,
+catalog, extension, and graph control-file mutation to emit a revision-sealed
+or tombstone descriptor before visibility; `.graphforge-cache/` paths are
+explicitly excluded and rejected. Terminal nodes use sorted exact-path buckets
+for the theoretical SHA-256 collision case. A genuine SHA-256 collision is not
+constructible as a practical test fixture, so validation tests exercise
+exact-path replacement/deletion and malformed digest, ordering, duplicate
+reference, depth, and object-corruption cases instead.
+
 For every other generation, cleanup:
 
 1. acquires `writer.lock`;

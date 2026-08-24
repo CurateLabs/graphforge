@@ -103,8 +103,11 @@ fn materialize_graph_projection_with_options(
     validate_distinct_paths(source, target)?;
     validate_graph_empty_target(target)?;
 
-    let nodes_path = source.join("topology/nodes.parquet");
-    let node_ids = uuid_rows(&nodes_path, "node_uuid")?;
+    let node_paths = crate::mutator::node_parquet_files(source)?;
+    let mut node_ids = BTreeSet::new();
+    for path in &node_paths {
+        node_ids.extend(uuid_rows(path, "node_uuid")?);
+    }
     require_present(&selection.node_uuids, &node_ids, "node")?;
 
     let edge_files = sorted_parquet_files(&source.join("topology/edges"))?;
@@ -121,13 +124,18 @@ fn materialize_graph_projection_with_options(
 
     clear_graph_empty_target(target)?;
     fs::create_dir_all(target).map_err(storage)?;
-    project_parquet_file(
-        &nodes_path,
-        &target.join("topology/nodes.parquet"),
-        "node_uuid",
-        &selected_nodes,
-        &selection.exclude_properties,
-    )?;
+    for nodes_path in node_paths {
+        let relative = nodes_path
+            .strip_prefix(source)
+            .map_err(|_| validation("node shard escaped graph source"))?;
+        project_parquet_file(
+            &nodes_path,
+            &target.join(relative),
+            "node_uuid",
+            &selected_nodes,
+            &selection.exclude_properties,
+        )?;
+    }
     project_parquet_directory(
         &source.join("topology/edges"),
         &target.join("topology/edges"),
@@ -251,10 +259,16 @@ fn project_parquet_directory(
     exclude_properties: &BTreeSet<String>,
 ) -> Result<(), GfError> {
     for path in sorted_parquet_files(source)? {
-        let name = path
-            .file_name()
-            .ok_or_else(|| validation("graph parquet path has no file name"))?;
-        project_parquet_file(&path, &target.join(name), key, selected, exclude_properties)?;
+        let relative = path
+            .strip_prefix(source)
+            .map_err(|_| validation("graph parquet path escaped source directory"))?;
+        project_parquet_file(
+            &path,
+            &target.join(relative),
+            key,
+            selected,
+            exclude_properties,
+        )?;
     }
     Ok(())
 }
@@ -493,6 +507,18 @@ fn selected_catalog_rows(target: &Path, catalog: &RecordBatch) -> Result<Vec<usi
 }
 
 fn parquet_stem(path: &Path) -> Result<String, GfError> {
+    if path
+        .parent()
+        .and_then(Path::file_name)
+        .is_some_and(|parent| parent != "edges")
+    {
+        return path
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|value| value.to_str())
+            .map(str::to_owned)
+            .ok_or_else(|| validation("graph edge shard relation is not UTF-8"));
+    }
     path.file_stem()
         .and_then(|value| value.to_str())
         .map(str::to_owned)
@@ -531,10 +557,7 @@ pub(crate) fn write_parquet(path: &Path, batch: &RecordBatch) -> Result<(), GfEr
 
 pub(crate) fn projected_graph_fingerprint(root: &Path) -> Result<[u8; 32], GfError> {
     let mut paths = Vec::new();
-    let nodes = root.join("topology/nodes.parquet");
-    if nodes.exists() {
-        paths.push(nodes);
-    }
+    paths.extend(crate::mutator::node_parquet_files(root)?);
     for directory in ["topology/edges", "properties", "edge_properties"] {
         paths.extend(sorted_parquet_files(&root.join(directory))?);
     }
@@ -551,10 +574,7 @@ pub(crate) fn projected_graph_fingerprint(root: &Path) -> Result<[u8; 32], GfErr
 pub(crate) fn portable_graph_data_fingerprint(root: &Path) -> Result<[u8; 32], GfError> {
     let runtime_entity_names = portable_runtime_entity_names(root)?;
     let mut paths = Vec::new();
-    let nodes = root.join("topology/nodes.parquet");
-    if nodes.exists() {
-        paths.push(nodes);
-    }
+    paths.extend(crate::mutator::node_parquet_files(root)?);
     for directory in ["topology/edges", "properties", "edge_properties"] {
         paths.extend(sorted_parquet_files(&root.join(directory))?);
     }
@@ -1097,7 +1117,9 @@ fn sorted_parquet_files(directory: &Path) -> Result<Vec<PathBuf>, GfError> {
             return Err(validation("graph directory contains a symbolic link"));
         }
         let path = entry.path();
-        if file_type.is_file()
+        if file_type.is_dir() {
+            paths.extend(sorted_parquet_files(&path)?);
+        } else if file_type.is_file()
             && path.extension().and_then(|value| value.to_str()) == Some("parquet")
         {
             paths.push(path);

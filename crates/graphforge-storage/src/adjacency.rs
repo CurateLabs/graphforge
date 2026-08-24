@@ -775,10 +775,10 @@ pub struct AdjacencyInspection {
     pub reason: Option<AdjacencyFreshnessReason>,
 }
 
-/// `indexes/adjacency/` within `project_dir`.
+/// Rebuildable adjacency cache within `project_dir`.
 #[must_use]
 pub fn adjacency_dir(project_dir: &Path) -> PathBuf {
-    project_dir.join("indexes").join("adjacency")
+    project_dir.join(".graphforge-cache").join("adjacency")
 }
 
 /// Path of the CSR file for (`relation_type`, `direction`):
@@ -1868,10 +1868,7 @@ fn for_each_adjacency_edge_file(
     batch_size: usize,
     on_batch: &mut dyn FnMut(&str, bool, &RecordBatch) -> Result<(), GfError>,
 ) -> Result<(), GfError> {
-    for path in crate::mutator::parquet_files_in(project_dir, "topology/edges")? {
-        let Some(stem) = path.file_stem().and_then(|s| s.to_str()).map(str::to_owned) else {
-            continue;
-        };
+    for (stem, path) in crate::mutator::edge_parquet_files(project_dir, None)? {
         // An unreadable edge file must FAIL the build, not be skipped: a
         // manifest written without it would stamp the current generation and
         // make an index missing a relation's edges look fresh.
@@ -2980,10 +2977,13 @@ mod tests {
     #[test]
     fn csr_path_layout() {
         let p = csr_path(Path::new("/proj"), "WORKS_AT", Direction::In);
-        assert_eq!(p, Path::new("/proj/indexes/adjacency/WORKS_AT.in.csr"));
+        assert_eq!(
+            p,
+            Path::new("/proj/.graphforge-cache/adjacency/WORKS_AT.in.csr")
+        );
         assert_eq!(
             manifest_path(Path::new("/proj")),
-            Path::new("/proj/indexes/adjacency/index_manifest.parquet")
+            Path::new("/proj/.graphforge-cache/adjacency/index_manifest.parquet")
         );
     }
 

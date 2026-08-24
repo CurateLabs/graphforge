@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use crate::project_checkpoints::checkpoint_retention_roots_after_writer_lock;
 use crate::project_generation::{resolve_project_generation, validated_generation_manifest_sha256};
-use crate::project_publication::{GENERATIONS_DIR, open_regular_lock};
+use crate::project_publication::{ATTEMPTS_DIR, GENERATIONS_DIR, open_regular_lock};
 use crate::project_recovery::{
     DEFAULT_RETAINED_ANCESTORS, GenerationCleanupOutcome, MAX_RETAINED_ANCESTORS, TRASH_DIR,
     acquire_recovery_lock, bounded_directory_entries, cleanup_trash_generation,
@@ -393,6 +393,88 @@ pub fn execute_project_cleanup_with_mode(
     run_cleanup(container_root.as_ref(), policy, limits, false, mode)
 }
 
+/// Reclaim obsolete generations while publication already owns the global
+/// writer lock. The pre-publication ancestor window is one smaller than the
+/// steady-state policy because the imminent generation becomes CURRENT and
+/// its parent becomes the first retained ancestor.
+pub(crate) fn preflight_publication_cleanup(
+    root: &Path,
+    selected: &crate::ResolvedProjectGeneration,
+) -> Result<(), GfError> {
+    let retained_ancestors = DEFAULT_RETAINED_ANCESTORS.saturating_sub(1);
+    let policy = ProjectRetentionPolicy { retained_ancestors };
+    let limits = ProjectRetentionLimits {
+        cleanup_batch: 0,
+        ..ProjectRetentionLimits::default()
+    };
+    let checkpoint_roots = checkpoint_retention_roots_after_writer_lock(root)?;
+    let classification = classify_cleanup_candidates(
+        root,
+        selected,
+        &checkpoint_roots.roots,
+        policy,
+        limits,
+        false,
+    )?;
+    if classification.bounded {
+        return Err(limit_error(
+            "publication retention work_units",
+            classification.work_units,
+        ));
+    }
+    Ok(())
+}
+
+/// Reclaim obsolete generations after CURRENT names the new complete child.
+/// A crash or error is recoverable because reachability is recomputed from
+/// CURRENT on the next cleanup/recovery pass.
+pub(crate) fn cleanup_after_publication(
+    root: &Path,
+    selected: &crate::ResolvedProjectGeneration,
+) -> Result<(u64, u64), GfError> {
+    let retained_ancestors = DEFAULT_RETAINED_ANCESTORS;
+    let checkpoint_roots = checkpoint_retention_roots_after_writer_lock(root)?;
+    let classification = classify_cleanup_candidates(
+        root,
+        selected,
+        &checkpoint_roots.roots,
+        ProjectRetentionPolicy { retained_ancestors },
+        ProjectRetentionLimits {
+            cleanup_batch: 0,
+            ..ProjectRetentionLimits::default()
+        },
+        false,
+    )?;
+    if classification.bounded {
+        return Err(limit_error(
+            "publication retention work_units",
+            classification.work_units,
+        ));
+    }
+    let mut removed = 0_u64;
+    let mut skipped_live = classification.skipped_live;
+    for (location, uuid) in classification.candidate_uuids {
+        let outcome = match location {
+            ProjectCleanupLocation::Generations => cleanup_unreachable_generation(
+                root,
+                uuid,
+                &checkpoint_roots.roots,
+                retained_ancestors,
+            )?,
+            ProjectCleanupLocation::Trash => cleanup_trash_generation(root, uuid)?,
+        };
+        match outcome {
+            GenerationCleanupOutcome::Removed => removed = removed.saturating_add(1),
+            GenerationCleanupOutcome::SkippedLiveLease => {
+                skipped_live = skipped_live.saturating_add(1);
+            }
+            GenerationCleanupOutcome::Retained | GenerationCleanupOutcome::Absent => {}
+        }
+    }
+    sweep_unreachable_graph_objects(root)?;
+    Ok((removed, skipped_live))
+}
+
 fn run_cleanup(
     root: &Path,
     policy: ProjectRetentionPolicy,
@@ -453,6 +535,9 @@ fn run_cleanup(
                 GenerationCleanupOutcome::Retained | GenerationCleanupOutcome::Absent => {}
             }
         }
+        if !bounded {
+            sweep_unreachable_graph_objects(root)?;
+        }
     }
 
     let remaining_bytes = remaining_project_bytes(root, limits)?;
@@ -479,6 +564,63 @@ fn run_cleanup(
         entries: classification.entries,
         elapsed_ms: elapsed_ms(started),
     })
+}
+
+fn sweep_unreachable_graph_objects(root: &Path) -> Result<(), GfError> {
+    if crate::graph_object_publication_is_live(root)? {
+        return Ok(());
+    }
+    let attempts = root.join(ATTEMPTS_DIR);
+    if attempts.exists()
+        && attempts
+            .read_dir()
+            .map_err(storage_io)?
+            .next()
+            .transpose()
+            .map_err(storage_io)?
+            .is_some()
+    {
+        return Ok(());
+    }
+    let generations = root.join(GENERATIONS_DIR);
+    let mut graph_roots = Vec::new();
+    if generations.exists() {
+        let mut entries = generations
+            .read_dir()
+            .map_err(storage_io)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(storage_io)?;
+        entries.sort_by_key(std::fs::DirEntry::file_name);
+        for entry in entries {
+            let file_type = entry.file_type().map_err(storage_io)?;
+            if !file_type.is_dir() || file_type.is_symlink() {
+                // The cleanup classifier quarantines unknown and linked entries
+                // without following or deleting them.  They are not generation
+                // roots and therefore must not prevent a safe census of the
+                // canonical generation directories that remain authoritative.
+                continue;
+            }
+            let name = entry.file_name().into_string().map_err(|_| {
+                project_error(
+                    ProjectErrorCode::ProjectCorrupt,
+                    "generation name is not UTF-8",
+                )
+            })?;
+            let Some(uuid) = parse_canonical_uuid(&name) else {
+                // As above, preserve quarantined caller-owned entries but never
+                // interpret them as roots or traverse their contents.
+                continue;
+            };
+            let generation = crate::resolve_generation_by_uuid(root, uuid)?;
+            if let Some(crate::GraphFilesParticipant::V2(graph_root)) =
+                generation.declared_graph_files_participant()?
+            {
+                graph_roots.push(graph_root);
+            }
+        }
+    }
+    crate::gc_graph_objects(root, &graph_roots, crate::GraphManifestLimits::default())?;
+    Ok(())
 }
 
 struct Classification {
@@ -1199,6 +1341,95 @@ mod tests {
             0
         };
         assert_eq!(trash_remaining, 0);
+    }
+
+    #[test]
+    fn live_cas_publication_lease_preserves_installed_unrooted_object() {
+        let root = tempfile::tempdir().unwrap();
+        open_or_initialize_project(root.path()).unwrap();
+        let lease = crate::begin_graph_object_publication(root.path()).unwrap();
+        let (digest, _) =
+            crate::install_graph_object_bytes(root.path(), b"not-yet-current").unwrap();
+        execute_project_cleanup(root.path(), policy(2), ProjectRetentionLimits::default()).unwrap();
+        assert!(
+            crate::graph_object_path(root.path(), &digest)
+                .unwrap()
+                .exists()
+        );
+
+        drop(lease);
+        execute_project_cleanup(root.path(), policy(2), ProjectRetentionLimits::default()).unwrap();
+        assert!(
+            !crate::graph_object_path(root.path(), &digest)
+                .unwrap()
+                .exists()
+        );
+    }
+
+    #[test]
+    fn staged_writer_authority_closes_lease_release_before_current_gap() {
+        let root = tempfile::tempdir().unwrap();
+        open_or_initialize_project(root.path()).unwrap();
+        let lease = crate::begin_graph_object_publication(root.path()).unwrap();
+        let (digest, _) = crate::install_graph_object_bytes(root.path(), b"staged-object").unwrap();
+        let request = ProjectGenerationRequest {
+            transaction_uuid: Uuid::now_v7(),
+            generation_uuid: Uuid::now_v7(),
+            capabilities: vec![ProjectCapability {
+                capability_id: "graph".into(),
+                capability_version: 1,
+            }],
+            participants: vec![participant("graph", "nodes")],
+        };
+        let ProjectStageOutcome::Staged(staged) =
+            stage_project_generation(root.path(), &request).unwrap()
+        else {
+            panic!("unexpected replay");
+        };
+
+        // The API releases the CAS lease only after staging.  The staged
+        // generation still owns writer authority through CURRENT and the
+        // post-CURRENT census, so cleanup cannot enter this interval.
+        drop(lease);
+        let error =
+            execute_project_cleanup(root.path(), policy(2), ProjectRetentionLimits::default())
+                .unwrap_err();
+        assert_eq!(error.code(), "GF_WRITER_BUSY");
+        assert!(
+            crate::graph_object_path(root.path(), &digest)
+                .unwrap()
+                .exists()
+        );
+
+        staged
+            .validate(|_| Ok(()), |_, _| Ok(()))
+            .unwrap()
+            .publish()
+            .unwrap();
+    }
+
+    #[test]
+    fn active_attempt_defers_cas_sweep_until_attempt_recovery() {
+        let root = tempfile::tempdir().unwrap();
+        open_or_initialize_project(root.path()).unwrap();
+        let (digest, _) =
+            crate::install_graph_object_bytes(root.path(), b"attempt-object").unwrap();
+        let attempt = root.path().join(ATTEMPTS_DIR).join("active-attempt");
+        std::fs::create_dir_all(&attempt).unwrap();
+        execute_project_cleanup(root.path(), policy(2), ProjectRetentionLimits::default()).unwrap();
+        assert!(
+            crate::graph_object_path(root.path(), &digest)
+                .unwrap()
+                .exists()
+        );
+
+        std::fs::remove_dir(&attempt).unwrap();
+        execute_project_cleanup(root.path(), policy(2), ProjectRetentionLimits::default()).unwrap();
+        assert!(
+            !crate::graph_object_path(root.path(), &digest)
+                .unwrap()
+                .exists()
+        );
     }
 
     #[test]

@@ -254,6 +254,7 @@ impl GraphForge {
             resolved_generation: self.resolved_generation.clone(),
             read_only: self.read_only,
             current_generation_uuid: Arc::clone(&self.current_generation_uuid),
+            graph_files_publication: Arc::clone(&self.graph_files_publication),
             uuid_membership_index: std::sync::Mutex::new(None),
             clock: std::sync::Mutex::new(Arc::clone(
                 &self.clock.lock().expect("clock lock poisoned"),

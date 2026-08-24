@@ -278,9 +278,7 @@ impl GraphForge {
         expected_parent: Uuid,
         cancellation: Option<&CancellationToken>,
     ) -> Result<Uuid, GfError> {
-        use graphforge_storage::{
-            ProjectCapability, ProjectGenerationRequest, ProjectStageOutcome,
-        };
+        use graphforge_storage::{ProjectGenerationRequest, ProjectStageOutcome};
 
         let _visibility = self.graph_visibility.acquire(cancellation)?;
         cancellation.map_or(Ok(()), CancellationToken::checkpoint)?;
@@ -298,7 +296,20 @@ impl GraphForge {
                 graphforge_storage::UuidIndexBuildLimits::default(),
             )?;
         }
-        let graph_files = graphforge_storage::capture_graph_files(staged_graph)?.1;
+        let (inventory, _) = graphforge_storage::capture_graph_files(staged_graph)?;
+        let cas_lease = graphforge_storage::begin_graph_object_publication(container)?;
+        let (graph_root, _) =
+            graphforge_storage::migrate_graph_files_v1_to_v2(container, staged_graph, &inventory)?;
+        let graph_files = graphforge_storage::graph_files_root_participant(&graph_root)?;
+        let candidate_graph_state = super::GraphFilesPublicationState {
+            root: Some(graph_root),
+            live_entries: inventory
+                .files
+                .into_iter()
+                .map(|entry| (entry.relative_path.clone(), entry))
+                .collect(),
+            unpublished_v1_migration_lease: None,
+        };
         let recorded_at = (self.clock.lock().expect("clock lock poisoned"))()?;
         let receipt = graphforge_exec::MutationReceipt::default();
         let participants = super::graph_publication_participants(
@@ -309,32 +320,29 @@ impl GraphForge {
                 .expect("semantic storage binding lock poisoned")
                 .as_ref(),
             parent.capability("provenance")?.is_some(),
-            &receipt,
-            operation_uuid,
-            None,
-            recorded_at,
+            super::GraphPublicationContext {
+                receipt: &receipt,
+                operation_uuid,
+                actor_uuid: None,
+                recorded_at_micros: recorded_at,
+            },
         )?;
         let generation_uuid = super::mutation_generation_uuid(operation_uuid, &participants);
         let request = ProjectGenerationRequest {
             transaction_uuid: operation_uuid,
             generation_uuid,
-            capabilities: parent
-                .capabilities()
-                .into_iter()
-                .map(|capability| ProjectCapability {
-                    capability_id: capability.capability_id,
-                    capability_version: capability.capability_version,
-                })
-                .collect(),
+            capabilities: super::publication_capabilities(&parent),
             participants,
         };
         cancellation.map_or(Ok(()), CancellationToken::checkpoint)?;
-        let publication = match graphforge_storage::stage_project_generation_with_graph_tree_mode(
+        let staged = graphforge_storage::stage_project_generation_with_graph_tree_mode(
             container,
             &request,
-            Some(staged_graph),
+            None,
             self.lifecycle_mode,
-        )? {
+        )?;
+        drop(cas_lease);
+        let publication = match staged {
             ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
             ProjectStageOutcome::Staged(staged) => staged
                 .validate(
@@ -354,6 +362,10 @@ impl GraphForge {
             .current_generation_uuid
             .lock()
             .expect("generation UUID lock poisoned") = publication.generation_uuid;
+        *self
+            .graph_files_publication
+            .lock()
+            .expect("graph publication lock poisoned") = candidate_graph_state;
         let resolved = graphforge_storage::resolve_project_generation(container)?;
         super::rematerialize_graph_workspace(&resolved, &self.dir)?;
         *self
