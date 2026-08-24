@@ -1320,6 +1320,7 @@ pub struct GraphWriter {
     pending_index_nodes: Vec<(Uuid, u64)>,
     pending_index_edges: Vec<Uuid>,
     prepared_index: Option<crate::uuid_membership::PreparedUuidIndexDelta>,
+    uuid_index_snapshot: Option<crate::AuthenticatedUuidIndexSnapshot>,
     limits: GraphWriterLimits,
     charged_topology_bytes: usize,
     buffered_topology_rows: usize,
@@ -1376,6 +1377,7 @@ impl GraphWriter {
             pending_index_nodes: Vec::new(),
             pending_index_edges: Vec::new(),
             prepared_index: None,
+            uuid_index_snapshot: None,
             limits: GraphWriterLimits::default(),
             charged_topology_bytes: 0,
             buffered_topology_rows: 0,
@@ -2238,7 +2240,7 @@ impl GraphWriter {
     }
 
     fn build_uuid_index_delta(
-        &self,
+        &mut self,
         generation: u64,
         staged: &mut RewriteBatch,
         deleted_nodes: &[Uuid],
@@ -2255,10 +2257,18 @@ impl GraphWriter {
         {
             (Vec::new(), Vec::new())
         } else {
-            let mut index = crate::UuidMembershipIndex::open_at_generation(
-                &self.dir,
-                generation.saturating_sub(1),
-            )?;
+            if self.uuid_index_snapshot.as_ref().is_none_or(|snapshot| {
+                snapshot.topology_generation() != generation.saturating_sub(1)
+            }) {
+                self.uuid_index_snapshot = Some(crate::UuidMembershipIndex::open_at_generation(
+                    &self.dir,
+                    generation.saturating_sub(1),
+                )?);
+            }
+            let index = self
+                .uuid_index_snapshot
+                .as_mut()
+                .expect("snapshot was installed");
             let (surrogates, _) = index.lookup_node_surrogates(deleted_nodes)?;
             let nodes = deleted_nodes
                 .iter()

@@ -175,6 +175,9 @@ pub struct UuidMembershipIndex {
     manifest: Manifest,
 }
 
+/// Long-lived authenticated UUID-index snapshot retained by construction writers.
+pub type AuthenticatedUuidIndexSnapshot = UuidMembershipIndex;
+
 impl UuidMembershipIndex {
     /// Open and fully authenticate the current immutable index snapshot.
     pub fn open(project_dir: &Path) -> Result<Self, GfError> {
