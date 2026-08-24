@@ -351,6 +351,8 @@ struct TopologyIndexReceipt {
 pub(crate) struct PreparedUuidIndexDelta {
     expected_generation: u64,
     auxiliary: crate::AuxiliaryReceipt,
+    root: PathBuf,
+    superseded: Vec<(String, graphforge_filesystem::FileIdentity)>,
 }
 
 /// Stage one bounded v3 UUID-index delta and its authenticated receipt into the
@@ -384,7 +386,7 @@ pub(crate) fn prepare_uuid_membership_delta(
         .prefix("uuid-membership-plan-")
         .tempdir_in(parent)
         .map_err(storage_err)?;
-    let (manifest, outputs, _metrics) = plan_uuid_membership_delta(
+    let (manifest, outputs, superseded, _metrics) = plan_uuid_membership_delta(
         &source_root,
         current,
         generation,
@@ -412,6 +414,8 @@ pub(crate) fn prepare_uuid_membership_delta(
     let digest = Sha256::digest(&receipt_bytes);
     Ok(Some(PreparedUuidIndexDelta {
         expected_generation: generation,
+        root: source_root,
+        superseded,
         auxiliary: crate::AuxiliaryReceipt {
             kind: "uuid-membership/v3".to_owned(),
             schema_version: FORMAT_VERSION,
@@ -439,7 +443,15 @@ fn plan_uuid_membership_delta(
     edges: &[Uuid],
     deleted_nodes: &[(Uuid, u64)],
     deleted_edges: &[Uuid],
-) -> Result<(Manifest, Vec<(FileRecord, PathBuf)>, UuidIndexAppendMetrics), GfError> {
+) -> Result<
+    (
+        Manifest,
+        Vec<(FileRecord, PathBuf)>,
+        Vec<(String, graphforge_filesystem::FileIdentity)>,
+        UuidIndexAppendMetrics,
+    ),
+    GfError,
+> {
     let mut manifest = if current == 0 {
         Manifest {
             format_version: FORMAT_VERSION,
@@ -463,6 +475,7 @@ fn plan_uuid_membership_delta(
         parsed
     };
 
+    let prior_names = manifest_file_names(&manifest);
     let mut identities = nodes
         .iter()
         .map(|(uuid, id)| (*uuid, 0_u8, *id))
@@ -644,8 +657,18 @@ fn plan_uuid_membership_delta(
         })
         .collect::<Vec<_>>();
     outputs.sort_unstable_by(|left, right| left.0.name.cmp(&right.0.name));
+    let mut superseded = Vec::new();
+    for name in prior_names.difference(&retained) {
+        let file = directory
+            .open_child_file(std::ffi::OsStr::new(name))
+            .map_err(storage_err)?;
+        superseded.push((
+            name.clone(),
+            graphforge_filesystem::file_identity(&file).map_err(storage_err)?,
+        ));
+    }
     metrics.retained_runs = manifest.runs.len();
-    Ok((manifest, outputs, metrics))
+    Ok((manifest, outputs, superseded, metrics))
 }
 
 fn open_verified_at(
@@ -833,13 +856,21 @@ impl PreparedUuidIndexDelta {
     }
 
     pub(crate) fn verify_generation(&self, committed_generation: u64) -> Result<(), GfError> {
-        if committed_generation == self.expected_generation {
-            Ok(())
-        } else {
-            Err(storage_err(
+        if committed_generation != self.expected_generation {
+            return Err(storage_err(
                 "topology commit returned an unexpected generation",
-            ))
+            ));
         }
+        let directory =
+            graphforge_filesystem::StableDirectory::open(&self.root).map_err(storage_err)?;
+        for (name, identity) in &self.superseded {
+            match directory.unlink_child_if_identity(std::ffi::OsStr::new(name), *identity) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(storage_err(error)),
+            }
+        }
+        directory.sync().map_err(storage_err)
     }
 }
 
@@ -2831,7 +2862,7 @@ mod tests {
         );
 
         let scratch = tempfile::tempdir_in(dir.path()).unwrap();
-        let (planned, outputs, metrics) = plan_uuid_membership_delta(
+        let (planned, outputs, superseded, metrics) = plan_uuid_membership_delta(
             &root,
             1,
             2,
@@ -2845,6 +2876,7 @@ mod tests {
         // Generation two carries L0+L0 into exactly one L1 pair. Retained base
         // files are descriptor-reused, not copied into planner outputs.
         assert_eq!(outputs.len(), 2);
+        assert_eq!(superseded.len(), 2);
         assert_eq!(planned.runs.iter().filter(|run| !run.base).count(), 1);
         assert_eq!(planned.runs.iter().find(|run| !run.base).unwrap().level, 1);
         assert!(
