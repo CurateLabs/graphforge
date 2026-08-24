@@ -6329,7 +6329,10 @@ mod tests {
             .register_existing_endpoints(&mut index, &[left, right])
             .unwrap();
         assert_eq!(metrics.found, 2);
-        assert!(metrics.file_seeks <= 4);
+        assert!(
+            metrics.file_seeks <= 8,
+            "two v3 endpoint lookups perform bounded identity and reverse-surrogate probes"
+        );
         writer
             .create_edge(new_v7(), "KNOWS", &left, &right)
             .unwrap();
