@@ -32,10 +32,12 @@ pub use graph_projection::{
 };
 
 pub mod graph_construction;
+mod graph_construction_encoding;
 pub use graph_construction::{
     CONSTRUCTION_EDGE_SCHEMA, CONSTRUCTION_NODE_SCHEMA, ConstructionChunkKind,
     ConstructionChunkReceipt, ConstructionShape, GraphConstructionBudgets,
-    GraphConstructionEvidence, GraphConstructionSession, GraphConstructionState,
+    GraphConstructionEncoding, GraphConstructionEncodingEvidence, GraphConstructionEvidence,
+    GraphConstructionSession, GraphConstructionState,
 };
 
 pub mod graph_files;
