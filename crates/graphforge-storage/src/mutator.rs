@@ -559,15 +559,18 @@ pub fn delete_nodes<S: BuildHasher>(
 ) -> Result<u64, GfError> {
     let mut staged = RewriteBatch::new();
     let removed = stage_delete_nodes(&mut staged, dir, node_uuids)?;
-    let prepared =
-        prepare_deletion_index(dir, node_uuids, &HashSet::<[u8; 16]>::new(), removed, 0)?;
-    if let Some(prepared) = &prepared {
-        prepared.stage_receipt(&mut staged)?;
-    }
-    if let Some(g) = crate::generation::commit_topology_aware(staged, dir)? {
-        if let Some(prepared) = prepared {
-            prepared.finalize(g)?;
-        }
+    let prepared = prepare_deletion_index(
+        &mut staged,
+        dir,
+        node_uuids,
+        &HashSet::<[u8; 16]>::new(),
+        removed,
+        0,
+    )?;
+    let auxiliary = prepared.as_ref().map(|value| value.auxiliary_receipt());
+    if let Some(g) =
+        crate::generation::commit_topology_aware_with_auxiliary(staged, dir, auxiliary)?
+    {
         crate::adjacency_delta::discard_segment(dir, g); // delete writes no segment
     }
     Ok(removed)
@@ -588,15 +591,18 @@ pub fn delete_edges<S: BuildHasher>(
 ) -> Result<u64, GfError> {
     let mut staged = RewriteBatch::new();
     let removed = stage_delete_edges(&mut staged, dir, edge_uuids)?;
-    let prepared =
-        prepare_deletion_index(dir, &HashSet::<[u8; 16]>::new(), edge_uuids, 0, removed)?;
-    if let Some(prepared) = &prepared {
-        prepared.stage_receipt(&mut staged)?;
-    }
-    if let Some(g) = crate::generation::commit_topology_aware(staged, dir)? {
-        if let Some(prepared) = prepared {
-            prepared.finalize(g)?;
-        }
+    let prepared = prepare_deletion_index(
+        &mut staged,
+        dir,
+        &HashSet::<[u8; 16]>::new(),
+        edge_uuids,
+        0,
+        removed,
+    )?;
+    let auxiliary = prepared.as_ref().map(|value| value.auxiliary_receipt());
+    if let Some(g) =
+        crate::generation::commit_topology_aware_with_auxiliary(staged, dir, auxiliary)?
+    {
         crate::adjacency_delta::discard_segment(dir, g); // delete writes no segment
     }
     Ok(removed)
@@ -623,21 +629,25 @@ pub fn delete_nodes_and_edges<S: BuildHasher>(
     let mut staged = RewriteBatch::new();
     let edges_removed = stage_delete_edges(&mut staged, dir, edge_uuids)?;
     let nodes_removed = stage_delete_nodes(&mut staged, dir, node_uuids)?;
-    let prepared =
-        prepare_deletion_index(dir, node_uuids, edge_uuids, nodes_removed, edges_removed)?;
-    if let Some(prepared) = &prepared {
-        prepared.stage_receipt(&mut staged)?;
-    }
-    if let Some(g) = crate::generation::commit_topology_aware(staged, dir)? {
-        if let Some(prepared) = prepared {
-            prepared.finalize(g)?;
-        }
+    let prepared = prepare_deletion_index(
+        &mut staged,
+        dir,
+        node_uuids,
+        edge_uuids,
+        nodes_removed,
+        edges_removed,
+    )?;
+    let auxiliary = prepared.as_ref().map(|value| value.auxiliary_receipt());
+    if let Some(g) =
+        crate::generation::commit_topology_aware_with_auxiliary(staged, dir, auxiliary)?
+    {
         crate::adjacency_delta::discard_segment(dir, g); // delete writes no segment
     }
     Ok((nodes_removed, edges_removed))
 }
 
 fn prepare_deletion_index<NS: BuildHasher, ES: BuildHasher>(
+    staged: &mut RewriteBatch,
     dir: &Path,
     node_uuids: &HashSet<[u8; 16], NS>,
     edge_uuids: &HashSet<[u8; 16], ES>,
@@ -680,6 +690,7 @@ fn prepare_deletion_index<NS: BuildHasher, ES: BuildHasher>(
     crate::uuid_membership::prepare_uuid_membership_delta(
         dir,
         generation,
+        staged,
         &[],
         &[],
         &deleted_nodes,

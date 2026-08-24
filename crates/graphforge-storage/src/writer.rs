@@ -2785,6 +2785,8 @@ impl GraphWriter {
     /// Returns [`GfError::Storage`] on any I/O, Arrow, or Parquet failure.
     pub fn flush(&mut self) -> Result<(), GfError> {
         if self.prepared_index.is_some() {
+            // Reading generation first rolls forward any durable #935 rewrite.
+            // No UUID-index participant publishes independently.
             let generation = crate::read_topology_generation(&self.dir)?;
             self.finalize_uuid_index_delta(generation)?;
             return Ok(());
@@ -2794,7 +2796,13 @@ impl GraphWriter {
         let pending = self.take_pending_delta();
         let expected_generation = crate::read_topology_generation(&self.dir)?.saturating_add(1);
         let index_staged = self.prepare_uuid_index_delta(expected_generation, &mut staged)?;
-        if let Some(generation) = crate::generation::commit_topology_aware(staged, &self.dir)? {
+        let auxiliary = self
+            .prepared_index
+            .as_ref()
+            .map(crate::uuid_membership::PreparedUuidIndexDelta::auxiliary_receipt);
+        if let Some(generation) =
+            crate::generation::commit_topology_aware_with_auxiliary(staged, &self.dir, auxiliary)?
+        {
             debug_assert_eq!(generation, expected_generation);
             // A pure-append flush (only CREATEs reach `GraphWriter`): record the
             // delta segment so the adjacency index can serve the new edges
@@ -2870,14 +2878,12 @@ impl GraphWriter {
         self.prepared_index = crate::uuid_membership::prepare_uuid_membership_delta(
             &self.dir,
             generation,
+            staged,
             &self.pending_index_nodes,
             &self.pending_index_edges,
             &deleted_nodes,
             &deleted_edges,
         )?;
-        if let Some(prepared) = &self.prepared_index {
-            prepared.stage_receipt(staged)?;
-        }
         Ok(self.prepared_index.is_some())
     }
 
@@ -2887,7 +2893,7 @@ impl GraphWriter {
             .prepared_index
             .as_ref()
             .ok_or_else(|| GfError::Storage("UUID index delta was not prepared".into()))?;
-        prepared.finalize(generation)?;
+        prepared.verify_generation(generation)?;
         self.prepared_index = None;
         self.pending_index_nodes.clear();
         self.pending_index_edges.clear();
