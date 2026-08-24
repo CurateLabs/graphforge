@@ -4,7 +4,8 @@
 //! It converts the shaper's authenticated, UUID-ordered streams into the exact
 //! ordinary storage schemas and prepares a streamed UUID-membership manifest.
 
-use std::collections::BTreeMap;
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BinaryHeap};
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Seek, Write};
@@ -22,15 +23,25 @@ use graphforge_core::GfError;
 use graphforge_core::OntologyMode;
 use graphforge_filesystem::{StableDirectory, file_identity};
 use graphforge_ir::runtime_entity_type_id;
+use graphforge_ir::{CompositionBindingContext, SymbolBinding};
+use graphforge_ontology::{QualifiedSymbol, SymbolKind};
 use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::graph_construction::{ConstructionShape, GraphConstructionBudgets};
-use crate::schemas::{TOPOLOGY_NODES_SCHEMA, TYPED_EDGE_SCHEMA, uuid_field};
-use crate::uuid_membership::{AuthenticatedUuidIndexSnapshot, ConstructionIndexOutput};
+use crate::graph_construction::{
+    ConstructionSemanticAuthority, ConstructionShape, CountingChunkReader,
+    GraphConstructionBudgets, IoCounter,
+};
+use crate::schemas::{
+    TOPOLOGY_NODES_SCHEMA, TYPED_EDGE_SCHEMA, uuid_field, with_semantic_route_metadata,
+};
+use crate::uuid_membership::{
+    AuthenticatedUuidIndexSnapshot, ConstructionIndexOutput, ConstructionIndexReference,
+};
+use crate::{SemanticRouteKind, SemanticStorageBindings};
 
 const ENCODED_ROOT: &str = "encoded-v1";
 const INVENTORY: &str = "inventory.json";
@@ -40,6 +51,179 @@ const NODE_DETAIL_WIDTH: usize = 272;
 const EDGE_DETAIL_WIDTH: usize = 304;
 const RESOLVED_ENDPOINT_WIDTH: usize = 32;
 const COPY_BUFFER_BYTES: usize = 1 << 20;
+
+struct CountingWriter {
+    inner: File,
+    counter: IoCounter,
+}
+
+struct CountingInput<R> {
+    inner: R,
+    counter: IoCounter,
+}
+
+impl<R: Read> Read for CountingInput<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let read = self.inner.read(buffer)?;
+        self.counter.account(read);
+        Ok(read)
+    }
+}
+
+impl Write for CountingWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let written = self.inner.write(buffer)?;
+        self.counter.account(written);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+struct EncodingRowCursor {
+    reader: Box<dyn Iterator<Item = Result<RecordBatch, arrow::error::ArrowError>>>,
+    batch: Option<RecordBatch>,
+    row: usize,
+    batch_sequence: u64,
+    counter: IoCounter,
+    counter_accounted: bool,
+}
+
+impl EncodingRowCursor {
+    fn current_uuid(
+        &mut self,
+        uuid_name: &str,
+        evidence: &mut GraphConstructionEncodingEvidence,
+    ) -> Result<Option<[u8; 16]>, GfError> {
+        loop {
+            if let Some(batch) = &self.batch
+                && self.row < batch.num_rows()
+            {
+                let values = required_uuid(batch, uuid_name)?;
+                return Ok(Some(values.value(self.row).try_into().expect("fixed UUID")));
+            }
+            self.batch = self.reader.next().transpose().map_err(storage)?;
+            self.row = 0;
+            self.batch_sequence = self.batch_sequence.saturating_add(1);
+            if self.batch.is_none() {
+                if !self.counter_accounted {
+                    let (bytes, operations) = self.counter.values();
+                    evidence.input_read_bytes = evidence.input_read_bytes.saturating_add(bytes);
+                    evidence.input_read_operations =
+                        evidence.input_read_operations.saturating_add(operations);
+                    self.counter_accounted = true;
+                }
+                return Ok(None);
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+struct MergedEncodingRow {
+    source: usize,
+    batch_sequence: u64,
+    batch: RecordBatch,
+    row: usize,
+}
+
+type EncodingRowHeap = BinaryHeap<(Reverse<[u8; 16]>, Reverse<usize>)>;
+
+fn open_merged_rows(
+    source: &StableDirectory,
+    names: &[String],
+    uuid_name: &str,
+    budgets: GraphConstructionBudgets,
+    evidence: &mut GraphConstructionEncodingEvidence,
+) -> Result<(Vec<EncodingRowCursor>, EncodingRowHeap), GfError> {
+    if names.len() > budgets.max_schema_groups {
+        return Err(storage(
+            "encoded schema registry exceeds its cardinality cap",
+        ));
+    }
+    let mut cursors = Vec::with_capacity(names.len());
+    for name in names {
+        let file = source.open_child_file(OsStr::new(name)).map_err(storage)?;
+        let counter = IoCounter::default();
+        let reader = ParquetRecordBatchReaderBuilder::try_new(CountingChunkReader {
+            file,
+            counter: counter.clone(),
+        })
+        .map_err(storage)?
+        .with_batch_size(budgets.max_batch_rows)
+        .build()
+        .map_err(storage)?;
+        cursors.push(EncodingRowCursor {
+            reader: Box::new(reader),
+            batch: None,
+            row: 0,
+            batch_sequence: 0,
+            counter,
+            counter_accounted: false,
+        });
+    }
+    let mut heap = BinaryHeap::new();
+    for (index, cursor) in cursors.iter_mut().enumerate() {
+        if let Some(uuid) = cursor.current_uuid(uuid_name, evidence)? {
+            heap.push((Reverse(uuid), Reverse(index)));
+        }
+    }
+    Ok((cursors, heap))
+}
+
+fn next_merged_window(
+    cursors: &mut [EncodingRowCursor],
+    heap: &mut BinaryHeap<(Reverse<[u8; 16]>, Reverse<usize>)>,
+    uuid_name: &str,
+    budgets: GraphConstructionBudgets,
+    cancelled: &mut impl FnMut() -> bool,
+    evidence: &mut GraphConstructionEncodingEvidence,
+) -> Result<Vec<MergedEncodingRow>, GfError> {
+    let mut rows = Vec::with_capacity(budgets.max_batch_rows);
+    let mut retained_bytes = 0_usize;
+    let mut previous = None;
+    while rows.len() < budgets.max_batch_rows {
+        let Some((Reverse(uuid), Reverse(source))) = heap.pop() else {
+            break;
+        };
+        if previous.is_some_and(|prior| prior >= uuid) {
+            return Err(storage(
+                "heterogeneous row streams are not globally unique and sorted",
+            ));
+        }
+        previous = Some(uuid);
+        let cursor = &mut cursors[source];
+        let batch = cursor.batch.as_ref().expect("heap row has batch");
+        if rows.iter().all(|row: &MergedEncodingRow| {
+            row.source != source || row.batch_sequence != cursor.batch_sequence
+        }) {
+            account_batch(batch, budgets, evidence)?;
+            retained_bytes = retained_bytes.saturating_add(batch.get_array_memory_size());
+            if !rows.is_empty() && retained_bytes > budgets.max_batch_bytes {
+                heap.push((Reverse(uuid), Reverse(source)));
+                break;
+            }
+        }
+        rows.push(MergedEncodingRow {
+            source,
+            batch_sequence: cursor.batch_sequence,
+            batch: batch.clone(),
+            row: cursor.row,
+        });
+        cursor.row += 1;
+        if let Some(next) = cursor.current_uuid(uuid_name, evidence)? {
+            heap.push((Reverse(next), Reverse(source)));
+        }
+        if rows.len().is_multiple_of(4096) && cancelled() {
+            return Err(storage("construction encoding cancelled"));
+        }
+    }
+    evidence.peak_batch_rows = evidence.peak_batch_rows.max(rows.len() as u64);
+    evidence.peak_batch_bytes = evidence.peak_batch_bytes.max(retained_bytes as u64);
+    Ok(rows)
+}
 
 fn storage(error: impl std::fmt::Display) -> GfError {
     GfError::Storage(format!("graph construction encoding: {error}"))
@@ -54,6 +238,31 @@ pub struct ConstructionEncodedArtifact {
     pub bytes: u64,
     /// Lowercase SHA-256 of the file.
     pub sha256: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+/// Exact authenticated parent object that a publisher must structurally retain.
+pub struct ConstructionRetainedArtifact {
+    /// Stable authenticated parent directory supplied to the publisher.
+    pub source_root: String,
+    /// Device identity of the authenticated parent directory.
+    pub source_root_volume: u64,
+    /// File identity of the authenticated parent directory.
+    pub source_root_file_id: String,
+    /// Parent-root-relative immutable object name.
+    pub source_path: String,
+    /// Device identity of the retained immutable object.
+    pub source_volume: u64,
+    /// File identity of the retained immutable object.
+    pub source_file_id: String,
+    /// Generation-root-relative target name for structural installation.
+    pub target_path: String,
+    /// Exact retained object length.
+    pub bytes: u64,
+    /// Exact retained object digest.
+    pub sha256: String,
+    /// Authenticated parent index manifest that authorized this reference.
+    pub parent_manifest_sha256: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -87,6 +296,20 @@ pub struct GraphConstructionEncodingEvidence {
     pub retained_index_runs: u64,
     /// Retained v3 payload bytes read only for required binary-carry compaction.
     pub retained_index_payload_bytes: u64,
+    /// Actual block reads performed by v3 construction encoding and carry.
+    pub membership_read_operations: u64,
+    /// Actual block writes, including outputs superseded by carry.
+    pub membership_write_operations: u64,
+    /// All v3 bytes written, including superseded carry inputs.
+    pub membership_total_write_bytes: u64,
+    /// v3 durability barriers.
+    pub membership_fsync_operations: u64,
+    /// Newly created immutable v3 runs, including superseded carry inputs.
+    pub membership_created_runs: u64,
+    /// Peak live v3 transform/merge buffer bytes.
+    pub membership_peak_buffer_bytes: u64,
+    /// Peak bytes in owned temporary v3 outputs.
+    pub membership_peak_temporary_bytes: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -98,20 +321,26 @@ pub struct GraphConstructionEncoding {
     pub generation: u64,
     /// Physical routing authority pinned by the construction checkpoint.
     pub ontology_mode: OntologyMode,
+    /// Exact compiled composition/physical binding authority, when present.
+    pub semantic_authority_sha256: Option<String>,
     /// Shaper authority digest for normalized catalog inputs.
     pub shape_inputs_sha256: String,
     /// Sorted, unique canonical artifact records.
     pub artifacts: Vec<ConstructionEncodedArtifact>,
+    /// Authenticated retained-parent objects required to assemble this graph.
+    pub retained_artifacts: Vec<ConstructionRetainedArtifact>,
     /// Measured bounded work.
     pub evidence: GraphConstructionEncodingEvidence,
 }
 
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(crate) fn encode(
     source: &StableDirectory,
     shape: &ConstructionShape,
     generation: u64,
     ontology_mode: OntologyMode,
     parent_index: Option<&AuthenticatedUuidIndexSnapshot>,
+    semantic_authority: Option<&ConstructionSemanticAuthority>,
     budgets: GraphConstructionBudgets,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<GraphConstructionEncoding, GfError> {
@@ -119,6 +348,12 @@ pub(crate) fn encode(
         return Err(storage(
             "shape ontology mode differs from session authority",
         ));
+    }
+    let semantic_digest = semantic_authority
+        .map(ConstructionSemanticAuthority::digest)
+        .transpose()?;
+    if shape.semantic_authority_sha256 != semantic_digest {
+        return Err(storage("shape semantic authority differs from session"));
     }
     if generation == 0 || generation <= shape.parent_topology_generation {
         return Err(storage("encoded generation is not newer than its parent"));
@@ -133,6 +368,7 @@ pub(crate) fn encode(
         authenticate_inventory(&output, &existing)?;
         if existing.generation != generation
             || existing.ontology_mode != shape.ontology_mode
+            || existing.semantic_authority_sha256 != shape.semantic_authority_sha256
             || existing.shape_inputs_sha256 != shape.runtime_catalog_inputs_sha256
         {
             return Err(storage("completed encoding belongs to another generation"));
@@ -140,12 +376,15 @@ pub(crate) fn encode(
         return Ok(existing);
     }
 
-    let label_ids = read_runtime_label_ids(source, &shape.runtime_catalog, budgets)?;
-    let mut artifacts = Vec::new();
     let mut evidence = GraphConstructionEncodingEvidence {
         peak_open_writers: 1,
         ..Default::default()
     };
+    let label_ids = read_runtime_label_ids(source, &shape.runtime_catalog, budgets, &mut evidence)?;
+    let semantic_context = semantic_authority
+        .map(ConstructionSemanticAuthority::context)
+        .transpose()?;
+    let mut artifacts = Vec::new();
 
     encode_nodes(
         source,
@@ -153,6 +392,8 @@ pub(crate) fn encode(
         shape,
         &label_ids,
         ontology_mode,
+        semantic_context.as_ref(),
+        semantic_authority.map(|authority| &authority.bindings),
         budgets,
         cancelled,
         &mut artifacts,
@@ -163,6 +404,8 @@ pub(crate) fn encode(
         &output,
         shape,
         ontology_mode,
+        semantic_context.as_ref(),
+        semantic_authority.map(|authority| &authority.bindings),
         budgets,
         cancelled,
         &mut artifacts,
@@ -197,8 +440,20 @@ pub(crate) fn encode(
     )?;
     evidence.membership_records = index.input_records;
     evidence.membership_write_bytes = index.write_bytes;
+    evidence.membership_total_write_bytes = index.write_bytes;
+    evidence.membership_read_operations = index.read_operations;
+    evidence.membership_write_operations = index.write_operations;
+    evidence.membership_fsync_operations = index.fsync_operations;
+    evidence.membership_created_runs = index.created_runs;
+    evidence.membership_peak_buffer_bytes = index.peak_buffer_bytes;
+    evidence.membership_peak_temporary_bytes = index.peak_temporary_bytes;
     evidence.retained_index_runs = index.retained_runs;
     evidence.retained_index_payload_bytes = index.retained_payload_bytes;
+    let retained_artifacts = index
+        .retained_references
+        .into_iter()
+        .map(retained_artifact)
+        .collect();
     artifacts.extend(index.artifacts.into_iter().map(index_artifact));
 
     artifacts.sort_unstable_by(|left, right| left.path.cmp(&right.path));
@@ -212,13 +467,30 @@ pub(crate) fn encode(
         root: ENCODED_ROOT.to_owned(),
         generation,
         ontology_mode: shape.ontology_mode,
+        semantic_authority_sha256: shape.semantic_authority_sha256.clone(),
         shape_inputs_sha256: shape.runtime_catalog_inputs_sha256.clone(),
         artifacts,
+        retained_artifacts,
         evidence,
     };
     install_json(&output, INVENTORY, &completed)?;
     authenticate_inventory(&output, &completed)?;
     Ok(completed)
+}
+
+fn retained_artifact(value: ConstructionIndexReference) -> ConstructionRetainedArtifact {
+    ConstructionRetainedArtifact {
+        source_root: value.source_root,
+        source_root_volume: value.source_root_volume,
+        source_root_file_id: value.source_root_file_id,
+        source_path: value.source_path,
+        source_volume: value.source_volume,
+        source_file_id: value.source_file_id,
+        target_path: value.target_path,
+        bytes: value.bytes,
+        sha256: value.sha256,
+        parent_manifest_sha256: value.parent_manifest_sha256,
+    }
 }
 
 fn index_artifact(value: ConstructionIndexOutput) -> ConstructionEncodedArtifact {
@@ -229,6 +501,113 @@ fn index_artifact(value: ConstructionIndexOutput) -> ConstructionEncodedArtifact
     }
 }
 
+#[derive(Clone)]
+struct ResolvedOwner {
+    input: String,
+    symbol: Option<QualifiedSymbol>,
+    topology_route: String,
+    storage_id: Option<u32>,
+}
+
+fn resolve_owner(
+    context: Option<&CompositionBindingContext>,
+    bindings: Option<&SemanticStorageBindings>,
+    symbol_kind: SymbolKind,
+    route_kind: SemanticRouteKind,
+    input: &str,
+    runtime_route: &str,
+) -> Result<ResolvedOwner, GfError> {
+    let (Some(context), Some(bindings)) = (context, bindings) else {
+        return Ok(ResolvedOwner {
+            input: input.to_owned(),
+            symbol: None,
+            topology_route: runtime_route.to_owned(),
+            storage_id: None,
+        });
+    };
+    let (binding, _) = context
+        .resolve(symbol_kind, input)
+        .map_err(|error| storage(format!("semantic owner resolution failed: {error:?}")))?;
+    match binding {
+        SymbolBinding::Runtime { .. } => Ok(ResolvedOwner {
+            input: input.to_owned(),
+            symbol: None,
+            topology_route: runtime_route.to_owned(),
+            storage_id: None,
+        }),
+        SymbolBinding::Qualified(symbol) => {
+            let physical = bindings
+                .bindings
+                .iter()
+                .find(|candidate| candidate.route_kind == route_kind && candidate.symbol == symbol)
+                .ok_or_else(|| storage("qualified owner lacks physical semantic binding"))?;
+            Ok(ResolvedOwner {
+                input: input.to_owned(),
+                symbol: Some(symbol),
+                topology_route: physical.route.clone(),
+                storage_id: Some(physical.storage_id),
+            })
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn property_projection(
+    input: &RecordBatch,
+    required: usize,
+    indexes: &[u32],
+    owner: &ResolvedOwner,
+    owner_kind: SymbolKind,
+    route_kind: SemanticRouteKind,
+    context: Option<&CompositionBindingContext>,
+    bindings: Option<&SemanticStorageBindings>,
+) -> Result<(String, Vec<usize>), GfError> {
+    let mut fields = Vec::new();
+    let mut route = None;
+    for column_index in required..input.num_columns() {
+        let column = input.column(column_index);
+        if !indexes.iter().any(|index| !column.is_null(*index as usize)) {
+            continue;
+        }
+        if let (Some(context), Some(bindings), Some(owner_symbol)) =
+            (context, bindings, owner.symbol.as_ref())
+        {
+            let schema = input.schema();
+            let field = schema.field(column_index);
+            let (binding, _) = context
+                .resolve_owned_property(owner_kind, &owner.input, field.name())
+                .map_err(|error| {
+                    storage(format!("semantic property resolution failed: {error:?}"))
+                })?;
+            let SymbolBinding::Qualified(symbol) = binding else {
+                return Err(storage(
+                    "qualified owner property resolved to runtime authority",
+                ));
+            };
+            let physical = bindings
+                .bindings
+                .iter()
+                .find(|candidate| {
+                    candidate.route_kind == route_kind
+                        && candidate.symbol == symbol
+                        && candidate.owner.as_ref() == Some(owner_symbol)
+                })
+                .ok_or_else(|| storage("qualified property lacks owner-bound physical route"))?;
+            if route.as_ref().is_some_and(|known| known != &physical.route) {
+                return Err(storage(
+                    "one semantic owner maps to multiple property routes",
+                ));
+            }
+            route = Some(physical.route.clone());
+        }
+        fields.push(column_index);
+    }
+    Ok((
+        route.unwrap_or_else(|| owner.topology_route.clone()),
+        fields,
+    ))
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn encode_nodes(
     source: &StableDirectory,
@@ -236,47 +615,50 @@ fn encode_nodes(
     shape: &ConstructionShape,
     label_ids: &BTreeMap<String, u32>,
     ontology_mode: OntologyMode,
+    semantic_context: Option<&CompositionBindingContext>,
+    semantic_bindings: Option<&SemanticStorageBindings>,
     budgets: GraphConstructionBudgets,
     cancelled: &mut impl FnMut() -> bool,
     artifacts: &mut Vec<ConstructionEncodedArtifact>,
     evidence: &mut GraphConstructionEncodingEvidence,
 ) -> Result<(), GfError> {
-    if shape.node_rows.len() > 1 {
-        return Err(storage(
-            "canonical node encoding requires one stable schema",
-        ));
-    }
-    let Some(rows_name) = shape.node_rows.first() else {
+    if shape.node_rows.is_empty() {
         return Ok(());
-    };
+    }
     let details_name = shape
         .node_details
         .as_deref()
         .ok_or_else(|| storage("node rows lack canonical details"))?;
     let mut identities = FixedReader::<IDENTITY_WIDTH>::open(source, &shape.identities, evidence)?;
     let mut details = FixedReader::<NODE_DETAIL_WIDTH>::open(source, details_name, evidence)?;
-    let row_file = source
-        .open_child_file(OsStr::new(rows_name))
-        .map_err(storage)?;
-    let mut rows = ParquetRecordBatchReaderBuilder::try_new(row_file)
-        .map_err(storage)?
-        .with_batch_size(budgets.max_batch_rows)
-        .build()
-        .map_err(storage)?;
+    let (mut row_cursors, mut row_heap) =
+        open_merged_rows(source, &shape.node_rows, "node_uuid", budgets, evidence)?;
     let mut ordinal = 0_u64;
-    for input in &mut rows {
+    loop {
         if cancelled() {
             return Err(storage("construction encoding cancelled"));
         }
-        let input = input.map_err(storage)?;
-        account_batch(&input, budgets, evidence)?;
-        let uuids = required_uuid(&input, "node_uuid")?;
-        let labels = required_string(&input, "label")?;
-        let mut out_uuid = Vec::with_capacity(input.num_rows());
-        let mut out_id = Vec::with_capacity(input.num_rows());
-        let mut out_type = Vec::with_capacity(input.num_rows());
-        let mut groups = BTreeMap::<String, Vec<u32>>::new();
-        for row in 0..input.num_rows() {
+        let merged = next_merged_window(
+            &mut row_cursors,
+            &mut row_heap,
+            "node_uuid",
+            budgets,
+            cancelled,
+            evidence,
+        )?;
+        if merged.is_empty() {
+            break;
+        }
+        let mut out_uuid = Vec::with_capacity(merged.len());
+        let mut out_id = Vec::with_capacity(merged.len());
+        let mut out_type = Vec::with_capacity(merged.len());
+        let mut owners = BTreeMap::<String, ResolvedOwner>::new();
+        let mut groups = BTreeMap::<(usize, u64, String), (RecordBatch, Vec<u32>)>::new();
+        for merged_row in &merged {
+            let input = &merged_row.batch;
+            let row = merged_row.row;
+            let uuids = required_uuid(input, "node_uuid")?;
+            let labels = required_string(input, "label")?;
             let uuid: [u8; 16] = uuids.value(row).try_into().expect("fixed UUID");
             let identity = next_kind(&mut identities, 0)?
                 .ok_or_else(|| storage("node identity stream ended early"))?;
@@ -291,20 +673,45 @@ fn encode_nodes(
             if label != labels.value(row) {
                 return Err(storage("node detail label differs from normalized row"));
             }
-            let type_id = *label_ids
-                .get(label)
-                .ok_or_else(|| storage("node label is absent from runtime catalog"))?;
+            let runtime_route = if ontology_mode == OntologyMode::Exploratory {
+                "_untyped"
+            } else {
+                label
+            };
+            let owner = if let Some(owner) = owners.get(label) {
+                owner.clone()
+            } else {
+                let owner = resolve_owner(
+                    semantic_context,
+                    semantic_bindings,
+                    SymbolKind::Entity,
+                    SemanticRouteKind::Entity,
+                    label,
+                    runtime_route,
+                )?;
+                owners.insert(label.to_owned(), owner.clone());
+                owner
+            };
+            let type_id = match owner.storage_id {
+                Some(storage_id) => storage_id,
+                None => *label_ids
+                    .get(label)
+                    .ok_or_else(|| storage("node label is absent from runtime catalog"))?,
+            };
             out_uuid.push(uuid);
             out_id.push(u64::from_be_bytes(
                 identity[24..32].try_into().expect("fixed"),
             ));
             out_type.push(type_id);
-            let route = if ontology_mode == OntologyMode::Exploratory {
-                "_untyped"
-            } else {
-                label
-            };
-            groups.entry(route.to_owned()).or_default().push(row as u32);
+            groups
+                .entry((
+                    merged_row.source,
+                    merged_row.batch_sequence,
+                    label.to_owned(),
+                ))
+                .or_insert_with(|| (input.clone(), Vec::new()))
+                .1
+                .push(u32::try_from(row).map_err(storage)?);
         }
         if out_id.is_empty() {
             continue;
@@ -319,20 +726,47 @@ fn encode_nodes(
         let last = *out_id.last().expect("nonempty");
         let path = format!("topology/nodes/{first:020}-{last:020}.parquet");
         artifacts.push(write_parquet(output, &path, &canonical, evidence)?);
-        for (label, indexes) in groups {
+        for ((_source, _batch_sequence, label), (input, indexes)) in groups {
             if input.num_columns() == 2 {
+                continue;
+            }
+            let owner = owners
+                .get(&label)
+                .ok_or_else(|| storage("node owner resolution was lost"))?;
+            let (route, fields) = property_projection(
+                &input,
+                2,
+                &indexes,
+                owner,
+                SymbolKind::Entity,
+                SemanticRouteKind::NodeProperty,
+                semantic_context,
+                semantic_bindings,
+            )?;
+            if fields.is_empty() {
                 continue;
             }
             let property = property_batch(
                 &input,
-                2,
                 "node_uuid",
                 "graphforge.entity_type",
-                &label,
+                &route,
                 &indexes,
+                &fields,
             )?;
+            let property = if owner.symbol.is_some() {
+                with_route_metadata_batch(
+                    &property,
+                    &route,
+                    semantic_context
+                        .expect("qualified owner has context")
+                        .fingerprint(),
+                )?
+            } else {
+                property
+            };
             let path = format!(
-                "properties/{label}/{:020}-{ordinal:020}.parquet",
+                "properties/{route}/{:020}-{ordinal:020}.parquet",
                 shape.parent_topology_generation + 1
             );
             artifacts.push(write_parquet(output, &path, &property, evidence)?);
@@ -342,6 +776,8 @@ fn encode_nodes(
     if details.next()?.is_some() || next_kind(&mut identities, 0)?.is_some() {
         return Err(storage("node streams contain unconsumed rows"));
     }
+    identities.account(evidence);
+    details.account(evidence);
     Ok(())
 }
 
@@ -351,19 +787,16 @@ fn encode_edges(
     output: &StableDirectory,
     shape: &ConstructionShape,
     ontology_mode: OntologyMode,
+    semantic_context: Option<&CompositionBindingContext>,
+    semantic_bindings: Option<&SemanticStorageBindings>,
     budgets: GraphConstructionBudgets,
     cancelled: &mut impl FnMut() -> bool,
     artifacts: &mut Vec<ConstructionEncodedArtifact>,
     evidence: &mut GraphConstructionEncodingEvidence,
 ) -> Result<(), GfError> {
-    if shape.edge_rows.len() > 1 {
-        return Err(storage(
-            "canonical edge encoding requires one stable schema",
-        ));
-    }
-    let Some(rows_name) = shape.edge_rows.first() else {
+    if shape.edge_rows.is_empty() {
         return Ok(());
-    };
+    }
     let details_name = shape
         .edge_details
         .as_deref()
@@ -376,33 +809,40 @@ fn encode_edges(
     let mut details = FixedReader::<EDGE_DETAIL_WIDTH>::open(source, details_name, evidence)?;
     let mut endpoints =
         FixedReader::<RESOLVED_ENDPOINT_WIDTH>::open(source, endpoints_name, evidence)?;
-    let row_file = source
-        .open_child_file(OsStr::new(rows_name))
-        .map_err(storage)?;
-    let mut rows = ParquetRecordBatchReaderBuilder::try_new(row_file)
-        .map_err(storage)?
-        .with_batch_size(budgets.max_batch_rows)
-        .build()
-        .map_err(storage)?;
+    let (mut row_cursors, mut row_heap) =
+        open_merged_rows(source, &shape.edge_rows, "edge_uuid", budgets, evidence)?;
     let mut ordinal = 0_u64;
-    for input in &mut rows {
+    loop {
         if cancelled() {
             return Err(storage("construction encoding cancelled"));
         }
-        let input = input.map_err(storage)?;
-        account_batch(&input, budgets, evidence)?;
-        let uuids = required_uuid(&input, "edge_uuid")?;
-        let srcs = required_uuid(&input, "source_uuid")?;
-        let dsts = required_uuid(&input, "target_uuid")?;
-        let routes = required_string(&input, "rel_type")?;
-        let mut out_uuid = Vec::with_capacity(input.num_rows());
-        let mut out_src = Vec::with_capacity(input.num_rows());
-        let mut out_dst = Vec::with_capacity(input.num_rows());
-        let mut out_id = Vec::with_capacity(input.num_rows());
-        let mut out_src_id = Vec::with_capacity(input.num_rows());
-        let mut out_dst_id = Vec::with_capacity(input.num_rows());
-        let mut groups = BTreeMap::<String, Vec<u32>>::new();
-        for row in 0..input.num_rows() {
+        let merged = next_merged_window(
+            &mut row_cursors,
+            &mut row_heap,
+            "edge_uuid",
+            budgets,
+            cancelled,
+            evidence,
+        )?;
+        if merged.is_empty() {
+            break;
+        }
+        let mut out_uuid = Vec::with_capacity(merged.len());
+        let mut out_src = Vec::with_capacity(merged.len());
+        let mut out_dst = Vec::with_capacity(merged.len());
+        let mut out_id = Vec::with_capacity(merged.len());
+        let mut out_src_id = Vec::with_capacity(merged.len());
+        let mut out_dst_id = Vec::with_capacity(merged.len());
+        let mut owners = BTreeMap::<String, ResolvedOwner>::new();
+        let mut groups =
+            BTreeMap::<(usize, u64, String), (RecordBatch, Vec<u32>, Vec<usize>)>::new();
+        for (output_row, merged_row) in merged.iter().enumerate() {
+            let input = &merged_row.batch;
+            let row = merged_row.row;
+            let uuids = required_uuid(input, "edge_uuid")?;
+            let srcs = required_uuid(input, "source_uuid")?;
+            let dsts = required_uuid(input, "target_uuid")?;
+            let routes = required_string(input, "rel_type")?;
             let uuid: [u8; 16] = uuids.value(row).try_into().expect("fixed UUID");
             let identity = next_kind(&mut identities, 1)?
                 .ok_or_else(|| storage("edge identity stream ended early"))?;
@@ -445,7 +885,33 @@ fn encode_edges(
             out_dst_id.push(u64::from_be_bytes(
                 target_endpoint[24..32].try_into().expect("fixed"),
             ));
-            groups.entry(route.to_owned()).or_default().push(row as u32);
+            if !owners.contains_key(route) {
+                let runtime_route = if ontology_mode == OntologyMode::Exploratory {
+                    "_exploratory"
+                } else {
+                    route
+                };
+                owners.insert(
+                    route.to_owned(),
+                    resolve_owner(
+                        semantic_context,
+                        semantic_bindings,
+                        SymbolKind::Relation,
+                        SemanticRouteKind::Relation,
+                        route,
+                        runtime_route,
+                    )?,
+                );
+            }
+            let group = groups
+                .entry((
+                    merged_row.source,
+                    merged_row.batch_sequence,
+                    route.to_owned(),
+                ))
+                .or_insert_with(|| (input.clone(), Vec::new(), Vec::new()));
+            group.1.push(u32::try_from(row).map_err(storage)?);
+            group.2.push(output_row);
         }
         if out_id.is_empty() {
             continue;
@@ -459,9 +925,18 @@ fn encode_edges(
             &out_dst_id,
             shape.runtime_catalog_now_micros,
         )?;
-        for (route, indexes) in groups {
-            let mut selected = select_rows(&canonical, &indexes)?;
-            let topology_route = if ontology_mode == OntologyMode::Exploratory {
+        for ((_source, _batch_sequence, route), (input, indexes, output_indexes)) in groups {
+            let output_indexes = output_indexes
+                .into_iter()
+                .map(|value| u32::try_from(value).map_err(storage))
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut selected = select_rows(&canonical, &output_indexes)?;
+            let owner = owners
+                .get(&route)
+                .ok_or_else(|| storage("edge owner resolution was lost"))?;
+            let topology_route = if owner.symbol.is_none()
+                && ontology_mode == OntologyMode::Exploratory
+            {
                 let routes = StringArray::from(vec![route.as_str(); selected.num_rows()]);
                 let mut fields = selected
                     .schema()
@@ -477,8 +952,17 @@ fn encode_edges(
                         .map_err(storage)?;
                 "_exploratory"
             } else {
-                route.as_str()
+                owner.topology_route.as_str()
             };
+            if owner.symbol.is_some() {
+                selected = with_route_metadata_batch(
+                    &selected,
+                    topology_route,
+                    semantic_context
+                        .expect("qualified owner has context")
+                        .fingerprint(),
+                )?;
+            }
             let ids = selected
                 .column_by_name("edge_id")
                 .and_then(|array| array.as_any().downcast_ref::<UInt64Array>())
@@ -488,16 +972,40 @@ fn encode_edges(
             let path = format!("topology/edges/{topology_route}/{first:020}-{last:020}.parquet");
             artifacts.push(write_parquet(output, &path, &selected, evidence)?);
             if input.num_columns() > 4 {
-                let property = property_batch(
+                let (property_route, fields) = property_projection(
                     &input,
                     4,
+                    &indexes,
+                    owner,
+                    SymbolKind::Relation,
+                    SemanticRouteKind::EdgeProperty,
+                    semantic_context,
+                    semantic_bindings,
+                )?;
+                if fields.is_empty() {
+                    continue;
+                }
+                let property = property_batch(
+                    &input,
                     "edge_uuid",
                     "graphforge.rel_type",
-                    &route,
+                    &property_route,
                     &indexes,
+                    &fields,
                 )?;
+                let property = if owner.symbol.is_some() {
+                    with_route_metadata_batch(
+                        &property,
+                        &property_route,
+                        semantic_context
+                            .expect("qualified owner has context")
+                            .fingerprint(),
+                    )?
+                } else {
+                    property
+                };
                 let path = format!(
-                    "edge_properties/{route}/{:020}-{ordinal:020}.parquet",
+                    "edge_properties/{property_route}/{:020}-{ordinal:020}.parquet",
                     shape.parent_topology_generation + 1
                 );
                 artifacts.push(write_parquet(output, &path, &property, evidence)?);
@@ -511,6 +1019,9 @@ fn encode_edges(
     {
         return Err(storage("edge streams contain unconsumed rows"));
     }
+    identities.account(evidence);
+    details.account(evidence);
+    endpoints.account(evidence);
     Ok(())
 }
 
@@ -584,18 +1095,18 @@ fn edge_batch(
 
 fn property_batch(
     input: &RecordBatch,
-    required: usize,
     uuid_name: &str,
     metadata_key: &str,
     owner: &str,
     indexes: &[u32],
+    field_indexes: &[usize],
 ) -> Result<RecordBatch, GfError> {
     let indexes = UInt32Array::from(indexes.to_vec());
     let mut fields = vec![uuid_field(uuid_name)];
     fields.extend(
-        input.schema().fields()[required..]
+        field_indexes
             .iter()
-            .map(|field| field.as_ref().clone()),
+            .map(|index| input.schema().field(*index).clone()),
     );
     let schema = Schema::new(fields).with_metadata(
         [(metadata_key.to_owned(), owner.to_owned())]
@@ -603,10 +1114,19 @@ fn property_batch(
             .collect(),
     );
     let columns = std::iter::once(input.column(0))
-        .chain(input.columns()[required..].iter())
+        .chain(field_indexes.iter().map(|index| input.column(*index)))
         .map(|array| take(array.as_ref(), &indexes, None).map_err(storage))
         .collect::<Result<Vec<ArrayRef>, _>>()?;
     RecordBatch::try_new(Arc::new(schema), columns).map_err(storage)
+}
+
+fn with_route_metadata_batch(
+    batch: &RecordBatch,
+    route: &str,
+    fingerprint: &str,
+) -> Result<RecordBatch, GfError> {
+    let schema = with_semantic_route_metadata(batch.schema().as_ref(), route, fingerprint);
+    RecordBatch::try_new(Arc::new(schema), batch.columns().to_vec()).map_err(storage)
 }
 
 fn select_rows(batch: &RecordBatch, indexes: &[u32]) -> Result<RecordBatch, GfError> {
@@ -654,16 +1174,22 @@ fn read_runtime_label_ids(
     source: &StableDirectory,
     name: &str,
     budgets: GraphConstructionBudgets,
+    evidence: &mut GraphConstructionEncodingEvidence,
 ) -> Result<BTreeMap<String, u32>, GfError> {
     let file = source.open_child_file(OsStr::new(name)).map_err(storage)?;
-    let mut reader = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(storage)?
-        .with_batch_size(budgets.max_batch_rows)
-        .build()
-        .map_err(storage)?;
+    let counter = IoCounter::default();
+    let mut reader = ParquetRecordBatchReaderBuilder::try_new(CountingChunkReader {
+        file,
+        counter: counter.clone(),
+    })
+    .map_err(storage)?
+    .with_batch_size(budgets.max_batch_rows)
+    .build()
+    .map_err(storage)?;
     let mut labels = BTreeMap::new();
     for batch in &mut reader {
         let batch = batch.map_err(storage)?;
+        account_batch(&batch, budgets, evidence)?;
         let kinds = required_string(&batch, "entry_kind")?;
         let names = required_string(&batch, "name")?;
         let ids = batch
@@ -679,6 +1205,9 @@ fn read_runtime_label_ids(
             }
         }
     }
+    let (bytes, operations) = counter.values();
+    evidence.input_read_bytes = evidence.input_read_bytes.saturating_add(bytes);
+    evidence.input_read_operations = evidence.input_read_operations.saturating_add(operations);
     Ok(labels)
 }
 
@@ -722,7 +1251,16 @@ fn write_parquet(
         .create_replaceable_child_file(OsStr::new(&temporary))
         .map_err(storage)?;
     let identity = file_identity(&file).map_err(storage)?;
-    let mut writer = ArrowWriter::try_new(file, batch.schema(), None).map_err(storage)?;
+    let counter = IoCounter::default();
+    let mut writer = ArrowWriter::try_new(
+        CountingWriter {
+            inner: file,
+            counter: counter.clone(),
+        },
+        batch.schema(),
+        None,
+    )
+    .map_err(storage)?;
     writer.write(batch).map_err(storage)?;
     writer.close().map_err(storage)?;
     let mut file = directory
@@ -734,8 +1272,9 @@ fn write_parquet(
         .replace_child(OsStr::new(&temporary), identity, OsStr::new(&name))
         .map_err(storage)?;
     directory.sync().map_err(storage)?;
-    evidence.output_write_bytes = evidence.output_write_bytes.saturating_add(artifact.bytes);
-    evidence.output_write_operations = evidence.output_write_operations.saturating_add(1);
+    let (written, operations) = counter.values();
+    evidence.output_write_bytes = evidence.output_write_bytes.saturating_add(written);
+    evidence.output_write_operations = evidence.output_write_operations.saturating_add(operations);
     evidence.fsync_operations = evidence.fsync_operations.saturating_add(2);
     Ok(artifact)
 }
@@ -857,6 +1396,12 @@ fn authenticate_inventory(
 ) -> Result<(), GfError> {
     if inventory.root != ENCODED_ROOT
         || inventory.shape_inputs_sha256.len() != 64
+        || inventory
+            .semantic_authority_sha256
+            .as_ref()
+            .is_some_and(|digest| {
+                digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
         || !inventory
             .shape_inputs_sha256
             .bytes()
@@ -903,26 +1448,30 @@ fn install_json<T: Serialize>(
 }
 
 struct FixedReader<const N: usize> {
-    reader: BufReader<File>,
+    reader: BufReader<CountingInput<File>>,
+    counter: IoCounter,
 }
 
 impl<const N: usize> FixedReader<N> {
     fn open(
         root: &StableDirectory,
         name: &str,
-        evidence: &mut GraphConstructionEncodingEvidence,
+        _evidence: &mut GraphConstructionEncodingEvidence,
     ) -> Result<Self, GfError> {
         let file = root.open_child_file(OsStr::new(name)).map_err(storage)?;
         if file.metadata().map_err(storage)?.len() % N as u64 != 0 {
             return Err(storage("fixed-width construction stream is truncated"));
         }
-        let bytes = file.metadata().map_err(storage)?.len();
-        evidence.input_read_bytes = evidence.input_read_bytes.saturating_add(bytes);
-        evidence.input_read_operations = evidence
-            .input_read_operations
-            .saturating_add(bytes.div_ceil(COPY_BUFFER_BYTES as u64));
+        let counter = IoCounter::default();
         Ok(Self {
-            reader: BufReader::with_capacity(COPY_BUFFER_BYTES, file),
+            reader: BufReader::with_capacity(
+                COPY_BUFFER_BYTES,
+                CountingInput {
+                    inner: file,
+                    counter: counter.clone(),
+                },
+            ),
+            counter,
         })
     }
 
@@ -940,6 +1489,12 @@ impl<const N: usize> FixedReader<N> {
             read += amount;
         }
         Ok(Some(record))
+    }
+
+    fn account(&self, evidence: &mut GraphConstructionEncodingEvidence) {
+        let (bytes, operations) = self.counter.values();
+        evidence.input_read_bytes = evidence.input_read_bytes.saturating_add(bytes);
+        evidence.input_read_operations = evidence.input_read_operations.saturating_add(operations);
     }
 }
 

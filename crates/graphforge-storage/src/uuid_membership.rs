@@ -11,7 +11,7 @@ use std::cmp::Reverse;
 use std::collections::{BTreeSet, BinaryHeap, HashMap};
 use std::fmt::Write as _;
 use std::fs::{self, File};
-use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use arrow::array::{Array, FixedSizeBinaryArray, UInt64Array};
@@ -33,6 +33,7 @@ const BULK_IO_BYTES: usize = 1 << 20;
 // that can be discarded and reconstructed without violating that contract.
 const INDEX_DIR: &str = "topology/uuid-membership";
 const MANIFEST: &str = "manifest.json";
+const CONSTRUCTION_INTENT: &str = ".construction-intent.json";
 
 fn storage_err(error: impl std::fmt::Display) -> GfError {
     GfError::Storage(format!("UUID membership index: {error}"))
@@ -573,6 +574,9 @@ pub struct UuidMembershipIndex {
 /// Long-lived authenticated UUID-index snapshot retained by construction writers.
 #[derive(Debug)]
 pub struct AuthenticatedUuidIndexSnapshot {
+    graph_root: graphforge_filesystem::StableDirectory,
+    graph_root_path: PathBuf,
+    graph_root_identity: graphforge_filesystem::FileIdentity,
     root: graphforge_filesystem::StableDirectory,
     root_identity: graphforge_filesystem::FileIdentity,
     manifest_file: File,
@@ -591,13 +595,122 @@ pub(crate) struct ConstructionIndexOutput {
     pub sha256: String,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct ConstructionIndexReference {
+    pub source_root: String,
+    pub source_root_volume: u64,
+    pub source_root_file_id: String,
+    pub source_path: String,
+    pub source_volume: u64,
+    pub source_file_id: String,
+    pub target_path: String,
+    pub bytes: u64,
+    pub sha256: String,
+    pub parent_manifest_sha256: String,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ConstructionIndexEncoding {
     pub artifacts: Vec<ConstructionIndexOutput>,
+    pub retained_references: Vec<ConstructionIndexReference>,
     pub input_records: u64,
+    pub read_bytes: u64,
+    pub read_operations: u64,
     pub write_bytes: u64,
+    pub write_operations: u64,
+    pub fsync_operations: u64,
+    pub created_runs: u64,
     pub retained_runs: u64,
     pub retained_payload_bytes: u64,
+    pub peak_buffer_bytes: u64,
+    pub peak_temporary_bytes: u64,
+}
+
+#[derive(Default)]
+struct ConstructionIndexWork {
+    read_bytes: u64,
+    read_operations: u64,
+    write_bytes: u64,
+    write_operations: u64,
+    fsync_operations: u64,
+    created_runs: u64,
+    retained_runs: u64,
+    retained_payload_bytes: u64,
+    peak_buffer_bytes: u64,
+    peak_temporary_bytes: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ConstructionRecoveryIntent {
+    format_version: u32,
+    generation: u64,
+    parent_generation: u64,
+    identities_name: String,
+    source_volume: u64,
+    source_file_id: String,
+    source_bytes: u64,
+    authority_sha256: String,
+}
+
+struct ConstructionIndexCleanupGuard<'a> {
+    encoded: &'a graphforge_filesystem::StableDirectory,
+    armed: bool,
+}
+
+impl ConstructionIndexCleanupGuard<'_> {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ConstructionIndexCleanupGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = cleanup_private_construction_index(self.encoded);
+        }
+    }
+}
+
+impl ConstructionRecoveryIntent {
+    fn authenticate(&self) -> Result<(), GfError> {
+        let expected = construction_intent_digest(
+            self.format_version,
+            self.generation,
+            self.parent_generation,
+            &self.identities_name,
+            self.source_volume,
+            &self.source_file_id,
+            self.source_bytes,
+        );
+        if self.format_version != FORMAT_VERSION || self.authority_sha256 != expected {
+            return Err(storage_err(
+                "construction recovery intent authentication failed",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn construction_intent_digest(
+    format_version: u32,
+    generation: u64,
+    parent_generation: u64,
+    identities_name: &str,
+    source_volume: u64,
+    source_file_id: &str,
+    source_bytes: u64,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"graphforge.uuid-membership.construction-intent.v1\0");
+    digest.update(format_version.to_be_bytes());
+    digest.update(generation.to_be_bytes());
+    digest.update(parent_generation.to_be_bytes());
+    digest.update((identities_name.len() as u64).to_be_bytes());
+    digest.update(identities_name.as_bytes());
+    digest.update(source_volume.to_be_bytes());
+    digest.update(source_file_id.as_bytes());
+    digest.update(source_bytes.to_be_bytes());
+    hex_bytes(&digest.finalize())
 }
 
 #[cfg(test)]
@@ -954,7 +1067,59 @@ pub(crate) fn pin_uuid_construction_snapshot(
 }
 
 impl AuthenticatedUuidIndexSnapshot {
+    fn open_retained_file(&self, record: &FileRecord) -> Result<File, GfError> {
+        let (held, expected) = self
+            .runs
+            .iter()
+            .find_map(|run| {
+                if run.descriptor.identities == *record {
+                    Some((&run.identities, run.identities_identity))
+                } else if run.descriptor.node_surrogates == *record {
+                    Some((&run.node_surrogates, run.node_surrogates_identity))
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| storage_err("retained UUID descriptor is not authenticated"))?;
+        let file = held.try_clone().map_err(storage_err)?;
+        if graphforge_filesystem::file_identity(&file).map_err(storage_err)? != expected
+            || graphforge_filesystem::file_link_count(&file).map_err(storage_err)? != 1
+        {
+            return Err(storage_err("retained UUID run identity changed"));
+        }
+        Ok(file)
+    }
+
+    fn retained_reference(
+        &self,
+        record: &FileRecord,
+    ) -> Result<ConstructionIndexReference, GfError> {
+        let file = self.open_retained_file(record)?;
+        let identity = graphforge_filesystem::file_identity(&file).map_err(storage_err)?;
+        Ok(ConstructionIndexReference {
+            source_root: self.graph_root_path.to_string_lossy().into_owned(),
+            source_root_volume: self.graph_root_identity.volume_serial,
+            source_root_file_id: hex_bytes(&self.graph_root_identity.file_id),
+            source_path: format!("{INDEX_DIR}/{}", record.name),
+            source_volume: identity.volume_serial,
+            source_file_id: hex_bytes(&identity.file_id),
+            target_path: format!("{INDEX_DIR}/{}", record.name),
+            bytes: record
+                .count
+                .saturating_mul(if record.name.starts_with("identities-") {
+                    IDENTITY_RECORD_BYTES
+                } else {
+                    NODE_LOOKUP_RECORD_BYTES
+                }),
+            sha256: record.sha256.clone(),
+            parent_manifest_sha256: self.manifest_sha256.clone(),
+        })
+    }
+
     pub(crate) fn open_at_generation(project_dir: &Path, generation: u64) -> Result<Self, GfError> {
+        let graph_root =
+            graphforge_filesystem::StableDirectory::open(project_dir).map_err(storage_err)?;
+        let graph_root_identity = graph_root.identity();
         let root_path = project_dir.join(INDEX_DIR);
         let root = graphforge_filesystem::StableDirectory::open(&root_path).map_err(storage_err)?;
         let root_identity = root.identity();
@@ -993,6 +1158,9 @@ impl AuthenticatedUuidIndexSnapshot {
             });
         }
         Ok(Self {
+            graph_root,
+            graph_root_path: project_dir.to_path_buf(),
+            graph_root_identity,
             root,
             root_identity,
             manifest_file,
@@ -1027,6 +1195,10 @@ impl AuthenticatedUuidIndexSnapshot {
     }
 
     pub(crate) fn revalidate(&self) -> Result<(), GfError> {
+        self.graph_root.revalidate_named().map_err(storage_err)?;
+        if self.graph_root.identity() != self.graph_root_identity {
+            return Err(storage_err("UUID graph root identity changed"));
+        }
         self.root.revalidate_named().map_err(storage_err)?;
         if self.root.identity() != self.root_identity {
             return Err(storage_err("UUID index root identity changed"));
@@ -1230,6 +1402,48 @@ pub(crate) fn encode_construction_index(
     live_edges: u64,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<ConstructionIndexEncoding, GfError> {
+    cleanup_private_construction_index(encoded)?;
+    let mut cleanup_guard = ConstructionIndexCleanupGuard {
+        encoded,
+        armed: true,
+    };
+    let result = encode_construction_index_inner(
+        source,
+        identities_name,
+        encoded,
+        generation,
+        parent_generation,
+        parent,
+        live_nodes,
+        live_edges,
+        cancelled,
+    );
+    match result {
+        Ok(value) => {
+            cleanup_guard.disarm();
+            Ok(value)
+        }
+        Err(original) => {
+            cleanup_private_construction_index(encoded).map_err(|cleanup| {
+                storage_err(format!("{original}; exact cleanup also failed: {cleanup}"))
+            })?;
+            Err(original)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn encode_construction_index_inner(
+    source: &graphforge_filesystem::StableDirectory,
+    identities_name: &str,
+    encoded: &graphforge_filesystem::StableDirectory,
+    generation: u64,
+    parent_generation: u64,
+    parent: Option<&AuthenticatedUuidIndexSnapshot>,
+    live_nodes: u64,
+    live_edges: u64,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<ConstructionIndexEncoding, GfError> {
     let graph = encoded
         .create_child_directory(std::ffi::OsStr::new("graph"))
         .map_err(storage_err)?;
@@ -1267,81 +1481,127 @@ pub(crate) fn encode_construction_index(
         ));
     }
 
+    let mut work = ConstructionIndexWork::default();
     let identity_temp = format!(".construction-identities-{}.tmp", Uuid::new_v4().simple());
     let surrogate_temp = format!(".construction-surrogates-{}.tmp", Uuid::new_v4().simple());
-    let mut input = BufReader::with_capacity(
-        BULK_IO_BYTES,
-        source
-            .open_child_file(std::ffi::OsStr::new(identities_name))
-            .map_err(storage_err)?,
+    let mut input = source
+        .open_child_file(std::ffi::OsStr::new(identities_name))
+        .map_err(storage_err)?;
+    let input_len = input.metadata().map_err(storage_err)?.len();
+    if input_len % IDENTITY_RECORD_BYTES != 0 {
+        return Err(storage_err("construction identity stream is truncated"));
+    }
+    let source_identity = graphforge_filesystem::file_identity(&input).map_err(storage_err)?;
+    let source_file_id = hex_bytes(&source_identity.file_id);
+    let mut intent = ConstructionRecoveryIntent {
+        format_version: FORMAT_VERSION,
+        generation,
+        parent_generation,
+        identities_name: identities_name.to_owned(),
+        source_volume: source_identity.volume_serial,
+        source_file_id: source_file_id.clone(),
+        source_bytes: input_len,
+        authority_sha256: String::new(),
+    };
+    intent.authority_sha256 = construction_intent_digest(
+        intent.format_version,
+        intent.generation,
+        intent.parent_generation,
+        &intent.identities_name,
+        intent.source_volume,
+        &intent.source_file_id,
+        intent.source_bytes,
     );
-    let identity_file = index
+    write_construction_intent(&index, &intent, &mut work)?;
+    crate::graph_construction::construction_failpoint("uuid_encode.after_intent");
+    let mut identity_writer = index
         .create_replaceable_child_file(std::ffi::OsStr::new(&identity_temp))
         .map_err(storage_err)?;
-    let surrogate_file = index
+    let mut surrogate_writer = index
         .create_replaceable_child_file(std::ffi::OsStr::new(&surrogate_temp))
         .map_err(storage_err)?;
     let identity_identity =
-        graphforge_filesystem::file_identity(&identity_file).map_err(storage_err)?;
+        graphforge_filesystem::file_identity(&identity_writer).map_err(storage_err)?;
     let surrogate_identity =
-        graphforge_filesystem::file_identity(&surrogate_file).map_err(storage_err)?;
-    let mut identity_writer = BufWriter::with_capacity(BULK_IO_BYTES, identity_file);
-    let mut surrogate_writer = BufWriter::with_capacity(BULK_IO_BYTES, surrogate_file);
+        graphforge_filesystem::file_identity(&surrogate_writer).map_err(storage_err)?;
+    crate::graph_construction::construction_failpoint("uuid_encode.after_temps");
+    let aligned_input_bytes = (BULK_IO_BYTES / IDENTITY_RECORD_WIDTH) * IDENTITY_RECORD_WIDTH;
+    let aligned_surrogate_bytes =
+        (BULK_IO_BYTES / NODE_LOOKUP_RECORD_WIDTH) * NODE_LOOKUP_RECORD_WIDTH;
+    let mut input_block = vec![0_u8; aligned_input_bytes];
+    let mut surrogate_block = Vec::with_capacity(aligned_surrogate_bytes);
+    work.peak_buffer_bytes = (input_block.len() + surrogate_block.capacity()) as u64;
     let mut previous_uuid = None;
     let mut previous_surrogate = 0_u64;
     let mut node_count = 0_u64;
     let mut edge_count = 0_u64;
-    loop {
+    let mut remaining = input_len;
+    while remaining != 0 {
         if cancelled() {
             return Err(storage_err("construction index encoding cancelled"));
         }
-        let mut record = [0_u8; IDENTITY_RECORD_WIDTH];
-        let mut filled = 0;
-        while filled < record.len() {
-            let read = input.read(&mut record[filled..]).map_err(storage_err)?;
-            if read == 0 {
-                if filled == 0 {
-                    break;
+        let count =
+            usize::try_from(remaining.min(input_block.len() as u64)).map_err(storage_err)?;
+        input
+            .read_exact(&mut input_block[..count])
+            .map_err(storage_err)?;
+        work.read_bytes = work.read_bytes.saturating_add(count as u64);
+        work.read_operations = work.read_operations.saturating_add(1);
+        for record in input_block[..count].chunks_exact_mut(IDENTITY_RECORD_WIDTH) {
+            let uuid: [u8; 16] = record[..16].try_into().expect("fixed UUID");
+            if previous_uuid.is_some_and(|prior| prior >= uuid)
+                || record[17..24].iter().any(|byte| *byte != 0)
+            {
+                return Err(storage_err("construction identity stream is not canonical"));
+            }
+            previous_uuid = Some(uuid);
+            match record[16] {
+                0 => {
+                    let surrogate = u64::from_be_bytes(record[24..32].try_into().expect("fixed"));
+                    if surrogate == 0 || surrogate <= previous_surrogate {
+                        return Err(storage_err(
+                            "construction node surrogate stream is not increasing",
+                        ));
+                    }
+                    previous_surrogate = surrogate;
+                    if surrogate_block.len() + NODE_LOOKUP_RECORD_WIDTH > aligned_surrogate_bytes {
+                        surrogate_writer
+                            .write_all(&surrogate_block)
+                            .map_err(storage_err)?;
+                        work.write_bytes = work
+                            .write_bytes
+                            .saturating_add(surrogate_block.len() as u64);
+                        work.write_operations = work.write_operations.saturating_add(1);
+                        surrogate_block.clear();
+                    }
+                    surrogate_block.extend_from_slice(&surrogate.to_be_bytes());
+                    surrogate_block.extend_from_slice(&uuid);
+                    node_count = node_count.saturating_add(1);
                 }
-                return Err(storage_err("construction identity stream is truncated"));
-            }
-            filled += read;
-        }
-        if filled == 0 {
-            break;
-        }
-        let uuid: [u8; 16] = record[..16].try_into().expect("fixed UUID");
-        if previous_uuid.is_some_and(|prior| prior >= uuid)
-            || record[17..24].iter().any(|byte| *byte != 0)
-        {
-            return Err(storage_err("construction identity stream is not canonical"));
-        }
-        previous_uuid = Some(uuid);
-        match record[16] {
-            0 => {
-                let surrogate = u64::from_be_bytes(record[24..32].try_into().expect("fixed"));
-                if surrogate == 0 || surrogate <= previous_surrogate {
-                    return Err(storage_err(
-                        "construction node surrogate stream is not increasing",
-                    ));
+                1 => {
+                    // Construction assigns edge surrogates for topology; v3
+                    // edge membership deliberately stores zero.
+                    record[24..32].fill(0);
+                    edge_count = edge_count.saturating_add(1);
                 }
-                previous_surrogate = surrogate;
-                surrogate_writer
-                    .write_all(&surrogate.to_be_bytes())
-                    .and_then(|()| surrogate_writer.write_all(&uuid))
-                    .map_err(storage_err)?;
-                node_count = node_count.saturating_add(1);
+                _ => return Err(storage_err("construction identity kind is invalid")),
             }
-            1 if record[24..32].iter().any(|byte| *byte != 0) => {
-                // Construction assigns edge surrogates for canonical topology,
-                // while v3 edge membership deliberately stores zero.
-                record[24..32].fill(0);
-                edge_count = edge_count.saturating_add(1);
-            }
-            1 => edge_count = edge_count.saturating_add(1),
-            _ => return Err(storage_err("construction identity kind is invalid")),
         }
-        identity_writer.write_all(&record).map_err(storage_err)?;
+        identity_writer
+            .write_all(&input_block[..count])
+            .map_err(storage_err)?;
+        work.write_bytes = work.write_bytes.saturating_add(count as u64);
+        work.write_operations = work.write_operations.saturating_add(1);
+        remaining -= count as u64;
+    }
+    if !surrogate_block.is_empty() {
+        surrogate_writer
+            .write_all(&surrogate_block)
+            .map_err(storage_err)?;
+        work.write_bytes = work
+            .write_bytes
+            .saturating_add(surrogate_block.len() as u64);
+        work.write_operations = work.write_operations.saturating_add(1);
     }
     if manifest.live_node_count.saturating_add(node_count) != live_nodes
         || manifest.live_edge_count.saturating_add(edge_count) != live_edges
@@ -1352,8 +1612,9 @@ pub(crate) fn encode_construction_index(
     }
     identity_writer.flush().map_err(storage_err)?;
     surrogate_writer.flush().map_err(storage_err)?;
-    identity_writer.get_ref().sync_all().map_err(storage_err)?;
-    surrogate_writer.get_ref().sync_all().map_err(storage_err)?;
+    identity_writer.sync_all().map_err(storage_err)?;
+    surrogate_writer.sync_all().map_err(storage_err)?;
+    work.fsync_operations = work.fsync_operations.saturating_add(2);
     drop(identity_writer);
     drop(surrogate_writer);
 
@@ -1366,6 +1627,7 @@ pub(crate) fn encode_construction_index(
         generation,
         IDENTITY_RECORD_WIDTH,
         &mut artifacts,
+        &mut work,
     )?;
     let surrogate_record = describe_and_install_construction_run(
         &index,
@@ -1375,11 +1637,13 @@ pub(crate) fn encode_construction_index(
         generation,
         NODE_LOOKUP_RECORD_WIDTH,
         &mut artifacts,
+        &mut work,
     )?;
     let mut output_names = artifacts
         .iter()
         .map(|artifact| artifact.name.clone())
         .collect::<BTreeSet<_>>();
+    crate::graph_construction::construction_failpoint("uuid_encode.after_delta_runs");
 
     if parent_generation == 0 {
         let base_identity = install_empty_construction_run(
@@ -1388,6 +1652,7 @@ pub(crate) fn encode_construction_index(
             0,
             IDENTITY_RECORD_WIDTH,
             &mut artifacts,
+            &mut work,
         )?;
         let base_surrogate = install_empty_construction_run(
             &index,
@@ -1395,6 +1660,7 @@ pub(crate) fn encode_construction_index(
             0,
             NODE_LOOKUP_RECORD_WIDTH,
             &mut artifacts,
+            &mut work,
         )?;
         output_names.insert(base_identity.name.clone());
         output_names.insert(base_surrogate.name.clone());
@@ -1433,8 +1699,10 @@ pub(crate) fn encode_construction_index(
         &mut artifacts,
         &mut output_names,
         &mut retained_payload_bytes,
+        &mut work,
         cancelled,
     )?;
+    work.retained_payload_bytes = retained_payload_bytes;
     manifest.current_generation = generation;
     manifest.live_node_count = live_nodes;
     manifest.live_edge_count = live_edges;
@@ -1444,9 +1712,24 @@ pub(crate) fn encode_construction_index(
     validate_run_descriptors(&manifest)?;
 
     let body = serde_json::to_vec(&manifest).map_err(storage_err)?;
-    let manifest_output = install_construction_bytes(&index, MANIFEST, &body)?;
+    let manifest_output = install_construction_bytes(&index, MANIFEST, &body, &mut work)?;
+    crate::graph_construction::construction_failpoint("uuid_encode.after_manifest");
     artifacts.push(manifest_output);
     let retained_names = manifest_file_names(&manifest);
+    let created_payload_bytes = artifacts
+        .iter()
+        .filter(|artifact| artifact.name != MANIFEST)
+        .map(|artifact| artifact.bytes)
+        .sum::<u64>();
+    work.created_runs = artifacts
+        .iter()
+        .filter(|artifact| artifact.name != MANIFEST)
+        .count() as u64;
+    // All byte and operation counters above are updated at the actual read,
+    // write, flush, and durability sites. Never reconstruct I/O from file
+    // lengths here: short reads and discarded carry outputs are observable.
+    work.peak_buffer_bytes = work.peak_buffer_bytes.max((3 * BULK_IO_BYTES) as u64);
+    work.peak_temporary_bytes = created_payload_bytes.saturating_add(body.len() as u64);
     for artifact in artifacts
         .iter()
         .filter(|artifact| artifact.name != MANIFEST && !retained_names.contains(&artifact.name))
@@ -1462,20 +1745,161 @@ pub(crate) fn encode_construction_index(
     artifacts
         .retain(|artifact| artifact.name == MANIFEST || retained_names.contains(&artifact.name));
     artifacts.sort_unstable_by(|left, right| left.name.cmp(&right.name));
-    let write_bytes = artifacts.iter().map(|artifact| artifact.bytes).sum();
+    let mut retained_references = Vec::new();
+    let locally_owned = artifacts
+        .iter()
+        .map(|artifact| artifact.name.as_str())
+        .collect::<BTreeSet<_>>();
+    if let Some(parent) = parent {
+        let mut referenced = BTreeSet::new();
+        for record in manifest
+            .runs
+            .iter()
+            .flat_map(|run| [&run.identities, &run.node_surrogates])
+        {
+            if !locally_owned.contains(record.name.as_str())
+                && referenced.insert(record.name.clone())
+            {
+                retained_references.push(parent.retained_reference(record)?);
+            }
+        }
+        work.retained_runs = manifest
+            .runs
+            .iter()
+            .filter(|run| {
+                !locally_owned.contains(run.identities.name.as_str())
+                    && !locally_owned.contains(run.node_surrogates.name.as_str())
+            })
+            .count() as u64;
+        parent.revalidate()?;
+    }
+    retained_references.sort_unstable_by(|left, right| left.target_path.cmp(&right.target_path));
+    let intent_file = index
+        .open_child_file(std::ffi::OsStr::new(CONSTRUCTION_INTENT))
+        .map_err(storage_err)?;
+    let intent_identity =
+        graphforge_filesystem::file_identity(&intent_file).map_err(storage_err)?;
+    index
+        .unlink_child_if_identity(std::ffi::OsStr::new(CONSTRUCTION_INTENT), intent_identity)
+        .map_err(storage_err)?;
+    crate::graph_construction::construction_failpoint("uuid_encode.after_intent_removal");
     index.sync().map_err(storage_err)?;
     cache.sync().map_err(storage_err)?;
     graph.sync().map_err(storage_err)?;
     encoded.sync().map_err(storage_err)?;
+    work.fsync_operations = work.fsync_operations.saturating_add(4);
     Ok(ConstructionIndexEncoding {
         artifacts,
+        retained_references,
         input_records: node_count.saturating_add(edge_count),
-        write_bytes,
-        retained_runs: manifest.runs.len() as u64,
-        retained_payload_bytes,
+        read_bytes: work.read_bytes,
+        read_operations: work.read_operations,
+        write_bytes: work.write_bytes,
+        write_operations: work.write_operations,
+        fsync_operations: work.fsync_operations,
+        created_runs: work.created_runs,
+        retained_runs: work.retained_runs,
+        retained_payload_bytes: work.retained_payload_bytes,
+        peak_buffer_bytes: work.peak_buffer_bytes,
+        peak_temporary_bytes: work.peak_temporary_bytes,
     })
 }
 
+fn cleanup_private_construction_index(
+    encoded: &graphforge_filesystem::StableDirectory,
+) -> Result<(), GfError> {
+    let graph = match encoded.open_child_directory(std::ffi::OsStr::new("graph")) {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(storage_err(error)),
+    };
+    let cache = match graph.open_child_directory(std::ffi::OsStr::new(".graphforge-cache")) {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(storage_err(error)),
+    };
+    let index = match cache.open_child_directory(std::ffi::OsStr::new("uuid-membership")) {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(storage_err(error)),
+    };
+    match index.open_child_file(std::ffi::OsStr::new(CONSTRUCTION_INTENT)) {
+        Ok(mut file) => {
+            if file.metadata().map_err(storage_err)?.len() > 16 * 1024 {
+                return Err(storage_err("construction recovery intent is oversized"));
+            }
+            let mut body = Vec::new();
+            file.read_to_end(&mut body).map_err(storage_err)?;
+            let intent: ConstructionRecoveryIntent =
+                serde_json::from_slice(&body).map_err(storage_err)?;
+            intent.authenticate()?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(storage_err(error)),
+    }
+    for name in index.child_names().map_err(storage_err)? {
+        let name_text = name
+            .to_str()
+            .ok_or_else(|| storage_err("construction recovery inventory name is not UTF-8"))?;
+        if name_text != CONSTRUCTION_INTENT
+            && name_text != MANIFEST
+            && !name_text.starts_with(".construction-")
+            && !name_text.starts_with(".manifest.json-")
+            && !name_text.starts_with("identities-v3")
+            && !name_text.starts_with("node-surrogates-v3")
+        {
+            return Err(storage_err(
+                "construction recovery inventory contains an unauthorised object",
+            ));
+        }
+        let file = index.open_child_file(&name).map_err(storage_err)?;
+        if graphforge_filesystem::file_link_count(&file).map_err(storage_err)? != 1 {
+            return Err(storage_err(
+                "private construction index artifact has extra links",
+            ));
+        }
+        let identity = graphforge_filesystem::file_identity(&file).map_err(storage_err)?;
+        index
+            .unlink_child_if_identity(&name, identity)
+            .map_err(storage_err)?;
+    }
+    index.sync().map_err(storage_err)?;
+    cache.sync().map_err(storage_err)?;
+    graph.sync().map_err(storage_err)?;
+    encoded.sync().map_err(storage_err)
+}
+
+fn write_construction_intent(
+    index: &graphforge_filesystem::StableDirectory,
+    intent: &ConstructionRecoveryIntent,
+    work: &mut ConstructionIndexWork,
+) -> Result<(), GfError> {
+    intent.authenticate()?;
+    let body = serde_json::to_vec(intent).map_err(storage_err)?;
+    let temporary = format!(".construction-intent-{}.tmp", Uuid::new_v4().simple());
+    let mut file = index
+        .create_replaceable_child_file(std::ffi::OsStr::new(&temporary))
+        .map_err(storage_err)?;
+    let identity = graphforge_filesystem::file_identity(&file).map_err(storage_err)?;
+    file.write_all(&body).map_err(storage_err)?;
+    work.write_bytes = work.write_bytes.saturating_add(body.len() as u64);
+    work.write_operations = work.write_operations.saturating_add(1);
+    file.sync_all().map_err(storage_err)?;
+    work.fsync_operations = work.fsync_operations.saturating_add(1);
+    drop(file);
+    index
+        .replace_child(
+            std::ffi::OsStr::new(&temporary),
+            identity,
+            std::ffi::OsStr::new(CONSTRUCTION_INTENT),
+        )
+        .map_err(storage_err)?;
+    index.sync().map_err(storage_err)?;
+    work.fsync_operations = work.fsync_operations.saturating_add(1);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 fn compact_construction_levels(
     output: &graphforge_filesystem::StableDirectory,
     parent: Option<&AuthenticatedUuidIndexSnapshot>,
@@ -1484,6 +1908,7 @@ fn compact_construction_levels(
     artifacts: &mut Vec<ConstructionIndexOutput>,
     output_names: &mut BTreeSet<String>,
     retained_payload_bytes: &mut u64,
+    work: &mut ConstructionIndexWork,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), GfError> {
     for level in 0_u8..=63 {
@@ -1522,6 +1947,7 @@ fn compact_construction_levels(
                 IDENTITY_RECORD_WIDTH,
                 artifacts,
                 retained_payload_bytes,
+                work,
                 cancelled,
             )?;
             let surrogates = merge_construction_records(
@@ -1535,6 +1961,7 @@ fn compact_construction_levels(
                 NODE_LOOKUP_RECORD_WIDTH,
                 artifacts,
                 retained_payload_bytes,
+                work,
                 cancelled,
             )?;
             output_names.insert(identities.name.clone());
@@ -1572,34 +1999,34 @@ fn merge_construction_records(
     width: usize,
     artifacts: &mut Vec<ConstructionIndexOutput>,
     retained_payload_bytes: &mut u64,
+    work: &mut ConstructionIndexWork,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<FileRecord, GfError> {
-    let mut left_reader = BufReader::with_capacity(
-        BULK_IO_BYTES,
+    let mut left_reader = ConstructionBlockCursor::new(
         open_construction_source(output, parent, left, output_names, retained_payload_bytes)?,
-    );
-    let mut right_reader = BufReader::with_capacity(
-        BULK_IO_BYTES,
+        left.clone(),
+        width,
+    )?;
+    let mut right_reader = ConstructionBlockCursor::new(
         open_construction_source(output, parent, right, output_names, retained_payload_bytes)?,
-    );
+        right.clone(),
+        width,
+    )?;
     let temporary = format!(".construction-merge-{}.tmp", Uuid::new_v4().simple());
     let file = output
         .create_replaceable_child_file(std::ffi::OsStr::new(&temporary))
         .map_err(storage_err)?;
     let identity = graphforge_filesystem::file_identity(&file).map_err(storage_err)?;
-    let mut writer = BufWriter::with_capacity(BULK_IO_BYTES, file);
+    let mut writer = file;
     let key_width = if width == IDENTITY_RECORD_WIDTH {
         16
     } else {
         8
     };
-    let mut left_record = read_construction_record(&mut left_reader, width)?;
-    let mut right_record = read_construction_record(&mut right_reader, width)?;
-    while left_record.is_some() || right_record.is_some() {
-        if cancelled() {
-            return Err(storage_err("construction index encoding cancelled"));
-        }
-        let take_left = match (&left_record, &right_record) {
+    let output_bytes = (BULK_IO_BYTES / width) * width;
+    let mut output_block = Vec::with_capacity(output_bytes);
+    while left_reader.current().is_some() || right_reader.current().is_some() {
+        let take_left = match (left_reader.current(), right_reader.current()) {
             (Some(left), Some(right)) => {
                 if left[..key_width] == right[..key_width] {
                     return Err(storage_err("construction index merge found duplicate key"));
@@ -1610,24 +2037,140 @@ fn merge_construction_records(
             (None, Some(_)) => false,
             (None, None) => break,
         };
-        if take_left {
-            writer
-                .write_all(left_record.as_ref().expect("left exists"))
-                .map_err(storage_err)?;
-            left_record = read_construction_record(&mut left_reader, width)?;
+        let selected = if take_left {
+            left_reader.current().expect("left exists")
         } else {
-            writer
-                .write_all(right_record.as_ref().expect("right exists"))
-                .map_err(storage_err)?;
-            right_record = read_construction_record(&mut right_reader, width)?;
+            right_reader.current().expect("right exists")
+        };
+        output_block.extend_from_slice(selected);
+        if take_left {
+            left_reader.advance()?;
+        } else {
+            right_reader.advance()?;
+        }
+        if output_block.len() + width > output_bytes {
+            if cancelled() {
+                return Err(storage_err("construction index encoding cancelled"));
+            }
+            writer.write_all(&output_block).map_err(storage_err)?;
+            work.write_bytes = work.write_bytes.saturating_add(output_block.len() as u64);
+            work.write_operations = work.write_operations.saturating_add(1);
+            output_block.clear();
         }
     }
+    if !output_block.is_empty() {
+        writer.write_all(&output_block).map_err(storage_err)?;
+        work.write_bytes = work.write_bytes.saturating_add(output_block.len() as u64);
+        work.write_operations = work.write_operations.saturating_add(1);
+    }
     writer.flush().map_err(storage_err)?;
-    writer.get_ref().sync_all().map_err(storage_err)?;
+    writer.sync_all().map_err(storage_err)?;
+    work.fsync_operations = work.fsync_operations.saturating_add(1);
+    work.read_bytes = work
+        .read_bytes
+        .saturating_add(left_reader.read_bytes)
+        .saturating_add(right_reader.read_bytes);
+    work.read_operations = work
+        .read_operations
+        .saturating_add(left_reader.read_operations)
+        .saturating_add(right_reader.read_operations);
     drop(writer);
     describe_and_install_construction_run(
-        output, &temporary, identity, prefix, generation, width, artifacts,
+        output, &temporary, identity, prefix, generation, width, artifacts, work,
     )
+}
+
+struct ConstructionBlockCursor {
+    file: File,
+    descriptor: FileRecord,
+    width: usize,
+    block: Vec<u8>,
+    block_index: usize,
+    within: usize,
+    records: u64,
+    digest: Sha256,
+    finished: bool,
+    read_bytes: u64,
+    read_operations: u64,
+}
+
+impl ConstructionBlockCursor {
+    fn new(file: File, descriptor: FileRecord, width: usize) -> Result<Self, GfError> {
+        let mut cursor = Self {
+            file,
+            descriptor,
+            width,
+            block: Vec::new(),
+            block_index: 0,
+            within: 0,
+            records: 0,
+            digest: Sha256::new(),
+            finished: false,
+            read_bytes: 0,
+            read_operations: 0,
+        };
+        cursor.fill()?;
+        Ok(cursor)
+    }
+
+    fn current(&self) -> Option<&[u8]> {
+        (!self.finished).then(|| &self.block[self.within..self.within + self.width])
+    }
+
+    fn advance(&mut self) -> Result<(), GfError> {
+        if self.finished {
+            return Ok(());
+        }
+        self.within += self.width;
+        self.records = self.records.saturating_add(1);
+        if self.within == self.block.len() {
+            self.fill()?;
+        }
+        Ok(())
+    }
+
+    fn fill(&mut self) -> Result<(), GfError> {
+        if self.block_index == self.descriptor.blocks.len() {
+            self.finished = true;
+            if self.records != self.descriptor.count
+                || hex_bytes(&self.digest.clone().finalize()) != self.descriptor.sha256
+            {
+                return Err(storage_err(
+                    "construction merge source authentication failed",
+                ));
+            }
+            return Ok(());
+        }
+        let expected = &self.descriptor.blocks[self.block_index];
+        if expected.offset != self.records.saturating_mul(self.width as u64)
+            || expected.len == 0
+            || !(expected.len as usize).is_multiple_of(self.width)
+        {
+            return Err(storage_err("construction merge block framing changed"));
+        }
+        self.block.resize(expected.len as usize, 0);
+        self.file.read_exact(&mut self.block).map_err(storage_err)?;
+        self.read_bytes = self.read_bytes.saturating_add(self.block.len() as u64);
+        self.read_operations = self.read_operations.saturating_add(1);
+        let key_width = if self.width == IDENTITY_RECORD_WIDTH {
+            16
+        } else {
+            8
+        };
+        if hex_sha256(&self.block) != expected.sha256
+            || hex_sha256_key(&self.block[..key_width]) != expected.first_key
+            || hex_sha256_key(
+                &self.block
+                    [self.block.len() - self.width..self.block.len() - self.width + key_width],
+            ) != expected.last_key
+        {
+            return Err(storage_err("construction merge source block changed"));
+        }
+        self.digest.update(&self.block);
+        self.block_index += 1;
+        self.within = 0;
+        Ok(())
+    }
 }
 
 fn open_construction_source(
@@ -1652,30 +2195,8 @@ fn open_construction_source(
                     NODE_LOOKUP_RECORD_BYTES
                 },
             ));
-        parent
-            .root
-            .open_child_file(std::ffi::OsStr::new(&record.name))
-            .map_err(storage_err)
+        parent.open_retained_file(record)
     }
-}
-
-fn read_construction_record(
-    reader: &mut impl Read,
-    width: usize,
-) -> Result<Option<Vec<u8>>, GfError> {
-    let mut record = vec![0_u8; width];
-    let mut filled = 0;
-    while filled < width {
-        let read = reader.read(&mut record[filled..]).map_err(storage_err)?;
-        if read == 0 {
-            if filled == 0 {
-                return Ok(None);
-            }
-            return Err(storage_err("construction index merge source is truncated"));
-        }
-        filled += read;
-    }
-    Ok(Some(record))
 }
 
 fn install_empty_construction_run(
@@ -1684,6 +2205,7 @@ fn install_empty_construction_run(
     generation: u64,
     width: usize,
     artifacts: &mut Vec<ConstructionIndexOutput>,
+    work: &mut ConstructionIndexWork,
 ) -> Result<FileRecord, GfError> {
     let temporary = format!(".construction-empty-{}.tmp", Uuid::new_v4().simple());
     let file = output
@@ -1691,12 +2213,14 @@ fn install_empty_construction_run(
         .map_err(storage_err)?;
     let identity = graphforge_filesystem::file_identity(&file).map_err(storage_err)?;
     file.sync_all().map_err(storage_err)?;
+    work.fsync_operations = work.fsync_operations.saturating_add(1);
     drop(file);
     describe_and_install_construction_run(
-        output, &temporary, identity, prefix, generation, width, artifacts,
+        output, &temporary, identity, prefix, generation, width, artifacts, work,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn describe_and_install_construction_run(
     output: &graphforge_filesystem::StableDirectory,
     temporary: &str,
@@ -1705,6 +2229,7 @@ fn describe_and_install_construction_run(
     generation: u64,
     width: usize,
     artifacts: &mut Vec<ConstructionIndexOutput>,
+    work: &mut ConstructionIndexWork,
 ) -> Result<FileRecord, GfError> {
     let mut file = output
         .open_child_file(std::ffi::OsStr::new(temporary))
@@ -1731,6 +2256,8 @@ fn describe_and_install_construction_run(
                 break;
             }
             filled += read;
+            work.read_bytes = work.read_bytes.saturating_add(read as u64);
+            work.read_operations = work.read_operations.saturating_add(1);
         }
         if filled == 0 {
             break;
@@ -1762,6 +2289,7 @@ fn describe_and_install_construction_run(
         )
         .map_err(storage_err)?;
     output.sync().map_err(storage_err)?;
+    work.fsync_operations = work.fsync_operations.saturating_add(1);
     artifacts.push(ConstructionIndexOutput {
         name: name.clone(),
         bytes,
@@ -1779,6 +2307,7 @@ fn install_construction_bytes(
     output: &graphforge_filesystem::StableDirectory,
     name: &str,
     bytes: &[u8],
+    work: &mut ConstructionIndexWork,
 ) -> Result<ConstructionIndexOutput, GfError> {
     let temporary = format!(".{name}-{}.tmp", Uuid::new_v4().simple());
     let mut file = output
@@ -1786,7 +2315,10 @@ fn install_construction_bytes(
         .map_err(storage_err)?;
     let identity = graphforge_filesystem::file_identity(&file).map_err(storage_err)?;
     file.write_all(bytes).map_err(storage_err)?;
+    work.write_bytes = work.write_bytes.saturating_add(bytes.len() as u64);
+    work.write_operations = work.write_operations.saturating_add(1);
     file.sync_all().map_err(storage_err)?;
+    work.fsync_operations = work.fsync_operations.saturating_add(1);
     drop(file);
     output
         .replace_child(
@@ -1796,6 +2328,7 @@ fn install_construction_bytes(
         )
         .map_err(storage_err)?;
     output.sync().map_err(storage_err)?;
+    work.fsync_operations = work.fsync_operations.saturating_add(1);
     Ok(ConstructionIndexOutput {
         name: name.to_owned(),
         bytes: bytes.len() as u64,
@@ -4830,6 +5363,7 @@ fn sha256_reader(reader: &mut impl Read) -> Result<String, GfError> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::BufWriter;
     use std::sync::{Arc, Barrier};
 
     use arrow::array::{FixedSizeBinaryArray, UInt64Array};
@@ -4838,6 +5372,54 @@ mod tests {
     use parquet::arrow::ArrowWriter;
 
     use super::*;
+
+    #[test]
+    fn construction_encoder_io_geometry_is_block_bounded() {
+        for records in [32_768_u64, 65_536, 131_072] {
+            let source_dir = tempfile::tempdir().unwrap();
+            let encoded_dir = tempfile::tempdir().unwrap();
+            let mut input = BufWriter::with_capacity(
+                BULK_IO_BYTES,
+                File::create(source_dir.path().join("identities.run")).unwrap(),
+            );
+            for value in 1..=records {
+                input.write_all(&u128::from(value).to_be_bytes()).unwrap();
+                input.write_all(&[0]).unwrap();
+                input.write_all(&[0; 7]).unwrap();
+                input.write_all(&value.to_be_bytes()).unwrap();
+            }
+            input.flush().unwrap();
+            drop(input);
+            let source = graphforge_filesystem::StableDirectory::open(source_dir.path()).unwrap();
+            let encoded = graphforge_filesystem::StableDirectory::open(encoded_dir.path()).unwrap();
+            let result = encode_construction_index(
+                &source,
+                "identities.run",
+                &encoded,
+                1,
+                0,
+                None,
+                records,
+                0,
+                &mut || false,
+            )
+            .unwrap();
+            let identity_blocks = (records * IDENTITY_RECORD_BYTES).div_ceil(BULK_IO_BYTES as u64);
+            let surrogate_blocks =
+                (records * NODE_LOOKUP_RECORD_BYTES).div_ceil(BULK_IO_BYTES as u64);
+            assert!(
+                result.read_operations <= 2 * identity_blocks + surrogate_blocks + 4,
+                "{records}: {} reads",
+                result.read_operations
+            );
+            assert!(
+                result.write_operations <= identity_blocks + surrogate_blocks + 4,
+                "{records}: {} writes",
+                result.write_operations
+            );
+            assert!(result.peak_buffer_bytes <= 3 * BULK_IO_BYTES as u64);
+        }
+    }
 
     #[test]
     fn fixed_width_codecs_distinguish_clean_eof_from_partial_tail() {

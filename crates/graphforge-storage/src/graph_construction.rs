@@ -12,6 +12,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Seek, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -24,7 +25,8 @@ use arrow::compute::take;
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use graphforge_core::GfError;
 use graphforge_filesystem::{FileIdentity, StableDirectory, file_identity, file_link_count};
-use graphforge_ir::RuntimeCatalog;
+use graphforge_ir::{CompositionBindingContext, CompositionBindingLimits, RuntimeCatalog};
+use graphforge_ontology::ActivationMode;
 use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::file::reader::{ChunkReader, Length};
@@ -104,9 +106,9 @@ pub struct GraphConstructionBudgets {
     pub max_run_records: usize,
     /// Maximum inputs opened by one external merge group.
     pub merge_fan_in: usize,
-    /// Maximum exact Arrow schema groups accepted by one session. Construction
-    /// deliberately requires one stable schema per entity kind, so this may be
-    /// one (single-kind sessions) or two (nodes plus edges).
+    /// Maximum exact Arrow schema groups accepted by one session. Schemas are
+    /// retained as a bounded external registry and merged at encode time; they
+    /// are not required to be identical across chunks.
     pub max_schema_groups: usize,
     /// Maximum trailing property columns in either stable entity schema.
     pub max_property_columns: usize,
@@ -126,7 +128,7 @@ impl Default for GraphConstructionBudgets {
             max_chunks: 1_000_000,
             max_run_records: 4 * 65_536,
             merge_fan_in: 32,
-            max_schema_groups: 2,
+            max_schema_groups: 256,
             max_property_columns: 4_096,
             max_catalog_entries: 1_000_000,
             max_catalog_decoded_bytes: 256 << 20,
@@ -142,7 +144,7 @@ impl GraphConstructionBudgets {
             || self.max_chunks == 0
             || self.max_run_records < 4 * self.max_batch_rows
             || self.merge_fan_in < 2
-            || !(1..=2).contains(&self.max_schema_groups)
+            || !(1..=4_096).contains(&self.max_schema_groups)
             || self.max_property_columns == 0
             || self.max_catalog_entries == 0
             || self.max_catalog_decoded_bytes == 0
@@ -274,6 +276,8 @@ pub struct GraphConstructionEvidence {
 pub struct ConstructionShape {
     /// Ontology mode authenticated at session open and used for physical routing.
     pub ontology_mode: graphforge_core::OntologyMode,
+    /// Digest of the exact compiled composition and physical semantic bindings.
+    pub semantic_authority_sha256: Option<String>,
     /// Parent generation retained by the publisher; zero denotes an empty base.
     pub parent_topology_generation: u64,
     /// Authenticated parent UUID-manifest authority. The shaped identities file
@@ -307,8 +311,57 @@ pub struct ConstructionShape {
     pub max_edge_surrogate: u64,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+/// Exact generation-pinned semantic authority for construction.
+pub struct ConstructionSemanticAuthority {
+    /// Generation-pinned ontology composition and declared construction mode.
+    pub composition: crate::WorkspaceOntologyComposition,
+    /// Compiled opaque physical routes and stable storage identifiers.
+    pub bindings: crate::SemanticStorageBindings,
+}
+
+impl ConstructionSemanticAuthority {
+    /// Validate the compiled composition and its stable physical bindings.
+    pub fn validate(&self) -> Result<(), GfError> {
+        let compiled = self.composition.compile()?;
+        self.bindings.validate_against(&compiled)
+    }
+
+    fn mode(&self) -> graphforge_core::OntologyMode {
+        match self.composition.profile_default {
+            ActivationMode::Exploratory => graphforge_core::OntologyMode::Exploratory,
+            ActivationMode::Advisory => graphforge_core::OntologyMode::Advisory,
+            ActivationMode::Strict => graphforge_core::OntologyMode::Strict,
+        }
+    }
+
+    pub(crate) fn digest(&self) -> Result<String, GfError> {
+        let mut digest = Sha256::new();
+        digest.update(b"graphforge-construction-semantic-authority/v1\0");
+        digest.update(self.composition.to_canonical_json()?);
+        digest.update(self.bindings.to_canonical_json()?);
+        Ok(hex(&digest.finalize()))
+    }
+
+    pub(crate) fn context(&self) -> Result<CompositionBindingContext, GfError> {
+        let compiled = self.composition.compile()?;
+        self.bindings.validate_against(&compiled)?;
+        Ok(CompositionBindingContext::new(
+            Arc::new(compiled),
+            self.composition.bridges.clone(),
+            CompositionBindingLimits::default(),
+        )
+        .with_generation_storage_ids(
+            self.bindings
+                .bindings
+                .iter()
+                .map(|binding| (binding.symbol.clone(), binding.storage_id)),
+        ))
+    }
+}
+
 pub use crate::graph_construction_encoding::{
-    GraphConstructionEncoding, GraphConstructionEncodingEvidence,
+    ConstructionRetainedArtifact, GraphConstructionEncoding, GraphConstructionEncodingEvidence,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -350,6 +403,7 @@ pub struct ConstructionChunkReceipt {
     session_identity: IdentityRecord,
     parent_topology_generation: u64,
     ontology_mode: graphforge_core::OntologyMode,
+    semantic_authority_sha256: Option<String>,
     prior_receipt_sha256: Option<String>,
     /// Caller-stable idempotency key.
     pub chunk_id: String,
@@ -382,6 +436,7 @@ struct Checkpoint {
     session_identity: IdentityRecord,
     parent_topology_generation: u64,
     ontology_mode: graphforge_core::OntologyMode,
+    semantic_authority_sha256: Option<String>,
     /// One authority-bound timestamp used by every catalog/topology row produced
     /// by this operation. Reopen never consults the wall clock again.
     session_now_micros: i64,
@@ -392,8 +447,8 @@ struct Checkpoint {
     last_receipt_sha256: Option<String>,
     has_base_snapshot: bool,
     parent_catalog_sha256: Option<String>,
-    node_schema_sha256: Option<String>,
-    edge_schema_sha256: Option<String>,
+    node_schema_sha256: BTreeSet<String>,
+    edge_schema_sha256: BTreeSet<String>,
     base_work: UuidConstructionSnapshotWork,
     evidence: GraphConstructionEvidence,
 }
@@ -414,6 +469,7 @@ struct ChunkIntent {
     schema_sha256: String,
     parent_topology_generation: u64,
     ontology_mode: graphforge_core::OntologyMode,
+    semantic_authority_sha256: Option<String>,
     prior_receipt_sha256: Option<String>,
     run_records: u64,
     accounted_live_bytes: u64,
@@ -431,6 +487,7 @@ struct ShapeIntent {
     session_identity: IdentityRecord,
     parent_topology_generation: u64,
     ontology_mode: graphforge_core::OntologyMode,
+    semantic_authority_sha256: Option<String>,
     budgets: GraphConstructionBudgets,
     last_receipt_sha256: Option<String>,
     baseline_evidence: GraphConstructionEvidence,
@@ -475,6 +532,7 @@ pub struct GraphConstructionSession {
     checkpoint: Checkpoint,
     base_snapshot: Option<AuthenticatedUuidIndexSnapshot>,
     parent_catalog: RuntimeCatalog,
+    semantic_authority: Option<ConstructionSemanticAuthority>,
     _reservation: ProcessReservation,
 }
 
@@ -515,13 +573,13 @@ impl GraphConstructionSession {
             generation,
             self.checkpoint.ontology_mode,
             self.base_snapshot.as_ref(),
+            self.semantic_authority.as_ref(),
             self.checkpoint.budgets,
             &mut cancelled,
         )
     }
 
     /// Create or resume an operation pinned to one parent topology generation.
-    #[allow(clippy::too_many_lines)]
     pub fn open_with_mode(
         project_dir: &Path,
         operation_uuid: Uuid,
@@ -529,7 +587,54 @@ impl GraphConstructionSession {
         ontology_mode: graphforge_core::OntologyMode,
         budgets: GraphConstructionBudgets,
     ) -> Result<Self, GfError> {
+        if ontology_mode != graphforge_core::OntologyMode::Exploratory {
+            return Err(storage(
+                "strict or advisory construction requires pinned semantic authority",
+            ));
+        }
+        Self::open_internal(
+            project_dir,
+            operation_uuid,
+            parent_topology_generation,
+            ontology_mode,
+            None,
+            budgets,
+        )
+    }
+
+    /// Open with exact composition and physical semantic routing authority.
+    pub fn open_with_semantic_authority(
+        project_dir: &Path,
+        operation_uuid: Uuid,
+        parent_topology_generation: u64,
+        authority: ConstructionSemanticAuthority,
+        budgets: GraphConstructionBudgets,
+    ) -> Result<Self, GfError> {
+        authority.validate()?;
+        Self::open_internal(
+            project_dir,
+            operation_uuid,
+            parent_topology_generation,
+            authority.mode(),
+            Some(authority),
+            budgets,
+        )
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn open_internal(
+        project_dir: &Path,
+        operation_uuid: Uuid,
+        parent_topology_generation: u64,
+        ontology_mode: graphforge_core::OntologyMode,
+        semantic_authority: Option<ConstructionSemanticAuthority>,
+        budgets: GraphConstructionBudgets,
+    ) -> Result<Self, GfError> {
         let budgets = budgets.validate()?;
+        let semantic_authority_sha256 = semantic_authority
+            .as_ref()
+            .map(ConstructionSemanticAuthority::digest)
+            .transpose()?;
         let project = StableDirectory::open(project_dir).map_err(storage)?;
         if crate::read_topology_generation(project_dir)? != parent_topology_generation {
             return Err(storage(
@@ -606,6 +711,7 @@ impl GraphConstructionSession {
                     session_identity: session_identity.into(),
                     parent_topology_generation,
                     ontology_mode,
+                    semantic_authority_sha256: semantic_authority_sha256.clone(),
                     session_now_micros: SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .map_err(storage)?
@@ -619,8 +725,8 @@ impl GraphConstructionSession {
                     last_receipt_sha256: None,
                     has_base_snapshot: parent_topology_generation != 0,
                     parent_catalog_sha256: parent_catalog_sha256.clone(),
-                    node_schema_sha256: None,
-                    edge_schema_sha256: None,
+                    node_schema_sha256: BTreeSet::new(),
+                    edge_schema_sha256: BTreeSet::new(),
                     base_work,
                     evidence,
                 };
@@ -636,6 +742,7 @@ impl GraphConstructionSession {
             session_identity,
             parent_topology_generation,
             ontology_mode,
+            semantic_authority_sha256.as_deref(),
             budgets,
             parent_catalog_sha256.as_deref(),
         )?;
@@ -646,6 +753,7 @@ impl GraphConstructionSession {
             checkpoint,
             base_snapshot,
             parent_catalog,
+            semantic_authority,
             _reservation: reservation,
         };
         recover_shape_intent(&session.root, &mut session.checkpoint)?;
@@ -788,23 +896,21 @@ impl GraphConstructionSession {
             }
             return Err(storage("conflicting construction chunk replay"));
         }
-        let (known_schema, other_schema) = match kind {
+        let (known_schemas, other_schemas) = match kind {
             ConstructionChunkKind::Node => (
-                self.checkpoint.node_schema_sha256.as_ref(),
-                self.checkpoint.edge_schema_sha256.as_ref(),
+                &self.checkpoint.node_schema_sha256,
+                &self.checkpoint.edge_schema_sha256,
             ),
             ConstructionChunkKind::Edge => (
-                self.checkpoint.edge_schema_sha256.as_ref(),
-                self.checkpoint.node_schema_sha256.as_ref(),
+                &self.checkpoint.edge_schema_sha256,
+                &self.checkpoint.node_schema_sha256,
             ),
         };
-        if known_schema.is_some_and(|known| known != &schema_sha256) {
-            return Err(storage(
-                "construction requires one stable Arrow schema per entity kind",
-            ));
-        }
-        if known_schema.is_none()
-            && usize::from(other_schema.is_some()).saturating_add(1)
+        if !known_schemas.contains(&schema_sha256)
+            && known_schemas
+                .len()
+                .saturating_add(other_schemas.len())
+                .saturating_add(1)
                 > self.checkpoint.budgets.max_schema_groups
         {
             return Err(storage("construction schema-group budget exhausted"));
@@ -834,6 +940,7 @@ impl GraphConstructionSession {
             schema_sha256,
             parent_topology_generation: self.checkpoint.parent_topology_generation,
             ontology_mode: self.checkpoint.ontology_mode,
+            semantic_authority_sha256: self.checkpoint.semantic_authority_sha256.clone(),
             prior_receipt_sha256: self.checkpoint.last_receipt_sha256.clone(),
             run_records: run_records as u64,
             accounted_live_bytes: 0,
@@ -992,6 +1099,7 @@ impl GraphConstructionSession {
             session_identity: self.checkpoint.session_identity.clone(),
             parent_topology_generation: self.checkpoint.parent_topology_generation,
             ontology_mode: self.checkpoint.ontology_mode,
+            semantic_authority_sha256: self.checkpoint.semantic_authority_sha256.clone(),
             budgets: self.checkpoint.budgets,
             last_receipt_sha256: self.checkpoint.last_receipt_sha256.clone(),
             baseline_evidence: self.checkpoint.evidence.clone(),
@@ -1229,6 +1337,7 @@ impl GraphConstructionSession {
             .max(measured_shape_bytes(&self.root)?);
         let shape = ConstructionShape {
             ontology_mode: self.checkpoint.ontology_mode,
+            semantic_authority_sha256: self.checkpoint.semantic_authority_sha256.clone(),
             parent_topology_generation: self.checkpoint.parent_topology_generation,
             parent_uuid_manifest_sha256: self
                 .base_snapshot
@@ -1287,6 +1396,7 @@ impl GraphConstructionSession {
                 session_identity: self.checkpoint.session_identity.clone(),
                 parent_topology_generation: self.checkpoint.parent_topology_generation,
                 ontology_mode: self.checkpoint.ontology_mode,
+                semantic_authority_sha256: self.checkpoint.semantic_authority_sha256.clone(),
                 budgets: self.checkpoint.budgets,
                 last_receipt_sha256: self.checkpoint.last_receipt_sha256.clone(),
                 baseline_evidence: shape_intent.baseline_evidence,
@@ -1437,6 +1547,7 @@ impl GraphConstructionSession {
             || receipt.session_identity != self.checkpoint.session_identity
             || receipt.parent_topology_generation != self.checkpoint.parent_topology_generation
             || receipt.ontology_mode != self.checkpoint.ontology_mode
+            || receipt.semantic_authority_sha256 != self.checkpoint.semantic_authority_sha256
         {
             return Err(storage("receipt authority differs from session checkpoint"));
         }
@@ -1481,10 +1592,14 @@ impl GraphConstructionSession {
         self.checkpoint.saw_edge |= receipt.kind == ConstructionChunkKind::Edge;
         match receipt.kind {
             ConstructionChunkKind::Node => {
-                self.checkpoint.node_schema_sha256 = Some(receipt.schema_sha256.clone());
+                self.checkpoint
+                    .node_schema_sha256
+                    .insert(receipt.schema_sha256.clone());
             }
             ConstructionChunkKind::Edge => {
-                self.checkpoint.edge_schema_sha256 = Some(receipt.schema_sha256.clone());
+                self.checkpoint
+                    .edge_schema_sha256
+                    .insert(receipt.schema_sha256.clone());
             }
         }
         self.checkpoint.last_receipt_sha256 = Some(sha256(receipt_bytes));
@@ -1834,13 +1949,13 @@ struct HashingWriter<W> {
 }
 
 #[derive(Clone, Default)]
-struct IoCounter {
+pub(crate) struct IoCounter {
     bytes: std::sync::Arc<AtomicU64>,
     operations: std::sync::Arc<AtomicU64>,
 }
 
 impl IoCounter {
-    fn account(&self, bytes: usize) {
+    pub(crate) fn account(&self, bytes: usize) {
         if bytes != 0 {
             self.bytes.fetch_add(bytes as u64, Ordering::Relaxed);
             self.operations.fetch_add(1, Ordering::Relaxed);
@@ -1855,9 +1970,16 @@ impl IoCounter {
             .parquet_read_operations
             .saturating_add(self.operations.load(Ordering::Relaxed));
     }
+
+    pub(crate) fn values(&self) -> (u64, u64) {
+        (
+            self.bytes.load(Ordering::Relaxed),
+            self.operations.load(Ordering::Relaxed),
+        )
+    }
 }
 
-struct CountingRead<R> {
+pub(crate) struct CountingRead<R> {
     inner: R,
     counter: IoCounter,
 }
@@ -1870,9 +1992,9 @@ impl<R: Read> Read for CountingRead<R> {
     }
 }
 
-struct CountingChunkReader {
-    file: File,
-    counter: IoCounter,
+pub(crate) struct CountingChunkReader {
+    pub(crate) file: File,
+    pub(crate) counter: IoCounter,
 }
 
 impl Length for CountingChunkReader {
@@ -2033,6 +2155,7 @@ fn recover_shape_intent(
             .as_ref()
             .ok_or_else(|| storage("complete shape manifest lacks output"))?;
         if shape.ontology_mode != checkpoint.ontology_mode
+            || shape.semantic_authority_sha256 != checkpoint.semantic_authority_sha256
             || shape.runtime_catalog_now_micros != checkpoint.session_now_micros
             || shape.runtime_catalog_inputs_sha256.len() != 64
             || !shape
@@ -2098,6 +2221,7 @@ fn validate_shape_binding(intent: &ShapeIntent, checkpoint: &Checkpoint) -> Resu
         || intent.session_identity != checkpoint.session_identity
         || intent.parent_topology_generation != checkpoint.parent_topology_generation
         || intent.ontology_mode != checkpoint.ontology_mode
+        || intent.semantic_authority_sha256 != checkpoint.semantic_authority_sha256
         || intent.budgets != checkpoint.budgets
         || intent.last_receipt_sha256 != checkpoint.last_receipt_sha256
     {
@@ -3934,6 +4058,7 @@ fn receipt_from_intent(intent: &ChunkIntent) -> Result<ConstructionChunkReceipt,
         session_identity: intent.session_identity.clone(),
         parent_topology_generation: intent.parent_topology_generation,
         ontology_mode: intent.ontology_mode,
+        semantic_authority_sha256: intent.semantic_authority_sha256.clone(),
         prior_receipt_sha256: intent.prior_receipt_sha256.clone(),
         chunk_id: intent.chunk_id.clone(),
         sequence: intent.sequence,
@@ -4126,6 +4251,7 @@ fn validate_intent(intent: &ChunkIntent, checkpoint: &Checkpoint) -> Result<(), 
             || intent.sequence.saturating_add(1) == checkpoint.next_sequence)
         || intent.parent_topology_generation != checkpoint.parent_topology_generation
         || intent.ontology_mode != checkpoint.ontology_mode
+        || intent.semantic_authority_sha256 != checkpoint.semantic_authority_sha256
         || (intent.sequence == checkpoint.next_sequence
             && intent.prior_receipt_sha256 != checkpoint.last_receipt_sha256)
         || intent.chunk_key != chunk_key_name(&intent.chunk_id)
@@ -4187,6 +4313,7 @@ fn validate_intent(intent: &ChunkIntent, checkpoint: &Checkpoint) -> Result<(), 
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_checkpoint(
     checkpoint: &Checkpoint,
     operation: Uuid,
@@ -4194,6 +4321,7 @@ fn validate_checkpoint(
     session: FileIdentity,
     generation: u64,
     ontology_mode: graphforge_core::OntologyMode,
+    semantic_authority_sha256: Option<&str>,
     budgets: GraphConstructionBudgets,
     parent_catalog_sha256: Option<&str>,
 ) -> Result<(), GfError> {
@@ -4203,6 +4331,13 @@ fn validate_checkpoint(
         || !checkpoint.session_identity.matches(session)
         || checkpoint.parent_topology_generation != generation
         || checkpoint.ontology_mode != ontology_mode
+        || checkpoint.semantic_authority_sha256.as_deref() != semantic_authority_sha256
+        || checkpoint
+            .semantic_authority_sha256
+            .as_ref()
+            .is_some_and(|digest| {
+                digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
         || checkpoint.session_now_micros <= 0
         || checkpoint.budgets != budgets
         || checkpoint.has_base_snapshot != (generation != 0)
@@ -4230,18 +4365,16 @@ fn validate_checkpoint(
         || checkpoint.evidence.current_transitions != 0
         || checkpoint
             .node_schema_sha256
-            .as_ref()
-            .is_some_and(|digest| {
-                digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_hexdigit())
-            })
+            .iter()
+            .any(|digest| digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_hexdigit()))
         || checkpoint
             .edge_schema_sha256
-            .as_ref()
-            .is_some_and(|digest| {
-                digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_hexdigit())
-            })
-        || usize::from(checkpoint.node_schema_sha256.is_some())
-            .saturating_add(usize::from(checkpoint.edge_schema_sha256.is_some()))
+            .iter()
+            .any(|digest| digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_hexdigit()))
+        || checkpoint
+            .node_schema_sha256
+            .len()
+            .saturating_add(checkpoint.edge_schema_sha256.len())
             > budgets.max_schema_groups
     {
         return Err(storage("checkpoint authority or resume parameters changed"));
@@ -4624,7 +4757,7 @@ fn write_control_body(
 }
 
 #[cfg(test)]
-fn construction_failpoint(name: &str) {
+pub(crate) fn construction_failpoint(name: &str) {
     if std::env::var("GF_CONSTRUCTION_FAILPOINT_COOKIE").as_deref()
         == Ok("graphforge-construction-test-v1")
         && std::env::var("GF_CONSTRUCTION_FAILPOINT").as_deref() == Ok(name)
@@ -4634,7 +4767,7 @@ fn construction_failpoint(name: &str) {
 }
 
 #[cfg(not(test))]
-fn construction_failpoint(_name: &str) {}
+pub(crate) fn construction_failpoint(_name: &str) {}
 
 fn sha256(bytes: &[u8]) -> String {
     hex(&Sha256::digest(bytes))
@@ -4765,6 +4898,68 @@ mod tests {
             ],
         )
         .unwrap()
+    }
+
+    fn semantic_authority(mode: graphforge_core::OntologyMode) -> ConstructionSemanticAuthority {
+        let document = graphforge_ontology::OntologyDoc {
+            ontology_id: "https://graphforge.dev/ontology/construction-test".into(),
+            version: "1.0.0".into(),
+            entity_types: vec![graphforge_ontology::EntityTypeDef {
+                name: "Person".into(),
+                r#abstract: false,
+                parent: None,
+            }],
+            relation_types: vec![graphforge_ontology::RelationTypeDef {
+                name: "R".into(),
+                src: "Person".into(),
+                dst: "Person".into(),
+                inverse: None,
+                semantic: graphforge_ontology::SemanticFlags::default(),
+            }],
+            properties: vec![
+                graphforge_ontology::PropertyDef {
+                    owner: "Person".into(),
+                    name: "score".into(),
+                    value_type: graphforge_ontology::PropertyValueType::Int64,
+                    nullable: true,
+                    multivalued: false,
+                    default_json: None,
+                },
+                graphforge_ontology::PropertyDef {
+                    owner: "R".into(),
+                    name: "weight".into(),
+                    value_type: graphforge_ontology::PropertyValueType::Int64,
+                    nullable: true,
+                    multivalued: false,
+                    default_json: None,
+                },
+            ],
+            constraints: vec![],
+            migrations: vec![],
+        };
+        let value = serde_json::to_value(&document).unwrap();
+        let legacy = crate::WorkspaceOntology {
+            contract_version: 1,
+            mode: match mode {
+                graphforge_core::OntologyMode::Strict => crate::WorkspaceOntologyMode::Strict,
+                graphforge_core::OntologyMode::Advisory => crate::WorkspaceOntologyMode::Advisory,
+                graphforge_core::OntologyMode::Exploratory => {
+                    crate::WorkspaceOntologyMode::Advisory
+                }
+            },
+            source_format: Some(crate::WorkspaceOntologySourceFormat::Json),
+            canonical_ontology_sha256: Some(sha256(&serde_json::to_vec(&value).unwrap())),
+            canonical_ontology: Some(value),
+        };
+        let composition = crate::WorkspaceOntologyComposition::virtual_legacy(&legacy)
+            .unwrap()
+            .unwrap();
+        let bindings =
+            crate::SemanticStorageBindings::project(&composition.compile().unwrap(), None).unwrap();
+        ConstructionSemanticAuthority {
+            composition,
+            bindings,
+        }
     }
 
     fn open(root: &TempDir, operation: u128) -> GraphConstructionSession {
@@ -5146,7 +5341,7 @@ mod tests {
         let slots = online_merge_name_slot_bound(1_000_000, 32);
         assert!(slots <= 31 * 4, "retained slots: {slots}");
         assert!(slots < 1_000_000 / 1_000);
-        assert_eq!(GraphConstructionBudgets::default().max_schema_groups, 2);
+        assert_eq!(GraphConstructionBudgets::default().max_schema_groups, 256);
     }
 
     #[test]
@@ -5286,8 +5481,8 @@ mod tests {
             .append(ConstructionChunkKind::Edge, "edges", &edge_batch(100, 1))
             .unwrap_err();
         assert!(error.to_string().contains("schema-group budget"));
-        assert!(session.checkpoint.node_schema_sha256.is_some());
-        assert!(session.checkpoint.edge_schema_sha256.is_none());
+        assert_eq!(session.checkpoint.node_schema_sha256.len(), 1);
+        assert!(session.checkpoint.edge_schema_sha256.is_empty());
     }
 
     #[test]
@@ -5869,12 +6064,67 @@ mod tests {
         session
             .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 8))
             .unwrap();
+        if std::env::var_os("GF_CONSTRUCTION_UUID_ENCODE_CRASH").is_some() {
+            session.seal().unwrap();
+            let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
+            session.encode_canonical(&shape, 1).unwrap();
+        }
         if std::env::var_os("GF_CONSTRUCTION_SHAPE_CRASH").is_some() {
             session
                 .append(ConstructionChunkKind::Node, "nodes-2", &node_batch(9, 8))
                 .unwrap();
             session.seal().unwrap();
             session.shape_canonical_with_cancellation(|| false).unwrap();
+        }
+    }
+
+    #[test]
+    fn uuid_encoding_crashes_recover_every_durable_boundary() {
+        for failpoint in [
+            "uuid_encode.after_intent",
+            "uuid_encode.after_temps",
+            "uuid_encode.after_delta_runs",
+            "uuid_encode.after_manifest",
+            "uuid_encode.after_intent_removal",
+        ] {
+            let root = TempDir::new().unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg("graph_construction::tests::crash_subprocess_helper")
+                .arg("--nocapture")
+                .env("GF_CONSTRUCTION_CRASH_ROOT", root.path())
+                .env("GF_CONSTRUCTION_UUID_ENCODE_CRASH", "1")
+                .env(
+                    "GF_CONSTRUCTION_FAILPOINT_COOKIE",
+                    "graphforge-construction-test-v1",
+                )
+                .env("GF_CONSTRUCTION_FAILPOINT", failpoint)
+                .status()
+                .unwrap();
+            assert_eq!(status.code(), Some(86), "{failpoint}");
+            let mut resumed = GraphConstructionSession::open(
+                root.path(),
+                Uuid::from_u128(600),
+                0,
+                GraphConstructionBudgets::default(),
+            )
+            .unwrap();
+            let shape = resumed.shape_canonical_with_cancellation(|| false).unwrap();
+            let encoded = resumed.encode_canonical(&shape, 1).unwrap();
+            assert_eq!(encoded.evidence.membership_records, 8, "{failpoint}");
+            let membership = root
+                .path()
+                .join(PRIVATE_ROOT)
+                .join(Uuid::from_u128(600).simple().to_string())
+                .join("encoded-v1/graph/.graphforge-cache/uuid-membership");
+            assert!(!membership.join(".construction-intent.json").exists());
+            assert!(std::fs::read_dir(membership).unwrap().all(|entry| {
+                !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(".tmp")
+            }));
         }
     }
 
@@ -6011,11 +6261,25 @@ mod tests {
     fn canonical_encoder_outputs_feed_ordinary_readers_index_and_adjacency() {
         let root = TempDir::new().unwrap();
         let operation = Uuid::from_u128(9_320);
-        let mut session = GraphConstructionSession::open_with_mode(
+        let authority = semantic_authority(graphforge_core::OntologyMode::Strict);
+        let route = |kind, local: &str| {
+            authority
+                .bindings
+                .bindings
+                .iter()
+                .find(|binding| binding.route_kind == kind && binding.symbol.local_id == local)
+                .unwrap()
+                .route
+                .clone()
+        };
+        let relation_route = route(crate::SemanticRouteKind::Relation, "R");
+        let node_property_route = route(crate::SemanticRouteKind::NodeProperty, "Person:score");
+        let edge_property_route = route(crate::SemanticRouteKind::EdgeProperty, "R:weight");
+        let mut session = GraphConstructionSession::open_with_semantic_authority(
             root.path(),
             operation,
             0,
-            graphforge_core::OntologyMode::Strict,
+            authority,
             GraphConstructionBudgets::default(),
         )
         .unwrap();
@@ -6061,9 +6325,14 @@ mod tests {
         .unwrap();
         let nodes = crate::read_nodes(&graph).unwrap();
         assert_eq!(nodes.iter().map(RecordBatch::num_rows).sum::<usize>(), 3);
-        let edges = crate::read_edges(&graph, "R", graphforge_core::OntologyMode::Strict).unwrap();
+        let edges = crate::read_edges(
+            &graph,
+            &relation_route,
+            graphforge_core::OntologyMode::Strict,
+        )
+        .unwrap();
         assert_eq!(edges.iter().map(RecordBatch::num_rows).sum::<usize>(), 2);
-        let node_properties = crate::read_properties(&graph, "Person").unwrap();
+        let node_properties = crate::read_properties(&graph, &node_property_route).unwrap();
         assert_eq!(
             node_properties
                 .iter()
@@ -6071,7 +6340,7 @@ mod tests {
                 .sum::<usize>(),
             3
         );
-        let edge_properties = crate::read_edge_properties(&graph, "R").unwrap();
+        let edge_properties = crate::read_edge_properties(&graph, &edge_property_route).unwrap();
         assert_eq!(
             edge_properties
                 .iter()
@@ -6092,14 +6361,79 @@ mod tests {
     }
 
     #[test]
-    fn canonical_encoder_cancellation_recovers_and_corruption_fails_closed() {
+    fn canonical_encoder_merges_bounded_heterogeneous_node_schemas() {
         let root = TempDir::new().unwrap();
-        let operation = Uuid::from_u128(9_322);
-        let mut session = GraphConstructionSession::open_with_mode(
+        let operation = Uuid::from_u128(9_323);
+        let authority = semantic_authority(graphforge_core::OntologyMode::Strict);
+        let property_route = authority
+            .bindings
+            .bindings
+            .iter()
+            .find(|binding| {
+                binding.route_kind == crate::SemanticRouteKind::NodeProperty
+                    && binding.symbol.local_id == "Person:score"
+            })
+            .unwrap()
+            .route
+            .clone();
+        let mut session = GraphConstructionSession::open_with_semantic_authority(
             root.path(),
             operation,
             0,
-            graphforge_core::OntologyMode::Strict,
+            authority,
+            GraphConstructionBudgets::default(),
+        )
+        .unwrap();
+        session
+            .append(ConstructionChunkKind::Node, "plain", &node_batch(1, 1))
+            .unwrap();
+        session
+            .append(
+                ConstructionChunkKind::Node,
+                "property",
+                &node_property_batch(2, 1),
+            )
+            .unwrap();
+        session.seal().unwrap();
+        let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
+        assert_eq!(shape.node_rows.len(), 2);
+        let encoded = session.encode_canonical(&shape, 1).unwrap();
+        let graph = root
+            .path()
+            .join(PRIVATE_ROOT)
+            .join(operation.simple().to_string())
+            .join(&encoded.root)
+            .join("graph");
+        assert_eq!(
+            crate::read_nodes(&graph)
+                .unwrap()
+                .iter()
+                .map(RecordBatch::num_rows)
+                .sum::<usize>(),
+            2
+        );
+        assert_eq!(
+            crate::read_properties(&graph, &property_route)
+                .unwrap()
+                .iter()
+                .map(RecordBatch::num_rows)
+                .sum::<usize>(),
+            1
+        );
+        assert!(encoded.evidence.peak_batch_rows <= 65_536);
+        assert!(encoded.evidence.input_read_operations > 0);
+        assert!(encoded.evidence.output_write_operations > 0);
+    }
+
+    #[test]
+    fn canonical_encoder_cancellation_recovers_and_corruption_fails_closed() {
+        let root = TempDir::new().unwrap();
+        let operation = Uuid::from_u128(9_322);
+        let mut session = GraphConstructionSession::open_with_semantic_authority(
+            root.path(),
+            operation,
+            0,
+            semantic_authority(graphforge_core::OntologyMode::Strict),
             GraphConstructionBudgets {
                 max_batch_rows: 2,
                 ..GraphConstructionBudgets::default()
@@ -6130,6 +6464,14 @@ mod tests {
             })
             .unwrap_err();
         assert!(error.to_string().contains("cancelled"));
+        let uuid_private = root
+            .path()
+            .join(PRIVATE_ROOT)
+            .join(operation.simple().to_string())
+            .join("encoded-v1/graph/.graphforge-cache/uuid-membership");
+        if uuid_private.exists() {
+            assert_eq!(std::fs::read_dir(&uuid_private).unwrap().count(), 0);
+        }
 
         let encoded = session.encode_canonical(&shape, 1).unwrap();
         let operation_root = root
@@ -6156,20 +6498,20 @@ mod tests {
         let root = TempDir::new().unwrap();
         let operation = Uuid::from_u128(9_321);
         drop(
-            GraphConstructionSession::open_with_mode(
+            GraphConstructionSession::open_with_semantic_authority(
                 root.path(),
                 operation,
                 0,
-                graphforge_core::OntologyMode::Advisory,
+                semantic_authority(graphforge_core::OntologyMode::Advisory),
                 GraphConstructionBudgets::default(),
             )
             .unwrap(),
         );
-        let error = match GraphConstructionSession::open_with_mode(
+        let error = match GraphConstructionSession::open_with_semantic_authority(
             root.path(),
             operation,
             0,
-            graphforge_core::OntologyMode::Strict,
+            semantic_authority(graphforge_core::OntologyMode::Strict),
             GraphConstructionBudgets::default(),
         ) {
             Ok(_) => panic!("ontology mode mismatch was accepted"),
@@ -6187,14 +6529,27 @@ mod tests {
         ] {
             let root = TempDir::new().unwrap();
             let operation = Uuid::from_u128(9_330 + offset);
-            let mut session = GraphConstructionSession::open_with_mode(
-                root.path(),
-                operation,
-                0,
-                mode,
-                GraphConstructionBudgets::default(),
-            )
-            .unwrap();
+            let authority = (mode != graphforge_core::OntologyMode::Exploratory)
+                .then(|| semantic_authority(mode));
+            let mut session = if mode == graphforge_core::OntologyMode::Exploratory {
+                GraphConstructionSession::open_with_mode(
+                    root.path(),
+                    operation,
+                    0,
+                    mode,
+                    GraphConstructionBudgets::default(),
+                )
+                .unwrap()
+            } else {
+                GraphConstructionSession::open_with_semantic_authority(
+                    root.path(),
+                    operation,
+                    0,
+                    authority.clone().unwrap(),
+                    GraphConstructionBudgets::default(),
+                )
+                .unwrap()
+            };
             session
                 .append(
                     ConstructionChunkKind::Node,
@@ -6219,8 +6574,19 @@ mod tests {
                 .join(operation.simple().to_string())
                 .join(&encoding.root)
                 .join("graph");
+            let route = |kind, local: &str, fallback: &str| {
+                authority
+                    .as_ref()
+                    .and_then(|authority| {
+                        authority.bindings.bindings.iter().find(|binding| {
+                            binding.route_kind == kind && binding.symbol.local_id == local
+                        })
+                    })
+                    .map_or_else(|| fallback.to_owned(), |binding| binding.route.clone())
+            };
+            let relation_route = route(crate::SemanticRouteKind::Relation, "R", "R");
             assert_eq!(
-                crate::read_edges(&graph, "R", mode)
+                crate::read_edges(&graph, &relation_route, mode)
                     .unwrap()
                     .iter()
                     .map(RecordBatch::num_rows)
@@ -6229,13 +6595,17 @@ mod tests {
             );
             let property_stem = if mode == graphforge_core::OntologyMode::Exploratory {
                 assert!(graph.join("topology/edges/_exploratory").is_dir());
-                "_untyped"
+                "_untyped".to_owned()
             } else {
-                assert!(graph.join("topology/edges/R").is_dir());
-                "Person"
+                assert!(!graph.join("topology/edges/R").exists());
+                route(
+                    crate::SemanticRouteKind::NodeProperty,
+                    "Person:score",
+                    "Person",
+                )
             };
             assert_eq!(
-                crate::read_properties(&graph, property_stem)
+                crate::read_properties(&graph, &property_stem)
                     .unwrap()
                     .iter()
                     .map(RecordBatch::num_rows)
@@ -6243,11 +6613,18 @@ mod tests {
                 2
             );
             assert_eq!(
-                crate::read_edge_properties(&graph, "R")
-                    .unwrap()
-                    .iter()
-                    .map(RecordBatch::num_rows)
-                    .sum::<usize>(),
+                crate::read_edge_properties(
+                    &graph,
+                    &route(
+                        crate::SemanticRouteKind::EdgeProperty,
+                        "R:weight",
+                        "_exploratory",
+                    ),
+                )
+                .unwrap()
+                .iter()
+                .map(RecordBatch::num_rows)
+                .sum::<usize>(),
                 1
             );
         }
@@ -6274,7 +6651,7 @@ mod tests {
         assert_eq!(encoded.evidence.retained_index_payload_bytes, 0);
         assert_eq!(encoded.evidence.retained_topology_bytes_copied, 0);
         assert_eq!(encoded.evidence.prior_topology_rows_decoded, 0);
-        assert_eq!(encoded.evidence.retained_index_runs, 3);
+        assert_eq!(encoded.evidence.retained_index_runs, 2);
         let index_outputs = encoded
             .artifacts
             .iter()
@@ -6283,6 +6660,29 @@ mod tests {
         // New identity + reverse runs and the new manifest. The retained base
         // and level-one descriptors remain structural references.
         assert_eq!(index_outputs, 3);
+        assert!(!encoded.retained_artifacts.is_empty());
+        let assembled = project
+            .path()
+            .join(PRIVATE_ROOT)
+            .join(operation.simple().to_string())
+            .join(&encoded.root)
+            .join("graph");
+        for retained in &encoded.retained_artifacts {
+            let target = assembled.join(&retained.target_path);
+            std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+            std::fs::hard_link(
+                std::path::Path::new(&retained.source_root).join(&retained.source_path),
+                target,
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            assembled.join("topology/generation.json"),
+            br#"{"topology_generation":3,"search_generation":0}"#,
+        )
+        .unwrap();
+        let opened = crate::UuidMembershipIndex::open(&assembled).unwrap();
+        assert_eq!(opened.count(crate::UuidIndexKind::Node), 4);
     }
 
     #[test]
@@ -6334,5 +6734,39 @@ mod tests {
         let index = crate::UuidMembershipIndex::open(&graph).unwrap();
         assert_eq!(index.count(crate::UuidIndexKind::Node), 3);
         assert_eq!(index.count(crate::UuidIndexKind::Edge), 1);
+    }
+
+    #[test]
+    fn parent_uuid_path_substitution_is_rejected_before_encoding() {
+        let project = nonempty_project_with_nodes(2);
+        let operation = Uuid::from_u128(9_342);
+        let mut session = GraphConstructionSession::open_with_mode(
+            project.path(),
+            operation,
+            1,
+            graphforge_core::OntologyMode::Exploratory,
+            GraphConstructionBudgets::default(),
+        )
+        .unwrap();
+        session
+            .append(ConstructionChunkKind::Node, "delta", &node_batch(3, 1))
+            .unwrap();
+        session.seal().unwrap();
+        let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
+        let membership = project.path().join(".graphforge-cache/uuid-membership");
+        let victim = std::fs::read_dir(&membership)
+            .unwrap()
+            .map(Result::unwrap)
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "uuidx")
+            })
+            .unwrap();
+        let saved = victim.with_extension("uuidx.saved");
+        std::fs::rename(&victim, &saved).unwrap();
+        std::fs::copy(&saved, &victim).unwrap();
+        let error = session.encode_canonical(&shape, 2).unwrap_err();
+        assert!(error.to_string().contains("identity changed"));
     }
 }
