@@ -71,6 +71,20 @@ HARD_TTL_S = 4 * 3600 + 30 * 60
 VOLUME_GB = 50
 MEMORY_MB = 4096
 CPUS = 2
+MAX_DIAGNOSTIC_EVENTS = 20
+SENSITIVE_KEY = re.compile(r"(?:auth|credential|password|secret|token)", re.IGNORECASE)
+DIAGNOSTIC_EVENT_KEYS = {
+    "created_at",
+    "exit_code",
+    "oom_killed",
+    "requested_stop",
+    "signal",
+    "source",
+    "status",
+    "timestamp",
+    "type",
+    "updated_at",
+}
 
 
 class ControllerError(RuntimeError):
@@ -80,6 +94,30 @@ class ControllerError(RuntimeError):
 def emit_progress(event: str, **fields: Any) -> None:
     """Emit one sanitized, machine-readable operator update."""
     print(json.dumps({"event": event, **fields}, sort_keys=True), flush=True)
+
+
+def sanitize_artifact(value: Any, *, depth: int = 0) -> Any:
+    """Bound diagnostic artifacts and redact credential-shaped fields."""
+    if depth > 12:
+        return "<maximum-depth>"
+    if isinstance(value, dict):
+        return {
+            str(key): "<redacted>"
+            if SENSITIVE_KEY.search(str(key))
+            else sanitize_artifact(item, depth=depth + 1)
+            for key, item in list(value.items())[:1000]
+        }
+    if isinstance(value, list):
+        return [sanitize_artifact(item, depth=depth + 1) for item in value[:1000]]
+    if isinstance(value, str):
+        return value[:4096]
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return "<unsupported-value>"
+
+
+def write_sanitized_json(path: Path, value: Any) -> None:
+    path.write_text(json.dumps(sanitize_artifact(value), indent=2, sort_keys=True) + "\n")
 
 
 def journal_progress(journal: Any) -> tuple[int, str | None]:
@@ -180,7 +218,11 @@ def validate_args(args: argparse.Namespace) -> str:
         raise ControllerError("controller requires the approved $10 ceiling and >=$1 reserve")
     if args.execute and (not args.confirm_disposable or args.pricing_html or args.manifest_json):
         raise ControllerError("execution requires confirmation and live official pricing")
-    if not args.evidence_out.parent.is_dir() or not args.journal_out.parent.is_dir():
+    if (
+        not args.evidence_out.parent.is_dir()
+        or not args.journal_out.parent.is_dir()
+        or not args.diagnostic_out.parent.is_dir()
+    ):
         raise ControllerError("local output parents must already exist")
     return image.group("digest")
 
@@ -298,6 +340,19 @@ def validate_evidence(evidence: dict[str, Any], journal: list[dict[str, Any]], s
             raise ControllerError(f"S20 lifecycle mismatch: {left}/{right}")
 
 
+def preserve_and_validate_evidence(
+    evidence: dict[str, Any],
+    journal: list[dict[str, Any]],
+    sha: str,
+    evidence_out: Path,
+    journal_out: Path,
+) -> None:
+    """Persist failure evidence before applying the success-only contract."""
+    write_sanitized_json(evidence_out, evidence)
+    write_sanitized_json(journal_out, journal)
+    validate_evidence(evidence, journal, sha)
+
+
 def destroy_and_verify(
     fly: Flyctl, app: str, machine_id: str | None, volume_id: str | None
 ) -> None:
@@ -332,6 +387,30 @@ def retrieve(fly: Flyctl, app: str, machine: str, remote: str, local: Path) -> b
         check=False,
     )
     return result.returncode == 0 and local.is_file()
+
+
+def machine_diagnostic(fly: Flyctl, app: str, machine: str) -> dict[str, Any]:
+    """Return a small allowlisted status record; never retain raw Machine logs."""
+    result = fly.run(["machine", "status", machine, "--app", app, "--json"], check=False)
+    if result.returncode != 0:
+        return {"available": False, "status_returncode": result.returncode}
+    try:
+        status = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return {"available": False, "status_returncode": 0, "status_json": "invalid"}
+    events = status.get("events", []) if isinstance(status, dict) else []
+    safe_events = []
+    for event in events[-MAX_DIAGNOSTIC_EVENTS:] if isinstance(events, list) else []:
+        if isinstance(event, dict):
+            safe_events.append(
+                {key: event[key] for key in DIAGNOSTIC_EVENT_KEYS if key in event}
+            )
+    return {
+        "available": True,
+        "state": status.get("state") if isinstance(status, dict) else None,
+        "region": status.get("region") if isinstance(status, dict) else None,
+        "events": safe_events,
+    }
 
 
 def execute(args: argparse.Namespace, fly: Flyctl, digest: str) -> None:
@@ -386,9 +465,7 @@ def execute(args: argparse.Namespace, fly: Flyctl, digest: str) -> None:
                         observed_completed, observed_active = journal_progress(journal)
                     except ControllerError as error:
                         if str(error).startswith("phase_failed "):
-                            args.journal_out.write_text(
-                                json.dumps(journal, indent=2, sort_keys=True) + "\n"
-                            )
+                            write_sanitized_json(args.journal_out, journal)
                         raise
                     if observed_completed < completed:
                         raise ControllerError("journal_invalid completed phase count regressed")
@@ -409,9 +486,7 @@ def execute(args: argparse.Namespace, fly: Flyctl, digest: str) -> None:
                             emit_progress("phase_start", phase=active_phase)
                     # Preserve the last valid incomplete journal even when a
                     # controller deadline stops and destroys the Machine.
-                    args.journal_out.write_text(
-                        json.dumps(journal, indent=2, sort_keys=True) + "\n"
-                    )
+                    write_sanitized_json(args.journal_out, journal)
                 if retrieve(
                     fly, args.app_name, machine_id, "/work/s20-evidence.json", evidence_path
                 ):
@@ -438,9 +513,13 @@ def execute(args: argparse.Namespace, fly: Flyctl, digest: str) -> None:
                 raise ControllerError("run_timeout 4h30 hard deadline reached before S20 evidence")
             evidence = json.loads(evidence_path.read_text())
             journal = json.loads(journal_path.read_text())
-            validate_evidence(evidence, journal, args.expected_sha)
-            args.evidence_out.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
-            args.journal_out.write_text(json.dumps(journal, indent=2, sort_keys=True) + "\n")
+            preserve_and_validate_evidence(
+                evidence,
+                journal,
+                args.expected_sha,
+                args.evidence_out,
+                args.journal_out,
+            )
             fly.run(
                 [
                     "machine",
@@ -451,6 +530,22 @@ def execute(args: argparse.Namespace, fly: Flyctl, digest: str) -> None:
                     "touch /work/controller-ack",
                 ]
             )
+    except (ControllerError, OSError, subprocess.SubprocessError, json.JSONDecodeError) as error:
+        diagnostic: dict[str, Any] = {
+            "schema": "graphforge-s20-controller-diagnostic/1",
+            "result": "fail",
+            "controller_error": str(error),
+            "git_sha": args.expected_sha,
+        }
+        if machine_id:
+            try:
+                diagnostic["machine"] = machine_diagnostic(
+                    fly, args.app_name, machine_id
+                )
+            except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+                diagnostic["machine"] = {"available": False, "status_error": "query_failed"}
+        write_sanitized_json(args.diagnostic_out, diagnostic)
+        raise
     finally:
         if app_created:
             destroy_and_verify(fly, args.app_name, machine_id, volume_id)
@@ -471,6 +566,9 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--manifest-json", type=Path, help="dry-run manifest fixture only")
     result.add_argument("--evidence-out", type=Path, default=Path("s20-evidence.json"))
     result.add_argument("--journal-out", type=Path, default=Path("s20-journal.json"))
+    result.add_argument(
+        "--diagnostic-out", type=Path, default=Path("s20-diagnostic.json")
+    )
     result.add_argument("--execute", action="store_true")
     result.add_argument("--confirm-disposable", action="store_true")
     return result

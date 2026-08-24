@@ -237,6 +237,15 @@ runaway spend and silence. They do not turn a partial lifecycle into a pass:
 success still requires the exact 17-phase journal and equivalent source/import
 evidence described above. The dry-run plan prints the complete timeout table.
 
+The retrieved final artifact is written to `--evidence-out` **before** pass
+validation. Consequently, an incomplete or non-pass artifact remains available
+after the disposable app is destroyed instead of being lost with its volume.
+All locally preserved JSON is bounded and redacts credential-shaped keys. On a
+controller failure, `--diagnostic-out` (default `s20-diagnostic.json`) also
+records the controller error plus an allowlisted Machine state and at most 20
+exit/status events captured before teardown. Raw Fly logs, environment values,
+network addresses, and unrecognized event fields are never retained.
+
 Ingest and clean import each have a 90-minute ceiling. A Fly S20 ingest remained
 responsive and made progress but crossed the former 60-minute boundary by 18
 seconds, with no OOM or disk failure; the Machine, volume, and app then tore down

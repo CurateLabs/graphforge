@@ -7,6 +7,7 @@ import argparse
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -42,6 +43,7 @@ def args(root: Path) -> argparse.Namespace:
         manifest_json=root / "manifest.json",
         evidence_out=root / "evidence.json",
         journal_out=root / "journal.json",
+        diagnostic_out=root / "diagnostic.json",
         execute=False,
         confirm_disposable=False,
     )
@@ -130,11 +132,68 @@ def main() -> None:
         else:
             raise AssertionError("out-of-order journal must be refused")
 
+        unsafe = {
+            "schema": "incomplete",
+            "token": "must-not-survive",
+            "nested": {"password_hint": "must-not-survive", "message": "bounded"},
+        }
+        controller.write_sanitized_json(options.evidence_out, unsafe)
+        preserved = json.loads(options.evidence_out.read_text())
+        assert preserved["schema"] == "incomplete"
+        assert preserved["token"] == "<redacted>"
+        assert preserved["nested"]["password_hint"] == "<redacted>"
+        try:
+            controller.preserve_and_validate_evidence(
+                unsafe,
+                phases[:2],
+                options.expected_sha,
+                options.evidence_out,
+                options.journal_out,
+            )
+        except controller.ControllerError:
+            pass
+        else:
+            raise AssertionError("incomplete evidence must not validate")
+        assert json.loads(options.evidence_out.read_text())["schema"] == "incomplete"
+        assert len(json.loads(options.journal_out.read_text())) == 2
+
+        class FakeFly:
+            def run(self, _arguments, *, check=True):
+                del check
+                return subprocess.CompletedProcess(
+                    [],
+                    0,
+                    json.dumps(
+                        {
+                            "state": "stopped",
+                            "region": "dfw",
+                            "private_ip": "must-not-survive",
+                            "events": [
+                                {
+                                    "type": "exit",
+                                    "status": "failed",
+                                    "exit_code": 137,
+                                    "request": "must-not-survive",
+                                }
+                            ],
+                        }
+                    ),
+                    "",
+                )
+
+        diagnostic = controller.machine_diagnostic(
+            FakeFly(), options.app_name, "machine-id"
+        )
+        assert diagnostic == {
+            "available": True,
+            "state": "stopped",
+            "region": "dfw",
+            "events": [{"type": "exit", "status": "failed", "exit_code": 137}],
+        }
+
         (root / "pricing.html").write_text(pricing_html())
         (root / "manifest.json").write_text(child)
         # Main dry-run exercises argument/config/rate/manifest validation without Fly.
-        import subprocess
-
         result = subprocess.run(
             [
                 "python3",
@@ -159,6 +218,8 @@ def main() -> None:
                 str(options.evidence_out),
                 "--journal-out",
                 str(options.journal_out),
+                "--diagnostic-out",
+                str(options.diagnostic_out),
             ],
             cwd=ROOT,
             check=True,
