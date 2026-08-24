@@ -47,6 +47,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::fs;
+use std::mem::size_of;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -1812,7 +1813,44 @@ pub struct TopologyWriteWork {
     pub existing_rows_rewritten: u64,
     /// Newly accepted topology rows encoded.
     pub new_rows_written: u64,
+    /// Maximum topology rows retained between explicit batch releases.
+    pub peak_buffered_rows: u64,
+    /// Conservative peak bytes charged to topology construction state.
+    pub peak_buffered_bytes: u64,
+    /// Conservative peak scratch bytes required while encoding a flush.
+    pub peak_flush_scratch_bytes: u64,
 }
+
+/// Explicit capability limits for topology construction state.
+///
+/// Property/literal mutation buffers are intentionally outside this capability:
+/// callers that construct properties must apply their own bounded batch limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GraphWriterLimits {
+    /// Maximum buffered node plus edge rows.
+    pub max_buffered_topology_rows: usize,
+    /// Maximum conservative charged bytes for retained topology state.
+    pub max_buffered_topology_bytes: usize,
+    /// Maximum conservative temporary Arrow/Parquet input bytes per flush.
+    pub max_flush_scratch_bytes: usize,
+}
+
+impl Default for GraphWriterLimits {
+    fn default() -> Self {
+        Self {
+            max_buffered_topology_rows: 65_536,
+            max_buffered_topology_bytes: 64 * 1024 * 1024,
+            max_flush_scratch_bytes: 64 * 1024 * 1024,
+        }
+    }
+}
+
+const NODE_ROW_CHARGE: usize = 256;
+const EDGE_ROW_CHARGE: usize = 384;
+const ENDPOINT_ENTRY_CHARGE: usize = 128;
+const ROUTE_ENTRY_CHARGE: usize = 128;
+const NODE_SCRATCH_CHARGE: usize = 96;
+const EDGE_SCRATCH_CHARGE: usize = 160;
 
 /// Buffered Parquet writer for graph topology and properties.
 ///
@@ -1839,6 +1877,10 @@ pub struct GraphWriter {
     /// Edges created since the last commit, captured during `flush_edges` for
     /// the adjacency delta segment (#765). Drained by `flush`/`take_pending_delta`.
     pending_delta: Vec<crate::adjacency_delta::DeltaEdge>,
+    limits: GraphWriterLimits,
+    charged_topology_bytes: usize,
+    buffered_topology_rows: usize,
+    flush_scratch_bytes: usize,
     semantic_composition_fingerprint: Option<String>,
     topology_work: TopologyWriteWork,
 }
@@ -1887,6 +1929,10 @@ impl GraphWriter {
             properties: HashMap::new(),
             edge_properties: HashMap::new(),
             pending_delta: Vec::new(),
+            limits: GraphWriterLimits::default(),
+            charged_topology_bytes: 0,
+            buffered_topology_rows: 0,
+            flush_scratch_bytes: 0,
             semantic_composition_fingerprint: None,
             topology_work: TopologyWriteWork::default(),
         })
@@ -1896,6 +1942,109 @@ impl GraphWriter {
     #[must_use]
     pub fn topology_write_work(&self) -> TopologyWriteWork {
         self.topology_work
+    }
+
+    /// Configure the explicit topology construction capability.
+    #[must_use]
+    pub fn with_limits(mut self, limits: GraphWriterLimits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    fn admit_topology(&mut self, rows: usize, bytes: usize, scratch: usize) -> Result<(), GfError> {
+        let next_rows = self
+            .buffered_topology_rows
+            .checked_add(rows)
+            .ok_or_else(|| GfError::Storage("graph writer topology row charge overflow".into()))?;
+        let next_bytes = self
+            .charged_topology_bytes
+            .checked_add(bytes)
+            .ok_or_else(|| GfError::Storage("graph writer topology byte charge overflow".into()))?;
+        let next_scratch = self
+            .flush_scratch_bytes
+            .checked_add(scratch)
+            .ok_or_else(|| GfError::Storage("graph writer scratch charge overflow".into()))?;
+        if next_rows > self.limits.max_buffered_topology_rows
+            || next_bytes > self.limits.max_buffered_topology_bytes
+            || next_scratch > self.limits.max_flush_scratch_bytes
+        {
+            return Err(GfError::Storage(
+                "graph writer topology construction window exhausted".into(),
+            ));
+        }
+        self.buffered_topology_rows = next_rows;
+        self.charged_topology_bytes = next_bytes;
+        self.flush_scratch_bytes = next_scratch;
+        self.topology_work.peak_buffered_rows =
+            self.topology_work.peak_buffered_rows.max(next_rows as u64);
+        self.topology_work.peak_buffered_bytes = self
+            .topology_work
+            .peak_buffered_bytes
+            .max(next_bytes as u64);
+        self.topology_work.peak_flush_scratch_bytes = self
+            .topology_work
+            .peak_flush_scratch_bytes
+            .max(next_scratch as u64);
+        Ok(())
+    }
+
+    fn refresh_topology_charge(&mut self) {
+        let node_bytes = self.nodes.iter().fold(0usize, |sum, row| {
+            sum.saturating_add(NODE_ROW_CHARGE)
+                .saturating_add(size_of::<(Uuid, u64)>())
+                .saturating_add(row.type_ids.len().saturating_mul(size_of::<u32>()))
+        });
+        let edge_bytes = self.edges.iter().fold(0usize, |sum, (route, rows)| {
+            sum.saturating_add(ROUTE_ENTRY_CHARGE)
+                .saturating_add(route.len().saturating_mul(2))
+                .saturating_add(rows.iter().fold(0usize, |rows_sum, row| {
+                    rows_sum
+                        .saturating_add(EDGE_ROW_CHARGE)
+                        .saturating_add(size_of::<Uuid>())
+                        .saturating_add(size_of::<crate::adjacency_delta::DeltaEdge>())
+                        .saturating_add(
+                            row.rel_type_name
+                                .as_ref()
+                                .map_or(0, |name| name.len().saturating_mul(2)),
+                        )
+                        .saturating_add(row.rel_type_name.as_ref().map_or(route.len(), String::len))
+                }))
+        });
+        let endpoint_bytes = self
+            .uuid_to_node_id
+            .len()
+            .saturating_mul(ENDPOINT_ENTRY_CHARGE);
+        let delta_bytes = self.pending_delta.iter().fold(0usize, |sum, edge| {
+            sum.saturating_add(size_of::<crate::adjacency_delta::DeltaEdge>())
+                .saturating_add(edge.rel_type_name.len())
+        });
+        self.charged_topology_bytes = node_bytes
+            .saturating_add(edge_bytes)
+            .saturating_add(endpoint_bytes)
+            .saturating_add(delta_bytes);
+        self.buffered_topology_rows = self
+            .nodes
+            .len()
+            .saturating_add(self.edges.values().map(Vec::len).sum::<usize>());
+        self.flush_scratch_bytes = self
+            .nodes
+            .iter()
+            .fold(0usize, |sum, row| {
+                sum.saturating_add(NODE_SCRATCH_CHARGE)
+                    .saturating_add(row.type_ids.len().saturating_mul(size_of::<u32>()))
+            })
+            .saturating_add(self.edges.values().flatten().fold(0usize, |sum, row| {
+                sum.saturating_add(EDGE_SCRATCH_CHARGE)
+                    .saturating_add(row.rel_type_name.as_ref().map_or(0, String::len))
+            }));
+    }
+
+    /// Release endpoint registrations after the caller has durably handed off
+    /// the batch's UUID index and adjacency evidence.
+    pub fn release_committed_topology_state(&mut self) {
+        self.uuid_to_node_id.clear();
+        self.pending_delta.clear();
+        self.refresh_topology_charge();
     }
 
     /// Attach the exact composition fingerprint used to authenticate opaque
@@ -1925,9 +2074,23 @@ impl GraphWriter {
         type_ids: &[TypeId],
     ) -> Result<u64, GfError> {
         let bytes = to_bytes(&node_uuid);
+        if self.uuid_to_node_id.contains_key(&bytes) {
+            return Err(GfError::Storage(
+                "duplicate node UUID in graph writer topology window".into(),
+            ));
+        }
+        let labels = type_ids.len().saturating_mul(size_of::<u32>());
+        self.admit_topology(
+            1,
+            NODE_ROW_CHARGE
+                .saturating_add(ENDPOINT_ENTRY_CHARGE)
+                // Reserve the immutable UUID-index duplicate at admission.
+                .saturating_add(size_of::<(Uuid, u64)>())
+                .saturating_add(labels),
+            NODE_SCRATCH_CHARGE.saturating_add(labels),
+        )?;
         let node_id = self.next_node_id;
         self.next_node_id += 1;
-        // Last-writer-wins on duplicate UUID (no dedup detection at this layer).
         self.uuid_to_node_id.insert(bytes, node_id);
         self.nodes.push(NodeRow {
             node_uuid: bytes,
@@ -1948,7 +2111,25 @@ impl GraphWriter {
     /// does **not** push a [`NodeRow`] or advance `next_node_id`; it only teaches
     /// the UUID→surrogate map.
     pub fn register_existing_node(&mut self, node_uuid: Uuid, node_id: u64) {
-        self.uuid_to_node_id.insert(to_bytes(&node_uuid), node_id);
+        // Temporary stack adapter only: primary integration must migrate every
+        // caller to the fallible API (or change this signature) before landing.
+        // Silently losing an endpoint on budget exhaustion is not acceptable.
+        let _ = self.try_register_existing_node(node_uuid, node_id);
+    }
+
+    /// Budgeted endpoint registration for topology construction.
+    pub fn try_register_existing_node(
+        &mut self,
+        node_uuid: Uuid,
+        node_id: u64,
+    ) -> Result<(), GfError> {
+        let key = to_bytes(&node_uuid);
+        if self.uuid_to_node_id.contains_key(&key) {
+            return Ok(());
+        }
+        self.admit_topology(0, ENDPOINT_ENTRY_CHARGE, 0)?;
+        self.uuid_to_node_id.insert(key, node_id);
+        Ok(())
     }
 
     /// Resolve and register persisted edge endpoints through the authenticated
@@ -1960,6 +2141,7 @@ impl GraphWriter {
         node_uuids: &[Uuid],
     ) -> Result<crate::UuidProbeMetrics, GfError> {
         let (surrogates, metrics) = index.lookup_node_surrogates(node_uuids)?;
+        let mut resolved = Vec::new();
         for (uuid, surrogate) in node_uuids.iter().zip(surrogates) {
             let surrogate = surrogate.ok_or_else(|| {
                 GfError::Storage(format!(
@@ -1967,7 +2149,16 @@ impl GraphWriter {
                     graphforge_core::uuid::to_string(uuid)
                 ))
             })?;
-            self.register_existing_node(*uuid, surrogate);
+            let key = to_bytes(uuid);
+            if !self.uuid_to_node_id.contains_key(&key)
+                && !resolved.iter().any(|(candidate, _)| candidate == uuid)
+            {
+                resolved.push((*uuid, surrogate));
+            }
+        }
+        self.admit_topology(0, resolved.len().saturating_mul(ENDPOINT_ENTRY_CHARGE), 0)?;
+        for (uuid, surrogate) in resolved {
+            self.uuid_to_node_id.insert(to_bytes(&uuid), surrogate);
         }
         Ok(metrics)
     }
@@ -2010,6 +2201,37 @@ impl GraphWriter {
             ))
         })?;
 
+        let edge_bytes = to_bytes(&edge_uuid);
+        if self
+            .edges
+            .values()
+            .flatten()
+            .any(|row| row.edge_uuid == edge_bytes)
+        {
+            return Err(GfError::Storage(
+                "duplicate edge UUID in graph writer topology window".into(),
+            ));
+        }
+        let route_is_new = match self.mode {
+            OntologyMode::Exploratory => !self.edges.contains_key(EXPLORATORY_STEM),
+            OntologyMode::Advisory | OntologyMode::Strict => !self.edges.contains_key(rel_type),
+        };
+        let route_charge = usize::from(route_is_new)
+            .saturating_mul(ROUTE_ENTRY_CHARGE.saturating_add(rel_type.len().saturating_mul(2)));
+        let dynamic = match self.mode {
+            OntologyMode::Exploratory => rel_type.len().saturating_mul(2),
+            OntologyMode::Advisory | OntologyMode::Strict => rel_type.len(),
+        };
+        self.admit_topology(
+            1,
+            EDGE_ROW_CHARGE
+                .saturating_add(size_of::<Uuid>())
+                .saturating_add(size_of::<crate::adjacency_delta::DeltaEdge>())
+                .saturating_add(route_charge)
+                .saturating_add(dynamic),
+            EDGE_SCRATCH_CHARGE.saturating_add(rel_type.len()),
+        )?;
+
         let edge_id = self.next_edge_id;
         self.next_edge_id += 1;
 
@@ -2019,7 +2241,7 @@ impl GraphWriter {
         };
 
         self.edges.entry(stem).or_default().push(EdgeRow {
-            edge_uuid: to_bytes(&edge_uuid),
+            edge_uuid: edge_bytes,
             src_uuid: src_bytes,
             dst_uuid: dst_bytes,
             edge_id,
@@ -2293,6 +2515,7 @@ impl GraphWriter {
         });
         self.uuid_to_node_id
             .retain(|uuid, _| !targets.contains(uuid));
+        self.refresh_topology_charge();
         dropped
     }
 
@@ -2313,6 +2536,7 @@ impl GraphWriter {
             rows.retain(|r| !targets.contains(&r.edge_uuid));
             !rows.is_empty()
         });
+        self.refresh_topology_charge();
         dropped
     }
 
@@ -2454,6 +2678,7 @@ impl GraphWriter {
         // drain interleaves stems); the segment's documented order. Correctness
         // does not depend on it — `apply_delta_segments` re-sorts by (key, edge).
         edges.sort_unstable_by_key(|e| e.edge_id);
+        self.refresh_topology_charge();
         edges
     }
 
@@ -2486,15 +2711,22 @@ impl GraphWriter {
     /// # Errors
     /// Returns [`GfError::Storage`] on any I/O, Arrow, or Parquet failure.
     pub fn flush_into(&mut self, staged: &mut RewriteBatch) -> Result<(), GfError> {
-        let topology_pending = !self.nodes.is_empty() || !self.edges.is_empty();
-        self.flush_nodes(staged)?;
-        self.flush_edges(staged)?;
-        if topology_pending {
-            self.stage_surrogate_tails(staged)?;
-        }
-        self.flush_properties(staged)?;
-        self.flush_edge_properties(staged)?;
-        Ok(())
+        let result = (|| {
+            let topology_pending = !self.nodes.is_empty() || !self.edges.is_empty();
+            self.flush_nodes(staged)?;
+            self.flush_edges(staged)?;
+            if topology_pending {
+                self.stage_surrogate_tails(staged)?;
+            }
+            self.flush_properties(staged)?;
+            self.flush_edge_properties(staged)?;
+            Ok(())
+        })();
+        // Success releases encoded rows; failure may have consumed only a
+        // prefix because this legacy writer is not reusable after staging
+        // failure. In either case accounting follows the exact retained state.
+        self.refresh_topology_charge();
+        result
     }
 
     fn record_topology_shard(
@@ -6043,6 +6275,85 @@ mod tests {
         assert_eq!(large.rows_encoded, small.rows_encoded * 2);
         assert_eq!(large.shard_count, small.shard_count);
         assert!(large.output_bytes <= small.output_bytes.saturating_mul(3));
+    }
+
+    #[test]
+    fn topology_budget_rejects_before_allocating_or_advancing_surrogates() {
+        let dir = TempDir::new().unwrap();
+        let required = NODE_ROW_CHARGE + ENDPOINT_ENTRY_CHARGE + size_of::<(Uuid, u64)>() + 4;
+        let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS)
+            .unwrap()
+            .with_limits(GraphWriterLimits {
+                max_buffered_topology_rows: 1,
+                max_buffered_topology_bytes: required - 1,
+                max_flush_scratch_bytes: usize::MAX,
+            });
+
+        assert!(writer.create_node(new_v7(), TypeId(0)).is_err());
+        assert_eq!(writer.next_node_id, 1);
+        assert!(writer.nodes.is_empty());
+        assert!(writer.uuid_to_node_id.is_empty());
+        assert_eq!(writer.charged_topology_bytes, 0);
+        assert_eq!(writer.topology_work.peak_buffered_rows, 0);
+    }
+
+    #[test]
+    fn topology_budget_plateaus_across_committed_mixed_batches() {
+        let dir = TempDir::new().unwrap();
+        let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS)
+            .unwrap()
+            .with_limits(GraphWriterLimits {
+                max_buffered_topology_rows: 3,
+                max_buffered_topology_bytes: 16 * 1024,
+                max_flush_scratch_bytes: 4 * 1024,
+            });
+
+        for _ in 0..8 {
+            let left = new_v7();
+            let right = new_v7();
+            writer.create_node(left, TypeId(0)).unwrap();
+            writer.create_node(right, TypeId(0)).unwrap();
+            writer
+                .create_edge(new_v7(), "KNOWS", &left, &right)
+                .unwrap();
+            assert!(writer.charged_topology_bytes <= writer.limits.max_buffered_topology_bytes);
+            assert!(writer.flush_scratch_bytes <= writer.limits.max_flush_scratch_bytes);
+            writer.flush().unwrap();
+            writer.release_committed_topology_state();
+            assert_eq!(writer.charged_topology_bytes, 0);
+            assert_eq!(writer.buffered_topology_rows, 0);
+            assert_eq!(writer.flush_scratch_bytes, 0);
+        }
+        assert_eq!(writer.topology_work.peak_buffered_rows, 3);
+        assert!(writer.topology_work.peak_buffered_bytes <= 16 * 1024);
+        assert!(writer.topology_work.peak_flush_scratch_bytes <= 4 * 1024);
+        assert_eq!(writer.topology_work.new_rows_written, 24);
+    }
+
+    #[test]
+    fn topology_budget_accounts_for_cancel_and_failed_flush_retained_state() {
+        let dir = TempDir::new().unwrap();
+        let left = new_v7();
+        let right = new_v7();
+        let edge = new_v7();
+        let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
+        writer.create_node(left, TypeId(0)).unwrap();
+        writer.create_node(right, TypeId(0)).unwrap();
+        writer.create_edge(edge, "KNOWS", &left, &right).unwrap();
+        assert_eq!(writer.cancel_edges(&HashSet::from([to_bytes(&edge)])), 1);
+        writer.refresh_topology_charge();
+        assert_eq!(writer.buffered_topology_rows, 2);
+
+        writer.create_edge(edge, "KNOWS", &left, &right).unwrap();
+        fs::create_dir_all(dir.path().join("topology")).unwrap();
+        fs::write(dir.path().join("topology/edges"), b"not a directory").unwrap();
+        assert!(writer.flush().is_err());
+        assert_eq!(writer.buffered_topology_rows, 1);
+        assert!(writer.charged_topology_bytes <= writer.limits.max_buffered_topology_bytes);
+        writer.release_committed_topology_state();
+        assert!(writer.charged_topology_bytes > 0);
+        assert_eq!(writer.cancel_edges(&HashSet::from([to_bytes(&edge)])), 1);
+        assert_eq!(writer.charged_topology_bytes, 0);
     }
 
     #[test]
