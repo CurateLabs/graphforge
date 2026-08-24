@@ -858,6 +858,29 @@ pub fn uuid_membership_index_present(project_dir: &Path) -> bool {
 
 const DEFAULT_ORPHAN_GC_LIMIT: usize = 64;
 
+#[cfg(test)]
+thread_local! {
+    static FAIL_NEXT_SNAPSHOT_REFRESH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn fail_next_snapshot_refresh_for_test() {
+    FAIL_NEXT_SNAPSHOT_REFRESH.set(true);
+}
+
+#[cfg(test)]
+fn injected_snapshot_refresh_failure() -> Option<GfError> {
+    if FAIL_NEXT_SNAPSHOT_REFRESH.replace(false) {
+        return Some(storage_err("injected UUID snapshot refresh failure"));
+    }
+    None
+}
+
+#[cfg(not(test))]
+fn injected_snapshot_refresh_failure() -> Option<GfError> {
+    None
+}
+
 /// Reclaim a bounded number of unreachable immutable UUID runs under the
 /// recovered project rewrite lock.
 pub fn maintain_uuid_membership_orphans(
@@ -990,10 +1013,11 @@ pub(crate) enum CommittedUuidTopologyRewrite {
 }
 
 /// Commit topology and its UUID participant under the one durable rewrite lock.
+#[allow(clippy::too_many_lines)] // One sealed participant lifecycle; order is the invariant.
 pub(crate) fn commit_uuid_topology_rewrite(
     project_dir: &Path,
     staged: crate::staging::RewriteBatch,
-    delta: UuidTopologyDelta,
+    delta: &UuidTopologyDelta,
     snapshot: &mut Option<AuthenticatedUuidIndexSnapshot>,
 ) -> Result<CommittedUuidTopologyRewrite, GfError> {
     ensure_uuid_membership_migrated(project_dir)?;
@@ -1104,12 +1128,17 @@ pub(crate) fn commit_uuid_topology_rewrite(
     if let (Some(generation), Some(token)) = (committed, token.as_ref()) {
         token.verify_generation(generation)?;
         let _work = token.metrics();
-        let refresh = if let Some(value) = snapshot.as_mut() {
-            token.advance_snapshot(value).map(|_| ())
-        } else {
-            AuthenticatedUuidIndexSnapshot::open_at_generation(&root, generation)
-                .map(|value| *snapshot = Some(value))
-        };
+        let refresh = injected_snapshot_refresh_failure().map_or_else(
+            || {
+                if let Some(value) = snapshot.as_mut() {
+                    token.advance_snapshot(value).map(|_| ())
+                } else {
+                    AuthenticatedUuidIndexSnapshot::open_at_generation(&root, generation)
+                        .map(|value| *snapshot = Some(value))
+                }
+            },
+            Err,
+        );
         if let Err(error) = refresh {
             *snapshot = None;
             return Ok(CommittedUuidTopologyRewrite::CommittedNeedsRefresh { generation, error });
@@ -1123,6 +1152,7 @@ pub(crate) fn commit_uuid_topology_rewrite(
 
 /// Stage one bounded v3 UUID-index delta and its authenticated receipt into the
 /// caller's generation-last topology rewrite transaction.
+#[allow(clippy::too_many_arguments)] // Mirrors the four disjoint UUID delta domains.
 pub(crate) fn prepare_uuid_membership_delta(
     project_dir: &Path,
     current: u64,
@@ -1243,6 +1273,7 @@ fn reconcile_uuid_auxiliary(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::type_complexity, clippy::too_many_lines)] // Pure planner returns its authenticated transaction bundle.
 fn plan_uuid_membership_delta(
     root: &Path,
     current: u64,
@@ -1513,7 +1544,8 @@ fn authenticate_file_blocks(
             .map_err(storage_err)?;
         let mut bytes = vec![0_u8; block.len as usize];
         file.read_exact(&mut bytes).map_err(storage_err)?;
-        let width = record_bytes as usize;
+        let width = usize::try_from(record_bytes)
+            .map_err(|_| storage_err("record width does not fit address space"))?;
         let key_width = if record_bytes == IDENTITY_RECORD_BYTES {
             16
         } else {
@@ -1796,7 +1828,8 @@ impl VerifiedBlockReader {
             cursor: 0,
             authenticated_bytes: 0,
             authenticated_blocks: 0,
-            width: width as usize,
+            width: usize::try_from(width)
+                .map_err(|_| storage_err("record width does not fit address space"))?,
             key_width: if width == IDENTITY_RECORD_BYTES {
                 16
             } else {
@@ -2002,7 +2035,9 @@ fn read_bounded(file: &mut File, maximum: u64) -> Result<Vec<u8>, GfError> {
     if length > maximum {
         return Err(storage_err("recovery control record exceeds size limit"));
     }
-    let mut body = Vec::with_capacity(length as usize);
+    let capacity = usize::try_from(length)
+        .map_err(|_| storage_err("control record length does not fit address space"))?;
+    let mut body = Vec::with_capacity(capacity);
     file.read_to_end(&mut body).map_err(storage_err)?;
     Ok(body)
 }
@@ -2625,7 +2660,7 @@ fn validate_run_descriptors(manifest: &Manifest) -> Result<(), GfError> {
             "manifest runs violate canonical level/interval policy",
         ));
     }
-    if intervals.last().map(|interval| interval.1).unwrap_or(0) != manifest.current_generation
+    if intervals.last().map_or(0, |interval| interval.1) != manifest.current_generation
         || intervals
             .windows(2)
             .any(|pair| pair[0].1.saturating_add(1) != pair[1].0)
@@ -2826,6 +2861,7 @@ fn migrate_uuid_membership_indexes(
     Ok(result)
 }
 
+#[allow(clippy::too_many_lines)] // Sequential bounded rebuild pipeline with one authority output.
 fn stage_uuid_membership_rebuild_locked(
     project_dir: &Path,
     generation: u64,
