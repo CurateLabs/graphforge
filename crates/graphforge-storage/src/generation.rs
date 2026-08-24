@@ -16,20 +16,13 @@
 //!
 //! # Crash-safety invariant
 //!
-//! [`commit_topology_aware`] bumps the counter **strictly before** the first
-//! rename of the staged batch. A crash after the bump but before (or during)
-//! the commit leaves the counter advanced over an unchanged or partially
-//! renamed topology — any existing index now merely *looks* stale and is
-//! rebuilt, costing one spurious rebuild. The reverse order would be unsound:
-//! a crash between commit and bump would leave new topology under the old
-//! counter, making a stale index look **fresh** and silently serving wrong
-//! traversals. Spurious bumps are safe; missed bumps are not.
-//!
-//! Multi-process writers can lose a bump (read-increment-rename is not
-//! cross-process atomic); this matches the consistency envelope of every
-//! Parquet rewrite in this embedded engine (see [`crate::staging`]).
+//! [`commit_topology_aware`] serializes writers, durably authenticates every
+//! retained replacement in a bounded intent journal, rolls data files forward,
+//! and publishes this counter last as the explicit authority switch. A crash at
+//! any barrier is replayed idempotently before the generation is read. Thus a
+//! generation can never describe a prefix of the intended topology and a
+//! completed topology can never remain authoritative under its prior counter.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use graphforge_core::GfError;
@@ -42,9 +35,9 @@ const GENERATION_KEY: &str = "topology_generation";
 const SEARCH_GENERATION_KEY: &str = "search_generation";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct GenerationState {
-    topology: u64,
-    search: u64,
+pub(crate) struct GenerationState {
+    pub(crate) topology: u64,
+    pub(crate) search: u64,
 }
 
 fn storage_err(e: impl std::fmt::Display) -> GfError {
@@ -87,7 +80,7 @@ pub fn read_search_generation(project_dir: &Path) -> Result<u64, GfError> {
     Ok(read_generation_state(project_dir)?.search)
 }
 
-fn read_generation_state(project_dir: &Path) -> Result<GenerationState, GfError> {
+pub(crate) fn read_generation_state_raw(project_dir: &Path) -> Result<GenerationState, GfError> {
     let path = generation_path(project_dir);
     let contents = match std::fs::read_to_string(&path) {
         Ok(c) => c,
@@ -124,6 +117,19 @@ fn read_generation_state(project_dir: &Path) -> Result<GenerationState, GfError>
     Ok(GenerationState { topology, search })
 }
 
+pub(crate) fn encode_generation_state(topology: u64, search: u64) -> Result<Vec<u8>, GfError> {
+    serde_json::to_vec(&serde_json::json!({
+        GENERATION_KEY: topology,
+        SEARCH_GENERATION_KEY: search,
+    }))
+    .map_err(storage_err)
+}
+
+fn read_generation_state(project_dir: &Path) -> Result<GenerationState, GfError> {
+    crate::durable_rewrite::recover(project_dir)?;
+    read_generation_state_raw(project_dir)
+}
+
 /// Atomically persist `current + 1` (sibling temp + rename) and return the
 /// new value. Creates `topology/` if needed.
 ///
@@ -131,7 +137,10 @@ fn read_generation_state(project_dir: &Path) -> Result<GenerationState, GfError>
 /// Returns [`GfError::Storage`] if the current value cannot be read (corrupt
 /// file) or on I/O failure; on failure the prior file is untouched.
 pub fn bump_topology_generation(project_dir: &Path) -> Result<u64, GfError> {
-    Ok(bump_generations(project_dir, true, false)?.topology)
+    Ok(
+        crate::durable_rewrite::commit(RewriteBatch::new(), project_dir, true, false, None)?
+            .topology,
+    )
 }
 
 /// Atomically advance and persist the graph-native search generation.
@@ -140,57 +149,7 @@ pub fn bump_topology_generation(project_dir: &Path) -> Result<u64, GfError> {
 /// Returns [`GfError::Storage`] if the existing generation is corrupt or the
 /// replacement cannot be persisted.
 pub fn bump_search_generation(project_dir: &Path) -> Result<u64, GfError> {
-    Ok(bump_generations(project_dir, false, true)?.search)
-}
-
-fn bump_generations(
-    project_dir: &Path,
-    bump_topology: bool,
-    bump_search: bool,
-) -> Result<GenerationState, GfError> {
-    let mut next = read_generation_state(project_dir)?;
-    if bump_topology {
-        next.topology = next
-            .topology
-            .checked_add(1)
-            .ok_or_else(|| GfError::Storage("topology generation counter overflow".to_owned()))?;
-    }
-    if bump_search {
-        next.search = next
-            .search
-            .checked_add(1)
-            .ok_or_else(|| GfError::Storage("search generation counter overflow".to_owned()))?;
-    }
-    let path = generation_path(project_dir);
-    let parent = path.parent().expect("generation path always has a parent");
-    std::fs::create_dir_all(parent).map_err(storage_err)?;
-    let mut tmp = tempfile::Builder::new()
-        .prefix("generation.json.")
-        .suffix(".tmp")
-        .tempfile_in(parent)
-        .map_err(storage_err)?;
-    let body = serde_json::json!({
-        GENERATION_KEY: next.topology,
-        SEARCH_GENERATION_KEY: next.search,
-    })
-    .to_string();
-    tmp.write_all(body.as_bytes()).map_err(storage_err)?;
-    tmp.as_file().sync_all().map_err(storage_err)?;
-    tmp.persist(&path).map_err(|e| storage_err(e.error))?;
-    sync_directory(parent)?;
-    Ok(next)
-}
-
-#[cfg(unix)]
-fn sync_directory(path: &Path) -> Result<(), GfError> {
-    std::fs::File::open(path)
-        .and_then(|directory| directory.sync_all())
-        .map_err(storage_err)
-}
-
-#[cfg(not(unix))]
-fn sync_directory(_path: &Path) -> Result<(), GfError> {
-    Ok(())
+    Ok(crate::durable_rewrite::commit(RewriteBatch::new(), project_dir, false, true, None)?.search)
 }
 
 /// Whether any staged destination in `staged` rewrites topology:
@@ -220,8 +179,8 @@ pub fn touches_search_source(staged: &RewriteBatch, project_dir: &Path) -> bool 
         .any(|path| path == nodes || path.starts_with(&properties))
 }
 
-/// Commit `staged`, bumping each affected generation **first** (see the module
-/// docs for why bump-before-commit is the only sound order). Edge topology
+/// Durably commit `staged`, publishing each affected generation **last** (see
+/// the module-level crash invariant). Edge topology
 /// advances only topology; node topology advances topology and search; node
 /// properties advance only search.
 ///
@@ -230,23 +189,28 @@ pub fn touches_search_source(staged: &RewriteBatch, project_dir: &Path) -> bool 
 /// than re-reading the counter (which a concurrent bump could have advanced).
 ///
 /// # Errors
-/// Returns [`GfError::Storage`] on bump or rename failure. A bump followed by
-/// a failed commit leaves the counter advanced — safe (the index reads as
-/// stale), see the crash-safety invariant.
+/// Returns [`GfError::Storage`] on admission, journal, authentication, replay,
+/// or namespace-durability failure. A durable intent is always rolled forward
+/// on retry/reopen; failures before intent preserve the prior authority.
 pub fn commit_topology_aware(
     staged: RewriteBatch,
     project_dir: &Path,
 ) -> Result<Option<u64>, GfError> {
+    commit_topology_aware_with_auxiliary(staged, project_dir, None)
+}
+
+/// Commit a rewrite with an authenticated typed auxiliary receipt bound to a
+/// staged destination in the same generation-last transaction.
+pub fn commit_topology_aware_with_auxiliary(
+    staged: RewriteBatch,
+    project_dir: &Path,
+    auxiliary: Option<crate::AuxiliaryReceipt>,
+) -> Result<Option<u64>, GfError> {
     let topology = touches_topology(&staged, project_dir);
     let search = touches_search_source(&staged, project_dir);
-    let bumped = if topology || search {
-        let generations = bump_generations(project_dir, topology, search)?;
-        topology.then_some(generations.topology)
-    } else {
-        None
-    };
-    staged.commit()?;
-    Ok(bumped)
+    let generations =
+        crate::durable_rewrite::commit(staged, project_dir, topology, search, auxiliary)?;
+    Ok(topology.then_some(generations.topology))
 }
 
 // ---------------------------------------------------------------------------
@@ -330,6 +294,20 @@ mod tests {
     }
 
     #[test]
+    fn corrupt_rewrite_journal_fails_closed_without_changing_authority() {
+        let dir = TempDir::new().unwrap();
+        assert_eq!(bump_topology_generation(dir.path()).unwrap(), 1);
+        std::fs::write(
+            dir.path().join(".graphforge-rewrite-v1.json"),
+            br#"{"version":1,"checksum":"forged"}"#,
+        )
+        .unwrap();
+        let before = std::fs::read(generation_path(dir.path())).unwrap();
+        assert!(read_topology_generation(dir.path()).is_err());
+        assert_eq!(std::fs::read(generation_path(dir.path())).unwrap(), before);
+    }
+
+    #[test]
     fn touches_topology_matrix() {
         let dir = TempDir::new().unwrap();
         for (rel, topology, search) in [
@@ -366,6 +344,10 @@ mod tests {
         commit_topology_aware(staged, dir.path()).unwrap();
         assert_eq!(read_topology_generation(dir.path()).unwrap(), 0);
         assert_eq!(read_search_generation(dir.path()).unwrap(), 1);
+        // Repeated reopen/recovery is idempotent and consumes the intent.
+        assert_eq!(read_topology_generation(dir.path()).unwrap(), 0);
+        assert_eq!(read_search_generation(dir.path()).unwrap(), 1);
+        assert!(!dir.path().join(".graphforge-rewrite-v1.json").exists());
 
         // Mixed batch staging topology: exactly one bump.
         let staged = staged_for(

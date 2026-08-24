@@ -10,7 +10,9 @@
 //! - [`search_manifest`] / [`search_publication`] — shared search search freshness and atomic publication
 #![forbid(unsafe_code)]
 
+mod durable_rewrite;
 mod file_lock;
+pub use durable_rewrite::AuxiliaryReceipt;
 #[doc(hidden)]
 pub mod filesystem_admission;
 
@@ -19,7 +21,8 @@ pub mod adjacency_delta;
 
 pub mod generation;
 pub use generation::{
-    commit_topology_aware, read_search_generation, read_topology_generation, touches_search_source,
+    commit_topology_aware, commit_topology_aware_with_auxiliary, read_search_generation,
+    read_topology_generation, touches_search_source,
 };
 
 pub mod graph_projection;
