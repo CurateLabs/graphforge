@@ -100,6 +100,60 @@ impl StableDirectory {
         Ok(file)
     }
 
+    /// Open an existing regular child for read/write, or create it once.
+    pub fn open_or_create_child_file(&self, name: &OsStr) -> io::Result<File> {
+        validate_child_name(name)?;
+        self.revalidate_named()?;
+        let path = self.path.join(name);
+        let file = stable_open_or_create_child_file(&self.file, &path, name)?;
+        validate_stable_child_file(&file, &path)?;
+        self.revalidate_named()?;
+        Ok(file)
+    }
+
+    /// Enumerate child names while retaining this directory capability.
+    pub fn child_names(&self) -> io::Result<Vec<std::ffi::OsString>> {
+        self.revalidate_named()?;
+        stable_child_names(&self.file, &self.path)
+    }
+
+    /// Create a hard link between retained source and destination directories.
+    pub fn link_child_into(
+        &self,
+        source_name: &OsStr,
+        destination: &Self,
+        destination_name: &OsStr,
+    ) -> io::Result<()> {
+        validate_child_name(source_name)?;
+        validate_child_name(destination_name)?;
+        self.revalidate_named()?;
+        destination.revalidate_named()?;
+        stable_link_child(
+            &self.file,
+            &self.path,
+            source_name,
+            &destination.file,
+            &destination.path,
+            destination_name,
+        )?;
+        self.revalidate_named()?;
+        destination.revalidate_named()
+    }
+
+    /// Remove a child only while its current named identity matches `expected`.
+    pub fn unlink_child_if_identity(&self, name: &OsStr, expected: FileIdentity) -> io::Result<()> {
+        validate_child_name(name)?;
+        self.revalidate_named()?;
+        stable_unlink_child_if_identity(&self.file, &self.path, name, expected)?;
+        self.revalidate_named()
+    }
+
+    /// Return the path used only for diagnostics and guarded Windows syscalls.
+    #[must_use]
+    pub fn diagnostic_path(&self) -> &Path {
+        &self.path
+    }
+
     /// Borrow the retained directory handle.
     #[must_use]
     pub fn file(&self) -> &File {
@@ -196,6 +250,86 @@ fn stable_open_child_file(
         .map_err(io::Error::from)
 }
 
+#[cfg(unix)]
+fn stable_open_or_create_child_file(parent: &File, _path: &Path, name: &OsStr) -> io::Result<File> {
+    use rustix::fs::{Mode, OFlags};
+    rustix::fs::openat(
+        parent,
+        name,
+        OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::from_bits_truncate(0o600),
+    )
+    .map(File::from)
+    .map_err(io::Error::from)
+}
+
+#[cfg(unix)]
+fn stable_child_names(parent: &File, _path: &Path) -> io::Result<Vec<std::ffi::OsString>> {
+    use std::os::unix::ffi::OsStrExt as _;
+    let directory = rustix::fs::Dir::read_from(parent).map_err(io::Error::from)?;
+    directory
+        .map(|entry| {
+            let entry = entry.map_err(io::Error::from)?;
+            let name = OsStr::from_bytes(entry.file_name().to_bytes());
+            Ok(name.to_os_string())
+        })
+        .filter(|entry| {
+            !matches!(entry, Ok(name) if name == OsStr::new(".") || name == OsStr::new(".."))
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+fn stable_link_child(
+    source: &File,
+    _source_path: &Path,
+    source_name: &OsStr,
+    destination: &File,
+    _destination_path: &Path,
+    destination_name: &OsStr,
+) -> io::Result<()> {
+    rustix::fs::linkat(
+        source,
+        source_name,
+        destination,
+        destination_name,
+        rustix::fs::AtFlags::empty(),
+    )
+    .map_err(io::Error::from)
+}
+
+#[cfg(unix)]
+fn stable_unlink_child_if_identity(
+    parent: &File,
+    _path: &Path,
+    name: &OsStr,
+    expected: FileIdentity,
+) -> io::Result<()> {
+    use rustix::fs::{AtFlags, Mode, OFlags};
+    let opened = rustix::fs::openat(
+        parent,
+        name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(io::Error::from)?;
+    if file_identity(&opened)? != expected {
+        return Err(io::Error::other("child identity changed before unlink"));
+    }
+    let named =
+        rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW).map_err(io::Error::from)?;
+    let named_identity = FileIdentity {
+        volume_serial: u64::try_from(named.st_dev)
+            .map_err(|_| io::Error::other("negative device identity"))?,
+        file_id: u128::from(named.st_ino).to_le_bytes(),
+    };
+    if named_identity != expected {
+        return Err(io::Error::other("child identity changed before unlink"));
+    }
+    rustix::fs::unlinkat(parent, name, AtFlags::empty()).map_err(io::Error::from)
+}
+
 #[cfg(windows)]
 fn stable_open_directory(path: &Path) -> io::Result<File> {
     use std::os::windows::fs::OpenOptionsExt as _;
@@ -245,6 +379,61 @@ fn stable_open_child_file(
     options.open(path)
 }
 
+#[cfg(windows)]
+fn stable_open_or_create_child_file(
+    _parent: &File,
+    path: &Path,
+    _name: &OsStr,
+) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    const FILE_SHARE_READ: u32 = 0x0000_0001;
+    const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+#[cfg(windows)]
+fn stable_child_names(_parent: &File, path: &Path) -> io::Result<Vec<std::ffi::OsString>> {
+    std::fs::read_dir(path)?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect()
+}
+
+#[cfg(windows)]
+fn stable_link_child(
+    _source: &File,
+    source_path: &Path,
+    source_name: &OsStr,
+    _destination: &File,
+    destination_path: &Path,
+    destination_name: &OsStr,
+) -> io::Result<()> {
+    std::fs::hard_link(
+        source_path.join(source_name),
+        destination_path.join(destination_name),
+    )
+}
+
+#[cfg(windows)]
+fn stable_unlink_child_if_identity(
+    _parent: &File,
+    path: &Path,
+    name: &OsStr,
+    expected: FileIdentity,
+) -> io::Result<()> {
+    let child = path.join(name);
+    if path_identity(&child)? != expected {
+        return Err(io::Error::other("child identity changed before unlink"));
+    }
+    std::fs::remove_file(child)
+}
+
 #[cfg(all(not(unix), not(windows)))]
 fn stable_open_directory(_path: &Path) -> io::Result<File> {
     Err(io::Error::new(
@@ -256,6 +445,51 @@ fn stable_open_directory(_path: &Path) -> io::Result<File> {
 #[cfg(all(not(unix), not(windows)))]
 fn stable_open_child_directory(_parent: &File, _path: &Path, _name: &OsStr) -> io::Result<File> {
     stable_open_directory(Path::new(""))
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn stable_open_or_create_child_file(
+    _parent: &File,
+    _path: &Path,
+    _name: &OsStr,
+) -> io::Result<File> {
+    stable_open_directory(Path::new(""))
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn stable_child_names(_parent: &File, _path: &Path) -> io::Result<Vec<std::ffi::OsString>> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "stable directories unsupported",
+    ))
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn stable_link_child(
+    _source: &File,
+    _source_path: &Path,
+    _source_name: &OsStr,
+    _destination: &File,
+    _destination_path: &Path,
+    _destination_name: &OsStr,
+) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "stable directories unsupported",
+    ))
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn stable_unlink_child_if_identity(
+    _parent: &File,
+    _path: &Path,
+    _name: &OsStr,
+    _expected: FileIdentity,
+) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "stable directories unsupported",
+    ))
 }
 
 #[cfg(all(not(unix), not(windows)))]
