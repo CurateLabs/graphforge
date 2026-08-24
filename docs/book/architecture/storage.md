@@ -440,13 +440,22 @@ record rather than enumerating or decoding the accumulated topology fragments;
 legacy projects without it use the bounded tail migration path once.
 
 Bulk endpoint resolution uses the derived
-`.graphforge-cache/uuid-membership/` snapshot. Its manifest authenticates the
-topology generation, record counts, lengths, and SHA-256 digests. Nodes have a
-sorted fixed-width `UUID -> node_id` file; edges have a sorted UUID membership
-file. Builds use bounded external sort runs and bounded-fan-in merges. Probes
-perform logarithmic seeks and decode zero topology rows. Duplicate node or edge
-UUIDs, reuse of one UUID across the node and edge domains, stale manifests, and
-missing, truncated, or checksum-mismatched index files fail closed.
+`.graphforge-cache/uuid-membership/` snapshot. One canonical version-3 manifest
+authenticates an immutable base and size-tiered generation deltas. Every run
+pairs a UUID-sorted 32-byte identity record (node or edge; node records carry
+the surrogate) with a node-only, surrogate-sorted 24-byte reverse record.
+Ordinary open authenticates each pinned file with linear 1 MiB streaming reads;
+small probes use logarithmic seeks and lazily verify the run-pair bijection.
+
+A construction session never probes or rescans retained history per chunk. It
+writes bounded, immutable chunk runs with 1 MiB block I/O, externally merges
+all session runs once, detects cross-chunk collisions, then performs one
+sequential merge-join against each already-authenticated retained run before
+publishing one generation-interval delta. Leveled compaction excludes the base;
+its physical rewrite cost is amortized O(N log D), not falsely described as
+strictly linear. Duplicate or cross-kind UUIDs, duplicate node surrogates,
+stale manifests, and missing, truncated, or checksum-mismatched files fail
+closed.
 
 New publications use a compact version-2 `graph/files` root. Payloads and
 fixed-depth radix nodes live once in the project content-addressed object

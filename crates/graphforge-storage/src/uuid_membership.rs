@@ -318,6 +318,298 @@ pub fn uuid_membership_index_is_fresh(project_dir: &Path) -> Result<bool, GfErro
         && manifest.current_generation == crate::read_topology_generation(project_dir)?)
 }
 
+/// A bounded bulk-construction index transaction. Chunks are staged without
+/// reading retained history; finalization authenticates retained runs once,
+/// externally merges all staged chunks, and performs one sequential collision
+/// join before publishing one generation-interval delta.
+pub struct UuidConstructionSession {
+    project_dir: PathBuf,
+    root: PathBuf,
+    staging: tempfile::TempDir,
+    manifest: Manifest,
+    first_generation: Option<u64>,
+    last_generation: u64,
+    identity_runs: Vec<PathBuf>,
+    surrogate_runs: Vec<PathBuf>,
+    metrics: UuidIndexAppendMetrics,
+}
+
+fn block_count(bytes: u64) -> u64 {
+    bytes.div_ceil(BULK_IO_BYTES as u64)
+}
+
+fn load_or_create_empty_v3_manifest(
+    project_dir: &Path,
+    current_generation: u64,
+) -> Result<Manifest, GfError> {
+    let root = project_dir.join(INDEX_DIR);
+    match fs::read(root.join(MANIFEST)) {
+        Ok(body) => {
+            let manifest: Manifest = serde_json::from_slice(&body).map_err(storage_err)?;
+            if manifest.format_version != FORMAT_VERSION
+                || manifest.current_generation != current_generation
+            {
+                return Err(storage_err("retained index is absent, stale, or unsupported"));
+            }
+            Ok(manifest)
+        }
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound && current_generation == 0 =>
+        {
+            let empty = root.join(format!(".empty-{}.run", Uuid::new_v4()));
+            File::create(&empty).and_then(|file| file.sync_all()).map_err(storage_err)?;
+            let parent = project_dir.parent().ok_or_else(|| storage_err("project directory has no staging parent"))?;
+            let identities = publish_data(&empty, &root, parent, "identities-v3-base", 0, 32)?;
+            let node_surrogates = publish_data(&empty, &root, parent, "node-surrogates-v3-base", 0, 24)?;
+            let _ = fs::remove_file(empty);
+            Ok(Manifest {
+                format_version: FORMAT_VERSION,
+                base_generation: 0,
+                current_generation: 0,
+                runs: vec![RunRecord {
+                    base: true,
+                    level: 0,
+                    first_generation: 0,
+                    last_generation: 0,
+                    identities,
+                    node_surrogates,
+                    node_count: 0,
+                    edge_count: 0,
+                }],
+            })
+        }
+        Err(error) => Err(storage_err(error)),
+    }
+}
+
+fn merge_v3_all(
+    mut runs: Vec<PathBuf>,
+    scratch: &Path,
+    prefix: &str,
+    fan_in: usize,
+    identity: bool,
+) -> Result<PathBuf, GfError> {
+    if runs.is_empty() {
+        let path = scratch.join(format!("{prefix}-empty.run"));
+        File::create(&path).and_then(|file| file.sync_all()).map_err(storage_err)?;
+        return Ok(path);
+    }
+    let mut round = 0;
+    while runs.len() > 1 {
+        let mut next = Vec::new();
+        for (group, chunk) in runs.chunks(fan_in).enumerate() {
+            let output = scratch.join(format!("{prefix}-{round}-{group}.run"));
+            if identity { merge_identity_v3(chunk, &output)?; } else { merge_surrogate_runs(chunk, &output)?; }
+            next.push(output);
+        }
+        for run in runs { let _ = fs::remove_file(run); }
+        runs = next;
+        round += 1;
+    }
+    Ok(runs.pop().expect("session run exists"))
+}
+
+fn reject_file_collisions(
+    incoming_path: &Path,
+    retained_path: &Path,
+    record_bytes: usize,
+) -> Result<(u64, u64), GfError> {
+    match record_bytes {
+        32 => reject_file_collisions_fixed::<32, 16>(incoming_path, retained_path),
+        24 => reject_file_collisions_fixed::<24, 8>(incoming_path, retained_path),
+        _ => Err(storage_err("unsupported collision record width")),
+    }
+}
+
+fn reject_file_collisions_fixed<const N: usize, const K: usize>(
+    incoming_path: &Path,
+    retained_path: &Path,
+) -> Result<(u64, u64), GfError> {
+    let mut incoming = BufReader::with_capacity(
+        BULK_IO_BYTES,
+        File::open(incoming_path).map_err(storage_err)?,
+    );
+    let mut retained = BufReader::with_capacity(
+        BULK_IO_BYTES,
+        File::open(retained_path).map_err(storage_err)?,
+    );
+    let mut left = read_exact_record::<N>(&mut incoming)?;
+    let mut right = read_exact_record::<N>(&mut retained)?;
+    let mut retained_bytes = 0_u64;
+    while let (Some(incoming_record), Some(retained_record)) = (left.as_ref(), right.as_ref()) {
+        match incoming_record[..K].cmp(&retained_record[..K]) {
+            std::cmp::Ordering::Less => left = read_exact_record::<N>(&mut incoming)?,
+            std::cmp::Ordering::Equal => {
+                return Err(storage_err(
+                    "staged session identity collides with retained index",
+                ));
+            }
+            std::cmp::Ordering::Greater => {
+                retained_bytes += N as u64;
+                right = read_exact_record::<N>(&mut retained)?;
+            }
+        }
+    }
+    // If incoming keys remain above the last comparison, consume the retained
+    // stream once to make the measured full-retained validation explicit.
+    while right.is_some() {
+        retained_bytes += N as u64;
+        right = read_exact_record::<N>(&mut retained)?;
+    }
+    Ok((retained_bytes, block_count(retained_bytes)))
+}
+
+impl UuidConstructionSession {
+    /// Pin and authenticate the retained snapshot once for this session.
+    pub fn begin(project_dir: &Path) -> Result<Self, GfError> {
+        let root = project_dir.join(INDEX_DIR);
+        fs::create_dir_all(&root).map_err(storage_err)?;
+        let current_generation = crate::read_topology_generation(project_dir)?;
+        let manifest = load_or_create_empty_v3_manifest(project_dir, current_generation)?;
+        validate_run_descriptors(&manifest)?;
+        for descriptor in &manifest.runs {
+            validate_run_contents(
+                open_verified(&root, &descriptor.identities, IDENTITY_RECORD_BYTES)?,
+                open_verified(&root, &descriptor.node_surrogates, NODE_LOOKUP_RECORD_BYTES)?,
+                descriptor,
+            )?;
+        }
+        let staging = tempfile::Builder::new()
+            .prefix(".uuid-v3-session-")
+            .tempdir_in(&root)
+            .map_err(storage_err)?;
+        Ok(Self {
+            project_dir: project_dir.to_path_buf(),
+            root,
+            staging,
+            last_generation: manifest.current_generation,
+            manifest,
+            first_generation: None,
+            identity_runs: Vec::new(),
+            surrogate_runs: Vec::new(),
+            metrics: UuidIndexAppendMetrics::default(),
+        })
+    }
+
+    /// Stage one already-committed, bounded topology chunk. No retained run is
+    /// read and no manifest is published here.
+    pub fn stage(
+        &mut self,
+        generation: u64,
+        nodes: &[(Uuid, u64)],
+        edges: &[Uuid],
+    ) -> Result<(), GfError> {
+        if generation != self.last_generation + 1 {
+            return Err(storage_err("session generations are not contiguous"));
+        }
+        let mut identities = nodes
+            .iter()
+            .map(|(uuid, surrogate)| (*uuid, 0_u8, *surrogate))
+            .chain(edges.iter().map(|uuid| (*uuid, 1_u8, 0)))
+            .collect::<Vec<_>>();
+        identities.sort_unstable_by_key(|entry| *entry.0.as_bytes());
+        if identities.windows(2).any(|pair| pair[0].0 == pair[1].0)
+            || nodes.iter().any(|(_, surrogate)| *surrogate == 0)
+        {
+            return Err(storage_err("staged chunk contains duplicate/invalid identity"));
+        }
+        let mut surrogates = nodes
+            .iter()
+            .map(|(uuid, surrogate)| (*surrogate, *uuid))
+            .collect::<Vec<_>>();
+        surrogates.sort_unstable();
+        if surrogates.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+            return Err(storage_err("staged chunk contains duplicate node surrogate"));
+        }
+        let ordinal = self.identity_runs.len();
+        let identity_path = self.staging.path().join(format!("identity-{ordinal:08}.run"));
+        let surrogate_path = self.staging.path().join(format!("surrogate-{ordinal:08}.run"));
+        write_identity_records(&identity_path, &identities)?;
+        write_surrogate_records(&surrogate_path, &surrogates)?;
+        let bytes = identities.len() as u64 * IDENTITY_RECORD_BYTES
+            + surrogates.len() as u64 * NODE_LOOKUP_RECORD_BYTES;
+        self.metrics.input_records += identities.len() as u64;
+        self.metrics.write_bytes += bytes;
+        self.metrics.physical_bytes_written += bytes;
+        self.metrics.write_blocks += block_count(identities.len() as u64 * IDENTITY_RECORD_BYTES)
+            + block_count(surrogates.len() as u64 * NODE_LOOKUP_RECORD_BYTES);
+        self.metrics.peak_buffered_records = self
+            .metrics
+            .peak_buffered_records
+            .max(identities.len() + surrogates.len());
+        self.metrics.peak_buffered_bytes = self
+            .metrics
+            .peak_buffered_bytes
+            .max(identities.len() * 32 + surrogates.len() * 24 + 2 * BULK_IO_BYTES);
+        self.identity_runs.push(identity_path);
+        self.surrogate_runs.push(surrogate_path);
+        self.first_generation.get_or_insert(generation);
+        self.last_generation = generation;
+        Ok(())
+    }
+
+    /// Validate and publish the complete session with one retained-history pass.
+    pub fn commit(mut self) -> Result<UuidIndexAppendMetrics, GfError> {
+        let Some(first_generation) = self.first_generation else { return Ok(self.metrics) };
+        if crate::read_topology_generation(&self.project_dir)? != self.last_generation {
+            return Err(storage_err("topology generation changed before session commit"));
+        }
+        let token = Uuid::new_v4();
+        let identity = merge_v3_all(
+            std::mem::take(&mut self.identity_runs),
+            &self.root,
+            &format!(".session-{token}-identities"),
+            32,
+            true,
+        )?;
+        let surrogate = merge_v3_all(
+            std::mem::take(&mut self.surrogate_runs),
+            &self.root,
+            &format!(".session-{token}-surrogates"),
+            32,
+            false,
+        )?;
+        for retained in &self.manifest.runs {
+            let (bytes, blocks) = reject_file_collisions(
+                &identity,
+                &self.root.join(&retained.identities.name),
+                32,
+            )?;
+            self.metrics.validation_scan_bytes += bytes;
+            self.metrics.validation_scan_blocks += blocks;
+            let (bytes, blocks) = reject_file_collisions(
+                &surrogate,
+                &self.root.join(&retained.node_surrogates.name),
+                24,
+            )?;
+            self.metrics.validation_scan_bytes += bytes;
+            self.metrics.validation_scan_blocks += blocks;
+        }
+        let staging_parent = self.project_dir.parent().ok_or_else(|| storage_err("project directory has no staging parent"))?;
+        let identities = publish_data_in_place(&identity, &self.root, "identities-v3-session", self.last_generation, 32)?;
+        let node_surrogates = publish_data_in_place(&surrogate, &self.root, "node-surrogates-v3-session", self.last_generation, 24)?;
+        let node_count = node_surrogates.count;
+        self.manifest.runs.push(RunRecord {
+            base: false,
+            level: 0,
+            first_generation,
+            last_generation: self.last_generation,
+            identities,
+            node_surrogates,
+            node_count,
+            edge_count: self.metrics.input_records.saturating_sub(node_count),
+        });
+        let prior = manifest_file_names(&self.manifest);
+        compact_manifest_levels(&self.root, staging_parent, self.staging.path(), &mut self.manifest, &mut self.metrics)?;
+        self.manifest.current_generation = self.last_generation;
+        self.manifest.runs.sort_unstable_by_key(|run| run.first_generation);
+        publish_manifest(&self.root, staging_parent, &self.manifest)?;
+        cleanup_superseded_files(&self.root, prior, &self.manifest)?;
+        self.metrics.retained_runs = self.manifest.runs.len();
+        Ok(self.metrics)
+    }
+}
+
 /// Publish one committed topology batch as an immutable authenticated v3 run.
 pub fn append_uuid_membership_delta(
     project_dir: &Path,
@@ -758,7 +1050,7 @@ fn compact_manifest_levels(
 fn merge_identity_v3(inputs: &[PathBuf], output: &Path) -> Result<(), GfError> {
     let mut readers = inputs
         .iter()
-        .map(|path| File::open(path).map(BufReader::new).map_err(storage_err))
+        .map(|path| File::open(path).map(|file| BufReader::with_capacity(BULK_IO_BYTES, file)).map_err(storage_err))
         .collect::<Result<Vec<_>, _>>()?;
     let mut heap = BinaryHeap::<Reverse<([u8; 32], usize)>>::new();
     for (index, reader) in readers.iter_mut().enumerate() {
@@ -1137,8 +1429,8 @@ fn scan_to_runs(
 }
 
 fn build_identity_run(nodes: &Path, edges: &Path, output: &Path) -> Result<(), GfError> {
-    let mut node_reader = BufReader::new(File::open(nodes).map_err(storage_err)?);
-    let mut edge_reader = BufReader::new(File::open(edges).map_err(storage_err)?);
+    let mut node_reader = BufReader::with_capacity(BULK_IO_BYTES, File::open(nodes).map_err(storage_err)?);
+    let mut edge_reader = BufReader::with_capacity(BULK_IO_BYTES, File::open(edges).map_err(storage_err)?);
     let mut node = read_node_surrogate_record(&mut node_reader)?;
     let mut edge = read_record(&mut edge_reader)?;
     let mut out = File::create(output).map_err(storage_err)?;
@@ -1186,7 +1478,7 @@ fn build_surrogate_run(
     limits: UuidIndexBuildLimits,
     metrics: &mut UuidIndexBuildMetrics,
 ) -> Result<PathBuf, GfError> {
-    let mut reader = BufReader::new(File::open(nodes).map_err(storage_err)?);
+    let mut reader = BufReader::with_capacity(BULK_IO_BYTES, File::open(nodes).map_err(storage_err)?);
     let mut buffer = Vec::with_capacity(limits.run_records);
     let mut runs = Vec::new();
     while let Some((uuid, surrogate)) = read_node_surrogate_record(&mut reader)? {
@@ -1251,7 +1543,7 @@ fn flush_surrogate_run(
 fn merge_surrogate_runs(inputs: &[PathBuf], output: &Path) -> Result<(), GfError> {
     let mut readers = inputs
         .iter()
-        .map(|path| File::open(path).map(BufReader::new).map_err(storage_err))
+        .map(|path| File::open(path).map(|file| BufReader::with_capacity(BULK_IO_BYTES, file)).map_err(storage_err))
         .collect::<Result<Vec<_>, _>>()?;
     let mut heap = BinaryHeap::<Reverse<((u64, [u8; 16]), usize)>>::new();
     for (index, reader) in readers.iter_mut().enumerate() {
@@ -1364,7 +1656,7 @@ fn merge_all(
 fn merge_runs(inputs: &[PathBuf], output: &Path) -> Result<(), GfError> {
     let mut readers = inputs
         .iter()
-        .map(|p| File::open(p).map(BufReader::new).map_err(storage_err))
+        .map(|p| File::open(p).map(|file| BufReader::with_capacity(BULK_IO_BYTES, file)).map_err(storage_err))
         .collect::<Result<Vec<_>, _>>()?;
     let mut heap = BinaryHeap::<Reverse<([u8; 16], usize)>>::new();
     for (idx, reader) in readers.iter_mut().enumerate() {
@@ -1515,7 +1807,7 @@ fn merge_node_surrogate_runs(
 fn merge_node_surrogate_group(inputs: &[PathBuf], output: &Path) -> Result<(), GfError> {
     let mut readers = inputs
         .iter()
-        .map(|path| File::open(path).map(BufReader::new).map_err(storage_err))
+        .map(|path| File::open(path).map(|file| BufReader::with_capacity(BULK_IO_BYTES, file)).map_err(storage_err))
         .collect::<Result<Vec<_>, _>>()?;
     let mut heap = BinaryHeap::<Reverse<(([u8; 16], u64), usize)>>::new();
     for (index, reader) in readers.iter_mut().enumerate() {
@@ -1563,8 +1855,8 @@ fn read_node_surrogate_record(
 }
 
 fn reject_cross_kind_identities(nodes: &Path, edges: &Path) -> Result<(), GfError> {
-    let mut node_reader = BufReader::new(File::open(nodes).map_err(storage_err)?);
-    let mut edge_reader = BufReader::new(File::open(edges).map_err(storage_err)?);
+    let mut node_reader = BufReader::with_capacity(BULK_IO_BYTES, File::open(nodes).map_err(storage_err)?);
+    let mut edge_reader = BufReader::with_capacity(BULK_IO_BYTES, File::open(edges).map_err(storage_err)?);
     let mut node = read_record(&mut node_reader)?;
     let mut edge = read_record(&mut edge_reader)?;
     while let (Some(node_uuid), Some(edge_uuid)) = (node, edge) {
@@ -1643,6 +1935,42 @@ fn publish_data(
         count: length / record_bytes,
         sha256,
     })
+}
+
+fn publish_data_in_place(
+    source: &Path,
+    root: &Path,
+    kind: &str,
+    generation: u64,
+    record_bytes: u64,
+) -> Result<FileRecord, GfError> {
+    if source.parent() != Some(root) {
+        return Err(storage_err("in-place publication source is outside retained root"));
+    }
+    let source_name = source.file_name().ok_or_else(|| storage_err("run lacks child name"))?;
+    let directory = graphforge_filesystem::StableDirectory::open(root).map_err(storage_err)?;
+    let mut source_file = directory.open_child_file(source_name).map_err(storage_err)?;
+    let identity = graphforge_filesystem::file_identity(&source_file).map_err(storage_err)?;
+    let length = source_file.metadata().map_err(storage_err)?.len();
+    if length % record_bytes != 0 { return Err(storage_err("internal run has a partial index record")); }
+    let sha256 = sha256_reader(&mut source_file)?;
+    source_file.sync_all().map_err(storage_err)?;
+    let name = format!("{kind}-{generation}-{}.uuidx", &sha256[..16]);
+    let target = std::ffi::OsStr::new(&name);
+    match directory.link_child_into(source_name, &source_file, identity, &directory, target) {
+        Ok(_) => {}
+        Err(_) => {
+            let mut existing = directory.open_child_file(target).map_err(storage_err)?;
+            if existing.metadata().map_err(storage_err)?.len() != length
+                || sha256_reader(&mut existing)? != sha256
+            {
+                return Err(storage_err("concurrent immutable run mismatch"));
+            }
+        }
+    }
+    directory.unlink_child_if_identity(source_name, identity).map_err(storage_err)?;
+    directory.sync().map_err(storage_err)?;
+    Ok(FileRecord { name, count: length / record_bytes, sha256 })
 }
 
 fn sync_dir(path: &Path) -> Result<(), GfError> {
@@ -2033,6 +2361,41 @@ mod tests {
         assert_eq!(metrics.validation_random_seeks, 0);
         assert_eq!(metrics.validation_scan_bytes, 40_000 * (32 + 24));
         assert_eq!(metrics.validation_scan_blocks, 3);
+    }
+
+    #[test]
+    fn construction_session_reads_retained_history_once_not_once_per_chunk() {
+        let (dir, _, _) = fixture();
+        rebuild_uuid_membership_indexes(dir.path(), UuidIndexBuildLimits::default()).unwrap();
+        let mut session = UuidConstructionSession::begin(dir.path()).unwrap();
+        for generation in 1..=64 {
+            crate::generation::bump_topology_generation(dir.path()).unwrap();
+            session
+                .stage(
+                    generation,
+                    &[(Uuid::from_u128(10_000 + u128::from(generation)), 10_000 + generation)],
+                    &[],
+                )
+                .unwrap();
+        }
+        let metrics = session.commit().unwrap();
+        assert_eq!(metrics.validation_random_seeks, 0);
+        assert_eq!(metrics.validation_scan_bytes, 5 * 32 + 3 * 24);
+        assert_eq!(metrics.validation_scan_blocks, 2);
+        let index = UuidMembershipIndex::open(dir.path()).unwrap();
+        assert_eq!(index.count(UuidIndexKind::Node), 67);
+    }
+
+    #[test]
+    fn construction_session_detects_cross_chunk_duplicates_before_publication() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = UuidConstructionSession::begin(dir.path()).unwrap();
+        crate::generation::bump_topology_generation(dir.path()).unwrap();
+        session.stage(1, &[(Uuid::from_u128(7), 7)], &[]).unwrap();
+        crate::generation::bump_topology_generation(dir.path()).unwrap();
+        session.stage(2, &[], &[Uuid::from_u128(7)]).unwrap();
+        assert!(session.commit().unwrap_err().to_string().contains("duplicate UUID"));
+        assert!(!dir.path().join(INDEX_DIR).join(MANIFEST).exists());
     }
 
     #[test]

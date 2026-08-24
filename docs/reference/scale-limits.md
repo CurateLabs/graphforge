@@ -24,10 +24,12 @@ first fragment and immutable bounded fragments thereafter. The writer encodes
 each accepted row once; increasing total row count must increase aggregate
 input rows, rows encoded, shard bytes, and shard count linearly while prior
 rows decoded remains zero. Writer reopen uses one persisted surrogate-tail
-record, and edge endpoint resolution uses logarithmic seeks in the
-authenticated disk UUID-to-surrogate index; neither operation scans retained
-topology. Peak construction RSS is therefore a configured batch/shard-window
-property. Continued RSS growth proportional to retained edge count is a
+record. Bulk construction block-writes bounded UUID/surrogate chunk runs,
+externally merges the session once, and sequentially reads each pinned retained
+index run once at final validation; it performs no per-edge random filesystem
+I/O. Small ordinary endpoint batches use logarithmic authenticated disk probes.
+Neither path scans retained topology. Peak construction RSS is therefore a
+configured batch/shard-window property. Continued RSS growth proportional to retained edge count is a
 correctness failure, not a reason to raise the M5 memory ceiling.
 
 ## Rust 0.5.0 Fixed-Hop LIMIT Contract

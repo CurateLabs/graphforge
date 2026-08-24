@@ -324,8 +324,8 @@ pub use io_stats::{IoSnapshot, snapshot as io_snapshot};
 
 pub mod uuid_membership;
 pub use uuid_membership::{
-    UuidIndexAppendMetrics, UuidIndexBuildLimits, UuidIndexBuildMetrics, UuidIndexKind,
-    UuidMembershipIndex, UuidProbeMetrics, append_uuid_membership_delta,
+    UuidConstructionSession, UuidIndexAppendMetrics, UuidIndexBuildLimits, UuidIndexBuildMetrics,
+    UuidIndexKind, UuidMembershipIndex, UuidProbeMetrics, append_uuid_membership_delta,
     rebuild_uuid_membership_indexes, uuid_membership_index_is_fresh, uuid_membership_index_present,
 };
 
