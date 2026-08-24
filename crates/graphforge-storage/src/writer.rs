@@ -1320,6 +1320,7 @@ pub struct GraphWriter {
     pending_index_nodes: Vec<(Uuid, u64)>,
     pending_index_edges: Vec<Uuid>,
     uuid_index_snapshot: Option<crate::AuthenticatedUuidIndexSnapshot>,
+    uuid_snapshot_refresh_needed: Option<u64>,
     limits: GraphWriterLimits,
     charged_topology_bytes: usize,
     buffered_topology_rows: usize,
@@ -1351,6 +1352,7 @@ impl GraphWriter {
     /// Returns [`GfError::Storage`] if the directory cannot be created.
     pub fn open_at(dir: &Path, mode: OntologyMode, now_micros: i64) -> Result<Self, GfError> {
         fs::create_dir_all(dir).map_err(|e| io_err(&e))?;
+        crate::uuid_membership::ensure_uuid_membership_migrated(dir)?;
         // Continue surrogate assignment from the on-disk maximum so a writer
         // opened on an existing project appends rather than colliding with /
         // overwriting prior rows. Absent files → max 0 → start at 1.
@@ -1376,6 +1378,7 @@ impl GraphWriter {
             pending_index_nodes: Vec::new(),
             pending_index_edges: Vec::new(),
             uuid_index_snapshot: None,
+            uuid_snapshot_refresh_needed: None,
             limits: GraphWriterLimits::default(),
             charged_topology_bytes: 0,
             buffered_topology_rows: 0,
@@ -2244,6 +2247,12 @@ impl GraphWriter {
         deleted_nodes: Vec<Uuid>,
         deleted_edges: Vec<Uuid>,
     ) -> Result<Option<u64>, GfError> {
+        if let Some(generation) = self.uuid_snapshot_refresh_needed {
+            self.uuid_index_snapshot = Some(
+                crate::AuthenticatedUuidIndexSnapshot::open_at_generation(&self.dir, generation)?,
+            );
+            self.uuid_snapshot_refresh_needed = None;
+        }
         let committed = crate::uuid_membership::commit_uuid_topology_rewrite(
             &self.dir,
             staged,
@@ -2255,12 +2264,25 @@ impl GraphWriter {
             },
             &mut self.uuid_index_snapshot,
         )?;
-        if let Some(generation) = committed {
-            let _ = generation;
-            self.pending_index_nodes.clear();
-            self.pending_index_edges.clear();
+        match committed {
+            crate::uuid_membership::CommittedUuidTopologyRewrite::NoTopologyChange => Ok(None),
+            crate::uuid_membership::CommittedUuidTopologyRewrite::Committed(generation) => {
+                self.pending_index_nodes.clear();
+                self.pending_index_edges.clear();
+                Ok(Some(generation))
+            }
+            crate::uuid_membership::CommittedUuidTopologyRewrite::CommittedNeedsRefresh {
+                generation,
+                error,
+            } => {
+                self.pending_index_nodes.clear();
+                self.pending_index_edges.clear();
+                self.uuid_snapshot_refresh_needed = Some(generation);
+                Err(GfError::Storage(format!(
+                    "topology generation {generation} committed but UUID index snapshot refresh failed: {error}"
+                )))
+            }
         }
-        Ok(committed)
     }
 
     /// Best-effort write of the delta segment for `generation` — only when the
