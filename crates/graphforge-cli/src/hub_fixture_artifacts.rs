@@ -238,6 +238,7 @@ pub fn check(source: &Path, expected: &Path) -> Result<(), String> {
     reason = "one validator must check every cross-artifact fixture binding"
 )]
 fn validate(source: &Path, artifacts: &Path) -> Result<(), String> {
+    validate_expected_tree(artifacts)?;
     let metadata: serde_json::Value = serde_json::from_slice(
         &fs::read(artifacts.join("fixture.json")).map_err(|error| error.to_string())?,
     )
@@ -299,6 +300,9 @@ fn validate(source: &Path, artifacts: &Path) -> Result<(), String> {
     let object_path = metadata["object_path"]
         .as_str()
         .ok_or("fixture object path is absent")?;
+    if object_path != "objects/openalex-openalex.gfpb" {
+        return Err("fixture object path is invalid".into());
+    }
     let object = artifacts.join(object_path);
     let bytes = fs::read(&object).map_err(|error| error.to_string())?;
     let report = verify_portable_v2(
@@ -314,7 +318,6 @@ fn validate(source: &Path, artifacts: &Path) -> Result<(), String> {
         || bytes.len() as u64 != selected.length
         || report.package_digest != manifest.package.package_digest.0
         || metadata["format"] != "graphforge-hub-fixture/1"
-        || metadata["object_path"] != "objects/openalex-openalex.gfpb"
         || metadata["object_digest"] != selected.digest.0
         || metadata["object_length"] != selected.length
         || metadata["package_digest"] != manifest.package.package_digest.0
@@ -339,6 +342,49 @@ fn validate(source: &Path, artifacts: &Path) -> Result<(), String> {
             "fixture portable, discovery, metadata, provenance, or source binding is invalid"
                 .into(),
         );
+    }
+    Ok(())
+}
+
+fn validate_expected_tree(root: &Path) -> Result<(), String> {
+    let mut actual = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory).map_err(|error| error.to_string())? {
+            let entry = entry.map_err(|error| error.to_string())?;
+            let path = entry.path();
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|error| error.to_string())?
+                .to_str()
+                .ok_or("fixture artifact path is not UTF-8")?
+                .to_owned();
+            let metadata = fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
+            if metadata.file_type().is_symlink() {
+                return Err(format!(
+                    "fixture artifact tree contains a symlink: {relative}"
+                ));
+            }
+            if metadata.is_dir() {
+                actual.push(format!("{relative}/"));
+                pending.push(path);
+            } else if metadata.is_file() {
+                actual.push(relative);
+            } else {
+                return Err("fixture artifact tree contains a non-file entry".into());
+            }
+        }
+    }
+    actual.sort();
+    let expected = [
+        "fixture.json",
+        "manifest.json",
+        "objects/",
+        "objects/openalex-openalex.gfpb",
+        "refs.json",
+    ];
+    if actual != expected {
+        return Err("fixture artifact tree does not match the exact generated contract".into());
     }
     Ok(())
 }
@@ -588,6 +634,9 @@ mod tests {
                 value["generator"]["source_digest"] =
                     serde_json::json!(format!("sha256:{}", "4".repeat(64)))
             }),
+            ("object-path", "fixture.json", |value| {
+                value["object_path"] = serde_json::json!("../../outside.gfpb")
+            }),
         ];
         for (name, relative, mutate) in cases {
             let candidate = copy_artifacts(&pristine);
@@ -615,5 +664,25 @@ mod tests {
         let altered_source = private_source();
         fs::write(altered_source.path().join("bag-info.txt"), b"changed").unwrap();
         assert!(validate(altered_source.path(), &pristine).is_err());
+    }
+
+    #[test]
+    fn exact_artifact_tree_rejects_extra_files_and_directories() {
+        let source = private_source();
+        let pristine = root().join("tests/fixtures/hub/generated/v1");
+        for relative in ["extra.json", "objects/extra.gfpb", "extra/nested.json"] {
+            let candidate = copy_artifacts(&pristine);
+            let path = candidate.path().join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"extra").unwrap();
+            assert!(
+                validate(source.path(), candidate.path()).is_err(),
+                "{relative}"
+            );
+            assert!(
+                check(source.path(), candidate.path()).is_err(),
+                "{relative}"
+            );
+        }
     }
 }
