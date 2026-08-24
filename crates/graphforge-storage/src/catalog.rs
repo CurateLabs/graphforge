@@ -187,11 +187,15 @@ pub fn read_edges(
         OntologyMode::Exploratory => ("_exploratory", EXPLORATORY_EDGE_SCHEMA.clone()),
         OntologyMode::Advisory | OntologyMode::Strict => (rel_name, TYPED_EDGE_SCHEMA.clone()),
     };
-    let path = dir
-        .join("topology")
-        .join("edges")
-        .join(format!("{stem}.parquet"));
-    let batches = read_parquet_or_empty(&path, schema)?;
+    let files = crate::mutator::edge_parquet_files(dir, Some(stem))
+        .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+    let mut batches = Vec::new();
+    for (_, path) in files {
+        batches.extend(read_parquet_or_empty(&path, schema.clone())?);
+    }
+    if batches.is_empty() {
+        batches.push(RecordBatch::new_empty(schema));
+    }
     crate::io_stats::record_edge_full_read(total_rows(&batches));
     Ok(batches)
 }
@@ -253,18 +257,23 @@ pub fn read_edges_filtered_observed(
         OntologyMode::Exploratory => ("_exploratory", EXPLORATORY_EDGE_SCHEMA.clone()),
         OntologyMode::Advisory | OntologyMode::Strict => (rel_name, TYPED_EDGE_SCHEMA.clone()),
     };
-    let path = dir
-        .join("topology")
-        .join("edges")
-        .join(format!("{stem}.parquet"));
-    read_parquet_filtered_u64(
-        &path,
-        schema,
-        "edge_id",
-        edge_ids,
-        FilteredReadKind::Edge,
-        observer,
-    )
+    let files = crate::mutator::edge_parquet_files(dir, Some(stem))
+        .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+    let mut batches = Vec::new();
+    for (_, path) in files {
+        batches.extend(read_parquet_filtered_u64(
+            &path,
+            schema.clone(),
+            "edge_id",
+            edge_ids,
+            FilteredReadKind::Edge,
+            observer,
+        )?);
+    }
+    if batches.is_empty() {
+        batches.push(RecordBatch::new_empty(schema));
+    }
+    Ok(batches)
 }
 
 /// Read the union of every relation's edges (#823): the "all relation types"
@@ -280,16 +289,10 @@ fn read_edges_union(
     edge_ids: Option<&std::collections::HashSet<u64>>,
     observer: Option<&std::sync::Arc<dyn crate::io_stats::FilteredReadObserver>>,
 ) -> Result<Vec<RecordBatch>, DataFusionError> {
-    let mut files = crate::mutator::parquet_files_in(dir, "topology/edges")
+    let files = crate::mutator::edge_parquet_files(dir, None)
         .map_err(|e| DataFusionError::Execution(e.to_string()))?;
-    files.sort();
     let mut out = Vec::new();
-    for path in files {
-        let stem = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or_default()
-            .to_owned();
+    for (stem, path) in files {
         let schema = discover_parquet_schema(&path).unwrap_or_else(|| TYPED_EDGE_SCHEMA.clone());
         let batches = if let Some(ids) = edge_ids {
             read_parquet_filtered_u64(
@@ -926,9 +929,16 @@ fn record_pruning(
 /// # Errors
 /// Propagates Parquet / Arrow errors encountered while reading.
 pub fn read_nodes(dir: &Path) -> Result<Vec<RecordBatch>, DataFusionError> {
-    let path = dir.join("topology").join("nodes.parquet");
-    let batches =
-        normalize_topology_nodes(read_parquet_or_empty(&path, TOPOLOGY_NODES_SCHEMA.clone())?)?;
+    let paths = crate::mutator::node_parquet_files(dir)
+        .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+    let mut raw = Vec::new();
+    for path in paths {
+        raw.extend(read_parquet_or_empty(&path, TOPOLOGY_NODES_SCHEMA.clone())?);
+    }
+    let mut batches = normalize_topology_nodes(raw)?;
+    if batches.is_empty() {
+        batches.push(RecordBatch::new_empty(TOPOLOGY_NODES_SCHEMA.clone()));
+    }
     crate::io_stats::record_node_full_read(total_rows(&batches));
     Ok(batches)
 }
@@ -962,15 +972,24 @@ pub fn read_nodes_filtered_observed(
     node_ids: &std::collections::HashSet<u64>,
     observer: Option<&std::sync::Arc<dyn crate::io_stats::FilteredReadObserver>>,
 ) -> Result<Vec<RecordBatch>, DataFusionError> {
-    let path = dir.join("topology").join("nodes.parquet");
-    normalize_topology_nodes(read_parquet_filtered_u64(
-        &path,
-        TOPOLOGY_NODES_SCHEMA.clone(),
-        "node_id",
-        node_ids,
-        FilteredReadKind::Node,
-        observer,
-    )?)
+    let paths = crate::mutator::node_parquet_files(dir)
+        .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+    let mut batches = Vec::new();
+    for path in paths {
+        batches.extend(read_parquet_filtered_u64(
+            &path,
+            TOPOLOGY_NODES_SCHEMA.clone(),
+            "node_id",
+            node_ids,
+            FilteredReadKind::Node,
+            observer,
+        )?);
+    }
+    let mut batches = normalize_topology_nodes(batches)?;
+    if batches.is_empty() {
+        batches.push(RecordBatch::new_empty(TOPOLOGY_NODES_SCHEMA.clone()));
+    }
+    Ok(batches)
 }
 
 /// Return the largest `edge_id` surrogate across every edge file under
@@ -983,19 +1002,10 @@ pub fn read_nodes_filtered_observed(
 /// # Errors
 /// Propagates Parquet / Arrow errors encountered while reading an edge file.
 pub(crate) fn max_edge_id(dir: &Path) -> Result<u64, DataFusionError> {
-    let edges_dir = dir.join("topology").join("edges");
-    let entries = match std::fs::read_dir(&edges_dir) {
-        Ok(rd) => rd,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-        Err(e) => return Err(io_err(&e)),
-    };
-
     let mut max = 0u64;
-    for entry in entries {
-        let path = entry.map_err(|e| io_err(&e))?.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("parquet") {
-            continue;
-        }
+    for (_, path) in crate::mutator::edge_parquet_files(dir, None)
+        .map_err(|error| DataFusionError::Execution(error.to_string()))?
+    {
         // Preserve discovery semantics: unrelated/corrupt edge artifacts are
         // ignored here and rejected by the normal catalog validation path.
         // Surrogate recovery must still inspect every readable relation stem.
@@ -1010,7 +1020,13 @@ pub(crate) fn max_edge_id(dir: &Path) -> Result<u64, DataFusionError> {
 /// node table. Canonical topology keeps surrogate ids strictly increasing, so
 /// only the final bounded Parquet row group is needed.
 pub(crate) fn max_node_id(dir: &Path) -> Result<u64, DataFusionError> {
-    max_ordered_u64_tail(&dir.join("topology/nodes.parquet"), "node_id")
+    let mut max = 0_u64;
+    for path in crate::mutator::node_parquet_files(dir)
+        .map_err(|error| DataFusionError::Execution(error.to_string()))?
+    {
+        max = max.max(max_ordered_u64_tail(&path, "node_id")?);
+    }
+    Ok(max)
 }
 
 fn max_ordered_u64_tail(path: &Path, column: &str) -> Result<u64, DataFusionError> {
@@ -1137,24 +1153,27 @@ pub fn visit_nodes_batched<F>(
 where
     F: FnMut(&RecordBatch) -> Result<bool, DataFusionError>,
 {
-    let path = dir.join("topology").join("nodes.parquet");
-    if !path.exists() {
+    let paths = crate::mutator::node_parquet_files(dir)
+        .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+    if paths.is_empty() {
         let empty = RecordBatch::new_empty(TOPOLOGY_NODES_SCHEMA.clone());
         let _ = visit(&empty)?;
         return Ok(());
     }
-    let file = File::open(&path).map_err(|e| io_err(&e))?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(parquet_err)?;
-    let builder = builder.with_batch_size(batch_size.max(1));
-    let reader = builder.build().map_err(parquet_err)?;
     let mut any = false;
-    for batch in reader {
-        any = true;
-        let batch = batch.map_err(parquet_err)?;
-        let normalized = normalize_topology_nodes(vec![batch])?;
-        for b in &normalized {
-            if !visit(b)? {
-                return Ok(());
+    for path in paths {
+        let file = File::open(&path).map_err(|e| io_err(&e))?;
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(parquet_err)?;
+        let builder = builder.with_batch_size(batch_size.max(1));
+        let reader = builder.build().map_err(parquet_err)?;
+        for batch in reader {
+            any = true;
+            let batch = batch.map_err(parquet_err)?;
+            let normalized = normalize_topology_nodes(vec![batch])?;
+            for b in &normalized {
+                if !visit(b)? {
+                    return Ok(());
+                }
             }
         }
     }
@@ -1221,14 +1240,19 @@ fn list_parquet_stems(dir: &Path) -> Vec<String> {
 /// [`TableProvider`] for `topology/nodes.parquet`.
 #[derive(Debug, Clone)]
 pub struct TopologyNodeTable {
-    path: PathBuf,
+    dir: PathBuf,
 }
 
 impl TopologyNodeTable {
     /// Create a table backed by the given Parquet file path.
     #[must_use]
+    #[allow(clippy::needless_pass_by_value)]
     pub fn new(path: PathBuf) -> Self {
-        Self { path }
+        let dir = path
+            .parent()
+            .and_then(Path::parent)
+            .map_or_else(|| path.clone(), Path::to_path_buf);
+        Self { dir }
     }
 }
 
@@ -1250,10 +1274,14 @@ impl TableProvider for TopologyNodeTable {
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
         // Existence only — no Parquet decode during planning (#339).
-        let fragment = ParquetFragment::for_path(self.path.clone(), true);
+        let fragments = crate::mutator::node_parquet_files(&self.dir)
+            .map_err(|error| DataFusionError::Execution(error.to_string()))?
+            .into_iter()
+            .map(|path| ParquetFragment::for_path(path, true))
+            .collect();
         scan_fragments(
             TOPOLOGY_NODES_SCHEMA.clone(),
-            vec![fragment],
+            fragments,
             projection,
             limit,
             state.config().batch_size(),
@@ -1268,7 +1296,8 @@ impl TableProvider for TopologyNodeTable {
 /// [`TableProvider`] for `topology/edges/TYPENAME.parquet`.
 #[derive(Debug, Clone)]
 pub struct TypedEdgeTable {
-    path: PathBuf,
+    dir: PathBuf,
+    relation: String,
     schema: SchemaRef,
 }
 
@@ -1279,16 +1308,16 @@ impl TypedEdgeTable {
     /// - any other name → [`TYPED_EDGE_SCHEMA`]
     #[must_use]
     pub fn open(dir: &Path, rel_type_name: &str) -> Self {
-        let path = dir
-            .join("topology")
-            .join("edges")
-            .join(format!("{rel_type_name}.parquet"));
         let schema = if rel_type_name == "_exploratory" {
             EXPLORATORY_EDGE_SCHEMA.clone()
         } else {
             TYPED_EDGE_SCHEMA.clone()
         };
-        Self { path, schema }
+        Self {
+            dir: dir.to_path_buf(),
+            relation: rel_type_name.to_owned(),
+            schema,
+        }
     }
 }
 
@@ -1309,10 +1338,14 @@ impl TableProvider for TypedEdgeTable {
         _filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
-        let fragment = ParquetFragment::for_path(self.path.clone(), false);
+        let fragments = crate::mutator::edge_parquet_files(&self.dir, Some(&self.relation))
+            .map_err(|error| DataFusionError::Execution(error.to_string()))?
+            .into_iter()
+            .map(|(_, path)| ParquetFragment::for_path(path, false))
+            .collect();
         scan_fragments(
             self.schema.clone(),
-            vec![fragment],
+            fragments,
             projection,
             limit,
             state.config().batch_size(),
@@ -1363,19 +1396,11 @@ impl TableProvider for UnionEdgeTable {
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
         // Directory listing only — stem order matches `read_edges_union`.
-        let mut files = crate::mutator::parquet_files_in(&self.dir, "topology/edges")
+        let files = crate::mutator::edge_parquet_files(&self.dir, None)
             .map_err(|e| DataFusionError::Execution(e.to_string()))?;
-        files.sort();
         let fragments: Vec<ParquetFragment> = files
             .into_iter()
-            .map(|path| {
-                let stem = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or_default()
-                    .to_owned();
-                ParquetFragment::for_union_edge(path, stem)
-            })
+            .map(|(stem, path)| ParquetFragment::for_union_edge(path, stem))
             .collect();
         scan_fragments(
             EXPLORATORY_EDGE_SCHEMA.clone(),
@@ -1698,11 +1723,10 @@ impl GraphCatalog {
                 Arc::new(TypedEdgeTable::open(dir, "_exploratory")),
             );
             for rel_name in runtime_catalog.relation_types() {
-                let typed_path = dir
-                    .join("topology")
-                    .join("edges")
-                    .join(format!("{rel_name}.parquet"));
-                if typed_path.exists() {
+                if !crate::mutator::edge_parquet_files(dir, Some(rel_name))
+                    .map_err(|error| DataFusionError::Execution(error.to_string()))?
+                    .is_empty()
+                {
                     schema.register(
                         format!("edges_{rel_name}"),
                         Arc::new(TypedEdgeTable::open(dir, rel_name)),

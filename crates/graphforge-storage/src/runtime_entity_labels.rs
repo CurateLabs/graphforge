@@ -31,6 +31,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::catalog::{normalize_topology_nodes, read_nodes};
 use crate::generation::commit_topology_aware;
+use crate::mutator::node_parquet_files;
 use crate::schemas::TOPOLOGY_NODES_SCHEMA;
 use crate::staging::RewriteBatch;
 
@@ -100,6 +101,13 @@ pub fn write_runtime_entity_label_encoding_marker(dir: &Path) -> Result<(), GfEr
     let path = encoding_path(dir);
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, bytes).map_err(|e| storage_err(e.to_string()))?;
+    crate::record_graph_file_descriptors(
+        dir,
+        [crate::GraphFileDeltaDescriptor::Sealed {
+            relative_path: std::path::PathBuf::from("topology/runtime_entity_label_encoding.json"),
+            revision_uuid: uuid::Uuid::new_v4(),
+        }],
+    )?;
     std::fs::rename(&tmp, &path).map_err(|e| storage_err(e.to_string()))?;
     Ok(())
 }
@@ -424,14 +432,21 @@ fn reconcile_inner(
                      read-only open cannot rewrite topology",
                 ));
             }
-            let (rewritten, remapped) = remap_batches(batches, &remap)?;
-            remapped_label_values = remapped;
+            let mut staged = RewriteBatch::new();
+            for path in node_parquet_files(dir)? {
+                let source =
+                    crate::catalog::read_parquet_or_empty(&path, TOPOLOGY_NODES_SCHEMA.clone())
+                        .map_err(pq_err)?;
+                let source = normalize_topology_nodes(source).map_err(pq_err)?;
+                let (rewritten, remapped) = remap_batches(source, &remap)?;
+                if remapped > 0 {
+                    let merged = arrow::compute::concat_batches(&TOPOLOGY_NODES_SCHEMA, &rewritten)
+                        .map_err(|e| storage_err(e.to_string()))?;
+                    staged.restage(&path, TOPOLOGY_NODES_SCHEMA.clone(), &merged)?;
+                    remapped_label_values += remapped;
+                }
+            }
             if remapped_label_values > 0 {
-                let path = dir.join("topology").join("nodes.parquet");
-                let merged = arrow::compute::concat_batches(&TOPOLOGY_NODES_SCHEMA, &rewritten)
-                    .map_err(|e| storage_err(e.to_string()))?;
-                let mut staged = RewriteBatch::new();
-                staged.restage(&path, TOPOLOGY_NODES_SCHEMA.clone(), &merged)?;
                 commit_topology_aware(staged, dir)?;
             }
         }
