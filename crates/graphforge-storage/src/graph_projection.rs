@@ -266,10 +266,16 @@ fn project_parquet_directory(
     exclude_properties: &BTreeSet<String>,
 ) -> Result<(), GfError> {
     for path in sorted_parquet_files(source)? {
-        let name = path
-            .file_name()
-            .ok_or_else(|| validation("graph parquet path has no file name"))?;
-        project_parquet_file(&path, &target.join(name), key, selected, exclude_properties)?;
+        let relative = path
+            .strip_prefix(source)
+            .map_err(|_| validation("graph parquet path escaped source directory"))?;
+        project_parquet_file(
+            &path,
+            &target.join(relative),
+            key,
+            selected,
+            exclude_properties,
+        )?;
     }
     Ok(())
 }
@@ -405,11 +411,12 @@ fn selected_catalog_rows(target: &Path, catalog: &RecordBatch) -> Result<Vec<usi
     }
 
     let mut relation_names = BTreeSet::new();
-    for path in sorted_parquet_files(&target.join("topology/edges"))? {
-        let stem = parquet_stem(&path)?;
+    let edge_root = target.join("topology/edges");
+    for path in sorted_parquet_files(&edge_root)? {
+        let stem = edge_relation_name(&edge_root, &path)?;
         let batches = read_parquet(&path)?;
         if stem != "_exploratory" && batches.iter().any(|batch| batch.num_rows() != 0) {
-            relation_names.insert(stem);
+            relation_names.insert(stem.to_owned());
         }
         for batch in batches {
             if let Some(column) = batch.column_by_name("rel_type_name") {
@@ -504,13 +511,6 @@ fn selected_catalog_rows(target: &Path, catalog: &RecordBatch) -> Result<Vec<usi
         }
     }
     Ok(selected.into_iter().collect())
-}
-
-fn parquet_stem(path: &Path) -> Result<String, GfError> {
-    path.file_stem()
-        .and_then(|value| value.to_str())
-        .map(str::to_owned)
-        .ok_or_else(|| validation("graph parquet path has no UTF-8 stem"))
 }
 
 fn string_column<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a StringArray, GfError> {
@@ -1131,7 +1131,9 @@ fn sorted_parquet_files(directory: &Path) -> Result<Vec<PathBuf>, GfError> {
             return Err(validation("graph directory contains a symbolic link"));
         }
         let path = entry.path();
-        if file_type.is_file()
+        if file_type.is_dir() {
+            paths.extend(sorted_parquet_files(&path)?);
+        } else if file_type.is_file()
             && path.extension().and_then(|value| value.to_str()) == Some("parquet")
         {
             paths.push(path);
@@ -1139,6 +1141,27 @@ fn sorted_parquet_files(directory: &Path) -> Result<Vec<PathBuf>, GfError> {
     }
     paths.sort();
     Ok(paths)
+}
+
+fn edge_relation_name<'a>(root: &Path, path: &'a Path) -> Result<&'a str, GfError> {
+    let relative = path
+        .strip_prefix(root)
+        .map_err(|_| validation("edge topology path escaped root"))?;
+    let mut components = relative.components();
+    let first = components
+        .next()
+        .and_then(|component| match component {
+            std::path::Component::Normal(value) => value.to_str(),
+            _ => None,
+        })
+        .ok_or_else(|| validation("edge topology relation is not canonical UTF-8"))?;
+    if components.next().is_some() {
+        Ok(first)
+    } else {
+        path.file_stem()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| validation("edge topology stem is not UTF-8"))
+    }
 }
 
 fn uuid_column<'a>(

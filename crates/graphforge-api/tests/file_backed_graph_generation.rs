@@ -29,11 +29,12 @@ use graphforge_api::{
 use graphforge_core::{OntologyMode, TypeId};
 use graphforge_storage::{
     GRAPH_CAPABILITY_ID, GRAPH_CAPABILITY_VERSION, GRAPH_FILES_FAMILY, GraphFileRole,
-    GraphFilesOpenStrategy, GraphWriter, GraphWriterLimits, PortableV2Limits, PortableV2Mode,
-    PortableV2Output, PortableV2SelectionProfile, ProjectCapability, ProjectGenerationRequest,
-    ProjectStageOutcome, UuidIndexKind, UuidMembershipIndex, capture_graph_files,
-    empty_workspace_participants, resolve_project_generation,
-    stage_project_generation_with_graph_tree,
+    GraphFilesOpenStrategy, GraphWriter, GraphWriterLimits, PortableV2GraphSelector,
+    PortableV2Limits, PortableV2Mode, PortableV2Output, PortableV2PackageClass,
+    PortableV2PropertyProjection, PortableV2SelectionProfile, PortableV2SubsetClosure,
+    PortableV2SubsetRequest, ProjectCapability, ProjectGenerationRequest, ProjectStageOutcome,
+    UuidIndexKind, UuidMembershipIndex, capture_graph_files, empty_workspace_participants,
+    resolve_project_generation, stage_project_generation_with_graph_tree,
 };
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -194,6 +195,11 @@ fn sharded_graph_uses_ordinary_reopen_query_and_portable_round_trip() {
     let queried = reopened.execute(traversal).unwrap();
     assert_eq!(queried.stats.rows_produced, 2);
     let source_query_fingerprint = result_fingerprint(&queried);
+    let later_edge_uuid = scalar_uuid(
+        &reopened
+            .execute("MATCH (a:Person {name:'Cy'})-[r:KNOWS]->(:Person) RETURN r.edge_uuid")
+            .unwrap(),
+    );
     let open = reopened.graph_open_evidence();
     let reopened_inventory = resolve_project_generation(&source)
         .unwrap()
@@ -205,6 +211,42 @@ fn sharded_graph_uses_ordinary_reopen_query_and_portable_round_trip() {
     assert_eq!(open.files_copied, open.files_validated);
 
     let limits = PortableV2Limits::default();
+    let subset_package = root.path().join("later-edge-subset.gfpb");
+    reopened
+        .export_portable_v2(
+            &PortableV2ExportRequest {
+                selection: PortableSelection::Current,
+                output_path: subset_package.clone(),
+                representation: PortableV2Output::Bundle,
+                profile: PortableV2SelectionProfile::Complete,
+                subset: Some(PortableV2SubsetRequest {
+                    selector: PortableV2GraphSelector {
+                        node_uuids: Vec::new(),
+                        edge_uuids: vec![later_edge_uuid.hyphenated().to_string()],
+                    },
+                    closure: PortableV2SubsetClosure::Referential,
+                    projection: PortableV2PropertyProjection::default(),
+                }),
+                limits,
+            },
+            None,
+            |_| {},
+        )
+        .unwrap();
+    let subset_verified = verify_portable_v2(
+        &PortableVerifyRequest {
+            input: subset_package,
+            mode: PortableV2Mode::Full,
+            limits,
+        },
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        subset_verified.package_class,
+        PortableV2PackageClass::GraphDataSubset
+    );
+
     let package = root.path().join("sharded.gfpb");
     let exported = reopened
         .export_portable_v2(
@@ -313,41 +355,47 @@ fn public_delete_keeps_multishard_index_readers_and_portability_consistent() {
     graph
         .execute("CREATE (:Person {name:'Cy'})-[:KNOWS]->(:Person {name:'Di'})")
         .unwrap();
+    graph
+        .execute("MATCH (p:Person {name:'Di'}) SET p:Selected")
+        .unwrap();
+    assert_eq!(graph.node_count("Selected").unwrap(), 1);
     let before_delete = inventory_digests(&source);
-    let later_shards = before_delete
+    let earlier_shards = before_delete
         .iter()
         .filter(|(path, _)| {
-            !first_inventory.contains_key(*path)
-                && (path.starts_with("topology/nodes/") || path.starts_with("topology/edges/"))
+            first_inventory.contains_key(*path)
+                && (*path == "topology/nodes.parquet"
+                    || path.starts_with("topology/nodes/")
+                    || path.starts_with("topology/edges/"))
                 && path.ends_with(".parquet")
         })
         .map(|(path, digest)| (path.clone(), digest.clone()))
         .collect::<BTreeMap<_, _>>();
     assert_eq!(
-        later_shards.len(),
+        earlier_shards.len(),
         2,
-        "the later node and edge shards are distinct"
+        "the first node and edge fragments remain distinct"
     );
 
     let deleted_uuid = scalar_uuid(
         &graph
-            .execute("MATCH (p:Person {name:'Ada'}) RETURN p.node_uuid")
+            .execute("MATCH (p:Person {name:'Cy'}) RETURN p.node_uuid")
             .unwrap(),
     );
     let generation = resolve_project_generation(&source).unwrap();
     let mut index = UuidMembershipIndex::open(&generation.graph_tree_root()).unwrap();
     let deleted_surrogate = index.lookup_node_surrogates(&[deleted_uuid]).unwrap().0[0]
-        .expect("Ada is indexed before deletion");
+        .expect("Cy is indexed before deletion");
 
     graph
-        .execute("MATCH (p:Person {name:'Ada'}) DETACH DELETE p")
+        .execute("MATCH (p:Person {name:'Cy'}) DETACH DELETE p")
         .unwrap();
     let after_delete = inventory_digests(&source);
-    for (path, digest) in &later_shards {
+    for (path, digest) in &earlier_shards {
         assert_eq!(
             after_delete.get(path),
             Some(digest),
-            "deleting an old-shard entity must not rewrite later shard {path}"
+            "deleting a later-shard entity must not rewrite earlier shard {path}"
         );
     }
     let generation = resolve_project_generation(&source).unwrap();
@@ -382,6 +430,7 @@ fn public_delete_keeps_multishard_index_readers_and_portability_consistent() {
     drop(graph);
     let reopened = GraphForge::new(Some(source.to_str().unwrap())).unwrap();
     assert_eq!(reopened.node_count("Person").unwrap(), 4);
+    assert_eq!(reopened.node_count("Selected").unwrap(), 1);
     let traversal = "MATCH (a:Person)-[:KNOWS]->(b:Person) \
                      RETURN a.name AS from, b.name AS to ORDER BY from, to";
     assert!(

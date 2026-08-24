@@ -911,13 +911,16 @@ where
 {
     checkpoint()?;
     let mut paths = Vec::new();
-    let topology = project_dir.join("topology").join("nodes.parquet");
-    match std::fs::symlink_metadata(&topology) {
-        Ok(_) => paths.push(("topology/nodes.parquet".to_owned(), topology)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(source(format!("inspect {}: {error}", topology.display())));
-        }
+    for topology in graphforge_storage::topology_node_files(project_dir)
+        .map_err(|error| source(error.to_string()))?
+    {
+        let relative = topology
+            .strip_prefix(project_dir)
+            .map_err(|_| source("topology source escaped project root"))?
+            .to_str()
+            .ok_or_else(|| source("topology source path is not UTF-8"))?
+            .to_owned();
+        paths.push((relative, topology));
     }
     paths.extend(property_source_paths(project_dir, &mut checkpoint)?);
     paths.sort_unstable_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
@@ -1367,6 +1370,30 @@ mod tests {
             Err(SearchArtifactError::ConcurrentMutation)
         ));
         assert!(calls.get() > 2);
+    }
+
+    #[test]
+    fn snapshot_fingerprint_detects_an_immutable_node_shard_change() {
+        let dir = TempDir::new().unwrap();
+        write_person(dir.path(), "Alice");
+        let mut second = GraphWriter::open_at(dir.path(), OntologyMode::Strict, 2).unwrap();
+        second.create_node(uuid(2), TypeId(LABEL_ID)).unwrap();
+        second.flush().unwrap();
+        let paths = graphforge_storage::topology_node_files(dir.path()).unwrap();
+        assert_eq!(paths.len(), 2);
+        let before =
+            capture_text_snapshot(dir.path(), TextSearchLimits::default(), || Ok(())).unwrap();
+        use std::io::Write as _;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&paths[1])
+            .unwrap()
+            .write_all(b"shard changed without a generation bump")
+            .unwrap();
+        let after =
+            capture_text_snapshot(dir.path(), TextSearchLimits::default(), || Ok(())).unwrap();
+        assert_ne!(before.fingerprint, after.fingerprint);
+        assert_eq!(before.generation, after.generation);
     }
 
     #[test]

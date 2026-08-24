@@ -721,11 +721,6 @@ fn collect_regular_files(
         if file_type.is_dir() {
             collect_regular_files(root, &path, observed)?;
         } else if file_type.is_file() {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if name.ends_with(".lock") || name.starts_with(".gf-stage-") {
-                continue;
-            }
             let relative = path
                 .strip_prefix(root)
                 .map_err(|_| corrupt("generation graph path escaped tree"))?;
@@ -941,6 +936,11 @@ mod tests {
         assert!(inventory.files.iter().any(|entry| {
             entry.relative_path == "topology/edges/KNOWS/.gf-stage-injected.parquet"
         }));
+        assert!(
+            crate::mutator::edge_parquet_files(source.path(), None).is_err(),
+            "non-canonical staged-looking names are authenticated but never topology"
+        );
+
         let generation = tempfile::tempdir().unwrap();
         stage_graph_tree(source.path(), generation.path(), &inventory).unwrap();
         let graph_root = graph_tree_root(generation.path());
