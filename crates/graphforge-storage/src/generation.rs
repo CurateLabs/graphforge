@@ -261,7 +261,7 @@ pub(crate) fn commit_topology_aware_with_participant(
 ) -> Result<Option<u64>, GfError> {
     let topology = touches_topology(&staged, project_dir);
     let search = touches_search_source(&staged, project_dir);
-    let property = touches_property_data(&staged, project_dir);
+    let property = staged.has_property_windows();
     let generations = crate::durable_rewrite::commit_with_participant(
         staged,
         project_dir,
