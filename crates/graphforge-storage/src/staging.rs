@@ -123,6 +123,19 @@ impl RewriteBatch {
         Self::default()
     }
 
+    /// Stage an authenticated control record in the same rename unit as graph data.
+    pub(crate) fn stage_bytes(&mut self, final_path: &Path, bytes: &[u8]) -> Result<(), GfError> {
+        let parent = final_path
+            .parent()
+            .ok_or_else(|| GfError::Storage("staged control record has no parent".into()))?;
+        std::fs::create_dir_all(parent).map_err(|error| io_err(&error))?;
+        let mut temp = NamedTempFile::new_in(parent).map_err(|error| io_err(&error))?;
+        std::io::Write::write_all(&mut temp, bytes).map_err(|error| io_err(&error))?;
+        temp.as_file().sync_all().map_err(|error| io_err(&error))?;
+        self.staged.push((temp, final_path.to_path_buf()));
+        Ok(())
+    }
+
     /// Stage `batch` as the replacement content for `final_path`.
     ///
     /// Writes a sibling temp file (creating the parent directory if needed);
