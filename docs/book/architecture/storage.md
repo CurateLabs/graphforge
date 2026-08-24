@@ -149,6 +149,14 @@ verifies every selected payload before exposing the generation. Version 1
 expanded inventories remain readable and can be migrated without changing
 `CURRENT` until the complete version-2 generation is durable.
 
+Pure CAS reads open the existing `graph-objects/sha256` namespace and existing
+`lifecycle.lock` with read-only capabilities. They create neither lifecycle
+state nor `tmp`/`active`, and shared directory/lifecycle locks pin the immutable
+objects against collection for the read guard's lifetime. Publication,
+materialization, lease cleanup, and GC use the distinct mutable open-or-create
+capability; materialization remains there because installing hard links mutates
+the source inode's link state.
+
 The node-v2 canonical shape has no unary branches: maximal lowercase-hex digest
 prefixes are compressed into nodes, branches have at least two distinct nibble
 children, and leaves contain the full-digest collision bucket in logical-path

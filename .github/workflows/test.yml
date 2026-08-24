@@ -940,6 +940,19 @@ jobs:
           cargo test -p graphforge-storage
           filesystem_admission::tests:: --lib --no-fail-fast
 
+      - name: Run Windows read-only CAS lock tests
+        shell: bash
+        run: |
+          cargo test -p graphforge-storage --lib \
+            graph_object_store::tests::pure_reads_require_only_existing_digest_namespace_and_never_create \
+            -- --exact --nocapture
+          cargo test -p graphforge-storage --lib \
+            graph_object_store::tests::read_only_guard_pins_cas_against_gc \
+            -- --exact --nocapture
+          cargo test -p graphforge-storage --lib \
+            graph_object_store::tests::read_only_lifecycle_rejects_multiple_links \
+            -- --exact --nocapture
+
       - name: Cross-check Windows publication-kill results against the fault oracle
         shell: bash
         env:

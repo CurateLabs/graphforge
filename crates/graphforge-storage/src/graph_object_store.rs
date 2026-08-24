@@ -51,8 +51,17 @@ struct CasRoot {
     lifecycle_identity: graphforge_filesystem::FileIdentity,
 }
 
+struct ReadOnlyCasRoot {
+    diagnostic_root: PathBuf,
+    project: StableDirectory,
+    objects: StableDirectory,
+    sha256: StableDirectory,
+    lifecycle: File,
+    lifecycle_identity: graphforge_filesystem::FileIdentity,
+}
+
 impl CasRoot {
-    fn open(root: &Path) -> Result<Self, GfError> {
+    fn open_mutable(root: &Path) -> Result<Self, GfError> {
         let project = StableDirectory::open(root)
             .map_err(|error| storage("open stable project root", root, error))?;
         let objects = project
@@ -140,6 +149,97 @@ impl CasRoot {
     }
 }
 
+impl ReadOnlyCasRoot {
+    fn open(root: &Path) -> Result<Self, GfError> {
+        let project = StableDirectory::open(root)
+            .map_err(|error| storage("open stable project root", root, error))?;
+        let objects = project
+            .open_child_directory(std::ffi::OsStr::new(GRAPH_OBJECTS_DIR))
+            .map_err(|error| storage("open existing graph object root", root, error))?;
+        let sha256 = objects
+            .open_child_directory(std::ffi::OsStr::new(SHA256_DIR))
+            .map_err(|error| storage("open existing graph object digest root", root, error))?;
+        let lifecycle = objects
+            .open_child_file(std::ffi::OsStr::new(LIFECYCLE_LOCK))
+            .map_err(|error| storage("open existing graph object lifecycle", root, error))?;
+        if graphforge_filesystem::file_link_count(&lifecycle)
+            .map_err(|error| storage("inspect graph object lifecycle links", root, error))?
+            != 1
+        {
+            return Err(validation("graph object lifecycle lock is multiply linked"));
+        }
+        let lifecycle_identity = graphforge_filesystem::file_identity(&lifecycle)
+            .map_err(|error| storage("inspect graph object lifecycle identity", root, error))?;
+        objects
+            .lock_shared()
+            .map_err(|error| storage("lock graph object directory for reading", root, error))?;
+        crate::file_lock::lock_shared(&lifecycle)
+            .inspect_err(|_| {
+                let _ = objects.unlock();
+            })
+            .map_err(|error| storage("lock graph object read lifecycle", root, error))?;
+        let cas = Self {
+            diagnostic_root: root.to_path_buf(),
+            project,
+            objects,
+            sha256,
+            lifecycle,
+            lifecycle_identity,
+        };
+        cas.revalidate_named()?;
+        Ok(cas)
+    }
+
+    fn revalidate_named(&self) -> Result<(), GfError> {
+        self.project
+            .revalidate_named()
+            .and_then(|()| self.objects.revalidate_named())
+            .and_then(|()| self.sha256.revalidate_named())
+            .and_then(|()| {
+                self.objects
+                    .open_child_file(std::ffi::OsStr::new(LIFECYCLE_LOCK))
+                    .and_then(|file| {
+                        (graphforge_filesystem::file_identity(&file)? == self.lifecycle_identity)
+                            .then_some(())
+                            .ok_or_else(|| std::io::Error::other("lifecycle identity changed"))
+                    })
+            })
+            .map_err(|error| {
+                storage(
+                    "revalidate read-only graph object root",
+                    &self.diagnostic_root,
+                    error,
+                )
+            })
+    }
+
+    fn digest_bucket(&self, digest: &str) -> Result<StableDirectory, GfError> {
+        validate_digest(digest)?;
+        self.sha256
+            .open_child_directory(std::ffi::OsStr::new(&digest[..2]))
+            .map_err(|error| {
+                storage(
+                    "open stable graph object bucket",
+                    &self.diagnostic_root,
+                    error,
+                )
+            })
+    }
+
+    fn open_digest(&self, digest: &str) -> Result<File, GfError> {
+        self.digest_bucket(digest)?
+            .open_child_file(std::ffi::OsStr::new(&digest[2..]))
+            .map_err(|error| storage("open stable graph object", &self.diagnostic_root, error))
+    }
+}
+
+impl Drop for ReadOnlyCasRoot {
+    fn drop(&mut self) {
+        let _ = crate::file_lock::unlock(&self.lifecycle);
+        let _ = self.objects.unlock();
+    }
+}
+
 impl Drop for GraphObjectGcGuard {
     fn drop(&mut self) {
         let _ = crate::file_lock::unlock(&self.cas.lifecycle);
@@ -182,7 +282,7 @@ impl GraphObjectPublicationLease {
 
 /// Begin a CAS installation attempt and hold its lease through CURRENT.
 pub fn begin_graph_object_publication(root: &Path) -> Result<GraphObjectPublicationLease, GfError> {
-    let cas = CasRoot::open(root)?;
+    let cas = CasRoot::open_mutable(root)?;
     cas.objects
         .lock_shared()
         .map_err(|error| storage("lock graph object directory for publication", root, error))?;
@@ -218,7 +318,7 @@ pub fn begin_graph_object_publication(root: &Path) -> Result<GraphObjectPublicat
 /// Unlocked lease files are crash residue and are removed while the caller
 /// holds the project writer/recovery lock.
 pub fn graph_object_publication_is_live(root: &Path) -> Result<bool, GfError> {
-    let cas = CasRoot::open(root)?;
+    let cas = CasRoot::open_mutable(root)?;
     let entries = cas
         .active
         .child_names()
@@ -378,7 +478,7 @@ pub fn gc_graph_objects(
 
 #[cfg(test)]
 pub(crate) fn begin_graph_object_gc(root: &Path) -> Result<GraphObjectGcGuard, GfError> {
-    let cas = CasRoot::open(root)?;
+    let cas = CasRoot::open_mutable(root)?;
     cas.objects
         .lock_exclusive()
         .map_err(|error| storage("lock graph object directory for GC", root, error))?;
@@ -394,7 +494,7 @@ pub(crate) fn begin_graph_object_gc(root: &Path) -> Result<GraphObjectGcGuard, G
 pub(crate) fn try_begin_graph_object_gc(
     root: &Path,
 ) -> Result<Option<GraphObjectGcGuard>, GfError> {
-    let cas = CasRoot::open(root)?;
+    let cas = CasRoot::open_mutable(root)?;
     if !cas
         .objects
         .try_lock_exclusive()
@@ -1132,7 +1232,7 @@ pub fn read_graph_object(
     digest: &str,
     expected_length: u64,
 ) -> Result<Vec<u8>, GfError> {
-    let cas = CasRoot::open(root)?;
+    let cas = ReadOnlyCasRoot::open(root)?;
     let mut file = cas.open_digest(digest)?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)
@@ -1143,7 +1243,7 @@ pub fn read_graph_object(
 
 /// Stream-verify a payload object without retaining it in memory.
 pub fn verify_graph_object(root: &Path, digest: &str, expected_length: u64) -> Result<(), GfError> {
-    let cas = CasRoot::open(root)?;
+    let cas = ReadOnlyCasRoot::open(root)?;
     verify_file(cas.open_digest(digest)?, digest, expected_length, root)
 }
 
@@ -1654,8 +1754,21 @@ pub fn read_graph_object_by_digest(
     digest: &str,
     max_length: u64,
 ) -> Result<Vec<u8>, GfError> {
-    let cas = CasRoot::open(root)?;
-    read_graph_object_by_digest_from_cas(&cas, digest, max_length)
+    let cas = ReadOnlyCasRoot::open(root)?;
+    read_graph_object_by_digest_from_read_only_cas(&cas, digest, max_length)
+}
+
+fn read_graph_object_by_digest_from_read_only_cas(
+    cas: &ReadOnlyCasRoot,
+    digest: &str,
+    max_length: u64,
+) -> Result<Vec<u8>, GfError> {
+    read_graph_object_by_digest_file(
+        cas.open_digest(digest)?,
+        digest,
+        max_length,
+        &cas.diagnostic_root,
+    )
 }
 
 fn read_graph_object_by_digest_from_cas(
@@ -1663,10 +1776,23 @@ fn read_graph_object_by_digest_from_cas(
     digest: &str,
     max_length: u64,
 ) -> Result<Vec<u8>, GfError> {
-    let mut file = cas.open_digest(digest)?;
+    read_graph_object_by_digest_file(
+        cas.open_digest(digest)?,
+        digest,
+        max_length,
+        &cas.diagnostic_root,
+    )
+}
+
+fn read_graph_object_by_digest_file(
+    mut file: File,
+    digest: &str,
+    max_length: u64,
+    diagnostic_root: &Path,
+) -> Result<Vec<u8>, GfError> {
     let metadata = file
         .metadata()
-        .map_err(|error| storage("inspect stable graph object", &cas.diagnostic_root, error))?;
+        .map_err(|error| storage("inspect stable graph object", diagnostic_root, error))?;
     if !metadata.is_file() || metadata.len() > max_length {
         return Err(validation(
             "graph object exceeds admitted length or is not regular",
@@ -1674,7 +1800,7 @@ fn read_graph_object_by_digest_from_cas(
     }
     let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
     file.read_to_end(&mut bytes)
-        .map_err(|error| storage("read stable graph object", &cas.diagnostic_root, error))?;
+        .map_err(|error| storage("read stable graph object", diagnostic_root, error))?;
     if hex_digest(Sha256::digest(&bytes).into()) != digest {
         return Err(validation("graph object digest does not match its address"));
     }
@@ -1882,6 +2008,241 @@ fn storage(action: &str, path: &Path, error: impl std::fmt::Display) -> GfError 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pure_reads_require_only_existing_digest_namespace_and_never_create() {
+        let root = tempfile::tempdir().unwrap();
+        let payload = b"read-only payload";
+        let digest = hex_digest(Sha256::digest(payload).into());
+        let objects = root.path().join(GRAPH_OBJECTS_DIR);
+        let sha256 = objects.join(SHA256_DIR);
+        let bucket = sha256.join(&digest[..2]);
+        fs::create_dir_all(&bucket).unwrap();
+        fs::write(bucket.join(&digest[2..]), payload).unwrap();
+        fs::write(objects.join(LIFECYCLE_LOCK), b"").unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(bucket.join(&digest[2..]), fs::Permissions::from_mode(0o400))
+                .unwrap();
+            fs::set_permissions(
+                objects.join(LIFECYCLE_LOCK),
+                fs::Permissions::from_mode(0o400),
+            )
+            .unwrap();
+            fs::set_permissions(&bucket, fs::Permissions::from_mode(0o500)).unwrap();
+            fs::set_permissions(&sha256, fs::Permissions::from_mode(0o500)).unwrap();
+            fs::set_permissions(&objects, fs::Permissions::from_mode(0o500)).unwrap();
+        }
+
+        let namespace_before = fs::read_dir(&objects)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<BTreeSet<_>>();
+        let digest_namespace_before = fs::read_dir(&sha256)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<BTreeSet<_>>();
+        let bucket_namespace_before = fs::read_dir(&bucket)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            read_graph_object(root.path(), &digest, payload.len() as u64).unwrap(),
+            payload
+        );
+        verify_graph_object(root.path(), &digest, payload.len() as u64).unwrap();
+        assert_eq!(
+            read_graph_object_by_digest(root.path(), &digest, 1024).unwrap(),
+            payload
+        );
+        let namespace_after = fs::read_dir(&objects)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(namespace_after, namespace_before);
+        assert_eq!(
+            namespace_after,
+            BTreeSet::from([SHA256_DIR.into(), LIFECYCLE_LOCK.into()])
+        );
+        assert_eq!(
+            fs::read_dir(&sha256)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<BTreeSet<_>>(),
+            digest_namespace_before
+        );
+        assert_eq!(
+            fs::read_dir(&bucket)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<BTreeSet<_>>(),
+            bucket_namespace_before
+        );
+        assert_eq!(fs::read(bucket.join(&digest[2..])).unwrap(), payload);
+
+        #[cfg(windows)]
+        {
+            let lifecycle = objects.join(LIFECYCLE_LOCK);
+            let object = bucket.join(&digest[2..]);
+            let mut permissions = fs::metadata(&lifecycle).unwrap().permissions();
+            permissions.set_readonly(true);
+            fs::set_permissions(&lifecycle, permissions).unwrap();
+            let mut permissions = fs::metadata(&object).unwrap().permissions();
+            permissions.set_readonly(true);
+            fs::set_permissions(&object, permissions).unwrap();
+            verify_graph_object(root.path(), &digest, payload.len() as u64).unwrap();
+            let mut permissions = fs::metadata(&lifecycle).unwrap().permissions();
+            permissions.set_readonly(false);
+            fs::set_permissions(&lifecycle, permissions).unwrap();
+            let mut permissions = fs::metadata(&object).unwrap().permissions();
+            permissions.set_readonly(false);
+            fs::set_permissions(&object, permissions).unwrap();
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let target_owner = tempfile::tempdir().unwrap();
+            let inventory = GraphFilesInventory {
+                format: "graphforge-graph-files".into(),
+                format_version: 1,
+                files: vec![crate::GraphFileEntry {
+                    relative_path: "payload.bin".into(),
+                    byte_length: payload.len() as u64,
+                    content_sha256: digest.clone(),
+                    role: crate::GraphFileRole::Other,
+                }],
+                file_count: 1,
+                total_byte_length: payload.len() as u64,
+            };
+            assert!(
+                materialize_graph_objects(
+                    root.path(),
+                    &inventory,
+                    &target_owner.path().join("readonly-target")
+                )
+                .is_err()
+            );
+            assert_eq!(
+                fs::read_dir(&objects)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().file_name())
+                    .collect::<BTreeSet<_>>(),
+                namespace_before
+            );
+            fs::set_permissions(&objects, fs::Permissions::from_mode(0o700)).unwrap();
+            fs::set_permissions(
+                objects.join(LIFECYCLE_LOCK),
+                fs::Permissions::from_mode(0o600),
+            )
+            .unwrap();
+            fs::set_permissions(&sha256, fs::Permissions::from_mode(0o700)).unwrap();
+            fs::set_permissions(&bucket, fs::Permissions::from_mode(0o700)).unwrap();
+            fs::set_permissions(bucket.join(&digest[2..]), fs::Permissions::from_mode(0o600))
+                .unwrap();
+            materialize_graph_objects(
+                root.path(),
+                &inventory,
+                &target_owner.path().join("writable-target"),
+            )
+            .unwrap();
+            assert!(objects.join(TEMP_DIR).is_dir());
+            assert!(objects.join(ACTIVE_DIR).is_dir());
+            assert!(objects.join(LIFECYCLE_LOCK).is_file());
+        }
+
+        let missing = tempfile::tempdir().unwrap();
+        assert!(read_graph_object(missing.path(), &digest, payload.len() as u64).is_err());
+        assert!(!missing.path().join(GRAPH_OBJECTS_DIR).exists());
+    }
+
+    #[test]
+    fn read_only_guard_pins_cas_against_gc() {
+        let root = tempfile::tempdir().unwrap();
+        let lease = begin_graph_object_publication(root.path()).unwrap();
+        drop(lease);
+        let reader = ReadOnlyCasRoot::open(root.path()).unwrap();
+        assert!(matches!(try_begin_graph_object_gc(root.path()), Ok(None)));
+        drop(reader);
+        assert!(matches!(
+            try_begin_graph_object_gc(root.path()),
+            Ok(Some(_))
+        ));
+    }
+
+    #[test]
+    fn read_only_lifecycle_rejects_multiple_links() {
+        let root = tempfile::tempdir().unwrap();
+        let objects = root.path().join(GRAPH_OBJECTS_DIR);
+        fs::create_dir_all(objects.join(SHA256_DIR)).unwrap();
+        let outside = root.path().join("outside");
+        fs::write(&outside, b"").unwrap();
+        fs::hard_link(&outside, objects.join(LIFECYCLE_LOCK)).unwrap();
+        assert!(ReadOnlyCasRoot::open(root.path()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_only_lifecycle_rejects_links_fifos_and_sockets_without_blocking() {
+        use std::os::unix::fs::symlink;
+        use std::os::unix::net::UnixListener;
+        use std::process::Command;
+
+        let prepare = || {
+            let root = tempfile::tempdir().unwrap();
+            let objects = root.path().join(GRAPH_OBJECTS_DIR);
+            fs::create_dir_all(objects.join(SHA256_DIR)).unwrap();
+            (root, objects)
+        };
+
+        const FIFO_HELPER: &str = "GRAPHFORGE_READ_ONLY_CAS_FIFO_HELPER";
+        if std::env::var_os(FIFO_HELPER).is_some() {
+            let (root, objects) = prepare();
+            assert!(
+                Command::new("mkfifo")
+                    .arg(objects.join(LIFECYCLE_LOCK))
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            assert!(ReadOnlyCasRoot::open(root.path()).is_err());
+            return;
+        }
+
+        let (root, objects) = prepare();
+        let outside = root.path().join("outside");
+        fs::write(&outside, b"").unwrap();
+        symlink(&outside, objects.join(LIFECYCLE_LOCK)).unwrap();
+        assert!(ReadOnlyCasRoot::open(root.path()).is_err());
+
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "graph_object_store::tests::read_only_lifecycle_rejects_links_fifos_and_sockets_without_blocking",
+                "--nocapture",
+            ])
+            .env(FIFO_HELPER, "1")
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success());
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                panic!("read-only lifecycle FIFO open blocked");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let (root, objects) = prepare();
+        let _socket = UnixListener::bind(objects.join(LIFECYCLE_LOCK)).unwrap();
+        assert!(ReadOnlyCasRoot::open(root.path()).is_err());
+    }
 
     #[cfg(unix)]
     #[test]
