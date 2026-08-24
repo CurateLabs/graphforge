@@ -73,7 +73,7 @@ impl UuidIndexBuildLimits {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 /// Aggregate-only build evidence; it never contains graph identities.
 pub struct UuidIndexBuildMetrics {
     /// Unique node identities written.
@@ -87,7 +87,7 @@ pub struct UuidIndexBuildMetrics {
 }
 
 /// Aggregate-only evidence for one incremental v3 run publication.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UuidIndexAppendMetrics {
     pub input_records: u64,
     pub prior_topology_rows_decoded: u64,
@@ -325,13 +325,25 @@ pub fn uuid_membership_index_is_fresh(project_dir: &Path) -> Result<bool, GfErro
 pub struct UuidConstructionSession {
     project_dir: PathBuf,
     root: PathBuf,
-    staging: tempfile::TempDir,
+    staging: PathBuf,
     manifest: Manifest,
     first_generation: Option<u64>,
     last_generation: u64,
     identity_runs: Vec<PathBuf>,
     surrogate_runs: Vec<PathBuf>,
     metrics: UuidIndexAppendMetrics,
+    pending: Option<(u64, PathBuf, PathBuf)>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct DurableSessionState {
+    manifest: Manifest,
+    first_generation: Option<u64>,
+    last_generation: u64,
+    identity_names: Vec<String>,
+    surrogate_names: Vec<String>,
+    metrics: UuidIndexAppendMetrics,
+    pending: Option<(u64, String, String)>,
 }
 
 fn block_count(bytes: u64) -> u64 {
@@ -402,6 +414,13 @@ fn merge_v3_all(
             .and_then(|file| file.sync_all())
             .map_err(storage_err)?;
         return Ok((path, 0, 0));
+    }
+    if runs.len() == 1 && runs[0].parent() != Some(scratch) {
+        let output = scratch.join(format!("{prefix}-single.run"));
+        if identity { merge_identity_v3(&runs, &output)?; } else { merge_surrogate_runs(&runs, &output)?; }
+        let bytes = output.metadata().map_err(storage_err)?.len();
+        let _ = fs::remove_file(&runs[0]);
+        return Ok((output, bytes, block_count(bytes)));
     }
     let mut round = 0;
     while runs.len() > 1 {
@@ -486,6 +505,21 @@ impl UuidConstructionSession {
     pub fn begin(project_dir: &Path) -> Result<Self, GfError> {
         let root = project_dir.join(INDEX_DIR);
         fs::create_dir_all(&root).map_err(storage_err)?;
+        let staging = root.join(format!("construction-{}", Uuid::new_v4()));
+        Self::begin_in(project_dir, &staging)
+    }
+
+    /// Begin a durable session in a caller-owned directory on the admitted
+    /// project volume. The directory can later be passed to [`Self::resume`].
+    pub fn begin_in(project_dir: &Path, staging: &Path) -> Result<Self, GfError> {
+        let root = project_dir.join(INDEX_DIR);
+        fs::create_dir_all(&root).map_err(storage_err)?;
+        if staging.parent() != Some(root.as_path()) {
+            return Err(storage_err(
+                "construction state must be a direct child of the index root",
+            ));
+        }
+        fs::create_dir(staging).map_err(storage_err)?;
         let current_generation = crate::read_topology_generation(project_dir)?;
         let manifest = load_or_create_empty_v3_manifest(project_dir, current_generation)?;
         validate_run_descriptors(&manifest)?;
@@ -496,32 +530,59 @@ impl UuidConstructionSession {
                 descriptor,
             )?;
         }
-        let staging = tempfile::Builder::new()
-            .prefix(".uuid-v3-session-")
-            .tempdir_in(&root)
-            .map_err(storage_err)?;
-        Ok(Self {
+        let session = Self {
             project_dir: project_dir.to_path_buf(),
             root,
-            staging,
+            staging: staging.to_path_buf(),
             last_generation: manifest.current_generation,
             manifest,
             first_generation: None,
             identity_runs: Vec::new(),
             surrogate_runs: Vec::new(),
             metrics: UuidIndexAppendMetrics::default(),
+            pending: None,
+        };
+        session.persist_state()?;
+        Ok(session)
+    }
+
+    /// Resume a durably staged session after process or host interruption.
+    pub fn resume(project_dir: &Path, staging: &Path) -> Result<Self, GfError> {
+        let root = project_dir.join(INDEX_DIR);
+        if staging.parent() != Some(root.as_path()) {
+            return Err(storage_err("construction state is outside index root"));
+        }
+        let state: DurableSessionState =
+            serde_json::from_slice(&fs::read(staging.join("state.json")).map_err(storage_err)?)
+                .map_err(storage_err)?;
+        validate_run_descriptors(&state.manifest)?;
+        let resolve =
+            |names: Vec<String>| names.into_iter().map(|name| staging.join(name)).collect();
+        Ok(Self {
+            project_dir: project_dir.to_path_buf(),
+            root,
+            staging: staging.to_path_buf(),
+            manifest: state.manifest,
+            first_generation: state.first_generation,
+            last_generation: state.last_generation,
+            identity_runs: resolve(state.identity_names),
+            surrogate_runs: resolve(state.surrogate_names),
+            metrics: state.metrics,
+            pending: state
+                .pending
+                .map(|(g, i, s)| (g, staging.join(i), staging.join(s))),
         })
     }
 
     /// Stage one already-committed, bounded topology chunk. No retained run is
     /// read and no manifest is published here.
-    pub fn stage(
+    pub fn prepare(
         &mut self,
         generation: u64,
         nodes: &[(Uuid, u64)],
         edges: &[Uuid],
     ) -> Result<(), GfError> {
-        if generation != self.last_generation + 1 {
+        if self.pending.is_some() || generation != self.last_generation + 1 {
             return Err(storage_err("session generations are not contiguous"));
         }
         let mut identities = nodes
@@ -548,14 +609,8 @@ impl UuidConstructionSession {
             ));
         }
         let ordinal = self.identity_runs.len();
-        let identity_path = self
-            .staging
-            .path()
-            .join(format!("identity-{ordinal:08}.run"));
-        let surrogate_path = self
-            .staging
-            .path()
-            .join(format!("surrogate-{ordinal:08}.run"));
+        let identity_path = self.staging.join(format!("identity-{ordinal:08}.run"));
+        let surrogate_path = self.staging.join(format!("surrogate-{ordinal:08}.run"));
         write_identity_records(&identity_path, &identities)?;
         write_surrogate_records(&surrogate_path, &surrogates)?;
         let bytes = identities.len() as u64 * IDENTITY_RECORD_BYTES
@@ -573,15 +628,77 @@ impl UuidConstructionSession {
             .metrics
             .peak_buffered_bytes
             .max(identities.len() * 32 + surrogates.len() * 24 + 2 * BULK_IO_BYTES);
-        self.identity_runs.push(identity_path);
-        self.surrogate_runs.push(surrogate_path);
+        self.pending = Some((generation, identity_path, surrogate_path));
+        self.persist_state()?;
+        Ok(())
+    }
+
+    /// Acknowledge that the caller's private topology recovery unit committed
+    /// the prepared generation. Prepared runs are ignored by final publication
+    /// until this durable acknowledgement.
+    pub fn acknowledge(&mut self, generation: u64) -> Result<(), GfError> {
+        let (pending_generation, identity, surrogate) = self
+            .pending
+            .take()
+            .ok_or_else(|| storage_err("no prepared UUID construction chunk"))?;
+        if pending_generation != generation {
+            self.pending = Some((pending_generation, identity, surrogate));
+            return Err(storage_err("prepared generation mismatch"));
+        }
+        self.identity_runs.push(identity);
+        self.surrogate_runs.push(surrogate);
         self.first_generation.get_or_insert(generation);
         self.last_generation = generation;
-        Ok(())
+        self.persist_state()
+    }
+
+    /// Convenience for callers whose surrounding private commit is already
+    /// complete. Recovery-aware callers should use `prepare` then `acknowledge`.
+    pub fn stage(
+        &mut self,
+        generation: u64,
+        nodes: &[(Uuid, u64)],
+        edges: &[Uuid],
+    ) -> Result<(), GfError> {
+        self.prepare(generation, nodes, edges)?;
+        self.acknowledge(generation)
+    }
+
+    fn persist_state(&self) -> Result<(), GfError> {
+        let name = |path: &PathBuf| {
+            path.file_name()
+                .expect("session child")
+                .to_string_lossy()
+                .into_owned()
+        };
+        let state = DurableSessionState {
+            manifest: self.manifest.clone(),
+            first_generation: self.first_generation,
+            last_generation: self.last_generation,
+            identity_names: self.identity_runs.iter().map(name).collect(),
+            surrogate_names: self.surrogate_runs.iter().map(name).collect(),
+            metrics: self.metrics.clone(),
+            pending: self
+                .pending
+                .as_ref()
+                .map(|(g, i, s)| (*g, name(i), name(s))),
+        };
+        let temp = self.staging.join(".state.tmp");
+        fs::write(&temp, serde_json::to_vec(&state).map_err(storage_err)?).map_err(storage_err)?;
+        File::open(&temp)
+            .and_then(|file| file.sync_all())
+            .map_err(storage_err)?;
+        fs::rename(&temp, self.staging.join("state.json")).map_err(storage_err)?;
+        sync_dir(&self.staging)
     }
 
     /// Validate and publish the complete session with one retained-history pass.
     pub fn commit(mut self) -> Result<UuidIndexAppendMetrics, GfError> {
+        if self.pending.is_some() {
+            return Err(storage_err(
+                "prepared UUID construction chunk is not acknowledged",
+            ));
+        }
         let Some(first_generation) = self.first_generation else {
             return Ok(self.metrics);
         };
@@ -661,7 +778,7 @@ impl UuidConstructionSession {
         compact_manifest_levels(
             &self.root,
             staging_parent,
-            self.staging.path(),
+            &self.staging,
             &mut self.manifest,
             &mut self.metrics,
         )?;
@@ -1967,7 +2084,7 @@ fn read_record(reader: &mut BufReader<File>) -> Result<Option<[u8; 16]>, GfError
 fn publish_data(
     source: &Path,
     root: &Path,
-    staging: &Path,
+    _staging: &Path,
     kind: &str,
     generation: u64,
     record_bytes: u64,
@@ -1995,7 +2112,7 @@ fn publish_data(
             .create_child_file(&temp_name)
             .map_err(storage_err)?;
         let temp_identity = graphforge_filesystem::file_identity(&temp).map_err(storage_err)?;
-        let install = || -> Result<(), GfError> {
+        let mut install = || -> Result<(), GfError> {
             let mut input = File::open(source).map_err(storage_err)?;
             std::io::copy(&mut input, &mut temp).map_err(storage_err)?;
             temp.sync_all().map_err(storage_err)?;
@@ -2506,6 +2623,37 @@ mod tests {
                 .contains("duplicate UUID")
         );
         assert!(!dir.path().join(INDEX_DIR).join(MANIFEST).exists());
+    }
+
+    #[test]
+    fn durable_prepare_resumes_without_half_visible_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join(INDEX_DIR).join("caller-session");
+        let mut session = UuidConstructionSession::begin_in(dir.path(), &state).unwrap();
+        session.prepare(1, &[(Uuid::from_u128(1), 1)], &[]).unwrap();
+        drop(session);
+        assert!(!dir.path().join(INDEX_DIR).join(MANIFEST).exists());
+
+        let mut resumed = UuidConstructionSession::resume(dir.path(), &state).unwrap();
+        assert!(
+            resumed
+                .commit()
+                .unwrap_err()
+                .to_string()
+                .contains("not acknowledged")
+        );
+        let mut resumed = UuidConstructionSession::resume(dir.path(), &state).unwrap();
+        crate::generation::bump_topology_generation(dir.path()).unwrap();
+        resumed.acknowledge(1).unwrap();
+        resumed.commit().unwrap();
+        let mut index = UuidMembershipIndex::open(dir.path()).unwrap();
+        assert_eq!(
+            index
+                .lookup_node_surrogates(&[Uuid::from_u128(1)])
+                .unwrap()
+                .0,
+            [Some(1)]
+        );
     }
 
     #[test]
