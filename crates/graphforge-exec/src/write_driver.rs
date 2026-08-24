@@ -2864,13 +2864,13 @@ fn run_set_phase_masked(
                         &uuid,
                         Some(&stem),
                         HashMap::from([(item.prop_name.clone(), lit)]),
-                    );
+                    )?;
                 } else if !is_edge && pending {
                     ctx.writer.merge_pending_node_props(
                         &uuid,
                         Some(&stem),
                         HashMap::from([(item.prop_name.clone(), lit)]),
-                    );
+                    )?;
                 } else {
                     ctx.remove_acc
                         .forget(is_edge, &stem, &uuid, &item.prop_name);
@@ -3016,7 +3016,7 @@ fn run_set_map_phase_with_input(
                     for name in updates.keys() {
                         let _ = ctx.record_property_set(is_edge, uuid, name);
                     }
-                    apply_map_updates(ctx, is_edge, &uuid, &stem, updates);
+                    apply_map_updates(ctx, is_edge, &uuid, &stem, updates)?;
                 }
                 continue;
             }
@@ -3098,7 +3098,7 @@ fn run_set_map_phase_with_input(
                 remove_map_complement(ctx, is_edge, &uuid, &stem, &removals);
                 ctx.counters.properties_removed += replaced as u64;
                 ctx.counters.properties_set += updates.len() as u64;
-                apply_map_updates(ctx, is_edge, &uuid, &stem, updates);
+                apply_map_updates(ctx, is_edge, &uuid, &stem, updates)?;
             }
         }
         overlay_map_result(frontier, item, existing_names, overlays)?;
@@ -3226,13 +3226,13 @@ fn apply_map_updates(
     uuid: &[u8; 16],
     stem: &str,
     updates: HashMap<String, graphforge_ir::IrLiteral>,
-) {
+) -> Result<(), GfError> {
     if is_edge && ctx.writer.contains_pending_edge(uuid) {
         ctx.writer
-            .merge_pending_edge_props(uuid, Some(stem), updates);
+            .merge_pending_edge_props(uuid, Some(stem), updates)?;
     } else if !is_edge && ctx.writer.contains_pending_node(uuid) {
         ctx.writer
-            .merge_pending_node_props(uuid, Some(stem), updates);
+            .merge_pending_node_props(uuid, Some(stem), updates)?;
     } else {
         for (name, value) in updates {
             ctx.remove_acc.forget(is_edge, stem, uuid, &name);
@@ -3240,6 +3240,7 @@ fn apply_map_updates(
                 .record(is_edge, stem.to_owned(), *uuid, name, value);
         }
     }
+    Ok(())
 }
 
 fn remove_map_complement(
@@ -3684,11 +3685,11 @@ mod tests {
         let node = [7_u8; 16];
         let uuid = graphforge_core::uuid::from_bytes(&node);
         ctx.writer.create_node_with_labels(uuid, &[]).unwrap();
-        apply_map_updates(&mut ctx, false, &node, "Person", updates.clone());
+        apply_map_updates(&mut ctx, false, &node, "Person", updates.clone()).unwrap();
         remove_map_complement(&mut ctx, false, &node, "Person", &removals);
 
         let committed = [8_u8; 16];
-        apply_map_updates(&mut ctx, false, &committed, "Person", updates);
+        apply_map_updates(&mut ctx, false, &committed, "Person", updates).unwrap();
         remove_map_complement(&mut ctx, false, &committed, "Person", &removals);
         let set_nodes = &ctx.set_acc.nodes["Person"];
         let remove_nodes = &ctx.remove_acc.nodes["Person"];
@@ -4347,11 +4348,14 @@ mod tests {
             .writer
             .create_edge(edge, "KNOWS", &src, &dst)
             .unwrap();
-        pending_ctx.writer.merge_pending_edge_props(
-            &[7; 16],
-            Some("KNOWS"),
-            HashMap::from([("score".into(), IrLiteral::Int(1))]),
-        );
+        pending_ctx
+            .writer
+            .merge_pending_edge_props(
+                &[7; 16],
+                Some("KNOWS"),
+                HashMap::from([("score".into(), IrLiteral::Int(1))]),
+            )
+            .unwrap();
         let err = run_remove_phase(
             &env,
             &[RemovePropItem {
@@ -4418,11 +4422,13 @@ mod tests {
                         &dst,
                     )
                     .unwrap();
-                ctx.writer.merge_pending_edge_props(
-                    &[7; 16],
-                    Some("KNOWS"),
-                    HashMap::from([("score".into(), IrLiteral::Int(1))]),
-                );
+                ctx.writer
+                    .merge_pending_edge_props(
+                        &[7; 16],
+                        Some("KNOWS"),
+                        HashMap::from([("score".into(), IrLiteral::Int(1))]),
+                    )
+                    .unwrap();
             } else {
                 ctx.writer
                     .create_node(
@@ -4430,11 +4436,13 @@ mod tests {
                         graphforge_core::TypeId(1),
                     )
                     .unwrap();
-                ctx.writer.merge_pending_node_props(
-                    &[7; 16],
-                    None,
-                    HashMap::from([("score".into(), IrLiteral::Int(1))]),
-                );
+                ctx.writer
+                    .merge_pending_node_props(
+                        &[7; 16],
+                        None,
+                        HashMap::from([("score".into(), IrLiteral::Int(1))]),
+                    )
+                    .unwrap();
             }
             run_remove_phase(
                 &env,
