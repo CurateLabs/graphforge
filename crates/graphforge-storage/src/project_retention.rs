@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use crate::project_checkpoints::checkpoint_retention_roots_after_writer_lock;
 use crate::project_generation::{resolve_project_generation, validated_generation_manifest_sha256};
-use crate::project_publication::{GENERATIONS_DIR, open_regular_lock};
+use crate::project_publication::{ATTEMPTS_DIR, GENERATIONS_DIR, open_regular_lock};
 use crate::project_recovery::{
     DEFAULT_RETAINED_ANCESTORS, GenerationCleanupOutcome, MAX_RETAINED_ANCESTORS, TRASH_DIR,
     acquire_recovery_lock, bounded_directory_entries, cleanup_trash_generation,
@@ -453,6 +453,9 @@ fn run_cleanup(
                 GenerationCleanupOutcome::Retained | GenerationCleanupOutcome::Absent => {}
             }
         }
+        if !bounded {
+            sweep_unreachable_graph_objects(root)?;
+        }
     }
 
     let remaining_bytes = remaining_project_bytes(root, limits)?;
@@ -479,6 +482,57 @@ fn run_cleanup(
         entries: classification.entries,
         elapsed_ms: elapsed_ms(started),
     })
+}
+
+fn sweep_unreachable_graph_objects(root: &Path) -> Result<(), GfError> {
+    if crate::graph_object_publication_is_live(root)? {
+        return Ok(());
+    }
+    let attempts = root.join(ATTEMPTS_DIR);
+    if attempts.exists()
+        && attempts
+            .read_dir()
+            .map_err(storage_io)?
+            .next()
+            .transpose()
+            .map_err(storage_io)?
+            .is_some()
+    {
+        return Ok(());
+    }
+    let generations = root.join(GENERATIONS_DIR);
+    let mut graph_roots = Vec::new();
+    if generations.exists() {
+        let mut entries = generations
+            .read_dir()
+            .map_err(storage_io)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(storage_io)?;
+        entries.sort_by_key(std::fs::DirEntry::file_name);
+        for entry in entries {
+            let file_type = entry.file_type().map_err(storage_io)?;
+            if !file_type.is_dir() || file_type.is_symlink() {
+                continue;
+            }
+            let name = entry.file_name().into_string().map_err(|_| {
+                project_error(
+                    ProjectErrorCode::ProjectCorrupt,
+                    "generation name is not UTF-8",
+                )
+            })?;
+            let Some(uuid) = parse_canonical_uuid(&name) else {
+                continue;
+            };
+            let generation = crate::resolve_generation_by_uuid(root, uuid)?;
+            if let Some(crate::GraphFilesParticipant::V2(graph_root)) =
+                generation.declared_graph_files_participant()?
+            {
+                graph_roots.push(graph_root);
+            }
+        }
+    }
+    crate::gc_graph_objects(root, &graph_roots, crate::GraphManifestLimits::default())?;
+    Ok(())
 }
 
 struct Classification {
@@ -1208,5 +1262,50 @@ mod tests {
         }
         let root = PathBuf::from(std::env::var("GRAPHFORGE_TEST_PROJECT_ROOT").unwrap());
         let _ = execute_project_cleanup(&root, policy(2), ProjectRetentionLimits::default());
+    }
+
+    #[test]
+    fn live_cas_publication_lease_preserves_unrooted_object() {
+        let root = tempfile::tempdir().unwrap();
+        open_or_initialize_project(root.path()).unwrap();
+        let lease = crate::begin_graph_object_publication(root.path()).unwrap();
+        let (digest, _) = crate::install_graph_object_bytes(root.path(), b"staged").unwrap();
+        execute_project_cleanup(root.path(), policy(2), ProjectRetentionLimits::default()).unwrap();
+        assert!(
+            crate::graph_object_path(root.path(), &digest)
+                .unwrap()
+                .exists()
+        );
+
+        drop(lease);
+        execute_project_cleanup(root.path(), policy(2), ProjectRetentionLimits::default()).unwrap();
+        assert!(
+            !crate::graph_object_path(root.path(), &digest)
+                .unwrap()
+                .exists()
+        );
+    }
+
+    #[test]
+    fn active_publication_attempt_defers_object_sweep() {
+        let root = tempfile::tempdir().unwrap();
+        open_or_initialize_project(root.path()).unwrap();
+        let (digest, _) = crate::install_graph_object_bytes(root.path(), b"attempt").unwrap();
+        let attempt = root.path().join(ATTEMPTS_DIR).join("active-attempt");
+        fs::create_dir_all(&attempt).unwrap();
+        execute_project_cleanup(root.path(), policy(2), ProjectRetentionLimits::default()).unwrap();
+        assert!(
+            crate::graph_object_path(root.path(), &digest)
+                .unwrap()
+                .exists()
+        );
+
+        fs::remove_dir(&attempt).unwrap();
+        execute_project_cleanup(root.path(), policy(2), ProjectRetentionLimits::default()).unwrap();
+        assert!(
+            !crate::graph_object_path(root.path(), &digest)
+                .unwrap()
+                .exists()
+        );
     }
 }

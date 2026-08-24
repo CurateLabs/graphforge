@@ -31,6 +31,7 @@ const PARTICIPANTS_DIR: &str = "participants";
 const LEASE_FILE: &str = "lease.lock";
 const MANIFEST_FILE: &str = "manifest.json";
 const MAX_JOURNAL_BYTES: u64 = 1024 * 1024;
+const MAX_GRAPH_MANIFEST_SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Persisted participant encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -1021,7 +1022,10 @@ fn stage_optional_graph_tree(
         return Ok(());
     };
     if files_participant.capability_version != crate::GRAPH_CAPABILITY_VERSION
-        || files_participant.record_version != crate::GRAPH_FILES_RECORD_VERSION
+        || !matches!(
+            files_participant.record_version,
+            crate::GRAPH_FILES_RECORD_VERSION | crate::GRAPH_FILES_V2_RECORD_VERSION
+        )
         || files_participant.encoding != ProjectParticipantEncoding::Json.extension()
     {
         return Err(project_error(
@@ -1032,8 +1036,23 @@ fn stage_optional_graph_tree(
     let inventory_path = generation_root
         .join(PARTICIPANTS_DIR)
         .join(&files_participant.relative_path);
-    let inventory =
-        crate::decode_inventory(&std::fs::read(inventory_path).map_err(publication_io)?)?;
+    let participant = crate::decode_graph_files_participant(
+        &std::fs::read(inventory_path).map_err(publication_io)?,
+    )?;
+    let inventory = match participant {
+        crate::GraphFilesParticipant::V1(inventory) => inventory,
+        crate::GraphFilesParticipant::V2(root) => {
+            if graph_tree.is_some() {
+                return Err(project_error(
+                    ProjectErrorCode::PublicationFailed,
+                    "graph/files v2 root must reference project objects, not a generation graph tree",
+                ));
+            }
+            verify_compact_graph_root(parent.container_root(), &root)?;
+            sync_directory(generation_root)?;
+            return Ok(());
+        }
+    };
     let parent_tree = parent.graph_tree_root();
     let source = match graph_tree {
         Some(path) => path,
@@ -1056,6 +1075,7 @@ fn stage_optional_graph_tree(
 fn verify_optional_graph_tree(
     generation_root: &Path,
     participants: &[StagedParticipant],
+    container_root: &Path,
 ) -> Result<(), GfError> {
     let Some(files) = participants.iter().find(|participant| {
         participant.capability_id == crate::GRAPH_CAPABILITY_ID
@@ -1067,8 +1087,30 @@ fn verify_optional_graph_tree(
         .join(PARTICIPANTS_DIR)
         .join(&files.relative_path);
     let bytes = std::fs::read(&path).map_err(publication_io)?;
-    let inventory = crate::decode_inventory(&bytes)?;
-    crate::verify_graph_tree(&crate::graph_tree_root(generation_root), &inventory)
+    match crate::decode_graph_files_participant(&bytes)? {
+        crate::GraphFilesParticipant::V1(inventory) => {
+            crate::verify_graph_tree(&crate::graph_tree_root(generation_root), &inventory)
+        }
+        crate::GraphFilesParticipant::V2(root) => verify_compact_graph_root(container_root, &root),
+    }
+}
+
+fn verify_compact_graph_root(
+    container_root: &Path,
+    root: &crate::GraphFilesRootV2,
+) -> Result<(), GfError> {
+    let (files, _) =
+        crate::resolve_graph_manifest(root, crate::GraphManifestLimits::default(), |digest| {
+            crate::read_graph_object_by_digest(
+                container_root,
+                digest,
+                MAX_GRAPH_MANIFEST_SEGMENT_BYTES,
+            )
+        })?;
+    for entry in files {
+        crate::verify_graph_object(container_root, &entry.content_sha256, entry.byte_length)?;
+    }
+    Ok(())
 }
 
 fn stage_participant_files(
@@ -1185,7 +1227,11 @@ impl StagedProjectGeneration {
                 participant,
             )?;
         }
-        verify_optional_graph_tree(&self.generation_root, &self.participants)?;
+        verify_optional_graph_tree(
+            &self.generation_root,
+            &self.participants,
+            self.parent.container_root(),
+        )?;
         domain_validation(&self.participants)?;
         project_failpoint::hit(
             "project.after_domain_validation",
@@ -1408,7 +1454,11 @@ fn make_generation_durable(staged: &StagedProjectGeneration) -> Result<[u8; 32],
             participant,
         )?;
     }
-    verify_optional_graph_tree(&staged.generation_root, &staged.participants)?;
+    verify_optional_graph_tree(
+        &staged.generation_root,
+        &staged.participants,
+        staged.parent.container_root(),
+    )?;
     verify_exact_file(&manifest_path, &manifest_bytes)?;
     sync_participant_directories(
         &staged.generation_root.join(PARTICIPANTS_DIR),
@@ -2601,6 +2651,61 @@ mod tests {
             .unwrap()
             .publish()
             .unwrap()
+    }
+
+    #[test]
+    fn publishes_and_reopens_compact_graph_files_v2_root() {
+        let root = project();
+        let workspace = tempfile::tempdir().unwrap();
+        let relative = std::path::PathBuf::from("topology/edges/knows.parquet");
+        fs::create_dir_all(workspace.path().join(relative.parent().unwrap())).unwrap();
+        fs::write(
+            workspace.path().join(&relative),
+            b"immutable topology payload",
+        )
+        .unwrap();
+        let mut live = std::collections::BTreeMap::new();
+        let (files_root, _) = crate::append_graph_files_v2(
+            root.path(),
+            workspace.path(),
+            None,
+            &mut live,
+            &[relative],
+            &[],
+        )
+        .unwrap();
+        let request = request(vec![
+            crate::graph_files_root_participant(&files_root).unwrap(),
+        ]);
+        publish(root.path(), request);
+
+        let reopened = resolve_project_generation(root.path()).unwrap();
+        let inventory = reopened.graph_files_inventory().unwrap().unwrap();
+        assert_eq!(inventory.files, live.into_values().collect::<Vec<_>>());
+        assert!(!reopened.graph_tree_root().exists());
+    }
+
+    #[test]
+    fn corrupt_compact_root_never_advances_current() {
+        let root = project();
+        let prior = resolve_project_generation(root.path())
+            .unwrap()
+            .generation_uuid();
+        let compact = crate::GraphFilesRootV2 {
+            format: crate::GRAPH_FILES_V2_FORMAT.into(),
+            format_version: crate::GRAPH_FILES_V2_VERSION,
+            root_node_sha256: "0".repeat(64),
+            logical_file_count: 1,
+            logical_byte_length: 1,
+        };
+        let request = request(vec![crate::graph_files_root_participant(&compact).unwrap()]);
+        assert!(stage_project_generation(root.path(), &request).is_err());
+        assert_eq!(
+            resolve_project_generation(root.path())
+                .unwrap()
+                .generation_uuid(),
+            prior
+        );
     }
 
     fn journal_path(root: &Path, transaction_uuid: Uuid) -> PathBuf {
