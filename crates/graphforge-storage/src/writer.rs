@@ -6557,13 +6557,31 @@ mod tests {
         let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
         writer.create_node(first, TypeId(0)).unwrap();
         writer.flush().unwrap();
-        assert!(crate::uuid_membership_index_is_fresh(dir.path()).unwrap());
+        assert!(
+            crate::uuid_membership_index_is_fresh(dir.path()).unwrap(),
+            "generation={} manifest={}",
+            crate::read_topology_generation(dir.path()).unwrap(),
+            std::fs::read_to_string(
+                dir.path()
+                    .join(".graphforge-cache/uuid-membership/manifest.json")
+            )
+            .unwrap()
+        );
 
         let second = new_v7();
         let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS + 1).unwrap();
         writer.create_node(second, TypeId(0)).unwrap();
         writer.flush().unwrap();
-        assert!(crate::uuid_membership_index_is_fresh(dir.path()).unwrap());
+        assert!(
+            crate::uuid_membership_index_is_fresh(dir.path()).unwrap(),
+            "generation={} manifest={}",
+            crate::read_topology_generation(dir.path()).unwrap(),
+            std::fs::read_to_string(
+                dir.path()
+                    .join(".graphforge-cache/uuid-membership/manifest.json")
+            )
+            .unwrap()
+        );
         let mut index = crate::UuidMembershipIndex::open(dir.path()).unwrap();
         assert_eq!(
             index.lookup_node_surrogates(&[first, second]).unwrap().0,

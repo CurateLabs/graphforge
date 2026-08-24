@@ -186,31 +186,34 @@ pub fn bump_search_generation(project_dir: &Path) -> Result<u64, GfError> {
 }
 
 /// Whether any staged destination in `staged` rewrites topology:
-/// `topology/nodes.parquet` or any file under `topology/edges/` (including
+/// `topology/nodes.parquet`, any immutable node shard under `topology/nodes/`,
+/// or any file under `topology/edges/` (including
 /// `_exploratory.parquet`). Paths elsewhere (`properties/`,
 /// `edge_properties/`, `provenance/`, …) do not count.
 #[must_use]
 pub fn touches_topology(staged: &RewriteBatch, project_dir: &Path) -> bool {
     let topology = project_dir.join("topology");
     let nodes = topology.join("nodes.parquet");
+    let node_shards = topology.join("nodes");
     let edges = topology.join("edges");
     staged
         .staged_paths()
-        .any(|path| path == nodes || path.starts_with(&edges))
+        .any(|path| path == nodes || path.starts_with(&node_shards) || path.starts_with(&edges))
 }
 
 /// Whether a staged batch changes graph-native search inputs: node identity or
-/// label membership (`topology/nodes.parquet`) or node properties
+/// label membership (`topology/nodes.parquet` or an immutable node shard) or node properties
 /// (`properties/`). Edge-only and knowledge-layer writes are intentionally
 /// excluded.
 #[must_use]
 pub fn touches_search_source(staged: &RewriteBatch, project_dir: &Path) -> bool {
     let nodes = project_dir.join("topology").join("nodes.parquet");
+    let node_shards = project_dir.join("topology").join("nodes");
     let properties = project_dir.join("properties");
     staged.has_node_property_windows()
-        || staged
-            .staged_paths()
-            .any(|path| path == nodes || path.starts_with(&properties))
+        || staged.staged_paths().any(|path| {
+            path == nodes || path.starts_with(&node_shards) || path.starts_with(&properties)
+        })
 }
 
 /// Durably commit `staged`, publishing each affected generation **last** (see
@@ -355,6 +358,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         for (rel, topology, search) in [
             ("topology/nodes.parquet", true, true),
+            ("topology/nodes/0001-0002.parquet", true, true),
+            ("topology/nodes2/0001-0002.parquet", false, false),
             ("topology/edges/KNOWS.parquet", true, false),
             ("topology/edges/_exploratory.parquet", true, false),
             ("topology/runtime_catalog.parquet", false, false),
