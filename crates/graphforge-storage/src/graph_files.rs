@@ -734,6 +734,11 @@ fn collect_regular_files(
         if file_type.is_dir() {
             collect_regular_files(root, &path, observed)?;
         } else if file_type.is_file() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.ends_with(".lock") || name.starts_with(".gf-stage-") {
+                continue;
+            }
             let relative = path
                 .strip_prefix(root)
                 .map_err(|_| corrupt("generation graph path escaped tree"))?;

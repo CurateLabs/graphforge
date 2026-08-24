@@ -3014,14 +3014,15 @@ fn table_source(schema: datafusion::arrow::datatypes::SchemaRef) -> Arc<LogicalT
 /// provider (wrapped via `provider_as_source`) so the scan reads actual rows at
 /// execution time. Without a `dir` (pure logical/explain lowering, e.g. golden
 /// tests), fall back to the schema-only [`LogicalTableSource`].
-fn node_scan_source(dir: Option<&Path>) -> Arc<dyn datafusion::logical_expr::TableSource> {
+fn node_scan_source(
+    dir: Option<&Path>,
+) -> Result<Arc<dyn datafusion::logical_expr::TableSource>, LoweringError> {
     use datafusion::datasource::provider_as_source;
     match dir {
-        Some(d) => {
-            let path = d.join("topology").join("nodes.parquet");
-            provider_as_source(Arc::new(graphforge_storage::TopologyNodeTable::new(path)))
-        }
-        None => table_source(TOPOLOGY_NODES_SCHEMA.clone()),
+        Some(d) => graphforge_storage::TopologyNodeTable::open_project(d)
+            .map(|table| provider_as_source(Arc::new(table)))
+            .map_unsupported_expr(),
+        None => Ok(table_source(TOPOLOGY_NODES_SCHEMA.clone())),
     }
 }
 
@@ -3081,7 +3082,7 @@ fn enrich_bound_node_identity(
     use datafusion::logical_expr::col;
 
     let identity_alias = format!("__gf_identity_{alias}");
-    let identity = LogicalPlanBuilder::scan(identity_alias.clone(), node_scan_source(dir), None)
+    let identity = LogicalPlanBuilder::scan(identity_alias.clone(), node_scan_source(dir)?, None)
         .and_then(LogicalPlanBuilder::build)
         .map_unsupported_expr()?;
     let joined = LogicalPlanBuilder::from(input.clone())
@@ -3133,7 +3134,7 @@ fn lower_node_scan(
         let table = MemTable::try_new(batch.schema(), vec![batches]).map_unsupported_expr()?;
         provider_as_source(Arc::new(table))
     } else {
-        node_scan_source(dir)
+        node_scan_source(dir)?
     };
     let mut builder = LogicalPlanBuilder::scan(alias.clone(), src, None).map_unsupported_expr()?;
 
