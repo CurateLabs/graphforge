@@ -89,13 +89,21 @@ pub struct UuidIndexBuildMetrics {
 /// Aggregate-only evidence for one incremental v3 run publication.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct UuidIndexAppendMetrics {
+    /// New identity and tombstone records accepted by this publication.
     pub input_records: u64,
+    /// Prior canonical topology rows decoded; ordinary append requires zero.
     pub prior_topology_rows_decoded: u64,
+    /// Immutable authenticated runs retained after publication.
     pub retained_runs: usize,
+    /// Exact physical bytes written for run and manifest outputs.
     pub physical_bytes_written: u64,
+    /// Bulk output blocks submitted to the filesystem.
     pub write_blocks: u64,
+    /// Bytes submitted through those bulk output blocks.
     pub write_bytes: u64,
+    /// Maximum fixed-width records buffered at once.
     pub peak_buffered_records: usize,
+    /// Maximum charged fixed-width buffer bytes at once.
     pub peak_buffered_bytes: usize,
     /// Sequential retained-run bytes examined for cross-run uniqueness.
     pub validation_scan_bytes: u64,
@@ -2100,18 +2108,6 @@ fn publish_data(
         count: length / record_bytes,
         sha256,
     })
-}
-
-fn sync_dir(path: &Path) -> Result<(), GfError> {
-    #[cfg(unix)]
-    {
-        File::open(path)
-            .and_then(|f| f.sync_all())
-            .map_err(storage_err)?;
-    }
-    #[cfg(not(unix))]
-    let _ = path;
-    Ok(())
 }
 
 fn sha256_reader(reader: &mut impl Read) -> Result<String, GfError> {
