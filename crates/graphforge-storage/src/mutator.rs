@@ -26,7 +26,8 @@ use arrow::datatypes::SchemaRef;
 use graphforge_core::GfError;
 
 use crate::catalog::{
-    discover_parquet_schema, normalize_topology_nodes, read_nodes, read_parquet_or_empty,
+    discover_parquet_schema, discover_parquet_schema_detailed, normalize_topology_nodes,
+    read_nodes, read_parquet_or_empty,
 };
 use crate::schemas::TOPOLOGY_NODES_SCHEMA;
 use crate::staging::RewriteBatch;
@@ -638,10 +639,8 @@ pub fn incident_edge_uuids<S: BuildHasher>(
     }
 
     let mut out = Vec::new();
-    for path in parquet_files_in(dir, "topology/edges")? {
-        let Some(schema) = discover_parquet_schema(&path) else {
-            continue;
-        };
+    for (_, path) in edge_parquet_files(dir, None)? {
+        let schema = discover_parquet_schema_detailed(&path).map_err(pq_err)?;
         for batch in read_parquet_or_empty(&path, schema).map_err(pq_err)? {
             let edge_uuid = batch
                 .column_by_name("edge_uuid")
@@ -814,6 +813,18 @@ mod tests {
         let (dir, _a, b, _c) = chain();
         let incident = incident_edge_uuids(dir.path(), &set(&[b])).unwrap();
         assert_eq!(incident.len(), 2, "both chain edges touch B");
+    }
+
+    #[test]
+    fn incident_edge_safety_rejects_a_corrupt_canonical_shard() {
+        let (dir, a, _b, _c) = chain();
+        fs::write(
+            dir.path().join("topology/edges/corrupt.parquet"),
+            b"not parquet",
+        )
+        .unwrap();
+
+        assert!(incident_edge_uuids(dir.path(), &set(&[a])).is_err());
     }
 
     #[test]
