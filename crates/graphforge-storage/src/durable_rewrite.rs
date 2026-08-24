@@ -660,6 +660,10 @@ pub(crate) fn commit_with_participant(
             prior.search
         },
     };
+    let participant_baseline = batch
+        .staged_paths()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
     let participant_auxiliary = if let Some(prepare) = participant {
         prepare(
             ParticipantPreparationContext {
@@ -678,6 +682,16 @@ pub(crate) fn commit_with_participant(
     }
     let auxiliary = participant_auxiliary.or(auxiliary);
     let reserved = root.join(".graphforge-cache/uuid-membership");
+    if has_participant
+        && batch
+            .staged_paths()
+            .filter(|destination| !participant_baseline.contains(*destination))
+            .any(|destination| !destination.starts_with(&reserved))
+    {
+        return Err(storage(
+            "rewrite participant staged a destination outside its reserved namespace",
+        ));
+    }
     let stages_reserved = batch
         .staged_paths()
         .any(|destination| destination.starts_with(&reserved));
@@ -687,7 +701,11 @@ pub(crate) fn commit_with_participant(
         ));
     }
     if stages_reserved
-        && auxiliary.as_ref().map(|receipt| receipt.kind.as_str()) != Some("uuid-membership/v3")
+        && auxiliary.as_ref().is_none_or(|receipt| {
+            receipt.kind != "uuid-membership/v3"
+                || receipt.schema_version != 3
+                || receipt.path != ".graphforge-cache/uuid-membership/topology-receipt.json"
+        })
     {
         return Err(storage(
             "UUID rewrite participant must stage its namespace and exact typed receipt",
