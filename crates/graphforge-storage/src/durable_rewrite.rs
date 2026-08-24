@@ -812,6 +812,7 @@ pub(crate) fn commit(
     )
 }
 
+#[allow(clippy::too_many_lines)] // Linear crash-barrier state machine; splitting obscures order.
 pub(crate) fn commit_with_participant(
     mut batch: RewriteBatch,
     root: &Path,
