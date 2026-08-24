@@ -30,7 +30,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use arrow::array::{Array, FixedSizeBinaryArray, Int64Array, StringArray, UInt64Array};
 use arrow::record_batch::RecordBatch;
 use graphforge_api::{
-    CancellationToken, GraphForge, OperationId, PortableSelection, PortableV2ExportRequest,
+    BulkInputKind, CancellationToken, GraphForge, GraphImportSession, ImportProgress,
+    ImportSessionLimits, OperationId, PortableSelection, PortableV2ExportRequest,
     PortableV2ImportRequest, PortableV2Limits, PortableV2Mode, PortableV2Output,
     PortableV2SelectionProfile, PortableVerifyRequest, bulk_edge_input_schema,
     bulk_node_input_schema, verify_portable_v2,
@@ -817,20 +818,35 @@ fn run_rung(
         let ingest_started = Instant::now();
         let graph = GraphForge::new(Some(project.to_str().expect("utf8 project")))
             .expect("open GraphForge for ingest");
+        let mut session = graph
+            .begin_import_session(
+                OperationId(uuidv7(0x9320_0000 + u128::from(rung.scale))),
+                ImportSessionLimits {
+                    batch_rows: BATCH_ROWS,
+                    ..ImportSessionLimits::default()
+                },
+            )
+            .expect("begin one-generation construction session");
         graphforge_storage::io_stats::reset();
         INGEST_CHUNK_INDEX.store(0, Ordering::Relaxed);
         INGEST_SUBPHASE.store(1, Ordering::Relaxed);
         let heartbeat =
             IngestHeartbeat::start(profile, rung, completed_rungs, &steps, &project, &spill_dir);
-        publish_nodes(&graph, 1u64 << rung.scale, None);
+        publish_nodes(&mut session, 1u64 << rung.scale, None);
         INGEST_SUBPHASE.store(2, Ordering::Relaxed);
-        let mut sink = EdgeSink::new(&graph, None);
+        let mut sink = EdgeSink::new(&mut session, None);
         let merge =
             merge_runs(&spill.runs, None, |src, dst| sink.push(src, dst)).expect("rung merge");
         sink.flush();
         live_unique_edges = merge.live_unique_edges;
         duplicates_rejected = merge.duplicates_rejected;
         input_fingerprint = format!("sha256:{}", hex_encode(sink.finish()));
+        let progress = session
+            .validate(&graph)
+            .expect("validate staged construction");
+        session
+            .commit(&graph, None)
+            .expect("publish exactly one graph generation");
         INGEST_SUBPHASE.store(0, Ordering::Relaxed);
         heartbeat.stop();
         drop(graph);
@@ -845,14 +861,14 @@ fn run_rung(
             "id": "ingest",
             "pass": ingest_violation.is_none(),
             "wall_time_s": ingest_s,
-            // NOTE: ingest RSS includes the upstream bulk-publication identity
-            // set (see runbook), so an ingest-phase `oom` is not a generator
-            // bottleneck. Recorded here so consumers can attribute it.
+            // RSS is paired with the bounded construction-session windows so
+            // consumers can distinguish memory growth from durable disk growth.
             "rss_peak_bytes": rss_value(),
             "detail": {
                 "live_unique_edges": live_unique_edges,
                 "duplicates_rejected": duplicates_rejected,
                 "input_fingerprint": input_fingerprint,
+                "construction_session": progress,
             }
         }));
         persist_phase_journal(
@@ -1098,7 +1114,7 @@ fn provisioned_rungs_through(profile: &ScaleProfile, max_scale: u32) -> Result<V
 // ---------------------------------------------------------------------------
 
 struct EdgeSink<'a> {
-    graph: &'a GraphForge,
+    session: &'a mut GraphImportSession,
     cancellation: Option<&'a AtomicBool>,
     buf: Vec<(u32, u32)>,
     chunk_index: u128,
@@ -1106,9 +1122,9 @@ struct EdgeSink<'a> {
 }
 
 impl<'a> EdgeSink<'a> {
-    fn new(graph: &'a GraphForge, cancellation: Option<&'a AtomicBool>) -> Self {
+    fn new(session: &'a mut GraphImportSession, cancellation: Option<&'a AtomicBool>) -> Self {
         EdgeSink {
-            graph,
+            session,
             cancellation,
             buf: Vec::with_capacity(EDGE_PUBLISH_ROWS),
             chunk_index: 0,
@@ -1132,7 +1148,6 @@ impl<'a> EdgeSink<'a> {
             return;
         }
         let schema = bulk_edge_input_schema(Vec::new()).expect("edge schema");
-        let mut batches = Vec::new();
         let mut offset = 0usize;
         while offset < self.buf.len() {
             self.check_cancellation();
@@ -1169,7 +1184,17 @@ impl<'a> EdgeSink<'a> {
                 ],
             )
             .expect("edge batch");
-            batches.push(batch);
+            self.session
+                .append_arrow_chunk(
+                    BulkInputKind::Edge,
+                    OperationId(uuidv7(
+                        0xB100_0000_0000
+                            + self.chunk_index.saturating_mul(EDGE_PUBLISH_ROWS as u128)
+                            + offset as u128,
+                    )),
+                    &[batch],
+                )
+                .expect("stage bounded edge chunk");
             offset = end;
         }
         INGEST_CHUNK_INDEX.store(
@@ -1177,9 +1202,6 @@ impl<'a> EdgeSink<'a> {
             Ordering::Relaxed,
         );
         INGEST_SUBPHASE.store(3, Ordering::Relaxed);
-        self.graph
-            .publish_bulk_edges(OperationId(uuidv7(0xB100 + self.chunk_index)), &batches)
-            .expect("publish_bulk_edges");
         INGEST_SUBPHASE.store(4, Ordering::Relaxed);
         self.chunk_index += 1;
         self.buf.clear();
@@ -1201,7 +1223,11 @@ impl<'a> EdgeSink<'a> {
     }
 }
 
-fn publish_nodes(graph: &GraphForge, vertex_count: u64, cancellation: Option<&AtomicBool>) {
+fn publish_nodes(
+    session: &mut GraphImportSession,
+    vertex_count: u64,
+    cancellation: Option<&AtomicBool>,
+) {
     let total = usize::try_from(vertex_count).expect("vertex count fits usize");
     let schema = bulk_node_input_schema(Vec::new()).expect("node schema");
     let mut offset = 0usize;
@@ -1211,7 +1237,6 @@ fn publish_nodes(graph: &GraphForge, vertex_count: u64, cancellation: Option<&At
             "node publication cancelled"
         );
         let chunk_end = (offset + EDGE_PUBLISH_ROWS).min(total);
-        let mut batches = Vec::new();
         let mut inner = offset;
         while inner < chunk_end {
             assert!(
@@ -1234,12 +1259,15 @@ fn publish_nodes(graph: &GraphForge, vertex_count: u64, cancellation: Option<&At
                 ],
             )
             .expect("node batch");
-            batches.push(batch);
+            session
+                .append_arrow_chunk(
+                    BulkInputKind::Node,
+                    OperationId(uuidv7(0xB001_0000 + inner as u128)),
+                    &[batch],
+                )
+                .expect("stage bounded node chunk");
             inner = end;
         }
-        graph
-            .publish_bulk_nodes(OperationId(uuidv7(0xB001_0000 + offset as u128)), &batches)
-            .expect("publish_bulk_nodes");
         offset = chunk_end;
     }
 }
@@ -2120,13 +2148,25 @@ fn create_bounded_drill_package(root: &Path, limits: PortableV2Limits) -> (PathB
     let package = root.join("drill.gfpb");
     fs::create_dir_all(&project).expect("bounded drill project");
     let graph = GraphForge::new(project.to_str()).expect("open bounded drill project");
-    publish_nodes(&graph, 8, None);
-    let mut sink = EdgeSink::new(&graph, None);
+    let mut session = graph
+        .begin_import_session(
+            OperationId(uuidv7(0x9320_1000)),
+            ImportSessionLimits::default(),
+        )
+        .expect("begin drill construction");
+    publish_nodes(&mut session, 8, None);
+    let mut sink = EdgeSink::new(&mut session, None);
     for edge in [(0, 1), (1, 2), (2, 3), (3, 4)] {
         sink.push(edge.0, edge.1);
     }
     sink.flush();
     let _ = sink.finish();
+    session
+        .validate(&graph)
+        .expect("validate drill construction");
+    session
+        .commit(&graph, None)
+        .expect("commit drill construction");
     let receipt = graph
         .export_portable_v2(
             &PortableV2ExportRequest {
@@ -2224,8 +2264,17 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
 
     let phase = Instant::now();
     let graph = GraphForge::new(source.to_str()).expect("open certification source");
-    publish_nodes(&graph, 1u64 << scale, Some(journal.cancellation()));
-    let mut sink = EdgeSink::new(&graph, Some(journal.cancellation()));
+    let mut session = graph
+        .begin_import_session(
+            OperationId(uuidv7(0x9320_2000)),
+            ImportSessionLimits {
+                batch_rows: BATCH_ROWS,
+                ..ImportSessionLimits::default()
+            },
+        )
+        .expect("begin certification construction");
+    publish_nodes(&mut session, 1u64 << scale, Some(journal.cancellation()));
+    let mut sink = EdgeSink::new(&mut session, Some(journal.cancellation()));
     if let Some(edges) = edges {
         for (src, dst) in edges {
             sink.push(src, dst);
@@ -2241,6 +2290,13 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
     sink.flush();
     let input_fingerprint = format!("sha256:{}", sink.finish());
     assert_eq!(input_fingerprint, generation_fingerprint);
+    let cancellation = journal.cancellation_token();
+    let construction_progress = session
+        .validate_with_cancellation(&graph, Some(&cancellation))
+        .expect("validate certification construction");
+    session
+        .commit(&graph, Some(&cancellation))
+        .expect("commit one certification generation");
     journal.pass("ingest", phase, Some(input_fingerprint));
 
     let phase = Instant::now();
@@ -2455,6 +2511,7 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
         "self_loops_rejected": spills.as_ref().map_or_else(|| summary.as_ref().unwrap().self_loops_rejected, |value| value.self_loops_rejected),
         "duplicates_rejected": generated_counts.as_ref().map_or_else(|| summary.as_ref().unwrap().duplicates_rejected, |value| value.duplicates_rejected),
         "generated_live_unique_edges": generated_counts.as_ref().map_or_else(|| summary.as_ref().unwrap().live_unique_edges, |value| value.live_unique_edges),
+        "construction_session": construction_progress,
         "source_nodes": source_nodes, "source_edges": source_edges,
         "imported_nodes": imported_nodes, "imported_edges": imported_edges,
         "source_project_fingerprint": project_fingerprint(source_nodes, source_edges, &source_1hop, &source_2hop),
@@ -2571,8 +2628,14 @@ fn cancellation_stops_merge_and_publication_before_more_work_is_committed() {
     let project = TempDir::new().expect("cancelled publication project");
     let graph = GraphForge::new(project.path().to_str()).expect("open publication project");
     let before = current_generation_uuid(&graph);
+    let mut session = graph
+        .begin_import_session(
+            OperationId(uuidv7(0x9320_3000)),
+            ImportSessionLimits::default(),
+        )
+        .expect("begin cancelled construction");
     let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        publish_nodes(&graph, 8, Some(&cancelled));
+        publish_nodes(&mut session, 8, Some(&cancelled));
     }));
     assert!(stopped.is_err());
     assert_eq!(current_generation_uuid(&graph), before);
