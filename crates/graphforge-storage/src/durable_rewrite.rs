@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+static PROCESS_REWRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 use crate::filesystem_admission::{ProjectLifecycleMode, ProjectRootRequirement};
 use crate::staging::RewriteBatch;
 
@@ -254,6 +256,7 @@ fn authenticated_file(file: &File) -> Result<AuthenticatedFile, GfError> {
 }
 
 struct RewriteGuard {
+    _process: std::sync::MutexGuard<'static, ()>,
     admission: crate::filesystem_admission::ProjectLifecycleAdmission,
     directory: StableDirectory,
     lifecycle: File,
@@ -267,6 +270,9 @@ impl Drop for RewriteGuard {
 }
 
 fn acquire(root: &Path) -> Result<RewriteGuard, GfError> {
+    let process = PROCESS_REWRITE_LOCK
+        .lock()
+        .map_err(|_| storage("process rewrite lock is poisoned"))?;
     // The lifecycle guard binds the named project root. Ephemeral mode avoids
     // repeating the expensive filesystem probe; durable projects have already
     // passed it at facade admission.
@@ -290,6 +296,7 @@ fn acquire(root: &Path) -> Result<RewriteGuard, GfError> {
     admission.revalidate_identity()?;
     let lifecycle_identity = graphforge_filesystem::file_identity(&lock).map_err(storage)?;
     Ok(RewriteGuard {
+        _process: process,
         admission,
         directory,
         lifecycle: lock,
@@ -761,6 +768,28 @@ pub(crate) fn recovery_required(root: &Path) -> Result<bool, GfError> {
 #[cfg(test)]
 thread_local! {
     static FAIL_AFTER_DURABLE_INTENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Execute bounded maintenance under the same recovered project rewrite lock.
+pub(crate) fn with_rewrite_lock<T>(
+    root: &Path,
+    operation: impl FnOnce(&StableDirectory) -> Result<T, GfError>,
+) -> Result<T, GfError> {
+    let guard = acquire(root)?;
+    guard.revalidate()?;
+    let current = crate::generation::read_generation_state_raw(root)?;
+    recover_locked(
+        root,
+        &guard.directory,
+        GenerationPair {
+            topology: current.topology,
+            search: current.search,
+        },
+    )?;
+    guard.revalidate()?;
+    let output = operation(&guard.directory)?;
+    guard.revalidate()?;
+    Ok(output)
 }
 
 #[allow(clippy::too_many_lines)]

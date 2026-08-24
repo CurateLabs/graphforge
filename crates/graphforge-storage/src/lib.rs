@@ -343,8 +343,9 @@ pub use io_stats::{IoSnapshot, snapshot as io_snapshot};
 pub mod uuid_membership;
 pub use uuid_membership::{
     AuthenticatedUuidIndexSnapshot, UuidIndexAppendMetrics, UuidIndexBuildLimits,
-    UuidIndexBuildMetrics, UuidIndexKind, UuidMembershipIndex, UuidProbeMetrics,
-    rebuild_uuid_membership_indexes, uuid_membership_index_is_fresh, uuid_membership_index_present,
+    UuidIndexBuildMetrics, UuidIndexKind, UuidIndexOrphanGcWork, UuidMembershipIndex,
+    UuidProbeMetrics, maintain_uuid_membership_orphans, rebuild_uuid_membership_indexes,
+    uuid_membership_index_is_fresh, uuid_membership_index_present,
 };
 
 pub mod property_overlay;
