@@ -3500,19 +3500,14 @@ pub(crate) fn commit_statement(ctx: &mut StatementWriteContext, dir: &Path) -> R
         .copied()
         .map(Uuid::from_bytes)
         .collect::<Vec<_>>();
-    let participant = ctx
-        .writer
-        .uuid_index_participant(deleted_nodes, deleted_edges);
     if let Some(generation) =
-        graphforge_storage::commit_topology_aware_with_participant(staged, dir, participant)?
+        ctx.writer
+            .commit_topology_aware_with_uuid_index(staged, deleted_nodes, deleted_edges)?
     {
         if pure_append {
             ctx.writer.write_segment_best_effort(generation, &pending);
         } else {
             graphforge_storage::adjacency_delta::discard_segment(dir, generation);
-        }
-        if ctx.writer.prepared_uuid_index_auxiliary_receipt().is_some() {
-            ctx.writer.finalize_uuid_index_delta(generation)?;
         }
     }
     Ok(())
