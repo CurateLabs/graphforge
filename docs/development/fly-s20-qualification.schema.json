@@ -8,7 +8,6 @@
     "schema",
     "region",
     "image_digest",
-    "qualification_observed_cost_usd",
     "max_phase_rss_growth_ratio",
     "machine_candidates",
     "rungs"
@@ -17,11 +16,6 @@
     "schema": { "const": "graphforge-fly-s20-qualification/1" },
     "region": { "type": "string", "pattern": "^[a-z0-9]{3}$" },
     "image_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
-    "qualification_observed_cost_usd": {
-      "type": "number",
-      "minimum": 0,
-      "exclusiveMaximum": 10
-    },
     "max_phase_rss_growth_ratio": { "type": "number", "minimum": 1, "maximum": 1.5 },
     "machine_candidates": {
       "type": "array",

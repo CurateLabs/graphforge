@@ -216,54 +216,10 @@ measurement, construction, or revision contract labels. #932 owns adding those
 labels only after its image build executes the real contract regression. Do not
 add labels or synthesize positive counters to bypass admission.
 
-Before the S20 dry run, produce its qualification artifact with
-[`scripts/produce-fly-s20-qualification.py`](../../scripts/produce-fly-s20-qualification.py).
-The producer accepts a smallest-first JSON list of candidate Machines; every
-candidate includes `name`, `cpus`, `memory_mb`, and the conservative maximum
-cost of one observation as `observation_max_usd`. Its executable adapter owns
-one disposable full-lifecycle observation at a time and receives the requested
-scale, exact source/image/platform/region/Machine/volume binding, and evidence
-path through `GF_QUALIFICATION_*`. The adapter must return authenticated
-`graphforge-fly-s20-qualification-observation/1` child evidence, including
-observed cost and proof that its Machine, volume, and app are absent. Stdout is
-never evidence.
-
-The producer admits the exact clean source and immutable image contract before
-calling the adapter, so the current unadvertised image invokes no adapter and
-creates no remote resource. It runs adjacent S18 and S19 with identical budgets
-on one candidate. Escalation is bounded and allowed only after a typed
-`memory_headroom_exceeded` result with verified cleanup; arbitrary timeout,
-CPU, disk, or I/O failure is an architectural/environmental failure rather than
-a reason to buy more RAM. After a successful pair, measured RSS must prove that
-every skipped smaller candidate lacked the required headroom. The observations
-share a four-hour product deadline, with an idempotent cleanup action given at
-most ten additional minutes after every attempt. Qualification and S20 share
-the approved $10 ceiling, including a $1 reserve; both the planned
-per-observation maximum and returned observed cost are enforced before
-continuing. The resulting artifact carries
-that observed spend into the S20 controller, whose compute, volume, reserve, and
-qualification spend must fit the same cumulative $10 ceiling.
-
-```bash
-python3 scripts/produce-fly-s20-qualification.py \
-  --expected-sha "$SHA" \
-  --image "registry.fly.io/${APP}@sha256:<linux-amd64-child>" \
-  --region dfw --volume-gb 100 \
-  --candidates-json build/fly-machine-candidates.json \
-  --observation-command scripts/private/run-disposable-qualification \
-  --evidence-out build/s20-fly-qualification.json
-```
-
-The adapter and candidate file are operator inputs, not committed evidence or
-credentials. The adapter must clean up independently on every pass, refusal,
-timeout, and interruption; a missing cleanup proof stops escalation. The
-producer itself contains no Fly create operation and cannot convert a failed
-admission into a launch.
-
-Then run the S20 controller without `--execute` against the resolved child
-digest. This creates no Machine or volume. Supply the producer's sanitized
-qualification artifact from the two lower rungs under identical budgets. It
-binds the fixed region and immutable image digest, records
+Run the controller without `--execute` against the resolved child digest before
+execution. This creates no Machine or volume. Supply a sanitized qualification
+artifact emitted by the eventual #932 path from at least two lower rungs under
+identical budgets. It binds the fixed region and immutable image digest, records
 phase-local cgroup/smaps and raw block/batch/shard/topology-row I/O observations,
 and contains an S20 physical-storage projection. Ingest and import counters must
 be nonzero, syscall counts must remain sub-row, and block/batch/shard density
@@ -344,7 +300,6 @@ work. Teardown independently attempts the exact Machine, volume, and app under
 one ten-minute deadline and reports every unresolved ID.
 
 ```bash
-python3 scripts/ci/test-produce-fly-s20-qualification.py
 python3 scripts/ci/test-fly-g500-s20.py
 ```
 
