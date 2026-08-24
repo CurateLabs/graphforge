@@ -39,25 +39,32 @@ pub use graph_files::{
     stage_graph_tree, verify_graph_tree,
 };
 
-pub mod graph_manifest;
-pub use graph_manifest::{
+#[allow(
+    dead_code,
+    reason = "private node-v2 construction is consumed by the staged #932 integration"
+)]
+mod graph_manifest;
+pub(crate) use graph_manifest::{
     GRAPH_FILES_V2_FORMAT, GRAPH_FILES_V2_VERSION, GRAPH_MANIFEST_NODE_FORMAT,
     GRAPH_MANIFEST_NODE_VERSION, GRAPH_RADIX_DEPTH, GraphFilesRootV2, GraphManifestLimits,
     GraphManifestNode, GraphManifestNodeKind, GraphManifestResolveEvidence,
     decode_node as decode_graph_manifest_node, decode_root as decode_graph_files_root_v2,
     encode_node as encode_graph_manifest_node, encode_root as encode_graph_files_root_v2,
-    object_digest as graph_object_digest, resolve_manifest as resolve_graph_manifest,
-    verify_object_bytes as verify_graph_object_bytes,
+    resolve_manifest as resolve_graph_manifest,
 };
 
-pub mod graph_object_store;
-pub use graph_object_store::{
-    GRAPH_OBJECTS_DIR, GraphFilesAppendEvidence, GraphFilesMigrationEvidence, GraphManifestState,
-    GraphObjectGcEvidence, GraphObjectInstallEvidence, GraphObjectPublicationLease,
-    append_graph_files_v2, begin_graph_object_publication, gc_graph_objects, graph_object_path,
-    graph_object_publication_is_live, install_graph_object_bytes, install_graph_object_file,
-    materialize_graph_objects, migrate_graph_files_v1_to_v2, read_graph_object,
-    read_graph_object_by_digest, verify_graph_object,
+#[allow(
+    dead_code,
+    reason = "private CAS construction is consumed by the staged #932 integration"
+)]
+mod graph_object_store;
+#[cfg(test)]
+pub(crate) use graph_object_store::{
+    GraphManifestState, append_graph_files_v2, install_graph_object_bytes, read_graph_object,
+};
+pub(crate) use graph_object_store::{
+    GraphObjectPublicationLease, begin_graph_object_publication, graph_object_path,
+    graph_object_publication_is_live, read_graph_object_by_digest, verify_graph_object,
 };
 
 pub mod semantic_bindings;

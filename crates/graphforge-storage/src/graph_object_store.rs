@@ -736,6 +736,9 @@ pub fn migrate_graph_files_v1_to_v2(
     graph_root: &Path,
     inventory: &GraphFilesInventory,
 ) -> Result<(GraphFilesRootV2, GraphFilesMigrationEvidence), GfError> {
+    // Authenticate the complete expanded contract before installing even one
+    // payload object; malformed caller-owned structs cannot create partial CAS.
+    crate::encode_inventory(inventory)?;
     validate_publication_identity(lease)?;
     let mut evidence = GraphFilesMigrationEvidence::default();
     for entry in &inventory.files {
@@ -2127,6 +2130,42 @@ mod tests {
             })
             .unwrap();
         assert_eq!(files, inventory.files);
+    }
+
+    #[test]
+    fn migration_rejects_noncanonical_v1_before_installing_objects() {
+        let graph = tempfile::tempdir().unwrap();
+        fs::write(graph.path().join("a.parquet"), b"a").unwrap();
+        fs::write(graph.path().join("b.parquet"), b"bb").unwrap();
+        let (valid, _) = crate::capture_graph_files(graph.path()).unwrap();
+        let mut invalid = Vec::new();
+        let mut wrong_count = valid.clone();
+        wrong_count.file_count += 1;
+        invalid.push(wrong_count);
+        let mut wrong_total = valid.clone();
+        wrong_total.total_byte_length += 1;
+        invalid.push(wrong_total);
+        let mut unordered = valid.clone();
+        unordered.files.reverse();
+        invalid.push(unordered);
+        let mut duplicate = valid.clone();
+        duplicate.files[1] = duplicate.files[0].clone();
+        duplicate.total_byte_length = duplicate.files.iter().map(|entry| entry.byte_length).sum();
+        invalid.push(duplicate);
+
+        for inventory in invalid {
+            let container = tempfile::tempdir().unwrap();
+            let lease = begin_graph_object_publication(container.path()).unwrap();
+            assert!(migrate_graph_files_v1_to_v2(&lease, graph.path(), &inventory,).is_err());
+            let digest_root = container.path().join(GRAPH_OBJECTS_DIR).join(SHA256_DIR);
+            assert_eq!(
+                fs::read_dir(digest_root)
+                    .unwrap()
+                    .map(Result::unwrap)
+                    .count(),
+                0
+            );
+        }
     }
 
     #[test]

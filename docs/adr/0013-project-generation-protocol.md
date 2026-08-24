@@ -395,7 +395,9 @@ expanded graph-files-v1 inventory writes node-v2 objects only.
 The participant descriptor is paired exactly with its payload: record version
 1 admits only an expanded v1 inventory and record version 2 admits only this
 Patricia root. Checkpoint revert retains the same representation, uses the CAS
-publication lease for v2, and never synthesizes a generation graph tree.
+publication lease for v2, and never synthesizes a generation graph tree. Revert
+acquires the CAS lifecycle guard before the project writer and checkpoint locks,
+matching retention's global `CAS -> writer -> checkpoint` order.
 
 CAS publication, reads, materialization, and collection retain directory and
 file capabilities and address children relative to those capabilities. The

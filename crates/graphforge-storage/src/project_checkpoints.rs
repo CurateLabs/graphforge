@@ -579,6 +579,10 @@ where
     let admission = admit_existing_project(container_root.as_ref(), mode)?;
     let root = canonical_project_root(admission.root())?;
     let transaction_uuid = revert_transaction_uuid(request.operation_uuid);
+    // Global lifecycle order is CAS -> writer -> checkpoint. Retain the
+    // shared CAS publication guard before acquiring either mutation lock;
+    // compact sources need it through CURRENT, while v1 holds it unused.
+    let graph_object_lease = crate::begin_graph_object_publication(&root)?;
     let mut locks = acquire_mutation_locks(&root)?;
     let checkpoint_root = checkpoint_root(&root)?;
     recover_pair(&checkpoint_root)?;
@@ -761,9 +765,6 @@ where
         Some(crate::GraphFilesParticipant::V1(_))
     )
     .then_some(source_graph_tree.as_path());
-    let graph_object_lease = compact_graph_objects
-        .then(|| crate::begin_graph_object_publication(&root))
-        .transpose()?;
     let receipt = match stage_project_generation_with_lock(
         identity,
         root.clone(),
@@ -815,9 +816,10 @@ where
                         Ok(())
                     },
                 )?;
-            match graph_object_lease.as_ref() {
-                Some(lease) => validated.publish_with_graph_objects(lease)?,
-                None => validated.publish()?,
+            if compact_graph_objects {
+                validated.publish_with_graph_objects(&graph_object_lease)?
+            } else {
+                validated.publish()?
             }
         }
     };
@@ -2558,6 +2560,55 @@ mod tests {
         )
         .unwrap();
         assert_eq!(bytes, b"checkpoint");
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let revert_root = directory.path().to_path_buf();
+        let revert_barrier = barrier.clone();
+        let revert_sender = sender.clone();
+        let revert_thread = std::thread::spawn(move || {
+            revert_barrier.wait();
+            let result = revert_checkpoint(
+                &revert_root,
+                &CheckpointRevertRequest {
+                    operation_uuid: Uuid::from_u128(142),
+                    name: "Compact".into(),
+                    reason: "concurrent compact restore".into(),
+                    actor_uuid: None,
+                },
+                || Ok(1_720_000_000_123_457),
+                |_| Ok(()),
+            );
+            revert_sender.send(("revert", result.map(|_| ()))).unwrap();
+        });
+        let cleanup_root = directory.path().to_path_buf();
+        let cleanup_barrier = barrier.clone();
+        let cleanup_sender = sender.clone();
+        let cleanup_thread = std::thread::spawn(move || {
+            cleanup_barrier.wait();
+            let result = crate::execute_project_cleanup(
+                &cleanup_root,
+                crate::ProjectRetentionPolicy::default(),
+                crate::ProjectRetentionLimits::default(),
+            );
+            cleanup_sender
+                .send(("cleanup", result.map(|_| ())))
+                .unwrap();
+        });
+        barrier.wait();
+        let mut outcomes = BTreeMap::new();
+        for _ in 0..2 {
+            let (operation, result) = receiver
+                .recv_timeout(Duration::from_secs(5))
+                .expect("compact revert/retention lock ordering deadlocked");
+            outcomes.insert(operation, result);
+        }
+        revert_thread.join().unwrap();
+        cleanup_thread.join().unwrap();
+        outcomes.remove("revert").unwrap().unwrap();
+        if let Err(error) = outcomes.remove("cleanup").unwrap() {
+            assert_eq!(error.code(), "GF_WRITER_BUSY");
+        }
     }
 
     #[test]

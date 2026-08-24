@@ -67,6 +67,7 @@ pub enum GraphManifestNodeKind {
 }
 
 /// Admission bounds for resolving an untrusted radix manifest.
+#[allow(clippy::struct_field_names)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GraphManifestLimits {
     /// Maximum distinct radix objects examined.
