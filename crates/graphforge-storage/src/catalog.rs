@@ -1006,12 +1006,10 @@ pub(crate) fn max_edge_id(dir: &Path) -> Result<u64, DataFusionError> {
     for (_, path) in crate::mutator::edge_parquet_files(dir, None)
         .map_err(|error| DataFusionError::Execution(error.to_string()))?
     {
-        // Preserve discovery semantics: unrelated/corrupt edge artifacts are
-        // ignored here and rejected by the normal catalog validation path.
-        // Surrogate recovery must still inspect every readable relation stem.
-        if let Ok(candidate) = max_ordered_u64_tail(&path, "edge_id") {
-            max = max.max(candidate);
-        }
+        // Every enumerated Parquet path is canonical topology. Ignoring a
+        // malformed shard here could resume surrogate allocation from an
+        // incomplete maximum and authenticate colliding edge identities.
+        max = max.max(max_ordered_u64_tail(&path, "edge_id")?);
     }
     Ok(max)
 }
@@ -2866,12 +2864,12 @@ mod tests {
     }
 
     #[test]
-    fn wave12_max_edge_id_skips_non_parquet_and_corrupt_parquet_entries() {
+    fn wave12_max_edge_id_ignores_non_parquet_but_rejects_corrupt_canonical_shards() {
         let dir = TempDir::new().unwrap();
         let edges = dir.path().join("topology/edges");
         std::fs::create_dir_all(&edges).unwrap();
         std::fs::write(edges.join("note.txt"), b"not parquet").unwrap();
         std::fs::write(edges.join("broken.parquet"), b"not parquet").unwrap();
-        assert_eq!(max_edge_id(dir.path()).unwrap(), 0);
+        assert!(max_edge_id(dir.path()).is_err());
     }
 }
