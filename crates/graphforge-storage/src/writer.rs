@@ -1228,6 +1228,17 @@ pub struct TopologyWriteWork {
     pub peak_flush_scratch_bytes: u64,
 }
 
+/// Bounded identity material captured from one writer window and staged into a
+/// [`crate::UuidConstructionSession`] after the topology commit assigns its
+/// generation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UuidConstructionChunk {
+    /// Newly created node UUIDs and canonical surrogates.
+    pub nodes: Vec<(Uuid, u64)>,
+    /// Newly created edge UUIDs.
+    pub edges: Vec<Uuid>,
+}
+
 /// Explicit capability limits for topology construction state.
 ///
 /// Property/literal mutation buffers are intentionally outside this capability:
@@ -1462,6 +1473,26 @@ impl GraphWriter {
         &self.sealed_files
     }
 
+    /// Capture the current bounded topology window for durable UUID-index
+    /// staging. Call before `flush_into`; stage the returned chunk only after
+    /// the same private topology commit succeeds and yields its generation.
+    #[must_use]
+    pub fn uuid_construction_chunk(&self) -> UuidConstructionChunk {
+        UuidConstructionChunk {
+            nodes: self
+                .nodes
+                .iter()
+                .map(|row| (Uuid::from_bytes(row.node_uuid), row.node_id))
+                .collect(),
+            edges: self
+                .edges
+                .values()
+                .flatten()
+                .map(|row| Uuid::from_bytes(row.edge_uuid))
+                .collect(),
+        }
+    }
+
     /// Attach the exact composition fingerprint used to authenticate opaque
     /// semantic routes written by this writer.
     #[must_use]
@@ -1489,7 +1520,13 @@ impl GraphWriter {
         type_ids: &[TypeId],
     ) -> Result<u64, GfError> {
         let bytes = to_bytes(&node_uuid);
-        if self.uuid_to_node_id.contains_key(&bytes) {
+        if self.uuid_to_node_id.contains_key(&bytes)
+            || self
+                .edges
+                .values()
+                .flatten()
+                .any(|row| row.edge_uuid == bytes)
+        {
             return Err(GfError::Storage(
                 "duplicate node UUID in graph writer topology window".into(),
             ));
@@ -1622,6 +1659,7 @@ impl GraphWriter {
             .values()
             .flatten()
             .any(|row| row.edge_uuid == edge_bytes)
+            || self.uuid_to_node_id.contains_key(&edge_bytes)
         {
             return Err(GfError::Storage(
                 "duplicate edge UUID in graph writer topology window".into(),
@@ -4687,6 +4725,29 @@ mod tests {
         assert!(writer.charged_topology_bytes > 0);
         assert_eq!(writer.cancel_edges(&HashSet::from([to_bytes(&edge)])), 1);
         assert_eq!(writer.charged_topology_bytes, 0);
+    }
+
+    #[test]
+    fn uuid_construction_chunk_tracks_only_live_bounded_topology_rows() {
+        let dir = TempDir::new().unwrap();
+        let left = new_v7();
+        let right = new_v7();
+        let canceled = new_v7();
+        let edge = new_v7();
+        let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
+        writer.create_node(left, TypeId(0)).unwrap();
+        writer.create_node(right, TypeId(0)).unwrap();
+        writer.create_node(canceled, TypeId(0)).unwrap();
+        writer.create_edge(edge, "KNOWS", &left, &right).unwrap();
+        assert_eq!(
+            writer.cancel_nodes(&HashSet::from([to_bytes(&canceled)])),
+            1
+        );
+        let chunk = writer.uuid_construction_chunk();
+        assert_eq!(chunk.nodes.len(), 2);
+        assert_eq!(chunk.edges, [edge]);
+        assert!(!chunk.nodes.iter().any(|(uuid, _)| *uuid == canceled));
+        assert!(writer.create_edge(left, "KNOWS", &left, &right).is_err());
     }
 
     #[test]
