@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Callable, Sequence
+from datetime import datetime, timezone
 import importlib.util
 import json
 import math
 import os
 from pathlib import Path
+import signal
 import subprocess
 import tempfile
 import time
@@ -30,9 +32,27 @@ SCALES = (18, 19)
 QUALIFICATION_TTL_S = 4 * 3600
 MEMORY_REFUSAL = "memory_headroom_exceeded"
 MAX_CANDIDATES = 8
+COST_AUTHORITY = "controller-reserved-exposure/1"
+
+
+def volume_binding(size_gb: int) -> dict[str, Any]:
+    return {
+        "provider": "fly.io",
+        "class": "attached-volume",
+        "mount_path": "/work",
+        "size_gb": size_gb,
+    }
+
+
+def utc_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 class ProducerError(RuntimeError):
+    pass
+
+
+class TerminationRequested(BaseException):
     pass
 
 
@@ -89,54 +109,58 @@ class ChildCommandRunner:
             }
         )
         cleanup_output = output.with_suffix(".cleanup.json")
-        observation_error: ProducerError | None = None
+        observation_error: BaseException | None = None
+        cleanup_error: BaseException | None = None
+        cleanup_evidence: Any = None
         value: Any = None
         try:
-            environment["GF_QUALIFICATION_ACTION"] = "observe"
-            result = subprocess.run(
-                [str(self.command)],
-                cwd=ROOT,
-                env=environment,
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=max(1.0, timeout),
-            )
-            if not output.is_file():
-                observation_error = ProducerError(
-                    f"qualification adapter returned {result.returncode} without child evidence"
+            try:
+                environment["GF_QUALIFICATION_ACTION"] = "observe"
+                result = subprocess.run(
+                    [str(self.command)],
+                    cwd=ROOT,
+                    env=environment,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=max(1.0, timeout),
                 )
-            else:
-                try:
+                if output.is_file():
                     value = json.loads(output.read_text())
-                except (OSError, UnicodeError, json.JSONDecodeError):
-                    observation_error = ProducerError("qualification adapter emitted invalid JSON")
-        except subprocess.TimeoutExpired:
-            observation_error = ProducerError(
-                "qualification observation exceeded the total deadline"
-            )
-        except OSError:
-            observation_error = ProducerError("qualification observation command failed")
-        environment["GF_QUALIFICATION_ACTION"] = "cleanup"
-        environment["GF_QUALIFICATION_CLEANUP_EVIDENCE_OUT"] = str(cleanup_output)
-        try:
-            cleanup = subprocess.run(
-                [str(self.command)],
-                cwd=ROOT,
-                env=environment,
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=controller.CLEANUP_TTL_S,
-            )
-        except (OSError, subprocess.TimeoutExpired) as error:
-            raise ProducerError("qualification adapter cleanup failed or timed out") from error
-        if cleanup.returncode != 0 or not cleanup_output.is_file():
-            raise ProducerError("qualification adapter did not complete cleanup")
-        try:
-            cleanup_evidence = json.loads(cleanup_output.read_text())
-        except (OSError, UnicodeError, json.JSONDecodeError) as error:
-            raise ProducerError("qualification adapter emitted invalid cleanup evidence") from error
+                else:
+                    observation_error = ProducerError(
+                        f"qualification adapter returned {result.returncode} without child evidence"
+                    )
+                if result.returncode != 0:
+                    observation_error = ProducerError(
+                        f"qualification adapter returned nonzero status {result.returncode}"
+                    )
+            except subprocess.TimeoutExpired:
+                observation_error = ProducerError(
+                    "qualification observation exceeded the total deadline"
+                )
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                observation_error = ProducerError("qualification observation command failed")
+            except BaseException as error:
+                observation_error = error
+        finally:
+            environment["GF_QUALIFICATION_ACTION"] = "cleanup"
+            environment["GF_QUALIFICATION_CLEANUP_EVIDENCE_OUT"] = str(cleanup_output)
+            try:
+                cleanup = subprocess.run(
+                    [str(self.command)],
+                    cwd=ROOT,
+                    env=environment,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=controller.CLEANUP_TTL_S,
+                )
+                if cleanup.returncode != 0 or not cleanup_output.is_file():
+                    raise ProducerError("qualification adapter did not complete cleanup")
+                cleanup_evidence = json.loads(cleanup_output.read_text())
+            except BaseException as error:
+                cleanup_error = error
         expected_cleanup = {
             "schema": CLEANUP_SCHEMA,
             "git_sha": self.sha,
@@ -149,9 +173,14 @@ class ChildCommandRunner:
                 "cpus": candidate["cpus"],
                 "memory_mb": candidate["memory_mb"],
             },
+            "volume": volume_binding(self.volume_gb),
             "verified": True,
             "resources_absent": True,
         }
+        if cleanup_error is not None:
+            raise ProducerError(
+                "qualification adapter cleanup failed or timed out"
+            ) from cleanup_error
         if cleanup_evidence != expected_cleanup:
             raise ProducerError("qualification adapter cleanup proof mismatches the observation")
         if observation_error is not None:
@@ -207,9 +236,12 @@ def validate_observation(
     sha: str,
     digest: str,
     region: str,
+    volume_gb: int,
     scale: int,
     candidate: dict[str, Any],
 ) -> None:
+    if not isinstance(value, dict):
+        raise ProducerError("qualification observation must be a JSON object")
     expected_binding = {
         "schema": OBSERVATION_SCHEMA,
         "git_sha": sha,
@@ -222,6 +254,7 @@ def validate_observation(
             "cpus": candidate["cpus"],
             "memory_mb": candidate["memory_mb"],
         },
+        "volume": volume_binding(volume_gb),
         "runtime_contract": controller.REQUIRED_IMAGE_CONTRACT,
         "measurement_contract": controller.REQUIRED_MEASUREMENT_CONTRACT,
         "construction_contract": controller.REQUIRED_CONSTRUCTION_CONTRACT,
@@ -258,6 +291,7 @@ def produce(
     sha: str,
     digest: str,
     region: str,
+    volume_gb: int,
     candidates: list[dict[str, Any]],
     runner: ObservationRunner,
     evidence_out: Path,
@@ -265,16 +299,21 @@ def produce(
     reserve_usd: float,
     admission: Callable[[], None],
     now: Callable[[], float] = time.monotonic,
+    utc_now: Callable[[], str] = utc_timestamp,
 ) -> dict[str, Any]:
     """Admit first, then select the smallest candidate with two valid rungs."""
     if ceiling_usd != 10.0 or reserve_usd < 1.0 or reserve_usd >= ceiling_usd:
         raise ProducerError("qualification requires the approved $10 ceiling and >=$1 reserve")
     if not evidence_out.parent.is_dir():
         raise ProducerError("qualification output parent must already exist")
+    if not 1 <= volume_gb <= controller.MAX_VOLUME_GB:
+        raise ProducerError("qualification volume exceeds the certification envelope")
     candidates = validate_candidates(candidates)
     admission()  # Must precede even the first adapter call/resource creation.
     deadline = now() + QUALIFICATION_TTL_S
-    spent = 0.0
+    reserved_exposure = 0.0
+    reported_cost = 0.0
+    attempts: list[dict[str, Any]] = []
     available = ceiling_usd - reserve_usd
     selected_index: int | None = None
     selected_rungs: list[dict[str, Any]] = []
@@ -282,15 +321,19 @@ def produce(
     with tempfile.TemporaryDirectory(prefix="graphforge-s20-qualification-") as directory:
         root = Path(directory)
         for candidate_index, candidate in enumerate(candidates):
-            planned_pair = 2 * float(candidate["observation_max_usd"])
-            if spent + planned_pair > available:
-                raise ProducerError("qualification candidate would exceed the total cost ceiling")
             pair: list[dict[str, Any]] = []
             capacity = False
             for scale in SCALES:
                 remaining = deadline - now()
                 if remaining <= 0:
                     raise ProducerError("qualification exceeded the total four-hour deadline")
+                exposure = float(candidate["observation_max_usd"])
+                if reserved_exposure + exposure > available:
+                    raise ProducerError(
+                        "qualification attempt would exceed the total reserved cost ceiling"
+                    )
+                reserved_at = utc_now()
+                reserved_exposure += exposure
                 path = root / f"candidate-{candidate_index}-s{scale}.json"
                 value = runner.observe(
                     scale=scale,
@@ -305,12 +348,20 @@ def produce(
                     region=region,
                     scale=scale,
                     candidate=candidate,
+                    volume_gb=volume_gb,
                 )
-                spent += float(value["cost_usd"])
-                if spent > available:
-                    raise ProducerError(
-                        "qualification observations exceeded the total cost ceiling"
-                    )
+                reported_cost += float(value["cost_usd"])
+                attempts.append(
+                    {
+                        "machine": candidate["name"],
+                        "scale": scale,
+                        "reserved_max_usd": exposure,
+                        "reported_cost_usd": float(value["cost_usd"]),
+                        "reserved_at": reserved_at,
+                        "completed_at": utc_now(),
+                        "result": value["result"],
+                    }
+                )
                 if value["result"] == "capacity_exceeded":
                     capacity = True
                     capacity_candidates.append(candidate)
@@ -330,7 +381,22 @@ def produce(
         "schema": QUALIFICATION_SCHEMA,
         "region": region,
         "image_digest": digest,
-        "qualification_observed_cost_usd": spent,
+        "volume": volume_binding(volume_gb),
+        "cost_admission": {
+            "authority": COST_AUTHORITY,
+            "ceiling_usd": ceiling_usd,
+            "reserve_usd": reserve_usd,
+            "reserved_max_usd": reserved_exposure,
+            "reported_cost_usd": reported_cost,
+            "candidate_rate_snapshot": [
+                {
+                    "machine": item["name"],
+                    "max_usd_per_observation": float(item["observation_max_usd"]),
+                }
+                for item in candidates
+            ],
+            "attempts": attempts,
+        },
         "max_phase_rss_growth_ratio": 1.2,
         # Exclude candidates empirically refused below the selected size. The
         # consumer still independently selects the smallest remaining option.
@@ -377,6 +443,14 @@ def parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parser().parse_args(argv)
+    previous_handlers: dict[signal.Signals, Any] = {}
+
+    def request_termination(signum: int, _frame: Any) -> None:
+        raise TerminationRequested(f"received signal {signum}")
+
+    for termination_signal in (signal.SIGHUP, signal.SIGTERM):
+        previous_handlers[termination_signal] = signal.getsignal(termination_signal)
+        signal.signal(termination_signal, request_termination)
     try:
         match = controller.CHILD_IMAGE.fullmatch(args.image)
         if not match or not controller.SHA.fullmatch(args.expected_sha):
@@ -405,6 +479,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             sha=args.expected_sha,
             digest=digest,
             region=args.region,
+            volume_gb=args.volume_gb,
             candidates=candidates,
             runner=runner,
             evidence_out=args.evidence_out,
@@ -418,9 +493,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         OSError,
         subprocess.SubprocessError,
         json.JSONDecodeError,
+        TerminationRequested,
     ) as error:
         print(f"Fly S20 qualification refused: {error}", file=__import__("sys").stderr)
         return 1
+    finally:
+        for termination_signal, previous in previous_handlers.items():
+            signal.signal(termination_signal, previous)
     return 0
 
 

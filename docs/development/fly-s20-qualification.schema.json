@@ -8,7 +8,8 @@
     "schema",
     "region",
     "image_digest",
-    "qualification_observed_cost_usd",
+    "volume",
+    "cost_admission",
     "max_phase_rss_growth_ratio",
     "machine_candidates",
     "rungs"
@@ -17,10 +18,76 @@
     "schema": { "const": "graphforge-fly-s20-qualification/1" },
     "region": { "type": "string", "pattern": "^[a-z0-9]{3}$" },
     "image_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
-    "qualification_observed_cost_usd": {
-      "type": "number",
-      "minimum": 0,
-      "exclusiveMaximum": 10
+    "volume": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "class", "mount_path", "size_gb"],
+      "properties": {
+        "provider": { "const": "fly.io" },
+        "class": { "const": "attached-volume" },
+        "mount_path": { "const": "/work" },
+        "size_gb": { "type": "integer", "minimum": 1, "maximum": 500 }
+      }
+    },
+    "cost_admission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "authority",
+        "ceiling_usd",
+        "reserve_usd",
+        "reserved_max_usd",
+        "reported_cost_usd",
+        "candidate_rate_snapshot",
+        "attempts"
+      ],
+      "properties": {
+        "authority": { "const": "controller-reserved-exposure/1" },
+        "ceiling_usd": { "const": 10 },
+        "reserve_usd": { "type": "number", "minimum": 1, "exclusiveMaximum": 10 },
+        "reserved_max_usd": { "type": "number", "exclusiveMinimum": 0, "maximum": 9 },
+        "reported_cost_usd": { "type": "number", "minimum": 0, "maximum": 9 },
+        "candidate_rate_snapshot": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["machine", "max_usd_per_observation"],
+            "properties": {
+              "machine": { "type": "string" },
+              "max_usd_per_observation": { "type": "number", "exclusiveMinimum": 0 }
+            }
+          }
+        },
+        "attempts": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "machine",
+              "scale",
+              "reserved_max_usd",
+              "reported_cost_usd",
+              "reserved_at",
+              "completed_at",
+              "result"
+            ],
+            "properties": {
+              "machine": { "type": "string" },
+              "scale": { "enum": [18, 19] },
+              "reserved_max_usd": { "type": "number", "exclusiveMinimum": 0 },
+              "reported_cost_usd": { "type": "number", "minimum": 0 },
+              "reserved_at": { "type": "string", "format": "date-time" },
+              "completed_at": { "type": "string", "format": "date-time" },
+              "result": { "enum": ["pass", "capacity_exceeded"] }
+            }
+          }
+        }
+      }
     },
     "max_phase_rss_growth_ratio": { "type": "number", "minimum": 1, "maximum": 1.5 },
     "machine_candidates": {

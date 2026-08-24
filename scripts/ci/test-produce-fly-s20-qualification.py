@@ -38,7 +38,13 @@ SELECTED = {
 }
 
 
-def observation(scale: int, candidate: dict, rung: dict | None = None) -> dict:
+def observation(
+    scale: int,
+    candidate: dict,
+    rung: dict | None = None,
+    *,
+    cost_usd: float = 0.1,
+) -> dict:
     return {
         "schema": producer.OBSERVATION_SCHEMA,
         "git_sha": SHA,
@@ -51,12 +57,13 @@ def observation(scale: int, candidate: dict, rung: dict | None = None) -> dict:
             "cpus": candidate["cpus"],
             "memory_mb": candidate["memory_mb"],
         },
+        "volume": producer.volume_binding(25),
         "runtime_contract": producer.controller.REQUIRED_IMAGE_CONTRACT,
         "measurement_contract": producer.controller.REQUIRED_MEASUREMENT_CONTRACT,
         "construction_contract": producer.controller.REQUIRED_CONSTRUCTION_CONTRACT,
         "result": "pass" if rung is not None else "capacity_exceeded",
         "failure": None if rung is not None else {"code": producer.MEMORY_REFUSAL},
-        "cost_usd": 0.1,
+        "cost_usd": cost_usd,
         "cleanup": {"verified": True, "resources_absent": True},
         "rung": rung,
     }
@@ -99,6 +106,7 @@ def invoke(root: Path, runner: FakeRunner, admission=lambda: None):
         sha=SHA,
         digest=DIGEST,
         region="dfw",
+        volume_gb=25,
         candidates=[SMALL, SELECTED],
         runner=runner,
         evidence_out=root / "qualification.json",
@@ -142,6 +150,12 @@ runtime = {
     "cpus": int(os.environ["GF_QUALIFICATION_CPUS"]),
     "memory_mb": int(os.environ["GF_QUALIFICATION_MEMORY_MB"]),
 }
+volume = {
+    "provider": "fly.io",
+    "class": "attached-volume",
+    "mount_path": "/work",
+    "size_gb": int(os.environ["GF_QUALIFICATION_VOLUME_GB"]),
+}
 value = {
     "schema": "graphforge-fly-s20-qualification-cleanup/1",
     "git_sha": os.environ["GF_QUALIFICATION_EXPECTED_SHA"],
@@ -150,6 +164,7 @@ value = {
     "region": os.environ["GF_QUALIFICATION_REGION"],
     "scale": int(os.environ["GF_QUALIFICATION_SCALE"]),
     "runtime": runtime,
+    "volume": volume,
     "verified": True,
     "resources_absent": True,
 }
@@ -162,11 +177,11 @@ Path(os.environ["GF_QUALIFICATION_CLEANUP_EVIDENCE_OUT"]).write_text(json.dumps(
             sha=SHA,
             image_digest=DIGEST,
             region="dfw",
-            volume_gb=20,
+            volume_gb=25,
         )
         command_output = root / "failed-observation.json"
         expect_error(
-            "without child evidence",
+            "nonzero status 7",
             lambda: command_runner.observe(
                 scale=18,
                 candidate=SMALL,
@@ -178,6 +193,88 @@ Path(os.environ["GF_QUALIFICATION_CLEANUP_EVIDENCE_OUT"]).write_text(json.dumps(
             json.loads(command_output.with_suffix(".cleanup.json").read_text())["resources_absent"]
             is True
         )
+
+        def cleanup_value(environment):
+            return {
+                "schema": producer.CLEANUP_SCHEMA,
+                "git_sha": SHA,
+                "image_digest": DIGEST,
+                "platform": producer.PLATFORM,
+                "region": "dfw",
+                "scale": int(environment["GF_QUALIFICATION_SCALE"]),
+                "runtime": {
+                    "machine": environment["GF_QUALIFICATION_MACHINE"],
+                    "cpus": int(environment["GF_QUALIFICATION_CPUS"]),
+                    "memory_mb": int(environment["GF_QUALIFICATION_MEMORY_MB"]),
+                },
+                "volume": producer.volume_binding(25),
+                "verified": True,
+                "resources_absent": True,
+            }
+
+        original_run = producer.subprocess.run
+        for interruption in (KeyboardInterrupt(), SystemExit(23)):
+            actions = []
+
+            def interrupted_run(_command, _actions=actions, _interruption=interruption, **kwargs):
+                environment = kwargs["env"]
+                action = environment["GF_QUALIFICATION_ACTION"]
+                _actions.append(action)
+                if action == "observe":
+                    raise _interruption
+                Path(environment["GF_QUALIFICATION_CLEANUP_EVIDENCE_OUT"]).write_text(
+                    json.dumps(cleanup_value(environment))
+                )
+                return producer.subprocess.CompletedProcess([], 0, "", "")
+
+            producer.subprocess.run = interrupted_run
+            try:
+                command_runner.observe(
+                    scale=18,
+                    candidate=SMALL,
+                    output=root / f"interrupted-{type(interruption).__name__}.json",
+                    timeout=5,
+                )
+            except type(interruption) as error:
+                if isinstance(error, SystemExit):
+                    assert error.code == 23
+            else:
+                raise AssertionError("BaseException must be re-raised after cleanup")
+            finally:
+                producer.subprocess.run = original_run
+            assert actions == ["observe", "cleanup"]
+
+        # A nonzero adapter exit cannot bless parseable pass/capacity JSON.
+        actions = []
+
+        def nonzero_run(_command, **kwargs):
+            environment = kwargs["env"]
+            action = environment["GF_QUALIFICATION_ACTION"]
+            actions.append(action)
+            if action == "observe":
+                Path(environment["GF_QUALIFICATION_EVIDENCE_OUT"]).write_text(
+                    json.dumps(observation(18, SMALL))
+                )
+                return producer.subprocess.CompletedProcess([], 7, "", "")
+            Path(environment["GF_QUALIFICATION_CLEANUP_EVIDENCE_OUT"]).write_text(
+                json.dumps(cleanup_value(environment))
+            )
+            return producer.subprocess.CompletedProcess([], 0, "", "")
+
+        producer.subprocess.run = nonzero_run
+        try:
+            expect_error(
+                "nonzero status 7",
+                lambda: command_runner.observe(
+                    scale=18,
+                    candidate=SMALL,
+                    output=root / "nonzero.json",
+                    timeout=5,
+                ),
+            )
+        finally:
+            producer.subprocess.run = original_run
+        assert actions == ["observe", "cleanup"]
 
         selected_rungs = rungs(SELECTED)
 
@@ -200,13 +297,27 @@ Path(os.environ["GF_QUALIFICATION_CLEANUP_EVIDENCE_OUT"]).write_text(json.dumps(
         )
         assert resources["machine"] == SELECTED["name"]
 
-        # Every child binding is authenticated; a different image cannot be mixed in.
+        # Every untrusted child artifact is exact-bound; it cannot relabel resources.
         def mismatch(scale, candidate):
             value = observation(scale, candidate, rungs(candidate)[scale])
             value["image_digest"] = "sha256:" + "c" * 64
             return value
 
         expect_error("image_digest", lambda: invoke(root, FakeRunner(mismatch)))
+
+        def missing_volume(scale, candidate):
+            value = observation(scale, candidate, rungs(candidate)[scale])
+            value.pop("volume")
+            return value
+
+        expect_error("volume", lambda: invoke(root, FakeRunner(missing_volume)))
+
+        def wrong_volume(scale, candidate):
+            value = observation(scale, candidate, rungs(candidate)[scale])
+            value["volume"]["size_gb"] = 24
+            return value
+
+        expect_error("volume", lambda: invoke(root, FakeRunner(wrong_volume)))
 
         # Cleanup evidence is mandatory even for the typed escalation path.
         def dirty_cleanup(scale, candidate):
@@ -258,13 +369,14 @@ Path(os.environ["GF_QUALIFICATION_CLEANUP_EVIDENCE_OUT"]).write_text(json.dumps(
         expect_error("does not plateau", lambda: invoke(root, FakeRunner(no_plateau)))
 
         over_budget = dict(SELECTED)
-        over_budget["observation_max_usd"] = 5.0
+        over_budget["observation_max_usd"] = 10.0
         expect_error(
-            "cost ceiling",
+            "reserved cost ceiling",
             lambda: producer.produce(
                 sha=SHA,
                 digest=DIGEST,
                 region="dfw",
+                volume_gb=25,
                 candidates=[over_budget],
                 runner=FakeRunner(lambda _scale, _candidate: None),
                 evidence_out=root / "qualification.json",
@@ -273,6 +385,37 @@ Path(os.environ["GF_QUALIFICATION_CLEANUP_EVIDENCE_OUT"]).write_text(json.dumps(
                 admission=lambda: None,
             ),
         )
+
+        # Zero reported spend cannot erase controller-reserved exposure from
+        # failed candidates. The fourth $3 attempt is refused after three.
+        costly_candidates = [
+            {
+                "name": f"performance-{index}x",
+                "cpus": index,
+                "memory_mb": index * 1024,
+                "observation_max_usd": 3.0,
+            }
+            for index in range(1, 5)
+        ]
+        zero_cost_runner = FakeRunner(
+            lambda scale, candidate: observation(scale, candidate, cost_usd=0.0)
+        )
+        expect_error(
+            "reserved cost ceiling",
+            lambda: producer.produce(
+                sha=SHA,
+                digest=DIGEST,
+                region="dfw",
+                volume_gb=25,
+                candidates=costly_candidates,
+                runner=zero_cost_runner,
+                evidence_out=root / "qualification.json",
+                ceiling_usd=10.0,
+                reserve_usd=1.0,
+                admission=lambda: None,
+            ),
+        )
+        assert len(zero_cost_runner.calls) == 3
 
     print("Fly S18/S19 qualification producer tests passed")
 

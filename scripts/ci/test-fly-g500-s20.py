@@ -87,7 +87,35 @@ def qualification(digest: str, *, growth: float = 1.1, disk_gib: int = 20) -> di
         "schema": "graphforge-fly-s20-qualification/1",
         "region": "dfw",
         "image_digest": digest,
-        "qualification_observed_cost_usd": 0.2,
+        "volume": {
+            "provider": "fly.io",
+            "class": "attached-volume",
+            "mount_path": "/work",
+            "size_gb": 25,
+        },
+        "cost_admission": {
+            "authority": "controller-reserved-exposure/1",
+            "ceiling_usd": 10.0,
+            "reserve_usd": 1.0,
+            "reserved_max_usd": 0.4,
+            "reported_cost_usd": 0.2,
+            "candidate_rate_snapshot": [
+                {"machine": "performance-2x", "max_usd_per_observation": 0.2},
+                {"machine": "performance-4x", "max_usd_per_observation": 0.3},
+            ],
+            "attempts": [
+                {
+                    "machine": "performance-2x",
+                    "scale": scale,
+                    "reserved_max_usd": 0.2,
+                    "reported_cost_usd": 0.1,
+                    "reserved_at": "2026-08-24T00:00:00+00:00",
+                    "completed_at": "2026-08-24T00:01:00+00:00",
+                    "result": "pass",
+                }
+                for scale in (18, 19)
+            ],
+        },
         "max_phase_rss_growth_ratio": 1.2,
         "machine_candidates": [
             {"name": "performance-2x", "cpus": 2, "memory_mb": 4096},
@@ -136,7 +164,7 @@ def main() -> None:
         cost = controller.cost_plan(parsed, 10.0, 1.0, 25)
         assert cost["projected_max_usd"] < 10.0
         cumulative = controller.cost_plan(parsed, 10.0, 1.0, 25, 0.2)
-        assert cumulative["qualification_observed_usd"] == 0.2
+        assert cumulative["qualification_reserved_usd"] == 0.2
         assert (
             abs(cumulative["projected_max_usd"] - cost["projected_max_usd"] - 0.2)
             < 1e-9
@@ -216,6 +244,24 @@ def main() -> None:
         assert resources["memory_mb"] == 4096
         assert resources["volume_gb"] == 25
         assert resources["construction_io_gate"] == "pass"
+        missing_volume = qualification(digest)
+        missing_volume.pop("volume")
+        options.qualification_evidence.write_text(json.dumps(missing_volume))
+        try:
+            controller.load_qualification(options.qualification_evidence, digest, "dfw")
+        except controller.ControllerError as error:
+            assert "volume binding" in str(error)
+        else:
+            raise AssertionError("qualification volume binding is mandatory")
+        relabeled_volume = qualification(digest)
+        relabeled_volume["volume"]["size_gb"] = 24
+        options.qualification_evidence.write_text(json.dumps(relabeled_volume))
+        try:
+            controller.load_qualification(options.qualification_evidence, digest, "dfw")
+        except controller.ControllerError as error:
+            assert "headroom" in str(error)
+        else:
+            raise AssertionError("qualification cannot be relabeled onto a smaller volume")
         zero_io = qualification(digest)
         zero_io["rungs"][0]["phases"][2]["io"]["blocks"] = 0
         options.qualification_evidence.write_text(json.dumps(zero_io))
