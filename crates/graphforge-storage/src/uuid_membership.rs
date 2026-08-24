@@ -386,20 +386,25 @@ pub(crate) fn prepare_uuid_membership_delta(
         let mut names = manifest_file_names(&manifest);
         names.insert(MANIFEST.to_owned());
         for name in names {
-            let source = source_directory
+            let mut source = source_directory
                 .open_child_file(std::ffi::OsStr::new(&name))
                 .map_err(storage_err)?;
-            let identity = graphforge_filesystem::file_identity(&source).map_err(storage_err)?;
-            source_directory
-                .link_child_into(
-                    std::ffi::OsStr::new(&name),
-                    &source,
-                    identity,
-                    &shadow_directory,
-                    std::ffi::OsStr::new(&name),
-                )
+            let mut destination = shadow_directory
+                .create_child_file(std::ffi::OsStr::new(&name))
                 .map_err(storage_err)?;
+            let mut block = vec![0_u8; BULK_IO_BYTES];
+            loop {
+                let count = source.read(&mut block).map_err(storage_err)?;
+                if count == 0 {
+                    break;
+                }
+                destination
+                    .write_all(&block[..count])
+                    .map_err(storage_err)?;
+            }
+            destination.sync_all().map_err(storage_err)?;
         }
+        shadow_directory.sync().map_err(storage_err)?;
     }
     fs::create_dir_all(shadow_project.join("topology")).map_err(storage_err)?;
     fs::write(
