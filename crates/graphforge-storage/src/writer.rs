@@ -2324,6 +2324,17 @@ impl GraphWriter {
         Ok(())
     }
 
+    /// Return the authenticated auxiliary receipt for the currently prepared
+    /// UUID-index participant. The enclosing rewrite must pass this receipt to
+    /// `commit_topology_aware_with_auxiliary`; a plain commit would discard the
+    /// atomic binding between topology and its membership index.
+    #[must_use]
+    pub fn prepared_uuid_index_auxiliary_receipt(&self) -> Option<crate::AuxiliaryReceipt> {
+        self.prepared_index
+            .as_ref()
+            .map(crate::uuid_membership::PreparedUuidIndexDelta::auxiliary_receipt)
+    }
+
     /// Best-effort write of the delta segment for `generation` — only when the
     /// adjacency capability directory exists (never grow `deltas/` for a project
     /// that has no index). A failed write costs at most one future rebuild and

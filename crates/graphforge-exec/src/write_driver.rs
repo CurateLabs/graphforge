@@ -3507,7 +3507,10 @@ pub(crate) fn commit_statement(ctx: &mut StatementWriteContext, dir: &Path) -> R
         &deleted_nodes,
         &deleted_edges,
     )?;
-    if let Some(generation) = graphforge_storage::commit_topology_aware(staged, dir)? {
+    let auxiliary = ctx.writer.prepared_uuid_index_auxiliary_receipt();
+    if let Some(generation) =
+        graphforge_storage::commit_topology_aware_with_auxiliary(staged, dir, auxiliary)?
+    {
         if pure_append {
             ctx.writer.write_segment_best_effort(generation, &pending);
         } else {
