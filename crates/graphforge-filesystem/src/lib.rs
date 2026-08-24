@@ -6,7 +6,7 @@
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Stable filesystem identity suitable for Windows and Unix filesystems.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,6 +15,265 @@ pub struct FileIdentity {
     pub volume_serial: u64,
     /// Full native file identity (128-bit on Windows; zero-extended inode on Unix).
     pub file_id: [u8; 16],
+}
+
+/// Retained directory capability whose children are opened without following
+/// links or reparse points.
+#[derive(Debug)]
+pub struct StableDirectory {
+    path: PathBuf,
+    file: File,
+    identity: FileIdentity,
+}
+
+impl StableDirectory {
+    /// Open and retain a real directory at `path`.
+    pub fn open(path: &Path) -> io::Result<Self> {
+        let file = stable_open_directory(path)?;
+        let identity = file_identity(&file)?;
+        let directory = Self {
+            path: path.to_path_buf(),
+            file,
+            identity,
+        };
+        directory.revalidate_named()?;
+        Ok(directory)
+    }
+
+    /// Require that the named path still identifies this retained directory.
+    pub fn revalidate_named(&self) -> io::Result<()> {
+        let metadata = std::fs::symlink_metadata(&self.path)?;
+        if !metadata.is_dir() || is_link_or_reparse(&metadata) {
+            return Err(io::Error::other(
+                "stable directory path is linked or special",
+            ));
+        }
+        if path_identity(&self.path)? != self.identity {
+            return Err(io::Error::other("stable directory identity changed"));
+        }
+        Ok(())
+    }
+
+    /// Open one real child directory relative to this capability.
+    pub fn open_child_directory(&self, name: &OsStr) -> io::Result<Self> {
+        validate_child_name(name)?;
+        self.revalidate_named()?;
+        let path = self.path.join(name);
+        let file = stable_open_child_directory(&self.file, &path, name)?;
+        let child = Self {
+            identity: file_identity(&file)?,
+            path,
+            file,
+        };
+        child.revalidate_named()?;
+        self.revalidate_named()?;
+        Ok(child)
+    }
+
+    /// Create one child directory if absent, then retain it.
+    pub fn create_child_directory(&self, name: &OsStr) -> io::Result<Self> {
+        validate_child_name(name)?;
+        self.revalidate_named()?;
+        stable_create_child_directory(&self.file, &self.path.join(name), name)?;
+        self.open_child_directory(name)
+    }
+
+    /// Open one regular child without following links or reparse points.
+    pub fn open_child_file(&self, name: &OsStr) -> io::Result<File> {
+        validate_child_name(name)?;
+        self.revalidate_named()?;
+        let path = self.path.join(name);
+        let file = stable_open_child_file(&self.file, &path, name, false)?;
+        validate_stable_child_file(&file, &path)?;
+        self.revalidate_named()?;
+        Ok(file)
+    }
+
+    /// Create one new regular child without following links or reparse points.
+    pub fn create_child_file(&self, name: &OsStr) -> io::Result<File> {
+        validate_child_name(name)?;
+        self.revalidate_named()?;
+        let path = self.path.join(name);
+        let file = stable_open_child_file(&self.file, &path, name, true)?;
+        validate_stable_child_file(&file, &path)?;
+        self.revalidate_named()?;
+        Ok(file)
+    }
+
+    /// Borrow the retained directory handle.
+    #[must_use]
+    pub fn file(&self) -> &File {
+        &self.file
+    }
+
+    /// Return the retained native identity.
+    #[must_use]
+    pub fn identity(&self) -> FileIdentity {
+        self.identity
+    }
+}
+
+fn validate_child_name(name: &OsStr) -> io::Result<()> {
+    let path = Path::new(name);
+    if name.is_empty()
+        || path.is_absolute()
+        || path.components().count() != 1
+        || matches!(name.to_str(), Some("." | ".."))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid child name",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_stable_child_file(file: &File, path: &Path) -> io::Result<()> {
+    let metadata = file.metadata()?;
+    let named = std::fs::symlink_metadata(path)?;
+    if !metadata.is_file()
+        || !named.is_file()
+        || is_link_or_reparse(&named)
+        || file_identity(file)? != path_identity(path)?
+    {
+        return Err(io::Error::other(
+            "stable child is linked, special, or substituted",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn stable_open_directory(path: &Path) -> io::Result<File> {
+    use rustix::fs::{Mode, OFlags};
+    rustix::fs::open(
+        path,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(io::Error::from)
+}
+
+#[cfg(unix)]
+fn stable_open_child_directory(parent: &File, _path: &Path, name: &OsStr) -> io::Result<File> {
+    use rustix::fs::{Mode, OFlags};
+    rustix::fs::openat(
+        parent,
+        name,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(io::Error::from)
+}
+
+#[cfg(unix)]
+fn stable_create_child_directory(parent: &File, _path: &Path, name: &OsStr) -> io::Result<()> {
+    use rustix::fs::Mode;
+    match rustix::fs::mkdirat(parent, name, Mode::from_bits_truncate(0o700)) {
+        Ok(()) | Err(rustix::io::Errno::EXIST) => Ok(()),
+        Err(error) => Err(io::Error::from(error)),
+    }
+}
+
+#[cfg(unix)]
+fn stable_open_child_file(
+    parent: &File,
+    _path: &Path,
+    name: &OsStr,
+    create_new: bool,
+) -> io::Result<File> {
+    use rustix::fs::{Mode, OFlags};
+    let flags = if create_new {
+        OFlags::RDWR | OFlags::CREATE | OFlags::EXCL
+    } else {
+        OFlags::RDONLY
+    } | OFlags::NOFOLLOW
+        | OFlags::CLOEXEC;
+    rustix::fs::openat(parent, name, flags, Mode::from_bits_truncate(0o600))
+        .map(File::from)
+        .map_err(io::Error::from)
+}
+
+#[cfg(windows)]
+fn stable_open_directory(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    const FILE_SHARE_READ: u32 = 0x0000_0001;
+    const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+#[cfg(windows)]
+fn stable_open_child_directory(_parent: &File, path: &Path, _name: &OsStr) -> io::Result<File> {
+    stable_open_directory(path)
+}
+
+#[cfg(windows)]
+fn stable_create_child_directory(_parent: &File, path: &Path, _name: &OsStr) -> io::Result<()> {
+    match create_private_directory(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(windows)]
+fn stable_open_child_file(
+    _parent: &File,
+    path: &Path,
+    _name: &OsStr,
+    create_new: bool,
+) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    const FILE_SHARE_READ: u32 = 0x0000_0001;
+    const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    let mut options = std::fs::OpenOptions::new();
+    options
+        .read(true)
+        .write(create_new)
+        .create_new(create_new)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    options.open(path)
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn stable_open_directory(_path: &Path) -> io::Result<File> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "stable directories unsupported",
+    ))
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn stable_open_child_directory(_parent: &File, _path: &Path, _name: &OsStr) -> io::Result<File> {
+    stable_open_directory(Path::new(""))
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn stable_create_child_directory(_parent: &File, _path: &Path, _name: &OsStr) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "stable directories unsupported",
+    ))
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn stable_open_child_file(
+    _parent: &File,
+    _path: &Path,
+    _name: &OsStr,
+    _create_new: bool,
+) -> io::Result<File> {
+    stable_open_directory(Path::new(""))
 }
 
 /// Native Windows volume facts needed by the durability admission policy.
@@ -1416,5 +1675,40 @@ mod tests {
                 0o700
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stable_directory_fails_closed_after_named_child_substitution() {
+        let root = tempfile::tempdir().unwrap();
+        let stable_root = StableDirectory::open(root.path()).unwrap();
+        let child = stable_root
+            .create_child_directory(OsStr::new("objects"))
+            .unwrap();
+        let file = child.create_child_file(OsStr::new("payload")).unwrap();
+        drop(file);
+        let displaced = root.path().join("displaced");
+        std::fs::rename(root.path().join("objects"), &displaced).unwrap();
+        std::fs::create_dir(root.path().join("objects")).unwrap();
+
+        assert!(child.revalidate_named().is_err());
+        assert!(child.open_child_file(OsStr::new("payload")).is_err());
+        assert_eq!(std::fs::read(displaced.join("payload")).unwrap(), b"");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stable_directory_rejects_symlink_child() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        symlink(outside.path(), root.path().join("objects")).unwrap();
+        let stable_root = StableDirectory::open(root.path()).unwrap();
+        assert!(
+            stable_root
+                .open_child_directory(OsStr::new("objects"))
+                .is_err()
+        );
     }
 }
