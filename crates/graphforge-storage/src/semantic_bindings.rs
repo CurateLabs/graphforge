@@ -1257,8 +1257,10 @@ fn validate_no_unlisted_semantic_routes(
     expected: &BTreeSet<PathBuf>,
 ) -> Result<(), GfError> {
     for subdir in ["topology/edges", "properties", "edge_properties"] {
-        let Ok(entries) = std::fs::read_dir(graph_root.join(subdir)) else {
-            continue;
+        let entries = match std::fs::read_dir(graph_root.join(subdir)) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return Err(corrupt("semantic route inventory cannot be read")),
         };
         for entry in entries {
             let entry = entry.map_err(|_| corrupt("semantic route inventory cannot be read"))?;
@@ -1270,21 +1272,36 @@ fn validate_no_unlisted_semantic_routes(
             let file_type = entry
                 .file_type()
                 .map_err(|_| corrupt("semantic route inventory cannot be inspected"))?;
-            if opaque && file_type.is_file() && !expected.contains(&path) {
-                return Err(corrupt("unlisted opaque semantic route file is present"));
+            if !opaque {
+                continue;
             }
-            if opaque && file_type.is_dir() {
-                for fragment in std::fs::read_dir(&path)
-                    .map_err(|_| corrupt("semantic shard route cannot be read"))?
+            if file_type.is_symlink() || (!file_type.is_file() && !file_type.is_dir()) {
+                return Err(corrupt(
+                    "opaque semantic route has a noncanonical file type",
+                ));
+            }
+            if file_type.is_file() {
+                if path.extension().and_then(|value| value.to_str()) != Some("parquet")
+                    || !expected.contains(&path)
                 {
-                    let fragment =
-                        fragment.map_err(|_| corrupt("semantic shard fragment cannot be read"))?;
-                    let fragment_path = fragment.path();
-                    if fragment_path.extension().and_then(|value| value.to_str()) == Some("parquet")
-                        && !expected.contains(&fragment_path)
-                    {
-                        return Err(corrupt("unlisted opaque semantic route shard is present"));
-                    }
+                    return Err(corrupt("unlisted opaque semantic route file is present"));
+                }
+                continue;
+            }
+            for fragment in std::fs::read_dir(&path)
+                .map_err(|_| corrupt("semantic shard route cannot be read"))?
+            {
+                let fragment =
+                    fragment.map_err(|_| corrupt("semantic shard fragment cannot be read"))?;
+                let fragment_path = fragment.path();
+                let fragment_type = fragment
+                    .file_type()
+                    .map_err(|_| corrupt("semantic shard fragment cannot be inspected"))?;
+                if !fragment_type.is_file()
+                    || fragment_path.extension().and_then(|value| value.to_str()) != Some("parquet")
+                    || !expected.contains(&fragment_path)
+                {
+                    return Err(corrupt("unlisted opaque semantic route shard is present"));
                 }
             }
         }
@@ -1698,19 +1715,8 @@ pub fn materialize_semantic_migration(
             checkpoint()?;
             let source = source_graph_root.join(&entry.relative_path);
             let relative = PathBuf::from(&entry.relative_path);
-            let old_route = source
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .filter(|stem| stem.starts_with("s-"));
-            let target_relative = if let Some(old_route) = old_route {
-                if let Some(new_route) = route_moves.get(old_route) {
-                    relative.with_file_name(format!("{new_route}.parquet"))
-                } else {
-                    relative.clone()
-                }
-            } else {
-                relative.clone()
-            };
+            let old_route = semantic_route_from_relative(&relative);
+            let target_relative = migrated_semantic_relative(&relative, &route_moves);
             let target = staging_graph_root.join(target_relative);
             std::fs::create_dir_all(
                 target
@@ -1829,30 +1835,30 @@ pub fn materialize_semantic_migration(
                 .iter()
                 .find(|binding| binding.symbol == property.symbol)
                 .ok_or_else(|| corrupt("migration target property binding is absent"))?;
-            let path = binding
-                .physical_path(&staging_graph_root)
-                .ok_or_else(|| corrupt("migration target property route is absent"))?;
-            if !path.exists() {
-                continue;
-            }
-            let builder = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
-                File::open(path)
-                    .map_err(|_| corrupt("migration target property table cannot be opened"))?,
-            )
-            .map_err(|_| corrupt("migration target property schema is invalid"))?;
             let property_name = property
                 .symbol
                 .local_id
                 .split_once(':')
                 .map(|(_, name)| name)
                 .ok_or_else(|| corrupt("migration target property identity is malformed"))?;
-            if let Ok(field) = builder.schema().field_with_name(property_name)
-                && (format!("{:?}", field.data_type()) != property.arrow_data_type
-                    || field.is_nullable() != property.nullable)
-            {
-                return Err(corrupt(
-                    "migration target property column type or nullability disagrees",
-                ));
+            for path in semantic_route_fragments(binding, &staging_graph_root)? {
+                let builder = admitted_semantic_parquet(&path)?;
+                match builder.schema().field_with_name(property_name) {
+                    Ok(field)
+                        if format!("{:?}", field.data_type()) != property.arrow_data_type
+                            || field.is_nullable() != property.nullable =>
+                    {
+                        return Err(corrupt(
+                            "migration target property column type or nullability disagrees",
+                        ));
+                    }
+                    Err(_) if !property.nullable => {
+                        return Err(corrupt(
+                            "migration target required property column is missing",
+                        ));
+                    }
+                    Ok(_) | Err(_) => {}
+                }
             }
         }
         let (candidate, _) = crate::capture_graph_files(&staging_graph_root)?;
@@ -1887,6 +1893,56 @@ pub fn materialize_semantic_migration(
         }
     })?;
     Ok(evidence)
+}
+
+fn semantic_route_from_relative(relative: &Path) -> Option<&str> {
+    let parts = relative
+        .components()
+        .map(std::path::Component::as_os_str)
+        .collect::<Vec<_>>();
+    let route_index = match parts.as_slice() {
+        [topology, edges, ..]
+            if *topology == std::ffi::OsStr::new("topology")
+                && *edges == std::ffi::OsStr::new("edges") =>
+        {
+            2
+        }
+        [properties, ..] if *properties == std::ffi::OsStr::new("properties") => 1,
+        [properties, ..] if *properties == std::ffi::OsStr::new("edge_properties") => 1,
+        _ => return None,
+    };
+    let route = parts.get(route_index)?.to_str()?;
+    route
+        .strip_suffix(".parquet")
+        .or(Some(route))
+        .filter(|route| route.starts_with("s-"))
+}
+
+fn migrated_semantic_relative(relative: &Path, route_moves: &BTreeMap<String, String>) -> PathBuf {
+    let Some(old_route) = semantic_route_from_relative(relative) else {
+        return relative.to_path_buf();
+    };
+    let Some(new_route) = route_moves.get(old_route) else {
+        return relative.to_path_buf();
+    };
+    let mut parts = relative
+        .components()
+        .map(|part| part.as_os_str().to_owned())
+        .collect::<Vec<_>>();
+    let route_index = if parts.first().is_some_and(|part| part == "topology") {
+        2
+    } else {
+        1
+    };
+    let flat = parts[route_index]
+        .to_str()
+        .is_some_and(|part| part.ends_with(".parquet"));
+    parts[route_index] = if flat {
+        format!("{new_route}.parquet").into()
+    } else {
+        new_route.into()
+    };
+    parts.into_iter().collect()
 }
 
 fn scan_retained_migration_rows(graph_root: &Path) -> Result<u64, GfError> {
@@ -3136,5 +3192,44 @@ mod tests {
                 .validate_physical_routes_with_inventory(dir.path(), Some(&omitted))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn semantic_route_moves_preserve_every_shard_basename() {
+        let moves = BTreeMap::from([("s-old".to_owned(), "s-new".to_owned())]);
+        for (source, target) in [
+            (
+                "properties/s-old/00000000000000000001.parquet",
+                "properties/s-new/00000000000000000001.parquet",
+            ),
+            (
+                "edge_properties/s-old/00000000000000000002.parquet",
+                "edge_properties/s-new/00000000000000000002.parquet",
+            ),
+            (
+                "topology/edges/s-old/00000000000000000003.parquet",
+                "topology/edges/s-new/00000000000000000003.parquet",
+            ),
+            ("properties/s-old.parquet", "properties/s-new.parquet"),
+        ] {
+            assert_eq!(
+                migrated_semantic_relative(Path::new(source), &moves),
+                PathBuf::from(target)
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn semantic_route_inventory_rejects_opaque_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().join("properties");
+        std::fs::create_dir_all(&root).unwrap();
+        let target = dir.path().join("target");
+        std::fs::write(&target, b"not parquet").unwrap();
+        symlink(&target, root.join("s-deadbeef.parquet")).unwrap();
+        assert!(validate_no_unlisted_semantic_routes(dir.path(), &BTreeSet::new()).is_err());
     }
 }

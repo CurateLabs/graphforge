@@ -4,12 +4,12 @@ use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use arrow::array::{Array, FixedSizeBinaryArray, ListArray, UInt32Array};
+use arrow::array::{Array, FixedSizeBinaryArray, ListArray, UInt32Array, UInt64Array};
 use graphforge_storage::{
     PublishedSearchArtifact, SearchArtifactError, SearchArtifactKey, SearchCoordinationLimits,
     SearchPublicationOutcome, SearchSourceSnapshot, VECTOR_BACKEND_VERSION,
     VECTOR_CONTRACT_VERSION, VectorSearchHit, VectorStoreLimits, current_search_artifact,
-    read_nodes, search_published_vectors, upsert_published_vector, validate_vector,
+    search_published_vectors, upsert_published_vector, validate_vector,
 };
 
 /// Bounds for graph membership, vector work, and atomic publication.
@@ -159,6 +159,7 @@ where
 /// # Errors
 /// Returns structured source, cancellation, or resource errors for malformed
 /// topology or an exhausted membership projection.
+#[allow(clippy::too_many_lines)] // one streaming callback preserves one admitted handle
 pub fn project_label_members<C>(
     project_dir: &Path,
     label_id: u32,
@@ -169,51 +170,110 @@ where
     C: FnMut() -> Result<(), SearchArtifactError>,
 {
     checkpoint()?;
-    let batches = read_nodes(project_dir).map_err(|error| source(error.to_string()))?;
     let mut eligible = BTreeSet::new();
-    let mut seen = BTreeSet::new();
     let mut rows = 0_usize;
-    for batch in batches {
-        checkpoint()?;
-        let uuids = batch
-            .column_by_name("node_uuid")
-            .and_then(|column| column.as_any().downcast_ref::<FixedSizeBinaryArray>())
-            .ok_or_else(|| source("topology node_uuid is not FixedSizeBinary(16)"))?;
-        let labels = batch
-            .column_by_name("type_ids")
-            .and_then(|column| column.as_any().downcast_ref::<ListArray>())
-            .ok_or_else(|| source("topology type_ids is not List<UInt32>"))?;
-        for row in 0..batch.num_rows() {
-            checkpoint()?;
-            rows = rows.saturating_add(1);
-            if rows > limits.topology_rows {
-                return Err(exhausted("vector_topology_rows", limits.topology_rows));
-            }
-            if uuids.is_null(row) || labels.is_null(row) {
-                return Err(source("topology contains null node identity data"));
-            }
-            let node_uuid: [u8; 16] = uuids
-                .value(row)
-                .try_into()
-                .map_err(|_| source("topology node_uuid is not 16 bytes"))?;
-            if !seen.insert(node_uuid) {
-                return Err(source("topology contains duplicate node UUIDs"));
-            }
-            let values = labels.value(row);
-            let values = values
-                .as_any()
-                .downcast_ref::<UInt32Array>()
-                .ok_or_else(|| source("topology type_ids child is not UInt32"))?;
-            if values.null_count() != 0 {
-                return Err(source("topology type_ids contains null labels"));
-            }
-            if values.values().contains(&label_id) {
-                eligible.insert(node_uuid);
-                if eligible.len() > limits.vector.eligible_nodes {
-                    return Err(exhausted("eligible_nodes", limits.vector.eligible_nodes));
+    let mut last_surrogate = None;
+    let mut index = graphforge_storage::uuid_membership_index_present(project_dir)
+        .then(|| graphforge_storage::UuidMembershipIndex::open(project_dir))
+        .transpose()
+        .map_err(|error| source(error.to_string()))?;
+    let mut legacy_seen = index.is_none().then(BTreeSet::new);
+    let mut failure = None;
+    graphforge_storage::visit_node_fragments_admitted(
+        project_dir,
+        8192,
+        limits.source_bytes,
+        |batch| {
+            let result: Result<(), SearchArtifactError> = (|| {
+                checkpoint()?;
+                let uuids = batch
+                    .column_by_name("node_uuid")
+                    .and_then(|column| column.as_any().downcast_ref::<FixedSizeBinaryArray>())
+                    .ok_or_else(|| source("topology node_uuid is not FixedSizeBinary(16)"))?;
+                let labels = batch
+                    .column_by_name("type_ids")
+                    .and_then(|column| column.as_any().downcast_ref::<ListArray>())
+                    .ok_or_else(|| source("topology type_ids is not List<UInt32>"))?;
+                let surrogates = batch
+                    .column_by_name("node_id")
+                    .and_then(|column| column.as_any().downcast_ref::<UInt64Array>())
+                    .ok_or_else(|| source("topology node_id is not UInt64"))?;
+                let mut batch_uuids = Vec::with_capacity(batch.num_rows());
+                for row in 0..batch.num_rows() {
+                    let bytes: [u8; 16] = uuids
+                        .value(row)
+                        .try_into()
+                        .map_err(|_| source("topology node_uuid is not 16 bytes"))?;
+                    batch_uuids.push(uuid::Uuid::from_bytes(bytes));
                 }
+                let indexed = index
+                    .as_mut()
+                    .map(|index| index.lookup_node_surrogates(&batch_uuids))
+                    .transpose()
+                    .map_err(|error| source(error.to_string()))?
+                    .map(|(values, _)| values);
+                for row in 0..batch.num_rows() {
+                    checkpoint()?;
+                    rows = rows.saturating_add(1);
+                    if rows > limits.topology_rows {
+                        return Err(exhausted("vector_topology_rows", limits.topology_rows));
+                    }
+                    if uuids.is_null(row) || labels.is_null(row) {
+                        return Err(source("topology contains null node identity data"));
+                    }
+                    let node_uuid: [u8; 16] = uuids
+                        .value(row)
+                        .try_into()
+                        .map_err(|_| source("topology node_uuid is not 16 bytes"))?;
+                    let surrogate = surrogates.value(row);
+                    if last_surrogate.is_some_and(|prior| surrogate <= prior)
+                        || indexed
+                            .as_ref()
+                            .is_some_and(|values| values[row] != Some(surrogate))
+                        || legacy_seen
+                            .as_mut()
+                            .is_some_and(|seen| !seen.insert(node_uuid))
+                    {
+                        return Err(source(
+                            "topology identity disagrees with authenticated UUID index",
+                        ));
+                    }
+                    last_surrogate = Some(surrogate);
+                    let values = labels.value(row);
+                    let values = values
+                        .as_any()
+                        .downcast_ref::<UInt32Array>()
+                        .ok_or_else(|| source("topology type_ids child is not UInt32"))?;
+                    if values.null_count() != 0 {
+                        return Err(source("topology type_ids contains null labels"));
+                    }
+                    if values.values().contains(&label_id) {
+                        eligible.insert(node_uuid);
+                        if eligible.len() > limits.vector.eligible_nodes {
+                            return Err(exhausted("eligible_nodes", limits.vector.eligible_nodes));
+                        }
+                    }
+                }
+                Ok(())
+            })();
+            if let Err(error) = result {
+                failure = Some(error);
+                return Ok(false);
             }
-        }
+            Ok(true)
+        },
+    )
+    .map_err(|error| source(error.to_string()))?;
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    if index
+        .as_ref()
+        .is_some_and(|index| rows as u64 != index.count(graphforge_storage::UuidIndexKind::Node))
+    {
+        return Err(source(
+            "topology row count disagrees with authenticated UUID index",
+        ));
     }
     Ok(eligible)
 }
