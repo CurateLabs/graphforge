@@ -1307,6 +1307,22 @@ impl ValidatedProjectGeneration {
     /// Returns a stable publication error whose diagnostic states whether the
     /// commit point was crossed.
     pub fn publish(mut self) -> Result<ProjectPublicationReceipt, GfError> {
+        self.publish_with_optional_graph_objects(None)
+    }
+
+    /// Publish a compact graph generation while holding its CAS lease through
+    /// the final closure and named-root validation immediately before CURRENT.
+    pub fn publish_with_graph_objects(
+        mut self,
+        lease: &crate::GraphObjectPublicationLease,
+    ) -> Result<ProjectPublicationReceipt, GfError> {
+        self.publish_with_optional_graph_objects(Some(lease))
+    }
+
+    fn publish_with_optional_graph_objects(
+        &mut self,
+        graph_object_lease: Option<&crate::GraphObjectPublicationLease>,
+    ) -> Result<ProjectPublicationReceipt, GfError> {
         self.0.admission.revalidate_identity()?;
         let lifecycle_admission = self.0.admission.readmit_for_publish()?;
         let commit_lock = self.prepare_commit_lock()?;
@@ -1315,7 +1331,7 @@ impl ValidatedProjectGeneration {
         } else {
             self.0.admission.revalidate_identity()?;
         }
-        let result = self.publish_inner().map_err(|error| {
+        let result = self.publish_inner(graph_object_lease).map_err(|error| {
             if matches!(error, GfError::Project { .. }) {
                 error
             } else {
@@ -1363,9 +1379,30 @@ impl ValidatedProjectGeneration {
         Ok(Some(writer_lock))
     }
 
-    fn publish_inner(&self) -> Result<ProjectPublicationReceipt, GfError> {
+    fn publish_inner(
+        &self,
+        graph_object_lease: Option<&crate::GraphObjectPublicationLease>,
+    ) -> Result<ProjectPublicationReceipt, GfError> {
         let staged = &self.0;
+        let compact_graph = has_compact_graph_participant(staged)?;
+        if compact_graph && graph_object_lease.is_none() {
+            return Err(project_error(
+                ProjectErrorCode::PublicationFailed,
+                "compact graph publication requires its graph object lease through CURRENT",
+            ));
+        }
+        if let Some(lease) = graph_object_lease {
+            lease.revalidate_for_root(staged.parent.container_root())?;
+        }
         let manifest_sha256 = make_generation_durable(staged)?;
+        if let Some(lease) = graph_object_lease {
+            verify_optional_graph_tree(
+                &staged.generation_root,
+                &staged.participants,
+                staged.parent.container_root(),
+            )?;
+            lease.revalidate_for_root(staged.parent.container_root())?;
+        }
         replace_current(staged, manifest_sha256)?;
         finish_published_generation(staged, manifest_sha256)?;
         Ok(ProjectPublicationReceipt {
@@ -1374,6 +1411,28 @@ impl ValidatedProjectGeneration {
             generation_manifest_sha256: manifest_sha256,
             idempotent_replay: false,
         })
+    }
+}
+
+fn has_compact_graph_participant(staged: &StagedProjectGeneration) -> Result<bool, GfError> {
+    let Some(files) = staged.participants.iter().find(|participant| {
+        participant.capability_id == crate::GRAPH_CAPABILITY_ID
+            && participant.record_family_id == crate::GRAPH_FILES_FAMILY
+    }) else {
+        return Ok(false);
+    };
+    let path = staged
+        .generation_root
+        .join(PARTICIPANTS_DIR)
+        .join(&files.relative_path);
+    let bytes = std::fs::read(&path).map_err(publication_io)?;
+    if matches!(
+        crate::decode_graph_files_participant(&bytes)?,
+        crate::GraphFilesParticipant::V2(_)
+    ) {
+        Ok(true)
+    } else {
+        Ok(false)
     }
 }
 
@@ -2678,7 +2737,16 @@ mod tests {
         let request = request(vec![
             crate::graph_files_root_participant(&files_root).unwrap(),
         ]);
-        publish(root.path(), request);
+        let ProjectStageOutcome::Staged(staged) =
+            stage_project_generation(root.path(), &request).unwrap()
+        else {
+            panic!("new request unexpectedly replayed");
+        };
+        staged
+            .validate(|_| Ok(()), |_, _| Ok(()))
+            .unwrap()
+            .publish_with_graph_objects(&lease)
+            .unwrap();
         drop(lease);
 
         let reopened = resolve_project_generation(root.path()).unwrap();

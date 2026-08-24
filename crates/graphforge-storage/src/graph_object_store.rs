@@ -27,6 +27,8 @@ const BUFFER_BYTES: usize = 64 * 1024;
 /// Kernel-visible lease protecting CAS objects installed by one publication.
 pub struct GraphObjectPublicationLease {
     root: PathBuf,
+    coordination_directory: File,
+    coordination_directory_path: PathBuf,
     path: PathBuf,
     file: File,
     lifecycle_directory: File,
@@ -38,6 +40,8 @@ pub struct GraphObjectPublicationLease {
 /// Exclusive guard spanning GC root discovery through sweep.
 pub(crate) struct GraphObjectGcGuard {
     root: PathBuf,
+    coordination_directory: File,
+    coordination_directory_path: PathBuf,
     lifecycle_directory: File,
     lifecycle_directory_path: PathBuf,
     lifecycle: File,
@@ -48,6 +52,7 @@ impl Drop for GraphObjectGcGuard {
     fn drop(&mut self) {
         let _ = crate::file_lock::unlock(&self.lifecycle);
         let _ = crate::file_lock::unlock(&self.lifecycle_directory);
+        let _ = crate::file_lock::unlock(&self.coordination_directory);
     }
 }
 
@@ -57,11 +62,40 @@ impl Drop for GraphObjectPublicationLease {
         let _ = fs::remove_file(&self.path);
         let _ = crate::file_lock::unlock(&self.lifecycle);
         let _ = crate::file_lock::unlock(&self.lifecycle_directory);
+        let _ = crate::file_lock::unlock(&self.coordination_directory);
+    }
+}
+
+impl GraphObjectPublicationLease {
+    /// Revalidate the stable CAS root immediately before publishing `CURRENT`.
+    pub fn revalidate_for_publish(&self) -> Result<(), GfError> {
+        validate_publication_identity(self)
+    }
+
+    pub(crate) fn revalidate_for_root(&self, root: &Path) -> Result<(), GfError> {
+        let lease_root = crate::filesystem_admission::open_directory_handle(&self.root)
+            .map_err(|error| storage("open leased graph object root", &self.root, error))?;
+        let requested_root = crate::filesystem_admission::open_directory_handle(root)
+            .map_err(|error| storage("open requested graph object root", root, error))?;
+        if graphforge_filesystem::file_identity(&lease_root)
+            .map_err(|error| storage("inspect leased graph object root", &self.root, error))?
+            != graphforge_filesystem::file_identity(&requested_root)
+                .map_err(|error| storage("inspect requested graph object root", root, error))?
+        {
+            return Err(validation(
+                "graph object lease belongs to a different project",
+            ));
+        }
+        self.revalidate_for_publish()
     }
 }
 
 /// Begin a CAS installation attempt and hold its lease through CURRENT.
 pub fn begin_graph_object_publication(root: &Path) -> Result<GraphObjectPublicationLease, GfError> {
+    let (coordination_directory, coordination_directory_path) = open_coordination_lock(root)?;
+    crate::file_lock::lock_shared(&coordination_directory)
+        .map_err(|error| storage("lock graph object coordination file", root, error))?;
+    validate_lock_identity(&coordination_directory, &coordination_directory_path)?;
     let object_root = root.join(GRAPH_OBJECTS_DIR);
     fs::create_dir_all(&object_root)
         .map_err(|error| storage("create graph object directory", &object_root, error))?;
@@ -94,6 +128,8 @@ pub fn begin_graph_object_publication(root: &Path) -> Result<GraphObjectPublicat
     sync_directory(&active)?;
     Ok(GraphObjectPublicationLease {
         root: root.to_path_buf(),
+        coordination_directory,
+        coordination_directory_path,
         path,
         file,
         lifecycle_directory,
@@ -224,6 +260,10 @@ pub fn gc_graph_objects(
 
 #[cfg(test)]
 pub(crate) fn begin_graph_object_gc(root: &Path) -> Result<GraphObjectGcGuard, GfError> {
+    let (coordination_directory, coordination_directory_path) = open_coordination_lock(root)?;
+    crate::file_lock::lock_exclusive(&coordination_directory)
+        .map_err(|error| storage("lock graph object GC coordination file", root, error))?;
+    validate_lock_identity(&coordination_directory, &coordination_directory_path)?;
     let (root, lifecycle_directory, lifecycle, lifecycle_path) = open_graph_object_lifecycle(root)?;
     crate::file_lock::lock_exclusive(&lifecycle_directory)
         .map_err(|error| storage("lock graph object GC directory", &root, error))?;
@@ -234,6 +274,8 @@ pub(crate) fn begin_graph_object_gc(root: &Path) -> Result<GraphObjectGcGuard, G
     let lifecycle_directory_path = root.join(GRAPH_OBJECTS_DIR);
     Ok(GraphObjectGcGuard {
         root,
+        coordination_directory,
+        coordination_directory_path,
         lifecycle_directory,
         lifecycle_directory_path,
         lifecycle,
@@ -244,6 +286,13 @@ pub(crate) fn begin_graph_object_gc(root: &Path) -> Result<GraphObjectGcGuard, G
 pub(crate) fn try_begin_graph_object_gc(
     root: &Path,
 ) -> Result<Option<GraphObjectGcGuard>, GfError> {
+    let (coordination_directory, coordination_directory_path) = open_coordination_lock(root)?;
+    if !crate::file_lock::try_lock_exclusive(&coordination_directory)
+        .map_err(|error| storage("try graph object GC coordination file", root, error))?
+    {
+        return Ok(None);
+    }
+    validate_lock_identity(&coordination_directory, &coordination_directory_path)?;
     let (root, lifecycle_directory, lifecycle, lifecycle_path) = open_graph_object_lifecycle(root)?;
     if !crate::file_lock::try_lock_exclusive(&lifecycle_directory)
         .map_err(|error| storage("try graph object GC directory", &root, error))?
@@ -261,6 +310,8 @@ pub(crate) fn try_begin_graph_object_gc(
     let lifecycle_directory_path = root.join(GRAPH_OBJECTS_DIR);
     Ok(Some(GraphObjectGcGuard {
         root,
+        coordination_directory,
+        coordination_directory_path,
         lifecycle_directory,
         lifecycle_directory_path,
         lifecycle,
@@ -274,6 +325,65 @@ fn open_graph_object_lifecycle(root: &Path) -> Result<(PathBuf, File, File, Path
         .map_err(|error| storage("create graph object directory", &object_root, error))?;
     let (directory, lifecycle, lifecycle_path) = open_lifecycle_lock(&object_root)?;
     Ok((root.to_path_buf(), directory, lifecycle, lifecycle_path))
+}
+
+fn coordination_lock_path(root: &Path) -> Result<PathBuf, GfError> {
+    let parent = root
+        .parent()
+        .ok_or_else(|| validation("graph object root has no coordination parent"))?;
+    let name = root
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .ok_or_else(|| validation("graph object root name is not UTF-8"))?;
+    Ok(parent.join(format!(".graphforge-cas-{name}.lock")))
+}
+
+#[cfg(unix)]
+fn open_coordination_lock(root: &Path) -> Result<(File, PathBuf), GfError> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let path = coordination_lock_path(root)?;
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&path)
+        .map_err(|error| storage("open graph object coordination lock", &path, error))?;
+    validate_lock_identity(&file, &path)?;
+    file.sync_all()
+        .map_err(|error| storage("sync graph object coordination lock", &path, error))?;
+    Ok((file, path))
+}
+
+#[cfg(windows)]
+fn open_coordination_lock(root: &Path) -> Result<(File, PathBuf), GfError> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    const FILE_SHARE_READ: u32 = 0x0000_0001;
+    const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const FILE_FLAG_WRITE_THROUGH: u32 = 0x8000_0000;
+    let path = coordination_lock_path(root)?;
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH)
+        .open(&path)
+        .map_err(|error| storage("open graph object coordination lock", &path, error))?;
+    validate_lock_identity(&file, &path)?;
+    file.sync_all()
+        .map_err(|error| storage("sync graph object coordination lock", &path, error))?;
+    Ok((file, path))
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn open_coordination_lock(_root: &Path) -> Result<(File, PathBuf), GfError> {
+    Err(validation(
+        "graph object coordination locks are unsupported on this platform",
+    ))
 }
 
 #[cfg(unix)]
@@ -319,16 +429,40 @@ fn open_lifecycle_lock(object_root: &Path) -> Result<(File, File, PathBuf), GfEr
     Ok((directory, file, object_root.join(LIFECYCLE_LOCK)))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 fn open_lifecycle_lock(object_root: &Path) -> Result<(File, File, PathBuf), GfError> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+
+    const FILE_SHARE_READ: u32 = 0x0000_0001;
+    const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const FILE_FLAG_WRITE_THROUGH: u32 = 0x8000_0000;
     let path = object_root.join(LIFECYCLE_LOCK);
-    let file = crate::project_publication::open_regular_lock(&path)?;
+    let directory = crate::filesystem_admission::open_directory_handle(object_root)
+        .map_err(|error| storage("open graph object lock directory", object_root, error))?;
+    validate_directory_identity(&directory, object_root)?;
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH)
+        .open(&path)
+        .map_err(|error| storage("open graph object lifecycle lock", &path, error))?;
+    validate_lock_identity(&file, &path)?;
     file.sync_all()
         .map_err(|error| storage("sync graph object lifecycle lock", &path, error))?;
-    sync_directory(object_root)?;
-    let directory = File::open(object_root)
-        .map_err(|error| storage("open graph object lock directory", object_root, error))?;
+    directory
+        .sync_all()
+        .map_err(|error| storage("sync graph object lock directory", object_root, error))?;
     Ok((directory, file, path))
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn open_lifecycle_lock(_object_root: &Path) -> Result<(File, File, PathBuf), GfError> {
+    Err(validation(
+        "graph object lifecycle locks are unsupported on this platform",
+    ))
 }
 
 fn validate_lock_identity(file: &File, path: &Path) -> Result<(), GfError> {
@@ -349,6 +483,26 @@ fn validate_lock_identity(file: &File, path: &Path) -> Result<(), GfError> {
             || descriptor.ino() != named.ino()
             || descriptor.nlink() != 1
             || named.nlink() != 1
+        {
+            return Err(validation("graph object lifecycle lock identity changed"));
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+        let descriptor_identity = graphforge_filesystem::file_identity(file)
+            .map_err(|error| storage("inspect lifecycle lock identity", path, error))?;
+        let named_identity = graphforge_filesystem::path_identity(path)
+            .map_err(|error| storage("inspect lifecycle lock identity", path, error))?;
+        if named.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            || descriptor_identity != named_identity
+            || graphforge_filesystem::file_link_count(file)
+                .map_err(|error| storage("inspect lifecycle lock links", path, error))?
+                != 1
+            || graphforge_filesystem::path_link_count(path)
+                .map_err(|error| storage("inspect lifecycle lock links", path, error))?
+                != 1
         {
             return Err(validation("graph object lifecycle lock identity changed"));
         }
@@ -376,7 +530,31 @@ fn validate_directory_identity(file: &File, path: &Path) -> Result<(), GfError> 
             ));
         }
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+        if named.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            || graphforge_filesystem::file_identity(file)
+                .map_err(|error| storage("inspect lifecycle directory identity", path, error))?
+                != graphforge_filesystem::path_identity(path)
+                    .map_err(|error| storage("inspect lifecycle directory identity", path, error))?
+        {
+            return Err(validation(
+                "graph object lifecycle directory identity changed",
+            ));
+        }
+    }
     Ok(())
+}
+
+fn validate_publication_identity(lease: &GraphObjectPublicationLease) -> Result<(), GfError> {
+    validate_lock_identity(
+        &lease.coordination_directory,
+        &lease.coordination_directory_path,
+    )?;
+    validate_directory_identity(&lease.lifecycle_directory, &lease.lifecycle_directory_path)?;
+    validate_lock_identity(&lease.lifecycle, &lease.lifecycle_path)
 }
 
 pub(crate) fn gc_graph_objects_guarded(
@@ -384,6 +562,10 @@ pub(crate) fn gc_graph_objects_guarded(
     roots: &[GraphFilesRootV2],
     limits: crate::GraphManifestLimits,
 ) -> Result<GraphObjectGcEvidence, GfError> {
+    validate_lock_identity(
+        &guard.coordination_directory,
+        &guard.coordination_directory_path,
+    )?;
     validate_directory_identity(&guard.lifecycle_directory, &guard.lifecycle_directory_path)?;
     validate_lock_identity(&guard.lifecycle, &guard.lifecycle_path)?;
     let root = &guard.root;
@@ -468,8 +650,7 @@ pub fn append_graph_files_v2(
     sealed_paths: &[PathBuf],
     tombstones: &[String],
 ) -> Result<(GraphFilesRootV2, GraphFilesAppendEvidence), GfError> {
-    validate_directory_identity(&lease.lifecycle_directory, &lease.lifecycle_directory_path)?;
-    validate_lock_identity(&lease.lifecycle, &lease.lifecycle_path)?;
+    validate_publication_identity(lease)?;
     let root = &lease.root;
     let mut additions = Vec::with_capacity(sealed_paths.len());
     let mut evidence = GraphFilesAppendEvidence::default();
@@ -571,8 +752,7 @@ pub fn migrate_graph_files_v1_to_v2(
     graph_root: &Path,
     inventory: &GraphFilesInventory,
 ) -> Result<(GraphFilesRootV2, GraphFilesMigrationEvidence), GfError> {
-    validate_directory_identity(&lease.lifecycle_directory, &lease.lifecycle_directory_path)?;
-    validate_lock_identity(&lease.lifecycle, &lease.lifecycle_path)?;
+    validate_publication_identity(lease)?;
     let root = &lease.root;
     let mut evidence = GraphFilesMigrationEvidence::default();
     for entry in &inventory.files {
@@ -878,6 +1058,7 @@ pub fn materialize_graph_objects(
     inventory: &GraphFilesInventory,
     target: &Path,
 ) -> Result<GraphFilesOpenEvidence, GfError> {
+    let lease = begin_graph_object_publication(root)?;
     let target_directory = open_empty_materialization_target(target)?;
     let mut evidence = GraphFilesOpenEvidence {
         strategy: GraphFilesOpenStrategy::PrivateMaterialize,
@@ -897,6 +1078,7 @@ pub fn materialize_graph_objects(
         evidence.files_reused = evidence.files_reused.saturating_add(1);
         evidence.bytes_reused = evidence.bytes_reused.saturating_add(entry.byte_length);
     }
+    lease.revalidate_for_publish()?;
     Ok(evidence)
 }
 
@@ -1080,15 +1262,35 @@ fn link_materialized_object(
     Err(validation("graph object logical path is empty"))
 }
 
-#[cfg(not(unix))]
-fn open_empty_materialization_target(target: &Path) -> Result<PathBuf, GfError> {
-    if let Ok(metadata) = fs::symlink_metadata(target)
-        && (metadata.file_type().is_symlink() || !metadata.is_dir())
-    {
-        return Err(validation("graph object target is not a real directory"));
+#[cfg(windows)]
+struct WindowsMaterializationTarget {
+    path: PathBuf,
+    _guards: Vec<File>,
+}
+
+#[cfg(windows)]
+fn open_empty_materialization_target(
+    target: &Path,
+) -> Result<WindowsMaterializationTarget, GfError> {
+    let parent = target
+        .parent()
+        .ok_or_else(|| validation("graph object target has no parent"))?;
+    let mut guards = windows_directory_guards(parent)?;
+    match fs::create_dir(target) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => {
+            return Err(storage(
+                "create graph object materialization target",
+                target,
+                error,
+            ));
+        }
     }
-    fs::create_dir_all(target)
-        .map_err(|error| storage("create graph object materialization target", target, error))?;
+    let target_handle = crate::filesystem_admission::open_directory_handle(target)
+        .map_err(|error| storage("open graph object materialization target", target, error))?;
+    validate_directory_identity(&target_handle, target)?;
+    guards.push(target_handle);
     if target
         .read_dir()
         .map_err(|error| storage("read graph object target", target, error))?
@@ -1099,42 +1301,169 @@ fn open_empty_materialization_target(target: &Path) -> Result<PathBuf, GfError> 
             "graph object materialization target is not empty",
         ));
     }
-    Ok(target.to_path_buf())
+    Ok(WindowsMaterializationTarget {
+        path: target.to_path_buf(),
+        _guards: guards,
+    })
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn windows_directory_guards(path: &Path) -> Result<Vec<File>, GfError> {
+    use std::os::windows::fs::MetadataExt as _;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    let mut paths = path.ancestors().collect::<Vec<_>>();
+    paths.reverse();
+    let mut guards = Vec::with_capacity(paths.len());
+    for component in paths {
+        let metadata = fs::symlink_metadata(component)
+            .map_err(|error| storage("inspect materialization directory", component, error))?;
+        if !metadata.is_dir() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(validation("materialization path contains a reparse point"));
+        }
+        let guard = crate::filesystem_admission::open_directory_handle(component)
+            .map_err(|error| storage("retain materialization directory", component, error))?;
+        validate_directory_identity(&guard, component)?;
+        guards.push(guard);
+    }
+    Ok(guards)
+}
+
+#[cfg(windows)]
+fn windows_create_guarded_directories(
+    root: &Path,
+    relative_parent: &Path,
+) -> Result<Vec<File>, GfError> {
+    let mut path = root.to_path_buf();
+    let mut guards = Vec::new();
+    for component in relative_parent.components() {
+        let Component::Normal(name) = component else {
+            return Err(validation("invalid materialization directory component"));
+        };
+        path.push(name);
+        match fs::create_dir(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(storage("create materialization directory", &path, error)),
+        }
+        let guard = crate::filesystem_admission::open_directory_handle(&path)
+            .map_err(|error| storage("retain materialization directory", &path, error))?;
+        validate_directory_identity(&guard, &path)?;
+        guards.push(guard);
+    }
+    Ok(guards)
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn open_empty_materialization_target(target: &Path) -> Result<PathBuf, GfError> {
+    let _ = target;
+    Err(validation(
+        "graph object materialization is unsupported on this platform",
+    ))
+}
+
+#[cfg(windows)]
 fn link_materialized_object(
-    target: &PathBuf,
+    target: &WindowsMaterializationTarget,
     source: &Path,
     relative: &str,
     expected_digest: &str,
     expected_length: u64,
 ) -> Result<(), GfError> {
-    let destination = target.join(relative);
-    if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| storage("create logical graph object directory", parent, error))?;
+    use std::os::windows::fs::OpenOptionsExt as _;
+    const FILE_SHARE_READ: u32 = 0x0000_0001;
+    const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    let destination = target.path.join(relative);
+    let relative_parent = Path::new(relative)
+        .parent()
+        .ok_or_else(|| validation("materialized object has no parent"))?;
+    let _guards = windows_create_guarded_directories(&target.path, relative_parent)?;
+    let source_file = OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(source)
+        .map_err(|error| {
+            storage(
+                "open graph object source without following reparse points",
+                source,
+                error,
+            )
+        })?;
+    let source_identity = graphforge_filesystem::file_identity(&source_file)
+        .map_err(|error| storage("inspect graph object source identity", source, error))?;
+    if source_identity
+        != graphforge_filesystem::path_identity(source)
+            .map_err(|error| storage("inspect graph object source identity", source, error))?
+    {
+        return Err(validation("graph object source identity changed"));
     }
     fs::hard_link(source, &destination)
         .map_err(|error| storage("link logical graph object", &destination, error))?;
-    let verified = fs::symlink_metadata(&destination)
-        .map_err(|error| storage("inspect materialized object", &destination, error))
-        .and_then(|metadata| {
-            if !metadata.is_file()
-                || metadata.file_type().is_symlink()
-                || metadata.len() != expected_length
-            {
-                return Err(validation("materialized graph object identity is invalid"));
+    let verified = (|| {
+        let mut linked = OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(&destination)
+            .map_err(|error| storage("open materialized object", &destination, error))?;
+        let metadata = linked
+            .metadata()
+            .map_err(|error| storage("inspect materialized object", &destination, error))?;
+        if !metadata.is_file()
+            || metadata.file_type().is_symlink()
+            || metadata.len() != expected_length
+        {
+            return Err(validation("materialized graph object identity is invalid"));
+        }
+        let linked_identity = graphforge_filesystem::file_identity(&linked).map_err(|error| {
+            storage("inspect materialized object identity", &destination, error)
+        })?;
+        if linked_identity != source_identity
+            || linked_identity
+                != graphforge_filesystem::path_identity(&destination).map_err(|error| {
+                    storage("inspect materialized object identity", &destination, error)
+                })?
+            || source_identity
+                != graphforge_filesystem::path_identity(source).map_err(|error| {
+                    storage("revalidate graph object source identity", source, error)
+                })?
+        {
+            return Err(validation("materialized graph object identity changed"));
+        }
+        let mut hasher = Sha256::new();
+        let mut buffer = vec![0_u8; BUFFER_BYTES];
+        loop {
+            let read = linked
+                .read(&mut buffer)
+                .map_err(|error| storage("verify materialized object", &destination, error))?;
+            if read == 0 {
+                break;
             }
-            (hex_digest(hash_regular_file(&destination)?) == expected_digest)
-                .then_some(())
-                .ok_or_else(|| validation("materialized graph object digest mismatch"))
-        });
+            hasher.update(&buffer[..read]);
+        }
+        (hex_digest(hasher.finalize().into()) == expected_digest)
+            .then_some(())
+            .ok_or_else(|| validation("materialized graph object digest mismatch"))
+    })();
     if let Err(error) = verified {
         let _ = fs::remove_file(&destination);
         return Err(error);
     }
     Ok(())
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn link_materialized_object(
+    _target: &PathBuf,
+    _source: &Path,
+    _relative: &str,
+    _expected_digest: &str,
+    _expected_length: u64,
+) -> Result<(), GfError> {
+    Err(validation(
+        "graph object materialization is unsupported on this platform",
+    ))
 }
 
 /// Read an object whose digest is known before its declared logical length.
@@ -1251,8 +1580,16 @@ fn create_new(path: &Path) -> Result<File, GfError> {
         .map_err(|error| storage("create temporary graph object", path, error))
 }
 
+#[cfg(not(windows))]
 fn sync_directory(path: &Path) -> Result<(), GfError> {
     File::open(path)
+        .and_then(|file| file.sync_all())
+        .map_err(|error| storage("fsync graph object directory", path, error))
+}
+
+#[cfg(windows)]
+fn sync_directory(path: &Path) -> Result<(), GfError> {
+    crate::filesystem_admission::open_directory_handle(path)
         .and_then(|file| file.sync_all())
         .map_err(|error| storage("fsync graph object directory", path, error))
 }
@@ -1362,6 +1699,38 @@ mod tests {
             )
             .is_err()
         );
+        assert!(matches!(
+            try_begin_graph_object_gc(other_root.path()),
+            Ok(None)
+        ));
+        assert!(lease.revalidate_for_publish().is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_lifecycle_handles_deny_coordination_path_replacement() {
+        let root = tempfile::tempdir().unwrap();
+        let lease = begin_graph_object_publication(root.path()).unwrap();
+        let replacement = lease
+            .coordination_directory_path
+            .with_extension("replacement");
+        assert!(fs::rename(&lease.coordination_directory_path, replacement).is_err());
+        lease.revalidate_for_publish().unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_materialization_rejects_regular_cas_substitution() {
+        let objects = tempfile::tempdir().unwrap();
+        let (digest, _) = install_graph_object_bytes(objects.path(), b"payload").unwrap();
+        let source = graph_object_path(objects.path(), &digest).unwrap();
+        fs::remove_file(&source).unwrap();
+        fs::write(&source, b"hostile").unwrap();
+        let owner = tempfile::tempdir().unwrap();
+        let target_path = owner.path().join("materialized");
+        let target = open_empty_materialization_target(&target_path).unwrap();
+        assert!(link_materialized_object(&target, &source, "payload.bin", &digest, 7).is_err());
+        assert!(!target_path.join("payload.bin").exists());
     }
 
     #[test]
