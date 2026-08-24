@@ -137,15 +137,11 @@ data. New publications store graph workspace files under the generation-owned
 `graph/` tree with a `graph`/`files` inventory participant; legacy
 `graph`/`snapshot` Arrow envelopes remain readable. Root YAML/JSON and
 environment settings are inputs only and cannot override the selected
-generation. Version 2 of `graph`/`files` replaces the expanded per-generation
-inventory with a compact authenticated radix root. Immutable payload and
-manifest objects are addressed by SHA-256 in the project object store, so an
-update writes only changed payloads and the bounded root path while unchanged
-objects are reused byte-for-byte. Open resolves the bounded manifest and
-verifies every selected payload before exposing the generation. Version 1
-expanded inventories remain readable and can be migrated without changing
-`CURRENT` until the complete version-2 generation is durable.
-
+generation. Immutable edge Parquet fragments are hard-linked into generation
+trees and writable private workspaces when source and destination share a
+filesystem. Mutations never edit a fragment inode: they publish a new fragment
+or atomically replace a workspace path, so prior generations remain byte-exact.
+Filesystems that cannot create the link fall back to verified private copies.
 Authoritative small-write delta runs, when present, live under
 `graph/deltas/` inside the same generation and are inventory-verified
 ([ADR 0019](../../adr/0019-authoritative-graph-delta-journal.md)). Compaction
@@ -160,7 +156,7 @@ routing-free or string-only prototype GFDR payloads fail with
 folds a verified contiguous prefix back into canonical Parquet via a new
 immutable generation (`compact_graph_delta`) and reclaims unreachable inputs
 only through the shared retention/GC oracle. They are
-distinct from rebuildable `indexes/adjacency/deltas/` accelerators.
+distinct from rebuildable `.graphforge-cache/adjacency/deltas/` accelerators.
 
 For explicit bounded composite property set/remove requests, the Rust facade
 selects GFDR before mutating its private workspace. Storage prepares an owning
@@ -170,6 +166,17 @@ participant and stages one complete generation. Creates, deletes, Cypher,
 bulk/algorithm writes, optimistic multi-writer requests, unsupported values,
 and journal capacity exhaustion select canonical full-Parquet publication
 before staging. Bindings and the CLI do not implement a second routing engine.
+
+Before each ordinary `CURRENT` transition, publication performs only a
+read-only cleanup preflight while holding the writer lock. It installs the
+complete child first, then invokes the shared checkpoint/lease reachability
+oracle to reclaim generations outside the steady-state window. Revert and
+checkpoint publication retain their explicit history semantics. After
+publication, the default physical namespace contains CURRENT plus two verified
+ancestors; checkpoint roots and actively leased historical generations are the
+only explicit additions. A preflight bound or ambiguous authority fails before
+the pointer transition; post-commit cleanup failure is typed as committed and
+is resumed by recovery.
 
 Optional capability absence is recorded in the generation manifest; it is not
 inferred by scanning folders. Graph-only readers validate the mandatory
@@ -227,7 +234,7 @@ canonical: every file under `indexes/` can be reconstructed from `topology/` (an
 built yet, and the engine falls back to building in memory on demand. See
 [ADR 0004](../../adr/0004-adjacency-index.md).
 
-### `indexes/adjacency/` — graph-native adjacency index
+### `.graphforge-cache/adjacency/` — graph-native adjacency cache
 
 The adjacency index is a derived CSR (compressed sparse row) representation of the topology,
 used by both the Cypher traversal path (variable-length `Expand`) and the analyst verbs
@@ -317,7 +324,7 @@ Conventions:
 - **Fallback.** On mismatch (or absent index), the provider scans the typed edge tables and
   builds the adjacency in memory — yielding identical results, only slower. A stale or missing
   index can therefore never cause incorrect output.
-- **Rebuild triggers.** Lazy on first traversal when the `indexes/adjacency/` capability is
+- **Rebuild triggers.** Lazy on first traversal when the `.graphforge-cache/adjacency/` capability is
   present, or explicit via `forge.index("adjacency", ...)`. Append-only commits
   publish bounded delta segments; a full rebuild compacts them into sharded bases.
 - **Determinism (R-ADJ-2).** Full rebuild streams each typed edge file once; `out` entries
@@ -395,7 +402,8 @@ selection; any mismatch is discarded and retried conservatively. This
 accelerator fallback applies only to a valid v0.5 participant; it is not a
 project-format compatibility path.
 
-**`topology/edges/TYPENAME.parquet`** (one file per relation type)
+**`topology/edges/TYPENAME.parquet`** (legacy first fragment) and
+**`topology/edges/TYPENAME/<first-id>-<last-id>.parquet`** (immutable append fragments)
 
 | Column | Arrow type | Notes |
 |---|---|---|
@@ -407,7 +415,51 @@ project-format compatibility path.
 | `dst_id` | `UInt64` | Local surrogate — DataFusion join key |
 | `created_at` | `Timestamp(Microseconds, UTC)` | |
 
-Typed edge tables (one Parquet file per relation type) replace the unified `edge_facts` table. This enables direct scans on a single relation type without filtering, yielding significant I/O savings at 100M+ edges. See [refactor-v0.5.md §7](refactor-v0.5.md) for performance analysis.
+Typed edge tables replace the unified `edge_facts` table. A relation is a
+logical union of its legacy flat fragment and ordered immutable range
+fragments. Each construction flush encodes only accepted rows; it never
+decodes and rewrites prior edge topology. Ordinary catalog, traversal,
+adjacency, UUID-index, mutation, projection, and delta-replay paths enumerate
+the same fragments. This keeps aggregate fresh-import edge encoding O(N) and
+resident topology bounded by the configured construction window while
+preserving direct single-relation scans. See [refactor-v0.5.md §7](refactor-v0.5.md)
+for performance analysis.
+
+Node topology follows the same immutable layout: the first compatible write
+may retain `topology/nodes.parquet`, while later appends create ordered
+`topology/nodes/<first>-<last>.parquet` fragments. Counts, filtered reads,
+surrogate recovery, UUID membership, semantic validation, projection, export,
+label mutation, and deletion operate over the logical union. A localized
+rewrite replaces only the fragment containing a changed row; untouched node
+fragments retain their filesystem identity.
+
+New publications use a compact version-2 `graph/files` root. Payloads and
+fixed-depth radix nodes live once in the project content-addressed object
+store; a generation stores only its root reference and logical totals. Updates
+copy at most one bounded SHA-256 nibble path and retain exact-path collision
+leaves, so publication never scans or recopies prior file metadata. The private
+workspace commit boundary records revision-identified sealed and tombstone
+descriptors before mutations become visible; they are acknowledged only after
+CURRENT advances. Reopen traverses the authenticated radix and hashes every
+selected payload object. Post-CURRENT GC traces every remaining generation
+root and defers while an optimistic attempt or CAS publication lease is live.
+Version-1 expanded inventories remain readable and are migrated under the same
+CAS publication lease before a writable facade publishes version 2.
+
+The authoritative write census is executable: topology node and edge shards,
+node and edge properties, graph deltas, catalog records, extension-owned graph
+records, and the generation/runtime-catalog/runtime-label control files must
+all appear in the revision descriptor journal and resolve to the same v2
+logical inventory. Rebuildable adjacency and UUID-membership artifacts live
+under `.graphforge-cache/` and are rejected as graph authority. Parquet write
+sites share `RewriteBatch` plus `commit_topology_aware`; the three control-file
+writers record their descriptor before making replacement bytes visible.
+
+Terminal leaves retain a sorted exact-path bucket for the theoretical case in
+which distinct path bytes have the same SHA-256 digest. Producing a real
+SHA-256 collision is cryptographically infeasible and is not a test fixture.
+Tests instead cover exact-path replacement/deletion and reject malformed leaf
+digests, ordering, duplicate references, wrong depth, and corrupt objects.
 
 ### Properties layer (warm path)
 
