@@ -689,6 +689,7 @@ fn prepare_deletion_index<NS: BuildHasher, ES: BuildHasher>(
         .collect::<Vec<_>>();
     crate::uuid_membership::prepare_uuid_membership_delta(
         dir,
+        generation.saturating_sub(1),
         generation,
         staged,
         &[],

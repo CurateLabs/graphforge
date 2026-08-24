@@ -2853,7 +2853,10 @@ impl GraphWriter {
         {
             (Vec::new(), Vec::new())
         } else {
-            let mut index = crate::UuidMembershipIndex::open(&self.dir)?;
+            let mut index = crate::UuidMembershipIndex::open_at_generation(
+                &self.dir,
+                generation.saturating_sub(1),
+            )?;
             let (surrogates, _) = index.lookup_node_surrogates(deleted_nodes)?;
             let nodes = deleted_nodes
                 .iter()
@@ -2872,6 +2875,7 @@ impl GraphWriter {
         };
         self.prepared_index = crate::uuid_membership::prepare_uuid_membership_delta(
             &self.dir,
+            generation.saturating_sub(1),
             generation,
             staged,
             &self.pending_index_nodes,
