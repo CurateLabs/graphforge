@@ -125,6 +125,71 @@ enum EntryClass {
     GenerationAuthority,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AuxiliaryReconcileOutcome {
+    Committed,
+    NotCommitted,
+}
+
+pub(crate) fn reconcile_auxiliary(
+    root: &Path,
+    prior: GenerationPair,
+    next: GenerationPair,
+    receipt: &AuxiliaryReceipt,
+) -> Result<AuxiliaryReconcileOutcome, GfError> {
+    let guard = acquire(root)?;
+    guard.revalidate()?;
+    let raw = crate::generation::read_generation_state_raw(root)?;
+    recover_locked(
+        root,
+        &guard.directory,
+        GenerationPair {
+            topology: raw.topology,
+            search: raw.search,
+        },
+    )?;
+    let current = crate::generation::read_generation_state_raw(root)?;
+    let relative = Path::new(&receipt.path);
+    canonical_journal_path(&receipt.path)?;
+    let mut directory = graphforge_filesystem::StableDirectory::open(root).map_err(storage)?;
+    let mut components = relative.components().peekable();
+    let mut file = None;
+    while let Some(component) = components.next() {
+        let Component::Normal(name) = component else {
+            return Err(storage("auxiliary receipt path is not canonical"));
+        };
+        if components.peek().is_some() {
+            directory = directory.open_child_directory(name).map_err(storage)?;
+        } else {
+            file = match directory.open_child_file(name) {
+                Ok(file) => Some(file),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(storage(error)),
+            };
+        }
+    }
+    let exact = if let Some(mut file) = file {
+        let (bytes, digest) = hash_reader(file.try_clone().map_err(storage)?)?;
+        directory.revalidate_named().map_err(storage)?;
+        bytes == receipt.bytes && digest == receipt.digest
+    } else {
+        false
+    };
+    let current = GenerationPair {
+        topology: current.topology,
+        search: current.search,
+    };
+    if current == next && exact {
+        Ok(AuxiliaryReconcileOutcome::Committed)
+    } else if current == prior && !exact {
+        Ok(AuxiliaryReconcileOutcome::NotCommitted)
+    } else {
+        Err(storage(
+            "auxiliary rewrite outcome is ambiguous or substituted",
+        ))
+    }
+}
+
 fn storage(error: impl std::fmt::Display) -> GfError {
     GfError::Storage(error.to_string())
 }
