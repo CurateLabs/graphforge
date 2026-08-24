@@ -10,7 +10,7 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufReader, BufWriter, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
@@ -108,6 +108,12 @@ pub struct GraphConstructionBudgets {
     /// deliberately requires one stable schema per entity kind, so this may be
     /// one (single-kind sessions) or two (nodes plus edges).
     pub max_schema_groups: usize,
+    /// Maximum trailing property columns in either stable entity schema.
+    pub max_property_columns: usize,
+    /// Maximum persisted runtime-catalog entries admitted from the parent.
+    pub max_catalog_entries: usize,
+    /// Maximum decoded Arrow bytes admitted while streaming the parent catalog.
+    pub max_catalog_decoded_bytes: usize,
 }
 
 impl Default for GraphConstructionBudgets {
@@ -119,6 +125,9 @@ impl Default for GraphConstructionBudgets {
             max_run_records: 4 * 65_536,
             merge_fan_in: 32,
             max_schema_groups: 2,
+            max_property_columns: 4_096,
+            max_catalog_entries: 1_000_000,
+            max_catalog_decoded_bytes: 256 << 20,
         }
     }
 }
@@ -131,6 +140,9 @@ impl GraphConstructionBudgets {
             || self.max_run_records < 4 * self.max_batch_rows
             || self.merge_fan_in < 2
             || !(1..=2).contains(&self.max_schema_groups)
+            || self.max_property_columns == 0
+            || self.max_catalog_entries == 0
+            || self.max_catalog_decoded_bytes == 0
         {
             return Err(storage("invalid construction budgets"));
         }
@@ -170,6 +182,18 @@ pub struct GraphConstructionEvidence {
     pub authentication_read_bytes: u64,
     /// Actual bounded authentication reads.
     pub authentication_read_operations: u64,
+    /// Parent runtime-catalog bytes read through its retained descriptor.
+    pub parent_catalog_read_bytes: u64,
+    /// Parent runtime-catalog read operations observed by the bounded reader.
+    pub parent_catalog_read_operations: u64,
+    /// Retained UUID-index bytes loaded by bounded construction probes.
+    pub retained_probe_read_bytes: u64,
+    /// One-MiB retained UUID-index cache fills performed by construction probes.
+    pub retained_probe_block_loads: u64,
+    /// Shaped-output bytes read while constructing its authenticated inventory.
+    pub shaped_output_authentication_bytes: u64,
+    /// Bounded reads used to construct the shaped-output inventory.
+    pub shaped_output_authentication_operations: u64,
     /// Fixed-width run records.
     pub run_records: u64,
     /// Largest retained Arrow row window.
@@ -213,6 +237,8 @@ pub struct GraphConstructionEvidence {
     pub peak_accounted_live_bytes: u64,
     /// Largest number of merge-source names retained by the online scheduler.
     pub peak_merge_name_slots: u64,
+    /// Largest number of endpoint-window names retained by its online merge.
+    pub peak_resolved_endpoint_name_slots: u64,
     /// File and directory durability barriers completed during shaping.
     pub merge_fsync_operations: u64,
     /// Bytes returned by instrumented Parquet range/sequential reads in shaping.
@@ -488,14 +514,16 @@ impl GraphConstructionSession {
             };
             (Some(snapshot), work)
         };
-        let (parent_catalog, parent_catalog_sha256) =
-            load_parent_runtime_catalog(project_dir, parent_topology_generation)?;
+        let (parent_catalog, parent_catalog_sha256, parent_catalog_work) =
+            load_parent_runtime_catalog(&project, parent_topology_generation, budgets)?;
         let checkpoint = match root.open_child_file(OsStr::new(CHECKPOINT)) {
             Ok(mut file) => decode_bounded(&mut file)?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 let evidence = GraphConstructionEvidence {
                     authentication_read_bytes: base_work.authentication_bytes,
                     authentication_read_operations: base_work.authentication_blocks,
+                    parent_catalog_read_bytes: parent_catalog_work.bytes,
+                    parent_catalog_read_operations: parent_catalog_work.operations,
                     ..GraphConstructionEvidence::default()
                 };
                 let initial = Checkpoint {
@@ -615,6 +643,16 @@ impl GraphConstructionSession {
             return Err(storage("empty construction chunk"));
         }
         let input_bytes = batch.get_array_memory_size();
+        let required_columns = if kind == ConstructionChunkKind::Node {
+            2
+        } else {
+            4
+        };
+        if batch.num_columns().saturating_sub(required_columns)
+            > self.checkpoint.budgets.max_property_columns
+        {
+            return Err(storage("construction property-column budget exhausted"));
+        }
         if batch.num_rows() > self.checkpoint.budgets.max_batch_rows
             || input_bytes > self.checkpoint.budgets.max_batch_bytes
             || self.checkpoint.next_sequence >= self.checkpoint.budgets.max_chunks
@@ -1008,6 +1046,7 @@ impl GraphConstructionSession {
                 base,
                 self.checkpoint.budgets.max_batch_rows,
                 &mut cancelled,
+                &mut self.checkpoint.evidence,
             )?;
         }
         let identities = assign_surrogates(
@@ -1098,7 +1137,9 @@ impl GraphConstructionSession {
             max_node_surrogate,
             max_edge_surrogate,
         };
-        let mut outputs = vec![receipt_for_existing(&self.root, &shape.identities)?];
+        let (identity_output, mut inventory_work) =
+            receipt_for_existing_with_work(&self.root, &shape.identities)?;
+        let mut outputs = vec![identity_output];
         for name in shape
             .node_details
             .iter()
@@ -1108,8 +1149,23 @@ impl GraphConstructionSession {
             .chain(shape.edge_endpoints.iter())
             .chain(std::iter::once(&shape.runtime_catalog))
         {
-            outputs.push(receipt_for_existing(&self.root, name)?);
+            let (output, work) = receipt_for_existing_with_work(&self.root, name)?;
+            inventory_work.bytes = inventory_work.bytes.saturating_add(work.bytes);
+            inventory_work.operations = inventory_work.operations.saturating_add(work.operations);
+            outputs.push(output);
         }
+        self.checkpoint.evidence.shaped_output_authentication_bytes = self
+            .checkpoint
+            .evidence
+            .shaped_output_authentication_bytes
+            .saturating_add(inventory_work.bytes);
+        self.checkpoint
+            .evidence
+            .shaped_output_authentication_operations = self
+            .checkpoint
+            .evidence
+            .shaped_output_authentication_operations
+            .saturating_add(inventory_work.operations);
         replace_control(
             &self.root,
             SHAPE_INTENT,
@@ -1959,6 +2015,13 @@ fn read_completed_shape(
 }
 
 fn receipt_for_existing(root: &StableDirectory, name: &str) -> Result<ArtifactReceipt, GfError> {
+    receipt_for_existing_with_work(root, name).map(|(receipt, _)| receipt)
+}
+
+fn receipt_for_existing_with_work(
+    root: &StableDirectory,
+    name: &str,
+) -> Result<(ArtifactReceipt, ReadWork), GfError> {
     let mut file = root.open_child_file(OsStr::new(name)).map_err(storage)?;
     if file_link_count(&file).map_err(storage)? != 1 {
         return Err(storage("shaped output has extra links"));
@@ -1977,14 +2040,17 @@ fn receipt_for_existing(root: &StableDirectory, name: &str) -> Result<ArtifactRe
         bytes = bytes.saturating_add(count as u64);
         operations = operations.saturating_add(1);
     }
-    Ok(ArtifactReceipt {
-        name: name.to_owned(),
-        bytes,
-        sha256: hex(&digest.finalize()),
-        identity: identity.into(),
-        write_operations: operations,
-        fsync_operations: 0,
-    })
+    Ok((
+        ArtifactReceipt {
+            name: name.to_owned(),
+            bytes,
+            sha256: hex(&digest.finalize()),
+            identity: identity.into(),
+            write_operations: 0,
+            fsync_operations: 0,
+        },
+        ReadWork { bytes, operations },
+    ))
 }
 
 fn authenticate_shaped_output(
@@ -2357,39 +2423,6 @@ impl FixedMergeAccumulator {
             level += 1;
         }
     }
-}
-
-fn merge_fixed_all<const N: usize>(
-    root: &StableDirectory,
-    mut inputs: Vec<String>,
-    prefix: &str,
-    fan_in: usize,
-    reject_duplicates: bool,
-    cancelled: &mut impl FnMut() -> bool,
-    evidence: &mut GraphConstructionEvidence,
-) -> Result<String, GfError> {
-    if inputs.is_empty() {
-        return Err(storage("external merge has no input"));
-    }
-    let mut level = 0_usize;
-    while inputs.len() > 1 {
-        evidence.merge_passes = evidence.merge_passes.saturating_add(1);
-        let mut outputs = Vec::with_capacity(inputs.len().div_ceil(fan_in));
-        for (group, names) in inputs.chunks(fan_in).enumerate() {
-            reject_cancelled(cancelled)?;
-            let output = format!("{prefix}-l{level:03}-g{group:08}.run");
-            merge_fixed_group::<N>(root, names, &output, reject_duplicates, cancelled, evidence)?;
-            outputs.push(output);
-        }
-        for old in &inputs {
-            if old.starts_with("merge-") && !outputs.contains(old) {
-                unlink_named(root, old)?;
-            }
-        }
-        inputs = outputs;
-        level += 1;
-    }
-    Ok(inputs.pop().expect("one merge output"))
 }
 
 fn merge_fixed_group<const N: usize>(
@@ -2888,50 +2921,91 @@ fn build_runtime_catalog(
 }
 
 fn load_parent_runtime_catalog(
-    project_path: &Path,
+    project: &StableDirectory,
     parent_generation: u64,
-) -> Result<(RuntimeCatalog, Option<String>), GfError> {
+    budgets: GraphConstructionBudgets,
+) -> Result<(RuntimeCatalog, Option<String>, ReadWork), GfError> {
     if parent_generation == 0 {
-        return Ok((RuntimeCatalog::new(), None));
+        return Ok((RuntimeCatalog::new(), None, ReadWork::default()));
     }
-    let path = project_path.join("topology/runtime_catalog.parquet");
-    let digest = match std::fs::read(&path) {
-        Ok(bytes) => Some(sha256(&bytes)),
+    let topology = match project.open_child_directory(OsStr::new("topology")) {
+        Ok(topology) => topology,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok((RuntimeCatalog::new(), None));
+            return Ok((RuntimeCatalog::new(), None, ReadWork::default()));
         }
-        Err(error) => {
-            return Err(storage(format!(
-                "cannot hash pinned parent catalog: {error}"
-            )));
-        }
+        Err(error) => return Err(storage(error)),
     };
-    let file = match File::open(&path) {
+    let mut file = match topology.open_child_file(OsStr::new("runtime_catalog.parquet")) {
         Ok(file) => file,
-        Err(error) => {
-            return Err(storage(format!(
-                "cannot open pinned parent catalog: {error}"
-            )));
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((RuntimeCatalog::new(), None, ReadWork::default()));
         }
+        Err(error) => return Err(storage(error)),
     };
-    let reader = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(storage)?
-        .with_batch_size(4096)
-        .build()
-        .map_err(storage)?;
-    let mut batches = Vec::new();
+    if file_link_count(&file).map_err(storage)? != 1 {
+        return Err(storage("parent runtime catalog has extra links"));
+    }
+    let identity = file_identity(&file).map_err(storage)?;
+    let mut digest = Sha256::new();
+    let mut work = ReadWork::default();
+    let mut block = vec![0_u8; BLOCK_BYTES];
+    loop {
+        let count = file.read(&mut block).map_err(storage)?;
+        if count == 0 {
+            break;
+        }
+        digest.update(&block[..count]);
+        work.bytes = work.bytes.saturating_add(count as u64);
+        work.operations = work.operations.saturating_add(1);
+    }
+    file.rewind().map_err(storage)?;
+    if file_identity(&file).map_err(storage)? != identity {
+        return Err(storage("parent runtime catalog identity changed"));
+    }
+    let counter = IoCounter::default();
+    let reader = ParquetRecordBatchReaderBuilder::try_new(CountingChunkReader {
+        file,
+        counter: counter.clone(),
+    })
+    .map_err(storage)?
+    .with_batch_size(4_096.min(budgets.max_catalog_entries))
+    .build()
+    .map_err(storage)?;
+    let mut catalog = RuntimeCatalog::new();
+    let mut entries = 0_usize;
+    let mut decoded_bytes = 0_usize;
     for batch in reader {
-        batches.push(batch.map_err(storage)?);
+        let batch = batch.map_err(storage)?;
+        entries = entries
+            .checked_add(batch.num_rows())
+            .ok_or_else(|| storage("parent runtime catalog entry count overflow"))?;
+        decoded_bytes = decoded_bytes
+            .checked_add(batch.get_array_memory_size())
+            .ok_or_else(|| storage("parent runtime catalog decoded size overflow"))?;
+        if entries > budgets.max_catalog_entries
+            || decoded_bytes > budgets.max_catalog_decoded_bytes
+        {
+            return Err(storage("parent runtime catalog admission budget exhausted"));
+        }
+        catalog.extend_from_record_batch(&batch).map_err(storage)?;
     }
-    if batches.is_empty() {
-        return Ok((RuntimeCatalog::new(), digest));
+    work.bytes = work
+        .bytes
+        .saturating_add(counter.bytes.load(Ordering::Relaxed));
+    work.operations = work
+        .operations
+        .saturating_add(counter.operations.load(Ordering::Relaxed));
+    let named = topology
+        .open_child_file(OsStr::new("runtime_catalog.parquet"))
+        .map_err(storage)?;
+    if file_identity(&named).map_err(storage)? != identity
+        || file_link_count(&named).map_err(storage)? != 1
+    {
+        return Err(storage("parent runtime catalog authority changed"));
     }
-    let schema = batches[0].schema();
-    let merged = arrow::compute::concat_batches(&schema, &batches).map_err(storage)?;
-    Ok((
-        RuntimeCatalog::from_record_batch(&merged).map_err(storage)?,
-        digest,
-    ))
+    topology.revalidate_named().map_err(storage)?;
+    project.revalidate_named().map_err(storage)?;
+    Ok((catalog, Some(hex(&digest.finalize())), work))
 }
 
 fn read_fixed<const N: usize>(reader: &mut impl Read) -> Result<Option<[u8; N]>, GfError> {
@@ -3023,6 +3097,7 @@ fn reject_staged_base_conflicts(
     base: &mut AuthenticatedUuidIndexSnapshot,
     window_rows: usize,
     cancelled: &mut impl FnMut() -> bool,
+    evidence: &mut GraphConstructionEvidence,
 ) -> Result<(), GfError> {
     let mut reader = BufReader::with_capacity(
         BLOCK_BYTES,
@@ -3042,8 +3117,10 @@ fn reject_staged_base_conflicts(
         if requested.is_empty() {
             break;
         }
-        let (nodes, _) = base.probe(UuidIndexKind::Node, &requested)?;
-        let (edges, _) = base.probe(UuidIndexKind::Edge, &requested)?;
+        let (nodes, node_work) = base.probe(UuidIndexKind::Node, &requested)?;
+        let (edges, edge_work) = base.probe(UuidIndexKind::Edge, &requested)?;
+        account_probe_work(&node_work, evidence);
+        account_probe_work(&edge_work, evidence);
         if nodes
             .into_iter()
             .zip(edges)
@@ -3396,7 +3473,7 @@ fn resolve_endpoint_surrogates(
     );
     let mut identity = read_fixed::<BASE_IDENTITY_WIDTH>(&mut identities)?;
     let mut window = Vec::<[u8; RESOLVED_ENDPOINT_WIDTH]>::with_capacity(window_rows);
-    let mut runs = Vec::new();
+    let mut resolved = FixedMergeAccumulator::new("merge-resolved", fan_in, false);
     let mut sequence = 0_u64;
     loop {
         let mut endpoint_window = Vec::with_capacity(window_rows);
@@ -3434,11 +3511,11 @@ fn resolve_endpoint_surrogates(
             }
         }
         if !base_requests.is_empty() {
-            let resolved = base
+            let (resolved, probe_work) = base
                 .as_deref_mut()
                 .ok_or_else(|| storage("endpoint UUID lacks node surrogate"))?
-                .lookup_node_surrogates(&base_requests)?
-                .0;
+                .lookup_node_surrogates(&base_requests)?;
+            account_probe_work(&probe_work, evidence);
             for (position, surrogate) in base_positions.into_iter().zip(resolved) {
                 surrogates[position] = surrogate;
             }
@@ -3467,7 +3544,10 @@ fn resolve_endpoint_surrogates(
                 .merge_fsync_operations
                 .saturating_add(receipt.fsync_operations);
             account_sequential_write(receipt.bytes, evidence);
-            runs.push(name);
+            resolved.push::<RESOLVED_ENDPOINT_WIDTH>(root, name, cancelled, evidence)?;
+            evidence.peak_resolved_endpoint_name_slots = evidence
+                .peak_resolved_endpoint_name_slots
+                .max(resolved.slot_count() as u64);
             window.clear();
             sequence = sequence.saturating_add(1);
             reject_cancelled(cancelled)?;
@@ -3485,21 +3565,27 @@ fn resolve_endpoint_surrogates(
             .merge_fsync_operations
             .saturating_add(receipt.fsync_operations);
         account_sequential_write(receipt.bytes, evidence);
-        runs.push(name);
+        resolved.push::<RESOLVED_ENDPOINT_WIDTH>(root, name, cancelled, evidence)?;
+        evidence.peak_resolved_endpoint_name_slots = evidence
+            .peak_resolved_endpoint_name_slots
+            .max(resolved.slot_count() as u64);
     }
-    merge_fixed_all::<RESOLVED_ENDPOINT_WIDTH>(
-        root,
-        runs,
-        "merge-resolved",
-        fan_in,
-        false,
-        cancelled,
-        evidence,
-    )
-    .map(Some)
+    resolved.finish_optional::<RESOLVED_ENDPOINT_WIDTH>(root, cancelled, evidence)
 }
 
-#[derive(Clone, Copy)]
+fn account_probe_work(
+    work: &crate::uuid_membership::UuidProbeMetrics,
+    evidence: &mut GraphConstructionEvidence,
+) {
+    evidence.retained_probe_read_bytes = evidence
+        .retained_probe_read_bytes
+        .saturating_add(work.read_bytes);
+    evidence.retained_probe_block_loads = evidence
+        .retained_probe_block_loads
+        .saturating_add(work.file_seeks);
+}
+
+#[derive(Clone, Copy, Debug, Default)]
 struct ReadWork {
     bytes: u64,
     operations: u64,
@@ -4643,8 +4729,10 @@ mod tests {
         .unwrap();
         write_parquet(&private, "nodes.parquet", &rows).unwrap();
         let mut evidence = GraphConstructionEvidence::default();
-        let (parent_catalog, parent_catalog_sha256) =
-            load_parent_runtime_catalog(project.path(), 1).unwrap();
+        let project_root = StableDirectory::open(project.path()).unwrap();
+        let (parent_catalog, parent_catalog_sha256, _) =
+            load_parent_runtime_catalog(&project_root, 1, GraphConstructionBudgets::default())
+                .unwrap();
         assert!(parent_catalog_sha256.is_some());
         let output = build_runtime_catalog(
             parent_catalog,
@@ -4738,6 +4826,123 @@ mod tests {
         assert!(slots <= 31 * 4, "retained slots: {slots}");
         assert!(slots < 1_000_000 / 1_000);
         assert_eq!(GraphConstructionBudgets::default().max_schema_groups, 2);
+    }
+
+    #[test]
+    fn resolved_endpoint_windows_use_logarithmic_name_state_at_1x_2x_4x() {
+        for windows in [1_u64, 2, 4] {
+            let root = TempDir::new().unwrap();
+            let budgets = GraphConstructionBudgets {
+                max_batch_rows: 2,
+                max_run_records: 8,
+                merge_fan_in: 2,
+                ..GraphConstructionBudgets::default()
+            };
+            let mut session = GraphConstructionSession::open(
+                root.path(),
+                Uuid::from_u128(7_100 + u128::from(windows)),
+                0,
+                budgets,
+            )
+            .unwrap();
+            let nodes = windows + 1;
+            for offset in (0..nodes).step_by(2) {
+                let rows = usize::try_from((nodes - offset).min(2)).unwrap();
+                session
+                    .append(
+                        ConstructionChunkKind::Node,
+                        &format!("nodes-{offset}"),
+                        &node_batch(1 + u128::from(offset), rows),
+                    )
+                    .unwrap();
+            }
+            for offset in (0..windows).step_by(2) {
+                let rows = usize::try_from((windows - offset).min(2)).unwrap();
+                session
+                    .append(
+                        ConstructionChunkKind::Edge,
+                        &format!("edges-{offset}"),
+                        &edge_batch(10_000 + u128::from(offset), rows),
+                    )
+                    .unwrap();
+            }
+            session.seal().unwrap();
+            let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
+            let expected_slots = u64::from(windows.ilog2()).max(1);
+            assert!(
+                session.evidence().peak_resolved_endpoint_name_slots <= expected_slots,
+                "windows={windows} slots={}",
+                session.evidence().peak_resolved_endpoint_name_slots
+            );
+            let expected_inventory_bytes = std::iter::once(&shape.identities)
+                .chain(shape.node_details.iter())
+                .chain(shape.edge_details.iter())
+                .chain(shape.node_rows.iter())
+                .chain(shape.edge_rows.iter())
+                .chain(shape.edge_endpoints.iter())
+                .chain(std::iter::once(&shape.runtime_catalog))
+                .map(|name| {
+                    session
+                        .root
+                        .open_child_file(OsStr::new(name))
+                        .unwrap()
+                        .metadata()
+                        .unwrap()
+                        .len()
+                })
+                .sum::<u64>();
+            assert_eq!(
+                session.evidence().shaped_output_authentication_bytes,
+                expected_inventory_bytes
+            );
+            assert!(session.evidence().shaped_output_authentication_operations > 0);
+        }
+    }
+
+    #[test]
+    fn parent_catalog_streaming_enforces_entry_and_decoded_byte_budgets() {
+        let root = TempDir::new().unwrap();
+        let project = StableDirectory::open(root.path()).unwrap();
+        let topology = project
+            .create_child_directory(OsStr::new("topology"))
+            .unwrap();
+        let mut source = RuntimeCatalog::new();
+        for index in 0..5_000 {
+            source.intern_label_at(&format!("Label{index:05}"), 42);
+        }
+        write_parquet(
+            &topology,
+            "runtime_catalog.parquet",
+            &source.to_record_batch(),
+        )
+        .unwrap();
+
+        let too_few = GraphConstructionBudgets {
+            max_catalog_entries: 4_999,
+            ..GraphConstructionBudgets::default()
+        };
+        assert!(
+            load_parent_runtime_catalog(&project, 1, too_few)
+                .unwrap_err()
+                .to_string()
+                .contains("admission budget")
+        );
+        let too_small = GraphConstructionBudgets {
+            max_catalog_decoded_bytes: 1,
+            ..GraphConstructionBudgets::default()
+        };
+        assert!(
+            load_parent_runtime_catalog(&project, 1, too_small)
+                .unwrap_err()
+                .to_string()
+                .contains("admission budget")
+        );
+        let (restored, digest, work) =
+            load_parent_runtime_catalog(&project, 1, GraphConstructionBudgets::default()).unwrap();
+        assert_eq!(restored.to_record_batch().num_rows(), 5_000);
+        assert!(digest.is_some());
+        assert!(work.bytes > 0);
+        assert!(work.operations > 0);
     }
 
     #[test]
@@ -5009,6 +5214,15 @@ mod tests {
             .shape_canonical_with_cancellation(|| false)
             .unwrap();
         assert_eq!((shape.node_count, shape.edge_count), (2, 2));
+        assert!(retained_endpoints.evidence().retained_probe_read_bytes > 0);
+        assert!(retained_endpoints.evidence().retained_probe_block_loads > 0);
+        assert!(
+            retained_endpoints.evidence().retained_probe_read_bytes
+                <= retained_endpoints
+                    .evidence()
+                    .retained_probe_block_loads
+                    .saturating_mul(BLOCK_BYTES as u64)
+        );
         let mut resolved = BufReader::new(
             retained_endpoints
                 .root
