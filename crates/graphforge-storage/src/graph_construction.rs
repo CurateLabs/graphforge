@@ -12,6 +12,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -26,16 +27,17 @@ use graphforge_filesystem::{FileIdentity, StableDirectory, file_identity, file_l
 use graphforge_ir::RuntimeCatalog;
 use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::file::reader::{ChunkReader, Length};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::uuid_membership::{
     ConstructionUuidIdentity, UuidConstructionSnapshot, UuidConstructionSnapshotWork,
-    open_uuid_construction_snapshot,
+    pin_uuid_construction_snapshot,
 };
 
-const FORMAT_VERSION: u32 = 3;
+const FORMAT_VERSION: u32 = 4;
 const PRIVATE_ROOT: &str = ".graphforge-construction";
 const CHECKPOINT: &str = "checkpoint.json";
 const INTENT: &str = "intent.json";
@@ -48,7 +50,6 @@ const RESOLVED_ENDPOINT_WIDTH: usize = 32;
 const NODE_DETAIL_WIDTH: usize = 272;
 const EDGE_DETAIL_WIDTH: usize = 304;
 const BASE_IDENTITY_WIDTH: usize = 32;
-const BASE_IDENTITIES: &str = "base-identities.run";
 
 /// Storage-normalized node input. API validation resolves nullable/generated
 /// identities before this boundary; trailing columns are normalized properties.
@@ -159,6 +160,8 @@ pub struct GraphConstructionEvidence {
     pub write_bytes: u64,
     /// Actual submissions by measured immutable-artifact writers.
     pub write_operations: u64,
+    /// File and directory durability barriers completed for accepted artifacts.
+    pub fsync_operations: u64,
     /// Bytes read for independent authentication.
     pub authentication_read_bytes: u64,
     /// Actual bounded authentication reads.
@@ -197,6 +200,23 @@ pub struct GraphConstructionEvidence {
     pub merge_passes: u64,
     /// Largest measured temporary merge footprint.
     pub peak_merge_temporary_bytes: u64,
+    /// Largest explicitly retained application buffer set during append. This
+    /// includes input Arrow buffers, extracted fixed runs, sorted Arrow output,
+    /// and a conservative full-batch Parquet encoding window; allocator/RSS is
+    /// intentionally measured by the outer process probe.
+    pub peak_accounted_live_bytes: u64,
+    /// Largest number of merge-source names retained by the online scheduler.
+    pub peak_merge_name_slots: u64,
+    /// File and directory durability barriers completed during shaping.
+    pub merge_fsync_operations: u64,
+    /// Bytes returned by instrumented Parquet range/sequential reads in shaping.
+    pub parquet_read_bytes: u64,
+    /// Instrumented Parquet read calls in shaping.
+    pub parquet_read_operations: u64,
+    /// Bytes submitted by instrumented Parquet writers in shaping.
+    pub parquet_write_bytes: u64,
+    /// Instrumented Parquet writer submissions in shaping.
+    pub parquet_write_operations: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -258,6 +278,7 @@ struct ArtifactReceipt {
     sha256: String,
     identity: IdentityRecord,
     write_operations: u64,
+    fsync_operations: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -284,6 +305,7 @@ pub struct ConstructionChunkReceipt {
     pub schema_sha256: String,
     /// Fixed-width run records.
     pub run_records: u64,
+    accounted_live_bytes: u64,
     parquet: ArtifactReceipt,
     identities: ArtifactReceipt,
     endpoints: Option<ArtifactReceipt>,
@@ -305,7 +327,8 @@ struct Checkpoint {
     next_sequence: u64,
     saw_edge: bool,
     last_receipt_sha256: Option<String>,
-    base_identities: Option<ArtifactReceipt>,
+    has_base_snapshot: bool,
+    parent_catalog_sha256: Option<String>,
     base_work: UuidConstructionSnapshotWork,
     evidence: GraphConstructionEvidence,
 }
@@ -327,6 +350,7 @@ struct ChunkIntent {
     parent_topology_generation: u64,
     prior_receipt_sha256: Option<String>,
     run_records: u64,
+    accounted_live_bytes: u64,
     parquet: Option<ArtifactReceipt>,
     identities: Option<ArtifactReceipt>,
     endpoints: Option<ArtifactReceipt>,
@@ -381,6 +405,7 @@ pub struct GraphConstructionSession {
     root: StableDirectory,
     checkpoint: Checkpoint,
     base_snapshot: Option<UuidConstructionSnapshot>,
+    parent_catalog: RuntimeCatalog,
     _reservation: ProcessReservation,
 }
 
@@ -427,50 +452,24 @@ impl GraphConstructionSession {
             session_identity,
         )?;
         cleanup_owned_artifact_temps(&root)?;
-        let checkpoint_exists = match root.open_child_file(OsStr::new(CHECKPOINT)) {
-            Ok(file) => {
-                drop(file);
-                true
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-            Err(error) => return Err(storage(error)),
-        };
-        if !checkpoint_exists && parent_topology_generation != 0 {
-            remove_unrecorded_base(&root)?;
-        }
-        let (base_snapshot, base_identities, base_work) = if parent_topology_generation == 0 {
-            (None, None, UuidConstructionSnapshotWork::default())
-        } else if checkpoint_exists {
-            let mut checkpoint_file = root
-                .open_child_file(OsStr::new(CHECKPOINT))
-                .map_err(storage)?;
-            let recorded: Checkpoint = decode_bounded(&mut checkpoint_file)?;
-            let receipt = recorded
-                .base_identities
-                .as_ref()
-                .ok_or_else(|| storage("nonempty parent lacks retained identity run"))?;
-            let (snapshot, work) = authenticate_base_snapshot(
-                project_dir,
-                parent_topology_generation,
-                &root,
-                receipt,
-            )?;
-            (Some(snapshot), Some(receipt.clone()), work)
+        let (base_snapshot, base_work) = if parent_topology_generation == 0 {
+            (None, UuidConstructionSnapshotWork::default())
         } else {
-            let (snapshot, receipt, work) =
-                create_base_snapshot(project_dir, parent_topology_generation, &root)?;
-            (Some(snapshot), Some(receipt), work)
+            let snapshot = pin_uuid_construction_snapshot(project_dir, parent_topology_generation)?;
+            let max_node_surrogate = crate::writer::read_surrogate_tails(project_dir)?
+                .ok_or_else(|| storage("nonempty parent lacks surrogate tails"))?
+                .0;
+            let work = snapshot.declared_work(max_node_surrogate);
+            (Some(snapshot), work)
         };
+        let (parent_catalog, parent_catalog_sha256) =
+            load_parent_runtime_catalog(project_dir, parent_topology_generation)?;
         let checkpoint = match root.open_child_file(OsStr::new(CHECKPOINT)) {
             Ok(mut file) => decode_bounded(&mut file)?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 let mut evidence = GraphConstructionEvidence::default();
                 evidence.authentication_read_bytes = base_work.authentication_bytes;
                 evidence.authentication_read_operations = base_work.authentication_blocks;
-                if let Some(base) = &base_identities {
-                    evidence.write_bytes = base.bytes;
-                    evidence.write_operations = base.write_operations;
-                }
                 let initial = Checkpoint {
                     format_version: FORMAT_VERSION,
                     operation_uuid,
@@ -488,7 +487,8 @@ impl GraphConstructionSession {
                     next_sequence: 0,
                     saw_edge: false,
                     last_receipt_sha256: None,
-                    base_identities,
+                    has_base_snapshot: parent_topology_generation != 0,
+                    parent_catalog_sha256: parent_catalog_sha256.clone(),
                     base_work,
                     evidence,
                 };
@@ -504,6 +504,7 @@ impl GraphConstructionSession {
             session_identity,
             parent_topology_generation,
             budgets,
+            parent_catalog_sha256.as_deref(),
         )?;
         let mut session = Self {
             project_path: project_dir.to_path_buf(),
@@ -511,6 +512,7 @@ impl GraphConstructionSession {
             root,
             checkpoint,
             base_snapshot,
+            parent_catalog,
             _reservation: reservation,
         };
         recover_shape_intent(&session.root, &session.checkpoint)?;
@@ -606,6 +608,7 @@ impl GraphConstructionSession {
                 && receipt.kind == kind
                 && receipt.rows == batch.num_rows() as u64
                 && receipt.input_sha256 == input_sha256
+                && receipt.schema_sha256 == schema_sha256
             {
                 validate_receipt_artifacts(&self.root, &receipt)?;
                 self.checkpoint.evidence.replayed_chunks =
@@ -641,6 +644,7 @@ impl GraphConstructionSession {
             parent_topology_generation: self.checkpoint.parent_topology_generation,
             prior_receipt_sha256: self.checkpoint.last_receipt_sha256.clone(),
             run_records: run_records as u64,
+            accounted_live_bytes: 0,
             parquet: None,
             identities: None,
             endpoints: None,
@@ -650,6 +654,22 @@ impl GraphConstructionSession {
         reject_cancelled(&mut cancelled)?;
         let stem = artifact_stem(sequence, kind);
         let sorted_batch = uuid_sorted_batch(kind, batch)?;
+        let fixed_bytes = arrays
+            .identities
+            .len()
+            .saturating_mul(IDENTITY_WIDTH)
+            .saturating_add(arrays.endpoints.len().saturating_mul(ENDPOINT_WIDTH))
+            .saturating_add(match &arrays.details {
+                DetailRuns::Node(records) => records.len().saturating_mul(NODE_DETAIL_WIDTH),
+                DetailRuns::Edge(records) => records.len().saturating_mul(EDGE_DETAIL_WIDTH),
+            });
+        let sorted_bytes = sorted_batch.get_array_memory_size();
+        intent.accounted_live_bytes = input_bytes
+            .saturating_add(fixed_bytes)
+            .saturating_add(sorted_bytes.saturating_mul(2))
+            .saturating_add(BLOCK_BYTES.saturating_mul(2))
+            as u64;
+        replace_control(&self.root, INTENT, &intent)?;
         intent.parquet = Some(write_parquet(
             &self.root,
             &format!("{stem}.parquet"),
@@ -772,47 +792,13 @@ impl GraphConstructionSession {
         }
         reject_existing_merge_artifacts(&self.root)?;
 
-        let mut unified = Vec::new();
-        if self.checkpoint.base_identities.is_some() {
-            unified.push(BASE_IDENTITIES.to_owned());
-        }
-        let mut node_details = Vec::new();
-        let mut edge_details = Vec::new();
-        let mut endpoints = Vec::new();
-        let mut receipts = Vec::new();
-        let mut row_groups: BTreeMap<(u8, String), Vec<String>> = BTreeMap::new();
+        let fan_in = self.checkpoint.budgets.merge_fan_in;
+        let mut unified = FixedMergeAccumulator::new("merge-identities", fan_in, true);
+        let mut node_details = FixedMergeAccumulator::new("merge-node-details", fan_in, true);
+        let mut edge_details = FixedMergeAccumulator::new("merge-edge-details", fan_in, true);
+        let mut endpoints = FixedMergeAccumulator::new("merge-endpoints", fan_in, false);
+        let mut row_groups: BTreeMap<(u8, String), RowMergeAccumulator> = BTreeMap::new();
         let mut catalog_authority = Sha256::new();
-        for sequence in 0..self.checkpoint.next_sequence {
-            reject_cancelled(&mut cancelled)?;
-            let receipt = self.read_receipt(sequence)?;
-            validate_receipt_artifacts(&self.root, &receipt)?;
-            catalog_authority.update([if receipt.kind == ConstructionChunkKind::Node {
-                0
-            } else {
-                1
-            }]);
-            catalog_authority.update(receipt.schema_sha256.as_bytes());
-            catalog_authority.update(receipt.parquet.sha256.as_bytes());
-            row_groups
-                .entry((
-                    if receipt.kind == ConstructionChunkKind::Node {
-                        0
-                    } else {
-                        1
-                    },
-                    receipt.schema_sha256.clone(),
-                ))
-                .or_default()
-                .push(receipt.parquet.name.clone());
-            match receipt.kind {
-                ConstructionChunkKind::Node => node_details.push(String::new()),
-                ConstructionChunkKind::Edge => {
-                    edge_details.push(String::new());
-                    endpoints.push(String::new());
-                }
-            }
-            receipts.push(receipt);
-        }
         let shape_intent = ShapeIntent {
             format_version: FORMAT_VERSION,
             operation_uuid: self.checkpoint.operation_uuid,
@@ -826,13 +812,35 @@ impl GraphConstructionSession {
             outputs: Vec::new(),
         };
         install_control(&self.root, SHAPE_INTENT, &shape_intent)?;
-        node_details.clear();
-        edge_details.clear();
-        endpoints.clear();
-        for (sequence, receipt) in receipts.iter().enumerate() {
+        for sequence in 0..self.checkpoint.next_sequence {
+            reject_cancelled(&mut cancelled)?;
+            let receipt = self.read_receipt(sequence)?;
+            validate_receipt_artifacts(&self.root, &receipt)?;
+            let kind = u8::from(receipt.kind == ConstructionChunkKind::Edge);
+            catalog_authority.update([kind]);
+            catalog_authority.update(receipt.schema_sha256.as_bytes());
+            catalog_authority.update(receipt.parquet.sha256.as_bytes());
+            row_groups
+                .entry((kind, receipt.schema_sha256.clone()))
+                .or_insert_with(|| {
+                    RowMergeAccumulator::new(fan_in, &format!("{kind}-{}", receipt.schema_sha256))
+                })
+                .push(
+                    &self.root,
+                    receipt.parquet.name.clone(),
+                    self.checkpoint.budgets.max_batch_rows,
+                    self.checkpoint.budgets.max_batch_bytes,
+                    &mut cancelled,
+                    &mut self.checkpoint.evidence,
+                )?;
             let name = format!("merge-unified-{sequence:020}.run");
-            convert_identity_run(&self.root, receipt, &name, &mut self.checkpoint.evidence)?;
-            unified.push(name);
+            convert_identity_run(&self.root, &receipt, &name, &mut self.checkpoint.evidence)?;
+            unified.push::<BASE_IDENTITY_WIDTH>(
+                &self.root,
+                name,
+                &mut cancelled,
+                &mut self.checkpoint.evidence,
+            )?;
             match receipt.kind {
                 ConstructionChunkKind::Node => {
                     let name = format!("merge-node-source-{sequence:020}.run");
@@ -842,7 +850,12 @@ impl GraphConstructionSession {
                         &name,
                         &mut self.checkpoint.evidence,
                     )?;
-                    node_details.push(name);
+                    node_details.push::<NODE_DETAIL_WIDTH>(
+                        &self.root,
+                        name,
+                        &mut cancelled,
+                        &mut self.checkpoint.evidence,
+                    )?;
                 }
                 ConstructionChunkKind::Edge => {
                     let detail = format!("merge-edge-source-{sequence:020}.run");
@@ -852,7 +865,12 @@ impl GraphConstructionSession {
                         &detail,
                         &mut self.checkpoint.evidence,
                     )?;
-                    edge_details.push(detail);
+                    edge_details.push::<EDGE_DETAIL_WIDTH>(
+                        &self.root,
+                        detail,
+                        &mut cancelled,
+                        &mut self.checkpoint.evidence,
+                    )?;
                     let endpoint = format!("merge-endpoint-source-{sequence:020}.run");
                     copy_authenticated_run::<ENDPOINT_WIDTH>(
                         &self.root,
@@ -863,43 +881,76 @@ impl GraphConstructionSession {
                         &endpoint,
                         &mut self.checkpoint.evidence,
                     )?;
-                    endpoints.push(endpoint);
+                    endpoints.push::<ENDPOINT_WIDTH>(
+                        &self.root,
+                        endpoint,
+                        &mut cancelled,
+                        &mut self.checkpoint.evidence,
+                    )?;
                 }
             }
+            let retained_names = unified
+                .slot_count()
+                .saturating_add(node_details.slot_count())
+                .saturating_add(edge_details.slot_count())
+                .saturating_add(endpoints.slot_count())
+                .saturating_add(
+                    row_groups
+                        .values()
+                        .map(RowMergeAccumulator::slot_count)
+                        .sum::<usize>(),
+                );
+            self.checkpoint.evidence.peak_merge_name_slots = self
+                .checkpoint
+                .evidence
+                .peak_merge_name_slots
+                .max(retained_names as u64);
         }
-        let identities = merge_fixed_all::<BASE_IDENTITY_WIDTH>(
+        let staged_identities = unified.finish_optional::<BASE_IDENTITY_WIDTH>(
             &self.root,
-            unified,
-            "merge-identities",
-            self.checkpoint.budgets.merge_fan_in,
-            true,
             &mut cancelled,
             &mut self.checkpoint.evidence,
         )?;
-        let node_details = merge_optional::<NODE_DETAIL_WIDTH>(
+        let identities = if let Some(base) = self.base_snapshot.as_mut() {
+            let (name, work) = merge_staged_with_base(
+                &self.root,
+                staged_identities.as_deref(),
+                base,
+                &mut cancelled,
+                &mut self.checkpoint.evidence,
+            )?;
+            if work.live_nodes != self.checkpoint.base_work.live_nodes
+                || work.live_edges != self.checkpoint.base_work.live_edges
+                || work.max_node_surrogate != self.checkpoint.base_work.max_node_surrogate
+            {
+                return Err(storage("pinned base UUID work differs from checkpoint"));
+            }
+            self.checkpoint.evidence.authentication_read_bytes = self
+                .checkpoint
+                .evidence
+                .authentication_read_bytes
+                .saturating_add(work.authentication_bytes);
+            self.checkpoint.evidence.authentication_read_operations = self
+                .checkpoint
+                .evidence
+                .authentication_read_operations
+                .saturating_add(work.authentication_blocks);
+            name
+        } else {
+            staged_identities.ok_or_else(|| storage("construction contains no identities"))?
+        };
+        let node_details = node_details.finish_optional::<NODE_DETAIL_WIDTH>(
             &self.root,
-            node_details,
-            "merge-node-details",
-            self.checkpoint.budgets.merge_fan_in,
-            true,
             &mut cancelled,
             &mut self.checkpoint.evidence,
         )?;
-        let edge_details = merge_optional::<EDGE_DETAIL_WIDTH>(
+        let edge_details = edge_details.finish_optional::<EDGE_DETAIL_WIDTH>(
             &self.root,
-            edge_details,
-            "merge-edge-details",
-            self.checkpoint.budgets.merge_fan_in,
-            true,
             &mut cancelled,
             &mut self.checkpoint.evidence,
         )?;
-        let endpoints = merge_optional::<ENDPOINT_WIDTH>(
+        let endpoints = endpoints.finish_optional::<ENDPOINT_WIDTH>(
             &self.root,
-            endpoints,
-            "merge-endpoints",
-            self.checkpoint.budgets.merge_fan_in,
-            false,
             &mut cancelled,
             &mut self.checkpoint.evidence,
         )?;
@@ -945,12 +996,11 @@ impl GraphConstructionSession {
         )?;
         let mut node_rows = Vec::new();
         let mut edge_rows = Vec::new();
-        for ((kind, schema_digest), inputs) in row_groups {
+        for ((kind, schema_digest), rows) in row_groups {
             reject_cancelled(&mut cancelled)?;
             let output = format!("shaped-rows-{kind}-{schema_digest}.parquet");
-            merge_row_all(
+            rows.finish(
                 &self.root,
-                inputs,
                 &output,
                 self.checkpoint.budgets.max_batch_rows,
                 self.checkpoint.budgets.max_batch_bytes,
@@ -965,22 +1015,14 @@ impl GraphConstructionSession {
             }
         }
         let runtime_catalog = build_runtime_catalog(
+            self.parent_catalog.clone(),
             &self.root,
             &node_rows,
             &edge_rows,
             self.checkpoint.session_now_micros,
             &mut cancelled,
+            &mut self.checkpoint.evidence,
         )?;
-        self.checkpoint.evidence.merge_read_blocks = self
-            .checkpoint
-            .evidence
-            .merge_read_bytes
-            .div_ceil(BLOCK_BYTES as u64);
-        self.checkpoint.evidence.merge_write_blocks = self
-            .checkpoint
-            .evidence
-            .merge_written_bytes
-            .div_ceil(BLOCK_BYTES as u64);
         self.checkpoint.evidence.peak_merge_temporary_bytes = self
             .checkpoint
             .evidence
@@ -1191,6 +1233,9 @@ impl GraphConstructionSession {
         evidence.peak_batch_rows = evidence.peak_batch_rows.max(receipt.rows);
         evidence.peak_batch_bytes = evidence.peak_batch_bytes.max(receipt.input_bytes);
         evidence.peak_run_records = evidence.peak_run_records.max(receipt.run_records);
+        evidence.peak_accounted_live_bytes = evidence
+            .peak_accounted_live_bytes
+            .max(receipt.accounted_live_bytes);
         for artifact in [&receipt.parquet, &receipt.identities, &receipt.details]
             .into_iter()
             .chain(receipt.endpoints.iter())
@@ -1199,6 +1244,9 @@ impl GraphConstructionSession {
             evidence.write_operations = evidence
                 .write_operations
                 .saturating_add(artifact.write_operations);
+            evidence.fsync_operations = evidence
+                .fsync_operations
+                .saturating_add(artifact.fsync_operations);
         }
         self.checkpoint.next_sequence = self.checkpoint.next_sequence.saturating_add(1);
         self.checkpoint.saw_edge |= receipt.kind == ConstructionChunkKind::Edge;
@@ -1355,6 +1403,12 @@ fn validate_schema(kind: ConstructionChunkKind, batch: &RecordBatch) -> Result<(
             return Err(storage("required construction columns are non-null"));
         }
     }
+    if batch.schema().fields()[expected.fields().len()..]
+        .iter()
+        .any(|field| !crate::schemas::property_data_type_supported(field.data_type()))
+    {
+        return Err(storage("unsupported construction property type"));
+    }
     let identifiers = batch
         .column(1)
         .as_any()
@@ -1412,7 +1466,18 @@ fn logical_batch_digest(
             }
         }
     }
-    for column in expected_property_columns(kind, batch) {
+    let required = if kind == ConstructionChunkKind::Node {
+        2
+    } else {
+        4
+    };
+    let schema = batch.schema();
+    for (field, column) in schema.fields()[required..]
+        .iter()
+        .zip(expected_property_columns(kind, batch))
+    {
+        digest.update((field.name().len() as u64).to_be_bytes());
+        digest.update(field.name().as_bytes());
         digest.update(column.data_type().to_string().as_bytes());
         for row in 0..column.len() {
             if column.is_null(row) {
@@ -1531,6 +1596,80 @@ struct HashingWriter<W> {
     operations: u64,
 }
 
+#[derive(Clone, Default)]
+struct IoCounter {
+    bytes: std::sync::Arc<AtomicU64>,
+    operations: std::sync::Arc<AtomicU64>,
+}
+
+impl IoCounter {
+    fn account(&self, bytes: usize) {
+        if bytes != 0 {
+            self.bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+            self.operations.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn add_to(&self, evidence: &mut GraphConstructionEvidence) {
+        evidence.parquet_read_bytes = evidence
+            .parquet_read_bytes
+            .saturating_add(self.bytes.load(Ordering::Relaxed));
+        evidence.parquet_read_operations = evidence
+            .parquet_read_operations
+            .saturating_add(self.operations.load(Ordering::Relaxed));
+    }
+}
+
+struct CountingRead<R> {
+    inner: R,
+    counter: IoCounter,
+}
+
+impl<R: Read> Read for CountingRead<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let read = self.inner.read(buffer)?;
+        self.counter.account(read);
+        Ok(read)
+    }
+}
+
+struct CountingChunkReader {
+    file: File,
+    counter: IoCounter,
+}
+
+impl Length for CountingChunkReader {
+    fn len(&self) -> u64 {
+        self.file.metadata().map_or(0, |metadata| metadata.len())
+    }
+}
+
+impl ChunkReader for CountingChunkReader {
+    type T = CountingRead<BufReader<File>>;
+
+    fn get_read(&self, start: u64) -> parquet::errors::Result<Self::T> {
+        use std::io::{Seek, SeekFrom};
+
+        let mut file = self.file.try_clone()?;
+        file.seek(SeekFrom::Start(start))?;
+        Ok(CountingRead {
+            inner: BufReader::with_capacity(BLOCK_BYTES, file),
+            counter: self.counter.clone(),
+        })
+    }
+
+    fn get_bytes(&self, start: u64, length: usize) -> parquet::errors::Result<bytes::Bytes> {
+        use std::io::{Seek, SeekFrom};
+
+        let mut file = self.file.try_clone()?;
+        file.seek(SeekFrom::Start(start))?;
+        let mut value = vec![0_u8; length];
+        file.read_exact(&mut value)?;
+        self.counter.account(length);
+        Ok(bytes::Bytes::from(value))
+    }
+}
+
 impl<W> HashingWriter<W> {
     fn new(inner: W) -> Self {
         Self {
@@ -1581,6 +1720,7 @@ fn write_parquet(
         sha256: hex(&hashing.digest.clone().finalize()),
         identity: identity.into(),
         write_operations: hashing.operations,
+        fsync_operations: 4,
     };
     root.sync().map_err(storage)?;
     root.install_child(OsStr::new(&temporary), identity, OsStr::new(name))
@@ -1619,6 +1759,7 @@ fn write_fixed_run<const N: usize>(
         sha256: hex(&writer.digest.finalize()),
         identity: identity.into(),
         write_operations: writer.operations,
+        fsync_operations: 3,
     };
     root.sync().map_err(storage)?;
     root.install_child(OsStr::new(&temporary), identity, OsStr::new(name))
@@ -1649,35 +1790,6 @@ fn reject_existing_merge_artifacts(root: &StableDirectory) -> Result<(), GfError
         }
     }
     Ok(())
-}
-
-fn planned_shape_names(
-    chunks: usize,
-    identity_inputs: usize,
-    node_runs: usize,
-    edge_runs: usize,
-    endpoint_runs: usize,
-    fan_in: usize,
-) -> Vec<String> {
-    let mut names = (0..chunks)
-        .map(|sequence| format!("merge-unified-{sequence:020}.run"))
-        .collect::<Vec<_>>();
-    plan_merge_names(identity_inputs, "merge-identities", fan_in, &mut names);
-    plan_merge_names(node_runs, "merge-node-details", fan_in, &mut names);
-    plan_merge_names(edge_runs, "merge-edge-details", fan_in, &mut names);
-    plan_merge_names(endpoint_runs, "merge-endpoints", fan_in, &mut names);
-    names.push("shaped-identities.run".to_owned());
-    names
-}
-
-fn plan_merge_names(mut count: usize, prefix: &str, fan_in: usize, names: &mut Vec<String>) {
-    let mut level = 0;
-    while count > 1 {
-        let groups = count.div_ceil(fan_in);
-        names.extend((0..groups).map(|group| format!("{prefix}-l{level:03}-g{group:08}.run")));
-        count = groups;
-        level += 1;
-    }
 }
 
 fn recover_shape_intent(root: &StableDirectory, checkpoint: &Checkpoint) -> Result<(), GfError> {
@@ -1718,55 +1830,18 @@ fn recover_shape_intent(root: &StableDirectory, checkpoint: &Checkpoint) -> Resu
     if intent.shape.is_some() || !intent.outputs.is_empty() {
         return Err(storage("incomplete shape intent claims completed output"));
     }
-    let mut node_runs = 0;
-    let mut edge_runs = 0;
-    let mut source_names = Vec::new();
-    for sequence in 0..checkpoint.next_sequence {
-        let mut file = root
-            .open_child_file(OsStr::new(&receipt_name(sequence)))
-            .map_err(storage)?;
-        let receipt: ConstructionChunkReceipt = decode_bounded(&mut file)?;
-        match receipt.kind {
-            ConstructionChunkKind::Node => {
-                node_runs += 1;
-                source_names.push(format!("merge-node-source-{sequence:020}.run"));
-            }
-            ConstructionChunkKind::Edge => {
-                edge_runs += 1;
-                source_names.push(format!("merge-edge-source-{sequence:020}.run"));
-                source_names.push(format!("merge-endpoint-source-{sequence:020}.run"));
-            }
-        }
-    }
-    let chunks = usize::try_from(checkpoint.next_sequence)
-        .map_err(|_| storage("construction shape chunk count exceeds this platform"))?;
-    let mut names = planned_shape_names(
-        chunks,
-        chunks + usize::from(checkpoint.base_identities.is_some()),
-        node_runs,
-        edge_runs,
-        edge_runs,
-        checkpoint.budgets.merge_fan_in,
-    );
-    names.extend(source_names);
     for child in root.child_names().map_err(storage)? {
         let Some(name) = child.to_str() else { continue };
-        if name.starts_with("merge-rows-")
-            || name.starts_with("shaped-rows-")
-            || name.starts_with("merge-resolved-")
-            || name == "shaped-runtime-catalog.parquet"
-        {
-            names.push(name.to_owned());
+        if !name.starts_with("merge-") && !name.starts_with("shaped-") {
+            continue;
         }
-    }
-    for name in names {
-        match root.open_child_file(OsStr::new(&name)) {
+        match root.open_child_file(OsStr::new(name)) {
             Ok(file) => {
                 if file_link_count(&file).map_err(storage)? != 1 {
                     return Err(storage("construction shape artifact has extra links"));
                 }
                 drop(file);
-                unlink_named(root, &name)?;
+                unlink_named(root, name)?;
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(storage(error)),
@@ -1837,6 +1912,7 @@ fn receipt_for_existing(root: &StableDirectory, name: &str) -> Result<ArtifactRe
         sha256: hex(&digest.finalize()),
         identity: identity.into(),
         write_operations: operations,
+        fsync_operations: 0,
     })
 }
 
@@ -1870,8 +1946,22 @@ fn is_shape_artifact_name(name: &str) -> bool {
             && body.as_bytes().get(1) == Some(&b'-')
             && body[2..].bytes().all(|byte| byte.is_ascii_hexdigit());
     }
-    if name.starts_with("merge-rows-l") && name.ends_with(".parquet") {
-        return true;
+    if let Some(body) = name
+        .strip_prefix("merge-rows-")
+        .and_then(|body| body.strip_suffix(".parquet"))
+    {
+        let mut parts = body.split("-l");
+        let namespace = parts.next().unwrap_or_default();
+        let level_group = parts.next().unwrap_or_default();
+        return parts.next().is_none()
+            && namespace.len() == 16
+            && namespace.bytes().all(|byte| byte.is_ascii_hexdigit())
+            && level_group.split_once("-g").is_some_and(|(level, group)| {
+                level.len() == 3
+                    && level.bytes().all(|byte| byte.is_ascii_digit())
+                    && group.len() == 20
+                    && group.bytes().all(|byte| byte.is_ascii_digit())
+            });
     }
     if let Some(sequence) = name
         .strip_prefix("merge-unified-")
@@ -1938,6 +2028,22 @@ fn account_merge_write<const N: usize>(evidence: &mut GraphConstructionEvidence)
     evidence.merge_written_bytes = evidence.merge_written_bytes.saturating_add(N as u64);
 }
 
+fn account_sequential_read(bytes: u64, evidence: &mut GraphConstructionEvidence) {
+    if bytes != 0 {
+        evidence.merge_read_blocks = evidence
+            .merge_read_blocks
+            .saturating_add(bytes.div_ceil(BLOCK_BYTES as u64));
+    }
+}
+
+fn account_sequential_write(bytes: u64, evidence: &mut GraphConstructionEvidence) {
+    if bytes != 0 {
+        evidence.merge_write_blocks = evidence
+            .merge_write_blocks
+            .saturating_add(bytes.div_ceil(BLOCK_BYTES as u64));
+    }
+}
+
 fn convert_identity_run(
     root: &StableDirectory,
     receipt: &ConstructionChunkReceipt,
@@ -1947,6 +2053,7 @@ fn convert_identity_run(
     let input = root
         .open_child_file(OsStr::new(&receipt.identities.name))
         .map_err(storage)?;
+    account_sequential_read(receipt.identities.bytes, evidence);
     if !receipt
         .identities
         .identity
@@ -1979,10 +2086,13 @@ fn convert_identity_run(
     }
     writer.flush().map_err(storage)?;
     writer.get_ref().sync_all().map_err(storage)?;
+    account_sequential_write(bytes.saturating_mul(2), evidence);
     drop(writer);
     root.install_child(OsStr::new(&temporary), identity, OsStr::new(output))
         .map_err(storage)?;
-    root.sync().map_err(storage)
+    root.sync().map_err(storage)?;
+    evidence.merge_fsync_operations = evidence.merge_fsync_operations.saturating_add(2);
+    Ok(())
 }
 
 fn copy_authenticated_run<const N: usize>(
@@ -1994,6 +2104,7 @@ fn copy_authenticated_run<const N: usize>(
     let input = root
         .open_child_file(OsStr::new(&receipt.name))
         .map_err(storage)?;
+    account_sequential_read(receipt.bytes, evidence);
     if !receipt
         .identity
         .matches(file_identity(&input).map_err(storage)?)
@@ -2022,34 +2133,157 @@ fn copy_authenticated_run<const N: usize>(
     }
     writer.flush().map_err(storage)?;
     writer.get_ref().sync_all().map_err(storage)?;
+    account_sequential_write(bytes, evidence);
     drop(writer);
     root.install_child(OsStr::new(&temporary), identity, OsStr::new(output))
         .map_err(storage)?;
-    root.sync().map_err(storage)
+    root.sync().map_err(storage)?;
+    evidence.merge_fsync_operations = evidence.merge_fsync_operations.saturating_add(2);
+    Ok(())
 }
 
-fn merge_optional<const N: usize>(
-    root: &StableDirectory,
-    inputs: Vec<String>,
-    prefix: &str,
+/// Online external-merge scheduler.  It retains at most `fan_in - 1` names per
+/// logarithmic level rather than one name per accepted chunk.
+struct FixedMergeAccumulator {
+    prefix: &'static str,
     fan_in: usize,
     reject_duplicates: bool,
-    cancelled: &mut impl FnMut() -> bool,
-    evidence: &mut GraphConstructionEvidence,
-) -> Result<Option<String>, GfError> {
-    if inputs.is_empty() {
-        Ok(None)
-    } else {
-        merge_fixed_all::<N>(
-            root,
-            inputs,
+    levels: Vec<Vec<String>>,
+    groups: Vec<usize>,
+    inputs: u64,
+}
+
+#[cfg(test)]
+fn online_merge_name_slot_bound(mut inputs: u64, fan_in: usize) -> u64 {
+    let radix = fan_in as u64;
+    let mut slots = 0_u64;
+    while inputs != 0 {
+        slots = slots.saturating_add(inputs % radix);
+        inputs /= radix;
+    }
+    slots.max(1)
+}
+
+impl FixedMergeAccumulator {
+    fn new(prefix: &'static str, fan_in: usize, reject_duplicates: bool) -> Self {
+        Self {
             prefix,
             fan_in,
             reject_duplicates,
-            cancelled,
-            evidence,
-        )
-        .map(Some)
+            levels: Vec::new(),
+            groups: Vec::new(),
+            inputs: 0,
+        }
+    }
+
+    fn slot_count(&self) -> usize {
+        self.levels.iter().map(Vec::len).sum()
+    }
+
+    fn push<const N: usize>(
+        &mut self,
+        root: &StableDirectory,
+        mut name: String,
+        cancelled: &mut impl FnMut() -> bool,
+        evidence: &mut GraphConstructionEvidence,
+    ) -> Result<(), GfError> {
+        self.inputs = self.inputs.saturating_add(1);
+        let mut level = 0;
+        loop {
+            if self.levels.len() <= level {
+                self.levels.push(Vec::with_capacity(self.fan_in));
+                self.groups.push(0);
+            }
+            self.levels[level].push(name);
+            if self.levels[level].len() < self.fan_in {
+                return Ok(());
+            }
+            let inputs = std::mem::take(&mut self.levels[level]);
+            let group = self.groups[level];
+            self.groups[level] = group.saturating_add(1);
+            evidence.merge_passes = evidence.merge_passes.max(level as u64 + 1);
+            name = format!("{}-l{level:03}-g{group:08}.run", self.prefix);
+            merge_fixed_group::<N>(
+                root,
+                &inputs,
+                &name,
+                self.reject_duplicates,
+                cancelled,
+                evidence,
+            )?;
+            for input in inputs {
+                if input.starts_with("merge-") {
+                    unlink_named(root, &input)?;
+                }
+            }
+            level += 1;
+        }
+    }
+
+    fn finish_optional<const N: usize>(
+        self,
+        root: &StableDirectory,
+        cancelled: &mut impl FnMut() -> bool,
+        evidence: &mut GraphConstructionEvidence,
+    ) -> Result<Option<String>, GfError> {
+        if self.inputs == 0 {
+            return Ok(None);
+        }
+        self.finish::<N>(root, cancelled, evidence).map(Some)
+    }
+
+    fn finish<const N: usize>(
+        mut self,
+        root: &StableDirectory,
+        cancelled: &mut impl FnMut() -> bool,
+        evidence: &mut GraphConstructionEvidence,
+    ) -> Result<String, GfError> {
+        if self.inputs == 0 {
+            return Err(storage("external merge has no input"));
+        }
+        let mut level = 0;
+        loop {
+            if level >= self.levels.len() {
+                return Err(storage("external merge scheduler lost its root"));
+            }
+            let inputs = std::mem::take(&mut self.levels[level]);
+            if inputs.is_empty() {
+                level += 1;
+                continue;
+            }
+            let higher_empty = self.levels[level + 1..].iter().all(Vec::is_empty);
+            if inputs.len() == 1 && higher_empty {
+                return Ok(inputs.into_iter().next().expect("one merge root"));
+            }
+            let name = if inputs.len() == 1 {
+                inputs[0].clone()
+            } else {
+                let group = self.groups[level];
+                self.groups[level] = group.saturating_add(1);
+                evidence.merge_passes = evidence.merge_passes.max(level as u64 + 1);
+                let output = format!("{}-l{level:03}-g{group:08}.run", self.prefix);
+                merge_fixed_group::<N>(
+                    root,
+                    &inputs,
+                    &output,
+                    self.reject_duplicates,
+                    cancelled,
+                    evidence,
+                )?;
+                for input in inputs {
+                    if input.starts_with("merge-") {
+                        unlink_named(root, &input)?;
+                    }
+                }
+                output
+            };
+            if self.levels.len() <= level + 1 {
+                self.levels.push(Vec::with_capacity(self.fan_in));
+                self.groups.push(0);
+            }
+            self.levels[level + 1].push(name);
+            level += 1;
+        }
     }
 }
 
@@ -2098,7 +2332,12 @@ fn merge_fixed_group<const N: usize>(
         .iter()
         .map(|name| {
             root.open_child_file(OsStr::new(name))
-                .map(|file| BufReader::with_capacity(BLOCK_BYTES, file))
+                .map(|file| {
+                    if let Ok(metadata) = file.metadata() {
+                        account_sequential_read(metadata.len(), evidence);
+                    }
+                    BufReader::with_capacity(BLOCK_BYTES, file)
+                })
                 .map_err(storage)
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -2138,10 +2377,15 @@ fn merge_fixed_group<const N: usize>(
     }
     writer.flush().map_err(storage)?;
     writer.get_ref().sync_all().map_err(storage)?;
+    account_sequential_write(
+        writer.get_ref().metadata().map_err(storage)?.len(),
+        evidence,
+    );
     drop(writer);
     root.install_child(OsStr::new(&temporary), identity, OsStr::new(output))
         .map_err(storage)?;
     root.sync().map_err(storage)?;
+    evidence.merge_fsync_operations = evidence.merge_fsync_operations.saturating_add(2);
     evidence.merge_groups = evidence.merge_groups.saturating_add(1);
     evidence.peak_merge_temporary_bytes = evidence
         .peak_merge_temporary_bytes
@@ -2212,11 +2456,18 @@ fn merge_row_group(
     if inputs.is_empty() || output_rows == 0 || output_bytes == 0 {
         return Err(storage("invalid row merge group"));
     }
+    evidence.peak_merge_inputs = evidence.peak_merge_inputs.max(inputs.len() as u64);
     let mut cursors = Vec::with_capacity(inputs.len());
+    let mut counters = Vec::with_capacity(inputs.len());
     let mut schema: Option<SchemaRef> = None;
     for input in inputs {
         let file = root.open_child_file(OsStr::new(input)).map_err(storage)?;
-        let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(storage)?;
+        let counter = IoCounter::default();
+        let builder = ParquetRecordBatchReaderBuilder::try_new(CountingChunkReader {
+            file,
+            counter: counter.clone(),
+        })
+        .map_err(storage)?;
         if schema
             .as_ref()
             .is_some_and(|known| known.as_ref() != builder.schema().as_ref())
@@ -2234,6 +2485,7 @@ fn merge_row_group(
             batch: None,
             row: 0,
         });
+        counters.push(counter);
     }
     let schema = schema.ok_or_else(|| storage("row merge lacks schema"))?;
     let temporary = artifact_temp(output);
@@ -2319,84 +2571,201 @@ fn merge_row_group(
         sha256: hex(&hashing.digest.clone().finalize()),
         identity: identity.into(),
         write_operations: hashing.operations,
+        fsync_operations: 4,
     };
     root.sync().map_err(storage)?;
     root.install_child(OsStr::new(&temporary), identity, OsStr::new(output))
         .map_err(storage)?;
     root.sync().map_err(storage)?;
+    evidence.merge_fsync_operations = evidence.merge_fsync_operations.saturating_add(4);
     evidence.merge_groups = evidence.merge_groups.saturating_add(1);
     evidence.merge_written_bytes = evidence.merge_written_bytes.saturating_add(receipt.bytes);
+    evidence.parquet_write_bytes = evidence.parquet_write_bytes.saturating_add(receipt.bytes);
+    evidence.parquet_write_operations = evidence
+        .parquet_write_operations
+        .saturating_add(receipt.write_operations);
+    for counter in counters {
+        counter.add_to(evidence);
+    }
+    evidence.peak_merge_temporary_bytes = evidence
+        .peak_merge_temporary_bytes
+        .max(measured_shape_bytes(root)?);
     Ok(receipt)
 }
 
-fn merge_row_all(
-    root: &StableDirectory,
-    mut inputs: Vec<String>,
-    output: &str,
-    output_rows: usize,
-    output_bytes: usize,
+struct RowMergeAccumulator {
     fan_in: usize,
-    cancelled: &mut impl FnMut() -> bool,
-    evidence: &mut GraphConstructionEvidence,
-) -> Result<ArtifactReceipt, GfError> {
-    let mut level = 0_u32;
-    let namespace = &sha256(output.as_bytes())[..16];
-    while inputs.len() > fan_in {
-        evidence.merge_passes = evidence.merge_passes.saturating_add(1);
-        let mut next = Vec::new();
-        for (group, names) in inputs.chunks(fan_in).enumerate() {
-            let name = format!("merge-rows-{namespace}-l{level:03}-g{group:020}.parquet");
+    namespace: String,
+    levels: Vec<Vec<String>>,
+    groups: Vec<usize>,
+    inputs: u64,
+}
+
+impl RowMergeAccumulator {
+    fn new(fan_in: usize, authority: &str) -> Self {
+        Self {
+            fan_in,
+            namespace: sha256(authority.as_bytes())[..16].to_owned(),
+            levels: Vec::new(),
+            groups: Vec::new(),
+            inputs: 0,
+        }
+    }
+
+    fn slot_count(&self) -> usize {
+        self.levels.iter().map(Vec::len).sum()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn push(
+        &mut self,
+        root: &StableDirectory,
+        mut name: String,
+        output_rows: usize,
+        output_bytes: usize,
+        cancelled: &mut impl FnMut() -> bool,
+        evidence: &mut GraphConstructionEvidence,
+    ) -> Result<(), GfError> {
+        self.inputs = self.inputs.saturating_add(1);
+        let mut level = 0;
+        loop {
+            if self.levels.len() <= level {
+                self.levels.push(Vec::with_capacity(self.fan_in));
+                self.groups.push(0);
+            }
+            self.levels[level].push(name);
+            if self.levels[level].len() < self.fan_in {
+                return Ok(());
+            }
+            let inputs = std::mem::take(&mut self.levels[level]);
+            let group = self.groups[level];
+            self.groups[level] = group.saturating_add(1);
+            evidence.merge_passes = evidence.merge_passes.max(level as u64 + 1);
+            name = format!(
+                "merge-rows-{}-l{level:03}-g{group:020}.parquet",
+                self.namespace
+            );
             merge_row_group(
                 root,
-                names,
+                &inputs,
                 &name,
                 output_rows,
                 output_bytes,
                 cancelled,
                 evidence,
             )?;
-            next.push(name);
-        }
-        for old in &inputs {
-            if old.starts_with("merge-rows-") {
-                unlink_named(root, old)?;
+            for input in inputs {
+                if input.starts_with("merge-rows-") {
+                    unlink_named(root, &input)?;
+                }
             }
+            level += 1;
         }
-        inputs = next;
-        level = level.saturating_add(1);
     }
-    evidence.merge_passes = evidence.merge_passes.saturating_add(1);
-    evidence.peak_merge_inputs = evidence.peak_merge_inputs.max(inputs.len() as u64);
-    merge_row_group(
-        root,
-        &inputs,
-        output,
-        output_rows,
-        output_bytes,
-        cancelled,
-        evidence,
-    )
+
+    #[allow(clippy::too_many_arguments)]
+    fn finish(
+        mut self,
+        root: &StableDirectory,
+        output: &str,
+        output_rows: usize,
+        output_bytes: usize,
+        _fan_in: usize,
+        cancelled: &mut impl FnMut() -> bool,
+        evidence: &mut GraphConstructionEvidence,
+    ) -> Result<ArtifactReceipt, GfError> {
+        if self.inputs == 0 {
+            return Err(storage("row merge has no input"));
+        }
+        let mut level = 0;
+        loop {
+            let inputs = std::mem::take(
+                self.levels
+                    .get_mut(level)
+                    .ok_or_else(|| storage("row merge scheduler lost its root"))?,
+            );
+            if inputs.is_empty() {
+                level += 1;
+                continue;
+            }
+            let higher_empty = self.levels[level + 1..].iter().all(Vec::is_empty);
+            if higher_empty {
+                let receipt = merge_row_group(
+                    root,
+                    &inputs,
+                    output,
+                    output_rows,
+                    output_bytes,
+                    cancelled,
+                    evidence,
+                )?;
+                for input in inputs {
+                    if input.starts_with("merge-rows-") {
+                        unlink_named(root, &input)?;
+                    }
+                }
+                return Ok(receipt);
+            }
+            let name = if inputs.len() == 1 {
+                inputs[0].clone()
+            } else {
+                let group = self.groups[level];
+                self.groups[level] = group.saturating_add(1);
+                evidence.merge_passes = evidence.merge_passes.max(level as u64 + 1);
+                let output_name = format!(
+                    "merge-rows-{}-l{level:03}-g{group:020}.parquet",
+                    self.namespace
+                );
+                merge_row_group(
+                    root,
+                    &inputs,
+                    &output_name,
+                    output_rows,
+                    output_bytes,
+                    cancelled,
+                    evidence,
+                )?;
+                for input in inputs {
+                    if input.starts_with("merge-rows-") {
+                        unlink_named(root, &input)?;
+                    }
+                }
+                output_name
+            };
+            if self.levels.len() <= level + 1 {
+                self.levels.push(Vec::with_capacity(self.fan_in));
+                self.groups.push(0);
+            }
+            self.levels[level + 1].push(name);
+            level += 1;
+        }
+    }
 }
 
 fn build_runtime_catalog(
+    mut catalog: RuntimeCatalog,
     root: &StableDirectory,
     node_rows: &[String],
     edge_rows: &[String],
     now_micros: i64,
     cancelled: &mut impl FnMut() -> bool,
+    evidence: &mut GraphConstructionEvidence,
 ) -> Result<String, GfError> {
-    let mut catalog = RuntimeCatalog::new();
     for (kind, names) in [
         (ConstructionChunkKind::Node, node_rows),
         (ConstructionChunkKind::Edge, edge_rows),
     ] {
         for name in names {
             let file = root.open_child_file(OsStr::new(name)).map_err(storage)?;
-            let reader = ParquetRecordBatchReaderBuilder::try_new(file)
-                .map_err(storage)?
-                .with_batch_size(4096)
-                .build()
-                .map_err(storage)?;
+            let counter = IoCounter::default();
+            let reader = ParquetRecordBatchReaderBuilder::try_new(CountingChunkReader {
+                file,
+                counter: counter.clone(),
+            })
+            .map_err(storage)?
+            .with_batch_size(4096)
+            .build()
+            .map_err(storage)?;
             for batch in reader {
                 reject_cancelled(cancelled)?;
                 let batch = batch.map_err(storage)?;
@@ -2420,16 +2789,74 @@ fn build_runtime_catalog(
                             catalog.intern_relation_type_at(owner_name, now_micros);
                         }
                     }
-                    for field in &batch.schema().fields()[required..] {
-                        catalog.intern_property_at(field.name(), Some(owner_name), now_micros);
+                    for (offset, field) in batch.schema().fields()[required..].iter().enumerate() {
+                        if !batch.column(required + offset).is_null(row) {
+                            catalog.intern_property_at(field.name(), Some(owner_name), now_micros);
+                        }
                     }
                 }
             }
+            counter.add_to(evidence);
         }
     }
     let output = "shaped-runtime-catalog.parquet";
-    write_parquet(root, output, &catalog.to_record_batch())?;
+    let receipt = write_parquet(root, output, &catalog.to_record_batch())?;
+    evidence.merge_fsync_operations = evidence
+        .merge_fsync_operations
+        .saturating_add(receipt.fsync_operations);
+    evidence.parquet_write_bytes = evidence.parquet_write_bytes.saturating_add(receipt.bytes);
+    evidence.parquet_write_operations = evidence
+        .parquet_write_operations
+        .saturating_add(receipt.write_operations);
+    account_sequential_write(receipt.bytes, evidence);
     Ok(output.to_owned())
+}
+
+fn load_parent_runtime_catalog(
+    project_path: &Path,
+    parent_generation: u64,
+) -> Result<(RuntimeCatalog, Option<String>), GfError> {
+    if parent_generation == 0 {
+        return Ok((RuntimeCatalog::new(), None));
+    }
+    let path = project_path.join("topology/runtime_catalog.parquet");
+    let digest = match std::fs::read(&path) {
+        Ok(bytes) => Some(sha256(&bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((RuntimeCatalog::new(), None));
+        }
+        Err(error) => {
+            return Err(storage(format!(
+                "cannot hash pinned parent catalog: {error}"
+            )));
+        }
+    };
+    let file = match File::open(&path) {
+        Ok(file) => file,
+        Err(error) => {
+            return Err(storage(format!(
+                "cannot open pinned parent catalog: {error}"
+            )));
+        }
+    };
+    let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+        .map_err(storage)?
+        .with_batch_size(4096)
+        .build()
+        .map_err(storage)?;
+    let mut batches = Vec::new();
+    for batch in reader {
+        batches.push(batch.map_err(storage)?);
+    }
+    if batches.is_empty() {
+        return Ok((RuntimeCatalog::new(), digest));
+    }
+    let schema = batches[0].schema();
+    let merged = arrow::compute::concat_batches(&schema, &batches).map_err(storage)?;
+    Ok((
+        RuntimeCatalog::from_record_batch(&merged).map_err(storage)?,
+        digest,
+    ))
 }
 
 fn read_fixed<const N: usize>(reader: &mut impl Read) -> Result<Option<[u8; N]>, GfError> {
@@ -2461,6 +2888,10 @@ fn validate_unified_and_details(
         BLOCK_BYTES,
         root.open_child_file(OsStr::new(identities_name))
             .map_err(storage)?,
+    );
+    account_sequential_read(
+        identities.get_ref().metadata().map_err(storage)?.len(),
+        evidence,
     );
     let mut node_count = 0_u64;
     let mut edge_count = 0_u64;
@@ -2538,6 +2969,99 @@ fn validate_unified_and_details(
     Ok((node_count, edge_count, max_node, max_edge))
 }
 
+fn merge_staged_with_base(
+    root: &StableDirectory,
+    staged_name: Option<&str>,
+    base: &mut UuidConstructionSnapshot,
+    cancelled: &mut impl FnMut() -> bool,
+    evidence: &mut GraphConstructionEvidence,
+) -> Result<(String, UuidConstructionSnapshotWork), GfError> {
+    let output = "merge-identities-with-base.run";
+    let temporary = artifact_temp(output);
+    let file = root
+        .create_replaceable_child_file(OsStr::new(&temporary))
+        .map_err(storage)?;
+    let identity = file_identity(&file).map_err(storage)?;
+    let mut writer = BufWriter::with_capacity(BLOCK_BYTES, file);
+    let mut staged = staged_name
+        .map(|name| {
+            root.open_child_file(OsStr::new(name))
+                .map(|file| BufReader::with_capacity(BLOCK_BYTES, file))
+                .map_err(storage)
+        })
+        .transpose()?;
+    let mut staged_record = staged
+        .as_mut()
+        .map(read_fixed::<BASE_IDENTITY_WIDTH>)
+        .transpose()?
+        .flatten();
+    if let Some(reader) = &staged {
+        account_sequential_read(
+            reader.get_ref().metadata().map_err(storage)?.len(),
+            evidence,
+        );
+    }
+    let mut emitted = 0_u64;
+    let work = base.stream_authenticated(|value| {
+        let base_record = encode_base_identity(value);
+        while staged_record
+            .as_ref()
+            .is_some_and(|record| record[..16] < base_record[..16])
+        {
+            let record = staged_record.take().expect("staged head exists");
+            writer.write_all(&record).map_err(storage)?;
+            account_merge_read::<BASE_IDENTITY_WIDTH>(evidence);
+            account_merge_write::<BASE_IDENTITY_WIDTH>(evidence);
+            staged_record = staged
+                .as_mut()
+                .map(read_fixed::<BASE_IDENTITY_WIDTH>)
+                .transpose()?
+                .flatten();
+        }
+        if staged_record
+            .as_ref()
+            .is_some_and(|record| record[..16] == base_record[..16])
+        {
+            return Err(storage("staged UUID conflicts with pinned base identity"));
+        }
+        writer.write_all(&base_record).map_err(storage)?;
+        account_merge_write::<BASE_IDENTITY_WIDTH>(evidence);
+        emitted = emitted.saturating_add(1);
+        if emitted.is_multiple_of(4096) {
+            reject_cancelled(cancelled)?;
+        }
+        Ok(())
+    })?;
+    while let Some(record) = staged_record {
+        writer.write_all(&record).map_err(storage)?;
+        account_merge_read::<BASE_IDENTITY_WIDTH>(evidence);
+        account_merge_write::<BASE_IDENTITY_WIDTH>(evidence);
+        staged_record = staged
+            .as_mut()
+            .map(read_fixed::<BASE_IDENTITY_WIDTH>)
+            .transpose()?
+            .flatten();
+    }
+    writer.flush().map_err(storage)?;
+    writer.get_ref().sync_all().map_err(storage)?;
+    account_sequential_write(
+        writer.get_ref().metadata().map_err(storage)?.len(),
+        evidence,
+    );
+    drop(writer);
+    root.install_child(OsStr::new(&temporary), identity, OsStr::new(output))
+        .map_err(storage)?;
+    root.sync().map_err(storage)?;
+    evidence.merge_fsync_operations = evidence.merge_fsync_operations.saturating_add(2);
+    if let Some(staged_name) = staged_name
+        && staged_name.starts_with("merge-")
+    {
+        unlink_named(root, staged_name)?;
+    }
+    evidence.merge_groups = evidence.merge_groups.saturating_add(1);
+    Ok((output.to_owned(), work))
+}
+
 fn validate_detail_domain<const N: usize>(
     root: &StableDirectory,
     identities_name: &str,
@@ -2558,6 +3082,14 @@ fn validate_detail_domain<const N: usize>(
         BLOCK_BYTES,
         root.open_child_file(OsStr::new(details_name))
             .map_err(storage)?,
+    );
+    account_sequential_read(
+        identities.get_ref().metadata().map_err(storage)?.len(),
+        evidence,
+    );
+    account_sequential_read(
+        details.get_ref().metadata().map_err(storage)?.len(),
+        evidence,
     );
     let mut identity = read_fixed::<BASE_IDENTITY_WIDTH>(&mut identities)?;
     let mut count = 0_u64;
@@ -2625,6 +3157,14 @@ fn validate_endpoints(
         root.open_child_file(OsStr::new(endpoints_name))
             .map_err(storage)?,
     );
+    account_sequential_read(
+        identities.get_ref().metadata().map_err(storage)?.len(),
+        evidence,
+    );
+    account_sequential_read(
+        endpoints.get_ref().metadata().map_err(storage)?.len(),
+        evidence,
+    );
     let mut identity = read_fixed::<BASE_IDENTITY_WIDTH>(&mut identities)?;
     let mut endpoint_count = 0_u64;
     while let Some(endpoint) = read_fixed::<ENDPOINT_WIDTH>(&mut endpoints)? {
@@ -2677,6 +3217,10 @@ fn assign_surrogates(
         root.open_child_file(OsStr::new(input_name))
             .map_err(storage)?,
     );
+    account_sequential_read(
+        reader.get_ref().metadata().map_err(storage)?.len(),
+        evidence,
+    );
     let mut writer = BufWriter::with_capacity(BLOCK_BYTES, file);
     let mut count = 0_u64;
     while let Some(mut record) = read_fixed::<BASE_IDENTITY_WIDTH>(&mut reader)? {
@@ -2710,10 +3254,15 @@ fn assign_surrogates(
     }
     writer.flush().map_err(storage)?;
     writer.get_ref().sync_all().map_err(storage)?;
+    account_sequential_write(
+        writer.get_ref().metadata().map_err(storage)?.len(),
+        evidence,
+    );
     drop(writer);
     root.install_child(OsStr::new(&temporary), identity, OsStr::new(output))
         .map_err(storage)?;
     root.sync().map_err(storage)?;
+    evidence.merge_fsync_operations = evidence.merge_fsync_operations.saturating_add(2);
     Ok(output.to_owned())
 }
 
@@ -2738,6 +3287,14 @@ fn resolve_endpoint_surrogates(
         BLOCK_BYTES,
         root.open_child_file(OsStr::new(endpoints_name))
             .map_err(storage)?,
+    );
+    account_sequential_read(
+        identities.get_ref().metadata().map_err(storage)?.len(),
+        evidence,
+    );
+    account_sequential_read(
+        endpoints.get_ref().metadata().map_err(storage)?.len(),
+        evidence,
     );
     let mut identity = read_fixed::<BASE_IDENTITY_WIDTH>(&mut identities)?;
     let mut window = Vec::<[u8; RESOLVED_ENDPOINT_WIDTH]>::with_capacity(window_rows);
@@ -2773,6 +3330,10 @@ fn resolve_endpoint_surrogates(
             evidence.merge_written_records = evidence
                 .merge_written_records
                 .saturating_add(window.len() as u64);
+            evidence.merge_fsync_operations = evidence
+                .merge_fsync_operations
+                .saturating_add(receipt.fsync_operations);
+            account_sequential_write(receipt.bytes, evidence);
             runs.push(name);
             window.clear();
             sequence = sequence.saturating_add(1);
@@ -2787,6 +3348,10 @@ fn resolve_endpoint_surrogates(
         evidence.merge_written_records = evidence
             .merge_written_records
             .saturating_add(window.len() as u64);
+        evidence.merge_fsync_operations = evidence
+            .merge_fsync_operations
+            .saturating_add(receipt.fsync_operations);
+        account_sequential_write(receipt.bytes, evidence);
         runs.push(name);
     }
     merge_fixed_all::<RESOLVED_ENDPOINT_WIDTH>(
@@ -2799,106 +3364,6 @@ fn resolve_endpoint_surrogates(
         evidence,
     )
     .map(Some)
-}
-
-fn create_base_snapshot(
-    project_dir: &Path,
-    generation: u64,
-    root: &StableDirectory,
-) -> Result<
-    (
-        UuidConstructionSnapshot,
-        ArtifactReceipt,
-        UuidConstructionSnapshotWork,
-    ),
-    GfError,
-> {
-    let temporary = artifact_temp(BASE_IDENTITIES);
-    let file = root
-        .create_replaceable_child_file(OsStr::new(&temporary))
-        .map_err(storage)?;
-    let identity = file_identity(&file).map_err(storage)?;
-    let mut writer = HashingWriter::new(file);
-    let records_per_block = (BLOCK_BYTES / BASE_IDENTITY_WIDTH).max(1);
-    let block_bytes = records_per_block * BASE_IDENTITY_WIDTH;
-    let mut block = Vec::with_capacity(block_bytes);
-    let (snapshot, work) = open_uuid_construction_snapshot(project_dir, generation, |value| {
-        block.extend_from_slice(&encode_base_identity(value));
-        if block.len() == block_bytes {
-            writer.write_all(&block).map_err(storage)?;
-            block.clear();
-        }
-        Ok(())
-    })?;
-    if !block.is_empty() {
-        writer.write_all(&block).map_err(storage)?;
-    }
-    writer.flush().map_err(storage)?;
-    writer.inner.sync_all().map_err(storage)?;
-    let receipt = ArtifactReceipt {
-        name: BASE_IDENTITIES.to_owned(),
-        bytes: writer.bytes,
-        sha256: hex(&writer.digest.finalize()),
-        identity: identity.into(),
-        write_operations: writer.operations,
-    };
-    root.sync().map_err(storage)?;
-    root.install_child(
-        OsStr::new(&temporary),
-        identity,
-        OsStr::new(BASE_IDENTITIES),
-    )
-    .map_err(storage)?;
-    root.sync().map_err(storage)?;
-    Ok((snapshot, receipt, work))
-}
-
-fn authenticate_base_snapshot(
-    project_dir: &Path,
-    generation: u64,
-    root: &StableDirectory,
-    receipt: &ArtifactReceipt,
-) -> Result<(UuidConstructionSnapshot, UuidConstructionSnapshotWork), GfError> {
-    let mut retained = BufReader::with_capacity(
-        BLOCK_BYTES,
-        root.open_child_file(OsStr::new(BASE_IDENTITIES))
-            .map_err(storage)?,
-    );
-    let (snapshot, work) = open_uuid_construction_snapshot(project_dir, generation, |value| {
-        let mut record = [0_u8; BASE_IDENTITY_WIDTH];
-        retained.read_exact(&mut record).map_err(storage)?;
-        if record != encode_base_identity(value) {
-            return Err(storage(
-                "retained base identities differ from parent UUID authority",
-            ));
-        }
-        Ok(())
-    })?;
-    let mut trailing = [0_u8; 1];
-    if retained.read(&mut trailing).map_err(storage)? != 0 {
-        return Err(storage("retained base identities have trailing records"));
-    }
-    authenticate_artifact(root, receipt)?;
-    Ok((snapshot, work))
-}
-
-fn remove_unrecorded_base(root: &StableDirectory) -> Result<(), GfError> {
-    let mut file = match root.open_child_file(OsStr::new(BASE_IDENTITIES)) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(storage(error)),
-    };
-    let identity = file_identity(&file).map_err(storage)?;
-    if file_link_count(&file).map_err(storage)? != 1
-        || file.metadata().map_err(storage)?.len() % BASE_IDENTITY_WIDTH as u64 != 0
-    {
-        return Err(storage("unrecorded base identity run is not session-owned"));
-    }
-    validate_sorted_run(&mut file, BASE_IDENTITY_WIDTH)?;
-    drop(file);
-    root.unlink_child_if_identity(OsStr::new(BASE_IDENTITIES), identity)
-        .map_err(storage)?;
-    root.sync().map_err(storage)
 }
 
 #[derive(Clone, Copy)]
@@ -2928,11 +3393,7 @@ fn authenticate_artifact(
     let mut bytes = 0_u64;
     let mut operations = 0_u64;
     let width = if receipt.name.ends_with(".identities.run") {
-        Some(if receipt.name == BASE_IDENTITIES {
-            BASE_IDENTITY_WIDTH
-        } else {
-            IDENTITY_WIDTH
-        })
+        Some(IDENTITY_WIDTH)
     } else if receipt.name.ends_with(".endpoints.run") {
         Some(ENDPOINT_WIDTH)
     } else if receipt.name.ends_with(".node-details.run") {
@@ -3007,8 +3468,7 @@ fn validate_artifact_name(receipt: &ArtifactReceipt) -> Result<(), GfError> {
         || receipt.name.ends_with(".identities.run")
         || receipt.name.ends_with(".endpoints.run")
         || receipt.name.ends_with(".node-details.run")
-        || receipt.name.ends_with(".edge-details.run")
-        || receipt.name == BASE_IDENTITIES;
+        || receipt.name.ends_with(".edge-details.run");
     if !valid_suffix
         || receipt.name.starts_with('.')
         || receipt.name.contains('/')
@@ -3021,20 +3481,13 @@ fn validate_artifact_name(receipt: &ArtifactReceipt) -> Result<(), GfError> {
             .file_id
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit())
-        || ((receipt.bytes == 0 || receipt.write_operations == 0)
-            && receipt.name != BASE_IDENTITIES)
+        || receipt.bytes == 0
+        || receipt.write_operations == 0
+        || receipt.fsync_operations == 0
     {
         return Err(storage("invalid construction artifact receipt"));
     }
-    if receipt.name.ends_with(".identities.run")
-        && receipt.bytes
-            % if receipt.name == BASE_IDENTITIES {
-                BASE_IDENTITY_WIDTH as u64
-            } else {
-                IDENTITY_WIDTH as u64
-            }
-            != 0
-    {
+    if receipt.name.ends_with(".identities.run") && receipt.bytes % IDENTITY_WIDTH as u64 != 0 {
         return Err(storage("truncated identity run"));
     }
     if receipt.name.ends_with(".endpoints.run") && receipt.bytes % ENDPOINT_WIDTH as u64 != 0 {
@@ -3066,6 +3519,7 @@ fn receipt_from_intent(intent: &ChunkIntent) -> Result<ConstructionChunkReceipt,
         input_sha256: intent.input_sha256.clone(),
         schema_sha256: intent.schema_sha256.clone(),
         run_records: intent.run_records,
+        accounted_live_bytes: intent.accounted_live_bytes,
         parquet: intent
             .parquet
             .clone()
@@ -3094,6 +3548,7 @@ fn validate_receipt_semantics(
         || receipt.rows > budgets.max_batch_rows as u64
         || receipt.input_bytes > budgets.max_batch_bytes as u64
         || receipt.run_records > budgets.max_run_records as u64
+        || receipt.accounted_live_bytes == 0
         || receipt.input_sha256.len() != 64
         || receipt.schema_sha256.len() != 64
         || !receipt
@@ -3239,6 +3694,7 @@ fn validate_intent(intent: &ChunkIntent, checkpoint: &Checkpoint) -> Result<(), 
         || intent.rows > checkpoint.budgets.max_batch_rows as u64
         || intent.input_bytes > checkpoint.budgets.max_batch_bytes as u64
         || intent.run_records > checkpoint.budgets.max_run_records as u64
+        || intent.accounted_live_bytes > 0 && intent.accounted_live_bytes < intent.input_bytes
         || intent.run_records != expected_run_records
         || intent.input_sha256.len() != 64
         || intent.schema_sha256.len() != 64
@@ -3299,6 +3755,7 @@ fn validate_checkpoint(
     session: FileIdentity,
     generation: u64,
     budgets: GraphConstructionBudgets,
+    parent_catalog_sha256: Option<&str>,
 ) -> Result<(), GfError> {
     if checkpoint.format_version != FORMAT_VERSION
         || checkpoint.operation_uuid != operation
@@ -3307,7 +3764,14 @@ fn validate_checkpoint(
         || checkpoint.parent_topology_generation != generation
         || checkpoint.session_now_micros <= 0
         || checkpoint.budgets != budgets
-        || checkpoint.base_identities.is_some() != (generation != 0)
+        || checkpoint.has_base_snapshot != (generation != 0)
+        || checkpoint.parent_catalog_sha256.as_deref() != parent_catalog_sha256
+        || checkpoint
+            .parent_catalog_sha256
+            .as_ref()
+            .is_some_and(|digest| {
+                digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
         || checkpoint.next_sequence > budgets.max_chunks
         || checkpoint.last_receipt_sha256.is_some() != (checkpoint.next_sequence != 0)
         || checkpoint
@@ -3325,18 +3789,6 @@ fn validate_checkpoint(
         || checkpoint.evidence.current_transitions != 0
     {
         return Err(storage("checkpoint authority or resume parameters changed"));
-    }
-    if let Some(base) = &checkpoint.base_identities {
-        validate_artifact_name(base)?;
-        if base.name != BASE_IDENTITIES
-            || base.bytes / BASE_IDENTITY_WIDTH as u64
-                != checkpoint
-                    .base_work
-                    .live_nodes
-                    .saturating_add(checkpoint.base_work.live_edges)
-        {
-            return Err(storage("checkpoint base identity receipt is inconsistent"));
-        }
     }
     Ok(())
 }
@@ -3431,7 +3883,7 @@ fn is_owned_artifact_temp(name: &str) -> bool {
 }
 
 fn canonical_artifact_target(name: &str) -> bool {
-    if name == BASE_IDENTITIES || is_shape_artifact_name(name) {
+    if is_shape_artifact_name(name) {
         return true;
     }
     let Some(body) = name.strip_prefix("chunk-") else {
@@ -3745,7 +4197,7 @@ fn hex(bytes: &[u8]) -> String {
 mod tests {
     use std::sync::Arc;
 
-    use arrow::array::{FixedSizeBinaryArray, Int64Array, StringArray};
+    use arrow::array::{BinaryArray, FixedSizeBinaryArray, Int64Array, StringArray};
     use tempfile::TempDir;
 
     use super::*;
@@ -3800,6 +4252,44 @@ mod tests {
         .unwrap()
     }
 
+    fn nonempty_project() -> TempDir {
+        let project = TempDir::new().unwrap();
+        std::fs::create_dir_all(project.path().join("topology")).unwrap();
+        std::fs::write(
+            project.path().join("topology/generation.json"),
+            br#"{"topology_generation":1,"search_generation":1}"#,
+        )
+        .unwrap();
+        let tails_schema = Arc::new(Schema::new(vec![
+            Field::new("max_node_id", DataType::UInt64, false),
+            Field::new("max_edge_id", DataType::UInt64, false),
+        ]));
+        let tails = RecordBatch::try_new(
+            tails_schema.clone(),
+            vec![
+                Arc::new(arrow::array::UInt64Array::from(vec![2])),
+                Arc::new(arrow::array::UInt64Array::from(vec![1])),
+            ],
+        )
+        .unwrap();
+        let mut writer = ArrowWriter::try_new(
+            File::create(project.path().join("topology/surrogate_tails.parquet")).unwrap(),
+            tails_schema,
+            None,
+        )
+        .unwrap();
+        writer.write(&tails).unwrap();
+        writer.close().unwrap();
+        crate::uuid_membership::append_uuid_membership_delta(
+            project.path(),
+            1,
+            &[(Uuid::from_u128(1), 1), (Uuid::from_u128(2), 2)],
+            &[Uuid::from_u128(100)],
+        )
+        .unwrap();
+        project
+    }
+
     #[test]
     fn row_artifact_retains_dynamic_properties_and_is_uuid_sorted() {
         let root = TempDir::new().unwrap();
@@ -3851,6 +4341,153 @@ mod tests {
     }
 
     #[test]
+    fn replay_binds_property_schema_and_rejects_unsupported_staging_types() {
+        let root = TempDir::new().unwrap();
+        let mut session = open(&root, 98);
+        let batch_with = |property: &str| {
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![
+                    Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+                    Field::new("label", DataType::Utf8, false),
+                    Field::new(property, DataType::Int64, false),
+                ])),
+                vec![
+                    Arc::new(fixed(&[1_u128.to_be_bytes()])),
+                    Arc::new(StringArray::from(vec!["Person"])),
+                    Arc::new(Int64Array::from(vec![7])),
+                ],
+            )
+            .unwrap()
+        };
+        session
+            .append(
+                ConstructionChunkKind::Node,
+                "schema-bound",
+                &batch_with("score"),
+            )
+            .unwrap();
+        assert!(
+            session
+                .append(
+                    ConstructionChunkKind::Node,
+                    "schema-bound",
+                    &batch_with("renamed")
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("conflicting")
+        );
+
+        let unsupported = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+                Field::new("label", DataType::Utf8, false),
+                Field::new("payload", DataType::Binary, false),
+            ])),
+            vec![
+                Arc::new(fixed(&[2_u128.to_be_bytes()])),
+                Arc::new(StringArray::from(vec!["Person"])),
+                Arc::new(BinaryArray::from(vec![b"bytes".as_slice()])),
+            ],
+        )
+        .unwrap();
+        assert!(
+            session
+                .append(ConstructionChunkKind::Node, "unsupported", &unsupported)
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported")
+        );
+    }
+
+    #[test]
+    fn catalog_shape_preserves_parent_ids_history_and_ignores_null_observations() {
+        let project = TempDir::new().unwrap();
+        std::fs::create_dir_all(project.path().join("topology")).unwrap();
+        let mut parent = RuntimeCatalog::new();
+        parent.intern_label_at("BaseOnly", 11);
+        parent.intern_property_at("legacy", Some("BaseOnly"), 11);
+        let parent_path = project.path().join("topology/runtime_catalog.parquet");
+        let parent_batch = parent.to_record_batch();
+        let mut parent_writer = ArrowWriter::try_new(
+            File::create(&parent_path).unwrap(),
+            parent_batch.schema(),
+            None,
+        )
+        .unwrap();
+        parent_writer.write(&parent_batch).unwrap();
+        parent_writer.close().unwrap();
+
+        let private_path = project.path().join("catalog-shape");
+        std::fs::create_dir(&private_path).unwrap();
+        let private = StableDirectory::open(&private_path).unwrap();
+        let rows = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+                Field::new("label", DataType::Utf8, false),
+                Field::new("score", DataType::Int64, true),
+            ])),
+            vec![
+                Arc::new(fixed(&[1_u128.to_be_bytes(), 2_u128.to_be_bytes()])),
+                Arc::new(StringArray::from(vec!["Person", "Person"])),
+                Arc::new(Int64Array::from(vec![Some(7), None])),
+            ],
+        )
+        .unwrap();
+        write_parquet(&private, "nodes.parquet", &rows).unwrap();
+        let mut evidence = GraphConstructionEvidence::default();
+        let (parent_catalog, parent_catalog_sha256) =
+            load_parent_runtime_catalog(project.path(), 1).unwrap();
+        assert!(parent_catalog_sha256.is_some());
+        let output = build_runtime_catalog(
+            parent_catalog,
+            &private,
+            &["nodes.parquet".to_owned()],
+            &[],
+            42,
+            &mut || false,
+            &mut evidence,
+        )
+        .unwrap();
+        let reader = ParquetRecordBatchReaderBuilder::try_new(
+            private.open_child_file(OsStr::new(&output)).unwrap(),
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+        let batches = reader.collect::<Result<Vec<_>, _>>().unwrap();
+        let merged = arrow::compute::concat_batches(&batches[0].schema(), &batches).unwrap();
+        let kinds = merged
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let names = merged
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let counts = merged
+            .column(3)
+            .as_any()
+            .downcast_ref::<arrow::array::UInt64Array>()
+            .unwrap();
+        let first = merged
+            .column(4)
+            .as_any()
+            .downcast_ref::<arrow::array::TimestampMicrosecondArray>()
+            .unwrap();
+        let base = (0..merged.num_rows())
+            .find(|&row| kinds.value(row) == "entity_type" && names.value(row) == "BaseOnly")
+            .unwrap();
+        assert_eq!((counts.value(base), first.value(base)), (1, 11));
+        let score = (0..merged.num_rows())
+            .find(|&row| kinds.value(row) == "property" && names.value(row) == "score")
+            .unwrap();
+        assert_eq!(counts.value(score), 1);
+    }
+
+    #[test]
     fn journal_is_constant_control_state_and_seal_reopens_every_artifact() {
         for chunks in [1_u64, 2, 4] {
             let root = TempDir::new().unwrap();
@@ -3871,6 +4508,9 @@ mod tests {
             assert_eq!(session.evidence().peak_run_records, 64);
             assert_eq!(session.evidence().prior_topology_rows_decoded, 0);
             assert_eq!(session.evidence().current_transitions, 0);
+            assert!(session.evidence().write_operations < session.evidence().input_rows);
+            assert!(session.evidence().fsync_operations > 0);
+            assert!(session.evidence().peak_accounted_live_bytes > 0);
             let checkpoint_bytes = session
                 .root
                 .open_child_file(OsStr::new(CHECKPOINT))
@@ -3883,6 +4523,13 @@ mod tests {
             assert_eq!(session.state(), GraphConstructionState::Sealed);
             assert!(session.evidence().authentication_read_bytes > 0);
         }
+    }
+
+    #[test]
+    fn million_chunk_online_scheduler_has_logarithmic_name_state() {
+        let slots = online_merge_name_slot_bound(1_000_000, 32);
+        assert!(slots <= 31 * 4, "retained slots: {slots}");
+        assert!(slots < 1_000_000 / 1_000);
     }
 
     #[test]
@@ -3933,10 +4580,49 @@ mod tests {
             assert!(session.evidence().peak_merge_inputs <= 2);
             assert!(session.evidence().merge_read_bytes > 0);
             assert!(session.evidence().merge_written_bytes > 0);
+            assert!(session.evidence().merge_read_blocks > 0);
+            assert!(session.evidence().merge_write_blocks > 0);
+            assert!(session.evidence().merge_fsync_operations > 0);
+            assert!(session.evidence().parquet_read_operations > 0);
+            assert!(session.evidence().parquet_write_operations > 0);
             if chunks == 4 {
                 assert!(session.evidence().merge_passes >= 2);
             }
         }
+    }
+
+    #[test]
+    fn batch_partition_and_resume_produce_identical_canonical_data_fingerprints() {
+        let one = TempDir::new().unwrap();
+        let mut one_session = open(&one, 7_100);
+        one_session
+            .append(ConstructionChunkKind::Node, "all", &node_batch(1, 8))
+            .unwrap();
+        one_session.seal().unwrap();
+        let one_shape = one_session
+            .shape_canonical_with_cancellation(|| false)
+            .unwrap();
+        let one_identity = receipt_for_existing(&one_session.root, &one_shape.identities).unwrap();
+        let one_rows = receipt_for_existing(&one_session.root, &one_shape.node_rows[0]).unwrap();
+
+        let two = TempDir::new().unwrap();
+        let mut two_session = open(&two, 7_101);
+        two_session
+            .append(ConstructionChunkKind::Node, "first", &node_batch(1, 4))
+            .unwrap();
+        two_session
+            .append(ConstructionChunkKind::Node, "second", &node_batch(5, 4))
+            .unwrap();
+        two_session.seal().unwrap();
+        drop(two_session);
+        let mut resumed = open(&two, 7_101);
+        let two_shape = resumed.shape_canonical_with_cancellation(|| false).unwrap();
+        let two_identity = receipt_for_existing(&resumed.root, &two_shape.identities).unwrap();
+        let two_rows = receipt_for_existing(&resumed.root, &two_shape.node_rows[0]).unwrap();
+        assert_eq!(one_identity.sha256, two_identity.sha256);
+        assert_eq!(one_rows.sha256, two_rows.sha256);
+        assert_eq!((one_shape.node_count, one_shape.edge_count), (8, 0));
+        assert_eq!((two_shape.node_count, two_shape.edge_count), (8, 0));
     }
 
     #[test]
@@ -3965,6 +4651,79 @@ mod tests {
             .unwrap();
         missing
             .append(ConstructionChunkKind::Edge, "edges", &edge_batch(20_000, 2))
+            .unwrap();
+        missing.seal().unwrap();
+        assert!(
+            missing
+                .shape_canonical_with_cancellation(|| false)
+                .unwrap_err()
+                .to_string()
+                .contains("endpoint")
+        );
+    }
+
+    #[test]
+    fn nonempty_base_rejects_duplicate_cross_kind_and_missing_endpoint_without_copy() {
+        let project = nonempty_project();
+        let budgets = GraphConstructionBudgets::default();
+
+        let mut duplicate =
+            GraphConstructionSession::open(project.path(), Uuid::from_u128(8_101), 1, budgets)
+                .unwrap();
+        duplicate
+            .append(ConstructionChunkKind::Node, "duplicate", &node_batch(1, 1))
+            .unwrap();
+        duplicate.seal().unwrap();
+        assert!(
+            duplicate
+                .shape_canonical_with_cancellation(|| false)
+                .unwrap_err()
+                .to_string()
+                .contains("conflicts with pinned base")
+        );
+        assert!(
+            !project
+                .path()
+                .join(PRIVATE_ROOT)
+                .join(Uuid::from_u128(8_101).simple().to_string())
+                .join("base-identities.run")
+                .exists()
+        );
+        drop(duplicate);
+
+        let edge = |edge_uuid: u128, source: u128, target: u128| {
+            RecordBatch::try_new(
+                CONSTRUCTION_EDGE_SCHEMA.clone(),
+                vec![
+                    Arc::new(fixed(&[edge_uuid.to_be_bytes()])),
+                    Arc::new(StringArray::from(vec!["R"])),
+                    Arc::new(fixed(&[source.to_be_bytes()])),
+                    Arc::new(fixed(&[target.to_be_bytes()])),
+                ],
+            )
+            .unwrap()
+        };
+        let mut cross_kind =
+            GraphConstructionSession::open(project.path(), Uuid::from_u128(8_102), 1, budgets)
+                .unwrap();
+        cross_kind
+            .append(ConstructionChunkKind::Edge, "cross-kind", &edge(1, 1, 2))
+            .unwrap();
+        cross_kind.seal().unwrap();
+        assert!(
+            cross_kind
+                .shape_canonical_with_cancellation(|| false)
+                .unwrap_err()
+                .to_string()
+                .contains("conflicts with pinned base")
+        );
+        drop(cross_kind);
+
+        let mut missing =
+            GraphConstructionSession::open(project.path(), Uuid::from_u128(8_103), 1, budgets)
+                .unwrap();
+        missing
+            .append(ConstructionChunkKind::Edge, "missing", &edge(200, 999, 1))
             .unwrap();
         missing.seal().unwrap();
         assert!(

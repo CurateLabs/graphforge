@@ -1765,35 +1765,7 @@ fn validate_property_type(
 }
 
 fn property_data_type_supported(data_type: &DataType) -> bool {
-    (match data_type {
-        DataType::List(field) | DataType::LargeList(field) => {
-            property_data_type_supported(field.data_type())
-        }
-        _ => matches!(
-            data_type,
-            DataType::Boolean
-                | DataType::Int8
-                | DataType::Int16
-                | DataType::Int32
-                | DataType::Int64
-                | DataType::UInt8
-                | DataType::UInt16
-                | DataType::UInt32
-                | DataType::Float32
-                | DataType::Float64
-                | DataType::Utf8
-                | DataType::LargeUtf8
-                | DataType::Time64(arrow::datatypes::TimeUnit::Nanosecond)
-        ),
-    }) || {
-        matches!(data_type, DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, zone) if zone.as_deref() == Some("UTC"))
-            || matches!(data_type, DataType::Struct(fields)
-        if fields == &graphforge_storage::schemas::duration_struct_fields()
-            || fields == &graphforge_storage::schemas::date_struct_fields()
-            || fields == &graphforge_storage::schemas::localdatetime_struct_fields()
-            || fields == &graphforge_storage::schemas::time_struct_fields()
-            || fields == &graphforge_storage::schemas::datetime_struct_fields())
-    }
+    graphforge_storage::schemas::property_data_type_supported(data_type)
 }
 
 fn validate_identifier(

@@ -22,6 +22,7 @@ graphforge-filesystem = { version = "0.5.2", path = "../graphforge-filesystem" }
 graphforge-ir = { version = "0.5.2", path = "../graphforge-ir" }
 graphforge-ontology = { version = "0.5.2", path = "../graphforge-ontology" }
 arrow = { workspace = true }
+bytes = "1"
 async-trait = "0.1"
 atomicwrites = "0.4.4"
 datafusion = { workspace = true }

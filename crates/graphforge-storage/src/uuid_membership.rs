@@ -608,11 +608,22 @@ pub(crate) struct UuidConstructionSnapshot {
     manifest_file: File,
     manifest_identity: graphforge_filesystem::FileIdentity,
     manifest_sha256: String,
+    manifest_bytes: u64,
     manifest: Manifest,
     named_files: Vec<(String, graphforge_filesystem::FileIdentity)>,
+    payload_consumed: bool,
 }
 
 impl UuidConstructionSnapshot {
+    pub(crate) fn declared_work(&self, max_node_surrogate: u64) -> UuidConstructionSnapshotWork {
+        UuidConstructionSnapshotWork {
+            live_nodes: self.manifest.live_node_count,
+            live_edges: self.manifest.live_edge_count,
+            max_node_surrogate,
+            ..Default::default()
+        }
+    }
+
     pub(crate) fn revalidate(&self) -> Result<(), GfError> {
         self.root.revalidate_named().map_err(storage_err)?;
         if self.root.identity() != self.root_identity
@@ -647,6 +658,123 @@ impl UuidConstructionSnapshot {
             }
         }
         Ok(())
+    }
+
+    /// Authenticate each retained payload block exactly once and emit the live
+    /// identity domain as a bounded UUID-ordered stream.
+    pub(crate) fn stream_authenticated(
+        &mut self,
+        mut emit: impl FnMut(ConstructionUuidIdentity) -> Result<(), GfError>,
+    ) -> Result<UuidConstructionSnapshotWork, GfError> {
+        if self.payload_consumed {
+            return Err(storage_err(
+                "construction UUID payload was already consumed",
+            ));
+        }
+        self.revalidate()?;
+        let mut identity_cursors = Vec::with_capacity(self.manifest.runs.len());
+        let mut work = UuidConstructionSnapshotWork {
+            authentication_bytes: self.manifest_bytes,
+            authentication_blocks: 1,
+            ..Default::default()
+        };
+        for run in &self.manifest.runs {
+            let identities = self
+                .root
+                .open_child_file(std::ffi::OsStr::new(&run.identities.name))
+                .map_err(storage_err)?;
+            identity_cursors.push(ConstructionRunCursor::new(
+                identities,
+                run.identities.clone(),
+                IDENTITY_RECORD_WIDTH,
+            ));
+            let surrogates = self
+                .root
+                .open_child_file(std::ffi::OsStr::new(&run.node_surrogates.name))
+                .map_err(storage_err)?;
+            let mut cursor = ConstructionRunCursor::new(
+                surrogates,
+                run.node_surrogates.clone(),
+                NODE_LOOKUP_RECORD_WIDTH,
+            );
+            while cursor.next_record()?.is_some() {}
+            work.authentication_bytes = work.authentication_bytes.saturating_add(cursor.bytes);
+            work.authentication_blocks = work.authentication_blocks.saturating_add(cursor.blocks);
+        }
+        let mut heads = identity_cursors
+            .iter_mut()
+            .map(ConstructionRunCursor::next_record)
+            .collect::<Result<Vec<_>, _>>()?;
+        loop {
+            let Some(next_uuid) = heads
+                .iter()
+                .flatten()
+                .map(|record| &record[..16])
+                .min()
+                .map(<[u8]>::to_vec)
+            else {
+                break;
+            };
+            let indexes = heads
+                .iter()
+                .enumerate()
+                .filter_map(|(index, record)| {
+                    record
+                        .as_ref()
+                        .is_some_and(|record| record[..16] == next_uuid)
+                        .then_some(index)
+                })
+                .collect::<Vec<_>>();
+            let selected = *indexes
+                .iter()
+                .max_by_key(|index| self.manifest.runs[**index].last_generation)
+                .expect("one UUID head was selected");
+            let record = heads[selected].as_ref().expect("selected head exists");
+            let kind = record[16];
+            if !matches!(kind, 0..=3) || record[17..24].iter().any(|byte| *byte != 0) {
+                return Err(storage_err(
+                    "construction UUID identity record is malformed",
+                ));
+            }
+            if matches!(kind, 0 | 1) {
+                let identity = ConstructionUuidIdentity {
+                    uuid: Uuid::from_bytes(record[..16].try_into().expect("fixed UUID width")),
+                    kind: if kind == 0 {
+                        UuidIndexKind::Node
+                    } else {
+                        UuidIndexKind::Edge
+                    },
+                    surrogate: u64::from_be_bytes(record[24..32].try_into().expect("fixed")),
+                };
+                if identity.kind == UuidIndexKind::Node {
+                    if identity.surrogate == 0 {
+                        return Err(storage_err("live node has zero surrogate"));
+                    }
+                    work.live_nodes = work.live_nodes.saturating_add(1);
+                    work.max_node_surrogate = work.max_node_surrogate.max(identity.surrogate);
+                } else {
+                    work.live_edges = work.live_edges.saturating_add(1);
+                }
+                emit(identity)?;
+            }
+            for index in indexes {
+                heads[index] = identity_cursors[index].next_record()?;
+            }
+        }
+        for cursor in &identity_cursors {
+            work.authentication_bytes = work.authentication_bytes.saturating_add(cursor.bytes);
+            work.authentication_blocks = work.authentication_blocks.saturating_add(cursor.blocks);
+        }
+        if work.live_nodes != self.manifest.live_node_count
+            || work.live_edges != self.manifest.live_edge_count
+        {
+            return Err(storage_err(
+                "construction UUID live counts differ from manifest",
+            ));
+        }
+        self.payload_consumed = true;
+        self.revalidate()?;
+        Ok(work)
     }
 }
 
@@ -736,11 +864,24 @@ impl ConstructionRunCursor {
 /// Authenticate each retained UUID byte once and emit the live identity set in
 /// UUID order. The returned token revalidates inode/name authority without
 /// rereading retained payload bytes.
+#[cfg(test)]
 pub(crate) fn open_uuid_construction_snapshot(
     project_dir: &Path,
     generation: u64,
-    mut emit: impl FnMut(ConstructionUuidIdentity) -> Result<(), GfError>,
+    emit: impl FnMut(ConstructionUuidIdentity) -> Result<(), GfError>,
 ) -> Result<(UuidConstructionSnapshot, UuidConstructionSnapshotWork), GfError> {
+    let mut token = pin_uuid_construction_snapshot(project_dir, generation)?;
+    let work = token.stream_authenticated(emit)?;
+    Ok((token, work))
+}
+
+/// Pin the generation's manifest and every run inode without reading retained
+/// payload bytes.  The caller later consumes those bytes exactly once through
+/// [`UuidConstructionSnapshot::stream_authenticated`].
+pub(crate) fn pin_uuid_construction_snapshot(
+    project_dir: &Path,
+    generation: u64,
+) -> Result<UuidConstructionSnapshot, GfError> {
     let root = graphforge_filesystem::StableDirectory::open(&project_dir.join(INDEX_DIR))
         .map_err(storage_err)?;
     let root_identity = root.identity();
@@ -759,12 +900,6 @@ pub(crate) fn open_uuid_construction_snapshot(
     }
     validate_run_descriptors(&manifest)?;
     let mut named_files = Vec::with_capacity(manifest.runs.len().saturating_mul(2));
-    let mut identity_cursors = Vec::with_capacity(manifest.runs.len());
-    let mut work = UuidConstructionSnapshotWork {
-        authentication_bytes: body.len() as u64,
-        authentication_blocks: 1,
-        ..Default::default()
-    };
     for run in &manifest.runs {
         let identities = root
             .open_child_file(std::ffi::OsStr::new(&run.identities.name))
@@ -776,11 +911,6 @@ pub(crate) fn open_uuid_construction_snapshot(
             ));
         }
         named_files.push((run.identities.name.clone(), identity));
-        identity_cursors.push(ConstructionRunCursor::new(
-            identities,
-            run.identities.clone(),
-            IDENTITY_RECORD_WIDTH,
-        ));
 
         let surrogates = root
             .open_child_file(std::ffi::OsStr::new(&run.node_surrogates.name))
@@ -793,84 +923,6 @@ pub(crate) fn open_uuid_construction_snapshot(
             ));
         }
         named_files.push((run.node_surrogates.name.clone(), surrogate_identity));
-        let mut cursor = ConstructionRunCursor::new(
-            surrogates,
-            run.node_surrogates.clone(),
-            NODE_LOOKUP_RECORD_WIDTH,
-        );
-        while cursor.next_record()?.is_some() {}
-        work.authentication_bytes = work.authentication_bytes.saturating_add(cursor.bytes);
-        work.authentication_blocks = work.authentication_blocks.saturating_add(cursor.blocks);
-    }
-
-    let mut heads = identity_cursors
-        .iter_mut()
-        .map(ConstructionRunCursor::next_record)
-        .collect::<Result<Vec<_>, _>>()?;
-    loop {
-        let Some(next_uuid) = heads
-            .iter()
-            .flatten()
-            .map(|record| &record[..16])
-            .min()
-            .map(<[u8]>::to_vec)
-        else {
-            break;
-        };
-        let indexes = heads
-            .iter()
-            .enumerate()
-            .filter_map(|(index, record)| {
-                record
-                    .as_ref()
-                    .is_some_and(|record| record[..16] == next_uuid)
-                    .then_some(index)
-            })
-            .collect::<Vec<_>>();
-        let selected = *indexes
-            .iter()
-            .max_by_key(|index| manifest.runs[**index].last_generation)
-            .expect("one UUID head was selected");
-        let record = heads[selected].as_ref().expect("selected head exists");
-        let kind = record[16];
-        if !matches!(kind, 0..=3) || record[17..24].iter().any(|byte| *byte != 0) {
-            return Err(storage_err(
-                "construction UUID identity record is malformed",
-            ));
-        }
-        if matches!(kind, 0 | 1) {
-            let identity = ConstructionUuidIdentity {
-                uuid: Uuid::from_bytes(record[..16].try_into().expect("fixed UUID width")),
-                kind: if kind == 0 {
-                    UuidIndexKind::Node
-                } else {
-                    UuidIndexKind::Edge
-                },
-                surrogate: u64::from_be_bytes(record[24..32].try_into().expect("fixed")),
-            };
-            if identity.kind == UuidIndexKind::Node {
-                if identity.surrogate == 0 {
-                    return Err(storage_err("live node has zero surrogate"));
-                }
-                work.live_nodes = work.live_nodes.saturating_add(1);
-                work.max_node_surrogate = work.max_node_surrogate.max(identity.surrogate);
-            } else {
-                work.live_edges = work.live_edges.saturating_add(1);
-            }
-            emit(identity)?;
-        }
-        for index in indexes {
-            heads[index] = identity_cursors[index].next_record()?;
-        }
-    }
-    for cursor in &identity_cursors {
-        work.authentication_bytes = work.authentication_bytes.saturating_add(cursor.bytes);
-        work.authentication_blocks = work.authentication_blocks.saturating_add(cursor.blocks);
-    }
-    if work.live_nodes != manifest.live_node_count || work.live_edges != manifest.live_edge_count {
-        return Err(storage_err(
-            "construction UUID live counts differ from manifest",
-        ));
     }
     root.revalidate_named().map_err(storage_err)?;
     let token = UuidConstructionSnapshot {
@@ -879,11 +931,13 @@ pub(crate) fn open_uuid_construction_snapshot(
         manifest_file,
         manifest_identity,
         manifest_sha256,
+        manifest_bytes: body.len() as u64,
         manifest,
         named_files,
+        payload_consumed: false,
     };
     token.revalidate()?;
-    Ok((token, work))
+    Ok(token)
 }
 
 impl AuthenticatedUuidIndexSnapshot {

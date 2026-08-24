@@ -105,6 +105,41 @@ pub fn duration_struct_fields() -> Fields {
     ])
 }
 
+/// Whether an Arrow value can be normalized into GraphForge's ordinary
+/// persisted property representation.
+#[must_use]
+pub fn property_data_type_supported(data_type: &DataType) -> bool {
+    match data_type {
+        DataType::List(field) | DataType::LargeList(field) => {
+            property_data_type_supported(field.data_type())
+        }
+        DataType::Boolean
+        | DataType::Int8
+        | DataType::Int16
+        | DataType::Int32
+        | DataType::Int64
+        | DataType::UInt8
+        | DataType::UInt16
+        | DataType::UInt32
+        | DataType::Float32
+        | DataType::Float64
+        | DataType::Utf8
+        | DataType::LargeUtf8
+        | DataType::Time64(arrow::datatypes::TimeUnit::Nanosecond) => true,
+        DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, zone) => {
+            zone.as_deref() == Some("UTC")
+        }
+        DataType::Struct(fields) => {
+            fields == &duration_struct_fields()
+                || fields == &date_struct_fields()
+                || fields == &localdatetime_struct_fields()
+                || fields == &time_struct_fields()
+                || fields == &datetime_struct_fields()
+        }
+        _ => false,
+    }
+}
+
 /// `Struct{epoch_day: Int64}` — a Cypher `date` typed value (ADR 0012): i64 days
 /// since the Unix epoch, spanning the full openCypher year range
 /// −999,999,999..+999,999,999. A self-describing one-field struct (a bare Int64
