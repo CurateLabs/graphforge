@@ -12,8 +12,6 @@ use graphforge_storage::{
     read_nodes, search_published_vectors, upsert_published_vector, validate_vector,
 };
 
-const TOPOLOGY_SOURCE: &str = "topology/nodes.parquet";
-
 /// Bounds for graph membership, vector work, and atomic publication.
 #[derive(Clone, Copy, Debug)]
 pub struct VectorLifecycleLimits {
@@ -229,41 +227,54 @@ where
     C: FnMut() -> Result<(), SearchArtifactError>,
 {
     checkpoint()?;
-    let path = project_dir.join(TOPOLOGY_SOURCE);
-    let bytes = match std::fs::symlink_metadata(&path) {
-        Ok(metadata) => {
-            if !metadata.file_type().is_file() {
-                return Err(source(format!(
-                    "search source {} is not a regular file",
-                    path.display()
-                )));
-            }
-            if metadata.len() > limits.source_bytes {
+    let paths = graphforge_storage::topology_node_files(project_dir)
+        .map_err(|error| source(error.to_string()))?;
+    let mut total = 0_u64;
+    let mut owned = Vec::with_capacity(paths.len());
+    for path in paths {
+        checkpoint()?;
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|error| source(format!("inspect {}: {error}", path.display())))?;
+        if !metadata.file_type().is_file() {
+            return Err(source(format!(
+                "search source {} is not a regular file",
+                path.display()
+            )));
+        }
+        total = total
+            .checked_add(metadata.len())
+            .ok_or_else(|| exhausted_u64("vector_source_bytes", limits.source_bytes))?;
+        if total > limits.source_bytes {
+            return Err(exhausted_u64("vector_source_bytes", limits.source_bytes));
+        }
+        let bytes = std::fs::read(&path)
+            .map_err(|error| source(format!("read {}: {error}", path.display())))?;
+        let actual = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        if actual > metadata.len() {
+            total = total
+                .checked_add(actual - metadata.len())
+                .ok_or_else(|| exhausted_u64("vector_source_bytes", limits.source_bytes))?;
+            if total > limits.source_bytes {
                 return Err(exhausted_u64("vector_source_bytes", limits.source_bytes));
             }
-            let bytes = std::fs::read(&path)
-                .map_err(|error| source(format!("read {}: {error}", path.display())))?;
-            if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > limits.source_bytes {
-                return Err(exhausted_u64("vector_source_bytes", limits.source_bytes));
-            }
-            Some(bytes)
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => {
-            return Err(source(format!("inspect {}: {error}", path.display())));
-        }
-    };
-    checkpoint()?;
-    match bytes.as_deref() {
-        Some(bytes) => SearchSourceSnapshot::capture(
-            project_dir,
-            &[SearchSourcePart {
-                name: TOPOLOGY_SOURCE,
-                bytes,
-            }],
-        ),
-        None => SearchSourceSnapshot::capture(project_dir, &[]),
+        let relative = path
+            .strip_prefix(project_dir)
+            .map_err(|_| source("topology source escaped project root"))?
+            .to_str()
+            .ok_or_else(|| source("topology source path is not UTF-8"))?
+            .to_owned();
+        owned.push((relative, bytes));
     }
+    checkpoint()?;
+    let parts = owned
+        .iter()
+        .map(|(name, bytes)| SearchSourcePart {
+            name,
+            bytes: bytes.as_slice(),
+        })
+        .collect::<Vec<_>>();
+    SearchSourceSnapshot::capture(project_dir, &parts)
 }
 
 fn validate_requested_artifact(
@@ -378,6 +389,44 @@ mod tests {
                 .unwrap();
         }
         writer.flush().unwrap();
+    }
+
+    #[test]
+    fn topology_snapshot_and_byte_limit_cover_every_node_shard() {
+        let dir = TempDir::new().unwrap();
+        for ordinal in 1_u8..=2 {
+            let mut writer =
+                GraphWriter::open_at(dir.path(), OntologyMode::Strict, i64::from(ordinal)).unwrap();
+            writer.create_node(uuid(ordinal), TypeId(9)).unwrap();
+            writer.flush().unwrap();
+        }
+        let paths = graphforge_storage::topology_node_files(dir.path()).unwrap();
+        assert_eq!(paths.len(), 2);
+        let before =
+            capture_topology_snapshot(dir.path(), VectorLifecycleLimits::default(), || Ok(()))
+                .unwrap();
+        use std::io::Write as _;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&paths[1])
+            .unwrap()
+            .write_all(b"changed without generation")
+            .unwrap();
+        let after =
+            capture_topology_snapshot(dir.path(), VectorLifecycleLimits::default(), || Ok(()))
+                .unwrap();
+        assert_eq!(before.generation, after.generation);
+        assert_ne!(before.fingerprint, after.fingerprint);
+
+        let mut limits = VectorLifecycleLimits::default();
+        limits.source_bytes = std::fs::metadata(&paths[0]).unwrap().len();
+        assert!(matches!(
+            capture_topology_snapshot(dir.path(), limits, || Ok(())),
+            Err(SearchArtifactError::ResourceExhausted {
+                resource: "vector_source_bytes",
+                ..
+            })
+        ));
     }
 
     #[test]
