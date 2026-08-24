@@ -1,0 +1,8 @@
+"""Deterministic Rust-owned public Hub fixture source and generated artifacts."""
+
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "artifacts",
+    srcs = glob(["**/*"]),
+)

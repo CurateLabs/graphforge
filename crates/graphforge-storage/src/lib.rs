@@ -142,7 +142,7 @@ pub use project_portable::{
 pub use project_portable_v2_export::{
     PortableV2ExportLimits, PortableV2ExportPlan, PortableV2ExportProgress,
     PortableV2ExportReceipt, PortableV2Output, export_complete_portable_v2,
-    plan_complete_portable_v2, plan_selected_portable_v2,
+    plan_complete_portable_v2, plan_selected_portable_v2, repack_verified_expanded_portable_v2,
 };
 pub use project_portable_v2_import::{
     PortableV2ImportPhase, PortableV2ImportProgress, PortableV2ImportReceipt,

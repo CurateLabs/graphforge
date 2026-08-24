@@ -22,6 +22,7 @@ use uuid::Uuid;
 include!(concat!(env!("OUT_DIR"), "/project_skills.rs"));
 
 mod hub_clone;
+pub mod hub_fixture_artifacts;
 mod maintenance_cli;
 mod ontology_cli;
 mod portable_cli;

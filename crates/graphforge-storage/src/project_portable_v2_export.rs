@@ -1126,6 +1126,128 @@ pub fn export_complete_portable_v2(
     })
 }
 
+/// Repack a fully verified expanded portable-v2 package into canonical bundle bytes.
+///
+/// This preserves the semantic manifest byte-for-byte and exists for deterministic
+/// checked-in contract artifacts; normal project export should use
+/// [`export_complete_portable_v2`].
+pub fn repack_verified_expanded_portable_v2(
+    source: impl AsRef<Path>,
+    destination: impl AsRef<Path>,
+    limits: PortableV2ExportLimits,
+    cancelled: &AtomicBool,
+) -> Result<PortableV2ExportReceipt, ExportError> {
+    let snapshot = tempfile::tempdir().map_err(storage)?;
+    let snapshot_root = snapshot.path().join("verified");
+    copy_expanded_snapshot(source.as_ref(), &snapshot_root, cancelled)?;
+    let report = crate::verify_portable_v2(
+        &snapshot_root,
+        crate::PortableV2Mode::Full,
+        limits,
+        Some(cancelled),
+    )?;
+    let source = snapshot_root.as_path();
+    let manifest = fs::read(source.join("data/graphforge-project.json")).map_err(storage)?;
+    let value: serde_json::Value = serde_json::from_slice(&manifest).map_err(storage)?;
+    let generation_uuid = value
+        .pointer("/source_generation/generation_uuid")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| err("GF_INVALID_MANIFEST", "source generation is missing"))?
+        .parse()
+        .map_err(|_| err("GF_INVALID_MANIFEST", "source generation is invalid"))?;
+    let package_class_name = value
+        .get("package_class")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| err("GF_INVALID_MANIFEST", "package class is missing"))?;
+    let mut package_digest = [0_u8; 32];
+    let digest = report
+        .package_digest
+        .strip_prefix("sha256:")
+        .ok_or_else(|| err("GF_INVALID_MANIFEST", "package digest is invalid"))?;
+    if digest.len() != 64 {
+        return Err(err("GF_INVALID_MANIFEST", "package digest is invalid"));
+    }
+    for (index, byte) in package_digest.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&digest[index * 2..index * 2 + 2], 16)
+            .map_err(|_| err("GF_INVALID_MANIFEST", "package digest is invalid"))?;
+    }
+    let mut files = Vec::new();
+    let mut total = 0_u64;
+    for component in value
+        .get("components")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| err("GF_INVALID_MANIFEST", "components are missing"))?
+    {
+        for file in component
+            .get("files")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| err("GF_INVALID_MANIFEST", "component files are missing"))?
+        {
+            let path = file
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| err("GF_INVALID_MANIFEST", "component path is missing"))?;
+            files.push(inspect(&source.join(path), path, limits, &mut total)?);
+        }
+    }
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+    let plan = PortableV2ExportPlan {
+        generation_uuid,
+        files,
+        manifest,
+        package_digest,
+        payload_bytes: total,
+        selection_fingerprint: report.package_digest.clone(),
+        package_class: package_class(package_class_name)?,
+        retained_subset: None,
+    };
+    export_complete_portable_v2(
+        &plan,
+        destination,
+        PortableV2Output::Bundle,
+        limits,
+        cancelled,
+        |_| {},
+    )
+}
+
+fn copy_expanded_snapshot(
+    source: &Path,
+    destination: &Path,
+    cancelled: &AtomicBool,
+) -> Result<(), ExportError> {
+    fs::create_dir(destination).map_err(storage)?;
+    let mut pending = vec![(source.to_path_buf(), destination.to_path_buf())];
+    while let Some((input, output)) = pending.pop() {
+        for entry in fs::read_dir(&input).map_err(storage)? {
+            if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(err("GF_CANCELLED", "portable export cancelled"));
+            }
+            let entry = entry.map_err(storage)?;
+            let metadata = fs::symlink_metadata(entry.path()).map_err(storage)?;
+            let target = output.join(entry.file_name());
+            if metadata.file_type().is_symlink() {
+                return Err(err(
+                    "GF_UNSUPPORTED_ENTRY_TYPE",
+                    "expanded portable source contains a symlink",
+                ));
+            }
+            if metadata.is_dir() {
+                fs::create_dir(&target).map_err(storage)?;
+                pending.push((entry.path(), target));
+            } else if metadata.is_file() {
+                fs::copy(entry.path(), target).map_err(storage)?;
+            } else {
+                return Err(err(
+                    "GF_UNSUPPORTED_ENTRY_TYPE",
+                    "expanded portable source contains a non-file entry",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn package_class(value: &str) -> Result<PortableV2PackageClass, ExportError> {
     match value {
         "complete" => Ok(PortableV2PackageClass::Complete),
