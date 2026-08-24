@@ -1293,6 +1293,9 @@ pub struct GraphWriter {
     /// Edges created since the last commit, captured during `flush_edges` for
     /// the adjacency delta segment (#765). Drained by `flush`/`take_pending_delta`.
     pending_delta: Vec<crate::adjacency_delta::DeltaEdge>,
+    pending_index_nodes: Vec<(Uuid, u64)>,
+    pending_index_edges: Vec<Uuid>,
+    prepared_index: Option<crate::uuid_membership::PreparedUuidIndexDelta>,
     limits: GraphWriterLimits,
     charged_topology_bytes: usize,
     buffered_topology_rows: usize,
@@ -1346,6 +1349,9 @@ impl GraphWriter {
             properties: HashMap::new(),
             edge_properties: HashMap::new(),
             pending_delta: Vec::new(),
+            pending_index_nodes: Vec::new(),
+            pending_index_edges: Vec::new(),
+            prepared_index: None,
             limits: GraphWriterLimits::default(),
             charged_topology_bytes: 0,
             buffered_topology_rows: 0,
@@ -1498,7 +1504,13 @@ impl GraphWriter {
         type_ids: &[TypeId],
     ) -> Result<u64, GfError> {
         let bytes = to_bytes(&node_uuid);
-        if self.uuid_to_node_id.contains_key(&bytes) {
+        if self.uuid_to_node_id.contains_key(&bytes)
+            || self
+                .edges
+                .values()
+                .flatten()
+                .any(|row| row.edge_uuid == bytes)
+        {
             return Err(GfError::Storage(
                 "duplicate node UUID in graph writer topology window".into(),
             ));
@@ -1522,6 +1534,7 @@ impl GraphWriter {
             type_id: type_ids.first().map_or(u32::MAX, |id| id.0),
             type_ids: type_ids.iter().map(|id| id.0).collect(),
         });
+        self.pending_index_nodes.push((node_uuid, node_id));
         Ok(node_id)
     }
 
@@ -1534,22 +1547,26 @@ impl GraphWriter {
     /// matched row), not created. Unlike [`create_node`](Self::create_node), this
     /// does **not** push a [`NodeRow`] or advance `next_node_id`; it only teaches
     /// the UUID→surrogate map.
-    pub fn register_existing_node(&mut self, node_uuid: Uuid, node_id: u64) {
-        // Temporary stack adapter only: primary integration must migrate every
-        // caller to the fallible API (or change this signature) before landing.
-        // Silently losing an endpoint on budget exhaustion is not acceptable.
-        let _ = self.try_register_existing_node(node_uuid, node_id);
-    }
-
-    /// Budgeted endpoint registration for topology construction.
-    pub fn try_register_existing_node(
-        &mut self,
-        node_uuid: Uuid,
-        node_id: u64,
-    ) -> Result<(), GfError> {
+    pub fn register_existing_node(&mut self, node_uuid: Uuid, node_id: u64) -> Result<(), GfError> {
         let key = to_bytes(&node_uuid);
-        if self.uuid_to_node_id.contains_key(&key) {
-            return Ok(());
+        if let Some(existing) = self.uuid_to_node_id.get(&key) {
+            return if *existing == node_id {
+                Ok(())
+            } else {
+                Err(GfError::Storage(
+                    "existing node UUID was registered with conflicting surrogates".into(),
+                ))
+            };
+        }
+        if self
+            .edges
+            .values()
+            .flatten()
+            .any(|row| row.edge_uuid == key)
+        {
+            return Err(GfError::Storage(
+                "existing node UUID collides with a buffered edge UUID".into(),
+            ));
         }
         self.admit_topology(0, ENDPOINT_ENTRY_CHARGE, 0)?;
         self.uuid_to_node_id.insert(key, node_id);
@@ -1626,11 +1643,12 @@ impl GraphWriter {
         })?;
 
         let edge_bytes = to_bytes(&edge_uuid);
-        if self
-            .edges
-            .values()
-            .flatten()
-            .any(|row| row.edge_uuid == edge_bytes)
+        if self.uuid_to_node_id.contains_key(&edge_bytes)
+            || self
+                .edges
+                .values()
+                .flatten()
+                .any(|row| row.edge_uuid == edge_bytes)
         {
             return Err(GfError::Storage(
                 "duplicate edge UUID in graph writer topology window".into(),
@@ -1673,6 +1691,7 @@ impl GraphWriter {
             dst_id,
             rel_type_name,
         });
+        self.pending_index_edges.push(edge_uuid);
         Ok(edge_id)
     }
 
@@ -1939,6 +1958,8 @@ impl GraphWriter {
         });
         self.uuid_to_node_id
             .retain(|uuid, _| !targets.contains(uuid));
+        self.pending_index_nodes
+            .retain(|(uuid, _)| !targets.contains(uuid.as_bytes()));
         self.refresh_topology_charge();
         dropped
     }
@@ -1960,6 +1981,8 @@ impl GraphWriter {
             rows.retain(|r| !targets.contains(&r.edge_uuid));
             !rows.is_empty()
         });
+        self.pending_index_edges
+            .retain(|uuid| !targets.contains(uuid.as_bytes()));
         self.refresh_topology_charge();
         dropped
     }
@@ -2079,15 +2102,26 @@ impl GraphWriter {
     /// # Errors
     /// Returns [`GfError::Storage`] on any I/O, Arrow, or Parquet failure.
     pub fn flush(&mut self) -> Result<(), GfError> {
+        if self.prepared_index.is_some() {
+            let generation = crate::read_topology_generation(&self.dir)?;
+            self.finalize_uuid_index_delta(generation)?;
+            return Ok(());
+        }
         let mut staged = RewriteBatch::new();
         self.flush_into(&mut staged)?;
         let pending = self.take_pending_delta();
+        let expected_generation = crate::read_topology_generation(&self.dir)?.saturating_add(1);
+        let index_staged = self.prepare_uuid_index_delta(expected_generation, &mut staged)?;
         if let Some(generation) = crate::generation::commit_topology_aware(staged, &self.dir)? {
+            debug_assert_eq!(generation, expected_generation);
             // A pure-append flush (only CREATEs reach `GraphWriter`): record the
             // delta segment so the adjacency index can serve the new edges
             // without a rebuild. A node-only flush writes an empty segment so
             // the chain stays contiguous. See `write_segment_best_effort`.
             self.write_segment_best_effort(generation, &pending);
+            if index_staged {
+                self.finalize_uuid_index_delta(generation)?;
+            }
         }
         Ok(())
     }
@@ -2104,6 +2138,78 @@ impl GraphWriter {
         edges.sort_unstable_by_key(|e| e.edge_id);
         self.refresh_topology_charge();
         edges
+    }
+
+    /// Prepare the captured UUID delta before the enclosing topology commit.
+    pub fn prepare_uuid_index_delta(
+        &mut self,
+        generation: u64,
+        staged: &mut RewriteBatch,
+    ) -> Result<bool, GfError> {
+        self.prepare_uuid_index_delta_with_deletions(generation, staged, &[], &[])
+    }
+
+    /// Prepare creations and authenticated deletion tombstones as one generation.
+    pub fn prepare_uuid_index_delta_with_deletions(
+        &mut self,
+        generation: u64,
+        staged: &mut RewriteBatch,
+        deleted_nodes: &[Uuid],
+        deleted_edges: &[Uuid],
+    ) -> Result<bool, GfError> {
+        if self.pending_index_nodes.is_empty()
+            && self.pending_index_edges.is_empty()
+            && deleted_nodes.is_empty()
+            && deleted_edges.is_empty()
+        {
+            return Ok(false);
+        }
+        let (deleted_nodes, deleted_edges) = if deleted_nodes.is_empty() && deleted_edges.is_empty()
+        {
+            (Vec::new(), Vec::new())
+        } else {
+            let mut index = crate::UuidMembershipIndex::open(&self.dir)?;
+            let (surrogates, _) = index.lookup_node_surrogates(deleted_nodes)?;
+            let nodes = deleted_nodes
+                .iter()
+                .copied()
+                .zip(surrogates)
+                .filter_map(|(uuid, surrogate)| surrogate.map(|id| (uuid, id)))
+                .collect();
+            let (present_edges, _) = index.probe(crate::UuidIndexKind::Edge, deleted_edges)?;
+            let edges = deleted_edges
+                .iter()
+                .copied()
+                .zip(present_edges)
+                .filter_map(|(uuid, present)| present.then_some(uuid))
+                .collect();
+            (nodes, edges)
+        };
+        self.prepared_index = crate::uuid_membership::prepare_uuid_membership_delta(
+            &self.dir,
+            generation,
+            &self.pending_index_nodes,
+            &self.pending_index_edges,
+            &deleted_nodes,
+            &deleted_edges,
+        )?;
+        if let Some(prepared) = &self.prepared_index {
+            prepared.stage_receipt(staged)?;
+        }
+        Ok(self.prepared_index.is_some())
+    }
+
+    /// Finalize a prepared UUID delta after the topology commit succeeds.
+    pub fn finalize_uuid_index_delta(&mut self, generation: u64) -> Result<(), GfError> {
+        let prepared = self
+            .prepared_index
+            .as_ref()
+            .ok_or_else(|| GfError::Storage("UUID index delta was not prepared".into()))?;
+        prepared.finalize(generation)?;
+        self.prepared_index = None;
+        self.pending_index_nodes.clear();
+        self.pending_index_edges.clear();
+        Ok(())
     }
 
     /// Best-effort write of the delta segment for `generation` — only when the
@@ -4407,8 +4513,8 @@ mod tests {
         crate::io_stats::reset();
         let mut reopened = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
         assert_eq!(reopened.create_node(new_v7(), TypeId(0)).unwrap(), 3);
-        reopened.register_existing_node(first_node, 1);
-        reopened.register_existing_node(second_node, 2);
+        reopened.register_existing_node(first_node, 1).unwrap();
+        reopened.register_existing_node(second_node, 2).unwrap();
         assert_eq!(
             reopened
                 .create_edge(new_v7(), "KNOWS", &first_node, &second_node)
@@ -4473,8 +4579,8 @@ mod tests {
         first.flush().unwrap();
 
         let mut second = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
-        second.register_existing_node(left, 1);
-        second.register_existing_node(right, 2);
+        second.register_existing_node(left, 1).unwrap();
+        second.register_existing_node(right, 2).unwrap();
         second
             .create_edge(new_v7(), "KNOWS", &right, &left)
             .unwrap();
@@ -4636,6 +4742,74 @@ mod tests {
     }
 
     #[test]
+    fn same_window_cross_kind_uuid_collisions_fail_before_state_mutation() {
+        let dir = TempDir::new().unwrap();
+        let left = new_v7();
+        let right = new_v7();
+        let collision = new_v7();
+        let mut edge_first = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
+        edge_first.create_node(left, TypeId(0)).unwrap();
+        edge_first.create_node(right, TypeId(0)).unwrap();
+        edge_first
+            .create_edge(collision, "KNOWS", &left, &right)
+            .unwrap();
+        let next_node = edge_first.next_node_id;
+        assert!(edge_first.create_node(collision, TypeId(0)).is_err());
+        assert_eq!(edge_first.next_node_id, next_node);
+        assert_eq!(edge_first.nodes.len(), 2);
+
+        let dir = TempDir::new().unwrap();
+        let mut node_first = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
+        node_first.create_node(left, TypeId(0)).unwrap();
+        node_first.create_node(right, TypeId(0)).unwrap();
+        node_first.create_node(collision, TypeId(0)).unwrap();
+        let next_edge = node_first.next_edge_id;
+        assert!(
+            node_first
+                .create_edge(collision, "KNOWS", &left, &right)
+                .is_err()
+        );
+        assert_eq!(node_first.next_edge_id, next_edge);
+        assert!(node_first.edges.values().all(Vec::is_empty));
+    }
+
+    #[test]
+    fn ordinary_writer_flush_keeps_v3_uuid_index_fresh_across_generations() {
+        let dir = TempDir::new().unwrap();
+        let first = new_v7();
+        let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
+        writer.create_node(first, TypeId(0)).unwrap();
+        writer.flush().unwrap();
+        assert!(crate::uuid_membership_index_is_fresh(dir.path()).unwrap());
+
+        let second = new_v7();
+        let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS + 1).unwrap();
+        writer.create_node(second, TypeId(0)).unwrap();
+        writer.flush().unwrap();
+        assert!(crate::uuid_membership_index_is_fresh(dir.path()).unwrap());
+        let mut index = crate::UuidMembershipIndex::open(dir.path()).unwrap();
+        assert_eq!(
+            index.lookup_node_surrogates(&[first, second]).unwrap().0,
+            [Some(1), Some(2)]
+        );
+    }
+
+    #[test]
+    fn existing_endpoint_registration_propagates_budget_failure() {
+        let dir = TempDir::new().unwrap();
+        let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS)
+            .unwrap()
+            .with_limits(GraphWriterLimits {
+                max_buffered_topology_rows: usize::MAX,
+                max_buffered_topology_bytes: ENDPOINT_ENTRY_CHARGE - 1,
+                max_flush_scratch_bytes: usize::MAX,
+            });
+        assert!(writer.register_existing_node(new_v7(), 7).is_err());
+        assert!(writer.uuid_to_node_id.is_empty());
+        assert_eq!(writer.charged_topology_bytes, 0);
+    }
+
+    #[test]
     fn topology_budget_plateaus_across_committed_mixed_batches() {
         let dir = TempDir::new().unwrap();
         let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS)
@@ -4768,7 +4942,7 @@ mod tests {
         let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
         // `a` already exists on disk with surrogate 42 (e.g. from a prior write).
         let a = new_v7();
-        w.register_existing_node(a, 42);
+        w.register_existing_node(a, 42).unwrap();
         // A freshly-minted `b` (next surrogate is 1 — register did not advance it).
         let b = new_v7();
         assert_eq!(w.create_node(b, TypeId(0)).unwrap(), 1);
@@ -4785,7 +4959,7 @@ mod tests {
         // genuinely-created node is flushed.
         let dir = TempDir::new().unwrap();
         let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
-        w.register_existing_node(new_v7(), 7);
+        w.register_existing_node(new_v7(), 7).unwrap();
         let created = new_v7();
         w.create_node(created, TypeId(0)).unwrap();
         w.flush().unwrap();

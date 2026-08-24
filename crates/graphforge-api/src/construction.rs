@@ -183,25 +183,19 @@ fn register_endpoint(
     dir: &std::path::Path,
     uuid: Uuid,
 ) -> Result<(), GfError> {
-    for batch in graphforge_storage::read_nodes(dir)
-        .map_err(|error| GfError::Storage(format!("failed to read node topology: {error}")))?
-    {
-        let uuids = batch
-            .column_by_name("node_uuid")
-            .and_then(|column| column.as_any().downcast_ref::<FixedSizeBinaryArray>())
-            .ok_or_else(|| GfError::Storage("node topology has malformed UUID column".into()))?;
-        let ids = batch
-            .column_by_name("node_id")
-            .and_then(|column| column.as_any().downcast_ref::<arrow::array::UInt64Array>())
-            .ok_or_else(|| GfError::Storage("node topology has malformed ID column".into()))?;
-        for row in 0..batch.num_rows() {
-            if uuids.value(row) == uuid.as_bytes() {
-                writer.register_existing_node(uuid, ids.value(row));
-                return Ok(());
-            }
-        }
+    if !graphforge_storage::uuid_membership_index_present(dir) {
+        graphforge_storage::rebuild_uuid_membership_indexes(
+            dir,
+            graphforge_storage::UuidIndexBuildLimits::default(),
+        )?;
     }
-    Err(validation("edge endpoint is not present in this graph"))
+    if !graphforge_storage::uuid_membership_index_is_fresh(dir)? {
+        return Err(GfError::Storage("edge endpoint index is stale".into()));
+    }
+    let mut index = graphforge_storage::UuidMembershipIndex::open(dir)?;
+    let surrogate = index.lookup_node_surrogates(&[uuid])?.0[0]
+        .ok_or_else(|| validation("edge endpoint is not present in this graph"))?;
+    writer.register_existing_node(uuid, surrogate)
 }
 
 fn validate_identifier(kind: &str, name: &str) -> Result<(), GfError> {
