@@ -616,6 +616,7 @@ pub(crate) struct ConstructionIndexEncoding {
     pub input_records: u64,
     pub read_bytes: u64,
     pub read_operations: u64,
+    pub final_write_bytes: u64,
     pub write_bytes: u64,
     pub write_operations: u64,
     pub fsync_operations: u64,
@@ -649,6 +650,7 @@ struct ConstructionRecoveryIntent {
     source_volume: u64,
     source_file_id: String,
     source_bytes: u64,
+    source_sha256: String,
     authority_sha256: String,
 }
 
@@ -681,6 +683,7 @@ impl ConstructionRecoveryIntent {
             self.source_volume,
             &self.source_file_id,
             self.source_bytes,
+            &self.source_sha256,
         );
         if self.format_version != FORMAT_VERSION || self.authority_sha256 != expected {
             return Err(storage_err(
@@ -691,6 +694,7 @@ impl ConstructionRecoveryIntent {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn construction_intent_digest(
     format_version: u32,
     generation: u64,
@@ -699,9 +703,10 @@ fn construction_intent_digest(
     source_volume: u64,
     source_file_id: &str,
     source_bytes: u64,
+    source_sha256: &str,
 ) -> String {
     let mut digest = Sha256::new();
-    digest.update(b"graphforge.uuid-membership.construction-intent.v1\0");
+    digest.update(b"graphforge.uuid-membership.construction-intent.v2\0");
     digest.update(format_version.to_be_bytes());
     digest.update(generation.to_be_bytes());
     digest.update(parent_generation.to_be_bytes());
@@ -710,6 +715,7 @@ fn construction_intent_digest(
     digest.update(source_volume.to_be_bytes());
     digest.update(source_file_id.as_bytes());
     digest.update(source_bytes.to_be_bytes());
+    digest.update(source_sha256.as_bytes());
     hex_bytes(&digest.finalize())
 }
 
@@ -1081,12 +1087,13 @@ impl AuthenticatedUuidIndexSnapshot {
                 }
             })
             .ok_or_else(|| storage_err("retained UUID descriptor is not authenticated"))?;
-        let file = held.try_clone().map_err(storage_err)?;
+        let mut file = held.try_clone().map_err(storage_err)?;
         if graphforge_filesystem::file_identity(&file).map_err(storage_err)? != expected
             || graphforge_filesystem::file_link_count(&file).map_err(storage_err)? != 1
         {
             return Err(storage_err("retained UUID run identity changed"));
         }
+        file.seek(SeekFrom::Start(0)).map_err(storage_err)?;
         Ok(file)
     }
 
@@ -1114,6 +1121,86 @@ impl AuthenticatedUuidIndexSnapshot {
             sha256: record.sha256.clone(),
             parent_manifest_sha256: self.manifest_sha256.clone(),
         })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn authenticate_construction_reference(
+        &self,
+        source_root: &str,
+        source_root_volume: u64,
+        source_root_file_id: &str,
+        source_path: &str,
+        source_volume: u64,
+        source_file_id: &str,
+        target_path: &str,
+        bytes: u64,
+        sha256: &str,
+        parent_manifest_sha256: &str,
+    ) -> Result<(), GfError> {
+        self.revalidate()?;
+        if source_root != self.graph_root_path.to_string_lossy()
+            || source_root_volume != self.graph_root_identity.volume_serial
+            || source_root_file_id != hex_bytes(&self.graph_root_identity.file_id)
+            || parent_manifest_sha256 != self.manifest_sha256
+            || source_path != target_path
+            || !source_path.starts_with(&format!("{INDEX_DIR}/"))
+        {
+            return Err(storage_err(
+                "retained construction reference authority changed",
+            ));
+        }
+        let name = source_path
+            .strip_prefix(&format!("{INDEX_DIR}/"))
+            .ok_or_else(|| storage_err("retained construction source path is invalid"))?;
+        let record = self
+            .manifest
+            .runs
+            .iter()
+            .flat_map(|run| [&run.identities, &run.node_surrogates])
+            .find(|record| record.name == name)
+            .ok_or_else(|| storage_err("retained construction run is absent"))?;
+        let mut file = self.open_retained_file(record)?;
+        let identity = graphforge_filesystem::file_identity(&file).map_err(storage_err)?;
+        let expected_bytes =
+            record
+                .count
+                .saturating_mul(if record.name.starts_with("identities-") {
+                    IDENTITY_RECORD_BYTES
+                } else {
+                    NODE_LOOKUP_RECORD_BYTES
+                });
+        file.seek(SeekFrom::Start(0)).map_err(storage_err)?;
+        let mut digest = Sha256::new();
+        let mut actual_bytes = 0_u64;
+        let mut block = vec![0_u8; BULK_IO_BYTES];
+        loop {
+            let count = file.read(&mut block).map_err(storage_err)?;
+            if count == 0 {
+                break;
+            }
+            digest.update(&block[..count]);
+            actual_bytes = actual_bytes.saturating_add(count as u64);
+        }
+        if identity.volume_serial != source_volume
+            || hex_bytes(&identity.file_id) != source_file_id
+            || bytes != expected_bytes
+            || actual_bytes != expected_bytes
+            || sha256 != record.sha256
+            || hex_bytes(&digest.finalize()) != record.sha256
+        {
+            return Err(storage_err(format!(
+                "retained construction reference changed: volume={} expected_volume={} file_id={} expected_file_id={} bytes={} expected_bytes={} reference_sha={} manifest_sha={}",
+                identity.volume_serial,
+                source_volume,
+                hex_bytes(&identity.file_id),
+                source_file_id,
+                actual_bytes,
+                expected_bytes,
+                sha256,
+                record.sha256
+            )));
+        }
+        self.revalidate()
     }
 
     pub(crate) fn open_at_generation(project_dir: &Path, generation: u64) -> Result<Self, GfError> {
@@ -1394,6 +1481,7 @@ impl AuthenticatedUuidIndexSnapshot {
 pub(crate) fn encode_construction_index(
     source: &graphforge_filesystem::StableDirectory,
     identities_name: &str,
+    identities_sha256: &str,
     encoded: &graphforge_filesystem::StableDirectory,
     generation: u64,
     parent_generation: u64,
@@ -1410,6 +1498,7 @@ pub(crate) fn encode_construction_index(
     let result = encode_construction_index_inner(
         source,
         identities_name,
+        identities_sha256,
         encoded,
         generation,
         parent_generation,
@@ -1436,6 +1525,7 @@ pub(crate) fn encode_construction_index(
 fn encode_construction_index_inner(
     source: &graphforge_filesystem::StableDirectory,
     identities_name: &str,
+    identities_sha256: &str,
     encoded: &graphforge_filesystem::StableDirectory,
     generation: u64,
     parent_generation: u64,
@@ -1501,6 +1591,7 @@ fn encode_construction_index_inner(
         source_volume: source_identity.volume_serial,
         source_file_id: source_file_id.clone(),
         source_bytes: input_len,
+        source_sha256: identities_sha256.to_owned(),
         authority_sha256: String::new(),
     };
     intent.authority_sha256 = construction_intent_digest(
@@ -1511,6 +1602,7 @@ fn encode_construction_index_inner(
         intent.source_volume,
         &intent.source_file_id,
         intent.source_bytes,
+        &intent.source_sha256,
     );
     write_construction_intent(&index, &intent, &mut work)?;
     crate::graph_construction::construction_failpoint("uuid_encode.after_intent");
@@ -1535,6 +1627,7 @@ fn encode_construction_index_inner(
     let mut previous_surrogate = 0_u64;
     let mut node_count = 0_u64;
     let mut edge_count = 0_u64;
+    let mut source_digest = Sha256::new();
     let mut remaining = input_len;
     while remaining != 0 {
         if cancelled() {
@@ -1545,6 +1638,7 @@ fn encode_construction_index_inner(
         input
             .read_exact(&mut input_block[..count])
             .map_err(storage_err)?;
+        source_digest.update(&input_block[..count]);
         work.read_bytes = work.read_bytes.saturating_add(count as u64);
         work.read_operations = work.read_operations.saturating_add(1);
         for record in input_block[..count].chunks_exact_mut(IDENTITY_RECORD_WIDTH) {
@@ -1593,6 +1687,9 @@ fn encode_construction_index_inner(
         work.write_bytes = work.write_bytes.saturating_add(count as u64);
         work.write_operations = work.write_operations.saturating_add(1);
         remaining -= count as u64;
+    }
+    if hex_bytes(&source_digest.finalize()) != identities_sha256 {
+        return Err(storage_err("construction identity source digest changed"));
     }
     if !surrogate_block.is_empty() {
         surrogate_writer
@@ -1745,6 +1842,7 @@ fn encode_construction_index_inner(
     artifacts
         .retain(|artifact| artifact.name == MANIFEST || retained_names.contains(&artifact.name));
     artifacts.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+    let final_write_bytes = artifacts.iter().map(|artifact| artifact.bytes).sum();
     let mut retained_references = Vec::new();
     let locally_owned = artifacts
         .iter()
@@ -1794,6 +1892,7 @@ fn encode_construction_index_inner(
         input_records: node_count.saturating_add(edge_count),
         read_bytes: work.read_bytes,
         read_operations: work.read_operations,
+        final_write_bytes,
         write_bytes: work.write_bytes,
         write_operations: work.write_operations,
         fsync_operations: work.fsync_operations,
@@ -5392,9 +5491,12 @@ mod tests {
             drop(input);
             let source = graphforge_filesystem::StableDirectory::open(source_dir.path()).unwrap();
             let encoded = graphforge_filesystem::StableDirectory::open(encoded_dir.path()).unwrap();
+            let source_sha256 =
+                hex_sha256(&fs::read(source_dir.path().join("identities.run")).unwrap());
             let result = encode_construction_index(
                 &source,
                 "identities.run",
+                &source_sha256,
                 &encoded,
                 1,
                 0,

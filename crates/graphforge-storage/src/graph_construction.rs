@@ -44,6 +44,7 @@ const INTENT: &str = "intent.json";
 const SHAPE_INTENT: &str = "shape-intent.json";
 const BLOCK_BYTES: usize = 1 << 20;
 const MAX_CONTROL_BYTES: u64 = 64 << 10;
+const MAX_SHAPE_CONTROL_BYTES: u64 = 32 << 20;
 const IDENTITY_WIDTH: usize = 16;
 const ENDPOINT_WIDTH: usize = 48;
 const RESOLVED_ENDPOINT_WIDTH: usize = 32;
@@ -386,7 +387,7 @@ impl IdentityRecord {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-struct ArtifactReceipt {
+pub(crate) struct ArtifactReceipt {
     name: String,
     bytes: u64,
     sha256: String,
@@ -567,6 +568,7 @@ impl GraphConstructionSession {
         if &completed != shape {
             return Err(storage("encoder input differs from completed shape"));
         }
+        let shape_outputs = read_completed_shape_outputs(&self.root, &self.checkpoint)?;
         crate::graph_construction_encoding::encode(
             &self.root,
             shape,
@@ -574,6 +576,7 @@ impl GraphConstructionSession {
             self.checkpoint.ontology_mode,
             self.base_snapshot.as_ref(),
             self.semantic_authority.as_ref(),
+            &shape_outputs,
             self.checkpoint.budgets,
             &mut cancelled,
         )
@@ -2147,7 +2150,7 @@ fn recover_shape_intent(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(storage(error)),
     };
-    let intent: ShapeIntent = decode_bounded(&mut file)?;
+    let intent: ShapeIntent = decode_shape_intent(&mut file)?;
     validate_shape_binding(&intent, checkpoint)?;
     if intent.complete {
         let shape = intent
@@ -2239,7 +2242,7 @@ fn read_completed_shape(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(storage(error)),
     };
-    let manifest: ShapeIntent = decode_bounded(&mut file)?;
+    let manifest: ShapeIntent = decode_shape_intent(&mut file)?;
     validate_shape_binding(&manifest, checkpoint)?;
     if !manifest.complete {
         return Err(storage("incomplete construction shape was not recovered"));
@@ -2251,6 +2254,42 @@ fn read_completed_shape(
         .shape
         .ok_or_else(|| storage("complete shape manifest lacks output"))
         .map(Some)
+}
+
+fn read_completed_shape_outputs(
+    root: &StableDirectory,
+    checkpoint: &Checkpoint,
+) -> Result<Vec<ArtifactReceipt>, GfError> {
+    let mut file = root
+        .open_child_file(OsStr::new(SHAPE_INTENT))
+        .map_err(storage)?;
+    let manifest: ShapeIntent = decode_shape_intent(&mut file)?;
+    validate_shape_binding(&manifest, checkpoint)?;
+    if !manifest.complete || manifest.shape.is_none() {
+        return Err(storage("complete construction shape inventory is absent"));
+    }
+    Ok(manifest.outputs)
+}
+
+pub(crate) fn authenticate_shaped_outputs(
+    root: &StableDirectory,
+    outputs: &[ArtifactReceipt],
+) -> Result<(), GfError> {
+    for output in outputs {
+        authenticate_shaped_output(root, output)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn shaped_output_sha256<'a>(
+    outputs: &'a [ArtifactReceipt],
+    name: &str,
+) -> Result<&'a str, GfError> {
+    outputs
+        .iter()
+        .find(|output| output.name == name)
+        .map(|output| output.sha256.as_str())
+        .ok_or_else(|| storage("shaped output receipt is absent"))
 }
 
 fn receipt_for_existing(root: &StableDirectory, name: &str) -> Result<ArtifactReceipt, GfError> {
@@ -4394,7 +4433,7 @@ fn cleanup_authenticated_control_temps(
             continue;
         }
         let mut file = root.open_child_file(&name).map_err(storage)?;
-        let body = read_bounded(&mut file)?;
+        let body = read_bounded_limit(&mut file, MAX_SHAPE_CONTROL_BYTES)?;
         let authenticated =
             serde_json::from_slice::<Checkpoint>(&body).is_ok_and(|value| {
                 value.format_version == FORMAT_VERSION
@@ -4412,6 +4451,11 @@ fn cleanup_authenticated_control_temps(
                     && value.session_identity.matches(session)
             }) || serde_json::from_slice::<ReceiptPointer>(&body).is_ok_and(|value| {
                 value.operation_uuid == operation
+                    && value.project_identity.matches(project)
+                    && value.session_identity.matches(session)
+            }) || serde_json::from_slice::<ShapeIntent>(&body).is_ok_and(|value| {
+                value.format_version == FORMAT_VERSION
+                    && value.operation_uuid == operation
                     && value.project_identity.matches(project)
                     && value.session_identity.matches(session)
             });
@@ -4500,10 +4544,7 @@ fn install_control<T: Serialize>(
     target: &str,
     value: &T,
 ) -> Result<(), GfError> {
-    let body = serde_json::to_vec(value).map_err(storage)?;
-    if body.len() as u64 > MAX_CONTROL_BYTES {
-        return Err(storage("control record exceeds bound"));
-    }
+    let body = encode_control(value, target)?;
     let temporary = control_temp(target);
     let mut file = root
         .create_replaceable_child_file(OsStr::new(&temporary))
@@ -4525,10 +4566,7 @@ fn replace_control<T: Serialize>(
     target: &str,
     value: &T,
 ) -> Result<(), GfError> {
-    let body = serde_json::to_vec(value).map_err(storage)?;
-    if body.len() as u64 > MAX_CONTROL_BYTES {
-        return Err(storage("control record exceeds bound"));
-    }
+    let body = encode_control(value, target)?;
     let temporary = control_temp(target);
     let mut file = root
         .create_replaceable_child_file(OsStr::new(&temporary))
@@ -4545,19 +4583,64 @@ fn replace_control<T: Serialize>(
     Ok(())
 }
 
+fn control_limit(target: &str) -> u64 {
+    if target == SHAPE_INTENT {
+        MAX_SHAPE_CONTROL_BYTES
+    } else {
+        MAX_CONTROL_BYTES
+    }
+}
+
+struct BoundedControlWriter {
+    body: Vec<u8>,
+    limit: usize,
+}
+
+impl Write for BoundedControlWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if self.body.len().saturating_add(bytes.len()) > self.limit {
+            return Err(std::io::Error::other("control record exceeds bound"));
+        }
+        self.body.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn encode_control<T: Serialize>(value: &T, target: &str) -> Result<Vec<u8>, GfError> {
+    let limit = usize::try_from(control_limit(target)).map_err(storage)?;
+    let mut writer = BoundedControlWriter {
+        body: Vec::new(),
+        limit,
+    };
+    serde_json::to_writer(&mut writer, value).map_err(storage)?;
+    Ok(writer.body)
+}
+
 fn decode_bounded<T: for<'de> Deserialize<'de>>(file: &mut File) -> Result<T, GfError> {
     serde_json::from_slice(&read_bounded(file)?).map_err(storage)
 }
 
+fn decode_shape_intent(file: &mut File) -> Result<ShapeIntent, GfError> {
+    serde_json::from_slice(&read_bounded_limit(file, MAX_SHAPE_CONTROL_BYTES)?).map_err(storage)
+}
+
 fn read_bounded(file: &mut File) -> Result<Vec<u8>, GfError> {
-    if file.metadata().map_err(storage)?.len() > MAX_CONTROL_BYTES {
+    read_bounded_limit(file, MAX_CONTROL_BYTES)
+}
+
+fn read_bounded_limit(file: &mut File, limit: u64) -> Result<Vec<u8>, GfError> {
+    if file.metadata().map_err(storage)?.len() > limit {
         return Err(storage("control record exceeds bound"));
     }
     let mut body = Vec::new();
-    file.take(MAX_CONTROL_BYTES + 1)
+    file.take(limit + 1)
         .read_to_end(&mut body)
         .map_err(storage)?;
-    if body.len() as u64 > MAX_CONTROL_BYTES {
+    if body.len() as u64 > limit {
         return Err(storage("control record exceeds bound"));
     }
     Ok(body)
@@ -4796,6 +4879,18 @@ mod tests {
         FixedSizeBinaryArray::try_from_iter(values.iter().map(|value| value.as_slice())).unwrap()
     }
 
+    fn tree_has_no_temps(path: &Path) -> bool {
+        std::fs::read_dir(path).unwrap().all(|entry| {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if path.is_dir() {
+                tree_has_no_temps(&path)
+            } else {
+                !entry.file_name().to_string_lossy().ends_with(".tmp")
+            }
+        })
+    }
+
     fn node_batch(first: u128, rows: usize) -> RecordBatch {
         let uuids = (first..first + rows as u128)
             .map(u128::to_be_bytes)
@@ -4847,6 +4942,10 @@ mod tests {
     }
 
     fn node_property_batch(first: u128, rows: usize) -> RecordBatch {
+        node_property_batch_for(first, rows, "Person")
+    }
+
+    fn node_property_batch_for(first: u128, rows: usize, label: &str) -> RecordBatch {
         let uuids = (first..first + rows as u128)
             .map(u128::to_be_bytes)
             .collect::<Vec<_>>();
@@ -4860,10 +4959,28 @@ mod tests {
             Arc::new(Schema::new(fields)),
             vec![
                 Arc::new(fixed(&uuids)),
-                Arc::new(StringArray::from(vec!["Person"; rows])),
+                Arc::new(StringArray::from(vec![label; rows])),
                 Arc::new(Int64Array::from_iter_values(
                     (0..rows).map(|row| row as i64 + 10),
                 )),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn heterogeneous_property_batch(uuid: u128, property: usize) -> RecordBatch {
+        let mut fields = CONSTRUCTION_NODE_SCHEMA
+            .fields()
+            .iter()
+            .map(|field| field.as_ref().clone())
+            .collect::<Vec<_>>();
+        fields.push(Field::new(format!("p{property:03}"), DataType::Int64, true));
+        RecordBatch::try_new(
+            Arc::new(Schema::new(fields)),
+            vec![
+                Arc::new(fixed(&[uuid.to_be_bytes()])),
+                Arc::new(StringArray::from(vec!["Person"])),
+                Arc::new(Int64Array::from(vec![property as i64])),
             ],
         )
         .unwrap()
@@ -4904,11 +5021,18 @@ mod tests {
         let document = graphforge_ontology::OntologyDoc {
             ontology_id: "https://graphforge.dev/ontology/construction-test".into(),
             version: "1.0.0".into(),
-            entity_types: vec![graphforge_ontology::EntityTypeDef {
-                name: "Person".into(),
-                r#abstract: false,
-                parent: None,
-            }],
+            entity_types: vec![
+                graphforge_ontology::EntityTypeDef {
+                    name: "Person".into(),
+                    r#abstract: false,
+                    parent: None,
+                },
+                graphforge_ontology::EntityTypeDef {
+                    name: "Child".into(),
+                    r#abstract: false,
+                    parent: Some("Person".into()),
+                },
+            ],
             relation_types: vec![graphforge_ontology::RelationTypeDef {
                 name: "R".into(),
                 src: "Person".into(),
@@ -5483,6 +5607,14 @@ mod tests {
         assert!(error.to_string().contains("schema-group budget"));
         assert_eq!(session.checkpoint.node_schema_sha256.len(), 1);
         assert!(session.checkpoint.edge_schema_sha256.is_empty());
+    }
+
+    #[test]
+    fn shape_control_encoding_fails_closed_above_its_separate_cap() {
+        let oversized = "x".repeat((MAX_SHAPE_CONTROL_BYTES + 1) as usize);
+        let error = encode_control(&oversized, SHAPE_INTENT).unwrap_err();
+        assert!(error.to_string().contains("control record exceeds bound"));
+        assert_eq!(control_limit(CHECKPOINT), MAX_CONTROL_BYTES);
     }
 
     #[test]
@@ -6081,11 +6213,17 @@ mod tests {
     #[test]
     fn uuid_encoding_crashes_recover_every_durable_boundary() {
         for failpoint in [
+            "encode.parquet.after_temp_fsync.topology/nodes/00000000000000000001-00000000000000000008.parquet",
+            "encode.parquet.after_install.topology/nodes/00000000000000000001-00000000000000000008.parquet",
+            "encode.copy.after_temp_fsync.topology/runtime_catalog.parquet",
+            "encode.copy.after_install.topology/runtime_catalog.parquet",
             "uuid_encode.after_intent",
             "uuid_encode.after_temps",
             "uuid_encode.after_delta_runs",
             "uuid_encode.after_manifest",
             "uuid_encode.after_intent_removal",
+            "encode.control.after_temp_fsync.inventory.json",
+            "encode.control.after_install.inventory.json",
         ] {
             let root = TempDir::new().unwrap();
             let status = std::process::Command::new(std::env::current_exe().unwrap())
@@ -6125,6 +6263,13 @@ mod tests {
                     .to_string_lossy()
                     .ends_with(".tmp")
             }));
+            let encoded_root = root
+                .path()
+                .join(PRIVATE_ROOT)
+                .join(Uuid::from_u128(600).simple().to_string())
+                .join("encoded-v1");
+            assert!(tree_has_no_temps(&encoded_root));
+            assert!(!encoded_root.join("encoding-intent.json").exists());
         }
     }
 
@@ -6423,6 +6568,105 @@ mod tests {
         assert!(encoded.evidence.peak_batch_rows <= 65_536);
         assert!(encoded.evidence.input_read_operations > 0);
         assert!(encoded.evidence.output_write_operations > 0);
+        assert_eq!(encoded.evidence.peak_open_input_readers, 1);
+    }
+
+    #[test]
+    fn canonical_encoder_routes_inherited_property_by_declaring_owner() {
+        let root = TempDir::new().unwrap();
+        let operation = Uuid::from_u128(9_324);
+        let authority = semantic_authority(graphforge_core::OntologyMode::Strict);
+        let property_route = authority
+            .bindings
+            .bindings
+            .iter()
+            .find(|binding| {
+                binding.route_kind == crate::SemanticRouteKind::NodeProperty
+                    && binding.symbol.local_id == "Person:score"
+            })
+            .unwrap()
+            .route
+            .clone();
+        let mut session = GraphConstructionSession::open_with_semantic_authority(
+            root.path(),
+            operation,
+            0,
+            authority,
+            GraphConstructionBudgets::default(),
+        )
+        .unwrap();
+        session
+            .append(
+                ConstructionChunkKind::Node,
+                "child",
+                &node_property_batch_for(1, 2, "Child"),
+            )
+            .unwrap();
+        session.seal().unwrap();
+        let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
+        let encoded = session.encode_canonical(&shape, 1).unwrap();
+        let graph = root
+            .path()
+            .join(PRIVATE_ROOT)
+            .join(operation.simple().to_string())
+            .join(&encoded.root)
+            .join("graph");
+        assert_eq!(
+            crate::read_properties(&graph, &property_route)
+                .unwrap()
+                .iter()
+                .map(RecordBatch::num_rows)
+                .sum::<usize>(),
+            2
+        );
+    }
+
+    #[test]
+    fn canonical_encoder_keeps_256_heterogeneous_schemas_to_one_live_reader() {
+        let root = TempDir::new().unwrap();
+        let operation = Uuid::from_u128(9_325);
+        let budgets = GraphConstructionBudgets {
+            max_batch_rows: 1,
+            max_run_records: 4,
+            ..GraphConstructionBudgets::default()
+        };
+        let mut session = GraphConstructionSession::open_with_mode(
+            root.path(),
+            operation,
+            0,
+            graphforge_core::OntologyMode::Exploratory,
+            budgets,
+        )
+        .unwrap();
+        for index in 0..256 {
+            session
+                .append(
+                    ConstructionChunkKind::Node,
+                    &format!("schema-{index:03}"),
+                    &heterogeneous_property_batch(index as u128 + 1, index),
+                )
+                .unwrap();
+        }
+        session.seal().unwrap();
+        let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
+        assert_eq!(shape.node_rows.len(), 256);
+        let encoded = session.encode_canonical(&shape, 1).unwrap();
+        assert_eq!(encoded.evidence.peak_open_input_readers, 1);
+        assert!(encoded.evidence.peak_batch_rows <= 1);
+        let graph = root
+            .path()
+            .join(PRIVATE_ROOT)
+            .join(operation.simple().to_string())
+            .join(&encoded.root)
+            .join("graph");
+        assert_eq!(
+            crate::read_nodes(&graph)
+                .unwrap()
+                .iter()
+                .map(RecordBatch::num_rows)
+                .sum::<usize>(),
+            256
+        );
     }
 
     #[test]
@@ -6686,6 +6930,35 @@ mod tests {
     }
 
     #[test]
+    fn completed_encoding_replay_reauthenticates_retained_parent_payload() {
+        let project = nonempty_project_generation_two();
+        let operation = Uuid::from_u128(9_343);
+        let mut session = GraphConstructionSession::open_with_mode(
+            project.path(),
+            operation,
+            2,
+            graphforge_core::OntologyMode::Exploratory,
+            GraphConstructionBudgets::default(),
+        )
+        .unwrap();
+        session
+            .append(ConstructionChunkKind::Node, "delta", &node_batch(4, 1))
+            .unwrap();
+        session.seal().unwrap();
+        let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
+        let encoded = session.encode_canonical(&shape, 3).unwrap();
+        let retained = encoded.retained_artifacts.first().unwrap();
+        let path = std::path::Path::new(&retained.source_root).join(&retained.source_path);
+        let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        use std::io::{Seek as _, SeekFrom};
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.write_all(&[0xff]).unwrap();
+        file.sync_all().unwrap();
+        let error = session.encode_canonical(&shape, 3).unwrap_err();
+        assert!(error.to_string().contains("retained construction"));
+    }
+
+    #[test]
     fn generation_one_parent_uses_streamed_binary_carry_and_authenticates_result() {
         let project = nonempty_project_with_nodes(2);
         let operation = Uuid::from_u128(9_341);
@@ -6704,6 +6977,10 @@ mod tests {
         let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
         let encoded = session.encode_canonical(&shape, 2).unwrap();
         assert!(encoded.evidence.retained_index_payload_bytes > 0);
+        assert!(encoded.evidence.membership_read_bytes > 0);
+        assert!(
+            encoded.evidence.membership_total_write_bytes > encoded.evidence.membership_write_bytes
+        );
 
         let graph = project
             .path()
