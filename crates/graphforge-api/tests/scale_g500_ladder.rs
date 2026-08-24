@@ -2188,7 +2188,6 @@ struct PhaseJournal {
 #[derive(Clone, Copy, Default)]
 struct SystemSnapshot {
     cgroup_current: u64,
-    cgroup_peak: u64,
     memory_limit: u64,
     smaps_rss: u64,
     smaps_anon: u64,
@@ -2253,7 +2252,6 @@ fn system_snapshot(workspace: &Path, memory_limit: u64) -> SystemSnapshot {
         filesystem_snapshot(workspace).unwrap_or_default();
     SystemSnapshot {
         cgroup_current: cgroup_value("memory.current").unwrap_or(rss),
-        cgroup_peak: cgroup_value("memory.peak").unwrap_or(rss),
         memory_limit: cgroup_value("memory.max").unwrap_or(memory_limit),
         smaps_rss,
         smaps_anon,
@@ -2269,14 +2267,21 @@ fn system_snapshot(workspace: &Path, memory_limit: u64) -> SystemSnapshot {
     }
 }
 
-fn reset_cgroup_peak() {
-    let _ = fs::write("/sys/fs/cgroup/memory.peak", b"0\n");
+fn sampled_memory_bytes() -> (u64, &'static str) {
+    cgroup_value("memory.current").map_or_else(
+        || {
+            (
+                current_rss_bytes().expect("certification RSS probe failed"),
+                "sampled_process_rss/250ms",
+            )
+        },
+        |value| (value, "sampled_cgroup_memory.current/250ms"),
+    )
 }
 
 impl PhaseJournal {
     fn new(path: PathBuf, workspace: &Path, envelope: Envelope) -> Self {
         let boundary = system_snapshot(workspace, envelope.rss_bytes);
-        reset_cgroup_peak();
         Self {
             path,
             phases: Vec::new(),
@@ -2312,7 +2317,12 @@ impl PhaseJournal {
             self.flush();
             panic!("certification resource watchdog stopped phase {id}: {code}");
         }
-        let rss_peak_bytes = self.monitor.peak_rss.swap(0, Ordering::SeqCst);
+        let rss_peak_bytes = self
+            .monitor
+            .peak_rss
+            .swap(after.cgroup_current, Ordering::SeqCst)
+            .max(before.cgroup_current)
+            .max(after.cgroup_current);
         let disk_peak_bytes = self.monitor.peak_disk.swap(0, Ordering::SeqCst);
         self.phases.push(json!({
             "id": id, "status": "pass",
@@ -2325,7 +2335,8 @@ impl PhaseJournal {
             "memory_limit_bytes": after.memory_limit,
             "memory": {
                 "cgroup_current_before_bytes": before.cgroup_current,
-                "cgroup_peak_bytes": after.cgroup_peak.max(before.cgroup_current).max(after.cgroup_current),
+                "cgroup_peak_bytes": rss_peak_bytes,
+                "peak_authority": self.monitor.memory_peak_authority,
                 "cgroup_current_after_bytes": after.cgroup_current,
                 "smaps_rss_before_bytes": before.smaps_rss,
                 "smaps_rss_after_bytes": after.smaps_rss,
@@ -2352,7 +2363,6 @@ impl PhaseJournal {
             },
         }));
         self.boundary = after;
-        reset_cgroup_peak();
         self.flush();
     }
 
@@ -2407,6 +2417,7 @@ struct ResourceMonitor {
     cancellation: CancellationToken,
     stop: Arc<AtomicBool>,
     peak_rss: Arc<AtomicU64>,
+    memory_peak_authority: &'static str,
     peak_disk: Arc<AtomicU64>,
     failure: Arc<AtomicU64>,
     envelope: Envelope,
@@ -2415,7 +2426,7 @@ struct ResourceMonitor {
 
 impl ResourceMonitor {
     fn start(workspace: PathBuf, envelope: Envelope) -> Self {
-        let initial_rss = current_rss_bytes().expect("certification host must expose process RSS");
+        let (initial_rss, memory_peak_authority) = sampled_memory_bytes();
         let initial_disk = allocated_bytes(&workspace)
             .expect("certification host must expose allocated disk bytes");
         let cancellation = CancellationToken::new();
@@ -2434,7 +2445,7 @@ impl ResourceMonitor {
         let worker = thread::spawn(move || {
             let mut samples = 0_u8;
             while !worker_stop.load(Ordering::Relaxed) {
-                let rss = current_rss_bytes().expect("certification RSS probe failed");
+                let (rss, _) = sampled_memory_bytes();
                 worker_peak_rss.fetch_max(rss, Ordering::Relaxed);
                 let mut code = if rss > envelope.rss_bytes {
                     1
@@ -2471,6 +2482,7 @@ impl ResourceMonitor {
             cancellation,
             stop,
             peak_rss,
+            memory_peak_authority,
             peak_disk,
             failure,
             envelope,
@@ -3071,6 +3083,32 @@ fn certification_lifecycle_journals_equivalent_round_trip_and_drills() {
         "every integrated rung must execute the full source/export/verify/clean-import lifecycle"
     );
     assert!(phases.iter().all(|phase| phase["status"] == "pass"));
+    let expected_authority = if cgroup_value("memory.current").is_some() {
+        "sampled_cgroup_memory.current/250ms"
+    } else {
+        "sampled_process_rss/250ms"
+    };
+    assert!(phases.iter().all(|phase| {
+        phase["memory"]["peak_authority"] == expected_authority
+            && phase["memory"]["cgroup_peak_bytes"]
+                .as_u64()
+                .is_some_and(|peak| {
+                    peak >= phase["memory"]["cgroup_current_before_bytes"]
+                        .as_u64()
+                        .unwrap()
+                        && peak
+                            >= phase["memory"]["cgroup_current_after_bytes"]
+                                .as_u64()
+                                .unwrap()
+                })
+    }));
+    assert_eq!(
+        LEGACY_CONSTRUCTION_CONTRACT,
+        "legacy-repeated-publication/refused"
+    );
+    assert_eq!(phases[2]["io"]["storage_blocks"], 0);
+    assert_eq!(phases[2]["io"]["arrow_batches"], 0);
+    assert_eq!(phases[2]["io"]["topology_rows"], 0);
 }
 
 #[test]

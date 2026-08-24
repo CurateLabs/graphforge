@@ -34,11 +34,14 @@ This ladder replaces that with **external sort + spill + k-way merge**:
 3. K-way merge the sorted runs, emitting each unique undirected pair once.
 
 Peak resident edges never exceed `buffer_edges`, **independent of total edge
-count**. The merge decodes fixed 1 MiB blocks into Arrow batches of at most
-65,536 rows and submits them to one storage-owned construction session. That
-session writes immutable runs, performs one bounded final merge and private
-seal, and publishes `CURRENT` exactly once. Pair-at-a-time callbacks and
-repeated `publish_bulk_edges` generations are not valid S20 evidence.
+count**. The required #932 implementation will decode fixed 1 MiB blocks into
+Arrow batches of at most 65,536 rows and submit them to one storage-owned
+construction session. That session must write immutable runs, perform one
+bounded final merge and private seal, and publish `CURRENT` exactly once. The
+current executable uses `EdgeSink` pair callbacks and repeated public
+publication, advertises `legacy-repeated-publication/refused`, and is
+intentionally refused before a Fly app, volume, or Machine can be created. It
+is diagnostic code, not valid S20 evidence.
 
 ## Counts always reconcile
 
@@ -113,7 +116,8 @@ stops — no larger rung is attempted and no SCALE-26 pass is claimed.
 > phase-local plateau. Continued material RSS growth with edge count is an
 > architecture failure, not permission to select a larger Machine.
 
-> Ingest-phase attribution: `publish_bulk_nodes` / `publish_bulk_edges` retain
+> Current legacy ingest attribution: `publish_bulk_nodes` / `publish_bulk_edges`
+> retain
 > request-sized normalization, identity, endpoint, writer, delta, and receipt
 > state. Existing fixed-schema Parquet is copied through bounded 64K-row batches,
 > and writer reopen reads only final row-group surrogate tails; neither operation
@@ -122,8 +126,8 @@ stops — no larger rung is attempted and no SCALE-26 pass is claimed.
 > anonymous/file RSS, disk usage, and aggregate topology rewrite counters. An
 > `oom` with `first_failing_phase: "ingest"` therefore remains an upstream
 > publication failure, not a generator-memory regression. Append-only linear-I/O
-> construction is tracked separately by #901 and remains required before the
-> billion-edge close gate.
+> construction is tracked by #932 and remains required before the paid S20
+> gate. These counters must never be relabeled as block/batch evidence.
 
 ### S20 Fly baseline and interpretation
 
@@ -206,18 +210,34 @@ docker buildx build --platform linux/amd64 --provenance=false --push \
 docker buildx imagetools inspect --raw "registry.fly.io/${APP}:${SHA}"
 ```
 
+This command currently builds the deliberately unadvertised legacy executable.
+The dry-run controller must reject it because the Dockerfile has no S20 runtime,
+measurement, construction, or revision contract labels. #932 owns adding those
+labels only after its image build executes the real contract regression. Do not
+add labels or synthesize positive counters to bypass admission.
+
 Run the controller without `--execute` against the resolved child digest before
 execution. This creates no Machine or volume. Supply a sanitized qualification
-artifact from at least two lower rungs under identical budgets. It binds the
-fixed region and immutable image digest, records phase-local cgroup/smaps and
-block/batch/shard I/O observations, and contains an S20 physical-storage
-projection. The checked-in
+artifact emitted by the eventual #932 path from at least two lower rungs under
+identical budgets. It binds the fixed region and immutable image digest, records
+phase-local cgroup/smaps and raw block/batch/shard/topology-row I/O observations,
+and contains an S20 physical-storage projection. Ingest and import counters must
+be nonzero, syscall counts must remain sub-row, and block/batch/shard density
+must remain linear across adjacent S18/S19 rows. These gates run before
+`execute()` and therefore before paid resources. The checked-in
 [`fly-s20-qualification.schema.json`](fly-s20-qualification.schema.json)
 defines that input. The controller refuses an RSS growth curve that does not
 plateau, chooses the smallest listed performance Machine with both 25% and 512
 MiB RSS headroom, and rounds the projected physical peak up with 25% volume
 headroom. 128 GiB and Fly's 500 GB volume limit are refusal ceilings, not
 defaults.
+
+The final S20 evidence must repeat the three computed gates as
+`rss_plateau=pass`, `disk_headroom=pass`, and `construction_io=pass`; the
+controller recomputes the S20 phase consistency and refuses missing or
+hand-declared substitutes. The current Rust executable emits neither this gate
+set nor the required construction contract, which is another intentional
+prelaunch incompatibility until #932 wires the actual storage counters.
 
 The current official rate for the selected Machine and derived volume is priced
 for the four-hour product clock plus bounded cleanup. The total, including a $1
@@ -246,8 +266,8 @@ dry-run tests.
 Before any Fly resource is created, the controller reads the pinned child image
 configuration and requires Linux/AMD64, the exact source revision, the
 phase-measurement contract, and the storage-owned construction-session contract.
-The legacy `EdgeSink`/repeated-publication executable deliberately does not
-advertise that contract and is refused before paid launch. A Docker label is
+The current legacy `EdgeSink`/repeated-publication executable deliberately does
+not advertise that contract and is refused before paid launch. A Docker label is
 evidence only when the image build itself runs the contract regression; it must
 never be added merely to bypass this admission gate.
 

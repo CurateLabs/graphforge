@@ -57,7 +57,7 @@ def args(root: Path) -> argparse.Namespace:
 
 
 def qualification(digest: str, *, growth: float = 1.1, disk_gib: int = 20) -> dict:
-    def phase(identifier: str, peak: int) -> dict:
+    def phase(identifier: str, peak: int, scale_multiplier: int) -> dict:
         return {
             "id": identifier,
             "elapsed_ms": 1,
@@ -68,15 +68,17 @@ def qualification(digest: str, *, growth: float = 1.1, disk_gib: int = 20) -> di
                 "smaps_rss_bytes": peak // 2,
                 "smaps_anon_bytes": peak // 3,
                 "smaps_file_bytes": peak // 6,
+                "peak_authority": "sampled_cgroup_memory.current/250ms",
             },
             "io": {
                 "read_bytes": 1_048_576,
                 "write_bytes": 1_048_576,
-                "read_syscalls": 1,
-                "write_syscalls": 1,
-                "blocks": 1,
-                "batches": 1,
-                "shards": 1,
+                "read_syscalls": 8 * scale_multiplier,
+                "write_syscalls": 8 * scale_multiplier,
+                "blocks": 64 * scale_multiplier,
+                "batches": 32 * scale_multiplier,
+                "shards": 2 * scale_multiplier,
+                "topology_rows": 65_536 * scale_multiplier,
             },
         }
 
@@ -103,7 +105,7 @@ def qualification(digest: str, *, growth: float = 1.1, disk_gib: int = 20) -> di
                     "source_current_transitions": 1,
                     "import_current_transitions": 1,
                 },
-                "phases": [phase(identifier, base) for identifier in controller.PHASES],
+                "phases": [phase(identifier, base, 1) for identifier in controller.PHASES],
             },
             {
                 "scale": 19,
@@ -118,7 +120,7 @@ def qualification(digest: str, *, growth: float = 1.1, disk_gib: int = 20) -> di
                     "import_current_transitions": 1,
                 },
                 "phases": [
-                    phase(identifier, int(base * growth)) for identifier in controller.PHASES
+                    phase(identifier, int(base * growth), 2) for identifier in controller.PHASES
                 ],
             },
         ],
@@ -200,6 +202,26 @@ def main() -> None:
         assert resources["machine"] == "performance-2x"
         assert resources["memory_mb"] == 4096
         assert resources["volume_gb"] == 25
+        assert resources["construction_io_gate"] == "pass"
+        zero_io = qualification(digest)
+        zero_io["rungs"][0]["phases"][2]["io"]["blocks"] = 0
+        options.qualification_evidence.write_text(json.dumps(zero_io))
+        try:
+            controller.load_qualification(options.qualification_evidence, digest, "dfw")
+        except controller.ControllerError as error:
+            assert "nonzero" in str(error)
+        else:
+            raise AssertionError("zero construction counters must refuse paid launch")
+        per_row = qualification(digest)
+        ingest_io = per_row["rungs"][0]["phases"][2]["io"]
+        ingest_io["write_syscalls"] = ingest_io["topology_rows"]
+        options.qualification_evidence.write_text(json.dumps(per_row))
+        try:
+            controller.load_qualification(options.qualification_evidence, digest, "dfw")
+        except controller.ControllerError as error:
+            assert "per-row" in str(error)
+        else:
+            raise AssertionError("per-row construction I/O must refuse paid launch")
         inconsistent = qualification(digest)
         inconsistent["rungs"][1]["budgets"]["batch_rows"] = 32_768
         options.qualification_evidence.write_text(json.dumps(inconsistent))
@@ -261,6 +283,7 @@ def main() -> None:
                         "smaps_anon_after_bytes": 1,
                         "smaps_file_before_bytes": 0,
                         "smaps_file_after_bytes": 0,
+                        "peak_authority": "sampled_cgroup_memory.current/250ms",
                     },
                     "io": {
                         "proc_read_bytes": 1,
@@ -302,9 +325,23 @@ def main() -> None:
             "public_services": 0,
             "restart": "no",
         }
-        measured["resource_gates"] = {"rss_plateau": "pass", "disk_headroom": "pass"}
+        measured["resource_gates"] = {
+            "rss_plateau": "pass",
+            "disk_headroom": "pass",
+            "construction_io": "pass",
+        }
         bound_resources = {**resources, "region": "dfw", "image_digest": digest}
         controller.validate_evidence(measured, measured_phases, "a" * 40, bound_resources)
+        missing_gate = json.loads(json.dumps(measured))
+        missing_gate["resource_gates"].pop("construction_io")
+        try:
+            controller.validate_evidence(
+                missing_gate, measured_phases, "a" * 40, bound_resources
+            )
+        except controller.ControllerError as error:
+            assert "resource gates" in str(error)
+        else:
+            raise AssertionError("hand-declared or incomplete gates must be refused")
         measured["lifecycle"]["phases"][0]["io"].pop("storage_blocks")
         try:
             controller.validate_evidence(measured, measured_phases, "a" * 40, bound_resources)
@@ -339,12 +376,29 @@ def main() -> None:
             "schema": "incomplete",
             "token": "must-not-survive",
             "nested": {"password_hint": "must-not-survive", "message": "bounded"},
+            "api_token": "must-not-survive",
+            "access-token": "must-not-survive",
+            "FLY_API_TOKEN": "must-not-survive",
+            "client_secret": "must-not-survive",
+            "cookie": "must-not-survive",
+            "authorization_header": "must-not-survive",
+            "note": "Authorization: Bearer must-not-survive",
         }
         controller.write_sanitized_json(options.evidence_out, unsafe)
         preserved = json.loads(options.evidence_out.read_text())
         assert preserved["schema"] == "incomplete"
         assert preserved["token"] == "<redacted>"
         assert preserved["nested"]["password_hint"] == "<redacted>"
+        for key in (
+            "api_token",
+            "access-token",
+            "FLY_API_TOKEN",
+            "client_secret",
+            "cookie",
+            "authorization_header",
+            "note",
+        ):
+            assert preserved[key] == "<redacted>"
         authority = "sha256:not-a-credential"
         controller.write_sanitized_json(
             options.evidence_out, {"source_authority_fingerprint": authority}
@@ -410,6 +464,9 @@ def main() -> None:
             def json(self, arguments, *, timeout=120):
                 del timeout
                 self.calls.append(arguments)
+                if arguments[:2] == ["apps", "list"]:
+                    destroyed = ["apps", "destroy", "gf-s20-test", "--yes"] in self.calls
+                    return [] if destroyed else [{"name": "gf-s20-test"}]
                 return []
 
         cleanup = FakeCleanup()
@@ -425,9 +482,51 @@ def main() -> None:
         assert ["volumes", "destroy", "volume-id", "--app", "gf-s20-test", "--yes"] in cleanup.calls
         assert ["apps", "destroy", "gf-s20-test", "--yes"] in cleanup.calls
 
+        class AmbiguousCreates(FakeCleanup):
+            def json(self, arguments, *, timeout=120):
+                del timeout
+                self.calls.append(arguments)
+                destroyed = ["apps", "destroy", "gf-s20-test", "--yes"] in self.calls
+                if arguments[:2] == ["apps", "list"]:
+                    return [] if destroyed else [{"name": "gf-s20-test"}]
+                if arguments[:2] == ["machines", "list"]:
+                    return [{"id": "discovered-machine", "name": "gf-s20-machine"}]
+                if arguments[:2] == ["volumes", "list"]:
+                    return [{"id": "discovered-volume", "name": "gf_s20_volume"}]
+                return []
+
+        ambiguous = AmbiguousCreates()
+        controller.destroy_and_verify(
+            ambiguous,
+            "gf-s20-test",
+            None,
+            None,
+            "gf-s20-machine",
+            "gf_s20_volume",
+        )
+        assert [
+            "machine",
+            "destroy",
+            "discovered-machine",
+            "--app",
+            "gf-s20-test",
+            "--force",
+        ] in ambiguous.calls
+        assert [
+            "volumes",
+            "destroy",
+            "discovered-volume",
+            "--app",
+            "gf-s20-test",
+            "--yes",
+        ] in ambiguous.calls
+
         class FirstDeleteFails(FakeCleanup):
+            failed = False
+
             def run(self, arguments, *, check=True, timeout=120):
-                if not self.calls:
+                if not self.failed:
+                    self.failed = True
                     self.calls.append(arguments)
                     raise subprocess.TimeoutExpired(arguments, timeout)
                 return super().run(arguments, check=check, timeout=timeout)
@@ -500,6 +599,29 @@ def main() -> None:
     assert "finally:" in source and "destroy_and_verify" in source
     assert "FLY_API_TOKEN" not in source
     assert "du -" not in source
+    dockerfile = (ROOT / "containers/fly-g500-s20/Dockerfile").read_text()
+    assert "dev.graphforge.s20.construction" not in dockerfile
+    try:
+        controller.assert_platform_child(
+            "unused",
+            "a" * 40,
+            child,
+            json.dumps(
+                {"architecture": "amd64", "os": "linux", "config": {"Labels": {}}}
+            ),
+        )
+    except controller.ControllerError as error:
+        assert "measurement/construction contract" in str(error)
+    else:
+        raise AssertionError("the current legacy image must be refused before Fly creation")
+    rust_source = (ROOT / "crates/graphforge-api/tests/scale_g500_ladder.rs").read_text()
+    assert (
+        'const LEGACY_CONSTRUCTION_CONTRACT: &str = "legacy-repeated-publication/refused"'
+        in rust_source
+    )
+    assert '"construction_contract": LEGACY_CONSTRUCTION_CONTRACT' in rust_source
+    main_source = source[source.index("def main()") :]
+    assert main_source.index("assert_platform_child(") < main_source.index("execute(args")
     print("Fly S20 controller tests passed")
 
 

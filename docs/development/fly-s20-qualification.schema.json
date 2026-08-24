@@ -104,7 +104,8 @@
             "cgroup_current_after_bytes",
             "smaps_rss_bytes",
             "smaps_anon_bytes",
-            "smaps_file_bytes"
+            "smaps_file_bytes",
+            "peak_authority"
           ],
           "properties": {
             "cgroup_current_before_bytes": { "$ref": "#/$defs/nonnegative" },
@@ -112,7 +113,8 @@
             "cgroup_current_after_bytes": { "$ref": "#/$defs/nonnegative" },
             "smaps_rss_bytes": { "$ref": "#/$defs/nonnegative" },
             "smaps_anon_bytes": { "$ref": "#/$defs/nonnegative" },
-            "smaps_file_bytes": { "$ref": "#/$defs/nonnegative" }
+            "smaps_file_bytes": { "$ref": "#/$defs/nonnegative" },
+            "peak_authority": { "const": "sampled_cgroup_memory.current/250ms" }
           }
         },
         "io": {
@@ -125,7 +127,8 @@
             "write_syscalls",
             "blocks",
             "batches",
-            "shards"
+            "shards",
+            "topology_rows"
           ],
           "properties": {
             "read_bytes": { "$ref": "#/$defs/nonnegative" },
@@ -134,7 +137,8 @@
             "write_syscalls": { "$ref": "#/$defs/nonnegative" },
             "blocks": { "$ref": "#/$defs/nonnegative" },
             "batches": { "$ref": "#/$defs/nonnegative" },
-            "shards": { "$ref": "#/$defs/nonnegative" }
+            "shards": { "$ref": "#/$defs/nonnegative" },
+            "topology_rows": { "$ref": "#/$defs/nonnegative" }
           }
         }
       }

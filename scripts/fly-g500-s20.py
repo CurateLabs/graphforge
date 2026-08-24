@@ -75,15 +75,22 @@ MIN_MEMORY_HEADROOM_BYTES = 512 * 1024 * 1024
 MEMORY_HEADROOM_RATIO = 1.25
 VOLUME_HEADROOM_RATIO = 1.25
 MAX_DIAGNOSTIC_EVENTS = 20
-SENSITIVE_KEYS = {
+SENSITIVE_NORMALIZED_KEYS = {
     "authorization",
     "credential",
     "credentials",
     "password",
-    "password_hint",
+    "passwordhint",
     "secret",
     "token",
+    "apitoken",
+    "accesstoken",
+    "flyapitoken",
+    "clientsecret",
+    "cookie",
+    "setcookie",
 }
+BEARER_VALUE = re.compile(r"(?:^|\s)bearer\s+\S+", re.IGNORECASE)
 REQUIRED_IMAGE_CONTRACT = "graphforge-s20-runtime/2"
 REQUIRED_MEASUREMENT_CONTRACT = "graphforge-s20-phase-measurement/1"
 REQUIRED_CONSTRUCTION_CONTRACT = "graphforge-storage-construction-session/1"
@@ -110,6 +117,18 @@ def emit_progress(event: str, **fields: Any) -> None:
     print(json.dumps({"event": event, **fields}, sort_keys=True), flush=True)
 
 
+def sensitive_key(key: Any) -> bool:
+    normalized = re.sub(r"[^a-z0-9]", "", str(key).casefold())
+    return (
+        normalized in SENSITIVE_NORMALIZED_KEYS
+        or normalized.endswith("token")
+        or normalized.endswith("secret")
+        or normalized.startswith("authorization")
+        or normalized.startswith("cookie")
+        or normalized.endswith("cookie")
+    )
+
+
 def sanitize_artifact(value: Any, *, depth: int = 0) -> Any:
     """Bound diagnostic artifacts and redact credential-shaped fields."""
     if depth > 12:
@@ -117,14 +136,14 @@ def sanitize_artifact(value: Any, *, depth: int = 0) -> Any:
     if isinstance(value, dict):
         return {
             str(key): "<redacted>"
-            if str(key).casefold() in SENSITIVE_KEYS
+            if sensitive_key(key)
             else sanitize_artifact(item, depth=depth + 1)
             for key, item in list(value.items())[:1000]
         }
     if isinstance(value, list):
         return [sanitize_artifact(item, depth=depth + 1) for item in value[:1000]]
     if isinstance(value, str):
-        return value[:4096]
+        return "<redacted>" if BEARER_VALUE.search(value) else value[:4096]
     if value is None or isinstance(value, (bool, int, float)):
         return value
     return "<unsupported-value>"
@@ -241,6 +260,7 @@ def load_qualification(path: Path, digest: str, region: str) -> dict[str, Any]:
     projected_disk = 0
     common_budgets: dict[str, Any] | None = None
     qualified_runtime: dict[str, Any] | None = None
+    construction_observations: list[dict[str, int]] = []
     for rung in rungs:
         if not isinstance(rung, dict) or rung.get("result") != "pass":
             raise ControllerError("qualification contains a non-pass rung")
@@ -302,6 +322,8 @@ def load_qualification(path: Path, digest: str, region: str) -> dict[str, Any]:
                 )
             ):
                 raise ControllerError("qualification lacks phase-local cgroup/smaps evidence")
+            if memory.get("peak_authority") != "sampled_cgroup_memory.current/250ms":
+                raise ControllerError("qualification used an unsupported phase-memory authority")
             if not isinstance(io, dict) or not all(
                 isinstance(io.get(key), int) and io[key] >= 0
                 for key in (
@@ -312,9 +334,12 @@ def load_qualification(path: Path, digest: str, region: str) -> dict[str, Any]:
                     "blocks",
                     "batches",
                     "shards",
+                    "topology_rows",
                 )
             ):
                 raise ControllerError("qualification lacks block/batch/shard I/O evidence")
+            if sum(io[key] for key in ("read_bytes", "write_bytes", "read_syscalls", "write_syscalls")) <= 0:
+                raise ControllerError("qualification contains an unobserved I/O phase")
             elapsed_ms = phase.get("elapsed_ms")
             if not isinstance(elapsed_ms, int) or elapsed_ms <= 0:
                 raise ControllerError("qualification phase lacks positive elapsed time")
@@ -326,12 +351,55 @@ def load_qualification(path: Path, digest: str, region: str) -> dict[str, Any]:
             ) or memory["smaps_anon_bytes"] + memory["smaps_file_bytes"] > memory["smaps_rss_bytes"]:
                 raise ControllerError("qualification memory counters are internally inconsistent")
             phase_peaks.setdefault(phase["id"], []).append(memory["cgroup_peak_bytes"])
+            if phase["id"] in ("ingest", "import"):
+                if any(io[key] <= 0 for key in ("blocks", "batches", "shards", "topology_rows")):
+                    raise ControllerError("qualification construction I/O must be observed and nonzero")
+                if io["read_syscalls"] + io["write_syscalls"] >= io["topology_rows"]:
+                    raise ControllerError("qualification construction performs per-row I/O")
+                if io["read_syscalls"] + io["write_syscalls"] <= 0:
+                    raise ControllerError("qualification construction syscall counters are unobserved")
+                construction_observations.append(
+                    {
+                        key: io[key]
+                        for key in (
+                            "read_syscalls",
+                            "write_syscalls",
+                            "blocks",
+                            "batches",
+                            "shards",
+                            "topology_rows",
+                        )
+                    }
+                )
     if scales != sorted(set(scales)):
         raise ControllerError("qualification rungs must be unique and increasing")
     if scales[-2:] != [18, 19]:
         raise ControllerError("qualification requires adjacent S18 and S19 observations")
     if physical_peaks != sorted(physical_peaks):
         raise ControllerError("qualification physical peaks regress across rungs")
+    # Two construction phases per rung, in exact lifecycle order. Raw counters
+    # must grow with rows at a bounded density, rejecting zero/fabricated and
+    # pair-at-a-time I/O before any paid resource is created.
+    adjacent_observations = construction_observations[-4:]
+    for phase_offset in range(2):
+        earlier = adjacent_observations[phase_offset]
+        later = adjacent_observations[phase_offset + 2]
+        if later["topology_rows"] <= earlier["topology_rows"]:
+            raise ControllerError("qualification construction rows did not grow across rungs")
+        row_growth = later["topology_rows"] / earlier["topology_rows"]
+        sys_growth = (
+            later["read_syscalls"] + later["write_syscalls"]
+        ) / (earlier["read_syscalls"] + earlier["write_syscalls"])
+        if sys_growth > row_growth * 1.25:
+            raise ControllerError("qualification syscall growth exceeds topology growth")
+        for key in ("blocks", "batches", "shards"):
+            density_ratio = (later[key] / later["topology_rows"]) / (
+                earlier[key] / earlier["topology_rows"]
+            )
+            if not 0.5 <= density_ratio <= 2.0:
+                raise ControllerError(
+                    f"qualification {key} do not scale linearly with topology rows"
+                )
     linear_edge_projection = physical_peaks[-1] * (1 << max(0, 20 - scales[-1]))
     if projected_disk < linear_edge_projection:
         raise ControllerError("S20 disk projection is below the observed linear edge bound")
@@ -392,6 +460,7 @@ def load_qualification(path: Path, digest: str, region: str) -> dict[str, Any]:
         "projected_physical_peak_bytes": projected_disk,
         "rung_scales": scales,
         "max_phase_rss_growth_ratio": float(plateau_ratio),
+        "construction_io_gate": "pass",
     }
 
 
@@ -596,6 +665,8 @@ def validate_phase_measurement(phase: dict[str, Any]) -> None:
         )
     ):
         raise ControllerError("S20 phase lacks boundary cgroup/smaps memory evidence")
+    if memory.get("peak_authority") != "sampled_cgroup_memory.current/250ms":
+        raise ControllerError("S20 phase lacks sampled cgroup phase-peak authority")
     if not isinstance(io, dict) or not all(
         isinstance(io.get(key), int) and io[key] >= 0
         for key in (
@@ -670,6 +741,12 @@ def validate_evidence(
         "construction_contract"
     ) != REQUIRED_CONSTRUCTION_CONTRACT:
         raise ControllerError("S20 evidence lacks the executable measurement/construction contract")
+    if resources is not None and evidence.get("resource_gates") != {
+        "rss_plateau": "pass",
+        "disk_headroom": "pass",
+        "construction_io": "pass",
+    }:
+        raise ControllerError("S20 evidence lacks the computed qualification resource gates")
     lifecycle = evidence.get("lifecycle", {})
     observed = [phase.get("id") for phase in lifecycle.get("phases", [])]
     if observed != PHASES or [phase.get("id") for phase in journal] != PHASES:
@@ -743,11 +820,18 @@ def preserve_and_validate_evidence(
 
 
 def destroy_and_verify(
-    fly: Flyctl, app: str, machine_id: str | None, volume_id: str | None
+    fly: Flyctl,
+    app: str,
+    machine_id: str | None,
+    volume_id: str | None,
+    machine_name: str | None = None,
+    volume_name: str | None = None,
 ) -> None:
-    """Attempt every teardown target independently under one short deadline."""
+    """Discover ambiguous creates, tear down independently, and prove absence."""
     deadline = time.monotonic() + CLEANUP_TTL_S
     failures: list[str] = []
+    machine_ids = {machine_id} if machine_id else set()
+    volume_ids = {volume_id} if volume_id else set()
 
     def attempt(kind: str, arguments: list[str]) -> None:
         remaining = deadline - time.monotonic()
@@ -759,14 +843,7 @@ def destroy_and_verify(
         except (OSError, subprocess.SubprocessError) as error:
             failures.append(f"{kind}:{type(error).__name__}")
 
-    if machine_id:
-        attempt("machine", ["machine", "destroy", machine_id, "--app", app, "--force"])
-    if volume_id:
-        attempt("volume", ["volumes", "destroy", volume_id, "--app", app, "--yes"])
-    attempt("app", ["apps", "destroy", app, "--yes"])
     while time.monotonic() < deadline:
-        machine_absent = machine_id is None
-        volume_absent = volume_id is None
         app_absent = False
         try:
             query_timeout = min(15, max(0.1, deadline - time.monotonic()))
@@ -781,27 +858,48 @@ def destroy_and_verify(
                     ["volumes", "list", "--app", app],
                     timeout=min(15, max(0.1, deadline - time.monotonic())),
                 )
-                machine_absent = machine_id is None or not any(
-                    item.get("id") == machine_id for item in machines
-                )
-                volume_absent = volume_id is None or not any(
-                    item.get("id") == volume_id for item in volumes
-                )
-            else:
-                machine_absent = volume_absent = True
+                for item in machines:
+                    if isinstance(item, dict) and (
+                        item.get("id") in machine_ids
+                        or (
+                            machine_name is not None
+                            and (item.get("name") == machine_name or item.get("Name") == machine_name)
+                        )
+                    ):
+                        if isinstance(item.get("id"), str):
+                            machine_ids.add(item["id"])
+                for item in volumes:
+                    if isinstance(item, dict) and (
+                        item.get("id") in volume_ids
+                        or (
+                            volume_name is not None
+                            and (item.get("name") == volume_name or item.get("Name") == volume_name)
+                        )
+                    ):
+                        if isinstance(item.get("id"), str):
+                            volume_ids.add(item["id"])
         except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
             pass
-        if app_absent and machine_absent and volume_absent:
+        if app_absent:
             return
-        if machine_id:
-            attempt("machine", ["machine", "destroy", machine_id, "--app", app, "--force"])
-        if volume_id:
-            attempt("volume", ["volumes", "destroy", volume_id, "--app", app, "--yes"])
+        for discovered_machine in sorted(machine_ids):
+            attempt(
+                "machine",
+                ["machine", "destroy", discovered_machine, "--app", app, "--force"],
+            )
+        for discovered_volume in sorted(volume_ids):
+            attempt(
+                "volume",
+                ["volumes", "destroy", discovered_volume, "--app", app, "--yes"],
+            )
         attempt("app", ["apps", "destroy", app, "--yes"])
-        time.sleep(2)
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(2, remaining))
     raise ControllerError(
         "cleanup deadline left unresolved "
-        f"app={app} machine={machine_id or 'none'} volume={volume_id or 'none'} "
+        f"app={app} machines={','.join(sorted(machine_ids)) or 'none'} "
+        f"volumes={','.join(sorted(volume_ids)) or 'none'} "
         f"attempt_failures={','.join(failures) or 'none'}"
     )
 
@@ -975,7 +1073,14 @@ def execute(args: argparse.Namespace, fly: Flyctl, digest: str, resources: dict[
         raise
     finally:
         if app_created:
-            destroy_and_verify(fly, args.app_name, machine_id, volume_id)
+            destroy_and_verify(
+                fly,
+                args.app_name,
+                machine_id,
+                volume_id,
+                args.machine_name,
+                args.volume_name,
+            )
 
 
 def parser() -> argparse.ArgumentParser:
