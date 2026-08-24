@@ -9,7 +9,7 @@ use graphforge_storage::{
 
 use crate::PreparedEmbeddingRead;
 use crate::vector_lifecycle::{
-    VectorLifecycleLimits, capture_topology_snapshot, project_label_members, validate_result_limit,
+    VectorLifecycleLimits, project_label_members_snapshot, validate_result_limit,
 };
 
 /// Statically distinct query vectors accepted by complete embedding generations.
@@ -68,23 +68,16 @@ where
     })?;
 
     for attempt in 1_u8..=2 {
-        let before = capture_topology_snapshot(project_dir, limits, &mut checkpoint)?;
-        let eligible =
-            project_label_members(project_dir, request.label_id, limits, &mut checkpoint)?;
-        let projected = capture_topology_snapshot(project_dir, limits, &mut checkpoint)?;
-        if before != projected {
-            if attempt == 2 {
-                return Err(SearchArtifactError::ConcurrentMutation);
-            }
-            continue;
-        }
+        let projection =
+            project_label_members_snapshot(project_dir, request.label_id, limits, &mut checkpoint)?;
+        let expected_generation = projection.snapshot.generation;
 
         let rows =
             read_vector_snapshot(&publication.path, dimension, limits.vector, &mut checkpoint)?;
         let query = match request.query {
             EmbeddingVectorQuery::Raw(vector) => vector,
             EmbeddingVectorQuery::Node(node_uuid) => {
-                if !eligible.contains(&node_uuid) {
+                if !projection.members.contains(&node_uuid) {
                     return Err(invalid(
                         "similar_to",
                         "node does not belong to the requested label",
@@ -113,13 +106,13 @@ where
         let hits = exact_cosine_search(
             &rows,
             query,
-            &eligible,
+            &projection.members,
             request.limit,
             limits.vector,
             &mut checkpoint,
         )?;
-        let after = capture_topology_snapshot(project_dir, limits, &mut checkpoint)?;
-        if before == after {
+        if graphforge_storage::SearchSourceSnapshot::generation(project_dir)? == expected_generation
+        {
             return Ok(hits);
         }
         if attempt == 2 {
