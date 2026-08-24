@@ -1477,13 +1477,12 @@ fn scan_node_surrogate_validation_runs(
     let mut buffer = Vec::<u64>::with_capacity(limits.run_records);
     let mut runs = Vec::new();
     for path in paths {
-        let reader = ParquetRecordBatchReaderBuilder::try_new(
-            File::open(path).map_err(storage_err)?,
-        )
-        .map_err(storage_err)?
-        .with_batch_size(limits.scan_batch_rows)
-        .build()
-        .map_err(storage_err)?;
+        let reader =
+            ParquetRecordBatchReaderBuilder::try_new(File::open(path).map_err(storage_err)?)
+                .map_err(storage_err)?
+                .with_batch_size(limits.scan_batch_rows)
+                .build()
+                .map_err(storage_err)?;
         for batch in reader {
             let batch = batch.map_err(storage_err)?;
             let surrogates = batch
@@ -1507,7 +1506,10 @@ fn scan_node_surrogate_validation_runs(
     }
     if runs.is_empty() {
         let path = scratch.join("node-surrogate-validation-empty.run");
-        File::create(&path).map_err(storage_err)?.sync_all().map_err(storage_err)?;
+        File::create(&path)
+            .map_err(storage_err)?
+            .sync_all()
+            .map_err(storage_err)?;
         runs.push(path);
     }
     Ok(runs)
@@ -1521,13 +1523,19 @@ fn flush_node_surrogate_validation_run(
 ) -> Result<(), GfError> {
     buffer.sort_unstable();
     if buffer.windows(2).any(|pair| pair[0] == pair[1]) {
-        return Err(storage_err("duplicate node surrogate in canonical topology"));
+        return Err(storage_err(
+            "duplicate node surrogate in canonical topology",
+        ));
     }
     let path = scratch.join(format!("node-surrogate-validation-{:08}.run", runs.len()));
     let mut bytes = Vec::with_capacity(buffer.len() * 8);
-    for surrogate in buffer.iter() { bytes.extend_from_slice(&surrogate.to_le_bytes()); }
+    for surrogate in buffer.iter() {
+        bytes.extend_from_slice(&surrogate.to_le_bytes());
+    }
     let mut file = File::create(&path).map_err(storage_err)?;
-    if !bytes.is_empty() { file.write_all(&bytes).map_err(storage_err)?; }
+    if !bytes.is_empty() {
+        file.write_all(&bytes).map_err(storage_err)?;
+    }
     file.sync_all().map_err(storage_err)?;
     buffer.clear();
     runs.push(path);
@@ -1545,12 +1553,16 @@ fn merge_node_surrogate_validation_runs(
     while runs.len() > 1 {
         let mut next = Vec::new();
         for (group, chunk) in runs.chunks(fan_in).enumerate() {
-            let path = scratch.join(format!("node-surrogate-validation-merge-{round}-{group}.run"));
+            let path = scratch.join(format!(
+                "node-surrogate-validation-merge-{round}-{group}.run"
+            ));
             merge_node_surrogate_validation_group(chunk, &path)?;
             next.push(path);
             metrics.temporary_runs += 1;
         }
-        for path in runs { let _ = fs::remove_file(path); }
+        for path in runs {
+            let _ = fs::remove_file(path);
+        }
         runs = next;
         round += 1;
     }
@@ -1564,19 +1576,32 @@ fn merge_node_surrogate_validation_group(inputs: &[PathBuf], output: &Path) -> R
         .collect::<Result<Vec<_>, _>>()?;
     let mut heap = BinaryHeap::<Reverse<(u64, usize)>>::new();
     for (index, reader) in readers.iter_mut().enumerate() {
-        if let Some(value) = read_validation_surrogate(reader)? { heap.push(Reverse((value, index))); }
+        if let Some(value) = read_validation_surrogate(reader)? {
+            heap.push(Reverse((value, index)));
+        }
     }
     let mut bytes = Vec::with_capacity(BULK_IO_BYTES);
     let mut out = File::create(output).map_err(storage_err)?;
     let mut previous = None;
     while let Some(Reverse((value, index))) = heap.pop() {
-        if previous == Some(value) { return Err(storage_err("duplicate node surrogate across external index runs")); }
-        if bytes.len() + 8 > BULK_IO_BYTES { out.write_all(&bytes).map_err(storage_err)?; bytes.clear(); }
+        if previous == Some(value) {
+            return Err(storage_err(
+                "duplicate node surrogate across external index runs",
+            ));
+        }
+        if bytes.len() + 8 > BULK_IO_BYTES {
+            out.write_all(&bytes).map_err(storage_err)?;
+            bytes.clear();
+        }
         bytes.extend_from_slice(&value.to_le_bytes());
         previous = Some(value);
-        if let Some(next) = read_validation_surrogate(&mut readers[index])? { heap.push(Reverse((next, index))); }
+        if let Some(next) = read_validation_surrogate(&mut readers[index])? {
+            heap.push(Reverse((next, index)));
+        }
     }
-    if !bytes.is_empty() { out.write_all(&bytes).map_err(storage_err)?; }
+    if !bytes.is_empty() {
+        out.write_all(&bytes).map_err(storage_err)?;
+    }
     out.sync_all().map_err(storage_err)
 }
 
@@ -2193,15 +2218,22 @@ mod tests {
         );
     }
 
-
     #[test]
     fn duplicate_and_zero_node_surrogates_fail_closed_across_bounded_runs() {
-        let limits = UuidIndexBuildLimits { scan_batch_rows: 1, run_records: 1, merge_fan_in: 2 };
+        let limits = UuidIndexBuildLimits {
+            scan_batch_rows: 1,
+            run_records: 1,
+            merge_fan_in: 2,
+        };
         let dir = tempfile::tempdir().unwrap();
         let nodes = [Uuid::from_u128(1), Uuid::from_u128(2)];
         write_node_parquet_with_ids(&dir.path().join("topology/nodes.parquet"), &nodes, &[7, 7]);
-        assert!(rebuild_uuid_membership_indexes(dir.path(), limits)
-            .unwrap_err().to_string().contains("duplicate node surrogate"));
+        assert!(
+            rebuild_uuid_membership_indexes(dir.path(), limits)
+                .unwrap_err()
+                .to_string()
+                .contains("duplicate node surrogate")
+        );
 
         let dir = tempfile::tempdir().unwrap();
         write_node_parquet_with_ids(
@@ -2209,7 +2241,11 @@ mod tests {
             &[Uuid::from_u128(3)],
             &[0],
         );
-        assert!(rebuild_uuid_membership_indexes(dir.path(), limits)
-            .unwrap_err().to_string().contains("invalid node surrogate"));
+        assert!(
+            rebuild_uuid_membership_indexes(dir.path(), limits)
+                .unwrap_err()
+                .to_string()
+                .contains("invalid node surrogate")
+        );
     }
 }
