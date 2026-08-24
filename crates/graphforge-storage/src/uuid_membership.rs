@@ -2824,14 +2824,11 @@ fn migrate_uuid_membership_indexes(
                 batch,
             )?;
             *callback_metrics.borrow_mut() = Some(built);
-            let manifest_bytes = fs::read(context.project_root.join(INDEX_DIR).join(MANIFEST))
-                .or_else(|_| {
-                    batch
-                        .staged_temp(&context.project_root.join(INDEX_DIR).join(MANIFEST))
-                        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
-                        .and_then(fs::read)
-                })
-                .map_err(storage_err)?;
+            let manifest_destination = context.project_root.join(INDEX_DIR).join(MANIFEST);
+            let manifest_temp = batch.staged_temp(&manifest_destination).ok_or_else(|| {
+                storage_err("UUID migration did not stage its canonical manifest")
+            })?;
+            let manifest_bytes = fs::read(manifest_temp).map_err(storage_err)?;
             let receipt = TopologyIndexReceipt {
                 nonce: Uuid::new_v4().simple().to_string(),
                 expected_generation: context.prior.topology,
@@ -3842,6 +3839,72 @@ mod tests {
             &edges,
         );
         (dir, nodes, edges)
+    }
+
+    fn receipt_manifest_digest(project: &Path) -> String {
+        let root = project.join(INDEX_DIR);
+        let receipt: TopologyIndexReceipt =
+            serde_json::from_slice(&fs::read(root.join(TOPOLOGY_RECEIPT)).unwrap()).unwrap();
+        assert_eq!(
+            receipt.manifest_sha256,
+            hex_sha256(&fs::read(root.join(MANIFEST)).unwrap())
+        );
+        receipt.manifest_sha256
+    }
+
+    fn make_installed_manifest_stale(project: &Path) -> String {
+        let path = project.join(INDEX_DIR).join(MANIFEST);
+        let mut manifest: Manifest = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        manifest.live_node_count = manifest.live_node_count.saturating_add(17);
+        let body = serde_json::to_vec(&manifest).unwrap();
+        fs::write(path, &body).unwrap();
+        hex_sha256(&body)
+    }
+
+    #[test]
+    fn forced_rebuild_receipt_binds_newly_staged_manifest() {
+        let (dir, _, _) = fixture();
+        rebuild_uuid_membership_indexes(dir.path(), UuidIndexBuildLimits::default()).unwrap();
+        let stale_digest = make_installed_manifest_stale(dir.path());
+        rebuild_uuid_membership_indexes(dir.path(), UuidIndexBuildLimits::default()).unwrap();
+        let installed_digest = receipt_manifest_digest(dir.path());
+        assert_ne!(installed_digest, stale_digest);
+    }
+
+    #[test]
+    fn stale_v3_migration_receipt_survives_crash_roll_forward() {
+        const CHILD_ROOT: &str = "GRAPHFORGE_UUID_MIGRATION_CHILD_ROOT";
+        if let Ok(root) = std::env::var(CHILD_ROOT) {
+            let _ =
+                rebuild_uuid_membership_indexes(Path::new(&root), UuidIndexBuildLimits::default());
+            panic!("child migration failpoint did not terminate the process");
+        }
+
+        let (dir, _, _) = fixture();
+        rebuild_uuid_membership_indexes(dir.path(), UuidIndexBuildLimits::default()).unwrap();
+        let stale_digest = make_installed_manifest_stale(dir.path());
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("uuid_membership::tests::stale_v3_migration_receipt_survives_crash_roll_forward")
+            .arg("--nocapture")
+            .env(CHILD_ROOT, dir.path())
+            .env(
+                "GRAPHFORGE_PROJECT_FAILPOINTS",
+                "graphforge-internal-subprocess-v1",
+            )
+            .env(
+                "GRAPHFORGE_PROJECT_FAILPOINT",
+                "rewrite.after_durable_intent",
+            )
+            .status()
+            .unwrap();
+        assert_eq!(status.code(), Some(crate::project_failpoint::exit_code()));
+
+        assert_eq!(crate::read_topology_generation(dir.path()).unwrap(), 0);
+        assert_eq!(crate::read_topology_generation(dir.path()).unwrap(), 0);
+        let installed_digest = receipt_manifest_digest(dir.path());
+        assert_ne!(installed_digest, stale_digest);
+        assert!(!dir.path().join(".graphforge-rewrite-v1.json").exists());
     }
 
     #[test]
