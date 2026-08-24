@@ -947,6 +947,16 @@ pub fn node_property_files(
 /// Enumerate all canonical node-property source fragments, failing closed on
 /// malformed route entries instead of silently omitting them.
 pub fn node_property_source_files(dir: &Path) -> Result<Vec<PathBuf>, graphforge_core::GfError> {
+    Ok(node_property_source_fragments(dir)?
+        .into_iter()
+        .map(|(_, path)| path)
+        .collect())
+}
+
+/// Enumerate the route and exact path of every canonical node-property source.
+pub fn node_property_source_fragments(
+    dir: &Path,
+) -> Result<Vec<(String, PathBuf)>, graphforge_core::GfError> {
     let root = dir.join("properties");
     let entries = match std::fs::read_dir(&root) {
         Ok(entries) => entries,
@@ -967,7 +977,15 @@ pub fn node_property_source_files(dir: &Path) -> Result<Vec<PathBuf>, graphforge
         }
         if file_type.is_file() {
             if path.extension().and_then(|value| value.to_str()) == Some("parquet") {
-                paths.push(path);
+                let stem = path
+                    .file_stem()
+                    .and_then(|value| value.to_str())
+                    .ok_or_else(|| {
+                        graphforge_core::GfError::Storage(
+                            "property source route is not canonical UTF-8".into(),
+                        )
+                    })?;
+                paths.push((stem.to_owned(), path));
             }
             continue;
         }
@@ -985,19 +1003,19 @@ pub fn node_property_source_files(dir: &Path) -> Result<Vec<PathBuf>, graphforge
                     "property source Parquet path is not a regular file".into(),
                 ));
             }
-            paths.extend(crate::mutator::property_parquet_files(
-                dir,
-                "properties",
-                stem,
-            )?);
+            paths.extend(
+                crate::mutator::property_parquet_files(dir, "properties", stem)?
+                    .into_iter()
+                    .map(|path| (stem.to_owned(), path)),
+            );
             continue;
         }
         return Err(graphforge_core::GfError::Storage(
             "property source contains a special file".into(),
         ));
     }
-    paths.sort();
-    paths.dedup();
+    paths.sort_by(|left, right| left.1.cmp(&right.1));
+    paths.dedup_by(|left, right| left.1 == right.1);
     Ok(paths)
 }
 
@@ -1244,6 +1262,71 @@ where
         }
     }
     Ok(())
+}
+
+/// Visit an already-enumerated property source set through the same stable file
+/// handles used for byte admission. This prevents pathname replacement between
+/// accounting and Parquet decode and bounds each compressed column chunk before
+/// Arrow allocation.
+pub fn visit_property_fragments_admitted<F>(
+    fragments: &[(String, PathBuf)],
+    batch_size: usize,
+    byte_limit: u64,
+    mut visit: F,
+) -> Result<u64, DataFusionError>
+where
+    F: FnMut(&str, &RecordBatch) -> Result<bool, DataFusionError>,
+{
+    const MAX_COLUMN_UNCOMPRESSED_BYTES: i64 = 64 * 1024 * 1024;
+    let mut total = 0_u64;
+    for (stem, path) in fragments {
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        }
+        let file = options.open(path).map_err(|e| io_err(&e))?;
+        let metadata = file.metadata().map_err(|e| io_err(&e))?;
+        if !metadata.file_type().is_file() {
+            return Err(DataFusionError::Execution(format!(
+                "property source {} is not a regular file",
+                path.display()
+            )));
+        }
+        total = total.checked_add(metadata.len()).ok_or_else(|| {
+            DataFusionError::ResourcesExhausted("property source bytes overflow".into())
+        })?;
+        if total > byte_limit {
+            return Err(DataFusionError::ResourcesExhausted(format!(
+                "property source bytes exceed {byte_limit}"
+            )));
+        }
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(parquet_err)?;
+        for row_group in builder.metadata().row_groups() {
+            for column in row_group.columns() {
+                if column.uncompressed_size() < 0
+                    || column.uncompressed_size() > MAX_COLUMN_UNCOMPRESSED_BYTES
+                {
+                    return Err(DataFusionError::ResourcesExhausted(
+                        "property column chunk exceeds decoded-byte admission limit".into(),
+                    ));
+                }
+            }
+        }
+        let reader = builder
+            .with_batch_size(batch_size.max(1))
+            .build()
+            .map_err(parquet_err)?;
+        for batch in reader {
+            let batch = batch.map_err(parquet_err)?;
+            if !visit(stem, &batch)? {
+                return Ok(total);
+            }
+        }
+    }
+    Ok(total)
 }
 
 /// Visit `topology/nodes.parquet` one bounded batch at a time (#706).
