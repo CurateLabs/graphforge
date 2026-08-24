@@ -7,7 +7,7 @@ use std::path::Path;
 use arrow::array::{Array, FixedSizeBinaryArray, ListArray, UInt32Array};
 use graphforge_storage::{
     PublishedSearchArtifact, SearchArtifactError, SearchArtifactKey, SearchCoordinationLimits,
-    SearchPublicationOutcome, SearchSourcePart, SearchSourceSnapshot, VECTOR_BACKEND_VERSION,
+    SearchPublicationOutcome, SearchSourceSnapshot, VECTOR_BACKEND_VERSION,
     VECTOR_CONTRACT_VERSION, VectorSearchHit, VectorStoreLimits, current_search_artifact,
     read_nodes, search_published_vectors, upsert_published_vector, validate_vector,
 };
@@ -229,52 +229,24 @@ where
     checkpoint()?;
     let paths = graphforge_storage::topology_node_files(project_dir)
         .map_err(|error| source(error.to_string()))?;
-    let mut total = 0_u64;
-    let mut owned = Vec::with_capacity(paths.len());
+    let mut named = Vec::with_capacity(paths.len());
     for path in paths {
         checkpoint()?;
-        let metadata = std::fs::symlink_metadata(&path)
-            .map_err(|error| source(format!("inspect {}: {error}", path.display())))?;
-        if !metadata.file_type().is_file() {
-            return Err(source(format!(
-                "search source {} is not a regular file",
-                path.display()
-            )));
-        }
-        total = total
-            .checked_add(metadata.len())
-            .ok_or_else(|| exhausted_u64("vector_source_bytes", limits.source_bytes))?;
-        if total > limits.source_bytes {
-            return Err(exhausted_u64("vector_source_bytes", limits.source_bytes));
-        }
-        let bytes = std::fs::read(&path)
-            .map_err(|error| source(format!("read {}: {error}", path.display())))?;
-        let actual = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-        if actual > metadata.len() {
-            total = total
-                .checked_add(actual - metadata.len())
-                .ok_or_else(|| exhausted_u64("vector_source_bytes", limits.source_bytes))?;
-            if total > limits.source_bytes {
-                return Err(exhausted_u64("vector_source_bytes", limits.source_bytes));
-            }
-        }
         let relative = path
             .strip_prefix(project_dir)
             .map_err(|_| source("topology source escaped project root"))?
             .to_str()
             .ok_or_else(|| source("topology source path is not UTF-8"))?
             .to_owned();
-        owned.push((relative, bytes));
+        named.push((relative, path));
     }
     checkpoint()?;
-    let parts = owned
-        .iter()
-        .map(|(name, bytes)| SearchSourcePart {
-            name,
-            bytes: bytes.as_slice(),
-        })
-        .collect::<Vec<_>>();
-    SearchSourceSnapshot::capture(project_dir, &parts)
+    SearchSourceSnapshot::capture_files(
+        project_dir,
+        &named,
+        limits.source_bytes,
+        "vector_source_bytes",
+    )
 }
 
 fn validate_requested_artifact(
