@@ -25,6 +25,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -1371,12 +1372,12 @@ pub fn visit_property_fragments_admitted<F>(
     fragments: &[(String, PathBuf)],
     batch_size: usize,
     byte_limit: u64,
+    projected_columns: Option<&std::collections::BTreeSet<String>>,
     mut visit: F,
 ) -> Result<u64, DataFusionError>
 where
     F: FnMut(&str, &RecordBatch) -> Result<bool, DataFusionError>,
 {
-    const MAX_COLUMN_UNCOMPRESSED_BYTES: i64 = 64 * 1024 * 1024;
     let mut total = 0_u64;
     for (stem, path) in fragments {
         let mut options = std::fs::OpenOptions::new();
@@ -1386,7 +1387,7 @@ where
             use std::os::unix::fs::OpenOptionsExt as _;
             options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
         }
-        let file = options.open(path).map_err(|e| io_err(&e))?;
+        let mut file = options.open(path).map_err(|e| io_err(&e))?;
         let metadata = file.metadata().map_err(|e| io_err(&e))?;
         if !metadata.file_type().is_file() {
             return Err(DataFusionError::Execution(format!(
@@ -1402,17 +1403,20 @@ where
                 "property source bytes exceed {byte_limit}"
             )));
         }
-        let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(parquet_err)?;
-        for row_group in builder.metadata().row_groups() {
-            for column in row_group.columns() {
-                if column.uncompressed_size() < 0
-                    || column.uncompressed_size() > MAX_COLUMN_UNCOMPRESSED_BYTES
-                {
-                    return Err(DataFusionError::ResourcesExhausted(
-                        "property column chunk exceeds decoded-byte admission limit".into(),
-                    ));
-                }
-            }
+        preflight_parquet_handle(&mut file, metadata.len())?;
+        let mut builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(parquet_err)?;
+        admit_decoded_parquet(&builder)?;
+        if let Some(columns) = projected_columns {
+            use parquet::arrow::ProjectionMask;
+            let roots = builder
+                .schema()
+                .fields()
+                .iter()
+                .enumerate()
+                .filter_map(|(index, field)| columns.contains(field.name()).then_some(index))
+                .collect::<Vec<_>>();
+            let projection = ProjectionMask::roots(builder.parquet_schema(), roots);
+            builder = builder.with_projection(projection);
         }
         let reader = builder
             .with_batch_size(batch_size.max(1))
@@ -1422,6 +1426,119 @@ where
             let batch = batch.map_err(parquet_err)?;
             if !visit(stem, &batch)? {
                 return Ok(total);
+            }
+        }
+    }
+    Ok(total)
+}
+
+const MAX_ADMITTED_PARQUET_COLUMNS: usize = 4_096;
+const MAX_ADMITTED_PARQUET_METADATA_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_ADMITTED_ROW_GROUP_BYTES: i64 = 256 * 1024 * 1024;
+const MAX_ADMITTED_COLUMN_BYTES: i64 = 64 * 1024 * 1024;
+
+fn preflight_parquet_handle(file: &mut File, length: u64) -> Result<(), DataFusionError> {
+    if length < 12 {
+        return Err(DataFusionError::Execution(
+            "Parquet footer is truncated".into(),
+        ));
+    }
+    file.seek(SeekFrom::End(-8)).map_err(|e| io_err(&e))?;
+    let mut footer = [0_u8; 8];
+    file.read_exact(&mut footer).map_err(|e| io_err(&e))?;
+    let metadata_len = u64::from(u32::from_le_bytes(footer[..4].try_into().unwrap()));
+    if &footer[4..] != b"PAR1"
+        || metadata_len > MAX_ADMITTED_PARQUET_METADATA_BYTES
+        || metadata_len
+            .checked_add(8)
+            .is_none_or(|bytes| bytes > length)
+    {
+        return Err(DataFusionError::ResourcesExhausted(
+            "Parquet metadata exceeds admission limit".into(),
+        ));
+    }
+    file.seek(SeekFrom::Start(0)).map_err(|e| io_err(&e))?;
+    Ok(())
+}
+
+fn admit_decoded_parquet(
+    builder: &ParquetRecordBatchReaderBuilder<File>,
+) -> Result<(), DataFusionError> {
+    if builder.schema().fields().len() > MAX_ADMITTED_PARQUET_COLUMNS {
+        return Err(DataFusionError::ResourcesExhausted(
+            "Parquet schema exceeds column admission limit".into(),
+        ));
+    }
+    for group in builder.metadata().row_groups() {
+        if group.total_byte_size() < 0 || group.total_byte_size() > MAX_ADMITTED_ROW_GROUP_BYTES {
+            return Err(DataFusionError::ResourcesExhausted(
+                "Parquet row group exceeds decoded-byte admission limit".into(),
+            ));
+        }
+        for column in group.columns() {
+            if column.uncompressed_size() < 0
+                || column.uncompressed_size() > MAX_ADMITTED_COLUMN_BYTES
+            {
+                return Err(DataFusionError::ResourcesExhausted(
+                    "Parquet column chunk exceeds decoded-byte admission limit".into(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Visit canonical topology fragments with byte/decode admission and decoding
+/// performed through the same no-follow file handle.
+pub fn visit_node_fragments_admitted<F>(
+    dir: &Path,
+    batch_size: usize,
+    byte_limit: u64,
+    mut visit: F,
+) -> Result<u64, DataFusionError>
+where
+    F: FnMut(&RecordBatch) -> Result<bool, DataFusionError>,
+{
+    let paths = crate::mutator::node_parquet_files(dir)
+        .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+    let mut total = 0_u64;
+    for path in paths {
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        }
+        let mut file = options.open(&path).map_err(|e| io_err(&e))?;
+        let metadata = file.metadata().map_err(|e| io_err(&e))?;
+        if !metadata.file_type().is_file() {
+            return Err(DataFusionError::Execution(format!(
+                "topology source {} is not a regular file",
+                path.display()
+            )));
+        }
+        total = total.checked_add(metadata.len()).ok_or_else(|| {
+            DataFusionError::ResourcesExhausted("topology source bytes overflow".into())
+        })?;
+        if total > byte_limit {
+            return Err(DataFusionError::ResourcesExhausted(format!(
+                "topology source bytes exceed {byte_limit}"
+            )));
+        }
+        preflight_parquet_handle(&mut file, metadata.len())?;
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(parquet_err)?;
+        admit_decoded_parquet(&builder)?;
+        for batch in builder
+            .with_batch_size(batch_size.max(1))
+            .build()
+            .map_err(parquet_err)?
+        {
+            let batch = batch.map_err(parquet_err)?;
+            for normalized in normalize_topology_nodes(vec![batch])? {
+                if !visit(&normalized)? {
+                    return Ok(total);
+                }
             }
         }
     }
@@ -2590,7 +2707,7 @@ mod tests {
     use datafusion::prelude::SessionContext;
     use parquet::arrow::ArrowWriter;
     use parquet::file::properties::WriterProperties;
-    use std::collections::HashMap;
+    use std::collections::{BTreeSet, HashMap};
     use tempfile::TempDir;
 
     #[test]
@@ -3602,5 +3719,127 @@ mod tests {
         std::fs::write(edges.join("note.txt"), b"not parquet").unwrap();
         std::fs::write(edges.join("broken.parquet"), b"not parquet").unwrap();
         assert!(max_edge_id(dir.path()).is_err());
+    }
+
+    #[test]
+    fn admitted_property_projection_retains_one_handle_across_replacement() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("route.parquet");
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+            Field::new("wanted", DataType::Utf8, true),
+            Field::new("ignored", DataType::Utf8, true),
+        ]));
+        let file = File::create(&path).unwrap();
+        let mut writer = ArrowWriter::try_new(
+            file,
+            schema.clone(),
+            Some(
+                WriterProperties::builder()
+                    .set_max_row_group_row_count(Some(1))
+                    .build(),
+            ),
+        )
+        .unwrap();
+        for value in ["one", "two"] {
+            writer
+                .write(
+                    &RecordBatch::try_new(
+                        schema.clone(),
+                        vec![
+                            Arc::new(
+                                FixedSizeBinaryArray::try_from_iter(std::iter::once(vec![1; 16]))
+                                    .unwrap(),
+                            ),
+                            Arc::new(StringArray::from(vec![value])),
+                            Arc::new(StringArray::from(vec!["unused"])),
+                        ],
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        writer.close().unwrap();
+        let fragments = vec![("route".to_owned(), path.clone())];
+        let columns = BTreeSet::from(["node_uuid".to_owned(), "wanted".to_owned()]);
+        let mut rows = 0;
+        visit_property_fragments_admitted(&fragments, 1, u64::MAX, Some(&columns), |_, batch| {
+            assert_eq!(batch.num_columns(), 2);
+            rows += batch.num_rows();
+            if rows == 1 {
+                std::fs::rename(&path, path.with_extension("original")).unwrap();
+                std::fs::write(&path, b"replacement is not parquet").unwrap();
+            }
+            Ok(true)
+        })
+        .unwrap();
+        assert_eq!(rows, 2);
+        assert!(
+            visit_property_fragments_admitted(&fragments, 1, u64::MAX, Some(&columns), |_, _| Ok(
+                true
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn admitted_property_rejects_wide_schema_before_decode() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("wide.parquet");
+        let fields = (0..=MAX_ADMITTED_PARQUET_COLUMNS)
+            .map(|index| Field::new(format!("c{index}"), DataType::Utf8, true))
+            .collect::<Vec<_>>();
+        let schema = Arc::new(Schema::new(fields));
+        let arrays = (0..schema.fields().len())
+            .map(|_| Arc::new(StringArray::from(Vec::<Option<&str>>::new())) as Arc<dyn Array>)
+            .collect();
+        let batch = RecordBatch::try_new(schema.clone(), arrays).unwrap();
+        let mut writer = ArrowWriter::try_new(File::create(&path).unwrap(), schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        let error = visit_property_fragments_admitted(
+            &[("wide".to_owned(), path)],
+            1,
+            u64::MAX,
+            None,
+            |_, _| Ok(true),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("column admission limit"));
+    }
+
+    #[test]
+    fn admitted_property_rejects_compressed_decode_expansion() {
+        use parquet::basic::Compression;
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("compressed.parquet");
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "payload",
+            DataType::Utf8,
+            false,
+        )]));
+        let payload = "x".repeat(usize::try_from(MAX_ADMITTED_COLUMN_BYTES).unwrap() + 1);
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(StringArray::from(vec![payload]))],
+        )
+        .unwrap();
+        let properties = WriterProperties::builder()
+            .set_compression(Compression::ZSTD(parquet::basic::ZstdLevel::default()))
+            .build();
+        let mut writer =
+            ArrowWriter::try_new(File::create(&path).unwrap(), schema, Some(properties)).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        let error = visit_property_fragments_admitted(
+            &[("compressed".to_owned(), path)],
+            1,
+            u64::MAX,
+            None,
+            |_, _| Ok(true),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("decoded-byte admission limit"));
     }
 }
