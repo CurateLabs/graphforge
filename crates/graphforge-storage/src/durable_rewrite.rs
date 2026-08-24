@@ -713,6 +713,7 @@ pub(crate) fn commit_with_participant(
     auxiliary: Option<AuxiliaryReceipt>,
     participant: Option<RewriteParticipantPreparer<'_>>,
 ) -> Result<GenerationPair, GfError> {
+    let has_participant = participant.is_some();
     let guard = acquire(root)?;
     guard.revalidate()?;
     let prior_state = crate::generation::read_generation_state_raw(root)?;
@@ -764,6 +765,22 @@ pub(crate) fn commit_with_participant(
         return Err(storage("rewrite has multiple auxiliary participants"));
     }
     let auxiliary = participant_auxiliary.or(auxiliary);
+    let reserved = root.join(".graphforge-cache/uuid-membership");
+    let stages_reserved = batch
+        .staged_paths()
+        .any(|destination| destination.starts_with(&reserved));
+    if stages_reserved && !has_participant {
+        return Err(storage(
+            "uuid-membership namespace requires the sealed rewrite participant",
+        ));
+    }
+    if stages_reserved
+        && auxiliary.as_ref().map(|receipt| receipt.kind.as_str()) != Some("uuid-membership/v3")
+    {
+        return Err(storage(
+            "UUID rewrite participant must stage its namespace and exact typed receipt",
+        ));
+    }
     let generation_bytes = crate::generation::encode_generation_state(next.topology, next.search)?;
     guard.revalidate()?;
     let transaction = Uuid::now_v7().simple().to_string();
