@@ -3,9 +3,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
-use graphforge_core::GfError;
+use graphforge_core::{GfError, ProjectErrorCode};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -21,6 +21,7 @@ pub const GRAPH_OBJECTS_DIR: &str = "graph-objects";
 const SHA256_DIR: &str = "sha256";
 const TEMP_DIR: &str = "tmp";
 const ACTIVE_DIR: &str = "active";
+const LIFECYCLE_LOCK: &str = "lifecycle.lock";
 const BUFFER_BYTES: usize = 64 * 1024;
 
 /// Kernel-visible lease protecting CAS objects installed by one publication.
@@ -28,18 +29,59 @@ pub struct GraphObjectPublicationLease {
     root: PathBuf,
     path: PathBuf,
     file: File,
+    lifecycle: File,
+}
+
+/// Exclusive guard spanning GC root discovery through sweep.
+pub(crate) struct GraphObjectGcGuard {
+    root: PathBuf,
+    lifecycle: File,
+}
+
+impl Drop for GraphObjectGcGuard {
+    fn drop(&mut self) {
+        let _ = crate::file_lock::unlock(&self.lifecycle);
+    }
 }
 
 impl Drop for GraphObjectPublicationLease {
     fn drop(&mut self) {
         let _ = crate::file_lock::unlock(&self.file);
         let _ = fs::remove_file(&self.path);
+        let _ = crate::file_lock::unlock(&self.lifecycle);
     }
 }
 
 /// Begin a CAS installation attempt and hold its lease through CURRENT.
 pub fn begin_graph_object_publication(root: &Path) -> Result<GraphObjectPublicationLease, GfError> {
-    let active = root.join(GRAPH_OBJECTS_DIR).join(ACTIVE_DIR);
+    let object_root = root.join(GRAPH_OBJECTS_DIR);
+    fs::create_dir_all(&object_root)
+        .map_err(|error| storage("create graph object directory", &object_root, error))?;
+    let lifecycle_path = object_root.join(LIFECYCLE_LOCK);
+    if !lifecycle_path.exists() {
+        let created = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lifecycle_path)
+            .map_err(|error| {
+                storage("create graph object lifecycle lock", &lifecycle_path, error)
+            })?;
+        created
+            .sync_all()
+            .map_err(|error| storage("sync graph object lifecycle lock", &lifecycle_path, error))?;
+        sync_directory(&object_root)?;
+    }
+    let lifecycle = crate::project_publication::open_regular_lock(&lifecycle_path)?;
+    crate::file_lock::lock_shared(&lifecycle).map_err(|error| {
+        storage(
+            "lock graph object publication lifecycle",
+            &lifecycle_path,
+            error,
+        )
+    })?;
+    let active = object_root.join(ACTIVE_DIR);
     fs::create_dir_all(&active)
         .map_err(|error| storage("create graph object active directory", &active, error))?;
     let path = active.join(format!("{}.lock", Uuid::new_v4().hyphenated()));
@@ -58,6 +100,7 @@ pub fn begin_graph_object_publication(root: &Path) -> Result<GraphObjectPublicat
         root: root.to_path_buf(),
         path,
         file,
+        lifecycle,
     })
 }
 
@@ -173,6 +216,54 @@ pub fn gc_graph_objects(
     roots: &[GraphFilesRootV2],
     limits: crate::GraphManifestLimits,
 ) -> Result<GraphObjectGcEvidence, GfError> {
+    let guard = try_begin_graph_object_gc(root)?.ok_or_else(|| GfError::Project {
+        code: ProjectErrorCode::WriterBusy,
+        message: "phase=GRAPH_OBJECT_GC committed=false cause=live_publication".into(),
+    })?;
+    gc_graph_objects_guarded(&guard, roots, limits)
+}
+
+#[cfg(test)]
+pub(crate) fn begin_graph_object_gc(root: &Path) -> Result<GraphObjectGcGuard, GfError> {
+    let (root, lifecycle, lifecycle_path) = open_graph_object_lifecycle(root)?;
+    crate::file_lock::lock_exclusive(&lifecycle)
+        .map_err(|error| storage("lock graph object GC lifecycle", &lifecycle_path, error))?;
+    Ok(GraphObjectGcGuard { root, lifecycle })
+}
+
+pub(crate) fn try_begin_graph_object_gc(
+    root: &Path,
+) -> Result<Option<GraphObjectGcGuard>, GfError> {
+    let (root, lifecycle, lifecycle_path) = open_graph_object_lifecycle(root)?;
+    if !crate::file_lock::try_lock_exclusive(&lifecycle)
+        .map_err(|error| storage("try graph object GC lifecycle", &lifecycle_path, error))?
+    {
+        return Ok(None);
+    }
+    Ok(Some(GraphObjectGcGuard { root, lifecycle }))
+}
+
+fn open_graph_object_lifecycle(root: &Path) -> Result<(PathBuf, File, PathBuf), GfError> {
+    let object_root = root.join(GRAPH_OBJECTS_DIR);
+    fs::create_dir_all(&object_root)
+        .map_err(|error| storage("create graph object directory", &object_root, error))?;
+    let lifecycle_path = object_root.join(LIFECYCLE_LOCK);
+    let lifecycle = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lifecycle_path)
+        .map_err(|error| storage("open graph object lifecycle lock", &lifecycle_path, error))?;
+    Ok((root.to_path_buf(), lifecycle, lifecycle_path))
+}
+
+pub(crate) fn gc_graph_objects_guarded(
+    guard: &GraphObjectGcGuard,
+    roots: &[GraphFilesRootV2],
+    limits: crate::GraphManifestLimits,
+) -> Result<GraphObjectGcEvidence, GfError> {
+    let root = &guard.root;
     let mut marked = BTreeSet::new();
     for graph_root in roots {
         let mut segment_digests = Vec::new();
@@ -660,19 +751,7 @@ pub fn materialize_graph_objects(
     inventory: &GraphFilesInventory,
     target: &Path,
 ) -> Result<GraphFilesOpenEvidence, GfError> {
-    if target.exists()
-        && target
-            .read_dir()
-            .map_err(|error| storage("read graph object target", target, error))?
-            .next()
-            .is_some()
-    {
-        return Err(validation(
-            "graph object materialization target is not empty",
-        ));
-    }
-    fs::create_dir_all(target)
-        .map_err(|error| storage("create graph object materialization target", target, error))?;
+    let target_directory = open_empty_materialization_target(target)?;
     let mut evidence = GraphFilesOpenEvidence {
         strategy: GraphFilesOpenStrategy::PrivateMaterialize,
         files_validated: inventory.file_count,
@@ -681,17 +760,186 @@ pub fn materialize_graph_objects(
     };
     for entry in &inventory.files {
         let source = graph_object_path(root, &entry.content_sha256)?;
-        let destination = target.join(&entry.relative_path);
-        if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|error| storage("create logical graph object directory", parent, error))?;
-        }
-        fs::hard_link(&source, &destination)
-            .map_err(|error| storage("link logical graph object", &destination, error))?;
+        link_materialized_object(&target_directory, &source, &entry.relative_path)?;
         evidence.files_reused = evidence.files_reused.saturating_add(1);
         evidence.bytes_reused = evidence.bytes_reused.saturating_add(entry.byte_length);
     }
     Ok(evidence)
+}
+
+#[cfg(unix)]
+fn open_empty_materialization_target(target: &Path) -> Result<std::os::fd::OwnedFd, GfError> {
+    use rustix::fs::{Mode, OFlags};
+
+    let parent = target
+        .parent()
+        .ok_or_else(|| validation("graph object target has no parent"))?;
+    let name = target
+        .file_name()
+        .ok_or_else(|| validation("graph object target has no final component"))?;
+    let canonical_parent = parent
+        .canonicalize()
+        .map_err(|error| storage("resolve graph object target parent", parent, error))?;
+    let parent_fd = open_directory_no_follow(&canonical_parent)?;
+    match rustix::fs::mkdirat(&parent_fd, name, Mode::from_bits_truncate(0o700)) {
+        Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+        Err(error) => return Err(storage("create graph object target", target, error)),
+    }
+    let directory = rustix::fs::openat(
+        &parent_fd,
+        name,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|error| {
+        storage(
+            "open graph object target without following links",
+            target,
+            error,
+        )
+    })?;
+    if target
+        .read_dir()
+        .map_err(|error| storage("read graph object target", target, error))?
+        .next()
+        .is_some()
+    {
+        return Err(validation(
+            "graph object materialization target is not empty",
+        ));
+    }
+    Ok(directory)
+}
+
+#[cfg(unix)]
+fn open_directory_no_follow(path: &Path) -> Result<std::os::fd::OwnedFd, GfError> {
+    use rustix::fs::{Mode, OFlags};
+
+    let mut directory = rustix::fs::open(
+        if path.is_absolute() {
+            Path::new("/")
+        } else {
+            Path::new(".")
+        },
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|error| storage("open graph object directory root", path, error))?;
+    for component in path.components() {
+        let Component::Normal(name) = component else {
+            continue;
+        };
+        directory = rustix::fs::openat(
+            &directory,
+            name,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|error| {
+            storage(
+                "open graph object directory without following links",
+                path,
+                error,
+            )
+        })?;
+    }
+    Ok(directory)
+}
+
+#[cfg(unix)]
+fn link_materialized_object(
+    target: &std::os::fd::OwnedFd,
+    source: &Path,
+    relative: &str,
+) -> Result<(), GfError> {
+    use rustix::fs::{AtFlags, Mode, OFlags};
+
+    let path = Path::new(relative);
+    validate_logical_path(path)?;
+    let mut directory = target
+        .try_clone()
+        .map_err(|error| storage("clone graph object target", path, error))?;
+    let mut components = path
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(name) => Some(name),
+            _ => None,
+        })
+        .peekable();
+    while let Some(component) = components.next() {
+        if components.peek().is_none() {
+            rustix::fs::linkat(
+                rustix::fs::CWD,
+                source,
+                &directory,
+                component,
+                AtFlags::empty(),
+            )
+            .map_err(|error| storage("link logical graph object", path, error))?;
+            return Ok(());
+        }
+        match rustix::fs::mkdirat(&directory, component, Mode::from_bits_truncate(0o700)) {
+            Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+            Err(error) => {
+                return Err(storage(
+                    "create logical graph object directory",
+                    path,
+                    error,
+                ));
+            }
+        }
+        directory = rustix::fs::openat(
+            &directory,
+            component,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|error| {
+            storage(
+                "open logical graph object directory without following links",
+                path,
+                error,
+            )
+        })?;
+    }
+    Err(validation("graph object logical path is empty"))
+}
+
+#[cfg(not(unix))]
+fn open_empty_materialization_target(target: &Path) -> Result<PathBuf, GfError> {
+    if let Ok(metadata) = fs::symlink_metadata(target)
+        && (metadata.file_type().is_symlink() || !metadata.is_dir())
+    {
+        return Err(validation("graph object target is not a real directory"));
+    }
+    fs::create_dir_all(target)
+        .map_err(|error| storage("create graph object materialization target", target, error))?;
+    if target
+        .read_dir()
+        .map_err(|error| storage("read graph object target", target, error))?
+        .next()
+        .is_some()
+    {
+        return Err(validation(
+            "graph object materialization target is not empty",
+        ));
+    }
+    Ok(target.to_path_buf())
+}
+
+#[cfg(not(unix))]
+fn link_materialized_object(
+    target: &PathBuf,
+    source: &Path,
+    relative: &str,
+) -> Result<(), GfError> {
+    let destination = target.join(relative);
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| storage("create logical graph object directory", parent, error))?;
+    }
+    fs::hard_link(source, &destination)
+        .map_err(|error| storage("link logical graph object", &destination, error))
 }
 
 /// Read an object whose digest is known before its declared logical length.
@@ -884,6 +1132,80 @@ fn storage(action: &str, path: &Path, error: impl std::fmt::Display) -> GfError 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn publication_and_gc_lifecycles_are_mutually_exclusive() {
+        use std::sync::mpsc::{self, TryRecvError};
+        use std::time::Duration;
+
+        let root = tempfile::tempdir().unwrap();
+        let publication = begin_graph_object_publication(root.path()).unwrap();
+        assert!(matches!(
+            gc_graph_objects(root.path(), &[], crate::GraphManifestLimits::default()),
+            Err(GfError::Project {
+                code: ProjectErrorCode::WriterBusy,
+                ..
+            })
+        ));
+        let path = root.path().to_path_buf();
+        let (gc_tx, gc_rx) = mpsc::channel();
+        let gc_thread = std::thread::spawn(move || {
+            let guard = begin_graph_object_gc(&path).unwrap();
+            gc_tx.send(guard).unwrap();
+        });
+        assert!(matches!(gc_rx.try_recv(), Err(TryRecvError::Empty)));
+        drop(publication);
+        let gc = gc_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        gc_thread.join().unwrap();
+
+        let path = root.path().to_path_buf();
+        let (publish_tx, publish_rx) = mpsc::channel();
+        let publish_thread = std::thread::spawn(move || {
+            let lease = begin_graph_object_publication(&path).unwrap();
+            publish_tx.send(lease).unwrap();
+        });
+        assert!(matches!(publish_rx.try_recv(), Err(TryRecvError::Empty)));
+        drop(gc);
+        let publication = publish_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        publish_thread.join().unwrap();
+        drop(publication);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn materialization_rejects_target_and_intermediate_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let objects = tempfile::tempdir().unwrap();
+        let (digest, _) = install_graph_object_bytes(objects.path(), b"payload").unwrap();
+        let entry = crate::GraphFileEntry {
+            relative_path: "nested/payload.bin".into(),
+            byte_length: 7,
+            content_sha256: digest,
+            role: crate::GraphFileRole::Other,
+        };
+        let inventory = crate::graph_files::inventory_from_entries(vec![entry.clone()]).unwrap();
+
+        let owner = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let linked_target = owner.path().join("linked-target");
+        symlink(outside.path(), &linked_target).unwrap();
+        assert!(materialize_graph_objects(objects.path(), &inventory, &linked_target).is_err());
+        assert!(!outside.path().join("nested/payload.bin").exists());
+
+        let target = owner.path().join("real-target");
+        let directory = open_empty_materialization_target(&target).unwrap();
+        symlink(outside.path(), target.join("nested")).unwrap();
+        assert!(
+            link_materialized_object(
+                &directory,
+                &graph_object_path(objects.path(), &entry.content_sha256).unwrap(),
+                &entry.relative_path,
+            )
+            .is_err()
+        );
+        assert!(!outside.path().join("payload.bin").exists());
+    }
 
     #[test]
     fn installs_once_reuses_exact_object_and_rejects_tampering() {
@@ -1085,6 +1407,7 @@ mod tests {
         let (root, _) =
             append_graph_files_v2(&lease, workspace.path(), None, &mut live, &[relative], &[])
                 .unwrap();
+        drop(lease);
         let (orphan, _) = install_graph_object_bytes(container.path(), b"orphan").unwrap();
         let evidence = gc_graph_objects(
             container.path(),

@@ -71,12 +71,20 @@ pub struct GraphManifestLimits {
     pub max_segments: usize,
     /// Maximum live logical entries resolved.
     pub max_entries: usize,
+    /// Maximum aggregate encoded bytes decoded across all radix objects.
+    pub max_decoded_bytes: u64,
+    /// Maximum aggregate node, child-reference, and entry work admitted.
+    pub max_work_units: u64,
 }
 impl Default for GraphManifestLimits {
     fn default() -> Self {
         Self {
-            max_segments: 6_500_000,
+            // A 100k-entry fixed-depth radix contains about 6.0m nodes once
+            // random SHA-256 prefixes share their compact upper levels.
+            max_segments: 6_100_000,
             max_entries: 100_000,
+            max_decoded_bytes: 1_610_612_736,
+            max_work_units: 12_300_000,
         }
     }
 }
@@ -88,6 +96,10 @@ pub struct GraphManifestResolveEvidence {
     pub segments_examined: u64,
     /// Terminal logical entries examined.
     pub entries_examined: u64,
+    /// Aggregate encoded bytes admitted for decoding.
+    pub decoded_bytes: u64,
+    /// Aggregate node, child-reference, and entry work performed.
+    pub work_units: u64,
 }
 
 /// Encode one validated node as canonical JSON-line bytes.
@@ -150,8 +162,15 @@ where
     F: FnMut(&str) -> Result<Vec<u8>, GfError>,
 {
     validate_root(root)?;
-    if limits.max_segments == 0 || limits.max_entries == 0 {
+    if limits.max_segments == 0
+        || limits.max_entries == 0
+        || limits.max_decoded_bytes == 0
+        || limits.max_work_units == 0
+    {
         return Err(validation("graph manifest limits must be positive"));
+    }
+    if root.logical_file_count > u64::try_from(limits.max_entries).unwrap_or(u64::MAX) {
+        return Err(validation("graph manifest declared entry limit exceeded"));
     }
     let mut stack = vec![(root.root_node_sha256.clone(), 0_u8)];
     let mut visited = BTreeSet::new();
@@ -167,6 +186,13 @@ where
             ));
         }
         let bytes = load(&digest)?;
+        evidence.decoded_bytes = evidence
+            .decoded_bytes
+            .checked_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX))
+            .ok_or_else(|| validation("graph manifest decoded byte total overflow"))?;
+        if evidence.decoded_bytes > limits.max_decoded_bytes {
+            return Err(validation("graph manifest decoded byte limit exceeded"));
+        }
         if object_digest(&bytes) != digest {
             return Err(validation("graph manifest node digest mismatch"));
         }
@@ -175,11 +201,17 @@ where
             return Err(validation("graph manifest radix depth mismatch"));
         }
         evidence.segments_examined = evidence.segments_examined.saturating_add(1);
+        admit_work(&mut evidence, limits, 1)?;
         match node.kind {
             GraphManifestNodeKind::Branch { children } => {
                 if expected_depth >= GRAPH_RADIX_DEPTH {
                     return Err(validation("graph manifest branch exceeds radix depth"));
                 }
+                admit_work(
+                    &mut evidence,
+                    limits,
+                    u64::try_from(children.len()).unwrap_or(u64::MAX),
+                )?;
                 for (nibble, child) in children.into_iter().rev() {
                     validate_nibble(&nibble)?;
                     stack.push((child, expected_depth + 1));
@@ -192,6 +224,11 @@ where
                 if expected_depth != GRAPH_RADIX_DEPTH {
                     return Err(validation("graph manifest leaf is not terminal"));
                 }
+                admit_work(
+                    &mut evidence,
+                    limits,
+                    u64::try_from(entries.len()).unwrap_or(u64::MAX),
+                )?;
                 for entry in entries {
                     if hex_digest(logical_path_digest(&entry.relative_path)) != path_sha256 {
                         return Err(validation("graph manifest leaf path digest mismatch"));
@@ -220,6 +257,21 @@ where
         ));
     }
     Ok((files, evidence))
+}
+
+fn admit_work(
+    evidence: &mut GraphManifestResolveEvidence,
+    limits: GraphManifestLimits,
+    units: u64,
+) -> Result<(), GfError> {
+    evidence.work_units = evidence
+        .work_units
+        .checked_add(units)
+        .ok_or_else(|| validation("graph manifest work total overflow"))?;
+    if evidence.work_units > limits.max_work_units {
+        return Err(validation("graph manifest work limit exceeded"));
+    }
+    Ok(())
 }
 
 fn validate_root(root: &GraphFilesRootV2) -> Result<(), GfError> {
@@ -449,5 +501,55 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    #[test]
+    fn aggregate_decode_and_work_limits_reject_hostile_roots() {
+        let empty_bytes = encode_node(&branch(0, BTreeMap::new())).unwrap();
+        let empty_digest = object_digest(&empty_bytes);
+        let empty_root = GraphFilesRootV2 {
+            format: GRAPH_FILES_V2_FORMAT.into(),
+            format_version: GRAPH_FILES_V2_VERSION,
+            root_node_sha256: empty_digest.clone(),
+            logical_file_count: 0,
+            logical_byte_length: 0,
+        };
+        let byte_limits = GraphManifestLimits {
+            max_decoded_bytes: u64::try_from(empty_bytes.len() - 1).unwrap(),
+            ..GraphManifestLimits::default()
+        };
+        assert!(resolve_manifest(&empty_root, byte_limits, |_| Ok(empty_bytes.clone())).is_err());
+
+        let children = (0_u8..16)
+            .map(|nibble| (format!("{nibble:x}"), "0".repeat(64)))
+            .collect();
+        let wide_bytes = encode_node(&branch(0, children)).unwrap();
+        let wide_digest = object_digest(&wide_bytes);
+        let wide_root = GraphFilesRootV2 {
+            root_node_sha256: wide_digest,
+            ..empty_root
+        };
+        let work_limits = GraphManifestLimits {
+            max_work_units: 16,
+            ..GraphManifestLimits::default()
+        };
+        assert!(resolve_manifest(&wide_root, work_limits, |_| Ok(wide_bytes.clone())).is_err());
+    }
+
+    #[test]
+    fn successful_resolution_reports_aggregate_admission_evidence() {
+        let bytes = encode_node(&branch(0, BTreeMap::new())).unwrap();
+        let digest = object_digest(&bytes);
+        let root = GraphFilesRootV2 {
+            format: GRAPH_FILES_V2_FORMAT.into(),
+            format_version: GRAPH_FILES_V2_VERSION,
+            root_node_sha256: digest,
+            logical_file_count: 0,
+            logical_byte_length: 0,
+        };
+        let (_, evidence) =
+            resolve_manifest(&root, GraphManifestLimits::default(), |_| Ok(bytes.clone())).unwrap();
+        assert_eq!(evidence.decoded_bytes, bytes.len() as u64);
+        assert_eq!(evidence.work_units, 1);
     }
 }
