@@ -33,8 +33,9 @@ pub use graph_projection::{
 
 pub mod graph_construction;
 pub use graph_construction::{
-    ConstructionChunkKind, ConstructionChunkReceipt, GraphConstructionBudgets,
-    GraphConstructionEvidence, GraphConstructionSession, GraphConstructionState,
+    CONSTRUCTION_EDGE_SCHEMA, CONSTRUCTION_NODE_SCHEMA, ConstructionChunkKind,
+    ConstructionChunkReceipt, GraphConstructionBudgets, GraphConstructionEvidence,
+    GraphConstructionSession, GraphConstructionState,
 };
 
 pub mod graph_files;

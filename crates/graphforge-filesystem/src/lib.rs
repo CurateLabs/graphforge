@@ -259,6 +259,37 @@ impl StableDirectory {
         self.open_child_file(target).map(|_| ())
     }
 
+    /// Atomically install a retained temporary child without replacing an
+    /// existing target. This is the creation authority for durable control
+    /// records whose first publication must never overwrite competing state.
+    ///
+    /// # Errors
+    /// Returns an I/O error when either name is invalid, the retained source
+    /// identity changed, the target already exists, or durable installation
+    /// and identity revalidation fail.
+    pub fn install_child(
+        &self,
+        temporary: &OsStr,
+        expected_temporary: FileIdentity,
+        target: &OsStr,
+    ) -> io::Result<()> {
+        validate_child_name(temporary)?;
+        validate_child_name(target)?;
+        self.revalidate_named()?;
+        let temporary_file = self.open_child_file(temporary)?;
+        if file_identity(&temporary_file)? != expected_temporary
+            || file_link_count(&temporary_file)? != 1
+        {
+            return Err(io::Error::other(
+                "atomic temporary child identity or link count changed",
+            ));
+        }
+        drop(temporary_file);
+        install_new_file_platform(&self.file, temporary, target, Some(expected_temporary))?;
+        self.revalidate_named()?;
+        self.open_child_file(target).map(|_| ())
+    }
+
     /// Flush this retained directory capability.
     pub fn sync(&self) -> io::Result<()> {
         self.revalidate_named()?;
