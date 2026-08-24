@@ -247,29 +247,6 @@ fn stage_rewrite_nodes_dropping<S: BuildHasher>(
     Ok(removed)
 }
 
-/// Every `*.parquet` path directly under `dir/<subdir>`, or an empty list when
-/// the directory is absent. Enumeration order is filesystem-dependent; callers
-/// needing determinism must sort or group the results themselves.
-pub(crate) fn parquet_files_in(
-    dir: &Path,
-    subdir: &str,
-) -> Result<Vec<std::path::PathBuf>, GfError> {
-    let d = dir.join(subdir);
-    let entries = match fs::read_dir(&d) {
-        Ok(rd) => rd,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(io_err(&e)),
-    };
-    let mut out = Vec::new();
-    for entry in entries {
-        let path = entry.map_err(|e| io_err(&e))?.path();
-        if path.extension().and_then(|s| s.to_str()) == Some("parquet") {
-            out.push(path);
-        }
-    }
-    Ok(out)
-}
-
 /// Enumerate canonical edge Parquet fragments, including the legacy flat
 /// `<relation>.parquet` layout and append-only `<relation>/<range>.parquet`
 /// shards. The returned relation is authoritative for typed fragments.
@@ -369,6 +346,43 @@ pub(crate) fn node_parquet_files(dir: &Path) -> Result<Vec<std::path::PathBuf>, 
     Ok(out)
 }
 
+/// Enumerate a legacy flat property file plus immutable construction shards.
+pub(crate) fn property_parquet_files(
+    dir: &Path,
+    subdir: &str,
+    stem: &str,
+) -> Result<Vec<std::path::PathBuf>, GfError> {
+    let root = dir.join(subdir);
+    let mut out = Vec::new();
+    let legacy = root.join(format!("{stem}.parquet"));
+    if legacy.exists() {
+        out.push(legacy);
+    }
+    let shards = root.join(stem);
+    let entries = match fs::read_dir(&shards) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Err(error) => return Err(io_err(&error)),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|error| io_err(&error))?;
+        let file_type = entry.file_type().map_err(|error| io_err(&error))?;
+        if file_type.is_symlink() || file_type.is_dir() {
+            return Err(GfError::Storage(
+                "property shard directory contains a linked or nested entry".into(),
+            ));
+        }
+        let path = entry.path();
+        if file_type.is_file()
+            && path.extension().and_then(|value| value.to_str()) == Some("parquet")
+        {
+            out.push(path);
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
 /// Stage the deletion of the given nodes into `staged`: every
 /// `properties/*.parquet` first, then `topology/nodes.parquet` **last** — the
 /// authoritative existence record commits only after everything that refers
@@ -386,9 +400,11 @@ pub fn stage_delete_nodes<S: BuildHasher>(
         return Ok(0);
     }
     // Drop the deleted nodes' property rows so they don't dangle.
-    for path in parquet_files_in(dir, "properties")? {
-        if let Some(schema) = discover_parquet_schema(&path) {
-            stage_rewrite_dropping(staged, &path, schema, "node_uuid", node_uuids)?;
+    for stem in crate::catalog::list_property_stems(dir) {
+        for path in property_parquet_files(dir, "properties", &stem)? {
+            if let Some(schema) = discover_parquet_schema(&path) {
+                stage_rewrite_dropping(staged, &path, schema, "node_uuid", node_uuids)?;
+            }
         }
     }
     let mut removed = 0;
@@ -421,9 +437,11 @@ pub fn stage_delete_edges<S: BuildHasher>(
     }
     // Drop edge-property rows (the `edge_properties/` dir exists once edge
     // properties have been written, #784).
-    for path in parquet_files_in(dir, "edge_properties")? {
-        if let Some(schema) = discover_parquet_schema(&path) {
-            stage_rewrite_dropping(staged, &path, schema, "edge_uuid", edge_uuids)?;
+    for stem in crate::catalog::list_edge_property_stems(dir) {
+        for path in property_parquet_files(dir, "edge_properties", &stem)? {
+            if let Some(schema) = discover_parquet_schema(&path) {
+                stage_rewrite_dropping(staged, &path, schema, "edge_uuid", edge_uuids)?;
+            }
         }
     }
     Ok(removed)

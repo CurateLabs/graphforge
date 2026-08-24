@@ -101,13 +101,6 @@ pub fn write_runtime_entity_label_encoding_marker(dir: &Path) -> Result<(), GfEr
     let path = encoding_path(dir);
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, bytes).map_err(|e| storage_err(e.to_string()))?;
-    crate::record_graph_file_descriptors(
-        dir,
-        [crate::GraphFileDeltaDescriptor::Sealed {
-            relative_path: std::path::PathBuf::from("topology/runtime_entity_label_encoding.json"),
-            revision_uuid: uuid::Uuid::new_v4(),
-        }],
-    )?;
     std::fs::rename(&tmp, &path).map_err(|e| storage_err(e.to_string()))?;
     Ok(())
 }

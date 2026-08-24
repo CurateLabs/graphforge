@@ -30,7 +30,7 @@ use std::sync::Arc;
 
 use arrow::array::RecordBatch;
 use arrow::compute::concat_batches;
-use arrow::datatypes::{DataType, Field, SchemaRef};
+use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use async_trait::async_trait;
 use datafusion::catalog::{CatalogProvider, SchemaProvider};
 use datafusion::datasource::{TableProvider, TableType};
@@ -1074,11 +1074,16 @@ fn max_ordered_u64_tail(path: &Path, column: &str) -> Result<u64, DataFusionErro
 /// # Errors
 /// Propagates Parquet / Arrow errors encountered while reading.
 pub fn read_properties(dir: &Path, stem: &str) -> Result<Vec<RecordBatch>, DataFusionError> {
-    let path = dir.join("properties").join(format!("{stem}.parquet"));
-    match discover_parquet_schema(&path) {
-        Some(schema) => read_parquet_or_empty(&path, schema),
-        None => Ok(Vec::new()),
+    let paths = crate::mutator::property_parquet_files(dir, "properties", stem)
+        .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+    let mut out = Vec::new();
+    for path in paths {
+        let schema = discover_parquet_schema_detailed(&path).map_err(|error| {
+            DataFusionError::Execution(format!("failed to discover {}: {error}", path.display()))
+        })?;
+        out.extend(read_parquet_or_empty(&path, schema)?);
     }
+    Ok(out)
 }
 
 /// Stream `properties/<stem>.parquet` as bounded batches without concatenating
@@ -1119,18 +1124,20 @@ pub fn visit_properties_batched<F>(
 where
     F: FnMut(&RecordBatch) -> Result<bool, DataFusionError>,
 {
-    let path = dir.join("properties").join(format!("{stem}.parquet"));
-    if !path.exists() {
-        return Ok(());
-    }
-    let file = File::open(&path).map_err(|e| io_err(&e))?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(parquet_err)?;
-    let builder = builder.with_batch_size(batch_size.max(1));
-    let reader = builder.build().map_err(parquet_err)?;
-    for batch in reader {
-        let batch = batch.map_err(parquet_err)?;
-        if !visit(&batch)? {
-            break;
+    let paths = crate::mutator::property_parquet_files(dir, "properties", stem)
+        .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+    for path in paths {
+        let file = File::open(&path).map_err(|e| io_err(&e))?;
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(parquet_err)?;
+        let reader = builder
+            .with_batch_size(batch_size.max(1))
+            .build()
+            .map_err(parquet_err)?;
+        for batch in reader {
+            let batch = batch.map_err(parquet_err)?;
+            if !visit(&batch)? {
+                return Ok(());
+            }
         }
     }
     Ok(())
@@ -1191,11 +1198,16 @@ where
 /// # Errors
 /// Propagates Parquet / Arrow errors encountered while reading.
 pub fn read_edge_properties(dir: &Path, stem: &str) -> Result<Vec<RecordBatch>, DataFusionError> {
-    let path = dir.join("edge_properties").join(format!("{stem}.parquet"));
-    match discover_parquet_schema(&path) {
-        Some(schema) => read_parquet_or_empty(&path, schema),
-        None => Ok(Vec::new()),
+    let paths = crate::mutator::property_parquet_files(dir, "edge_properties", stem)
+        .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+    let mut out = Vec::new();
+    for path in paths {
+        let schema = discover_parquet_schema_detailed(&path).map_err(|error| {
+            DataFusionError::Execution(format!("failed to discover {}: {error}", path.display()))
+        })?;
+        out.extend(read_parquet_or_empty(&path, schema)?);
     }
+    Ok(out)
 }
 
 /// Stems (relation names) of every `edge_properties/<stem>.parquet` under
@@ -1215,21 +1227,24 @@ pub fn list_property_stems(dir: &Path) -> Vec<String> {
     list_parquet_stems(&dir.join("properties"))
 }
 
-/// Sorted `<stem>` names of the `<stem>.parquet` files directly under `dir`.
+/// Sorted stems represented by a legacy flat file or immutable shard directory.
 fn list_parquet_stems(dir: &Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
     let mut stems: Vec<String> = entries
         .filter_map(|entry| {
-            let path = entry.ok()?.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("parquet") {
-                return None;
+            let entry = entry.ok()?;
+            let path = entry.path();
+            if entry.file_type().ok()?.is_dir() {
+                return path.file_name()?.to_str().map(str::to_owned);
             }
-            Some(path.file_stem()?.to_str()?.to_owned())
+            (path.extension().and_then(|e| e.to_str()) == Some("parquet"))
+                .then(|| path.file_stem()?.to_str().map(str::to_owned))?
         })
         .collect();
     stems.sort();
+    stems.dedup();
     stems
 }
 
@@ -1448,8 +1463,12 @@ impl PropertyTable {
     #[must_use]
     pub fn open_discovered(dir: &Path, stem: &str) -> Self {
         let path = dir.join("properties").join(format!("{stem}.parquet"));
-        let schema = discover_parquet_schema(&path)
-            .unwrap_or_else(|| crate::schemas::PROPERTY_BASE_SCHEMA.clone());
+        let schema = discover_property_schema(
+            dir,
+            "properties",
+            stem,
+            crate::schemas::PROPERTY_BASE_SCHEMA.clone(),
+        );
         Self { path, schema }
     }
 
@@ -1489,8 +1508,12 @@ impl EdgePropertyTable {
         let path = dir
             .join("edge_properties")
             .join(format!("{rel_type}.parquet"));
-        let schema = discover_parquet_schema(&path)
-            .unwrap_or_else(|| crate::schemas::EDGE_PROPERTY_BASE_SCHEMA.clone());
+        let schema = discover_property_schema(
+            dir,
+            "edge_properties",
+            rel_type,
+            crate::schemas::EDGE_PROPERTY_BASE_SCHEMA.clone(),
+        );
         Self { path, schema }
     }
 
@@ -1518,10 +1541,24 @@ impl TableProvider for EdgePropertyTable {
         _filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
-        let fragment = ParquetFragment::for_path(self.path.clone(), false);
+        let dir = self
+            .path
+            .parent()
+            .and_then(Path::parent)
+            .unwrap_or(&self.path);
+        let stem = self
+            .path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default();
+        let fragments = crate::mutator::property_parquet_files(dir, "edge_properties", stem)
+            .map_err(|error| DataFusionError::Execution(error.to_string()))?
+            .into_iter()
+            .map(|path| ParquetFragment::for_path(path, false))
+            .collect();
         scan_fragments(
             self.schema.clone(),
-            vec![fragment],
+            fragments,
             projection,
             limit,
             state.config().batch_size(),
@@ -1544,6 +1581,28 @@ pub(crate) fn discover_parquet_schema_detailed(path: &Path) -> Result<SchemaRef,
     Ok(builder.schema().clone())
 }
 
+fn discover_property_schema(
+    dir: &Path,
+    subdir: &str,
+    stem: &str,
+    fallback: SchemaRef,
+) -> SchemaRef {
+    let Ok(paths) = crate::mutator::property_parquet_files(dir, subdir, stem) else {
+        return fallback;
+    };
+    let schemas = paths
+        .iter()
+        .filter_map(|path| discover_parquet_schema(path))
+        .map(|schema| schema.as_ref().clone())
+        .collect::<Vec<_>>();
+    if schemas.is_empty() {
+        fallback
+    } else {
+        let first = Arc::new(schemas[0].clone());
+        Schema::try_merge(schemas).map_or(first, Arc::new)
+    }
+}
+
 #[async_trait]
 impl TableProvider for PropertyTable {
     fn schema(&self) -> SchemaRef {
@@ -1561,10 +1620,24 @@ impl TableProvider for PropertyTable {
         _filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
-        let fragment = ParquetFragment::for_path(self.path.clone(), false);
+        let dir = self
+            .path
+            .parent()
+            .and_then(Path::parent)
+            .unwrap_or(&self.path);
+        let stem = self
+            .path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default();
+        let fragments = crate::mutator::property_parquet_files(dir, "properties", stem)
+            .map_err(|error| DataFusionError::Execution(error.to_string()))?
+            .into_iter()
+            .map(|path| ParquetFragment::for_path(path, false))
+            .collect();
         scan_fragments(
             self.schema.clone(),
-            vec![fragment],
+            fragments,
             projection,
             limit,
             state.config().batch_size(),
