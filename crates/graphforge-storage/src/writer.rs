@@ -2208,13 +2208,6 @@ impl GraphWriter {
     /// # Errors
     /// Returns [`GfError::Storage`] on any I/O, Arrow, or Parquet failure.
     pub fn flush(&mut self) -> Result<(), GfError> {
-        if self.prepared_index.is_some() {
-            // Reading generation first rolls forward any durable #935 rewrite.
-            // No UUID-index participant publishes independently.
-            let generation = crate::read_topology_generation(&self.dir)?;
-            self.finalize_uuid_index_delta(generation)?;
-            return Ok(());
-        }
         let mut staged = RewriteBatch::new();
         self.flush_into(&mut staged)?;
         let pending = self.take_pending_delta();
@@ -2242,28 +2235,6 @@ impl GraphWriter {
         edges.sort_unstable_by_key(|e| e.edge_id);
         self.refresh_topology_charge();
         edges
-    }
-
-    /// Prepare the captured UUID delta before the enclosing topology commit.
-    pub fn prepare_uuid_index_delta(
-        &mut self,
-        generation: u64,
-        staged: &mut RewriteBatch,
-    ) -> Result<bool, GfError> {
-        self.prepare_uuid_index_delta_with_deletions(generation, staged, &[], &[])
-    }
-
-    /// Prepare creations and authenticated deletion tombstones as one generation.
-    pub fn prepare_uuid_index_delta_with_deletions(
-        &mut self,
-        generation: u64,
-        staged: &mut RewriteBatch,
-        deleted_nodes: &[Uuid],
-        deleted_edges: &[Uuid],
-    ) -> Result<bool, GfError> {
-        self.prepared_index =
-            self.build_uuid_index_delta(generation, staged, deleted_nodes, deleted_edges)?;
-        Ok(self.prepared_index.is_some())
     }
 
     fn build_uuid_index_delta(
@@ -2352,7 +2323,7 @@ impl GraphWriter {
     }
 
     /// Finalize a prepared UUID delta after the topology commit succeeds.
-    pub fn finalize_uuid_index_delta(&mut self, generation: u64) -> Result<(), GfError> {
+    fn finalize_uuid_index_delta(&mut self, generation: u64) -> Result<(), GfError> {
         let prepared = self
             .prepared_index
             .as_ref()
@@ -2362,17 +2333,6 @@ impl GraphWriter {
         self.pending_index_nodes.clear();
         self.pending_index_edges.clear();
         Ok(())
-    }
-
-    /// Return the authenticated auxiliary receipt for the currently prepared
-    /// UUID-index participant. The enclosing rewrite must pass this receipt to
-    /// `commit_topology_aware_with_auxiliary`; a plain commit would discard the
-    /// atomic binding between topology and its membership index.
-    #[must_use]
-    pub fn prepared_uuid_index_auxiliary_receipt(&self) -> Option<crate::AuxiliaryReceipt> {
-        self.prepared_index
-            .as_ref()
-            .map(crate::uuid_membership::PreparedUuidIndexDelta::auxiliary_receipt)
     }
 
     /// Best-effort write of the delta segment for `generation` — only when the
