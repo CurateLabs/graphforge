@@ -46,6 +46,8 @@ pub struct AuxiliaryReceipt {
 /// Authoritative rewrite state exposed to an auxiliary participant while the
 /// admitted project rewrite lock is held.
 pub struct ParticipantPreparationContext<'a> {
+    /// Exact recovered generation pair preceding this transaction.
+    pub prior: GenerationPair,
     /// Exact generation pair that this transaction will publish.
     pub next: GenerationPair,
     /// Retained, admitted project directory capability.
@@ -748,6 +750,7 @@ pub(crate) fn commit_with_participant(
     let participant_auxiliary = if let Some(prepare) = participant {
         prepare(
             ParticipantPreparationContext {
+                prior,
                 next,
                 project: &guard.directory,
                 project_root: root,
