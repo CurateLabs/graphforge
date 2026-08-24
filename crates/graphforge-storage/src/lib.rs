@@ -12,7 +12,9 @@
 
 mod durable_rewrite;
 mod file_lock;
-pub use durable_rewrite::AuxiliaryReceipt;
+pub use durable_rewrite::{
+    AuxiliaryReceipt, GenerationPair, ParticipantPreparationContext, RewriteParticipantPreparer,
+};
 #[doc(hidden)]
 pub mod filesystem_admission;
 
@@ -21,8 +23,9 @@ pub mod adjacency_delta;
 
 pub mod generation;
 pub use generation::{
-    commit_topology_aware, commit_topology_aware_with_auxiliary, read_search_generation,
-    read_topology_generation, touches_search_source,
+    commit_topology_aware, commit_topology_aware_with_auxiliary,
+    commit_topology_aware_with_participant, read_search_generation, read_topology_generation,
+    touches_search_source,
 };
 
 pub mod graph_projection;

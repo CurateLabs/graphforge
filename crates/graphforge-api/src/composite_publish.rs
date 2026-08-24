@@ -1088,7 +1088,6 @@ fn apply_graph_mutations(
     graphforge_storage::stage_delete_edges(&mut staged, &graph.dir, &delete_edges)?;
     graphforge_storage::stage_delete_nodes(&mut staged, &graph.dir, &delete_nodes)?;
     writer.flush_into(&mut staged)?;
-    let expected_generation = graphforge_storage::read_topology_generation(&graph.dir)? + 1;
     let deleted_nodes = delete_nodes
         .iter()
         .copied()
@@ -1099,17 +1098,11 @@ fn apply_graph_mutations(
         .copied()
         .map(Uuid::from_bytes)
         .collect::<Vec<_>>();
-    let index_prepared = writer.prepare_uuid_index_delta_with_deletions(
-        expected_generation,
-        &mut staged,
-        &deleted_nodes,
-        &deleted_edges,
-    )?;
-    let auxiliary = writer.prepared_uuid_index_auxiliary_receipt();
+    let participant = writer.uuid_index_participant(deleted_nodes, deleted_edges);
     if let Some(generation) =
-        graphforge_storage::commit_topology_aware_with_auxiliary(staged, &graph.dir, auxiliary)?
+        graphforge_storage::commit_topology_aware_with_participant(staged, &graph.dir, participant)?
     {
-        if index_prepared {
+        if writer.prepared_uuid_index_auxiliary_receipt().is_some() {
             writer.finalize_uuid_index_delta(generation)?;
         }
     }
