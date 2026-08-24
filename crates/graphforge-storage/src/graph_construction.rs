@@ -396,6 +396,33 @@ pub(crate) struct ArtifactReceipt {
     fsync_operations: u64,
 }
 
+#[derive(Serialize)]
+struct ShapeAuthorityEnvelope<'a> {
+    shape: &'a ConstructionShape,
+    outputs: Vec<&'a ArtifactReceipt>,
+}
+
+pub(crate) fn shape_authority_sha256(
+    shape: &ConstructionShape,
+    outputs: &[ArtifactReceipt],
+) -> Result<String, GfError> {
+    let mut ordered = outputs.iter().collect::<Vec<_>>();
+    ordered.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+    if ordered.windows(2).any(|pair| pair[0].name == pair[1].name) {
+        return Err(storage("shape authority repeats an output receipt"));
+    }
+    let mut digest = Sha256::new();
+    digest.update(b"graphforge-construction-shape-authority/v1\0");
+    digest.update(
+        serde_json::to_vec(&ShapeAuthorityEnvelope {
+            shape,
+            outputs: ordered,
+        })
+        .map_err(storage)?,
+    );
+    Ok(hex(&digest.finalize()))
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 /// Immutable acknowledgement of one canonical Arrow chunk.
 pub struct ConstructionChunkReceipt {
@@ -450,6 +477,10 @@ struct Checkpoint {
     parent_catalog_sha256: Option<String>,
     node_schema_sha256: BTreeSet<String>,
     edge_schema_sha256: BTreeSet<String>,
+    #[serde(default)]
+    shape_authority_sha256: Option<String>,
+    #[serde(default)]
+    encoding_inventory_sha256: Option<String>,
     base_work: UuidConstructionSnapshotWork,
     evidence: GraphConstructionEvidence,
 }
@@ -496,6 +527,8 @@ struct ShapeIntent {
     complete: bool,
     shape: Option<ConstructionShape>,
     outputs: Vec<ArtifactReceipt>,
+    #[serde(default)]
+    shape_authority_sha256: Option<String>,
 }
 
 static ACTIVE_OPERATIONS: LazyLock<Mutex<BTreeSet<String>>> =
@@ -569,7 +602,11 @@ impl GraphConstructionSession {
             return Err(storage("encoder input differs from completed shape"));
         }
         let shape_outputs = read_completed_shape_outputs(&self.root, &self.checkpoint)?;
-        crate::graph_construction_encoding::encode(
+        let shape_authority = shape_authority_sha256(shape, &shape_outputs)?;
+        if self.checkpoint.shape_authority_sha256.as_deref() != Some(&shape_authority) {
+            return Err(storage("encoder shape authority differs from checkpoint"));
+        }
+        let encoded = crate::graph_construction_encoding::encode(
             &self.root,
             shape,
             generation,
@@ -577,9 +614,26 @@ impl GraphConstructionSession {
             self.base_snapshot.as_ref(),
             self.semantic_authority.as_ref(),
             &shape_outputs,
+            &shape_authority,
+            self.checkpoint.encoding_inventory_sha256.as_deref(),
             self.checkpoint.budgets,
             &mut cancelled,
-        )
+        )?;
+        let inventory_authority =
+            crate::graph_construction_encoding::inventory_authority_sha256(&encoded)?;
+        match self.checkpoint.encoding_inventory_sha256.as_deref() {
+            Some(expected) if expected != inventory_authority => {
+                return Err(storage(
+                    "encoded inventory differs from checkpoint authority",
+                ));
+            }
+            Some(_) => {}
+            None => {
+                self.checkpoint.encoding_inventory_sha256 = Some(inventory_authority);
+                replace_control(&self.root, CHECKPOINT, &self.checkpoint)?;
+            }
+        }
+        Ok(encoded)
     }
 
     /// Create or resume an operation pinned to one parent topology generation.
@@ -730,6 +784,8 @@ impl GraphConstructionSession {
                     parent_catalog_sha256: parent_catalog_sha256.clone(),
                     node_schema_sha256: BTreeSet::new(),
                     edge_schema_sha256: BTreeSet::new(),
+                    shape_authority_sha256: None,
+                    encoding_inventory_sha256: None,
                     base_work,
                     evidence,
                 };
@@ -1110,6 +1166,7 @@ impl GraphConstructionSession {
             complete: false,
             shape: None,
             outputs: Vec::new(),
+            shape_authority_sha256: None,
         };
         install_control(&self.root, SHAPE_INTENT, &shape_intent)?;
         for sequence in 0..self.checkpoint.next_sequence {
@@ -1389,6 +1446,8 @@ impl GraphConstructionSession {
             .evidence
             .shaped_output_authentication_operations
             .saturating_add(inventory_work.operations);
+        let shape_authority_sha256 = shape_authority_sha256(&shape, &outputs)?;
+        self.checkpoint.shape_authority_sha256 = Some(shape_authority_sha256.clone());
         replace_control(
             &self.root,
             SHAPE_INTENT,
@@ -1407,6 +1466,7 @@ impl GraphConstructionSession {
                 complete: true,
                 shape: Some(shape.clone()),
                 outputs,
+                shape_authority_sha256: Some(shape_authority_sha256),
             },
         )?;
         construction_failpoint("shape.after_complete_inventory");
@@ -1772,11 +1832,30 @@ fn validate_schema(kind: ConstructionChunkKind, batch: &RecordBatch) -> Result<(
     if identifiers
         .iter()
         .flatten()
-        .any(|value| !graphforge_core::identifier::is_graph_identifier(value))
+        .any(|value| !is_construction_identifier(value))
     {
         return Err(storage("invalid canonical label or relation"));
     }
     Ok(())
+}
+
+fn is_construction_identifier(value: &str) -> bool {
+    if graphforge_core::identifier::is_graph_identifier(value) {
+        return true;
+    }
+    let parts = value.split(':').collect::<Vec<_>>();
+    match parts.as_slice() {
+        [module, local] => {
+            graphforge_core::identifier::is_graph_identifier(module)
+                && graphforge_core::identifier::is_graph_identifier(local)
+        }
+        [module, kind, local] => {
+            graphforge_core::identifier::is_graph_identifier(module)
+                && matches!(*kind, "entity" | "relation")
+                && graphforge_core::identifier::is_graph_identifier(local)
+        }
+        _ => false,
+    }
 }
 
 fn logical_batch_digest(
@@ -2179,14 +2258,25 @@ fn recover_shape_intent(
         for output in &intent.outputs {
             authenticate_shaped_output(root, output)?;
         }
+        let expected_shape_authority = shape_authority_sha256(shape, &intent.outputs)?;
+        if intent.shape_authority_sha256.as_deref() != Some(&expected_shape_authority) {
+            return Err(storage(
+                "complete shape authority digest differs from inventory",
+            ));
+        }
         let final_evidence = intent
             .final_evidence
             .as_ref()
             .ok_or_else(|| storage("complete shape manifest lacks final evidence"))?;
-        if checkpoint.evidence == intent.baseline_evidence {
+        if checkpoint.evidence == intent.baseline_evidence
+            && checkpoint.shape_authority_sha256.is_none()
+        {
             checkpoint.evidence = final_evidence.clone();
+            checkpoint.shape_authority_sha256 = Some(expected_shape_authority);
             replace_control(root, CHECKPOINT, checkpoint)?;
-        } else if checkpoint.evidence != *final_evidence {
+        } else if checkpoint.evidence != *final_evidence
+            || checkpoint.shape_authority_sha256.as_deref() != Some(&expected_shape_authority)
+        {
             return Err(storage("shape evidence authority differs from inventory"));
         }
         return Ok(());
@@ -2250,10 +2340,16 @@ fn read_completed_shape(
     for output in &manifest.outputs {
         authenticate_shaped_output(root, output)?;
     }
-    manifest
+    let shape = manifest
         .shape
-        .ok_or_else(|| storage("complete shape manifest lacks output"))
-        .map(Some)
+        .ok_or_else(|| storage("complete shape manifest lacks output"))?;
+    let authority = shape_authority_sha256(&shape, &manifest.outputs)?;
+    if manifest.shape_authority_sha256.as_deref() != Some(&authority)
+        || checkpoint.shape_authority_sha256.as_deref() != Some(&authority)
+    {
+        return Err(storage("completed shape authority digest changed"));
+    }
+    Ok(Some(shape))
 }
 
 fn read_completed_shape_outputs(
@@ -2271,16 +2367,6 @@ fn read_completed_shape_outputs(
     Ok(manifest.outputs)
 }
 
-pub(crate) fn authenticate_shaped_outputs(
-    root: &StableDirectory,
-    outputs: &[ArtifactReceipt],
-) -> Result<(), GfError> {
-    for output in outputs {
-        authenticate_shaped_output(root, output)?;
-    }
-    Ok(())
-}
-
 pub(crate) fn shaped_output_sha256<'a>(
     outputs: &'a [ArtifactReceipt],
     name: &str,
@@ -2290,6 +2376,38 @@ pub(crate) fn shaped_output_sha256<'a>(
         .find(|output| output.name == name)
         .map(|output| output.sha256.as_str())
         .ok_or_else(|| storage("shaped output receipt is absent"))
+}
+
+pub(crate) struct AuthenticatedShapeSource {
+    pub(crate) file: File,
+    pub(crate) identity: FileIdentity,
+    pub(crate) bytes: u64,
+    pub(crate) sha256: String,
+}
+
+pub(crate) fn open_authenticated_shape_source(
+    root: &StableDirectory,
+    outputs: &[ArtifactReceipt],
+    name: &str,
+) -> Result<AuthenticatedShapeSource, GfError> {
+    let expected = outputs
+        .iter()
+        .find(|output| output.name == name)
+        .ok_or_else(|| storage("shaped output receipt is absent"))?;
+    let file = root.open_child_file(OsStr::new(name)).map_err(storage)?;
+    if file_link_count(&file).map_err(storage)? != 1 {
+        return Err(storage("shaped output has extra links"));
+    }
+    let identity = file_identity(&file).map_err(storage)?;
+    if !expected.identity.matches(identity) {
+        return Err(storage("shaped output identity changed before consumption"));
+    }
+    Ok(AuthenticatedShapeSource {
+        file,
+        identity,
+        bytes: expected.bytes,
+        sha256: expected.sha256.clone(),
+    })
 }
 
 fn receipt_for_existing(root: &StableDirectory, name: &str) -> Result<ArtifactReceipt, GfError> {
@@ -4395,6 +4513,20 @@ fn validate_checkpoint(
             .is_some_and(|digest| {
                 digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
             })
+        || checkpoint
+            .shape_authority_sha256
+            .as_ref()
+            .is_some_and(|digest| {
+                digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+        || checkpoint
+            .encoding_inventory_sha256
+            .as_ref()
+            .is_some_and(|digest| {
+                digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+        || checkpoint.encoding_inventory_sha256.is_some()
+            && checkpoint.shape_authority_sha256.is_none()
         || checkpoint.evidence.input_batches != checkpoint.next_sequence
         || checkpoint.evidence.parquet_shards != checkpoint.next_sequence
         || checkpoint.evidence.peak_batch_rows > budgets.max_batch_rows as u64
@@ -4968,6 +5100,47 @@ mod tests {
         .unwrap()
     }
 
+    fn child_parent_property_batch(first: u128, rows: usize) -> RecordBatch {
+        let uuids = (first..first + rows as u128)
+            .map(u128::to_be_bytes)
+            .collect::<Vec<_>>();
+        let mut fields = CONSTRUCTION_NODE_SCHEMA
+            .fields()
+            .iter()
+            .map(|field| field.as_ref().clone())
+            .collect::<Vec<_>>();
+        fields.push(Field::new("score", DataType::Int64, true));
+        fields.push(Field::new("nickname", DataType::Utf8, true));
+        RecordBatch::try_new(
+            Arc::new(Schema::new(fields)),
+            vec![
+                Arc::new(fixed(&uuids)),
+                Arc::new(StringArray::from(vec!["Child"; rows])),
+                Arc::new(Int64Array::from_iter_values(0..rows as i64)),
+                Arc::new(StringArray::from(vec!["kid"; rows])),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn colliding_property_batch(uuid: u128, label: &str, value: i64) -> RecordBatch {
+        let mut fields = CONSTRUCTION_NODE_SCHEMA
+            .fields()
+            .iter()
+            .map(|field| field.as_ref().clone())
+            .collect::<Vec<_>>();
+        fields.push(Field::new("value", DataType::Int64, true));
+        RecordBatch::try_new(
+            Arc::new(Schema::new(fields)),
+            vec![
+                Arc::new(fixed(&[uuid.to_be_bytes()])),
+                Arc::new(StringArray::from(vec![label])),
+                Arc::new(Int64Array::from(vec![value])),
+            ],
+        )
+        .unwrap()
+    }
+
     fn heterogeneous_property_batch(uuid: u128, property: usize) -> RecordBatch {
         let mut fields = CONSTRUCTION_NODE_SCHEMA
             .fields()
@@ -5050,6 +5223,14 @@ mod tests {
                     default_json: None,
                 },
                 graphforge_ontology::PropertyDef {
+                    owner: "Child".into(),
+                    name: "nickname".into(),
+                    value_type: graphforge_ontology::PropertyValueType::Utf8,
+                    nullable: true,
+                    multivalued: false,
+                    default_json: None,
+                },
+                graphforge_ontology::PropertyDef {
                     owner: "R".into(),
                     name: "weight".into(),
                     value_type: graphforge_ontology::PropertyValueType::Int64,
@@ -5080,6 +5261,58 @@ mod tests {
             .unwrap();
         let bindings =
             crate::SemanticStorageBindings::project(&composition.compile().unwrap(), None).unwrap();
+        ConstructionSemanticAuthority {
+            composition,
+            bindings,
+        }
+    }
+
+    fn colliding_module_authority() -> ConstructionSemanticAuthority {
+        let documents = ["alpha", "beta"].map(|name| graphforge_ontology::OntologyDoc {
+            ontology_id: format!("https://graphforge.dev/ontology/{name}"),
+            version: "1.0.0".into(),
+            entity_types: vec![graphforge_ontology::EntityTypeDef {
+                name: "Thing".into(),
+                r#abstract: false,
+                parent: None,
+            }],
+            relation_types: vec![],
+            properties: vec![graphforge_ontology::PropertyDef {
+                owner: "Thing".into(),
+                name: "value".into(),
+                value_type: graphforge_ontology::PropertyValueType::Int64,
+                nullable: true,
+                multivalued: false,
+                default_json: None,
+            }],
+            constraints: vec![],
+            migrations: vec![],
+        });
+        let modules = documents
+            .into_iter()
+            .map(|doc| graphforge_ontology::AuthoredModule {
+                id: graphforge_ontology::OntologyModuleId {
+                    ontology_id: doc.ontology_id.clone(),
+                    authored_version: doc.version.clone(),
+                    canonical_digest: graphforge_ontology::module_document_digest(&doc).unwrap(),
+                },
+                dependencies: vec![],
+                doc,
+                allow_projected_identity: false,
+            })
+            .collect::<Vec<_>>();
+        let compiled =
+            graphforge_ontology::compile_inventory(graphforge_ontology::InventoryCompileRequest {
+                modules: &modules,
+                bridges: &[],
+                activation: &[],
+                profile_default: graphforge_ontology::ActivationMode::Strict,
+                limits: graphforge_ontology::CompositionLimits::default(),
+                cancelled: None,
+            })
+            .unwrap();
+        let composition = crate::WorkspaceOntologyComposition::from_compiled(&compiled, vec![]);
+        let bindings = crate::SemanticStorageBindings::project(&compiled, None).unwrap();
         ConstructionSemanticAuthority {
             composition,
             bindings,
@@ -6622,6 +6855,121 @@ mod tests {
     }
 
     #[test]
+    fn canonical_encoder_splits_child_and_inherited_properties_by_declaring_route() {
+        let root = TempDir::new().unwrap();
+        let operation = Uuid::from_u128(9_326);
+        let authority = semantic_authority(graphforge_core::OntologyMode::Strict);
+        let binding_route = |kind, local: &str| {
+            authority
+                .bindings
+                .bindings
+                .iter()
+                .find(|binding| binding.route_kind == kind && binding.symbol.local_id == local)
+                .unwrap()
+                .route
+                .clone()
+        };
+        let parent_route = binding_route(crate::SemanticRouteKind::NodeProperty, "Person:score");
+        let child_route = binding_route(crate::SemanticRouteKind::NodeProperty, "Child:nickname");
+        let concrete_route = binding_route(crate::SemanticRouteKind::Entity, "Child");
+        let mut session = GraphConstructionSession::open_with_semantic_authority(
+            root.path(),
+            operation,
+            0,
+            authority,
+            GraphConstructionBudgets::default(),
+        )
+        .unwrap();
+        session
+            .append(
+                ConstructionChunkKind::Node,
+                "child-parent-properties",
+                &child_parent_property_batch(1, 2),
+            )
+            .unwrap();
+        session.seal().unwrap();
+        let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
+        let encoded = session.encode_canonical(&shape, 1).unwrap();
+        let graph = root
+            .path()
+            .join(PRIVATE_ROOT)
+            .join(operation.simple().to_string())
+            .join(&encoded.root)
+            .join("graph");
+        for (route, property) in [(parent_route, "score"), (child_route, "nickname")] {
+            let batches = crate::read_properties(&graph, &route).unwrap();
+            assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 2);
+            assert!(
+                batches
+                    .iter()
+                    .all(|batch| batch.column_by_name(property).is_some())
+            );
+            assert!(batches.iter().all(|batch| {
+                batch.schema().metadata().get("graphforge.entity_type") == Some(&concrete_route)
+            }));
+        }
+    }
+
+    #[test]
+    fn canonical_encoder_keeps_same_local_property_names_module_qualified() {
+        let root = TempDir::new().unwrap();
+        let operation = Uuid::from_u128(9_327);
+        let authority = colliding_module_authority();
+        let mut labels = authority
+            .bindings
+            .bindings
+            .iter()
+            .filter(|binding| binding.route_kind == crate::SemanticRouteKind::Entity)
+            .map(|binding| binding.symbol.ambiguity_candidate())
+            .collect::<Vec<_>>();
+        labels.sort();
+        let property_routes = authority
+            .bindings
+            .bindings
+            .iter()
+            .filter(|binding| binding.route_kind == crate::SemanticRouteKind::NodeProperty)
+            .map(|binding| binding.route.clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(property_routes.len(), 2);
+        let mut session = GraphConstructionSession::open_with_semantic_authority(
+            root.path(),
+            operation,
+            0,
+            authority,
+            GraphConstructionBudgets::default(),
+        )
+        .unwrap();
+        for (index, label) in labels.iter().enumerate() {
+            session
+                .append(
+                    ConstructionChunkKind::Node,
+                    &format!("module-{index}"),
+                    &colliding_property_batch(index as u128 + 1, label, index as i64),
+                )
+                .unwrap();
+        }
+        session.seal().unwrap();
+        let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
+        let encoded = session.encode_canonical(&shape, 1).unwrap();
+        let graph = root
+            .path()
+            .join(PRIVATE_ROOT)
+            .join(operation.simple().to_string())
+            .join(&encoded.root)
+            .join("graph");
+        for route in property_routes {
+            assert_eq!(
+                crate::read_properties(&graph, &route)
+                    .unwrap()
+                    .iter()
+                    .map(RecordBatch::num_rows)
+                    .sum::<usize>(),
+                1
+            );
+        }
+    }
+
+    #[test]
     fn canonical_encoder_keeps_256_heterogeneous_schemas_to_one_live_reader() {
         let root = TempDir::new().unwrap();
         let operation = Uuid::from_u128(9_325);
@@ -6735,6 +7083,125 @@ mod tests {
                 .to_string()
                 .contains("canonical artifact differs from inventory")
         );
+    }
+
+    #[test]
+    fn canonical_encoder_rejects_same_inode_mutate_restore_during_spool() {
+        let root = TempDir::new().unwrap();
+        let operation = Uuid::from_u128(9_328);
+        let mut session = open(&root, 9_328);
+        session
+            .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 2))
+            .unwrap();
+        session.seal().unwrap();
+        let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
+        let source = root
+            .path()
+            .join(PRIVATE_ROOT)
+            .join(operation.simple().to_string())
+            .join(&shape.runtime_catalog);
+        let original = std::fs::read(&source).unwrap()[0];
+        let mut mutated = false;
+        let hook_source = source.clone();
+        crate::graph_construction_encoding::set_source_spool_hook(Some(Box::new(move |phase| {
+            use std::io::{Seek as _, SeekFrom};
+            if phase == "before_read" && !mutated {
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&hook_source)
+                    .unwrap();
+                file.seek(SeekFrom::Start(0)).unwrap();
+                file.write_all(&[original ^ 0xff]).unwrap();
+                mutated = true;
+            } else if phase == "after_read" && mutated {
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&hook_source)
+                    .unwrap();
+                file.seek(SeekFrom::Start(0)).unwrap();
+                file.write_all(&[original]).unwrap();
+            }
+        })));
+        let error = session.encode_canonical(&shape, 1).unwrap_err();
+        crate::graph_construction_encoding::set_source_spool_hook(None);
+        assert!(
+            error
+                .to_string()
+                .contains("changed during authenticated spooling")
+        );
+        assert_eq!(std::fs::read(source).unwrap()[0], original);
+    }
+
+    #[test]
+    fn canonical_encoder_uses_owned_spool_after_source_mutation() {
+        let root = TempDir::new().unwrap();
+        let operation = Uuid::from_u128(9_329);
+        let mut session = open(&root, 9_329);
+        session
+            .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 2))
+            .unwrap();
+        session.seal().unwrap();
+        let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
+        let source = root
+            .path()
+            .join(PRIVATE_ROOT)
+            .join(operation.simple().to_string())
+            .join(&shape.runtime_catalog);
+        let original = std::fs::read(&source).unwrap()[0];
+        let hook_source = source.clone();
+        let mut changed = false;
+        crate::graph_construction_encoding::set_source_spool_hook(Some(Box::new(move |phase| {
+            if phase == "after_read" && !changed {
+                use std::io::{Seek as _, SeekFrom};
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&hook_source)
+                    .unwrap();
+                file.seek(SeekFrom::Start(0)).unwrap();
+                file.write_all(&[original ^ 0xff]).unwrap();
+                changed = true;
+            }
+        })));
+        let encoded = session.encode_canonical(&shape, 1).unwrap();
+        crate::graph_construction_encoding::set_source_spool_hook(None);
+        assert!(encoded.evidence.source_spool_read_bytes > 0);
+        assert_ne!(std::fs::read(source).unwrap()[0], original);
+    }
+
+    #[test]
+    fn canonical_encoder_rejects_coherent_inventory_and_artifact_substitution() {
+        let root = TempDir::new().unwrap();
+        let operation = Uuid::from_u128(9_330);
+        let mut session = open(&root, 9_330);
+        session
+            .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 2))
+            .unwrap();
+        session.seal().unwrap();
+        let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
+        let mut encoded = session.encode_canonical(&shape, 1).unwrap();
+        let encoded_root = root
+            .path()
+            .join(PRIVATE_ROOT)
+            .join(operation.simple().to_string())
+            .join(&encoded.root);
+        let artifact = encoded
+            .artifacts
+            .iter_mut()
+            .find(|artifact| artifact.path == "topology/surrogate_tails.parquet")
+            .unwrap();
+        let artifact_path = encoded_root.join("graph").join(&artifact.path);
+        let mut body = std::fs::read(&artifact_path).unwrap();
+        let last = body.len() - 1;
+        body[last] ^= 0xff;
+        std::fs::write(&artifact_path, &body).unwrap();
+        artifact.sha256 = sha256(&body);
+        std::fs::write(
+            encoded_root.join("inventory.json"),
+            serde_json::to_vec(&encoded).unwrap(),
+        )
+        .unwrap();
+        let error = session.encode_canonical(&shape, 1).unwrap_err();
+        assert!(error.to_string().contains("checkpoint inventory authority"));
     }
 
     #[test]

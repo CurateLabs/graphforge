@@ -11,6 +11,9 @@ use std::io::{BufReader, BufWriter, Read, Seek, Write};
 use std::path::{Component, Path};
 use std::sync::Arc;
 
+#[cfg(test)]
+use std::cell::RefCell;
+
 use arrow::array::{
     Array, ArrayRef, FixedSizeBinaryArray, ListArray, StringArray, TimestampMicrosecondArray,
     UInt32Array, UInt64Array,
@@ -32,7 +35,7 @@ use uuid::Uuid;
 
 use crate::graph_construction::{
     ArtifactReceipt, ConstructionSemanticAuthority, ConstructionShape, CountingChunkReader,
-    GraphConstructionBudgets, IoCounter, authenticate_shaped_outputs, shaped_output_sha256,
+    GraphConstructionBudgets, IoCounter, open_authenticated_shape_source, shaped_output_sha256,
 };
 use crate::schemas::{
     TOPOLOGY_NODES_SCHEMA, TYPED_EDGE_SCHEMA, uuid_field, with_semantic_route_metadata,
@@ -51,6 +54,30 @@ const NODE_DETAIL_WIDTH: usize = 272;
 const EDGE_DETAIL_WIDTH: usize = 304;
 const RESOLVED_ENDPOINT_WIDTH: usize = 32;
 const COPY_BUFFER_BYTES: usize = 1 << 20;
+
+#[cfg(test)]
+type SourceSpoolHook = Box<dyn FnMut(&str)>;
+#[cfg(test)]
+thread_local! {
+    static SOURCE_SPOOL_HOOK: RefCell<Option<SourceSpoolHook>> = RefCell::new(None);
+}
+
+#[cfg(test)]
+pub(crate) fn set_source_spool_hook(hook: Option<SourceSpoolHook>) {
+    SOURCE_SPOOL_HOOK.with(|slot| *slot.borrow_mut() = hook);
+}
+
+#[cfg(test)]
+fn run_source_spool_hook(phase: &str) {
+    SOURCE_SPOOL_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().as_mut() {
+            hook(phase);
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn run_source_spool_hook(_phase: &str) {}
 
 struct CountingWriter {
     inner: File,
@@ -91,6 +118,65 @@ impl Drop for EncodingTempGuard<'_> {
             let _ = self.directory.sync();
         }
     }
+}
+
+fn authenticated_source_spool<'a>(
+    source: &StableDirectory,
+    outputs: &[ArtifactReceipt],
+    name: &str,
+    output: &'a StableDirectory,
+    evidence: &mut GraphConstructionEncodingEvidence,
+) -> Result<(File, EncodingTempGuard<'a>), GfError> {
+    let mut authenticated = open_authenticated_shape_source(source, outputs, name)?;
+    let temporary = format!(".authenticated-source-{}.tmp", Uuid::new_v4().simple());
+    let mut spool = output
+        .create_replaceable_child_file(OsStr::new(&temporary))
+        .map_err(storage)?;
+    let spool_identity = file_identity(&spool).map_err(storage)?;
+    let guard = EncodingTempGuard {
+        directory: output,
+        name: temporary,
+        identity: spool_identity,
+        armed: true,
+    };
+    let mut digest = Sha256::new();
+    let mut bytes = 0_u64;
+    let mut buffer = vec![0_u8; COPY_BUFFER_BYTES];
+    loop {
+        run_source_spool_hook("before_read");
+        let read = authenticated.file.read(&mut buffer).map_err(storage)?;
+        run_source_spool_hook("after_read");
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+        spool.write_all(&buffer[..read]).map_err(storage)?;
+        bytes = bytes.saturating_add(read as u64);
+        evidence.input_read_bytes = evidence.input_read_bytes.saturating_add(read as u64);
+        evidence.input_read_operations = evidence.input_read_operations.saturating_add(1);
+        evidence.source_spool_write_bytes = evidence
+            .source_spool_write_bytes
+            .saturating_add(read as u64);
+        evidence.source_spool_write_operations =
+            evidence.source_spool_write_operations.saturating_add(1);
+    }
+    if file_identity(&authenticated.file).map_err(storage)? != authenticated.identity
+        || file_link_count(&authenticated.file).map_err(storage)? != 1
+        || bytes != authenticated.bytes
+        || hex(&digest.finalize()) != authenticated.sha256
+    {
+        return Err(storage(
+            "shaped source changed during authenticated spooling",
+        ));
+    }
+    spool.flush().map_err(storage)?;
+    spool.sync_all().map_err(storage)?;
+    evidence.source_spool_fsync_operations =
+        evidence.source_spool_fsync_operations.saturating_add(1);
+    evidence.source_spool_peak_temporary_bytes =
+        evidence.source_spool_peak_temporary_bytes.max(bytes);
+    spool.rewind().map_err(storage)?;
+    Ok((spool, guard))
 }
 
 impl<R: Read> Read for CountingInput<R> {
@@ -194,6 +280,18 @@ pub struct GraphConstructionEncodingEvidence {
     pub membership_total_write_bytes: u64,
     /// Largest number of decoded shaped-row readers simultaneously live.
     pub peak_open_input_readers: u64,
+    /// Authenticated source bytes written to one private random-access spool.
+    pub source_spool_write_bytes: u64,
+    /// Physical writes used by authenticated source spools.
+    pub source_spool_write_operations: u64,
+    /// Reads served from authenticated source spools to Parquet consumers.
+    pub source_spool_read_bytes: u64,
+    /// Physical reads served from authenticated source spools.
+    pub source_spool_read_operations: u64,
+    /// Durability barriers completed for authenticated source spools.
+    pub source_spool_fsync_operations: u64,
+    /// Peak owned authenticated source spool bytes (one source at a time).
+    pub source_spool_peak_temporary_bytes: u64,
     /// v3 durability barriers.
     pub membership_fsync_operations: u64,
     /// Newly created immutable v3 runs, including superseded carry inputs.
@@ -217,6 +315,8 @@ pub struct GraphConstructionEncoding {
     pub semantic_authority_sha256: Option<String>,
     /// Shaper authority digest for normalized catalog inputs.
     pub shape_inputs_sha256: String,
+    /// Canonical authority over the sealed shape and every authenticated source receipt.
+    pub shape_authority_sha256: String,
     /// Sorted, unique canonical artifact records.
     pub artifacts: Vec<ConstructionEncodedArtifact>,
     /// Authenticated retained-parent objects required to assemble this graph.
@@ -232,6 +332,16 @@ struct EncodingIntent {
     ontology_mode: OntologyMode,
     semantic_authority_sha256: Option<String>,
     shape_inputs_sha256: String,
+    shape_authority_sha256: String,
+}
+
+pub(crate) fn inventory_authority_sha256(
+    inventory: &GraphConstructionEncoding,
+) -> Result<String, GfError> {
+    let mut digest = Sha256::new();
+    digest.update(b"graphforge-construction-encoding-inventory/v1\0");
+    digest.update(serde_json::to_vec(inventory).map_err(storage)?);
+    Ok(hex(&digest.finalize()))
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -243,6 +353,8 @@ pub(crate) fn encode(
     parent_index: Option<&AuthenticatedUuidIndexSnapshot>,
     semantic_authority: Option<&ConstructionSemanticAuthority>,
     shape_outputs: &[ArtifactReceipt],
+    shape_authority_sha256: &str,
+    expected_inventory_sha256: Option<&str>,
     budgets: GraphConstructionBudgets,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<GraphConstructionEncoding, GfError> {
@@ -275,11 +387,28 @@ pub(crate) fn encode(
             || existing.ontology_mode != shape.ontology_mode
             || existing.semantic_authority_sha256 != shape.semantic_authority_sha256
             || existing.shape_inputs_sha256 != shape.runtime_catalog_inputs_sha256
+            || existing.shape_authority_sha256 != shape_authority_sha256
         {
             return Err(storage("completed encoding belongs to another generation"));
         }
-        remove_encoding_intent(&output)?;
-        return Ok(existing);
+        let actual_authority = inventory_authority_sha256(&existing)?;
+        match expected_inventory_sha256 {
+            Some(expected) if expected == actual_authority => {
+                remove_encoding_intent(&output)?;
+                return Ok(existing);
+            }
+            Some(_) => {
+                return Err(storage(
+                    "completed encoding differs from checkpoint inventory authority",
+                ));
+            }
+            None => {
+                // An inventory installed before its checkpoint receipt is not
+                // authoritative. Regenerate it from the sealed shape instead
+                // of adopting self-described output after a crash.
+                remove_encoding_control(&output, INVENTORY)?;
+            }
+        }
     }
 
     let intent = EncodingIntent {
@@ -288,6 +417,7 @@ pub(crate) fn encode(
         ontology_mode,
         semantic_authority_sha256: shape.semantic_authority_sha256.clone(),
         shape_inputs_sha256: shape.runtime_catalog_inputs_sha256.clone(),
+        shape_authority_sha256: shape_authority_sha256.to_owned(),
     };
     match read_encoding_intent(&output)? {
         Some(existing) if existing != intent => {
@@ -303,16 +433,38 @@ pub(crate) fn encode(
         peak_open_writers: 1,
         ..Default::default()
     };
-    let label_ids = read_runtime_label_ids(source, &shape.runtime_catalog, budgets, &mut evidence)?;
+    let mut artifacts = Vec::new();
+    let label_ids = {
+        let (catalog_spool, _catalog_guard) = authenticated_source_spool(
+            source,
+            shape_outputs,
+            &shape.runtime_catalog,
+            &output,
+            &mut evidence,
+        )?;
+        let label_ids = read_runtime_label_ids(
+            catalog_spool.try_clone().map_err(storage)?,
+            budgets,
+            &mut evidence,
+        )?;
+        copy_artifact(
+            catalog_spool.try_clone().map_err(storage)?,
+            &output,
+            "topology/runtime_catalog.parquet",
+            &mut artifacts,
+            &mut evidence,
+        )?;
+        label_ids
+    };
     let semantic_context = semantic_authority
         .map(ConstructionSemanticAuthority::context)
         .transpose()?;
-    let mut artifacts = Vec::new();
 
     encode_nodes(
         source,
         &output,
         shape,
+        shape_outputs,
         &label_ids,
         ontology_mode,
         semantic_context.as_ref(),
@@ -326,19 +478,12 @@ pub(crate) fn encode(
         source,
         &output,
         shape,
+        shape_outputs,
         ontology_mode,
         semantic_context.as_ref(),
         semantic_authority.map(|authority| &authority.bindings),
         budgets,
         cancelled,
-        &mut artifacts,
-        &mut evidence,
-    )?;
-    copy_artifact(
-        source,
-        &shape.runtime_catalog,
-        &output,
-        "topology/runtime_catalog.parquet",
         &mut artifacts,
         &mut evidence,
     )?;
@@ -349,8 +494,6 @@ pub(crate) fn encode(
         &mut artifacts,
         &mut evidence,
     )?;
-
-    authenticate_shaped_outputs(source, shape_outputs)?;
 
     let index = crate::uuid_membership::encode_construction_index(
         source,
@@ -396,11 +539,11 @@ pub(crate) fn encode(
         ontology_mode: shape.ontology_mode,
         semantic_authority_sha256: shape.semantic_authority_sha256.clone(),
         shape_inputs_sha256: shape.runtime_catalog_inputs_sha256.clone(),
+        shape_authority_sha256: shape_authority_sha256.to_owned(),
         artifacts,
         retained_artifacts,
         evidence,
     };
-    authenticate_shaped_outputs(source, shape_outputs)?;
     install_json(&output, INVENTORY, &completed)?;
     authenticate_inventory(&output, &completed, parent_index)?;
     remove_encoding_intent(&output)?;
@@ -481,7 +624,7 @@ fn resolve_owner(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn property_projection(
+fn property_projections(
     input: &RecordBatch,
     required: usize,
     indexes: &[u32],
@@ -490,15 +633,14 @@ fn property_projection(
     route_kind: SemanticRouteKind,
     context: Option<&CompositionBindingContext>,
     bindings: Option<&SemanticStorageBindings>,
-) -> Result<(String, Vec<usize>), GfError> {
-    let mut fields = Vec::new();
-    let mut route = None;
+) -> Result<Vec<(String, Vec<usize>)>, GfError> {
+    let mut projections = BTreeMap::<String, Vec<usize>>::new();
     for column_index in required..input.num_columns() {
         let column = input.column(column_index);
         if !indexes.iter().any(|index| !column.is_null(*index as usize)) {
             continue;
         }
-        if let (Some(context), Some(bindings), Some(_owner_symbol)) =
+        let route = if let (Some(context), Some(bindings), Some(_owner_symbol)) =
             (context, bindings, owner.symbol.as_ref())
         {
             let schema = input.schema();
@@ -521,19 +663,13 @@ fn property_projection(
             if physical.owner.is_none() {
                 return Err(storage("qualified property binding lacks declaring owner"));
             }
-            if route.as_ref().is_some_and(|known| known != &physical.route) {
-                return Err(storage(
-                    "one semantic owner maps to multiple property routes",
-                ));
-            }
-            route = Some(physical.route.clone());
-        }
-        fields.push(column_index);
+            physical.route.clone()
+        } else {
+            owner.topology_route.clone()
+        };
+        projections.entry(route).or_default().push(column_index);
     }
-    Ok((
-        route.unwrap_or_else(|| owner.topology_route.clone()),
-        fields,
-    ))
+    Ok(projections.into_iter().collect())
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -541,6 +677,7 @@ fn encode_nodes(
     source: &StableDirectory,
     output: &StableDirectory,
     shape: &ConstructionShape,
+    shape_outputs: &[ArtifactReceipt],
     label_ids: &BTreeMap<String, u32>,
     ontology_mode: OntologyMode,
     semantic_context: Option<&CompositionBindingContext>,
@@ -557,8 +694,9 @@ fn encode_nodes(
         .node_details
         .as_deref()
         .ok_or_else(|| storage("node rows lack canonical details"))?;
-    let mut identities = FixedReader::<IDENTITY_WIDTH>::open(source, &shape.identities, evidence)?;
-    let mut details = FixedReader::<NODE_DETAIL_WIDTH>::open(source, details_name, evidence)?;
+    let mut identities =
+        FixedReader::<IDENTITY_WIDTH>::open(source, shape_outputs, &shape.identities)?;
+    let mut details = FixedReader::<NODE_DETAIL_WIDTH>::open(source, shape_outputs, details_name)?;
     let rows_per_window = budgets
         .max_batch_rows
         .min((budgets.max_batch_bytes / 128).max(1));
@@ -634,12 +772,13 @@ fn encode_nodes(
     if details.next()?.is_some() || next_kind(&mut identities, 0)?.is_some() {
         return Err(storage("node streams contain unconsumed rows"));
     }
-    identities.account(evidence);
-    details.account(evidence);
+    identities.authenticate_and_account(evidence)?;
+    details.authenticate_and_account(evidence)?;
     encode_node_properties(
         source,
         output,
         shape,
+        shape_outputs,
         ontology_mode,
         semantic_context,
         semantic_bindings,
@@ -655,6 +794,7 @@ fn encode_node_properties(
     source: &StableDirectory,
     output: &StableDirectory,
     shape: &ConstructionShape,
+    shape_outputs: &[ArtifactReceipt],
     ontology_mode: OntologyMode,
     semantic_context: Option<&CompositionBindingContext>,
     semantic_bindings: Option<&SemanticStorageBindings>,
@@ -668,7 +808,8 @@ fn encode_node_properties(
         if cancelled() {
             return Err(storage("construction encoding cancelled"));
         }
-        let file = source.open_child_file(OsStr::new(name)).map_err(storage)?;
+        let (file, _spool_guard) =
+            authenticated_source_spool(source, shape_outputs, name, output, evidence)?;
         let counter = IoCounter::default();
         let mut reader = ParquetRecordBatchReaderBuilder::try_new(CountingChunkReader {
             file,
@@ -707,7 +848,7 @@ fn encode_node_properties(
                     &label,
                     runtime_route,
                 )?;
-                let (route, fields) = property_projection(
+                let projections = property_projections(
                     &input,
                     2,
                     &indexes,
@@ -717,39 +858,42 @@ fn encode_node_properties(
                     semantic_context,
                     semantic_bindings,
                 )?;
-                if fields.is_empty() {
-                    continue;
+                for (route, fields) in projections {
+                    let property = property_batch(
+                        &input,
+                        "node_uuid",
+                        "graphforge.entity_type",
+                        &owner.topology_route,
+                        &indexes,
+                        &fields,
+                    )?;
+                    let property = if owner.symbol.is_some() {
+                        with_route_metadata_batch(
+                            &property,
+                            &route,
+                            semantic_context
+                                .expect("qualified owner has context")
+                                .fingerprint(),
+                        )?
+                    } else {
+                        property
+                    };
+                    let path = format!(
+                        "properties/{route}/{:020}-{ordinal:020}.parquet",
+                        shape.parent_topology_generation + 1
+                    );
+                    artifacts.push(write_parquet(output, &path, &property, evidence)?);
+                    ordinal = ordinal.saturating_add(1);
                 }
-                let property = property_batch(
-                    &input,
-                    "node_uuid",
-                    "graphforge.entity_type",
-                    &route,
-                    &indexes,
-                    &fields,
-                )?;
-                let property = if owner.symbol.is_some() {
-                    with_route_metadata_batch(
-                        &property,
-                        &route,
-                        semantic_context
-                            .expect("qualified owner has context")
-                            .fingerprint(),
-                    )?
-                } else {
-                    property
-                };
-                let path = format!(
-                    "properties/{route}/{:020}-{ordinal:020}.parquet",
-                    shape.parent_topology_generation + 1
-                );
-                artifacts.push(write_parquet(output, &path, &property, evidence)?);
-                ordinal = ordinal.saturating_add(1);
             }
         }
         let (bytes, operations) = counter.values();
         evidence.input_read_bytes = evidence.input_read_bytes.saturating_add(bytes);
         evidence.input_read_operations = evidence.input_read_operations.saturating_add(operations);
+        evidence.source_spool_read_bytes = evidence.source_spool_read_bytes.saturating_add(bytes);
+        evidence.source_spool_read_operations = evidence
+            .source_spool_read_operations
+            .saturating_add(operations);
     }
     Ok(())
 }
@@ -759,6 +903,7 @@ fn encode_edges(
     source: &StableDirectory,
     output: &StableDirectory,
     shape: &ConstructionShape,
+    shape_outputs: &[ArtifactReceipt],
     ontology_mode: OntologyMode,
     semantic_context: Option<&CompositionBindingContext>,
     semantic_bindings: Option<&SemanticStorageBindings>,
@@ -778,10 +923,11 @@ fn encode_edges(
         .edge_endpoints
         .as_deref()
         .ok_or_else(|| storage("edge rows lack resolved endpoints"))?;
-    let mut identities = FixedReader::<IDENTITY_WIDTH>::open(source, &shape.identities, evidence)?;
-    let mut details = FixedReader::<EDGE_DETAIL_WIDTH>::open(source, details_name, evidence)?;
+    let mut identities =
+        FixedReader::<IDENTITY_WIDTH>::open(source, shape_outputs, &shape.identities)?;
+    let mut details = FixedReader::<EDGE_DETAIL_WIDTH>::open(source, shape_outputs, details_name)?;
     let mut endpoints =
-        FixedReader::<RESOLVED_ENDPOINT_WIDTH>::open(source, endpoints_name, evidence)?;
+        FixedReader::<RESOLVED_ENDPOINT_WIDTH>::open(source, shape_outputs, endpoints_name)?;
     let rows_per_window = budgets
         .max_batch_rows
         .min((budgets.max_batch_bytes / 192).max(1));
@@ -913,13 +1059,14 @@ fn encode_edges(
     {
         return Err(storage("edge streams contain unconsumed rows"));
     }
-    identities.account(evidence);
-    details.account(evidence);
-    endpoints.account(evidence);
+    identities.authenticate_and_account(evidence)?;
+    details.authenticate_and_account(evidence)?;
+    endpoints.authenticate_and_account(evidence)?;
     encode_edge_properties(
         source,
         output,
         shape,
+        shape_outputs,
         ontology_mode,
         semantic_context,
         semantic_bindings,
@@ -935,6 +1082,7 @@ fn encode_edge_properties(
     source: &StableDirectory,
     output: &StableDirectory,
     shape: &ConstructionShape,
+    shape_outputs: &[ArtifactReceipt],
     ontology_mode: OntologyMode,
     semantic_context: Option<&CompositionBindingContext>,
     semantic_bindings: Option<&SemanticStorageBindings>,
@@ -948,7 +1096,8 @@ fn encode_edge_properties(
         if cancelled() {
             return Err(storage("construction encoding cancelled"));
         }
-        let file = source.open_child_file(OsStr::new(name)).map_err(storage)?;
+        let (file, _spool_guard) =
+            authenticated_source_spool(source, shape_outputs, name, output, evidence)?;
         let counter = IoCounter::default();
         let mut reader = ParquetRecordBatchReaderBuilder::try_new(CountingChunkReader {
             file,
@@ -987,7 +1136,7 @@ fn encode_edge_properties(
                     &route,
                     runtime_route,
                 )?;
-                let (property_route, fields) = property_projection(
+                let projections = property_projections(
                     &input,
                     4,
                     &indexes,
@@ -997,39 +1146,42 @@ fn encode_edge_properties(
                     semantic_context,
                     semantic_bindings,
                 )?;
-                if fields.is_empty() {
-                    continue;
+                for (property_route, fields) in projections {
+                    let property = property_batch(
+                        &input,
+                        "edge_uuid",
+                        "graphforge.rel_type",
+                        &owner.topology_route,
+                        &indexes,
+                        &fields,
+                    )?;
+                    let property = if owner.symbol.is_some() {
+                        with_route_metadata_batch(
+                            &property,
+                            &property_route,
+                            semantic_context
+                                .expect("qualified owner has context")
+                                .fingerprint(),
+                        )?
+                    } else {
+                        property
+                    };
+                    let path = format!(
+                        "edge_properties/{property_route}/{:020}-{ordinal:020}.parquet",
+                        shape.parent_topology_generation + 1
+                    );
+                    artifacts.push(write_parquet(output, &path, &property, evidence)?);
+                    ordinal = ordinal.saturating_add(1);
                 }
-                let property = property_batch(
-                    &input,
-                    "edge_uuid",
-                    "graphforge.rel_type",
-                    &property_route,
-                    &indexes,
-                    &fields,
-                )?;
-                let property = if owner.symbol.is_some() {
-                    with_route_metadata_batch(
-                        &property,
-                        &property_route,
-                        semantic_context
-                            .expect("qualified owner has context")
-                            .fingerprint(),
-                    )?
-                } else {
-                    property
-                };
-                let path = format!(
-                    "edge_properties/{property_route}/{:020}-{ordinal:020}.parquet",
-                    shape.parent_topology_generation + 1
-                );
-                artifacts.push(write_parquet(output, &path, &property, evidence)?);
-                ordinal = ordinal.saturating_add(1);
             }
         }
         let (bytes, operations) = counter.values();
         evidence.input_read_bytes = evidence.input_read_bytes.saturating_add(bytes);
         evidence.input_read_operations = evidence.input_read_operations.saturating_add(operations);
+        evidence.source_spool_read_bytes = evidence.source_spool_read_bytes.saturating_add(bytes);
+        evidence.source_spool_read_operations = evidence
+            .source_spool_read_operations
+            .saturating_add(operations);
     }
     Ok(())
 }
@@ -1170,12 +1322,10 @@ fn account_batch(
 }
 
 fn read_runtime_label_ids(
-    source: &StableDirectory,
-    name: &str,
+    file: File,
     budgets: GraphConstructionBudgets,
     evidence: &mut GraphConstructionEncodingEvidence,
 ) -> Result<BTreeMap<String, u32>, GfError> {
-    let file = source.open_child_file(OsStr::new(name)).map_err(storage)?;
     let counter = IoCounter::default();
     let mut reader = ParquetRecordBatchReaderBuilder::try_new(CountingChunkReader {
         file,
@@ -1207,6 +1357,10 @@ fn read_runtime_label_ids(
     let (bytes, operations) = counter.values();
     evidence.input_read_bytes = evidence.input_read_bytes.saturating_add(bytes);
     evidence.input_read_operations = evidence.input_read_operations.saturating_add(operations);
+    evidence.source_spool_read_bytes = evidence.source_spool_read_bytes.saturating_add(bytes);
+    evidence.source_spool_read_operations = evidence
+        .source_spool_read_operations
+        .saturating_add(operations);
     Ok(labels)
 }
 
@@ -1292,20 +1446,18 @@ fn write_parquet(
 }
 
 fn copy_artifact(
-    source: &StableDirectory,
-    source_name: &str,
+    mut source_file: File,
     output: &StableDirectory,
     relative: &str,
     artifacts: &mut Vec<ConstructionEncodedArtifact>,
     evidence: &mut GraphConstructionEncodingEvidence,
 ) -> Result<(), GfError> {
     let read_counter = IoCounter::default();
+    source_file.rewind().map_err(storage)?;
     let mut input = BufReader::with_capacity(
         COPY_BUFFER_BYTES,
         CountingInput {
-            inner: source
-                .open_child_file(OsStr::new(source_name))
-                .map_err(storage)?,
+            inner: source_file,
             counter: read_counter.clone(),
         },
     );
@@ -1358,6 +1510,10 @@ fn copy_artifact(
     }
     evidence.input_read_operations = evidence
         .input_read_operations
+        .saturating_add(read_operations);
+    evidence.source_spool_read_bytes = evidence.source_spool_read_bytes.saturating_add(read_bytes);
+    evidence.source_spool_read_operations = evidence
+        .source_spool_read_operations
         .saturating_add(read_operations);
     evidence.output_write_bytes = evidence.output_write_bytes.saturating_add(bytes);
     let (write_bytes, write_operations) = write_counter.values();
@@ -1451,17 +1607,21 @@ fn read_encoding_intent(root: &StableDirectory) -> Result<Option<EncodingIntent>
 }
 
 fn remove_encoding_intent(root: &StableDirectory) -> Result<(), GfError> {
-    let file = match root.open_child_file(OsStr::new(ENCODING_INTENT)) {
+    remove_encoding_control(root, ENCODING_INTENT)
+}
+
+fn remove_encoding_control(root: &StableDirectory, name: &str) -> Result<(), GfError> {
+    let file = match root.open_child_file(OsStr::new(name)) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(storage(error)),
     };
     if file_link_count(&file).map_err(storage)? != 1 {
-        return Err(storage("encoding intent has unexpected links"));
+        return Err(storage("encoding control has unexpected links"));
     }
     let identity = file_identity(&file).map_err(storage)?;
     drop(file);
-    root.unlink_child_if_identity(OsStr::new(ENCODING_INTENT), identity)
+    root.unlink_child_if_identity(OsStr::new(name), identity)
         .map_err(storage)?;
     root.sync().map_err(storage)
 }
@@ -1535,6 +1695,7 @@ fn authenticate_inventory(
 ) -> Result<(), GfError> {
     if inventory.root != ENCODED_ROOT
         || inventory.shape_inputs_sha256.len() != 64
+        || inventory.shape_authority_sha256.len() != 64
         || inventory
             .semantic_authority_sha256
             .as_ref()
@@ -1543,6 +1704,10 @@ fn authenticate_inventory(
             })
         || !inventory
             .shape_inputs_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+        || !inventory
+            .shape_authority_sha256
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit())
         || inventory
@@ -1632,15 +1797,21 @@ fn install_json<T: Serialize>(
 struct FixedReader<const N: usize> {
     reader: BufReader<CountingInput<File>>,
     counter: IoCounter,
+    identity: graphforge_filesystem::FileIdentity,
+    expected_bytes: u64,
+    expected_sha256: String,
+    digest: Sha256,
+    consumed_bytes: u64,
 }
 
 impl<const N: usize> FixedReader<N> {
     fn open(
         root: &StableDirectory,
+        outputs: &[ArtifactReceipt],
         name: &str,
-        _evidence: &mut GraphConstructionEncodingEvidence,
     ) -> Result<Self, GfError> {
-        let file = root.open_child_file(OsStr::new(name)).map_err(storage)?;
+        let authenticated = open_authenticated_shape_source(root, outputs, name)?;
+        let file = authenticated.file;
         if file.metadata().map_err(storage)?.len() % N as u64 != 0 {
             return Err(storage("fixed-width construction stream is truncated"));
         }
@@ -1654,6 +1825,11 @@ impl<const N: usize> FixedReader<N> {
                 },
             ),
             counter,
+            identity: authenticated.identity,
+            expected_bytes: authenticated.bytes,
+            expected_sha256: authenticated.sha256,
+            digest: Sha256::new(),
+            consumed_bytes: 0,
         })
     }
 
@@ -1670,13 +1846,28 @@ impl<const N: usize> FixedReader<N> {
             }
             read += amount;
         }
+        self.digest.update(record);
+        self.consumed_bytes = self.consumed_bytes.saturating_add(N as u64);
         Ok(Some(record))
     }
 
-    fn account(&self, evidence: &mut GraphConstructionEncodingEvidence) {
+    fn authenticate_and_account(
+        &self,
+        evidence: &mut GraphConstructionEncodingEvidence,
+    ) -> Result<(), GfError> {
+        if file_identity(&self.reader.get_ref().inner).map_err(storage)? != self.identity
+            || file_link_count(&self.reader.get_ref().inner).map_err(storage)? != 1
+            || self.consumed_bytes != self.expected_bytes
+            || hex(&self.digest.clone().finalize()) != self.expected_sha256
+        {
+            return Err(storage(
+                "fixed-width shaped source changed during consumption",
+            ));
+        }
         let (bytes, operations) = self.counter.values();
         evidence.input_read_bytes = evidence.input_read_bytes.saturating_add(bytes);
         evidence.input_read_operations = evidence.input_read_operations.saturating_add(operations);
+        Ok(())
     }
 }
 
