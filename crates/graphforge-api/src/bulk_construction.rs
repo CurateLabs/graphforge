@@ -2111,42 +2111,31 @@ pub(crate) fn register_existing_endpoints(
     dir: &std::path::Path,
     endpoints: &BTreeSet<Uuid>,
 ) -> Result<(), super::GfError> {
-    let mut unresolved = endpoints.clone();
-    graphforge_storage::visit_nodes_batched(dir, 8_192, |batch| {
-        let uuids = batch
-            .column_by_name("node_uuid")
-            .and_then(|column| column.as_any().downcast_ref::<FixedSizeBinaryArray>())
-            .ok_or_else(|| {
-                datafusion::error::DataFusionError::Execution(
-                    "node topology has malformed UUID column".into(),
-                )
-            })?;
-        let ids = batch
-            .column_by_name("node_id")
-            .and_then(|column| column.as_any().downcast_ref::<UInt64Array>())
-            .ok_or_else(|| {
-                datafusion::error::DataFusionError::Execution(
-                    "node topology has malformed ID column".into(),
-                )
-            })?;
-        for row in 0..batch.num_rows() {
-            let uuid = Uuid::from_slice(uuids.value(row)).map_err(|error| {
-                datafusion::error::DataFusionError::Execution(error.to_string())
-            })?;
-            if unresolved.remove(&uuid) {
-                writer.register_existing_node(uuid, ids.value(row));
-            }
-        }
-        Ok(!unresolved.is_empty())
-    })
-    .map_err(|error| super::GfError::Storage(format!("failed to read node topology: {error}")))?;
-    if unresolved.is_empty() {
-        Ok(())
-    } else {
-        Err(super::GfError::Validation(
-            "bulk edge endpoint disappeared before publication".into(),
-        ))
+    if !graphforge_storage::uuid_membership_index_present(dir) {
+        graphforge_storage::rebuild_uuid_membership_indexes(
+            dir,
+            graphforge_storage::UuidIndexBuildLimits::default(),
+        )?;
     }
+    if !graphforge_storage::uuid_membership_index_is_fresh(dir)? {
+        return Err(super::GfError::Storage(
+            "bulk endpoint UUID index is stale".into(),
+        ));
+    }
+    let requested = endpoints.iter().copied().collect::<Vec<_>>();
+    let mut index = graphforge_storage::UuidMembershipIndex::open(dir)?;
+    let (surrogates, _) = index.lookup_node_surrogates(&requested)?;
+    for (uuid, surrogate) in requested.into_iter().zip(surrogates) {
+        writer.register_existing_node(
+            uuid,
+            surrogate.ok_or_else(|| {
+                super::GfError::Validation(
+                    "bulk edge endpoint disappeared before publication".into(),
+                )
+            })?,
+        )?;
+    }
+    Ok(())
 }
 
 fn bulk_node_generation_uuid(operation_uuid: OperationId, rows: &[BulkNodeRow]) -> Uuid {
