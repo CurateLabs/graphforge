@@ -24,6 +24,8 @@ use uuid::Uuid;
 const FORMAT_VERSION: u32 = 3;
 const NODE_LOOKUP_RECORD_BYTES: u64 = 24;
 const IDENTITY_RECORD_BYTES: u64 = 32;
+const NODE_LOOKUP_RECORD_WIDTH: usize = 24;
+const IDENTITY_RECORD_WIDTH: usize = 32;
 const BULK_IO_BYTES: usize = 1 << 20;
 const INDEX_DIR: &str = ".graphforge-cache/uuid-membership";
 const MANIFEST: &str = "manifest.json";
@@ -119,6 +121,35 @@ pub struct UuidIndexAppendMetrics {
     pub new_output_authentication_bytes: u64,
     /// Newly installed authenticated run blocks.
     pub new_output_authentication_blocks: u64,
+    /// Unreferenced canonical run files examined under the rewrite lock.
+    pub orphan_gc_candidates: u64,
+    /// Unreferenced one-link run files removed by retained identity.
+    pub orphan_gc_removed: u64,
+    /// Candidates left for a later bounded maintenance pass.
+    pub orphan_gc_deferred: u64,
+    /// Candidates deferred solely because the per-transaction bound was reached.
+    pub orphan_gc_deferred_limit: u64,
+    /// Candidates retained because another hard link exists.
+    pub orphan_gc_deferred_linked: u64,
+    /// Physical bytes reclaimed from removed orphan runs.
+    pub orphan_gc_bytes: u64,
+}
+
+/// Typed bounded orphan-collection evidence.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct UuidIndexOrphanGcWork {
+    /// Unreferenced canonical run files encountered.
+    pub candidates: u64,
+    /// Files removed by exact retained identity.
+    pub removed: u64,
+    /// Files deferred because the transaction work bound was reached.
+    pub deferred: u64,
+    /// Files deferred because the transaction work bound was reached.
+    pub deferred_limit: u64,
+    /// Files deferred because their retained inode has another hard link.
+    pub deferred_linked: u64,
+    /// Bytes reclaimed.
+    pub bytes: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -287,7 +318,7 @@ fn authenticated_block(
         .map_err(storage_err)?;
     let mut bytes = vec![0_u8; block.len as usize];
     file.read_exact(&mut bytes).map_err(storage_err)?;
-    let key_width = if width == IDENTITY_RECORD_BYTES as usize {
+    let key_width = if width == IDENTITY_RECORD_WIDTH {
         16
     } else {
         8
@@ -348,21 +379,20 @@ fn reject_retained_identity_collisions(
         let bytes = authenticated_block(
             &mut run.identities,
             &run.descriptor.identities.blocks[index],
-            IDENTITY_RECORD_BYTES as usize,
+            IDENTITY_RECORD_WIDTH,
             metrics,
         )?;
         for (uuid, kind, surrogate) in items {
-            let found = block_record_index(&bytes, IDENTITY_RECORD_BYTES as usize, uuid.as_bytes())
+            let found = block_record_index(&bytes, IDENTITY_RECORD_WIDTH, uuid.as_bytes())
                 .map(|at| &bytes[at * 32..at * 32 + 32]);
             if let Some(record) = found {
                 let retained_kind = record[16];
                 let retained_surrogate =
                     u64::from_be_bytes(record[24..32].try_into().expect("fixed"));
-                let same_domain = matches!((*kind, retained_kind), (0 | 2, 0 | 2) | (1 | 3, 1 | 3));
-                let deletion_matches = matches!(kind, 2 | 3)
-                    && matches!(retained_kind, 0 | 1)
+                let deletion_matches = ((*kind == 2 && retained_kind == 0)
+                    || (*kind == 3 && retained_kind == 1))
                     && retained_surrogate == *surrogate;
-                if same_domain && !deletion_matches {
+                if !deletion_matches {
                     return Err(storage_err(
                         "UUID already exists in an authenticated retained run",
                     ));
@@ -389,12 +419,12 @@ fn reject_retained_surrogate_collisions(
         let bytes = authenticated_block(
             &mut run.node_surrogates,
             &run.descriptor.node_surrogates.blocks[index],
-            NODE_LOOKUP_RECORD_BYTES as usize,
+            NODE_LOOKUP_RECORD_WIDTH,
             metrics,
         )?;
         for (surrogate, uuid) in items {
             let key = surrogate.to_be_bytes();
-            if let Some(at) = block_record_index(&bytes, NODE_LOOKUP_RECORD_BYTES as usize, &key) {
+            if let Some(at) = block_record_index(&bytes, NODE_LOOKUP_RECORD_WIDTH, &key) {
                 let record = &bytes[at * 24..at * 24 + 24];
                 if record[8..] != *uuid.as_bytes() {
                     return Err(storage_err(
@@ -826,6 +856,94 @@ pub fn uuid_membership_index_present(project_dir: &Path) -> bool {
     project_dir.join(INDEX_DIR).join(MANIFEST).is_file()
 }
 
+const DEFAULT_ORPHAN_GC_LIMIT: usize = 64;
+
+/// Reclaim a bounded number of unreachable immutable UUID runs under the
+/// recovered project rewrite lock.
+pub fn maintain_uuid_membership_orphans(
+    project_dir: &Path,
+    maximum: usize,
+) -> Result<UuidIndexOrphanGcWork, GfError> {
+    crate::durable_rewrite::with_rewrite_lock(project_dir, |project| {
+        collect_uuid_orphans_locked(project, maximum)
+    })
+}
+
+fn collect_uuid_orphans_locked(
+    project: &graphforge_filesystem::StableDirectory,
+    maximum: usize,
+) -> Result<UuidIndexOrphanGcWork, GfError> {
+    let cache = match project.open_child_directory(std::ffi::OsStr::new(".graphforge-cache")) {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(UuidIndexOrphanGcWork::default());
+        }
+        Err(error) => return Err(storage_err(error)),
+    };
+    let index = match cache.open_child_directory(std::ffi::OsStr::new("uuid-membership")) {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(UuidIndexOrphanGcWork::default());
+        }
+        Err(error) => return Err(storage_err(error)),
+    };
+    let mut manifest_file = index
+        .open_child_file(std::ffi::OsStr::new(MANIFEST))
+        .map_err(storage_err)?;
+    let manifest: Manifest =
+        serde_json::from_slice(&read_bounded(&mut manifest_file, MAX_MANIFEST_BYTES)?)
+            .map_err(storage_err)?;
+    validate_run_descriptors(&manifest)?;
+    let referenced = manifest_file_names(&manifest);
+    let mut names = index.child_names().map_err(storage_err)?;
+    names.sort();
+    let mut work = UuidIndexOrphanGcWork::default();
+    for name in names {
+        let Some(text) = name.to_str() else { continue };
+        if referenced.contains(text) || !is_canonical_run_name(text) {
+            continue;
+        }
+        work.candidates = work.candidates.saturating_add(1);
+        if usize::try_from(work.candidates).unwrap_or(usize::MAX) > maximum {
+            work.deferred = work.deferred.saturating_add(1);
+            work.deferred_limit = work.deferred_limit.saturating_add(1);
+            continue;
+        }
+        let file = index.open_child_file(&name).map_err(storage_err)?;
+        if graphforge_filesystem::file_link_count(&file).map_err(storage_err)? != 1 {
+            work.deferred = work.deferred.saturating_add(1);
+            work.deferred_linked = work.deferred_linked.saturating_add(1);
+            continue;
+        }
+        let bytes = file.metadata().map_err(storage_err)?.len();
+        let identity = graphforge_filesystem::file_identity(&file).map_err(storage_err)?;
+        index
+            .unlink_child_if_identity(&name, identity)
+            .map_err(storage_err)?;
+        work.removed = work.removed.saturating_add(1);
+        work.bytes = work.bytes.saturating_add(bytes);
+    }
+    if work.removed != 0 {
+        index.sync().map_err(storage_err)?;
+    }
+    index.revalidate_named().map_err(storage_err)?;
+    cache.revalidate_named().map_err(storage_err)?;
+    project.revalidate_named().map_err(storage_err)?;
+    Ok(work)
+}
+
+fn is_canonical_run_name(name: &str) -> bool {
+    let Some(stem) = name.strip_suffix(".uuidx") else {
+        return false;
+    };
+    let Some((prefix, digest)) = stem.rsplit_once('-') else {
+        return false;
+    };
+    (prefix.starts_with("identities-v3") || prefix.starts_with("node-surrogates-v3"))
+        && digest.len() == 16
+        && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 /// Whether the manifest version and topology generation match the workspace.
 /// This cheap publication-path check deliberately does not authenticate data;
 /// readers still use [`UuidMembershipIndex::open`] before trusting membership.
@@ -865,19 +983,31 @@ pub(crate) struct UuidTopologyDelta {
     pub deleted_edges: Vec<Uuid>,
 }
 
+pub(crate) enum CommittedUuidTopologyRewrite {
+    NoTopologyChange,
+    Committed(u64),
+    CommittedNeedsRefresh { generation: u64, error: GfError },
+}
+
 /// Commit topology and its UUID participant under the one durable rewrite lock.
 pub(crate) fn commit_uuid_topology_rewrite(
     project_dir: &Path,
     staged: crate::staging::RewriteBatch,
     delta: UuidTopologyDelta,
     snapshot: &mut Option<AuthenticatedUuidIndexSnapshot>,
-) -> Result<Option<u64>, GfError> {
+) -> Result<CommittedUuidTopologyRewrite, GfError> {
+    ensure_uuid_membership_migrated(project_dir)?;
     if delta.nodes.is_empty()
         && delta.edges.is_empty()
         && delta.deleted_nodes.is_empty()
         && delta.deleted_edges.is_empty()
     {
-        return crate::generation::commit_topology_aware(staged, project_dir);
+        return crate::generation::commit_topology_aware(staged, project_dir).map(|generation| {
+            generation.map_or(
+                CommittedUuidTopologyRewrite::NoTopologyChange,
+                CommittedUuidTopologyRewrite::Committed,
+            )
+        });
     }
     let prepared = std::rc::Rc::new(std::cell::RefCell::new(None));
     let prepared_from_callback = std::rc::Rc::clone(&prepared);
@@ -892,11 +1022,11 @@ pub(crate) fn commit_uuid_topology_rewrite(
             }
             context.project.revalidate_named().map_err(storage_err)?;
             generations_from_callback.set(Some((context.prior, context.next)));
+            let orphan_gc = collect_uuid_orphans_locked(context.project, DEFAULT_ORPHAN_GC_LIMIT)?;
             if context.prior.topology != 0 && !uuid_membership_index_present(context.project_root) {
-                rebuild_uuid_membership_indexes(
-                    context.project_root,
-                    UuidIndexBuildLimits::default(),
-                )?;
+                return Err(storage_err(
+                    "UUID membership index migration is required before topology mutation",
+                ));
             }
             if context.prior.topology != 0
                 && snapshot
@@ -929,7 +1059,7 @@ pub(crate) fn commit_uuid_topology_rewrite(
             } else {
                 (Vec::new(), Vec::new())
             };
-            let token = prepare_uuid_membership_delta(
+            let mut token = prepare_uuid_membership_delta(
                 context.project_root,
                 context.prior.topology,
                 context.next.topology,
@@ -940,6 +1070,14 @@ pub(crate) fn commit_uuid_topology_rewrite(
                 &deleted_nodes,
                 &deleted_edges,
             )?;
+            if let Some(token) = token.as_mut() {
+                token.metrics.orphan_gc_candidates = orphan_gc.candidates;
+                token.metrics.orphan_gc_removed = orphan_gc.removed;
+                token.metrics.orphan_gc_deferred = orphan_gc.deferred;
+                token.metrics.orphan_gc_deferred_limit = orphan_gc.deferred_limit;
+                token.metrics.orphan_gc_deferred_linked = orphan_gc.deferred_linked;
+                token.metrics.orphan_gc_bytes = orphan_gc.bytes;
+            }
             let receipt = token
                 .as_ref()
                 .map(PreparedUuidIndexDelta::auxiliary_receipt);
@@ -972,11 +1110,15 @@ pub(crate) fn commit_uuid_topology_rewrite(
             AuthenticatedUuidIndexSnapshot::open_at_generation(&root, generation)
                 .map(|value| *snapshot = Some(value))
         };
-        if refresh.is_err() {
+        if let Err(error) = refresh {
             *snapshot = None;
+            return Ok(CommittedUuidTopologyRewrite::CommittedNeedsRefresh { generation, error });
         }
     }
-    Ok(committed)
+    Ok(committed.map_or(
+        CommittedUuidTopologyRewrite::NoTopologyChange,
+        CommittedUuidTopologyRewrite::Committed,
+    ))
 }
 
 /// Stage one bounded v3 UUID-index delta and its authenticated receipt into the
@@ -1046,17 +1188,14 @@ pub(crate) fn prepare_uuid_membership_delta(
             kind: "uuid-membership/v3".to_owned(),
             schema_version: FORMAT_VERSION,
             path: format!("{INDEX_DIR}/{TOPOLOGY_RECEIPT}"),
-            digest: digest.iter().map(|byte| format!("{byte:02x}")).collect(),
+            digest: hex_bytes(&digest),
             bytes: receipt_bytes.len() as u64,
         },
     }))
 }
 
 fn hex_sha256(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    hex_bytes(&Sha256::digest(bytes))
 }
 
 fn reconcile_uuid_auxiliary(
@@ -1395,11 +1534,7 @@ fn authenticate_file_blocks(
             metrics.validation_scan_blocks = metrics.validation_scan_blocks.saturating_add(1);
         }
     }
-    let digest: String = whole
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
+    let digest = hex_bytes(&whole.finalize());
     if digest != record.sha256 {
         return Err(storage_err("UUID run authentication failed"));
     }
@@ -1505,18 +1640,21 @@ fn describe_blocks(file: &mut File, width: u64) -> Result<(String, Vec<BlockReco
         });
         offset = offset.saturating_add(valid as u64);
     }
-    Ok((
-        whole
-            .finalize()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect(),
-        blocks,
-    ))
+    Ok((hex_bytes(&whole.finalize()), blocks))
 }
 
 fn hex_sha256_key(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    hex_bytes(bytes)
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    bytes.iter().fold(
+        String::with_capacity(bytes.len().saturating_mul(2)),
+        |mut output, byte| {
+            write!(output, "{byte:02x}").expect("writing to String cannot fail");
+            output
+        },
+    )
 }
 
 fn compact_planned_levels(
@@ -2285,6 +2423,7 @@ fn write_surrogate_records(path: &Path, records: &[(u64, Uuid)]) -> Result<(), G
     file.sync_all().map_err(storage_err)
 }
 
+#[cfg(test)]
 fn publish_manifest(root: &Path, staging: &Path, manifest: &Manifest) -> Result<(), GfError> {
     let _ = staging;
     let directory = graphforge_filesystem::StableDirectory::open(root).map_err(storage_err)?;
@@ -2617,6 +2756,82 @@ pub fn rebuild_uuid_membership_indexes(
     project_dir: &Path,
     limits: UuidIndexBuildLimits,
 ) -> Result<UuidIndexBuildMetrics, GfError> {
+    migrate_uuid_membership_indexes(project_dir, limits, true)
+}
+
+/// Ensure the current topology generation has a v3 UUID index before a
+/// topology mutation enters its sealed rewrite callback.
+pub(crate) fn ensure_uuid_membership_migrated(project_dir: &Path) -> Result<(), GfError> {
+    migrate_uuid_membership_indexes(project_dir, UuidIndexBuildLimits::default(), false).map(|_| ())
+}
+
+fn migrate_uuid_membership_indexes(
+    project_dir: &Path,
+    limits: UuidIndexBuildLimits,
+    force: bool,
+) -> Result<UuidIndexBuildMetrics, GfError> {
+    if !force && uuid_membership_index_is_fresh(project_dir)? {
+        return Ok(UuidIndexBuildMetrics::default());
+    }
+    let metrics = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let callback_metrics = std::rc::Rc::clone(&metrics);
+    let root = project_dir.to_path_buf();
+    let participant: crate::durable_rewrite::RewriteParticipantPreparer<'_> =
+        Box::new(move |context, batch| {
+            if !force && manifest_generation(context.project_root)? == Some(context.prior.topology)
+            {
+                return Ok(None);
+            }
+            let built = stage_uuid_membership_rebuild_locked(
+                context.project_root,
+                context.prior.topology,
+                limits,
+                batch,
+            )?;
+            *callback_metrics.borrow_mut() = Some(built);
+            let manifest_bytes = fs::read(context.project_root.join(INDEX_DIR).join(MANIFEST))
+                .or_else(|_| {
+                    batch
+                        .staged_temp(&context.project_root.join(INDEX_DIR).join(MANIFEST))
+                        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
+                        .and_then(fs::read)
+                })
+                .map_err(storage_err)?;
+            let receipt = TopologyIndexReceipt {
+                nonce: Uuid::new_v4().simple().to_string(),
+                expected_generation: context.prior.topology,
+                topology_delta_sha256: hex_sha256(b"uuid-membership-migration"),
+                manifest_sha256: hex_sha256(&manifest_bytes),
+            };
+            let receipt_bytes = serde_json::to_vec(&receipt).map_err(storage_err)?;
+            batch.stage_bytes(
+                &context.project_root.join(INDEX_DIR).join(TOPOLOGY_RECEIPT),
+                &receipt_bytes,
+            )?;
+            Ok(Some(crate::AuxiliaryReceipt {
+                kind: "uuid-membership/v3".to_owned(),
+                schema_version: FORMAT_VERSION,
+                path: format!("{INDEX_DIR}/{TOPOLOGY_RECEIPT}"),
+                digest: hex_sha256(&receipt_bytes),
+                bytes: u64::try_from(receipt_bytes.len())
+                    .map_err(|_| storage_err("receipt length overflow"))?,
+            }))
+        });
+    crate::generation::commit_topology_aware_with_participant(
+        crate::staging::RewriteBatch::new(),
+        &root,
+        participant,
+    )?;
+    let result = metrics.borrow_mut().take().unwrap_or_default();
+    Ok(result)
+}
+
+fn stage_uuid_membership_rebuild_locked(
+    project_dir: &Path,
+    generation: u64,
+    limits: UuidIndexBuildLimits,
+    batch: &mut crate::staging::RewriteBatch,
+) -> Result<UuidIndexBuildMetrics, GfError> {
     let limits = limits.validate()?;
     let root = project_dir.join(INDEX_DIR);
     fs::create_dir_all(&root).map_err(storage_err)?;
@@ -2628,7 +2843,6 @@ pub fn rebuild_uuid_membership_indexes(
         .tempdir_in(staging)
         .map_err(storage_err)?;
     let mut metrics = UuidIndexBuildMetrics::default();
-    let generation = crate::read_topology_generation(project_dir)?;
     let node_paths = crate::mutator::node_parquet_files(project_dir).map_err(storage_err)?;
     let node_runs = scan_to_runs(
         &node_paths,
@@ -2690,37 +2904,23 @@ pub fn rebuild_uuid_membership_indexes(
         limits.merge_fan_in,
         &mut metrics,
     )?;
-    if crate::read_topology_generation(project_dir)? != generation {
-        return Err(storage_err(
-            "topology generation changed during the index build",
-        ));
-    }
     reject_cross_kind_identities(&node_tmp, &edge_tmp)?;
     let identity_tmp = scratch.path().join("identities-v3.run");
     build_identity_run(&node_surrogates_tmp, &edge_tmp, &identity_tmp)?;
     let surrogate_tmp =
         build_surrogate_run(&node_surrogates_tmp, scratch.path(), limits, &mut metrics)?;
-    let identities = publish_data(
+    let identities = describe_staged_data(
         &identity_tmp,
-        &root,
-        staging,
         "identities-v3",
         generation,
         IDENTITY_RECORD_BYTES,
     )?;
-    let node_surrogates = publish_data(
+    let node_surrogates = describe_staged_data(
         &surrogate_tmp,
-        &root,
-        staging,
         "node-surrogates-v3",
         generation,
         NODE_LOOKUP_RECORD_BYTES,
     )?;
-    if crate::read_topology_generation(project_dir)? != generation {
-        return Err(storage_err(
-            "topology generation changed before index manifest publication",
-        ));
-    }
     metrics.node_count = node_surrogates.count;
     metrics.edge_count = identities.count.saturating_sub(metrics.node_count);
     let manifest = Manifest {
@@ -2742,8 +2942,47 @@ pub fn rebuild_uuid_membership_indexes(
             deleted_edge_count: 0,
         }],
     };
-    publish_manifest(&root, staging, &manifest)?;
+    batch.stage_file(&root.join(&manifest.runs[0].identities.name), &identity_tmp)?;
+    batch.stage_file(
+        &root.join(&manifest.runs[0].node_surrogates.name),
+        &surrogate_tmp,
+    )?;
+    batch.stage_bytes(
+        &root.join(MANIFEST),
+        &serde_json::to_vec(&manifest).map_err(storage_err)?,
+    )?;
     Ok(metrics)
+}
+
+fn manifest_generation(project_dir: &Path) -> Result<Option<u64>, GfError> {
+    let bytes = match fs::read(project_dir.join(INDEX_DIR).join(MANIFEST)) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(storage_err(error)),
+    };
+    let manifest: Manifest = serde_json::from_slice(&bytes).map_err(storage_err)?;
+    validate_run_descriptors(&manifest)?;
+    Ok((manifest.format_version == FORMAT_VERSION).then_some(manifest.current_generation))
+}
+
+fn describe_staged_data(
+    source: &Path,
+    kind: &str,
+    generation: u64,
+    record_bytes: u64,
+) -> Result<FileRecord, GfError> {
+    let length = source.metadata().map_err(storage_err)?.len();
+    if length % record_bytes != 0 {
+        return Err(storage_err("internal run has a partial index record"));
+    }
+    let mut input = File::open(source).map_err(storage_err)?;
+    let (sha256, blocks) = describe_blocks(&mut input, record_bytes)?;
+    Ok(FileRecord {
+        name: format!("{kind}-{generation}-{}.uuidx", &sha256[..16]),
+        count: length / record_bytes,
+        sha256,
+        blocks,
+    })
 }
 
 fn scan_to_runs(
@@ -3396,6 +3635,7 @@ fn read_record(reader: &mut BufReader<File>) -> Result<Option<[u8; 16]>, GfError
     read_exact_record::<16>(reader)
 }
 
+#[cfg(test)]
 fn publish_data(
     source: &Path,
     root: &Path,
@@ -3457,6 +3697,7 @@ fn publish_data(
     })
 }
 
+#[cfg(test)]
 fn sha256_reader(reader: &mut impl Read) -> Result<String, GfError> {
     let mut digest = Sha256::new();
     let mut buffer = vec![0_u8; 64 * 1024];
@@ -3882,6 +4123,49 @@ mod tests {
                 .to_string()
                 .contains("surrogate already exists")
         );
+
+        let reverse = tempfile::tempdir().unwrap();
+        crate::generation::bump_topology_generation(reverse.path()).unwrap();
+        append_uuid_membership_delta(reverse.path(), 1, &[], &[Uuid::from_u128(9)]).unwrap();
+        crate::generation::bump_topology_generation(reverse.path()).unwrap();
+        assert!(
+            append_uuid_membership_delta(reverse.path(), 2, &[(Uuid::from_u128(9), 9)], &[])
+                .unwrap_err()
+                .to_string()
+                .contains("already exists")
+        );
+    }
+
+    #[test]
+    fn orphan_maintenance_is_bounded_and_preserves_linked_and_live_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::generation::bump_topology_generation(dir.path()).unwrap();
+        append_uuid_membership_delta(
+            dir.path(),
+            1,
+            &[(Uuid::from_u128(1), 1)],
+            &[Uuid::from_u128(2)],
+        )
+        .unwrap();
+        let root = dir.path().join(INDEX_DIR);
+        let manifest: Manifest =
+            serde_json::from_slice(&fs::read(root.join(MANIFEST)).unwrap()).unwrap();
+        let live = root.join(&manifest.runs[0].identities.name);
+        let orphan_one = root.join("identities-v3-orphan-0000000000000001.uuidx");
+        let orphan_two = root.join("node-surrogates-v3-orphan-0000000000000002.uuidx");
+        fs::copy(&live, &orphan_one).unwrap();
+        fs::copy(&live, &orphan_two).unwrap();
+
+        let first = maintain_uuid_membership_orphans(dir.path(), 1).unwrap();
+        assert_eq!(first.candidates, 2);
+        assert_eq!(first.removed, 1);
+        assert_eq!(first.deferred_limit, 1);
+        assert!(live.is_file());
+        let second = maintain_uuid_membership_orphans(dir.path(), 64).unwrap();
+        assert_eq!(second.removed, 1);
+        assert!(live.is_file());
+        assert!(!orphan_one.exists());
+        assert!(!orphan_two.exists());
     }
 
     #[test]
