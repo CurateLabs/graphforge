@@ -983,25 +983,14 @@ pub fn read_nodes_filtered_observed(
 /// # Errors
 /// Propagates Parquet / Arrow errors encountered while reading an edge file.
 pub(crate) fn max_edge_id(dir: &Path) -> Result<u64, DataFusionError> {
-    let edges_dir = dir.join("topology").join("edges");
-    let entries = match std::fs::read_dir(&edges_dir) {
-        Ok(rd) => rd,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-        Err(e) => return Err(io_err(&e)),
-    };
-
     let mut max = 0u64;
-    for entry in entries {
-        let path = entry.map_err(|e| io_err(&e))?.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("parquet") {
-            continue;
-        }
-        // Preserve discovery semantics: unrelated/corrupt edge artifacts are
-        // ignored here and rejected by the normal catalog validation path.
-        // Surrogate recovery must still inspect every readable relation stem.
-        if let Ok(candidate) = max_ordered_u64_tail(&path, "edge_id") {
-            max = max.max(candidate);
-        }
+    for (_, path) in crate::mutator::edge_parquet_files(dir, None)
+        .map_err(|error| DataFusionError::Execution(error.to_string()))?
+    {
+        // Every enumerated Parquet path is canonical topology. Ignoring a
+        // malformed shard here could resume surrogate allocation from an
+        // incomplete maximum and authenticate colliding edge identities.
+        max = max.max(max_ordered_u64_tail(&path, "edge_id")?);
     }
     Ok(max)
 }
@@ -2842,12 +2831,12 @@ mod tests {
     }
 
     #[test]
-    fn wave12_max_edge_id_skips_non_parquet_and_corrupt_parquet_entries() {
+    fn wave12_max_edge_id_ignores_non_parquet_but_rejects_corrupt_canonical_shards() {
         let dir = TempDir::new().unwrap();
         let edges = dir.path().join("topology/edges");
         std::fs::create_dir_all(&edges).unwrap();
         std::fs::write(edges.join("note.txt"), b"not parquet").unwrap();
         std::fs::write(edges.join("broken.parquet"), b"not parquet").unwrap();
-        assert_eq!(max_edge_id(dir.path()).unwrap(), 0);
+        assert!(max_edge_id(dir.path()).is_err());
     }
 }
