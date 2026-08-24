@@ -1,15 +1,17 @@
 //! Persistent, bounded-memory UUID membership indexes used by bulk ingest.
 //!
 //! The canonical graph remains Parquet.  This derived format is deliberately
-//! small: a manifest (published last with an atomic rename) names two immutable
-//! sorted files containing 16-byte UUID records. Readers verify version,
-//! topology generation, length, count, and SHA-256 before serving probes.
+//! small: one manifest (published last with an atomic replacement) names an
+//! immutable base plus size-tiered delta runs. Each run contains a unified
+//! UUID-sorted identity file and a node-only surrogate-sorted reverse file.
+//! Readers verify version, topology generation, framing, canonical ordering,
+//! counts, and SHA-256 before serving bounded binary-search probes.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeSet, BinaryHeap};
 use std::fmt::Write as _;
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use arrow::array::{Array, FixedSizeBinaryArray, UInt64Array};
@@ -19,9 +21,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-const FORMAT_VERSION: u32 = 2;
-const RECORD_BYTES: u64 = 16;
+const FORMAT_VERSION: u32 = 3;
 const NODE_LOOKUP_RECORD_BYTES: u64 = 24;
+const IDENTITY_RECORD_BYTES: u64 = 32;
+const BULK_IO_BYTES: usize = 1 << 20;
 const INDEX_DIR: &str = ".graphforge-cache/uuid-membership";
 const MANIFEST: &str = "manifest.json";
 
@@ -83,6 +86,25 @@ pub struct UuidIndexBuildMetrics {
     pub temporary_runs: u64,
 }
 
+/// Aggregate-only evidence for one incremental v3 run publication.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct UuidIndexAppendMetrics {
+    pub input_records: u64,
+    pub prior_topology_rows_decoded: u64,
+    pub retained_runs: usize,
+    pub physical_bytes_written: u64,
+    pub write_blocks: u64,
+    pub write_bytes: u64,
+    pub peak_buffered_records: usize,
+    pub peak_buffered_bytes: usize,
+    /// Sequential retained-run bytes examined for cross-run uniqueness.
+    pub validation_scan_bytes: u64,
+    /// One-MiB read blocks covering `validation_scan_bytes`.
+    pub validation_scan_blocks: u64,
+    /// Bulk append validation never performs per-key random seeks.
+    pub validation_random_seeks: u64,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 /// Aggregate-only probe evidence; it never contains graph identities.
 pub struct UuidProbeMetrics {
@@ -104,20 +126,36 @@ struct FileRecord {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+struct RunRecord {
+    base: bool,
+    level: u8,
+    first_generation: u64,
+    last_generation: u64,
+    identities: FileRecord,
+    node_surrogates: FileRecord,
+    node_count: u64,
+    edge_count: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct Manifest {
     format_version: u32,
-    topology_generation: u64,
-    nodes: FileRecord,
-    node_surrogates: FileRecord,
-    edges: FileRecord,
+    base_generation: u64,
+    current_generation: u64,
+    runs: Vec<RunRecord>,
+}
+
+#[derive(Debug)]
+struct OpenRun {
+    identities: File,
+    node_surrogates: File,
+    descriptor: RunRecord,
 }
 
 #[derive(Debug)]
 /// An authenticated node-and-edge index snapshot pinned by one manifest.
 pub struct UuidMembershipIndex {
-    node: File,
-    node_surrogates: File,
-    edge: File,
+    runs: Vec<OpenRun>,
     manifest: Manifest,
 }
 
@@ -134,37 +172,49 @@ impl UuidMembershipIndex {
             )));
         }
         let generation = crate::read_topology_generation(project_dir)?;
-        if manifest.topology_generation != generation {
+        if manifest.current_generation != generation {
             return Err(storage_err(format!(
                 "stale index generation {} (graph generation {generation})",
-                manifest.topology_generation
+                manifest.current_generation
             )));
         }
-        let node = open_verified(&root, &manifest.nodes, RECORD_BYTES)?;
-        let node_surrogates =
-            open_verified(&root, &manifest.node_surrogates, NODE_LOOKUP_RECORD_BYTES)?;
-        let edge = open_verified(&root, &manifest.edges, RECORD_BYTES)?;
-        Ok(Self {
-            node,
-            node_surrogates,
-            edge,
-            manifest,
-        })
+        validate_run_descriptors(&manifest)?;
+        let mut runs = Vec::with_capacity(manifest.runs.len());
+        for descriptor in &manifest.runs {
+            let identities = open_verified(&root, &descriptor.identities, IDENTITY_RECORD_BYTES)?;
+            let node_surrogates =
+                open_verified(&root, &descriptor.node_surrogates, NODE_LOOKUP_RECORD_BYTES)?;
+            validate_run_contents(
+                identities.try_clone().map_err(storage_err)?,
+                node_surrogates.try_clone().map_err(storage_err)?,
+                descriptor,
+            )?;
+            runs.push(OpenRun {
+                identities,
+                node_surrogates,
+                descriptor: descriptor.clone(),
+            });
+        }
+        Ok(Self { runs, manifest })
     }
 
     /// Topology generation authenticated by this open handle.
     #[must_use]
     pub const fn topology_generation(&self) -> u64 {
-        self.manifest.topology_generation
+        self.manifest.current_generation
     }
 
     #[must_use]
     /// Return the authenticated unique-record count for one identity domain.
     pub fn count(&self, kind: UuidIndexKind) -> u64 {
-        match kind {
-            UuidIndexKind::Node => self.manifest.nodes.count,
-            UuidIndexKind::Edge => self.manifest.edges.count,
-        }
+        self.manifest
+            .runs
+            .iter()
+            .map(|run| match kind {
+                UuidIndexKind::Node => run.node_count,
+                UuidIndexKind::Edge => run.edge_count,
+            })
+            .sum()
     }
 
     /// Probe a batch in caller order. Memory is O(unique requested UUIDs).
@@ -179,13 +229,23 @@ impl UuidMembershipIndex {
         };
         let unique = requested.iter().copied().collect::<BTreeSet<_>>();
         metrics.unique_requested = unique.len() as u64;
-        let (file, count) = match kind {
-            UuidIndexKind::Node => (&mut self.node, self.manifest.nodes.count),
-            UuidIndexKind::Edge => (&mut self.edge, self.manifest.edges.count),
-        };
         let mut membership = std::collections::BTreeMap::new();
         for uuid in unique {
-            let found = binary_search(file, count, uuid, &mut metrics.file_seeks)?;
+            let mut found = false;
+            for run in self.runs.iter_mut().rev() {
+                if binary_search_identity(
+                    &mut run.identities,
+                    run.descriptor.identities.count,
+                    uuid,
+                    kind,
+                    &mut metrics.file_seeks,
+                )?
+                .is_some()
+                {
+                    found = true;
+                    break;
+                }
+            }
             metrics.found += u64::from(found);
             membership.insert(uuid, found);
         }
@@ -206,12 +266,28 @@ impl UuidMembershipIndex {
         metrics.unique_requested = unique.len() as u64;
         let mut resolved = std::collections::BTreeMap::new();
         for uuid in unique {
-            let surrogate = binary_search_node_surrogate(
-                &mut self.node_surrogates,
-                self.manifest.node_surrogates.count,
-                uuid,
-                &mut metrics.file_seeks,
-            )?;
+            let mut surrogate = None;
+            for run in self.runs.iter_mut().rev() {
+                surrogate = binary_search_identity(
+                    &mut run.identities,
+                    run.descriptor.identities.count,
+                    uuid,
+                    UuidIndexKind::Node,
+                    &mut metrics.file_seeks,
+                )?;
+                if let Some(value) = surrogate {
+                    if binary_search_surrogate_uuid(
+                        &mut run.node_surrogates,
+                        run.descriptor.node_surrogates.count,
+                        value,
+                        &mut metrics.file_seeks,
+                    )? != Some(*uuid.as_bytes())
+                    {
+                        return Err(storage_err("identity/surrogate run pair is inconsistent"));
+                    }
+                    break;
+                }
+            }
             metrics.found += u64::from(surrogate.is_some());
             resolved.insert(uuid, surrogate);
         }
@@ -239,7 +315,602 @@ pub fn uuid_membership_index_is_fresh(project_dir: &Path) -> Result<bool, GfErro
     };
     let manifest: Manifest = serde_json::from_slice(&body).map_err(storage_err)?;
     Ok(manifest.format_version == FORMAT_VERSION
-        && manifest.topology_generation == crate::read_topology_generation(project_dir)?)
+        && manifest.current_generation == crate::read_topology_generation(project_dir)?)
+}
+
+/// Publish one committed topology batch as an immutable authenticated v3 run.
+pub fn append_uuid_membership_delta(
+    project_dir: &Path,
+    generation: u64,
+    nodes: &[(Uuid, u64)],
+    edges: &[Uuid],
+) -> Result<UuidIndexAppendMetrics, GfError> {
+    if crate::read_topology_generation(project_dir)? != generation {
+        return Err(storage_err(
+            "topology generation changed before index append",
+        ));
+    }
+    let root = project_dir.join(INDEX_DIR);
+    fs::create_dir_all(&root).map_err(storage_err)?;
+    let staging = project_dir
+        .parent()
+        .ok_or_else(|| storage_err("project directory has no staging parent"))?;
+    let mut manifest: Manifest = match fs::read(root.join(MANIFEST)) {
+        Ok(body) => serde_json::from_slice(&body).map_err(storage_err)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && generation == 1 => {
+            let scratch = tempfile::Builder::new()
+                .prefix("uuid-v3-empty-")
+                .tempdir_in(staging)
+                .map_err(storage_err)?;
+            let empty = scratch.path().join("empty.run");
+            File::create(&empty)
+                .and_then(|file| file.sync_all())
+                .map_err(storage_err)?;
+            let identities = publish_data(
+                &empty,
+                &root,
+                staging,
+                "identities-v3-base",
+                0,
+                IDENTITY_RECORD_BYTES,
+            )?;
+            let node_surrogates = publish_data(
+                &empty,
+                &root,
+                staging,
+                "node-surrogates-v3-base",
+                0,
+                NODE_LOOKUP_RECORD_BYTES,
+            )?;
+            Manifest {
+                format_version: FORMAT_VERSION,
+                base_generation: 0,
+                current_generation: 0,
+                runs: vec![RunRecord {
+                    base: true,
+                    level: 0,
+                    first_generation: 0,
+                    last_generation: 0,
+                    identities,
+                    node_surrogates,
+                    node_count: 0,
+                    edge_count: 0,
+                }],
+            }
+        }
+        Err(error) => return Err(storage_err(error)),
+    };
+    if manifest.format_version != FORMAT_VERSION || manifest.current_generation + 1 != generation {
+        return Err(storage_err(
+            "index append is not a v3 generation continuation",
+        ));
+    }
+    validate_run_descriptors(&manifest)?;
+    let prior_files = manifest_file_names(&manifest);
+    let mut open_runs = Vec::new();
+    for descriptor in &manifest.runs {
+        let identities = open_verified(&root, &descriptor.identities, IDENTITY_RECORD_BYTES)?;
+        let node_surrogates =
+            open_verified(&root, &descriptor.node_surrogates, NODE_LOOKUP_RECORD_BYTES)?;
+        validate_run_contents(
+            identities.try_clone().map_err(storage_err)?,
+            node_surrogates.try_clone().map_err(storage_err)?,
+            descriptor,
+        )?;
+        open_runs.push(OpenRun {
+            identities,
+            node_surrogates,
+            descriptor: descriptor.clone(),
+        });
+    }
+    let mut identities = nodes
+        .iter()
+        .map(|(uuid, surrogate)| (*uuid, 0_u8, *surrogate))
+        .chain(edges.iter().map(|uuid| (*uuid, 1_u8, 0)))
+        .collect::<Vec<_>>();
+    identities.sort_unstable_by_key(|entry| *entry.0.as_bytes());
+    if identities.windows(2).any(|pair| pair[0].0 == pair[1].0)
+        || nodes.iter().any(|(_, surrogate)| *surrogate == 0)
+    {
+        return Err(storage_err(
+            "new identity run contains duplicate/invalid identity",
+        ));
+    }
+    let mut surrogate_keys = nodes
+        .iter()
+        .map(|(uuid, surrogate)| (*surrogate, *uuid))
+        .collect::<Vec<_>>();
+    surrogate_keys.sort_unstable();
+    if surrogate_keys.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return Err(storage_err("new node run contains duplicate surrogate"));
+    }
+    let mut validation_bytes = 0_u64;
+    let mut validation_blocks = 0_u64;
+    for run in &open_runs {
+        let identity_bytes = reject_identity_collisions(
+            BufReader::with_capacity(
+                BULK_IO_BYTES,
+                File::open(root.join(&run.descriptor.identities.name)).map_err(storage_err)?,
+            ),
+            &identities,
+        )?;
+        validation_bytes = validation_bytes.saturating_add(identity_bytes);
+        validation_blocks =
+            validation_blocks.saturating_add(identity_bytes.div_ceil(BULK_IO_BYTES as u64));
+        let surrogate_bytes = reject_surrogate_collisions(
+            BufReader::with_capacity(
+                BULK_IO_BYTES,
+                File::open(root.join(&run.descriptor.node_surrogates.name)).map_err(storage_err)?,
+            ),
+            &surrogate_keys,
+        )?;
+        validation_bytes = validation_bytes.saturating_add(surrogate_bytes);
+        validation_blocks =
+            validation_blocks.saturating_add(surrogate_bytes.div_ceil(BULK_IO_BYTES as u64));
+    }
+    let scratch = tempfile::Builder::new()
+        .prefix("uuid-v3-append-")
+        .tempdir_in(staging)
+        .map_err(storage_err)?;
+    let identity_path = scratch.path().join("identities.run");
+    let surrogate_path = scratch.path().join("surrogates.run");
+    write_identity_records(&identity_path, &identities)?;
+    write_surrogate_records(&surrogate_path, &surrogate_keys)?;
+    let identity_record = publish_data(
+        &identity_path,
+        &root,
+        staging,
+        "identities-v3",
+        generation,
+        IDENTITY_RECORD_BYTES,
+    )?;
+    let surrogate_record = publish_data(
+        &surrogate_path,
+        &root,
+        staging,
+        "node-surrogates-v3",
+        generation,
+        NODE_LOOKUP_RECORD_BYTES,
+    )?;
+    manifest.runs.push(RunRecord {
+        base: false,
+        level: 0,
+        first_generation: generation,
+        last_generation: generation,
+        identities: identity_record,
+        node_surrogates: surrogate_record,
+        node_count: nodes.len() as u64,
+        edge_count: edges.len() as u64,
+    });
+    let mut metrics = UuidIndexAppendMetrics {
+        input_records: identities.len() as u64,
+        physical_bytes_written: identities.len() as u64 * IDENTITY_RECORD_BYTES
+            + surrogate_keys.len() as u64 * NODE_LOOKUP_RECORD_BYTES,
+        write_blocks: (identities.len() as u64 * IDENTITY_RECORD_BYTES)
+            .div_ceil(BULK_IO_BYTES as u64)
+            + (surrogate_keys.len() as u64 * NODE_LOOKUP_RECORD_BYTES)
+                .div_ceil(BULK_IO_BYTES as u64),
+        write_bytes: identities.len() as u64 * IDENTITY_RECORD_BYTES
+            + surrogate_keys.len() as u64 * NODE_LOOKUP_RECORD_BYTES,
+        peak_buffered_records: identities.len() + surrogate_keys.len(),
+        peak_buffered_bytes: identities.len() * 32 + surrogate_keys.len() * 24,
+        validation_scan_bytes: validation_bytes,
+        validation_scan_blocks: validation_blocks,
+        ..Default::default()
+    };
+    compact_manifest_levels(&root, staging, scratch.path(), &mut manifest, &mut metrics)?;
+    manifest.current_generation = generation;
+    manifest
+        .runs
+        .sort_unstable_by_key(|run| run.first_generation);
+    publish_manifest(&root, staging, &manifest)?;
+    cleanup_superseded_files(&root, prior_files, &manifest)?;
+    metrics.retained_runs = manifest.runs.len();
+    Ok(metrics)
+}
+
+fn manifest_file_names(manifest: &Manifest) -> BTreeSet<String> {
+    manifest
+        .runs
+        .iter()
+        .flat_map(|run| {
+            [
+                run.identities.name.clone(),
+                run.node_surrogates.name.clone(),
+            ]
+        })
+        .collect()
+}
+
+fn cleanup_superseded_files(
+    root: &Path,
+    prior: BTreeSet<String>,
+    manifest: &Manifest,
+) -> Result<(), GfError> {
+    let retained = manifest_file_names(manifest);
+    let directory = graphforge_filesystem::StableDirectory::open(root).map_err(storage_err)?;
+    for name in prior.difference(&retained) {
+        let file = directory
+            .open_child_file(std::ffi::OsStr::new(name))
+            .map_err(storage_err)?;
+        let identity = graphforge_filesystem::file_identity(&file).map_err(storage_err)?;
+        directory
+            .unlink_child_if_identity(std::ffi::OsStr::new(name), identity)
+            .map_err(storage_err)?;
+    }
+    directory.sync().map_err(storage_err)
+}
+
+fn reject_identity_collisions(
+    mut retained: BufReader<File>,
+    incoming: &[(Uuid, u8, u64)],
+) -> Result<u64, GfError> {
+    let mut incoming_index = 0;
+    let mut bytes = 0_u64;
+    while incoming_index < incoming.len() {
+        let Some(record) = read_exact_record::<32>(&mut retained)? else {
+            break;
+        };
+        bytes += IDENTITY_RECORD_BYTES;
+        let retained_uuid = &record[..16];
+        while incoming_index < incoming.len()
+            && incoming[incoming_index].0.as_bytes().as_slice() < retained_uuid
+        {
+            incoming_index += 1;
+        }
+        if incoming_index < incoming.len()
+            && incoming[incoming_index].0.as_bytes().as_slice() == retained_uuid
+        {
+            return Err(storage_err(
+                "UUID already exists in an authenticated retained run",
+            ));
+        }
+    }
+    Ok(bytes)
+}
+
+fn reject_surrogate_collisions(
+    mut retained: BufReader<File>,
+    incoming: &[(u64, Uuid)],
+) -> Result<u64, GfError> {
+    let mut incoming_index = 0;
+    let mut bytes = 0_u64;
+    while incoming_index < incoming.len() {
+        let Some(record) = read_exact_record::<24>(&mut retained)? else {
+            break;
+        };
+        bytes += NODE_LOOKUP_RECORD_BYTES;
+        let retained_surrogate = u64::from_be_bytes(record[..8].try_into().expect("fixed"));
+        while incoming_index < incoming.len() && incoming[incoming_index].0 < retained_surrogate {
+            incoming_index += 1;
+        }
+        if incoming_index < incoming.len() && incoming[incoming_index].0 == retained_surrogate {
+            return Err(storage_err(
+                "node surrogate already exists in an authenticated retained run",
+            ));
+        }
+    }
+    Ok(bytes)
+}
+
+fn binary_search_surrogate_uuid(
+    file: &mut File,
+    count: u64,
+    target: u64,
+    seeks: &mut u64,
+) -> Result<Option<[u8; 16]>, GfError> {
+    let mut lo = 0;
+    let mut hi = count;
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        file.seek(SeekFrom::Start(mid * NODE_LOOKUP_RECORD_BYTES))
+            .map_err(storage_err)?;
+        *seeks += 1;
+        let mut record = [0_u8; 24];
+        file.read_exact(&mut record).map_err(storage_err)?;
+        match u64::from_be_bytes(record[..8].try_into().expect("fixed")).cmp(&target) {
+            std::cmp::Ordering::Less => lo = mid + 1,
+            std::cmp::Ordering::Greater => hi = mid,
+            std::cmp::Ordering::Equal => return Ok(Some(record[8..].try_into().expect("fixed"))),
+        }
+    }
+    Ok(None)
+}
+
+fn write_identity_records(path: &Path, records: &[(Uuid, u8, u64)]) -> Result<(), GfError> {
+    let mut bytes = Vec::with_capacity(BULK_IO_BYTES);
+    let mut file = File::create(path).map_err(storage_err)?;
+    for (uuid, kind, surrogate) in records {
+        if bytes.len() + 32 > BULK_IO_BYTES {
+            file.write_all(&bytes).map_err(storage_err)?;
+            bytes.clear();
+        }
+        bytes.extend_from_slice(uuid.as_bytes());
+        bytes.push(*kind);
+        bytes.extend_from_slice(&[0; 7]);
+        bytes.extend_from_slice(&surrogate.to_be_bytes());
+    }
+    if !bytes.is_empty() {
+        file.write_all(&bytes).map_err(storage_err)?;
+    }
+    file.sync_all().map_err(storage_err)
+}
+
+fn write_surrogate_records(path: &Path, records: &[(u64, Uuid)]) -> Result<(), GfError> {
+    let mut bytes = Vec::with_capacity(BULK_IO_BYTES);
+    let mut file = File::create(path).map_err(storage_err)?;
+    for (surrogate, uuid) in records {
+        if bytes.len() + 24 > BULK_IO_BYTES {
+            file.write_all(&bytes).map_err(storage_err)?;
+            bytes.clear();
+        }
+        bytes.extend_from_slice(&surrogate.to_be_bytes());
+        bytes.extend_from_slice(uuid.as_bytes());
+    }
+    if !bytes.is_empty() {
+        file.write_all(&bytes).map_err(storage_err)?;
+    }
+    file.sync_all().map_err(storage_err)
+}
+
+fn publish_manifest(root: &Path, staging: &Path, manifest: &Manifest) -> Result<(), GfError> {
+    let _ = staging;
+    let directory = graphforge_filesystem::StableDirectory::open(root).map_err(storage_err)?;
+    let temp_name = std::ffi::OsString::from(format!(".manifest-{}.tmp", Uuid::new_v4()));
+    let mut temp = directory
+        .create_child_file(&temp_name)
+        .map_err(storage_err)?;
+    let identity = graphforge_filesystem::file_identity(&temp).map_err(storage_err)?;
+    let result = (|| -> Result<(), GfError> {
+        serde_json::to_writer(&mut temp, manifest).map_err(storage_err)?;
+        temp.flush().map_err(storage_err)?;
+        temp.sync_all().map_err(storage_err)?;
+        directory
+            .replace_child(&temp_name, std::ffi::OsStr::new(MANIFEST))
+            .map_err(storage_err)?;
+        directory.sync().map_err(storage_err)
+    })();
+    if result.is_err() {
+        let _ = directory.unlink_child_if_identity(&temp_name, identity);
+    }
+    result
+}
+
+fn compact_manifest_levels(
+    root: &Path,
+    _staging: &Path,
+    scratch: &Path,
+    manifest: &mut Manifest,
+    metrics: &mut UuidIndexAppendMetrics,
+) -> Result<(), GfError> {
+    for level in 0..63_u8 {
+        loop {
+            let mut indexes = manifest
+                .runs
+                .iter()
+                .enumerate()
+                .filter(|(_, run)| !run.base && run.level == level)
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            if indexes.len() < 2 {
+                break;
+            }
+            indexes.sort_unstable_by_key(|index| manifest.runs[*index].first_generation);
+            let right = manifest.runs.remove(indexes[1]);
+            let left = manifest.runs.remove(indexes[0]);
+            if left.last_generation.saturating_add(1) != right.first_generation {
+                return Err(storage_err("equal-level runs are not adjacent"));
+            }
+            let identity_path = scratch.join(format!("identities-level-{}.run", level + 1));
+            let surrogate_path = scratch.join(format!("surrogates-level-{}.run", level + 1));
+            merge_identity_v3(
+                &[
+                    root.join(&left.identities.name),
+                    root.join(&right.identities.name),
+                ],
+                &identity_path,
+            )?;
+            merge_surrogate_runs(
+                &[
+                    root.join(&left.node_surrogates.name),
+                    root.join(&right.node_surrogates.name),
+                ],
+                &surrogate_path,
+            )?;
+            let identities = publish_data(
+                &identity_path,
+                root,
+                staging,
+                &format!("identities-v3-l{}", level + 1),
+                right.last_generation,
+                IDENTITY_RECORD_BYTES,
+            )?;
+            let node_surrogates = publish_data(
+                &surrogate_path,
+                root,
+                staging,
+                &format!("node-surrogates-v3-l{}", level + 1),
+                right.last_generation,
+                NODE_LOOKUP_RECORD_BYTES,
+            )?;
+            let bytes = identities.count * IDENTITY_RECORD_BYTES
+                + node_surrogates.count * NODE_LOOKUP_RECORD_BYTES;
+            metrics.physical_bytes_written = metrics.physical_bytes_written.saturating_add(bytes);
+            metrics.write_bytes = metrics.write_bytes.saturating_add(bytes);
+            metrics.write_blocks = metrics
+                .write_blocks
+                .saturating_add(bytes.div_ceil(BULK_IO_BYTES as u64));
+            manifest.runs.push(RunRecord {
+                base: false,
+                level: level + 1,
+                first_generation: left.first_generation,
+                last_generation: right.last_generation,
+                identities,
+                node_surrogates,
+                node_count: left.node_count + right.node_count,
+                edge_count: left.edge_count + right.edge_count,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn merge_identity_v3(inputs: &[PathBuf], output: &Path) -> Result<(), GfError> {
+    let mut readers = inputs
+        .iter()
+        .map(|path| File::open(path).map(BufReader::new).map_err(storage_err))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut heap = BinaryHeap::<Reverse<([u8; 32], usize)>>::new();
+    for (index, reader) in readers.iter_mut().enumerate() {
+        if let Some(record) = read_exact_record::<32>(reader)? {
+            heap.push(Reverse((record, index)));
+        }
+    }
+    let mut out = File::create(output).map_err(storage_err)?;
+    let mut block = Vec::with_capacity(BULK_IO_BYTES);
+    let mut previous = None;
+    while let Some(Reverse((record, index))) = heap.pop() {
+        let uuid: [u8; 16] = record[..16].try_into().expect("fixed");
+        if previous == Some(uuid) {
+            return Err(storage_err("duplicate UUID across v3 levels"));
+        }
+        if block.len() + 32 > BULK_IO_BYTES {
+            out.write_all(&block).map_err(storage_err)?;
+            block.clear();
+        }
+        block.extend_from_slice(&record);
+        previous = Some(uuid);
+        if let Some(next) = read_exact_record::<32>(&mut readers[index])? {
+            heap.push(Reverse((next, index)));
+        }
+    }
+    if !block.is_empty() {
+        out.write_all(&block).map_err(storage_err)?;
+    }
+    out.flush().map_err(storage_err)?;
+    out.sync_all().map_err(storage_err)
+}
+
+fn validate_run_descriptors(manifest: &Manifest) -> Result<(), GfError> {
+    let mut levels = BTreeSet::new();
+    let mut intervals = manifest
+        .runs
+        .iter()
+        .map(|run| (run.first_generation, run.last_generation))
+        .collect::<Vec<_>>();
+    intervals.sort_unstable();
+    let bases = manifest
+        .runs
+        .iter()
+        .filter(|run| run.base)
+        .collect::<Vec<_>>();
+    if bases.len() != 1
+        || bases[0].first_generation != 0
+        || bases[0].last_generation != manifest.base_generation
+        || manifest
+            .runs
+            .iter()
+            .filter(|run| !run.base)
+            .any(|run| run.first_generation > run.last_generation || !levels.insert(run.level))
+    {
+        return Err(storage_err(
+            "manifest runs violate canonical level/interval policy",
+        ));
+    }
+    if intervals.last().map(|interval| interval.1).unwrap_or(0) != manifest.current_generation
+        || intervals
+            .windows(2)
+            .any(|pair| pair[0].1.saturating_add(1) != pair[1].0)
+    {
+        return Err(storage_err(
+            "manifest generation intervals are not contiguous",
+        ));
+    }
+    Ok(())
+}
+
+fn binary_search_identity(
+    file: &mut File,
+    count: u64,
+    target: Uuid,
+    expected_kind: UuidIndexKind,
+    seeks: &mut u64,
+) -> Result<Option<u64>, GfError> {
+    let mut lo = 0;
+    let mut hi = count;
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        file.seek(SeekFrom::Start(mid * IDENTITY_RECORD_BYTES))
+            .map_err(storage_err)?;
+        *seeks += 1;
+        let mut record = [0_u8; 32];
+        file.read_exact(&mut record).map_err(storage_err)?;
+        match record[..16].cmp(target.as_bytes()) {
+            std::cmp::Ordering::Less => lo = mid + 1,
+            std::cmp::Ordering::Greater => hi = mid,
+            std::cmp::Ordering::Equal => {
+                let kind = if record[16] == 0 {
+                    UuidIndexKind::Node
+                } else {
+                    UuidIndexKind::Edge
+                };
+                if kind != expected_kind {
+                    return Ok(None);
+                }
+                return Ok(Some(u64::from_be_bytes(
+                    record[24..32].try_into().expect("fixed record"),
+                )));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn validate_run_contents(
+    identities: File,
+    surrogates: File,
+    descriptor: &RunRecord,
+) -> Result<(), GfError> {
+    let mut identities = BufReader::with_capacity(BULK_IO_BYTES, identities);
+    let mut surrogates = BufReader::with_capacity(BULK_IO_BYTES, surrogates);
+    let mut previous_uuid = None;
+    let mut node_count = 0_u64;
+    let mut edge_count = 0_u64;
+    for _ in 0..descriptor.identities.count {
+        let mut record = [0_u8; 32];
+        identities.read_exact(&mut record).map_err(storage_err)?;
+        let uuid: [u8; 16] = record[..16].try_into().expect("fixed record");
+        if previous_uuid.is_some_and(|previous| previous >= uuid) || record[17..24] != [0_u8; 7] {
+            return Err(storage_err(
+                "identity run is not canonical and strictly sorted",
+            ));
+        }
+        previous_uuid = Some(uuid);
+        let surrogate = u64::from_be_bytes(record[24..32].try_into().expect("fixed record"));
+        match record[16] {
+            0 if surrogate != 0 => node_count += 1,
+            1 if surrogate == 0 => edge_count += 1,
+            _ => return Err(storage_err("identity run contains an invalid kind")),
+        }
+    }
+    if node_count != descriptor.node_count
+        || edge_count != descriptor.edge_count
+        || descriptor.identities.count != node_count + edge_count
+        || descriptor.node_surrogates.count != node_count
+    {
+        return Err(storage_err("run descriptor counts do not reconcile"));
+    }
+    let mut previous_surrogate = None;
+    for _ in 0..node_count {
+        let mut record = [0_u8; 24];
+        surrogates.read_exact(&mut record).map_err(storage_err)?;
+        let surrogate = u64::from_be_bytes(record[..8].try_into().expect("fixed record"));
+        if previous_surrogate.is_some_and(|previous| previous >= surrogate) {
+            return Err(storage_err("surrogate run is not strictly sorted"));
+        }
+        previous_surrogate = Some(surrogate);
+    }
+    Ok(())
 }
 
 fn open_verified(root: &Path, record: &FileRecord, record_bytes: u64) -> Result<File, GfError> {
@@ -269,58 +940,6 @@ fn open_verified(root: &Path, record: &FileRecord, record_bytes: u64) -> Result<
     Ok(file)
 }
 
-fn binary_search_node_surrogate(
-    file: &mut File,
-    count: u64,
-    target: Uuid,
-    seeks: &mut u64,
-) -> Result<Option<u64>, GfError> {
-    let mut lo = 0_u64;
-    let mut hi = count;
-    let target = *target.as_bytes();
-    while lo < hi {
-        let mid = lo + (hi - lo) / 2;
-        file.seek(SeekFrom::Start(mid * NODE_LOOKUP_RECORD_BYTES))
-            .map_err(storage_err)?;
-        *seeks += 1;
-        let mut current = [0_u8; 16];
-        file.read_exact(&mut current).map_err(storage_err)?;
-        let mut surrogate = [0_u8; 8];
-        file.read_exact(&mut surrogate).map_err(storage_err)?;
-        match current.cmp(&target) {
-            std::cmp::Ordering::Less => lo = mid + 1,
-            std::cmp::Ordering::Greater => hi = mid,
-            std::cmp::Ordering::Equal => return Ok(Some(u64::from_le_bytes(surrogate))),
-        }
-    }
-    Ok(None)
-}
-
-fn binary_search(
-    file: &mut File,
-    count: u64,
-    target: Uuid,
-    seeks: &mut u64,
-) -> Result<bool, GfError> {
-    let mut lo = 0_u64;
-    let mut hi = count;
-    let target = *target.as_bytes();
-    while lo < hi {
-        let mid = lo + (hi - lo) / 2;
-        file.seek(SeekFrom::Start(mid * RECORD_BYTES))
-            .map_err(storage_err)?;
-        *seeks += 1;
-        let mut current = [0_u8; 16];
-        file.read_exact(&mut current).map_err(storage_err)?;
-        match current.cmp(&target) {
-            std::cmp::Ordering::Less => lo = mid + 1,
-            std::cmp::Ordering::Greater => hi = mid,
-            std::cmp::Ordering::Equal => return Ok(true),
-        }
-    }
-    Ok(false)
-}
-
 /// Explicit bounded rebuild/migration path. Immutable data files are completed
 /// and synced first; `manifest.json` is atomically replaced last.
 pub fn rebuild_uuid_membership_indexes(
@@ -347,8 +966,15 @@ pub fn rebuild_uuid_membership_indexes(
         limits,
         &mut metrics,
     )?;
-    let node_surrogate_runs =
-        scan_node_surrogate_runs(&node_paths, scratch.path(), limits, &mut metrics)?;
+    let node_surrogate_runs = scan_entity_surrogate_runs(
+        &node_paths,
+        "node_uuid",
+        "node_id",
+        "node",
+        scratch.path(),
+        limits,
+        &mut metrics,
+    )?;
     let mut edge_paths = crate::mutator::edge_parquet_files(project_dir, None)
         .map_err(storage_err)?
         .into_iter()
@@ -389,42 +1015,70 @@ pub fn rebuild_uuid_membership_indexes(
         ));
     }
     reject_cross_kind_identities(&node_tmp, &edge_tmp)?;
-    let nodes = publish_data(&node_tmp, &root, staging, "nodes", generation, RECORD_BYTES)?;
-    let node_surrogates = publish_data(
-        &node_surrogates_tmp,
+    let identity_tmp = scratch.path().join("identities-v3.run");
+    build_identity_run(&node_surrogates_tmp, &edge_tmp, &identity_tmp)?;
+    let surrogate_tmp =
+        build_surrogate_run(&node_surrogates_tmp, scratch.path(), limits, &mut metrics)?;
+    let identities = publish_data(
+        &identity_tmp,
         &root,
         staging,
-        "node-surrogates",
+        "identities-v3",
+        generation,
+        IDENTITY_RECORD_BYTES,
+    )?;
+    let node_surrogates = publish_data(
+        &surrogate_tmp,
+        &root,
+        staging,
+        "node-surrogates-v3",
         generation,
         NODE_LOOKUP_RECORD_BYTES,
     )?;
-    let edges = publish_data(&edge_tmp, &root, staging, "edges", generation, RECORD_BYTES)?;
     if crate::read_topology_generation(project_dir)? != generation {
         return Err(storage_err(
             "topology generation changed before index manifest publication",
         ));
     }
-    metrics.node_count = nodes.count;
-    metrics.edge_count = edges.count;
+    metrics.node_count = node_surrogates.count;
+    metrics.edge_count = identities.count.saturating_sub(metrics.node_count);
     let manifest = Manifest {
         format_version: FORMAT_VERSION,
-        topology_generation: generation,
-        nodes,
-        node_surrogates,
-        edges,
+        base_generation: generation,
+        current_generation: generation,
+        runs: vec![RunRecord {
+            base: true,
+            level: 0,
+            first_generation: 0,
+            last_generation: generation,
+            identities,
+            node_surrogates,
+            node_count: metrics.node_count,
+            edge_count: metrics.edge_count,
+        }],
     };
-    let mut tmp = tempfile::Builder::new()
-        .prefix("manifest-")
-        .suffix(".tmp")
-        .tempfile_in(staging)
-        .map_err(storage_err)?;
-    serde_json::to_writer(&mut tmp, &manifest).map_err(storage_err)?;
-    tmp.flush().map_err(storage_err)?;
-    tmp.as_file().sync_all().map_err(storage_err)?;
-    tmp.persist(root.join(MANIFEST))
-        .map_err(|e| storage_err(e.error))?;
-    sync_dir(&root)?;
+    publish_manifest(&root, staging, &manifest)?;
+    cleanup_unreferenced_runs(&root, &manifest)?;
     Ok(metrics)
+}
+
+fn cleanup_unreferenced_runs(root: &Path, manifest: &Manifest) -> Result<(), GfError> {
+    let retained = manifest_file_names(manifest);
+    let directory = graphforge_filesystem::StableDirectory::open(root).map_err(storage_err)?;
+    for name in directory.child_names().map_err(storage_err)? {
+        let Some(text) = name.to_str() else {
+            continue;
+        };
+        if !text.ends_with(".uuidx") || retained.contains(text) {
+            continue;
+        }
+        let file = directory.open_child_file(&name).map_err(storage_err)?;
+        let identity = graphforge_filesystem::file_identity(&file).map_err(storage_err)?;
+        directory
+            .unlink_child_if_identity(&name, identity)
+            .map_err(storage_err)?;
+    }
+    directory.sync().map_err(storage_err)
 }
 
 fn scan_to_runs(
@@ -481,6 +1135,177 @@ fn scan_to_runs(
     Ok(runs)
 }
 
+fn build_identity_run(nodes: &Path, edges: &Path, output: &Path) -> Result<(), GfError> {
+    let mut node_reader = BufReader::new(File::open(nodes).map_err(storage_err)?);
+    let mut edge_reader = BufReader::new(File::open(edges).map_err(storage_err)?);
+    let mut node = read_node_surrogate_record(&mut node_reader)?;
+    let mut edge = read_record(&mut edge_reader)?;
+    let mut out = File::create(output).map_err(storage_err)?;
+    let mut block = Vec::with_capacity(BULK_IO_BYTES);
+    while node.is_some() || edge.is_some() {
+        let take_node = match (&node, &edge) {
+            (Some((node_uuid, _)), Some(edge_uuid)) => {
+                if node_uuid == edge_uuid {
+                    return Err(storage_err("UUID occurs in both identity domains"));
+                }
+                node_uuid < edge_uuid
+            }
+            (Some(_), None) => true,
+            _ => false,
+        };
+        let (uuid, surrogate, kind) = if take_node {
+            let (uuid, surrogate) = node.take().expect("node present");
+            node = read_node_surrogate_record(&mut node_reader)?;
+            (uuid, surrogate, 0_u8)
+        } else {
+            let uuid = edge.take().expect("edge present");
+            edge = read_record(&mut edge_reader)?;
+            (uuid, 0, 1_u8)
+        };
+        let mut record = [0_u8; 32];
+        record[..16].copy_from_slice(&uuid);
+        record[16] = kind;
+        record[24..].copy_from_slice(&surrogate.to_be_bytes());
+        if block.len() + 32 > BULK_IO_BYTES {
+            out.write_all(&block).map_err(storage_err)?;
+            block.clear();
+        }
+        block.extend_from_slice(&record);
+    }
+    if !block.is_empty() {
+        out.write_all(&block).map_err(storage_err)?;
+    }
+    out.flush().map_err(storage_err)?;
+    out.sync_all().map_err(storage_err)
+}
+
+fn build_surrogate_run(
+    nodes: &Path,
+    scratch: &Path,
+    limits: UuidIndexBuildLimits,
+    metrics: &mut UuidIndexBuildMetrics,
+) -> Result<PathBuf, GfError> {
+    let mut reader = BufReader::new(File::open(nodes).map_err(storage_err)?);
+    let mut buffer = Vec::with_capacity(limits.run_records);
+    let mut runs = Vec::new();
+    while let Some((uuid, surrogate)) = read_node_surrogate_record(&mut reader)? {
+        buffer.push((surrogate, uuid));
+        metrics.peak_buffered_records = metrics.peak_buffered_records.max(buffer.len());
+        if buffer.len() == limits.run_records {
+            flush_surrogate_run(&mut buffer, scratch, &mut runs, metrics)?;
+        }
+    }
+    if !buffer.is_empty() {
+        flush_surrogate_run(&mut buffer, scratch, &mut runs, metrics)?;
+    }
+    if runs.is_empty() {
+        let path = scratch.join("surrogates-empty.run");
+        File::create(&path)
+            .and_then(|file| file.sync_all())
+            .map_err(storage_err)?;
+        runs.push(path);
+    }
+    let mut round = 0;
+    while runs.len() > 1 {
+        let mut next = Vec::new();
+        for (group, inputs) in runs.chunks(limits.merge_fan_in).enumerate() {
+            let output = scratch.join(format!("surrogates-merge-{round}-{group}.run"));
+            merge_surrogate_runs(inputs, &output)?;
+            next.push(output);
+        }
+        for run in runs {
+            let _ = fs::remove_file(run);
+        }
+        runs = next;
+        round += 1;
+    }
+    Ok(runs.pop().expect("surrogate run exists"))
+}
+
+fn flush_surrogate_run(
+    buffer: &mut Vec<(u64, [u8; 16])>,
+    scratch: &Path,
+    runs: &mut Vec<PathBuf>,
+    metrics: &mut UuidIndexBuildMetrics,
+) -> Result<(), GfError> {
+    buffer.sort_unstable();
+    if buffer.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return Err(storage_err("duplicate node surrogate"));
+    }
+    let path = scratch.join(format!("surrogates-{:08}.run", runs.len()));
+    let mut bytes = Vec::with_capacity(buffer.len() * 24);
+    for (surrogate, uuid) in buffer.iter() {
+        bytes.extend_from_slice(&surrogate.to_be_bytes());
+        bytes.extend_from_slice(uuid);
+    }
+    let mut file = File::create(&path).map_err(storage_err)?;
+    file.write_all(&bytes).map_err(storage_err)?;
+    file.sync_all().map_err(storage_err)?;
+    buffer.clear();
+    runs.push(path);
+    metrics.temporary_runs += 1;
+    Ok(())
+}
+
+fn merge_surrogate_runs(inputs: &[PathBuf], output: &Path) -> Result<(), GfError> {
+    let mut readers = inputs
+        .iter()
+        .map(|path| File::open(path).map(BufReader::new).map_err(storage_err))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut heap = BinaryHeap::<Reverse<((u64, [u8; 16]), usize)>>::new();
+    for (index, reader) in readers.iter_mut().enumerate() {
+        if let Some(record) = read_surrogate_record(reader)? {
+            heap.push(Reverse((record, index)));
+        }
+    }
+    let mut out = File::create(output).map_err(storage_err)?;
+    let mut block = Vec::with_capacity(BULK_IO_BYTES);
+    let mut previous = None;
+    while let Some(Reverse(((surrogate, uuid), index))) = heap.pop() {
+        if previous == Some(surrogate) {
+            return Err(storage_err("duplicate node surrogate across runs"));
+        }
+        if block.len() + 24 > BULK_IO_BYTES {
+            out.write_all(&block).map_err(storage_err)?;
+            block.clear();
+        }
+        block.extend_from_slice(&surrogate.to_be_bytes());
+        block.extend_from_slice(&uuid);
+        previous = Some(surrogate);
+        if let Some(record) = read_surrogate_record(&mut readers[index])? {
+            heap.push(Reverse((record, index)));
+        }
+    }
+    if !block.is_empty() {
+        out.write_all(&block).map_err(storage_err)?;
+    }
+    out.flush().map_err(storage_err)?;
+    out.sync_all().map_err(storage_err)
+}
+
+fn read_surrogate_record(reader: &mut BufReader<File>) -> Result<Option<(u64, [u8; 16])>, GfError> {
+    let Some(record) = read_exact_record::<24>(reader)? else {
+        return Ok(None);
+    };
+    Ok(Some((
+        u64::from_be_bytes(record[..8].try_into().expect("fixed")),
+        record[8..].try_into().expect("fixed"),
+    )))
+}
+
+fn read_exact_record<const N: usize>(reader: &mut impl Read) -> Result<Option<[u8; N]>, GfError> {
+    let mut record = [0_u8; N];
+    let mut filled = 0;
+    while filled < N {
+        match reader.read(&mut record[filled..]).map_err(storage_err)? {
+            0 if filled == 0 => return Ok(None),
+            0 => return Err(storage_err("truncated fixed-width index record")),
+            read => filled += read,
+        }
+    }
+    Ok(Some(record))
+}
+
 fn flush_run(
     buffer: &mut Vec<[u8; 16]>,
     scratch: &Path,
@@ -495,12 +1320,15 @@ fn flush_run(
         )));
     }
     let path = scratch.join(format!("{prefix}-{:08}.run", runs.len()));
-    let mut out = BufWriter::new(File::create(&path).map_err(storage_err)?);
+    let mut out = File::create(&path).map_err(storage_err)?;
+    let mut block = Vec::with_capacity(buffer.len().min(BULK_IO_BYTES / 16) * 16);
     for value in buffer.iter() {
-        out.write_all(value).map_err(storage_err)?;
+        block.extend_from_slice(value);
     }
-    out.flush().map_err(storage_err)?;
-    out.get_ref().sync_all().map_err(storage_err)?;
+    if !block.is_empty() {
+        out.write_all(&block).map_err(storage_err)?;
+    }
+    out.sync_all().map_err(storage_err)?;
     buffer.clear();
     runs.push(path);
     metrics.temporary_runs += 1;
@@ -543,25 +1371,35 @@ fn merge_runs(inputs: &[PathBuf], output: &Path) -> Result<(), GfError> {
             heap.push(Reverse((value, idx)));
         }
     }
-    let mut out = BufWriter::new(File::create(output).map_err(storage_err)?);
+    let mut out = File::create(output).map_err(storage_err)?;
+    let mut block = Vec::with_capacity(BULK_IO_BYTES);
     let mut previous = None;
     while let Some(Reverse((value, idx))) = heap.pop() {
         if previous == Some(value) {
             return Err(storage_err("duplicate UUID across external index runs"));
         }
-        out.write_all(&value).map_err(storage_err)?;
+        if block.len() + 16 > BULK_IO_BYTES {
+            out.write_all(&block).map_err(storage_err)?;
+            block.clear();
+        }
+        block.extend_from_slice(&value);
         previous = Some(value);
         if let Some(next) = read_record(&mut readers[idx])? {
             heap.push(Reverse((next, idx)));
         }
     }
-    out.flush().map_err(storage_err)?;
-    out.get_ref().sync_all().map_err(storage_err)?;
+    if !block.is_empty() {
+        out.write_all(&block).map_err(storage_err)?;
+    }
+    out.sync_all().map_err(storage_err)?;
     Ok(())
 }
 
-fn scan_node_surrogate_runs(
+fn scan_entity_surrogate_runs(
     paths: &[PathBuf],
+    uuid_column: &str,
+    surrogate_column: &str,
+    prefix: &str,
     scratch: &Path,
     limits: UuidIndexBuildLimits,
     metrics: &mut UuidIndexBuildMetrics,
@@ -578,21 +1416,23 @@ fn scan_node_surrogate_runs(
         for batch in reader {
             let batch = batch.map_err(storage_err)?;
             let uuids = batch
-                .column_by_name("node_uuid")
+                .column_by_name(uuid_column)
                 .and_then(|column| column.as_any().downcast_ref::<FixedSizeBinaryArray>())
-                .ok_or_else(|| storage_err(format!("{} lacks node_uuid", path.display())))?;
+                .ok_or_else(|| storage_err(format!("{} lacks {uuid_column}", path.display())))?;
             let surrogates = batch
-                .column_by_name("node_id")
+                .column_by_name(surrogate_column)
                 .and_then(|column| column.as_any().downcast_ref::<UInt64Array>())
-                .ok_or_else(|| storage_err(format!("{} lacks node_id", path.display())))?;
+                .ok_or_else(|| {
+                    storage_err(format!("{} lacks {surrogate_column}", path.display()))
+                })?;
             if uuids.len() != surrogates.len() {
                 return Err(storage_err(
-                    "node UUID and surrogate columns differ in length",
+                    "identity UUID and surrogate columns differ in length",
                 ));
             }
             for row in 0..uuids.len() {
                 if uuids.is_null(row) || uuids.value(row).len() != 16 || surrogates.is_null(row) {
-                    return Err(storage_err(format!("invalid node identity at row {row}")));
+                    return Err(storage_err(format!("invalid entity identity at row {row}")));
                 }
                 buffer.push((
                     uuids.value(row).try_into().expect("length checked"),
@@ -600,16 +1440,16 @@ fn scan_node_surrogate_runs(
                 ));
                 metrics.peak_buffered_records = metrics.peak_buffered_records.max(buffer.len());
                 if buffer.len() == limits.run_records {
-                    flush_node_surrogate_run(&mut buffer, scratch, &mut runs, metrics)?;
+                    flush_entity_surrogate_run(&mut buffer, scratch, prefix, &mut runs, metrics)?;
                 }
             }
         }
     }
     if !buffer.is_empty() {
-        flush_node_surrogate_run(&mut buffer, scratch, &mut runs, metrics)?;
+        flush_entity_surrogate_run(&mut buffer, scratch, prefix, &mut runs, metrics)?;
     }
     if runs.is_empty() {
-        let path = scratch.join("node-surrogates-empty.run");
+        let path = scratch.join(format!("{prefix}-surrogates-empty.run"));
         File::create(&path)
             .map_err(storage_err)?
             .sync_all()
@@ -619,25 +1459,28 @@ fn scan_node_surrogate_runs(
     Ok(runs)
 }
 
-fn flush_node_surrogate_run(
+fn flush_entity_surrogate_run(
     buffer: &mut Vec<([u8; 16], u64)>,
     scratch: &Path,
+    prefix: &str,
     runs: &mut Vec<PathBuf>,
     metrics: &mut UuidIndexBuildMetrics,
 ) -> Result<(), GfError> {
     buffer.sort_unstable_by_key(|record| record.0);
     if buffer.windows(2).any(|pair| pair[0].0 == pair[1].0) {
-        return Err(storage_err("duplicate node UUID in canonical topology"));
+        return Err(storage_err("duplicate UUID in canonical topology"));
     }
-    let path = scratch.join(format!("node-surrogates-{:08}.run", runs.len()));
-    let mut out = BufWriter::new(File::create(&path).map_err(storage_err)?);
+    let path = scratch.join(format!("{prefix}-surrogates-{:08}.run", runs.len()));
+    let mut out = File::create(&path).map_err(storage_err)?;
+    let mut block = Vec::with_capacity(buffer.len().min(BULK_IO_BYTES / 24) * 24);
     for (uuid, surrogate) in buffer.iter() {
-        out.write_all(uuid).map_err(storage_err)?;
-        out.write_all(&surrogate.to_le_bytes())
-            .map_err(storage_err)?;
+        block.extend_from_slice(uuid);
+        block.extend_from_slice(&surrogate.to_le_bytes());
     }
-    out.flush().map_err(storage_err)?;
-    out.get_ref().sync_all().map_err(storage_err)?;
+    if !block.is_empty() {
+        out.write_all(&block).map_err(storage_err)?;
+    }
+    out.sync_all().map_err(storage_err)?;
     buffer.clear();
     runs.push(path);
     metrics.temporary_runs += 1;
@@ -679,7 +1522,8 @@ fn merge_node_surrogate_group(inputs: &[PathBuf], output: &Path) -> Result<(), G
             heap.push(Reverse((record, index)));
         }
     }
-    let mut out = BufWriter::new(File::create(output).map_err(storage_err)?);
+    let mut out = File::create(output).map_err(storage_err)?;
+    let mut block = Vec::with_capacity(BULK_IO_BYTES);
     let mut previous = None;
     while let Some(Reverse(((uuid, surrogate), index))) = heap.pop() {
         if previous == Some(uuid) {
@@ -687,28 +1531,34 @@ fn merge_node_surrogate_group(inputs: &[PathBuf], output: &Path) -> Result<(), G
                 "duplicate node UUID across external index runs",
             ));
         }
-        out.write_all(&uuid).map_err(storage_err)?;
-        out.write_all(&surrogate.to_le_bytes())
-            .map_err(storage_err)?;
+        if block.len() + 24 > BULK_IO_BYTES {
+            out.write_all(&block).map_err(storage_err)?;
+            block.clear();
+        }
+        block.extend_from_slice(&uuid);
+        block.extend_from_slice(&surrogate.to_le_bytes());
         previous = Some(uuid);
         if let Some(record) = read_node_surrogate_record(&mut readers[index])? {
             heap.push(Reverse((record, index)));
         }
     }
-    out.flush().map_err(storage_err)?;
-    out.get_ref().sync_all().map_err(storage_err)?;
+    if !block.is_empty() {
+        out.write_all(&block).map_err(storage_err)?;
+    }
+    out.sync_all().map_err(storage_err)?;
     Ok(())
 }
 
 fn read_node_surrogate_record(
     reader: &mut BufReader<File>,
 ) -> Result<Option<([u8; 16], u64)>, GfError> {
-    let Some(uuid) = read_record(reader)? else {
+    let Some(record) = read_exact_record::<24>(reader)? else {
         return Ok(None);
     };
-    let mut surrogate = [0_u8; 8];
-    reader.read_exact(&mut surrogate).map_err(storage_err)?;
-    Ok(Some((uuid, u64::from_le_bytes(surrogate))))
+    Ok(Some((
+        record[..16].try_into().expect("fixed"),
+        u64::from_le_bytes(record[16..].try_into().expect("fixed")),
+    )))
 }
 
 fn reject_cross_kind_identities(nodes: &Path, edges: &Path) -> Result<(), GfError> {
@@ -731,17 +1581,7 @@ fn reject_cross_kind_identities(nodes: &Path, edges: &Path) -> Result<(), GfErro
 }
 
 fn read_record(reader: &mut BufReader<File>) -> Result<Option<[u8; 16]>, GfError> {
-    let mut value = [0_u8; 16];
-    match reader.read_exact(&mut value) {
-        Ok(()) => Ok(Some(value)),
-        Err(error)
-            if error.kind() == std::io::ErrorKind::UnexpectedEof
-                && reader.fill_buf().map_err(storage_err)?.is_empty() =>
-        {
-            Ok(None)
-        }
-        Err(error) => Err(storage_err(error)),
-    }
+    read_exact_record::<16>(reader)
 }
 
 fn publish_data(
@@ -759,22 +1599,43 @@ fn publish_data(
     let mut input = File::open(source).map_err(storage_err)?;
     let sha256 = sha256_reader(&mut input)?;
     let name = format!("{kind}-{generation}-{}.uuidx", &sha256[..16]);
-    let destination = root.join(&name);
-    if !destination.exists() {
-        let mut tmp = tempfile::Builder::new()
-            .prefix(kind)
-            .suffix(".tmp")
-            .tempfile_in(staging)
-            .map_err(storage_err)?;
-        let mut input = File::open(source).map_err(storage_err)?;
-        std::io::copy(&mut input, &mut tmp).map_err(storage_err)?;
-        tmp.flush().map_err(storage_err)?;
-        tmp.as_file().sync_all().map_err(storage_err)?;
-        if let Err(error) = tmp.persist(&destination)
-            && !destination.exists()
+    let directory = graphforge_filesystem::StableDirectory::open(root).map_err(storage_err)?;
+    let target = std::ffi::OsStr::new(&name);
+    if let Ok(mut existing) = directory.open_child_file(target) {
+        if existing.metadata().map_err(storage_err)?.len() != length
+            || sha256_reader(&mut existing)? != sha256
         {
-            return Err(storage_err(error.error));
+            return Err(storage_err(
+                "existing immutable run does not match its content name",
+            ));
         }
+    } else {
+        let temp_name = std::ffi::OsString::from(format!(".run-{}.tmp", Uuid::new_v4()));
+        let mut temp = directory
+            .create_child_file(&temp_name)
+            .map_err(storage_err)?;
+        let temp_identity = graphforge_filesystem::file_identity(&temp).map_err(storage_err)?;
+        let install = || -> Result<(), GfError> {
+            let mut input = File::open(source).map_err(storage_err)?;
+            std::io::copy(&mut input, &mut temp).map_err(storage_err)?;
+            temp.sync_all().map_err(storage_err)?;
+            match directory.link_child_into(&temp_name, &temp, temp_identity, &directory, target) {
+                Ok(_) => Ok(()),
+                Err(_) => {
+                    let mut existing = directory.open_child_file(target).map_err(storage_err)?;
+                    if existing.metadata().map_err(storage_err)?.len() != length
+                        || sha256_reader(&mut existing)? != sha256
+                    {
+                        return Err(storage_err("concurrent immutable run mismatch"));
+                    }
+                    Ok(())
+                }
+            }
+        };
+        let result = install();
+        let _ = directory.unlink_child_if_identity(&temp_name, temp_identity);
+        result?;
+        directory.sync().map_err(storage_err)?;
     }
     Ok(FileRecord {
         name,
@@ -822,6 +1683,34 @@ mod tests {
     use parquet::arrow::ArrowWriter;
 
     use super::*;
+
+    #[test]
+    fn fixed_width_codecs_distinguish_clean_eof_from_partial_tail() {
+        let mut clean = std::io::Cursor::new(Vec::<u8>::new());
+        assert_eq!(read_exact_record::<32>(&mut clean).unwrap(), None);
+        for length in 1..32 {
+            let mut partial = std::io::Cursor::new(vec![0_u8; length]);
+            assert!(read_exact_record::<32>(&mut partial).is_err());
+        }
+        for length in 1..24 {
+            let mut partial = std::io::Cursor::new(vec![0_u8; length]);
+            assert!(read_exact_record::<24>(&mut partial).is_err());
+        }
+    }
+
+    #[test]
+    fn unified_identity_merge_rejects_cross_kind_uuid() {
+        let scratch = tempfile::tempdir().unwrap();
+        let uuid = [7_u8; 16];
+        let node = scratch.path().join("node.run");
+        let edge = scratch.path().join("edge.run");
+        for path in [&node, &edge] {
+            let mut file = File::create(path).unwrap();
+            file.write_all(&uuid).unwrap();
+            file.write_all(&1_u64.to_le_bytes()).unwrap();
+        }
+        assert!(build_identity_run(&node, &edge, &scratch.path().join("out.run")).is_err());
+    }
 
     fn write_uuid_parquet(path: &Path, column: &str, values: &[Uuid]) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -930,7 +1819,7 @@ mod tests {
             serde_json::from_slice(&fs::read(root.join(MANIFEST)).unwrap()).unwrap();
         let mut file = fs::OpenOptions::new()
             .write(true)
-            .open(root.join(manifest.nodes.name))
+            .open(root.join(&manifest.runs[0].identities.name))
             .unwrap();
         file.seek(SeekFrom::Start(0)).unwrap();
         file.write_all(&[0xff]).unwrap();
@@ -1052,5 +1941,124 @@ mod tests {
             rebuild_uuid_membership_indexes(dir.path(), UuidIndexBuildLimits::default())
                 .unwrap_err();
         assert!(cross_kind.to_string().contains("both node and edge"));
+    }
+
+    fn singleton_append_series(batches: u64) -> (tempfile::TempDir, u64) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bytes = 0;
+        for generation in 1..=batches {
+            crate::generation::bump_topology_generation(dir.path()).unwrap();
+            let metrics = append_uuid_membership_delta(
+                dir.path(),
+                generation,
+                &[(Uuid::from_u128(u128::from(generation)), generation)],
+                &[],
+            )
+            .unwrap();
+            assert_eq!(metrics.prior_topology_rows_decoded, 0);
+            assert!(metrics.write_blocks >= 2);
+            assert_eq!(metrics.write_bytes, metrics.physical_bytes_written);
+            bytes += metrics.physical_bytes_written;
+        }
+        (dir, bytes)
+    }
+
+    #[test]
+    fn v3_leveled_append_has_bounded_runs_and_nonquadratic_doubling() {
+        let (_, small) = singleton_append_series(64);
+        let (large, large_bytes) = singleton_append_series(128);
+        assert!(large_bytes <= small * 5 / 2);
+        let manifest: Manifest =
+            serde_json::from_slice(&fs::read(large.path().join(INDEX_DIR).join(MANIFEST)).unwrap())
+                .unwrap();
+        assert!(manifest.runs.len() <= 9);
+        assert_eq!(manifest.runs.iter().filter(|run| run.base).count(), 1);
+        let mut index = UuidMembershipIndex::open(large.path()).unwrap();
+        assert_eq!(index.count(UuidIndexKind::Node), 128);
+        assert_eq!(
+            index
+                .lookup_node_surrogates(&[Uuid::from_u128(1), Uuid::from_u128(128)])
+                .unwrap()
+                .0,
+            [Some(1), Some(128)]
+        );
+    }
+
+    #[test]
+    fn append_rejects_cross_run_uuid_and_surrogate_collisions_before_publication() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::generation::bump_topology_generation(dir.path()).unwrap();
+        append_uuid_membership_delta(
+            dir.path(),
+            1,
+            &[(Uuid::from_u128(1), 1)],
+            &[Uuid::from_u128(2)],
+        )
+        .unwrap();
+        let manifest_before = fs::read(dir.path().join(INDEX_DIR).join(MANIFEST)).unwrap();
+
+        crate::generation::bump_topology_generation(dir.path()).unwrap();
+        assert!(
+            append_uuid_membership_delta(dir.path(), 2, &[], &[Uuid::from_u128(1)],)
+                .unwrap_err()
+                .to_string()
+                .contains("already exists")
+        );
+        assert_eq!(
+            fs::read(dir.path().join(INDEX_DIR).join(MANIFEST)).unwrap(),
+            manifest_before
+        );
+        assert!(
+            append_uuid_membership_delta(dir.path(), 2, &[(Uuid::from_u128(3), 1)], &[],)
+                .unwrap_err()
+                .to_string()
+                .contains("surrogate already exists")
+        );
+    }
+
+    #[test]
+    fn bulk_append_validation_uses_sequential_megabyte_blocks_and_zero_random_seeks() {
+        let dir = tempfile::tempdir().unwrap();
+        let retained = (1_u64..=40_000)
+            .map(|value| (Uuid::from_u128(u128::from(value)), value))
+            .collect::<Vec<_>>();
+        crate::generation::bump_topology_generation(dir.path()).unwrap();
+        append_uuid_membership_delta(dir.path(), 1, &retained, &[]).unwrap();
+
+        crate::generation::bump_topology_generation(dir.path()).unwrap();
+        let metrics =
+            append_uuid_membership_delta(dir.path(), 2, &[(Uuid::from_u128(50_000), 50_000)], &[])
+                .unwrap();
+        assert_eq!(metrics.validation_random_seeks, 0);
+        assert_eq!(metrics.validation_scan_bytes, 40_000 * (32 + 24));
+        assert_eq!(metrics.validation_scan_blocks, 3);
+    }
+
+    #[test]
+    fn lookup_lazily_rejects_authenticated_pair_inconsistency() {
+        let (dir, nodes, _) = fixture();
+        rebuild_uuid_membership_indexes(dir.path(), UuidIndexBuildLimits::default()).unwrap();
+        let root = dir.path().join(INDEX_DIR);
+        let mut manifest: Manifest =
+            serde_json::from_slice(&fs::read(root.join(MANIFEST)).unwrap()).unwrap();
+        let run = &mut manifest.runs[0];
+        let path = root.join(&run.node_surrogates.name);
+        let mut bytes = fs::read(&path).unwrap();
+        bytes[8..24].copy_from_slice(Uuid::from_u128(999).as_bytes());
+        fs::write(&path, &bytes).unwrap();
+        let mut file = File::open(&path).unwrap();
+        run.node_surrogates.sha256 = sha256_reader(&mut file).unwrap();
+        fs::write(root.join(MANIFEST), serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+        // Ordinary open remains a bounded linear stream and does not perform
+        // one random identity probe per surrogate record.
+        let mut index = UuidMembershipIndex::open(dir.path()).unwrap();
+        assert!(
+            index
+                .lookup_node_surrogates(&[nodes[0]])
+                .unwrap_err()
+                .to_string()
+                .contains("pair is inconsistent")
+        );
     }
 }
