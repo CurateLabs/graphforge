@@ -2296,9 +2296,12 @@ impl GraphWriter {
     ) -> Result<Option<u64>, GfError> {
         let prepared = std::rc::Rc::new(std::cell::RefCell::new(None));
         let prepared_from_callback = std::rc::Rc::clone(&prepared);
+        let generations = std::rc::Rc::new(std::cell::Cell::new(None));
+        let generations_from_callback = std::rc::Rc::clone(&generations);
         let dir = self.dir.clone();
         let participant: crate::durable_rewrite::RewriteParticipantPreparer<'_> =
             Box::new(|context, staged| {
+                generations_from_callback.set(Some((context.prior, context.next)));
                 let token = self.build_uuid_index_delta(
                     context.next.topology,
                     staged,
@@ -2311,9 +2314,34 @@ impl GraphWriter {
                 *prepared_from_callback.borrow_mut() = token;
                 Ok(receipt)
             });
-        let committed =
-            crate::generation::commit_topology_aware_with_participant(staged, &dir, participant)?;
+        let commit =
+            crate::generation::commit_topology_aware_with_participant(staged, &dir, participant);
         self.prepared_index = prepared.borrow_mut().take();
+        let committed = match commit {
+            Ok(committed) => committed,
+            Err(error) => {
+                let Some(token) = self.prepared_index.as_ref() else {
+                    return Err(error);
+                };
+                let Some((prior, next)) = generations.get() else {
+                    return Err(error);
+                };
+                match crate::durable_rewrite::reconcile_auxiliary(
+                    &dir,
+                    prior,
+                    next,
+                    &token.auxiliary_receipt(),
+                )? {
+                    crate::durable_rewrite::AuxiliaryReconcileOutcome::Committed => {
+                        Some(next.topology)
+                    }
+                    crate::durable_rewrite::AuxiliaryReconcileOutcome::NotCommitted => {
+                        self.prepared_index = None;
+                        return Err(error);
+                    }
+                }
+            }
+        };
         if let Some(generation) = committed {
             if self.prepared_index.is_some() {
                 self.finalize_uuid_index_delta(generation)?;
