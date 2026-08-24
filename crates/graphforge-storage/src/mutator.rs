@@ -687,10 +687,15 @@ fn prepare_deletion_index<NS: BuildHasher, ES: BuildHasher>(
         .zip(present)
         .filter_map(|(uuid, present)| present.then_some(uuid))
         .collect::<Vec<_>>();
+    let mut snapshot = crate::AuthenticatedUuidIndexSnapshot::open_at_generation(
+        dir,
+        generation.saturating_sub(1),
+    )?;
     crate::uuid_membership::prepare_uuid_membership_delta(
         dir,
         generation.saturating_sub(1),
         generation,
+        Some(&mut snapshot),
         staged,
         &[],
         &[],
