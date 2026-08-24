@@ -460,19 +460,27 @@ pub fn infer_role(relative: &Path) -> GraphFileRole {
 fn build_inventory(source_root: &Path) -> Result<GraphFilesInventory, GfError> {
     let mut paths = Vec::new();
     collect_source_files(source_root, &mut paths)?;
-    paths.sort();
     if paths.len() > MAX_GRAPH_FILES {
         return Err(resource_limit("graph files count exceeds limit"));
     }
+    let mut paths = paths
+        .into_iter()
+        .map(|path| {
+            let relative = path
+                .strip_prefix(source_root)
+                .map_err(|_| validation("graph file path escaped workspace"))?;
+            validate_relative_path(relative)?;
+            Ok((path_text(relative)?, path))
+        })
+        .collect::<Result<Vec<_>, GfError>>()?;
+    paths.sort_by(|(left, _), (right, _)| left.cmp(right));
     let mut files = Vec::with_capacity(paths.len());
     let mut total = 0_u64;
     let mut seen = HashSet::new();
-    for path in paths {
+    for (relative_text, path) in paths {
         let relative = path
             .strip_prefix(source_root)
             .map_err(|_| validation("graph file path escaped workspace"))?;
-        validate_relative_path(relative)?;
-        let relative_text = path_text(relative)?;
         if !seen.insert(relative_text.clone()) {
             return Err(validation("graph files inventory contains duplicate paths"));
         }
@@ -825,6 +833,34 @@ mod tests {
         assert_eq!(inventory.files[1].relative_path, "topology/nodes.parquet");
         assert_eq!(inventory.files[1].role, GraphFileRole::Topology);
         assert_eq!(participant.record_family_id, GRAPH_FILES_FAMILY);
+        assert_eq!(decode_inventory(&participant.bytes).unwrap(), inventory);
+    }
+
+    #[test]
+    fn legacy_monolith_and_shards_sort_by_canonical_wire_path() {
+        let source = tempfile::tempdir().unwrap();
+        fs::create_dir_all(source.path().join("topology/nodes")).unwrap();
+        fs::write(source.path().join("topology/nodes.parquet"), b"legacy").unwrap();
+        fs::write(
+            source
+                .path()
+                .join("topology/nodes/00000000000000000001.parquet"),
+            b"shard",
+        )
+        .unwrap();
+
+        let (inventory, participant) = capture_graph_files(source.path()).unwrap();
+        assert_eq!(
+            inventory
+                .files
+                .iter()
+                .map(|entry| entry.relative_path.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "topology/nodes.parquet",
+                "topology/nodes/00000000000000000001.parquet",
+            ]
+        );
         assert_eq!(decode_inventory(&participant.bytes).unwrap(), inventory);
     }
 

@@ -410,6 +410,14 @@ fn run_cleanup(
     let root = admission.root();
     let policy = policy.validate()?;
     let limits = limits.validate()?;
+    // Lifecycle lock order is CAS lifecycle -> project writer everywhere.
+    // Publishers already hold the shared lifecycle guard before acquiring the
+    // writer for CURRENT; cleanup must acquire its exclusive guard first to
+    // avoid a writer/lifecycle inversion deadlock.
+    let graph_gc_guard = (!dry_run)
+        .then(|| crate::graph_object_store::try_begin_graph_object_gc(root))
+        .transpose()?
+        .flatten();
     let writer_lock = acquire_recovery_lock(root)?;
     let selected = resolve_project_generation(root).map_err(map_recovery_resolution)?;
     let checkpoint_roots = checkpoint_retention_roots_after_writer_lock(root)?;
@@ -424,6 +432,9 @@ fn run_cleanup(
 
     let mut removed = 0_u64;
     let mut skipped_live = classification.skipped_live;
+    if !dry_run && graph_gc_guard.is_none() {
+        skipped_live = skipped_live.saturating_add(1);
+    }
     let mut bounded = classification.bounded;
     if !dry_run {
         let batch_limit = if limits.cleanup_batch == 0 {
@@ -453,8 +464,8 @@ fn run_cleanup(
                 GenerationCleanupOutcome::Retained | GenerationCleanupOutcome::Absent => {}
             }
         }
-        if !bounded {
-            sweep_unreachable_graph_objects(root)?;
+        if !bounded && let Some(gc_guard) = graph_gc_guard.as_ref() {
+            sweep_unreachable_graph_objects(root, gc_guard)?;
         }
     }
 
@@ -484,7 +495,10 @@ fn run_cleanup(
     })
 }
 
-fn sweep_unreachable_graph_objects(root: &Path) -> Result<(), GfError> {
+fn sweep_unreachable_graph_objects(
+    root: &Path,
+    gc_guard: &crate::graph_object_store::GraphObjectGcGuard,
+) -> Result<(), GfError> {
     if crate::graph_object_publication_is_live(root)? {
         return Ok(());
     }
@@ -531,7 +545,11 @@ fn sweep_unreachable_graph_objects(root: &Path) -> Result<(), GfError> {
             }
         }
     }
-    crate::gc_graph_objects(root, &graph_roots, crate::GraphManifestLimits::default())?;
+    crate::graph_object_store::gc_graph_objects_guarded(
+        gc_guard,
+        &graph_roots,
+        crate::GraphManifestLimits::default(),
+    )?;
     Ok(())
 }
 
@@ -1270,7 +1288,13 @@ mod tests {
         open_or_initialize_project(root.path()).unwrap();
         let lease = crate::begin_graph_object_publication(root.path()).unwrap();
         let (digest, _) = crate::install_graph_object_bytes(root.path(), b"staged").unwrap();
-        execute_project_cleanup(root.path(), policy(2), ProjectRetentionLimits::default()).unwrap();
+        let report =
+            execute_project_cleanup(root.path(), policy(2), ProjectRetentionLimits::default())
+                .unwrap();
+        assert_eq!(
+            report.skipped_live, 1,
+            "live CAS publication skip is evidenced"
+        );
         assert!(
             crate::graph_object_path(root.path(), &digest)
                 .unwrap()
