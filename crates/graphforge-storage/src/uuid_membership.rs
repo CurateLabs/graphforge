@@ -923,7 +923,7 @@ fn publish_manifest(root: &Path, staging: &Path, manifest: &Manifest) -> Result<
         temp.flush().map_err(storage_err)?;
         temp.sync_all().map_err(storage_err)?;
         directory
-            .replace_child(&temp_name, std::ffi::OsStr::new(MANIFEST))
+            .replace_child(&temp_name, identity, std::ffi::OsStr::new(MANIFEST))
             .map_err(storage_err)?;
         directory.sync().map_err(storage_err)
     })();
@@ -1250,8 +1250,9 @@ pub fn rebuild_uuid_membership_indexes(
         .map_err(storage_err)?;
     let mut metrics = UuidIndexBuildMetrics::default();
     let generation = crate::read_topology_generation(project_dir)?;
+    let node_paths = crate::mutator::node_parquet_files(project_dir).map_err(storage_err)?;
     let node_runs = scan_to_runs(
-        &[project_dir.join("topology/nodes.parquet")],
+        &node_paths,
         "node_uuid",
         scratch.path(),
         "node",
