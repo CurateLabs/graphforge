@@ -5,11 +5,20 @@ to the current project generation. Arrow batches are copied to Arrow IPC and
 Parquet files are copied into session ownership; callers may then checkpoint,
 drop the handle, and resume by UUID.
 
+Callers that can retry supply a stable operation ID to `append_arrow_chunk` or
+`register_parquet_chunk`. Replaying the same ID and content is a no-op, including
+replaying an earlier node chunk after edge registration; reusing an ID for
+different content fails closed. New node chunks must precede edge chunks.
+
 The resource envelope is explicit in `ImportSessionLimits`. Decoding is capped
 by `batch_rows`, source bytes and files have hard limits, and source readers are
 bounded by `io_concurrency`. Status reports accepted and rejected rows, bytes,
 accepted and pending files, elapsed work, the peak decoded batch, and the
-configured concurrency bound.
+configured concurrency bound. Validation also reports topology work rows, the
+largest topology window, staged shard count, and allocated bytes under the
+private session root. On Linux the allocated-byte value comes from filesystem
+block allocation; the scale ladder pairs it with its periodic RSS and disk
+journal so memory plateau and disk growth remain distinct claims.
 
 Validation processes node sources before edge sources. Each batch is normalized
 through the public bulk contract and flushed into a private graph tree. A

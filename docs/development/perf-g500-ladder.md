@@ -18,7 +18,7 @@ edges.
 | Pinned `github.com/graph500/graph500` generator | No — bounded bench-local Kronecker in the test file |
 | Graph500 BFS kernel / harmonic-mean TEPS | Non-goal (`teps` is `null`) |
 | One-billion-live-edge product certification | No — that is #745 |
-| Engineering green (generate → ingest → reopen → GSI → `LIMIT 1000`) | Yes, on `GraphForge::publish_bulk_*` + `execute` |
+| Engineering green (generate → ingest → reopen → GSI → `LIMIT 1000`) | Yes, through one durable construction session + `execute` |
 
 ## What is new versus the #710 SCALE-20 client
 
@@ -34,8 +34,9 @@ This ladder replaces that with **external sort + spill + k-way merge**:
 3. K-way merge the sorted runs, emitting each unique undirected pair once.
 
 Peak resident edges never exceed `buffer_edges`, **independent of total edge
-count**. Live edges stream straight into `publish_bulk_edges` during the merge,
-so ingest is bounded too.
+count**. Live edges stream as bounded Arrow chunks into one durable construction
+session during the merge. Stable chunk operation IDs make retry exact, and the
+session validates all chunks before publishing exactly one generation.
 
 ## Counts always reconcile
 
@@ -107,17 +108,14 @@ stops — no larger rung is attempted and no SCALE-26 pass is claimed.
 > (`vmhwm` | `ps_sampled`) so a `ps_sampled` value is read as a floor. Run
 > provisioned certification rungs on **Linux**.
 
-> Ingest-phase attribution: `publish_bulk_nodes` / `publish_bulk_edges` retain
-> request-sized normalization, identity, endpoint, writer, delta, and receipt
-> state. Existing fixed-schema Parquet is copied through bounded 64K-row batches,
-> and writer reopen reads only final row-group surrogate tails; neither operation
-> materializes accumulated topology. While ingest runs, the atomic journal is
-> refreshed every two seconds with the current subphase, edge-chunk index,
-> anonymous/file RSS, disk usage, and aggregate topology rewrite counters. An
-> `oom` with `first_failing_phase: "ingest"` therefore remains an upstream
-> publication failure, not a generator-memory regression. Append-only linear-I/O
-> construction is tracked separately by #901 and remains required before the
-> billion-edge close gate.
+> Ingest-phase attribution: node and edge batches use the public durable
+> construction session, not repeated generation publication. Its evidence records
+> accepted rows/files/bytes, elapsed work, peak decoded and topology-window rows,
+> topology work, staged shard count, and allocated staging bytes. The atomic
+> ladder journal independently samples current/peak RSS, disk usage, subphase,
+> chunk index, and storage counters every two seconds. An ingest OOM is therefore
+> diagnosed from the construction window where it occurred; bounded RSS should
+> plateau as edge count rises, while persistent graph size remains disk-bound.
 
 ## Commands
 
