@@ -662,7 +662,7 @@ pub(crate) fn commit_with_participant(
     };
     let participant_baseline = batch
         .staged_paths()
-        .cloned()
+        .map(Path::to_path_buf)
         .collect::<std::collections::BTreeSet<_>>();
     let participant_auxiliary = if let Some(prepare) = participant {
         prepare(
