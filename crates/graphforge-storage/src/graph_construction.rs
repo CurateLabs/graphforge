@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{LazyLock, Mutex};
 
 use arrow::array::{Array, FixedSizeBinaryArray, RecordBatch, StringArray, UInt32Array};
@@ -23,6 +23,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::uuid_membership::{
+    ConstructionUuidIdentity, UuidConstructionSnapshot, UuidConstructionSnapshotWork,
+    open_uuid_construction_snapshot,
+};
+
 const FORMAT_VERSION: u32 = 2;
 const PRIVATE_ROOT: &str = ".graphforge-construction";
 const CHECKPOINT: &str = "checkpoint.json";
@@ -31,6 +36,10 @@ const BLOCK_BYTES: usize = 1 << 20;
 const MAX_CONTROL_BYTES: u64 = 64 << 10;
 const IDENTITY_WIDTH: usize = 16;
 const ENDPOINT_WIDTH: usize = 48;
+const NODE_DETAIL_WIDTH: usize = 20;
+const EDGE_DETAIL_WIDTH: usize = 304;
+const BASE_IDENTITY_WIDTH: usize = 32;
+const BASE_IDENTITIES: &str = "base-identities.run";
 
 /// Canonical node construction input: UUID and primary type id.
 pub static CONSTRUCTION_NODE_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
@@ -94,7 +103,7 @@ impl Default for GraphConstructionBudgets {
             max_batch_rows: 65_536,
             max_batch_bytes: 64 << 20,
             max_chunks: 1_000_000,
-            max_run_records: 3 * 65_536,
+            max_run_records: 4 * 65_536,
             merge_fan_in: 32,
         }
     }
@@ -105,7 +114,7 @@ impl GraphConstructionBudgets {
         if self.max_batch_rows == 0
             || self.max_batch_bytes == 0
             || self.max_chunks == 0
-            || self.max_run_records < 3 * self.max_batch_rows
+            || self.max_run_records < 4 * self.max_batch_rows
             || self.merge_fan_in < 2
         {
             return Err(storage("invalid construction budgets"));
@@ -215,6 +224,7 @@ pub struct ConstructionChunkReceipt {
     parquet: ArtifactReceipt,
     identities: ArtifactReceipt,
     endpoints: Option<ArtifactReceipt>,
+    details: ArtifactReceipt,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -229,6 +239,8 @@ struct Checkpoint {
     next_sequence: u64,
     saw_edge: bool,
     last_receipt_sha256: Option<String>,
+    base_identities: Option<ArtifactReceipt>,
+    base_work: UuidConstructionSnapshotWork,
     evidence: GraphConstructionEvidence,
 }
 
@@ -251,6 +263,7 @@ struct ChunkIntent {
     parquet: Option<ArtifactReceipt>,
     identities: Option<ArtifactReceipt>,
     endpoints: Option<ArtifactReceipt>,
+    details: Option<ArtifactReceipt>,
 }
 
 static ACTIVE_OPERATIONS: LazyLock<Mutex<BTreeSet<String>>> =
@@ -285,6 +298,7 @@ pub struct GraphConstructionSession {
     project: StableDirectory,
     root: StableDirectory,
     checkpoint: Checkpoint,
+    base_snapshot: Option<UuidConstructionSnapshot>,
     _reservation: ProcessReservation,
 }
 
@@ -331,9 +345,50 @@ impl GraphConstructionSession {
             session_identity,
         )?;
         cleanup_owned_artifact_temps(&root)?;
+        let checkpoint_exists = match root.open_child_file(OsStr::new(CHECKPOINT)) {
+            Ok(file) => {
+                drop(file);
+                true
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(storage(error)),
+        };
+        if !checkpoint_exists && parent_topology_generation != 0 {
+            remove_unrecorded_base(&root)?;
+        }
+        let (base_snapshot, base_identities, base_work) = if parent_topology_generation == 0 {
+            (None, None, UuidConstructionSnapshotWork::default())
+        } else if checkpoint_exists {
+            let mut checkpoint_file = root
+                .open_child_file(OsStr::new(CHECKPOINT))
+                .map_err(storage)?;
+            let recorded: Checkpoint = decode_bounded(&mut checkpoint_file)?;
+            let receipt = recorded
+                .base_identities
+                .as_ref()
+                .ok_or_else(|| storage("nonempty parent lacks retained identity run"))?;
+            let (snapshot, work) = authenticate_base_snapshot(
+                project_dir,
+                parent_topology_generation,
+                &root,
+                receipt,
+            )?;
+            (Some(snapshot), Some(receipt.clone()), work)
+        } else {
+            let (snapshot, receipt, work) =
+                create_base_snapshot(project_dir, parent_topology_generation, &root)?;
+            (Some(snapshot), Some(receipt), work)
+        };
         let checkpoint = match root.open_child_file(OsStr::new(CHECKPOINT)) {
             Ok(mut file) => decode_bounded(&mut file)?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let mut evidence = GraphConstructionEvidence::default();
+                evidence.authentication_read_bytes = base_work.authentication_bytes;
+                evidence.authentication_read_operations = base_work.authentication_blocks;
+                if let Some(base) = &base_identities {
+                    evidence.write_bytes = base.bytes;
+                    evidence.write_operations = base.write_operations;
+                }
                 let initial = Checkpoint {
                     format_version: FORMAT_VERSION,
                     operation_uuid,
@@ -345,7 +400,9 @@ impl GraphConstructionSession {
                     next_sequence: 0,
                     saw_edge: false,
                     last_receipt_sha256: None,
-                    evidence: GraphConstructionEvidence::default(),
+                    base_identities,
+                    base_work,
+                    evidence,
                 };
                 install_control(&root, CHECKPOINT, &initial)?;
                 initial
@@ -364,6 +421,7 @@ impl GraphConstructionSession {
             project,
             root,
             checkpoint,
+            base_snapshot,
             _reservation: reservation,
         };
         session.recover_intent()?;
@@ -463,7 +521,8 @@ impl GraphConstructionSession {
         let run_records = arrays
             .identities
             .len()
-            .saturating_add(arrays.endpoints.len());
+            .saturating_add(arrays.endpoints.len())
+            .saturating_add(batch.num_rows());
         if run_records > self.checkpoint.budgets.max_run_records {
             return Err(storage("construction run window exhausted"));
         }
@@ -486,6 +545,7 @@ impl GraphConstructionSession {
             parquet: None,
             identities: None,
             endpoints: None,
+            details: None,
         };
         install_control(&self.root, INTENT, &intent)?;
         reject_cancelled(&mut cancelled)?;
@@ -513,6 +573,16 @@ impl GraphConstructionSession {
             replace_control(&self.root, INTENT, &intent)?;
             reject_cancelled(&mut cancelled)?;
         }
+        intent.details = Some(match &arrays.details {
+            DetailRuns::Node(records) => {
+                write_fixed_run(&self.root, &format!("{stem}.node-details.run"), records)?
+            }
+            DetailRuns::Edge(records) => {
+                write_fixed_run(&self.root, &format!("{stem}.edge-details.run"), records)?
+            }
+        });
+        replace_control(&self.root, INTENT, &intent)?;
+        reject_cancelled(&mut cancelled)?;
         let receipt = receipt_from_intent(&intent)?;
         let receipt_name = receipt_name(sequence);
         install_control(&self.root, &receipt_name, &receipt)?;
@@ -552,7 +622,7 @@ impl GraphConstructionSession {
             if receipt.prior_receipt_sha256 != prior_digest {
                 return Err(storage("receipt journal chain is discontinuous"));
             }
-            for artifact in [&receipt.parquet, &receipt.identities]
+            for artifact in [&receipt.parquet, &receipt.identities, &receipt.details]
                 .into_iter()
                 .chain(receipt.endpoints.iter())
             {
@@ -652,6 +722,7 @@ impl GraphConstructionSession {
                     intent.parquet.clone(),
                     intent.identities.clone(),
                     intent.endpoints.clone(),
+                    intent.details.clone(),
                 ]
                 .into_iter()
                 .flatten()
@@ -680,6 +751,21 @@ impl GraphConstructionSession {
                     remove_unrecorded_artifact(
                         &self.root,
                         &format!("{stem}.endpoints.run"),
+                        intent.kind,
+                        intent.rows,
+                    )?;
+                }
+                if intent.details.is_none() {
+                    remove_unrecorded_artifact(
+                        &self.root,
+                        &format!(
+                            "{stem}.{}-details.run",
+                            if intent.kind == ConstructionChunkKind::Node {
+                                "node"
+                            } else {
+                                "edge"
+                            }
+                        ),
                         intent.kind,
                         intent.rows,
                     )?;
@@ -726,7 +812,7 @@ impl GraphConstructionSession {
         evidence.peak_batch_rows = evidence.peak_batch_rows.max(receipt.rows);
         evidence.peak_batch_bytes = evidence.peak_batch_bytes.max(receipt.input_bytes);
         evidence.peak_run_records = evidence.peak_run_records.max(receipt.run_records);
-        for artifact in [&receipt.parquet, &receipt.identities]
+        for artifact in [&receipt.parquet, &receipt.identities, &receipt.details]
             .into_iter()
             .chain(receipt.endpoints.iter())
         {
@@ -755,6 +841,9 @@ impl GraphConstructionSession {
         {
             return Err(storage("retained construction authority identity changed"));
         }
+        if let Some(snapshot) = &self.base_snapshot {
+            snapshot.revalidate()?;
+        }
         Ok(())
     }
 }
@@ -771,6 +860,12 @@ struct ReceiptPointer {
 struct RunArrays {
     identities: Vec<[u8; IDENTITY_WIDTH]>,
     endpoints: Vec<[u8; ENDPOINT_WIDTH]>,
+    details: DetailRuns,
+}
+
+enum DetailRuns {
+    Node(Vec<[u8; NODE_DETAIL_WIDTH]>),
+    Edge(Vec<[u8; EDGE_DETAIL_WIDTH]>),
 }
 
 fn extract_runs(kind: ConstructionChunkKind, batch: &RecordBatch) -> Result<RunArrays, GfError> {
@@ -790,11 +885,17 @@ fn extract_runs(kind: ConstructionChunkKind, batch: &RecordBatch) -> Result<RunA
         return Err(storage("duplicate identity inside chunk"));
     }
     let mut endpoints = Vec::new();
-    if kind == ConstructionChunkKind::Edge {
+    let details = if kind == ConstructionChunkKind::Edge {
         let edges = uuid_column(batch, "edge_uuid")?;
         let src = uuid_column(batch, "src_uuid")?;
         let dst = uuid_column(batch, "dst_uuid")?;
+        let routes = batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or_else(|| storage("canonical edge route is not Utf8"))?;
         endpoints.reserve(batch.num_rows().saturating_mul(2));
+        let mut details = Vec::with_capacity(batch.num_rows());
         for row in 0..batch.num_rows() {
             let edge = uuid_value(edges, row)?;
             for (role, endpoint) in [uuid_value(src, row)?, uuid_value(dst, row)?]
@@ -807,12 +908,39 @@ fn extract_runs(kind: ConstructionChunkKind, batch: &RecordBatch) -> Result<RunA
                 record[32] = role as u8;
                 endpoints.push(record);
             }
+            let route = routes.value(row).as_bytes();
+            let mut detail = [0_u8; EDGE_DETAIL_WIDTH];
+            detail[..16].copy_from_slice(&edge);
+            detail[16..32].copy_from_slice(&uuid_value(src, row)?);
+            detail[32..48].copy_from_slice(&uuid_value(dst, row)?);
+            detail[48] = route.len() as u8;
+            detail[49..49 + route.len()].copy_from_slice(route);
+            details.push(detail);
         }
         endpoints.sort_unstable();
-    }
+        details.sort_unstable();
+        DetailRuns::Edge(details)
+    } else {
+        let nodes = uuid_column(batch, "node_uuid")?;
+        let types = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .ok_or_else(|| storage("canonical node type is not UInt32"))?;
+        let mut details = Vec::with_capacity(batch.num_rows());
+        for row in 0..batch.num_rows() {
+            let mut detail = [0_u8; NODE_DETAIL_WIDTH];
+            detail[..16].copy_from_slice(&uuid_value(nodes, row)?);
+            detail[16..20].copy_from_slice(&types.value(row).to_be_bytes());
+            details.push(detail);
+        }
+        details.sort_unstable();
+        DetailRuns::Node(details)
+    };
     Ok(RunArrays {
         identities,
         endpoints,
+        details,
     })
 }
 
@@ -1022,6 +1150,117 @@ fn write_fixed_run<const N: usize>(
     Ok(receipt)
 }
 
+fn encode_base_identity(identity: ConstructionUuidIdentity) -> [u8; BASE_IDENTITY_WIDTH] {
+    let mut record = [0_u8; BASE_IDENTITY_WIDTH];
+    record[..16].copy_from_slice(identity.uuid.as_bytes());
+    record[16] = match identity.kind {
+        crate::uuid_membership::UuidIndexKind::Node => 0,
+        crate::uuid_membership::UuidIndexKind::Edge => 1,
+    };
+    record[24..].copy_from_slice(&identity.surrogate.to_be_bytes());
+    record
+}
+
+fn create_base_snapshot(
+    project_dir: &Path,
+    generation: u64,
+    root: &StableDirectory,
+) -> Result<
+    (
+        UuidConstructionSnapshot,
+        ArtifactReceipt,
+        UuidConstructionSnapshotWork,
+    ),
+    GfError,
+> {
+    let temporary = artifact_temp(BASE_IDENTITIES);
+    let file = root
+        .create_replaceable_child_file(OsStr::new(&temporary))
+        .map_err(storage)?;
+    let identity = file_identity(&file).map_err(storage)?;
+    let mut writer = HashingWriter::new(file);
+    let records_per_block = (BLOCK_BYTES / BASE_IDENTITY_WIDTH).max(1);
+    let block_bytes = records_per_block * BASE_IDENTITY_WIDTH;
+    let mut block = Vec::with_capacity(block_bytes);
+    let (snapshot, work) = open_uuid_construction_snapshot(project_dir, generation, |value| {
+        block.extend_from_slice(&encode_base_identity(value));
+        if block.len() == block_bytes {
+            writer.write_all(&block).map_err(storage)?;
+            block.clear();
+        }
+        Ok(())
+    })?;
+    if !block.is_empty() {
+        writer.write_all(&block).map_err(storage)?;
+    }
+    writer.flush().map_err(storage)?;
+    writer.inner.sync_all().map_err(storage)?;
+    let receipt = ArtifactReceipt {
+        name: BASE_IDENTITIES.to_owned(),
+        bytes: writer.bytes,
+        sha256: hex(&writer.digest.finalize()),
+        identity: identity.into(),
+        write_operations: writer.operations,
+    };
+    root.sync().map_err(storage)?;
+    root.install_child(
+        OsStr::new(&temporary),
+        identity,
+        OsStr::new(BASE_IDENTITIES),
+    )
+    .map_err(storage)?;
+    root.sync().map_err(storage)?;
+    Ok((snapshot, receipt, work))
+}
+
+fn authenticate_base_snapshot(
+    project_dir: &Path,
+    generation: u64,
+    root: &StableDirectory,
+    receipt: &ArtifactReceipt,
+) -> Result<(UuidConstructionSnapshot, UuidConstructionSnapshotWork), GfError> {
+    let mut retained = BufReader::with_capacity(
+        BLOCK_BYTES,
+        root.open_child_file(OsStr::new(BASE_IDENTITIES))
+            .map_err(storage)?,
+    );
+    let (snapshot, work) = open_uuid_construction_snapshot(project_dir, generation, |value| {
+        let mut record = [0_u8; BASE_IDENTITY_WIDTH];
+        retained.read_exact(&mut record).map_err(storage)?;
+        if record != encode_base_identity(value) {
+            return Err(storage(
+                "retained base identities differ from parent UUID authority",
+            ));
+        }
+        Ok(())
+    })?;
+    let mut trailing = [0_u8; 1];
+    if retained.read(&mut trailing).map_err(storage)? != 0 {
+        return Err(storage("retained base identities have trailing records"));
+    }
+    authenticate_artifact(root, receipt)?;
+    Ok((snapshot, work))
+}
+
+fn remove_unrecorded_base(root: &StableDirectory) -> Result<(), GfError> {
+    let mut file = match root.open_child_file(OsStr::new(BASE_IDENTITIES)) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(storage(error)),
+    };
+    let identity = file_identity(&file).map_err(storage)?;
+    if file_link_count(&file).map_err(storage)? != 1
+        || file.metadata().map_err(storage)?.len() % BASE_IDENTITY_WIDTH as u64 != 0
+    {
+        return Err(storage("unrecorded base identity run is not session-owned"));
+    }
+    validate_sorted_run(&mut file, BASE_IDENTITY_WIDTH)?;
+    drop(file);
+    root.unlink_child_if_identity(OsStr::new(BASE_IDENTITIES), identity)
+        .map_err(storage)?;
+    root.sync().map_err(storage)
+}
+
 #[derive(Clone, Copy)]
 struct ReadWork {
     bytes: u64,
@@ -1049,9 +1288,17 @@ fn authenticate_artifact(
     let mut bytes = 0_u64;
     let mut operations = 0_u64;
     let width = if receipt.name.ends_with(".identities.run") {
-        Some(IDENTITY_WIDTH)
+        Some(if receipt.name == BASE_IDENTITIES {
+            BASE_IDENTITY_WIDTH
+        } else {
+            IDENTITY_WIDTH
+        })
     } else if receipt.name.ends_with(".endpoints.run") {
         Some(ENDPOINT_WIDTH)
+    } else if receipt.name.ends_with(".node-details.run") {
+        Some(NODE_DETAIL_WIDTH)
+    } else if receipt.name.ends_with(".edge-details.run") {
+        Some(EDGE_DETAIL_WIDTH)
     } else {
         None
     };
@@ -1080,6 +1327,20 @@ fn authenticate_artifact(
                 {
                     return Err(storage("endpoint run record is malformed"));
                 }
+                if width == EDGE_DETAIL_WIDTH {
+                    let route_len = record[48] as usize;
+                    if route_len == 0 || record[49 + route_len..].iter().any(|byte| *byte != 0) {
+                        return Err(storage("edge detail run record is malformed"));
+                    }
+                }
+                if width == BASE_IDENTITY_WIDTH
+                    && (!matches!(record[16], 0 | 1)
+                        || record[17..24].iter().any(|byte| *byte != 0)
+                        || (record[16] == 0 && record[24..].iter().all(|byte| *byte == 0))
+                        || (record[16] == 1 && record[24..].iter().any(|byte| *byte != 0)))
+                {
+                    return Err(storage("base identity run record is malformed"));
+                }
                 previous = Some(record.to_vec());
             }
             pending.drain(..complete);
@@ -1097,7 +1358,10 @@ fn authenticate_artifact(
 fn validate_artifact_name(receipt: &ArtifactReceipt) -> Result<(), GfError> {
     let valid_suffix = receipt.name.ends_with(".parquet")
         || receipt.name.ends_with(".identities.run")
-        || receipt.name.ends_with(".endpoints.run");
+        || receipt.name.ends_with(".endpoints.run")
+        || receipt.name.ends_with(".node-details.run")
+        || receipt.name.ends_with(".edge-details.run")
+        || receipt.name == BASE_IDENTITIES;
     if !valid_suffix
         || receipt.name.starts_with('.')
         || receipt.name.contains('/')
@@ -1110,16 +1374,32 @@ fn validate_artifact_name(receipt: &ArtifactReceipt) -> Result<(), GfError> {
             .file_id
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit())
-        || receipt.bytes == 0
-        || receipt.write_operations == 0
+        || ((receipt.bytes == 0 || receipt.write_operations == 0)
+            && receipt.name != BASE_IDENTITIES)
     {
         return Err(storage("invalid construction artifact receipt"));
     }
-    if receipt.name.ends_with(".identities.run") && receipt.bytes % IDENTITY_WIDTH as u64 != 0 {
+    if receipt.name.ends_with(".identities.run")
+        && receipt.bytes
+            % if receipt.name == BASE_IDENTITIES {
+                BASE_IDENTITY_WIDTH as u64
+            } else {
+                IDENTITY_WIDTH as u64
+            }
+            != 0
+    {
         return Err(storage("truncated identity run"));
     }
     if receipt.name.ends_with(".endpoints.run") && receipt.bytes % ENDPOINT_WIDTH as u64 != 0 {
         return Err(storage("truncated endpoint run"));
+    }
+    if receipt.name.ends_with(".node-details.run") && receipt.bytes % NODE_DETAIL_WIDTH as u64 != 0
+    {
+        return Err(storage("truncated node detail run"));
+    }
+    if receipt.name.ends_with(".edge-details.run") && receipt.bytes % EDGE_DETAIL_WIDTH as u64 != 0
+    {
+        return Err(storage("truncated edge detail run"));
     }
     Ok(())
 }
@@ -1147,6 +1427,10 @@ fn receipt_from_intent(intent: &ChunkIntent) -> Result<ConstructionChunkReceipt,
             .clone()
             .ok_or_else(|| storage("intent lacks identity run"))?,
         endpoints: intent.endpoints.clone(),
+        details: intent
+            .details
+            .clone()
+            .ok_or_else(|| storage("intent lacks detail run"))?,
     })
 }
 
@@ -1170,15 +1454,25 @@ fn validate_receipt_semantics(
         || receipt.parquet.name != format!("{}.parquet", artifact_stem(sequence, receipt.kind))
         || receipt.identities.name
             != format!("{}.identities.run", artifact_stem(sequence, receipt.kind))
+        || receipt.details.name
+            != format!(
+                "{}.{}-details.run",
+                artifact_stem(sequence, receipt.kind),
+                if receipt.kind == ConstructionChunkKind::Node {
+                    "node"
+                } else {
+                    "edge"
+                }
+            )
         || (receipt.kind == ConstructionChunkKind::Node && receipt.endpoints.is_some())
         || (receipt.kind == ConstructionChunkKind::Edge && receipt.endpoints.is_none())
         || receipt.identities.bytes / IDENTITY_WIDTH as u64 != receipt.rows
         || receipt.run_records
             != receipt.rows
                 * if receipt.kind == ConstructionChunkKind::Edge {
-                    3
+                    4
                 } else {
-                    1
+                    2
                 }
     {
         return Err(storage("receipt semantics are inconsistent"));
@@ -1189,8 +1483,17 @@ fn validate_receipt_semantics(
     {
         return Err(storage("endpoint receipt semantics are inconsistent"));
     }
+    let detail_width = if receipt.kind == ConstructionChunkKind::Node {
+        NODE_DETAIL_WIDTH
+    } else {
+        EDGE_DETAIL_WIDTH
+    };
+    if receipt.details.bytes / detail_width as u64 != receipt.rows {
+        return Err(storage("detail receipt semantics are inconsistent"));
+    }
     validate_artifact_name(&receipt.parquet)?;
     validate_artifact_name(&receipt.identities)?;
+    validate_artifact_name(&receipt.details)?;
     if let Some(endpoints) = &receipt.endpoints {
         validate_artifact_name(endpoints)?;
     }
@@ -1201,7 +1504,7 @@ fn validate_receipt_artifacts(
     root: &StableDirectory,
     receipt: &ConstructionChunkReceipt,
 ) -> Result<(), GfError> {
-    for artifact in [&receipt.parquet, &receipt.identities]
+    for artifact in [&receipt.parquet, &receipt.identities, &receipt.details]
         .into_iter()
         .chain(receipt.endpoints.iter())
     {
@@ -1244,9 +1547,9 @@ fn validate_intent(intent: &ChunkIntent, checkpoint: &Checkpoint) -> Result<(), 
         intent
             .rows
             .saturating_mul(if intent.kind == ConstructionChunkKind::Edge {
-                3
+                4
             } else {
-                1
+                2
             });
     if intent.format_version != FORMAT_VERSION
         || intent.operation_uuid != checkpoint.operation_uuid
@@ -1285,6 +1588,25 @@ fn validate_intent(intent: &ChunkIntent, checkpoint: &Checkpoint) -> Result<(), 
                         .saturating_mul(2)
                         .saturating_mul(ENDPOINT_WIDTH as u64)
         })
+        || intent.details.as_ref().is_some_and(|artifact| {
+            artifact.name
+                != format!(
+                    "{stem}.{}-details.run",
+                    if intent.kind == ConstructionChunkKind::Node {
+                        "node"
+                    } else {
+                        "edge"
+                    }
+                )
+                || artifact.bytes
+                    != intent
+                        .rows
+                        .saturating_mul(if intent.kind == ConstructionChunkKind::Node {
+                            NODE_DETAIL_WIDTH
+                        } else {
+                            EDGE_DETAIL_WIDTH
+                        } as u64)
+        })
     {
         return Err(storage("durable intent is inconsistent with checkpoint"));
     }
@@ -1305,6 +1627,7 @@ fn validate_checkpoint(
         || !checkpoint.session_identity.matches(session)
         || checkpoint.parent_topology_generation != generation
         || checkpoint.budgets != budgets
+        || checkpoint.base_identities.is_some() != (generation != 0)
         || checkpoint.next_sequence > budgets.max_chunks
         || checkpoint.last_receipt_sha256.is_some() != (checkpoint.next_sequence != 0)
         || checkpoint
@@ -1322,6 +1645,18 @@ fn validate_checkpoint(
         || checkpoint.evidence.current_transitions != 0
     {
         return Err(storage("checkpoint authority or resume parameters changed"));
+    }
+    if let Some(base) = &checkpoint.base_identities {
+        validate_artifact_name(base)?;
+        if base.name != BASE_IDENTITIES
+            || base.bytes / BASE_IDENTITY_WIDTH as u64
+                != checkpoint
+                    .base_work
+                    .live_nodes
+                    .saturating_add(checkpoint.base_work.live_edges)
+        {
+            return Err(storage("checkpoint base identity receipt is inconsistent"));
+        }
     }
     Ok(())
 }
@@ -1416,6 +1751,9 @@ fn is_owned_artifact_temp(name: &str) -> bool {
 }
 
 fn canonical_artifact_target(name: &str) -> bool {
+    if name == BASE_IDENTITIES {
+        return true;
+    }
     let Some(body) = name.strip_prefix("chunk-") else {
         return false;
     };
@@ -1431,6 +1769,8 @@ fn canonical_artifact_target(name: &str) -> bool {
                 | "edge.parquet"
                 | "edge.identities.run"
                 | "edge.endpoints.run"
+                | "node.node-details.run"
+                | "edge.edge-details.run"
         )
 }
 
@@ -1559,6 +1899,10 @@ fn remove_unrecorded_artifact(
             IDENTITY_WIDTH
         } else if name.ends_with(".endpoints.run") {
             ENDPOINT_WIDTH
+        } else if name.ends_with(".node-details.run") {
+            NODE_DETAIL_WIDTH
+        } else if name.ends_with(".edge-details.run") {
+            EDGE_DETAIL_WIDTH
         } else {
             return Err(storage("unrecorded artifact name is not canonical"));
         };
@@ -1596,6 +1940,16 @@ fn validate_sorted_run(file: &mut File, width: usize) -> Result<(), GfError> {
                 .is_some_and(|prior| prior.as_slice() >= record)
                 || (width == ENDPOINT_WIDTH
                     && (!matches!(record[32], 0 | 1) || record[33..].iter().any(|byte| *byte != 0)))
+                || (width == EDGE_DETAIL_WIDTH
+                    && (record[48] == 0
+                        || record[49 + record[48] as usize..]
+                            .iter()
+                            .any(|byte| *byte != 0)))
+                || (width == BASE_IDENTITY_WIDTH
+                    && (!matches!(record[16], 0 | 1)
+                        || record[17..24].iter().any(|byte| *byte != 0)
+                        || (record[16] == 0 && record[24..].iter().all(|byte| *byte == 0))
+                        || (record[16] == 1 && record[24..].iter().any(|byte| *byte != 0))))
             {
                 return Err(storage("unrecorded fixed run is malformed"));
             }
@@ -1777,7 +2131,7 @@ mod tests {
             assert_eq!(session.accepted_chunks(), chunks);
             assert_eq!(session.evidence().input_rows, chunks * 32);
             assert_eq!(session.evidence().peak_batch_rows, 32);
-            assert_eq!(session.evidence().peak_run_records, 32);
+            assert_eq!(session.evidence().peak_run_records, 64);
             assert_eq!(session.evidence().prior_topology_rows_decoded, 0);
             assert_eq!(session.evidence().current_transitions, 0);
             let checkpoint_bytes = session

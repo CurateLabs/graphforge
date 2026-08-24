@@ -584,6 +584,308 @@ pub struct AuthenticatedUuidIndexSnapshot {
     authenticated_blocks: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ConstructionUuidIdentity {
+    pub uuid: Uuid,
+    pub kind: UuidIndexKind,
+    pub surrogate: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct UuidConstructionSnapshotWork {
+    pub authentication_bytes: u64,
+    pub authentication_blocks: u64,
+    pub live_nodes: u64,
+    pub live_edges: u64,
+    pub max_node_surrogate: u64,
+}
+
+/// Retained authority for a UUID snapshot authenticated exactly once while its
+/// live identities were emitted as one bounded sorted stream.
+pub(crate) struct UuidConstructionSnapshot {
+    root: graphforge_filesystem::StableDirectory,
+    root_identity: graphforge_filesystem::FileIdentity,
+    manifest_file: File,
+    manifest_identity: graphforge_filesystem::FileIdentity,
+    manifest_sha256: String,
+    manifest: Manifest,
+    named_files: Vec<(String, graphforge_filesystem::FileIdentity)>,
+}
+
+impl UuidConstructionSnapshot {
+    pub(crate) fn revalidate(&self) -> Result<(), GfError> {
+        self.root.revalidate_named().map_err(storage_err)?;
+        if self.root.identity() != self.root_identity
+            || graphforge_filesystem::file_identity(&self.manifest_file).map_err(storage_err)?
+                != self.manifest_identity
+            || graphforge_filesystem::file_link_count(&self.manifest_file).map_err(storage_err)?
+                != 1
+        {
+            return Err(storage_err("construction UUID snapshot authority changed"));
+        }
+        let mut manifest = self
+            .root
+            .open_child_file(std::ffi::OsStr::new(MANIFEST))
+            .map_err(storage_err)?;
+        let body = read_bounded(&mut manifest, MAX_MANIFEST_BYTES)?;
+        if graphforge_filesystem::file_identity(&manifest).map_err(storage_err)?
+            != self.manifest_identity
+            || hex_sha256(&body) != self.manifest_sha256
+            || serde_json::from_slice::<Manifest>(&body).map_err(storage_err)? != self.manifest
+        {
+            return Err(storage_err("construction UUID manifest changed"));
+        }
+        for (name, identity) in &self.named_files {
+            let file = self
+                .root
+                .open_child_file(std::ffi::OsStr::new(name))
+                .map_err(storage_err)?;
+            if graphforge_filesystem::file_identity(&file).map_err(storage_err)? != *identity
+                || graphforge_filesystem::file_link_count(&file).map_err(storage_err)? != 1
+            {
+                return Err(storage_err("construction UUID run identity changed"));
+            }
+        }
+        Ok(())
+    }
+}
+
+struct ConstructionRunCursor {
+    file: File,
+    descriptor: FileRecord,
+    width: usize,
+    block_index: usize,
+    block: Vec<u8>,
+    within: usize,
+    records: u64,
+    bytes: u64,
+    blocks: u64,
+    digest: Sha256,
+    finished: bool,
+}
+
+impl ConstructionRunCursor {
+    fn new(file: File, descriptor: FileRecord, width: usize) -> Self {
+        Self {
+            file,
+            descriptor,
+            width,
+            block_index: 0,
+            block: Vec::new(),
+            within: 0,
+            records: 0,
+            bytes: 0,
+            blocks: 0,
+            digest: Sha256::new(),
+            finished: false,
+        }
+    }
+
+    fn next_record(&mut self) -> Result<Option<Vec<u8>>, GfError> {
+        if self.finished {
+            return Ok(None);
+        }
+        if self.within == self.block.len() {
+            if self.block_index == self.descriptor.blocks.len() {
+                self.finished = true;
+                if self.records != self.descriptor.count
+                    || self.bytes != self.descriptor.count.saturating_mul(self.width as u64)
+                    || hex_bytes(&self.digest.clone().finalize()) != self.descriptor.sha256
+                {
+                    return Err(storage_err("construction UUID run authentication failed"));
+                }
+                return Ok(None);
+            }
+            let descriptor = &self.descriptor.blocks[self.block_index];
+            if descriptor.offset != self.bytes
+                || descriptor.len as usize % self.width != 0
+                || descriptor.len == 0
+            {
+                return Err(storage_err("construction UUID block framing changed"));
+            }
+            self.block.resize(descriptor.len as usize, 0);
+            self.file.read_exact(&mut self.block).map_err(storage_err)?;
+            let key_width = if self.width == IDENTITY_RECORD_WIDTH {
+                16
+            } else {
+                8
+            };
+            if hex_sha256(&self.block) != descriptor.sha256
+                || hex_sha256_key(&self.block[..key_width]) != descriptor.first_key
+                || hex_sha256_key(
+                    &self.block
+                        [self.block.len() - self.width..self.block.len() - self.width + key_width],
+                ) != descriptor.last_key
+            {
+                return Err(storage_err("construction UUID block digest changed"));
+            }
+            self.digest.update(&self.block);
+            self.bytes = self.bytes.saturating_add(self.block.len() as u64);
+            self.blocks = self.blocks.saturating_add(1);
+            self.block_index += 1;
+            self.within = 0;
+        }
+        let end = self.within + self.width;
+        let record = self.block[self.within..end].to_vec();
+        self.within = end;
+        self.records = self.records.saturating_add(1);
+        Ok(Some(record))
+    }
+}
+
+/// Authenticate each retained UUID byte once and emit the live identity set in
+/// UUID order. The returned token revalidates inode/name authority without
+/// rereading retained payload bytes.
+pub(crate) fn open_uuid_construction_snapshot(
+    project_dir: &Path,
+    generation: u64,
+    mut emit: impl FnMut(ConstructionUuidIdentity) -> Result<(), GfError>,
+) -> Result<(UuidConstructionSnapshot, UuidConstructionSnapshotWork), GfError> {
+    let root = graphforge_filesystem::StableDirectory::open(&project_dir.join(INDEX_DIR))
+        .map_err(storage_err)?;
+    let root_identity = root.identity();
+    let mut manifest_file = root
+        .open_child_file(std::ffi::OsStr::new(MANIFEST))
+        .map_err(storage_err)?;
+    let manifest_identity =
+        graphforge_filesystem::file_identity(&manifest_file).map_err(storage_err)?;
+    let body = read_bounded(&mut manifest_file, MAX_MANIFEST_BYTES)?;
+    let manifest_sha256 = hex_sha256(&body);
+    let manifest: Manifest = serde_json::from_slice(&body).map_err(storage_err)?;
+    if manifest.format_version != FORMAT_VERSION || manifest.current_generation != generation {
+        return Err(storage_err(
+            "construction UUID snapshot generation is stale",
+        ));
+    }
+    validate_run_descriptors(&manifest)?;
+    let mut named_files = Vec::with_capacity(manifest.runs.len().saturating_mul(2));
+    let mut identity_cursors = Vec::with_capacity(manifest.runs.len());
+    let mut work = UuidConstructionSnapshotWork {
+        authentication_bytes: body.len() as u64,
+        authentication_blocks: 1,
+        ..Default::default()
+    };
+    for run in &manifest.runs {
+        let identities = root
+            .open_child_file(std::ffi::OsStr::new(&run.identities.name))
+            .map_err(storage_err)?;
+        let identity = graphforge_filesystem::file_identity(&identities).map_err(storage_err)?;
+        if graphforge_filesystem::file_link_count(&identities).map_err(storage_err)? != 1 {
+            return Err(storage_err(
+                "construction UUID identity run has extra links",
+            ));
+        }
+        named_files.push((run.identities.name.clone(), identity));
+        identity_cursors.push(ConstructionRunCursor::new(
+            identities,
+            run.identities.clone(),
+            IDENTITY_RECORD_WIDTH,
+        ));
+
+        let surrogates = root
+            .open_child_file(std::ffi::OsStr::new(&run.node_surrogates.name))
+            .map_err(storage_err)?;
+        let surrogate_identity =
+            graphforge_filesystem::file_identity(&surrogates).map_err(storage_err)?;
+        if graphforge_filesystem::file_link_count(&surrogates).map_err(storage_err)? != 1 {
+            return Err(storage_err(
+                "construction UUID surrogate run has extra links",
+            ));
+        }
+        named_files.push((run.node_surrogates.name.clone(), surrogate_identity));
+        let mut cursor = ConstructionRunCursor::new(
+            surrogates,
+            run.node_surrogates.clone(),
+            NODE_LOOKUP_RECORD_WIDTH,
+        );
+        while cursor.next_record()?.is_some() {}
+        work.authentication_bytes = work.authentication_bytes.saturating_add(cursor.bytes);
+        work.authentication_blocks = work.authentication_blocks.saturating_add(cursor.blocks);
+    }
+
+    let mut heads = identity_cursors
+        .iter_mut()
+        .map(ConstructionRunCursor::next_record)
+        .collect::<Result<Vec<_>, _>>()?;
+    loop {
+        let Some(next_uuid) = heads
+            .iter()
+            .flatten()
+            .map(|record| &record[..16])
+            .min()
+            .map(<[u8]>::to_vec)
+        else {
+            break;
+        };
+        let indexes = heads
+            .iter()
+            .enumerate()
+            .filter_map(|(index, record)| {
+                record
+                    .as_ref()
+                    .is_some_and(|record| record[..16] == next_uuid)
+                    .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        let selected = *indexes
+            .iter()
+            .max_by_key(|index| manifest.runs[**index].last_generation)
+            .expect("one UUID head was selected");
+        let record = heads[selected].as_ref().expect("selected head exists");
+        let kind = record[16];
+        if !matches!(kind, 0..=3) || record[17..24].iter().any(|byte| *byte != 0) {
+            return Err(storage_err(
+                "construction UUID identity record is malformed",
+            ));
+        }
+        if matches!(kind, 0 | 1) {
+            let identity = ConstructionUuidIdentity {
+                uuid: Uuid::from_bytes(record[..16].try_into().expect("fixed UUID width")),
+                kind: if kind == 0 {
+                    UuidIndexKind::Node
+                } else {
+                    UuidIndexKind::Edge
+                },
+                surrogate: u64::from_be_bytes(record[24..32].try_into().expect("fixed")),
+            };
+            if identity.kind == UuidIndexKind::Node {
+                if identity.surrogate == 0 {
+                    return Err(storage_err("live node has zero surrogate"));
+                }
+                work.live_nodes = work.live_nodes.saturating_add(1);
+                work.max_node_surrogate = work.max_node_surrogate.max(identity.surrogate);
+            } else {
+                work.live_edges = work.live_edges.saturating_add(1);
+            }
+            emit(identity)?;
+        }
+        for index in indexes {
+            heads[index] = identity_cursors[index].next_record()?;
+        }
+    }
+    for cursor in &identity_cursors {
+        work.authentication_bytes = work.authentication_bytes.saturating_add(cursor.bytes);
+        work.authentication_blocks = work.authentication_blocks.saturating_add(cursor.blocks);
+    }
+    if work.live_nodes != manifest.live_node_count || work.live_edges != manifest.live_edge_count {
+        return Err(storage_err(
+            "construction UUID live counts differ from manifest",
+        ));
+    }
+    root.revalidate_named().map_err(storage_err)?;
+    let token = UuidConstructionSnapshot {
+        root,
+        root_identity,
+        manifest_file,
+        manifest_identity,
+        manifest_sha256,
+        manifest,
+        named_files,
+    };
+    token.revalidate()?;
+    Ok((token, work))
+}
+
 impl AuthenticatedUuidIndexSnapshot {
     pub(crate) fn open_at_generation(project_dir: &Path, generation: u64) -> Result<Self, GfError> {
         let root_path = project_dir.join(INDEX_DIR);
