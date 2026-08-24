@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
-use arrow::array::{Array, FixedSizeBinaryArray, UInt64Array};
+use arrow::array::{Array, FixedSizeBinaryArray};
 use arrow::record_batch::RecordBatch;
 use graphforge_core::{GfError, OntologyMode, ProjectErrorCode};
 use graphforge_ir::{IrLiteral, RuntimeCatalog};
@@ -868,31 +868,30 @@ fn register_existing_endpoints(
     writer: &mut graphforge_storage::GraphWriter,
     dir: &Path,
     endpoints: &BTreeSet<Uuid>,
+    same_request_nodes: &BTreeSet<Uuid>,
 ) -> Result<(), GfError> {
-    if endpoints.is_empty() {
+    let existing = endpoints
+        .difference(same_request_nodes)
+        .copied()
+        .collect::<Vec<_>>();
+    if existing.is_empty() {
         return Ok(());
     }
-    let mut unresolved = endpoints.clone();
-    for batch in graphforge_storage::read_nodes(dir)
-        .map_err(|error| GfError::Storage(format!("failed to read node topology: {error}")))?
-    {
-        let uuids = batch
-            .column_by_name("node_uuid")
-            .and_then(|column| column.as_any().downcast_ref::<FixedSizeBinaryArray>())
-            .ok_or_else(|| GfError::Storage("node topology has malformed UUID column".into()))?;
-        let ids = batch
-            .column_by_name("node_id")
-            .and_then(|column| column.as_any().downcast_ref::<UInt64Array>())
-            .ok_or_else(|| GfError::Storage("node topology has malformed ID column".into()))?;
-        for row in 0..batch.num_rows() {
-            let uuid = Uuid::from_slice(uuids.value(row))
-                .map_err(|error| GfError::Storage(error.to_string()))?;
-            if unresolved.remove(&uuid) {
-                writer.register_existing_node(uuid, ids.value(row));
-            }
+    if !graphforge_storage::uuid_membership_index_is_fresh(dir)? {
+        graphforge_storage::rebuild_uuid_membership_indexes(
+            dir,
+            graphforge_storage::UuidIndexBuildLimits::default(),
+        )?;
+    }
+    let mut index = graphforge_storage::UuidMembershipIndex::open(dir)?;
+    let (surrogates, _) = index.lookup_node_surrogates(&existing)?;
+    for (uuid, surrogate) in existing.into_iter().zip(surrogates) {
+        if let Some(surrogate) = surrogate {
+            writer.register_existing_node(uuid, surrogate);
         }
     }
-    // Remaining endpoints must be created in this same request.
+    // Missing indexed endpoints retain the existing behavior: validation has
+    // already classified them, and the writer fails closed if one is used.
     Ok(())
 }
 
@@ -921,7 +920,15 @@ fn apply_graph_mutations(
         })
         .flatten()
         .collect::<BTreeSet<_>>();
-    register_existing_endpoints(&mut writer, &graph.dir, &endpoints)?;
+    let same_request_nodes = request
+        .graph_mutations
+        .iter()
+        .filter_map(|mutation| match mutation {
+            CompositeGraphMutation::CreateNode { node_uuid, .. } => Some(*node_uuid),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    register_existing_endpoints(&mut writer, &graph.dir, &endpoints, &same_request_nodes)?;
     let mut created_nodes = HashSet::new();
     let mut created_edges = HashSet::new();
     let mut node_sets: HashMap<String, HashMap<[u8; 16], HashMap<String, IrLiteral>>> =
@@ -933,6 +940,25 @@ fn apply_graph_mutations(
     let mut delete_nodes = HashSet::new();
     let mut delete_edges = HashSet::new();
 
+    // Allocate every same-request node first so edge endpoints are independent
+    // of mutation ordering, as guaranteed by composite validation.
+    for mutation in &request.graph_mutations {
+        if let CompositeGraphMutation::CreateNode {
+            node_uuid, label, ..
+        } = mutation
+        {
+            let type_id = graph
+                .ontology
+                .as_ref()
+                .and_then(|ontology| ontology.entity_type_id(label))
+                .unwrap_or_else(|| {
+                    graphforge_ir::runtime_entity_type_id(catalog.intern_label(label))
+                });
+            writer.create_node(*node_uuid, type_id)?;
+            created_nodes.insert(*node_uuid);
+        }
+    }
+
     for mutation in &request.graph_mutations {
         match mutation {
             CompositeGraphMutation::CreateNode {
@@ -940,15 +966,6 @@ fn apply_graph_mutations(
                 label,
                 properties,
             } => {
-                let type_id = graph
-                    .ontology
-                    .as_ref()
-                    .and_then(|ontology| ontology.entity_type_id(label))
-                    .unwrap_or_else(|| {
-                        graphforge_ir::runtime_entity_type_id(catalog.intern_label(label))
-                    });
-                writer.create_node(*node_uuid, type_id)?;
-                created_nodes.insert(*node_uuid);
                 if !properties.is_empty() {
                     let props = properties
                         .iter()
@@ -1449,6 +1466,52 @@ mod tests {
                 capability_id: capability,
                 capability_version: 1,
             })
+            .unwrap();
+    }
+
+    #[test]
+    fn composite_endpoint_resolution_uses_index_without_topology_decode() {
+        let directory = tempfile::tempdir().unwrap();
+        let existing = uuid7(180);
+        let mut seed =
+            graphforge_storage::GraphWriter::open_at(directory.path(), OntologyMode::Strict, 1)
+                .unwrap();
+        seed.create_node(existing, graphforge_core::TypeId(0))
+            .unwrap();
+        seed.flush().unwrap();
+        graphforge_storage::rebuild_uuid_membership_indexes(
+            directory.path(),
+            graphforge_storage::UuidIndexBuildLimits {
+                scan_batch_rows: 1,
+                run_records: 1,
+                merge_fan_in: 2,
+            },
+        )
+        .unwrap();
+
+        let same_request = uuid7(181);
+        let endpoints = BTreeSet::from([existing, same_request]);
+        let same_request_nodes = BTreeSet::from([same_request]);
+        graphforge_storage::io_stats::reset();
+        let mut writer =
+            graphforge_storage::GraphWriter::open_at(directory.path(), OntologyMode::Strict, 2)
+                .unwrap();
+        register_existing_endpoints(
+            &mut writer,
+            directory.path(),
+            &endpoints,
+            &same_request_nodes,
+        )
+        .unwrap();
+        let io = graphforge_storage::io_stats::snapshot();
+        assert_eq!(io.node_full_reads, 0);
+        assert_eq!(io.node_filtered_reads, 0);
+
+        writer
+            .create_node(same_request, graphforge_core::TypeId(0))
+            .unwrap();
+        writer
+            .create_edge(uuid7(182), "KNOWS", &existing, &same_request)
             .unwrap();
     }
 
