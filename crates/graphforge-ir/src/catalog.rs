@@ -186,7 +186,11 @@ impl RuntimeCatalog {
     /// If `name` has been seen before the observation count is incremented and
     /// the existing ID is returned unchanged.
     pub fn intern_label(&mut self, name: &str) -> RuntimeTypeId {
-        let now = now_micros();
+        self.intern_label_at(name, now_micros())
+    }
+
+    /// Interns an entity label at a caller-authoritative timestamp.
+    pub fn intern_label_at(&mut self, name: &str, now: i64) -> RuntimeTypeId {
         if let Some(&idx) = self.entity_types.get(name) {
             let entry = &mut self.entries[idx];
             entry.observation_count += 1;
@@ -211,7 +215,11 @@ impl RuntimeCatalog {
 
     /// Interns a relation type name and returns a stable [`RuntimeTypeId`].
     pub fn intern_relation_type(&mut self, name: &str) -> RuntimeTypeId {
-        let now = now_micros();
+        self.intern_relation_type_at(name, now_micros())
+    }
+
+    /// Interns a relation type at a caller-authoritative timestamp.
+    pub fn intern_relation_type_at(&mut self, name: &str, now: i64) -> RuntimeTypeId {
         if let Some(&idx) = self.relation_types.get(name) {
             let entry = &mut self.entries[idx];
             entry.observation_count += 1;
@@ -239,7 +247,16 @@ impl RuntimeCatalog {
     /// Properties are keyed by `(name, owner_label)` so the same property name
     /// observed on different labels gets independent IDs.
     pub fn intern_property(&mut self, name: &str, owner_label: Option<&str>) -> RuntimePropId {
-        let now = now_micros();
+        self.intern_property_at(name, owner_label, now_micros())
+    }
+
+    /// Interns a property at a caller-authoritative timestamp.
+    pub fn intern_property_at(
+        &mut self,
+        name: &str,
+        owner_label: Option<&str>,
+        now: i64,
+    ) -> RuntimePropId {
         let key = (name.to_owned(), owner_label.map(str::to_owned));
         if let Some(&idx) = self.properties.get(&key) {
             let entry = &mut self.entries[idx];
@@ -559,6 +576,27 @@ mod tests {
         let id1 = cat.intern_label("Person");
         let id2 = cat.intern_label("Person");
         assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn caller_authoritative_timestamp_is_preserved_for_every_catalog_kind() {
+        let mut catalog = RuntimeCatalog::new();
+        catalog.intern_label_at("Person", 42);
+        catalog.intern_relation_type_at("KNOWS", 42);
+        catalog.intern_property_at("score", Some("Person"), 42);
+        let batch = catalog.to_record_batch();
+        let first = batch
+            .column(4)
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .unwrap();
+        let last = batch
+            .column(5)
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .unwrap();
+        assert_eq!(first.values(), &[42, 42, 42]);
+        assert_eq!(last.values(), &[42, 42, 42]);
     }
 
     #[test]

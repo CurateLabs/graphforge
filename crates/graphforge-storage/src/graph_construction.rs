@@ -7,17 +7,23 @@
 //! sealing path. A generation-last publisher consumes the sealed inventory.
 
 use std::cmp::Reverse;
-use std::collections::{BTreeSet, BinaryHeap};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use arrow::array::{Array, FixedSizeBinaryArray, RecordBatch, StringArray, UInt32Array};
+use arrow::array::{
+    Array, FixedSizeBinaryArray, MutableArrayData, RecordBatch, StringArray, UInt32Array,
+    make_array,
+};
+use arrow::compute::take;
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use graphforge_core::GfError;
 use graphforge_filesystem::{FileIdentity, StableDirectory, file_identity, file_link_count};
+use graphforge_ir::RuntimeCatalog;
 use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde::{Deserialize, Serialize};
@@ -29,7 +35,7 @@ use crate::uuid_membership::{
     open_uuid_construction_snapshot,
 };
 
-const FORMAT_VERSION: u32 = 2;
+const FORMAT_VERSION: u32 = 3;
 const PRIVATE_ROOT: &str = ".graphforge-construction";
 const CHECKPOINT: &str = "checkpoint.json";
 const INTENT: &str = "intent.json";
@@ -38,26 +44,28 @@ const BLOCK_BYTES: usize = 1 << 20;
 const MAX_CONTROL_BYTES: u64 = 64 << 10;
 const IDENTITY_WIDTH: usize = 16;
 const ENDPOINT_WIDTH: usize = 48;
-const NODE_DETAIL_WIDTH: usize = 20;
+const RESOLVED_ENDPOINT_WIDTH: usize = 32;
+const NODE_DETAIL_WIDTH: usize = 272;
 const EDGE_DETAIL_WIDTH: usize = 304;
 const BASE_IDENTITY_WIDTH: usize = 32;
 const BASE_IDENTITIES: &str = "base-identities.run";
 
-/// Canonical node construction input: UUID and primary type id.
+/// Storage-normalized node input. API validation resolves nullable/generated
+/// identities before this boundary; trailing columns are normalized properties.
 pub static CONSTRUCTION_NODE_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
     std::sync::Arc::new(Schema::new(vec![
         Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
-        Field::new("type_id", DataType::UInt32, false),
+        Field::new("label", DataType::Utf8, false),
     ]))
 });
 
-/// Canonical edge construction input: UUID endpoints and relation route.
+/// Storage-normalized edge input. Trailing columns are normalized properties.
 pub static CONSTRUCTION_EDGE_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
     std::sync::Arc::new(Schema::new(vec![
         Field::new("edge_uuid", DataType::FixedSizeBinary(16), false),
-        Field::new("src_uuid", DataType::FixedSizeBinary(16), false),
-        Field::new("dst_uuid", DataType::FixedSizeBinary(16), false),
         Field::new("rel_type", DataType::Utf8, false),
+        Field::new("source_uuid", DataType::FixedSizeBinary(16), false),
+        Field::new("target_uuid", DataType::FixedSizeBinary(16), false),
     ]))
 });
 
@@ -200,6 +208,18 @@ pub struct ConstructionShape {
     pub node_details: Option<String>,
     /// UUID-sorted edge endpoint and relation records, when edges were staged.
     pub edge_details: Option<String>,
+    /// UUID-sorted normalized node row artifacts, partitioned by exact schema.
+    pub node_rows: Vec<String>,
+    /// UUID-sorted normalized edge row artifacts, partitioned by exact schema.
+    pub edge_rows: Vec<String>,
+    /// Edge-UUID regrouped `(edge, role, node_surrogate)` endpoint run.
+    pub edge_endpoints: Option<String>,
+    /// Timestamp that the publisher must use for every RuntimeCatalog observation.
+    pub runtime_catalog_now_micros: i64,
+    /// Authority digest of the exact normalized row artifacts that feed the catalog.
+    pub runtime_catalog_inputs_sha256: String,
+    /// Serialized RuntimeCatalog produced once from the normalized row stream.
+    pub runtime_catalog: String,
     /// Live retained plus staged nodes.
     pub node_count: u64,
     /// Live retained plus staged edges.
@@ -260,6 +280,8 @@ pub struct ConstructionChunkReceipt {
     pub input_bytes: u64,
     /// Canonical logical digest, independent of Arrow buffer layout.
     pub input_sha256: String,
+    /// Digest of the complete normalized Arrow schema carried by the row artifact.
+    pub schema_sha256: String,
     /// Fixed-width run records.
     pub run_records: u64,
     parquet: ArtifactReceipt,
@@ -275,6 +297,9 @@ struct Checkpoint {
     project_identity: IdentityRecord,
     session_identity: IdentityRecord,
     parent_topology_generation: u64,
+    /// One authority-bound timestamp used by every catalog/topology row produced
+    /// by this operation. Reopen never consults the wall clock again.
+    session_now_micros: i64,
     budgets: GraphConstructionBudgets,
     state: GraphConstructionState,
     next_sequence: u64,
@@ -298,6 +323,7 @@ struct ChunkIntent {
     rows: u64,
     input_bytes: u64,
     input_sha256: String,
+    schema_sha256: String,
     parent_topology_generation: u64,
     prior_receipt_sha256: Option<String>,
     run_records: u64,
@@ -451,6 +477,12 @@ impl GraphConstructionSession {
                     project_identity: project_identity.into(),
                     session_identity: session_identity.into(),
                     parent_topology_generation,
+                    session_now_micros: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map_err(storage)?
+                        .as_micros()
+                        .try_into()
+                        .map_err(|_| storage("session timestamp exceeds i64"))?,
                     budgets,
                     state: GraphConstructionState::Staging,
                     next_sequence: 0,
@@ -497,6 +529,13 @@ impl GraphConstructionSession {
     #[must_use]
     pub const fn parent_topology_generation(&self) -> u64 {
         self.checkpoint.parent_topology_generation
+    }
+
+    /// Authority-bound timestamp for deterministic topology and runtime-catalog
+    /// materialization. It is created once and survives crash/reopen.
+    #[must_use]
+    pub const fn session_now_micros(&self) -> i64 {
+        self.checkpoint.session_now_micros
     }
 
     /// Measured aggregate evidence.
@@ -553,6 +592,7 @@ impl GraphConstructionSession {
             return Err(storage("node chunk cannot follow edge staging"));
         }
         let input_sha256 = logical_batch_digest(kind, batch)?;
+        let schema_sha256 = normalized_schema_digest(batch.schema().as_ref())?;
         let key_name = chunk_key_name(chunk_id);
         if let Ok(mut key_file) = self.root.open_child_file(OsStr::new(&key_name)) {
             let pointer: ReceiptPointer = decode_bounded(&mut key_file)?;
@@ -597,6 +637,7 @@ impl GraphConstructionSession {
             rows: batch.num_rows() as u64,
             input_bytes: input_bytes as u64,
             input_sha256,
+            schema_sha256,
             parent_topology_generation: self.checkpoint.parent_topology_generation,
             prior_receipt_sha256: self.checkpoint.last_receipt_sha256.clone(),
             run_records: run_records as u64,
@@ -608,10 +649,11 @@ impl GraphConstructionSession {
         install_control(&self.root, INTENT, &intent)?;
         reject_cancelled(&mut cancelled)?;
         let stem = artifact_stem(sequence, kind);
+        let sorted_batch = uuid_sorted_batch(kind, batch)?;
         intent.parquet = Some(write_parquet(
             &self.root,
             &format!("{stem}.parquet"),
-            batch,
+            &sorted_batch,
         )?);
         replace_control(&self.root, INTENT, &intent)?;
         reject_cancelled(&mut cancelled)?;
@@ -738,10 +780,30 @@ impl GraphConstructionSession {
         let mut edge_details = Vec::new();
         let mut endpoints = Vec::new();
         let mut receipts = Vec::new();
+        let mut row_groups: BTreeMap<(u8, String), Vec<String>> = BTreeMap::new();
+        let mut catalog_authority = Sha256::new();
         for sequence in 0..self.checkpoint.next_sequence {
             reject_cancelled(&mut cancelled)?;
             let receipt = self.read_receipt(sequence)?;
             validate_receipt_artifacts(&self.root, &receipt)?;
+            catalog_authority.update([if receipt.kind == ConstructionChunkKind::Node {
+                0
+            } else {
+                1
+            }]);
+            catalog_authority.update(receipt.schema_sha256.as_bytes());
+            catalog_authority.update(receipt.parquet.sha256.as_bytes());
+            row_groups
+                .entry((
+                    if receipt.kind == ConstructionChunkKind::Node {
+                        0
+                    } else {
+                        1
+                    },
+                    receipt.schema_sha256.clone(),
+                ))
+                .or_default()
+                .push(receipt.parquet.name.clone());
             match receipt.kind {
                 ConstructionChunkKind::Node => node_details.push(String::new()),
                 ConstructionChunkKind::Edge => {
@@ -872,6 +934,43 @@ impl GraphConstructionSession {
             &mut cancelled,
             &mut self.checkpoint.evidence,
         )?;
+        let edge_endpoints = resolve_endpoint_surrogates(
+            &self.root,
+            &identities,
+            endpoints.as_deref(),
+            self.checkpoint.budgets.max_batch_rows,
+            self.checkpoint.budgets.merge_fan_in,
+            &mut cancelled,
+            &mut self.checkpoint.evidence,
+        )?;
+        let mut node_rows = Vec::new();
+        let mut edge_rows = Vec::new();
+        for ((kind, schema_digest), inputs) in row_groups {
+            reject_cancelled(&mut cancelled)?;
+            let output = format!("shaped-rows-{kind}-{schema_digest}.parquet");
+            merge_row_all(
+                &self.root,
+                inputs,
+                &output,
+                self.checkpoint.budgets.max_batch_rows,
+                self.checkpoint.budgets.max_batch_bytes,
+                self.checkpoint.budgets.merge_fan_in,
+                &mut cancelled,
+                &mut self.checkpoint.evidence,
+            )?;
+            if kind == 0 {
+                node_rows.push(output);
+            } else {
+                edge_rows.push(output);
+            }
+        }
+        let runtime_catalog = build_runtime_catalog(
+            &self.root,
+            &node_rows,
+            &edge_rows,
+            self.checkpoint.session_now_micros,
+            &mut cancelled,
+        )?;
         self.checkpoint.evidence.merge_read_blocks = self
             .checkpoint
             .evidence
@@ -891,13 +990,27 @@ impl GraphConstructionSession {
             identities,
             node_details,
             edge_details,
+            node_rows,
+            edge_rows,
+            edge_endpoints,
+            runtime_catalog_now_micros: self.checkpoint.session_now_micros,
+            runtime_catalog_inputs_sha256: hex(&catalog_authority.finalize()),
+            runtime_catalog,
             node_count,
             edge_count,
             max_node_surrogate,
             max_edge_surrogate,
         };
         let mut outputs = vec![receipt_for_existing(&self.root, &shape.identities)?];
-        for name in shape.node_details.iter().chain(shape.edge_details.iter()) {
+        for name in shape
+            .node_details
+            .iter()
+            .chain(shape.edge_details.iter())
+            .chain(shape.node_rows.iter())
+            .chain(shape.edge_rows.iter())
+            .chain(shape.edge_endpoints.iter())
+            .chain(std::iter::once(&shape.runtime_catalog))
+        {
             outputs.push(receipt_for_existing(&self.root, name)?);
         }
         replace_control(&self.root, CHECKPOINT, &self.checkpoint)?;
@@ -1153,10 +1266,10 @@ fn extract_runs(kind: ConstructionChunkKind, batch: &RecordBatch) -> Result<RunA
     let mut endpoints = Vec::new();
     let details = if kind == ConstructionChunkKind::Edge {
         let edges = uuid_column(batch, "edge_uuid")?;
-        let src = uuid_column(batch, "src_uuid")?;
-        let dst = uuid_column(batch, "dst_uuid")?;
+        let src = uuid_column(batch, "source_uuid")?;
+        let dst = uuid_column(batch, "target_uuid")?;
         let routes = batch
-            .column(3)
+            .column(1)
             .as_any()
             .downcast_ref::<StringArray>()
             .ok_or_else(|| storage("canonical edge route is not Utf8"))?;
@@ -1189,16 +1302,19 @@ fn extract_runs(kind: ConstructionChunkKind, batch: &RecordBatch) -> Result<RunA
         DetailRuns::Edge(details)
     } else {
         let nodes = uuid_column(batch, "node_uuid")?;
-        let types = batch
+        let labels = batch
             .column(1)
             .as_any()
-            .downcast_ref::<UInt32Array>()
-            .ok_or_else(|| storage("canonical node type is not UInt32"))?;
+            .downcast_ref::<StringArray>()
+            .ok_or_else(|| storage("canonical node label is not Utf8"))?;
         let mut details = Vec::with_capacity(batch.num_rows());
         for row in 0..batch.num_rows() {
             let mut detail = [0_u8; NODE_DETAIL_WIDTH];
             detail[..16].copy_from_slice(&uuid_value(nodes, row)?);
-            detail[16..20].copy_from_slice(&types.value(row).to_be_bytes());
+            let label = labels.value(row).as_bytes();
+            detail[16] = u8::try_from(label.len())
+                .map_err(|_| storage("canonical node label exceeds identifier bound"))?;
+            detail[17..17 + label.len()].copy_from_slice(label);
             details.push(detail);
         }
         details.sort_unstable();
@@ -1216,27 +1332,40 @@ fn validate_schema(kind: ConstructionChunkKind, batch: &RecordBatch) -> Result<(
         ConstructionChunkKind::Node => &*CONSTRUCTION_NODE_SCHEMA,
         ConstructionChunkKind::Edge => &*CONSTRUCTION_EDGE_SCHEMA,
     };
-    if batch.schema().as_ref() != expected.as_ref() {
+    if batch.num_columns() < expected.fields().len()
+        || batch.schema().fields()[..expected.fields().len()] != expected.fields()[..]
+        || batch.schema().fields()[expected.fields().len()..]
+            .iter()
+            .any(|field| {
+                matches!(
+                    field.name().as_str(),
+                    "node_uuid"
+                        | "label"
+                        | "edge_uuid"
+                        | "rel_type"
+                        | "source_uuid"
+                        | "target_uuid"
+                ) || !graphforge_core::identifier::is_graph_identifier(field.name())
+            })
+    {
         return Err(storage("construction batch schema is not canonical"));
     }
-    for column in batch.columns() {
+    for column in &batch.columns()[..expected.fields().len()] {
         if column.null_count() != 0 {
-            return Err(storage("canonical construction columns are non-null"));
+            return Err(storage("required construction columns are non-null"));
         }
     }
-    if kind == ConstructionChunkKind::Edge {
-        let routes = batch
-            .column(3)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or_else(|| storage("canonical edge route is not Utf8"))?;
-        if routes
-            .iter()
-            .flatten()
-            .any(|route| !graphforge_core::identifier::is_graph_identifier(route))
-        {
-            return Err(storage("invalid canonical edge route"));
-        }
+    let identifiers = batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .ok_or_else(|| storage("canonical label or relation is not Utf8"))?;
+    if identifiers
+        .iter()
+        .flatten()
+        .any(|value| !graphforge_core::identifier::is_graph_identifier(value))
+    {
+        return Err(storage("invalid canonical label or relation"));
     }
     Ok(())
 }
@@ -1252,22 +1381,24 @@ fn logical_batch_digest(
     match kind {
         ConstructionChunkKind::Node => {
             let uuids = uuid_column(batch, "node_uuid")?;
-            let types = batch
+            let labels = batch
                 .column(1)
                 .as_any()
-                .downcast_ref::<UInt32Array>()
-                .ok_or_else(|| storage("canonical node type is not UInt32"))?;
+                .downcast_ref::<StringArray>()
+                .ok_or_else(|| storage("canonical node label is not Utf8"))?;
             for row in 0..batch.num_rows() {
                 digest.update(uuid_value(uuids, row)?);
-                digest.update(types.value(row).to_be_bytes());
+                let label = labels.value(row).as_bytes();
+                digest.update((label.len() as u64).to_be_bytes());
+                digest.update(label);
             }
         }
         ConstructionChunkKind::Edge => {
             let edge = uuid_column(batch, "edge_uuid")?;
-            let src = uuid_column(batch, "src_uuid")?;
-            let dst = uuid_column(batch, "dst_uuid")?;
+            let src = uuid_column(batch, "source_uuid")?;
+            let dst = uuid_column(batch, "target_uuid")?;
             let route = batch
-                .column(3)
+                .column(1)
                 .as_any()
                 .downcast_ref::<StringArray>()
                 .ok_or_else(|| storage("canonical edge route is not Utf8"))?;
@@ -1281,7 +1412,90 @@ fn logical_batch_digest(
             }
         }
     }
+    for column in expected_property_columns(kind, batch) {
+        digest.update(column.data_type().to_string().as_bytes());
+        for row in 0..column.len() {
+            if column.is_null(row) {
+                digest.update([0]);
+            } else {
+                digest.update([1]);
+                let value = arrow::util::display::array_value_to_string(column.as_ref(), row)
+                    .map_err(storage)?;
+                digest.update((value.len() as u64).to_be_bytes());
+                digest.update(value.as_bytes());
+            }
+        }
+    }
     Ok(hex(&digest.finalize()))
+}
+
+fn normalized_schema_digest(schema: &Schema) -> Result<String, GfError> {
+    let mut digest = Sha256::new();
+    for field in schema.fields() {
+        digest.update((field.name().len() as u64).to_be_bytes());
+        digest.update(field.name().as_bytes());
+        let data_type = format!("{:?}", field.data_type());
+        digest.update((data_type.len() as u64).to_be_bytes());
+        digest.update(data_type.as_bytes());
+        digest.update([u8::from(field.is_nullable())]);
+        let mut metadata = field.metadata().iter().collect::<Vec<_>>();
+        metadata.sort_unstable();
+        for (key, value) in metadata {
+            digest.update((key.len() as u64).to_be_bytes());
+            digest.update(key.as_bytes());
+            digest.update((value.len() as u64).to_be_bytes());
+            digest.update(value.as_bytes());
+        }
+    }
+    let mut metadata = schema.metadata().iter().collect::<Vec<_>>();
+    metadata.sort_unstable();
+    for (key, value) in metadata {
+        digest.update((key.len() as u64).to_be_bytes());
+        digest.update(key.as_bytes());
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value.as_bytes());
+    }
+    Ok(hex(&digest.finalize()))
+}
+
+fn uuid_sorted_batch(
+    kind: ConstructionChunkKind,
+    batch: &RecordBatch,
+) -> Result<RecordBatch, GfError> {
+    let identity = uuid_column(
+        batch,
+        if kind == ConstructionChunkKind::Node {
+            "node_uuid"
+        } else {
+            "edge_uuid"
+        },
+    )?;
+    let mut order = (0..batch.num_rows()).collect::<Vec<_>>();
+    order.sort_unstable_by_key(|&row| identity.value(row));
+    let indices = UInt32Array::from(
+        order
+            .into_iter()
+            .map(|row| u32::try_from(row).map_err(|_| storage("row index exceeds UInt32")))
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+    let columns = batch
+        .columns()
+        .iter()
+        .map(|column| take(column.as_ref(), &indices, None).map_err(storage))
+        .collect::<Result<Vec<_>, _>>()?;
+    RecordBatch::try_new(batch.schema(), columns).map_err(storage)
+}
+
+fn expected_property_columns<'a>(
+    kind: ConstructionChunkKind,
+    batch: &'a RecordBatch,
+) -> impl Iterator<Item = &'a arrow::array::ArrayRef> {
+    let required = if kind == ConstructionChunkKind::Node {
+        2
+    } else {
+        4
+    };
+    batch.columns()[required..].iter()
 }
 
 fn uuid_column<'a>(
@@ -1479,11 +1693,20 @@ fn recover_shape_intent(root: &StableDirectory, checkpoint: &Checkpoint) -> Resu
             .shape
             .as_ref()
             .ok_or_else(|| storage("complete shape manifest lacks output"))?;
-        if intent.outputs.is_empty()
-            || !intent
-                .outputs
-                .iter()
-                .any(|item| item.name == shape.identities)
+        if shape.runtime_catalog_now_micros != checkpoint.session_now_micros
+            || shape.runtime_catalog_inputs_sha256.len() != 64
+            || !shape
+                .runtime_catalog_inputs_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+            || std::iter::once(&shape.identities)
+                .chain(shape.node_details.iter())
+                .chain(shape.edge_details.iter())
+                .chain(shape.node_rows.iter())
+                .chain(shape.edge_rows.iter())
+                .chain(shape.edge_endpoints.iter())
+                .chain(std::iter::once(&shape.runtime_catalog))
+                .any(|name| !intent.outputs.iter().any(|item| item.name == *name))
         {
             return Err(storage("complete shape manifest inventory is incomplete"));
         }
@@ -1526,6 +1749,16 @@ fn recover_shape_intent(root: &StableDirectory, checkpoint: &Checkpoint) -> Resu
         checkpoint.budgets.merge_fan_in,
     );
     names.extend(source_names);
+    for child in root.child_names().map_err(storage)? {
+        let Some(name) = child.to_str() else { continue };
+        if name.starts_with("merge-rows-")
+            || name.starts_with("shaped-rows-")
+            || name.starts_with("merge-resolved-")
+            || name == "shaped-runtime-catalog.parquet"
+        {
+            names.push(name.to_owned());
+        }
+    }
     for name in names {
         match root.open_child_file(OsStr::new(&name)) {
             Ok(file) => {
@@ -1625,7 +1858,19 @@ fn authenticate_shaped_output(
 }
 
 fn is_shape_artifact_name(name: &str) -> bool {
-    if name == "shaped-identities.run" {
+    if name == "shaped-identities.run" || name == "shaped-runtime-catalog.parquet" {
+        return true;
+    }
+    if let Some(body) = name
+        .strip_prefix("shaped-rows-")
+        .and_then(|body| body.strip_suffix(".parquet"))
+    {
+        return body.len() == 66
+            && matches!(body.as_bytes().first(), Some(b'0' | b'1'))
+            && body.as_bytes().get(1) == Some(&b'-')
+            && body[2..].bytes().all(|byte| byte.is_ascii_hexdigit());
+    }
+    if name.starts_with("merge-rows-l") && name.ends_with(".parquet") {
         return true;
     }
     if let Some(sequence) = name
@@ -1638,6 +1883,7 @@ fn is_shape_artifact_name(name: &str) -> bool {
         "merge-node-source-",
         "merge-edge-source-",
         "merge-endpoint-source-",
+        "merge-resolved-source-",
     ] {
         if let Some(sequence) = name
             .strip_prefix(prefix)
@@ -1651,6 +1897,7 @@ fn is_shape_artifact_name(name: &str) -> bool {
         "merge-node-details-l",
         "merge-edge-details-l",
         "merge-endpoints-l",
+        "merge-resolved-l",
     ]
     .iter()
     .any(|prefix| {
@@ -1902,6 +2149,289 @@ fn merge_fixed_group<const N: usize>(
     Ok(())
 }
 
+struct RowCursor {
+    reader: Box<dyn Iterator<Item = Result<RecordBatch, arrow::error::ArrowError>>>,
+    batch: Option<RecordBatch>,
+    row: usize,
+}
+
+impl RowCursor {
+    fn advance(&mut self) -> Result<Option<[u8; 16]>, GfError> {
+        loop {
+            if let Some(batch) = &self.batch
+                && self.row < batch.num_rows()
+            {
+                return uuid_value(
+                    uuid_column(batch, batch.schema().field(0).name())?,
+                    self.row,
+                )
+                .map(Some);
+            }
+            self.batch = self.reader.next().transpose().map_err(storage)?;
+            self.row = 0;
+            if self.batch.is_none() {
+                return Ok(None);
+            }
+        }
+    }
+}
+
+fn materialize_selected_rows(
+    schema: SchemaRef,
+    selected: &[(RecordBatch, usize)],
+) -> Result<RecordBatch, GfError> {
+    let columns = (0..schema.fields().len())
+        .map(|column| {
+            let data = selected
+                .iter()
+                .map(|(batch, _)| batch.column(column).to_data())
+                .collect::<Vec<_>>();
+            let refs = data.iter().collect::<Vec<_>>();
+            let mut mutable = MutableArrayData::new(refs, false, selected.len());
+            for (source, (_, row)) in selected.iter().enumerate() {
+                mutable.extend(source, *row, row.saturating_add(1));
+            }
+            Ok(make_array(mutable.freeze()))
+        })
+        .collect::<Result<Vec<_>, GfError>>()?;
+    RecordBatch::try_new(schema, columns).map_err(storage)
+}
+
+/// Merge one exact-schema set of UUID-sorted normalized Parquet row artifacts.
+/// Memory is bounded by one decoder window per input plus one caller-sized
+/// output window; no property values are projected away.
+fn merge_row_group(
+    root: &StableDirectory,
+    inputs: &[String],
+    output: &str,
+    output_rows: usize,
+    output_bytes: usize,
+    cancelled: &mut impl FnMut() -> bool,
+    evidence: &mut GraphConstructionEvidence,
+) -> Result<ArtifactReceipt, GfError> {
+    if inputs.is_empty() || output_rows == 0 || output_bytes == 0 {
+        return Err(storage("invalid row merge group"));
+    }
+    let mut cursors = Vec::with_capacity(inputs.len());
+    let mut schema: Option<SchemaRef> = None;
+    for input in inputs {
+        let file = root.open_child_file(OsStr::new(input)).map_err(storage)?;
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(storage)?;
+        if schema
+            .as_ref()
+            .is_some_and(|known| known.as_ref() != builder.schema().as_ref())
+        {
+            return Err(storage("row merge schemas differ"));
+        }
+        schema.get_or_insert_with(|| builder.schema().clone());
+        cursors.push(RowCursor {
+            reader: Box::new(
+                builder
+                    .with_batch_size(output_rows.min(4096))
+                    .build()
+                    .map_err(storage)?,
+            ),
+            batch: None,
+            row: 0,
+        });
+    }
+    let schema = schema.ok_or_else(|| storage("row merge lacks schema"))?;
+    let temporary = artifact_temp(output);
+    let file = root
+        .create_replaceable_child_file(OsStr::new(&temporary))
+        .map_err(storage)?;
+    let identity = file_identity(&file).map_err(storage)?;
+    let hashing = HashingWriter::new(file);
+    let buffered = BufWriter::with_capacity(BLOCK_BYTES, hashing);
+    let mut writer = ArrowWriter::try_new(buffered, schema.clone(), None).map_err(storage)?;
+    let mut heap = BinaryHeap::new();
+    for (source, cursor) in cursors.iter_mut().enumerate() {
+        if let Some(uuid) = cursor.advance()? {
+            heap.push((Reverse(uuid), Reverse(source)));
+        }
+    }
+    let mut selected = Vec::with_capacity(output_rows);
+    let mut selected_bytes = 0_usize;
+    let mut previous = None;
+    while let Some((Reverse(uuid), Reverse(source))) = heap.pop() {
+        reject_cancelled(cancelled)?;
+        if previous.is_some_and(|prior| prior >= uuid) {
+            return Err(storage("duplicate or unordered UUID in row merge"));
+        }
+        previous = Some(uuid);
+        let cursor = &mut cursors[source];
+        let batch = cursor
+            .batch
+            .as_ref()
+            .ok_or_else(|| storage("row cursor lacks batch"))?;
+        let row_bytes = batch.columns().iter().try_fold(0_usize, |total, column| {
+            column
+                .slice(cursor.row, 1)
+                .to_data()
+                .get_slice_memory_size()
+                .map(|bytes| total.saturating_add(bytes))
+                .map_err(storage)
+        })?;
+        if row_bytes > output_bytes {
+            return Err(storage("one normalized row exceeds merge byte window"));
+        }
+        if !selected.is_empty()
+            && (selected.len() == output_rows
+                || selected_bytes.saturating_add(row_bytes) > output_bytes)
+        {
+            let output_batch = materialize_selected_rows(schema.clone(), &selected)?;
+            evidence.merge_read_records = evidence
+                .merge_read_records
+                .saturating_add(output_batch.num_rows() as u64);
+            writer.write(&output_batch).map_err(storage)?;
+            evidence.merge_written_records = evidence
+                .merge_written_records
+                .saturating_add(output_batch.num_rows() as u64);
+            selected.clear();
+            selected_bytes = 0;
+        }
+        selected.push((batch.clone(), cursor.row));
+        selected_bytes = selected_bytes.saturating_add(row_bytes);
+        cursor.row = cursor.row.saturating_add(1);
+        if let Some(next) = cursor.advance()? {
+            heap.push((Reverse(next), Reverse(source)));
+        }
+        if heap.is_empty() {
+            let batch = materialize_selected_rows(schema.clone(), &selected)?;
+            evidence.merge_read_records = evidence
+                .merge_read_records
+                .saturating_add(batch.num_rows() as u64);
+            writer.write(&batch).map_err(storage)?;
+            evidence.merge_written_records = evidence
+                .merge_written_records
+                .saturating_add(batch.num_rows() as u64);
+            selected.clear();
+            selected_bytes = 0;
+        }
+    }
+    writer.finish().map_err(storage)?;
+    writer.sync().map_err(storage)?;
+    let hashing = writer.inner().get_ref();
+    hashing.inner.sync_all().map_err(storage)?;
+    let receipt = ArtifactReceipt {
+        name: output.to_owned(),
+        bytes: hashing.bytes,
+        sha256: hex(&hashing.digest.clone().finalize()),
+        identity: identity.into(),
+        write_operations: hashing.operations,
+    };
+    root.sync().map_err(storage)?;
+    root.install_child(OsStr::new(&temporary), identity, OsStr::new(output))
+        .map_err(storage)?;
+    root.sync().map_err(storage)?;
+    evidence.merge_groups = evidence.merge_groups.saturating_add(1);
+    evidence.merge_written_bytes = evidence.merge_written_bytes.saturating_add(receipt.bytes);
+    Ok(receipt)
+}
+
+fn merge_row_all(
+    root: &StableDirectory,
+    mut inputs: Vec<String>,
+    output: &str,
+    output_rows: usize,
+    output_bytes: usize,
+    fan_in: usize,
+    cancelled: &mut impl FnMut() -> bool,
+    evidence: &mut GraphConstructionEvidence,
+) -> Result<ArtifactReceipt, GfError> {
+    let mut level = 0_u32;
+    let namespace = &sha256(output.as_bytes())[..16];
+    while inputs.len() > fan_in {
+        evidence.merge_passes = evidence.merge_passes.saturating_add(1);
+        let mut next = Vec::new();
+        for (group, names) in inputs.chunks(fan_in).enumerate() {
+            let name = format!("merge-rows-{namespace}-l{level:03}-g{group:020}.parquet");
+            merge_row_group(
+                root,
+                names,
+                &name,
+                output_rows,
+                output_bytes,
+                cancelled,
+                evidence,
+            )?;
+            next.push(name);
+        }
+        for old in &inputs {
+            if old.starts_with("merge-rows-") {
+                unlink_named(root, old)?;
+            }
+        }
+        inputs = next;
+        level = level.saturating_add(1);
+    }
+    evidence.merge_passes = evidence.merge_passes.saturating_add(1);
+    evidence.peak_merge_inputs = evidence.peak_merge_inputs.max(inputs.len() as u64);
+    merge_row_group(
+        root,
+        &inputs,
+        output,
+        output_rows,
+        output_bytes,
+        cancelled,
+        evidence,
+    )
+}
+
+fn build_runtime_catalog(
+    root: &StableDirectory,
+    node_rows: &[String],
+    edge_rows: &[String],
+    now_micros: i64,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<String, GfError> {
+    let mut catalog = RuntimeCatalog::new();
+    for (kind, names) in [
+        (ConstructionChunkKind::Node, node_rows),
+        (ConstructionChunkKind::Edge, edge_rows),
+    ] {
+        for name in names {
+            let file = root.open_child_file(OsStr::new(name)).map_err(storage)?;
+            let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+                .map_err(storage)?
+                .with_batch_size(4096)
+                .build()
+                .map_err(storage)?;
+            for batch in reader {
+                reject_cancelled(cancelled)?;
+                let batch = batch.map_err(storage)?;
+                let owner = batch
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .ok_or_else(|| storage("catalog owner column is not Utf8"))?;
+                let required = if kind == ConstructionChunkKind::Node {
+                    2
+                } else {
+                    4
+                };
+                for row in 0..batch.num_rows() {
+                    let owner_name = owner.value(row);
+                    match kind {
+                        ConstructionChunkKind::Node => {
+                            catalog.intern_label_at(owner_name, now_micros);
+                        }
+                        ConstructionChunkKind::Edge => {
+                            catalog.intern_relation_type_at(owner_name, now_micros);
+                        }
+                    }
+                    for field in &batch.schema().fields()[required..] {
+                        catalog.intern_property_at(field.name(), Some(owner_name), now_micros);
+                    }
+                }
+            }
+        }
+    }
+    let output = "shaped-runtime-catalog.parquet";
+    write_parquet(root, output, &catalog.to_record_batch())?;
+    Ok(output.to_owned())
+}
+
 fn read_fixed<const N: usize>(reader: &mut impl Read) -> Result<Option<[u8; N]>, GfError> {
     let mut record = [0_u8; N];
     let mut filled = 0;
@@ -1975,6 +2505,22 @@ fn validate_unified_and_details(
     {
         return Err(storage("identity and canonical detail domains disagree"));
     }
+    validate_detail_domain::<NODE_DETAIL_WIDTH>(
+        root,
+        identities_name,
+        node_details_name,
+        0,
+        cancelled,
+        evidence,
+    )?;
+    validate_detail_domain::<EDGE_DETAIL_WIDTH>(
+        root,
+        identities_name,
+        edge_details_name,
+        1,
+        cancelled,
+        evidence,
+    )?;
     validate_endpoints(
         root,
         identities_name,
@@ -1990,6 +2536,67 @@ fn validate_unified_and_details(
         .checked_add(new_edges)
         .ok_or_else(|| storage("edge surrogate overflow"))?;
     Ok((node_count, edge_count, max_node, max_edge))
+}
+
+fn validate_detail_domain<const N: usize>(
+    root: &StableDirectory,
+    identities_name: &str,
+    details_name: Option<&str>,
+    kind: u8,
+    cancelled: &mut impl FnMut() -> bool,
+    evidence: &mut GraphConstructionEvidence,
+) -> Result<(), GfError> {
+    let Some(details_name) = details_name else {
+        return Ok(());
+    };
+    let mut identities = BufReader::with_capacity(
+        BLOCK_BYTES,
+        root.open_child_file(OsStr::new(identities_name))
+            .map_err(storage)?,
+    );
+    let mut details = BufReader::with_capacity(
+        BLOCK_BYTES,
+        root.open_child_file(OsStr::new(details_name))
+            .map_err(storage)?,
+    );
+    let mut identity = read_fixed::<BASE_IDENTITY_WIDTH>(&mut identities)?;
+    let mut count = 0_u64;
+    while let Some(detail) = read_fixed::<N>(&mut details)? {
+        while identity
+            .as_ref()
+            .is_some_and(|item| item[17] == 1 || item[16] != kind || item[..16] < detail[..16])
+        {
+            identity = read_fixed::<BASE_IDENTITY_WIDTH>(&mut identities)?;
+            account_merge_read::<BASE_IDENTITY_WIDTH>(evidence);
+        }
+        if identity
+            .as_ref()
+            .is_none_or(|item| item[17] != 0 || item[16] != kind || item[..16] != detail[..16])
+        {
+            return Err(storage(
+                "canonical detail UUID differs from identity domain",
+            ));
+        }
+        account_merge_read::<N>(evidence);
+        identity = read_fixed::<BASE_IDENTITY_WIDTH>(&mut identities)?;
+        account_merge_read::<BASE_IDENTITY_WIDTH>(evidence);
+        count += 1;
+        if count.is_multiple_of(4096) {
+            reject_cancelled(cancelled)?;
+        }
+    }
+    while identity
+        .as_ref()
+        .is_some_and(|item| item[17] == 1 || item[16] != kind)
+    {
+        identity = read_fixed::<BASE_IDENTITY_WIDTH>(&mut identities)?;
+    }
+    if identity.is_some() {
+        return Err(storage(
+            "identity domain contains a row without canonical detail",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_endpoints(
@@ -2108,6 +2715,90 @@ fn assign_surrogates(
         .map_err(storage)?;
     root.sync().map_err(storage)?;
     Ok(output.to_owned())
+}
+
+fn resolve_endpoint_surrogates(
+    root: &StableDirectory,
+    identities_name: &str,
+    endpoints_name: Option<&str>,
+    window_rows: usize,
+    fan_in: usize,
+    cancelled: &mut impl FnMut() -> bool,
+    evidence: &mut GraphConstructionEvidence,
+) -> Result<Option<String>, GfError> {
+    let Some(endpoints_name) = endpoints_name else {
+        return Ok(None);
+    };
+    let mut identities = BufReader::with_capacity(
+        BLOCK_BYTES,
+        root.open_child_file(OsStr::new(identities_name))
+            .map_err(storage)?,
+    );
+    let mut endpoints = BufReader::with_capacity(
+        BLOCK_BYTES,
+        root.open_child_file(OsStr::new(endpoints_name))
+            .map_err(storage)?,
+    );
+    let mut identity = read_fixed::<BASE_IDENTITY_WIDTH>(&mut identities)?;
+    let mut window = Vec::<[u8; RESOLVED_ENDPOINT_WIDTH]>::with_capacity(window_rows);
+    let mut runs = Vec::new();
+    let mut sequence = 0_u64;
+    while let Some(endpoint) = read_fixed::<ENDPOINT_WIDTH>(&mut endpoints)? {
+        while identity
+            .as_ref()
+            .is_some_and(|record| record[..16] < endpoint[..16])
+        {
+            identity = read_fixed::<BASE_IDENTITY_WIDTH>(&mut identities)?;
+            account_merge_read::<BASE_IDENTITY_WIDTH>(evidence);
+        }
+        let node = identity
+            .as_ref()
+            .filter(|record| record[..16] == endpoint[..16] && record[16] == 0)
+            .ok_or_else(|| storage("endpoint UUID lacks node surrogate"))?;
+        if node[24..32].iter().all(|byte| *byte == 0) {
+            return Err(storage("endpoint node surrogate is zero"));
+        }
+        let mut resolved = [0_u8; RESOLVED_ENDPOINT_WIDTH];
+        resolved[..16].copy_from_slice(&endpoint[16..32]);
+        resolved[16] = endpoint[32];
+        resolved[24..32].copy_from_slice(&node[24..32]);
+        window.push(resolved);
+        account_merge_read::<ENDPOINT_WIDTH>(evidence);
+        if window.len() == window_rows {
+            window.sort_unstable();
+            let name = format!("merge-resolved-source-{sequence:020}.run");
+            let receipt = write_fixed_run(root, &name, &window)?;
+            evidence.merge_written_bytes =
+                evidence.merge_written_bytes.saturating_add(receipt.bytes);
+            evidence.merge_written_records = evidence
+                .merge_written_records
+                .saturating_add(window.len() as u64);
+            runs.push(name);
+            window.clear();
+            sequence = sequence.saturating_add(1);
+            reject_cancelled(cancelled)?;
+        }
+    }
+    if !window.is_empty() {
+        window.sort_unstable();
+        let name = format!("merge-resolved-source-{sequence:020}.run");
+        let receipt = write_fixed_run(root, &name, &window)?;
+        evidence.merge_written_bytes = evidence.merge_written_bytes.saturating_add(receipt.bytes);
+        evidence.merge_written_records = evidence
+            .merge_written_records
+            .saturating_add(window.len() as u64);
+        runs.push(name);
+    }
+    merge_fixed_all::<RESOLVED_ENDPOINT_WIDTH>(
+        root,
+        runs,
+        "merge-resolved",
+        fan_in,
+        false,
+        cancelled,
+        evidence,
+    )
+    .map(Some)
 }
 
 fn create_base_snapshot(
@@ -2282,6 +2973,12 @@ fn authenticate_artifact(
                         return Err(storage("edge detail run record is malformed"));
                     }
                 }
+                if width == NODE_DETAIL_WIDTH {
+                    let label_len = record[16] as usize;
+                    if label_len == 0 || record[17 + label_len..].iter().any(|byte| *byte != 0) {
+                        return Err(storage("node detail run record is malformed"));
+                    }
+                }
                 if width == BASE_IDENTITY_WIDTH
                     && (!matches!(record[16], 0 | 1)
                         || record[17] != 1
@@ -2367,6 +3064,7 @@ fn receipt_from_intent(intent: &ChunkIntent) -> Result<ConstructionChunkReceipt,
         rows: intent.rows,
         input_bytes: intent.input_bytes,
         input_sha256: intent.input_sha256.clone(),
+        schema_sha256: intent.schema_sha256.clone(),
         run_records: intent.run_records,
         parquet: intent
             .parquet
@@ -2397,6 +3095,11 @@ fn validate_receipt_semantics(
         || receipt.input_bytes > budgets.max_batch_bytes as u64
         || receipt.run_records > budgets.max_run_records as u64
         || receipt.input_sha256.len() != 64
+        || receipt.schema_sha256.len() != 64
+        || !receipt
+            .schema_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
         || !receipt
             .input_sha256
             .bytes()
@@ -2479,14 +3182,35 @@ fn validate_parquet_shape(
         return Err(storage("Parquet identity changed during schema reopen"));
     }
     let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(storage)?;
-    let expected = match receipt.kind {
+    let expected_prefix = match receipt.kind {
         ConstructionChunkKind::Node => &*CONSTRUCTION_NODE_SCHEMA,
         ConstructionChunkKind::Edge => &*CONSTRUCTION_EDGE_SCHEMA,
     };
-    if builder.schema().as_ref() != expected.as_ref()
+    let schema = builder.schema();
+    if schema.fields().len() < expected_prefix.fields().len()
+        || schema.fields()[..expected_prefix.fields().len()] != expected_prefix.fields()[..]
+        || normalized_schema_digest(schema.as_ref())? != receipt.schema_sha256
         || builder.metadata().file_metadata().num_rows() != receipt.rows as i64
     {
         return Err(storage("Parquet schema or row count differs from receipt"));
+    }
+    let mut reader = builder.with_batch_size(4096).build().map_err(storage)?;
+    let identity_name = if receipt.kind == ConstructionChunkKind::Node {
+        "node_uuid"
+    } else {
+        "edge_uuid"
+    };
+    let mut previous: Option<[u8; 16]> = None;
+    for batch in &mut reader {
+        let batch = batch.map_err(storage)?;
+        let identities = uuid_column(&batch, identity_name)?;
+        for row in 0..batch.num_rows() {
+            let value = uuid_value(identities, row)?;
+            if previous.is_some_and(|prior| prior >= value) {
+                return Err(storage("row artifact is not strictly UUID sorted"));
+            }
+            previous = Some(value);
+        }
     }
     Ok(())
 }
@@ -2517,6 +3241,11 @@ fn validate_intent(intent: &ChunkIntent, checkpoint: &Checkpoint) -> Result<(), 
         || intent.run_records > checkpoint.budgets.max_run_records as u64
         || intent.run_records != expected_run_records
         || intent.input_sha256.len() != 64
+        || intent.schema_sha256.len() != 64
+        || !intent
+            .schema_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
         || !intent
             .input_sha256
             .bytes()
@@ -2576,6 +3305,7 @@ fn validate_checkpoint(
         || !checkpoint.project_identity.matches(project)
         || !checkpoint.session_identity.matches(session)
         || checkpoint.parent_topology_generation != generation
+        || checkpoint.session_now_micros <= 0
         || checkpoint.budgets != budgets
         || checkpoint.base_identities.is_some() != (generation != 0)
         || checkpoint.next_sequence > budgets.max_chunks
@@ -2839,7 +3569,8 @@ fn remove_unrecorded_artifact(
             ConstructionChunkKind::Node => &*CONSTRUCTION_NODE_SCHEMA,
             ConstructionChunkKind::Edge => &*CONSTRUCTION_EDGE_SCHEMA,
         };
-        if builder.schema().as_ref() != expected.as_ref()
+        if builder.schema().fields().len() < expected.fields().len()
+            || builder.schema().fields()[..expected.fields().len()] != expected.fields()[..]
             || builder.metadata().file_metadata().num_rows() != rows as i64
         {
             return Err(storage("unrecorded Parquet artifact is not session-owned"));
@@ -2893,6 +3624,11 @@ fn validate_sorted_run(file: &mut File, width: usize) -> Result<(), GfError> {
                 || (width == EDGE_DETAIL_WIDTH
                     && (record[48] == 0
                         || record[49 + record[48] as usize..]
+                            .iter()
+                            .any(|byte| *byte != 0)))
+                || (width == NODE_DETAIL_WIDTH
+                    && (record[16] == 0
+                        || record[17 + record[16] as usize..]
                             .iter()
                             .any(|byte| *byte != 0)))
                 || (width == BASE_IDENTITY_WIDTH
@@ -3009,7 +3745,7 @@ fn hex(bytes: &[u8]) -> String {
 mod tests {
     use std::sync::Arc;
 
-    use arrow::array::{FixedSizeBinaryArray, StringArray, UInt32Array};
+    use arrow::array::{FixedSizeBinaryArray, Int64Array, StringArray};
     use tempfile::TempDir;
 
     use super::*;
@@ -3026,7 +3762,7 @@ mod tests {
             CONSTRUCTION_NODE_SCHEMA.clone(),
             vec![
                 Arc::new(fixed(&uuids)),
-                Arc::new(UInt32Array::from(vec![7_u32; rows])),
+                Arc::new(StringArray::from(vec!["Person"; rows])),
             ],
         )
         .unwrap()
@@ -3046,9 +3782,9 @@ mod tests {
             CONSTRUCTION_EDGE_SCHEMA.clone(),
             vec![
                 Arc::new(fixed(&edges)),
+                Arc::new(StringArray::from(vec!["R"; rows])),
                 Arc::new(fixed(&src)),
                 Arc::new(fixed(&dst)),
-                Arc::new(StringArray::from(vec!["R"; rows])),
             ],
         )
         .unwrap()
@@ -3062,6 +3798,56 @@ mod tests {
             GraphConstructionBudgets::default(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn row_artifact_retains_dynamic_properties_and_is_uuid_sorted() {
+        let root = TempDir::new().unwrap();
+        let mut session = open(&root, 99);
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+            Field::new("label", DataType::Utf8, false),
+            Field::new("score", DataType::Int64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(fixed(&[3_u128.to_be_bytes(), 1_u128.to_be_bytes()])),
+                Arc::new(StringArray::from(vec!["Person", "Person"])),
+                Arc::new(Int64Array::from(vec![30, 10])),
+            ],
+        )
+        .unwrap();
+        let receipt = session
+            .append(ConstructionChunkKind::Node, "properties", &batch)
+            .unwrap();
+        let file = session
+            .root
+            .open_child_file(OsStr::new(&receipt.parquet.name))
+            .unwrap();
+        let batches = ParquetRecordBatchReaderBuilder::try_new(file)
+            .unwrap()
+            .build()
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let uuids = uuid_column(&batches[0], "node_uuid").unwrap();
+        let scores = batches[0]
+            .column_by_name("score")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(uuid_value(uuids, 0).unwrap(), 1_u128.to_be_bytes());
+        assert_eq!(scores.values(), &[10, 30]);
+        drop(session);
+
+        let resumed = open(&root, 99);
+        assert!(resumed.checkpoint.session_now_micros > 0);
+        assert_eq!(
+            resumed.read_receipt(0).unwrap().schema_sha256,
+            receipt.schema_sha256
+        );
     }
 
     #[test]
@@ -3135,6 +3921,15 @@ mod tests {
             assert_eq!(shape.edge_count, (chunks * 2) as u64);
             assert_eq!(shape.max_node_surrogate, (chunks * 4) as u64);
             assert_eq!(shape.max_edge_surrogate, (chunks * 2) as u64);
+            assert_eq!(shape.node_rows.len(), 1);
+            assert_eq!(shape.edge_rows.len(), 1);
+            assert!(shape.edge_endpoints.is_some());
+            assert!(
+                session
+                    .root
+                    .open_child_file(OsStr::new(&shape.runtime_catalog))
+                    .is_ok()
+            );
             assert!(session.evidence().peak_merge_inputs <= 2);
             assert!(session.evidence().merge_read_bytes > 0);
             assert!(session.evidence().merge_written_bytes > 0);
@@ -3228,9 +4023,9 @@ mod tests {
             CONSTRUCTION_EDGE_SCHEMA.clone(),
             vec![
                 Arc::new(fixed(&[9_000_u128.to_be_bytes()])),
-                Arc::new(fixed(&endpoint)),
-                Arc::new(fixed(&endpoint)),
                 Arc::new(StringArray::from(vec!["R"])),
+                Arc::new(fixed(&endpoint)),
+                Arc::new(fixed(&endpoint)),
             ],
         )
         .unwrap();
@@ -3240,6 +4035,26 @@ mod tests {
         session.seal().unwrap();
         let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
         assert_eq!(shape.edge_count, 1);
+        let mut resolved = BufReader::new(
+            session
+                .root
+                .open_child_file(OsStr::new(shape.edge_endpoints.as_ref().unwrap()))
+                .unwrap(),
+        );
+        let source = read_fixed::<RESOLVED_ENDPOINT_WIDTH>(&mut resolved)
+            .unwrap()
+            .unwrap();
+        let target = read_fixed::<RESOLVED_ENDPOINT_WIDTH>(&mut resolved)
+            .unwrap()
+            .unwrap();
+        assert_eq!(&source[..16], &9_000_u128.to_be_bytes());
+        assert_eq!((source[16], target[16]), (0, 1));
+        assert_eq!(&source[24..32], &target[24..32]);
+        assert!(
+            read_fixed::<RESOLVED_ENDPOINT_WIDTH>(&mut resolved)
+                .unwrap()
+                .is_none()
+        );
         drop(session);
         let mut resumed = GraphConstructionSession::open(
             root.path(),
