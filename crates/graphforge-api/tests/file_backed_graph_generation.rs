@@ -13,24 +13,28 @@
 #[path = "support/project_fixture.rs"]
 mod project_fixture;
 
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use arrow::array::Int64Array;
 use graphforge_api::{
     CheckpointRequest, GraphForge, OperationId, PortableExportRequest, PortableSelection,
     PortableV2ExportRequest, PortableV2ImportRequest, PortableVerifyRequest, verify_portable_v2,
 };
 use graphforge_core::{OntologyMode, TypeId};
 use graphforge_storage::{
-    GRAPH_CAPABILITY_ID, GRAPH_CAPABILITY_VERSION, GRAPH_FILES_FAMILY, GraphFilesOpenStrategy,
-    GraphWriter, PortableV2Limits, PortableV2Mode, PortableV2Output, PortableV2SelectionProfile,
-    ProjectCapability, ProjectGenerationRequest, ProjectStageOutcome, capture_graph_files,
-    empty_workspace_participants, resolve_project_generation,
-    stage_project_generation_with_graph_tree,
+    GRAPH_CAPABILITY_ID, GRAPH_CAPABILITY_VERSION, GRAPH_FILES_FAMILY, GraphFileRole,
+    GraphFilesOpenStrategy, GraphWriter, GraphWriterLimits, PortableV2Limits, PortableV2Mode,
+    PortableV2Output, PortableV2SelectionProfile, ProjectCapability, ProjectGenerationRequest,
+    ProjectStageOutcome, capture_graph_files, empty_workspace_participants,
+    resolve_project_generation, stage_project_generation_with_graph_tree,
 };
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 /// Legacy graph snapshot envelope total (must remain exceeded by oversize evidence).
@@ -38,8 +42,55 @@ const LEGACY_SNAPSHOT_ENVELOPE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// Deterministic oversize padding used for the manual large-class proof.
 const OVERSIZE_PADDING_BYTES: u64 = LEGACY_SNAPSHOT_ENVELOPE_BYTES + 64 * 1024 * 1024;
 
+/// Serializes the process-global storage counters used by the acceptance proof.
+static IO_STATS_LOCK: Mutex<()> = Mutex::new(());
+
+fn result_fingerprint(result: &graphforge_api::ExecutionResult) -> String {
+    let mut hasher = Sha256::new();
+    for batch in &result.batches {
+        for row in 0..batch.num_rows() {
+            for column in batch.columns() {
+                let value = arrow::util::display::array_value_to_string(column, row)
+                    .expect("canonical Arrow display value");
+                hasher.update(value.len().to_le_bytes());
+                hasher.update(value.as_bytes());
+            }
+        }
+    }
+    let digest = hasher.finalize();
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    format!("sha256:{encoded}")
+}
+
+fn scalar_i64(result: &graphforge_api::ExecutionResult) -> i64 {
+    result.batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .expect("scalar is Int64")
+        .value(0)
+}
+
+fn property_digests(root: &Path) -> BTreeMap<String, String> {
+    resolve_project_generation(root)
+        .unwrap()
+        .graph_files_inventory()
+        .unwrap()
+        .unwrap()
+        .files
+        .into_iter()
+        .filter(|entry| entry.role == GraphFileRole::Properties)
+        .map(|entry| (entry.relative_path, entry.content_sha256))
+        .collect()
+}
+
 #[test]
 fn sharded_graph_uses_ordinary_reopen_query_and_portable_round_trip() {
+    let _io_guard = IO_STATS_LOCK.lock().expect("I/O stats lock");
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("source");
     let source_path = source.to_str().unwrap();
@@ -75,13 +126,60 @@ fn sharded_graph_uses_ordinary_reopen_query_and_portable_round_trip() {
 
     let reopened = GraphForge::new(Some(source_path)).unwrap();
     assert_eq!(reopened.node_count("Person").unwrap(), 4);
-    let queried = reopened
-        .execute("MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name")
+    let properties_before = property_digests(&source);
+    assert_eq!(
+        properties_before.len(),
+        2,
+        "each append owns a property shard"
+    );
+    reopened
+        .execute("MATCH (p:Person {name:'Ada'}) SET p.name = 'Ada Lovelace'")
         .unwrap();
+    let properties_after = property_digests(&source);
+    let unchanged_properties = properties_before
+        .iter()
+        .filter(|(path, digest)| properties_after.get(*path) == Some(*digest))
+        .count();
+    let changed_properties = properties_before
+        .iter()
+        .filter(|(path, digest)| {
+            properties_after
+                .get(*path)
+                .is_some_and(|after| after != *digest)
+        })
+        .count();
+    assert_eq!(
+        changed_properties, 1,
+        "only the affected shard is rewritten"
+    );
+    assert_eq!(
+        unchanged_properties, 1,
+        "the unaffected shard remains byte-identical"
+    );
+
+    reopened.rebuild_adjacency(None).unwrap();
+    drop(reopened);
+    let reopened = GraphForge::new(Some(source_path)).unwrap();
+    let traversal = "MATCH (a:Person)-[:KNOWS]->(b:Person) \
+                     RETURN a.name AS from, b.name AS to ORDER BY from, to";
+    assert!(
+        reopened
+            .explain(traversal)
+            .unwrap()
+            .contains("adjacency=hit"),
+        "reopened traversal must use the rebuilt adjacency index"
+    );
+    let queried = reopened.execute(traversal).unwrap();
     assert_eq!(queried.stats.rows_produced, 2);
+    let source_query_fingerprint = result_fingerprint(&queried);
     let open = reopened.graph_open_evidence();
+    let reopened_inventory = resolve_project_generation(&source)
+        .unwrap()
+        .graph_files_inventory()
+        .unwrap()
+        .unwrap();
     assert_eq!(open.strategy, GraphFilesOpenStrategy::PrivateMaterialize);
-    assert_eq!(open.files_validated, inventory.file_count);
+    assert_eq!(open.files_validated, reopened_inventory.file_count);
     assert_eq!(open.files_copied, open.files_validated);
 
     let limits = PortableV2Limits::default();
@@ -126,13 +224,15 @@ fn sharded_graph_uses_ordinary_reopen_query_and_portable_round_trip() {
     .unwrap();
     let imported = GraphForge::new(Some(imported_path.to_str().unwrap())).unwrap();
     assert_eq!(imported.node_count("Person").unwrap(), 4);
+    let imported_edges = imported
+        .execute("MATCH (:Person)-[:KNOWS]->(:Person) RETURN count(*) AS edges")
+        .unwrap();
+    assert_eq!(scalar_i64(&imported_edges), 2);
+    let imported_query = imported.execute(traversal).unwrap();
+    assert_eq!(imported_query.stats.rows_produced, 2);
     assert_eq!(
-        imported
-            .execute("MATCH (:Person)-[:KNOWS]->(:Person) RETURN count(*) AS edges")
-            .unwrap()
-            .stats
-            .rows_produced,
-        1
+        result_fingerprint(&imported_query),
+        source_query_fingerprint
     );
 
     // The writer's direct evidence proves the second shard encodes only new
@@ -143,10 +243,19 @@ fn sharded_graph_uses_ordinary_reopen_query_and_portable_round_trip() {
     let mut first = GraphWriter::open_at(&direct, OntologyMode::Strict, 1).unwrap();
     first.create_node(first_uuid, TypeId(0)).unwrap();
     first.flush().unwrap();
-    let mut second = GraphWriter::open_at(&direct, OntologyMode::Strict, 2).unwrap();
+    let writer_limits = GraphWriterLimits {
+        max_buffered_topology_rows: 1,
+        max_buffered_topology_bytes: 16 * 1024,
+        max_flush_scratch_bytes: 16 * 1024,
+    };
+    graphforge_storage::io_stats::reset();
+    let mut second = GraphWriter::open_at(&direct, OntologyMode::Strict, 2)
+        .unwrap()
+        .with_limits(writer_limits);
     second.create_node(Uuid::now_v7(), TypeId(0)).unwrap();
     second.flush().unwrap();
     let work = second.topology_write_work();
+    let io = graphforge_storage::io_stats::snapshot();
     assert_eq!(work.input_rows, 1);
     assert_eq!(work.prior_rows_decoded, 0);
     assert_eq!(work.rows_encoded, 1);
@@ -154,6 +263,20 @@ fn sharded_graph_uses_ordinary_reopen_query_and_portable_round_trip() {
     assert_eq!(work.existing_rows_rewritten, 0);
     assert_eq!(work.new_rows_written, 1);
     assert!(work.output_bytes > 0);
+    assert_eq!(work.peak_buffered_rows, 1);
+    assert!(work.peak_buffered_bytes <= writer_limits.max_buffered_topology_bytes as u64);
+    assert!(work.peak_flush_scratch_bytes <= writer_limits.max_flush_scratch_bytes as u64);
+    assert_eq!(
+        io.node_full_reads, 0,
+        "append must not decode prior node shards"
+    );
+    assert_eq!(
+        io.edge_full_reads, 0,
+        "append must not decode prior edge shards"
+    );
+    assert_eq!(io.topology_rewrite_existing_rows, 0);
+    assert_eq!(io.topology_rewrite_new_rows, 1);
+    assert_eq!(io.topology_rewrite_output_rows, 1);
 }
 
 #[test]
