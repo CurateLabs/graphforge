@@ -1105,6 +1105,7 @@ fn manifest_file_names(manifest: &Manifest) -> BTreeSet<String> {
         .collect()
 }
 
+#[cfg(test)]
 fn cleanup_superseded_files(
     root: &Path,
     prior: BTreeSet<String>,
@@ -1124,6 +1125,7 @@ fn cleanup_superseded_files(
     directory.sync().map_err(storage_err)
 }
 
+#[cfg(test)]
 fn reject_identity_collisions(
     mut retained: BufReader<File>,
     incoming: &[(Uuid, u8, u64)],
@@ -1161,6 +1163,7 @@ fn reject_identity_collisions(
     Ok(bytes)
 }
 
+#[cfg(test)]
 fn reject_surrogate_collisions(
     mut retained: BufReader<File>,
     incoming: &[(u64, Uuid)],
@@ -1271,6 +1274,7 @@ fn publish_manifest(root: &Path, staging: &Path, manifest: &Manifest) -> Result<
     result
 }
 
+#[cfg(test)]
 fn compact_manifest_levels(
     root: &Path,
     staging: &Path,
