@@ -2299,8 +2299,18 @@ impl GraphWriter {
         let generations = std::rc::Rc::new(std::cell::Cell::new(None));
         let generations_from_callback = std::rc::Rc::clone(&generations);
         let dir = self.dir.clone();
+        let expected_dir = dir.clone();
         let participant: crate::durable_rewrite::RewriteParticipantPreparer<'_> =
             Box::new(|context, staged| {
+                if context.project_root != expected_dir {
+                    return Err(GfError::Storage(
+                        "rewrite participant project root changed".into(),
+                    ));
+                }
+                context
+                    .project
+                    .revalidate_named()
+                    .map_err(|error| GfError::Storage(error.to_string()))?;
                 generations_from_callback.set(Some((context.prior, context.next)));
                 let token = self.build_uuid_index_delta(
                     context.next.topology,
