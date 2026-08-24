@@ -356,52 +356,6 @@ pub(crate) fn try_begin_graph_object_gc(
 }
 
 #[cfg(windows)]
-fn validate_lock_identity(file: &File, path: &Path) -> Result<(), GfError> {
-    let descriptor = file
-        .metadata()
-        .map_err(|error| storage("inspect lifecycle lock descriptor", path, error))?;
-    let named = fs::symlink_metadata(path)
-        .map_err(|error| storage("inspect lifecycle lock path", path, error))?;
-    if !descriptor.is_file() || !named.is_file() || named.file_type().is_symlink() {
-        return Err(validation(
-            "graph object lifecycle lock is not a regular file",
-        ));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if descriptor.dev() != named.dev()
-            || descriptor.ino() != named.ino()
-            || descriptor.nlink() != 1
-            || named.nlink() != 1
-        {
-            return Err(validation("graph object lifecycle lock identity changed"));
-        }
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt as _;
-        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
-        let descriptor_identity = graphforge_filesystem::file_identity(file)
-            .map_err(|error| storage("inspect lifecycle lock identity", path, error))?;
-        let named_identity = graphforge_filesystem::path_identity(path)
-            .map_err(|error| storage("inspect lifecycle lock identity", path, error))?;
-        if named.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-            || descriptor_identity != named_identity
-            || graphforge_filesystem::file_link_count(file)
-                .map_err(|error| storage("inspect lifecycle lock links", path, error))?
-                != 1
-            || graphforge_filesystem::path_link_count(path)
-                .map_err(|error| storage("inspect lifecycle lock links", path, error))?
-                != 1
-        {
-            return Err(validation("graph object lifecycle lock identity changed"));
-        }
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
 fn validate_directory_identity(file: &File, path: &Path) -> Result<(), GfError> {
     let descriptor = file
         .metadata()

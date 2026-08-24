@@ -1,6 +1,6 @@
 {
   "schema": "graphforge.cargo-feature-fingerprint.v1",
-  "sha256": "abee5518fa5758615df53d8fad39a8e5b082e50d14a9e1c3c6b4562d7d457e41",
+  "sha256": "578c0de5c055fbdfe3406ebbcbff82dc48187ffb212dabdf291a61e8bd583f51",
   "entries": [
     {
       "name": "graphforge-api",
@@ -1067,6 +1067,15 @@
       "version": "0.5.2",
       "features": [],
       "dependencies": [
+        {
+          "name": "fs4",
+          "req": "^1.1",
+          "features": [],
+          "optional": false,
+          "uses_default_features": true,
+          "kind": null,
+          "target": null
+        },
         {
           "name": "rustix",
           "req": "^1.1",

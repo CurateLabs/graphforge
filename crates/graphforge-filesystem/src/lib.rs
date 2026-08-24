@@ -124,6 +124,18 @@ impl StableDirectory {
         Ok(file)
     }
 
+    /// Create a new regular child whose retained handle permits an atomic
+    /// namespace replacement while it remains open.
+    pub fn create_replaceable_child_file(&self, name: &OsStr) -> io::Result<File> {
+        validate_child_name(name)?;
+        self.revalidate_named()?;
+        let path = self.path.join(name);
+        let file = stable_open_replaceable_child_file(&self.file, &path, name)?;
+        validate_stable_child_file(&file, &path)?;
+        self.revalidate_named()?;
+        Ok(file)
+    }
+
     /// Open an existing regular child for read/write, or create it once.
     pub fn open_or_create_child_file(&self, name: &OsStr) -> io::Result<File> {
         validate_child_name(name)?;
@@ -197,13 +209,20 @@ impl StableDirectory {
                 "atomic temporary child is multiply linked",
             ));
         }
-        let result = match self.open_child_file(target) {
-            Ok(_) => replace_file(&self.file, temporary, target)
-                .map_err(|error| io::Error::other(error.to_string())),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                install_new_file(&self.file, temporary, target)
+        drop(temporary_file);
+        let target_exists = match self.open_child_file(target) {
+            Ok(target_file) => {
+                drop(target_file);
+                true
             }
-            Err(error) => Err(error),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+            Err(error) => return Err(error),
+        };
+        let result = if target_exists {
+            replace_file(&self.file, temporary, target)
+                .map_err(|error| io::Error::other(error.to_string()))
+        } else {
+            install_new_file(&self.file, temporary, target)
         };
         result?;
         self.revalidate_named()?;
@@ -306,6 +325,15 @@ fn stable_open_child_file(
 }
 
 #[cfg(unix)]
+fn stable_open_replaceable_child_file(
+    parent: &File,
+    path: &Path,
+    name: &OsStr,
+) -> io::Result<File> {
+    stable_open_child_file(parent, path, name, true)
+}
+
+#[cfg(unix)]
 fn stable_open_or_create_child_file(parent: &File, _path: &Path, name: &OsStr) -> io::Result<File> {
     use rustix::fs::{Mode, OFlags};
     rustix::fs::openat(
@@ -375,8 +403,7 @@ fn stable_unlink_child_if_identity(
     let named =
         rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW).map_err(io::Error::from)?;
     let named_identity = FileIdentity {
-        volume_serial: u64::try_from(named.st_dev)
-            .map_err(|_| io::Error::other("negative device identity"))?,
+        volume_serial: named.st_dev as u64,
         file_id: u128::from(named.st_ino).to_le_bytes(),
     };
     if named_identity != expected {
@@ -432,6 +459,26 @@ fn stable_open_child_file(
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
     options.open(path)
+}
+
+#[cfg(windows)]
+fn stable_open_replaceable_child_file(
+    _parent: &File,
+    path: &Path,
+    _name: &OsStr,
+) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    const FILE_SHARE_READ: u32 = 0x0000_0001;
+    const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+    const FILE_SHARE_DELETE: u32 = 0x0000_0004;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
 }
 
 #[cfg(windows)]
@@ -501,6 +548,15 @@ fn stable_open_child_directory(_parent: &File, _path: &Path, _name: &OsStr) -> i
 
 #[cfg(all(not(unix), not(windows)))]
 fn stable_open_or_create_child_file(
+    _parent: &File,
+    _path: &Path,
+    _name: &OsStr,
+) -> io::Result<File> {
+    stable_open_directory(Path::new(""))
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn stable_open_replaceable_child_file(
     _parent: &File,
     _path: &Path,
     _name: &OsStr,

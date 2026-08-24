@@ -1378,19 +1378,21 @@ impl ValidatedProjectGeneration {
         } else {
             self.0.admission.revalidate_identity()?;
         }
-        let result = self.publish_inner(graph_object_lease).map_err(|error| {
-            if matches!(error, GfError::Project { .. }) {
-                error
-            } else {
-                publication_error_from_parts(
-                    self.0.transaction_uuid,
-                    self.0.generation_uuid,
-                    "DURABLE",
-                    false,
-                    &error.to_string(),
-                )
-            }
-        });
+        let result = self
+            .publish_inner(graph_object_lease, lifecycle_admission.as_ref())
+            .map_err(|error| {
+                if matches!(error, GfError::Project { .. }) {
+                    error
+                } else {
+                    publication_error_from_parts(
+                        self.0.transaction_uuid,
+                        self.0.generation_uuid,
+                        "DURABLE",
+                        false,
+                        &error.to_string(),
+                    )
+                }
+            });
         drop(commit_lock);
         drop(lifecycle_admission);
         result
@@ -1429,6 +1431,7 @@ impl ValidatedProjectGeneration {
     fn publish_inner(
         &self,
         graph_object_lease: Option<&crate::GraphObjectPublicationLease>,
+        lifecycle_admission: Option<&crate::filesystem_admission::ProjectLifecycleAdmission>,
     ) -> Result<ProjectPublicationReceipt, GfError> {
         let staged = &self.0;
         let compact_graph = has_compact_graph_participant(staged)?;
@@ -1450,7 +1453,12 @@ impl ValidatedProjectGeneration {
             )?;
             lease.revalidate_for_root(staged.parent.container_root())?;
         }
-        replace_current(staged, manifest_sha256, graph_object_lease)?;
+        replace_current(
+            staged,
+            manifest_sha256,
+            graph_object_lease,
+            lifecycle_admission,
+        )?;
         finish_published_generation(staged, manifest_sha256)?;
         Ok(ProjectPublicationReceipt {
             transaction_uuid: staged.transaction_uuid,
@@ -1632,6 +1640,7 @@ fn replace_current(
     staged: &StagedProjectGeneration,
     manifest_sha256: [u8; 32],
     graph_object_lease: Option<&crate::GraphObjectPublicationLease>,
+    lifecycle_admission: Option<&crate::filesystem_admission::ProjectLifecycleAdmission>,
 ) -> Result<(), GfError> {
     let current = CurrentRecord {
         format: "graphforge-project".into(),
@@ -1674,10 +1683,16 @@ fn replace_current(
                 "CURRENT",
                 false,
             )?;
-            staged
-                .admission
-                .revalidate_identity()
-                .map_err(std::io::Error::other)?;
+            if let Some(admission) = lifecycle_admission {
+                admission
+                    .revalidate_identity()
+                    .map_err(std::io::Error::other)?;
+            } else {
+                staged
+                    .admission
+                    .revalidate_identity()
+                    .map_err(std::io::Error::other)?;
+            }
             if let Some(lease) = graph_object_lease {
                 lease
                     .revalidate_for_root(staged.parent.container_root())
@@ -2438,7 +2453,7 @@ fn publish_atomic_bytes_in(
         .to_str()
         .ok_or_else(|| std::io::Error::other("atomic publication target is not UTF-8"))?;
     let temp_name = std::ffi::OsString::from(unique_atomic_temp_name(target_text));
-    let mut temp = directory.create_child_file(&temp_name)?;
+    let mut temp = directory.create_replaceable_child_file(&temp_name)?;
     let temp_identity = graphforge_filesystem::file_identity(&temp)?;
     let publish = || -> Result<(), AtomicPublishError> {
         crate::file_lock::lock_exclusive(&temp)?;
