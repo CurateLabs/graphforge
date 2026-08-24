@@ -38,7 +38,7 @@ use datafusion::physical_plan::placeholder_row::PlaceholderRowExec;
 use datafusion::scalar::ScalarValue;
 use datafusion_datasource::memory::MemorySourceConfig;
 
-use graphforge_core::uuid::to_bytes;
+use graphforge_core::uuid::{Uuid, to_bytes};
 use graphforge_core::{GfError, OntologyMode, TypeId};
 use graphforge_ir::plan::GraphOp;
 use graphforge_ir::{
@@ -2022,8 +2022,8 @@ fn run_relationship_merge_phase(
 
             let src_id = merge_node_id_at(batch, src_id_idx, row, "source")?;
             let dst_id = merge_node_id_at(batch, dst_id_idx, row, "destination")?;
-            ctx.writer.register_existing_node(src_uuid, src_id);
-            ctx.writer.register_existing_node(dst_uuid, dst_id);
+            ctx.writer.register_existing_node(src_uuid, src_id)?;
+            ctx.writer.register_existing_node(dst_uuid, dst_id)?;
             let edge_value = graphforge_core::uuid::new_v7();
             ctx.writer
                 .create_edge(edge_value, rel_name, &src_uuid, &dst_uuid)?;
@@ -3487,11 +3487,33 @@ pub(crate) fn commit_statement(ctx: &mut StatementWriteContext, dir: &Path) -> R
     // incremental path), so write no segment and clear any stale file there.
     let pure_append = ctx.pending_node_deletes.is_empty() && ctx.pending_edge_deletes.is_empty();
     let pending = ctx.writer.take_pending_delta();
+    let expected_generation = graphforge_storage::read_topology_generation(dir)? + 1;
+    let deleted_nodes = ctx
+        .pending_node_deletes
+        .iter()
+        .copied()
+        .map(Uuid::from_bytes)
+        .collect::<Vec<_>>();
+    let deleted_edges = ctx
+        .pending_edge_deletes
+        .iter()
+        .copied()
+        .map(Uuid::from_bytes)
+        .collect::<Vec<_>>();
+    let index_prepared = ctx.writer.prepare_uuid_index_delta_with_deletions(
+        expected_generation,
+        &mut staged,
+        &deleted_nodes,
+        &deleted_edges,
+    )?;
     if let Some(generation) = graphforge_storage::commit_topology_aware(staged, dir)? {
         if pure_append {
             ctx.writer.write_segment_best_effort(generation, &pending);
         } else {
             graphforge_storage::adjacency_delta::discard_segment(dir, generation);
+        }
+        if index_prepared {
+            ctx.writer.finalize_uuid_index_delta(generation)?;
         }
     }
     Ok(())

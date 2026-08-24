@@ -1199,7 +1199,7 @@ fn write_batch_creates(
                             ))
                         })?
                 };
-                writer.register_existing_node(uuid, node_id);
+                writer.register_existing_node(uuid, node_id)?;
                 var_to_uuid.insert(spec.var, uuid);
             } else {
                 let uuid = new_v7();

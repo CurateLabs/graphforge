@@ -135,6 +135,10 @@ struct RunRecord {
     node_surrogates: FileRecord,
     node_count: u64,
     edge_count: u64,
+    #[serde(default)]
+    deleted_node_count: u64,
+    #[serde(default)]
+    deleted_edge_count: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -162,6 +166,7 @@ pub struct UuidMembershipIndex {
 impl UuidMembershipIndex {
     /// Open and fully authenticate the current immutable index snapshot.
     pub fn open(project_dir: &Path) -> Result<Self, GfError> {
+        recover_uuid_membership_publication(project_dir)?;
         let root = project_dir.join(INDEX_DIR);
         let body = fs::read(root.join(MANIFEST)).map_err(storage_err)?;
         let manifest: Manifest = serde_json::from_slice(&body).map_err(storage_err)?;
@@ -207,14 +212,16 @@ impl UuidMembershipIndex {
     #[must_use]
     /// Return the authenticated unique-record count for one identity domain.
     pub fn count(&self, kind: UuidIndexKind) -> u64 {
-        self.manifest
+        let (added, deleted) = self
+            .manifest
             .runs
             .iter()
             .map(|run| match kind {
-                UuidIndexKind::Node => run.node_count,
-                UuidIndexKind::Edge => run.edge_count,
+                UuidIndexKind::Node => (run.node_count, run.deleted_node_count),
+                UuidIndexKind::Edge => (run.edge_count, run.deleted_edge_count),
             })
-            .sum()
+            .fold((0_u64, 0_u64), |(a, d), (ra, rd)| (a + ra, d + rd));
+        added.saturating_sub(deleted)
     }
 
     /// Probe a batch in caller order. Memory is O(unique requested UUIDs).
@@ -233,16 +240,14 @@ impl UuidMembershipIndex {
         for uuid in unique {
             let mut found = false;
             for run in self.runs.iter_mut().rev() {
-                if binary_search_identity(
+                if let Some((present, _)) = binary_search_identity_state(
                     &mut run.identities,
                     run.descriptor.identities.count,
                     uuid,
                     kind,
                     &mut metrics.file_seeks,
-                )?
-                .is_some()
-                {
-                    found = true;
+                )? {
+                    found = present;
                     break;
                 }
             }
@@ -268,14 +273,19 @@ impl UuidMembershipIndex {
         for uuid in unique {
             let mut surrogate = None;
             for run in self.runs.iter_mut().rev() {
-                surrogate = binary_search_identity(
+                let state = binary_search_identity_state(
                     &mut run.identities,
                     run.descriptor.identities.count,
                     uuid,
                     UuidIndexKind::Node,
                     &mut metrics.file_seeks,
                 )?;
-                if let Some(value) = surrogate {
+                if let Some((present, value)) = state {
+                    if !present {
+                        surrogate = None;
+                        break;
+                    }
+                    surrogate = Some(value);
                     if binary_search_surrogate_uuid(
                         &mut run.node_surrogates,
                         run.descriptor.node_surrogates.count,
@@ -308,6 +318,7 @@ pub fn uuid_membership_index_present(project_dir: &Path) -> bool {
 /// This cheap publication-path check deliberately does not authenticate data;
 /// readers still use [`UuidMembershipIndex::open`] before trusting membership.
 pub fn uuid_membership_index_is_fresh(project_dir: &Path) -> Result<bool, GfError> {
+    recover_uuid_membership_publication(project_dir)?;
     let body = match fs::read(project_dir.join(INDEX_DIR).join(MANIFEST)) {
         Ok(body) => body,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -318,12 +329,495 @@ pub fn uuid_membership_index_is_fresh(project_dir: &Path) -> Result<bool, GfErro
         && manifest.current_generation == crate::read_topology_generation(project_dir)?)
 }
 
+const RECOVERY_MARKER: &str = "recovery.json";
+const TOPOLOGY_RECEIPT: &str = "topology-receipt.json";
+const MAX_RECOVERY_MARKER_BYTES: u64 = 1 << 20;
+const MAX_RECOVERY_RECEIPT_BYTES: u64 = 4 << 10;
+const MAX_PREPARED_FILES: usize = 128;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PreparedIndexFile {
+    prepared_name: String,
+    final_name: String,
+    length: u64,
+    sha256: String,
+    manifest: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct UuidIndexRecovery {
+    format_version: u32,
+    nonce: String,
+    prior_generation: u64,
+    expected_generation: u64,
+    topology_delta_sha256: String,
+    root_volume_serial: u64,
+    root_file_id: [u8; 16],
+    files: Vec<PreparedIndexFile>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct TopologyIndexReceipt {
+    nonce: String,
+    expected_generation: u64,
+    topology_delta_sha256: String,
+}
+
+pub(crate) struct PreparedUuidIndexDelta {
+    project_dir: PathBuf,
+    expected_generation: u64,
+    receipt: TopologyIndexReceipt,
+    root_identity: graphforge_filesystem::FileIdentity,
+}
+
+/// Prepare one bounded v3 UUID-index delta before its topology commit. The
+/// durable recovery marker binds immutable prepared files to the expected
+/// generation. Finalization switches the manifest last and is idempotent.
+pub(crate) fn prepare_uuid_membership_delta(
+    project_dir: &Path,
+    generation: u64,
+    nodes: &[(Uuid, u64)],
+    edges: &[Uuid],
+    deleted_nodes: &[(Uuid, u64)],
+    deleted_edges: &[Uuid],
+) -> Result<Option<PreparedUuidIndexDelta>, GfError> {
+    recover_uuid_membership_publication(project_dir)?;
+    let current = crate::read_topology_generation(project_dir)?;
+    if generation != current.saturating_add(1) {
+        return Err(storage_err(
+            "prepared UUID delta generation is not the next generation",
+        ));
+    }
+    let source_root = project_dir.join(INDEX_DIR);
+    if current != 0 && !source_root.join(MANIFEST).is_file() {
+        return Ok(None);
+    }
+    fs::create_dir_all(&source_root).map_err(storage_err)?;
+    let parent = project_dir
+        .parent()
+        .ok_or_else(|| storage_err("project directory has no staging parent"))?;
+    let shadow = tempfile::Builder::new()
+        .prefix("uuid-membership-stage-")
+        .tempdir_in(parent)
+        .map_err(storage_err)?;
+    let shadow_project = shadow.path().join("project");
+    let shadow_root = shadow_project.join(INDEX_DIR);
+    fs::create_dir_all(&shadow_root).map_err(storage_err)?;
+    if source_root.is_dir() {
+        for entry in fs::read_dir(&source_root).map_err(storage_err)? {
+            let entry = entry.map_err(storage_err)?;
+            if !entry.file_type().map_err(storage_err)?.is_file() {
+                continue;
+            }
+            let source = entry.path();
+            let destination = shadow_root.join(entry.file_name());
+            if fs::hard_link(&source, &destination).is_err() {
+                fs::copy(&source, &destination).map_err(storage_err)?;
+            }
+        }
+    }
+    fs::create_dir_all(shadow_project.join("topology")).map_err(storage_err)?;
+    fs::write(
+        crate::generation::generation_path(&shadow_project),
+        serde_json::to_vec(&serde_json::json!({
+            "topology_generation": generation,
+            "search_generation": generation,
+        }))
+        .map_err(storage_err)?,
+    )
+    .map_err(storage_err)?;
+    append_uuid_membership_delta_with_tombstones(
+        &shadow_project,
+        generation,
+        nodes,
+        edges,
+        deleted_nodes,
+        deleted_edges,
+    )?;
+
+    let mut data = fs::read_dir(&shadow_root)
+        .map_err(storage_err)?
+        .map(|entry| entry.map_err(storage_err))
+        .collect::<Result<Vec<_>, _>>()?;
+    data.sort_unstable_by_key(std::fs::DirEntry::file_name);
+    let nonce = Uuid::new_v4().simple().to_string();
+    let directory =
+        graphforge_filesystem::StableDirectory::open(&source_root).map_err(storage_err)?;
+    let mut files = Vec::new();
+    for (ordinal, entry) in data.into_iter().enumerate() {
+        let name = entry.file_name();
+        if !entry.file_type().map_err(storage_err)?.is_file() {
+            continue;
+        }
+        let final_name = name.to_string_lossy().into_owned();
+        if final_name != MANIFEST && source_root.join(&name).exists() {
+            continue;
+        }
+        let prepared_name = format!(".prepared-{nonce}-{ordinal:04}");
+        let mut prepared = directory
+            .create_child_file(std::ffi::OsStr::new(&prepared_name))
+            .map_err(storage_err)?;
+        let mut input = File::open(entry.path()).map_err(storage_err)?;
+        std::io::copy(&mut input, &mut prepared).map_err(storage_err)?;
+        prepared.sync_all().map_err(storage_err)?;
+        let length = prepared.metadata().map_err(storage_err)?.len();
+        prepared.seek(SeekFrom::Start(0)).map_err(storage_err)?;
+        let sha256 = sha256_reader(&mut prepared)?;
+        files.push(PreparedIndexFile {
+            prepared_name,
+            final_name: final_name.clone(),
+            length,
+            sha256,
+            manifest: final_name == MANIFEST,
+        });
+    }
+    files.sort_by_key(|file| file.manifest);
+    let recovery = UuidIndexRecovery {
+        format_version: FORMAT_VERSION,
+        nonce,
+        prior_generation: current,
+        expected_generation: generation,
+        topology_delta_sha256: topology_delta_sha256(nodes, edges, deleted_nodes, deleted_edges),
+        root_volume_serial: directory.identity().volume_serial,
+        root_file_id: directory.identity().file_id,
+        files,
+    };
+    write_recovery_marker(&source_root, &recovery)?;
+    Ok(Some(PreparedUuidIndexDelta {
+        project_dir: project_dir.to_path_buf(),
+        expected_generation: generation,
+        receipt: TopologyIndexReceipt {
+            nonce: recovery.nonce,
+            expected_generation: generation,
+            topology_delta_sha256: recovery.topology_delta_sha256,
+        },
+        root_identity: directory.identity(),
+    }))
+}
+
+fn topology_delta_sha256(
+    nodes: &[(Uuid, u64)],
+    edges: &[Uuid],
+    deleted_nodes: &[(Uuid, u64)],
+    deleted_edges: &[Uuid],
+) -> String {
+    let mut nodes = nodes.to_vec();
+    nodes.sort_unstable_by_key(|(uuid, _)| *uuid.as_bytes());
+    let mut edges = edges.to_vec();
+    edges.sort_unstable_by_key(|uuid| *uuid.as_bytes());
+    let mut hasher = Sha256::new();
+    hasher.update(b"graphforge/uuid-index-topology-delta/v1");
+    for (uuid, surrogate) in nodes {
+        hasher.update([0]);
+        hasher.update(uuid.as_bytes());
+        hasher.update(surrogate.to_be_bytes());
+    }
+    for uuid in edges {
+        hasher.update([1]);
+        hasher.update(uuid.as_bytes());
+    }
+    let mut deleted_nodes = deleted_nodes.to_vec();
+    deleted_nodes.sort_unstable_by_key(|(uuid, _)| *uuid.as_bytes());
+    for (uuid, surrogate) in deleted_nodes {
+        hasher.update([2]);
+        hasher.update(uuid.as_bytes());
+        hasher.update(surrogate.to_be_bytes());
+    }
+    let mut deleted_edges = deleted_edges.to_vec();
+    deleted_edges.sort_unstable_by_key(|uuid| *uuid.as_bytes());
+    for uuid in deleted_edges {
+        hasher.update([3]);
+        hasher.update(uuid.as_bytes());
+    }
+    let mut encoded = String::with_capacity(64);
+    for byte in hasher.finalize() {
+        write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    encoded
+}
+
+fn is_canonical_child_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && Path::new(name).file_name() == Some(std::ffi::OsStr::new(name))
+}
+
+fn read_bounded(file: &mut File, maximum: u64) -> Result<Vec<u8>, GfError> {
+    let length = file.metadata().map_err(storage_err)?.len();
+    if length > maximum {
+        return Err(storage_err("recovery control record exceeds size limit"));
+    }
+    let mut body = Vec::with_capacity(length as usize);
+    file.read_to_end(&mut body).map_err(storage_err)?;
+    Ok(body)
+}
+
+impl PreparedUuidIndexDelta {
+    pub(crate) fn stage_receipt(
+        &self,
+        batch: &mut crate::staging::RewriteBatch,
+    ) -> Result<(), GfError> {
+        batch.stage_bytes(
+            &self.project_dir.join(INDEX_DIR).join(TOPOLOGY_RECEIPT),
+            &serde_json::to_vec(&self.receipt).map_err(storage_err)?,
+        )
+    }
+    pub(crate) fn finalize(&self, committed_generation: u64) -> Result<(), GfError> {
+        let directory =
+            graphforge_filesystem::StableDirectory::open(&self.project_dir.join(INDEX_DIR))
+                .map_err(storage_err)?;
+        directory.revalidate_named().map_err(storage_err)?;
+        if directory.identity() != self.root_identity {
+            return Err(storage_err(
+                "UUID index root identity changed before finalize",
+            ));
+        }
+        if committed_generation != self.expected_generation {
+            return Err(storage_err(
+                "topology commit returned an unexpected generation",
+            ));
+        }
+        recover_uuid_membership_publication(&self.project_dir)
+    }
+}
+
+fn write_recovery_marker(root: &Path, recovery: &UuidIndexRecovery) -> Result<(), GfError> {
+    let directory = graphforge_filesystem::StableDirectory::open(root).map_err(storage_err)?;
+    let temp_name = std::ffi::OsString::from(format!(".recovery-{}.tmp", recovery.nonce));
+    let mut temp = directory
+        .create_child_file(&temp_name)
+        .map_err(storage_err)?;
+    serde_json::to_writer(&mut temp, recovery).map_err(storage_err)?;
+    temp.sync_all().map_err(storage_err)?;
+    directory
+        .replace_child(&temp_name, std::ffi::OsStr::new(RECOVERY_MARKER))
+        .map_err(storage_err)?;
+    directory.sync().map_err(storage_err)
+}
+
+fn recover_uuid_membership_publication(project_dir: &Path) -> Result<(), GfError> {
+    let root = project_dir.join(INDEX_DIR);
+    let directory = match graphforge_filesystem::StableDirectory::open(&root) {
+        Ok(directory) => directory,
+        Err(_) if !root.exists() => return Ok(()),
+        Err(error) => return Err(storage_err(error)),
+    };
+    let marker = match directory.open_child_file(std::ffi::OsStr::new(RECOVERY_MARKER)) {
+        Ok(mut file) => read_bounded(&mut file, MAX_RECOVERY_MARKER_BYTES)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(storage_err(error)),
+    };
+    let recovery: UuidIndexRecovery = serde_json::from_slice(&marker).map_err(storage_err)?;
+    if recovery.format_version != FORMAT_VERSION
+        || recovery.files.iter().filter(|file| file.manifest).count() != 1
+        || recovery.files.is_empty()
+        || recovery.files.len() > MAX_PREPARED_FILES
+        || recovery.nonce.len() != 32
+        || !recovery
+            .nonce
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        || recovery.topology_delta_sha256.len() != 64
+        || !recovery
+            .topology_delta_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        || recovery.files.iter().any(|file| {
+            !is_canonical_child_name(&file.prepared_name)
+                || !is_canonical_child_name(&file.final_name)
+        })
+        || recovery.files.iter().any(|file| {
+            !file
+                .prepared_name
+                .starts_with(&format!(".prepared-{}-", recovery.nonce))
+                || file
+                    .prepared_name
+                    .rsplit_once('-')
+                    .and_then(|(_, ordinal)| {
+                        (ordinal.len() == 4 && ordinal.bytes().all(|byte| byte.is_ascii_digit()))
+                            .then(|| ordinal.parse::<usize>().ok())
+                            .flatten()
+                    })
+                    .is_none_or(|ordinal| ordinal >= recovery.files.len())
+                || (file.manifest && file.final_name != MANIFEST)
+                || (!file.manifest
+                    && (file.final_name == MANIFEST
+                        || file.final_name == RECOVERY_MARKER
+                        || file.final_name == TOPOLOGY_RECEIPT
+                        || file.final_name.starts_with('.')
+                        || file.final_name.ends_with(".tmp")))
+        })
+        || recovery
+            .files
+            .iter()
+            .map(|file| &file.prepared_name)
+            .collect::<BTreeSet<_>>()
+            .len()
+            != recovery.files.len()
+        || recovery
+            .files
+            .iter()
+            .map(|file| &file.final_name)
+            .collect::<BTreeSet<_>>()
+            .len()
+            != recovery.files.len()
+        || recovery
+            .files
+            .iter()
+            .filter_map(|file| {
+                file.prepared_name
+                    .rsplit_once('-')
+                    .and_then(|(_, ordinal)| ordinal.parse::<usize>().ok())
+            })
+            .collect::<BTreeSet<_>>()
+            != (0..recovery.files.len()).collect::<BTreeSet<_>>()
+    {
+        return Err(storage_err("UUID index recovery marker is noncanonical"));
+    }
+    directory.revalidate_named().map_err(storage_err)?;
+    if directory.identity().volume_serial != recovery.root_volume_serial
+        || directory.identity().file_id != recovery.root_file_id
+    {
+        return Err(storage_err("UUID index recovery root identity changed"));
+    }
+    let generation = crate::read_topology_generation(project_dir)?;
+    if generation == recovery.prior_generation {
+        for file in &recovery.files {
+            unlink_named_identity(&directory, &file.prepared_name)?;
+        }
+        unlink_named_identity(&directory, RECOVERY_MARKER)?;
+        unlink_named_identity(&directory, TOPOLOGY_RECEIPT)?;
+        directory.sync().map_err(storage_err)?;
+        return Ok(());
+    }
+    if generation != recovery.expected_generation {
+        return Err(storage_err("UUID index recovery generation is ambiguous"));
+    }
+    let mut receipt_file = directory
+        .open_child_file(std::ffi::OsStr::new(TOPOLOGY_RECEIPT))
+        .map_err(storage_err)?;
+    let receipt_body = read_bounded(&mut receipt_file, MAX_RECOVERY_RECEIPT_BYTES)?;
+    let receipt: TopologyIndexReceipt =
+        serde_json::from_slice(&receipt_body).map_err(storage_err)?;
+    if receipt.nonce != recovery.nonce
+        || receipt.expected_generation != recovery.expected_generation
+        || receipt.topology_delta_sha256 != recovery.topology_delta_sha256
+    {
+        return Err(storage_err("topology/index recovery receipt mismatch"));
+    }
+    for file in recovery.files.iter().filter(|file| !file.manifest) {
+        install_prepared_file(&directory, file)?;
+    }
+    let manifest = recovery
+        .files
+        .iter()
+        .find(|file| file.manifest)
+        .expect("validated");
+    if directory
+        .open_child_file(std::ffi::OsStr::new(&manifest.prepared_name))
+        .is_ok()
+    {
+        verify_prepared_file(&directory, manifest)?;
+        directory
+            .replace_child(
+                std::ffi::OsStr::new(&manifest.prepared_name),
+                std::ffi::OsStr::new(MANIFEST),
+            )
+            .map_err(storage_err)?;
+    } else {
+        let mut installed = directory
+            .open_child_file(std::ffi::OsStr::new(MANIFEST))
+            .map_err(storage_err)?;
+        if installed.metadata().map_err(storage_err)?.len() != manifest.length
+            || sha256_reader(&mut installed)? != manifest.sha256
+        {
+            return Err(storage_err("installed recovered UUID manifest mismatch"));
+        }
+    }
+    directory.sync().map_err(storage_err)?;
+    for file in recovery.files.iter().filter(|file| !file.manifest) {
+        unlink_named_identity(&directory, &file.prepared_name)?;
+    }
+    unlink_named_identity(&directory, RECOVERY_MARKER)?;
+    unlink_named_identity(&directory, TOPOLOGY_RECEIPT)?;
+    directory.sync().map_err(storage_err)
+}
+
+fn verify_prepared_file(
+    directory: &graphforge_filesystem::StableDirectory,
+    descriptor: &PreparedIndexFile,
+) -> Result<File, GfError> {
+    let mut file = directory
+        .open_child_file(std::ffi::OsStr::new(&descriptor.prepared_name))
+        .map_err(storage_err)?;
+    if file.metadata().map_err(storage_err)?.len() != descriptor.length
+        || sha256_reader(&mut file)? != descriptor.sha256
+    {
+        return Err(storage_err(
+            "prepared UUID index file authentication failed",
+        ));
+    }
+    Ok(file)
+}
+
+fn install_prepared_file(
+    directory: &graphforge_filesystem::StableDirectory,
+    descriptor: &PreparedIndexFile,
+) -> Result<(), GfError> {
+    let prepared = verify_prepared_file(directory, descriptor)?;
+    let identity = graphforge_filesystem::file_identity(&prepared).map_err(storage_err)?;
+    let final_name = std::ffi::OsStr::new(&descriptor.final_name);
+    if let Ok(mut existing) = directory.open_child_file(final_name) {
+        if existing.metadata().map_err(storage_err)?.len() != descriptor.length
+            || sha256_reader(&mut existing)? != descriptor.sha256
+        {
+            return Err(storage_err("prepared UUID index destination mismatch"));
+        }
+        return Ok(());
+    }
+    directory
+        .link_child_into(
+            std::ffi::OsStr::new(&descriptor.prepared_name),
+            &prepared,
+            identity,
+            directory,
+            final_name,
+        )
+        .map_err(storage_err)?;
+    Ok(())
+}
+
+fn unlink_named_identity(
+    directory: &graphforge_filesystem::StableDirectory,
+    name: &str,
+) -> Result<(), GfError> {
+    let Ok(file) = directory.open_child_file(std::ffi::OsStr::new(name)) else {
+        return Ok(());
+    };
+    let identity = graphforge_filesystem::file_identity(&file).map_err(storage_err)?;
+    directory
+        .unlink_child_if_identity(std::ffi::OsStr::new(name), identity)
+        .map_err(storage_err)
+}
+
 /// Publish one committed topology batch as an immutable authenticated v3 run.
 pub fn append_uuid_membership_delta(
     project_dir: &Path,
     generation: u64,
     nodes: &[(Uuid, u64)],
     edges: &[Uuid],
+) -> Result<UuidIndexAppendMetrics, GfError> {
+    append_uuid_membership_delta_with_tombstones(project_dir, generation, nodes, edges, &[], &[])
+}
+
+pub(crate) fn append_uuid_membership_delta_with_tombstones(
+    project_dir: &Path,
+    generation: u64,
+    nodes: &[(Uuid, u64)],
+    edges: &[Uuid],
+    deleted_nodes: &[(Uuid, u64)],
+    deleted_edges: &[Uuid],
 ) -> Result<UuidIndexAppendMetrics, GfError> {
     if crate::read_topology_generation(project_dir)? != generation {
         return Err(storage_err(
@@ -375,6 +869,8 @@ pub fn append_uuid_membership_delta(
                     node_surrogates,
                     node_count: 0,
                     edge_count: 0,
+                    deleted_node_count: 0,
+                    deleted_edge_count: 0,
                 }],
             }
         }
@@ -407,6 +903,12 @@ pub fn append_uuid_membership_delta(
         .iter()
         .map(|(uuid, surrogate)| (*uuid, 0_u8, *surrogate))
         .chain(edges.iter().map(|uuid| (*uuid, 1_u8, 0)))
+        .chain(
+            deleted_nodes
+                .iter()
+                .map(|(uuid, surrogate)| (*uuid, 2_u8, *surrogate)),
+        )
+        .chain(deleted_edges.iter().map(|uuid| (*uuid, 3_u8, 0)))
         .collect::<Vec<_>>();
     identities.sort_unstable_by_key(|entry| *entry.0.as_bytes());
     if identities.windows(2).any(|pair| pair[0].0 == pair[1].0)
@@ -419,6 +921,11 @@ pub fn append_uuid_membership_delta(
     let mut surrogate_keys = nodes
         .iter()
         .map(|(uuid, surrogate)| (*surrogate, *uuid))
+        .chain(
+            deleted_nodes
+                .iter()
+                .map(|(uuid, surrogate)| (*surrogate, *uuid)),
+        )
         .collect::<Vec<_>>();
     surrogate_keys.sort_unstable();
     if surrogate_keys.windows(2).any(|pair| pair[0].0 == pair[1].0) {
@@ -481,6 +988,8 @@ pub fn append_uuid_membership_delta(
         node_surrogates: surrogate_record,
         node_count: nodes.len() as u64,
         edge_count: edges.len() as u64,
+        deleted_node_count: deleted_nodes.len() as u64,
+        deleted_edge_count: deleted_edges.len() as u64,
     });
     let mut metrics = UuidIndexAppendMetrics {
         input_records: identities.len() as u64,
@@ -561,6 +1070,15 @@ fn reject_identity_collisions(
         if incoming_index < incoming.len()
             && incoming[incoming_index].0.as_bytes().as_slice() == retained_uuid
         {
+            let incoming_record = incoming[incoming_index];
+            let retained_kind = record[16];
+            let retained_surrogate = u64::from_be_bytes(record[24..32].try_into().expect("fixed"));
+            if matches!(incoming_record.1, 2 | 3)
+                && incoming_record.1 - 2 == retained_kind
+                && incoming_record.2 == retained_surrogate
+            {
+                continue;
+            }
             return Err(storage_err(
                 "UUID already exists in an authenticated retained run",
             ));
@@ -585,6 +1103,9 @@ fn reject_surrogate_collisions(
             incoming_index += 1;
         }
         if incoming_index < incoming.len() && incoming[incoming_index].0 == retained_surrogate {
+            if incoming[incoming_index].1.as_bytes() == &record[8..24] {
+                continue;
+            }
             return Err(storage_err(
                 "node surrogate already exists in an authenticated retained run",
             ));
@@ -740,6 +1261,8 @@ fn compact_manifest_levels(
             metrics.write_blocks = metrics
                 .write_blocks
                 .saturating_add(bytes.div_ceil(BULK_IO_BYTES as u64));
+            let (node_count, edge_count, deleted_node_count, deleted_edge_count) =
+                count_identity_states(&root.join(&identities.name))?;
             manifest.runs.push(RunRecord {
                 base: false,
                 level: level + 1,
@@ -747,12 +1270,28 @@ fn compact_manifest_levels(
                 last_generation: right.last_generation,
                 identities,
                 node_surrogates,
-                node_count: left.node_count + right.node_count,
-                edge_count: left.edge_count + right.edge_count,
+                node_count,
+                edge_count,
+                deleted_node_count,
+                deleted_edge_count,
             });
         }
     }
     Ok(())
+}
+
+fn count_identity_states(path: &Path) -> Result<(u64, u64, u64, u64), GfError> {
+    let mut reader =
+        BufReader::with_capacity(BULK_IO_BYTES, File::open(path).map_err(storage_err)?);
+    let mut counts = [0_u64; 4];
+    while let Some(record) = read_exact_record::<32>(&mut reader)? {
+        let kind = usize::from(record[16]);
+        if kind >= counts.len() {
+            return Err(storage_err("invalid compacted identity kind"));
+        }
+        counts[kind] += 1;
+    }
+    Ok((counts[0], counts[1], counts[2], counts[3]))
 }
 
 fn merge_identity_v3(inputs: &[PathBuf], output: &Path) -> Result<(), GfError> {
@@ -768,21 +1307,30 @@ fn merge_identity_v3(inputs: &[PathBuf], output: &Path) -> Result<(), GfError> {
     }
     let mut out = File::create(output).map_err(storage_err)?;
     let mut block = Vec::with_capacity(BULK_IO_BYTES);
-    let mut previous = None;
-    while let Some(Reverse((record, index))) = heap.pop() {
+    while let Some(Reverse((mut record, index))) = heap.pop() {
         let uuid: [u8; 16] = record[..16].try_into().expect("fixed");
-        if previous == Some(uuid) {
-            return Err(storage_err("duplicate UUID across v3 levels"));
+        let mut newest_index = index;
+        if let Some(next) = read_exact_record::<32>(&mut readers[index])? {
+            heap.push(Reverse((next, index)));
+        }
+        while heap
+            .peek()
+            .is_some_and(|Reverse((candidate, _))| candidate[..16] == uuid)
+        {
+            let Reverse((candidate, candidate_index)) = heap.pop().expect("peeked");
+            if candidate_index > newest_index {
+                record = candidate;
+                newest_index = candidate_index;
+            }
+            if let Some(next) = read_exact_record::<32>(&mut readers[candidate_index])? {
+                heap.push(Reverse((next, candidate_index)));
+            }
         }
         if block.len() + 32 > BULK_IO_BYTES {
             out.write_all(&block).map_err(storage_err)?;
             block.clear();
         }
         block.extend_from_slice(&record);
-        previous = Some(uuid);
-        if let Some(next) = read_exact_record::<32>(&mut readers[index])? {
-            heap.push(Reverse((next, index)));
-        }
     }
     if !block.is_empty() {
         out.write_all(&block).map_err(storage_err)?;
@@ -829,13 +1377,13 @@ fn validate_run_descriptors(manifest: &Manifest) -> Result<(), GfError> {
     Ok(())
 }
 
-fn binary_search_identity(
+fn binary_search_identity_state(
     file: &mut File,
     count: u64,
     target: Uuid,
     expected_kind: UuidIndexKind,
     seeks: &mut u64,
-) -> Result<Option<u64>, GfError> {
+) -> Result<Option<(bool, u64)>, GfError> {
     let mut lo = 0;
     let mut hi = count;
     while lo < hi {
@@ -849,16 +1397,17 @@ fn binary_search_identity(
             std::cmp::Ordering::Less => lo = mid + 1,
             std::cmp::Ordering::Greater => hi = mid,
             std::cmp::Ordering::Equal => {
-                let kind = if record[16] == 0 {
+                let kind = if matches!(record[16], 0 | 2) {
                     UuidIndexKind::Node
                 } else {
                     UuidIndexKind::Edge
                 };
                 if kind != expected_kind {
-                    return Ok(None);
+                    return Ok(Some((false, 0)));
                 }
-                return Ok(Some(u64::from_be_bytes(
-                    record[24..32].try_into().expect("fixed record"),
+                return Ok(Some((
+                    matches!(record[16], 0 | 1),
+                    u64::from_be_bytes(record[24..32].try_into().expect("fixed record")),
                 )));
             }
         }
@@ -876,6 +1425,8 @@ fn validate_run_contents(
     let mut previous_uuid = None;
     let mut node_count = 0_u64;
     let mut edge_count = 0_u64;
+    let mut deleted_node_count = 0_u64;
+    let mut deleted_edge_count = 0_u64;
     for _ in 0..descriptor.identities.count {
         let mut record = [0_u8; 32];
         identities.read_exact(&mut record).map_err(storage_err)?;
@@ -890,18 +1441,23 @@ fn validate_run_contents(
         match record[16] {
             0 if surrogate != 0 => node_count += 1,
             1 if surrogate == 0 => edge_count += 1,
+            2 if surrogate != 0 => deleted_node_count += 1,
+            3 if surrogate == 0 => deleted_edge_count += 1,
             _ => return Err(storage_err("identity run contains an invalid kind")),
         }
     }
     if node_count != descriptor.node_count
         || edge_count != descriptor.edge_count
-        || descriptor.identities.count != node_count + edge_count
-        || descriptor.node_surrogates.count != node_count
+        || deleted_node_count != descriptor.deleted_node_count
+        || deleted_edge_count != descriptor.deleted_edge_count
+        || descriptor.identities.count
+            != node_count + edge_count + deleted_node_count + deleted_edge_count
+        || descriptor.node_surrogates.count != node_count + deleted_node_count
     {
         return Err(storage_err("run descriptor counts do not reconcile"));
     }
     let mut previous_surrogate = None;
-    for _ in 0..node_count {
+    for _ in 0..node_count + deleted_node_count {
         let mut record = [0_u8; 24];
         surrogates.read_exact(&mut record).map_err(storage_err)?;
         let surrogate = u64::from_be_bytes(record[..8].try_into().expect("fixed record"));
@@ -1064,6 +1620,8 @@ pub fn rebuild_uuid_membership_indexes(
             node_surrogates,
             node_count: metrics.node_count,
             edge_count: metrics.edge_count,
+            deleted_node_count: 0,
+            deleted_edge_count: 0,
         }],
     };
     publish_manifest(&root, staging, &manifest)?;
@@ -1271,7 +1829,13 @@ fn merge_surrogate_runs(inputs: &[PathBuf], output: &Path) -> Result<(), GfError
     let mut block = Vec::with_capacity(BULK_IO_BYTES);
     let mut previous = None;
     while let Some(Reverse(((surrogate, uuid), index))) = heap.pop() {
-        if previous == Some(surrogate) {
+        if previous.is_some_and(|(prior, _)| prior == surrogate) {
+            if previous.is_some_and(|(_, prior_uuid)| prior_uuid == uuid) {
+                if let Some(record) = read_surrogate_record(&mut readers[index])? {
+                    heap.push(Reverse((record, index)));
+                }
+                continue;
+            }
             return Err(storage_err("duplicate node surrogate across runs"));
         }
         if block.len() + 24 > BULK_IO_BYTES {
@@ -1280,7 +1844,7 @@ fn merge_surrogate_runs(inputs: &[PathBuf], output: &Path) -> Result<(), GfError
         }
         block.extend_from_slice(&surrogate.to_be_bytes());
         block.extend_from_slice(&uuid);
-        previous = Some(surrogate);
+        previous = Some((surrogate, uuid));
         if let Some(record) = read_surrogate_record(&mut readers[index])? {
             heap.push(Reverse((record, index)));
         }
@@ -2246,6 +2810,170 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("invalid node surrogate")
+        );
+    }
+
+    #[test]
+    fn prepared_delta_discards_before_topology_commit_and_recovers_after_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        prepare_uuid_membership_delta(dir.path(), 1, &[(Uuid::from_u128(1), 1)], &[], &[], &[])
+            .unwrap()
+            .unwrap();
+        assert!(!uuid_membership_index_is_fresh(dir.path()).unwrap());
+        assert!(!dir.path().join(INDEX_DIR).join(RECOVERY_MARKER).exists());
+
+        let prepared =
+            prepare_uuid_membership_delta(dir.path(), 1, &[(Uuid::from_u128(1), 1)], &[], &[], &[])
+                .unwrap()
+                .unwrap();
+        fs::write(
+            dir.path().join(INDEX_DIR).join(TOPOLOGY_RECEIPT),
+            serde_json::to_vec(&prepared.receipt).unwrap(),
+        )
+        .unwrap();
+        crate::generation::bump_topology_generation(dir.path()).unwrap();
+        crate::io_stats::reset();
+        prepared.finalize(1).unwrap();
+        assert!(uuid_membership_index_is_fresh(dir.path()).unwrap());
+        assert_eq!(crate::io_stats::snapshot().node_full_reads, 0);
+        let mut index = UuidMembershipIndex::open(dir.path()).unwrap();
+        assert_eq!(
+            index
+                .lookup_node_surrogates(&[Uuid::from_u128(1)])
+                .unwrap()
+                .0,
+            [Some(1)]
+        );
+    }
+
+    #[test]
+    fn recovered_manifest_switch_replays_idempotently_and_rejects_corruption() {
+        let dir = tempfile::tempdir().unwrap();
+        let prepared =
+            prepare_uuid_membership_delta(dir.path(), 1, &[(Uuid::from_u128(2), 1)], &[], &[], &[])
+                .unwrap()
+                .unwrap();
+        fs::write(
+            dir.path().join(INDEX_DIR).join(TOPOLOGY_RECEIPT),
+            serde_json::to_vec(&prepared.receipt).unwrap(),
+        )
+        .unwrap();
+        crate::generation::bump_topology_generation(dir.path()).unwrap();
+        let root = dir.path().join(INDEX_DIR);
+        let recovery: UuidIndexRecovery =
+            serde_json::from_slice(&fs::read(root.join(RECOVERY_MARKER)).unwrap()).unwrap();
+        let directory = graphforge_filesystem::StableDirectory::open(&root).unwrap();
+        for file in recovery.files.iter().filter(|file| !file.manifest) {
+            install_prepared_file(&directory, file).unwrap();
+        }
+        let manifest = recovery.files.iter().find(|file| file.manifest).unwrap();
+        directory
+            .replace_child(
+                std::ffi::OsStr::new(&manifest.prepared_name),
+                std::ffi::OsStr::new(MANIFEST),
+            )
+            .unwrap();
+        directory.sync().unwrap();
+        recover_uuid_membership_publication(dir.path()).unwrap();
+        recover_uuid_membership_publication(dir.path()).unwrap();
+        assert!(uuid_membership_index_is_fresh(dir.path()).unwrap());
+
+        let dir = tempfile::tempdir().unwrap();
+        let prepared =
+            prepare_uuid_membership_delta(dir.path(), 1, &[(Uuid::from_u128(3), 1)], &[], &[], &[])
+                .unwrap()
+                .unwrap();
+        fs::write(
+            dir.path().join(INDEX_DIR).join(TOPOLOGY_RECEIPT),
+            serde_json::to_vec(&prepared.receipt).unwrap(),
+        )
+        .unwrap();
+        crate::generation::bump_topology_generation(dir.path()).unwrap();
+        let root = dir.path().join(INDEX_DIR);
+        let recovery: UuidIndexRecovery =
+            serde_json::from_slice(&fs::read(root.join(RECOVERY_MARKER)).unwrap()).unwrap();
+        fs::write(root.join(&recovery.files[0].prepared_name), [0_u8]).unwrap();
+        assert!(recover_uuid_membership_publication(dir.path()).is_err());
+    }
+
+    #[test]
+    fn tombstones_survive_reopen_and_identity_and_surrogate_are_never_reused() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = Uuid::from_u128(41);
+        let edge = Uuid::from_u128(42);
+        let created = prepare_uuid_membership_delta(dir.path(), 1, &[(node, 7)], &[edge], &[], &[])
+            .unwrap()
+            .unwrap();
+        fs::write(
+            dir.path().join(INDEX_DIR).join(TOPOLOGY_RECEIPT),
+            serde_json::to_vec(&created.receipt).unwrap(),
+        )
+        .unwrap();
+        crate::generation::bump_topology_generation(dir.path()).unwrap();
+        created.finalize(1).unwrap();
+
+        let deleted = prepare_uuid_membership_delta(dir.path(), 2, &[], &[], &[(node, 7)], &[edge])
+            .unwrap()
+            .unwrap();
+        fs::write(
+            dir.path().join(INDEX_DIR).join(TOPOLOGY_RECEIPT),
+            serde_json::to_vec(&deleted.receipt).unwrap(),
+        )
+        .unwrap();
+        crate::generation::bump_topology_generation(dir.path()).unwrap();
+        deleted.finalize(2).unwrap();
+
+        let mut reopened = UuidMembershipIndex::open(dir.path()).unwrap();
+        assert_eq!(reopened.lookup_node_surrogates(&[node]).unwrap().0, [None]);
+        assert_eq!(
+            reopened.probe(UuidIndexKind::Edge, &[edge]).unwrap().0,
+            [false]
+        );
+        assert_eq!(reopened.count(UuidIndexKind::Node), 0);
+        assert_eq!(reopened.count(UuidIndexKind::Edge), 0);
+        assert!(prepare_uuid_membership_delta(dir.path(), 3, &[(node, 8)], &[], &[], &[]).is_err());
+        assert!(
+            prepare_uuid_membership_delta(
+                dir.path(),
+                3,
+                &[(Uuid::from_u128(43), 7)],
+                &[],
+                &[],
+                &[]
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn recovery_control_records_are_bounded_and_cannot_substitute_live_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(INDEX_DIR);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join(RECOVERY_MARKER),
+            vec![b'x'; MAX_RECOVERY_MARKER_BYTES as usize + 1],
+        )
+        .unwrap();
+        assert!(recover_uuid_membership_publication(dir.path()).is_err());
+
+        fs::remove_file(root.join(RECOVERY_MARKER)).unwrap();
+        prepare_uuid_membership_delta(dir.path(), 1, &[(Uuid::from_u128(50), 1)], &[], &[], &[])
+            .unwrap()
+            .unwrap();
+        let mut recovery: UuidIndexRecovery =
+            serde_json::from_slice(&fs::read(root.join(RECOVERY_MARKER)).unwrap()).unwrap();
+        fs::write(root.join(TOPOLOGY_RECEIPT), b"live-sentinel").unwrap();
+        recovery.files[0].prepared_name = TOPOLOGY_RECEIPT.to_owned();
+        fs::write(
+            root.join(RECOVERY_MARKER),
+            serde_json::to_vec(&recovery).unwrap(),
+        )
+        .unwrap();
+        assert!(recover_uuid_membership_publication(dir.path()).is_err());
+        assert_eq!(
+            fs::read(root.join(TOPOLOGY_RECEIPT)).unwrap(),
+            b"live-sentinel"
         );
     }
 }

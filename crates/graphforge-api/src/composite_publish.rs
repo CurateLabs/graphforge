@@ -895,16 +895,15 @@ fn register_existing_endpoints(
         return Ok(());
     }
     if !graphforge_storage::uuid_membership_index_is_fresh(dir)? {
-        graphforge_storage::rebuild_uuid_membership_indexes(
-            dir,
-            graphforge_storage::UuidIndexBuildLimits::default(),
-        )?;
+        return Err(GfError::Storage(
+            "composite endpoint resolution requires a fresh authenticated UUID index; run the explicit bounded index migration first".into(),
+        ));
     }
     let mut index = graphforge_storage::UuidMembershipIndex::open(dir)?;
     let (surrogates, _) = index.lookup_node_surrogates(&existing)?;
     for (uuid, surrogate) in existing.into_iter().zip(surrogates) {
         if let Some(surrogate) = surrogate {
-            writer.register_existing_node(uuid, surrogate);
+            writer.register_existing_node(uuid, surrogate)?;
         }
     }
     // Missing indexed endpoints retain the existing behavior: validation has
@@ -1131,7 +1130,28 @@ fn apply_graph_mutations(
         inventory,
         &delete_nodes,
     )?;
-    graphforge_storage::commit_topology_aware(staged, &graph.dir)?;
+    let expected_generation = graphforge_storage::read_topology_generation(&graph.dir)? + 1;
+    let deleted_nodes = delete_nodes
+        .iter()
+        .copied()
+        .map(Uuid::from_bytes)
+        .collect::<Vec<_>>();
+    let deleted_edges = delete_edges
+        .iter()
+        .copied()
+        .map(Uuid::from_bytes)
+        .collect::<Vec<_>>();
+    let index_prepared = writer.prepare_uuid_index_delta_with_deletions(
+        expected_generation,
+        &mut staged,
+        &deleted_nodes,
+        &deleted_edges,
+    )?;
+    if let Some(generation) = graphforge_storage::commit_topology_aware(staged, &graph.dir)? {
+        if index_prepared {
+            writer.finalize_uuid_index_delta(generation)?;
+        }
+    }
     Ok(())
 }
 

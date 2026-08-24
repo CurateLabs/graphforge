@@ -24,6 +24,7 @@ use arrow::compute::filter_record_batch;
 use arrow::datatypes::SchemaRef;
 
 use graphforge_core::GfError;
+use uuid::Uuid;
 
 use crate::catalog::{
     discover_parquet_schema, discover_parquet_schema_detailed, normalize_topology_nodes,
@@ -558,7 +559,15 @@ pub fn delete_nodes<S: BuildHasher>(
 ) -> Result<u64, GfError> {
     let mut staged = RewriteBatch::new();
     let removed = stage_delete_nodes(&mut staged, dir, node_uuids)?;
+    let prepared =
+        prepare_deletion_index(dir, node_uuids, &HashSet::<[u8; 16]>::new(), removed, 0)?;
+    if let Some(prepared) = &prepared {
+        prepared.stage_receipt(&mut staged)?;
+    }
     if let Some(g) = crate::generation::commit_topology_aware(staged, dir)? {
+        if let Some(prepared) = prepared {
+            prepared.finalize(g)?;
+        }
         crate::adjacency_delta::discard_segment(dir, g); // delete writes no segment
     }
     Ok(removed)
@@ -579,7 +588,15 @@ pub fn delete_edges<S: BuildHasher>(
 ) -> Result<u64, GfError> {
     let mut staged = RewriteBatch::new();
     let removed = stage_delete_edges(&mut staged, dir, edge_uuids)?;
+    let prepared =
+        prepare_deletion_index(dir, &HashSet::<[u8; 16]>::new(), edge_uuids, 0, removed)?;
+    if let Some(prepared) = &prepared {
+        prepared.stage_receipt(&mut staged)?;
+    }
     if let Some(g) = crate::generation::commit_topology_aware(staged, dir)? {
+        if let Some(prepared) = prepared {
+            prepared.finalize(g)?;
+        }
         crate::adjacency_delta::discard_segment(dir, g); // delete writes no segment
     }
     Ok(removed)
@@ -606,10 +623,68 @@ pub fn delete_nodes_and_edges<S: BuildHasher>(
     let mut staged = RewriteBatch::new();
     let edges_removed = stage_delete_edges(&mut staged, dir, edge_uuids)?;
     let nodes_removed = stage_delete_nodes(&mut staged, dir, node_uuids)?;
+    let prepared =
+        prepare_deletion_index(dir, node_uuids, edge_uuids, nodes_removed, edges_removed)?;
+    if let Some(prepared) = &prepared {
+        prepared.stage_receipt(&mut staged)?;
+    }
     if let Some(g) = crate::generation::commit_topology_aware(staged, dir)? {
+        if let Some(prepared) = prepared {
+            prepared.finalize(g)?;
+        }
         crate::adjacency_delta::discard_segment(dir, g); // delete writes no segment
     }
     Ok((nodes_removed, edges_removed))
+}
+
+fn prepare_deletion_index<NS: BuildHasher, ES: BuildHasher>(
+    dir: &Path,
+    node_uuids: &HashSet<[u8; 16], NS>,
+    edge_uuids: &HashSet<[u8; 16], ES>,
+    nodes_removed: u64,
+    edges_removed: u64,
+) -> Result<Option<crate::uuid_membership::PreparedUuidIndexDelta>, GfError> {
+    if nodes_removed == 0 && edges_removed == 0 {
+        return Ok(None);
+    }
+    if !crate::uuid_membership_index_present(dir) {
+        crate::rebuild_uuid_membership_indexes(dir, crate::UuidIndexBuildLimits::default())?;
+    }
+    if !crate::uuid_membership_index_is_fresh(dir)? {
+        return Err(GfError::Storage(
+            "UUID membership index is stale before deletion".into(),
+        ));
+    }
+    let generation = crate::read_topology_generation(dir)?.saturating_add(1);
+    let mut index = crate::UuidMembershipIndex::open(dir)?;
+    let requested_nodes = node_uuids
+        .iter()
+        .map(|bytes| Uuid::from_bytes(*bytes))
+        .collect::<Vec<_>>();
+    let (surrogates, _) = index.lookup_node_surrogates(&requested_nodes)?;
+    let deleted_nodes = requested_nodes
+        .into_iter()
+        .zip(surrogates)
+        .filter_map(|(uuid, surrogate)| surrogate.map(|id| (uuid, id)))
+        .collect::<Vec<_>>();
+    let requested_edges = edge_uuids
+        .iter()
+        .map(|bytes| Uuid::from_bytes(*bytes))
+        .collect::<Vec<_>>();
+    let (present, _) = index.probe(crate::UuidIndexKind::Edge, &requested_edges)?;
+    let deleted_edges = requested_edges
+        .into_iter()
+        .zip(present)
+        .filter_map(|(uuid, present)| present.then_some(uuid))
+        .collect::<Vec<_>>();
+    crate::uuid_membership::prepare_uuid_membership_delta(
+        dir,
+        generation,
+        &[],
+        &[],
+        &deleted_nodes,
+        &deleted_edges,
+    )
 }
 
 /// Return the `edge_uuid`s of every edge incident to any of `node_uuids`
