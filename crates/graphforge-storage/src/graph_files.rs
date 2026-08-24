@@ -592,13 +592,16 @@ fn collect_source_files(directory: &Path, paths: &mut Vec<PathBuf>) -> Result<()
 /// basename suffix/prefix rule would let an unauthenticated Parquet fragment
 /// disappear from inventory reconciliation while topology readers consume it.
 fn is_graph_operational_file(relative: &Path) -> bool {
-    let components = relative
+    let Some(components) = relative
         .components()
-        .filter_map(|component| match component {
+        .map(|component| match component {
             std::path::Component::Normal(value) => value.to_str(),
             _ => None,
         })
-        .collect::<Vec<_>>();
+        .collect::<Option<Vec<_>>>()
+    else {
+        return false;
+    };
     match components.as_slice() {
         [".graphforge-rewrite.lock"]
         | ["embeddings", ".catalog.lock" | ".refresh.lock"]
@@ -609,13 +612,19 @@ fn is_graph_operational_file(relative: &Path) -> bool {
                 .strip_prefix(".writer-")
                 .and_then(|value| value.strip_suffix(".lock"))
                 .is_some_and(|value| {
-                    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    value.len() == 64
+                        && value
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
                 }) =>
         {
             true
         }
         ["embeddings", "spaces", identity, ".writer.lock"]
-            if identity.len() == 64 && identity.bytes().all(|byte| byte.is_ascii_hexdigit()) =>
+            if identity.len() == 64
+                && identity
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) =>
         {
             true
         }
@@ -917,6 +926,31 @@ mod tests {
         )
         .unwrap();
         assert!(verify_graph_tree(&graph_root, &inventory).is_err());
+    }
+
+    #[test]
+    fn operational_classifier_rejects_noncanonical_hex_identity() {
+        assert!(!is_graph_operational_file(Path::new(&format!(
+            "embeddings/.writer-{}.lock",
+            "A".repeat(64)
+        ))));
+        assert!(!is_graph_operational_file(Path::new(&format!(
+            "embeddings/spaces/{}/.writer.lock",
+            "F".repeat(64)
+        ))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn operational_classifier_never_collapses_non_utf8_components() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let path = PathBuf::from("indexes")
+            .join("search")
+            .join(OsString::from_vec(vec![0xff]))
+            .join(".writer.lock");
+        assert!(!is_graph_operational_file(&path));
     }
 
     #[test]
