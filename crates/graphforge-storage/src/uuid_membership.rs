@@ -351,8 +351,6 @@ struct TopologyIndexReceipt {
 pub(crate) struct PreparedUuidIndexDelta {
     expected_generation: u64,
     auxiliary: crate::AuxiliaryReceipt,
-    root: PathBuf,
-    superseded: Vec<(String, graphforge_filesystem::FileIdentity)>,
 }
 
 /// Stage one bounded v3 UUID-index delta and its authenticated receipt into the
@@ -386,7 +384,7 @@ pub(crate) fn prepare_uuid_membership_delta(
         .prefix("uuid-membership-plan-")
         .tempdir_in(parent)
         .map_err(storage_err)?;
-    let (manifest, outputs, superseded, _metrics) = plan_uuid_membership_delta(
+    let (manifest, outputs, _superseded, _metrics) = plan_uuid_membership_delta(
         &source_root,
         current,
         generation,
@@ -414,8 +412,6 @@ pub(crate) fn prepare_uuid_membership_delta(
     let digest = Sha256::digest(&receipt_bytes);
     Ok(Some(PreparedUuidIndexDelta {
         expected_generation: generation,
-        root: source_root,
-        superseded,
         auxiliary: crate::AuxiliaryReceipt {
             kind: "uuid-membership/v3".to_owned(),
             schema_version: FORMAT_VERSION,
@@ -861,16 +857,7 @@ impl PreparedUuidIndexDelta {
                 "topology commit returned an unexpected generation",
             ));
         }
-        let directory =
-            graphforge_filesystem::StableDirectory::open(&self.root).map_err(storage_err)?;
-        for (name, identity) in &self.superseded {
-            match directory.unlink_child_if_identity(std::ffi::OsStr::new(name), *identity) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(storage_err(error)),
-            }
-        }
-        directory.sync().map_err(storage_err)
+        Ok(())
     }
 }
 
