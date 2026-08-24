@@ -2794,22 +2794,17 @@ impl GraphWriter {
         let mut staged = RewriteBatch::new();
         self.flush_into(&mut staged)?;
         let pending = self.take_pending_delta();
-        let expected_generation = crate::read_topology_generation(&self.dir)?.saturating_add(1);
-        let index_staged = self.prepare_uuid_index_delta(expected_generation, &mut staged)?;
-        let auxiliary = self
-            .prepared_index
-            .as_ref()
-            .map(crate::uuid_membership::PreparedUuidIndexDelta::auxiliary_receipt);
+        let dir = self.dir.clone();
+        let participant = self.uuid_index_participant(Vec::new(), Vec::new());
         if let Some(generation) =
-            crate::generation::commit_topology_aware_with_auxiliary(staged, &self.dir, auxiliary)?
+            crate::generation::commit_topology_aware_with_participant(staged, &dir, participant)?
         {
-            debug_assert_eq!(generation, expected_generation);
             // A pure-append flush (only CREATEs reach `GraphWriter`): record the
             // delta segment so the adjacency index can serve the new edges
             // without a rebuild. A node-only flush writes an empty segment so
             // the chain stays contiguous. See `write_segment_best_effort`.
             self.write_segment_best_effort(generation, &pending);
-            if index_staged {
+            if self.prepared_index.is_some() {
                 self.finalize_uuid_index_delta(generation)?;
             }
         }
@@ -2885,6 +2880,24 @@ impl GraphWriter {
             &deleted_edges,
         )?;
         Ok(self.prepared_index.is_some())
+    }
+
+    /// Build the UUID-index participant under the durable rewrite lock, using
+    /// the authoritative generation derived after recovery.
+    pub fn uuid_index_participant<'a>(
+        &'a mut self,
+        deleted_nodes: Vec<Uuid>,
+        deleted_edges: Vec<Uuid>,
+    ) -> crate::RewriteParticipantPreparer<'a> {
+        Box::new(move |context, staged| {
+            self.prepare_uuid_index_delta_with_deletions(
+                context.next.topology,
+                staged,
+                &deleted_nodes,
+                &deleted_edges,
+            )?;
+            Ok(self.prepared_uuid_index_auxiliary_receipt())
+        })
     }
 
     /// Finalize a prepared UUID delta after the topology commit succeeds.

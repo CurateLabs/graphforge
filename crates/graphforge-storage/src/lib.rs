@@ -12,7 +12,9 @@
 
 mod durable_rewrite;
 mod file_lock;
-pub use durable_rewrite::AuxiliaryReceipt;
+pub use durable_rewrite::{
+    AuxiliaryReceipt, GenerationPair, ParticipantPreparationContext, RewriteParticipantPreparer,
+};
 #[doc(hidden)]
 pub mod filesystem_admission;
 
@@ -21,8 +23,9 @@ pub mod adjacency_delta;
 
 pub mod generation;
 pub use generation::{
-    commit_topology_aware, commit_topology_aware_with_auxiliary, read_search_generation,
-    read_topology_generation, touches_search_source,
+    commit_topology_aware, commit_topology_aware_with_auxiliary,
+    commit_topology_aware_with_participant, read_search_generation, read_topology_generation,
+    touches_search_source,
 };
 
 pub mod graph_projection;
@@ -390,8 +393,7 @@ pub use writer::{
     GraphWriter, GraphWriterLimits, count_entity_properties, decode_spatial_property_value,
     read_entity_properties, read_entity_property_keys, read_node_property_rows,
     remove_edge_properties, remove_node_properties, set_edge_properties_rewrite,
-    set_node_properties,
-    stage_property_tombstones_authenticated, stage_remove_edge_properties,
+    set_node_properties, stage_property_tombstones_authenticated, stage_remove_edge_properties,
     stage_remove_edge_properties_authenticated, stage_remove_node_properties,
     stage_remove_node_properties_authenticated, stage_set_edge_properties,
     stage_set_edge_properties_authenticated, stage_set_node_properties,

@@ -43,9 +43,33 @@ pub struct AuxiliaryReceipt {
     pub bytes: u64,
 }
 
+/// Authoritative rewrite state exposed to an auxiliary participant while the
+/// admitted project rewrite lock is held.
+pub struct ParticipantPreparationContext<'a> {
+    /// Exact generation pair that this transaction will publish.
+    pub next: GenerationPair,
+    /// Retained, admitted project directory capability.
+    pub project: &'a StableDirectory,
+    /// Canonical admitted project root.
+    pub project_root: &'a Path,
+}
+
+/// One-shot participant preparation executed inside the retained rewrite
+/// critical section.
+pub type RewriteParticipantPreparer<'a> = Box<
+    dyn FnOnce(
+            ParticipantPreparationContext<'_>,
+            &mut RewriteBatch,
+        ) -> Result<Option<AuxiliaryReceipt>, GfError>
+        + 'a,
+>;
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub(crate) struct GenerationPair {
+/// Topology and search authorities selected for one durable rewrite.
+pub struct GenerationPair {
+    /// Topology generation published by the transaction.
     pub topology: u64,
+    /// Search generation published by the transaction.
     pub search: u64,
     #[serde(default)]
     pub property: u64,
@@ -674,12 +698,32 @@ thread_local! {
 
 #[allow(clippy::too_many_lines)]
 pub(crate) fn commit(
+    batch: RewriteBatch,
+    root: &Path,
+    bump_topology: bool,
+    bump_search: bool,
+    bump_property: bool,
+    auxiliary: Option<AuxiliaryReceipt>,
+) -> Result<GenerationPair, GfError> {
+    commit_with_participant(
+        batch,
+        root,
+        bump_topology,
+        bump_search,
+        bump_property,
+        auxiliary,
+        None,
+    )
+}
+
+pub(crate) fn commit_with_participant(
     mut batch: RewriteBatch,
     root: &Path,
     bump_topology: bool,
     bump_search: bool,
     bump_property: bool,
     auxiliary: Option<AuxiliaryReceipt>,
+    participant: Option<RewriteParticipantPreparer<'_>>,
 ) -> Result<GenerationPair, GfError> {
     // Serialize the pinned-generation precondition with CURRENT replacement.
     // Project publication takes this same lock before it can replace CURRENT.
@@ -702,7 +746,13 @@ pub(crate) fn commit(
         search: recovered.search,
         property: recovered.property,
     };
-    if batch.is_empty() && !bump_topology && !bump_search && !bump_property && auxiliary.is_none() {
+    if batch.is_empty()
+        && !bump_topology
+        && !bump_search
+        && !bump_property
+        && auxiliary.is_none()
+        && participant.is_none()
+    {
         return Ok(prior);
     }
     let next = GenerationPair {
@@ -735,6 +785,22 @@ pub(crate) fn commit(
         crate::writer::seal_property_windows(&mut batch, root, next.property)?;
         batch.move_staged_destination_to_end(&root.join("topology/nodes.parquet"));
     }
+    let participant_auxiliary = if let Some(prepare) = participant {
+        prepare(
+            ParticipantPreparationContext {
+                next,
+                project: &guard.directory,
+                project_root: root,
+            },
+            &mut batch,
+        )?
+    } else {
+        None
+    };
+    if auxiliary.is_some() && participant_auxiliary.is_some() {
+        return Err(storage("rewrite has multiple auxiliary participants"));
+    }
+    let auxiliary = participant_auxiliary.or(auxiliary);
     let generation_bytes =
         crate::generation::encode_generation_state(next.topology, next.search, next.property)?;
     guard.revalidate()?;
