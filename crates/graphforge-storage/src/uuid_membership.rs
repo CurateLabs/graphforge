@@ -146,6 +146,10 @@ struct Manifest {
     format_version: u32,
     base_generation: u64,
     current_generation: u64,
+    #[serde(default)]
+    live_node_count: u64,
+    #[serde(default)]
+    live_edge_count: u64,
     runs: Vec<RunRecord>,
 }
 
@@ -212,16 +216,10 @@ impl UuidMembershipIndex {
     #[must_use]
     /// Return the authenticated unique-record count for one identity domain.
     pub fn count(&self, kind: UuidIndexKind) -> u64 {
-        let (added, deleted) = self
-            .manifest
-            .runs
-            .iter()
-            .map(|run| match kind {
-                UuidIndexKind::Node => (run.node_count, run.deleted_node_count),
-                UuidIndexKind::Edge => (run.edge_count, run.deleted_edge_count),
-            })
-            .fold((0_u64, 0_u64), |(a, d), (ra, rd)| (a + ra, d + rd));
-        added.saturating_sub(deleted)
+        match kind {
+            UuidIndexKind::Node => self.manifest.live_node_count,
+            UuidIndexKind::Edge => self.manifest.live_edge_count,
+        }
     }
 
     /// Probe a batch in caller order. Memory is O(unique requested UUIDs).
@@ -353,6 +351,10 @@ struct UuidIndexRecovery {
     topology_delta_sha256: String,
     root_volume_serial: u64,
     root_file_id: [u8; 16],
+    project_volume_serial: u64,
+    project_file_id: [u8; 16],
+    topology_volume_serial: u64,
+    topology_file_id: [u8; 16],
     files: Vec<PreparedIndexFile>,
 }
 
@@ -403,17 +405,33 @@ pub(crate) fn prepare_uuid_membership_delta(
     let shadow_project = shadow.path().join("project");
     let shadow_root = shadow_project.join(INDEX_DIR);
     fs::create_dir_all(&shadow_root).map_err(storage_err)?;
-    if source_root.is_dir() {
-        for entry in fs::read_dir(&source_root).map_err(storage_err)? {
-            let entry = entry.map_err(storage_err)?;
-            if !entry.file_type().map_err(storage_err)?.is_file() {
-                continue;
-            }
-            let source = entry.path();
-            let destination = shadow_root.join(entry.file_name());
-            if fs::hard_link(&source, &destination).is_err() {
-                fs::copy(&source, &destination).map_err(storage_err)?;
-            }
+    if current != 0 {
+        let _authenticated = UuidMembershipIndex::open(project_dir)?;
+        let source_directory =
+            graphforge_filesystem::StableDirectory::open(&source_root).map_err(storage_err)?;
+        let shadow_directory =
+            graphforge_filesystem::StableDirectory::open(&shadow_root).map_err(storage_err)?;
+        let mut manifest_file = source_directory
+            .open_child_file(std::ffi::OsStr::new(MANIFEST))
+            .map_err(storage_err)?;
+        let manifest_body = read_bounded(&mut manifest_file, MAX_RECOVERY_MARKER_BYTES)?;
+        let manifest: Manifest = serde_json::from_slice(&manifest_body).map_err(storage_err)?;
+        let mut names = manifest_file_names(&manifest);
+        names.insert(MANIFEST.to_owned());
+        for name in names {
+            let source = source_directory
+                .open_child_file(std::ffi::OsStr::new(&name))
+                .map_err(storage_err)?;
+            let identity = graphforge_filesystem::file_identity(&source).map_err(storage_err)?;
+            source_directory
+                .link_child_into(
+                    std::ffi::OsStr::new(&name),
+                    &source,
+                    identity,
+                    &shadow_directory,
+                    std::ffi::OsStr::new(&name),
+                )
+                .map_err(storage_err)?;
         }
     }
     fs::create_dir_all(shadow_project.join("topology")).map_err(storage_err)?;
@@ -480,6 +498,26 @@ pub(crate) fn prepare_uuid_membership_delta(
         topology_delta_sha256: topology_delta_sha256(nodes, edges, deleted_nodes, deleted_edges),
         root_volume_serial: directory.identity().volume_serial,
         root_file_id: directory.identity().file_id,
+        project_volume_serial: graphforge_filesystem::StableDirectory::open(project_dir)
+            .map_err(storage_err)?
+            .identity()
+            .volume_serial,
+        project_file_id: graphforge_filesystem::StableDirectory::open(project_dir)
+            .map_err(storage_err)?
+            .identity()
+            .file_id,
+        topology_volume_serial: graphforge_filesystem::StableDirectory::open(
+            &project_dir.join("topology"),
+        )
+        .map_err(storage_err)?
+        .identity()
+        .volume_serial,
+        topology_file_id: graphforge_filesystem::StableDirectory::open(
+            &project_dir.join("topology"),
+        )
+        .map_err(storage_err)?
+        .identity()
+        .file_id,
         files,
     };
     write_recovery_marker(&source_root, &recovery)?;
@@ -681,6 +719,18 @@ fn recover_uuid_membership_publication(project_dir: &Path) -> Result<(), GfError
     {
         return Err(storage_err("UUID index recovery root identity changed"));
     }
+    let project = graphforge_filesystem::StableDirectory::open(project_dir).map_err(storage_err)?;
+    let topology = graphforge_filesystem::StableDirectory::open(&project_dir.join("topology"))
+        .map_err(storage_err)?;
+    project.revalidate_named().map_err(storage_err)?;
+    topology.revalidate_named().map_err(storage_err)?;
+    if project.identity().volume_serial != recovery.project_volume_serial
+        || project.identity().file_id != recovery.project_file_id
+        || topology.identity().volume_serial != recovery.topology_volume_serial
+        || topology.identity().file_id != recovery.topology_file_id
+    {
+        return Err(storage_err("UUID index recovery project identity changed"));
+    }
     let generation = crate::read_topology_generation(project_dir)?;
     if generation == recovery.prior_generation {
         for file in &recovery.files {
@@ -860,6 +910,8 @@ pub(crate) fn append_uuid_membership_delta_with_tombstones(
                 format_version: FORMAT_VERSION,
                 base_generation: 0,
                 current_generation: 0,
+                live_node_count: 0,
+                live_edge_count: 0,
                 runs: vec![RunRecord {
                     base: true,
                     level: 0,
@@ -1009,6 +1061,16 @@ pub(crate) fn append_uuid_membership_delta_with_tombstones(
     };
     compact_manifest_levels(&root, staging, scratch.path(), &mut manifest, &mut metrics)?;
     manifest.current_generation = generation;
+    manifest.live_node_count = manifest
+        .live_node_count
+        .checked_add(nodes.len() as u64)
+        .and_then(|count| count.checked_sub(deleted_nodes.len() as u64))
+        .ok_or_else(|| storage_err("node live-count delta is invalid"))?;
+    manifest.live_edge_count = manifest
+        .live_edge_count
+        .checked_add(edges.len() as u64)
+        .and_then(|count| count.checked_sub(deleted_edges.len() as u64))
+        .ok_or_else(|| storage_err("edge live-count delta is invalid"))?;
     manifest
         .runs
         .sort_unstable_by_key(|run| run.first_generation);
@@ -1612,6 +1674,8 @@ pub fn rebuild_uuid_membership_indexes(
         format_version: FORMAT_VERSION,
         base_generation: generation,
         current_generation: generation,
+        live_node_count: metrics.node_count,
+        live_edge_count: metrics.edge_count,
         runs: vec![RunRecord {
             base: true,
             level: 0,
