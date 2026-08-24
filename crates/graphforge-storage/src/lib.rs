@@ -29,28 +29,30 @@ pub use graph_projection::{
 };
 
 pub mod graph_files;
+#[cfg(test)]
+pub(crate) use graph_files::graph_files_root_participant;
 pub use graph_files::{
     GRAPH_CAPABILITY_ID, GRAPH_CAPABILITY_VERSION, GRAPH_FILES_FAMILY, GRAPH_FILES_RECORD_VERSION,
     GRAPH_FILES_V2_RECORD_VERSION, GRAPH_TREE_DIR, GraphFileEntry, GraphFileRole,
-    GraphFilesInventory, GraphFilesOpenEvidence, GraphFilesOpenStrategy, GraphFilesParticipant,
-    capture_graph_files, decode_graph_files_participant, decode_inventory,
-    decode_versioned_graph_files_participant, encode_inventory, graph_files_root_participant,
-    graph_tree_root, inventory_participant, materialize_graph_tree, pinned_open_evidence,
-    stage_graph_tree, verify_graph_tree,
+    GraphFilesInventory, GraphFilesOpenEvidence, GraphFilesOpenStrategy, capture_graph_files,
+    decode_inventory, encode_inventory, graph_tree_root, inventory_participant,
+    materialize_graph_tree, pinned_open_evidence, stage_graph_tree, verify_graph_tree,
 };
+pub(crate) use graph_files::{GraphFilesParticipant, decode_versioned_graph_files_participant};
 
 #[allow(
     dead_code,
     reason = "private node-v2 construction is consumed by the staged #932 integration"
 )]
 mod graph_manifest;
+#[cfg(test)]
+pub(crate) use graph_manifest::encode_root as encode_graph_files_root_v2;
 pub(crate) use graph_manifest::{
     GRAPH_FILES_V2_FORMAT, GRAPH_FILES_V2_VERSION, GRAPH_MANIFEST_NODE_FORMAT,
     GRAPH_MANIFEST_NODE_VERSION, GRAPH_RADIX_DEPTH, GraphFilesRootV2, GraphManifestLimits,
     GraphManifestNode, GraphManifestNodeKind, GraphManifestResolveEvidence,
     decode_node as decode_graph_manifest_node, decode_root as decode_graph_files_root_v2,
-    encode_node as encode_graph_manifest_node, encode_root as encode_graph_files_root_v2,
-    resolve_manifest as resolve_graph_manifest,
+    encode_node as encode_graph_manifest_node, resolve_manifest as resolve_graph_manifest,
 };
 
 #[allow(

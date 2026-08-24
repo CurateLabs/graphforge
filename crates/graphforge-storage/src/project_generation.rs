@@ -208,7 +208,7 @@ impl ResolvedProjectGeneration {
 
     /// Decode the explicitly versioned graph-files participant without
     /// resolving payload objects.
-    pub fn declared_graph_files_participant(
+    pub(crate) fn declared_graph_files_participant(
         &self,
     ) -> Result<Option<crate::GraphFilesParticipant>, GfError> {
         let Some(snapshot) =

@@ -37,6 +37,7 @@ const MAX_GRAPH_FILES: usize = 100_000;
 const HASH_BUFFER_BYTES: usize = 64 * 1024;
 const GRAPH_FILES_SCHEMA_CANONICAL_BYTES: &[u8] =
     b"graphforge-graph-files/1|relative_path|byte_length|content_sha256|role";
+#[cfg(test)]
 const GRAPH_FILES_V2_SCHEMA_CANONICAL_BYTES: &[u8] =
     b"graphforge-graph-files-root/2|root_node_sha256|logical_file_count|logical_byte_length";
 
@@ -88,7 +89,7 @@ pub struct GraphFilesInventory {
 
 /// Explicitly decoded `graph/files` participant generation.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GraphFilesParticipant {
+pub(crate) enum GraphFilesParticipant {
     /// Expanded generation-owned v1 inventory.
     V1(GraphFilesInventory),
     /// Compact project-object-store v2 manifest root.
@@ -167,7 +168,8 @@ pub fn inventory_participant(
 }
 
 /// Encode a compact v2 root as the registered `graph`/`files` participant.
-pub fn graph_files_root_participant(
+#[cfg(test)]
+pub(crate) fn graph_files_root_participant(
     root: &crate::GraphFilesRootV2,
 ) -> Result<ProjectParticipant, GfError> {
     Ok(ProjectParticipant {
@@ -215,7 +217,9 @@ pub fn decode_inventory(bytes: &[u8]) -> Result<GraphFilesInventory, GfError> {
 
 /// Decode either the legacy expanded inventory or compact v2 root.
 /// Unknown format tags and future versions fail closed.
-pub fn decode_graph_files_participant(bytes: &[u8]) -> Result<GraphFilesParticipant, GfError> {
+pub(crate) fn decode_graph_files_participant(
+    bytes: &[u8],
+) -> Result<GraphFilesParticipant, GfError> {
     let value: serde_json::Value = serde_json::from_slice(bytes)
         .map_err(|error| validation(format!("invalid graph files participant JSON: {error}")))?;
     let format = value
@@ -243,7 +247,7 @@ pub fn decode_graph_files_participant(bytes: &[u8]) -> Result<GraphFilesParticip
 }
 
 /// Decode a participant and enforce the descriptor/payload version pairing.
-pub fn decode_versioned_graph_files_participant(
+pub(crate) fn decode_versioned_graph_files_participant(
     record_version: u32,
     bytes: &[u8],
 ) -> Result<GraphFilesParticipant, GfError> {
