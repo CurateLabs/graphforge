@@ -2794,19 +2794,14 @@ impl GraphWriter {
         let mut staged = RewriteBatch::new();
         self.flush_into(&mut staged)?;
         let pending = self.take_pending_delta();
-        let dir = self.dir.clone();
-        let participant = self.uuid_index_participant(Vec::new(), Vec::new());
         if let Some(generation) =
-            crate::generation::commit_topology_aware_with_participant(staged, &dir, participant)?
+            self.commit_topology_aware_with_uuid_index(staged, Vec::new(), Vec::new())?
         {
             // A pure-append flush (only CREATEs reach `GraphWriter`): record the
             // delta segment so the adjacency index can serve the new edges
             // without a rebuild. A node-only flush writes an empty segment so
             // the chain stays contiguous. See `write_segment_best_effort`.
             self.write_segment_best_effort(generation, &pending);
-            if self.prepared_index.is_some() {
-                self.finalize_uuid_index_delta(generation)?;
-            }
         }
         Ok(())
     }
@@ -2888,11 +2883,11 @@ impl GraphWriter {
 
     /// Build the UUID-index participant under the durable rewrite lock, using
     /// the authoritative generation derived after recovery.
-    pub fn uuid_index_participant<'a>(
+    fn uuid_index_participant<'a>(
         &'a mut self,
         deleted_nodes: Vec<Uuid>,
         deleted_edges: Vec<Uuid>,
-    ) -> crate::RewriteParticipantPreparer<'a> {
+    ) -> crate::durable_rewrite::RewriteParticipantPreparer<'a> {
         Box::new(move |context, staged| {
             self.prepare_uuid_index_delta_with_deletions(
                 context.next.topology,
@@ -2902,6 +2897,25 @@ impl GraphWriter {
             )?;
             Ok(self.prepared_uuid_index_auxiliary_receipt())
         })
+    }
+
+    /// Commit topology and its UUID-index participant as one sealed durable rewrite.
+    pub fn commit_topology_aware_with_uuid_index(
+        &mut self,
+        staged: RewriteBatch,
+        deleted_nodes: Vec<Uuid>,
+        deleted_edges: Vec<Uuid>,
+    ) -> Result<Option<u64>, GfError> {
+        let dir = self.dir.clone();
+        let participant = self.uuid_index_participant(deleted_nodes, deleted_edges);
+        let committed =
+            crate::generation::commit_topology_aware_with_participant(staged, &dir, participant)?;
+        if let Some(generation) = committed {
+            if self.prepared_index.is_some() {
+                self.finalize_uuid_index_delta(generation)?;
+            }
+        }
+        Ok(committed)
     }
 
     /// Finalize a prepared UUID delta after the topology commit succeeds.

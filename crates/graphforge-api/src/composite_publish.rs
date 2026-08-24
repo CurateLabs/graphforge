@@ -1140,14 +1140,7 @@ fn apply_graph_mutations(
         .copied()
         .map(Uuid::from_bytes)
         .collect::<Vec<_>>();
-    let participant = writer.uuid_index_participant(deleted_nodes, deleted_edges);
-    if let Some(generation) =
-        graphforge_storage::commit_topology_aware_with_participant(staged, &graph.dir, participant)?
-    {
-        if writer.prepared_uuid_index_auxiliary_receipt().is_some() {
-            writer.finalize_uuid_index_delta(generation)?;
-        }
-    }
+    writer.commit_topology_aware_with_uuid_index(staged, deleted_nodes, deleted_edges)?;
     Ok(())
 }
 
