@@ -169,6 +169,118 @@ struct OpenRun {
 }
 
 #[derive(Debug)]
+struct AuthenticatedRun {
+    identities: File,
+    identities_identity: graphforge_filesystem::FileIdentity,
+    node_surrogates: File,
+    node_surrogates_identity: graphforge_filesystem::FileIdentity,
+    descriptor: RunRecord,
+}
+
+#[derive(Debug, Default)]
+struct ProbeBlockCache {
+    file: Option<graphforge_filesystem::FileIdentity>,
+    offset: u64,
+    bytes: Vec<u8>,
+}
+
+fn cached_record<const N: usize>(
+    file: &mut File,
+    identity: graphforge_filesystem::FileIdentity,
+    index: u64,
+    cache: &mut ProbeBlockCache,
+    block_loads: &mut u64,
+) -> Result<[u8; N], GfError> {
+    let byte_offset = index
+        .checked_mul(N as u64)
+        .ok_or_else(|| storage_err("probe offset overflow"))?;
+    let block_offset = byte_offset / BULK_IO_BYTES as u64 * BULK_IO_BYTES as u64;
+    if cache.file != Some(identity) || cache.offset != block_offset {
+        file.seek(SeekFrom::Start(block_offset))
+            .map_err(storage_err)?;
+        cache.bytes.resize(BULK_IO_BYTES, 0);
+        let mut valid = 0;
+        while valid < BULK_IO_BYTES {
+            let read = file.read(&mut cache.bytes[valid..]).map_err(storage_err)?;
+            if read == 0 {
+                break;
+            }
+            valid += read;
+        }
+        cache.bytes.truncate(valid);
+        cache.file = Some(identity);
+        cache.offset = block_offset;
+        *block_loads = block_loads.saturating_add(1);
+    }
+    let within = usize::try_from(byte_offset - block_offset).map_err(storage_err)?;
+    let end = within
+        .checked_add(N)
+        .ok_or_else(|| storage_err("probe range overflow"))?;
+    cache
+        .bytes
+        .get(within..end)
+        .ok_or_else(|| storage_err("truncated cached UUID record"))?
+        .try_into()
+        .map_err(|_| storage_err("invalid cached UUID record"))
+}
+
+fn cached_identity_state(
+    file: &mut File,
+    identity: graphforge_filesystem::FileIdentity,
+    count: u64,
+    target: Uuid,
+    expected_kind: UuidIndexKind,
+    cache: &mut ProbeBlockCache,
+    loads: &mut u64,
+) -> Result<Option<(bool, u64)>, GfError> {
+    let (mut lo, mut hi) = (0, count);
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        let record = cached_record::<32>(file, identity, mid, cache, loads)?;
+        match record[..16].cmp(target.as_bytes()) {
+            std::cmp::Ordering::Less => lo = mid + 1,
+            std::cmp::Ordering::Greater => hi = mid,
+            std::cmp::Ordering::Equal => {
+                let kind = if matches!(record[16], 0 | 2) {
+                    UuidIndexKind::Node
+                } else {
+                    UuidIndexKind::Edge
+                };
+                if kind != expected_kind {
+                    return Ok(Some((false, 0)));
+                }
+                return Ok(Some((
+                    matches!(record[16], 0 | 1),
+                    u64::from_be_bytes(record[24..32].try_into().expect("fixed")),
+                )));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn cached_surrogate_uuid(
+    file: &mut File,
+    identity: graphforge_filesystem::FileIdentity,
+    count: u64,
+    target: u64,
+    cache: &mut ProbeBlockCache,
+    loads: &mut u64,
+) -> Result<Option<[u8; 16]>, GfError> {
+    let (mut lo, mut hi) = (0, count);
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        let record = cached_record::<24>(file, identity, mid, cache, loads)?;
+        match u64::from_be_bytes(record[..8].try_into().expect("fixed")).cmp(&target) {
+            std::cmp::Ordering::Less => lo = mid + 1,
+            std::cmp::Ordering::Greater => hi = mid,
+            std::cmp::Ordering::Equal => return Ok(Some(record[8..].try_into().expect("fixed"))),
+        }
+    }
+    Ok(None)
+}
+
+#[derive(Debug)]
 /// An authenticated node-and-edge index snapshot pinned by one manifest.
 pub struct UuidMembershipIndex {
     runs: Vec<OpenRun>,
@@ -176,7 +288,253 @@ pub struct UuidMembershipIndex {
 }
 
 /// Long-lived authenticated UUID-index snapshot retained by construction writers.
-pub type AuthenticatedUuidIndexSnapshot = UuidMembershipIndex;
+#[derive(Debug)]
+pub struct AuthenticatedUuidIndexSnapshot {
+    root: graphforge_filesystem::StableDirectory,
+    root_identity: graphforge_filesystem::FileIdentity,
+    manifest_file: File,
+    manifest_identity: graphforge_filesystem::FileIdentity,
+    manifest_sha256: String,
+    manifest: Manifest,
+    runs: Vec<AuthenticatedRun>,
+    cache: ProbeBlockCache,
+    authenticated_bytes: u64,
+}
+
+impl AuthenticatedUuidIndexSnapshot {
+    pub(crate) fn open_at_generation(project_dir: &Path, generation: u64) -> Result<Self, GfError> {
+        let root_path = project_dir.join(INDEX_DIR);
+        let root = graphforge_filesystem::StableDirectory::open(&root_path).map_err(storage_err)?;
+        let root_identity = root.identity();
+        let mut manifest_file = root
+            .open_child_file(std::ffi::OsStr::new(MANIFEST))
+            .map_err(storage_err)?;
+        let manifest_identity =
+            graphforge_filesystem::file_identity(&manifest_file).map_err(storage_err)?;
+        let body = read_bounded(&mut manifest_file, MAX_MANIFEST_BYTES)?;
+        let manifest_sha256 = hex_sha256(&body);
+        let manifest: Manifest = serde_json::from_slice(&body).map_err(storage_err)?;
+        if manifest.format_version != FORMAT_VERSION || manifest.current_generation != generation {
+            return Err(storage_err("authenticated snapshot generation is stale"));
+        }
+        validate_run_descriptors(&manifest)?;
+        let mut authenticated_bytes = body.len() as u64;
+        let mut runs = Vec::with_capacity(manifest.runs.len());
+        for descriptor in &manifest.runs {
+            let identities =
+                open_verified_at(&root, &descriptor.identities, IDENTITY_RECORD_BYTES)?;
+            let node_surrogates =
+                open_verified_at(&root, &descriptor.node_surrogates, NODE_LOOKUP_RECORD_BYTES)?;
+            authenticated_bytes = authenticated_bytes
+                .saturating_add(descriptor.identities.count * IDENTITY_RECORD_BYTES)
+                .saturating_add(descriptor.node_surrogates.count * NODE_LOOKUP_RECORD_BYTES);
+            runs.push(AuthenticatedRun {
+                identities_identity: graphforge_filesystem::file_identity(&identities)
+                    .map_err(storage_err)?,
+                node_surrogates_identity: graphforge_filesystem::file_identity(&node_surrogates)
+                    .map_err(storage_err)?,
+                identities,
+                node_surrogates,
+                descriptor: descriptor.clone(),
+            });
+        }
+        Ok(Self {
+            root,
+            root_identity,
+            manifest_file,
+            manifest_identity,
+            manifest_sha256,
+            manifest,
+            runs,
+            cache: ProbeBlockCache::default(),
+            authenticated_bytes,
+        })
+    }
+
+    pub(crate) fn topology_generation(&self) -> u64 {
+        self.manifest.current_generation
+    }
+    fn take_authenticated_bytes(&mut self) -> u64 {
+        std::mem::take(&mut self.authenticated_bytes)
+    }
+
+    fn revalidate(&self) -> Result<(), GfError> {
+        self.root.revalidate_named().map_err(storage_err)?;
+        if self.root.identity() != self.root_identity {
+            return Err(storage_err("UUID index root identity changed"));
+        }
+        if graphforge_filesystem::file_identity(&self.manifest_file).map_err(storage_err)?
+            != self.manifest_identity
+            || graphforge_filesystem::file_link_count(&self.manifest_file).map_err(storage_err)?
+                != 1
+            || self.manifest_sha256.len() != 64
+        {
+            return Err(storage_err("retained UUID manifest identity changed"));
+        }
+        let named_manifest = self
+            .root
+            .open_child_file(std::ffi::OsStr::new(MANIFEST))
+            .map_err(storage_err)?;
+        if graphforge_filesystem::file_identity(&named_manifest).map_err(storage_err)?
+            != self.manifest_identity
+            || graphforge_filesystem::file_link_count(&named_manifest).map_err(storage_err)? != 1
+        {
+            return Err(storage_err("UUID manifest identity changed"));
+        }
+        for run in &self.runs {
+            for (record, identity) in [
+                (&run.descriptor.identities, run.identities_identity),
+                (
+                    &run.descriptor.node_surrogates,
+                    run.node_surrogates_identity,
+                ),
+            ] {
+                let named = self
+                    .root
+                    .open_child_file(std::ffi::OsStr::new(&record.name))
+                    .map_err(storage_err)?;
+                if graphforge_filesystem::file_identity(&named).map_err(storage_err)? != identity
+                    || graphforge_filesystem::file_link_count(&named).map_err(storage_err)? != 1
+                {
+                    return Err(storage_err("UUID retained run identity changed"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn advance_to(&mut self, manifest: Manifest) -> Result<(), GfError> {
+        self.root.revalidate_named().map_err(storage_err)?;
+        let mut manifest_file = self
+            .root
+            .open_child_file(std::ffi::OsStr::new(MANIFEST))
+            .map_err(storage_err)?;
+        let body = read_bounded(&mut manifest_file, MAX_MANIFEST_BYTES)?;
+        if hex_sha256(&body) != hex_sha256(&serde_json::to_vec(&manifest).map_err(storage_err)?) {
+            return Err(storage_err("committed UUID manifest differs from plan"));
+        }
+        let mut prior = std::mem::take(&mut self.runs);
+        let mut next_runs = Vec::with_capacity(manifest.runs.len());
+        let mut authenticated_bytes = body.len() as u64;
+        for descriptor in &manifest.runs {
+            if let Some(index) = prior.iter().position(|run| {
+                run.descriptor.identities.name == descriptor.identities.name
+                    && run.descriptor.node_surrogates.name == descriptor.node_surrogates.name
+            }) {
+                let mut retained = prior.swap_remove(index);
+                retained.descriptor = descriptor.clone();
+                next_runs.push(retained);
+            } else {
+                let identities =
+                    open_verified_at(&self.root, &descriptor.identities, IDENTITY_RECORD_BYTES)?;
+                let node_surrogates = open_verified_at(
+                    &self.root,
+                    &descriptor.node_surrogates,
+                    NODE_LOOKUP_RECORD_BYTES,
+                )?;
+                authenticated_bytes = authenticated_bytes
+                    .saturating_add(descriptor.identities.count * IDENTITY_RECORD_BYTES)
+                    .saturating_add(descriptor.node_surrogates.count * NODE_LOOKUP_RECORD_BYTES);
+                next_runs.push(AuthenticatedRun {
+                    identities_identity: graphforge_filesystem::file_identity(&identities)
+                        .map_err(storage_err)?,
+                    node_surrogates_identity: graphforge_filesystem::file_identity(
+                        &node_surrogates,
+                    )
+                    .map_err(storage_err)?,
+                    identities,
+                    node_surrogates,
+                    descriptor: descriptor.clone(),
+                });
+            }
+        }
+        self.manifest_identity =
+            graphforge_filesystem::file_identity(&manifest_file).map_err(storage_err)?;
+        self.manifest_sha256 = hex_sha256(&body);
+        self.manifest_file = manifest_file;
+        self.manifest = manifest;
+        self.runs = next_runs;
+        self.cache = ProbeBlockCache::default();
+        let _new_output_authentication_bytes = authenticated_bytes;
+        self.authenticated_bytes = 0;
+        Ok(())
+    }
+
+    pub(crate) fn probe(
+        &mut self,
+        kind: UuidIndexKind,
+        requested: &[Uuid],
+    ) -> Result<(Vec<bool>, UuidProbeMetrics), GfError> {
+        let mut metrics = UuidProbeMetrics {
+            requested: requested.len() as u64,
+            ..Default::default()
+        };
+        let unique = requested.iter().copied().collect::<BTreeSet<_>>();
+        metrics.unique_requested = unique.len() as u64;
+        let mut resolved = std::collections::BTreeMap::new();
+        for uuid in unique {
+            let mut found = false;
+            for run in self.runs.iter_mut().rev() {
+                if let Some((present, _)) = cached_identity_state(
+                    &mut run.identities,
+                    run.identities_identity,
+                    run.descriptor.identities.count,
+                    uuid,
+                    kind,
+                    &mut self.cache,
+                    &mut metrics.file_seeks,
+                )? {
+                    found = present;
+                    break;
+                }
+            }
+            metrics.found += u64::from(found);
+            resolved.insert(uuid, found);
+        }
+        Ok((
+            requested.iter().map(|uuid| resolved[uuid]).collect(),
+            metrics,
+        ))
+    }
+
+    pub(crate) fn lookup_node_surrogates(
+        &mut self,
+        requested: &[Uuid],
+    ) -> Result<(Vec<Option<u64>>, UuidProbeMetrics), GfError> {
+        let mut metrics = UuidProbeMetrics {
+            requested: requested.len() as u64,
+            ..Default::default()
+        };
+        let unique = requested.iter().copied().collect::<BTreeSet<_>>();
+        metrics.unique_requested = unique.len() as u64;
+        let mut resolved = std::collections::BTreeMap::new();
+        for uuid in unique {
+            let mut value = None;
+            for run in self.runs.iter_mut().rev() {
+                if let Some((present, surrogate)) = cached_identity_state(
+                    &mut run.identities,
+                    run.identities_identity,
+                    run.descriptor.identities.count,
+                    uuid,
+                    UuidIndexKind::Node,
+                    &mut self.cache,
+                    &mut metrics.file_seeks,
+                )? {
+                    if present {
+                        value = Some(surrogate);
+                    }
+                    break;
+                }
+            }
+            metrics.found += u64::from(value.is_some());
+            resolved.insert(uuid, value);
+        }
+        Ok((
+            requested.iter().map(|uuid| resolved[uuid]).collect(),
+            metrics,
+        ))
+    }
+}
 
 impl UuidMembershipIndex {
     /// Open and fully authenticate the current immutable index snapshot.
@@ -354,6 +712,8 @@ struct TopologyIndexReceipt {
 pub(crate) struct PreparedUuidIndexDelta {
     expected_generation: u64,
     auxiliary: crate::AuxiliaryReceipt,
+    metrics: UuidIndexAppendMetrics,
+    manifest: Manifest,
 }
 
 /// Stage one bounded v3 UUID-index delta and its authenticated receipt into the
@@ -362,6 +722,7 @@ pub(crate) fn prepare_uuid_membership_delta(
     project_dir: &Path,
     current: u64,
     generation: u64,
+    snapshot: Option<&mut AuthenticatedUuidIndexSnapshot>,
     batch: &mut crate::staging::RewriteBatch,
     nodes: &[(Uuid, u64)],
     edges: &[Uuid],
@@ -387,10 +748,11 @@ pub(crate) fn prepare_uuid_membership_delta(
         .prefix("uuid-membership-plan-")
         .tempdir_in(parent)
         .map_err(storage_err)?;
-    let (manifest, outputs, _superseded, _metrics) = plan_uuid_membership_delta(
+    let (manifest, outputs, _superseded, metrics) = plan_uuid_membership_delta(
         &source_root,
         current,
         generation,
+        snapshot,
         scratch.path(),
         nodes,
         edges,
@@ -415,6 +777,8 @@ pub(crate) fn prepare_uuid_membership_delta(
     let digest = Sha256::digest(&receipt_bytes);
     Ok(Some(PreparedUuidIndexDelta {
         expected_generation: generation,
+        metrics,
+        manifest,
         auxiliary: crate::AuxiliaryReceipt {
             kind: "uuid-membership/v3".to_owned(),
             schema_version: FORMAT_VERSION,
@@ -437,6 +801,7 @@ fn plan_uuid_membership_delta(
     root: &Path,
     current: u64,
     generation: u64,
+    mut snapshot: Option<&mut AuthenticatedUuidIndexSnapshot>,
     scratch: &Path,
     nodes: &[(Uuid, u64)],
     edges: &[Uuid],
@@ -461,17 +826,14 @@ fn plan_uuid_membership_delta(
             runs: Vec::new(),
         }
     } else {
-        let directory = graphforge_filesystem::StableDirectory::open(root).map_err(storage_err)?;
-        let mut file = directory
-            .open_child_file(std::ffi::OsStr::new(MANIFEST))
-            .map_err(storage_err)?;
-        let bytes = read_bounded(&mut file, MAX_MANIFEST_BYTES)?;
-        let parsed: Manifest = serde_json::from_slice(&bytes).map_err(storage_err)?;
-        if parsed.format_version != FORMAT_VERSION || parsed.current_generation != current {
+        let retained = snapshot
+            .as_deref_mut()
+            .ok_or_else(|| storage_err("authenticated UUID snapshot is required"))?;
+        retained.revalidate()?;
+        if retained.manifest.current_generation != current {
             return Err(storage_err("retained manifest generation is stale"));
         }
-        validate_run_descriptors(&parsed)?;
-        parsed
+        retained.manifest.clone()
     };
 
     let prior_names = manifest_file_names(&manifest);
@@ -500,44 +862,51 @@ fn plan_uuid_membership_delta(
         return Err(storage_err("new node run contains duplicate surrogate"));
     }
 
-    let directory = graphforge_filesystem::StableDirectory::open(root).map_err(storage_err)?;
     let mut probe_metrics = UuidProbeMetrics::default();
-    for run in &manifest.runs {
-        let mut identity_file =
-            open_verified_at(&directory, &run.identities, IDENTITY_RECORD_BYTES)?;
-        for (uuid, kind, surrogate) in &identities {
-            if let Some((present, retained)) = binary_search_identity_state(
-                &mut identity_file,
-                run.identities.count,
-                *uuid,
-                if matches!(kind, 0 | 2) {
-                    UuidIndexKind::Node
-                } else {
-                    UuidIndexKind::Edge
-                },
-                &mut probe_metrics.file_seeks,
-            )? {
-                let deletion_matches = matches!(kind, 2 | 3) && present && retained == *surrogate;
-                if !deletion_matches {
-                    return Err(storage_err(
-                        "UUID already exists in an authenticated retained run",
-                    ));
+    let retained_authentication_bytes = snapshot
+        .as_deref_mut()
+        .map_or(0, AuthenticatedUuidIndexSnapshot::take_authenticated_bytes);
+    if let Some(retained) = snapshot.as_deref_mut() {
+        for run in &mut retained.runs {
+            let mut identity_file = run.identities.try_clone().map_err(storage_err)?;
+            for (uuid, kind, surrogate) in &identities {
+                if let Some((present, retained)) = cached_identity_state(
+                    &mut identity_file,
+                    run.identities_identity,
+                    run.descriptor.identities.count,
+                    *uuid,
+                    if matches!(kind, 0 | 2) {
+                        UuidIndexKind::Node
+                    } else {
+                        UuidIndexKind::Edge
+                    },
+                    &mut retained.cache,
+                    &mut probe_metrics.file_seeks,
+                )? {
+                    let deletion_matches =
+                        matches!(kind, 2 | 3) && present && retained == *surrogate;
+                    if !deletion_matches {
+                        return Err(storage_err(
+                            "UUID already exists in an authenticated retained run",
+                        ));
+                    }
                 }
             }
-        }
-        let mut surrogate_file =
-            open_verified_at(&directory, &run.node_surrogates, NODE_LOOKUP_RECORD_BYTES)?;
-        for (surrogate, uuid) in &surrogates {
-            if let Some(retained) = binary_search_surrogate_uuid(
-                &mut surrogate_file,
-                run.node_surrogates.count,
-                *surrogate,
-                &mut probe_metrics.file_seeks,
-            )? && retained != *uuid.as_bytes()
-            {
-                return Err(storage_err(
-                    "node surrogate already exists in an authenticated retained run",
-                ));
+            let mut surrogate_file = run.node_surrogates.try_clone().map_err(storage_err)?;
+            for (surrogate, uuid) in &surrogates {
+                if let Some(retained) = cached_surrogate_uuid(
+                    &mut surrogate_file,
+                    run.node_surrogates_identity,
+                    run.descriptor.node_surrogates.count,
+                    *surrogate,
+                    &mut retained.cache,
+                    &mut probe_metrics.file_seeks,
+                )? && retained != *uuid.as_bytes()
+                {
+                    return Err(storage_err(
+                        "node surrogate already exists in an authenticated retained run",
+                    ));
+                }
             }
         }
     }
@@ -622,9 +991,18 @@ fn plan_uuid_membership_delta(
         peak_buffered_records: identities.len() + surrogates.len(),
         peak_buffered_bytes: identities.len() * 32 + surrogates.len() * 24,
         validation_random_seeks: probe_metrics.file_seeks,
+        validation_scan_bytes: retained_authentication_bytes,
+        validation_scan_blocks: retained_authentication_bytes.div_ceil(BULK_IO_BYTES as u64),
         ..Default::default()
     };
-    compact_planned_levels(root, scratch, &mut manifest, &mut sources, &mut metrics)?;
+    compact_planned_levels(
+        root,
+        scratch,
+        &mut manifest,
+        &mut sources,
+        snapshot.as_deref(),
+        &mut metrics,
+    )?;
     manifest.current_generation = generation;
     manifest.live_node_count = manifest
         .live_node_count
@@ -657,14 +1035,17 @@ fn plan_uuid_membership_delta(
         .collect::<Vec<_>>();
     outputs.sort_unstable_by(|left, right| left.0.name.cmp(&right.0.name));
     let mut superseded = Vec::new();
-    for name in prior_names.difference(&retained) {
-        let file = directory
-            .open_child_file(std::ffi::OsStr::new(name))
-            .map_err(storage_err)?;
-        superseded.push((
-            name.clone(),
-            graphforge_filesystem::file_identity(&file).map_err(storage_err)?,
-        ));
+    if let Some(snapshot) = snapshot.as_deref() {
+        for name in prior_names.difference(&retained) {
+            let file = snapshot
+                .root
+                .open_child_file(std::ffi::OsStr::new(name))
+                .map_err(storage_err)?;
+            superseded.push((
+                name.clone(),
+                graphforge_filesystem::file_identity(&file).map_err(storage_err)?,
+            ));
+        }
     }
     metrics.retained_runs = manifest.runs.len();
     Ok((manifest, outputs, superseded, metrics))
@@ -712,18 +1093,12 @@ fn describe_run(
     })
 }
 
-fn planned_source(root: &Path, sources: &HashMap<String, PathBuf>, name: &str) -> PathBuf {
-    sources
-        .get(name)
-        .cloned()
-        .unwrap_or_else(|| root.join(name))
-}
-
 fn compact_planned_levels(
     root: &Path,
     scratch: &Path,
     manifest: &mut Manifest,
     sources: &mut HashMap<String, PathBuf>,
+    snapshot: Option<&AuthenticatedUuidIndexSnapshot>,
     metrics: &mut UuidIndexAppendMetrics,
 ) -> Result<(), GfError> {
     for level in 0..63_u8 {
@@ -751,15 +1126,15 @@ fn compact_planned_levels(
         let identity_path = scratch.join(format!("identities-level-{}.run", level + 1));
         let surrogate_path = scratch.join(format!("surrogates-level-{}.run", level + 1));
         let identity_inputs = [
-            planned_source(root, sources, &left.identities.name),
-            planned_source(root, sources, &right.identities.name),
+            planned_file(root, sources, snapshot, &left.identities.name, true)?,
+            planned_file(root, sources, snapshot, &right.identities.name, true)?,
         ];
         let surrogate_inputs = [
-            planned_source(root, sources, &left.node_surrogates.name),
-            planned_source(root, sources, &right.node_surrogates.name),
+            planned_file(root, sources, snapshot, &left.node_surrogates.name, false)?,
+            planned_file(root, sources, snapshot, &right.node_surrogates.name, false)?,
         ];
-        merge_identity_v3(&identity_inputs, &identity_path)?;
-        merge_surrogate_runs(&surrogate_inputs, &surrogate_path)?;
+        merge_identity_handles(identity_inputs, &identity_path)?;
+        merge_surrogate_handles(surrogate_inputs, &surrogate_path)?;
         let identities = describe_run(
             &identity_path,
             &format!("identities-v3-l{}", level + 1),
@@ -796,6 +1171,112 @@ fn compact_planned_levels(
         });
     }
     Ok(())
+}
+
+fn planned_file(
+    root: &Path,
+    sources: &HashMap<String, PathBuf>,
+    snapshot: Option<&AuthenticatedUuidIndexSnapshot>,
+    name: &str,
+    identities: bool,
+) -> Result<File, GfError> {
+    if let Some(path) = sources.get(name) {
+        return File::open(path).map_err(storage_err);
+    }
+    if let Some(snapshot) = snapshot {
+        for run in &snapshot.runs {
+            if identities && run.descriptor.identities.name == name {
+                return run.identities.try_clone().map_err(storage_err);
+            }
+            if !identities && run.descriptor.node_surrogates.name == name {
+                return run.node_surrogates.try_clone().map_err(storage_err);
+            }
+        }
+        return Err(storage_err("planned compaction input is not retained"));
+    }
+    File::open(root.join(name)).map_err(storage_err)
+}
+
+fn merge_identity_handles(inputs: [File; 2], output: &Path) -> Result<(), GfError> {
+    let mut readers = inputs.into_iter().map(BufReader::new).collect::<Vec<_>>();
+    let mut heap = BinaryHeap::<Reverse<([u8; 32], usize)>>::new();
+    for (index, reader) in readers.iter_mut().enumerate() {
+        if let Some(record) = read_exact_record::<32>(reader)? {
+            heap.push(Reverse((record, index)));
+        }
+    }
+    let mut out = File::create(output).map_err(storage_err)?;
+    let mut block = Vec::with_capacity(BULK_IO_BYTES);
+    while let Some(Reverse((mut record, index))) = heap.pop() {
+        let key: [u8; 16] = record[..16].try_into().expect("fixed");
+        let mut newest = index;
+        if let Some(next) = read_exact_record::<32>(&mut readers[index])? {
+            heap.push(Reverse((next, index)));
+        }
+        while heap
+            .peek()
+            .is_some_and(|Reverse((candidate, _))| candidate[..16] == key)
+        {
+            let Reverse((candidate, source)) = heap.pop().expect("peeked");
+            if source > newest {
+                record = candidate;
+                newest = source;
+            }
+            if let Some(next) = read_exact_record::<32>(&mut readers[source])? {
+                heap.push(Reverse((next, source)));
+            }
+        }
+        if block.len() + 32 > BULK_IO_BYTES {
+            out.write_all(&block).map_err(storage_err)?;
+            block.clear();
+        }
+        block.extend_from_slice(&record);
+    }
+    if !block.is_empty() {
+        out.write_all(&block).map_err(storage_err)?;
+    }
+    out.sync_all().map_err(storage_err)
+}
+
+fn merge_surrogate_handles(inputs: [File; 2], output: &Path) -> Result<(), GfError> {
+    let mut readers = inputs.into_iter().map(BufReader::new).collect::<Vec<_>>();
+    let mut heap = BinaryHeap::<Reverse<([u8; 24], usize)>>::new();
+    for (index, reader) in readers.iter_mut().enumerate() {
+        if let Some(record) = read_exact_record::<24>(reader)? {
+            heap.push(Reverse((record, index)));
+        }
+    }
+    let mut out = File::create(output).map_err(storage_err)?;
+    let mut block = Vec::with_capacity(BULK_IO_BYTES);
+    while let Some(Reverse((mut record, index))) = heap.pop() {
+        let key: [u8; 8] = record[..8].try_into().expect("fixed");
+        let mut newest = index;
+        if let Some(next) = read_exact_record::<24>(&mut readers[index])? {
+            heap.push(Reverse((next, index)));
+        }
+        while heap
+            .peek()
+            .is_some_and(|Reverse((candidate, _))| candidate[..8] == key)
+        {
+            let Reverse((candidate, source)) = heap.pop().expect("peeked");
+            if source > newest {
+                record = candidate;
+                newest = source;
+            }
+            if let Some(next) = read_exact_record::<24>(&mut readers[source])? {
+                heap.push(Reverse((next, source)));
+            }
+        }
+        if block.len() + 24 > BULK_IO_BYTES {
+            out.write_all(&block).map_err(storage_err)?;
+            block.clear();
+        }
+        block.extend_from_slice(&record);
+    }
+    if !block.is_empty() {
+        out.write_all(&block).map_err(storage_err)?;
+    }
+    out.sync_all().map_err(storage_err)
 }
 
 fn topology_delta_sha256(
@@ -861,6 +1342,17 @@ impl PreparedUuidIndexDelta {
             ));
         }
         Ok(())
+    }
+
+    pub(crate) fn metrics(&self) -> &UuidIndexAppendMetrics {
+        &self.metrics
+    }
+
+    pub(crate) fn advance_snapshot(
+        &self,
+        snapshot: &mut AuthenticatedUuidIndexSnapshot,
+    ) -> Result<(), GfError> {
+        snapshot.advance_to(self.manifest.clone())
     }
 }
 
@@ -1375,6 +1867,7 @@ fn count_identity_states(path: &Path) -> Result<(u64, u64, u64, u64), GfError> {
     Ok((counts[0], counts[1], counts[2], counts[3]))
 }
 
+#[cfg(test)]
 fn merge_identity_v3(inputs: &[PathBuf], output: &Path) -> Result<(), GfError> {
     let mut readers = inputs
         .iter()
@@ -2836,6 +3329,7 @@ mod tests {
             dir.path(),
             0,
             1,
+            None,
             &mut first,
             &[(Uuid::from_u128(1), 1)],
             &[],
@@ -2858,10 +3352,13 @@ mod tests {
         );
 
         let scratch = tempfile::tempdir_in(dir.path()).unwrap();
+        let mut snapshot =
+            AuthenticatedUuidIndexSnapshot::open_at_generation(dir.path(), 1).unwrap();
         let (planned, outputs, superseded, metrics) = plan_uuid_membership_delta(
             &root,
             1,
             2,
+            Some(&mut snapshot),
             scratch.path(),
             &[(Uuid::from_u128(2), 2)],
             &[],
@@ -2883,6 +3380,33 @@ mod tests {
         assert_eq!(metrics.validation_scan_bytes, 0);
         assert!(metrics.validation_random_seeks > 0);
         assert_eq!(metrics.prior_topology_rows_decoded, 0);
+        assert!(metrics.validation_scan_bytes > 0);
+
+        let mut install = crate::RewriteBatch::new();
+        for (record, path) in &outputs {
+            install.stage_file(&root.join(&record.name), path).unwrap();
+        }
+        install
+            .stage_bytes(&root.join(MANIFEST), &serde_json::to_vec(&planned).unwrap())
+            .unwrap();
+        install.commit().unwrap();
+        snapshot.advance_to(planned).unwrap();
+
+        let scratch = tempfile::tempdir_in(dir.path()).unwrap();
+        let (_, _, _, subsequent) = plan_uuid_membership_delta(
+            &root,
+            2,
+            3,
+            Some(&mut snapshot),
+            scratch.path(),
+            &[(Uuid::from_u128(3), 3)],
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(subsequent.validation_scan_bytes, 0);
+        assert!(subsequent.validation_scan_blocks <= 1);
     }
 
     #[test]

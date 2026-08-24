@@ -2260,10 +2260,11 @@ impl GraphWriter {
             if self.uuid_index_snapshot.as_ref().is_none_or(|snapshot| {
                 snapshot.topology_generation() != generation.saturating_sub(1)
             }) {
-                self.uuid_index_snapshot = Some(crate::UuidMembershipIndex::open_at_generation(
-                    &self.dir,
-                    generation.saturating_sub(1),
-                )?);
+                self.uuid_index_snapshot =
+                    Some(crate::AuthenticatedUuidIndexSnapshot::open_at_generation(
+                        &self.dir,
+                        generation.saturating_sub(1),
+                    )?);
             }
             let index = self
                 .uuid_index_snapshot
@@ -2285,10 +2286,22 @@ impl GraphWriter {
                 .collect();
             (nodes, edges)
         };
+        let current = generation.saturating_sub(1);
+        if current != 0
+            && self
+                .uuid_index_snapshot
+                .as_ref()
+                .is_none_or(|snapshot| snapshot.topology_generation() != current)
+        {
+            self.uuid_index_snapshot = Some(
+                crate::AuthenticatedUuidIndexSnapshot::open_at_generation(&self.dir, current)?,
+            );
+        }
         crate::uuid_membership::prepare_uuid_membership_delta(
             &self.dir,
-            generation.saturating_sub(1),
+            current,
             generation,
+            self.uuid_index_snapshot.as_mut(),
             staged,
             &self.pending_index_nodes,
             &self.pending_index_edges,
@@ -2377,6 +2390,14 @@ impl GraphWriter {
             .as_ref()
             .ok_or_else(|| GfError::Storage("UUID index delta was not prepared".into()))?;
         prepared.verify_generation(generation)?;
+        let _uuid_index_work = prepared.metrics();
+        if let Some(snapshot) = self.uuid_index_snapshot.as_mut() {
+            prepared.advance_snapshot(snapshot)?;
+        } else {
+            self.uuid_index_snapshot = Some(
+                crate::AuthenticatedUuidIndexSnapshot::open_at_generation(&self.dir, generation)?,
+            );
+        }
         self.prepared_index = None;
         self.pending_index_nodes.clear();
         self.pending_index_edges.clear();
@@ -5145,7 +5166,7 @@ mod tests {
                     .peak_flush_scratch_bytes
                     .max(work.peak_flush_scratch_bytes);
                 let generation = crate::read_topology_generation(dir.path()).unwrap();
-                let index = crate::append_uuid_membership_delta(
+                let index = crate::uuid_membership::append_uuid_membership_delta(
                     dir.path(),
                     generation,
                     &[(left, left_id), (right, right_id)],
