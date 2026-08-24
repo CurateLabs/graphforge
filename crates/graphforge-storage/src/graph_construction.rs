@@ -6,11 +6,12 @@
 //! the next sequence. `CURRENT` is never touched by this module's staging or
 //! sealing path. A generation-last publisher consumes the sealed inventory.
 
-use std::collections::BTreeSet;
+use std::cmp::Reverse;
+use std::collections::{BTreeSet, BinaryHeap};
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 
 use arrow::array::{Array, FixedSizeBinaryArray, RecordBatch, StringArray, UInt32Array};
@@ -32,6 +33,7 @@ const FORMAT_VERSION: u32 = 2;
 const PRIVATE_ROOT: &str = ".graphforge-construction";
 const CHECKPOINT: &str = "checkpoint.json";
 const INTENT: &str = "intent.json";
+const SHAPE_INTENT: &str = "shape-intent.json";
 const BLOCK_BYTES: usize = 1 << 20;
 const MAX_CONTROL_BYTES: u64 = 64 << 10;
 const IDENTITY_WIDTH: usize = 16;
@@ -167,6 +169,45 @@ pub struct GraphConstructionEvidence {
     pub current_transitions: u64,
     /// Exact idempotent replays.
     pub replayed_chunks: u64,
+    /// Temporary and final fixed-width records read by canonical shaping.
+    pub merge_read_records: u64,
+    /// Temporary and final fixed-width records written by canonical shaping.
+    pub merge_written_records: u64,
+    /// External merge groups completed (including intermediate levels).
+    pub merge_groups: u64,
+    /// Highest number of simultaneously open merge inputs.
+    pub peak_merge_inputs: u64,
+    /// Exact fixed-width payload bytes read during shaping.
+    pub merge_read_bytes: u64,
+    /// Exact fixed-width payload bytes written during shaping.
+    pub merge_written_bytes: u64,
+    /// Bounded reader refills implied by the fixed one-MiB I/O window.
+    pub merge_read_blocks: u64,
+    /// Bounded writer flushes implied by the fixed one-MiB I/O window.
+    pub merge_write_blocks: u64,
+    /// Number of completed merge levels across shaped domains.
+    pub merge_passes: u64,
+    /// Largest measured temporary merge footprint.
+    pub peak_merge_temporary_bytes: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+/// Publisher input produced from a sealed construction session.
+pub struct ConstructionShape {
+    /// UUID-sorted node/edge identity records with assigned surrogates.
+    pub identities: String,
+    /// UUID-sorted node type records, when nodes were staged.
+    pub node_details: Option<String>,
+    /// UUID-sorted edge endpoint and relation records, when edges were staged.
+    pub edge_details: Option<String>,
+    /// Live retained plus staged nodes.
+    pub node_count: u64,
+    /// Live retained plus staged edges.
+    pub edge_count: u64,
+    /// Assigned node surrogate tail.
+    pub max_node_surrogate: u64,
+    /// Assigned edge surrogate tail.
+    pub max_edge_surrogate: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -266,6 +307,20 @@ struct ChunkIntent {
     details: Option<ArtifactReceipt>,
 }
 
+#[derive(Serialize, Deserialize)]
+struct ShapeIntent {
+    format_version: u32,
+    operation_uuid: Uuid,
+    project_identity: IdentityRecord,
+    session_identity: IdentityRecord,
+    parent_topology_generation: u64,
+    budgets: GraphConstructionBudgets,
+    last_receipt_sha256: Option<String>,
+    complete: bool,
+    shape: Option<ConstructionShape>,
+    outputs: Vec<ArtifactReceipt>,
+}
+
 static ACTIVE_OPERATIONS: LazyLock<Mutex<BTreeSet<String>>> =
     LazyLock::new(|| Mutex::new(BTreeSet::new()));
 
@@ -295,6 +350,7 @@ impl Drop for ProcessReservation {
 
 /// Descriptor-relative, exclusively owned private construction session.
 pub struct GraphConstructionSession {
+    project_path: PathBuf,
     project: StableDirectory,
     root: StableDirectory,
     checkpoint: Checkpoint,
@@ -418,12 +474,14 @@ impl GraphConstructionSession {
             budgets,
         )?;
         let mut session = Self {
+            project_path: project_dir.to_path_buf(),
             project,
             root,
             checkpoint,
             base_snapshot,
             _reservation: reservation,
         };
+        recover_shape_intent(&session.root, &session.checkpoint)?;
         session.recover_intent()?;
         session.revalidate_authority()?;
         Ok(session)
@@ -652,6 +710,214 @@ impl GraphConstructionSession {
             .saturating_add(read_operations);
         self.checkpoint.state = GraphConstructionState::Sealed;
         replace_control(&self.root, CHECKPOINT, &self.checkpoint)
+    }
+
+    /// Validate the sealed identity domains and produce deterministic,
+    /// UUID-sorted canonical construction runs.  This is deliberately still
+    /// private staging: the generation-last publisher owns Parquet and CURRENT.
+    #[allow(clippy::too_many_lines)] // One authenticated external-shape lifecycle; ordering is the invariant.
+    pub fn shape_canonical_with_cancellation(
+        &mut self,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<ConstructionShape, GfError> {
+        self.revalidate_authority()?;
+        if self.checkpoint.state != GraphConstructionState::Sealed {
+            return Err(storage("only a sealed session can be shaped"));
+        }
+        reject_cancelled(&mut cancelled)?;
+        if let Some(shape) = read_completed_shape(&self.root, &self.checkpoint)? {
+            return Ok(shape);
+        }
+        reject_existing_merge_artifacts(&self.root)?;
+
+        let mut unified = Vec::new();
+        if self.checkpoint.base_identities.is_some() {
+            unified.push(BASE_IDENTITIES.to_owned());
+        }
+        let mut node_details = Vec::new();
+        let mut edge_details = Vec::new();
+        let mut endpoints = Vec::new();
+        let mut receipts = Vec::new();
+        for sequence in 0..self.checkpoint.next_sequence {
+            reject_cancelled(&mut cancelled)?;
+            let receipt = self.read_receipt(sequence)?;
+            validate_receipt_artifacts(&self.root, &receipt)?;
+            match receipt.kind {
+                ConstructionChunkKind::Node => node_details.push(String::new()),
+                ConstructionChunkKind::Edge => {
+                    edge_details.push(String::new());
+                    endpoints.push(String::new());
+                }
+            }
+            receipts.push(receipt);
+        }
+        let shape_intent = ShapeIntent {
+            format_version: FORMAT_VERSION,
+            operation_uuid: self.checkpoint.operation_uuid,
+            project_identity: self.checkpoint.project_identity.clone(),
+            session_identity: self.checkpoint.session_identity.clone(),
+            parent_topology_generation: self.checkpoint.parent_topology_generation,
+            budgets: self.checkpoint.budgets,
+            last_receipt_sha256: self.checkpoint.last_receipt_sha256.clone(),
+            complete: false,
+            shape: None,
+            outputs: Vec::new(),
+        };
+        install_control(&self.root, SHAPE_INTENT, &shape_intent)?;
+        node_details.clear();
+        edge_details.clear();
+        endpoints.clear();
+        for (sequence, receipt) in receipts.iter().enumerate() {
+            let name = format!("merge-unified-{sequence:020}.run");
+            convert_identity_run(&self.root, receipt, &name, &mut self.checkpoint.evidence)?;
+            unified.push(name);
+            match receipt.kind {
+                ConstructionChunkKind::Node => {
+                    let name = format!("merge-node-source-{sequence:020}.run");
+                    copy_authenticated_run::<NODE_DETAIL_WIDTH>(
+                        &self.root,
+                        &receipt.details,
+                        &name,
+                        &mut self.checkpoint.evidence,
+                    )?;
+                    node_details.push(name);
+                }
+                ConstructionChunkKind::Edge => {
+                    let detail = format!("merge-edge-source-{sequence:020}.run");
+                    copy_authenticated_run::<EDGE_DETAIL_WIDTH>(
+                        &self.root,
+                        &receipt.details,
+                        &detail,
+                        &mut self.checkpoint.evidence,
+                    )?;
+                    edge_details.push(detail);
+                    let endpoint = format!("merge-endpoint-source-{sequence:020}.run");
+                    copy_authenticated_run::<ENDPOINT_WIDTH>(
+                        &self.root,
+                        receipt
+                            .endpoints
+                            .as_ref()
+                            .ok_or_else(|| storage("edge receipt lacks endpoint run"))?,
+                        &endpoint,
+                        &mut self.checkpoint.evidence,
+                    )?;
+                    endpoints.push(endpoint);
+                }
+            }
+        }
+        let identities = merge_fixed_all::<BASE_IDENTITY_WIDTH>(
+            &self.root,
+            unified,
+            "merge-identities",
+            self.checkpoint.budgets.merge_fan_in,
+            true,
+            &mut cancelled,
+            &mut self.checkpoint.evidence,
+        )?;
+        let node_details = merge_optional::<NODE_DETAIL_WIDTH>(
+            &self.root,
+            node_details,
+            "merge-node-details",
+            self.checkpoint.budgets.merge_fan_in,
+            true,
+            &mut cancelled,
+            &mut self.checkpoint.evidence,
+        )?;
+        let edge_details = merge_optional::<EDGE_DETAIL_WIDTH>(
+            &self.root,
+            edge_details,
+            "merge-edge-details",
+            self.checkpoint.budgets.merge_fan_in,
+            true,
+            &mut cancelled,
+            &mut self.checkpoint.evidence,
+        )?;
+        let endpoints = merge_optional::<ENDPOINT_WIDTH>(
+            &self.root,
+            endpoints,
+            "merge-endpoints",
+            self.checkpoint.budgets.merge_fan_in,
+            false,
+            &mut cancelled,
+            &mut self.checkpoint.evidence,
+        )?;
+        let (base_max_node, base_max_edge) = match self.checkpoint.parent_topology_generation {
+            0 => (0, 0),
+            _ => crate::writer::read_surrogate_tails(
+                // The retained project directory is revalidated immediately above.
+                &self.project_path,
+            )?
+            .ok_or_else(|| storage("nonempty parent lacks surrogate tails"))?,
+        };
+        if base_max_node != self.checkpoint.base_work.max_node_surrogate {
+            return Err(storage("UUID snapshot and surrogate tails disagree"));
+        }
+        let (node_count, edge_count, max_node_surrogate, max_edge_surrogate) =
+            validate_unified_and_details(
+                &self.root,
+                &identities,
+                node_details.as_deref(),
+                edge_details.as_deref(),
+                endpoints.as_deref(),
+                base_max_node,
+                base_max_edge,
+                &mut cancelled,
+                &mut self.checkpoint.evidence,
+            )?;
+        let identities = assign_surrogates(
+            &self.root,
+            &identities,
+            base_max_node,
+            base_max_edge,
+            &mut cancelled,
+            &mut self.checkpoint.evidence,
+        )?;
+        self.checkpoint.evidence.merge_read_blocks = self
+            .checkpoint
+            .evidence
+            .merge_read_bytes
+            .div_ceil(BLOCK_BYTES as u64);
+        self.checkpoint.evidence.merge_write_blocks = self
+            .checkpoint
+            .evidence
+            .merge_written_bytes
+            .div_ceil(BLOCK_BYTES as u64);
+        self.checkpoint.evidence.peak_merge_temporary_bytes = self
+            .checkpoint
+            .evidence
+            .peak_merge_temporary_bytes
+            .max(measured_shape_bytes(&self.root)?);
+        let shape = ConstructionShape {
+            identities,
+            node_details,
+            edge_details,
+            node_count,
+            edge_count,
+            max_node_surrogate,
+            max_edge_surrogate,
+        };
+        let mut outputs = vec![receipt_for_existing(&self.root, &shape.identities)?];
+        for name in shape.node_details.iter().chain(shape.edge_details.iter()) {
+            outputs.push(receipt_for_existing(&self.root, name)?);
+        }
+        replace_control(&self.root, CHECKPOINT, &self.checkpoint)?;
+        replace_control(
+            &self.root,
+            SHAPE_INTENT,
+            &ShapeIntent {
+                format_version: FORMAT_VERSION,
+                operation_uuid: self.checkpoint.operation_uuid,
+                project_identity: self.checkpoint.project_identity.clone(),
+                session_identity: self.checkpoint.session_identity.clone(),
+                parent_topology_generation: self.checkpoint.parent_topology_generation,
+                budgets: self.checkpoint.budgets,
+                last_receipt_sha256: self.checkpoint.last_receipt_sha256.clone(),
+                complete: true,
+                shape: Some(shape.clone()),
+                outputs,
+            },
+        )?;
+        Ok(shape)
     }
 
     /// Abort before seal. CURRENT remains unchanged.
@@ -1155,8 +1421,693 @@ fn encode_base_identity(identity: ConstructionUuidIdentity) -> [u8; BASE_IDENTIT
         crate::uuid_membership::UuidIndexKind::Node => 0,
         crate::uuid_membership::UuidIndexKind::Edge => 1,
     };
+    // Retained parent member; session-converted records keep this byte zero.
+    record[17] = 1;
     record[24..].copy_from_slice(&identity.surrogate.to_be_bytes());
     record
+}
+
+fn reject_existing_merge_artifacts(root: &StableDirectory) -> Result<(), GfError> {
+    for name in root.child_names().map_err(storage)? {
+        let Some(name) = name.to_str() else { continue };
+        if name.starts_with("merge-") || name.starts_with("shaped-") {
+            return Err(storage("unowned construction shaping artifact exists"));
+        }
+    }
+    Ok(())
+}
+
+fn planned_shape_names(
+    chunks: usize,
+    identity_inputs: usize,
+    node_runs: usize,
+    edge_runs: usize,
+    endpoint_runs: usize,
+    fan_in: usize,
+) -> Vec<String> {
+    let mut names = (0..chunks)
+        .map(|sequence| format!("merge-unified-{sequence:020}.run"))
+        .collect::<Vec<_>>();
+    plan_merge_names(identity_inputs, "merge-identities", fan_in, &mut names);
+    plan_merge_names(node_runs, "merge-node-details", fan_in, &mut names);
+    plan_merge_names(edge_runs, "merge-edge-details", fan_in, &mut names);
+    plan_merge_names(endpoint_runs, "merge-endpoints", fan_in, &mut names);
+    names.push("shaped-identities.run".to_owned());
+    names
+}
+
+fn plan_merge_names(mut count: usize, prefix: &str, fan_in: usize, names: &mut Vec<String>) {
+    let mut level = 0;
+    while count > 1 {
+        let groups = count.div_ceil(fan_in);
+        names.extend((0..groups).map(|group| format!("{prefix}-l{level:03}-g{group:08}.run")));
+        count = groups;
+        level += 1;
+    }
+}
+
+fn recover_shape_intent(root: &StableDirectory, checkpoint: &Checkpoint) -> Result<(), GfError> {
+    let mut file = match root.open_child_file(OsStr::new(SHAPE_INTENT)) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(storage(error)),
+    };
+    let intent: ShapeIntent = decode_bounded(&mut file)?;
+    validate_shape_binding(&intent, checkpoint)?;
+    if intent.complete {
+        let shape = intent
+            .shape
+            .as_ref()
+            .ok_or_else(|| storage("complete shape manifest lacks output"))?;
+        if intent.outputs.is_empty()
+            || !intent
+                .outputs
+                .iter()
+                .any(|item| item.name == shape.identities)
+        {
+            return Err(storage("complete shape manifest inventory is incomplete"));
+        }
+        for output in &intent.outputs {
+            authenticate_shaped_output(root, output)?;
+        }
+        return Ok(());
+    }
+    if intent.shape.is_some() || !intent.outputs.is_empty() {
+        return Err(storage("incomplete shape intent claims completed output"));
+    }
+    let mut node_runs = 0;
+    let mut edge_runs = 0;
+    let mut source_names = Vec::new();
+    for sequence in 0..checkpoint.next_sequence {
+        let mut file = root
+            .open_child_file(OsStr::new(&receipt_name(sequence)))
+            .map_err(storage)?;
+        let receipt: ConstructionChunkReceipt = decode_bounded(&mut file)?;
+        match receipt.kind {
+            ConstructionChunkKind::Node => {
+                node_runs += 1;
+                source_names.push(format!("merge-node-source-{sequence:020}.run"));
+            }
+            ConstructionChunkKind::Edge => {
+                edge_runs += 1;
+                source_names.push(format!("merge-edge-source-{sequence:020}.run"));
+                source_names.push(format!("merge-endpoint-source-{sequence:020}.run"));
+            }
+        }
+    }
+    let chunks = usize::try_from(checkpoint.next_sequence)
+        .map_err(|_| storage("construction shape chunk count exceeds this platform"))?;
+    let mut names = planned_shape_names(
+        chunks,
+        chunks + usize::from(checkpoint.base_identities.is_some()),
+        node_runs,
+        edge_runs,
+        edge_runs,
+        checkpoint.budgets.merge_fan_in,
+    );
+    names.extend(source_names);
+    for name in names {
+        match root.open_child_file(OsStr::new(&name)) {
+            Ok(file) => {
+                if file_link_count(&file).map_err(storage)? != 1 {
+                    return Err(storage("construction shape artifact has extra links"));
+                }
+                drop(file);
+                unlink_named(root, &name)?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(storage(error)),
+        }
+    }
+    unlink_named(root, SHAPE_INTENT)
+}
+
+fn validate_shape_binding(intent: &ShapeIntent, checkpoint: &Checkpoint) -> Result<(), GfError> {
+    if intent.format_version != FORMAT_VERSION
+        || intent.operation_uuid != checkpoint.operation_uuid
+        || intent.project_identity != checkpoint.project_identity
+        || intent.session_identity != checkpoint.session_identity
+        || intent.parent_topology_generation != checkpoint.parent_topology_generation
+        || intent.budgets != checkpoint.budgets
+        || intent.last_receipt_sha256 != checkpoint.last_receipt_sha256
+    {
+        return Err(storage("construction shape manifest authority changed"));
+    }
+    Ok(())
+}
+
+fn read_completed_shape(
+    root: &StableDirectory,
+    checkpoint: &Checkpoint,
+) -> Result<Option<ConstructionShape>, GfError> {
+    let mut file = match root.open_child_file(OsStr::new(SHAPE_INTENT)) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(storage(error)),
+    };
+    let manifest: ShapeIntent = decode_bounded(&mut file)?;
+    validate_shape_binding(&manifest, checkpoint)?;
+    if !manifest.complete {
+        return Err(storage("incomplete construction shape was not recovered"));
+    }
+    for output in &manifest.outputs {
+        authenticate_shaped_output(root, output)?;
+    }
+    manifest
+        .shape
+        .ok_or_else(|| storage("complete shape manifest lacks output"))
+        .map(Some)
+}
+
+fn receipt_for_existing(root: &StableDirectory, name: &str) -> Result<ArtifactReceipt, GfError> {
+    let mut file = root.open_child_file(OsStr::new(name)).map_err(storage)?;
+    if file_link_count(&file).map_err(storage)? != 1 {
+        return Err(storage("shaped output has extra links"));
+    }
+    let identity = file_identity(&file).map_err(storage)?;
+    let mut digest = Sha256::new();
+    let mut bytes = 0_u64;
+    let mut operations = 0_u64;
+    let mut block = vec![0_u8; BLOCK_BYTES];
+    loop {
+        let count = file.read(&mut block).map_err(storage)?;
+        if count == 0 {
+            break;
+        }
+        digest.update(&block[..count]);
+        bytes = bytes.saturating_add(count as u64);
+        operations = operations.saturating_add(1);
+    }
+    Ok(ArtifactReceipt {
+        name: name.to_owned(),
+        bytes,
+        sha256: hex(&digest.finalize()),
+        identity: identity.into(),
+        write_operations: operations,
+    })
+}
+
+fn authenticate_shaped_output(
+    root: &StableDirectory,
+    expected: &ArtifactReceipt,
+) -> Result<(), GfError> {
+    if !is_shape_artifact_name(&expected.name) && !canonical_artifact_target(&expected.name) {
+        return Err(storage("shape manifest output name is not canonical"));
+    }
+    let actual = receipt_for_existing(root, &expected.name)?;
+    if actual.bytes != expected.bytes
+        || actual.sha256 != expected.sha256
+        || actual.identity != expected.identity
+    {
+        return Err(storage("shape manifest output authentication changed"));
+    }
+    Ok(())
+}
+
+fn is_shape_artifact_name(name: &str) -> bool {
+    if name == "shaped-identities.run" {
+        return true;
+    }
+    if let Some(sequence) = name
+        .strip_prefix("merge-unified-")
+        .and_then(|body| body.strip_suffix(".run"))
+    {
+        return sequence.len() == 20 && sequence.bytes().all(|byte| byte.is_ascii_digit());
+    }
+    for prefix in [
+        "merge-node-source-",
+        "merge-edge-source-",
+        "merge-endpoint-source-",
+    ] {
+        if let Some(sequence) = name
+            .strip_prefix(prefix)
+            .and_then(|body| body.strip_suffix(".run"))
+        {
+            return sequence.len() == 20 && sequence.bytes().all(|byte| byte.is_ascii_digit());
+        }
+    }
+    [
+        "merge-identities-l",
+        "merge-node-details-l",
+        "merge-edge-details-l",
+        "merge-endpoints-l",
+    ]
+    .iter()
+    .any(|prefix| {
+        name.strip_prefix(prefix).is_some_and(|tail| {
+            tail.len() == 17
+                && tail.get(3..5) == Some("-g")
+                && tail.get(13..) == Some(".run")
+                && tail[..3].bytes().all(|byte| byte.is_ascii_digit())
+                && tail[5..13].bytes().all(|byte| byte.is_ascii_digit())
+        })
+    })
+}
+
+fn measured_shape_bytes(root: &StableDirectory) -> Result<u64, GfError> {
+    let mut bytes = 0_u64;
+    for name in root.child_names().map_err(storage)? {
+        let Some(name) = name.to_str() else { continue };
+        if is_shape_artifact_name(name) {
+            bytes = bytes.saturating_add(
+                root.open_child_file(OsStr::new(name))
+                    .map_err(storage)?
+                    .metadata()
+                    .map_err(storage)?
+                    .len(),
+            );
+        }
+    }
+    Ok(bytes)
+}
+
+fn account_merge_read<const N: usize>(evidence: &mut GraphConstructionEvidence) {
+    evidence.merge_read_records = evidence.merge_read_records.saturating_add(1);
+    evidence.merge_read_bytes = evidence.merge_read_bytes.saturating_add(N as u64);
+}
+
+fn account_merge_write<const N: usize>(evidence: &mut GraphConstructionEvidence) {
+    evidence.merge_written_records = evidence.merge_written_records.saturating_add(1);
+    evidence.merge_written_bytes = evidence.merge_written_bytes.saturating_add(N as u64);
+}
+
+fn convert_identity_run(
+    root: &StableDirectory,
+    receipt: &ConstructionChunkReceipt,
+    output: &str,
+    evidence: &mut GraphConstructionEvidence,
+) -> Result<(), GfError> {
+    let input = root
+        .open_child_file(OsStr::new(&receipt.identities.name))
+        .map_err(storage)?;
+    if !receipt
+        .identities
+        .identity
+        .matches(file_identity(&input).map_err(storage)?)
+        || file_link_count(&input).map_err(storage)? != 1
+    {
+        return Err(storage("identity source authority changed before merge"));
+    }
+    let temporary = artifact_temp(output);
+    let file = root
+        .create_replaceable_child_file(OsStr::new(&temporary))
+        .map_err(storage)?;
+    let identity = file_identity(&file).map_err(storage)?;
+    let mut reader = BufReader::with_capacity(BLOCK_BYTES, input);
+    let mut writer = BufWriter::with_capacity(BLOCK_BYTES, file);
+    let mut digest = Sha256::new();
+    let mut bytes = 0_u64;
+    while let Some(uuid) = read_fixed::<IDENTITY_WIDTH>(&mut reader)? {
+        digest.update(uuid);
+        bytes = bytes.saturating_add(IDENTITY_WIDTH as u64);
+        let mut record = [0_u8; BASE_IDENTITY_WIDTH];
+        record[..16].copy_from_slice(&uuid);
+        record[16] = u8::from(receipt.kind == ConstructionChunkKind::Edge);
+        writer.write_all(&record).map_err(storage)?;
+        account_merge_read::<IDENTITY_WIDTH>(evidence);
+        account_merge_write::<BASE_IDENTITY_WIDTH>(evidence);
+    }
+    if bytes != receipt.identities.bytes || hex(&digest.finalize()) != receipt.identities.sha256 {
+        return Err(storage("identity source content changed before merge"));
+    }
+    writer.flush().map_err(storage)?;
+    writer.get_ref().sync_all().map_err(storage)?;
+    drop(writer);
+    root.install_child(OsStr::new(&temporary), identity, OsStr::new(output))
+        .map_err(storage)?;
+    root.sync().map_err(storage)
+}
+
+fn copy_authenticated_run<const N: usize>(
+    root: &StableDirectory,
+    receipt: &ArtifactReceipt,
+    output: &str,
+    evidence: &mut GraphConstructionEvidence,
+) -> Result<(), GfError> {
+    let input = root
+        .open_child_file(OsStr::new(&receipt.name))
+        .map_err(storage)?;
+    if !receipt
+        .identity
+        .matches(file_identity(&input).map_err(storage)?)
+        || file_link_count(&input).map_err(storage)? != 1
+    {
+        return Err(storage("construction merge source authority changed"));
+    }
+    let temporary = artifact_temp(output);
+    let file = root
+        .create_replaceable_child_file(OsStr::new(&temporary))
+        .map_err(storage)?;
+    let identity = file_identity(&file).map_err(storage)?;
+    let mut reader = BufReader::with_capacity(BLOCK_BYTES, input);
+    let mut writer = BufWriter::with_capacity(BLOCK_BYTES, file);
+    let mut digest = Sha256::new();
+    let mut bytes = 0_u64;
+    while let Some(record) = read_fixed::<N>(&mut reader)? {
+        digest.update(record);
+        bytes = bytes.saturating_add(N as u64);
+        writer.write_all(&record).map_err(storage)?;
+        account_merge_read::<N>(evidence);
+        account_merge_write::<N>(evidence);
+    }
+    if bytes != receipt.bytes || hex(&digest.finalize()) != receipt.sha256 {
+        return Err(storage("construction merge source content changed"));
+    }
+    writer.flush().map_err(storage)?;
+    writer.get_ref().sync_all().map_err(storage)?;
+    drop(writer);
+    root.install_child(OsStr::new(&temporary), identity, OsStr::new(output))
+        .map_err(storage)?;
+    root.sync().map_err(storage)
+}
+
+fn merge_optional<const N: usize>(
+    root: &StableDirectory,
+    inputs: Vec<String>,
+    prefix: &str,
+    fan_in: usize,
+    reject_duplicates: bool,
+    cancelled: &mut impl FnMut() -> bool,
+    evidence: &mut GraphConstructionEvidence,
+) -> Result<Option<String>, GfError> {
+    if inputs.is_empty() {
+        Ok(None)
+    } else {
+        merge_fixed_all::<N>(
+            root,
+            inputs,
+            prefix,
+            fan_in,
+            reject_duplicates,
+            cancelled,
+            evidence,
+        )
+        .map(Some)
+    }
+}
+
+fn merge_fixed_all<const N: usize>(
+    root: &StableDirectory,
+    mut inputs: Vec<String>,
+    prefix: &str,
+    fan_in: usize,
+    reject_duplicates: bool,
+    cancelled: &mut impl FnMut() -> bool,
+    evidence: &mut GraphConstructionEvidence,
+) -> Result<String, GfError> {
+    if inputs.is_empty() {
+        return Err(storage("external merge has no input"));
+    }
+    let mut level = 0_usize;
+    while inputs.len() > 1 {
+        evidence.merge_passes = evidence.merge_passes.saturating_add(1);
+        let mut outputs = Vec::with_capacity(inputs.len().div_ceil(fan_in));
+        for (group, names) in inputs.chunks(fan_in).enumerate() {
+            reject_cancelled(cancelled)?;
+            let output = format!("{prefix}-l{level:03}-g{group:08}.run");
+            merge_fixed_group::<N>(root, names, &output, reject_duplicates, cancelled, evidence)?;
+            outputs.push(output);
+        }
+        for old in &inputs {
+            if old.starts_with("merge-") && !outputs.contains(old) {
+                unlink_named(root, old)?;
+            }
+        }
+        inputs = outputs;
+        level += 1;
+    }
+    Ok(inputs.pop().expect("one merge output"))
+}
+
+fn merge_fixed_group<const N: usize>(
+    root: &StableDirectory,
+    inputs: &[String],
+    output: &str,
+    reject_duplicates: bool,
+    cancelled: &mut impl FnMut() -> bool,
+    evidence: &mut GraphConstructionEvidence,
+) -> Result<(), GfError> {
+    let mut readers = inputs
+        .iter()
+        .map(|name| {
+            root.open_child_file(OsStr::new(name))
+                .map(|file| BufReader::with_capacity(BLOCK_BYTES, file))
+                .map_err(storage)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    evidence.peak_merge_inputs = evidence.peak_merge_inputs.max(readers.len() as u64);
+    let temporary = artifact_temp(output);
+    let file = root
+        .create_replaceable_child_file(OsStr::new(&temporary))
+        .map_err(storage)?;
+    let identity = file_identity(&file).map_err(storage)?;
+    let mut writer = BufWriter::with_capacity(BLOCK_BYTES, file);
+    let mut heap = BinaryHeap::new();
+    for (index, reader) in readers.iter_mut().enumerate() {
+        if let Some(record) = read_fixed::<N>(reader)? {
+            heap.push(Reverse((record, index)));
+            account_merge_read::<N>(evidence);
+        }
+    }
+    let mut previous = None;
+    while let Some(Reverse((record, index))) = heap.pop() {
+        if reject_duplicates
+            && previous
+                .as_ref()
+                .is_some_and(|prior: &[u8; N]| prior[..16] == record[..16])
+        {
+            return Err(storage("duplicate identity across construction runs"));
+        }
+        writer.write_all(&record).map_err(storage)?;
+        account_merge_write::<N>(evidence);
+        previous = Some(record);
+        if evidence.merge_written_records.is_multiple_of(4096) {
+            reject_cancelled(cancelled)?;
+        }
+        if let Some(next) = read_fixed::<N>(&mut readers[index])? {
+            heap.push(Reverse((next, index)));
+            account_merge_read::<N>(evidence);
+        }
+    }
+    writer.flush().map_err(storage)?;
+    writer.get_ref().sync_all().map_err(storage)?;
+    drop(writer);
+    root.install_child(OsStr::new(&temporary), identity, OsStr::new(output))
+        .map_err(storage)?;
+    root.sync().map_err(storage)?;
+    evidence.merge_groups = evidence.merge_groups.saturating_add(1);
+    evidence.peak_merge_temporary_bytes = evidence
+        .peak_merge_temporary_bytes
+        .max(measured_shape_bytes(root)?);
+    Ok(())
+}
+
+fn read_fixed<const N: usize>(reader: &mut impl Read) -> Result<Option<[u8; N]>, GfError> {
+    let mut record = [0_u8; N];
+    let mut filled = 0;
+    while filled < N {
+        match reader.read(&mut record[filled..]).map_err(storage)? {
+            0 if filled == 0 => return Ok(None),
+            0 => return Err(storage("truncated fixed-width construction run")),
+            count => filled += count,
+        }
+    }
+    Ok(Some(record))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_unified_and_details(
+    root: &StableDirectory,
+    identities_name: &str,
+    node_details_name: Option<&str>,
+    edge_details_name: Option<&str>,
+    endpoints_name: Option<&str>,
+    base_max_node: u64,
+    base_max_edge: u64,
+    cancelled: &mut impl FnMut() -> bool,
+    evidence: &mut GraphConstructionEvidence,
+) -> Result<(u64, u64, u64, u64), GfError> {
+    let mut identities = BufReader::with_capacity(
+        BLOCK_BYTES,
+        root.open_child_file(OsStr::new(identities_name))
+            .map_err(storage)?,
+    );
+    let mut node_count = 0_u64;
+    let mut edge_count = 0_u64;
+    let mut new_nodes = 0_u64;
+    let mut new_edges = 0_u64;
+    while let Some(record) = read_fixed::<BASE_IDENTITY_WIDTH>(&mut identities)? {
+        match record[16] {
+            0 => {
+                node_count += 1;
+                if record[17] == 0 {
+                    new_nodes += 1;
+                }
+            }
+            1 => {
+                edge_count += 1;
+                if record[17] == 0 {
+                    new_edges += 1;
+                }
+            }
+            _ => return Err(storage("invalid identity kind in unified merge")),
+        }
+        account_merge_read::<BASE_IDENTITY_WIDTH>(evidence);
+        if (node_count + edge_count).is_multiple_of(4096) {
+            reject_cancelled(cancelled)?;
+        }
+    }
+    let detail_count = |name: Option<&str>, width: u64| -> Result<u64, GfError> {
+        let Some(name) = name else { return Ok(0) };
+        let bytes = root
+            .open_child_file(OsStr::new(name))
+            .map_err(storage)?
+            .metadata()
+            .map_err(storage)?
+            .len();
+        if bytes % width != 0 {
+            return Err(storage("truncated canonical detail run"));
+        }
+        Ok(bytes / width)
+    };
+    if detail_count(node_details_name, NODE_DETAIL_WIDTH as u64)? != new_nodes
+        || detail_count(edge_details_name, EDGE_DETAIL_WIDTH as u64)? != new_edges
+    {
+        return Err(storage("identity and canonical detail domains disagree"));
+    }
+    validate_endpoints(
+        root,
+        identities_name,
+        endpoints_name,
+        new_edges,
+        cancelled,
+        evidence,
+    )?;
+    let max_node = base_max_node
+        .checked_add(new_nodes)
+        .ok_or_else(|| storage("node surrogate overflow"))?;
+    let max_edge = base_max_edge
+        .checked_add(new_edges)
+        .ok_or_else(|| storage("edge surrogate overflow"))?;
+    Ok((node_count, edge_count, max_node, max_edge))
+}
+
+fn validate_endpoints(
+    root: &StableDirectory,
+    identities_name: &str,
+    endpoints_name: Option<&str>,
+    new_edges: u64,
+    cancelled: &mut impl FnMut() -> bool,
+    evidence: &mut GraphConstructionEvidence,
+) -> Result<(), GfError> {
+    if new_edges == 0 {
+        return if endpoints_name.is_none() {
+            Ok(())
+        } else {
+            Err(storage("endpoint run exists without new edges"))
+        };
+    }
+    let endpoints_name = endpoints_name.ok_or_else(|| storage("new edges lack endpoints"))?;
+    let mut identities = BufReader::with_capacity(
+        BLOCK_BYTES,
+        root.open_child_file(OsStr::new(identities_name))
+            .map_err(storage)?,
+    );
+    let mut endpoints = BufReader::with_capacity(
+        BLOCK_BYTES,
+        root.open_child_file(OsStr::new(endpoints_name))
+            .map_err(storage)?,
+    );
+    let mut identity = read_fixed::<BASE_IDENTITY_WIDTH>(&mut identities)?;
+    let mut endpoint_count = 0_u64;
+    while let Some(endpoint) = read_fixed::<ENDPOINT_WIDTH>(&mut endpoints)? {
+        while identity
+            .as_ref()
+            .is_some_and(|item| item[..16] < endpoint[..16])
+        {
+            identity = read_fixed::<BASE_IDENTITY_WIDTH>(&mut identities)?;
+            account_merge_read::<BASE_IDENTITY_WIDTH>(evidence);
+        }
+        let Some(node) = identity.as_ref() else {
+            return Err(storage("edge endpoint UUID does not exist"));
+        };
+        if node[..16] != endpoint[..16] || node[16] != 0 {
+            return Err(storage("edge endpoint is not a node UUID"));
+        }
+        if endpoint[32] > 1 || endpoint[33..].iter().any(|byte| *byte != 0) {
+            return Err(storage("endpoint run record is not canonical"));
+        }
+        endpoint_count += 1;
+        account_merge_read::<ENDPOINT_WIDTH>(evidence);
+        if endpoint_count.is_multiple_of(4096) {
+            reject_cancelled(cancelled)?;
+        }
+    }
+    if endpoint_count != new_edges.saturating_mul(2) {
+        return Err(storage(
+            "edge endpoint cardinality differs from edge domain",
+        ));
+    }
+    Ok(())
+}
+
+fn assign_surrogates(
+    root: &StableDirectory,
+    input_name: &str,
+    mut node_tail: u64,
+    mut edge_tail: u64,
+    cancelled: &mut impl FnMut() -> bool,
+    evidence: &mut GraphConstructionEvidence,
+) -> Result<String, GfError> {
+    let output = "shaped-identities.run";
+    let temporary = artifact_temp(output);
+    let file = root
+        .create_replaceable_child_file(OsStr::new(&temporary))
+        .map_err(storage)?;
+    let identity = file_identity(&file).map_err(storage)?;
+    let mut reader = BufReader::with_capacity(
+        BLOCK_BYTES,
+        root.open_child_file(OsStr::new(input_name))
+            .map_err(storage)?,
+    );
+    let mut writer = BufWriter::with_capacity(BLOCK_BYTES, file);
+    let mut count = 0_u64;
+    while let Some(mut record) = read_fixed::<BASE_IDENTITY_WIDTH>(&mut reader)? {
+        if record[17] == 0 {
+            let surrogate = match record[16] {
+                0 => {
+                    node_tail = node_tail
+                        .checked_add(1)
+                        .ok_or_else(|| storage("node surrogate overflow"))?;
+                    node_tail
+                }
+                1 => {
+                    edge_tail = edge_tail
+                        .checked_add(1)
+                        .ok_or_else(|| storage("edge surrogate overflow"))?;
+                    edge_tail
+                }
+                _ => return Err(storage("invalid identity kind during shaping")),
+            };
+            record[24..32].copy_from_slice(&surrogate.to_be_bytes());
+        } else if record[17] != 1 {
+            return Err(storage("invalid retained identity marker during shaping"));
+        }
+        writer.write_all(&record).map_err(storage)?;
+        account_merge_read::<BASE_IDENTITY_WIDTH>(evidence);
+        account_merge_write::<BASE_IDENTITY_WIDTH>(evidence);
+        count += 1;
+        if count.is_multiple_of(4096) {
+            reject_cancelled(cancelled)?;
+        }
+    }
+    writer.flush().map_err(storage)?;
+    writer.get_ref().sync_all().map_err(storage)?;
+    drop(writer);
+    root.install_child(OsStr::new(&temporary), identity, OsStr::new(output))
+        .map_err(storage)?;
+    root.sync().map_err(storage)?;
+    Ok(output.to_owned())
 }
 
 fn create_base_snapshot(
@@ -1333,7 +2284,8 @@ fn authenticate_artifact(
                 }
                 if width == BASE_IDENTITY_WIDTH
                     && (!matches!(record[16], 0 | 1)
-                        || record[17..24].iter().any(|byte| *byte != 0)
+                        || record[17] != 1
+                        || record[18..24].iter().any(|byte| *byte != 0)
                         || (record[16] == 0 && record[24..].iter().all(|byte| *byte == 0))
                         || (record[16] == 1 && record[24..].iter().any(|byte| *byte != 0)))
                 {
@@ -1749,7 +2701,7 @@ fn is_owned_artifact_temp(name: &str) -> bool {
 }
 
 fn canonical_artifact_target(name: &str) -> bool {
-    if name == BASE_IDENTITIES {
+    if name == BASE_IDENTITIES || is_shape_artifact_name(name) {
         return true;
     }
     let Some(body) = name.strip_prefix("chunk-") else {
@@ -1945,7 +2897,8 @@ fn validate_sorted_run(file: &mut File, width: usize) -> Result<(), GfError> {
                             .any(|byte| *byte != 0)))
                 || (width == BASE_IDENTITY_WIDTH
                     && (!matches!(record[16], 0 | 1)
-                        || record[17..24].iter().any(|byte| *byte != 0)
+                        || record[17] != 1
+                        || record[18..24].iter().any(|byte| *byte != 0)
                         || (record[16] == 0 && record[24..].iter().all(|byte| *byte == 0))
                         || (record[16] == 1 && record[24..].iter().any(|byte| *byte != 0))))
             {
@@ -2144,6 +3097,161 @@ mod tests {
             assert_eq!(session.state(), GraphConstructionState::Sealed);
             assert!(session.evidence().authentication_read_bytes > 0);
         }
+    }
+
+    #[test]
+    fn shaping_is_bounded_deterministic_and_multipass_at_1x_2x_4x() {
+        for chunks in [1_usize, 2, 4] {
+            let root = TempDir::new().unwrap();
+            let mut session = GraphConstructionSession::open(
+                root.path(),
+                Uuid::from_u128(7_000 + chunks as u128),
+                0,
+                GraphConstructionBudgets {
+                    merge_fan_in: 2,
+                    ..GraphConstructionBudgets::default()
+                },
+            )
+            .unwrap();
+            for chunk in 0..chunks {
+                session
+                    .append(
+                        ConstructionChunkKind::Node,
+                        &format!("nodes-{chunk}"),
+                        &node_batch(1 + chunk as u128 * 4, 4),
+                    )
+                    .unwrap();
+            }
+            session
+                .append(
+                    ConstructionChunkKind::Edge,
+                    "edges",
+                    &edge_batch(10_000, chunks * 2),
+                )
+                .unwrap();
+            session.seal().unwrap();
+            let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
+            assert_eq!(shape.node_count, (chunks * 4) as u64);
+            assert_eq!(shape.edge_count, (chunks * 2) as u64);
+            assert_eq!(shape.max_node_surrogate, (chunks * 4) as u64);
+            assert_eq!(shape.max_edge_surrogate, (chunks * 2) as u64);
+            assert!(session.evidence().peak_merge_inputs <= 2);
+            assert!(session.evidence().merge_read_bytes > 0);
+            assert!(session.evidence().merge_written_bytes > 0);
+            if chunks == 4 {
+                assert!(session.evidence().merge_passes >= 2);
+            }
+        }
+    }
+
+    #[test]
+    fn shaping_rejects_cross_kind_duplicates_and_missing_endpoints() {
+        let root = TempDir::new().unwrap();
+        let mut duplicate = open(&root, 8_001);
+        duplicate
+            .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 2))
+            .unwrap();
+        duplicate
+            .append(ConstructionChunkKind::Edge, "edges", &edge_batch(1, 1))
+            .unwrap();
+        duplicate.seal().unwrap();
+        assert!(
+            duplicate
+                .shape_canonical_with_cancellation(|| false)
+                .unwrap_err()
+                .to_string()
+                .contains("duplicate identity")
+        );
+
+        let root = TempDir::new().unwrap();
+        let mut missing = open(&root, 8_002);
+        missing
+            .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 2))
+            .unwrap();
+        missing
+            .append(ConstructionChunkKind::Edge, "edges", &edge_batch(20_000, 2))
+            .unwrap();
+        missing.seal().unwrap();
+        assert!(
+            missing
+                .shape_canonical_with_cancellation(|| false)
+                .unwrap_err()
+                .to_string()
+                .contains("endpoint")
+        );
+    }
+
+    #[test]
+    fn shaping_cancellation_is_recovered_on_reopen() {
+        let root = TempDir::new().unwrap();
+        let mut session = open(&root, 8_003);
+        for chunk in 0..4 {
+            session
+                .append(
+                    ConstructionChunkKind::Node,
+                    &format!("nodes-{chunk}"),
+                    &node_batch(1 + chunk * 8, 8),
+                )
+                .unwrap();
+        }
+        session.seal().unwrap();
+        let mut polls = 0;
+        assert!(
+            session
+                .shape_canonical_with_cancellation(|| {
+                    polls += 1;
+                    polls > 6
+                })
+                .is_err()
+        );
+        drop(session);
+        let mut resumed = GraphConstructionSession::open(
+            root.path(),
+            Uuid::from_u128(8_003),
+            0,
+            GraphConstructionBudgets::default(),
+        )
+        .unwrap();
+        resumed.shape_canonical_with_cancellation(|| false).unwrap();
+    }
+
+    #[test]
+    fn fixed_merge_reader_rejects_truncation_and_self_loop_is_valid() {
+        assert!(read_fixed::<16>(&mut std::io::Cursor::new(vec![0_u8; 15])).is_err());
+        let root = TempDir::new().unwrap();
+        let mut session = open(&root, 8_004);
+        session
+            .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 1))
+            .unwrap();
+        let endpoint = [1_u128.to_be_bytes()];
+        let edge = RecordBatch::try_new(
+            CONSTRUCTION_EDGE_SCHEMA.clone(),
+            vec![
+                Arc::new(fixed(&[9_000_u128.to_be_bytes()])),
+                Arc::new(fixed(&endpoint)),
+                Arc::new(fixed(&endpoint)),
+                Arc::new(StringArray::from(vec!["R"])),
+            ],
+        )
+        .unwrap();
+        session
+            .append(ConstructionChunkKind::Edge, "self-loop", &edge)
+            .unwrap();
+        session.seal().unwrap();
+        let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
+        assert_eq!(shape.edge_count, 1);
+        drop(session);
+        let mut resumed = GraphConstructionSession::open(
+            root.path(),
+            Uuid::from_u128(8_004),
+            0,
+            GraphConstructionBudgets::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            resumed.shape_canonical_with_cancellation(|| false).unwrap(),
+            shape
+        );
     }
 
     #[test]

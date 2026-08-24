@@ -92,7 +92,7 @@ fn surrogate_tails_schema() -> SchemaRef {
     ]))
 }
 
-fn read_surrogate_tails(dir: &Path) -> Result<Option<(u64, u64)>, GfError> {
+pub(crate) fn read_surrogate_tails(dir: &Path) -> Result<Option<(u64, u64)>, GfError> {
     use arrow::array::Array;
 
     let path = dir.join(SURROGATE_TAILS_FILE);
