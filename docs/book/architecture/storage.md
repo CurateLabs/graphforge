@@ -138,13 +138,25 @@ data. New publications store graph workspace files under the generation-owned
 `graph`/`snapshot` Arrow envelopes remain readable. Root YAML/JSON and
 environment settings are inputs only and cannot override the selected
 generation. Version 2 of `graph`/`files` replaces the expanded per-generation
-inventory with a compact authenticated radix root. Immutable payload and
+inventory with a compact authenticated Patricia/radix root. Immutable payload and
 manifest objects are addressed by SHA-256 in the project object store, so an
-update writes only changed payloads and the bounded root path while unchanged
-objects are reused byte-for-byte. Open resolves the bounded manifest and
+update writes only changed payloads and the compressed path-copy root path while
+unchanged objects are reused byte-for-byte. A storage-owned root-bound state
+authenticates an existing inventory once per publication sequence; individual
+updates cannot substitute a caller-owned cache and do not rescan all prior
+descriptors. Open resolves the bounded manifest and
 verifies every selected payload before exposing the generation. Version 1
 expanded inventories remain readable and can be migrated without changing
 `CURRENT` until the complete version-2 generation is durable.
+
+The node-v2 canonical shape has no unary branches: maximal lowercase-hex digest
+prefixes are compressed into nodes, branches have at least two distinct nibble
+children, and leaves contain the full-digest collision bucket in logical-path
+order. Empty inventory is the sole one-node empty-branch exception. Therefore
+`F > 0` distinct path digests require at most `2F - 1` manifest objects instead
+of one object per hash nibble. Resolver admission derives its structural bound
+from the authenticated root totals and rejects v1/mixed/future nodes, malformed
+or nonmaximal shapes, wrong routes, duplicate references, and corrupt objects.
 
 Authoritative small-write delta runs, when present, live under
 `graph/deltas/` inside the same generation and are inventory-verified

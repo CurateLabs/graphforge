@@ -280,18 +280,75 @@ pub struct GraphFilesMigrationEvidence {
     pub bytes_installed: u64,
 }
 
-/// Exact incremental publication work; prior manifest entries are supplied by
-/// the owning facade's pinned cache and are never enumerated here.
+/// Exact publication work, including authentication of the caller's prior cache.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GraphFilesAppendEvidence {
     /// New/replaced and tombstoned descriptors examined.
     pub changed_entries_examined: u64,
-    /// Prior descriptors examined by publication (always zero).
+    /// Prior descriptors authenticated before publication.
     pub prior_entries_examined: u64,
     /// New/replaced payload bytes hashed, including verification passes.
     pub payload_bytes_hashed: u64,
     /// New physical object bytes installed.
     pub bytes_installed: u64,
+}
+
+/// Storage-owned, root-bound state for a sequence of path-copy publications.
+///
+/// Opening an existing root authenticates its inventory exactly once. Callers
+/// cannot replace the cached inventory independently of the root.
+#[derive(Debug, Clone, Default)]
+pub struct GraphManifestState {
+    project_identity: Option<graphforge_filesystem::FileIdentity>,
+    root: Option<GraphFilesRootV2>,
+    entries: BTreeMap<String, crate::GraphFileEntry>,
+}
+
+impl GraphManifestState {
+    /// Start an empty authenticated publication sequence.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self {
+            project_identity: None,
+            root: None,
+            entries: BTreeMap::new(),
+        }
+    }
+
+    /// Authenticate an existing root once, then retain its exact inventory.
+    pub fn open(
+        lease: &GraphObjectPublicationLease,
+        root: GraphFilesRootV2,
+        limits: crate::GraphManifestLimits,
+    ) -> Result<(Self, crate::GraphManifestResolveEvidence), GfError> {
+        validate_publication_identity(lease)?;
+        let (entries, evidence) = crate::resolve_graph_manifest(&root, limits, |digest| {
+            read_graph_object_by_digest_from_cas(&lease.cas, digest, 64 * 1024 * 1024)
+        })?;
+        Ok((
+            Self {
+                project_identity: Some(lease.cas.project.identity()),
+                root: Some(root),
+                entries: entries
+                    .into_iter()
+                    .map(|entry| (entry.relative_path.clone(), entry))
+                    .collect(),
+            },
+            evidence,
+        ))
+    }
+
+    /// Current authenticated compact root, if one has been published.
+    #[must_use]
+    pub const fn root(&self) -> Option<&GraphFilesRootV2> {
+        self.root.as_ref()
+    }
+
+    /// Current entries in canonical logical-path order.
+    #[must_use]
+    pub fn entries(&self) -> impl ExactSizeIterator<Item = &crate::GraphFileEntry> {
+        self.entries.values()
+    }
 }
 
 /// Mark/sweep evidence for project-level graph objects.
@@ -519,20 +576,50 @@ pub(crate) fn gc_graph_objects_guarded(
 }
 
 /// Seal only changed logical files into a structurally shared radix manifest.
+#[allow(clippy::too_many_lines)]
 pub fn append_graph_files_v2(
     lease: &GraphObjectPublicationLease,
     workspace: &Path,
-    previous_root: Option<&GraphFilesRootV2>,
-    live_entries: &mut BTreeMap<String, crate::GraphFileEntry>,
+    state: &mut GraphManifestState,
     sealed_paths: &[PathBuf],
     tombstones: &[String],
 ) -> Result<(GraphFilesRootV2, GraphFilesAppendEvidence), GfError> {
     validate_publication_identity(lease)?;
+    if state
+        .project_identity
+        .is_some_and(|identity| identity != lease.cas.project.identity())
+    {
+        return Err(validation(
+            "graph manifest state belongs to a different project",
+        ));
+    }
     let mut additions = Vec::with_capacity(sealed_paths.len());
     let mut evidence = GraphFilesAppendEvidence::default();
-    let mut logical_byte_length = previous_root.map_or(0, |root| root.logical_byte_length);
+    let mut sealed_names = BTreeSet::new();
     for relative in sealed_paths {
         validate_logical_path(relative)?;
+        let name = relative
+            .to_str()
+            .ok_or_else(|| validation("sealed graph path is not UTF-8"))?;
+        if !sealed_names.insert(name.to_owned()) {
+            return Err(validation("sealed graph paths contain a duplicate"));
+        }
+    }
+    let mut tombstone_names = BTreeSet::new();
+    for path in tombstones {
+        validate_logical_path(Path::new(path))?;
+        if !tombstone_names.insert(path.clone()) {
+            return Err(validation("graph tombstones contain a duplicate"));
+        }
+        if sealed_names.contains(path) {
+            return Err(validation("graph path is both sealed and tombstoned"));
+        }
+    }
+    let mut logical_byte_length = state
+        .root
+        .as_ref()
+        .map_or(0, |root| root.logical_byte_length);
+    for relative in sealed_paths {
         let source = workspace.join(relative);
         let metadata = fs::symlink_metadata(&source)
             .map_err(|error| storage("inspect sealed graph file", &source, error))?;
@@ -560,7 +647,7 @@ pub fn append_graph_files_v2(
             content_sha256: digest,
             role: crate::graph_files::infer_role(relative),
         };
-        if let Some(previous) = live_entries.insert(relative_path, entry.clone()) {
+        if let Some(previous) = state.entries.get(&relative_path) {
             logical_byte_length = logical_byte_length.saturating_sub(previous.byte_length);
         }
         logical_byte_length = logical_byte_length
@@ -571,37 +658,35 @@ pub fn append_graph_files_v2(
     additions.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
     let mut tombstones = tombstones.to_vec();
     tombstones.sort();
-    tombstones.dedup();
     for path in &tombstones {
-        validate_logical_path(Path::new(path))?;
-        if let Some(previous) = live_entries.remove(path) {
+        if let Some(previous) = state.entries.get(path) {
             logical_byte_length = logical_byte_length.saturating_sub(previous.byte_length);
         }
     }
     evidence.changed_entries_examined =
         u64::try_from(additions.len().saturating_add(tombstones.len())).unwrap_or(u64::MAX);
-    let mut root_digest = match previous_root {
+    let mut root_digest = match state.root.as_ref() {
         Some(previous) => previous.root_node_sha256.clone(),
         None => install_manifest_node(lease, &empty_branch(0), &mut evidence.bytes_installed)?,
     };
-    for entry in additions {
+    for entry in &additions {
         let relative_path = entry.relative_path.clone();
         root_digest = update_manifest_path(
             lease,
             Some(&root_digest),
             0,
             &relative_path,
-            Some(entry),
+            Some(entry.clone()),
             &mut evidence.bytes_installed,
         )?
         .ok_or_else(|| validation("radix update unexpectedly removed the root"))?;
     }
-    for path in tombstones {
+    for path in &tombstones {
         root_digest = update_manifest_path(
             lease,
             Some(&root_digest),
             0,
-            &path,
+            path,
             None,
             &mut evidence.bytes_installed,
         )?
@@ -611,16 +696,38 @@ pub fn append_graph_files_v2(
             &mut evidence.bytes_installed,
         )?);
     }
-    Ok((
-        GraphFilesRootV2 {
-            format: GRAPH_FILES_V2_FORMAT.into(),
-            format_version: GRAPH_FILES_V2_VERSION,
-            root_node_sha256: root_digest,
-            logical_file_count: u64::try_from(live_entries.len()).unwrap_or(u64::MAX),
-            logical_byte_length,
-        },
-        evidence,
-    ))
+    let added_new = additions
+        .iter()
+        .filter(|entry| !state.entries.contains_key(&entry.relative_path))
+        .count();
+    let removed_existing = tombstones
+        .iter()
+        .filter(|path| state.entries.contains_key(path.as_str()))
+        .count();
+    let logical_file_count = state
+        .entries
+        .len()
+        .checked_add(added_new)
+        .and_then(|count| count.checked_sub(removed_existing))
+        .ok_or_else(|| validation("graph files v2 file total overflow"))?;
+    let root = GraphFilesRootV2 {
+        format: GRAPH_FILES_V2_FORMAT.into(),
+        format_version: GRAPH_FILES_V2_VERSION,
+        root_node_sha256: root_digest,
+        logical_file_count: u64::try_from(logical_file_count).unwrap_or(u64::MAX),
+        logical_byte_length,
+    };
+    // Commit the root-bound cache only after every payload and Patricia node
+    // operation succeeded. An error above leaves both fields unchanged.
+    for entry in additions {
+        state.entries.insert(entry.relative_path.clone(), entry);
+    }
+    for path in tombstones {
+        state.entries.remove(&path);
+    }
+    state.root = Some(root.clone());
+    state.project_identity = Some(lease.cas.project.identity());
+    Ok((root, evidence))
 }
 
 /// Import a verified v1 graph tree into a self-contained v2 radix root.
@@ -676,6 +783,7 @@ fn empty_branch(depth: u8) -> GraphManifestNode {
         format: GRAPH_MANIFEST_NODE_FORMAT.into(),
         format_version: GRAPH_MANIFEST_NODE_VERSION,
         depth,
+        prefix: String::new(),
         kind: GraphManifestNodeKind::Branch {
             children: BTreeMap::new(),
         },
@@ -716,98 +824,193 @@ fn update_manifest_path(
     replacement: Option<crate::GraphFileEntry>,
     bytes_installed: &mut u64,
 ) -> Result<Option<String>, GfError> {
-    let path_digest = crate::graph_manifest::logical_path_digest(path);
-    if depth == GRAPH_RADIX_DEPTH {
-        let mut entries = match current_digest {
-            Some(digest) => match load_manifest_node(lease, digest, depth)?.kind {
-                GraphManifestNodeKind::Leaf {
-                    path_sha256,
-                    entries,
-                } => {
-                    if path_sha256 != hex_digest(path_digest) {
-                        return Err(validation("graph manifest collision leaf digest mismatch"));
-                    }
-                    entries
-                }
-                GraphManifestNodeKind::Branch { .. } => {
-                    return Err(validation("graph manifest terminal node is not a leaf"));
-                }
-            },
-            None => Vec::new(),
-        };
-        match entries.binary_search_by(|entry| entry.relative_path.as_str().cmp(path)) {
-            Ok(index) => match replacement {
-                Some(entry) => entries[index] = entry,
-                None => {
-                    entries.remove(index);
-                }
-            },
-            Err(index) => {
-                if let Some(entry) = replacement {
-                    entries.insert(index, entry);
-                }
-            }
-        }
-        if entries.is_empty() {
-            return Ok(None);
-        }
-        let node = GraphManifestNode {
-            format: GRAPH_MANIFEST_NODE_FORMAT.into(),
-            format_version: GRAPH_MANIFEST_NODE_VERSION,
-            depth,
-            kind: GraphManifestNodeKind::Leaf {
-                path_sha256: hex_digest(path_digest),
-                entries,
-            },
-        };
-        return install_manifest_node(lease, &node, bytes_installed).map(Some);
-    }
-
-    let mut children = match current_digest {
-        Some(digest) => match load_manifest_node(lease, digest, depth)?.kind {
-            GraphManifestNodeKind::Branch { children } => children,
-            GraphManifestNodeKind::Leaf { .. } => {
-                return Err(validation(
-                    "graph manifest non-terminal node is not a branch",
-                ));
-            }
-        },
-        None => BTreeMap::new(),
-    };
-    let nibble = format!(
-        "{:x}",
-        crate::graph_manifest::radix_nibble(&path_digest, depth)
-    );
-    let child = update_manifest_path(
+    let path_digest = hex_digest(crate::graph_manifest::logical_path_digest(path));
+    update_manifest_digest(
         lease,
-        children.get(&nibble).map(String::as_str),
-        depth + 1,
+        current_digest,
+        depth,
         path,
+        &path_digest,
         replacement,
         bytes_installed,
-    )?;
-    match child {
-        Some(digest) => {
-            children.insert(nibble, digest);
-        }
-        None => {
-            children.remove(&nibble);
-        }
-    }
-    if children.is_empty() && depth != 0 {
-        return Ok(None);
-    }
-    install_manifest_node(
-        lease,
-        &GraphManifestNode {
-            format: GRAPH_MANIFEST_NODE_FORMAT.into(),
-            format_version: GRAPH_MANIFEST_NODE_VERSION,
-            depth,
-            kind: GraphManifestNodeKind::Branch { children },
-        },
-        bytes_installed,
     )
-    .map(Some)
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn update_manifest_digest(
+    lease: &GraphObjectPublicationLease,
+    current_digest: Option<&str>,
+    depth: u8,
+    path: &str,
+    path_digest: &str,
+    replacement: Option<crate::GraphFileEntry>,
+    bytes_installed: &mut u64,
+) -> Result<Option<String>, GfError> {
+    let Some(current_digest) = current_digest else {
+        return replacement
+            .map(|entry| {
+                install_manifest_node(
+                    lease,
+                    &leaf_node(
+                        depth,
+                        &path_digest[usize::from(depth)..],
+                        path_digest,
+                        vec![entry],
+                    ),
+                    bytes_installed,
+                )
+            })
+            .transpose();
+    };
+    let mut node = load_manifest_node(lease, current_digest, depth)?;
+    let start = usize::from(depth);
+    let common = node
+        .prefix
+        .bytes()
+        .zip(path_digest.as_bytes()[start..].iter().copied())
+        .take_while(|(left, right)| left == right)
+        .count();
+    if common != node.prefix.len() {
+        let Some(entry) = replacement else {
+            return Ok(Some(current_digest.to_owned()));
+        };
+        let split_depth = depth
+            .checked_add(u8::try_from(common).map_err(|_| validation("Patricia split overflow"))?)
+            .ok_or_else(|| validation("Patricia split overflow"))?;
+        let old_edge = node.prefix[common..=common].to_owned();
+        node.depth = split_depth + 1;
+        node.prefix = node.prefix[common + 1..].to_owned();
+        let old_digest = install_manifest_node(lease, &node, bytes_installed)?;
+        let new_edge = path_digest[usize::from(split_depth)..=usize::from(split_depth)].to_owned();
+        if old_edge == new_edge {
+            return Err(validation("Patricia split did not diverge"));
+        }
+        let new_digest = install_manifest_node(
+            lease,
+            &leaf_node(
+                split_depth + 1,
+                &path_digest[usize::from(split_depth) + 1..],
+                path_digest,
+                vec![entry],
+            ),
+            bytes_installed,
+        )?;
+        let children = BTreeMap::from([(old_edge, old_digest), (new_edge, new_digest)]);
+        return install_manifest_node(
+            lease,
+            &branch_node(depth, &path_digest[start..start + common], children),
+            bytes_installed,
+        )
+        .map(Some);
+    }
+    let payload_depth = depth
+        .checked_add(
+            u8::try_from(node.prefix.len()).map_err(|_| validation("Patricia depth overflow"))?,
+        )
+        .ok_or_else(|| validation("Patricia depth overflow"))?;
+    match node.kind {
+        GraphManifestNodeKind::Leaf {
+            path_sha256,
+            mut entries,
+        } => {
+            if path_sha256 != path_digest {
+                return Err(validation("Patricia leaf route mismatch"));
+            }
+            match entries.binary_search_by(|entry| entry.relative_path.as_str().cmp(path)) {
+                Ok(index) => match replacement {
+                    Some(entry) => entries[index] = entry,
+                    None => {
+                        entries.remove(index);
+                    }
+                },
+                Err(index) => {
+                    if let Some(entry) = replacement {
+                        entries.insert(index, entry);
+                    } else {
+                        return Ok(Some(current_digest.to_owned()));
+                    }
+                }
+            }
+            if entries.is_empty() {
+                Ok(None)
+            } else {
+                install_manifest_node(
+                    lease,
+                    &leaf_node(depth, &node.prefix, path_digest, entries),
+                    bytes_installed,
+                )
+                .map(Some)
+            }
+        }
+        GraphManifestNodeKind::Branch { mut children } => {
+            if payload_depth >= GRAPH_RADIX_DEPTH {
+                return Err(validation("Patricia branch exceeds digest route"));
+            }
+            let edge =
+                path_digest[usize::from(payload_depth)..=usize::from(payload_depth)].to_owned();
+            let child = update_manifest_digest(
+                lease,
+                children.get(&edge).map(String::as_str),
+                payload_depth + 1,
+                path,
+                path_digest,
+                replacement,
+                bytes_installed,
+            )?;
+            match child {
+                Some(digest) => {
+                    children.insert(edge, digest);
+                }
+                None => {
+                    children.remove(&edge);
+                }
+            }
+            match children.len() {
+                0 => Ok(None),
+                1 => {
+                    let (edge, child_digest) = children.into_iter().next().expect("one child");
+                    let mut child = load_manifest_node(lease, &child_digest, payload_depth + 1)?;
+                    child.depth = depth;
+                    child.prefix = format!("{}{}{}", node.prefix, edge, child.prefix);
+                    install_manifest_node(lease, &child, bytes_installed).map(Some)
+                }
+                _ => install_manifest_node(
+                    lease,
+                    &branch_node(depth, &node.prefix, children),
+                    bytes_installed,
+                )
+                .map(Some),
+            }
+        }
+    }
+}
+
+fn branch_node(depth: u8, prefix: &str, children: BTreeMap<String, String>) -> GraphManifestNode {
+    GraphManifestNode {
+        format: GRAPH_MANIFEST_NODE_FORMAT.into(),
+        format_version: GRAPH_MANIFEST_NODE_VERSION,
+        depth,
+        prefix: prefix.to_owned(),
+        kind: GraphManifestNodeKind::Branch { children },
+    }
+}
+
+fn leaf_node(
+    depth: u8,
+    prefix: &str,
+    path_sha256: &str,
+    entries: Vec<crate::GraphFileEntry>,
+) -> GraphManifestNode {
+    GraphManifestNode {
+        format: GRAPH_MANIFEST_NODE_FORMAT.into(),
+        format_version: GRAPH_MANIFEST_NODE_VERSION,
+        depth,
+        prefix: prefix.to_owned(),
+        kind: GraphManifestNodeKind::Leaf {
+            path_sha256: path_sha256.to_owned(),
+            entries,
+        },
+    }
 }
 
 /// Resolve a digest to its admitted project-level object path.
@@ -1931,8 +2134,7 @@ mod tests {
         let container = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         let lease = begin_graph_object_publication(container.path()).unwrap();
-        let mut live = BTreeMap::new();
-        let mut previous = None;
+        let mut state = GraphManifestState::empty();
         for ordinal in 0_u8..8 {
             let relative = PathBuf::from(format!(
                 "topology/edges/knows/{ordinal:020}-{ordinal:020}.parquet"
@@ -1940,20 +2142,14 @@ mod tests {
             let path = workspace.path().join(&relative);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(&path, [ordinal]).unwrap();
-            let (root, evidence) = append_graph_files_v2(
-                &lease,
-                workspace.path(),
-                previous.as_ref(),
-                &mut live,
-                &[relative],
-                &[],
-            )
-            .unwrap();
+            let (root, evidence) =
+                append_graph_files_v2(&lease, workspace.path(), &mut state, &[relative], &[])
+                    .unwrap();
             assert_eq!(evidence.changed_entries_examined, 1);
             assert_eq!(evidence.prior_entries_examined, 0);
-            previous = Some(root);
+            assert_eq!(state.root(), Some(&root));
         }
-        let root = previous.unwrap();
+        let root = state.root().unwrap().clone();
         let (resolved, evidence) =
             crate::resolve_graph_manifest(&root, crate::GraphManifestLimits::default(), |digest| {
                 read_graph_object_by_digest(container.path(), digest, 1024 * 1024)
@@ -1963,15 +2159,9 @@ mod tests {
         assert!(evidence.segments_examined <= 1 + u64::from(GRAPH_RADIX_DEPTH) * 8);
 
         let deleted = "topology/edges/knows/00000000000000000003-00000000000000000003.parquet";
-        let (root, delete_evidence) = append_graph_files_v2(
-            &lease,
-            workspace.path(),
-            Some(&root),
-            &mut live,
-            &[],
-            &[deleted.into()],
-        )
-        .unwrap();
+        let (root, delete_evidence) =
+            append_graph_files_v2(&lease, workspace.path(), &mut state, &[], &[deleted.into()])
+                .unwrap();
         assert_eq!(delete_evidence.changed_entries_examined, 1);
         assert_eq!(delete_evidence.prior_entries_examined, 0);
         let (resolved, _) =
@@ -2001,12 +2191,11 @@ mod tests {
 
         let first = tempfile::tempdir().unwrap();
         let first_lease = begin_graph_object_publication(first.path()).unwrap();
-        let mut first_live = BTreeMap::new();
+        let mut first_state = GraphManifestState::empty();
         let (first_root, _) = append_graph_files_v2(
             &first_lease,
             workspace.path(),
-            None,
-            &mut first_live,
+            &mut first_state,
             &paths,
             &[],
         )
@@ -2016,17 +2205,171 @@ mod tests {
         let second_lease = begin_graph_object_publication(second.path()).unwrap();
         let mut reversed = paths.clone();
         reversed.reverse();
-        let mut second_live = BTreeMap::new();
+        let mut second_state = GraphManifestState::empty();
         let (second_root, _) = append_graph_files_v2(
             &second_lease,
             workspace.path(),
-            None,
-            &mut second_live,
+            &mut second_state,
             &reversed,
             &[],
         )
         .unwrap();
         assert_eq!(first_root, second_root);
+    }
+
+    #[test]
+    fn patricia_delete_collapse_and_readd_converge_to_fresh_roots() {
+        let workspace = tempfile::tempdir().unwrap();
+        let paths = [PathBuf::from("a.parquet"), PathBuf::from("b.parquet")];
+        for (ordinal, path) in paths.iter().enumerate() {
+            fs::write(
+                workspace.path().join(path),
+                [u8::try_from(ordinal).unwrap()],
+            )
+            .unwrap();
+        }
+        let container = tempfile::tempdir().unwrap();
+        let lease = begin_graph_object_publication(container.path()).unwrap();
+        let mut state = GraphManifestState::empty();
+        let (both, _) =
+            append_graph_files_v2(&lease, workspace.path(), &mut state, &paths, &[]).unwrap();
+        let (survivor, _) = append_graph_files_v2(
+            &lease,
+            workspace.path(),
+            &mut state,
+            &[],
+            &["b.parquet".into()],
+        )
+        .unwrap();
+
+        let fresh = tempfile::tempdir().unwrap();
+        let fresh_lease = begin_graph_object_publication(fresh.path()).unwrap();
+        let mut fresh_state = GraphManifestState::empty();
+        let (fresh_survivor, _) = append_graph_files_v2(
+            &fresh_lease,
+            workspace.path(),
+            &mut fresh_state,
+            &paths[..1],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(survivor, fresh_survivor);
+
+        let (readded, _) =
+            append_graph_files_v2(&lease, workspace.path(), &mut state, &paths[1..], &[]).unwrap();
+        assert_eq!(readded, both);
+    }
+
+    #[test]
+    fn root_bound_state_opens_once_and_failed_append_is_transactional() {
+        let container = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        fs::write(workspace.path().join("a.parquet"), b"a").unwrap();
+        fs::write(workspace.path().join("b.parquet"), b"b").unwrap();
+        let lease = begin_graph_object_publication(container.path()).unwrap();
+        let mut initial = GraphManifestState::empty();
+        let (root, _) = append_graph_files_v2(
+            &lease,
+            workspace.path(),
+            &mut initial,
+            &[PathBuf::from("a.parquet")],
+            &[],
+        )
+        .unwrap();
+        let (mut reopened, open_evidence) =
+            GraphManifestState::open(&lease, root.clone(), crate::GraphManifestLimits::default())
+                .unwrap();
+        assert_eq!(open_evidence.entries_examined, 1);
+        let (_, append_evidence) = append_graph_files_v2(
+            &lease,
+            workspace.path(),
+            &mut reopened,
+            &[PathBuf::from("b.parquet")],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(append_evidence.prior_entries_examined, 0);
+
+        let before_root = reopened.root().unwrap().clone();
+        let before_entries = reopened.entries().cloned().collect::<Vec<_>>();
+        fs::remove_file(
+            graph_object_path(container.path(), &before_root.root_node_sha256).unwrap(),
+        )
+        .unwrap();
+        fs::write(workspace.path().join("c.parquet"), b"c").unwrap();
+        assert!(
+            append_graph_files_v2(
+                &lease,
+                workspace.path(),
+                &mut reopened,
+                &[PathBuf::from("c.parquet")],
+                &[],
+            )
+            .is_err()
+        );
+        assert_eq!(reopened.root(), Some(&before_root));
+        assert_eq!(
+            reopened.entries().cloned().collect::<Vec<_>>(),
+            before_entries
+        );
+    }
+
+    #[test]
+    fn patricia_s20_inventory_has_linear_resolve_work() {
+        const FILES: usize = 277;
+        let container = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let paths = (0..FILES)
+            .map(|ordinal| PathBuf::from(format!("shards/{ordinal:06}.parquet")))
+            .collect::<Vec<_>>();
+        fs::create_dir_all(workspace.path().join("shards")).unwrap();
+        for (ordinal, path) in paths.iter().enumerate() {
+            fs::write(workspace.path().join(path), ordinal.to_le_bytes()).unwrap();
+        }
+        let lease = begin_graph_object_publication(container.path()).unwrap();
+        let mut state = GraphManifestState::empty();
+        let (root, _) =
+            append_graph_files_v2(&lease, workspace.path(), &mut state, &paths, &[]).unwrap();
+        let (resolved, evidence) =
+            crate::resolve_graph_manifest(&root, crate::GraphManifestLimits::default(), |digest| {
+                read_graph_object_by_digest(container.path(), digest, 1024 * 1024)
+            })
+            .unwrap();
+        assert_eq!(resolved.len(), FILES);
+        assert!(evidence.segments_examined <= (2 * FILES - 1) as u64);
+        assert!(evidence.work_units <= (4 * FILES - 2) as u64);
+    }
+
+    #[test]
+    fn duplicate_and_conflicting_delta_inputs_fail_before_publication() {
+        let container = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        fs::write(workspace.path().join("a.parquet"), b"a").unwrap();
+        let lease = begin_graph_object_publication(container.path()).unwrap();
+        let mut state = GraphManifestState::empty();
+        let path = PathBuf::from("a.parquet");
+        assert!(
+            append_graph_files_v2(
+                &lease,
+                workspace.path(),
+                &mut state,
+                &[path.clone(), path.clone()],
+                &[],
+            )
+            .is_err()
+        );
+        assert!(state.root().is_none());
+        assert!(
+            append_graph_files_v2(
+                &lease,
+                workspace.path(),
+                &mut state,
+                &[path],
+                &["a.parquet".into()],
+            )
+            .is_err()
+        );
+        assert!(state.root().is_none());
     }
 
     #[test]
@@ -2038,10 +2381,9 @@ mod tests {
         let source = workspace.path().join(&relative);
         fs::create_dir_all(source.parent().unwrap()).unwrap();
         fs::write(&source, b"node").unwrap();
-        let mut live = BTreeMap::new();
+        let mut state = GraphManifestState::empty();
         let (root, _) =
-            append_graph_files_v2(&lease, workspace.path(), None, &mut live, &[relative], &[])
-                .unwrap();
+            append_graph_files_v2(&lease, workspace.path(), &mut state, &[relative], &[]).unwrap();
         drop(lease);
         let (orphan, _) = install_graph_object_bytes(container.path(), b"orphan").unwrap();
         let evidence = gc_graph_objects(
@@ -2050,9 +2392,9 @@ mod tests {
             crate::GraphManifestLimits::default(),
         )
         .unwrap();
-        assert_eq!(evidence.objects_marked, u64::from(GRAPH_RADIX_DEPTH) + 2);
+        assert_eq!(evidence.objects_marked, 2);
         // The initial empty root and the explicit orphan are both unreachable.
-        assert_eq!(evidence.objects_removed, 2);
+        assert_eq!(evidence.objects_removed, 3);
         assert!(
             !graph_object_path(container.path(), &orphan)
                 .unwrap()

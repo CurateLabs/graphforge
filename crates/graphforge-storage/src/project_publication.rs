@@ -1036,7 +1036,8 @@ fn stage_optional_graph_tree(
     let inventory_path = generation_root
         .join(PARTICIPANTS_DIR)
         .join(&files_participant.relative_path);
-    let participant = crate::decode_graph_files_participant(
+    let participant = crate::decode_versioned_graph_files_participant(
+        files_participant.record_version,
         &std::fs::read(inventory_path).map_err(publication_io)?,
     )?;
     let inventory = match participant {
@@ -1087,7 +1088,7 @@ fn verify_optional_graph_tree(
         .join(PARTICIPANTS_DIR)
         .join(&files.relative_path);
     let bytes = std::fs::read(&path).map_err(publication_io)?;
-    match crate::decode_graph_files_participant(&bytes)? {
+    match crate::decode_versioned_graph_files_participant(files.record_version, &bytes)? {
         crate::GraphFilesParticipant::V1(inventory) => {
             crate::verify_graph_tree(&crate::graph_tree_root(generation_root), &inventory)
         }
@@ -1110,7 +1111,7 @@ fn verify_optional_graph_tree_with_lease(
         .join(PARTICIPANTS_DIR)
         .join(&files.relative_path);
     let bytes = std::fs::read(&path).map_err(publication_io)?;
-    match crate::decode_graph_files_participant(&bytes)? {
+    match crate::decode_versioned_graph_files_participant(files.record_version, &bytes)? {
         crate::GraphFilesParticipant::V1(inventory) => {
             crate::verify_graph_tree(&crate::graph_tree_root(generation_root), &inventory)
         }
@@ -1482,7 +1483,7 @@ fn has_compact_graph_participant(staged: &StagedProjectGeneration) -> Result<boo
         .join(&files.relative_path);
     let bytes = std::fs::read(&path).map_err(publication_io)?;
     if matches!(
-        crate::decode_graph_files_participant(&bytes)?,
+        crate::decode_versioned_graph_files_participant(files.record_version, &bytes)?,
         crate::GraphFilesParticipant::V2(_)
     ) {
         Ok(true)
@@ -2837,17 +2838,11 @@ mod tests {
             b"immutable topology payload",
         )
         .unwrap();
-        let mut live = std::collections::BTreeMap::new();
+        let mut state = crate::GraphManifestState::empty();
         let lease = crate::begin_graph_object_publication(root.path()).unwrap();
-        let (files_root, _) = crate::append_graph_files_v2(
-            &lease,
-            workspace.path(),
-            None,
-            &mut live,
-            &[relative],
-            &[],
-        )
-        .unwrap();
+        let (files_root, _) =
+            crate::append_graph_files_v2(&lease, workspace.path(), &mut state, &[relative], &[])
+                .unwrap();
         let request = request(vec![
             crate::graph_files_root_participant(&files_root).unwrap(),
         ]);
@@ -2865,7 +2860,10 @@ mod tests {
 
         let reopened = resolve_project_generation(root.path()).unwrap();
         let inventory = reopened.graph_files_inventory().unwrap().unwrap();
-        assert_eq!(inventory.files, live.into_values().collect::<Vec<_>>());
+        assert_eq!(
+            inventory.files,
+            state.entries().cloned().collect::<Vec<_>>()
+        );
         assert!(!reopened.graph_tree_root().exists());
     }
 

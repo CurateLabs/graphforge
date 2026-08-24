@@ -1,4 +1,4 @@
-//! Fixed-depth content-addressed radix manifest for graph files.
+//! Canonical content-addressed Patricia manifest for graph files.
 
 use crate::{GraphFileEntry, GraphFileRole};
 use graphforge_core::GfError;
@@ -13,8 +13,8 @@ pub const GRAPH_FILES_V2_VERSION: u32 = 2;
 /// Canonical radix-node format identifier.
 pub const GRAPH_MANIFEST_NODE_FORMAT: &str = "graphforge-graph-manifest-radix-node";
 /// Supported radix-node format version.
-pub const GRAPH_MANIFEST_NODE_VERSION: u32 = 1;
-/// Number of SHA-256 nibbles consumed by the fixed-depth trie.
+pub const GRAPH_MANIFEST_NODE_VERSION: u32 = 2;
+/// Number of SHA-256 nibbles consumed by the Patricia trie.
 pub const GRAPH_RADIX_DEPTH: u8 = 64;
 
 /// Generation participant root naming one immutable radix root and its totals.
@@ -41,6 +41,8 @@ pub struct GraphManifestNode {
     pub format_version: u32,
     /// SHA-256 nibble depth represented by this node.
     pub depth: u8,
+    /// Lowercase hex path compressed between `depth` and this node's payload.
+    pub prefix: String,
     #[serde(flatten)]
     /// Branch or collision-leaf payload.
     pub kind: GraphManifestNodeKind,
@@ -79,12 +81,12 @@ pub struct GraphManifestLimits {
 impl Default for GraphManifestLimits {
     fn default() -> Self {
         Self {
-            // A 100k-entry fixed-depth radix contains about 6.0m nodes once
-            // random SHA-256 prefixes share their compact upper levels.
-            max_segments: 6_100_000,
+            // A non-empty canonical Patricia tree has at most 2F-1 nodes for
+            // F distinct path digests. The empty inventory has one root node.
+            max_segments: 200_000,
             max_entries: 100_000,
-            max_decoded_bytes: 1_610_612_736,
-            max_work_units: 12_300_000,
+            max_decoded_bytes: 1024 * 1024 * 1024,
+            max_work_units: 500_000,
         }
     }
 }
@@ -153,6 +155,7 @@ pub fn verify_object_bytes(expected: &str, length: u64, bytes: &[u8]) -> Result<
 }
 
 /// Resolve a compact radix root into its authenticated logical inventory.
+#[allow(clippy::too_many_lines)]
 pub fn resolve_manifest<F>(
     root: &GraphFilesRootV2,
     limits: GraphManifestLimits,
@@ -172,17 +175,30 @@ where
     if root.logical_file_count > u64::try_from(limits.max_entries).unwrap_or(u64::MAX) {
         return Err(validation("graph manifest declared entry limit exceeded"));
     }
-    let mut stack = vec![(root.root_node_sha256.clone(), 0_u8)];
+    let structural_node_bound = if root.logical_file_count == 0 {
+        1
+    } else {
+        root.logical_file_count
+            .checked_mul(2)
+            .and_then(|value| value.checked_sub(1))
+            .ok_or_else(|| validation("graph manifest structural bound overflow"))?
+    };
+    let mut stack = vec![(root.root_node_sha256.clone(), 0_u8, String::new())];
     let mut visited = BTreeSet::new();
     let mut files = BTreeMap::new();
     let mut evidence = GraphManifestResolveEvidence::default();
-    while let Some((digest, expected_depth)) = stack.pop() {
+    while let Some((digest, expected_depth, route)) = stack.pop() {
         if visited.len() >= limits.max_segments {
             return Err(validation("graph manifest node limit exceeded"));
         }
         if !visited.insert(digest.clone()) {
             return Err(validation(
                 "graph manifest node cycle or duplicate reference detected",
+            ));
+        }
+        if u64::try_from(visited.len()).unwrap_or(u64::MAX) > structural_node_bound {
+            return Err(validation(
+                "graph manifest exceeds canonical Patricia node bound",
             ));
         }
         let bytes = load(&digest)?;
@@ -200,11 +216,19 @@ where
         if node.depth != expected_depth {
             return Err(validation("graph manifest radix depth mismatch"));
         }
+        let payload_depth = node
+            .depth
+            .checked_add(u8::try_from(node.prefix.len()).map_err(|_| {
+                validation("graph manifest compressed prefix length exceeds radix depth")
+            })?)
+            .ok_or_else(|| validation("graph manifest compressed depth overflow"))?;
+        let mut node_route = route;
+        node_route.push_str(&node.prefix);
         evidence.segments_examined = evidence.segments_examined.saturating_add(1);
         admit_work(&mut evidence, limits, 1)?;
         match node.kind {
             GraphManifestNodeKind::Branch { children } => {
-                if expected_depth >= GRAPH_RADIX_DEPTH {
+                if payload_depth >= GRAPH_RADIX_DEPTH {
                     return Err(validation("graph manifest branch exceeds radix depth"));
                 }
                 admit_work(
@@ -214,14 +238,16 @@ where
                 )?;
                 for (nibble, child) in children.into_iter().rev() {
                     validate_nibble(&nibble)?;
-                    stack.push((child, expected_depth + 1));
+                    let mut child_route = node_route.clone();
+                    child_route.push_str(&nibble);
+                    stack.push((child, payload_depth + 1, child_route));
                 }
             }
             GraphManifestNodeKind::Leaf {
                 path_sha256,
                 entries,
             } => {
-                if expected_depth != GRAPH_RADIX_DEPTH {
+                if payload_depth != GRAPH_RADIX_DEPTH || node_route != path_sha256 {
                     return Err(validation("graph manifest leaf is not terminal"));
                 }
                 admit_work(
@@ -286,27 +312,49 @@ fn validate_node(node: &GraphManifestNode) -> Result<(), GfError> {
     {
         return Err(validation("unsupported graph manifest radix node contract"));
     }
-    if node.depth > GRAPH_RADIX_DEPTH {
+    validate_prefix(&node.prefix)?;
+    let payload_depth = node
+        .depth
+        .checked_add(u8::try_from(node.prefix.len()).map_err(|_| {
+            validation("graph manifest compressed prefix length exceeds radix depth")
+        })?)
+        .ok_or_else(|| validation("graph manifest compressed depth overflow"))?;
+    if payload_depth > GRAPH_RADIX_DEPTH {
         return Err(validation("graph manifest radix depth exceeds limit"));
     }
     match &node.kind {
         GraphManifestNodeKind::Branch { children } => {
-            if node.depth >= GRAPH_RADIX_DEPTH {
+            if payload_depth >= GRAPH_RADIX_DEPTH {
                 return Err(validation("terminal graph manifest node must be a leaf"));
+            }
+            if children.len() == 1 {
+                return Err(validation("graph manifest unary branch is not canonical"));
+            }
+            let mut child_digests = BTreeSet::new();
+            if children.is_empty() && (node.depth != 0 || !node.prefix.is_empty()) {
+                return Err(validation("only the root may be an empty branch"));
             }
             for (nibble, digest) in children {
                 validate_nibble(nibble)?;
                 validate_digest(digest)?;
+                if !child_digests.insert(digest) {
+                    return Err(validation(
+                        "graph manifest branch contains duplicate child references",
+                    ));
+                }
             }
         }
         GraphManifestNodeKind::Leaf {
             path_sha256,
             entries,
         } => {
-            if node.depth != GRAPH_RADIX_DEPTH || entries.is_empty() {
+            if payload_depth != GRAPH_RADIX_DEPTH || entries.is_empty() {
                 return Err(validation("graph manifest leaf shape is invalid"));
             }
             validate_digest(path_sha256)?;
+            if node.prefix != path_sha256[usize::from(node.depth)..] {
+                return Err(validation("graph manifest leaf compressed route mismatch"));
+            }
             let mut previous: Option<&str> = None;
             for entry in entries {
                 validate_entry(entry)?;
@@ -378,6 +426,17 @@ fn validate_nibble(value: &str) -> Result<(), GfError> {
     }
     Ok(())
 }
+fn validate_prefix(value: &str) -> Result<(), GfError> {
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(validation(
+            "graph manifest compressed prefix is not canonical lowercase hex",
+        ));
+    }
+    Ok(())
+}
 fn canonical_line<T: Serialize>(value: &T, label: &str) -> Result<Vec<u8>, GfError> {
     let mut bytes = serde_json::to_vec(value)
         .map_err(|e| validation(format!("failed to encode {label}: {e}")))?;
@@ -422,6 +481,7 @@ mod tests {
             format: GRAPH_MANIFEST_NODE_FORMAT.into(),
             format_version: GRAPH_MANIFEST_NODE_VERSION,
             depth,
+            prefix: String::new(),
             kind: GraphManifestNodeKind::Branch { children },
         }
     }
@@ -441,6 +501,7 @@ mod tests {
                 format: GRAPH_MANIFEST_NODE_FORMAT.into(),
                 format_version: GRAPH_MANIFEST_NODE_VERSION,
                 depth: GRAPH_RADIX_DEPTH,
+                prefix: String::new(),
                 kind: GraphManifestNodeKind::Leaf {
                     path_sha256: digest.clone(),
                     entries: vec![GraphFileEntry {
@@ -457,11 +518,14 @@ mod tests {
 
     #[test]
     fn duplicate_references_depth_mismatch_and_corruption_fail_closed() {
-        let child_bytes = encode_node(&branch(1, BTreeMap::new())).unwrap();
-        let child_digest = object_digest(&child_bytes);
         let mut children = BTreeMap::new();
-        children.insert("0".into(), child_digest.clone());
-        children.insert("1".into(), child_digest.clone());
+        children.insert("0".into(), "1".repeat(64));
+        children.insert("1".into(), "1".repeat(64));
+        assert!(encode_node(&branch(0, children)).is_err());
+
+        let mut children = BTreeMap::new();
+        children.insert("0".into(), "1".repeat(64));
+        children.insert("1".into(), "2".repeat(64));
         let root_bytes = encode_node(&branch(0, children)).unwrap();
         let root_digest = object_digest(&root_bytes);
         let root = GraphFilesRootV2 {
@@ -474,15 +538,17 @@ mod tests {
         let load = |digest: &str| {
             if digest == root_digest {
                 Ok(root_bytes.clone())
-            } else if digest == child_digest {
-                Ok(child_bytes.clone())
             } else {
                 Err(validation("missing test object"))
             }
         };
         assert!(resolve_manifest(&root, GraphManifestLimits::default(), load).is_err());
 
-        let wrong_depth = encode_node(&branch(1, BTreeMap::new())).unwrap();
+        let wrong_depth = encode_node(&branch(
+            1,
+            BTreeMap::from([("0".into(), "1".repeat(64)), ("1".into(), "2".repeat(64))]),
+        ))
+        .unwrap();
         let wrong_digest = object_digest(&wrong_depth);
         let wrong_root = GraphFilesRootV2 {
             root_node_sha256: wrong_digest,
@@ -521,7 +587,7 @@ mod tests {
         assert!(resolve_manifest(&empty_root, byte_limits, |_| Ok(empty_bytes.clone())).is_err());
 
         let children = (0_u8..16)
-            .map(|nibble| (format!("{nibble:x}"), "0".repeat(64)))
+            .map(|nibble| (format!("{nibble:x}"), format!("{nibble:064x}")))
             .collect();
         let wide_bytes = encode_node(&branch(0, children)).unwrap();
         let wide_digest = object_digest(&wide_bytes);
@@ -551,5 +617,53 @@ mod tests {
             resolve_manifest(&root, GraphManifestLimits::default(), |_| Ok(bytes.clone())).unwrap();
         assert_eq!(evidence.decoded_bytes, bytes.len() as u64);
         assert_eq!(evidence.work_units, 1);
+    }
+
+    #[test]
+    fn node_v1_unary_and_wrong_compressed_routes_fail_closed() {
+        let old = b"{\"format\":\"graphforge-graph-manifest-radix-node\",\"format_version\":1,\"depth\":0,\"kind\":\"branch\",\"children\":{}}\n";
+        assert!(decode_node(old).is_err());
+
+        let unary = branch(0, BTreeMap::from([("0".into(), "1".repeat(64))]));
+        assert!(encode_node(&unary).is_err());
+
+        let path = "topology/nodes/a.parquet";
+        let path_sha256 = hex_digest(logical_path_digest(path));
+        let entry = GraphFileEntry {
+            relative_path: path.into(),
+            byte_length: 1,
+            content_sha256: "a".repeat(64),
+            role: GraphFileRole::Topology,
+        };
+        let node = GraphManifestNode {
+            format: GRAPH_MANIFEST_NODE_FORMAT.into(),
+            format_version: GRAPH_MANIFEST_NODE_VERSION,
+            depth: 0,
+            prefix: path_sha256.clone(),
+            kind: GraphManifestNodeKind::Leaf {
+                path_sha256,
+                entries: vec![entry],
+            },
+        };
+        let bytes = encode_node(&node).unwrap();
+        let digest = object_digest(&bytes);
+        let root = GraphFilesRootV2 {
+            format: GRAPH_FILES_V2_FORMAT.into(),
+            format_version: GRAPH_FILES_V2_VERSION,
+            root_node_sha256: digest,
+            logical_file_count: 1,
+            logical_byte_length: 1,
+        };
+        let mut wrong = node;
+        wrong
+            .prefix
+            .replace_range(..1, if &wrong.prefix[..1] == "0" { "1" } else { "0" });
+        let wrong_bytes = encode_node(&wrong).unwrap_err();
+        assert!(matches!(wrong_bytes, GfError::Validation(_)));
+        // Correctly routed leaf resolves; changing its authenticated bytes or
+        // route changes the address and cannot satisfy this root.
+        let (entries, _) =
+            resolve_manifest(&root, GraphManifestLimits::default(), |_| Ok(bytes.clone())).unwrap();
+        assert_eq!(entries.len(), 1);
     }
 }

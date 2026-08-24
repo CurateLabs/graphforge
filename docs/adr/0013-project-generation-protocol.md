@@ -368,7 +368,7 @@ does not rewrite participant or manifest bytes.
 ### Retention and garbage collection
 
 Graph inventory participants may use the compact version-2 authenticated root.
-Its immutable payloads and fixed-depth manifest nodes live in the project
+Its immutable payloads and canonical Patricia/radix manifest nodes live in the project
 content-addressed object store, while the generation stores only the root
 digest and logical totals. Publication resolves the entire bounded manifest
 and verifies all payload digests before the atomic `CURRENT` transition.
@@ -381,6 +381,21 @@ live-lease-retained generations, and defers while a publication attempt or
 object-installation lease is active. Marking and validation finish before any
 object deletion. Malformed, cyclic, oversized, duplicate-reference, traversal,
 and wrong-digest manifests fail closed and do not grant deletion authority.
+
+Manifest node version 2 compresses every maximal shared lowercase-hex SHA-256
+path prefix. A branch consumes its compressed prefix and one child nibble and
+has at least two children; unary branches are noncanonical. A leaf consumes the
+complete remaining digest and retains the canonically path-ordered collision
+bucket. The empty inventory alone uses one empty root branch. Consequently a
+nonempty inventory with `F` distinct path digests has at most `2F - 1` manifest
+nodes (the empty inventory has one), and resolution work is linear in the live
+inventory. Old node-v1, mixed-version, malformed-prefix, wrong-route, cyclic,
+duplicate-reference, and noncanonical trees fail closed. Migration from an
+expanded graph-files-v1 inventory writes node-v2 objects only.
+The participant descriptor is paired exactly with its payload: record version
+1 admits only an expanded v1 inventory and record version 2 admits only this
+Patricia root. Checkpoint revert retains the same representation, uses the CAS
+publication lease for v2, and never synthesizes a generation graph tree.
 
 CAS publication, reads, materialization, and collection retain directory and
 file capabilities and address children relative to those capabilities. The

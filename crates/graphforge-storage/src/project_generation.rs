@@ -227,7 +227,8 @@ impl ResolvedProjectGeneration {
                 "unsupported graph files participant contract".into(),
             ));
         }
-        crate::decode_graph_files_participant(&snapshot.bytes).map(Some)
+        crate::decode_versioned_graph_files_participant(snapshot.record_version, &snapshot.bytes)
+            .map(Some)
     }
 
     /// SHA-256 over the exact selected `manifest.json` bytes.

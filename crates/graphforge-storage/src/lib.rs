@@ -33,9 +33,10 @@ pub use graph_files::{
     GRAPH_CAPABILITY_ID, GRAPH_CAPABILITY_VERSION, GRAPH_FILES_FAMILY, GRAPH_FILES_RECORD_VERSION,
     GRAPH_FILES_V2_RECORD_VERSION, GRAPH_TREE_DIR, GraphFileEntry, GraphFileRole,
     GraphFilesInventory, GraphFilesOpenEvidence, GraphFilesOpenStrategy, GraphFilesParticipant,
-    capture_graph_files, decode_graph_files_participant, decode_inventory, encode_inventory,
-    graph_files_root_participant, graph_tree_root, inventory_participant, materialize_graph_tree,
-    pinned_open_evidence, stage_graph_tree, verify_graph_tree,
+    capture_graph_files, decode_graph_files_participant, decode_inventory,
+    decode_versioned_graph_files_participant, encode_inventory, graph_files_root_participant,
+    graph_tree_root, inventory_participant, materialize_graph_tree, pinned_open_evidence,
+    stage_graph_tree, verify_graph_tree,
 };
 
 pub mod graph_manifest;
@@ -51,7 +52,7 @@ pub use graph_manifest::{
 
 pub mod graph_object_store;
 pub use graph_object_store::{
-    GRAPH_OBJECTS_DIR, GraphFilesAppendEvidence, GraphFilesMigrationEvidence,
+    GRAPH_OBJECTS_DIR, GraphFilesAppendEvidence, GraphFilesMigrationEvidence, GraphManifestState,
     GraphObjectGcEvidence, GraphObjectInstallEvidence, GraphObjectPublicationLease,
     append_graph_files_v2, begin_graph_object_publication, gc_graph_objects, graph_object_path,
     graph_object_publication_is_live, install_graph_object_bytes, install_graph_object_file,

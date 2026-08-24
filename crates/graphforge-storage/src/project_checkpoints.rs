@@ -751,14 +751,19 @@ where
     // the parent's tree (CURRENT) would verify the restored inventory against
     // post-checkpoint mutations and fail closed with length/digest mismatch.
     let source_graph_tree = source.graph_tree_root();
-    let graph_tree = publication
-        .participants
-        .iter()
-        .any(|participant| {
-            participant.capability_id == crate::GRAPH_CAPABILITY_ID
-                && participant.record_family_id == crate::GRAPH_FILES_FAMILY
-        })
-        .then_some(source_graph_tree.as_path());
+    let source_graph_files = source.declared_graph_files_participant()?;
+    let compact_graph_objects = matches!(
+        source_graph_files,
+        Some(crate::GraphFilesParticipant::V2(_))
+    );
+    let graph_tree = matches!(
+        source_graph_files,
+        Some(crate::GraphFilesParticipant::V1(_))
+    )
+    .then_some(source_graph_tree.as_path());
+    let graph_object_lease = compact_graph_objects
+        .then(|| crate::begin_graph_object_publication(&root))
+        .transpose()?;
     let receipt = match stage_project_generation_with_lock(
         identity,
         root.clone(),
@@ -770,7 +775,7 @@ where
     )? {
         ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
         ProjectStageOutcome::Staged(staged) => {
-            staged
+            let validated = staged
                 .validate(
                     |rows| {
                         let actual = rows
@@ -809,8 +814,11 @@ where
                         }
                         Ok(())
                     },
-                )?
-                .publish()?
+                )?;
+            match graph_object_lease.as_ref() {
+                Some(lease) => validated.publish_with_graph_objects(lease)?,
+                None => validated.publish()?,
+            }
         }
     };
     let resolved = resolve_verified_generation(
@@ -2459,6 +2467,97 @@ mod tests {
             "action=revert published-replay conflict return",
             false,
         );
+    }
+
+    #[test]
+    fn compact_graph_checkpoint_revert_reopens_without_a_graph_tree() {
+        let directory = tempdir().unwrap();
+        crate::open_or_initialize_project(directory.path()).unwrap();
+
+        let publish_compact = |payload: &[u8]| {
+            let selected = crate::resolve_project_generation(directory.path()).unwrap();
+            let workspace = tempdir().unwrap();
+            let relative = PathBuf::from("topology/nodes/000001.parquet");
+            fs::create_dir_all(workspace.path().join(relative.parent().unwrap())).unwrap();
+            fs::write(workspace.path().join(&relative), payload).unwrap();
+            let lease = crate::begin_graph_object_publication(directory.path()).unwrap();
+            let mut state = crate::GraphManifestState::empty();
+            let (graph_root, _) = crate::append_graph_files_v2(
+                &lease,
+                workspace.path(),
+                &mut state,
+                &[relative],
+                &[],
+            )
+            .unwrap();
+            let mut participants = selected
+                .participant_snapshots()
+                .unwrap()
+                .into_iter()
+                .filter(|entry| {
+                    !(entry.capability_id == crate::GRAPH_CAPABILITY_ID
+                        && entry.record_family_id == crate::GRAPH_FILES_FAMILY)
+                })
+                .map(snapshot_to_participant)
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            participants.push(crate::graph_files_root_participant(&graph_root).unwrap());
+            let request = crate::ProjectGenerationRequest {
+                transaction_uuid: Uuid::now_v7(),
+                generation_uuid: Uuid::now_v7(),
+                capabilities: selected
+                    .capabilities()
+                    .into_iter()
+                    .map(|entry| crate::ProjectCapability {
+                        capability_id: entry.capability_id,
+                        capability_version: entry.capability_version,
+                    })
+                    .collect(),
+                participants,
+            };
+            let crate::ProjectStageOutcome::Staged(staged) =
+                crate::stage_project_generation(directory.path(), &request).unwrap()
+            else {
+                panic!("fresh compact publication replayed")
+            };
+            staged
+                .validate(|_| Ok(()), |_, _| Ok(()))
+                .unwrap()
+                .publish_with_graph_objects(&lease)
+                .unwrap();
+            request.generation_uuid
+        };
+
+        let checkpoint_generation = publish_compact(b"checkpoint");
+        create_checkpoint(
+            directory.path(),
+            &create_request(Uuid::from_u128(140), "Compact"),
+        )
+        .unwrap();
+        let newer_generation = publish_compact(b"newer");
+        assert_ne!(checkpoint_generation, newer_generation);
+        let (_, restored) = revert_checkpoint(
+            directory.path(),
+            &CheckpointRevertRequest {
+                operation_uuid: Uuid::from_u128(141),
+                name: "Compact".into(),
+                reason: "restore compact root".into(),
+                actor_uuid: None,
+            },
+            || Ok(1_720_000_000_123_456),
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert!(!restored.graph_tree_root().exists());
+        let inventory = restored.graph_files_inventory().unwrap().unwrap();
+        assert_eq!(inventory.files.len(), 1);
+        let bytes = crate::read_graph_object(
+            directory.path(),
+            &inventory.files[0].content_sha256,
+            inventory.files[0].byte_length,
+        )
+        .unwrap();
+        assert_eq!(bytes, b"checkpoint");
     }
 
     #[test]

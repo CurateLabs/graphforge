@@ -242,6 +242,24 @@ pub fn decode_graph_files_participant(bytes: &[u8]) -> Result<GraphFilesParticip
     }
 }
 
+/// Decode a participant and enforce the descriptor/payload version pairing.
+pub fn decode_versioned_graph_files_participant(
+    record_version: u32,
+    bytes: &[u8],
+) -> Result<GraphFilesParticipant, GfError> {
+    let participant = decode_graph_files_participant(bytes)?;
+    if !matches!(
+        (record_version, &participant),
+        (GRAPH_FILES_RECORD_VERSION, GraphFilesParticipant::V1(_))
+            | (GRAPH_FILES_V2_RECORD_VERSION, GraphFilesParticipant::V2(_))
+    ) {
+        return Err(validation(
+            "graph files descriptor version does not match its encoded payload",
+        ));
+    }
+    Ok(participant)
+}
+
 /// Encode inventory as one canonical JSON line ending in LF.
 pub fn encode_inventory(inventory: &GraphFilesInventory) -> Result<Vec<u8>, GfError> {
     validate_inventory_contract(inventory)?;
@@ -1143,5 +1161,27 @@ mod tests {
             row_count: wire.row_count,
             bytes: wire.bytes,
         }
+    }
+
+    #[test]
+    fn descriptor_record_version_must_match_graph_files_payload_version() {
+        let inventory = inventory_from_entries(Vec::new()).unwrap();
+        let v1 = encode_inventory(&inventory).unwrap();
+        let v2 = crate::encode_graph_files_root_v2(&crate::GraphFilesRootV2 {
+            format: crate::GRAPH_FILES_V2_FORMAT.into(),
+            format_version: crate::GRAPH_FILES_V2_VERSION,
+            root_node_sha256: "0".repeat(64),
+            logical_file_count: 0,
+            logical_byte_length: 0,
+        })
+        .unwrap();
+        assert!(decode_versioned_graph_files_participant(GRAPH_FILES_RECORD_VERSION, &v1).is_ok());
+        assert!(
+            decode_versioned_graph_files_participant(GRAPH_FILES_V2_RECORD_VERSION, &v2).is_ok()
+        );
+        assert!(decode_versioned_graph_files_participant(GRAPH_FILES_RECORD_VERSION, &v2).is_err());
+        assert!(
+            decode_versioned_graph_files_participant(GRAPH_FILES_V2_RECORD_VERSION, &v1).is_err()
+        );
     }
 }
