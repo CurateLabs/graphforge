@@ -50,6 +50,8 @@ _MULTI_ONTOLOGY_FIXTURE = [
     "//tests/fixtures/multi-ontology-v1:certification_files",
 ]
 
+_HUB_FIXTURE = ["//tests/fixtures/hub:artifacts"]
+
 # Skill bundle stays at the workspace root (`//:project_skills_bundle`) so
 # `project-skills/` remains a pure distribution tree (#7 packaging contract).
 gf_cargo_build_script(
@@ -79,7 +81,11 @@ gf_rust_library(
 gf_rust_test(
     name = "graphforge_cli_test",
     crate = ":graphforge_cli",
-    compile_data = _CONTRACT_FIXTURES + _GEOARROW_FIXTURE,
+    compile_data = _CONTRACT_FIXTURES + _GEOARROW_FIXTURE + _HUB_FIXTURE,
+    data = _HUB_FIXTURE,
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "crates/graphforge-cli",
+    },
     size = "medium",
     deps = _CLI_DEPS,
 )
@@ -108,6 +114,17 @@ gf_rust_binary(
         "CARGO_MANIFEST_DIR": "crates/graphforge-cli",
     },
     deps = _CLI_DEPS + ["@crates//:parquet"],
+)
+
+gf_rust_binary(
+    name = "generate_hub_fixture",
+    srcs = ["examples/generate_hub_fixture.rs"],
+    compile_data = _HUB_FIXTURE,
+    data = _HUB_FIXTURE,
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "crates/graphforge-cli",
+    },
+    deps = _CLI_DEPS + [":graphforge_cli"],
 )
 
 _CLI_TEST_DATA = [":gf"] + _CONTRACT_FIXTURES

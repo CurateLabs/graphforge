@@ -1,0 +1,2 @@
+Bag-Software-Agent: GraphForge portable-v2
+Bagging-Date: 1970-01-01

@@ -1,0 +1,1 @@
+{"default_ref":"main","format":"graphforge-discovery/1","refs":[{"name":"main","target":"sha256:fbbf2d07c8b10790b2023cbfba6c6ca70ca58b8df68eceb9bdf3fafd8637e57e","validator":"sha256:e236ba6ce256089c2c13ba65c709580143514ab9559e03cdb225c5190d4e39cd"}],"repository":{"owner":"openalex","repository":"openalex"},"version":{"major":1,"minor":0}}

@@ -169,7 +169,10 @@ test_suite(
 # CLI binary build surface (#8).
 build_test(
     name = "cli_bins",
-    targets = ["//crates/graphforge-cli:gf"],
+    targets = [
+        "//crates/graphforge-cli:generate_hub_fixture",
+        "//crates/graphforge-cli:gf",
+    ],
 )
 
 # Deterministic CI target groups (#8 / #1 step 5).
