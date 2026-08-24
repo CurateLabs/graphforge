@@ -353,12 +353,9 @@ fn validate_expected_tree(root: &Path) -> Result<(), String> {
         for entry in fs::read_dir(&directory).map_err(|error| error.to_string())? {
             let entry = entry.map_err(|error| error.to_string())?;
             let path = entry.path();
-            let relative = path
-                .strip_prefix(root)
-                .map_err(|error| error.to_string())?
-                .to_str()
-                .ok_or("fixture artifact path is not UTF-8")?
-                .to_owned();
+            let relative = canonical_relative_path(
+                path.strip_prefix(root).map_err(|error| error.to_string())?,
+            )?;
             let metadata = fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
             if metadata.file_type().is_symlink() {
                 return Err(format!(
@@ -417,6 +414,19 @@ fn hex(bytes: &[u8]) -> String {
     )
 }
 
+fn canonical_relative_path(path: &Path) -> Result<String, String> {
+    path.components()
+        .map(|component| match component {
+            std::path::Component::Normal(value) => value
+                .to_str()
+                .map(str::to_owned)
+                .ok_or_else(|| "fixture path component is not UTF-8".to_owned()),
+            _ => Err("fixture path is not a normalized relative path".to_owned()),
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(|components| components.join("/"))
+}
+
 fn tree_digest(root: &Path) -> Result<String, String> {
     fn walk(root: &Path, current: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
         for entry in fs::read_dir(current).map_err(|error| error.to_string())? {
@@ -445,10 +455,8 @@ fn tree_digest(root: &Path) -> Result<String, String> {
     let mut hasher = Sha256::new();
     hasher.update(b"graphforge-hub-fixture-source/1\0");
     for relative in files {
-        let name = relative
-            .to_str()
-            .ok_or("fixture source path is not UTF-8")?
-            .as_bytes();
+        let canonical = canonical_relative_path(&relative)?;
+        let name = canonical.as_bytes();
         let bytes = fs::read(root.join(&relative)).map_err(|error| error.to_string())?;
         hasher.update((name.len() as u64).to_be_bytes());
         hasher.update(name);
@@ -485,6 +493,16 @@ mod tests {
             private.path(),
         );
         private
+    }
+
+    #[test]
+    fn relative_paths_use_platform_independent_slash_encoding() {
+        let nested = PathBuf::from("objects").join("sha256").join("fixture.gfpb");
+        assert_eq!(
+            canonical_relative_path(&nested).unwrap(),
+            "objects/sha256/fixture.gfpb"
+        );
+        assert!(canonical_relative_path(Path::new("../outside")).is_err());
     }
 
     fn copy_artifacts(source: &Path) -> tempfile::TempDir {
