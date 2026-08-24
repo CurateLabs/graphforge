@@ -18,7 +18,7 @@
     "timeout_s": 14400,
     "dispatch_timeout_s": 14400,
     "provisioning_ttl_s": 18000,
-    "timeout_headroom_note": "The four-hour product envelope includes both certification test commands. Provisioning and runner registration happen before dispatch and are bounded separately by the five-hour infrastructure TTL; they are never excluded from billed-cost approval."
+    "timeout_headroom_note": "The 128 GiB, 1 TiB, and four-hour values are M5 failure ceilings, not minimum host requirements. Select the smallest host with measured RSS and storage headroom. The product time ceiling includes both certification test commands; provisioning and runner registration are bounded separately by the five-hour infrastructure TTL and remain inside billed-cost approval."
   },
   "preflight_scale": 10,
   "provider_decision": "required-at-dispatch",

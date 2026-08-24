@@ -38,6 +38,13 @@ count**. Live edges stream as bounded Arrow chunks into one durable construction
 session during the merge. Stable chunk operation IDs make retry exact, and the
 session validates all chunks before publishing exactly one generation.
 
+Paid certification rungs use a fixed 16,777,216-edge binary sort window
+(128 MiB for `(u32, u32)` pairs). S20 therefore creates one ordinary spill run
+instead of roughly 32,000 tiny files; larger scales add runs without raising the
+generator memory ceiling. The construction session consumes 65,536-row Arrow
+batches. Neither phase serializes a text line per edge or publishes a generation
+per batch.
+
 ## Counts always reconcile
 
 Every attempted rung proves:
@@ -64,8 +71,8 @@ hard-code rungs elsewhere.
 | Rungs | S10 (CI), S20, S22, S24, S25, S26 (provisioned) |
 | Seed / initiator | `1` / `A,B,C,D = 0.57, 0.19, 0.19, 0.05` |
 | Policy | undirected, drop self-loops, drop duplicates, canonical `(lo,hi)` |
-| Host capacity | **128 GiB** peak RSS, **1 TiB** local NVMe (declared **Linux cloud** SKU) |
-| Wall-clock fail-safe | **4 h** (`timeout_s: 14400`) end-to-end on that SKU — provisional #745 budget, not a laptop or “overnight is fine” product claim |
+| M5 failure ceilings | **128 GiB** peak RSS, **1 TiB** allocated disk; these are maxima, not minimum host requirements |
+| Wall-clock fail-safe | **4 h** (`timeout_s: 14400`) end-to-end — provisional #745 ceiling, not a laptop or “overnight is fine” product claim |
 
 Before any provisioned rung, complete the read-only/no-spend checks from the
 [certification runbook](g500-certification.md): subscription and role, provider
@@ -74,12 +81,13 @@ price, protected environment, and unique runner-label availability. Provider
 registration, quota requests, runner-token generation, provisioning, and
 dispatch require recorded resource and spend authorization.
 
-The declared certification filesystem is the filesystem the Rust process
-actually uses. Configure process `TMPDIR` and GitHub `RUNNER_TEMP` on the same
-local-NVMe XFS mount and verify their resolved filesystem/device identity before
-dispatch. Merely attaching NVMe or checking a different runner directory is not
-capacity evidence. Absolute paths stay in the private provisioning log and are
-excluded from sanitized evidence.
+The measured evidence filesystem is the filesystem the Rust process actually
+uses. Bind its work and temporary roots to the same admitted durable volume and
+record that volume's observed capacity before dispatch. A particular cloud SKU,
+1 TiB allocation, XFS, and 128 GiB RAM are not prerequisites. Choose the
+smallest machine with measured headroom; materially increasing phase RSS as
+scale rises is an architectural failure. Absolute paths stay in the private
+provisioning log and are excluded from sanitized evidence.
 
 The **S10** rung runs in normal CI and deliberately sets `buffer_edges` below
 its own edge count, so the spill/merge path is exercised on every run. S20–S26
@@ -161,7 +169,8 @@ One object per attempted rung (schema
 - `first_failing_phase`, `error_class`, `pass`, `reconciles`.
 - `input_fingerprint` (deterministic SHA-256 of the sorted live edge set),
   `rss_peak_bytes`, `disk_used_bytes`, `wall_time_s`, per-phase `steps`.
-- `machine_envelope` (128 GiB / 1 TiB / 4 h fail-safe), `sut`, `generator`.
+- `machine_envelope` (observed host limits plus the 128 GiB / 1 TiB / 4 h M5
+  ceilings), `sut`, `generator`.
 - `track` and `teps` are always `null`.
 
 Wall-clock and RSS numbers are hardware-specific observations, never CI

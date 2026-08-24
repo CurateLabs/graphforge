@@ -17,7 +17,7 @@
     "rss_bytes": 137438953472,
     "disk_bytes": 1099511627776,
     "timeout_s": 14400,
-    "note": "Declared Linux cloud SKU capacity: 128 GiB peak RSS, 1 TiB local NVMe. Wall-clock 4 h is a provisional certification fail-safe for provisioned evidence hosts (#745) — not a laptop SLA and not a 24 h overnight story. Developer laptops are not a valid #745 SUT."
+    "note": "M5 ceilings: at most 128 GiB peak RSS, at most 1 TiB allocated disk, and at most 4 h. These are failure ceilings, not minimum machine requirements. Select the smallest Linux evidence host with measured headroom; materially rising RSS across rungs is an architectural failure."
   },
   "metrics": [
     "raw_attempts",

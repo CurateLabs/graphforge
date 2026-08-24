@@ -30,11 +30,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use arrow::array::{Array, FixedSizeBinaryArray, Int64Array, StringArray, UInt64Array};
 use arrow::record_batch::RecordBatch;
 use graphforge_api::{
-    BulkInputKind, CancellationToken, GraphForge, GraphImportSession, ImportProgress,
-    ImportSessionLimits, OperationId, PortableSelection, PortableV2ExportRequest,
-    PortableV2ImportRequest, PortableV2Limits, PortableV2Mode, PortableV2Output,
-    PortableV2SelectionProfile, PortableVerifyRequest, bulk_edge_input_schema,
-    bulk_node_input_schema, verify_portable_v2,
+    BulkInputKind, CancellationToken, GraphForge, GraphImportSession, ImportSessionLimits,
+    OperationId, PortableSelection, PortableV2ExportRequest, PortableV2ImportRequest,
+    PortableV2Limits, PortableV2Mode, PortableV2Output, PortableV2SelectionProfile,
+    PortableVerifyRequest, bulk_edge_input_schema, bulk_node_input_schema, verify_portable_v2,
 };
 use graphforge_core::uuid::Uuid;
 use serde::Deserialize;
@@ -50,8 +49,12 @@ const GENERATOR_SOURCE: &str = "crates/graphforge-api/tests/scale_g500_ladder.rs
 
 const NODE_LABEL: &str = "Node";
 const REL_TYPE: &str = "LINK";
-const BATCH_ROWS: usize = 8_192;
-const EDGE_PUBLISH_ROWS: usize = 1_048_576;
+/// Arrow-sized construction windows avoid thousands of tiny durable chunks
+/// without coupling resident memory to total graph size.
+const BATCH_ROWS: usize = 65_536;
+/// Fixed 128 MiB external-sort window for `(u32, u32)` edge pairs.
+const CERTIFICATION_SPILL_BUFFER_EDGES: usize = 16_777_216;
+const EDGE_PUBLISH_ROWS: usize = BATCH_ROWS;
 
 const ONE_HOP: &str = "MATCH (a)-[r]->(b) RETURN b.node_uuid AS id ORDER BY id LIMIT 1000";
 const TWO_HOP: &str =
@@ -1458,14 +1461,14 @@ fn reference_generation(
 // Tests
 // ---------------------------------------------------------------------------
 
-/// The versioned profile is well-formed and carries the M5 host envelope.
+/// The versioned profile is well-formed and carries the M5 ceilings.
 #[test]
 fn ladder_profile_is_versioned_and_pinned() {
     let profile = load_profile();
     assert_eq!(profile.schema, PROFILE_SCHEMA);
     assert_eq!(profile.schema_version, SCHEMA_VERSION);
     assert_eq!(profile.edgefactor, 16, "Official parameter ef must be 16");
-    // Declared Linux cloud SKU (#745): 128 GiB RSS, 1 TiB disk, 4 h fail-safe.
+    // M5 certification ceilings, not minimum host provisioning requirements.
     assert_eq!(profile.envelope.rss_bytes, 137_438_953_472);
     assert_eq!(profile.envelope.disk_bytes, 1_099_511_627_776);
     assert_eq!(profile.envelope.timeout_s, 14_400);
@@ -2202,7 +2205,8 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
         "required-at-dispatch"
     );
     assert_eq!(certification_profile.runner_label, "required-at-dispatch");
-    let certification_envelope = certification_profile.envelope;
+    let certification_ceiling = certification_profile.envelope;
+    let certification_envelope = effective_runtime_envelope(root, certification_ceiling);
     let mut journal = PhaseJournal::new(journal_path, root, certification_envelope);
     let limits = PortableV2Limits::default();
     let phase = Instant::now();
@@ -2238,7 +2242,7 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
                 edge_factor,
                 initiator,
                 seed,
-                buffer_edges: if scale == 26 { 16_777_216 } else { 512 },
+                buffer_edges: CERTIFICATION_SPILL_BUFFER_EDGES,
                 target_live_edges: target,
             },
             &spill_root,
@@ -2522,6 +2526,13 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
         "compatibility": serde_json::to_value(verified.compatibility).expect("compatibility JSON"),
         "source_authority_fingerprint": source_authority_fingerprint,
         "imported_authority_fingerprint": imported_authority_fingerprint,
+        "resource_envelope": {
+            "rss_bytes": certification_envelope.rss_bytes,
+            "disk_bytes": certification_envelope.disk_bytes,
+            "timeout_s": certification_envelope.timeout_s,
+            "ceiling_rss_bytes": certification_ceiling.rss_bytes,
+            "ceiling_disk_bytes": certification_ceiling.disk_bytes,
+        },
         "phases": journal.phases,
     })
 }
@@ -2605,6 +2616,49 @@ fn target_live_windows_are_deterministic_bounded_and_reconciled() {
 }
 
 #[test]
+fn certification_windows_are_realistic_and_scale_independent() {
+    let s20_attempts = (1_u64 << 20) * 16;
+    let s20_runs = s20_attempts.div_ceil(CERTIFICATION_SPILL_BUFFER_EDGES as u64);
+    assert_eq!(s20_runs, 1, "S20 must not fan out into tiny spill files");
+    assert_eq!(
+        CERTIFICATION_SPILL_BUFFER_EDGES * std::mem::size_of::<(u32, u32)>(),
+        128 * 1024 * 1024,
+        "the generator working set is an explicit fixed 128 MiB"
+    );
+    assert_eq!(
+        EDGE_PUBLISH_ROWS, BATCH_ROWS,
+        "each staged window must be one normal Arrow batch"
+    );
+}
+
+#[test]
+fn runtime_envelope_uses_observed_capacity_below_m5_ceilings() {
+    let ceiling = Envelope {
+        rss_bytes: 128 * 1024 * 1024 * 1024,
+        disk_bytes: 1024 * 1024 * 1024 * 1024,
+        timeout_s: 14_400,
+    };
+    let effective = envelope_for_capacities(
+        ceiling,
+        Some(4 * 1024 * 1024 * 1024),
+        Some(50 * 1024 * 1024 * 1024),
+    );
+    assert_eq!(effective.rss_bytes, 3_865_470_567);
+    assert_eq!(effective.disk_bytes, 48_318_382_080);
+    assert_eq!(effective.timeout_s, ceiling.timeout_s);
+    let (total, available) = filesystem_space_bytes(Path::new(".")).expect("filesystem space");
+    assert!(total > 0 && available <= total);
+    assert_eq!(
+        memory_limit_candidates("0::/machine.slice/fly.scope")[0],
+        PathBuf::from("/sys/fs/cgroup/machine.slice/fly.scope/memory.max")
+    );
+    assert_eq!(
+        memory_limit_candidates("5:cpu,memory:/docker/abc")[0],
+        PathBuf::from("/sys/fs/cgroup/memory/docker/abc/memory.limit_in_bytes")
+    );
+}
+
+#[test]
 fn cancellation_stops_merge_and_publication_before_more_work_is_committed() {
     let profile = load_profile();
     let spill_root = TempDir::new().expect("cancellation spill root");
@@ -2648,7 +2702,7 @@ fn cancellation_stops_merge_and_publication_before_more_work_is_committed() {
 }
 
 #[test]
-#[ignore = "requires approved 128 GiB / 1 TiB Linux certification host"]
+#[ignore = "requires an explicitly approved provisioned Linux evidence host"]
 fn certification_target_live_full_lifecycle_evidence() {
     let elapsed_before_process = certification_elapsed_before_process();
     let started = Instant::now();
@@ -2695,6 +2749,7 @@ fn certification_target_live_full_lifecycle_evidence() {
             "filesystem": normalized_filesystem(root.path()),
             "memory_bytes": linux_memory_bytes(),
             "nvme_bytes": filesystem_capacity_bytes(root.path()),
+            "nvme_available_bytes": filesystem_available_bytes(root.path()),
         },
         "tools": { "rustc": command_text("rustc", &["--version"]), "cargo": command_text("cargo", &["--version"]) },
         "counts": {
@@ -2752,11 +2807,118 @@ fn linux_memory_bytes() -> u64 {
         .saturating_mul(1024)
 }
 
+fn effective_runtime_envelope(workspace: &Path, ceiling: Envelope) -> Envelope {
+    envelope_for_capacities(
+        ceiling,
+        linux_memory_limit_bytes().or_else(|| {
+            let bytes = linux_memory_bytes();
+            (bytes > 0).then_some(bytes)
+        }),
+        filesystem_space_bytes(workspace).map(|(_, available)| available),
+    )
+}
+
+fn envelope_for_capacities(
+    ceiling: Envelope,
+    memory_capacity: Option<u64>,
+    disk_capacity: Option<u64>,
+) -> Envelope {
+    let with_headroom = |bytes: u64| bytes.saturating_sub(bytes / 10);
+    Envelope {
+        rss_bytes: memory_capacity
+            .map(with_headroom)
+            .unwrap_or(ceiling.rss_bytes)
+            .min(ceiling.rss_bytes),
+        disk_bytes: disk_capacity
+            .map(with_headroom)
+            .unwrap_or(ceiling.disk_bytes)
+            .min(ceiling.disk_bytes),
+        timeout_s: ceiling.timeout_s,
+    }
+}
+
+fn linux_memory_limit_bytes() -> Option<u64> {
+    let mut candidates = fs::read_to_string("/proc/self/cgroup").map_or_else(
+        |_| Vec::new(),
+        |contents| memory_limit_candidates(&contents),
+    );
+    candidates.extend([
+        PathBuf::from("/sys/fs/cgroup/memory.max"),
+        PathBuf::from("/sys/fs/cgroup/memory/memory.limit_in_bytes"),
+    ]);
+    candidates.iter().find_map(|path| {
+        let value = fs::read_to_string(path).ok()?;
+        let value = value.trim();
+        if value == "max" {
+            return None;
+        }
+        value
+            .parse::<u64>()
+            .ok()
+            .filter(|bytes| *bytes > 0 && *bytes < (1_u64 << 62))
+    })
+}
+
+fn memory_limit_candidates(contents: &str) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    for line in contents.lines() {
+        let mut fields = line.splitn(3, ':');
+        let (Some(_hierarchy), Some(controllers), Some(relative)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        let relative = relative.trim_start_matches('/');
+        if controllers.is_empty() {
+            candidates.push(
+                Path::new("/sys/fs/cgroup")
+                    .join(relative)
+                    .join("memory.max"),
+            );
+        } else if controllers
+            .split(',')
+            .any(|controller| controller == "memory")
+        {
+            candidates.push(
+                Path::new("/sys/fs/cgroup/memory")
+                    .join(relative)
+                    .join("memory.limit_in_bytes"),
+            );
+            candidates.push(
+                Path::new("/sys/fs/cgroup")
+                    .join(relative)
+                    .join("memory.limit_in_bytes"),
+            );
+        }
+    }
+    candidates
+}
+
 fn filesystem_capacity_bytes(path: &Path) -> u64 {
-    command_text("df", &["-k", "--output=size", path.to_str().unwrap()])
+    filesystem_space_bytes(path).map_or(0, |(total, _)| total)
+}
+
+fn filesystem_available_bytes(path: &Path) -> u64 {
+    filesystem_space_bytes(path).map_or(0, |(_, available)| available)
+}
+
+fn filesystem_space_bytes(path: &Path) -> Option<(u64, u64)> {
+    let Ok(output) = Command::new("df")
+        .args(["-k", path.to_str().unwrap()])
+        .output()
+    else {
+        return None;
+    };
+    if !output.status.success() {
+        return None;
+    }
+    let output = String::from_utf8_lossy(&output.stdout);
+    let columns = output
         .lines()
         .last()
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .unwrap_or(0)
-        .saturating_mul(1024)
+        .map(str::split_whitespace)?
+        .collect::<Vec<_>>();
+    let total = columns.get(1)?.parse::<u64>().ok()?.saturating_mul(1024);
+    let available = columns.get(3)?.parse::<u64>().ok()?.saturating_mul(1024);
+    Some((total, available))
 }
