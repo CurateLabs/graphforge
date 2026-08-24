@@ -1095,6 +1095,31 @@ fn verify_optional_graph_tree(
     }
 }
 
+fn verify_optional_graph_tree_with_lease(
+    generation_root: &Path,
+    participants: &[StagedParticipant],
+    lease: &crate::GraphObjectPublicationLease,
+) -> Result<(), GfError> {
+    let Some(files) = participants.iter().find(|participant| {
+        participant.capability_id == crate::GRAPH_CAPABILITY_ID
+            && participant.record_family_id == crate::GRAPH_FILES_FAMILY
+    }) else {
+        return Ok(());
+    };
+    let path = generation_root
+        .join(PARTICIPANTS_DIR)
+        .join(&files.relative_path);
+    let bytes = std::fs::read(&path).map_err(publication_io)?;
+    match crate::decode_graph_files_participant(&bytes)? {
+        crate::GraphFilesParticipant::V1(inventory) => {
+            crate::verify_graph_tree(&crate::graph_tree_root(generation_root), &inventory)
+        }
+        crate::GraphFilesParticipant::V2(root) => {
+            verify_compact_graph_root_with_lease(lease, &root)
+        }
+    }
+}
+
 fn verify_compact_graph_root(
     container_root: &Path,
     root: &crate::GraphFilesRootV2,
@@ -1109,6 +1134,28 @@ fn verify_compact_graph_root(
         })?;
     for entry in files {
         crate::verify_graph_object(container_root, &entry.content_sha256, entry.byte_length)?;
+    }
+    Ok(())
+}
+
+fn verify_compact_graph_root_with_lease(
+    lease: &crate::GraphObjectPublicationLease,
+    root: &crate::GraphFilesRootV2,
+) -> Result<(), GfError> {
+    let (files, _) =
+        crate::resolve_graph_manifest(root, crate::GraphManifestLimits::default(), |digest| {
+            crate::graph_object_store::read_graph_object_by_digest_with_lease(
+                lease,
+                digest,
+                MAX_GRAPH_MANIFEST_SEGMENT_BYTES,
+            )
+        })?;
+    for entry in files {
+        crate::graph_object_store::verify_graph_object_with_lease(
+            lease,
+            &entry.content_sha256,
+            entry.byte_length,
+        )?;
     }
     Ok(())
 }
@@ -1396,14 +1443,14 @@ impl ValidatedProjectGeneration {
         }
         let manifest_sha256 = make_generation_durable(staged)?;
         if let Some(lease) = graph_object_lease {
-            verify_optional_graph_tree(
+            verify_optional_graph_tree_with_lease(
                 &staged.generation_root,
                 &staged.participants,
-                staged.parent.container_root(),
+                lease,
             )?;
             lease.revalidate_for_root(staged.parent.container_root())?;
         }
-        replace_current(staged, manifest_sha256)?;
+        replace_current(staged, manifest_sha256, graph_object_lease)?;
         finish_published_generation(staged, manifest_sha256)?;
         Ok(ProjectPublicationReceipt {
             transaction_uuid: staged.transaction_uuid,
@@ -1584,6 +1631,7 @@ fn promote_optimistic_generation(staged: &StagedProjectGeneration) -> Result<(),
 fn replace_current(
     staged: &StagedProjectGeneration,
     manifest_sha256: [u8; 32],
+    graph_object_lease: Option<&crate::GraphObjectPublicationLease>,
 ) -> Result<(), GfError> {
     let current = CurrentRecord {
         format: "graphforge-project".into(),
@@ -1593,8 +1641,12 @@ fn replace_current(
     };
     let current_bytes = canonical_line(&current)?;
     let current_path = staged.root.join(CURRENT_FILE);
-    let replace_result = publish_atomic_bytes(
+    let stable_root =
+        graphforge_filesystem::StableDirectory::open(&staged.root).map_err(publication_io)?;
+    let replace_result = publish_atomic_bytes_in(
+        &stable_root,
         &current_path,
+        std::ffi::OsStr::new(CURRENT_FILE),
         &current_bytes,
         || {
             failpoint_as_io(
@@ -1621,7 +1673,17 @@ fn replace_current(
                 staged.generation_uuid,
                 "CURRENT",
                 false,
-            )
+            )?;
+            staged
+                .admission
+                .revalidate_identity()
+                .map_err(std::io::Error::other)?;
+            if let Some(lease) = graph_object_lease {
+                lease
+                    .revalidate_for_root(staged.parent.container_root())
+                    .map_err(std::io::Error::other)?;
+            }
+            Ok(())
         },
     );
     if let Err(error) = replace_result {
@@ -2359,6 +2421,43 @@ pub(crate) fn publish_atomic_bytes(
     let result = publish();
     if result.is_err() {
         let _ = std::fs::remove_file(&temp_path);
+    }
+    result
+}
+
+fn publish_atomic_bytes_in(
+    directory: &graphforge_filesystem::StableDirectory,
+    diagnostic_path: &Path,
+    target_name: &std::ffi::OsStr,
+    bytes: &[u8],
+    after_write: impl FnOnce() -> std::io::Result<()>,
+    after_sync: impl FnOnce() -> std::io::Result<()>,
+    before_replace: impl FnOnce() -> std::io::Result<()>,
+) -> Result<(), AtomicPublishError> {
+    let target_text = target_name
+        .to_str()
+        .ok_or_else(|| std::io::Error::other("atomic publication target is not UTF-8"))?;
+    let temp_name = std::ffi::OsString::from(unique_atomic_temp_name(target_text));
+    let mut temp = directory.create_child_file(&temp_name)?;
+    let temp_identity = graphforge_filesystem::file_identity(&temp)?;
+    let publish = || -> Result<(), AtomicPublishError> {
+        crate::file_lock::lock_exclusive(&temp)?;
+        temp.write_all(bytes)?;
+        after_write()?;
+        temp.sync_all()?;
+        after_sync()?;
+        before_replace()?;
+        let namespace_lock = lock_atomic_publish_target(diagnostic_path);
+        let _namespace_guard = namespace_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        directory.replace_child(&temp_name, target_name)?;
+        crate::file_lock::unlock(&temp)?;
+        Ok(())
+    };
+    let result = publish();
+    if result.is_err() {
+        let _ = directory.unlink_child_if_identity(&temp_name, temp_identity);
     }
     result
 }

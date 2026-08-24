@@ -382,6 +382,18 @@ object-installation lease is active. Marking and validation finish before any
 object deletion. Malformed, cyclic, oversized, duplicate-reference, traversal,
 and wrong-digest manifests fail closed and do not grant deletion authority.
 
+CAS publication, reads, materialization, and collection retain directory and
+file capabilities and address children relative to those capabilities. The
+named project, object root, digest buckets, lifecycle lock, and complete object
+closure are revalidated immediately before `CURRENT`, which is replaced
+relative to the retained project directory. This coordinates concurrent
+GraphForge processes and fails closed when namespace substitution is detected.
+The operational boundary does not claim atomic protection against an actively
+malicious same-identity process racing the final Unix namespace syscall;
+deployments requiring that adversarial isolation must use OS ownership or
+sandbox boundaries. Identity-conditional Unix cleanup likewise runs only under
+GraphForge's cooperative exclusive lifecycle guard.
+
 The current generation is always reachable. The default retention set also
 contains its two most recent valid ancestors, determined only from verified
 `parent_generation_uuid` links. A configured larger finite retention count may

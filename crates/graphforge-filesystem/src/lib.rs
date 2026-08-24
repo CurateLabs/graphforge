@@ -121,13 +121,19 @@ impl StableDirectory {
     pub fn link_child_into(
         &self,
         source_name: &OsStr,
+        source: &File,
+        expected_source: FileIdentity,
         destination: &Self,
         destination_name: &OsStr,
-    ) -> io::Result<()> {
+    ) -> io::Result<(File, FileIdentity)> {
         validate_child_name(source_name)?;
         validate_child_name(destination_name)?;
         self.revalidate_named()?;
         destination.revalidate_named()?;
+        validate_stable_child_file(source, &self.path.join(source_name))?;
+        if file_identity(source)? != expected_source {
+            return Err(io::Error::other("hard-link source identity changed"));
+        }
         stable_link_child(
             &self.file,
             &self.path,
@@ -137,10 +143,17 @@ impl StableDirectory {
             destination_name,
         )?;
         self.revalidate_named()?;
-        destination.revalidate_named()
+        destination.revalidate_named()?;
+        let installed = destination.open_child_file(destination_name)?;
+        let installed_identity = file_identity(&installed)?;
+        if installed_identity != expected_source {
+            return Err(io::Error::other("hard-link destination identity mismatch"));
+        }
+        Ok((installed, installed_identity))
     }
 
-    /// Remove a child only while its current named identity matches `expected`.
+    /// Remove a child under the caller's held cooperative exclusive lifecycle
+    /// guard, only while its current named identity matches `expected`.
     pub fn unlink_child_if_identity(&self, name: &OsStr, expected: FileIdentity) -> io::Result<()> {
         validate_child_name(name)?;
         self.revalidate_named()?;
@@ -148,16 +161,34 @@ impl StableDirectory {
         self.revalidate_named()
     }
 
-    /// Return the path used only for diagnostics and guarded Windows syscalls.
-    #[must_use]
-    pub fn diagnostic_path(&self) -> &Path {
-        &self.path
+    /// Atomically publish a retained temporary child as `target` within this
+    /// retained directory. Cooperative publishers must serialize the target.
+    pub fn replace_child(&self, temporary: &OsStr, target: &OsStr) -> io::Result<()> {
+        validate_child_name(temporary)?;
+        validate_child_name(target)?;
+        self.revalidate_named()?;
+        let temporary_file = self.open_child_file(temporary)?;
+        if file_link_count(&temporary_file)? != 1 {
+            return Err(io::Error::other(
+                "atomic temporary child is multiply linked",
+            ));
+        }
+        let result = match self.open_child_file(target) {
+            Ok(_) => replace_file(&self.file, temporary, target)
+                .map_err(|error| io::Error::other(error.to_string())),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                install_new_file(&self.file, temporary, target)
+            }
+            Err(error) => Err(error),
+        };
+        result?;
+        self.revalidate_named()?;
+        self.open_child_file(target).map(|_| ())
     }
 
-    /// Borrow the retained directory handle.
-    #[must_use]
-    pub fn file(&self) -> &File {
-        &self.file
+    /// Flush this retained directory capability.
+    pub fn sync(&self) -> io::Result<()> {
+        self.file.sync_all()
     }
 
     /// Return the retained native identity.
@@ -428,10 +459,7 @@ fn stable_unlink_child_if_identity(
     expected: FileIdentity,
 ) -> io::Result<()> {
     let child = path.join(name);
-    if path_identity(&child)? != expected {
-        return Err(io::Error::other("child identity changed before unlink"));
-    }
-    std::fs::remove_file(child)
+    windows::delete_file_by_handle(&child, expected)
 }
 
 #[cfg(all(not(unix), not(windows)))]
@@ -966,12 +994,13 @@ mod windows {
     use windows_sys::Win32::Security::{DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION};
     use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
     use windows_sys::Win32::Storage::FileSystem::{
-        BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, DELETE, FILE_FLAG_BACKUP_SEMANTICS,
-        FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_WRITE_THROUGH, FILE_ID_INFO, FILE_NAME_NORMALIZED,
-        FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ,
-        FILE_SHARE_WRITE, FileIdInfo, FileRenameInfo, FileRenameInfoEx, GetDriveTypeW,
-        GetFileInformationByHandle, GetFileInformationByHandleEx, GetFinalPathNameByHandleW,
-        GetVolumeInformationW, GetVolumePathNameW, SetFileInformationByHandle, VOLUME_NAME_DOS,
+        BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, DELETE, FILE_DISPOSITION_INFO,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_WRITE_THROUGH,
+        FILE_ID_INFO, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileDispositionInfo, FileIdInfo,
+        FileRenameInfo, FileRenameInfoEx, GetDriveTypeW, GetFileInformationByHandle,
+        GetFileInformationByHandleEx, GetFinalPathNameByHandleW, GetVolumeInformationW,
+        GetVolumePathNameW, SetFileInformationByHandle, VOLUME_NAME_DOS,
     };
 
     #[cfg(test)]
@@ -1132,6 +1161,35 @@ mod windows {
             .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH)
             .open(path)
+    }
+
+    pub(super) fn delete_file_by_handle(path: &Path, expected: FileIdentity) -> io::Result<()> {
+        let file = std::fs::OpenOptions::new()
+            .access_mode(DELETE | FILE_READ_ATTRIBUTES)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH)
+            .open(path)?;
+        if file_identity(&file)? != expected || identity(path)? != expected {
+            return Err(io::Error::other("child identity changed before unlink"));
+        }
+        let mut disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
+        // SAFETY: `file` is an exact retained handle opened with DELETE access,
+        // and `disposition` is the initialized structure required by
+        // FileDispositionInfo for the duration of the call.
+        let deleted = unsafe {
+            SetFileInformationByHandle(
+                file.as_raw_handle(),
+                FileDispositionInfo,
+                (&mut disposition as *mut FILE_DISPOSITION_INFO).cast(),
+                u32::try_from(std::mem::size_of::<FILE_DISPOSITION_INFO>())
+                    .expect("FILE_DISPOSITION_INFO size fits u32"),
+            )
+        };
+        if deleted == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
     }
 
     fn rename_handle(
@@ -1943,6 +2001,77 @@ mod tests {
             stable_root
                 .open_child_directory(OsStr::new("objects"))
                 .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stable_directory_enumerates_and_links_only_retained_regular_source() {
+        use std::io::Write as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let stable = StableDirectory::open(root.path()).unwrap();
+        let source_dir = stable.create_child_directory(OsStr::new("source")).unwrap();
+        let destination = stable
+            .create_child_directory(OsStr::new("destination"))
+            .unwrap();
+        let mut source = source_dir.create_child_file(OsStr::new("payload")).unwrap();
+        source.write_all(b"payload").unwrap();
+        let identity = file_identity(&source).unwrap();
+        assert_eq!(
+            source_dir.child_names().unwrap(),
+            [std::ffi::OsString::from("payload")]
+        );
+        let (installed, installed_identity) = source_dir
+            .link_child_into(
+                OsStr::new("payload"),
+                &source,
+                identity,
+                &destination,
+                OsStr::new("copy"),
+            )
+            .unwrap();
+        assert_eq!(installed_identity, identity);
+        assert_eq!(file_identity(&installed).unwrap(), identity);
+
+        std::fs::rename(
+            root.path().join("source/payload"),
+            root.path().join("source/old"),
+        )
+        .unwrap();
+        std::fs::write(root.path().join("source/payload"), b"replacement").unwrap();
+        assert!(
+            source_dir
+                .link_child_into(
+                    OsStr::new("payload"),
+                    &source,
+                    identity,
+                    &destination,
+                    OsStr::new("bad")
+                )
+                .is_err()
+        );
+        assert!(!root.path().join("destination/bad").exists());
+    }
+
+    #[test]
+    fn stable_directory_rejects_non_child_names_and_identity_mismatch_cleanup() {
+        let root = tempfile::tempdir().unwrap();
+        let stable = StableDirectory::open(root.path()).unwrap();
+        assert!(stable.open_child_file(OsStr::new("../escape")).is_err());
+        let file = stable.create_child_file(OsStr::new("payload")).unwrap();
+        let identity = file_identity(&file).unwrap();
+        drop(file);
+        std::fs::rename(root.path().join("payload"), root.path().join("old")).unwrap();
+        std::fs::write(root.path().join("payload"), b"replacement").unwrap();
+        assert!(
+            stable
+                .unlink_child_if_identity(OsStr::new("payload"), identity)
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("payload")).unwrap(),
+            b"replacement"
         );
     }
 }
