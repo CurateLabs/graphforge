@@ -2261,12 +2261,24 @@ impl GraphWriter {
         deleted_nodes: &[Uuid],
         deleted_edges: &[Uuid],
     ) -> Result<bool, GfError> {
+        self.prepared_index =
+            self.build_uuid_index_delta(generation, staged, deleted_nodes, deleted_edges)?;
+        Ok(self.prepared_index.is_some())
+    }
+
+    fn build_uuid_index_delta(
+        &self,
+        generation: u64,
+        staged: &mut RewriteBatch,
+        deleted_nodes: &[Uuid],
+        deleted_edges: &[Uuid],
+    ) -> Result<Option<crate::uuid_membership::PreparedUuidIndexDelta>, GfError> {
         if self.pending_index_nodes.is_empty()
             && self.pending_index_edges.is_empty()
             && deleted_nodes.is_empty()
             && deleted_edges.is_empty()
         {
-            return Ok(false);
+            return Ok(None);
         }
         let (deleted_nodes, deleted_edges) = if deleted_nodes.is_empty() && deleted_edges.is_empty()
         {
@@ -2292,7 +2304,7 @@ impl GraphWriter {
                 .collect();
             (nodes, edges)
         };
-        self.prepared_index = crate::uuid_membership::prepare_uuid_membership_delta(
+        crate::uuid_membership::prepare_uuid_membership_delta(
             &self.dir,
             generation.saturating_sub(1),
             generation,
@@ -2301,26 +2313,7 @@ impl GraphWriter {
             &self.pending_index_edges,
             &deleted_nodes,
             &deleted_edges,
-        )?;
-        Ok(self.prepared_index.is_some())
-    }
-
-    /// Build the UUID-index participant under the durable rewrite lock, using
-    /// the authoritative generation derived after recovery.
-    fn uuid_index_participant<'a>(
-        &'a mut self,
-        deleted_nodes: Vec<Uuid>,
-        deleted_edges: Vec<Uuid>,
-    ) -> crate::durable_rewrite::RewriteParticipantPreparer<'a> {
-        Box::new(move |context, staged| {
-            self.prepare_uuid_index_delta_with_deletions(
-                context.next.topology,
-                staged,
-                &deleted_nodes,
-                &deleted_edges,
-            )?;
-            Ok(self.prepared_uuid_index_auxiliary_receipt())
-        })
+        )
     }
 
     /// Commit topology and its UUID-index participant as one sealed durable rewrite.
@@ -2330,10 +2323,26 @@ impl GraphWriter {
         deleted_nodes: Vec<Uuid>,
         deleted_edges: Vec<Uuid>,
     ) -> Result<Option<u64>, GfError> {
+        let prepared = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let prepared_from_callback = std::rc::Rc::clone(&prepared);
         let dir = self.dir.clone();
-        let participant = self.uuid_index_participant(deleted_nodes, deleted_edges);
+        let participant: crate::durable_rewrite::RewriteParticipantPreparer<'_> =
+            Box::new(|context, staged| {
+                let token = self.build_uuid_index_delta(
+                    context.next.topology,
+                    staged,
+                    &deleted_nodes,
+                    &deleted_edges,
+                )?;
+                let receipt = token
+                    .as_ref()
+                    .map(crate::uuid_membership::PreparedUuidIndexDelta::auxiliary_receipt);
+                *prepared_from_callback.borrow_mut() = token;
+                Ok(receipt)
+            });
         let committed =
             crate::generation::commit_topology_aware_with_participant(staged, &dir, participant)?;
+        self.prepared_index = prepared.borrow_mut().take();
         if let Some(generation) = committed {
             if self.prepared_index.is_some() {
                 self.finalize_uuid_index_delta(generation)?;
