@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 
 use graphforge_storage::{
     PublishedSearchArtifact, SearchArtifactError, SearchArtifactKey, SearchCoordinationLimits,
-    SearchPublicationMode, SearchPublicationOutcome, SearchPublicationPlan, SearchSourcePart,
-    SearchSourceSnapshot, coordinate_search_publication,
+    SearchPublicationMode, SearchPublicationOutcome, SearchPublicationPlan, SearchSourceSnapshot,
+    coordinate_search_publication,
 };
 
 use crate::TextSearchLimits;
@@ -925,47 +925,13 @@ where
     paths.extend(property_source_paths(project_dir, &mut checkpoint)?);
     paths.sort_unstable_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
 
-    let mut total = 0_u64;
-    let mut owned = Vec::with_capacity(paths.len());
-    for (name, path) in paths {
-        checkpoint()?;
-        let metadata = std::fs::symlink_metadata(&path)
-            .map_err(|error| source(format!("inspect {}: {error}", path.display())))?;
-        if !metadata.file_type().is_file() {
-            return Err(source(format!(
-                "search source {} is not a regular file",
-                path.display()
-            )));
-        }
-        total = total
-            .checked_add(metadata.len())
-            .ok_or_else(|| exhausted_source(limits.source_bytes))?;
-        if total > limits.source_bytes {
-            return Err(exhausted_source(limits.source_bytes));
-        }
-        let bytes = std::fs::read(&path)
-            .map_err(|error| source(format!("read {}: {error}", path.display())))?;
-        let actual =
-            u64::try_from(bytes.len()).map_err(|_| exhausted_source(limits.source_bytes))?;
-        if actual > metadata.len() {
-            total = total
-                .checked_add(actual - metadata.len())
-                .ok_or_else(|| exhausted_source(limits.source_bytes))?;
-            if total > limits.source_bytes {
-                return Err(exhausted_source(limits.source_bytes));
-            }
-        }
-        owned.push((name, bytes));
-    }
     checkpoint()?;
-    let parts = owned
-        .iter()
-        .map(|(name, bytes)| SearchSourcePart {
-            name,
-            bytes: bytes.as_slice(),
-        })
-        .collect::<Vec<_>>();
-    SearchSourceSnapshot::capture(project_dir, &parts)
+    SearchSourceSnapshot::capture_files(
+        project_dir,
+        &paths,
+        limits.source_bytes,
+        "text_source_bytes",
+    )
 }
 
 fn property_source_paths<C>(
@@ -990,13 +956,6 @@ where
     }
     paths.sort_unstable_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
     Ok(paths)
-}
-
-fn exhausted_source(limit: u64) -> SearchArtifactError {
-    SearchArtifactError::ResourceExhausted {
-        resource: "text_source_bytes",
-        limit,
-    }
 }
 
 fn invalid(field: &'static str, reason: impl Into<String>) -> SearchArtifactError {

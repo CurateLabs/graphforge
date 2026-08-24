@@ -5,7 +5,7 @@ use std::path::Path;
 
 use arrow::array::{Array, FixedSizeBinaryArray, ListArray, StringArray, UInt32Array};
 use arrow::datatypes::DataType;
-use graphforge_storage::{SearchArtifactError, list_property_stems, read_nodes, read_properties};
+use graphforge_storage::{SearchArtifactError, read_nodes};
 
 use crate::TextSearchLimits;
 
@@ -180,6 +180,7 @@ where
     Ok(eligible)
 }
 
+#[allow(clippy::too_many_lines)]
 fn project_properties<C>(
     project_dir: &Path,
     eligible: &BTreeSet<[u8; 16]>,
@@ -195,83 +196,105 @@ where
     let mut seen_property_rows = BTreeSet::new();
     let mut observed_properties = BTreeSet::new();
     let mut fields_by_uuid = TextFieldsByUuid::new();
-    for path in graphforge_storage::node_property_source_files(project_dir)
-        .map_err(|error| source(error.to_string()))?
-    {
-        add_source_bytes(&path, source_bytes, limits)?;
-    }
-    for stem in list_property_stems(project_dir) {
-        checkpoint()?;
-        let batches = read_properties(project_dir, &stem)
-            .map_err(|error| source(format!("read property route {stem}: {error}")))?;
-        if batches.is_empty() {
-            return Err(source(format!(
-                "property route {stem} is not readable Parquet"
-            )));
-        }
-        for batch in batches {
-            checkpoint()?;
-            let uuids = batch
-                .column_by_name("node_uuid")
-                .and_then(|column| column.as_any().downcast_ref::<FixedSizeBinaryArray>())
-                .ok_or_else(|| source(format!("property route {stem} node_uuid is malformed")))?;
-            for row in 0..batch.num_rows() {
+    let fragments = graphforge_storage::node_property_source_fragments(project_dir)
+        .map_err(|error| source(error.to_string()))?;
+    checkpoint()?;
+    let remaining = limits.source_bytes.saturating_sub(*source_bytes);
+    let mut failure = None;
+    let admitted = graphforge_storage::visit_property_fragments_admitted(
+        &fragments,
+        8192,
+        remaining,
+        |stem, batch| {
+            let result: Result<(), SearchArtifactError> = (|| {
                 checkpoint()?;
-                property_rows = property_rows.saturating_add(1);
-                if property_rows > limits.property_rows {
-                    return Err(exhausted("text_property_rows", limits.property_rows));
-                }
-                if uuids.is_null(row) {
-                    return Err(source(format!(
-                        "property route {stem} contains null node_uuid"
-                    )));
-                }
-                let node_uuid: [u8; 16] = uuids.value(row).try_into().map_err(|_| {
-                    source(format!("property route {stem} node_uuid is not 16 bytes"))
-                })?;
-                if !eligible.contains(&node_uuid) {
-                    continue;
-                }
-                if !seen_property_rows.insert(node_uuid) {
-                    return Err(source(format!(
-                        "eligible UUID {node_uuid:02x?} has duplicate property rows"
-                    )));
-                }
-                for (field, column) in batch.schema().fields().iter().zip(batch.columns()) {
-                    let name = field.name();
-                    if name == "node_uuid"
-                        || explicit.is_some_and(|selected| !selected.contains(name))
-                    {
-                        continue;
+                let uuids = batch
+                    .column_by_name("node_uuid")
+                    .and_then(|column| column.as_any().downcast_ref::<FixedSizeBinaryArray>())
+                    .ok_or_else(|| {
+                        source(format!("property route {stem} node_uuid is malformed"))
+                    })?;
+                for row in 0..batch.num_rows() {
+                    checkpoint()?;
+                    property_rows = property_rows.saturating_add(1);
+                    if property_rows > limits.property_rows {
+                        return Err(exhausted("text_property_rows", limits.property_rows));
                     }
-                    if field.data_type() != &DataType::Utf8 {
-                        continue;
-                    }
-                    let values =
-                        column
-                            .as_any()
-                            .downcast_ref::<StringArray>()
-                            .ok_or_else(|| {
-                                source(format!("property route {stem} field {name:?} is malformed"))
-                            })?;
-                    if values.is_null(row) {
-                        continue;
-                    }
-                    validate_property(name, limits)?;
-                    observed_properties.insert(name.clone());
-                    let replaced = fields_by_uuid
-                        .entry(node_uuid)
-                        .or_default()
-                        .insert(name.clone(), values.value(row).to_owned());
-                    if replaced.is_some() {
+                    if uuids.is_null(row) {
                         return Err(source(format!(
-                            "eligible UUID {node_uuid:02x?} repeats property {name:?}"
+                            "property route {stem} contains null node_uuid"
                         )));
                     }
+                    let node_uuid: [u8; 16] = uuids.value(row).try_into().map_err(|_| {
+                        source(format!("property route {stem} node_uuid is not 16 bytes"))
+                    })?;
+                    if !eligible.contains(&node_uuid) {
+                        continue;
+                    }
+                    if !seen_property_rows.insert(node_uuid) {
+                        return Err(source(format!(
+                            "eligible UUID {node_uuid:02x?} has duplicate property rows"
+                        )));
+                    }
+                    for (field, column) in batch.schema().fields().iter().zip(batch.columns()) {
+                        let name = field.name();
+                        if name == "node_uuid"
+                            || explicit.is_some_and(|selected| !selected.contains(name))
+                        {
+                            continue;
+                        }
+                        if field.data_type() != &DataType::Utf8 {
+                            continue;
+                        }
+                        let values =
+                            column
+                                .as_any()
+                                .downcast_ref::<StringArray>()
+                                .ok_or_else(|| {
+                                    source(format!(
+                                        "property route {stem} field {name:?} is malformed"
+                                    ))
+                                })?;
+                        if values.is_null(row) {
+                            continue;
+                        }
+                        validate_property(name, limits)?;
+                        observed_properties.insert(name.clone());
+                        let replaced = fields_by_uuid
+                            .entry(node_uuid)
+                            .or_default()
+                            .insert(name.clone(), values.value(row).to_owned());
+                        if replaced.is_some() {
+                            return Err(source(format!(
+                                "eligible UUID {node_uuid:02x?} repeats property {name:?}"
+                            )));
+                        }
+                    }
                 }
+                Ok(())
+            })();
+            if let Err(error) = result {
+                failure = Some(error);
+                return Ok(false);
             }
-        }
+            Ok(true)
+        },
+    );
+    if let Some(error) = failure {
+        return Err(error);
     }
+    let admitted = admitted.map_err(|error| {
+        if error.to_string().contains("property source bytes")
+            || error.to_string().contains("decoded-byte admission")
+        {
+            exhausted_u64("text_source_bytes", limits.source_bytes)
+        } else {
+            source(format!("read property sources: {error}"))
+        }
+    })?;
+    *source_bytes = source_bytes
+        .checked_add(admitted)
+        .ok_or_else(|| exhausted_u64("text_source_bytes", limits.source_bytes))?;
     Ok((observed_properties, fields_by_uuid))
 }
 

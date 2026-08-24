@@ -629,9 +629,11 @@ fn is_graph_operational_file(relative: &Path) -> bool {
             true
         }
         ["graph-objects", "active", lease]
-            if lease
-                .strip_suffix(".lock")
-                .is_some_and(|value| uuid::Uuid::parse_str(value).is_ok()) =>
+            if lease.strip_suffix(".lock").is_some_and(|value| {
+                uuid::Uuid::parse_str(value).is_ok_and(|parsed| {
+                    value.len() == 36 && parsed.hyphenated().to_string() == value
+                })
+            }) =>
         {
             true
         }
@@ -938,6 +940,17 @@ mod tests {
             "embeddings/spaces/{}/.writer.lock",
             "F".repeat(64)
         ))));
+        let canonical = "018f1f39-7b2a-7ab0-8000-000000000001";
+        assert!(is_graph_operational_file(Path::new(&format!(
+            "graph-objects/active/{canonical}.lock"
+        ))));
+        assert!(!is_graph_operational_file(Path::new(&format!(
+            "graph-objects/active/{}.lock",
+            canonical.to_ascii_uppercase()
+        ))));
+        assert!(!is_graph_operational_file(Path::new(
+            "graph-objects/active/018f1f397b2a7ab08000000000000001.lock"
+        )));
     }
 
     #[cfg(unix)]
