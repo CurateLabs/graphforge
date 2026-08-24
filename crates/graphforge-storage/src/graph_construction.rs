@@ -114,6 +114,8 @@ pub struct GraphConstructionBudgets {
     pub max_catalog_entries: usize,
     /// Maximum decoded Arrow bytes admitted while streaming the parent catalog.
     pub max_catalog_decoded_bytes: usize,
+    /// Maximum UTF-8 identifier bytes retained by the complete runtime catalog.
+    pub max_catalog_identifier_bytes: usize,
 }
 
 impl Default for GraphConstructionBudgets {
@@ -128,6 +130,7 @@ impl Default for GraphConstructionBudgets {
             max_property_columns: 4_096,
             max_catalog_entries: 1_000_000,
             max_catalog_decoded_bytes: 256 << 20,
+            max_catalog_identifier_bytes: 64 << 20,
         }
     }
 }
@@ -143,6 +146,7 @@ impl GraphConstructionBudgets {
             || self.max_property_columns == 0
             || self.max_catalog_entries == 0
             || self.max_catalog_decoded_bytes == 0
+            || self.max_catalog_identifier_bytes == 0
         {
             return Err(storage("invalid construction budgets"));
         }
@@ -194,6 +198,14 @@ pub struct GraphConstructionEvidence {
     pub shaped_output_authentication_bytes: u64,
     /// Bounded reads used to construct the shaped-output inventory.
     pub shaped_output_authentication_operations: u64,
+    /// Bytes read while validating exact idempotent replays.
+    pub replay_validation_read_bytes: u64,
+    /// Read operations while validating exact idempotent replays.
+    pub replay_validation_read_operations: u64,
+    /// Bytes read while revalidating sealed inputs for canonical shaping.
+    pub shape_input_validation_read_bytes: u64,
+    /// Read operations while revalidating sealed inputs for canonical shaping.
+    pub shape_input_validation_read_operations: u64,
     /// Fixed-width run records.
     pub run_records: u64,
     /// Largest retained Arrow row window.
@@ -239,6 +251,12 @@ pub struct GraphConstructionEvidence {
     pub peak_merge_name_slots: u64,
     /// Largest number of endpoint-window names retained by its online merge.
     pub peak_resolved_endpoint_name_slots: u64,
+    /// Largest complete runtime-catalog entry count retained during shaping.
+    pub peak_catalog_entries: u64,
+    /// Largest complete runtime-catalog identifier payload retained during shaping.
+    pub peak_catalog_identifier_bytes: u64,
+    /// Largest decoded catalog Arrow batch retained during one streaming pass.
+    pub peak_catalog_decoded_batch_bytes: u64,
     /// File and directory durability barriers completed during shaping.
     pub merge_fsync_operations: u64,
     /// Bytes returned by instrumented Parquet range/sequential reads in shaping.
@@ -524,6 +542,9 @@ impl GraphConstructionSession {
                     authentication_read_operations: base_work.authentication_blocks,
                     parent_catalog_read_bytes: parent_catalog_work.bytes,
                     parent_catalog_read_operations: parent_catalog_work.operations,
+                    peak_catalog_entries: parent_catalog.entry_count() as u64,
+                    peak_catalog_identifier_bytes: parent_catalog.retained_identifier_bytes()
+                        as u64,
                     ..GraphConstructionEvidence::default()
                 };
                 let initial = Checkpoint {
@@ -679,7 +700,17 @@ impl GraphConstructionSession {
                 && receipt.input_sha256 == input_sha256
                 && receipt.schema_sha256 == schema_sha256
             {
-                validate_receipt_artifacts(&self.root, &receipt)?;
+                let work = validate_receipt_artifacts(&self.root, &receipt)?;
+                self.checkpoint.evidence.replay_validation_read_bytes = self
+                    .checkpoint
+                    .evidence
+                    .replay_validation_read_bytes
+                    .saturating_add(work.bytes);
+                self.checkpoint.evidence.replay_validation_read_operations = self
+                    .checkpoint
+                    .evidence
+                    .replay_validation_read_operations
+                    .saturating_add(work.operations);
                 self.checkpoint.evidence.replayed_chunks =
                     self.checkpoint.evidence.replayed_chunks.saturating_add(1);
                 replace_control(&self.root, CHECKPOINT, &self.checkpoint)?;
@@ -832,15 +863,9 @@ impl GraphConstructionSession {
             if receipt.prior_receipt_sha256 != prior_digest {
                 return Err(storage("receipt journal chain is discontinuous"));
             }
-            for artifact in [&receipt.parquet, &receipt.identities, &receipt.details]
-                .into_iter()
-                .chain(receipt.endpoints.iter())
-            {
-                let work = authenticate_artifact(&self.root, artifact)?;
-                read_bytes = read_bytes.saturating_add(work.bytes);
-                read_operations = read_operations.saturating_add(work.operations);
-            }
-            validate_parquet_shape(&self.root, &receipt)?;
+            let work = validate_receipt_artifacts(&self.root, &receipt)?;
+            read_bytes = read_bytes.saturating_add(work.bytes);
+            read_operations = read_operations.saturating_add(work.operations);
             let body = serde_json::to_vec(&receipt).map_err(storage)?;
             prior_digest = Some(sha256(&body));
         }
@@ -907,7 +932,19 @@ impl GraphConstructionSession {
         for sequence in 0..self.checkpoint.next_sequence {
             reject_cancelled(&mut cancelled)?;
             let receipt = self.read_receipt(sequence)?;
-            validate_receipt_artifacts(&self.root, &receipt)?;
+            let work = validate_receipt_artifacts(&self.root, &receipt)?;
+            self.checkpoint.evidence.shape_input_validation_read_bytes = self
+                .checkpoint
+                .evidence
+                .shape_input_validation_read_bytes
+                .saturating_add(work.bytes);
+            self.checkpoint
+                .evidence
+                .shape_input_validation_read_operations = self
+                .checkpoint
+                .evidence
+                .shape_input_validation_read_operations
+                .saturating_add(work.operations);
             let kind = u8::from(receipt.kind == ConstructionChunkKind::Edge);
             catalog_authority.update([kind]);
             catalog_authority.update(receipt.schema_sha256.as_bytes());
@@ -1109,6 +1146,7 @@ impl GraphConstructionSession {
             &node_rows,
             &edge_rows,
             self.checkpoint.session_now_micros,
+            self.checkpoint.budgets,
             &mut cancelled,
             &mut self.checkpoint.evidence,
         )?;
@@ -2850,15 +2888,30 @@ impl RowMergeAccumulator {
     }
 }
 
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // One bounded streamed catalog pass; admission must surround each intern.
 fn build_runtime_catalog(
     mut catalog: RuntimeCatalog,
     root: &StableDirectory,
     node_rows: &[String],
     edge_rows: &[String],
     now_micros: i64,
+    budgets: GraphConstructionBudgets,
     cancelled: &mut impl FnMut() -> bool,
     evidence: &mut GraphConstructionEvidence,
 ) -> Result<String, GfError> {
+    let mut catalog_entries = catalog.entry_count();
+    let mut identifier_bytes = catalog.retained_identifier_bytes();
+    if catalog_entries > budgets.max_catalog_entries
+        || identifier_bytes > budgets.max_catalog_identifier_bytes
+    {
+        return Err(storage(
+            "runtime catalog exceeds construction admission budget",
+        ));
+    }
+    evidence.peak_catalog_entries = evidence.peak_catalog_entries.max(catalog_entries as u64);
+    evidence.peak_catalog_identifier_bytes = evidence
+        .peak_catalog_identifier_bytes
+        .max(identifier_bytes as u64);
     for (kind, names) in [
         (ConstructionChunkKind::Node, node_rows),
         (ConstructionChunkKind::Edge, edge_rows),
@@ -2877,6 +2930,13 @@ fn build_runtime_catalog(
             for batch in reader {
                 reject_cancelled(cancelled)?;
                 let batch = batch.map_err(storage)?;
+                let decoded_bytes = batch.get_array_memory_size();
+                if decoded_bytes > budgets.max_catalog_decoded_bytes {
+                    return Err(storage("runtime catalog decoded batch budget exhausted"));
+                }
+                evidence.peak_catalog_decoded_batch_bytes = evidence
+                    .peak_catalog_decoded_batch_bytes
+                    .max(decoded_bytes as u64);
                 let owner = batch
                     .column(1)
                     .as_any()
@@ -2891,14 +2951,38 @@ fn build_runtime_catalog(
                     let owner_name = owner.value(row);
                     match kind {
                         ConstructionChunkKind::Node => {
+                            admit_catalog_identifier(
+                                !catalog.contains_entity_type(owner_name),
+                                owner_name.len(),
+                                &mut catalog_entries,
+                                &mut identifier_bytes,
+                                budgets,
+                                evidence,
+                            )?;
                             catalog.intern_label_at(owner_name, now_micros);
                         }
                         ConstructionChunkKind::Edge => {
+                            admit_catalog_identifier(
+                                !catalog.contains_relation_type(owner_name),
+                                owner_name.len(),
+                                &mut catalog_entries,
+                                &mut identifier_bytes,
+                                budgets,
+                                evidence,
+                            )?;
                             catalog.intern_relation_type_at(owner_name, now_micros);
                         }
                     }
                     for (offset, field) in batch.schema().fields()[required..].iter().enumerate() {
                         if !batch.column(required + offset).is_null(row) {
+                            admit_catalog_identifier(
+                                !catalog.contains_property(field.name(), Some(owner_name)),
+                                field.name().len().saturating_add(owner_name.len()),
+                                &mut catalog_entries,
+                                &mut identifier_bytes,
+                                budgets,
+                                evidence,
+                            )?;
                             catalog.intern_property_at(field.name(), Some(owner_name), now_micros);
                         }
                     }
@@ -2918,6 +3002,38 @@ fn build_runtime_catalog(
         .saturating_add(receipt.write_operations);
     account_sequential_write(receipt.bytes, evidence);
     Ok(output.to_owned())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn admit_catalog_identifier(
+    is_new: bool,
+    added_identifier_bytes: usize,
+    entries: &mut usize,
+    identifier_bytes: &mut usize,
+    budgets: GraphConstructionBudgets,
+    evidence: &mut GraphConstructionEvidence,
+) -> Result<(), GfError> {
+    if !is_new {
+        return Ok(());
+    }
+    let next_entries = entries
+        .checked_add(1)
+        .ok_or_else(|| storage("runtime catalog entry count overflow"))?;
+    let next_identifier_bytes = identifier_bytes
+        .checked_add(added_identifier_bytes)
+        .ok_or_else(|| storage("runtime catalog identifier byte count overflow"))?;
+    if next_entries > budgets.max_catalog_entries
+        || next_identifier_bytes > budgets.max_catalog_identifier_bytes
+    {
+        return Err(storage("runtime catalog admission budget exhausted"));
+    }
+    *entries = next_entries;
+    *identifier_bytes = next_identifier_bytes;
+    evidence.peak_catalog_entries = evidence.peak_catalog_entries.max(next_entries as u64);
+    evidence.peak_catalog_identifier_bytes = evidence
+        .peak_catalog_identifier_bytes
+        .max(next_identifier_bytes as u64);
+    Ok(())
 }
 
 fn load_parent_runtime_catalog(
@@ -2988,6 +3104,11 @@ fn load_parent_runtime_catalog(
             return Err(storage("parent runtime catalog admission budget exhausted"));
         }
         catalog.extend_from_record_batch(&batch).map_err(storage)?;
+        if catalog.retained_identifier_bytes() > budgets.max_catalog_identifier_bytes {
+            return Err(storage(
+                "parent runtime catalog identifier budget exhausted",
+            ));
+        }
     }
     work.bytes = work
         .bytes
@@ -3836,21 +3957,26 @@ fn validate_receipt_semantics(
 fn validate_receipt_artifacts(
     root: &StableDirectory,
     receipt: &ConstructionChunkReceipt,
-) -> Result<(), GfError> {
+) -> Result<ReadWork, GfError> {
+    let mut work = ReadWork::default();
     for artifact in [&receipt.parquet, &receipt.identities, &receipt.details]
         .into_iter()
         .chain(receipt.endpoints.iter())
     {
-        authenticate_artifact(root, artifact)?;
+        let artifact_work = authenticate_artifact(root, artifact)?;
+        work.bytes = work.bytes.saturating_add(artifact_work.bytes);
+        work.operations = work.operations.saturating_add(artifact_work.operations);
     }
-    validate_parquet_shape(root, receipt)?;
-    Ok(())
+    let parquet_work = validate_parquet_shape(root, receipt)?;
+    work.bytes = work.bytes.saturating_add(parquet_work.bytes);
+    work.operations = work.operations.saturating_add(parquet_work.operations);
+    Ok(work)
 }
 
 fn validate_parquet_shape(
     root: &StableDirectory,
     receipt: &ConstructionChunkReceipt,
-) -> Result<(), GfError> {
+) -> Result<ReadWork, GfError> {
     let file = root
         .open_child_file(OsStr::new(&receipt.parquet.name))
         .map_err(storage)?;
@@ -3861,7 +3987,12 @@ fn validate_parquet_shape(
     {
         return Err(storage("Parquet identity changed during schema reopen"));
     }
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(storage)?;
+    let counter = IoCounter::default();
+    let builder = ParquetRecordBatchReaderBuilder::try_new(CountingChunkReader {
+        file,
+        counter: counter.clone(),
+    })
+    .map_err(storage)?;
     let expected_prefix = match receipt.kind {
         ConstructionChunkKind::Node => &*CONSTRUCTION_NODE_SCHEMA,
         ConstructionChunkKind::Edge => &*CONSTRUCTION_EDGE_SCHEMA,
@@ -3893,7 +4024,10 @@ fn validate_parquet_shape(
             previous = Some(value);
         }
     }
-    Ok(())
+    Ok(ReadWork {
+        bytes: counter.bytes.load(Ordering::Relaxed),
+        operations: counter.operations.load(Ordering::Relaxed),
+    })
 }
 
 fn validate_intent(intent: &ChunkIntent, checkpoint: &Checkpoint) -> Result<(), GfError> {
@@ -4462,6 +4596,20 @@ mod tests {
         .unwrap()
     }
 
+    fn distinct_label_batch(first: u128, rows: usize) -> RecordBatch {
+        let uuids = (first..first + rows as u128)
+            .map(u128::to_be_bytes)
+            .collect::<Vec<_>>();
+        let labels = (first..first + rows as u128)
+            .map(|index| format!("Label{index:08}"))
+            .collect::<Vec<_>>();
+        RecordBatch::try_new(
+            CONSTRUCTION_NODE_SCHEMA.clone(),
+            vec![Arc::new(fixed(&uuids)), Arc::new(StringArray::from(labels))],
+        )
+        .unwrap()
+    }
+
     fn edge_batch(first: u128, rows: usize) -> RecordBatch {
         let edges = (first..first + rows as u128)
             .map(u128::to_be_bytes)
@@ -4740,6 +4888,7 @@ mod tests {
             &["nodes.parquet".to_owned()],
             &[],
             42,
+            GraphConstructionBudgets::default(),
             &mut || false,
             &mut evidence,
         )
@@ -5371,11 +5520,91 @@ mod tests {
         );
         assert_eq!(session.accepted_chunks(), 1);
         assert_eq!(session.evidence().replayed_chunks, 1);
+        assert!(session.evidence().replay_validation_read_bytes > 0);
+        assert!(session.evidence().replay_validation_read_operations > 0);
         assert!(
             session
                 .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 9))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn staged_catalog_cardinality_is_bounded_at_one_and_two_windows() {
+        for windows in [1_usize, 2] {
+            let root = TempDir::new().unwrap();
+            let rows = windows * 8;
+            let expected_identifier_bytes = rows * "Label00000000".len();
+            let budgets = GraphConstructionBudgets {
+                max_batch_rows: 8,
+                max_run_records: 32,
+                max_catalog_entries: rows,
+                max_catalog_identifier_bytes: expected_identifier_bytes,
+                ..GraphConstructionBudgets::default()
+            };
+            let mut session = GraphConstructionSession::open(
+                root.path(),
+                Uuid::from_u128(8_000 + rows as u128),
+                0,
+                budgets,
+            )
+            .unwrap();
+            for window in 0..windows {
+                session
+                    .append(
+                        ConstructionChunkKind::Node,
+                        &format!("nodes-{window}"),
+                        &distinct_label_batch(1 + (window * 8) as u128, 8),
+                    )
+                    .unwrap();
+            }
+            session.seal().unwrap();
+            session.shape_canonical_with_cancellation(|| false).unwrap();
+            assert_eq!(session.evidence().peak_catalog_entries, rows as u64);
+            assert_eq!(
+                session.evidence().peak_catalog_identifier_bytes,
+                expected_identifier_bytes as u64
+            );
+            assert!(session.evidence().peak_catalog_decoded_batch_bytes > 0);
+            assert!(session.evidence().shape_input_validation_read_bytes > 0);
+        }
+    }
+
+    #[test]
+    fn staged_catalog_rejects_entry_and_identifier_overflow_before_interning() {
+        for budgets in [
+            GraphConstructionBudgets {
+                max_batch_rows: 8,
+                max_run_records: 32,
+                max_catalog_entries: 7,
+                ..GraphConstructionBudgets::default()
+            },
+            GraphConstructionBudgets {
+                max_batch_rows: 8,
+                max_run_records: 32,
+                max_catalog_identifier_bytes: 7 * "Label00000000".len(),
+                ..GraphConstructionBudgets::default()
+            },
+        ] {
+            let root = TempDir::new().unwrap();
+            let mut session =
+                GraphConstructionSession::open(root.path(), Uuid::new_v4(), 0, budgets).unwrap();
+            session
+                .append(
+                    ConstructionChunkKind::Node,
+                    "nodes",
+                    &distinct_label_batch(1, 8),
+                )
+                .unwrap();
+            session.seal().unwrap();
+            assert!(
+                session
+                    .shape_canonical_with_cancellation(|| false)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("catalog admission budget")
+            );
+        }
     }
 
     #[test]

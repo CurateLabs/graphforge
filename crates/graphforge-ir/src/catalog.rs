@@ -181,6 +181,22 @@ impl RuntimeCatalog {
         Self::default()
     }
 
+    /// Number of retained catalog entries.
+    #[must_use]
+    pub fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Exact UTF-8 bytes retained by entry names and property owners.
+    #[must_use]
+    pub fn retained_identifier_bytes(&self) -> usize {
+        self.entries.iter().fold(0_usize, |bytes, entry| {
+            bytes
+                .saturating_add(entry.name.len())
+                .saturating_add(entry.owner_label.as_ref().map_or(0, String::len))
+        })
+    }
+
     /// Interns an entity label and returns a stable [`RuntimeTypeId`].
     ///
     /// If `name` has been seen before the observation count is incremented and
@@ -284,6 +300,19 @@ impl RuntimeCatalog {
     #[must_use]
     pub fn contains_entity_type(&self, name: &str) -> bool {
         self.entity_types.contains_key(name)
+    }
+
+    /// Returns `true` if `name` has been interned as a relation type.
+    #[must_use]
+    pub fn contains_relation_type(&self, name: &str) -> bool {
+        self.relation_types.contains_key(name)
+    }
+
+    /// Returns `true` if the owner-scoped property has been interned.
+    #[must_use]
+    pub fn contains_property(&self, name: &str, owner_label: Option<&str>) -> bool {
+        self.properties
+            .contains_key(&(name.to_owned(), owner_label.map(str::to_owned)))
     }
 
     /// Returns all interned entity type names (order unspecified).
@@ -442,11 +471,23 @@ impl RuntimeCatalog {
     pub fn from_record_batches<'a>(
         batches: impl IntoIterator<Item = &'a RecordBatch>,
     ) -> Result<Self, GfError> {
+        Self::decode_record_batches_at(batches, 0, 0)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn decode_record_batches_at<'a>(
+        batches: impl IntoIterator<Item = &'a RecordBatch>,
+        initial_type_id: u32,
+        initial_prop_id: u32,
+    ) -> Result<Self, GfError> {
         let storage_err = |msg: &str| GfError::Storage(msg.to_owned());
         let mut catalog = Self::new();
-        let mut max_type_id: u32 = 0;
-        let mut max_prop_id: u32 = 0;
+        let mut next_type_id = initial_type_id;
+        let mut next_prop_id = initial_prop_id;
         for batch in batches {
+            if batch.schema().as_ref() != RUNTIME_CATALOG_SCHEMA.as_ref() {
+                return Err(storage_err("runtime_catalog schema is not canonical"));
+            }
             let kinds = batch
                 .column(0)
                 .as_any()
@@ -489,6 +530,16 @@ impl RuntimeCatalog {
                 .downcast_ref::<StringArray>()
                 .ok_or_else(|| storage_err("runtime_catalog col 6 (owner_label) not Utf8"))?;
 
+            if kinds.null_count() != 0
+                || names.null_count() != 0
+                || ids.null_count() != 0
+                || counts.null_count() != 0
+                || first_seens.null_count() != 0
+                || last_seens.null_count() != 0
+            {
+                return Err(storage_err("runtime_catalog required column contains null"));
+            }
+
             for row in 0..batch.num_rows() {
                 let kind = match kinds.value(row) {
                     "entity_type" => EntryKind::EntityType,
@@ -511,6 +562,26 @@ impl RuntimeCatalog {
                     Some(owners.value(row).to_owned())
                 };
 
+                if name.is_empty()
+                    || observation_count == 0
+                    || first_seen > last_seen
+                    || (kind == EntryKind::Property) != owner_label.is_some()
+                {
+                    return Err(storage_err("runtime_catalog row is not canonical"));
+                }
+                let expected_id = match kind {
+                    EntryKind::EntityType | EntryKind::RelationType => &mut next_type_id,
+                    EntryKind::Property => &mut next_prop_id,
+                };
+                if runtime_id != *expected_id {
+                    return Err(storage_err(
+                        "runtime_catalog IDs are not unique and contiguous in insertion order",
+                    ));
+                }
+                *expected_id = expected_id.checked_add(1).ok_or_else(|| {
+                    storage_err("runtime_catalog persisted ID exceeds supported range")
+                })?;
+
                 let idx = catalog.entries.len();
                 catalog.entries.push(CatalogEntry {
                     kind,
@@ -529,7 +600,6 @@ impl RuntimeCatalog {
                                 "runtime_catalog contains duplicate entity type",
                             ));
                         }
-                        max_type_id = max_type_id.max(runtime_id + 1);
                     }
                     EntryKind::RelationType => {
                         if catalog.relation_types.insert(name, idx).is_some() {
@@ -537,7 +607,6 @@ impl RuntimeCatalog {
                                 "runtime_catalog contains duplicate relation type",
                             ));
                         }
-                        max_type_id = max_type_id.max(runtime_id + 1);
                     }
                     EntryKind::Property => {
                         if catalog
@@ -547,14 +616,13 @@ impl RuntimeCatalog {
                         {
                             return Err(storage_err("runtime_catalog contains duplicate property"));
                         }
-                        max_prop_id = max_prop_id.max(runtime_id + 1);
                     }
                 }
             }
         }
 
-        catalog.next_type_id = max_type_id;
-        catalog.next_prop_id = max_prop_id;
+        catalog.next_type_id = next_type_id;
+        catalog.next_prop_id = next_prop_id;
         Ok(catalog)
     }
 
@@ -562,7 +630,13 @@ impl RuntimeCatalog {
     /// observations. The caller may therefore decode a Parquet catalog in
     /// bounded windows rather than concatenating it in memory.
     pub fn extend_from_record_batch(&mut self, batch: &RecordBatch) -> Result<(), GfError> {
-        let incoming = Self::from_record_batch(batch)?;
+        let incoming = Self::decode_record_batches_at(
+            std::iter::once(batch),
+            self.next_type_id,
+            self.next_prop_id,
+        )?;
+        let mut expected_type_id = self.next_type_id;
+        let mut expected_prop_id = self.next_prop_id;
         for entry in &incoming.entries {
             let duplicate = match entry.kind {
                 EntryKind::EntityType => self.entity_types.contains_key(&entry.name),
@@ -576,7 +650,16 @@ impl RuntimeCatalog {
                     "runtime_catalog contains a duplicate persisted entry".to_owned(),
                 ));
             }
-            entry.runtime_id.checked_add(1).ok_or_else(|| {
+            let expected = match entry.kind {
+                EntryKind::EntityType | EntryKind::RelationType => &mut expected_type_id,
+                EntryKind::Property => &mut expected_prop_id,
+            };
+            if entry.runtime_id != *expected {
+                return Err(GfError::Storage(
+                    "runtime_catalog persisted IDs do not continue prior authority".to_owned(),
+                ));
+            }
+            *expected = expected.checked_add(1).ok_or_else(|| {
                 GfError::Storage("runtime_catalog persisted ID overflow".to_owned())
             })?;
         }
@@ -585,16 +668,28 @@ impl RuntimeCatalog {
             match entry.kind {
                 EntryKind::EntityType => {
                     self.entity_types.insert(entry.name.clone(), idx);
-                    self.next_type_id = self.next_type_id.max(entry.runtime_id + 1);
+                    self.next_type_id =
+                        self.next_type_id
+                            .max(entry.runtime_id.checked_add(1).ok_or_else(|| {
+                                GfError::Storage("runtime_catalog persisted ID overflow".to_owned())
+                            })?);
                 }
                 EntryKind::RelationType => {
                     self.relation_types.insert(entry.name.clone(), idx);
-                    self.next_type_id = self.next_type_id.max(entry.runtime_id + 1);
+                    self.next_type_id =
+                        self.next_type_id
+                            .max(entry.runtime_id.checked_add(1).ok_or_else(|| {
+                                GfError::Storage("runtime_catalog persisted ID overflow".to_owned())
+                            })?);
                 }
                 EntryKind::Property => {
                     let key = (entry.name.clone(), entry.owner_label.clone());
                     self.properties.insert(key, idx);
-                    self.next_prop_id = self.next_prop_id.max(entry.runtime_id + 1);
+                    self.next_prop_id =
+                        self.next_prop_id
+                            .max(entry.runtime_id.checked_add(1).ok_or_else(|| {
+                                GfError::Storage("runtime_catalog persisted ID overflow".to_owned())
+                            })?);
                 }
             }
             self.entries.push(entry);
@@ -851,5 +946,29 @@ mod tests {
             matches!(result, Err(GfError::Storage(_))),
             "expected Storage error for unknown entry_kind"
         );
+    }
+
+    #[test]
+    fn persisted_catalog_rejects_noncanonical_schema_without_panicking() {
+        let mut cat = RuntimeCatalog::new();
+        cat.intern_label("X");
+        let good = cat.to_record_batch();
+        let shortened = RecordBatch::try_new(
+            Arc::new(Schema::new(RUNTIME_CATALOG_SCHEMA.fields()[..6].to_vec())),
+            good.columns()[..6].to_vec(),
+        )
+        .unwrap();
+        assert!(RuntimeCatalog::from_record_batch(&shortened).is_err());
+    }
+
+    #[test]
+    fn persisted_catalog_rejects_maximum_id_before_overflow() {
+        let mut cat = RuntimeCatalog::new();
+        cat.intern_label("X");
+        let good = cat.to_record_batch();
+        let mut columns = good.columns().to_vec();
+        columns[2] = Arc::new(UInt32Array::from(vec![u32::MAX]));
+        let malformed = RecordBatch::try_new(RUNTIME_CATALOG_SCHEMA.clone(), columns).unwrap();
+        assert!(RuntimeCatalog::from_record_batch(&malformed).is_err());
     }
 }
