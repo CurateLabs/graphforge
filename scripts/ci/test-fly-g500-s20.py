@@ -87,6 +87,7 @@ def qualification(digest: str, *, growth: float = 1.1, disk_gib: int = 20) -> di
         "schema": "graphforge-fly-s20-qualification/1",
         "region": "dfw",
         "image_digest": digest,
+        "qualification_observed_cost_usd": 0.2,
         "max_phase_rss_growth_ratio": 1.2,
         "machine_candidates": [
             {"name": "performance-2x", "cpus": 2, "memory_mb": 4096},
@@ -134,6 +135,18 @@ def main() -> None:
         assert parsed == {"compute_per_hour_usd": 0.1076, "volume_gb_month_usd": 0.15}
         cost = controller.cost_plan(parsed, 10.0, 1.0, 25)
         assert cost["projected_max_usd"] < 10.0
+        cumulative = controller.cost_plan(parsed, 10.0, 1.0, 25, 0.2)
+        assert cumulative["qualification_observed_usd"] == 0.2
+        assert (
+            abs(cumulative["projected_max_usd"] - cost["projected_max_usd"] - 0.2)
+            < 1e-9
+        )
+        try:
+            controller.cost_plan(parsed, 10.0, 1.0, 25, 9.0)
+        except controller.ControllerError:
+            pass
+        else:
+            raise AssertionError("qualification and S20 must share one cost ceiling")
         try:
             controller.cost_plan(
                 {"compute_per_hour_usd": 3.0, "volume_gb_month_usd": 1.0}, 10.0, 1.0, 25

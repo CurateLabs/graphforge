@@ -7,6 +7,7 @@ import argparse
 from collections.abc import Sequence
 from datetime import datetime, timezone
 import json
+import math
 from pathlib import Path
 import re
 import subprocess
@@ -226,17 +227,24 @@ def parse_live_rates(
 
 
 def cost_plan(
-    rates: dict[str, float], ceiling: float, reserve: float, volume_gb: int
+    rates: dict[str, float],
+    ceiling: float,
+    reserve: float,
+    volume_gb: int,
+    qualification_cost_usd: float = 0.0,
 ) -> dict[str, float]:
+    if not math.isfinite(qualification_cost_usd) or qualification_cost_usd < 0:
+        raise ControllerError("qualification cost must be finite and nonnegative")
     billed_hours = (HARD_TTL_S + CLEANUP_TTL_S) / 3600
     compute = rates["compute_per_hour_usd"] * billed_hours
     volume = rates["volume_gb_month_usd"] * volume_gb * billed_hours / (30 * 24)
-    projected = compute + volume + reserve
+    projected = qualification_cost_usd + compute + volume + reserve
     if projected > ceiling:
         raise ControllerError(f"projected maximum ${projected:.4f} exceeds ${ceiling:.2f} ceiling")
     return {
         "compute_usd": compute,
         "volume_usd": volume,
+        "qualification_observed_usd": qualification_cost_usd,
         "unpriced_reserve_usd": reserve,
         "projected_max_usd": projected,
         "ceiling_usd": ceiling,
@@ -250,6 +258,12 @@ def load_qualification(path: Path, digest: str, region: str) -> dict[str, Any]:
         raise ControllerError("qualification evidence has an unexpected schema")
     if value.get("region") != region or value.get("image_digest") != digest:
         raise ControllerError("qualification region/image differs from the planned run")
+    qualification_cost = value.get("qualification_observed_cost_usd")
+    if (
+        type(qualification_cost) not in (int, float)
+        or not 0 <= qualification_cost < 10.0
+    ):
+        raise ControllerError("qualification lacks bounded observed cost")
     rungs = value.get("rungs")
     candidates = value.get("machine_candidates")
     if not isinstance(rungs, list) or len(rungs) < 2 or not isinstance(candidates, list):
@@ -461,6 +475,7 @@ def load_qualification(path: Path, digest: str, region: str) -> dict[str, Any]:
         "rung_scales": scales,
         "max_phase_rss_growth_ratio": float(plateau_ratio),
         "construction_io_gate": "pass",
+        "qualification_observed_cost_usd": float(qualification_cost),
     }
 
 
@@ -1129,7 +1144,11 @@ def main() -> int:
             resources["memory_mb"],
         )
         costs = cost_plan(
-            rates, args.ceiling_usd, args.unpriced_reserve_usd, resources["volume_gb"]
+            rates,
+            args.ceiling_usd,
+            args.unpriced_reserve_usd,
+            resources["volume_gb"],
+            resources["qualification_observed_cost_usd"],
         )
         plan = {
             "mode": "execute" if args.execute else "dry-run",
