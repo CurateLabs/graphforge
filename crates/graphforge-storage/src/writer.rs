@@ -2256,7 +2256,7 @@ impl GraphWriter {
         let committed = crate::uuid_membership::commit_uuid_topology_rewrite(
             &self.dir,
             staged,
-            crate::uuid_membership::UuidTopologyDelta {
+            &crate::uuid_membership::UuidTopologyDelta {
                 nodes: self.pending_index_nodes.clone(),
                 edges: self.pending_index_edges.clone(),
                 deleted_nodes,
@@ -5945,6 +5945,45 @@ mod tests {
         assert!(
             !read_node_props(dir.path(), "_untyped").contains_key(&to_bytes(&a)),
             "deleted node's props gone"
+        );
+    }
+
+    #[test]
+    fn committed_snapshot_refresh_failure_never_restages_rows() {
+        let dir = TempDir::new().unwrap();
+        let node = new_v7();
+        let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
+        writer.create_node(node, TypeId(0)).unwrap();
+        crate::uuid_membership::fail_next_snapshot_refresh_for_test();
+
+        let error = writer.flush().unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("committed but UUID index snapshot refresh failed")
+        );
+        assert!(writer.pending_index_nodes.is_empty());
+        assert!(writer.nodes.is_empty());
+        let committed_generation = crate::read_topology_generation(dir.path()).unwrap();
+        assert_eq!(committed_generation, 1);
+        assert!(
+            dir.path()
+                .join(".graphforge-cache/uuid-membership/topology-receipt.json")
+                .is_file()
+        );
+
+        writer.flush().unwrap();
+        assert_eq!(
+            crate::read_topology_generation(dir.path()).unwrap(),
+            committed_generation
+        );
+        let batches = crate::catalog::read_nodes(dir.path()).unwrap();
+        assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 1);
+        let mut index = crate::UuidMembershipIndex::open(dir.path()).unwrap();
+        assert_eq!(index.count(crate::UuidIndexKind::Node), 1);
+        assert_eq!(
+            index.probe(crate::UuidIndexKind::Node, &[node]).unwrap().0,
+            [true]
         );
     }
 

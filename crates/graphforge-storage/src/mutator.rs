@@ -528,7 +528,7 @@ pub fn delete_nodes<S: BuildHasher>(
         committed_uuid_generation(crate::uuid_membership::commit_uuid_topology_rewrite(
             dir,
             staged,
-            crate::uuid_membership::UuidTopologyDelta {
+            &crate::uuid_membership::UuidTopologyDelta {
                 nodes: Vec::new(),
                 edges: Vec::new(),
                 deleted_nodes: if removed == 0 {
@@ -567,7 +567,7 @@ pub fn delete_edges<S: BuildHasher>(
         committed_uuid_generation(crate::uuid_membership::commit_uuid_topology_rewrite(
             dir,
             staged,
-            crate::uuid_membership::UuidTopologyDelta {
+            &crate::uuid_membership::UuidTopologyDelta {
                 nodes: Vec::new(),
                 edges: Vec::new(),
                 deleted_nodes: Vec::new(),
@@ -612,7 +612,7 @@ pub fn delete_nodes_and_edges<S: BuildHasher>(
         committed_uuid_generation(crate::uuid_membership::commit_uuid_topology_rewrite(
             dir,
             staged,
-            crate::uuid_membership::UuidTopologyDelta {
+            &crate::uuid_membership::UuidTopologyDelta {
                 nodes: Vec::new(),
                 edges: Vec::new(),
                 deleted_nodes: if nodes_removed == 0 {

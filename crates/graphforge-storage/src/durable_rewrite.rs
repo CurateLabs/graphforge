@@ -5,6 +5,7 @@
 //! final authority switch.  Journal paths are bounded, canonical relative
 //! paths and every recovery input is authenticated before it is used.
 
+use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{Read, Seek, Write};
 use std::path::{Component, Path};
@@ -186,7 +187,13 @@ fn storage(error: impl std::fmt::Display) -> GfError {
     GfError::Storage(error.to_string())
 }
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    bytes.iter().fold(
+        String::with_capacity(bytes.len().saturating_mul(2)),
+        |mut output, byte| {
+            write!(output, "{byte:02x}").expect("writing to String cannot fail");
+            output
+        },
+    )
 }
 
 fn canonical_relative(root: &Path, path: &Path) -> Result<String, GfError> {
@@ -217,7 +224,7 @@ fn hash_reader(mut file: File) -> Result<(u64, String), GfError> {
     file.rewind().map_err(storage)?;
     let mut hash = Sha256::new();
     let mut bytes = 0_u64;
-    let mut buffer = [0_u8; 1024 * 1024];
+    let mut buffer = vec![0_u8; 1024 * 1024].into_boxed_slice();
     loop {
         let count = file.read(&mut buffer).map_err(storage)?;
         if count == 0 {
@@ -347,7 +354,7 @@ fn publish_journal(root: &StableDirectory, intent: &Intent) -> Result<(), GfErro
         .create_replaceable_child_file(std::ffi::OsStr::new(&name))
         .map_err(storage)?;
     temp.write_all(&bytes)
-        .and_then(|_| temp.sync_all())
+        .and_then(|()| temp.sync_all())
         .map_err(storage)?;
     let expected = graphforge_filesystem::file_identity(&temp).map_err(storage)?;
     root.replace_child(
@@ -368,18 +375,18 @@ fn install(root_path: &Path, root: &StableDirectory, entry: &Entry) -> Result<()
     {
         return Err(storage("rewrite parent identity changed"));
     }
-    if let Ok(destination) = parent.open_child_file(&target) {
-        if hash_reader(destination)? == (entry.bytes, entry.sha256.clone()) {
-            if let Ok(temp) = parent.open_child_file(&temporary) {
-                let id = graphforge_filesystem::file_identity(&temp).map_err(storage)?;
-                drop(temp);
-                parent
-                    .unlink_child_if_identity(&temporary, id)
-                    .map_err(storage)?;
-                parent.sync().map_err(storage)?;
-            }
-            return Ok(());
+    if let Ok(destination) = parent.open_child_file(&target)
+        && hash_reader(destination)? == (entry.bytes, entry.sha256.clone())
+    {
+        if let Ok(temp) = parent.open_child_file(&temporary) {
+            let id = graphforge_filesystem::file_identity(&temp).map_err(storage)?;
+            drop(temp);
+            parent
+                .unlink_child_if_identity(&temporary, id)
+                .map_err(storage)?;
+            parent.sync().map_err(storage)?;
         }
+        return Ok(());
     }
     let temp = parent.open_child_file(&temporary).map_err(storage)?;
     let temp_id = graphforge_filesystem::file_identity(&temp).map_err(storage)?;
@@ -452,7 +459,9 @@ fn read_journal(root: &StableDirectory) -> Result<Option<(Vec<u8>, FileIdentity)
     if metadata.len() > MAX_JOURNAL_BYTES {
         return Err(storage("rewrite journal exceeds bound"));
     }
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    let capacity = usize::try_from(metadata.len())
+        .map_err(|_| storage("rewrite journal length does not fit address space"))?;
+    let mut bytes = Vec::with_capacity(capacity);
     file.take(MAX_JOURNAL_BYTES + 1)
         .read_to_end(&mut bytes)
         .map_err(storage)?;
@@ -714,6 +723,7 @@ pub(crate) fn commit(
     commit_with_participant(batch, root, bump_topology, bump_search, auxiliary, None)
 }
 
+#[allow(clippy::too_many_lines)] // Linear crash-barrier state machine; splitting obscures order.
 pub(crate) fn commit_with_participant(
     mut batch: RewriteBatch,
     root: &Path,
@@ -821,7 +831,7 @@ pub(crate) fn commit_with_participant(
         .map_err(storage)?;
     generation
         .write_all(&generation_bytes)
-        .and_then(|_| generation.as_file().sync_all())
+        .and_then(|()| generation.as_file().sync_all())
         .map_err(storage)?;
     staged.push((generation, generation_path));
     if staged.len() > MAX_ENTRIES {
@@ -829,7 +839,7 @@ pub(crate) fn commit_with_participant(
     }
     let last = staged.len().saturating_sub(1);
     for (ordinal, (temp, destination)) in staged.iter().enumerate() {
-        let relative = canonical_relative(root, &destination)?;
+        let relative = canonical_relative(root, destination)?;
         let parent = destination
             .parent()
             .ok_or_else(|| storage("rewrite destination has no parent"))?;
