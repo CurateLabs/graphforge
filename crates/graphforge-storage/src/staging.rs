@@ -136,6 +136,29 @@ impl RewriteBatch {
         Ok(())
     }
 
+    /// Stage an existing file into this transaction using bounded block I/O.
+    pub(crate) fn stage_file(&mut self, final_path: &Path, source: &Path) -> Result<(), GfError> {
+        let parent = final_path
+            .parent()
+            .ok_or_else(|| GfError::Storage("staged file has no parent".into()))?;
+        std::fs::create_dir_all(parent).map_err(|error| io_err(&error))?;
+        let mut input = std::fs::File::open(source).map_err(|error| io_err(&error))?;
+        let mut temp = NamedTempFile::new_in(parent).map_err(|error| io_err(&error))?;
+        let mut block = vec![0_u8; 1024 * 1024];
+        loop {
+            let count =
+                std::io::Read::read(&mut input, &mut block).map_err(|error| io_err(&error))?;
+            if count == 0 {
+                break;
+            }
+            std::io::Write::write_all(&mut temp, &block[..count])
+                .map_err(|error| io_err(&error))?;
+        }
+        temp.as_file().sync_all().map_err(|error| io_err(&error))?;
+        self.staged.push((temp, final_path.to_path_buf()));
+        Ok(())
+    }
+
     /// Stage `batch` as the replacement content for `final_path`.
     ///
     /// Writes a sibling temp file (creating the parent directory if needed);
