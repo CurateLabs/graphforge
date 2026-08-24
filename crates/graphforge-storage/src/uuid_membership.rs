@@ -584,6 +584,7 @@ pub struct AuthenticatedUuidIndexSnapshot {
     authenticated_blocks: u64,
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ConstructionUuidIdentity {
     pub uuid: Uuid,
@@ -602,6 +603,7 @@ pub(crate) struct UuidConstructionSnapshotWork {
 
 /// Retained authority for a UUID snapshot authenticated exactly once while its
 /// live identities were emitted as one bounded sorted stream.
+#[cfg(test)]
 pub(crate) struct UuidConstructionSnapshot {
     root: graphforge_filesystem::StableDirectory,
     root_identity: graphforge_filesystem::FileIdentity,
@@ -614,16 +616,8 @@ pub(crate) struct UuidConstructionSnapshot {
     payload_consumed: bool,
 }
 
+#[cfg(test)]
 impl UuidConstructionSnapshot {
-    pub(crate) fn declared_work(&self, max_node_surrogate: u64) -> UuidConstructionSnapshotWork {
-        UuidConstructionSnapshotWork {
-            live_nodes: self.manifest.live_node_count,
-            live_edges: self.manifest.live_edge_count,
-            max_node_surrogate,
-            ..Default::default()
-        }
-    }
-
     pub(crate) fn revalidate(&self) -> Result<(), GfError> {
         self.root.revalidate_named().map_err(storage_err)?;
         if self.root.identity() != self.root_identity
@@ -778,6 +772,7 @@ impl UuidConstructionSnapshot {
     }
 }
 
+#[cfg(test)]
 struct ConstructionRunCursor {
     file: File,
     descriptor: FileRecord,
@@ -792,6 +787,7 @@ struct ConstructionRunCursor {
     finished: bool,
 }
 
+#[cfg(test)]
 impl ConstructionRunCursor {
     fn new(file: File, descriptor: FileRecord, width: usize) -> Self {
         Self {
@@ -878,6 +874,7 @@ pub(crate) fn open_uuid_construction_snapshot(
 /// Pin the generation's manifest and every run inode without reading retained
 /// payload bytes.  The caller later consumes those bytes exactly once through
 /// [`UuidConstructionSnapshot::stream_authenticated`].
+#[cfg(test)]
 pub(crate) fn pin_uuid_construction_snapshot(
     project_dir: &Path,
     generation: u64,
@@ -995,14 +992,25 @@ impl AuthenticatedUuidIndexSnapshot {
     pub(crate) fn topology_generation(&self) -> u64 {
         self.manifest.current_generation
     }
-    fn take_authentication_work(&mut self) -> (u64, u64) {
+
+    pub(crate) fn count(&self, kind: UuidIndexKind) -> u64 {
+        match kind {
+            UuidIndexKind::Node => self.manifest.live_node_count,
+            UuidIndexKind::Edge => self.manifest.live_edge_count,
+        }
+    }
+
+    pub(crate) fn manifest_sha256(&self) -> &str {
+        &self.manifest_sha256
+    }
+    pub(crate) fn take_authentication_work(&mut self) -> (u64, u64) {
         (
             std::mem::take(&mut self.authenticated_bytes),
             std::mem::take(&mut self.authenticated_blocks),
         )
     }
 
-    fn revalidate(&self) -> Result<(), GfError> {
+    pub(crate) fn revalidate(&self) -> Result<(), GfError> {
         self.root.revalidate_named().map_err(storage_err)?;
         if self.root.identity() != self.root_identity {
             return Err(storage_err("UUID index root identity changed"));

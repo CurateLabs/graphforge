@@ -32,12 +32,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::uuid_membership::{
-    ConstructionUuidIdentity, UuidConstructionSnapshot, UuidConstructionSnapshotWork,
-    pin_uuid_construction_snapshot,
-};
+use crate::UuidIndexKind;
+use crate::uuid_membership::{AuthenticatedUuidIndexSnapshot, UuidConstructionSnapshotWork};
 
-const FORMAT_VERSION: u32 = 4;
+const FORMAT_VERSION: u32 = 5;
 const PRIVATE_ROOT: &str = ".graphforge-construction";
 const CHECKPOINT: &str = "checkpoint.json";
 const INTENT: &str = "intent.json";
@@ -106,6 +104,10 @@ pub struct GraphConstructionBudgets {
     pub max_run_records: usize,
     /// Maximum inputs opened by one external merge group.
     pub merge_fan_in: usize,
+    /// Maximum exact Arrow schema groups accepted by one session. Construction
+    /// deliberately requires one stable schema per entity kind, so this may be
+    /// one (single-kind sessions) or two (nodes plus edges).
+    pub max_schema_groups: usize,
 }
 
 impl Default for GraphConstructionBudgets {
@@ -116,6 +118,7 @@ impl Default for GraphConstructionBudgets {
             max_chunks: 1_000_000,
             max_run_records: 4 * 65_536,
             merge_fan_in: 32,
+            max_schema_groups: 2,
         }
     }
 }
@@ -127,6 +130,7 @@ impl GraphConstructionBudgets {
             || self.max_chunks == 0
             || self.max_run_records < 4 * self.max_batch_rows
             || self.merge_fan_in < 2
+            || !(1..=2).contains(&self.max_schema_groups)
         {
             return Err(storage("invalid construction budgets"));
         }
@@ -192,9 +196,11 @@ pub struct GraphConstructionEvidence {
     pub merge_read_bytes: u64,
     /// Exact fixed-width payload bytes written during shaping.
     pub merge_written_bytes: u64,
-    /// Bounded reader refills implied by the fixed one-MiB I/O window.
+    /// Logical lower bound on bounded reader refills implied by payload bytes
+    /// and the fixed one-MiB window; this is not an observed syscall count.
     pub merge_read_blocks: u64,
-    /// Bounded writer flushes implied by the fixed one-MiB I/O window.
+    /// Logical lower bound on bounded writer flushes implied by payload bytes
+    /// and the fixed one-MiB window; this is not an observed syscall count.
     pub merge_write_blocks: u64,
     /// Number of completed merge levels across shaped domains.
     pub merge_passes: u64,
@@ -222,6 +228,11 @@ pub struct GraphConstructionEvidence {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 /// Publisher input produced from a sealed construction session.
 pub struct ConstructionShape {
+    /// Parent generation retained by the publisher; zero denotes an empty base.
+    pub parent_topology_generation: u64,
+    /// Authenticated parent UUID-manifest authority. The shaped identities file
+    /// contains only this session's delta and never copies the parent payload.
+    pub parent_uuid_manifest_sha256: Option<String>,
     /// UUID-sorted node/edge identity records with assigned surrogates.
     pub identities: String,
     /// UUID-sorted node type records, when nodes were staged.
@@ -329,6 +340,8 @@ struct Checkpoint {
     last_receipt_sha256: Option<String>,
     has_base_snapshot: bool,
     parent_catalog_sha256: Option<String>,
+    node_schema_sha256: Option<String>,
+    edge_schema_sha256: Option<String>,
     base_work: UuidConstructionSnapshotWork,
     evidence: GraphConstructionEvidence,
 }
@@ -366,6 +379,8 @@ struct ShapeIntent {
     parent_topology_generation: u64,
     budgets: GraphConstructionBudgets,
     last_receipt_sha256: Option<String>,
+    baseline_evidence: GraphConstructionEvidence,
+    final_evidence: Option<GraphConstructionEvidence>,
     complete: bool,
     shape: Option<ConstructionShape>,
     outputs: Vec<ArtifactReceipt>,
@@ -404,13 +419,14 @@ pub struct GraphConstructionSession {
     project: StableDirectory,
     root: StableDirectory,
     checkpoint: Checkpoint,
-    base_snapshot: Option<UuidConstructionSnapshot>,
+    base_snapshot: Option<AuthenticatedUuidIndexSnapshot>,
     parent_catalog: RuntimeCatalog,
     _reservation: ProcessReservation,
 }
 
 impl GraphConstructionSession {
     /// Create or resume an operation pinned to one parent topology generation.
+    #[allow(clippy::too_many_lines)]
     pub fn open(
         project_dir: &Path,
         operation_uuid: Uuid,
@@ -455,11 +471,21 @@ impl GraphConstructionSession {
         let (base_snapshot, base_work) = if parent_topology_generation == 0 {
             (None, UuidConstructionSnapshotWork::default())
         } else {
-            let snapshot = pin_uuid_construction_snapshot(project_dir, parent_topology_generation)?;
+            let mut snapshot = AuthenticatedUuidIndexSnapshot::open_at_generation(
+                project_dir,
+                parent_topology_generation,
+            )?;
             let max_node_surrogate = crate::writer::read_surrogate_tails(project_dir)?
                 .ok_or_else(|| storage("nonempty parent lacks surrogate tails"))?
                 .0;
-            let work = snapshot.declared_work(max_node_surrogate);
+            let (authentication_bytes, authentication_blocks) = snapshot.take_authentication_work();
+            let work = UuidConstructionSnapshotWork {
+                authentication_bytes,
+                authentication_blocks,
+                live_nodes: snapshot.count(UuidIndexKind::Node),
+                live_edges: snapshot.count(UuidIndexKind::Edge),
+                max_node_surrogate,
+            };
             (Some(snapshot), work)
         };
         let (parent_catalog, parent_catalog_sha256) =
@@ -467,9 +493,11 @@ impl GraphConstructionSession {
         let checkpoint = match root.open_child_file(OsStr::new(CHECKPOINT)) {
             Ok(mut file) => decode_bounded(&mut file)?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let mut evidence = GraphConstructionEvidence::default();
-                evidence.authentication_read_bytes = base_work.authentication_bytes;
-                evidence.authentication_read_operations = base_work.authentication_blocks;
+                let evidence = GraphConstructionEvidence {
+                    authentication_read_bytes: base_work.authentication_bytes,
+                    authentication_read_operations: base_work.authentication_blocks,
+                    ..GraphConstructionEvidence::default()
+                };
                 let initial = Checkpoint {
                     format_version: FORMAT_VERSION,
                     operation_uuid,
@@ -489,6 +517,8 @@ impl GraphConstructionSession {
                     last_receipt_sha256: None,
                     has_base_snapshot: parent_topology_generation != 0,
                     parent_catalog_sha256: parent_catalog_sha256.clone(),
+                    node_schema_sha256: None,
+                    edge_schema_sha256: None,
                     base_work,
                     evidence,
                 };
@@ -515,7 +545,7 @@ impl GraphConstructionSession {
             parent_catalog,
             _reservation: reservation,
         };
-        recover_shape_intent(&session.root, &session.checkpoint)?;
+        recover_shape_intent(&session.root, &mut session.checkpoint)?;
         session.recover_intent()?;
         session.revalidate_authority()?;
         Ok(session)
@@ -565,6 +595,7 @@ impl GraphConstructionSession {
     /// Append while polling a caller-owned cancellation signal at durable
     /// artifact boundaries. Cancellation leaves an intent that the next open
     /// authenticates and rolls back without changing public authority.
+    #[allow(clippy::too_many_lines)]
     pub fn append_with_cancellation(
         &mut self,
         kind: ConstructionChunkKind,
@@ -594,7 +625,7 @@ impl GraphConstructionSession {
             return Err(storage("node chunk cannot follow edge staging"));
         }
         let input_sha256 = logical_batch_digest(kind, batch)?;
-        let schema_sha256 = normalized_schema_digest(batch.schema().as_ref())?;
+        let schema_sha256 = normalized_schema_digest(batch.schema().as_ref());
         let key_name = chunk_key_name(chunk_id);
         if let Ok(mut key_file) = self.root.open_child_file(OsStr::new(&key_name)) {
             let pointer: ReceiptPointer = decode_bounded(&mut key_file)?;
@@ -617,6 +648,27 @@ impl GraphConstructionSession {
                 return Ok(receipt);
             }
             return Err(storage("conflicting construction chunk replay"));
+        }
+        let (known_schema, other_schema) = match kind {
+            ConstructionChunkKind::Node => (
+                self.checkpoint.node_schema_sha256.as_ref(),
+                self.checkpoint.edge_schema_sha256.as_ref(),
+            ),
+            ConstructionChunkKind::Edge => (
+                self.checkpoint.edge_schema_sha256.as_ref(),
+                self.checkpoint.node_schema_sha256.as_ref(),
+            ),
+        };
+        if known_schema.is_some_and(|known| known != &schema_sha256) {
+            return Err(storage(
+                "construction requires one stable Arrow schema per entity kind",
+            ));
+        }
+        if known_schema.is_none()
+            && usize::from(other_schema.is_some()).saturating_add(1)
+                > self.checkpoint.budgets.max_schema_groups
+        {
+            return Err(storage("construction schema-group budget exhausted"));
         }
         let arrays = extract_runs(kind, batch)?;
         let run_records = arrays
@@ -807,6 +859,8 @@ impl GraphConstructionSession {
             parent_topology_generation: self.checkpoint.parent_topology_generation,
             budgets: self.checkpoint.budgets,
             last_receipt_sha256: self.checkpoint.last_receipt_sha256.clone(),
+            baseline_evidence: self.checkpoint.evidence.clone(),
+            final_evidence: None,
             complete: false,
             shape: None,
             outputs: Vec::new(),
@@ -911,34 +965,8 @@ impl GraphConstructionSession {
             &mut cancelled,
             &mut self.checkpoint.evidence,
         )?;
-        let identities = if let Some(base) = self.base_snapshot.as_mut() {
-            let (name, work) = merge_staged_with_base(
-                &self.root,
-                staged_identities.as_deref(),
-                base,
-                &mut cancelled,
-                &mut self.checkpoint.evidence,
-            )?;
-            if work.live_nodes != self.checkpoint.base_work.live_nodes
-                || work.live_edges != self.checkpoint.base_work.live_edges
-                || work.max_node_surrogate != self.checkpoint.base_work.max_node_surrogate
-            {
-                return Err(storage("pinned base UUID work differs from checkpoint"));
-            }
-            self.checkpoint.evidence.authentication_read_bytes = self
-                .checkpoint
-                .evidence
-                .authentication_read_bytes
-                .saturating_add(work.authentication_bytes);
-            self.checkpoint.evidence.authentication_read_operations = self
-                .checkpoint
-                .evidence
-                .authentication_read_operations
-                .saturating_add(work.authentication_blocks);
-            name
-        } else {
-            staged_identities.ok_or_else(|| storage("construction contains no identities"))?
-        };
+        let staged_identities =
+            staged_identities.ok_or_else(|| storage("construction contains no identities"))?;
         let node_details = node_details.finish_optional::<NODE_DETAIL_WIDTH>(
             &self.root,
             &mut cancelled,
@@ -965,21 +993,26 @@ impl GraphConstructionSession {
         if base_max_node != self.checkpoint.base_work.max_node_surrogate {
             return Err(storage("UUID snapshot and surrogate tails disagree"));
         }
-        let (node_count, edge_count, max_node_surrogate, max_edge_surrogate) =
-            validate_unified_and_details(
+        let (new_nodes, new_edges) = validate_staged_details(
+            &self.root,
+            &staged_identities,
+            node_details.as_deref(),
+            edge_details.as_deref(),
+            &mut cancelled,
+            &mut self.checkpoint.evidence,
+        )?;
+        if let Some(base) = self.base_snapshot.as_mut() {
+            reject_staged_base_conflicts(
                 &self.root,
-                &identities,
-                node_details.as_deref(),
-                edge_details.as_deref(),
-                endpoints.as_deref(),
-                base_max_node,
-                base_max_edge,
+                &staged_identities,
+                base,
+                self.checkpoint.budgets.max_batch_rows,
                 &mut cancelled,
-                &mut self.checkpoint.evidence,
             )?;
+        }
         let identities = assign_surrogates(
             &self.root,
-            &identities,
+            &staged_identities,
             base_max_node,
             base_max_edge,
             &mut cancelled,
@@ -989,11 +1022,28 @@ impl GraphConstructionSession {
             &self.root,
             &identities,
             endpoints.as_deref(),
+            self.base_snapshot.as_mut(),
             self.checkpoint.budgets.max_batch_rows,
             self.checkpoint.budgets.merge_fan_in,
             &mut cancelled,
             &mut self.checkpoint.evidence,
         )?;
+        let node_count = self
+            .checkpoint
+            .base_work
+            .live_nodes
+            .saturating_add(new_nodes);
+        let edge_count = self
+            .checkpoint
+            .base_work
+            .live_edges
+            .saturating_add(new_edges);
+        let max_node_surrogate = base_max_node
+            .checked_add(new_nodes)
+            .ok_or_else(|| storage("node surrogate overflow"))?;
+        let max_edge_surrogate = base_max_edge
+            .checked_add(new_edges)
+            .ok_or_else(|| storage("edge surrogate overflow"))?;
         let mut node_rows = Vec::new();
         let mut edge_rows = Vec::new();
         for ((kind, schema_digest), rows) in row_groups {
@@ -1029,6 +1079,11 @@ impl GraphConstructionSession {
             .peak_merge_temporary_bytes
             .max(measured_shape_bytes(&self.root)?);
         let shape = ConstructionShape {
+            parent_topology_generation: self.checkpoint.parent_topology_generation,
+            parent_uuid_manifest_sha256: self
+                .base_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.manifest_sha256().to_owned()),
             identities,
             node_details,
             edge_details,
@@ -1055,7 +1110,6 @@ impl GraphConstructionSession {
         {
             outputs.push(receipt_for_existing(&self.root, name)?);
         }
-        replace_control(&self.root, CHECKPOINT, &self.checkpoint)?;
         replace_control(
             &self.root,
             SHAPE_INTENT,
@@ -1067,11 +1121,16 @@ impl GraphConstructionSession {
                 parent_topology_generation: self.checkpoint.parent_topology_generation,
                 budgets: self.checkpoint.budgets,
                 last_receipt_sha256: self.checkpoint.last_receipt_sha256.clone(),
+                baseline_evidence: shape_intent.baseline_evidence,
+                final_evidence: Some(self.checkpoint.evidence.clone()),
                 complete: true,
                 shape: Some(shape.clone()),
                 outputs,
             },
         )?;
+        construction_failpoint("shape.after_complete_inventory");
+        replace_control(&self.root, CHECKPOINT, &self.checkpoint)?;
+        construction_failpoint("shape.after_evidence_checkpoint");
         Ok(shape)
     }
 
@@ -1086,6 +1145,7 @@ impl GraphConstructionSession {
         replace_control(&self.root, CHECKPOINT, &self.checkpoint)
     }
 
+    #[allow(clippy::too_many_lines)]
     fn recover_intent(&mut self) -> Result<(), GfError> {
         let mut file = match self.root.open_child_file(OsStr::new(INTENT)) {
             Ok(file) => file,
@@ -1250,6 +1310,14 @@ impl GraphConstructionSession {
         }
         self.checkpoint.next_sequence = self.checkpoint.next_sequence.saturating_add(1);
         self.checkpoint.saw_edge |= receipt.kind == ConstructionChunkKind::Edge;
+        match receipt.kind {
+            ConstructionChunkKind::Node => {
+                self.checkpoint.node_schema_sha256 = Some(receipt.schema_sha256.clone());
+            }
+            ConstructionChunkKind::Edge => {
+                self.checkpoint.edge_schema_sha256 = Some(receipt.schema_sha256.clone());
+            }
+        }
         self.checkpoint.last_receipt_sha256 = Some(sha256(receipt_bytes));
         replace_control(&self.root, CHECKPOINT, &self.checkpoint)
     }
@@ -1332,7 +1400,7 @@ fn extract_runs(kind: ConstructionChunkKind, batch: &RecordBatch) -> Result<RunA
                 let mut record = [0_u8; ENDPOINT_WIDTH];
                 record[..16].copy_from_slice(&endpoint);
                 record[16..32].copy_from_slice(&edge);
-                record[32] = role as u8;
+                record[32] = u8::try_from(role).expect("endpoint role is zero or one");
                 endpoints.push(record);
             }
             let route = routes.value(row).as_bytes();
@@ -1494,7 +1562,7 @@ fn logical_batch_digest(
     Ok(hex(&digest.finalize()))
 }
 
-fn normalized_schema_digest(schema: &Schema) -> Result<String, GfError> {
+fn normalized_schema_digest(schema: &Schema) -> String {
     let mut digest = Sha256::new();
     for field in schema.fields() {
         digest.update((field.name().len() as u64).to_be_bytes());
@@ -1520,7 +1588,7 @@ fn normalized_schema_digest(schema: &Schema) -> Result<String, GfError> {
         digest.update((value.len() as u64).to_be_bytes());
         digest.update(value.as_bytes());
     }
-    Ok(hex(&digest.finalize()))
+    hex(&digest.finalize())
 }
 
 fn uuid_sorted_batch(
@@ -1551,10 +1619,10 @@ fn uuid_sorted_batch(
     RecordBatch::try_new(batch.schema(), columns).map_err(storage)
 }
 
-fn expected_property_columns<'a>(
+fn expected_property_columns(
     kind: ConstructionChunkKind,
-    batch: &'a RecordBatch,
-) -> impl Iterator<Item = &'a arrow::array::ArrayRef> {
+    batch: &RecordBatch,
+) -> impl Iterator<Item = &arrow::array::ArrayRef> {
     let required = if kind == ConstructionChunkKind::Node {
         2
     } else {
@@ -1769,19 +1837,6 @@ fn write_fixed_run<const N: usize>(
     Ok(receipt)
 }
 
-fn encode_base_identity(identity: ConstructionUuidIdentity) -> [u8; BASE_IDENTITY_WIDTH] {
-    let mut record = [0_u8; BASE_IDENTITY_WIDTH];
-    record[..16].copy_from_slice(identity.uuid.as_bytes());
-    record[16] = match identity.kind {
-        crate::uuid_membership::UuidIndexKind::Node => 0,
-        crate::uuid_membership::UuidIndexKind::Edge => 1,
-    };
-    // Retained parent member; session-converted records keep this byte zero.
-    record[17] = 1;
-    record[24..].copy_from_slice(&identity.surrogate.to_be_bytes());
-    record
-}
-
 fn reject_existing_merge_artifacts(root: &StableDirectory) -> Result<(), GfError> {
     for name in root.child_names().map_err(storage)? {
         let Some(name) = name.to_str() else { continue };
@@ -1792,7 +1847,10 @@ fn reject_existing_merge_artifacts(root: &StableDirectory) -> Result<(), GfError
     Ok(())
 }
 
-fn recover_shape_intent(root: &StableDirectory, checkpoint: &Checkpoint) -> Result<(), GfError> {
+fn recover_shape_intent(
+    root: &StableDirectory,
+    checkpoint: &mut Checkpoint,
+) -> Result<(), GfError> {
     let mut file = match root.open_child_file(OsStr::new(SHAPE_INTENT)) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -1825,10 +1883,23 @@ fn recover_shape_intent(root: &StableDirectory, checkpoint: &Checkpoint) -> Resu
         for output in &intent.outputs {
             authenticate_shaped_output(root, output)?;
         }
+        let final_evidence = intent
+            .final_evidence
+            .as_ref()
+            .ok_or_else(|| storage("complete shape manifest lacks final evidence"))?;
+        if checkpoint.evidence == intent.baseline_evidence {
+            checkpoint.evidence = final_evidence.clone();
+            replace_control(root, CHECKPOINT, checkpoint)?;
+        } else if checkpoint.evidence != *final_evidence {
+            return Err(storage("shape evidence authority differs from inventory"));
+        }
         return Ok(());
     }
     if intent.shape.is_some() || !intent.outputs.is_empty() {
         return Err(storage("incomplete shape intent claims completed output"));
+    }
+    if intent.final_evidence.is_some() || checkpoint.evidence != intent.baseline_evidence {
+        return Err(storage("incomplete shape changed committed evidence"));
     }
     for child in root.child_names().map_err(storage)? {
         let Some(name) = child.to_str() else { continue };
@@ -2091,6 +2162,7 @@ fn convert_identity_run(
     root.install_child(OsStr::new(&temporary), identity, OsStr::new(output))
         .map_err(storage)?;
     root.sync().map_err(storage)?;
+    construction_failpoint("shape.fixed.after_install");
     evidence.merge_fsync_operations = evidence.merge_fsync_operations.saturating_add(2);
     Ok(())
 }
@@ -2385,6 +2457,7 @@ fn merge_fixed_group<const N: usize>(
     root.install_child(OsStr::new(&temporary), identity, OsStr::new(output))
         .map_err(storage)?;
     root.sync().map_err(storage)?;
+    construction_failpoint("shape.fixed_merge.after_install");
     evidence.merge_fsync_operations = evidence.merge_fsync_operations.saturating_add(2);
     evidence.merge_groups = evidence.merge_groups.saturating_add(1);
     evidence.peak_merge_temporary_bytes = evidence
@@ -2444,6 +2517,7 @@ fn materialize_selected_rows(
 /// Merge one exact-schema set of UUID-sorted normalized Parquet row artifacts.
 /// Memory is bounded by one decoder window per input plus one caller-sized
 /// output window; no property values are projected away.
+#[allow(clippy::too_many_lines)]
 fn merge_row_group(
     root: &StableDirectory,
     inputs: &[String],
@@ -2577,6 +2651,7 @@ fn merge_row_group(
     root.install_child(OsStr::new(&temporary), identity, OsStr::new(output))
         .map_err(storage)?;
     root.sync().map_err(storage)?;
+    construction_failpoint("shape.row_merge.after_install");
     evidence.merge_fsync_operations = evidence.merge_fsync_operations.saturating_add(4);
     evidence.merge_groups = evidence.merge_groups.saturating_add(1);
     evidence.merge_written_bytes = evidence.merge_written_bytes.saturating_add(receipt.bytes);
@@ -2872,7 +2947,119 @@ fn read_fixed<const N: usize>(reader: &mut impl Read) -> Result<Option<[u8; N]>,
     Ok(Some(record))
 }
 
+fn validate_staged_details(
+    root: &StableDirectory,
+    identities_name: &str,
+    node_details_name: Option<&str>,
+    edge_details_name: Option<&str>,
+    cancelled: &mut impl FnMut() -> bool,
+    evidence: &mut GraphConstructionEvidence,
+) -> Result<(u64, u64), GfError> {
+    let mut identities = BufReader::with_capacity(
+        BLOCK_BYTES,
+        root.open_child_file(OsStr::new(identities_name))
+            .map_err(storage)?,
+    );
+    account_sequential_read(
+        identities.get_ref().metadata().map_err(storage)?.len(),
+        evidence,
+    );
+    let mut nodes = 0_u64;
+    let mut edges = 0_u64;
+    while let Some(record) = read_fixed::<BASE_IDENTITY_WIDTH>(&mut identities)? {
+        if record[17] != 0 || record[18..].iter().any(|byte| *byte != 0) {
+            return Err(storage("staged identity record is not canonical"));
+        }
+        match record[16] {
+            0 => nodes = nodes.saturating_add(1),
+            1 => edges = edges.saturating_add(1),
+            _ => return Err(storage("invalid staged identity kind")),
+        }
+        account_merge_read::<BASE_IDENTITY_WIDTH>(evidence);
+        if nodes.saturating_add(edges).is_multiple_of(4096) {
+            reject_cancelled(cancelled)?;
+        }
+    }
+    let count = |name: Option<&str>, width: u64| -> Result<u64, GfError> {
+        let Some(name) = name else { return Ok(0) };
+        let bytes = root
+            .open_child_file(OsStr::new(name))
+            .map_err(storage)?
+            .metadata()
+            .map_err(storage)?
+            .len();
+        if bytes % width != 0 {
+            return Err(storage("truncated canonical detail run"));
+        }
+        Ok(bytes / width)
+    };
+    if count(node_details_name, NODE_DETAIL_WIDTH as u64)? != nodes
+        || count(edge_details_name, EDGE_DETAIL_WIDTH as u64)? != edges
+    {
+        return Err(storage("staged identity and detail domains disagree"));
+    }
+    validate_detail_domain::<NODE_DETAIL_WIDTH>(
+        root,
+        identities_name,
+        node_details_name,
+        0,
+        cancelled,
+        evidence,
+    )?;
+    validate_detail_domain::<EDGE_DETAIL_WIDTH>(
+        root,
+        identities_name,
+        edge_details_name,
+        1,
+        cancelled,
+        evidence,
+    )?;
+    Ok((nodes, edges))
+}
+
+fn reject_staged_base_conflicts(
+    root: &StableDirectory,
+    identities_name: &str,
+    base: &mut AuthenticatedUuidIndexSnapshot,
+    window_rows: usize,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), GfError> {
+    let mut reader = BufReader::with_capacity(
+        BLOCK_BYTES,
+        root.open_child_file(OsStr::new(identities_name))
+            .map_err(storage)?,
+    );
+    loop {
+        let mut requested = Vec::with_capacity(window_rows);
+        for _ in 0..window_rows {
+            let Some(record) = read_fixed::<BASE_IDENTITY_WIDTH>(&mut reader)? else {
+                break;
+            };
+            requested.push(Uuid::from_bytes(
+                record[..16].try_into().expect("fixed UUID"),
+            ));
+        }
+        if requested.is_empty() {
+            break;
+        }
+        let (nodes, _) = base.probe(UuidIndexKind::Node, &requested)?;
+        let (edges, _) = base.probe(UuidIndexKind::Edge, &requested)?;
+        if nodes
+            .into_iter()
+            .zip(edges)
+            .any(|(node, edge)| node || edge)
+        {
+            return Err(storage("staged UUID conflicts with pinned base identity"));
+        }
+        reject_cancelled(cancelled)?;
+    }
+    base.revalidate()?;
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
+#[allow(dead_code)]
 fn validate_unified_and_details(
     root: &StableDirectory,
     identities_name: &str,
@@ -2969,99 +3156,6 @@ fn validate_unified_and_details(
     Ok((node_count, edge_count, max_node, max_edge))
 }
 
-fn merge_staged_with_base(
-    root: &StableDirectory,
-    staged_name: Option<&str>,
-    base: &mut UuidConstructionSnapshot,
-    cancelled: &mut impl FnMut() -> bool,
-    evidence: &mut GraphConstructionEvidence,
-) -> Result<(String, UuidConstructionSnapshotWork), GfError> {
-    let output = "merge-identities-with-base.run";
-    let temporary = artifact_temp(output);
-    let file = root
-        .create_replaceable_child_file(OsStr::new(&temporary))
-        .map_err(storage)?;
-    let identity = file_identity(&file).map_err(storage)?;
-    let mut writer = BufWriter::with_capacity(BLOCK_BYTES, file);
-    let mut staged = staged_name
-        .map(|name| {
-            root.open_child_file(OsStr::new(name))
-                .map(|file| BufReader::with_capacity(BLOCK_BYTES, file))
-                .map_err(storage)
-        })
-        .transpose()?;
-    let mut staged_record = staged
-        .as_mut()
-        .map(read_fixed::<BASE_IDENTITY_WIDTH>)
-        .transpose()?
-        .flatten();
-    if let Some(reader) = &staged {
-        account_sequential_read(
-            reader.get_ref().metadata().map_err(storage)?.len(),
-            evidence,
-        );
-    }
-    let mut emitted = 0_u64;
-    let work = base.stream_authenticated(|value| {
-        let base_record = encode_base_identity(value);
-        while staged_record
-            .as_ref()
-            .is_some_and(|record| record[..16] < base_record[..16])
-        {
-            let record = staged_record.take().expect("staged head exists");
-            writer.write_all(&record).map_err(storage)?;
-            account_merge_read::<BASE_IDENTITY_WIDTH>(evidence);
-            account_merge_write::<BASE_IDENTITY_WIDTH>(evidence);
-            staged_record = staged
-                .as_mut()
-                .map(read_fixed::<BASE_IDENTITY_WIDTH>)
-                .transpose()?
-                .flatten();
-        }
-        if staged_record
-            .as_ref()
-            .is_some_and(|record| record[..16] == base_record[..16])
-        {
-            return Err(storage("staged UUID conflicts with pinned base identity"));
-        }
-        writer.write_all(&base_record).map_err(storage)?;
-        account_merge_write::<BASE_IDENTITY_WIDTH>(evidence);
-        emitted = emitted.saturating_add(1);
-        if emitted.is_multiple_of(4096) {
-            reject_cancelled(cancelled)?;
-        }
-        Ok(())
-    })?;
-    while let Some(record) = staged_record {
-        writer.write_all(&record).map_err(storage)?;
-        account_merge_read::<BASE_IDENTITY_WIDTH>(evidence);
-        account_merge_write::<BASE_IDENTITY_WIDTH>(evidence);
-        staged_record = staged
-            .as_mut()
-            .map(read_fixed::<BASE_IDENTITY_WIDTH>)
-            .transpose()?
-            .flatten();
-    }
-    writer.flush().map_err(storage)?;
-    writer.get_ref().sync_all().map_err(storage)?;
-    account_sequential_write(
-        writer.get_ref().metadata().map_err(storage)?.len(),
-        evidence,
-    );
-    drop(writer);
-    root.install_child(OsStr::new(&temporary), identity, OsStr::new(output))
-        .map_err(storage)?;
-    root.sync().map_err(storage)?;
-    evidence.merge_fsync_operations = evidence.merge_fsync_operations.saturating_add(2);
-    if let Some(staged_name) = staged_name
-        && staged_name.starts_with("merge-")
-    {
-        unlink_named(root, staged_name)?;
-    }
-    evidence.merge_groups = evidence.merge_groups.saturating_add(1);
-    Ok((output.to_owned(), work))
-}
-
 fn validate_detail_domain<const N: usize>(
     root: &StableDirectory,
     identities_name: &str,
@@ -3131,6 +3225,8 @@ fn validate_detail_domain<const N: usize>(
     Ok(())
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn validate_endpoints(
     root: &StableDirectory,
     identities_name: &str,
@@ -3266,10 +3362,12 @@ fn assign_surrogates(
     Ok(output.to_owned())
 }
 
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn resolve_endpoint_surrogates(
     root: &StableDirectory,
     identities_name: &str,
     endpoints_name: Option<&str>,
+    mut base: Option<&mut AuthenticatedUuidIndexSnapshot>,
     window_rows: usize,
     fan_in: usize,
     cancelled: &mut impl FnMut() -> bool,
@@ -3300,27 +3398,62 @@ fn resolve_endpoint_surrogates(
     let mut window = Vec::<[u8; RESOLVED_ENDPOINT_WIDTH]>::with_capacity(window_rows);
     let mut runs = Vec::new();
     let mut sequence = 0_u64;
-    while let Some(endpoint) = read_fixed::<ENDPOINT_WIDTH>(&mut endpoints)? {
-        while identity
-            .as_ref()
-            .is_some_and(|record| record[..16] < endpoint[..16])
-        {
-            identity = read_fixed::<BASE_IDENTITY_WIDTH>(&mut identities)?;
-            account_merge_read::<BASE_IDENTITY_WIDTH>(evidence);
+    loop {
+        let mut endpoint_window = Vec::with_capacity(window_rows);
+        for _ in 0..window_rows {
+            let Some(endpoint) = read_fixed::<ENDPOINT_WIDTH>(&mut endpoints)? else {
+                break;
+            };
+            endpoint_window.push(endpoint);
         }
-        let node = identity
-            .as_ref()
-            .filter(|record| record[..16] == endpoint[..16] && record[16] == 0)
-            .ok_or_else(|| storage("endpoint UUID lacks node surrogate"))?;
-        if node[24..32].iter().all(|byte| *byte == 0) {
-            return Err(storage("endpoint node surrogate is zero"));
+        if endpoint_window.is_empty() {
+            break;
         }
-        let mut resolved = [0_u8; RESOLVED_ENDPOINT_WIDTH];
-        resolved[..16].copy_from_slice(&endpoint[16..32]);
-        resolved[16] = endpoint[32];
-        resolved[24..32].copy_from_slice(&node[24..32]);
-        window.push(resolved);
-        account_merge_read::<ENDPOINT_WIDTH>(evidence);
+        let mut surrogates = Vec::with_capacity(endpoint_window.len());
+        let mut base_requests = Vec::new();
+        let mut base_positions = Vec::new();
+        for endpoint in &endpoint_window {
+            while identity
+                .as_ref()
+                .is_some_and(|record| record[..16] < endpoint[..16])
+            {
+                identity = read_fixed::<BASE_IDENTITY_WIDTH>(&mut identities)?;
+                account_merge_read::<BASE_IDENTITY_WIDTH>(evidence);
+            }
+            if let Some(node) = identity
+                .as_ref()
+                .filter(|record| record[..16] == endpoint[..16] && record[16] == 0)
+            {
+                surrogates.push(Some(u64::from_be_bytes(
+                    node[24..32].try_into().expect("fixed"),
+                )));
+            } else {
+                base_positions.push(surrogates.len());
+                base_requests.push(Uuid::from_bytes(endpoint[..16].try_into().expect("fixed")));
+                surrogates.push(None);
+            }
+        }
+        if !base_requests.is_empty() {
+            let resolved = base
+                .as_deref_mut()
+                .ok_or_else(|| storage("endpoint UUID lacks node surrogate"))?
+                .lookup_node_surrogates(&base_requests)?
+                .0;
+            for (position, surrogate) in base_positions.into_iter().zip(resolved) {
+                surrogates[position] = surrogate;
+            }
+        }
+        for (endpoint, surrogate) in endpoint_window.into_iter().zip(surrogates) {
+            let surrogate = surrogate
+                .filter(|value| *value != 0)
+                .ok_or_else(|| storage("endpoint UUID lacks node surrogate"))?;
+            let mut resolved = [0_u8; RESOLVED_ENDPOINT_WIDTH];
+            resolved[..16].copy_from_slice(&endpoint[16..32]);
+            resolved[16] = endpoint[32];
+            resolved[24..32].copy_from_slice(&surrogate.to_be_bytes());
+            window.push(resolved);
+            account_merge_read::<ENDPOINT_WIDTH>(evidence);
+        }
         if window.len() == window_rows {
             window.sort_unstable();
             let name = format!("merge-resolved-source-{sequence:020}.run");
@@ -3487,17 +3620,23 @@ fn validate_artifact_name(receipt: &ArtifactReceipt) -> Result<(), GfError> {
     {
         return Err(storage("invalid construction artifact receipt"));
     }
-    if receipt.name.ends_with(".identities.run") && receipt.bytes % IDENTITY_WIDTH as u64 != 0 {
+    if receipt.name.ends_with(".identities.run")
+        && !receipt.bytes.is_multiple_of(IDENTITY_WIDTH as u64)
+    {
         return Err(storage("truncated identity run"));
     }
-    if receipt.name.ends_with(".endpoints.run") && receipt.bytes % ENDPOINT_WIDTH as u64 != 0 {
+    if receipt.name.ends_with(".endpoints.run")
+        && !receipt.bytes.is_multiple_of(ENDPOINT_WIDTH as u64)
+    {
         return Err(storage("truncated endpoint run"));
     }
-    if receipt.name.ends_with(".node-details.run") && receipt.bytes % NODE_DETAIL_WIDTH as u64 != 0
+    if receipt.name.ends_with(".node-details.run")
+        && !receipt.bytes.is_multiple_of(NODE_DETAIL_WIDTH as u64)
     {
         return Err(storage("truncated node detail run"));
     }
-    if receipt.name.ends_with(".edge-details.run") && receipt.bytes % EDGE_DETAIL_WIDTH as u64 != 0
+    if receipt.name.ends_with(".edge-details.run")
+        && !receipt.bytes.is_multiple_of(EDGE_DETAIL_WIDTH as u64)
     {
         return Err(storage("truncated edge detail run"));
     }
@@ -3644,8 +3783,9 @@ fn validate_parquet_shape(
     let schema = builder.schema();
     if schema.fields().len() < expected_prefix.fields().len()
         || schema.fields()[..expected_prefix.fields().len()] != expected_prefix.fields()[..]
-        || normalized_schema_digest(schema.as_ref())? != receipt.schema_sha256
-        || builder.metadata().file_metadata().num_rows() != receipt.rows as i64
+        || normalized_schema_digest(schema.as_ref()) != receipt.schema_sha256
+        || builder.metadata().file_metadata().num_rows()
+            != i64::try_from(receipt.rows).map_err(|_| storage("receipt row count exceeds i64"))?
     {
         return Err(storage("Parquet schema or row count differs from receipt"));
     }
@@ -3787,6 +3927,21 @@ fn validate_checkpoint(
         || checkpoint.evidence.peak_run_records > budgets.max_run_records as u64
         || checkpoint.evidence.prior_topology_rows_decoded != 0
         || checkpoint.evidence.current_transitions != 0
+        || checkpoint
+            .node_schema_sha256
+            .as_ref()
+            .is_some_and(|digest| {
+                digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_hexdigit())
+            })
+        || checkpoint
+            .edge_schema_sha256
+            .as_ref()
+            .is_some_and(|digest| {
+                digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_hexdigit())
+            })
+        || usize::from(checkpoint.node_schema_sha256.is_some())
+            .saturating_add(usize::from(checkpoint.edge_schema_sha256.is_some()))
+            > budgets.max_schema_groups
     {
         return Err(storage("checkpoint authority or resume parameters changed"));
     }
@@ -4023,7 +4178,8 @@ fn remove_unrecorded_artifact(
         };
         if builder.schema().fields().len() < expected.fields().len()
             || builder.schema().fields()[..expected.fields().len()] != expected.fields()[..]
-            || builder.metadata().file_metadata().num_rows() != rows as i64
+            || builder.metadata().file_metadata().num_rows()
+                != i64::try_from(rows).map_err(|_| storage("artifact row count exceeds i64"))?
         {
             return Err(storage("unrecorded Parquet artifact is not session-owned"));
         }
@@ -4253,6 +4409,10 @@ mod tests {
     }
 
     fn nonempty_project() -> TempDir {
+        nonempty_project_with_nodes(2)
+    }
+
+    fn nonempty_project_with_nodes(node_count: u64) -> TempDir {
         let project = TempDir::new().unwrap();
         std::fs::create_dir_all(project.path().join("topology")).unwrap();
         std::fs::write(
@@ -4267,7 +4427,7 @@ mod tests {
         let tails = RecordBatch::try_new(
             tails_schema.clone(),
             vec![
-                Arc::new(arrow::array::UInt64Array::from(vec![2])),
+                Arc::new(arrow::array::UInt64Array::from(vec![node_count])),
                 Arc::new(arrow::array::UInt64Array::from(vec![1])),
             ],
         )
@@ -4283,11 +4443,47 @@ mod tests {
         crate::uuid_membership::append_uuid_membership_delta(
             project.path(),
             1,
-            &[(Uuid::from_u128(1), 1), (Uuid::from_u128(2), 2)],
+            &(1..=node_count)
+                .map(|value| (Uuid::from_u128(u128::from(value)), value))
+                .collect::<Vec<_>>(),
             &[Uuid::from_u128(100)],
         )
         .unwrap();
         project
+    }
+
+    #[test]
+    fn parent_identity_payload_is_referenced_not_copied_at_1x_and_2x_base() {
+        for (base_nodes, operation) in [(2_u64, 8_110_u128), (4, 8_111)] {
+            let project = nonempty_project_with_nodes(base_nodes);
+            let mut session = GraphConstructionSession::open(
+                project.path(),
+                Uuid::from_u128(operation),
+                1,
+                GraphConstructionBudgets::default(),
+            )
+            .unwrap();
+            session
+                .append(
+                    ConstructionChunkKind::Node,
+                    "delta",
+                    &node_batch(u128::from(base_nodes + 1), 1),
+                )
+                .unwrap();
+            session.seal().unwrap();
+            let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
+            let root = project
+                .path()
+                .join(PRIVATE_ROOT)
+                .join(Uuid::from_u128(operation).simple().to_string());
+            assert_eq!(
+                std::fs::metadata(root.join(shape.identities))
+                    .unwrap()
+                    .len(),
+                32
+            );
+            assert_eq!(shape.node_count, base_nodes + 1);
+        }
     }
 
     #[test]
@@ -4376,6 +4572,17 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("conflicting")
+        );
+        assert!(
+            session
+                .append(
+                    ConstructionChunkKind::Node,
+                    "different-chunk-schema",
+                    &batch_with("renamed")
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("stable Arrow schema")
         );
 
         let unsupported = RecordBatch::try_new(
@@ -4530,6 +4737,31 @@ mod tests {
         let slots = online_merge_name_slot_bound(1_000_000, 32);
         assert!(slots <= 31 * 4, "retained slots: {slots}");
         assert!(slots < 1_000_000 / 1_000);
+        assert_eq!(GraphConstructionBudgets::default().max_schema_groups, 2);
+    }
+
+    #[test]
+    fn schema_group_admission_is_constant_and_budgeted() {
+        let root = TempDir::new().unwrap();
+        let mut session = GraphConstructionSession::open(
+            root.path(),
+            Uuid::from_u128(6_999),
+            0,
+            GraphConstructionBudgets {
+                max_schema_groups: 1,
+                ..GraphConstructionBudgets::default()
+            },
+        )
+        .unwrap();
+        session
+            .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 2))
+            .unwrap();
+        let error = session
+            .append(ConstructionChunkKind::Edge, "edges", &edge_batch(100, 1))
+            .unwrap_err();
+        assert!(error.to_string().contains("schema-group budget"));
+        assert!(session.checkpoint.node_schema_sha256.is_some());
+        assert!(session.checkpoint.edge_schema_sha256.is_none());
     }
 
     #[test]
@@ -4732,6 +4964,76 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("endpoint")
+        );
+
+        drop(missing);
+        let operation = Uuid::from_u128(8_104);
+        let mut delta =
+            GraphConstructionSession::open(project.path(), operation, 1, budgets).unwrap();
+        delta
+            .append(ConstructionChunkKind::Node, "one-new", &node_batch(3, 1))
+            .unwrap();
+        delta.seal().unwrap();
+        let shape = delta.shape_canonical_with_cancellation(|| false).unwrap();
+        let operation_root = project
+            .path()
+            .join(PRIVATE_ROOT)
+            .join(operation.simple().to_string());
+        assert_eq!(
+            std::fs::metadata(operation_root.join(&shape.identities))
+                .unwrap()
+                .len(),
+            32
+        );
+        assert!(
+            !operation_root
+                .join("merge-identities-with-base.run")
+                .exists()
+        );
+        assert_eq!(shape.parent_topology_generation, 1);
+        assert!(shape.parent_uuid_manifest_sha256.is_some());
+
+        drop(delta);
+        let mut retained_endpoints =
+            GraphConstructionSession::open(project.path(), Uuid::from_u128(8_105), 1, budgets)
+                .unwrap();
+        retained_endpoints
+            .append(
+                ConstructionChunkKind::Edge,
+                "base-endpoints",
+                &edge(200, 1, 2),
+            )
+            .unwrap();
+        retained_endpoints.seal().unwrap();
+        let shape = retained_endpoints
+            .shape_canonical_with_cancellation(|| false)
+            .unwrap();
+        assert_eq!((shape.node_count, shape.edge_count), (2, 2));
+        let mut resolved = BufReader::new(
+            retained_endpoints
+                .root
+                .open_child_file(OsStr::new(shape.edge_endpoints.as_ref().unwrap()))
+                .unwrap(),
+        );
+        assert_eq!(
+            u64::from_be_bytes(
+                read_fixed::<RESOLVED_ENDPOINT_WIDTH>(&mut resolved)
+                    .unwrap()
+                    .unwrap()[24..32]
+                    .try_into()
+                    .unwrap()
+            ),
+            1
+        );
+        assert_eq!(
+            u64::from_be_bytes(
+                read_fixed::<RESOLVED_ENDPOINT_WIDTH>(&mut resolved)
+                    .unwrap()
+                    .unwrap()[24..32]
+                    .try_into()
+                    .unwrap()
+            ),
+            2
         );
     }
 
@@ -4952,6 +5254,13 @@ mod tests {
         session
             .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 8))
             .unwrap();
+        if std::env::var_os("GF_CONSTRUCTION_SHAPE_CRASH").is_some() {
+            session
+                .append(ConstructionChunkKind::Node, "nodes-2", &node_batch(9, 8))
+                .unwrap();
+            session.seal().unwrap();
+            session.shape_canonical_with_cancellation(|| false).unwrap();
+        }
     }
 
     #[test]
@@ -5024,6 +5333,62 @@ mod tests {
                     .unwrap();
             }
             resumed.seal().unwrap();
+        }
+    }
+
+    #[test]
+    fn shape_inventory_and_evidence_commit_recover_without_double_counting() {
+        let reference_root = TempDir::new().unwrap();
+        let mut reference = GraphConstructionSession::open(
+            reference_root.path(),
+            Uuid::from_u128(600),
+            0,
+            GraphConstructionBudgets::default(),
+        )
+        .unwrap();
+        reference
+            .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 8))
+            .unwrap();
+        reference
+            .append(ConstructionChunkKind::Node, "nodes-2", &node_batch(9, 8))
+            .unwrap();
+        reference.seal().unwrap();
+        reference
+            .shape_canonical_with_cancellation(|| false)
+            .unwrap();
+        let expected = reference.evidence().clone();
+
+        for failpoint in [
+            "shape.fixed.after_install",
+            "shape.fixed_merge.after_install",
+            "shape.row_merge.after_install",
+            "shape.after_complete_inventory",
+            "shape.after_evidence_checkpoint",
+        ] {
+            let root = TempDir::new().unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg("graph_construction::tests::crash_subprocess_helper")
+                .arg("--nocapture")
+                .env("GF_CONSTRUCTION_CRASH_ROOT", root.path())
+                .env("GF_CONSTRUCTION_SHAPE_CRASH", "1")
+                .env(
+                    "GF_CONSTRUCTION_FAILPOINT_COOKIE",
+                    "graphforge-construction-test-v1",
+                )
+                .env("GF_CONSTRUCTION_FAILPOINT", failpoint)
+                .status()
+                .unwrap();
+            assert_eq!(status.code(), Some(86), "{failpoint}");
+            let mut resumed = GraphConstructionSession::open(
+                root.path(),
+                Uuid::from_u128(600),
+                0,
+                GraphConstructionBudgets::default(),
+            )
+            .unwrap();
+            resumed.shape_canonical_with_cancellation(|| false).unwrap();
+            assert_eq!(resumed.evidence(), &expected, "{failpoint}");
         }
     }
 }
