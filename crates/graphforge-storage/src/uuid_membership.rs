@@ -1261,7 +1261,7 @@ fn publish_manifest(root: &Path, staging: &Path, manifest: &Manifest) -> Result<
 
 fn compact_manifest_levels(
     root: &Path,
-    _staging: &Path,
+    staging: &Path,
     scratch: &Path,
     manifest: &mut Manifest,
     metrics: &mut UuidIndexAppendMetrics,
@@ -2366,7 +2366,7 @@ fn read_record(reader: &mut BufReader<File>) -> Result<Option<[u8; 16]>, GfError
 fn publish_data(
     source: &Path,
     root: &Path,
-    staging: &Path,
+    _staging: &Path,
     kind: &str,
     generation: u64,
     record_bytes: u64,
@@ -2394,7 +2394,7 @@ fn publish_data(
             .create_child_file(&temp_name)
             .map_err(storage_err)?;
         let temp_identity = graphforge_filesystem::file_identity(&temp).map_err(storage_err)?;
-        let install = || -> Result<(), GfError> {
+        let mut install = || -> Result<(), GfError> {
             let mut input = File::open(source).map_err(storage_err)?;
             std::io::copy(&mut input, &mut temp).map_err(storage_err)?;
             temp.sync_all().map_err(storage_err)?;
