@@ -170,7 +170,7 @@ pub(crate) fn reconcile_auxiliary(
             };
         }
     }
-    let exact = if let Some(mut file) = file {
+    let exact = if let Some(file) = file {
         let (bytes, digest) = hash_reader(file.try_clone().map_err(storage)?)?;
         directory.revalidate_named().map_err(storage)?;
         bytes == receipt.bytes && digest == receipt.digest
