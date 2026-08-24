@@ -70,6 +70,7 @@ where
 {
     let key = SearchArtifactKey::vector(request.label, request.space)?;
     let checkpoint = RefCell::new(checkpoint);
+    let projection = RefCell::new(None::<LabelMemberProjection>);
     upsert_published_vector(
         project_dir,
         key.label(),
@@ -79,12 +80,27 @@ where
         updated_at_micros,
         limits.vector,
         limits.coordination,
-        || capture_topology_snapshot(project_dir, limits, || checkpoint.borrow_mut()()),
+        || {
+            if projection.borrow().is_none() {
+                *projection.borrow_mut() = Some(project_label_members_snapshot(
+                    project_dir,
+                    request.label_id,
+                    limits,
+                    || checkpoint.borrow_mut()(),
+                )?);
+            }
+            let borrowed = projection.borrow();
+            let projected = borrowed.as_ref().expect("projection initialized");
+            if SearchSourceSnapshot::generation(project_dir)? != projected.snapshot.generation {
+                return Err(SearchArtifactError::ConcurrentMutation);
+            }
+            Ok(projected.snapshot.clone())
+        },
         |candidate| {
-            project_label_members(project_dir, request.label_id, limits, || {
-                checkpoint.borrow_mut()()
-            })
-            .map(|eligible| eligible.contains(&candidate))
+            Ok(projection
+                .borrow()
+                .as_ref()
+                .is_some_and(|projected| projected.members.contains(&candidate)))
         },
         || checkpoint.borrow_mut()(),
     )
@@ -115,16 +131,9 @@ where
     validate_result_limit(limit, limits.vector)?;
 
     for attempt in 1_u8..=2 {
-        let before = capture_topology_snapshot(project_dir, limits, &mut checkpoint)?;
-        let eligible =
-            project_label_members(project_dir, request.label_id, limits, &mut checkpoint)?;
-        let projected = capture_topology_snapshot(project_dir, limits, &mut checkpoint)?;
-        if before != projected {
-            if attempt == 2 {
-                return Err(SearchArtifactError::ConcurrentMutation);
-            }
-            continue;
-        }
+        let projection =
+            project_label_members_snapshot(project_dir, request.label_id, limits, &mut checkpoint)?;
+        let expected_generation = projection.snapshot.generation;
 
         let hits = match current_search_artifact(project_dir, &key)? {
             Some(artifact) => {
@@ -132,7 +141,7 @@ where
                 search_published_vectors(
                     &artifact,
                     query,
-                    &eligible,
+                    &projection.members,
                     limit,
                     limits.vector,
                     &mut checkpoint,
@@ -140,8 +149,7 @@ where
             }
             None => Vec::new(),
         };
-        let after = capture_topology_snapshot(project_dir, limits, &mut checkpoint)?;
-        if before == after {
+        if SearchSourceSnapshot::generation(project_dir)? == expected_generation {
             return Ok(hits);
         }
         if attempt == 2 {
@@ -159,17 +167,37 @@ where
 /// # Errors
 /// Returns structured source, cancellation, or resource errors for malformed
 /// topology or an exhausted membership projection.
-#[allow(clippy::too_many_lines)] // one streaming callback preserves one admitted handle
 pub fn project_label_members<C>(
     project_dir: &Path,
     label_id: u32,
     limits: VectorLifecycleLimits,
-    mut checkpoint: C,
+    checkpoint: C,
 ) -> Result<BTreeSet<[u8; 16]>, SearchArtifactError>
 where
     C: FnMut() -> Result<(), SearchArtifactError>,
 {
+    project_label_members_snapshot(project_dir, label_id, limits, checkpoint)
+        .map(|projection| projection.members)
+}
+
+pub(crate) struct LabelMemberProjection {
+    pub(crate) members: BTreeSet<[u8; 16]>,
+    pub(crate) snapshot: SearchSourceSnapshot,
+}
+
+#[allow(clippy::too_many_lines)] // one streaming callback preserves one admitted handle
+pub(crate) fn project_label_members_snapshot<C>(
+    project_dir: &Path,
+    label_id: u32,
+    limits: VectorLifecycleLimits,
+    mut checkpoint: C,
+) -> Result<LabelMemberProjection, SearchArtifactError>
+where
+    C: FnMut() -> Result<(), SearchArtifactError>,
+{
     checkpoint()?;
+    let source_generation = SearchSourceSnapshot::generation(project_dir)?;
+    let mut source_evidence = Vec::new();
     let mut eligible = BTreeSet::new();
     let mut rows = 0_usize;
     let mut last_surrogate = None;
@@ -183,6 +211,7 @@ where
         project_dir,
         8192,
         limits.source_bytes,
+        &mut source_evidence,
         |batch| {
             let result: Result<(), SearchArtifactError> = (|| {
                 checkpoint()?;
@@ -218,7 +247,7 @@ where
                     if rows > limits.topology_rows {
                         return Err(exhausted("vector_topology_rows", limits.topology_rows));
                     }
-                    if uuids.is_null(row) || labels.is_null(row) {
+                    if uuids.is_null(row) || labels.is_null(row) || surrogates.is_null(row) {
                         return Err(source("topology contains null node identity data"));
                     }
                     let node_uuid: [u8; 16] = uuids
@@ -275,9 +304,18 @@ where
             "topology row count disagrees with authenticated UUID index",
         ));
     }
-    Ok(eligible)
+    let snapshot = SearchSourceSnapshot::from_admitted_files(
+        project_dir,
+        source_generation,
+        &source_evidence,
+    )?;
+    Ok(LabelMemberProjection {
+        members: eligible,
+        snapshot,
+    })
 }
 
+#[cfg(test)]
 pub(crate) fn capture_topology_snapshot<C>(
     project_dir: &Path,
     limits: VectorLifecycleLimits,
@@ -371,6 +409,7 @@ mod tests {
     use graphforge_storage::{
         GraphWriter, SearchPublicationOutcome, delete_nodes, generation::bump_search_generation,
     };
+    use parquet::arrow::ArrowWriter;
     use tempfile::TempDir;
 
     use super::*;
@@ -421,6 +460,41 @@ mod tests {
                 .unwrap();
         }
         writer.flush().unwrap();
+    }
+
+    fn corrupt_node_surrogate_to_null(root: &Path) {
+        let path = graphforge_storage::topology_node_files(root)
+            .unwrap()
+            .remove(0);
+        let batch = graphforge_storage::read_nodes(root).unwrap().remove(0);
+        let mut fields = batch
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.as_ref().clone())
+            .collect::<Vec<_>>();
+        let index = batch.schema().index_of("node_id").unwrap();
+        fields[index] = fields[index].clone().with_nullable(true);
+        let schema = std::sync::Arc::new(arrow::datatypes::Schema::new(fields));
+        let mut columns = batch.columns().to_vec();
+        columns[index] = std::sync::Arc::new(arrow::array::UInt64Array::from(vec![None]));
+        let corrupted = arrow::array::RecordBatch::try_new(schema.clone(), columns).unwrap();
+        let mut writer =
+            ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
+        writer.write(&corrupted).unwrap();
+        writer.close().unwrap();
+    }
+
+    #[test]
+    fn vector_membership_rejects_null_node_surrogate_explicitly() {
+        let dir = TempDir::new().unwrap();
+        write_members(&dir, &[(1, vec![9])]);
+        corrupt_node_surrogate_to_null(dir.path());
+        std::fs::remove_dir_all(dir.path().join(".graphforge-cache/uuid-membership")).unwrap();
+        assert!(matches!(
+            project_label_members(dir.path(), 9, VectorLifecycleLimits::default(), || Ok(())),
+            Err(SearchArtifactError::SourceSnapshot { .. })
+        ));
     }
 
     #[test]

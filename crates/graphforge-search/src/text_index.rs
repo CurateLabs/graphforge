@@ -539,6 +539,10 @@ mod tests {
             properties: vec!["body".to_owned(), "title".to_owned()],
             documents,
             source_bytes: 0,
+            source_snapshot: graphforge_storage::SearchSourceSnapshot {
+                generation: 0,
+                fingerprint: "test".into(),
+            },
         }
     }
 
@@ -607,6 +611,10 @@ mod tests {
             properties: vec!["title".to_owned()],
             documents: Vec::new(),
             source_bytes: 0,
+            source_snapshot: graphforge_storage::SearchSourceSnapshot {
+                generation: 0,
+                fingerprint: "test".into(),
+            },
         };
         assert_eq!(
             build_text_index(&index_dir, &source, TextSearchLimits::default(), || Ok(())).unwrap(),
@@ -981,6 +989,10 @@ mod tests {
             properties: Vec::new(),
             documents: vec![document(1, "title", "body")],
             source_bytes: 0,
+            source_snapshot: graphforge_storage::SearchSourceSnapshot {
+                generation: 0,
+                fingerprint: "test".into(),
+            },
         };
         assert_eq!(
             build_text_index(

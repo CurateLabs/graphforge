@@ -40,6 +40,7 @@ use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::Expr;
 use datafusion_catalog::Session;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use sha2::{Digest, Sha256};
 
 use graphforge_core::OntologyMode;
 use graphforge_ir::RuntimeCatalog;
@@ -1274,6 +1275,7 @@ pub fn visit_property_fragments_admitted<F>(
     batch_size: usize,
     byte_limit: u64,
     projected_columns: Option<&std::collections::BTreeSet<String>>,
+    evidence: &mut Vec<AdmittedSourceFile>,
     mut visit: F,
 ) -> Result<u64, DataFusionError>
 where
@@ -1305,6 +1307,11 @@ where
             )));
         }
         preflight_parquet_handle(&mut file, metadata.len())?;
+        evidence.push(hash_admitted_source(
+            property_relative_name(stem, path)?,
+            &mut file,
+            metadata.len(),
+        )?);
         let mut builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(parquet_err)?;
         admit_decoded_parquet(&builder)?;
         if let Some(columns) = projected_columns {
@@ -1395,6 +1402,7 @@ pub fn visit_node_fragments_admitted<F>(
     dir: &Path,
     batch_size: usize,
     byte_limit: u64,
+    evidence: &mut Vec<AdmittedSourceFile>,
     mut visit: F,
 ) -> Result<u64, DataFusionError>
 where
@@ -1428,6 +1436,11 @@ where
             )));
         }
         preflight_parquet_handle(&mut file, metadata.len())?;
+        evidence.push(hash_admitted_source(
+            node_relative_name(&path)?,
+            &mut file,
+            metadata.len(),
+        )?);
         let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(parquet_err)?;
         admit_decoded_parquet(&builder)?;
         for batch in builder
@@ -1444,6 +1457,93 @@ where
         }
     }
     Ok(total)
+}
+
+/// Content identity captured from the same stable handle later decoded by a
+/// bounded graph-source visitor.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AdmittedSourceFile {
+    /// Canonical graph-root-relative source name.
+    pub name: String,
+    /// Exact handle length admitted before hashing and decode.
+    pub byte_length: u64,
+    /// SHA-256 of the complete bytes read from that handle.
+    pub sha256: [u8; 32],
+}
+
+fn property_relative_name(stem: &str, path: &Path) -> Result<String, DataFusionError> {
+    let file = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| DataFusionError::Execution("property source name is not UTF-8".into()))?;
+    Ok(
+        if path
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            == Some(stem)
+        {
+            format!("properties/{stem}/{file}")
+        } else {
+            format!("properties/{file}")
+        },
+    )
+}
+
+fn node_relative_name(path: &Path) -> Result<String, DataFusionError> {
+    let file = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| DataFusionError::Execution("topology source name is not UTF-8".into()))?;
+    Ok(
+        if path
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            == Some("nodes")
+        {
+            format!("topology/nodes/{file}")
+        } else {
+            "topology/nodes.parquet".into()
+        },
+    )
+}
+
+fn hash_admitted_source(
+    name: String,
+    file: &mut File,
+    length: u64,
+) -> Result<AdmittedSourceFile, DataFusionError> {
+    file.seek(SeekFrom::Start(0)).map_err(|e| io_err(&e))?;
+    let mut digest = Sha256::new();
+    let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
+    let mut read = 0_u64;
+    loop {
+        let count = file.read(&mut buffer).map_err(|e| io_err(&e))?;
+        if count == 0 {
+            break;
+        }
+        read = read.checked_add(count as u64).ok_or_else(|| {
+            DataFusionError::ResourcesExhausted("graph source length overflow".into())
+        })?;
+        if read > length {
+            return Err(DataFusionError::Execution(
+                "graph source changed while hashing admitted handle".into(),
+            ));
+        }
+        digest.update(&buffer[..count]);
+    }
+    if read != length {
+        return Err(DataFusionError::Execution(
+            "graph source changed while hashing admitted handle".into(),
+        ));
+    }
+    file.seek(SeekFrom::Start(0)).map_err(|e| io_err(&e))?;
+    Ok(AdmittedSourceFile {
+        name,
+        byte_length: length,
+        sha256: digest.finalize().into(),
+    })
 }
 
 /// Visit `topology/nodes.parquet` one bounded batch at a time (#706).
@@ -3283,22 +3383,42 @@ mod tests {
         let fragments = vec![("route".to_owned(), path.clone())];
         let columns = BTreeSet::from(["node_uuid".to_owned(), "wanted".to_owned()]);
         let mut rows = 0;
-        visit_property_fragments_admitted(&fragments, 1, u64::MAX, Some(&columns), |_, batch| {
-            assert_eq!(batch.num_columns(), 2);
-            rows += batch.num_rows();
-            if rows == 1 {
-                std::fs::rename(&path, path.with_extension("original")).unwrap();
-                std::fs::write(&path, b"replacement is not parquet").unwrap();
-            }
-            Ok(true)
-        })
+        let mut evidence = Vec::new();
+        visit_property_fragments_admitted(
+            &fragments,
+            1,
+            u64::MAX,
+            Some(&columns),
+            &mut evidence,
+            |_, batch| {
+                assert_eq!(batch.num_columns(), 2);
+                rows += batch.num_rows();
+                if rows == 1 {
+                    std::fs::rename(&path, path.with_extension("original")).unwrap();
+                    std::fs::write(&path, b"replacement is not parquet").unwrap();
+                } else if rows == 2 {
+                    std::fs::remove_file(&path).unwrap();
+                    std::fs::rename(path.with_extension("original"), &path).unwrap();
+                }
+                Ok(true)
+            },
+        )
         .unwrap();
         assert_eq!(rows, 2);
-        assert!(
-            visit_property_fragments_admitted(&fragments, 1, u64::MAX, Some(&columns), |_, _| Ok(
-                true
-            ))
-            .is_err()
+        assert_eq!(evidence.len(), 1, "one admitted handle emits one identity");
+        let mut reopened = Vec::new();
+        visit_property_fragments_admitted(
+            &fragments,
+            1,
+            u64::MAX,
+            Some(&columns),
+            &mut reopened,
+            |_, _| Ok(true),
+        )
+        .unwrap();
+        assert_eq!(
+            reopened, evidence,
+            "A-B-A cannot redirect the decoded handle"
         );
     }
 
@@ -3322,6 +3442,7 @@ mod tests {
             1,
             u64::MAX,
             None,
+            &mut Vec::new(),
             |_, _| Ok(true),
         )
         .unwrap_err();
@@ -3357,6 +3478,7 @@ mod tests {
             1,
             u64::MAX,
             None,
+            &mut Vec::new(),
             |_, _| Ok(true),
         )
         .unwrap_err();

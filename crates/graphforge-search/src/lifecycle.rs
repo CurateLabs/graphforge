@@ -1,7 +1,9 @@
 //! Freshness-aware, atomic lifecycle for derived Tantivy text indexes.
 
 use std::cell::{Cell, RefCell};
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 
 use graphforge_storage::{
     PublishedSearchArtifact, SearchArtifactError, SearchArtifactKey, SearchCoordinationLimits,
@@ -169,45 +171,34 @@ pub fn inspect_text_index_freshness<C>(
 where
     C: FnMut() -> Result<(), SearchArtifactError>,
 {
-    let mut retry = true;
-    loop {
-        let before = capture_text_snapshot(project_dir, limits.text, &mut checkpoint)?;
-        let projection = project_text_source(
-            project_dir,
-            request.label_id,
-            explicit_properties,
-            limits.text,
-            &mut checkpoint,
-        )?;
-        if explicit_properties.is_some() {
-            validate_observed_properties(&projection)?;
-        }
-        let after = capture_text_snapshot(project_dir, limits.text, &mut checkpoint)?;
-        if before != after {
-            if !retry {
-                return Err(SearchArtifactError::ConcurrentMutation);
-            }
-            retry = false;
-            continue;
-        }
-        let properties = explicit_properties
-            .map(<[String]>::to_vec)
-            .unwrap_or(projection.properties);
-        if properties.is_empty() {
-            return Ok(TextIndexFreshnessInspection {
-                properties,
-                source_generation: after.generation,
-                source_fingerprint: after.fingerprint,
-                artifact_generation: None,
-                artifact_source_generation: None,
-                artifact_source_fingerprint: None,
-                state: TextIndexFreshnessState::Missing,
-                reason: Some(TextIndexFreshnessReason::NoTextProperties),
-            });
-        }
-        let key = SearchArtifactKey::text(request.label, &properties)?;
-        return inspect_published_text(project_dir, &key, after);
+    let projection = project_text_source(
+        project_dir,
+        request.label_id,
+        explicit_properties,
+        limits.text,
+        &mut checkpoint,
+    )?;
+    if explicit_properties.is_some() {
+        validate_observed_properties(&projection)?;
     }
+    let after = projection.source_snapshot.clone();
+    let properties = explicit_properties
+        .map(<[String]>::to_vec)
+        .unwrap_or(projection.properties);
+    if properties.is_empty() {
+        return Ok(TextIndexFreshnessInspection {
+            properties,
+            source_generation: after.generation,
+            source_fingerprint: after.fingerprint,
+            artifact_generation: None,
+            artifact_source_generation: None,
+            artifact_source_fingerprint: None,
+            state: TextIndexFreshnessState::Missing,
+            reason: Some(TextIndexFreshnessReason::NoTextProperties),
+        });
+    }
+    let key = SearchArtifactKey::text(request.label, &properties)?;
+    inspect_published_text(project_dir, &key, after)
 }
 
 fn inspect_published_text(
@@ -426,7 +417,6 @@ where
     let retry_budget = Cell::new(true);
 
     loop {
-        let before = capture_text_snapshot(project_dir, limits.text, &mut checkpoint)?;
         let projection = project_text_source(
             project_dir,
             request.label_id,
@@ -437,11 +427,7 @@ where
         if explicit_properties.is_some() {
             validate_observed_properties(&projection)?;
         }
-        let discovered = capture_text_snapshot(project_dir, limits.text, &mut checkpoint)?;
-        if before != discovered {
-            consume_retry(Some(&retry_budget))?;
-            continue;
-        }
+        let discovered = projection.source_snapshot.clone();
         let properties = explicit_properties.clone().unwrap_or(projection.properties);
         if properties.is_empty() {
             return Ok(TextIndexPreparation::NoTextProperties);
@@ -464,7 +450,7 @@ where
             },
         ) {
             Ok(index) => {
-                let after = capture_text_snapshot(project_dir, limits.text, &mut checkpoint)?;
+                let after = generation_checked_snapshot(project_dir, &discovered)?;
                 match index.artifact().manifest.verify_fresh(
                     &key,
                     TEXT_BACKEND_VERSION,
@@ -512,6 +498,7 @@ where
         .to_vec();
     let checkpoint = RefCell::new(checkpoint);
     let build_calls = Cell::new(0_u8);
+    let projection = RefCell::new(None::<TextSourceProjection>);
     let outcome = coordinate_search_publication(
         project_dir,
         SearchPublicationPlan {
@@ -523,17 +510,33 @@ where
         },
         limits.coordination,
         || {
-            let snapshot =
-                capture_text_snapshot(project_dir, limits.text, || checkpoint.borrow_mut()())?;
-            if policy
-                .expected_snapshot
-                .is_some_and(|expected| expected != &snapshot)
-            {
-                return Err(SearchArtifactError::Stale {
-                    reason: "graph changed after text property discovery".to_owned(),
+            if let Some(expected) = policy.expected_snapshot {
+                return generation_checked_snapshot(project_dir, expected).map_err(|error| {
+                    match error {
+                        SearchArtifactError::ConcurrentMutation => SearchArtifactError::Stale {
+                            reason: "graph changed after text property discovery".to_owned(),
+                        },
+                        other => other,
+                    }
                 });
             }
-            Ok(snapshot)
+            if projection.borrow().is_none() {
+                *projection.borrow_mut() = Some(project_text_source(
+                    project_dir,
+                    request.label_id,
+                    Some(&properties),
+                    limits.text,
+                    || checkpoint.borrow_mut()(),
+                )?);
+            }
+            let borrowed = projection.borrow();
+            generation_checked_snapshot(
+                project_dir,
+                &borrowed
+                    .as_ref()
+                    .expect("projection initialized")
+                    .source_snapshot,
+            )
         },
         |artifact| {
             inspect_text_artifact(artifact, &properties, limits.text, || {
@@ -545,17 +548,29 @@ where
             if build_calls.replace(build_calls.get().saturating_add(1)) > 0 {
                 consume_retry(policy.retry_budget)?;
             }
-            let projection = project_text_source(
-                project_dir,
-                request.label_id,
-                Some(&properties),
-                limits.text,
-                || checkpoint.borrow_mut()(),
-            )?;
-            if policy.require_observed_properties {
-                validate_observed_properties(&projection)?;
+            if projection.borrow().is_none() {
+                *projection.borrow_mut() = Some(project_text_source(
+                    project_dir,
+                    request.label_id,
+                    Some(&properties),
+                    limits.text,
+                    || checkpoint.borrow_mut()(),
+                )?);
             }
-            match build_text_index(build_dir, &projection, limits.text, || {
+            let borrowed = projection.borrow();
+            let projection = borrowed.as_ref().expect("projection initialized");
+            if policy
+                .expected_snapshot
+                .is_some_and(|expected| expected != &projection.source_snapshot)
+            {
+                return Err(SearchArtifactError::Stale {
+                    reason: "graph changed after text property discovery".to_owned(),
+                });
+            }
+            if policy.require_observed_properties {
+                validate_observed_properties(projection)?;
+            }
+            match build_text_index(build_dir, projection, limits.text, || {
                 checkpoint.borrow_mut()()
             })? {
                 TextIndexBuildOutcome::Empty => write_empty_marker(build_dir)?,
@@ -662,7 +677,6 @@ where
     let retry_budget = Cell::new(true);
 
     loop {
-        let before = capture_text_snapshot(project_dir, limits.text, &mut checkpoint)?;
         let projection = project_text_source(
             project_dir,
             request.label_id,
@@ -670,11 +684,7 @@ where
             limits.text,
             &mut checkpoint,
         )?;
-        let after_discovery = capture_text_snapshot(project_dir, limits.text, &mut checkpoint)?;
-        if before != after_discovery {
-            consume_retry(Some(&retry_budget))?;
-            continue;
-        }
+        let after_discovery = projection.source_snapshot.clone();
         if projection.properties.is_empty() {
             return Ok(Vec::new());
         }
@@ -756,7 +766,15 @@ where
             &mut *checkpoint,
         )?,
     };
-    let after = capture_text_snapshot(project_dir, limits.text, &mut *checkpoint)?;
+    let manifest_snapshot = SearchSourceSnapshot {
+        generation: publication.artifact().manifest.source_generation,
+        fingerprint: publication.artifact().manifest.source_fingerprint.clone(),
+    };
+    let after = match generation_checked_snapshot(project_dir, &manifest_snapshot) {
+        Ok(snapshot) => snapshot,
+        Err(SearchArtifactError::ConcurrentMutation) => return Ok(TextSearchAttempt::Retry),
+        Err(error) => return Err(error),
+    };
     if request
         .expected_snapshot
         .is_some_and(|expected| expected != &after)
@@ -901,6 +919,7 @@ where
     Ok(())
 }
 
+#[cfg(test)]
 fn capture_text_snapshot<C>(
     project_dir: &Path,
     limits: TextSearchLimits,
@@ -934,6 +953,17 @@ where
     )
 }
 
+fn generation_checked_snapshot(
+    project_dir: &Path,
+    expected: &SearchSourceSnapshot,
+) -> Result<SearchSourceSnapshot, SearchArtifactError> {
+    if SearchSourceSnapshot::generation(project_dir)? != expected.generation {
+        return Err(SearchArtifactError::ConcurrentMutation);
+    }
+    Ok(expected.clone())
+}
+
+#[cfg(test)]
 fn property_source_paths<C>(
     project_dir: &Path,
     checkpoint: &mut C,
@@ -983,6 +1013,7 @@ fn validate_observed_properties(
     Ok(())
 }
 
+#[cfg(test)]
 fn source(reason: impl Into<String>) -> SearchArtifactError {
     SearchArtifactError::SourceSnapshot {
         reason: reason.into(),

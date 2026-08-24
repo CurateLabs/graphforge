@@ -5,7 +5,7 @@ use std::path::Path;
 
 use arrow::array::{Array, FixedSizeBinaryArray, ListArray, StringArray, UInt32Array, UInt64Array};
 use arrow::datatypes::DataType;
-use graphforge_storage::SearchArtifactError;
+use graphforge_storage::{AdmittedSourceFile, SearchArtifactError, SearchSourceSnapshot};
 
 use crate::TextSearchLimits;
 
@@ -30,6 +30,8 @@ pub struct TextSourceProjection {
     pub documents: Vec<TextDocument>,
     /// Physical committed source bytes inspected while projecting.
     pub source_bytes: u64,
+    /// Generation and content identity captured from the exact decoded handles.
+    pub source_snapshot: SearchSourceSnapshot,
 }
 
 /// Project one caller-resolved label from topology and property Parquet files.
@@ -57,6 +59,8 @@ where
     C: FnMut() -> Result<(), SearchArtifactError>,
 {
     checkpoint()?;
+    let source_generation = SearchSourceSnapshot::generation(project_dir)?;
+    let mut source_evidence = Vec::<AdmittedSourceFile>::new();
     let explicit = selected_properties
         .map(|properties| normalize_properties(properties, limits))
         .transpose()?;
@@ -71,15 +75,22 @@ where
         limits,
         &mut checkpoint,
         &mut source_bytes,
+        &mut source_evidence,
     )?;
     if eligible.len() > limits.documents {
         return Err(exhausted("text_documents", limits.documents));
     }
     if eligible.is_empty() {
+        let source_snapshot = SearchSourceSnapshot::from_admitted_files(
+            project_dir,
+            source_generation,
+            &source_evidence,
+        )?;
         return Ok(TextSourceProjection {
             properties: explicit.unwrap_or_default(),
             documents: Vec::new(),
             source_bytes,
+            source_snapshot,
         });
     }
 
@@ -90,13 +101,20 @@ where
         limits,
         &mut checkpoint,
         &mut source_bytes,
+        &mut source_evidence,
     )?;
     let properties = explicit.unwrap_or_else(|| observed_properties.into_iter().collect());
     if properties.is_empty() {
+        let source_snapshot = SearchSourceSnapshot::from_admitted_files(
+            project_dir,
+            source_generation,
+            &source_evidence,
+        )?;
         return Ok(TextSourceProjection {
             properties,
             documents: Vec::new(),
             source_bytes,
+            source_snapshot,
         });
     }
     let property_set = properties.iter().collect::<BTreeSet<_>>();
@@ -112,10 +130,16 @@ where
             TextDocument { node_uuid, fields }
         })
         .collect();
+    let source_snapshot = SearchSourceSnapshot::from_admitted_files(
+        project_dir,
+        source_generation,
+        &source_evidence,
+    )?;
     Ok(TextSourceProjection {
         properties,
         documents,
         source_bytes,
+        source_snapshot,
     })
 }
 
@@ -126,6 +150,7 @@ fn select_eligible_nodes<C>(
     limits: TextSearchLimits,
     checkpoint: &mut C,
     source_bytes: &mut u64,
+    source_evidence: &mut Vec<AdmittedSourceFile>,
 ) -> Result<BTreeSet<[u8; 16]>, SearchArtifactError>
 where
     C: FnMut() -> Result<(), SearchArtifactError>,
@@ -145,6 +170,7 @@ where
         project_dir,
         8192,
         limits.source_bytes,
+        source_evidence,
         |batch| {
             let result: Result<(), SearchArtifactError> = (|| {
                 checkpoint()?;
@@ -180,7 +206,7 @@ where
                     if topology_rows > limits.topology_rows {
                         return Err(exhausted("text_topology_rows", limits.topology_rows));
                     }
-                    if uuids.is_null(row) || labels.is_null(row) {
+                    if uuids.is_null(row) || labels.is_null(row) || surrogates.is_null(row) {
                         return Err(source("topology contains null node identity data"));
                     }
                     let node_uuid: [u8; 16] = uuids
@@ -253,6 +279,7 @@ fn project_properties<C>(
     limits: TextSearchLimits,
     checkpoint: &mut C,
     source_bytes: &mut u64,
+    source_evidence: &mut Vec<AdmittedSourceFile>,
 ) -> Result<ProjectedProperties, SearchArtifactError>
 where
     C: FnMut() -> Result<(), SearchArtifactError>,
@@ -276,6 +303,7 @@ where
         8192,
         remaining,
         projected_columns.as_ref(),
+        source_evidence,
         |stem, batch| {
             let result: Result<(), SearchArtifactError> = (|| {
                 checkpoint()?;
@@ -462,6 +490,7 @@ mod tests {
     use graphforge_core::uuid::Uuid;
     use graphforge_ir::{IrLiteral, OntologyMode, TypeId};
     use graphforge_storage::GraphWriter;
+    use parquet::arrow::ArrowWriter;
     use tempfile::TempDir;
 
     use super::*;
@@ -470,6 +499,29 @@ mod tests {
         let mut bytes = [0_u8; 16];
         bytes[15] = value;
         Uuid::from_bytes(bytes)
+    }
+
+    fn corrupt_node_surrogate_to_null(root: &Path) {
+        let path = graphforge_storage::topology_node_files(root)
+            .unwrap()
+            .remove(0);
+        let batch = graphforge_storage::read_nodes(root).unwrap().remove(0);
+        let mut fields = batch
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.as_ref().clone())
+            .collect::<Vec<_>>();
+        let node_id = batch.schema().index_of("node_id").unwrap();
+        fields[node_id] = fields[node_id].clone().with_nullable(true);
+        let schema = std::sync::Arc::new(arrow::datatypes::Schema::new(fields));
+        let mut columns = batch.columns().to_vec();
+        columns[node_id] = std::sync::Arc::new(arrow::array::UInt64Array::from(vec![None]));
+        let corrupted = arrow::array::RecordBatch::try_new(schema.clone(), columns).unwrap();
+        let mut writer =
+            ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
+        writer.write(&corrupted).unwrap();
+        writer.close().unwrap();
     }
 
     #[test]
@@ -667,6 +719,19 @@ mod tests {
                 SearchArtifactError::Cancelled
             )),
             Err(SearchArtifactError::Cancelled)
+        ));
+    }
+
+    #[test]
+    fn projection_rejects_null_node_surrogate_explicitly() {
+        let dir = TempDir::new().unwrap();
+        let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, 1).unwrap();
+        writer.create_node(uuid(1), TypeId(1)).unwrap();
+        writer.flush().unwrap();
+        corrupt_node_surrogate_to_null(dir.path());
+        assert!(matches!(
+            project_text_source(dir.path(), 1, None, TextSearchLimits::default(), || Ok(())),
+            Err(SearchArtifactError::SourceSnapshot { .. })
         ));
     }
 
