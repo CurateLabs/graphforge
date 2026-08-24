@@ -1105,7 +1105,10 @@ fn apply_graph_mutations(
         &deleted_nodes,
         &deleted_edges,
     )?;
-    if let Some(generation) = graphforge_storage::commit_topology_aware(staged, &graph.dir)? {
+    let auxiliary = writer.prepared_uuid_index_auxiliary_receipt();
+    if let Some(generation) =
+        graphforge_storage::commit_topology_aware_with_auxiliary(staged, &graph.dir, auxiliary)?
+    {
         if index_prepared {
             writer.finalize_uuid_index_delta(generation)?;
         }
