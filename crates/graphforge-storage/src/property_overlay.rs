@@ -368,6 +368,108 @@ where
     Ok(metrics)
 }
 
+/// Resolve a bounded UUID batch newest-first without decoding unrelated row
+/// groups. Caller order is restored by the returned map lookup.
+pub fn read_authenticated_property_snapshots_for(
+    project: &Path,
+    kind: PropertyRouteKind,
+    route: &str,
+    targets: &std::collections::BTreeSet<[u8; 16]>,
+) -> Result<
+    (
+        BTreeMap<[u8; 16], PropertySnapshotRow>,
+        PropertyOverlayMetrics,
+    ),
+    GfError,
+> {
+    let mut unresolved = targets.clone();
+    let mut found = BTreeMap::new();
+    let mut metrics = PropertyOverlayMetrics::default();
+    let mut fragments = enumerate_property_fragments(project, kind, route)?;
+    fragments.reverse();
+    for fragment in fragments {
+        if unresolved.is_empty() {
+            break;
+        }
+        let mut options = fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        let file = options.open(&fragment.path).map_err(io_error)?;
+        let metadata = file.metadata().map_err(io_error)?;
+        if !metadata.file_type().is_file() {
+            return Err(corrupt("property fragment handle is not a regular file"));
+        }
+        let counts = Arc::new(ReadCounts::default());
+        let source = CountingChunkReader {
+            file,
+            length: metadata.len(),
+            counts: Arc::clone(&counts),
+        };
+        let mut builder =
+            ParquetRecordBatchReaderBuilder::try_new(source).map_err(parquet_error)?;
+        validate_fragment_schema(builder.schema().as_ref(), fragment.id, kind, route)?;
+        let uuid_index = builder
+            .schema()
+            .fields()
+            .iter()
+            .position(|field| field.name() == kind.uuid_field())
+            .ok_or_else(|| corrupt("property fragment lacks its UUID field"))?;
+        let mut row_groups = Vec::new();
+        for (index, group) in builder.metadata().row_groups().iter().enumerate() {
+            let statistics = group
+                .column(uuid_index)
+                .statistics()
+                .ok_or_else(|| corrupt("property UUID row group lacks statistics"))?;
+            let min: [u8; 16] = statistics
+                .min_bytes_opt()
+                .ok_or_else(|| corrupt("property UUID statistics lack minimum"))?
+                .try_into()
+                .map_err(|_| corrupt("property UUID statistics have wrong width"))?;
+            let max: [u8; 16] = statistics
+                .max_bytes_opt()
+                .ok_or_else(|| corrupt("property UUID statistics lack maximum"))?
+                .try_into()
+                .map_err(|_| corrupt("property UUID statistics have wrong width"))?;
+            if unresolved.range(min..=max).next().is_some() {
+                row_groups.push(index);
+            }
+        }
+        if !row_groups.is_empty() {
+            builder = builder.with_row_groups(row_groups);
+            let reader = builder
+                .with_batch_size(4096)
+                .build()
+                .map_err(parquet_error)?;
+            for batch in reader {
+                let batch = batch.map_err(|error| GfError::Storage(error.to_string()))?;
+                for row in decode_snapshot_batch(&batch, kind.uuid_field())? {
+                    metrics.physical_rows = metrics.physical_rows.saturating_add(1);
+                    if unresolved.remove(&row.uuid) {
+                        if !row.tombstone {
+                            found.insert(row.uuid, row);
+                        } else {
+                            metrics.tombstones = metrics.tombstones.saturating_add(1);
+                        }
+                    }
+                }
+            }
+        }
+        metrics.fragments_considered = metrics.fragments_considered.saturating_add(1);
+        metrics.physical_bytes = metrics
+            .physical_bytes
+            .saturating_add(counts.bytes.load(Ordering::Relaxed));
+        metrics.blocks_read = metrics
+            .blocks_read
+            .saturating_add(counts.blocks.load(Ordering::Relaxed));
+    }
+    metrics.logical_rows = u64::try_from(found.len()).unwrap_or(u64::MAX);
+    Ok((found, metrics))
+}
+
 fn open_authenticated_fragment(
     fragment: PropertyFragment,
     kind: PropertyRouteKind,

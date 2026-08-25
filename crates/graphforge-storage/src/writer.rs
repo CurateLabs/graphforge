@@ -3657,17 +3657,26 @@ pub fn stage_set_node_properties(
     stem: &str,
     updates: &HashMap<[u8; 16], HashMap<String, IrLiteral>>,
 ) -> Result<u64, GfError> {
-    let existing = crate::catalog::read_properties(dir, stem).map_err(pq_err)?;
-    let metadata = existing
-        .first()
-        .map(|batch| batch.schema().metadata().clone());
-    let rows = decode_property_rows(&existing)?;
+    let targets = updates.keys().copied().collect();
+    let (existing, _) = crate::property_overlay::read_authenticated_property_snapshots_for(
+        dir,
+        crate::property_overlay::PropertyRouteKind::Node,
+        stem,
+        &targets,
+    )?;
+    let rows = existing
+        .into_values()
+        .map(|row| PropRow {
+            node_uuid: row.uuid,
+            props: row.values.into_iter().collect(),
+        })
+        .collect();
     let (rows, touched) = apply_property_updates(rows, updates);
     let rows = rows
         .into_iter()
         .filter(|row| updates.contains_key(&row.node_uuid))
         .collect::<Vec<_>>();
-    stage_node_property_file(staged, dir, stem, &rows, metadata.as_ref())?;
+    stage_node_property_file(staged, dir, stem, &rows, None)?;
     Ok(touched)
 }
 
@@ -3683,17 +3692,26 @@ pub fn stage_remove_node_properties(
     stem: &str,
     removals: &HashMap<[u8; 16], HashSet<String>>,
 ) -> Result<u64, GfError> {
-    let existing = crate::catalog::read_properties(dir, stem).map_err(pq_err)?;
-    let metadata = existing
-        .first()
-        .map(|batch| batch.schema().metadata().clone());
-    let rows = decode_property_rows(&existing)?;
+    let targets = removals.keys().copied().collect();
+    let (existing, _) = crate::property_overlay::read_authenticated_property_snapshots_for(
+        dir,
+        crate::property_overlay::PropertyRouteKind::Node,
+        stem,
+        &targets,
+    )?;
+    let rows = existing
+        .into_values()
+        .map(|row| PropRow {
+            node_uuid: row.uuid,
+            props: row.values.into_iter().collect(),
+        })
+        .collect();
     let (rows, touched) = apply_property_removals(rows, removals);
     let rows = rows
         .into_iter()
         .filter(|row| removals.contains_key(&row.node_uuid))
         .collect::<Vec<_>>();
-    stage_node_property_file(staged, dir, stem, &rows, metadata.as_ref())?;
+    stage_node_property_file(staged, dir, stem, &rows, None)?;
     Ok(touched)
 }
 
@@ -3711,17 +3729,26 @@ pub fn stage_set_edge_properties(
     rel_stem: &str,
     updates: &HashMap<[u8; 16], HashMap<String, IrLiteral>>,
 ) -> Result<u64, GfError> {
-    let existing = crate::catalog::read_edge_properties(dir, rel_stem).map_err(pq_err)?;
-    let metadata = existing
-        .first()
-        .map(|batch| batch.schema().metadata().clone());
-    let rows = decode_edge_property_rows(&existing)?;
+    let targets = updates.keys().copied().collect();
+    let (existing, _) = crate::property_overlay::read_authenticated_property_snapshots_for(
+        dir,
+        crate::property_overlay::PropertyRouteKind::Edge,
+        rel_stem,
+        &targets,
+    )?;
+    let rows = existing
+        .into_values()
+        .map(|row| EdgePropRow {
+            edge_uuid: row.uuid,
+            props: row.values.into_iter().collect(),
+        })
+        .collect();
     let (rows, touched) = apply_property_updates(rows, updates);
     let rows = rows
         .into_iter()
         .filter(|row| updates.contains_key(&row.edge_uuid))
         .collect::<Vec<_>>();
-    stage_edge_property_file(staged, dir, rel_stem, &rows, metadata.as_ref())?;
+    stage_edge_property_file(staged, dir, rel_stem, &rows, None)?;
     Ok(touched)
 }
 
@@ -3738,17 +3765,26 @@ pub fn stage_remove_edge_properties(
     rel_stem: &str,
     removals: &HashMap<[u8; 16], HashSet<String>>,
 ) -> Result<u64, GfError> {
-    let existing = crate::catalog::read_edge_properties(dir, rel_stem).map_err(pq_err)?;
-    let metadata = existing
-        .first()
-        .map(|batch| batch.schema().metadata().clone());
-    let rows = decode_edge_property_rows(&existing)?;
+    let targets = removals.keys().copied().collect();
+    let (existing, _) = crate::property_overlay::read_authenticated_property_snapshots_for(
+        dir,
+        crate::property_overlay::PropertyRouteKind::Edge,
+        rel_stem,
+        &targets,
+    )?;
+    let rows = existing
+        .into_values()
+        .map(|row| EdgePropRow {
+            edge_uuid: row.uuid,
+            props: row.values.into_iter().collect(),
+        })
+        .collect();
     let (rows, touched) = apply_property_removals(rows, removals);
     let rows = rows
         .into_iter()
         .filter(|row| removals.contains_key(&row.edge_uuid))
         .collect::<Vec<_>>();
-    stage_edge_property_file(staged, dir, rel_stem, &rows, metadata.as_ref())?;
+    stage_edge_property_file(staged, dir, rel_stem, &rows, None)?;
     Ok(touched)
 }
 
