@@ -215,6 +215,8 @@ pub struct AuthenticatedPropertyInventory {
     _root: Option<graphforge_filesystem::StableDirectory>,
     routes: BTreeMap<(PropertyRouteKind, String), Vec<AuthenticatedPropertyFragment>>,
     schemas: BTreeMap<(PropertyRouteKind, String), arrow::datatypes::SchemaRef>,
+    authority_bytes: u64,
+    authority_blocks: u64,
 }
 
 #[derive(Debug)]
@@ -265,6 +267,8 @@ impl AuthenticatedPropertyInventory {
                 _root: None,
                 routes: BTreeMap::new(),
                 schemas: BTreeMap::new(),
+                authority_bytes: 0,
+                authority_blocks: 0,
             });
         };
         let inventory = generation.graph_files_inventory()?.ok_or_else(|| {
@@ -397,6 +401,8 @@ impl AuthenticatedPropertyInventory {
                     )
                 })
                 .collect(),
+            authority_bytes: 0,
+            authority_blocks: 0,
         })
     }
 
@@ -501,12 +507,18 @@ impl AuthenticatedPropertyInventory {
         if let Some(error) = failed.lock().expect("property failure lock").take() {
             return Err(error);
         }
-        metrics.authentication_bytes = fragments.iter().fold(0_u64, |sum, fragment| {
-            sum.saturating_add(fragment.authentication_bytes)
-        });
-        metrics.authentication_blocks = fragments.iter().fold(0_u64, |sum, fragment| {
-            sum.saturating_add(fragment.authentication_blocks)
-        });
+        metrics.authentication_bytes = fragments
+            .iter()
+            .fold(0_u64, |sum, fragment| {
+                sum.saturating_add(fragment.authentication_bytes)
+            })
+            .saturating_add(self.authority_bytes);
+        metrics.authentication_blocks = fragments
+            .iter()
+            .fold(0_u64, |sum, fragment| {
+                sum.saturating_add(fragment.authentication_blocks)
+            })
+            .saturating_add(self.authority_blocks);
         metrics.validation_bytes = counts.bytes.load(Ordering::Relaxed);
         metrics.physical_bytes = metrics
             .authentication_bytes
@@ -976,12 +988,19 @@ pub(crate) fn authenticated_property_inventory_for_route(
         );
     }
     let (inventory, _) = crate::capture_graph_files(project)?;
-    AuthenticatedPropertyInventory::from_entries_at_root_for_route(
+    let authority_bytes = inventory.total_byte_length;
+    let authority_blocks = inventory.files.iter().fold(0_u64, |blocks, entry| {
+        blocks.saturating_add(entry.byte_length.div_ceil(64 * 1024))
+    });
+    let mut admitted = AuthenticatedPropertyInventory::from_entries_at_root_for_route(
         project,
         inventory.files,
         kind,
         route,
-    )
+    )?;
+    admitted.authority_bytes = authority_bytes;
+    admitted.authority_blocks = authority_blocks;
+    Ok(admitted)
 }
 
 /// Resolve the canonical authenticated logical schema for one route.
@@ -1016,6 +1035,10 @@ pub fn read_authenticated_property_snapshots_for(
     let mut found = BTreeMap::new();
     let mut metrics = PropertyOverlayMetrics::default();
     let inventory = authenticated_property_inventory_for_route(project, kind, route)?;
+    metrics.authentication_bytes = inventory.authority_bytes;
+    metrics.authentication_blocks = inventory.authority_blocks;
+    metrics.physical_bytes = inventory.authority_bytes;
+    metrics.physical_blocks = inventory.authority_blocks;
     let Some(fragments) = inventory.routes.get(&(kind, route.to_owned())) else {
         return Ok((found, metrics));
     };
@@ -1267,6 +1290,10 @@ fn validate_fragment_schema(
 #[allow(
     deprecated,
     reason = "Parquet 58 exposes raw compact-Thrift page type and sizes only here"
+)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "raw page parsing and aggregate pre-decode admission form one proof"
 )]
 fn validate_parquet_resource_admission(
     metadata: &parquet::file::metadata::ParquetMetaData,
@@ -2750,10 +2777,15 @@ mod tests {
             assert_eq!(found.len(), 1);
             assert_eq!(metrics.physical_rows, u64::try_from(rows * 2).unwrap());
             assert_eq!(metrics.fragments_considered, 1);
-            assert_eq!(metrics.authentication_bytes, expected_authentication_bytes);
+            // Raw graph-tree adapters first capture/hash the authority and
+            // then authenticate the selected retained fragment.
+            assert_eq!(
+                metrics.authentication_bytes,
+                expected_authentication_bytes * 2
+            );
             assert_eq!(
                 metrics.authentication_blocks,
-                expected_authentication_bytes.div_ceil(64 * 1024)
+                expected_authentication_bytes.div_ceil(64 * 1024) * 2
             );
             assert_eq!(metrics.row_groups_considered, 1);
             assert_eq!(metrics.row_groups_selected, 1);
