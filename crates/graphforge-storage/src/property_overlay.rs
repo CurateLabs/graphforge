@@ -594,7 +594,7 @@ fn validate_fragment_schema(
     Ok(())
 }
 
-fn decode_snapshot_batch(
+pub(crate) fn decode_snapshot_batch(
     batch: &RecordBatch,
     uuid_field: &str,
 ) -> Result<Vec<PropertySnapshotRow>, GfError> {

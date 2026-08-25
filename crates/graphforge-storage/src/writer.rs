@@ -3660,12 +3660,18 @@ pub fn stage_set_node_properties(
     updates: &HashMap<[u8; 16], HashMap<String, IrLiteral>>,
 ) -> Result<u64, GfError> {
     let targets = updates.keys().copied().collect();
-    let (existing, _) = crate::property_overlay::read_authenticated_property_snapshots_for(
+    let (mut existing, _) = crate::property_overlay::read_authenticated_property_snapshots_for(
         dir,
         crate::property_overlay::PropertyRouteKind::Node,
         stem,
         &targets,
     )?;
+    existing.extend(pending_property_snapshots(
+        staged,
+        dir,
+        crate::property_overlay::PropertyRouteKind::Node,
+        stem,
+    )?);
     let rows = existing
         .into_values()
         .map(|row| PropRow {
@@ -3682,6 +3688,40 @@ pub fn stage_set_node_properties(
     Ok(touched)
 }
 
+fn pending_property_snapshots(
+    staged: &RewriteBatch,
+    dir: &Path,
+    kind: crate::property_overlay::PropertyRouteKind,
+    route: &str,
+) -> Result<BTreeMap<[u8; 16], crate::property_overlay::PropertySnapshotRow>, GfError> {
+    let subdir = match kind {
+        crate::property_overlay::PropertyRouteKind::Node => "properties",
+        crate::property_overlay::PropertyRouteKind::Edge => "edge_properties",
+    };
+    let route_dir = dir.join(subdir).join(route);
+    let uuid_field = match kind {
+        crate::property_overlay::PropertyRouteKind::Node => NODE_PROPERTY_UUID_FIELD,
+        crate::property_overlay::PropertyRouteKind::Edge => EDGE_PROPERTY_UUID_FIELD,
+    };
+    let mut rows = BTreeMap::new();
+    for final_path in staged
+        .staged_paths()
+        .filter(|path| path.parent() == Some(route_dir.as_path()))
+    {
+        let temp = staged
+            .staged_temp(final_path)
+            .ok_or_else(|| GfError::Storage("staged property path lacks temp".into()))?;
+        let schema = crate::catalog::discover_parquet_schema(temp)
+            .ok_or_else(|| GfError::Storage("staged property fragment is unreadable".into()))?;
+        for batch in crate::catalog::read_parquet_or_empty(temp, schema).map_err(pq_err)? {
+            for row in crate::property_overlay::decode_snapshot_batch(&batch, uuid_field)? {
+                rows.insert(row.uuid, row);
+            }
+        }
+    }
+    Ok(rows)
+}
+
 /// Stage a rewrite of `properties/<stem>.parquet` applying per-`node_uuid`
 /// REMOVE `removals`. Returns the number of distinct nodes targeted.
 ///
@@ -3695,12 +3735,18 @@ pub fn stage_remove_node_properties(
     removals: &HashMap<[u8; 16], HashSet<String>>,
 ) -> Result<u64, GfError> {
     let targets = removals.keys().copied().collect();
-    let (existing, _) = crate::property_overlay::read_authenticated_property_snapshots_for(
+    let (mut existing, _) = crate::property_overlay::read_authenticated_property_snapshots_for(
         dir,
         crate::property_overlay::PropertyRouteKind::Node,
         stem,
         &targets,
     )?;
+    existing.extend(pending_property_snapshots(
+        staged,
+        dir,
+        crate::property_overlay::PropertyRouteKind::Node,
+        stem,
+    )?);
     let rows = existing
         .into_values()
         .map(|row| PropRow {
@@ -3732,12 +3778,18 @@ pub fn stage_set_edge_properties(
     updates: &HashMap<[u8; 16], HashMap<String, IrLiteral>>,
 ) -> Result<u64, GfError> {
     let targets = updates.keys().copied().collect();
-    let (existing, _) = crate::property_overlay::read_authenticated_property_snapshots_for(
+    let (mut existing, _) = crate::property_overlay::read_authenticated_property_snapshots_for(
         dir,
         crate::property_overlay::PropertyRouteKind::Edge,
         rel_stem,
         &targets,
     )?;
+    existing.extend(pending_property_snapshots(
+        staged,
+        dir,
+        crate::property_overlay::PropertyRouteKind::Edge,
+        rel_stem,
+    )?);
     let rows = existing
         .into_values()
         .map(|row| EdgePropRow {
@@ -3768,12 +3820,18 @@ pub fn stage_remove_edge_properties(
     removals: &HashMap<[u8; 16], HashSet<String>>,
 ) -> Result<u64, GfError> {
     let targets = removals.keys().copied().collect();
-    let (existing, _) = crate::property_overlay::read_authenticated_property_snapshots_for(
+    let (mut existing, _) = crate::property_overlay::read_authenticated_property_snapshots_for(
         dir,
         crate::property_overlay::PropertyRouteKind::Edge,
         rel_stem,
         &targets,
     )?;
+    existing.extend(pending_property_snapshots(
+        staged,
+        dir,
+        crate::property_overlay::PropertyRouteKind::Edge,
+        rel_stem,
+    )?);
     let rows = existing
         .into_values()
         .map(|row| EdgePropRow {
@@ -4035,16 +4093,57 @@ fn stage_property_fragment(
     metadata.insert(PROPERTY_GENERATION_KEY.into(), generation.to_string());
     metadata.insert(PROPERTY_ORDINAL_KEY.into(), ordinal.to_string());
     let schema = Arc::new(Schema::new_with_metadata(fields, metadata));
-    let batch = RecordBatch::try_new(Arc::clone(&schema), cols).map_err(pq_err)?;
+    let mut batch = RecordBatch::try_new(Arc::clone(&schema), cols).map_err(pq_err)?;
     let subdir = match kind {
         crate::property_overlay::PropertyRouteKind::Node => "properties",
         crate::property_overlay::PropertyRouteKind::Edge => "edge_properties",
     };
-    staged.stage(
-        &dir.join(subdir).join(route).join(id.file_name()),
-        schema,
-        &batch,
-    )
+    let final_path = dir.join(subdir).join(route).join(id.file_name());
+    if let Some(temp) = staged.staged_temp(&final_path) {
+        let existing_schema = crate::catalog::discover_parquet_schema(temp)
+            .ok_or_else(|| GfError::Storage("staged property fragment is unreadable".into()))?;
+        let existing =
+            crate::catalog::read_parquet_or_empty(temp, existing_schema).map_err(pq_err)?;
+        let uuid_field = match kind {
+            crate::property_overlay::PropertyRouteKind::Node => NODE_PROPERTY_UUID_FIELD,
+            crate::property_overlay::PropertyRouteKind::Edge => EDGE_PROPERTY_UUID_FIELD,
+        };
+        let mut snapshots = BTreeMap::new();
+        for existing_batch in &existing {
+            for row in crate::property_overlay::decode_snapshot_batch(existing_batch, uuid_field)? {
+                snapshots.insert(row.uuid, row);
+            }
+        }
+        for row in crate::property_overlay::decode_snapshot_batch(&batch, uuid_field)? {
+            snapshots.insert(row.uuid, row);
+        }
+        let rows = snapshots.into_values().collect::<Vec<_>>();
+        let tombstones = rows.iter().map(|row| row.tombstone).collect::<Vec<_>>();
+        let mut rebuilt = property_snapshots_to_batch(
+            route,
+            matches!(kind, crate::property_overlay::PropertyRouteKind::Edge),
+            rows,
+        )?
+        .ok_or_else(|| GfError::Storage("property window cannot seal empty fragment".into()))?;
+        let mut fields = rebuilt
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.as_ref().clone())
+            .collect::<Vec<_>>();
+        fields.insert(
+            1,
+            Field::new(PROPERTY_TOMBSTONE_FIELD, DataType::Boolean, false),
+        );
+        let mut columns = rebuilt.columns().to_vec();
+        columns.insert(1, Arc::new(BooleanArray::from(tombstones)));
+        let schema = Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone()));
+        rebuilt = RecordBatch::try_new(Arc::clone(&schema), columns).map_err(pq_err)?;
+        batch = rebuilt;
+        staged.restage(&final_path, schema, &batch)
+    } else {
+        staged.stage(&final_path, schema, &batch)
+    }
 }
 
 /// `properties/<stem>.parquet` under `dir`.
@@ -4695,6 +4794,59 @@ mod tests {
             read_edge_props(dir.path(), "KNOWS")[&eb]["since"],
             IrLiteral::Int(2024)
         );
+    }
+
+    #[test]
+    fn same_window_set_then_remove_seals_one_ordered_snapshot() {
+        let dir = TempDir::new().unwrap();
+        let node = new_v7();
+        let uuid = to_bytes(&node);
+        let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
+        writer.create_node(node, TypeId(0)).unwrap();
+        writer
+            .set_properties(
+                &node,
+                None,
+                HashMap::from([("base".into(), IrLiteral::Int(1))]),
+            )
+            .unwrap();
+        writer.flush().unwrap();
+
+        let mut staged = RewriteBatch::new();
+        stage_set_node_properties(
+            &mut staged,
+            dir.path(),
+            "_untyped",
+            &HashMap::from([(
+                uuid,
+                HashMap::from([
+                    ("keep".into(), IrLiteral::Int(2)),
+                    ("remove".into(), IrLiteral::Int(3)),
+                ]),
+            )]),
+        )
+        .unwrap();
+        stage_remove_node_properties(
+            &mut staged,
+            dir.path(),
+            "_untyped",
+            &HashMap::from([(uuid, HashSet::from(["remove".into()]))]),
+        )
+        .unwrap();
+        assert_eq!(
+            staged
+                .staged_paths()
+                .filter(|path| path
+                    .parent()
+                    .is_some_and(|parent| parent.ends_with("_untyped")))
+                .count(),
+            1
+        );
+        staged.commit().unwrap();
+        let properties = read_entity_properties(dir.path(), "_untyped", &uuid, false).unwrap();
+        assert_eq!(properties.get("base"), Some(&IrLiteral::Int(1)));
+        assert_eq!(properties.get("keep"), Some(&IrLiteral::Int(2)));
+        assert!(!properties.contains_key("remove"));
     }
 
     // -----------------------------------------------------------------------
