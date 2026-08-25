@@ -27,10 +27,10 @@ pub const PROPERTY_OVERLAY_FORMAT: &str = "full-snapshot-v1";
 pub const PROPERTY_OVERLAY_FORMAT_KEY: &str = "graphforge.property_overlay";
 /// Reserved non-user column marking whole-row deletion.
 pub const PROPERTY_TOMBSTONE_FIELD: &str = "__gf_property_tombstone";
-const PROPERTY_ROUTE_KEY: &str = "graphforge.property_route";
-const PROPERTY_KIND_KEY: &str = "graphforge.property_kind";
-const PROPERTY_GENERATION_KEY: &str = "graphforge.property_generation";
-const PROPERTY_ORDINAL_KEY: &str = "graphforge.property_ordinal";
+pub(crate) const PROPERTY_ROUTE_KEY: &str = "graphforge.property_route";
+pub(crate) const PROPERTY_KIND_KEY: &str = "graphforge.property_kind";
+pub(crate) const PROPERTY_GENERATION_KEY: &str = "graphforge.property_generation";
+pub(crate) const PROPERTY_ORDINAL_KEY: &str = "graphforge.property_ordinal";
 
 /// Node and edge property namespaces are disjoint authorities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,7 +49,7 @@ impl PropertyRouteKind {
         }
     }
 
-    fn metadata_value(self) -> &'static str {
+    pub(crate) fn metadata_value(self) -> &'static str {
         match self {
             Self::Node => "node",
             Self::Edge => "edge",
@@ -84,7 +84,9 @@ struct CountingRead<R> {
 
 impl<R: std::io::Read> std::io::Read for CountingRead<R> {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
-        let read = self.inner.read(buffer)?;
+        const BLOCK_BYTES: usize = 64 * 1024;
+        let limit = buffer.len().min(BLOCK_BYTES);
+        let read = self.inner.read(&mut buffer[..limit])?;
         if read != 0 {
             self.counts
                 .bytes
@@ -184,7 +186,7 @@ pub struct PropertyOverlayMetrics {
     pub physical_rows: u64,
     /// Authenticated fragment bytes read.
     pub physical_bytes: u64,
-    /// Bounded input blocks read.
+    /// Non-empty input reads, each capped at 64 KiB.
     pub blocks_read: u64,
     /// Canonical fragments considered for authority.
     pub fragments_considered: u64,
@@ -204,6 +206,14 @@ pub struct PropertyOverlayMetrics {
     pub peak_buffered_rows: u64,
     /// Maximum charged decoded bytes retained at once.
     pub peak_buffered_bytes: u64,
+    /// Maximum rows retained by one decoded Parquet batch.
+    pub decoder_peak_rows: u64,
+    /// Maximum charged row bytes retained by one decoded Parquet batch.
+    pub decoder_peak_bytes: u64,
+    /// Maximum rows retained by spill sorting or k-way cursors.
+    pub merge_peak_rows: u64,
+    /// Maximum charged bytes retained by spill sorting or k-way cursors.
+    pub merge_peak_bytes: u64,
     /// Random/per-record seeks are forbidden and remain zero.
     pub per_record_seeks: u64,
 }
@@ -233,6 +243,15 @@ struct PropertyParquetRows {
     current: std::vec::IntoIter<PropertySnapshotRow>,
     uuid_field: &'static str,
     failed: Arc<Mutex<Option<GfError>>>,
+    decoded: Arc<Mutex<DecodedRetention>>,
+}
+
+#[derive(Debug, Default)]
+struct DecodedRetention {
+    current_rows: u64,
+    current_bytes: u64,
+    peak_rows: u64,
+    peak_bytes: u64,
 }
 
 impl Iterator for PropertyParquetRows {
@@ -241,6 +260,9 @@ impl Iterator for PropertyParquetRows {
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             if let Some(row) = self.current.next() {
+                let mut decoded = self.decoded.lock().expect("property retention lock");
+                decoded.current_rows = decoded.current_rows.saturating_sub(1);
+                decoded.current_bytes = decoded.current_bytes.saturating_sub(snapshot_charge(&row));
                 return Some(row);
             }
             let batch = match self.reader.next()? {
@@ -252,7 +274,18 @@ impl Iterator for PropertyParquetRows {
                 }
             };
             match decode_snapshot_batch(&batch, self.uuid_field) {
-                Ok(rows) => self.current = rows.into_iter(),
+                Ok(rows) => {
+                    let bytes = rows.iter().fold(0_u64, |total, row| {
+                        total.saturating_add(snapshot_charge(row))
+                    });
+                    let mut decoded = self.decoded.lock().expect("property retention lock");
+                    decoded.current_rows = u64::try_from(rows.len()).unwrap_or(u64::MAX);
+                    decoded.current_bytes = bytes;
+                    decoded.peak_rows = decoded.peak_rows.max(decoded.current_rows);
+                    decoded.peak_bytes = decoded.peak_bytes.max(decoded.current_bytes);
+                    drop(decoded);
+                    self.current = rows.into_iter();
+                }
                 Err(error) => {
                     *self.failed.lock().expect("property failure lock") = Some(error);
                     return None;
@@ -267,6 +300,7 @@ struct AuthenticatedFragmentRows {
     rows: PropertyParquetRows,
     counts: Arc<ReadCounts>,
     failed: Arc<Mutex<Option<GfError>>>,
+    decoded: Arc<Mutex<DecodedRetention>>,
 }
 
 /// Scan a route through authenticated retained file handles and emit its
@@ -296,6 +330,10 @@ where
         .iter_mut()
         .map(|fragment| Arc::clone(&fragment.failed))
         .collect::<Vec<_>>();
+    let decoded = admitted
+        .iter()
+        .map(|fragment| Arc::clone(&fragment.decoded))
+        .collect::<Vec<_>>();
     let inputs = admitted
         .into_iter()
         .map(|fragment| (fragment.id, 0, 0, fragment.rows));
@@ -314,6 +352,19 @@ where
         .iter()
         .map(|counts| counts.blocks.load(Ordering::Relaxed))
         .sum();
+    metrics.merge_peak_rows = metrics.peak_buffered_rows;
+    metrics.merge_peak_bytes = metrics.peak_buffered_bytes;
+    for retention in decoded {
+        let retention = retention.lock().expect("property retention lock");
+        metrics.decoder_peak_rows = metrics.decoder_peak_rows.max(retention.peak_rows);
+        metrics.decoder_peak_bytes = metrics.decoder_peak_bytes.max(retention.peak_bytes);
+    }
+    metrics.peak_buffered_rows = metrics
+        .decoder_peak_rows
+        .saturating_add(metrics.merge_peak_rows);
+    metrics.peak_buffered_bytes = metrics
+        .decoder_peak_bytes
+        .saturating_add(metrics.merge_peak_bytes);
     Ok(metrics)
 }
 
@@ -347,6 +398,7 @@ fn open_authenticated_fragment(
         .build()
         .map_err(parquet_error)?;
     let failed = Arc::new(Mutex::new(None));
+    let decoded = Arc::new(Mutex::new(DecodedRetention::default()));
     Ok(AuthenticatedFragmentRows {
         id: fragment.id,
         rows: PropertyParquetRows {
@@ -354,9 +406,11 @@ fn open_authenticated_fragment(
             current: Vec::new().into_iter(),
             uuid_field: kind.uuid_field(),
             failed: Arc::clone(&failed),
+            decoded: Arc::clone(&decoded),
         },
         counts,
         failed,
+        decoded,
     })
 }
 
@@ -587,6 +641,13 @@ fn record_charge(record: &SpoolRecord) -> u64 {
         .saturating_add(8)
         .saturating_add(1)
         .saturating_add(values)
+}
+
+fn snapshot_charge(row: &PropertySnapshotRow) -> u64 {
+    let values = serde_json::to_vec(&row.values).map_or(u64::MAX, |encoded| {
+        u64::try_from(encoded.len()).unwrap_or(u64::MAX)
+    });
+    16_u64.saturating_add(1).saturating_add(values)
 }
 
 fn merge_runs<F>(
@@ -924,6 +985,7 @@ mod tests {
             ],
             metadata,
         ));
+        let large_name = "A".repeat(100_000);
         let batch = RecordBatch::try_new(
             Arc::clone(&schema),
             vec![
@@ -931,7 +993,7 @@ mod tests {
                     FixedSizeBinaryArray::try_from_iter(vec![vec![4; 16]].into_iter()).unwrap(),
                 ) as ArrayRef,
                 Arc::new(BooleanArray::from(vec![false])) as ArrayRef,
-                Arc::new(StringArray::from(vec![Some("Ada")])) as ArrayRef,
+                Arc::new(StringArray::from(vec![Some(large_name.as_str())])) as ArrayRef,
             ],
         )
         .unwrap();
@@ -956,11 +1018,13 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(
             rows[0].values.get("name"),
-            Some(&IrLiteral::Str("Ada".into()))
+            Some(&IrLiteral::Str(large_name))
         );
         assert_eq!(metrics.physical_rows, 1);
         assert!(metrics.physical_bytes > 0);
         assert!(metrics.blocks_read > 0);
+        assert!(metrics.decoder_peak_bytes > 100_000);
+        assert!(metrics.peak_buffered_bytes >= metrics.decoder_peak_bytes);
         assert_eq!(metrics.per_record_seeks, 0);
     }
 }

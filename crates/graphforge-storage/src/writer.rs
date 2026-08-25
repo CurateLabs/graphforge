@@ -47,7 +47,7 @@
 //!    baseline capabilities); capability-gated directories for other features
 //!    are deferred to when those capabilities exist.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -55,12 +55,11 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use arrow::array::{
-    ArrayRef, BooleanBuilder, FixedSizeBinaryArray, Float64Array, Float64Builder, Int64Builder,
-    RecordBatch, StringArray, StringBuilder, TimestampMicrosecondArray,
+    ArrayRef, BooleanArray, BooleanBuilder, FixedSizeBinaryArray, Float64Array, Float64Builder,
+    Int64Builder, RecordBatch, StringArray, StringBuilder, TimestampMicrosecondArray,
     TimestampMicrosecondBuilder, UInt32Array, UInt64Array,
 };
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use graphforge_core::uuid::{Uuid, to_bytes};
 use graphforge_core::{
@@ -1934,25 +1933,15 @@ impl GraphWriter {
         }
         let buffered: Vec<(String, Vec<PropRow>)> = self.properties.drain().collect();
         for (stem, new_rows) in buffered {
-            // Decode any rows already on disk and prepend them, then re-run the
-            // schema inference over the combined set (#733). Re-using
-            // `build_property_columns` keeps one source of truth for the
-            // first-seen ordering and type-coercion rules across flushes.
-            let existing = read_props_through(staged, &node_props_path(&self.dir, &stem))?;
-            let existing_metadata = existing
-                .first()
-                .map(|batch| batch.schema().metadata().clone());
-            let mut rows = decode_property_rows(&existing)?;
-            rows.extend(new_rows);
+            let rows = merge_node_property_window(new_rows);
             let (schema, cols) = build_property_columns(&stem, &rows)?;
             let schema = self.authenticated_route_schema(Arc::new(schema), &stem);
-            let schema = preserve_semantic_route_metadata(schema, existing_metadata.as_ref());
-            stage_property_file(
+            stage_property_fragment(
                 staged,
                 &self.dir,
-                "properties",
+                crate::property_overlay::PropertyRouteKind::Node,
                 &stem,
-                schema.as_ref().clone(),
+                schema,
                 cols,
             )?;
         }
@@ -1968,12 +1957,7 @@ impl GraphWriter {
         }
         let buffered: Vec<(String, Vec<EdgePropRow>)> = self.edge_properties.drain().collect();
         for (stem, new_rows) in buffered {
-            let existing = read_props_through(staged, &edge_props_path(&self.dir, &stem))?;
-            let existing_metadata = existing
-                .first()
-                .map(|batch| batch.schema().metadata().clone());
-            let mut rows = decode_edge_property_rows(&existing)?;
-            rows.extend(new_rows);
+            let rows = merge_edge_property_window(new_rows);
             let (schema, cols) = build_property_columns_keyed(
                 EDGE_PROPERTY_UUID_FIELD,
                 "graphforge.rel_type",
@@ -1981,13 +1965,12 @@ impl GraphWriter {
                 &rows,
             )?;
             let schema = self.authenticated_route_schema(Arc::new(schema), &stem);
-            let schema = preserve_semantic_route_metadata(schema, existing_metadata.as_ref());
-            stage_property_file(
+            stage_property_fragment(
                 staged,
                 &self.dir,
-                "edge_properties",
+                crate::property_overlay::PropertyRouteKind::Edge,
                 &stem,
-                schema.as_ref().clone(),
+                schema,
                 cols,
             )?;
         }
@@ -2276,6 +2259,46 @@ fn build_property_columns_keyed<R: PropRowLike>(
         cols.push(build_property_array(name, ct, rows));
     }
     Ok((schema, cols))
+}
+
+pub(crate) fn property_snapshots_to_batch(
+    route: &str,
+    is_edge: bool,
+    rows: Vec<crate::property_overlay::PropertySnapshotRow>,
+) -> Result<Option<RecordBatch>, GfError> {
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    if is_edge {
+        let rows = rows
+            .into_iter()
+            .map(|row| EdgePropRow {
+                edge_uuid: row.uuid,
+                props: row.values.into_iter().collect(),
+            })
+            .collect::<Vec<_>>();
+        let (schema, columns) = build_property_columns_keyed(
+            EDGE_PROPERTY_UUID_FIELD,
+            "graphforge.rel_type",
+            route,
+            &rows,
+        )?;
+        RecordBatch::try_new(Arc::new(schema), columns)
+            .map(Some)
+            .map_err(pq_err)
+    } else {
+        let rows = rows
+            .into_iter()
+            .map(|row| PropRow {
+                node_uuid: row.uuid,
+                props: row.values.into_iter().collect(),
+            })
+            .collect::<Vec<_>>();
+        let (schema, columns) = build_property_columns(route, &rows)?;
+        RecordBatch::try_new(Arc::new(schema), columns)
+            .map(Some)
+            .map_err(pq_err)
+    }
 }
 
 fn reject_map_property_value(name: &str, lit: &IrLiteral) -> Result<(), GfError> {
@@ -2976,15 +2999,12 @@ pub fn read_entity_property_keys(
     uuid: &[u8; 16],
     is_edge: bool,
 ) -> Result<HashSet<String>, GfError> {
-    let path = if is_edge {
-        edge_props_path(dir, stem)
+    let batches = if is_edge {
+        crate::catalog::read_edge_properties(dir, stem)
     } else {
-        node_props_path(dir, stem)
-    };
-    let Some(schema) = crate::catalog::discover_parquet_schema(&path) else {
-        return Ok(HashSet::new());
-    };
-    let batches = crate::catalog::read_parquet_or_empty(&path, schema).map_err(pq_err)?;
+        crate::catalog::read_properties(dir, stem)
+    }
+    .map_err(pq_err)?;
     let rows = if is_edge {
         decode_edge_property_rows(&batches)?
             .into_iter()
@@ -3011,15 +3031,12 @@ pub fn read_entity_properties(
     uuid: &[u8; 16],
     is_edge: bool,
 ) -> Result<HashMap<String, IrLiteral>, GfError> {
-    let path = if is_edge {
-        edge_props_path(dir, stem)
+    let batches = if is_edge {
+        crate::catalog::read_edge_properties(dir, stem)
     } else {
-        node_props_path(dir, stem)
-    };
-    let Some(schema) = crate::catalog::discover_parquet_schema(&path) else {
-        return Ok(HashMap::new());
-    };
-    let batches = crate::catalog::read_parquet_or_empty(&path, schema).map_err(pq_err)?;
+        crate::catalog::read_properties(dir, stem)
+    }
+    .map_err(pq_err)?;
     let rows = if is_edge {
         decode_edge_property_rows(&batches)?
             .into_iter()
@@ -3042,16 +3059,7 @@ pub fn read_node_property_rows(
     dir: &Path,
     stem: &str,
 ) -> Result<HashMap<[u8; 16], HashMap<String, IrLiteral>>, GfError> {
-    let path = node_props_path(dir, stem);
-    if !path.try_exists().map_err(|error| io_err(&error))? {
-        return Ok(HashMap::new());
-    }
-    let file = fs::File::open(&path).map_err(|error| io_err(&error))?;
-    let schema = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(pq_err)?
-        .schema()
-        .clone();
-    let batches = crate::catalog::read_parquet_or_empty(&path, schema).map_err(pq_err)?;
+    let batches = crate::catalog::read_properties(dir, stem).map_err(pq_err)?;
     Ok(decode_property_rows(&batches)?
         .into_iter()
         .map(|row| (row.node_uuid, row.props))
@@ -3068,29 +3076,19 @@ pub fn count_entity_properties<S: std::hash::BuildHasher>(
     if targets.is_empty() {
         return Ok(0);
     }
-    let property_dir = dir.join(if is_edge {
-        "edge_properties"
-    } else {
-        "properties"
-    });
-    let Ok(entries) = std::fs::read_dir(property_dir) else {
-        return Ok(0);
-    };
     let mut count = 0u64;
-    for entry in entries {
-        let path = entry
-            .map_err(|error| GfError::Storage(error.to_string()))?
-            .path();
-        if path
-            .extension()
-            .is_none_or(|extension| extension != "parquet")
-        {
-            continue;
+    let stems = if is_edge {
+        crate::catalog::list_edge_property_stems(dir)
+    } else {
+        crate::catalog::list_property_stems(dir)
+    };
+    for stem in stems {
+        let batches = if is_edge {
+            crate::catalog::read_edge_properties(dir, &stem)
+        } else {
+            crate::catalog::read_properties(dir, &stem)
         }
-        let Some(schema) = crate::catalog::discover_parquet_schema(&path) else {
-            continue;
-        };
-        let batches = crate::catalog::read_parquet_or_empty(&path, schema).map_err(pq_err)?;
+        .map_err(pq_err)?;
         if is_edge {
             for row in decode_edge_property_rows(&batches)? {
                 if targets.contains(&row.edge_uuid) {
@@ -3659,12 +3657,16 @@ pub fn stage_set_node_properties(
     stem: &str,
     updates: &HashMap<[u8; 16], HashMap<String, IrLiteral>>,
 ) -> Result<u64, GfError> {
-    let existing = read_props_through(staged, &node_props_path(dir, stem))?;
+    let existing = crate::catalog::read_properties(dir, stem).map_err(pq_err)?;
     let metadata = existing
         .first()
         .map(|batch| batch.schema().metadata().clone());
     let rows = decode_property_rows(&existing)?;
     let (rows, touched) = apply_property_updates(rows, updates);
+    let rows = rows
+        .into_iter()
+        .filter(|row| updates.contains_key(&row.node_uuid))
+        .collect::<Vec<_>>();
     stage_node_property_file(staged, dir, stem, &rows, metadata.as_ref())?;
     Ok(touched)
 }
@@ -3681,12 +3683,16 @@ pub fn stage_remove_node_properties(
     stem: &str,
     removals: &HashMap<[u8; 16], HashSet<String>>,
 ) -> Result<u64, GfError> {
-    let existing = read_props_through(staged, &node_props_path(dir, stem))?;
+    let existing = crate::catalog::read_properties(dir, stem).map_err(pq_err)?;
     let metadata = existing
         .first()
         .map(|batch| batch.schema().metadata().clone());
     let rows = decode_property_rows(&existing)?;
     let (rows, touched) = apply_property_removals(rows, removals);
+    let rows = rows
+        .into_iter()
+        .filter(|row| removals.contains_key(&row.node_uuid))
+        .collect::<Vec<_>>();
     stage_node_property_file(staged, dir, stem, &rows, metadata.as_ref())?;
     Ok(touched)
 }
@@ -3705,12 +3711,16 @@ pub fn stage_set_edge_properties(
     rel_stem: &str,
     updates: &HashMap<[u8; 16], HashMap<String, IrLiteral>>,
 ) -> Result<u64, GfError> {
-    let existing = read_props_through(staged, &edge_props_path(dir, rel_stem))?;
+    let existing = crate::catalog::read_edge_properties(dir, rel_stem).map_err(pq_err)?;
     let metadata = existing
         .first()
         .map(|batch| batch.schema().metadata().clone());
     let rows = decode_edge_property_rows(&existing)?;
     let (rows, touched) = apply_property_updates(rows, updates);
+    let rows = rows
+        .into_iter()
+        .filter(|row| updates.contains_key(&row.edge_uuid))
+        .collect::<Vec<_>>();
     stage_edge_property_file(staged, dir, rel_stem, &rows, metadata.as_ref())?;
     Ok(touched)
 }
@@ -3728,12 +3738,16 @@ pub fn stage_remove_edge_properties(
     rel_stem: &str,
     removals: &HashMap<[u8; 16], HashSet<String>>,
 ) -> Result<u64, GfError> {
-    let existing = read_props_through(staged, &edge_props_path(dir, rel_stem))?;
+    let existing = crate::catalog::read_edge_properties(dir, rel_stem).map_err(pq_err)?;
     let metadata = existing
         .first()
         .map(|batch| batch.schema().metadata().clone());
     let rows = decode_edge_property_rows(&existing)?;
     let (rows, touched) = apply_property_removals(rows, removals);
+    let rows = rows
+        .into_iter()
+        .filter(|row| removals.contains_key(&row.edge_uuid))
+        .collect::<Vec<_>>();
     stage_edge_property_file(staged, dir, rel_stem, &rows, metadata.as_ref())?;
     Ok(touched)
 }
@@ -3823,12 +3837,12 @@ fn stage_node_property_file(
     }
     let (schema, cols) = build_property_columns(stem, rows)?;
     let schema = preserve_semantic_route_metadata(Arc::new(schema), metadata);
-    stage_property_file(
+    stage_property_fragment(
         staged,
         dir,
-        "properties",
+        crate::property_overlay::PropertyRouteKind::Node,
         stem,
-        schema.as_ref().clone(),
+        schema,
         cols,
     )
 }
@@ -3848,12 +3862,12 @@ fn stage_edge_property_file(
     let (schema, cols) =
         build_property_columns_keyed(EDGE_PROPERTY_UUID_FIELD, "graphforge.rel_type", stem, rows)?;
     let schema = preserve_semantic_route_metadata(Arc::new(schema), metadata);
-    stage_property_file(
+    stage_property_fragment(
         staged,
         dir,
-        "edge_properties",
+        crate::property_overlay::PropertyRouteKind::Edge,
         stem,
-        schema.as_ref().clone(),
+        schema,
         cols,
     )
 }
@@ -3862,18 +3876,82 @@ fn stage_edge_property_file(
 /// staging core creates the subdirectory), replacing any content this
 /// statement already staged for it. Callers guard the empty-row case before
 /// reaching here.
-fn stage_property_file(
+fn merge_node_property_window(rows: Vec<PropRow>) -> Vec<PropRow> {
+    let mut merged = BTreeMap::<[u8; 16], HashMap<String, IrLiteral>>::new();
+    for row in rows {
+        merged.entry(row.node_uuid).or_default().extend(row.props);
+    }
+    merged
+        .into_iter()
+        .map(|(node_uuid, props)| PropRow { node_uuid, props })
+        .collect()
+}
+
+fn merge_edge_property_window(rows: Vec<EdgePropRow>) -> Vec<EdgePropRow> {
+    let mut merged = BTreeMap::<[u8; 16], HashMap<String, IrLiteral>>::new();
+    for row in rows {
+        merged.entry(row.edge_uuid).or_default().extend(row.props);
+    }
+    merged
+        .into_iter()
+        .map(|(edge_uuid, props)| EdgePropRow { edge_uuid, props })
+        .collect()
+}
+
+fn stage_property_fragment(
     staged: &mut RewriteBatch,
     dir: &Path,
-    subdir: &str,
-    stem: &str,
-    schema: Schema,
-    cols: Vec<ArrayRef>,
+    kind: crate::property_overlay::PropertyRouteKind,
+    route: &str,
+    schema: SchemaRef,
+    mut cols: Vec<ArrayRef>,
 ) -> Result<(), GfError> {
-    let batch = RecordBatch::try_new(Arc::new(schema), cols).map_err(pq_err)?;
-    staged.restage(
-        &dir.join(subdir).join(format!("{stem}.parquet")),
-        batch.schema(),
+    use crate::property_overlay::{
+        PROPERTY_GENERATION_KEY, PROPERTY_KIND_KEY, PROPERTY_ORDINAL_KEY, PROPERTY_OVERLAY_FORMAT,
+        PROPERTY_OVERLAY_FORMAT_KEY, PROPERTY_ROUTE_KEY, PROPERTY_TOMBSTONE_FIELD,
+        PropertyFragmentId, enumerate_property_fragments,
+    };
+    let generation = crate::generation::read_topology_generation(dir)?.max(1);
+    let fragments = enumerate_property_fragments(dir, kind, route)?;
+    let ordinal = fragments
+        .iter()
+        .filter(|fragment| fragment.id.generation == generation)
+        .map(|fragment| fragment.id.ordinal)
+        .max()
+        .map_or(0, |ordinal| ordinal.saturating_add(1));
+    let id = PropertyFragmentId {
+        generation,
+        ordinal,
+    };
+    let mut fields = schema
+        .fields()
+        .iter()
+        .map(|field| field.as_ref().clone())
+        .collect::<Vec<_>>();
+    fields.insert(
+        1,
+        Field::new(PROPERTY_TOMBSTONE_FIELD, DataType::Boolean, false),
+    );
+    let rows = cols.first().map_or(0, |column| column.len());
+    cols.insert(1, Arc::new(BooleanArray::from(vec![false; rows])));
+    let mut metadata = schema.metadata().clone();
+    metadata.insert(
+        PROPERTY_OVERLAY_FORMAT_KEY.into(),
+        PROPERTY_OVERLAY_FORMAT.into(),
+    );
+    metadata.insert(PROPERTY_ROUTE_KEY.into(), route.into());
+    metadata.insert(PROPERTY_KIND_KEY.into(), kind.metadata_value().into());
+    metadata.insert(PROPERTY_GENERATION_KEY.into(), generation.to_string());
+    metadata.insert(PROPERTY_ORDINAL_KEY.into(), ordinal.to_string());
+    let schema = Arc::new(Schema::new_with_metadata(fields, metadata));
+    let batch = RecordBatch::try_new(Arc::clone(&schema), cols).map_err(pq_err)?;
+    let subdir = match kind {
+        crate::property_overlay::PropertyRouteKind::Node => "properties",
+        crate::property_overlay::PropertyRouteKind::Edge => "edge_properties",
+    };
+    staged.stage(
+        &dir.join(subdir).join(route).join(id.file_name()),
+        schema,
         &batch,
     )
 }
@@ -3881,24 +3959,6 @@ fn stage_property_file(
 /// `properties/<stem>.parquet` under `dir`.
 fn node_props_path(dir: &Path, stem: &str) -> PathBuf {
     dir.join("properties").join(format!("{stem}.parquet"))
-}
-
-/// `edge_properties/<stem>.parquet` under `dir`.
-fn edge_props_path(dir: &Path, stem: &str) -> PathBuf {
-    dir.join("edge_properties").join(format!("{stem}.parquet"))
-}
-
-/// Read a dynamic-schema property file's batches for staging, **through**
-/// `staged` (#792): content already staged for `path` in this statement is
-/// the base, else the committed file; an absent file reads as empty.
-fn read_props_through(staged: &RewriteBatch, path: &Path) -> Result<Vec<RecordBatch>, GfError> {
-    let read_path = staged
-        .staged_temp(path)
-        .map_or_else(|| path.to_path_buf(), Path::to_path_buf);
-    match crate::catalog::discover_parquet_schema(&read_path) {
-        Some(schema) => crate::catalog::read_parquet_or_empty(&read_path, schema).map_err(pq_err),
-        None => Ok(Vec::new()),
-    }
 }
 
 // ---------------------------------------------------------------------------

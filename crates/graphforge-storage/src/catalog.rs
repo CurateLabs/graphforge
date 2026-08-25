@@ -1058,11 +1058,35 @@ fn max_ordered_u64_tail(path: &Path, column: &str) -> Result<u64, DataFusionErro
 /// # Errors
 /// Propagates Parquet / Arrow errors encountered while reading.
 pub fn read_properties(dir: &Path, stem: &str) -> Result<Vec<RecordBatch>, DataFusionError> {
-    let path = dir.join("properties").join(format!("{stem}.parquet"));
-    match discover_parquet_schema(&path) {
-        Some(schema) => read_parquet_or_empty(&path, schema),
-        None => Ok(Vec::new()),
-    }
+    read_property_overlay(dir, stem, false)
+}
+
+fn read_property_overlay(
+    dir: &Path,
+    stem: &str,
+    is_edge: bool,
+) -> Result<Vec<RecordBatch>, DataFusionError> {
+    let scratch = tempfile::tempdir().map_err(|error| io_err(&error))?;
+    let mut rows = Vec::new();
+    crate::property_overlay::visit_authenticated_property_snapshots(
+        dir,
+        if is_edge {
+            crate::property_overlay::PropertyRouteKind::Edge
+        } else {
+            crate::property_overlay::PropertyRouteKind::Node
+        },
+        stem,
+        scratch.path(),
+        crate::property_overlay::PropertyOverlayLimits::default(),
+        |row| {
+            rows.push(row);
+            Ok(())
+        },
+    )
+    .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+    crate::writer::property_snapshots_to_batch(stem, is_edge, rows)
+        .map(|batch| batch.into_iter().collect())
+        .map_err(|error| DataFusionError::Execution(error.to_string()))
 }
 
 /// Stream `properties/<stem>.parquet` as bounded batches without concatenating
@@ -1103,16 +1127,8 @@ pub fn visit_properties_batched<F>(
 where
     F: FnMut(&RecordBatch) -> Result<bool, DataFusionError>,
 {
-    let path = dir.join("properties").join(format!("{stem}.parquet"));
-    if !path.exists() {
-        return Ok(());
-    }
-    let file = File::open(&path).map_err(|e| io_err(&e))?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(parquet_err)?;
-    let builder = builder.with_batch_size(batch_size.max(1));
-    let reader = builder.build().map_err(parquet_err)?;
-    for batch in reader {
-        let batch = batch.map_err(parquet_err)?;
+    let _ = batch_size;
+    for batch in read_properties(dir, stem)? {
         if !visit(&batch)? {
             break;
         }
@@ -1172,11 +1188,7 @@ where
 /// # Errors
 /// Propagates Parquet / Arrow errors encountered while reading.
 pub fn read_edge_properties(dir: &Path, stem: &str) -> Result<Vec<RecordBatch>, DataFusionError> {
-    let path = dir.join("edge_properties").join(format!("{stem}.parquet"));
-    match discover_parquet_schema(&path) {
-        Some(schema) => read_parquet_or_empty(&path, schema),
-        None => Ok(Vec::new()),
-    }
+    read_property_overlay(dir, stem, true)
 }
 
 /// Stems (relation names) of every `edge_properties/<stem>.parquet` under
@@ -1203,7 +1215,11 @@ fn list_parquet_stems(dir: &Path) -> Vec<String> {
     };
     let mut stems: Vec<String> = entries
         .filter_map(|entry| {
-            let path = entry.ok()?.path();
+            let entry = entry.ok()?;
+            let path = entry.path();
+            if entry.file_type().ok()?.is_dir() {
+                return Some(path.file_name()?.to_str()?.to_owned());
+            }
             if path.extension().and_then(|e| e.to_str()) != Some("parquet") {
                 return None;
             }
