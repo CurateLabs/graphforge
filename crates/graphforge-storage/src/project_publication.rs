@@ -1073,10 +1073,9 @@ fn stage_optional_graph_tree(
     Ok(())
 }
 
-fn verify_optional_graph_tree(
+fn verify_optional_generation_graph_tree(
     generation_root: &Path,
     participants: &[StagedParticipant],
-    container_root: &Path,
 ) -> Result<(), GfError> {
     let Some(files) = participants.iter().find(|participant| {
         participant.capability_id == crate::GRAPH_CAPABILITY_ID
@@ -1092,7 +1091,11 @@ fn verify_optional_graph_tree(
         crate::GraphFilesParticipant::V1(inventory) => {
             crate::verify_graph_tree(&crate::graph_tree_root(generation_root), &inventory)
         }
-        crate::GraphFilesParticipant::V2(root) => verify_compact_graph_root(container_root, &root),
+        // Compact payloads live outside this generation. Staging verifies the
+        // complete named root once, and publication repeats that verification
+        // while holding the CAS lease immediately before CURRENT. Intermediate
+        // generation validation must not re-read every immutable payload byte.
+        crate::GraphFilesParticipant::V2(_) => Ok(()),
     }
 }
 
@@ -1275,11 +1278,7 @@ impl StagedProjectGeneration {
                 participant,
             )?;
         }
-        verify_optional_graph_tree(
-            &self.generation_root,
-            &self.participants,
-            self.parent.container_root(),
-        )?;
+        verify_optional_generation_graph_tree(&self.generation_root, &self.participants)?;
         domain_validation(&self.participants)?;
         project_failpoint::hit(
             "project.after_domain_validation",
@@ -1569,11 +1568,7 @@ fn make_generation_durable(staged: &StagedProjectGeneration) -> Result<[u8; 32],
             participant,
         )?;
     }
-    verify_optional_graph_tree(
-        &staged.generation_root,
-        &staged.participants,
-        staged.parent.container_root(),
-    )?;
+    verify_optional_generation_graph_tree(&staged.generation_root, &staged.participants)?;
     verify_exact_file(&manifest_path, &manifest_bytes)?;
     sync_participant_directories(
         &staged.generation_root.join(PARTICIPANTS_DIR),
@@ -2888,6 +2883,112 @@ mod tests {
                 .generation_uuid(),
             prior
         );
+    }
+
+    #[test]
+    fn compact_payload_is_reverified_only_at_the_lease_backed_commit_boundary() {
+        let root = project();
+        let parent = resolve_project_generation(root.path())
+            .unwrap()
+            .generation_uuid();
+        let workspace = tempfile::tempdir().unwrap();
+        let relative = std::path::PathBuf::from("topology/edges/knows.parquet");
+        fs::create_dir_all(workspace.path().join(relative.parent().unwrap())).unwrap();
+        fs::write(
+            workspace.path().join(&relative),
+            b"immutable topology payload",
+        )
+        .unwrap();
+        let mut state = crate::GraphManifestState::empty();
+        let lease = crate::begin_graph_object_publication(root.path()).unwrap();
+        let (files_root, _) =
+            crate::append_graph_files_v2(&lease, workspace.path(), &mut state, &[relative], &[])
+                .unwrap();
+        let payload_digest = state
+            .entries()
+            .next()
+            .expect("one compact payload")
+            .content_sha256
+            .clone();
+        let request = request(vec![
+            crate::graph_files_root_participant(&files_root).unwrap(),
+        ]);
+        let ProjectStageOutcome::Staged(staged) =
+            stage_project_generation(root.path(), &request).unwrap()
+        else {
+            panic!("new request unexpectedly replayed");
+        };
+
+        fs::write(
+            crate::graph_object_path(root.path(), &payload_digest).unwrap(),
+            b"corrupt",
+        )
+        .unwrap();
+        let validated = staged
+            .validate(|_| Ok(()), |_, _| Ok(()))
+            .expect("intermediate validation must not rehash compact payloads");
+        let error = validated
+            .publish_with_graph_objects(&lease)
+            .expect_err("final lease-backed verification must reject corruption");
+        assert_eq!(error.code(), "GF_PUBLICATION_FAILED");
+        assert_eq!(
+            resolve_project_generation(root.path())
+                .unwrap()
+                .generation_uuid(),
+            parent
+        );
+        assert!(
+            root.path()
+                .join(GENERATIONS_DIR)
+                .join(request.generation_uuid.hyphenated().to_string())
+                .exists()
+        );
+
+        drop(lease);
+        let report = crate::recover_project_transactions(root.path()).unwrap();
+        assert_eq!(report.aborted_journals, 1);
+        assert_eq!(report.removed_generations, 1);
+        assert!(
+            !root
+                .path()
+                .join(GENERATIONS_DIR)
+                .join(request.generation_uuid.hyphenated().to_string())
+                .exists()
+        );
+        assert_eq!(
+            resolve_project_generation(root.path())
+                .unwrap()
+                .generation_uuid(),
+            parent
+        );
+    }
+
+    #[test]
+    fn expanded_graph_tree_corruption_still_fails_intermediate_validation() {
+        let root = project();
+        let workspace = tempfile::tempdir().unwrap();
+        let relative = std::path::PathBuf::from("topology/edges/knows.parquet");
+        fs::create_dir_all(workspace.path().join(relative.parent().unwrap())).unwrap();
+        fs::write(workspace.path().join(&relative), b"expanded graph payload").unwrap();
+        let (_, files) = crate::capture_graph_files(workspace.path()).unwrap();
+        let request = request(vec![files]);
+        let ProjectStageOutcome::Staged(staged) =
+            stage_project_generation_with_graph_tree(root.path(), &request, Some(workspace.path()))
+                .unwrap()
+        else {
+            panic!("new request unexpectedly replayed");
+        };
+        fs::write(
+            crate::graph_tree_root(&staged.generation_root).join(relative),
+            b"corrupt",
+        )
+        .unwrap();
+
+        let error = match staged.validate(|_| Ok(()), |_, _| Ok(())) {
+            Ok(_) => panic!("expanded generation tree must remain verified"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code(), "GF_PROJECT_CORRUPT");
     }
 
     fn journal_path(root: &Path, transaction_uuid: Uuid) -> PathBuf {
