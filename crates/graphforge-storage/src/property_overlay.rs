@@ -7,7 +7,7 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap, HashMap};
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -19,6 +19,7 @@ use graphforge_ir::IrLiteral;
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
 use parquet::errors::ParquetError;
 use parquet::file::reader::{ChunkReader, Length};
+use parquet::thrift::TSerializable;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -82,6 +83,31 @@ struct CountingChunkReader {
 struct CountingRead<R> {
     inner: R,
     counts: Arc<ReadCounts>,
+}
+
+struct HeaderRead {
+    file: File,
+    remaining: usize,
+    consumed: Arc<AtomicU64>,
+    counts: Arc<ReadCounts>,
+}
+
+impl Read for HeaderRead {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let limit = buffer.len().min(self.remaining);
+        if limit == 0 {
+            return Ok(0);
+        }
+        let read = self.file.read(&mut buffer[..limit])?;
+        self.remaining -= read;
+        if read != 0 {
+            let read = u64::try_from(read).unwrap_or(u64::MAX);
+            self.consumed.fetch_add(read, Ordering::Relaxed);
+            self.counts.bytes.fetch_add(read, Ordering::Relaxed);
+            self.counts.blocks.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(read)
+    }
 }
 
 impl<R: std::io::Read> std::io::Read for CountingRead<R> {
@@ -186,7 +212,7 @@ pub struct PropertyFragment {
 /// retained through no-follow directory capabilities.
 #[derive(Debug)]
 pub struct AuthenticatedPropertyInventory {
-    root: Option<graphforge_filesystem::StableDirectory>,
+    _root: Option<graphforge_filesystem::StableDirectory>,
     routes: BTreeMap<(PropertyRouteKind, String), Vec<AuthenticatedPropertyFragment>>,
     schemas: BTreeMap<(PropertyRouteKind, String), arrow::datatypes::SchemaRef>,
 }
@@ -195,7 +221,10 @@ pub struct AuthenticatedPropertyInventory {
 struct AuthenticatedPropertyFragment {
     id: PropertyFragmentId,
     entry: crate::GraphFileEntry,
-    physical_relative: PathBuf,
+    _physical_relative: PathBuf,
+    file: File,
+    authentication_bytes: u64,
+    authentication_blocks: u64,
 }
 
 #[derive(Debug)]
@@ -216,7 +245,7 @@ impl AuthenticatedPropertyInventory {
     ) -> Result<Self, GfError> {
         let Some(participant) = generation.declared_graph_files_participant()? else {
             return Ok(Self {
-                root: None,
+                _root: None,
                 routes: BTreeMap::new(),
                 schemas: BTreeMap::new(),
             });
@@ -280,7 +309,8 @@ impl AuthenticatedPropertyInventory {
                 return Err(corrupt("properties role names a non-property path"));
             };
             let file = open_retained_under(&root, &physical_relative)?;
-            authenticate_inventory_file(&file, &entry)?;
+            let (authentication_bytes, authentication_blocks) =
+                authenticate_inventory_file(&file, &entry)?;
             let builder =
                 ParquetRecordBatchReaderBuilder::try_new(file.try_clone().map_err(io_error)?)
                     .map_err(parquet_error)?;
@@ -293,7 +323,10 @@ impl AuthenticatedPropertyInventory {
             fragments.push(AuthenticatedPropertyFragment {
                 id,
                 entry,
-                physical_relative,
+                _physical_relative: physical_relative,
+                file,
+                authentication_bytes,
+                authentication_blocks,
             });
         }
         for fragments in routes.values_mut() {
@@ -301,7 +334,7 @@ impl AuthenticatedPropertyInventory {
             validate_fragment_id_sequence(fragments.iter().map(|fragment| fragment.id))?;
         }
         Ok(Self {
-            root: Some(root),
+            _root: Some(root),
             routes,
             schemas: schemas
                 .into_iter()
@@ -332,6 +365,10 @@ impl AuthenticatedPropertyInventory {
 
     /// Visit one authenticated route through the retained generation
     /// capability, opening and closing one Parquet decoder at a time.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "authenticated decoder admission and exact accounting stay co-located"
+    )]
     pub fn visit_route<F>(
         &self,
         kind: PropertyRouteKind,
@@ -346,39 +383,49 @@ impl AuthenticatedPropertyInventory {
         let Some(fragments) = self.routes.get(&(kind, route.to_owned())) else {
             return Ok(PropertyOverlayMetrics::default());
         };
-        let root = self
-            .root
-            .as_ref()
-            .ok_or_else(|| corrupt("property inventory lost its retained root"))?;
         let counts = Arc::new(ReadCounts::default());
+        let budget = Arc::new(LiveByteBudget::new(limits.max_buffered_bytes));
         let failed = Arc::new(Mutex::new(None));
         let decoded = Arc::new(Mutex::new(DecodedRetention::default()));
         let inputs = fragments.iter().map(|fragment| {
             let reader = (|| {
-                let file = open_retained_under(root, &fragment.physical_relative)?;
-                authenticate_inventory_file(&file, &fragment.entry)?;
                 let source = CountingChunkReader {
                     length: fragment.entry.byte_length,
-                    file,
+                    file: fragment.file.try_clone().map_err(io_error)?,
                     counts: Arc::clone(&counts),
                 };
                 let builder =
                     ParquetRecordBatchReaderBuilder::try_new(source).map_err(parquet_error)?;
                 validate_fragment_schema(builder.schema().as_ref(), fragment.id, kind, route)?;
-                builder.with_batch_size(4096).build().map_err(parquet_error)
+                let page_reservation_bytes = validate_parquet_resource_admission(
+                    builder.metadata(),
+                    limits,
+                    &fragment.file,
+                    &counts,
+                )?;
+                budget.charge(page_reservation_bytes)?;
+                {
+                    let mut retention = decoded.lock().expect("property retention lock");
+                    retention.page_peak = retention.page_peak.max(page_reservation_bytes);
+                }
+                let reader = builder
+                    .with_batch_size(admitted_batch_rows(limits))
+                    .build()
+                    .map_err(parquet_error)?;
+                Ok((reader, page_reservation_bytes))
             })();
-            let reader = match reader {
-                Ok(reader) => {
+            let (reader, page_reservation_bytes) = match reader {
+                Ok((reader, page_reservation_bytes)) => {
                     #[cfg(test)]
                     {
                         let current = OPEN_FRAGMENT_READERS.fetch_add(1, Ordering::SeqCst) + 1;
                         PEAK_OPEN_FRAGMENT_READERS.fetch_max(current, Ordering::SeqCst);
                     }
-                    Some(reader)
+                    (Some(reader), page_reservation_bytes)
                 }
                 Err(error) => {
                     *failed.lock().expect("property failure lock") = Some(error);
-                    None
+                    (None, 0)
                 }
             };
             #[cfg(test)]
@@ -393,21 +440,39 @@ impl AuthenticatedPropertyInventory {
                     uuid_field: kind.uuid_field(),
                     failed: Arc::clone(&failed),
                     decoded: Arc::clone(&decoded),
+                    budget: Arc::clone(&budget),
+                    max_row_bytes: limits.max_row_bytes,
+                    page_reservation_bytes,
                     #[cfg(test)]
                     opened,
                 },
             )
         });
-        let mut metrics = visit_newest_property_snapshots(inputs, scratch, limits, emit)?;
+        let mut metrics =
+            visit_newest_property_snapshots(inputs, scratch, limits, budget.as_ref(), emit)?;
         if let Some(error) = failed.lock().expect("property failure lock").take() {
             return Err(error);
         }
-        metrics.physical_bytes = counts.bytes.load(Ordering::Relaxed);
+        metrics.authentication_bytes = fragments.iter().fold(0_u64, |sum, fragment| {
+            sum.saturating_add(fragment.authentication_bytes)
+        });
+        metrics.authentication_blocks = fragments.iter().fold(0_u64, |sum, fragment| {
+            sum.saturating_add(fragment.authentication_blocks)
+        });
+        metrics.validation_bytes = counts.bytes.load(Ordering::Relaxed);
+        metrics.physical_bytes = metrics
+            .authentication_bytes
+            .saturating_add(metrics.validation_bytes);
         metrics.read_calls = counts.blocks.load(Ordering::Relaxed);
+        metrics.validation_read_calls = metrics.read_calls;
+        metrics.physical_blocks = metrics
+            .authentication_blocks
+            .saturating_add(metrics.read_calls);
         metrics.range_seeks = counts.range_seeks.load(Ordering::Relaxed);
         let decoded = decoded.lock().expect("property retention lock");
         metrics.decoder_peak_rows = decoded.peak_rows;
         metrics.decoder_peak_bytes = decoded.peak_bytes;
+        metrics.decoder_page_reservation_bytes = decoded.page_peak;
         metrics.emitted_batches = decoded.batches;
         metrics.merge_peak_rows = metrics.peak_buffered_rows;
         metrics.merge_peak_bytes = metrics.peak_buffered_bytes;
@@ -417,6 +482,7 @@ impl AuthenticatedPropertyInventory {
         metrics.peak_buffered_bytes = metrics
             .decoder_peak_bytes
             .saturating_add(metrics.merge_peak_bytes);
+        metrics.peak_buffered_bytes = budget.peak();
         Ok(metrics)
     }
 }
@@ -529,7 +595,10 @@ fn open_retained_under(
     Err(corrupt("property inventory path is empty"))
 }
 
-fn authenticate_inventory_file(file: &File, entry: &crate::GraphFileEntry) -> Result<(), GfError> {
+fn authenticate_inventory_file(
+    file: &File,
+    entry: &crate::GraphFileEntry,
+) -> Result<(u64, u64), GfError> {
     let metadata = file.metadata().map_err(io_error)?;
     if !metadata.is_file() || metadata.len() != entry.byte_length {
         return Err(corrupt(
@@ -539,17 +608,21 @@ fn authenticate_inventory_file(file: &File, entry: &crate::GraphFileEntry) -> Re
     let mut clone = file.try_clone().map_err(io_error)?;
     let mut digest = Sha256::new();
     let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
+    let mut bytes = 0_u64;
     loop {
         let read = std::io::Read::read(&mut clone, &mut buffer).map_err(io_error)?;
         if read == 0 {
             break;
         }
+        bytes = bytes
+            .checked_add(u64::try_from(read).map_err(|_| corrupt("authentication byte overflow"))?)
+            .ok_or_else(|| corrupt("authentication byte overflow"))?;
         digest.update(&buffer[..read]);
     }
     if digest_hex(&digest.finalize()) != entry.content_sha256 {
         return Err(corrupt("property handle digest conflicts with inventory"));
     }
-    Ok(())
+    Ok((bytes, bytes.div_ceil(64 * 1024)))
 }
 
 fn digest_hex(bytes: &[u8]) -> String {
@@ -567,14 +640,20 @@ fn digest_hex(bytes: &[u8]) -> String {
 pub struct PropertyOverlayMetrics {
     /// Physical snapshot rows decoded.
     pub physical_rows: u64,
-    /// Authenticated fragment bytes read.
+    /// Total authentication plus decoder bytes read.
     pub physical_bytes: u64,
+    /// Full-file bytes read exactly once for SHA-256 authentication.
+    pub authentication_bytes: u64,
     /// Bytes read while validating canonical UUID/tombstone authority.
     pub validation_bytes: u64,
     /// Bytes read while decoding values from selected row groups.
     pub selected_value_bytes: u64,
-    /// Non-empty input reads, each capped at 64 KiB.
+    /// Total fixed-size authentication blocks plus decoder reads.
+    pub physical_blocks: u64,
+    /// Decoder-only non-empty reads, each capped at 64 KiB.
     pub read_calls: u64,
+    /// Fixed-size 64 KiB authentication blocks.
+    pub authentication_blocks: u64,
     /// Read calls used by the validation pass.
     pub validation_read_calls: u64,
     /// Read calls used by selected value decoding.
@@ -599,6 +678,8 @@ pub struct PropertyOverlayMetrics {
     pub spill_bytes: u64,
     /// External merge runs written.
     pub spill_runs: u64,
+    /// Maximum in-memory spill-run path references retained.
+    pub peak_run_references: u64,
     /// Bounded fan-in merge passes performed.
     pub merge_passes: u64,
     /// Maximum decoded rows retained at once.
@@ -609,6 +690,8 @@ pub struct PropertyOverlayMetrics {
     pub decoder_peak_rows: u64,
     /// Maximum charged row bytes retained by one decoded Parquet batch.
     pub decoder_peak_bytes: u64,
+    /// Maximum declared uncompressed page bytes reserved before decode.
+    pub decoder_page_reservation_bytes: u64,
     /// Maximum rows retained by spill sorting or k-way cursors.
     pub merge_peak_rows: u64,
     /// Maximum charged bytes retained by spill sorting or k-way cursors.
@@ -641,12 +724,62 @@ pub struct PropertyOverlayLimits {
     pub max_row_bytes: u64,
 }
 
+#[derive(Debug)]
+pub(crate) struct LiveByteBudget {
+    max: u64,
+    state: Mutex<(u64, u64)>,
+}
+
+impl LiveByteBudget {
+    fn new(max: u64) -> Self {
+        Self {
+            max,
+            state: Mutex::new((0, 0)),
+        }
+    }
+
+    fn charge(&self, bytes: u64) -> Result<(), GfError> {
+        let mut state = self.state.lock().expect("property byte budget lock");
+        let next = state
+            .0
+            .checked_add(bytes)
+            .ok_or_else(|| corrupt("property live-byte charge overflows"))?;
+        if next > self.max {
+            return Err(corrupt("property live-byte budget exceeded"));
+        }
+        state.0 = next;
+        state.1 = state.1.max(next);
+        Ok(())
+    }
+
+    fn release(&self, bytes: u64) {
+        let mut state = self.state.lock().expect("property byte budget lock");
+        state.0 = state.0.saturating_sub(bytes);
+    }
+
+    fn can_charge(&self, bytes: u64) -> bool {
+        self.state
+            .lock()
+            .expect("property byte budget lock")
+            .0
+            .checked_add(bytes)
+            .is_some_and(|next| next <= self.max)
+    }
+
+    fn peak(&self) -> u64 {
+        self.state.lock().expect("property byte budget lock").1
+    }
+}
+
 struct PropertyParquetRows {
     reader: Option<ParquetRecordBatchReader>,
     current: std::vec::IntoIter<PropertySnapshotRow>,
     uuid_field: &'static str,
     failed: Arc<Mutex<Option<GfError>>>,
     decoded: Arc<Mutex<DecodedRetention>>,
+    budget: Arc<LiveByteBudget>,
+    max_row_bytes: u64,
+    page_reservation_bytes: u64,
     #[cfg(test)]
     opened: bool,
 }
@@ -656,9 +789,10 @@ static OPEN_FRAGMENT_READERS: AtomicU64 = AtomicU64::new(0);
 #[cfg(test)]
 static PEAK_OPEN_FRAGMENT_READERS: AtomicU64 = AtomicU64::new(0);
 
-#[cfg(test)]
 impl Drop for PropertyParquetRows {
     fn drop(&mut self) {
+        self.budget.release(self.page_reservation_bytes);
+        #[cfg(test)]
         if self.opened {
             OPEN_FRAGMENT_READERS.fetch_sub(1, Ordering::SeqCst);
         }
@@ -672,6 +806,7 @@ struct DecodedRetention {
     peak_rows: u64,
     peak_bytes: u64,
     batches: u64,
+    page_peak: u64,
 }
 
 impl Iterator for PropertyParquetRows {
@@ -680,6 +815,7 @@ impl Iterator for PropertyParquetRows {
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             if let Some(row) = self.current.next() {
+                self.budget.release(snapshot_charge(&row));
                 let mut decoded = self.decoded.lock().expect("property retention lock");
                 decoded.current_rows = decoded.current_rows.saturating_sub(1);
                 decoded.current_bytes = decoded.current_bytes.saturating_sub(snapshot_charge(&row));
@@ -693,11 +829,41 @@ impl Iterator for PropertyParquetRows {
                     return None;
                 }
             };
+            let arrow_bytes = u64::try_from(batch.get_array_memory_size()).unwrap_or(u64::MAX);
+            if let Err(error) = self.budget.charge(arrow_bytes) {
+                *self.failed.lock().expect("property failure lock") = Some(error);
+                return None;
+            }
+            let decode_reservation = self
+                .max_row_bytes
+                .saturating_mul(u64::try_from(batch.num_rows()).unwrap_or(u64::MAX));
+            if let Err(error) = self.budget.charge(decode_reservation) {
+                self.budget.release(arrow_bytes);
+                *self.failed.lock().expect("property failure lock") = Some(error);
+                return None;
+            }
             match decode_snapshot_batch(&batch, self.uuid_field) {
                 Ok(rows) => {
+                    if rows
+                        .iter()
+                        .any(|row| snapshot_charge(row) > self.max_row_bytes)
+                    {
+                        self.budget.release(decode_reservation);
+                        self.budget.release(arrow_bytes);
+                        *self.failed.lock().expect("property failure lock") =
+                            Some(corrupt("property snapshot row exceeds byte limit"));
+                        return None;
+                    }
                     let bytes = rows.iter().fold(0_u64, |total, row| {
                         total.saturating_add(snapshot_charge(row))
                     });
+                    self.budget.release(decode_reservation);
+                    if let Err(error) = self.budget.charge(bytes) {
+                        self.budget.release(arrow_bytes);
+                        *self.failed.lock().expect("property failure lock") = Some(error);
+                        return None;
+                    }
+                    self.budget.release(arrow_bytes);
                     let mut decoded = self.decoded.lock().expect("property retention lock");
                     decoded.current_rows = u64::try_from(rows.len()).unwrap_or(u64::MAX);
                     decoded.current_bytes = bytes;
@@ -708,6 +874,8 @@ impl Iterator for PropertyParquetRows {
                     self.current = rows.into_iter();
                 }
                 Err(error) => {
+                    self.budget.release(decode_reservation);
+                    self.budget.release(arrow_bytes);
                     *self.failed.lock().expect("property failure lock") = Some(error);
                     return None;
                 }
@@ -773,33 +941,41 @@ pub fn read_authenticated_property_snapshots_for(
     let Some(fragments) = inventory.routes.get(&(kind, route.to_owned())) else {
         return Ok((found, metrics));
     };
-    let root = inventory
-        .root
-        .as_ref()
-        .ok_or_else(|| corrupt("property inventory lost its retained root"))?;
     for fragment in fragments.iter().rev() {
-        if unresolved.is_empty() {
-            break;
-        }
+        metrics.authentication_bytes = metrics
+            .authentication_bytes
+            .saturating_add(fragment.authentication_bytes);
+        metrics.authentication_blocks = metrics
+            .authentication_blocks
+            .saturating_add(fragment.authentication_blocks);
         let counts = Arc::new(ReadCounts::default());
-        let builder = open_counted_retained_property_builder(root, fragment, Arc::clone(&counts))?;
+        let builder = open_counted_retained_property_builder(fragment, Arc::clone(&counts))?;
         validate_fragment_schema(builder.schema().as_ref(), fragment.id, kind, route)?;
+        let page_reservation_bytes = validate_parquet_resource_admission(
+            builder.metadata(),
+            PropertyOverlayLimits::default(),
+            &fragment.file,
+            &counts,
+        )?;
+        metrics.decoder_page_reservation_bytes = metrics
+            .decoder_page_reservation_bytes
+            .max(page_reservation_bytes);
+        let targeted_batch_rows = admitted_batch_rows(PropertyOverlayLimits::default());
         metrics.row_groups_considered = metrics
             .row_groups_considered
             .saturating_add(u64::try_from(builder.metadata().num_row_groups()).unwrap_or(u64::MAX));
         let mut row_groups = Vec::new();
         let mut prior_uuid = None;
         for index in 0..builder.metadata().num_row_groups() {
-            let validation =
-                open_counted_retained_property_builder(root, fragment, Arc::clone(&counts))?
-                    .with_row_groups(vec![index])
-                    .with_batch_size(64)
-                    .build()
-                    .map_err(parquet_error)?;
+            let validation = open_counted_retained_property_builder(fragment, Arc::clone(&counts))?
+                .with_row_groups(vec![index])
+                .with_batch_size(targeted_batch_rows)
+                .build()
+                .map_err(parquet_error)?;
             let mut selected = false;
             for batch in validation {
                 let batch = batch.map_err(|error| GfError::Storage(error.to_string()))?;
-                charge_target_batch(&mut metrics, &batch);
+                charge_target_batch(&mut metrics, &batch, page_reservation_bytes)?;
                 let uuids = batch
                     .column_by_name(kind.uuid_field())
                     .and_then(|column| column.as_any().downcast_ref::<FixedSizeBinaryArray>())
@@ -832,7 +1008,7 @@ pub fn read_authenticated_property_snapshots_for(
                         ));
                     }
                     prior_uuid = Some(uuid);
-                    selected |= unresolved.contains(&uuid);
+                    selected |= !unresolved.is_empty() && unresolved.contains(&uuid);
                     if tombstones.is_some_and(|values| values.value(row))
                         && batch
                             .columns()
@@ -857,16 +1033,20 @@ pub fn read_authenticated_property_snapshots_for(
             metrics.row_groups_selected = metrics
                 .row_groups_selected
                 .saturating_add(u64::try_from(row_groups.len()).unwrap_or(u64::MAX));
-            let reader =
-                open_counted_retained_property_builder(root, fragment, Arc::clone(&counts))?
-                    .with_row_groups(row_groups)
-                    .with_batch_size(64)
-                    .build()
-                    .map_err(parquet_error)?;
+            let reader = open_counted_retained_property_builder(fragment, Arc::clone(&counts))?
+                .with_row_groups(row_groups)
+                .with_batch_size(targeted_batch_rows)
+                .build()
+                .map_err(parquet_error)?;
             for batch in reader {
                 let batch = batch.map_err(|error| GfError::Storage(error.to_string()))?;
-                charge_target_batch(&mut metrics, &batch);
+                charge_target_batch(&mut metrics, &batch, page_reservation_bytes)?;
                 let decoded = decode_snapshot_batch(&batch, kind.uuid_field())?;
+                if decoded.iter().any(|row| {
+                    snapshot_charge(row) > PropertyOverlayLimits::default().max_row_bytes
+                }) {
+                    return Err(corrupt("property snapshot row exceeds byte limit"));
+                }
                 metrics.decoder_peak_bytes = metrics
                     .decoder_peak_bytes
                     .max(decoded.iter().map(snapshot_charge).sum::<u64>());
@@ -885,7 +1065,10 @@ pub fn read_authenticated_property_snapshots_for(
         let total_bytes = counts.bytes.load(Ordering::Relaxed);
         let total_read_calls = counts.blocks.load(Ordering::Relaxed);
         metrics.fragments_considered = metrics.fragments_considered.saturating_add(1);
-        metrics.physical_bytes = metrics.physical_bytes.saturating_add(total_bytes);
+        metrics.physical_bytes = metrics
+            .physical_bytes
+            .saturating_add(fragment.authentication_bytes)
+            .saturating_add(total_bytes);
         metrics.validation_bytes = metrics.validation_bytes.saturating_add(validation_bytes);
         metrics.selected_value_bytes = metrics
             .selected_value_bytes
@@ -897,35 +1080,55 @@ pub fn read_authenticated_property_snapshots_for(
         metrics.selected_value_read_calls = metrics
             .selected_value_read_calls
             .saturating_add(total_read_calls.saturating_sub(validation_read_calls));
+        metrics.physical_blocks = metrics
+            .physical_blocks
+            .saturating_add(fragment.authentication_blocks)
+            .saturating_add(total_read_calls);
         metrics.range_seeks = metrics
             .range_seeks
             .saturating_add(counts.range_seeks.load(Ordering::Relaxed));
     }
     metrics.logical_rows = u64::try_from(found.len()).unwrap_or(u64::MAX);
     metrics.peak_buffered_rows = metrics.decoder_peak_rows;
-    metrics.peak_buffered_bytes = metrics.decoder_peak_bytes;
     Ok((found, metrics))
 }
 
-fn charge_target_batch(metrics: &mut PropertyOverlayMetrics, batch: &RecordBatch) {
+fn charge_target_batch(
+    metrics: &mut PropertyOverlayMetrics,
+    batch: &RecordBatch,
+    page_reservation_bytes: u64,
+) -> Result<(), GfError> {
+    let limits = PropertyOverlayLimits::default();
+    let arrow_bytes = u64::try_from(batch.get_array_memory_size()).unwrap_or(u64::MAX);
+    let decoded_reservation = limits
+        .max_row_bytes
+        .saturating_mul(u64::try_from(batch.num_rows()).unwrap_or(u64::MAX));
+    if page_reservation_bytes
+        .checked_add(arrow_bytes)
+        .and_then(|bytes| bytes.checked_add(decoded_reservation))
+        .is_none_or(|bytes| bytes > limits.max_buffered_bytes)
+    {
+        return Err(corrupt("targeted property decode exceeds live-byte budget"));
+    }
     metrics.emitted_batches = metrics.emitted_batches.saturating_add(1);
     metrics.decoder_peak_rows = metrics
         .decoder_peak_rows
         .max(u64::try_from(batch.num_rows()).unwrap_or(u64::MAX));
-    metrics.decoder_peak_bytes = metrics
-        .decoder_peak_bytes
-        .max(u64::try_from(batch.get_array_memory_size()).unwrap_or(u64::MAX));
+    metrics.decoder_peak_bytes = metrics.decoder_peak_bytes.max(arrow_bytes);
+    metrics.peak_buffered_bytes = metrics.peak_buffered_bytes.max(
+        page_reservation_bytes
+            .saturating_add(arrow_bytes)
+            .saturating_add(decoded_reservation),
+    );
+    Ok(())
 }
 
 fn open_counted_retained_property_builder(
-    root: &graphforge_filesystem::StableDirectory,
     fragment: &AuthenticatedPropertyFragment,
     counts: Arc<ReadCounts>,
 ) -> Result<ParquetRecordBatchReaderBuilder<CountingChunkReader>, GfError> {
-    let file = open_retained_under(root, &fragment.physical_relative)?;
-    authenticate_inventory_file(&file, &fragment.entry)?;
     ParquetRecordBatchReaderBuilder::try_new(CountingChunkReader {
-        file,
+        file: fragment.file.try_clone().map_err(io_error)?,
         length: fragment.entry.byte_length,
         counts,
     })
@@ -981,6 +1184,96 @@ fn validate_fragment_schema(
         return Err(corrupt("property tombstone is not canonical second field"));
     }
     Ok(())
+}
+
+fn validate_parquet_resource_admission(
+    metadata: &parquet::file::metadata::ParquetMetaData,
+    limits: PropertyOverlayLimits,
+    file: &File,
+    counts: &Arc<ReadCounts>,
+) -> Result<u64, GfError> {
+    use std::io::{Seek, SeekFrom};
+    const MAX_PAGE_HEADER_BYTES: usize = 64 * 1024;
+    let max_page_bytes = limits.max_buffered_bytes / 3;
+    if max_page_bytes == 0 {
+        return Err(corrupt("property page byte budget is too small"));
+    }
+    let mut largest_page = 0_u64;
+    for group in metadata.row_groups() {
+        for column in group.columns() {
+            let _uncompressed = u64::try_from(column.uncompressed_size())
+                .map_err(|_| corrupt("property column chunk has negative uncompressed size"))?;
+            let compressed = u64::try_from(column.compressed_size())
+                .map_err(|_| corrupt("property column chunk has negative compressed size"))?;
+            let data_offset = u64::try_from(column.data_page_offset())
+                .map_err(|_| corrupt("property column chunk has negative data-page offset"))?;
+            let start = column
+                .dictionary_page_offset()
+                .map(|offset| {
+                    u64::try_from(offset)
+                        .map_err(|_| corrupt("property dictionary page has negative offset"))
+                })
+                .transpose()?
+                .map_or(data_offset, |offset| offset.min(data_offset));
+            let end = start
+                .checked_add(compressed)
+                .ok_or_else(|| corrupt("property column chunk range overflows"))?;
+            if end > file.metadata().map_err(io_error)?.len() {
+                return Err(corrupt("property column chunk escapes authenticated file"));
+            }
+            let mut position = start;
+            while position < end {
+                let mut clone = file.try_clone().map_err(io_error)?;
+                clone.seek(SeekFrom::Start(position)).map_err(io_error)?;
+                let consumed = Arc::new(AtomicU64::new(0));
+                let transport = HeaderRead {
+                    file: clone,
+                    remaining: MAX_PAGE_HEADER_BYTES,
+                    consumed: Arc::clone(&consumed),
+                    counts: Arc::clone(counts),
+                };
+                let mut protocol = thrift::protocol::TCompactInputProtocol::new(transport);
+                #[allow(deprecated, reason = "Parquet 58 exposes raw page headers only here")]
+                let header = parquet::format::PageHeader::read_from_in_protocol(&mut protocol)
+                    .map_err(|_| corrupt("property page header is malformed or oversized"))?;
+                let header_bytes = consumed.load(Ordering::Relaxed);
+                #[allow(deprecated, reason = "Parquet 58 page admission requires raw sizes")]
+                let compressed_page = u64::try_from(header.compressed_page_size)
+                    .map_err(|_| corrupt("property page has negative compressed size"))?;
+                #[allow(deprecated, reason = "Parquet 58 page admission requires raw sizes")]
+                let uncompressed_page = u64::try_from(header.uncompressed_page_size)
+                    .map_err(|_| corrupt("property page has negative uncompressed size"))?;
+                if header_bytes == 0
+                    || uncompressed_page > max_page_bytes
+                    || compressed_page > compressed
+                {
+                    return Err(corrupt("property page exceeds pre-decode byte admission"));
+                }
+                largest_page = largest_page.max(uncompressed_page);
+                position = position
+                    .checked_add(header_bytes)
+                    .and_then(|offset| offset.checked_add(compressed_page))
+                    .ok_or_else(|| corrupt("property page range overflows"))?;
+                if position > end {
+                    return Err(corrupt("property page escapes its column chunk"));
+                }
+            }
+            if position != end {
+                return Err(corrupt(
+                    "property page sequence does not cover its column chunk",
+                ));
+            }
+        }
+    }
+    Ok(largest_page)
+}
+
+fn admitted_batch_rows(limits: PropertyOverlayLimits) -> usize {
+    let row_budget = limits.max_buffered_bytes / 3;
+    let byte_limited = usize::try_from(row_budget / limits.max_row_bytes)
+        .unwrap_or(usize::MAX)
+        .max(1);
+    limits.max_buffered_rows.clamp(1, 4096).min(byte_limited)
 }
 
 pub(crate) fn decode_snapshot_batch(
@@ -1046,6 +1339,58 @@ struct SpoolRecord {
     values: BTreeMap<String, IrLiteral>,
 }
 
+#[derive(Debug, Default)]
+struct RunLevels {
+    levels: Vec<Vec<PathBuf>>,
+    next_ordinal: u64,
+}
+
+impl RunLevels {
+    fn add<F>(
+        &mut self,
+        root: &Path,
+        mut level: usize,
+        mut path: PathBuf,
+        fan_in: usize,
+        budget: &LiveByteBudget,
+        metrics: &mut PropertyOverlayMetrics,
+    ) -> Result<(), GfError>
+    where
+        F: FnMut(PropertySnapshotRow) -> Result<(), GfError>,
+    {
+        loop {
+            if self.levels.len() <= level {
+                self.levels.resize_with(level + 1, Vec::new);
+            }
+            self.levels[level].push(path);
+            metrics.peak_run_references = metrics.peak_run_references.max(
+                u64::try_from(self.levels.iter().map(Vec::len).sum::<usize>()).unwrap_or(u64::MAX),
+            );
+            if self.levels[level].len() < fan_in {
+                return Ok(());
+            }
+            let inputs = std::mem::take(&mut self.levels[level]);
+            path = root.join(format!("level-{level}-{}.jsonl", self.next_ordinal));
+            self.next_ordinal = self
+                .next_ordinal
+                .checked_add(1)
+                .ok_or_else(|| corrupt("property run ordinal overflow"))?;
+            merge_runs::<F>(&inputs, &path, None, budget, metrics)?;
+            for input in inputs {
+                fs::remove_file(input).map_err(io_error)?;
+            }
+            metrics.merge_passes = metrics.merge_passes.saturating_add(1);
+            level = level
+                .checked_add(1)
+                .ok_or_else(|| corrupt("property run level overflow"))?;
+        }
+    }
+
+    fn finish(self) -> Vec<PathBuf> {
+        self.levels.into_iter().flatten().collect()
+    }
+}
+
 impl SpoolRecord {
     fn sort_key(&self) -> ([u8; 16], Reverse<(u64, u64)>) {
         (self.uuid, Reverse((self.generation, self.ordinal)))
@@ -1066,6 +1411,7 @@ pub(crate) fn visit_newest_property_snapshots<I, R, F>(
     inputs: I,
     scratch: &Path,
     limits: PropertyOverlayLimits,
+    budget: &LiveByteBudget,
     mut emit: F,
 ) -> Result<PropertyOverlayMetrics, GfError>
 where
@@ -1088,7 +1434,8 @@ where
         .map_err(io_error)?;
     let mut metrics = PropertyOverlayMetrics::default();
     let mut buffer = Vec::with_capacity(limits.max_buffered_rows);
-    let mut runs = Vec::new();
+    let mut runs = RunLevels::default();
+    let mut next_run = 0_usize;
     let mut buffered_bytes = 0_u64;
     for (id, physical_bytes, read_calls, rows) in inputs {
         metrics.fragments_considered = metrics.fragments_considered.saturating_add(1);
@@ -1116,53 +1463,77 @@ where
                 return Err(corrupt("property snapshot row exceeds byte limit"));
             }
             if !buffer.is_empty()
-                && buffered_bytes
+                && (buffered_bytes
                     .checked_add(charge)
                     .is_none_or(|bytes| bytes > limits.max_buffered_bytes)
+                    || !budget.can_charge(charge))
             {
-                runs.push(write_sorted_run(
+                let run = write_sorted_run(temp.path(), next_run, &mut buffer, &mut metrics)?;
+                budget.release(buffered_bytes);
+                next_run = next_run
+                    .checked_add(1)
+                    .ok_or_else(|| corrupt("property run ordinal overflow"))?;
+                runs.add::<F>(
                     temp.path(),
-                    runs.len(),
-                    &mut buffer,
+                    0,
+                    run,
+                    limits.max_open_runs,
+                    budget,
                     &mut metrics,
-                )?);
+                )?;
                 buffered_bytes = 0;
             }
             buffered_bytes = buffered_bytes
                 .checked_add(charge)
                 .ok_or_else(|| corrupt("property snapshot byte charge overflows"))?;
+            budget.charge(charge)?;
             buffer.push(record);
             metrics.peak_buffered_rows = metrics
                 .peak_buffered_rows
                 .max(u64::try_from(buffer.len()).unwrap_or(u64::MAX));
             metrics.peak_buffered_bytes = metrics.peak_buffered_bytes.max(buffered_bytes);
             if buffer.len() == limits.max_buffered_rows {
-                runs.push(write_sorted_run(
+                let run = write_sorted_run(temp.path(), next_run, &mut buffer, &mut metrics)?;
+                budget.release(buffered_bytes);
+                next_run = next_run
+                    .checked_add(1)
+                    .ok_or_else(|| corrupt("property run ordinal overflow"))?;
+                runs.add::<F>(
                     temp.path(),
-                    runs.len(),
-                    &mut buffer,
+                    0,
+                    run,
+                    limits.max_open_runs,
+                    budget,
                     &mut metrics,
-                )?);
+                )?;
                 buffered_bytes = 0;
             }
         }
     }
     if !buffer.is_empty() {
-        runs.push(write_sorted_run(
+        let run = write_sorted_run(temp.path(), next_run, &mut buffer, &mut metrics)?;
+        budget.release(buffered_bytes);
+        runs.add::<F>(
             temp.path(),
-            runs.len(),
-            &mut buffer,
+            0,
+            run,
+            limits.max_open_runs,
+            budget,
             &mut metrics,
-        )?);
+        )?;
     }
+    let mut runs = runs.finish();
     while runs.len() > limits.max_open_runs {
         let mut next = Vec::new();
         for (group, chunk) in runs.chunks(limits.max_open_runs).enumerate() {
             let path = temp
                 .path()
                 .join(format!("pass-{}-{group}.jsonl", metrics.merge_passes));
-            merge_runs::<F>(chunk, &path, None, &mut metrics)?;
+            merge_runs::<F>(chunk, &path, None, budget, &mut metrics)?;
             next.push(path);
+            for input in chunk {
+                fs::remove_file(input).map_err(io_error)?;
+            }
         }
         metrics.merge_passes = metrics.merge_passes.saturating_add(1);
         runs = next;
@@ -1172,6 +1543,7 @@ where
             &runs,
             &temp.path().join("final.jsonl"),
             Some(&mut emit),
+            budget,
             &mut metrics,
         )?;
         metrics.merge_passes = metrics.merge_passes.saturating_add(1);
@@ -1221,6 +1593,7 @@ fn merge_runs<F>(
     runs: &[PathBuf],
     output: &Path,
     mut emit: Option<&mut F>,
+    budget: &LiveByteBudget,
     metrics: &mut PropertyOverlayMetrics,
 ) -> Result<(), GfError>
 where
@@ -1233,7 +1606,7 @@ where
     let mut current = Vec::with_capacity(readers.len());
     let mut heap = BinaryHeap::new();
     for (index, reader) in readers.iter_mut().enumerate() {
-        current.push(read_spool(reader)?);
+        current.push(read_spool(reader, budget.max)?);
         if let Some(row) = &current[index] {
             heap.push(Reverse((row.sort_key(), index)));
         }
@@ -1242,6 +1615,7 @@ where
         .iter()
         .flatten()
         .fold(0_u64, |total, row| total.saturating_add(record_charge(row)));
+    budget.charge(cursor_bytes)?;
     metrics.peak_buffered_rows = metrics
         .peak_buffered_rows
         .max(u64::try_from(current.iter().flatten().count()).unwrap_or(u64::MAX));
@@ -1252,6 +1626,7 @@ where
     let mut resolved_uuid = None;
     while let Some(Reverse((_, index))) = heap.pop() {
         let row = current[index].take().expect("heap row exists");
+        budget.release(record_charge(&row));
         if emit.is_some() {
             let newest = resolved_uuid != Some(row.uuid);
             if newest {
@@ -1274,7 +1649,10 @@ where
             serde_json::to_writer(&mut *out, &row).map_err(json_error)?;
             out.write_all(b"\n").map_err(io_error)?;
         }
-        current[index] = read_spool(&mut readers[index])?;
+        current[index] = read_spool(&mut readers[index], budget.max)?;
+        if let Some(next) = &current[index] {
+            budget.charge(record_charge(next))?;
+        }
         let cursor_bytes = current.iter().flatten().fold(0_u64, |total, candidate| {
             total.saturating_add(record_charge(candidate))
         });
@@ -1295,10 +1673,20 @@ where
     Ok(())
 }
 
-fn read_spool(reader: &mut BufReader<File>) -> Result<Option<SpoolRecord>, GfError> {
+fn read_spool(
+    reader: &mut BufReader<File>,
+    max_encoded_bytes: u64,
+) -> Result<Option<SpoolRecord>, GfError> {
     let mut line = String::new();
-    if reader.read_line(&mut line).map_err(io_error)? == 0 {
+    let read = reader
+        .take(max_encoded_bytes.saturating_add(1))
+        .read_line(&mut line)
+        .map_err(io_error)?;
+    if read == 0 {
         return Ok(None);
+    }
+    if u64::try_from(read).unwrap_or(u64::MAX) > max_encoded_bytes || !line.ends_with('\n') {
+        return Err(corrupt("property spill record exceeds byte limit"));
     }
     serde_json::from_str(&line).map(Some).map_err(json_error)
 }
@@ -1594,6 +1982,7 @@ mod tests {
             ),
         ];
         let mut rows = Vec::new();
+        let budget = LiveByteBudget::new(1024);
         let metrics = visit_newest_property_snapshots(
             inputs,
             dir.path(),
@@ -1603,6 +1992,7 @@ mod tests {
                 max_buffered_bytes: 1024,
                 max_row_bytes: 512,
             },
+            &budget,
             |row| {
                 rows.push(row);
                 Ok(())
@@ -1622,12 +2012,55 @@ mod tests {
         assert_eq!(metrics.shadowed_rows, 2);
         assert_eq!(metrics.tombstones, 1);
         assert!(metrics.spill_runs >= 5);
+        assert!(metrics.peak_run_references <= 3);
         assert!(metrics.merge_passes >= 2);
         // One decoded spill row or one cursor per open run, whichever is larger.
         assert_eq!(metrics.peak_buffered_rows, 2);
         assert!(metrics.peak_buffered_bytes > 33);
         assert!(metrics.peak_buffered_bytes < metrics.spill_bytes);
         assert_eq!(metrics.per_record_seeks, 0);
+    }
+
+    #[test]
+    fn rolling_fan_in_keeps_run_references_logarithmic() {
+        let dir = TempDir::new().unwrap();
+        let rows = (0_u16..1024)
+            .map(|value| {
+                let mut uuid = [0_u8; 16];
+                uuid[14..].copy_from_slice(&value.to_be_bytes());
+                PropertySnapshotRow {
+                    uuid,
+                    tombstone: false,
+                    values: BTreeMap::new(),
+                }
+            })
+            .collect::<Vec<_>>();
+        let budget = LiveByteBudget::new(1024);
+        let metrics = visit_newest_property_snapshots(
+            [(
+                PropertyFragmentId {
+                    generation: 1,
+                    ordinal: 0,
+                },
+                0,
+                0,
+                rows,
+            )],
+            dir.path(),
+            PropertyOverlayLimits {
+                max_buffered_rows: 1,
+                max_open_runs: 2,
+                max_buffered_bytes: 1024,
+                max_row_bytes: 512,
+            },
+            &budget,
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(metrics.physical_rows, 1024);
+        assert!(metrics.spill_runs > 1024);
+        assert!(metrics.peak_run_references <= 11);
+        assert!(budget.peak() <= 1024);
     }
 
     #[test]
@@ -1703,6 +2136,24 @@ mod tests {
         assert_eq!(metrics.per_record_seeks, 0);
         assert_eq!(OPEN_FRAGMENT_READERS.load(Ordering::SeqCst), 0);
         assert_eq!(PEAK_OPEN_FRAGMENT_READERS.load(Ordering::SeqCst), 1);
+        let error = visit_authenticated_property_snapshots(
+            dir.path(),
+            PropertyRouteKind::Node,
+            "Person",
+            scratch.path(),
+            PropertyOverlayLimits {
+                max_buffered_rows: 8,
+                max_open_runs: 2,
+                max_buffered_bytes: 1024,
+                max_row_bytes: 512,
+            },
+            |_| Ok(()),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("pre-decode byte admission"),
+            "{error}"
+        );
 
         let bytes = fs::read(&path).unwrap();
         let entry = crate::GraphFileEntry {
@@ -1856,7 +2307,6 @@ mod tests {
             .unwrap();
             writer.write(&batch).unwrap();
             writer.close().unwrap();
-
             let error = read_authenticated_property_snapshots_for(
                 dir.path(),
                 PropertyRouteKind::Node,
@@ -1869,9 +2319,164 @@ mod tests {
     }
 
     #[test]
+    fn targeted_reader_validates_corrupt_older_fragment_after_target_resolves() {
+        let dir = TempDir::new().unwrap();
+        let route_dir = dir.path().join("properties/Person");
+        fs::create_dir_all(&route_dir).unwrap();
+        for (generation, uuids) in [(1, vec![[2; 16], [1; 16]]), (2, vec![[9; 16]])] {
+            let id = PropertyFragmentId {
+                generation,
+                ordinal: 0,
+            };
+            let schema = Arc::new(Schema::new_with_metadata(
+                vec![
+                    Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+                    Field::new(PROPERTY_TOMBSTONE_FIELD, DataType::Boolean, false),
+                    Field::new("name", DataType::Utf8, true),
+                ],
+                HashMap::from([
+                    (
+                        PROPERTY_OVERLAY_FORMAT_KEY.into(),
+                        PROPERTY_OVERLAY_FORMAT.into(),
+                    ),
+                    (PROPERTY_ROUTE_KEY.into(), "Person".into()),
+                    (PROPERTY_KIND_KEY.into(), "node".into()),
+                    (PROPERTY_GENERATION_KEY.into(), generation.to_string()),
+                    (PROPERTY_ORDINAL_KEY.into(), "0".into()),
+                ]),
+            ));
+            let batch = RecordBatch::try_new(
+                Arc::clone(&schema),
+                vec![
+                    Arc::new(
+                        FixedSizeBinaryArray::try_from_iter(uuids.iter().map(|uuid| uuid.to_vec()))
+                            .unwrap(),
+                    ),
+                    Arc::new(BooleanArray::from(vec![false; uuids.len()])),
+                    Arc::new(StringArray::from(vec![Some("value"); uuids.len()])),
+                ],
+            )
+            .unwrap();
+            let mut writer = ArrowWriter::try_new(
+                File::create(route_dir.join(id.file_name())).unwrap(),
+                schema,
+                None,
+            )
+            .unwrap();
+            writer.write(&batch).unwrap();
+            writer.close().unwrap();
+        }
+        let error = read_authenticated_property_snapshots_for(
+            dir.path(),
+            PropertyRouteKind::Node,
+            "Person",
+            &BTreeSet::from([[9; 16]]),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("strictly sorted"), "{error}");
+    }
+
+    #[test]
+    #[allow(
+        deprecated,
+        reason = "hostile raw PageHeader regression for Parquet 58"
+    )]
+    fn retained_reader_rejects_footer_small_page_header_large_before_decode() {
+        use std::io::{Cursor, Seek, SeekFrom};
+
+        let dir = TempDir::new().unwrap();
+        let route_dir = dir.path().join("properties/Person");
+        fs::create_dir_all(&route_dir).unwrap();
+        let id = PropertyFragmentId {
+            generation: 1,
+            ordinal: 0,
+        };
+        let schema = Arc::new(Schema::new_with_metadata(
+            vec![
+                Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+                Field::new(PROPERTY_TOMBSTONE_FIELD, DataType::Boolean, false),
+                Field::new("name", DataType::Utf8, true),
+            ],
+            HashMap::from([
+                (
+                    PROPERTY_OVERLAY_FORMAT_KEY.into(),
+                    PROPERTY_OVERLAY_FORMAT.into(),
+                ),
+                (PROPERTY_ROUTE_KEY.into(), "Person".into()),
+                (PROPERTY_KIND_KEY.into(), "node".into()),
+                (PROPERTY_GENERATION_KEY.into(), "1".into()),
+                (PROPERTY_ORDINAL_KEY.into(), "0".into()),
+            ]),
+        ));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(
+                    FixedSizeBinaryArray::try_from_iter(vec![vec![7; 16]].into_iter()).unwrap(),
+                ),
+                Arc::new(BooleanArray::from(vec![false])),
+                Arc::new(StringArray::from(vec![Some("small")])),
+            ],
+        )
+        .unwrap();
+        let path = route_dir.join(id.file_name());
+        let mut writer = ArrowWriter::try_new(File::create(&path).unwrap(), schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+
+        let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(&path).unwrap()).unwrap();
+        let column = &builder.metadata().row_group(0).columns()[0];
+        let offset = u64::try_from(column.data_page_offset()).unwrap();
+        let footer_uncompressed = column.uncompressed_size();
+        let mut file = File::open(&path).unwrap();
+        file.seek(SeekFrom::Start(offset)).unwrap();
+        let mut raw = vec![0_u8; 64 * 1024];
+        let read = file.read(&mut raw).unwrap();
+        raw.truncate(read);
+        let mut cursor = Cursor::new(raw.as_slice());
+        let mut protocol = thrift::protocol::TCompactInputProtocol::new(&mut cursor);
+        let original = parquet::format::PageHeader::read_from_in_protocol(&mut protocol).unwrap();
+        drop(protocol);
+        let header_len = usize::try_from(cursor.position()).unwrap();
+        let mut hostile = original.clone();
+        let mut encoded = Vec::new();
+        for candidate in (footer_uncompressed + 1)..=(footer_uncompressed + 4096) {
+            hostile.uncompressed_page_size = i32::try_from(candidate).unwrap();
+            encoded.clear();
+            let mut output = thrift::protocol::TCompactOutputProtocol::new(&mut encoded);
+            hostile.write_to_out_protocol(&mut output).unwrap();
+            if encoded.len() == header_len {
+                break;
+            }
+        }
+        assert_eq!(encoded.len(), header_len);
+        let mut file = fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.seek(SeekFrom::Start(offset)).unwrap();
+        file.write_all(&encoded).unwrap();
+        file.flush().unwrap();
+
+        let error = visit_authenticated_property_snapshots(
+            dir.path(),
+            PropertyRouteKind::Node,
+            "Person",
+            dir.path(),
+            PropertyOverlayLimits {
+                max_buffered_rows: 8,
+                max_open_runs: 2,
+                max_buffered_bytes: u64::try_from(footer_uncompressed).unwrap() * 3,
+                max_row_bytes: 32,
+            },
+            |_| Ok(()),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("page exceeds"), "{error}");
+    }
+
+    #[test]
     fn targeted_reader_n_2n_4n_has_bounded_retention_and_exact_work() {
         let mut prior_bytes = 0;
         let mut byte_deltas = Vec::new();
+        let mut prior_peak = None;
         for rows in [128_usize, 256, 512] {
             let dir = TempDir::new().unwrap();
             let route_dir = dir.path().join("properties/Person");
@@ -1924,6 +2529,8 @@ mod tests {
             .unwrap();
             writer.write(&batch).unwrap();
             writer.close().unwrap();
+            let expected_authentication_bytes =
+                fs::metadata(route_dir.join(id.file_name())).unwrap().len();
 
             let (found, metrics) = read_authenticated_property_snapshots_for(
                 dir.path(),
@@ -1935,20 +2542,35 @@ mod tests {
             assert_eq!(found.len(), 1);
             assert_eq!(metrics.physical_rows, u64::try_from(rows * 2).unwrap());
             assert_eq!(metrics.fragments_considered, 1);
+            assert_eq!(metrics.authentication_bytes, expected_authentication_bytes);
+            assert_eq!(
+                metrics.authentication_blocks,
+                expected_authentication_bytes.div_ceil(64 * 1024)
+            );
             assert_eq!(metrics.row_groups_considered, 1);
             assert_eq!(metrics.row_groups_selected, 1);
-            assert_eq!(metrics.decoder_peak_rows, 64);
-            assert_eq!(metrics.peak_buffered_rows, 64);
-            assert!(metrics.peak_buffered_bytes < 64 * 1024);
+            assert_eq!(metrics.decoder_peak_rows, 2);
+            assert_eq!(metrics.peak_buffered_rows, 2);
+            assert!(
+                metrics.peak_buffered_bytes <= PropertyOverlayLimits::default().max_buffered_bytes
+            );
+            if let Some(prior) = prior_peak {
+                assert!(metrics.peak_buffered_bytes <= prior + 64 * 1024);
+            }
+            prior_peak = Some(metrics.peak_buffered_bytes);
             assert!(metrics.physical_bytes > prior_bytes);
             assert_eq!(
                 metrics.physical_bytes,
-                metrics.validation_bytes + metrics.selected_value_bytes
+                metrics.authentication_bytes
+                    + metrics.validation_bytes
+                    + metrics.selected_value_bytes
             );
             assert!(metrics.read_calls > 0);
             assert_eq!(
-                metrics.read_calls,
-                metrics.validation_read_calls + metrics.selected_value_read_calls
+                metrics.physical_blocks,
+                metrics.authentication_blocks
+                    + metrics.validation_read_calls
+                    + metrics.selected_value_read_calls
             );
             assert!(metrics.validation_bytes > 0);
             assert!(metrics.selected_value_bytes > 0);

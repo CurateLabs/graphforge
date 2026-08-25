@@ -157,7 +157,7 @@ expanded inventories remain readable and can be migrated without changing
 ### Immutable property snapshots
 
 Node and edge properties use `full-snapshot-v1` fragments under
-`properties/<route>/g-<generation>-o-<ordinal>.parquet` and the corresponding
+`properties/<route>/<generation>-<ordinal>.parquet` (fixed-width decimal identity) and the corresponding
 `edge_properties` tree. Each row is the complete property state for one UUID;
 the newest canonical fragment identity wins, and an explicit tombstone deletes
 the whole row. A write window composes repeated SET/REMOVE operations once and
@@ -168,9 +168,16 @@ validate canonical fragment identity, schema/semantic metadata, strictly sorted
 unique non-null UUIDs, and tombstone invariants, then perform a bounded
 disk-backed newest-wins merge. SQL and direct APIs share that scanner. SQL emits
 bounded Arrow batches; `LIMIT` changes emission only after authority validation.
-Operational evidence distinguishes authenticated bytes/read calls/range seeks,
+Each retained file is hashed once, then its Parquet page headers are parsed
+through a bounded compact-protocol reader before Arrow allocation. Declared
+compressed/uncompressed sizes must remain within the authenticated chunk/file
+ranges and the configured live-byte limit. One shared budget covers Arrow
+batches, decoded rows, spill buffers, and merge cursors; rolling fan-in levels
+keep run references logarithmic and unlink merged inputs immediately.
+Operational evidence distinguishes authentication bytes/64 KiB blocks,
+validation and selected-value decoder bytes/read calls, range seeks,
 physical and shadowed rows, fragments and row groups considered/selected,
-spill runs/bytes/passes, decoder and merge retention peaks, and the invariant
+spill runs/bytes/passes and peak run references, the shared live-byte peak, and the invariant
 `per_record_seeks = 0`.
 
 Property-only commits reserve a checked monotonic property generation under the

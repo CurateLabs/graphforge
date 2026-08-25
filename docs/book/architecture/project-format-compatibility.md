@@ -24,9 +24,10 @@ v1.0 format freeze.
   the v0.5 public construction or ingest surface.
 
 Within a supported v0.5 generation, base-only canonical Parquet remains
-readable. Property routes may be a legacy single canonical Parquet snapshot or
-the authenticated `full-snapshot-v1` immutable fragment directory; mixed
-authority for one route is rejected rather than concatenated. Typed GFDR records use the current versioned framing and typed value
+readable. A legacy single canonical property Parquet snapshot remains the
+oldest `(0, 0)` authority when later `full-snapshot-v1` immutable fragments are
+published; it is authenticated and retained rather than rewritten or silently
+deleted. Typed GFDR records use the current versioned framing and typed value
 encoding. The superseded prototype's routing-free topology/property payloads
 and plain-string property representation are not losslessly migratable and are
 rejected with `GF_UNSUPPORTED_PROJECT_FORMAT`; GraphForge never silently
