@@ -135,16 +135,18 @@ fn materialize_graph_projection_with_options(
         &selected_edges,
         &BTreeSet::new(),
     )?;
-    project_parquet_directory(
-        &source.join("properties"),
-        &target.join("properties"),
+    project_property_directory(
+        source,
+        target,
+        false,
         "node_uuid",
         &selected_nodes,
         &selection.exclude_properties,
     )?;
-    project_parquet_directory(
-        &source.join("edge_properties"),
-        &target.join("edge_properties"),
+    project_property_directory(
+        source,
+        target,
+        true,
         "edge_uuid",
         &selected_edges,
         &selection.exclude_properties,
@@ -280,7 +282,57 @@ fn project_parquet_file(
     } else {
         concat_batches(&schema, &batches).map_err(storage)?
     };
-    let keys = uuid_column(&combined, key)?;
+    project_record_batch(&combined, target, key, selected, exclude_properties)
+}
+
+fn project_property_directory(
+    source: &Path,
+    target: &Path,
+    edge: bool,
+    key: &str,
+    selected: &BTreeSet<[u8; 16]>,
+    exclude_properties: &BTreeSet<String>,
+) -> Result<(), GfError> {
+    let routes = if edge {
+        crate::catalog::list_edge_property_stems(source)
+    } else {
+        crate::catalog::list_property_stems(source)
+    };
+    let directory = if edge {
+        "edge_properties"
+    } else {
+        "properties"
+    };
+    for route in routes {
+        let batches = if edge {
+            crate::catalog::read_edge_properties(source, &route)
+        } else {
+            crate::catalog::read_properties(source, &route)
+        }
+        .map_err(|error| GfError::Storage(error.to_string()))?;
+        let Some(schema) = batches.first().map(RecordBatch::schema) else {
+            continue;
+        };
+        let combined = concat_batches(&schema, &batches).map_err(storage)?;
+        project_record_batch(
+            &combined,
+            &target.join(directory).join(format!("{route}.parquet")),
+            key,
+            selected,
+            exclude_properties,
+        )?;
+    }
+    Ok(())
+}
+
+fn project_record_batch(
+    combined: &RecordBatch,
+    target: &Path,
+    key: &str,
+    selected: &BTreeSet<[u8; 16]>,
+    exclude_properties: &BTreeSet<String>,
+) -> Result<(), GfError> {
+    let keys = uuid_column(combined, key)?;
     let mut rows = Vec::new();
     for row in 0..combined.num_rows() {
         let uuid = uuid_at(keys, row)?;
@@ -310,7 +362,10 @@ fn project_parquet_file(
         .iter()
         .map(|index| combined.schema().field(*index).clone())
         .collect::<Vec<_>>();
-    let projected_schema = Arc::new(Schema::new(fields));
+    let projected_schema = Arc::new(Schema::new_with_metadata(
+        fields,
+        combined.schema().metadata().clone(),
+    ));
     let columns = keep_columns
         .into_iter()
         .map(|index| take(combined.column(index).as_ref(), &indices, None).map_err(storage))
@@ -1563,14 +1618,23 @@ mod tests {
             materialize_graph_projection(source.path(), baseline_target.path(), &selection)
                 .unwrap();
 
-        for relative in [
-            "topology/nodes.parquet",
-            "topology/edges/_exploratory.parquet",
-            "properties/_untyped.parquet",
-            "edge_properties/KNOWS.parquet",
-            "topology/runtime_catalog.parquet",
+        let mut paths = vec![
+            source.path().join("topology/nodes.parquet"),
+            source.path().join("topology/edges/_exploratory.parquet"),
+            source.path().join("topology/runtime_catalog.parquet"),
+        ];
+        for (kind, route) in [
+            (crate::property_overlay::PropertyRouteKind::Node, "_untyped"),
+            (crate::property_overlay::PropertyRouteKind::Edge, "KNOWS"),
         ] {
-            let path = source.path().join(relative);
+            paths.extend(
+                crate::property_overlay::enumerate_property_fragments(source.path(), kind, route)
+                    .unwrap()
+                    .into_iter()
+                    .map(|fragment| fragment.path),
+            );
+        }
+        for path in paths {
             let batches = read_parquet(&path).unwrap();
             let schema = batches[0].schema();
             let replacement = path.with_extension("rewritten");
