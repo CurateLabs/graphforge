@@ -727,6 +727,7 @@ pub(crate) fn commit(
     };
     if bump_property {
         crate::writer::seal_property_windows(&mut batch, root, next.property)?;
+        batch.move_staged_destination_to_end(&root.join("topology/nodes.parquet"));
     }
     let generation_bytes =
         crate::generation::encode_generation_state(next.topology, next.search, next.property)?;

@@ -519,6 +519,15 @@ mod tests {
             .sum()
     }
 
+    fn logical_property_rows(dir: &Path, route: &str, edge: bool) -> usize {
+        let batches = if edge {
+            crate::catalog::read_edge_properties(dir, route).unwrap()
+        } else {
+            crate::catalog::read_properties(dir, route).unwrap()
+        };
+        batches.iter().map(RecordBatch::num_rows).sum()
+    }
+
     fn set(uuids: &[Uuid]) -> HashSet<[u8; 16]> {
         uuids.iter().map(to_bytes).collect()
     }
@@ -587,11 +596,11 @@ mod tests {
         )
         .unwrap();
         w.flush().unwrap();
-        assert_eq!(row_count(dir.path(), "properties/_untyped.parquet"), 2);
+        assert_eq!(logical_property_rows(dir.path(), "_untyped", false), 2);
 
         delete_nodes(dir.path(), &set(&[a])).unwrap();
         assert_eq!(
-            row_count(dir.path(), "properties/_untyped.parquet"),
+            logical_property_rows(dir.path(), "_untyped", false),
             1,
             "the deleted node's property row is dropped too"
         );
@@ -714,6 +723,12 @@ mod tests {
         let mut staged = RewriteBatch::new();
         stage_delete_edges(&mut staged, dir.path(), &set(&[e_ab])).unwrap();
         stage_delete_nodes(&mut staged, dir.path(), &set(&[a])).unwrap();
+        let property_generation = crate::generation::read_property_generation(dir.path())
+            .unwrap()
+            .checked_add(1)
+            .unwrap();
+        crate::writer::seal_property_windows(&mut staged, dir.path(), property_generation).unwrap();
+        staged.move_staged_destination_to_end(&dir.path().join("topology/nodes.parquet"));
 
         let order: Vec<_> = staged.staged_paths().collect();
         assert!(
@@ -752,8 +767,8 @@ mod tests {
             row_count(dir.path(), "topology/edges/_exploratory.parquet"),
             1
         );
-        assert_eq!(row_count(dir.path(), "properties/_untyped.parquet"), 0);
-        assert_eq!(row_count(dir.path(), "edge_properties/KNOWS.parquet"), 0);
+        assert_eq!(logical_property_rows(dir.path(), "_untyped", false), 0);
+        assert_eq!(logical_property_rows(dir.path(), "KNOWS", true), 0);
 
         // No temp residue anywhere the delete touched.
         for sub in [
@@ -787,7 +802,7 @@ mod tests {
             row_count(dir.path(), "topology/edges/_exploratory.parquet"),
             2
         );
-        assert_eq!(row_count(dir.path(), "properties/_untyped.parquet"), 1);
-        assert_eq!(row_count(dir.path(), "edge_properties/KNOWS.parquet"), 1);
+        assert_eq!(logical_property_rows(dir.path(), "_untyped", false), 1);
+        assert_eq!(logical_property_rows(dir.path(), "KNOWS", true), 1);
     }
 }

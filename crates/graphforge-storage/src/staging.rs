@@ -386,6 +386,13 @@ impl RewriteBatch {
     pub(crate) fn into_staged(self) -> Vec<(NamedTempFile, PathBuf)> {
         self.staged
     }
+
+    pub(crate) fn move_staged_destination_to_end(&mut self, destination: &Path) {
+        if let Some(index) = self.staged.iter().position(|(_, path)| path == destination) {
+            let entry = self.staged.remove(index);
+            self.staged.push(entry);
+        }
+    }
 }
 
 /// Parquet row-group size for all staged files. Smaller than the 1 M-row
