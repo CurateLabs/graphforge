@@ -150,6 +150,7 @@ pub(crate) fn reconcile_auxiliary(
         GenerationPair {
             topology: raw.topology,
             search: raw.search,
+            property: raw.property,
         },
     )?;
     let current = crate::generation::read_generation_state_raw(root)?;
@@ -182,6 +183,7 @@ pub(crate) fn reconcile_auxiliary(
     let current = GenerationPair {
         topology: current.topology,
         search: current.search,
+        property: current.property,
     };
     if current == next && exact {
         Ok(AuxiliaryReconcileOutcome::Committed)
@@ -784,6 +786,7 @@ pub(crate) fn with_rewrite_lock<T>(
         GenerationPair {
             topology: current.topology,
             search: current.search,
+            property: current.property,
         },
     )?;
     guard.revalidate()?;
@@ -849,7 +852,7 @@ pub(crate) fn commit_with_participant(
         && !bump_search
         && !bump_property
         && auxiliary.is_none()
-        && participant.is_none()
+        && !has_participant
     {
         return Ok(prior);
     }

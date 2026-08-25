@@ -553,7 +553,7 @@ pub fn stage_delete_edges_authenticated<S: BuildHasher>(
         return Ok(0);
     }
     let mut removed = 0u64;
-    for path in parquet_files_in(dir, "topology/edges")? {
+    for (_, path) in edge_parquet_files(dir, None)? {
         if let Some(schema) = discover_parquet_schema(&path) {
             removed += stage_rewrite_dropping(staged, &path, schema, "edge_uuid", edge_uuids)?;
         }
@@ -711,12 +711,13 @@ fn committed_uuid_generation(
 ) -> Result<Option<u64>, GfError> {
     match outcome {
         crate::uuid_membership::CommittedUuidTopologyRewrite::NoTopologyChange => Ok(None),
-        crate::uuid_membership::CommittedUuidTopologyRewrite::Committed(generation) => {
+        crate::uuid_membership::CommittedUuidTopologyRewrite::Committed { generation, .. } => {
             Ok(Some(generation))
         }
         crate::uuid_membership::CommittedUuidTopologyRewrite::CommittedNeedsRefresh {
             generation,
             error,
+            ..
         } => Err(GfError::Storage(format!(
             "topology generation {generation} committed but UUID index snapshot refresh failed: {error}"
         ))),

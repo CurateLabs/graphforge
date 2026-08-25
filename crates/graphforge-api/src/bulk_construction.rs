@@ -2129,18 +2129,18 @@ pub(crate) fn register_existing_endpoints(
         ));
     }
     let requested = endpoints.iter().copied().collect::<Vec<_>>();
-    let mut index = graphforge_storage::UuidMembershipIndex::open(dir)?;
-    let (surrogates, _) = index.lookup_node_surrogates(&requested)?;
-    for (uuid, surrogate) in requested.into_iter().zip(surrogates) {
-        writer.register_existing_node(
-            uuid,
-            surrogate.ok_or_else(|| {
+    writer
+        .register_existing_endpoints(&requested)
+        .map_err(|error| match error {
+            super::GfError::Storage(message)
+                if message.contains("is absent from the authenticated node index") =>
+            {
                 super::GfError::Validation(
                     "bulk edge endpoint disappeared before publication".into(),
                 )
-            })?,
-        )?;
-    }
+            }
+            other => other,
+        })?;
     Ok(())
 }
 

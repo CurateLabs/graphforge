@@ -161,8 +161,21 @@ pub struct UuidProbeMetrics {
     pub unique_requested: u64,
     /// Distinct identities found.
     pub found: u64,
-    /// Binary-search file seeks performed.
+    /// Block-positioning seeks performed. One seek corresponds to one bounded
+    /// authenticated block read, never to one requested record.
     pub file_seeks: u64,
+    /// Identity-run blocks read after block-fence selection.
+    pub identity_blocks_read: u64,
+    /// Identity-run bytes read after block-fence selection.
+    pub identity_bytes_read: u64,
+    /// Reverse-surrogate blocks read for batched pair validation.
+    pub surrogate_blocks_read: u64,
+    /// Reverse-surrogate bytes read for batched pair validation.
+    pub surrogate_bytes_read: u64,
+    /// Immutable runs considered while applying newest-run shadowing.
+    pub runs_considered: u64,
+    /// Per-record filesystem seeks. Batched lookup must keep this exactly zero.
+    pub per_record_seeks: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -226,88 +239,6 @@ struct AuthenticatedRun {
     descriptor: RunRecord,
 }
 
-#[derive(Debug, Default)]
-struct ProbeBlockCache {
-    file: Option<graphforge_filesystem::FileIdentity>,
-    offset: u64,
-    bytes: Vec<u8>,
-}
-
-fn cached_record<const N: usize>(
-    file: &mut File,
-    identity: graphforge_filesystem::FileIdentity,
-    index: u64,
-    cache: &mut ProbeBlockCache,
-    block_loads: &mut u64,
-) -> Result<[u8; N], GfError> {
-    let byte_offset = index
-        .checked_mul(N as u64)
-        .ok_or_else(|| storage_err("probe offset overflow"))?;
-    let block_offset = byte_offset / BULK_IO_BYTES as u64 * BULK_IO_BYTES as u64;
-    if cache.file != Some(identity) || cache.offset != block_offset {
-        file.seek(SeekFrom::Start(block_offset))
-            .map_err(storage_err)?;
-        cache.bytes.resize(BULK_IO_BYTES, 0);
-        let mut valid = 0;
-        while valid < BULK_IO_BYTES {
-            let read = file.read(&mut cache.bytes[valid..]).map_err(storage_err)?;
-            if read == 0 {
-                break;
-            }
-            valid += read;
-        }
-        cache.bytes.truncate(valid);
-        cache.file = Some(identity);
-        cache.offset = block_offset;
-        *block_loads = block_loads.saturating_add(1);
-    }
-    let within = usize::try_from(byte_offset - block_offset).map_err(storage_err)?;
-    let end = within
-        .checked_add(N)
-        .ok_or_else(|| storage_err("probe range overflow"))?;
-    cache
-        .bytes
-        .get(within..end)
-        .ok_or_else(|| storage_err("truncated cached UUID record"))?
-        .try_into()
-        .map_err(|_| storage_err("invalid cached UUID record"))
-}
-
-fn cached_identity_state(
-    file: &mut File,
-    identity: graphforge_filesystem::FileIdentity,
-    count: u64,
-    target: Uuid,
-    expected_kind: UuidIndexKind,
-    cache: &mut ProbeBlockCache,
-    loads: &mut u64,
-) -> Result<Option<(bool, u64)>, GfError> {
-    let (mut lo, mut hi) = (0, count);
-    while lo < hi {
-        let mid = lo + (hi - lo) / 2;
-        let record = cached_record::<32>(file, identity, mid, cache, loads)?;
-        match record[..16].cmp(target.as_bytes()) {
-            std::cmp::Ordering::Less => lo = mid + 1,
-            std::cmp::Ordering::Greater => hi = mid,
-            std::cmp::Ordering::Equal => {
-                let kind = if matches!(record[16], 0 | 2) {
-                    UuidIndexKind::Node
-                } else {
-                    UuidIndexKind::Edge
-                };
-                if kind != expected_kind {
-                    return Ok(Some((false, 0)));
-                }
-                return Ok(Some((
-                    matches!(record[16], 0 | 1),
-                    u64::from_be_bytes(record[24..32].try_into().expect("fixed")),
-                )));
-            }
-        }
-    }
-    Ok(None)
-}
-
 fn authenticated_block(
     file: &mut File,
     block: &BlockRecord,
@@ -335,6 +266,170 @@ fn authenticated_block(
         .saturating_add(bytes.len() as u64);
     metrics.validation_scan_blocks = metrics.validation_scan_blocks.saturating_add(1);
     Ok(bytes)
+}
+
+#[derive(Clone, Copy)]
+enum ProbeFileKind {
+    Identity,
+    Surrogate,
+}
+
+fn authenticated_probe_block(
+    file: &mut File,
+    block: &BlockRecord,
+    width: usize,
+    kind: ProbeFileKind,
+    metrics: &mut UuidProbeMetrics,
+) -> Result<Vec<u8>, GfError> {
+    file.seek(SeekFrom::Start(block.offset))
+        .map_err(storage_err)?;
+    metrics.file_seeks = metrics.file_seeks.saturating_add(1);
+    let mut bytes = vec![0_u8; block.len as usize];
+    file.read_exact(&mut bytes).map_err(storage_err)?;
+    let key_width = match width {
+        IDENTITY_RECORD_WIDTH => 16,
+        NODE_LOOKUP_RECORD_WIDTH => 8,
+        _ => return Err(storage_err("unsupported UUID probe record width")),
+    };
+    if bytes.is_empty()
+        || bytes.len() % width != 0
+        || hex_sha256(&bytes) != block.sha256
+        || hex_sha256_key(&bytes[..key_width]) != block.first_key
+        || hex_sha256_key(&bytes[bytes.len() - width..bytes.len() - width + key_width])
+            != block.last_key
+    {
+        return Err(storage_err("UUID probe block authentication failed"));
+    }
+    match kind {
+        ProbeFileKind::Identity => {
+            metrics.identity_blocks_read = metrics.identity_blocks_read.saturating_add(1);
+            metrics.identity_bytes_read = metrics
+                .identity_bytes_read
+                .saturating_add(bytes.len() as u64);
+        }
+        ProbeFileKind::Surrogate => {
+            metrics.surrogate_blocks_read = metrics.surrogate_blocks_read.saturating_add(1);
+            metrics.surrogate_bytes_read = metrics
+                .surrogate_bytes_read
+                .saturating_add(bytes.len() as u64);
+        }
+    }
+    Ok(bytes)
+}
+
+#[derive(Clone, Copy, Debug)]
+struct IdentityState {
+    present: bool,
+    surrogate: u64,
+}
+
+/// Resolve all candidate keys in one run by selecting authenticated blocks
+/// from their fences and merge-scanning each selected block once.
+fn batch_identity_states(
+    file: &mut File,
+    descriptor: &FileRecord,
+    expected_kind: UuidIndexKind,
+    requested: &BTreeSet<Uuid>,
+    metrics: &mut UuidProbeMetrics,
+) -> Result<std::collections::BTreeMap<Uuid, IdentityState>, GfError> {
+    let mut groups = std::collections::BTreeMap::<usize, Vec<Uuid>>::new();
+    for uuid in requested {
+        let key = hex_sha256_key(uuid.as_bytes());
+        if let Some(index) = candidate_block(descriptor, &key) {
+            groups.entry(index).or_default().push(*uuid);
+        }
+    }
+    let mut found = std::collections::BTreeMap::new();
+    for (index, candidates) in groups {
+        let bytes = authenticated_probe_block(
+            file,
+            &descriptor.blocks[index],
+            IDENTITY_RECORD_WIDTH,
+            ProbeFileKind::Identity,
+            metrics,
+        )?;
+        let mut record_index = 0_usize;
+        for uuid in candidates {
+            while record_index < bytes.len() / IDENTITY_RECORD_WIDTH {
+                let start = record_index * IDENTITY_RECORD_WIDTH;
+                let record = &bytes[start..start + IDENTITY_RECORD_WIDTH];
+                match record[..16].cmp(uuid.as_bytes()) {
+                    std::cmp::Ordering::Less => record_index += 1,
+                    std::cmp::Ordering::Greater => break,
+                    std::cmp::Ordering::Equal => {
+                        let record_kind = if matches!(record[16], 0 | 2) {
+                            UuidIndexKind::Node
+                        } else {
+                            UuidIndexKind::Edge
+                        };
+                        found.insert(
+                            uuid,
+                            IdentityState {
+                                present: record_kind == expected_kind
+                                    && matches!(record[16], 0 | 1),
+                                surrogate: u64::from_be_bytes(
+                                    record[24..32].try_into().expect("fixed record"),
+                                ),
+                            },
+                        );
+                        record_index += 1;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// Validate all resolved node identity/surrogate pairs in one run with the
+/// same fence-selected merge scan. A missing or mismatched reverse pair is
+/// authenticated corruption.
+fn validate_surrogate_pairs(
+    file: &mut File,
+    descriptor: &FileRecord,
+    pairs: &[(u64, Uuid)],
+    metrics: &mut UuidProbeMetrics,
+) -> Result<(), GfError> {
+    let mut groups = std::collections::BTreeMap::<usize, Vec<(u64, Uuid)>>::new();
+    for &(surrogate, uuid) in pairs {
+        let key = hex_sha256_key(&surrogate.to_be_bytes());
+        let index = candidate_block(descriptor, &key)
+            .ok_or_else(|| storage_err("identity/surrogate run pair is inconsistent"))?;
+        groups.entry(index).or_default().push((surrogate, uuid));
+    }
+    for (index, mut candidates) in groups {
+        candidates.sort_unstable();
+        let bytes = authenticated_probe_block(
+            file,
+            &descriptor.blocks[index],
+            NODE_LOOKUP_RECORD_WIDTH,
+            ProbeFileKind::Surrogate,
+            metrics,
+        )?;
+        let mut record_index = 0_usize;
+        for (surrogate, uuid) in candidates {
+            let key = surrogate.to_be_bytes();
+            let mut matched = false;
+            while record_index < bytes.len() / NODE_LOOKUP_RECORD_WIDTH {
+                let start = record_index * NODE_LOOKUP_RECORD_WIDTH;
+                let record = &bytes[start..start + NODE_LOOKUP_RECORD_WIDTH];
+                match record[..8].cmp(&key) {
+                    std::cmp::Ordering::Less => record_index += 1,
+                    std::cmp::Ordering::Greater => break,
+                    std::cmp::Ordering::Equal => {
+                        matched = record[8..24] == *uuid.as_bytes();
+                        record_index += 1;
+                        break;
+                    }
+                }
+            }
+            if !matched {
+                return Err(storage_err("identity/surrogate run pair is inconsistent"));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn candidate_block(record: &FileRecord, key: &str) -> Option<usize> {
@@ -454,7 +549,6 @@ pub struct AuthenticatedUuidIndexSnapshot {
     manifest_sha256: String,
     manifest: Manifest,
     runs: Vec<AuthenticatedRun>,
-    cache: ProbeBlockCache,
     authenticated_bytes: u64,
     authenticated_blocks: u64,
 }
@@ -508,7 +602,6 @@ impl AuthenticatedUuidIndexSnapshot {
             manifest_sha256,
             manifest,
             runs,
-            cache: ProbeBlockCache::default(),
             authenticated_bytes,
             authenticated_blocks,
         })
@@ -626,7 +719,6 @@ impl AuthenticatedUuidIndexSnapshot {
         self.manifest_file = manifest_file;
         self.manifest = manifest;
         self.runs = next_runs;
-        self.cache = ProbeBlockCache::default();
         self.authenticated_bytes = 0;
         self.authenticated_blocks = 0;
         Ok(authenticated_bytes)
@@ -643,28 +735,31 @@ impl AuthenticatedUuidIndexSnapshot {
         };
         let unique = requested.iter().copied().collect::<BTreeSet<_>>();
         metrics.unique_requested = unique.len() as u64;
+        let mut unresolved = unique;
         let mut resolved = std::collections::BTreeMap::new();
-        for uuid in unique {
-            let mut found = false;
-            for run in self.runs.iter_mut().rev() {
-                if let Some((present, _)) = cached_identity_state(
-                    &mut run.identities,
-                    run.identities_identity,
-                    run.descriptor.identities.count,
-                    uuid,
-                    kind,
-                    &mut self.cache,
-                    &mut metrics.file_seeks,
-                )? {
-                    found = present;
-                    break;
-                }
+        for run in self.runs.iter_mut().rev() {
+            if unresolved.is_empty() {
+                break;
             }
-            metrics.found += u64::from(found);
-            resolved.insert(uuid, found);
+            metrics.runs_considered = metrics.runs_considered.saturating_add(1);
+            let states = batch_identity_states(
+                &mut run.identities,
+                &run.descriptor.identities,
+                kind,
+                &unresolved,
+                &mut metrics,
+            )?;
+            for (uuid, state) in states {
+                unresolved.remove(&uuid);
+                metrics.found = metrics.found.saturating_add(u64::from(state.present));
+                resolved.insert(uuid, state.present);
+            }
         }
         Ok((
-            requested.iter().map(|uuid| resolved[uuid]).collect(),
+            requested
+                .iter()
+                .map(|uuid| resolved.get(uuid).copied().unwrap_or(false))
+                .collect(),
             metrics,
         ))
     }
@@ -679,30 +774,42 @@ impl AuthenticatedUuidIndexSnapshot {
         };
         let unique = requested.iter().copied().collect::<BTreeSet<_>>();
         metrics.unique_requested = unique.len() as u64;
+        let mut unresolved = unique;
         let mut resolved = std::collections::BTreeMap::new();
-        for uuid in unique {
-            let mut value = None;
-            for run in self.runs.iter_mut().rev() {
-                if let Some((present, surrogate)) = cached_identity_state(
-                    &mut run.identities,
-                    run.identities_identity,
-                    run.descriptor.identities.count,
-                    uuid,
-                    UuidIndexKind::Node,
-                    &mut self.cache,
-                    &mut metrics.file_seeks,
-                )? {
-                    if present {
-                        value = Some(surrogate);
-                    }
-                    break;
-                }
+        for run in self.runs.iter_mut().rev() {
+            if unresolved.is_empty() {
+                break;
             }
-            metrics.found += u64::from(value.is_some());
-            resolved.insert(uuid, value);
+            metrics.runs_considered = metrics.runs_considered.saturating_add(1);
+            let states = batch_identity_states(
+                &mut run.identities,
+                &run.descriptor.identities,
+                UuidIndexKind::Node,
+                &unresolved,
+                &mut metrics,
+            )?;
+            let mut pairs = Vec::new();
+            for (uuid, state) in states {
+                unresolved.remove(&uuid);
+                let value = state.present.then_some(state.surrogate);
+                if let Some(surrogate) = value {
+                    pairs.push((surrogate, uuid));
+                    metrics.found = metrics.found.saturating_add(1);
+                }
+                resolved.insert(uuid, value);
+            }
+            validate_surrogate_pairs(
+                &mut run.node_surrogates,
+                &run.descriptor.node_surrogates,
+                &pairs,
+                &mut metrics,
+            )?;
         }
         Ok((
-            requested.iter().map(|uuid| resolved[uuid]).collect(),
+            requested
+                .iter()
+                .map(|uuid| resolved.get(uuid).copied().flatten())
+                .collect(),
             metrics,
         ))
     }
@@ -778,25 +885,33 @@ impl UuidMembershipIndex {
         };
         let unique = requested.iter().copied().collect::<BTreeSet<_>>();
         metrics.unique_requested = unique.len() as u64;
+        let mut unresolved = unique;
         let mut membership = std::collections::BTreeMap::new();
-        for uuid in unique {
-            let mut found = false;
-            for run in self.runs.iter_mut().rev() {
-                if let Some((present, _)) = binary_search_identity_state(
-                    &mut run.identities,
-                    run.descriptor.identities.count,
-                    uuid,
-                    kind,
-                    &mut metrics.file_seeks,
-                )? {
-                    found = present;
-                    break;
-                }
+        for run in self.runs.iter_mut().rev() {
+            if unresolved.is_empty() {
+                break;
             }
-            metrics.found += u64::from(found);
-            membership.insert(uuid, found);
+            metrics.runs_considered = metrics.runs_considered.saturating_add(1);
+            let states = batch_identity_states(
+                &mut run.identities,
+                &run.descriptor.identities,
+                kind,
+                &unresolved,
+                &mut metrics,
+            )?;
+            for (uuid, state) in states {
+                unresolved.remove(&uuid);
+                metrics.found = metrics.found.saturating_add(u64::from(state.present));
+                membership.insert(uuid, state.present);
+            }
         }
-        Ok((requested.iter().map(|u| membership[u]).collect(), metrics))
+        Ok((
+            requested
+                .iter()
+                .map(|uuid| membership.get(uuid).copied().unwrap_or(false))
+                .collect(),
+            metrics,
+        ))
     }
 
     /// Resolve node UUIDs to their canonical surrogates without scanning
@@ -811,40 +926,42 @@ impl UuidMembershipIndex {
         };
         let unique = requested.iter().copied().collect::<BTreeSet<_>>();
         metrics.unique_requested = unique.len() as u64;
+        let mut unresolved = unique;
         let mut resolved = std::collections::BTreeMap::new();
-        for uuid in unique {
-            let mut surrogate = None;
-            for run in self.runs.iter_mut().rev() {
-                let state = binary_search_identity_state(
-                    &mut run.identities,
-                    run.descriptor.identities.count,
-                    uuid,
-                    UuidIndexKind::Node,
-                    &mut metrics.file_seeks,
-                )?;
-                if let Some((present, value)) = state {
-                    if !present {
-                        surrogate = None;
-                        break;
-                    }
-                    surrogate = Some(value);
-                    if binary_search_surrogate_uuid(
-                        &mut run.node_surrogates,
-                        run.descriptor.node_surrogates.count,
-                        value,
-                        &mut metrics.file_seeks,
-                    )? != Some(*uuid.as_bytes())
-                    {
-                        return Err(storage_err("identity/surrogate run pair is inconsistent"));
-                    }
-                    break;
-                }
+        for run in self.runs.iter_mut().rev() {
+            if unresolved.is_empty() {
+                break;
             }
-            metrics.found += u64::from(surrogate.is_some());
-            resolved.insert(uuid, surrogate);
+            metrics.runs_considered = metrics.runs_considered.saturating_add(1);
+            let states = batch_identity_states(
+                &mut run.identities,
+                &run.descriptor.identities,
+                UuidIndexKind::Node,
+                &unresolved,
+                &mut metrics,
+            )?;
+            let mut pairs = Vec::new();
+            for (uuid, state) in states {
+                unresolved.remove(&uuid);
+                let value = state.present.then_some(state.surrogate);
+                if let Some(surrogate) = value {
+                    pairs.push((surrogate, uuid));
+                    metrics.found = metrics.found.saturating_add(1);
+                }
+                resolved.insert(uuid, value);
+            }
+            validate_surrogate_pairs(
+                &mut run.node_surrogates,
+                &run.descriptor.node_surrogates,
+                &pairs,
+                &mut metrics,
+            )?;
         }
         Ok((
-            requested.iter().map(|uuid| resolved[uuid]).collect(),
+            requested
+                .iter()
+                .map(|uuid| resolved.get(uuid).copied().flatten())
+                .collect(),
             metrics,
         ))
     }
@@ -1008,8 +1125,15 @@ pub(crate) struct UuidTopologyDelta {
 
 pub(crate) enum CommittedUuidTopologyRewrite {
     NoTopologyChange,
-    Committed(u64),
-    CommittedNeedsRefresh { generation: u64, error: GfError },
+    Committed {
+        generation: u64,
+        metrics: UuidIndexAppendMetrics,
+    },
+    CommittedNeedsRefresh {
+        generation: u64,
+        metrics: UuidIndexAppendMetrics,
+        error: GfError,
+    },
 }
 
 /// Commit topology and its UUID participant under the one durable rewrite lock.
@@ -1020,16 +1144,22 @@ pub(crate) fn commit_uuid_topology_rewrite(
     delta: &UuidTopologyDelta,
     snapshot: &mut Option<AuthenticatedUuidIndexSnapshot>,
 ) -> Result<CommittedUuidTopologyRewrite, GfError> {
-    ensure_uuid_membership_migrated(project_dir)?;
-    if delta.nodes.is_empty()
+    let delta_is_empty = delta.nodes.is_empty()
         && delta.edges.is_empty()
         && delta.deleted_nodes.is_empty()
-        && delta.deleted_edges.is_empty()
-    {
+        && delta.deleted_edges.is_empty();
+    if delta_is_empty && staged.is_empty() {
+        return Ok(CommittedUuidTopologyRewrite::NoTopologyChange);
+    }
+    ensure_uuid_membership_migrated(project_dir)?;
+    if delta_is_empty {
         return crate::generation::commit_topology_aware(staged, project_dir).map(|generation| {
             generation.map_or(
                 CommittedUuidTopologyRewrite::NoTopologyChange,
-                CommittedUuidTopologyRewrite::Committed,
+                |generation| CommittedUuidTopologyRewrite::Committed {
+                    generation,
+                    metrics: UuidIndexAppendMetrics::default(),
+                },
             )
         });
     }
@@ -1125,9 +1255,10 @@ pub(crate) fn commit_uuid_topology_rewrite(
             }
         }
     };
+    let mut committed_metrics = UuidIndexAppendMetrics::default();
     if let (Some(generation), Some(token)) = (committed, token.as_ref()) {
         token.verify_generation(generation)?;
-        let _work = token.metrics();
+        committed_metrics = token.metrics().clone();
         let refresh = injected_snapshot_refresh_failure().map_or_else(
             || {
                 if let Some(value) = snapshot.as_mut() {
@@ -1141,12 +1272,19 @@ pub(crate) fn commit_uuid_topology_rewrite(
         );
         if let Err(error) = refresh {
             *snapshot = None;
-            return Ok(CommittedUuidTopologyRewrite::CommittedNeedsRefresh { generation, error });
+            return Ok(CommittedUuidTopologyRewrite::CommittedNeedsRefresh {
+                generation,
+                metrics: committed_metrics,
+                error,
+            });
         }
     }
     Ok(committed.map_or(
         CommittedUuidTopologyRewrite::NoTopologyChange,
-        CommittedUuidTopologyRewrite::Committed,
+        |generation| CommittedUuidTopologyRewrite::Committed {
+            generation,
+            metrics: committed_metrics,
+        },
     ))
 }
 
@@ -2398,30 +2536,6 @@ fn reject_surrogate_collisions(
     Ok(bytes)
 }
 
-fn binary_search_surrogate_uuid(
-    file: &mut File,
-    count: u64,
-    target: u64,
-    seeks: &mut u64,
-) -> Result<Option<[u8; 16]>, GfError> {
-    let mut lo = 0;
-    let mut hi = count;
-    while lo < hi {
-        let mid = lo + (hi - lo) / 2;
-        file.seek(SeekFrom::Start(mid * NODE_LOOKUP_RECORD_BYTES))
-            .map_err(storage_err)?;
-        *seeks += 1;
-        let mut record = [0_u8; 24];
-        file.read_exact(&mut record).map_err(storage_err)?;
-        match u64::from_be_bytes(record[..8].try_into().expect("fixed")).cmp(&target) {
-            std::cmp::Ordering::Less => lo = mid + 1,
-            std::cmp::Ordering::Greater => hi = mid,
-            std::cmp::Ordering::Equal => return Ok(Some(record[8..].try_into().expect("fixed"))),
-        }
-    }
-    Ok(None)
-}
-
 fn write_identity_records(path: &Path, records: &[(Uuid, u8, u64)]) -> Result<(), GfError> {
     let mut bytes = Vec::with_capacity(BULK_IO_BYTES);
     let mut file = File::create(path).map_err(storage_err)?;
@@ -2670,44 +2784,6 @@ fn validate_run_descriptors(manifest: &Manifest) -> Result<(), GfError> {
         ));
     }
     Ok(())
-}
-
-fn binary_search_identity_state(
-    file: &mut File,
-    count: u64,
-    target: Uuid,
-    expected_kind: UuidIndexKind,
-    seeks: &mut u64,
-) -> Result<Option<(bool, u64)>, GfError> {
-    let mut lo = 0;
-    let mut hi = count;
-    while lo < hi {
-        let mid = lo + (hi - lo) / 2;
-        file.seek(SeekFrom::Start(mid * IDENTITY_RECORD_BYTES))
-            .map_err(storage_err)?;
-        *seeks += 1;
-        let mut record = [0_u8; 32];
-        file.read_exact(&mut record).map_err(storage_err)?;
-        match record[..16].cmp(target.as_bytes()) {
-            std::cmp::Ordering::Less => lo = mid + 1,
-            std::cmp::Ordering::Greater => hi = mid,
-            std::cmp::Ordering::Equal => {
-                let kind = if matches!(record[16], 0 | 2) {
-                    UuidIndexKind::Node
-                } else {
-                    UuidIndexKind::Edge
-                };
-                if kind != expected_kind {
-                    return Ok(Some((false, 0)));
-                }
-                return Ok(Some((
-                    matches!(record[16], 0 | 1),
-                    u64::from_be_bytes(record[24..32].try_into().expect("fixed record")),
-                )));
-            }
-        }
-    }
-    Ok(None)
 }
 
 fn validate_run_contents(
@@ -3932,6 +4008,9 @@ mod tests {
             .unwrap();
         assert_eq!(surrogates, vec![Some(2), None, Some(1)]);
         assert_eq!(lookup.found, 2);
+        assert_eq!(probe.per_record_seeks, 0);
+        assert_eq!(lookup.per_record_seeks, 0);
+        assert_eq!(lookup.surrogate_blocks_read, 1);
         assert_eq!(
             (probe.requested, probe.unique_requested, probe.found),
             (3, 2, 1)
@@ -3939,7 +4018,7 @@ mod tests {
     }
 
     #[test]
-    fn probe_work_is_candidate_logarithmic_not_index_linear() {
+    fn probe_work_is_fence_selected_block_merge_not_per_record_seeks() {
         let dir = tempfile::tempdir().unwrap();
         let nodes = (1..=8_192).map(Uuid::from_u128).collect::<Vec<_>>();
         write_node_parquet(&dir.path().join("topology/nodes.parquet"), &nodes);
@@ -3951,10 +4030,47 @@ mod tests {
             .unwrap();
         assert_eq!(found, [true, false]);
         assert_eq!(metrics.unique_requested, 2);
-        assert!(
-            metrics.file_seeks <= 28,
-            "two probes in 8192 records require at most 2 * (log2(8192) + 1) seeks"
+        assert_eq!(metrics.per_record_seeks, 0);
+        assert_eq!(metrics.identity_blocks_read, 1);
+        assert_eq!(metrics.file_seeks, metrics.identity_blocks_read);
+        assert_eq!(metrics.identity_bytes_read, 8_192 * IDENTITY_RECORD_BYTES);
+    }
+
+    #[test]
+    fn batch_lookup_restores_duplicates_and_applies_newest_tombstones() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::generation::bump_topology_generation(dir.path()).unwrap();
+        let retained = (1_u64..=40_000)
+            .map(|value| (Uuid::from_u128(u128::from(value)), value))
+            .collect::<Vec<_>>();
+        append_uuid_membership_delta(dir.path(), 1, &retained, &[]).unwrap();
+        crate::generation::bump_topology_generation(dir.path()).unwrap();
+        append_uuid_membership_delta_with_tombstones(
+            dir.path(),
+            2,
+            &[],
+            &[],
+            &[(retained[19_999].0, retained[19_999].1)],
+            &[],
+        )
+        .unwrap();
+
+        let present = retained[39_999].0;
+        let deleted = retained[19_999].0;
+        let missing = Uuid::from_u128(50_000);
+        let mut index = UuidMembershipIndex::open(dir.path()).unwrap();
+        let (resolved, metrics) = index
+            .lookup_node_surrogates(&[present, deleted, present, missing])
+            .unwrap();
+        assert_eq!(resolved, [Some(40_000), None, Some(40_000), None]);
+        assert_eq!(
+            (metrics.requested, metrics.unique_requested, metrics.found),
+            (4, 3, 1)
         );
+        assert_eq!(metrics.per_record_seeks, 0);
+        assert!(metrics.identity_blocks_read <= 3);
+        assert_eq!(metrics.surrogate_blocks_read, 1);
+        assert_eq!(metrics.file_seeks, metrics.identity_blocks_read + 1);
     }
 
     #[test]

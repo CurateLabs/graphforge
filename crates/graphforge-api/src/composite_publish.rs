@@ -899,15 +899,7 @@ fn register_existing_endpoints(
             "composite endpoint resolution requires a fresh authenticated UUID index; run the explicit bounded index migration first".into(),
         ));
     }
-    let mut index = graphforge_storage::UuidMembershipIndex::open(dir)?;
-    let (surrogates, _) = index.lookup_node_surrogates(&existing)?;
-    for (uuid, surrogate) in existing.into_iter().zip(surrogates) {
-        if let Some(surrogate) = surrogate {
-            writer.register_existing_node(uuid, surrogate)?;
-        }
-    }
-    // Missing indexed endpoints retain the existing behavior: validation has
-    // already classified them, and the writer fails closed if one is used.
+    writer.register_existing_endpoints(&existing)?;
     Ok(())
 }
 

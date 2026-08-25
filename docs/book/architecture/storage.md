@@ -597,9 +597,15 @@ Bulk endpoint resolution uses the derived
 topology generation, record counts, lengths, and SHA-256 digests. Nodes have a
 sorted fixed-width `UUID -> node_id` file; edges have a sorted UUID membership
 file. Builds use bounded external sort runs and bounded-fan-in merges. Probes
-perform logarithmic seeks and decode zero topology rows. Duplicate node or edge
-UUIDs, reuse of one UUID across the node and edge domains, stale manifests, and
-missing, truncated, or checksum-mismatched index files fail closed.
+sort and deduplicate the caller batch, use authenticated block fences to select
+only candidate blocks, and merge-scan every selected block once. Newest runs
+own tombstone and cross-kind shadowing; node results are batch-validated against
+the surrogate-sorted reverse file before caller order is restored. Production
+work evidence reports identity/surrogate block reads and bytes, runs considered,
+and exactly zero per-record filesystem seeks while decoding zero topology rows.
+Duplicate node or edge UUIDs, reuse of one UUID across the node and edge
+domains, stale manifests, and missing, truncated, checksum-mismatched, or
+identity/reverse-inconsistent index files fail closed.
 
 New publications use a compact version-2 `graph/files` root. Payloads and
 fixed-depth radix nodes live once in the project content-addressed object
