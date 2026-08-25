@@ -289,9 +289,9 @@ pub use graphforge_storage::{
     GraphDeltaCompactionLimits, GraphDeltaCompactionPolicy, GraphDeltaCompactionReport,
     GraphDeltaCompactionRequest, GraphDeltaCompactionStatus, GraphDeltaJournalLimits,
     ProjectCleanupDisposition, ProjectCleanupEntry, ProjectCleanupLocation, ProjectCleanupReport,
-    ProjectOpenRecoveryEvidence, ProjectOpenRecoveryKind, ProjectReachabilityReport,
-    ProjectRecoveryDeferral, ProjectRecoveryGenerationClass, ProjectRetentionLimits,
-    ProjectRetentionPolicy,
+    ProjectGraphObjectSweepDisposition, ProjectGraphObjectSweepReport, ProjectOpenRecoveryEvidence,
+    ProjectOpenRecoveryKind, ProjectReachabilityReport, ProjectRecoveryDeferral,
+    ProjectRecoveryGenerationClass, ProjectRetentionLimits, ProjectRetentionPolicy,
 };
 pub use gsi_profiler::{GraphScaleIndexProfile, GsiDirectedness, grade_gsi};
 pub use hypotheses::{

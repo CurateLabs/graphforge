@@ -172,6 +172,71 @@ pub struct ProjectCleanupEntry {
     pub bytes: u64,
 }
 
+/// Terminal disposition of the project graph-object sweep for one cleanup pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectGraphObjectSweepDisposition {
+    /// Preview classified generations but intentionally did not mutate graph objects.
+    NotRunDryRun,
+    /// Bounded generation cleanup left work outstanding, so graph objects remain untouched.
+    DeferredBoundedCleanup,
+    /// Another graph-object lifecycle operation held the exclusive GC guard.
+    DeferredGcGuardBusy,
+    /// A live graph-object publication lease made unrooted objects potentially reachable.
+    DeferredLivePublication,
+    /// A staged project-publication attempt may still reference uncommitted graph objects.
+    DeferredActiveAttempt,
+    /// Root tracing and the bounded graph-object sweep completed.
+    Completed,
+}
+
+impl ProjectGraphObjectSweepDisposition {
+    /// Stable machine-readable disposition token.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotRunDryRun => "not_run_dry_run",
+            Self::DeferredBoundedCleanup => "deferred_bounded_cleanup",
+            Self::DeferredGcGuardBusy => "deferred_gc_guard_busy",
+            Self::DeferredLivePublication => "deferred_live_publication",
+            Self::DeferredActiveAttempt => "deferred_active_attempt",
+            Self::Completed => "completed",
+        }
+    }
+}
+
+/// Outcome and physical evidence for the project graph-object sweep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProjectGraphObjectSweepReport {
+    /// Why the sweep completed or was not run.
+    pub disposition: ProjectGraphObjectSweepDisposition,
+    /// Reachable segment and payload objects marked by a completed sweep.
+    pub objects_marked: u64,
+    /// Unreachable graph objects removed by a completed sweep.
+    pub objects_removed: u64,
+    /// Physical unreachable graph-object bytes removed by a completed sweep.
+    pub bytes_removed: u64,
+}
+
+impl ProjectGraphObjectSweepReport {
+    const fn without_sweep(disposition: ProjectGraphObjectSweepDisposition) -> Self {
+        Self {
+            disposition,
+            objects_marked: 0,
+            objects_removed: 0,
+            bytes_removed: 0,
+        }
+    }
+
+    const fn completed(evidence: &crate::graph_object_store::GraphObjectGcEvidence) -> Self {
+        Self {
+            disposition: ProjectGraphObjectSweepDisposition::Completed,
+            objects_marked: evidence.objects_marked,
+            objects_removed: evidence.objects_removed,
+            bytes_removed: evidence.bytes_removed,
+        }
+    }
+}
+
 /// Reachability inspection report.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectReachabilityReport {
@@ -224,6 +289,8 @@ pub struct ProjectCleanupReport {
     pub work_units: u64,
     /// True when a bound stopped further work before the tree was exhausted.
     pub bounded: bool,
+    /// Separate status and physical evidence for project graph-object collection.
+    pub graph_object_sweep: ProjectGraphObjectSweepReport,
     /// Classified entries (capped by work units).
     pub entries: Vec<ProjectCleanupEntry>,
     /// Elapsed wall time in milliseconds.
@@ -432,9 +499,6 @@ fn run_cleanup(
 
     let mut removed = 0_u64;
     let mut skipped_live = classification.skipped_live;
-    if !dry_run && graph_gc_guard.is_none() {
-        skipped_live = skipped_live.saturating_add(1);
-    }
     let mut bounded = classification.bounded;
     if !dry_run {
         let batch_limit = if limits.cleanup_batch == 0 {
@@ -464,10 +528,27 @@ fn run_cleanup(
                 GenerationCleanupOutcome::Retained | GenerationCleanupOutcome::Absent => {}
             }
         }
-        if !bounded && let Some(gc_guard) = graph_gc_guard.as_ref() {
-            sweep_unreachable_graph_objects(root, gc_guard)?;
-        }
     }
+
+    let graph_object_sweep = if dry_run {
+        ProjectGraphObjectSweepReport::without_sweep(
+            ProjectGraphObjectSweepDisposition::NotRunDryRun,
+        )
+    } else if bounded {
+        ProjectGraphObjectSweepReport::without_sweep(
+            ProjectGraphObjectSweepDisposition::DeferredBoundedCleanup,
+        )
+    } else if let Some(gc_guard) = graph_gc_guard.as_ref() {
+        sweep_unreachable_graph_objects(root, gc_guard)?
+    } else if crate::graph_object_publication_is_live(root)? {
+        ProjectGraphObjectSweepReport::without_sweep(
+            ProjectGraphObjectSweepDisposition::DeferredLivePublication,
+        )
+    } else {
+        ProjectGraphObjectSweepReport::without_sweep(
+            ProjectGraphObjectSweepDisposition::DeferredGcGuardBusy,
+        )
+    };
 
     let remaining_bytes = remaining_project_bytes(root, limits)?;
 
@@ -490,6 +571,7 @@ fn run_cleanup(
         entries_scanned: classification.entries_scanned,
         work_units: classification.work_units,
         bounded,
+        graph_object_sweep,
         entries: classification.entries,
         elapsed_ms: elapsed_ms(started),
     })
@@ -498,9 +580,11 @@ fn run_cleanup(
 fn sweep_unreachable_graph_objects(
     root: &Path,
     gc_guard: &crate::graph_object_store::GraphObjectGcGuard,
-) -> Result<(), GfError> {
+) -> Result<ProjectGraphObjectSweepReport, GfError> {
     if crate::graph_object_publication_is_live(root)? {
-        return Ok(());
+        return Ok(ProjectGraphObjectSweepReport::without_sweep(
+            ProjectGraphObjectSweepDisposition::DeferredLivePublication,
+        ));
     }
     let attempts = root.join(ATTEMPTS_DIR);
     if attempts.exists()
@@ -512,7 +596,9 @@ fn sweep_unreachable_graph_objects(
             .map_err(storage_io)?
             .is_some()
     {
-        return Ok(());
+        return Ok(ProjectGraphObjectSweepReport::without_sweep(
+            ProjectGraphObjectSweepDisposition::DeferredActiveAttempt,
+        ));
     }
     let generations = root.join(GENERATIONS_DIR);
     let mut graph_roots = Vec::new();
@@ -545,12 +631,12 @@ fn sweep_unreachable_graph_objects(
             }
         }
     }
-    crate::graph_object_store::gc_graph_objects_guarded(
+    let evidence = crate::graph_object_store::gc_graph_objects_guarded(
         gc_guard,
         &graph_roots,
         crate::GraphManifestLimits::default(),
     )?;
-    Ok(())
+    Ok(ProjectGraphObjectSweepReport::completed(&evidence))
 }
 
 struct Classification {
@@ -991,6 +1077,14 @@ mod tests {
         assert_eq!(execute.selected_generation_uuid, current);
         assert!(preview.dry_run);
         assert!(!execute.dry_run);
+        assert_eq!(
+            preview.graph_object_sweep.disposition,
+            ProjectGraphObjectSweepDisposition::NotRunDryRun
+        );
+        assert_eq!(
+            execute.graph_object_sweep.disposition,
+            ProjectGraphObjectSweepDisposition::Completed
+        );
         assert_eq!(preview.reachable_count, execute.reachable_count);
         assert!(preview.candidates >= 1);
         assert_eq!(preview.candidates, execute.candidates);
@@ -1292,8 +1386,12 @@ mod tests {
             execute_project_cleanup(root.path(), policy(2), ProjectRetentionLimits::default())
                 .unwrap();
         assert_eq!(
-            report.skipped_live, 1,
-            "live CAS publication skip is evidenced"
+            report.skipped_live, 0,
+            "only generation entries are counted"
+        );
+        assert_eq!(
+            report.graph_object_sweep.disposition,
+            ProjectGraphObjectSweepDisposition::DeferredLivePublication
         );
         assert!(
             crate::graph_object_path(root.path(), &digest)
@@ -1317,7 +1415,13 @@ mod tests {
         let (digest, _) = crate::install_graph_object_bytes(root.path(), b"attempt").unwrap();
         let attempt = root.path().join(ATTEMPTS_DIR).join("active-attempt");
         fs::create_dir_all(&attempt).unwrap();
-        execute_project_cleanup(root.path(), policy(2), ProjectRetentionLimits::default()).unwrap();
+        let deferred =
+            execute_project_cleanup(root.path(), policy(2), ProjectRetentionLimits::default())
+                .unwrap();
+        assert_eq!(
+            deferred.graph_object_sweep.disposition,
+            ProjectGraphObjectSweepDisposition::DeferredActiveAttempt
+        );
         assert!(
             crate::graph_object_path(root.path(), &digest)
                 .unwrap()
@@ -1325,7 +1429,99 @@ mod tests {
         );
 
         fs::remove_dir(&attempt).unwrap();
-        execute_project_cleanup(root.path(), policy(2), ProjectRetentionLimits::default()).unwrap();
+        let completed =
+            execute_project_cleanup(root.path(), policy(2), ProjectRetentionLimits::default())
+                .unwrap();
+        assert_eq!(
+            completed.graph_object_sweep.disposition,
+            ProjectGraphObjectSweepDisposition::Completed
+        );
+        assert_eq!(completed.graph_object_sweep.objects_removed, 1);
+        assert!(
+            !crate::graph_object_path(root.path(), &digest)
+                .unwrap()
+                .exists()
+        );
+    }
+
+    #[test]
+    fn busy_graph_object_gc_guard_has_distinct_entry_neutral_report() {
+        let root = tempfile::tempdir().unwrap();
+        open_or_initialize_project(root.path()).unwrap();
+        let guard = crate::graph_object_store::begin_graph_object_gc(root.path()).unwrap();
+        let report =
+            execute_project_cleanup(root.path(), policy(2), ProjectRetentionLimits::default())
+                .unwrap();
+        assert_eq!(
+            report.graph_object_sweep.disposition,
+            ProjectGraphObjectSweepDisposition::DeferredGcGuardBusy
+        );
+        assert_eq!(report.skipped_live, 0);
+        assert_eq!(
+            report.candidates
+                + report.skipped_live
+                + report.quarantined
+                + report.unknown
+                + report
+                    .entries
+                    .iter()
+                    .filter(|entry| { entry.disposition == ProjectCleanupDisposition::Reachable })
+                    .count() as u64,
+            report.entries.len() as u64
+        );
+        drop(guard);
+    }
+
+    #[test]
+    fn bounded_generation_cleanup_defers_graph_object_sweep() {
+        let root = tempfile::tempdir().unwrap();
+        open_or_initialize_project(root.path()).unwrap();
+        for _ in 0..3 {
+            publish_one(root.path());
+        }
+        let (digest, _) = crate::install_graph_object_bytes(root.path(), b"bounded").unwrap();
+        let report = execute_project_cleanup(
+            root.path(),
+            policy(0),
+            limits(
+                DEFAULT_RETENTION_MAX_ENTRIES,
+                DEFAULT_RETENTION_MAX_BYTES,
+                DEFAULT_RETENTION_MAX_WORK_UNITS,
+                1,
+            ),
+        )
+        .unwrap();
+        assert!(report.bounded);
+        assert_eq!(
+            report.graph_object_sweep.disposition,
+            ProjectGraphObjectSweepDisposition::DeferredBoundedCleanup
+        );
+        assert!(
+            crate::graph_object_path(root.path(), &digest)
+                .unwrap()
+                .exists()
+        );
+    }
+
+    #[test]
+    fn completed_graph_object_sweep_reports_physical_evidence() {
+        let root = tempfile::tempdir().unwrap();
+        open_or_initialize_project(root.path()).unwrap();
+        let payload = b"unreachable-object";
+        let (digest, _) = crate::install_graph_object_bytes(root.path(), payload).unwrap();
+        let report =
+            execute_project_cleanup(root.path(), policy(2), ProjectRetentionLimits::default())
+                .unwrap();
+        assert_eq!(
+            report.graph_object_sweep.disposition,
+            ProjectGraphObjectSweepDisposition::Completed
+        );
+        assert_eq!(report.graph_object_sweep.objects_marked, 0);
+        assert_eq!(report.graph_object_sweep.objects_removed, 1);
+        assert_eq!(
+            report.graph_object_sweep.bytes_removed,
+            payload.len() as u64
+        );
         assert!(
             !crate::graph_object_path(root.path(), &digest)
                 .unwrap()

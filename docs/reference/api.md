@@ -3775,6 +3775,16 @@ Busy writers, resource limits, and conflicts map to the same typed project
 error codes across surfaces. Node reports 64-bit counts and sizes as `bigint`
 so values above `Number.MAX_SAFE_INTEGER` stay exact.
 
+Cleanup reports keep generation-entry accounting separate from project
+graph-object collection. `skipped_live` counts only classified generation
+entries with a live lease. The nested `graph_object_sweep` report has one
+terminal `disposition`: `not_run_dry_run`, `deferred_bounded_cleanup`,
+`deferred_gc_guard_busy`, `deferred_live_publication`,
+`deferred_active_attempt`, or `completed`. Its `objects_marked`,
+`objects_removed`, and `bytes_removed` counters are physical evidence from a
+completed sweep and are zero when no sweep ran. A completed sweep may
+legitimately report all-zero counters.
+
 ```text
 gf --project PATH --json recovery
 gf --project PATH --json transaction commit --operation-uuid UUID --cypher 'CREATE (:Person {name: "A"})'

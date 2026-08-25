@@ -74,6 +74,13 @@ def check_maintenance_preview_execute_reconcile(project: Path) -> None:
     assert "selected_generation_uuid" in recovery
     preview = forge.preview_project_cleanup(retained_ancestors=2)
     execute = forge.execute_project_cleanup(retained_ancestors=2)
+    assert preview["graph_object_sweep"] == {
+        "disposition": "not_run_dry_run",
+        "objects_marked": 0,
+        "objects_removed": 0,
+        "bytes_removed": 0,
+    }
+    assert execute["graph_object_sweep"]["disposition"] == "completed"
     assert preview["candidates"] == execute["candidates"]
     assert preview["reachable_count"] == execute["reachable_count"]
     assert [entry["generation_uuid"] for entry in preview["entries"]] == [
@@ -114,6 +121,24 @@ def check_cli_parity(project: Path) -> None:
     assert code == 0, stdout
     recovery = json.loads(stdout.decode())
     assert "selected_generation_uuid" in recovery
+    code, stdout, _stderr = _cli_execute(
+        [
+            "gf",
+            "--project",
+            str(project),
+            "--json",
+            "maintenance",
+            "cleanup-preview",
+        ]
+    )
+    assert code == 0, stdout
+    cleanup = json.loads(stdout.decode())
+    assert cleanup["graph_object_sweep"] == {
+        "disposition": "not_run_dry_run",
+        "objects_marked": 0,
+        "objects_removed": 0,
+        "bytes_removed": 0,
+    }
 
 
 def check_certification_observation_parity(project: Path) -> None:

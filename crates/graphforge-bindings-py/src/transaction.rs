@@ -338,6 +338,15 @@ fn cleanup_report_dict<'py>(
     dict.set_item("entries_scanned", report.entries_scanned)?;
     dict.set_item("work_units", report.work_units)?;
     dict.set_item("bounded", report.bounded)?;
+    let graph_object_sweep = PyDict::new(py);
+    graph_object_sweep.set_item(
+        "disposition",
+        report.graph_object_sweep.disposition.as_str(),
+    )?;
+    graph_object_sweep.set_item("objects_marked", report.graph_object_sweep.objects_marked)?;
+    graph_object_sweep.set_item("objects_removed", report.graph_object_sweep.objects_removed)?;
+    graph_object_sweep.set_item("bytes_removed", report.graph_object_sweep.bytes_removed)?;
+    dict.set_item("graph_object_sweep", graph_object_sweep)?;
     dict.set_item("elapsed_ms", report.elapsed_ms)?;
     let entries = PyList::empty(py);
     for entry in &report.entries {

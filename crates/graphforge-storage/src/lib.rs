@@ -162,10 +162,10 @@ pub mod project_retention;
 pub use project_retention::{
     DEFAULT_RETENTION_CLEANUP_BATCH, DEFAULT_RETENTION_MAX_BYTES, DEFAULT_RETENTION_MAX_ENTRIES,
     DEFAULT_RETENTION_MAX_WORK_UNITS, ProjectCleanupDisposition, ProjectCleanupEntry,
-    ProjectCleanupLocation, ProjectCleanupReport, ProjectReachabilityReport,
-    ProjectRetentionLimits, ProjectRetentionPolicy, execute_project_cleanup,
-    execute_project_cleanup_with_mode, inspect_project_reachability,
-    inspect_project_reachability_with_mode, preview_project_cleanup,
+    ProjectCleanupLocation, ProjectCleanupReport, ProjectGraphObjectSweepDisposition,
+    ProjectGraphObjectSweepReport, ProjectReachabilityReport, ProjectRetentionLimits,
+    ProjectRetentionPolicy, execute_project_cleanup, execute_project_cleanup_with_mode,
+    inspect_project_reachability, inspect_project_reachability_with_mode, preview_project_cleanup,
     preview_project_cleanup_with_mode,
 };
 
