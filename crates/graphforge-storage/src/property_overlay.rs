@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use arrow::array::{Array, BooleanArray, RecordBatch};
+use arrow::array::{Array, BooleanArray, FixedSizeBinaryArray, RecordBatch};
 use bytes::Bytes;
 use graphforge_core::GfError;
 use graphforge_ir::IrLiteral;
@@ -838,50 +838,61 @@ pub fn read_authenticated_property_snapshots_for(
         if unresolved.is_empty() {
             break;
         }
-        let mut options = fs::OpenOptions::new();
-        options.read(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
-        }
-        let file = options.open(&fragment.path).map_err(io_error)?;
-        let metadata = file.metadata().map_err(io_error)?;
-        if !metadata.file_type().is_file() {
-            return Err(corrupt("property fragment handle is not a regular file"));
-        }
         let counts = Arc::new(ReadCounts::default());
-        let source = CountingChunkReader {
-            file,
-            length: metadata.len(),
-            counts: Arc::clone(&counts),
-        };
-        let mut builder =
-            ParquetRecordBatchReaderBuilder::try_new(source).map_err(parquet_error)?;
+        let builder = open_counted_property_builder(&fragment.path, Arc::clone(&counts))?;
         validate_fragment_schema(builder.schema().as_ref(), fragment.id, kind, route)?;
-        // Canonical overlay schemas require the non-nested UUID as leaf zero;
-        // never substitute an Arrow top-level index for a Parquet leaf index.
-        let uuid_index = 0;
         metrics.row_groups_considered = metrics
             .row_groups_considered
             .saturating_add(u64::try_from(builder.metadata().num_row_groups()).unwrap_or(u64::MAX));
         let mut row_groups = Vec::new();
-        for (index, group) in builder.metadata().row_groups().iter().enumerate() {
-            let statistics = group
-                .column(uuid_index)
-                .statistics()
-                .ok_or_else(|| corrupt("property UUID row group lacks statistics"))?;
-            let min: [u8; 16] = statistics
-                .min_bytes_opt()
-                .ok_or_else(|| corrupt("property UUID statistics lack minimum"))?
-                .try_into()
-                .map_err(|_| corrupt("property UUID statistics have wrong width"))?;
-            let max: [u8; 16] = statistics
-                .max_bytes_opt()
-                .ok_or_else(|| corrupt("property UUID statistics lack maximum"))?
-                .try_into()
-                .map_err(|_| corrupt("property UUID statistics have wrong width"))?;
-            if unresolved.range(min..=max).next().is_some() {
+        let mut prior_uuid = None;
+        for index in 0..builder.metadata().num_row_groups() {
+            let validation = open_counted_property_builder(&fragment.path, Arc::clone(&counts))?
+                .with_row_groups(vec![index])
+                .with_batch_size(4096)
+                .build()
+                .map_err(parquet_error)?;
+            let mut selected = false;
+            for batch in validation {
+                let batch = batch.map_err(|error| GfError::Storage(error.to_string()))?;
+                let uuids = batch
+                    .column_by_name(kind.uuid_field())
+                    .and_then(|column| column.as_any().downcast_ref::<FixedSizeBinaryArray>())
+                    .ok_or_else(|| corrupt("property UUID column has wrong physical type"))?;
+                let tombstones = batch
+                    .column_by_name(PROPERTY_TOMBSTONE_FIELD)
+                    .and_then(|column| column.as_any().downcast_ref::<BooleanArray>())
+                    .ok_or_else(|| corrupt("property tombstone column is not boolean"))?;
+                if uuids.null_count() != 0 || tombstones.null_count() != 0 {
+                    return Err(corrupt("property identity columns contain null slots"));
+                }
+                for row in 0..batch.num_rows() {
+                    let uuid: [u8; 16] = uuids
+                        .value(row)
+                        .try_into()
+                        .map_err(|_| corrupt("property UUID value has wrong width"))?;
+                    if prior_uuid.is_some_and(|prior| prior >= uuid) {
+                        return Err(corrupt(
+                            "property fragment UUIDs are not strictly sorted and unique",
+                        ));
+                    }
+                    prior_uuid = Some(uuid);
+                    selected |= unresolved.contains(&uuid);
+                    if tombstones.value(row)
+                        && batch
+                            .columns()
+                            .iter()
+                            .skip(2)
+                            .any(|column| !column.is_null(row))
+                    {
+                        return Err(corrupt("property tombstone carries values"));
+                    }
+                }
+                metrics.physical_rows = metrics
+                    .physical_rows
+                    .saturating_add(u64::try_from(batch.num_rows()).unwrap_or(u64::MAX));
+            }
+            if selected {
                 row_groups.push(index);
             }
         }
@@ -889,8 +900,8 @@ pub fn read_authenticated_property_snapshots_for(
             metrics.row_groups_selected = metrics
                 .row_groups_selected
                 .saturating_add(u64::try_from(row_groups.len()).unwrap_or(u64::MAX));
-            builder = builder.with_row_groups(row_groups);
-            let reader = builder
+            let reader = open_counted_property_builder(&fragment.path, Arc::clone(&counts))?
+                .with_row_groups(row_groups)
                 .with_batch_size(4096)
                 .build()
                 .map_err(parquet_error)?;
@@ -983,6 +994,30 @@ fn open_fragment_reader(
         .build()
         .map_err(parquet_error)?;
     Ok(reader)
+}
+
+fn open_counted_property_builder(
+    path: &Path,
+    counts: Arc<ReadCounts>,
+) -> Result<ParquetRecordBatchReaderBuilder<CountingChunkReader>, GfError> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options.open(path).map_err(io_error)?;
+    let metadata = file.metadata().map_err(io_error)?;
+    if !metadata.file_type().is_file() {
+        return Err(corrupt("property fragment handle is not a regular file"));
+    }
+    ParquetRecordBatchReaderBuilder::try_new(CountingChunkReader {
+        file,
+        length: metadata.len(),
+        counts,
+    })
+    .map_err(parquet_error)
 }
 
 fn validate_fragment_schema(
@@ -1431,7 +1466,7 @@ mod tests {
     use arrow::array::{ArrayRef, BooleanArray, FixedSizeBinaryArray, Int64Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
     use parquet::arrow::ArrowWriter;
-    use std::collections::HashMap;
+    use std::collections::{BTreeSet, HashMap};
     use tempfile::TempDir;
 
     #[test]
@@ -1741,5 +1776,74 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn targeted_reader_validates_unselected_rows_before_value_pruning() {
+        for (uuids, tombstones, names, expected) in [
+            (
+                vec![vec![2; 16], vec![1; 16]],
+                vec![false, false],
+                vec![Some("target"), Some("out-of-order")],
+                "strictly sorted",
+            ),
+            (
+                vec![vec![1; 16], vec![2; 16]],
+                vec![false, true],
+                vec![Some("target"), Some("forbidden")],
+                "tombstone carries values",
+            ),
+        ] {
+            let dir = TempDir::new().unwrap();
+            let route_dir = dir.path().join("properties/Person");
+            fs::create_dir_all(&route_dir).unwrap();
+            let id = PropertyFragmentId {
+                generation: 1,
+                ordinal: 0,
+            };
+            let schema = Arc::new(Schema::new_with_metadata(
+                vec![
+                    Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+                    Field::new(PROPERTY_TOMBSTONE_FIELD, DataType::Boolean, false),
+                    Field::new("name", DataType::Utf8, true),
+                ],
+                HashMap::from([
+                    (
+                        PROPERTY_OVERLAY_FORMAT_KEY.into(),
+                        PROPERTY_OVERLAY_FORMAT.into(),
+                    ),
+                    (PROPERTY_ROUTE_KEY.into(), "Person".into()),
+                    (PROPERTY_KIND_KEY.into(), "node".into()),
+                    (PROPERTY_GENERATION_KEY.into(), "1".into()),
+                    (PROPERTY_ORDINAL_KEY.into(), "0".into()),
+                ]),
+            ));
+            let batch = RecordBatch::try_new(
+                Arc::clone(&schema),
+                vec![
+                    Arc::new(FixedSizeBinaryArray::try_from_iter(uuids.into_iter()).unwrap()),
+                    Arc::new(BooleanArray::from(tombstones)),
+                    Arc::new(StringArray::from(names)),
+                ],
+            )
+            .unwrap();
+            let mut writer = ArrowWriter::try_new(
+                File::create(route_dir.join(id.file_name())).unwrap(),
+                schema,
+                None,
+            )
+            .unwrap();
+            writer.write(&batch).unwrap();
+            writer.close().unwrap();
+
+            let error = read_authenticated_property_snapshots_for(
+                dir.path(),
+                PropertyRouteKind::Node,
+                "Person",
+                &BTreeSet::from([[1; 16]]),
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+        }
     }
 }
