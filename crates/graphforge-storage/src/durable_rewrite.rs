@@ -665,8 +665,9 @@ pub(crate) fn recovery_required(root: &Path) -> Result<bool, GfError> {
 }
 
 #[cfg(test)]
-static FAIL_AFTER_DURABLE_INTENT: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+thread_local! {
+    static FAIL_AFTER_DURABLE_INTENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
 #[allow(clippy::too_many_lines)]
 pub(crate) fn commit(
@@ -816,7 +817,7 @@ pub(crate) fn commit(
     intent.checksum = checksum(&intent)?;
     publish_journal(&guard.directory, &intent)?;
     #[cfg(test)]
-    if FAIL_AFTER_DURABLE_INTENT.swap(false, std::sync::atomic::Ordering::SeqCst) {
+    if FAIL_AFTER_DURABLE_INTENT.replace(false) {
         return Err(storage("injected ordinary error after durable intent"));
     }
     crate::project_failpoint::hit(
@@ -845,8 +846,6 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-
-    static DURABLE_INTENT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn entry(destination: &str, class: EntryClass) -> Entry {
         Entry {
@@ -888,7 +887,6 @@ mod tests {
     }
 
     fn leave_durable_intent(root: &Path) -> Intent {
-        let _test_guard = DURABLE_INTENT_TEST_LOCK.lock().unwrap();
         let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, false)]));
         let batch = RecordBatch::try_new(
             Arc::clone(&schema),
@@ -899,13 +897,27 @@ mod tests {
         rewrite
             .stage(&root.join("topology/nodes.parquet"), schema, &batch)
             .unwrap();
-        FAIL_AFTER_DURABLE_INTENT.store(true, std::sync::atomic::Ordering::SeqCst);
+        FAIL_AFTER_DURABLE_INTENT.set(true);
         assert!(commit(rewrite, root, true, true, None).is_err());
         let stable = StableDirectory::open(root).unwrap();
         let (bytes, _) = read_journal(&stable).unwrap().unwrap();
         let value: Intent = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(value.state, IntentState::Durable);
         value
+    }
+
+    fn single_value_rewrite(root: &Path, value: i64) -> RewriteBatch {
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, false)]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![Arc::new(Int64Array::from(vec![value]))],
+        )
+        .unwrap();
+        let mut rewrite = RewriteBatch::new();
+        rewrite
+            .stage(&root.join("topology/nodes.parquet"), schema, &batch)
+            .unwrap();
+        rewrite
     }
 
     fn republish_intent(root: &Path, intent: &mut Intent) {
@@ -1077,6 +1089,33 @@ mod tests {
         );
         assert!(destination.is_file());
         assert!(!root.path().join(JOURNAL).exists());
+    }
+
+    #[test]
+    fn durable_intent_error_injection_is_thread_scoped_and_one_shot() {
+        let armed_root = TempDir::new().unwrap();
+        let unrelated_root = TempDir::new().unwrap();
+        let armed_rewrite = single_value_rewrite(armed_root.path(), 7);
+        let unrelated_rewrite = single_value_rewrite(unrelated_root.path(), 11);
+
+        FAIL_AFTER_DURABLE_INTENT.set(true);
+        let unrelated_path = unrelated_root.path().to_path_buf();
+        std::thread::spawn(move || {
+            commit(unrelated_rewrite, &unrelated_path, true, true, None).unwrap();
+        })
+        .join()
+        .unwrap();
+
+        let error = commit(armed_rewrite, armed_root.path(), true, true, None).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("injected ordinary error after durable intent")
+        );
+        recover(armed_root.path()).unwrap();
+
+        let next = single_value_rewrite(armed_root.path(), 13);
+        commit(next, armed_root.path(), true, true, None).unwrap();
     }
 
     #[test]
