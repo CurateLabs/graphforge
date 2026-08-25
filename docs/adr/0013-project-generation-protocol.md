@@ -367,6 +367,50 @@ does not rewrite participant or manifest bytes.
 
 ### Retention and garbage collection
 
+Graph inventory participants may use the compact version-2 authenticated root.
+Its immutable payloads and canonical Patricia/radix manifest nodes live in the project
+content-addressed object store, while the generation stores only the root
+digest and logical totals. Publication resolves the entire bounded manifest
+and verifies all payload digests before the atomic `CURRENT` transition.
+Interrupted installation therefore leaves the prior generation authoritative;
+an acknowledged transition survives reopen without copying unchanged objects.
+
+Object collection runs only after generation reachability is established. It
+marks roots from every remaining generation, including checkpoint-retained and
+live-lease-retained generations, and defers while a publication attempt or
+object-installation lease is active. Marking and validation finish before any
+object deletion. Malformed, cyclic, oversized, duplicate-reference, traversal,
+and wrong-digest manifests fail closed and do not grant deletion authority.
+
+Manifest node version 2 compresses every maximal shared lowercase-hex SHA-256
+path prefix. A branch consumes its compressed prefix and one child nibble and
+has at least two children; unary branches are noncanonical. A leaf consumes the
+complete remaining digest and retains the canonically path-ordered collision
+bucket. The empty inventory alone uses one empty root branch. Consequently a
+nonempty inventory with `F` distinct path digests has at most `2F - 1` manifest
+nodes (the empty inventory has one), and resolution work is linear in the live
+inventory. Old node-v1, mixed-version, malformed-prefix, wrong-route, cyclic,
+duplicate-reference, and noncanonical trees fail closed. Migration from an
+expanded graph-files-v1 inventory writes node-v2 objects only.
+The participant descriptor is paired exactly with its payload: record version
+1 admits only an expanded v1 inventory and record version 2 admits only this
+Patricia root. Checkpoint revert retains the same representation, uses the CAS
+publication lease for v2, and never synthesizes a generation graph tree. Revert
+acquires the CAS lifecycle guard before the project writer and checkpoint locks,
+matching retention's global `CAS -> writer -> checkpoint` order.
+
+CAS publication, reads, materialization, and collection retain directory and
+file capabilities and address children relative to those capabilities. The
+named project, object root, digest buckets, lifecycle lock, and complete object
+closure are revalidated immediately before `CURRENT`, which is replaced
+relative to the retained project directory. This coordinates concurrent
+GraphForge processes and fails closed when namespace substitution is detected.
+The operational boundary does not claim atomic protection against an actively
+malicious same-identity process racing the final Unix namespace syscall;
+deployments requiring that adversarial isolation must use OS ownership or
+sandbox boundaries. Identity-conditional Unix cleanup likewise runs only under
+GraphForge's cooperative exclusive lifecycle guard.
+
 The current generation is always reachable. The default retention set also
 contains its two most recent valid ancestors, determined only from verified
 `parent_generation_uuid` links. A configured larger finite retention count may

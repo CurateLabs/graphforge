@@ -148,22 +148,87 @@ impl ResolvedProjectGeneration {
     /// Returns structured validation/corruption errors for unsupported
     /// contracts or inventory/tree mismatch.
     pub fn graph_files_inventory(&self) -> Result<Option<crate::GraphFilesInventory>, GfError> {
+        let Some(participant) = self.declared_graph_files_participant()? else {
+            return Ok(None);
+        };
+        match participant {
+            crate::GraphFilesParticipant::V1(inventory) => {
+                crate::verify_graph_tree(&self.graph_tree_root(), &inventory)?;
+                Ok(Some(inventory))
+            }
+            crate::GraphFilesParticipant::V2(root) => {
+                const MAX_SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
+                let (files, _) = crate::resolve_graph_manifest(
+                    &root,
+                    crate::GraphManifestLimits::default(),
+                    |digest| {
+                        crate::read_graph_object_by_digest(
+                            self.container_root(),
+                            digest,
+                            MAX_SEGMENT_BYTES,
+                        )
+                    },
+                )?;
+                for entry in &files {
+                    let path =
+                        crate::graph_object_path(self.container_root(), &entry.content_sha256)?;
+                    let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+                        GfError::Storage(format!(
+                            "inspect graph payload object at {}: {error}",
+                            path.display()
+                        ))
+                    })?;
+                    if !metadata.is_file() || metadata.len() != entry.byte_length {
+                        return Err(GfError::Validation(
+                            "graph payload object length does not match manifest".into(),
+                        ));
+                    }
+                    crate::verify_graph_object(
+                        self.container_root(),
+                        &entry.content_sha256,
+                        entry.byte_length,
+                    )?;
+                }
+                crate::graph_files::inventory_from_entries(files).map(Some)
+            }
+        }
+    }
+
+    /// Decode the manifest-authenticated graph inventory without rereading
+    /// graph payload bytes. Publication uses this only to reuse digests for
+    /// immutable files proven to retain the same filesystem identity.
+    pub fn declared_graph_files_inventory(
+        &self,
+    ) -> Result<Option<crate::GraphFilesInventory>, GfError> {
+        match self.declared_graph_files_participant()? {
+            Some(crate::GraphFilesParticipant::V1(inventory)) => Ok(Some(inventory)),
+            Some(crate::GraphFilesParticipant::V2(_)) | None => Ok(None),
+        }
+    }
+
+    /// Decode the explicitly versioned graph-files participant without
+    /// resolving payload objects.
+    pub(crate) fn declared_graph_files_participant(
+        &self,
+    ) -> Result<Option<crate::GraphFilesParticipant>, GfError> {
         let Some(snapshot) =
             self.participant_snapshot(crate::GRAPH_CAPABILITY_ID, crate::GRAPH_FILES_FAMILY)?
         else {
             return Ok(None);
         };
         if snapshot.capability_version != crate::GRAPH_CAPABILITY_VERSION
-            || snapshot.record_version != crate::GRAPH_FILES_RECORD_VERSION
+            || !matches!(
+                snapshot.record_version,
+                crate::GRAPH_FILES_RECORD_VERSION | crate::GRAPH_FILES_V2_RECORD_VERSION
+            )
             || snapshot.encoding != "json"
         {
             return Err(GfError::Validation(
                 "unsupported graph files participant contract".into(),
             ));
         }
-        let inventory = crate::decode_inventory(&snapshot.bytes)?;
-        crate::verify_graph_tree(&self.graph_tree_root(), &inventory)?;
-        Ok(Some(inventory))
+        crate::decode_versioned_graph_files_participant(snapshot.record_version, &snapshot.bytes)
+            .map(Some)
     }
 
     /// SHA-256 over the exact selected `manifest.json` bytes.

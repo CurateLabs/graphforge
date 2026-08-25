@@ -97,6 +97,15 @@ pub struct ProjectCleanupEntryOutput {
     pub bytes: BigInt,
 }
 
+/// Graph-object sweep disposition and physical evidence.
+#[napi(object)]
+pub struct ProjectGraphObjectSweepReportOutput {
+    pub disposition: String,
+    pub objects_marked: BigInt,
+    pub objects_removed: BigInt,
+    pub bytes_removed: BigInt,
+}
+
 /// Retention/GC report with lossless 64-bit counters.
 #[napi(object)]
 pub struct ProjectCleanupReportOutput {
@@ -114,6 +123,7 @@ pub struct ProjectCleanupReportOutput {
     pub entries_scanned: BigInt,
     pub work_units: BigInt,
     pub bounded: bool,
+    pub graph_object_sweep: ProjectGraphObjectSweepReportOutput,
     pub elapsed_ms: BigInt,
     pub entries: Vec<ProjectCleanupEntryOutput>,
 }
@@ -281,6 +291,12 @@ fn cleanup_output(report: &ProjectCleanupReport) -> ProjectCleanupReportOutput {
         entries_scanned: u64_bigint(report.entries_scanned),
         work_units: u64_bigint(report.work_units),
         bounded: report.bounded,
+        graph_object_sweep: ProjectGraphObjectSweepReportOutput {
+            disposition: report.graph_object_sweep.disposition.as_str().into(),
+            objects_marked: u64_bigint(report.graph_object_sweep.objects_marked),
+            objects_removed: u64_bigint(report.graph_object_sweep.objects_removed),
+            bytes_removed: u64_bigint(report.graph_object_sweep.bytes_removed),
+        },
         elapsed_ms: u64_bigint(report.elapsed_ms),
         entries: report
             .entries

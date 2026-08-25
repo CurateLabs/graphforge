@@ -657,7 +657,7 @@ fn open_lifecycle_lock_file(parent: &LifecycleDirectory, name: &str) -> std::io:
         openat(
             &parent.handle,
             name,
-            OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            OFlags::RDWR | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
             Mode::empty(),
         )
         .map(File::from)
@@ -668,7 +668,12 @@ fn open_lifecycle_lock_file(parent: &LifecycleDirectory, name: &str) -> std::io:
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => match openat(
             &parent.handle,
             name,
-            OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            OFlags::RDWR
+                | OFlags::CREATE
+                | OFlags::EXCL
+                | OFlags::NOFOLLOW
+                | OFlags::NONBLOCK
+                | OFlags::CLOEXEC,
             Mode::RUSR | Mode::WUSR,
         ) {
             Ok(file) => Ok(File::from(file)),
@@ -1465,7 +1470,7 @@ fn open_regular_non_link(probe: &ProbeDirectory, name: &str) -> Result<File, GfE
 fn open_probe_file(probe: &ProbeDirectory, name: &str, create: bool) -> std::io::Result<File> {
     use rustix::fs::{Mode, OFlags, openat};
 
-    let mut flags = OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let mut flags = OFlags::RDWR | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
     if create {
         flags |= OFlags::CREATE | OFlags::EXCL;
     }

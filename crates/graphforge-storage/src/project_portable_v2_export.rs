@@ -1801,7 +1801,10 @@ pub(crate) fn open_source_no_follow(path: &Path) -> Result<File, ExportError> {
     let descriptor = rustix::fs::openat(
         &directory,
         *last,
-        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::NONBLOCK
+            | rustix::fs::OFlags::CLOEXEC,
         rustix::fs::Mode::empty(),
     )
     .map_err(storage)?;

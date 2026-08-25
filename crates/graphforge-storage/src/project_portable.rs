@@ -752,7 +752,7 @@ pub(crate) fn open_regular_nofollow(path: &Path) -> std::io::Result<std::fs::Fil
 
     std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)
 }
 

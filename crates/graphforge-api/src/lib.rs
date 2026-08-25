@@ -289,9 +289,9 @@ pub use graphforge_storage::{
     GraphDeltaCompactionLimits, GraphDeltaCompactionPolicy, GraphDeltaCompactionReport,
     GraphDeltaCompactionRequest, GraphDeltaCompactionStatus, GraphDeltaJournalLimits,
     ProjectCleanupDisposition, ProjectCleanupEntry, ProjectCleanupLocation, ProjectCleanupReport,
-    ProjectOpenRecoveryEvidence, ProjectOpenRecoveryKind, ProjectReachabilityReport,
-    ProjectRecoveryDeferral, ProjectRecoveryGenerationClass, ProjectRetentionLimits,
-    ProjectRetentionPolicy,
+    ProjectGraphObjectSweepDisposition, ProjectGraphObjectSweepReport, ProjectOpenRecoveryEvidence,
+    ProjectOpenRecoveryKind, ProjectReachabilityReport, ProjectRecoveryDeferral,
+    ProjectRecoveryGenerationClass, ProjectRetentionLimits, ProjectRetentionPolicy,
 };
 pub use gsi_profiler::{GraphScaleIndexProfile, GsiDirectedness, grade_gsi};
 pub use hypotheses::{
@@ -3761,13 +3761,12 @@ fn hydrate_graph_workspace(
     }
 
     if let Some(files) = files {
-        if files.capability_version != graphforge_storage::GRAPH_CAPABILITY_VERSION
-            || files.record_version != graphforge_storage::GRAPH_FILES_RECORD_VERSION
-            || files.encoding != "json"
-        {
-            return Err(GfError::Validation(
-                "unsupported graph files participant contract".into(),
-            ));
+        validate_graph_files_snapshot(&files)?;
+        if files.record_version == graphforge_storage::GRAPH_FILES_V2_RECORD_VERSION {
+            let inventory = generation
+                .graph_files_inventory()?
+                .ok_or_else(|| GfError::Validation("compact graph root disappeared".into()))?;
+            return hydrate_compact_graph_workspace(generation, &inventory);
         }
         let inventory = graphforge_storage::decode_inventory(&files.bytes)?;
         let tree = generation.graph_tree_root();
@@ -3853,6 +3852,100 @@ fn hydrate_graph_workspace(
     Ok((workspace.path().to_path_buf(), workspace, evidence))
 }
 
+fn validate_graph_files_snapshot(
+    files: &graphforge_storage::ProjectParticipantSnapshot,
+) -> Result<(), GfError> {
+    if files.capability_version != graphforge_storage::GRAPH_CAPABILITY_VERSION
+        || !matches!(
+            files.record_version,
+            graphforge_storage::GRAPH_FILES_RECORD_VERSION
+                | graphforge_storage::GRAPH_FILES_V2_RECORD_VERSION
+        )
+        || files.encoding != "json"
+    {
+        return Err(GfError::Validation(
+            "unsupported graph files participant contract".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn hydrate_compact_graph_workspace(
+    generation: &ResolvedProjectGeneration,
+    inventory: &graphforge_storage::GraphFilesInventory,
+) -> Result<
+    (
+        PathBuf,
+        Arc<tempfile::TempDir>,
+        graphforge_storage::GraphFilesOpenEvidence,
+    ),
+    GfError,
+> {
+    let workspace = Arc::new(
+        tempfile::Builder::new()
+            .prefix("graphforge-graph-workspace-")
+            .tempdir()
+            .map_err(|error| {
+                GfError::Storage(format!("failed to create graph workspace: {error}"))
+            })?,
+    );
+    let evidence = materialize_compact_graph_target(generation, inventory, workspace.path())?;
+    Ok((workspace.path().to_path_buf(), workspace, evidence))
+}
+
+fn materialize_compact_graph_target(
+    generation: &ResolvedProjectGeneration,
+    inventory: &graphforge_storage::GraphFilesInventory,
+    target: &std::path::Path,
+) -> Result<graphforge_storage::GraphFilesOpenEvidence, GfError> {
+    let has_authoritative_deltas = !graphforge_storage::list_delta_runs(
+        inventory,
+        graphforge_storage::GraphDeltaJournalLimits::default(),
+    )?
+    .is_empty();
+    if !has_authoritative_deltas {
+        return graphforge_storage::materialize_graph_objects(
+            generation.container_root(),
+            inventory,
+            target,
+        );
+    }
+    let source = tempfile::Builder::new()
+        .prefix("graphforge-graph-cas-source-")
+        .tempdir()
+        .map_err(|error| {
+            GfError::Storage(format!(
+                "failed to create graph CAS source workspace: {error}"
+            ))
+        })?;
+    let reused = graphforge_storage::materialize_graph_objects(
+        generation.container_root(),
+        inventory,
+        source.path(),
+    )?;
+    let (copied, _replay) = graphforge_storage::materialize_replayed_graph_tree(
+        source.path(),
+        inventory,
+        target,
+        graphforge_storage::GraphDeltaJournalLimits::default(),
+    )?;
+    let evidence = graphforge_storage::GraphFilesOpenEvidence {
+        strategy: graphforge_storage::GraphFilesOpenStrategy::PrivateMaterialize,
+        files_validated: reused
+            .files_validated
+            .saturating_add(copied.files_validated),
+        bytes_validated: reused
+            .bytes_validated
+            .saturating_add(copied.bytes_validated),
+        files_copied: copied.files_copied,
+        bytes_copied: copied.bytes_copied,
+        files_opened_in_place: 0,
+        files_reused: reused.files_reused,
+        bytes_reused: reused.bytes_reused,
+    };
+    Ok(evidence)
+}
+
 pub(crate) fn rematerialize_graph_workspace(
     generation: &ResolvedProjectGeneration,
     target: &std::path::Path,
@@ -3883,12 +3976,24 @@ pub(crate) fn rematerialize_graph_workspace(
             }
         }
     }
-    if let Some(inventory) = generation.graph_files_inventory()? {
-        graphforge_storage::materialize_graph_tree(
-            &generation.graph_tree_root(),
-            &inventory,
-            target,
-        )?;
+    if let Some(files) = generation.participant_snapshot(
+        graphforge_storage::GRAPH_CAPABILITY_ID,
+        graphforge_storage::GRAPH_FILES_FAMILY,
+    )? {
+        validate_graph_files_snapshot(&files)?;
+        if files.record_version == graphforge_storage::GRAPH_FILES_V2_RECORD_VERSION {
+            let inventory = generation
+                .graph_files_inventory()?
+                .ok_or_else(|| GfError::Validation("compact graph root disappeared".into()))?;
+            materialize_compact_graph_target(generation, &inventory, target)?;
+        } else {
+            let inventory = graphforge_storage::decode_inventory(&files.bytes)?;
+            graphforge_storage::materialize_graph_tree(
+                &generation.graph_tree_root(),
+                &inventory,
+                target,
+            )?;
+        }
         return Ok(());
     }
     if let Some(snapshot) = generation.participant_snapshot("graph", "snapshot")? {
@@ -4351,6 +4456,106 @@ mod tests {
     const ABSENT_TARGET_COOKIE: &str = "graphforge-absent-target-open-v1";
     const ABSENT_TARGET_DEADLINE: Duration = Duration::from_secs(10);
 
+    fn regular_files_beneath(root: &Path) -> Vec<PathBuf> {
+        let mut pending = vec![root.to_path_buf()];
+        let mut files = Vec::new();
+        while let Some(directory) = pending.pop() {
+            for entry in std::fs::read_dir(&directory).unwrap() {
+                let entry = entry.unwrap();
+                let kind = entry.file_type().unwrap();
+                if kind.is_dir() {
+                    pending.push(entry.path());
+                } else if kind.is_file() {
+                    files.push(entry.path().strip_prefix(root).unwrap().to_path_buf());
+                }
+            }
+        }
+        files.sort();
+        files
+    }
+
+    fn publish_compact_graph_workspace(project: &Path, workspace: &Path) {
+        use graphforge_core::canonical::{
+            CANONICAL_CONTRACT_VERSION, CanonicalDomain, fingerprint,
+        };
+        use graphforge_storage::{
+            ProjectCapability, ProjectGenerationRequest, ProjectParticipant,
+            ProjectParticipantEncoding, ProjectStageOutcome,
+        };
+
+        let lease = graphforge_storage::begin_graph_object_publication(project).unwrap();
+        let mut state = graphforge_storage::GraphManifestState::empty();
+        let paths = regular_files_beneath(workspace);
+        let (root, _) =
+            graphforge_storage::append_graph_files_v2(&lease, workspace, &mut state, &paths, &[])
+                .unwrap();
+        let participant = ProjectParticipant {
+            capability_id: graphforge_storage::GRAPH_CAPABILITY_ID.into(),
+            capability_version: graphforge_storage::GRAPH_CAPABILITY_VERSION,
+            record_family_id: graphforge_storage::GRAPH_FILES_FAMILY.into(),
+            record_version: graphforge_storage::GRAPH_FILES_V2_RECORD_VERSION,
+            encoding: ProjectParticipantEncoding::Json,
+            schema_fingerprint: fingerprint(
+                CanonicalDomain::Schema,
+                CANONICAL_CONTRACT_VERSION,
+                b"graphforge-graph-files-root/2|root_node_sha256|logical_file_count|logical_byte_length",
+            )
+            .unwrap(),
+            row_count: root.logical_file_count,
+            bytes: graphforge_storage::encode_graph_files_root_v2(&root).unwrap(),
+        };
+        let current = graphforge_storage::resolve_project_generation(project).unwrap();
+        let capabilities = current
+            .capabilities()
+            .into_iter()
+            .map(|capability| ProjectCapability {
+                capability_id: capability.capability_id,
+                capability_version: capability.capability_version,
+            })
+            .collect();
+        let mut participants = current
+            .participant_snapshots()
+            .unwrap()
+            .into_iter()
+            .filter(|snapshot| {
+                snapshot.capability_id != graphforge_storage::GRAPH_CAPABILITY_ID
+                    || snapshot.record_family_id != graphforge_storage::GRAPH_FILES_FAMILY
+            })
+            .map(|snapshot| ProjectParticipant {
+                capability_id: snapshot.capability_id,
+                capability_version: snapshot.capability_version,
+                record_family_id: snapshot.record_family_id,
+                record_version: snapshot.record_version,
+                encoding: match snapshot.encoding.as_str() {
+                    "parquet" => ProjectParticipantEncoding::Parquet,
+                    "arrow" => ProjectParticipantEncoding::Arrow,
+                    "json" => ProjectParticipantEncoding::Json,
+                    other => panic!("unsupported fixture participant encoding {other}"),
+                },
+                schema_fingerprint: snapshot.schema_fingerprint,
+                row_count: snapshot.row_count,
+                bytes: snapshot.bytes,
+            })
+            .collect::<Vec<_>>();
+        participants.push(participant);
+        let request = ProjectGenerationRequest {
+            transaction_uuid: uuid::Uuid::new_v4(),
+            generation_uuid: uuid::Uuid::new_v4(),
+            capabilities,
+            participants,
+        };
+        let ProjectStageOutcome::Staged(staged) =
+            graphforge_storage::stage_project_generation(project, &request).unwrap()
+        else {
+            panic!("compact graph publication unexpectedly replayed");
+        };
+        staged
+            .validate(|_| Ok(()), |_, _| Ok(()))
+            .unwrap()
+            .publish_with_graph_objects(&lease)
+            .unwrap();
+    }
+
     fn spawn_absent_target_child(parent: &Path, child_id: &str) -> Child {
         Command::new(std::env::current_exe().expect("absent-target current test executable"))
             .args(["--exact", ABSENT_TARGET_CHILD, "--nocapture"])
@@ -4457,6 +4662,114 @@ mod tests {
             error.to_string(),
             "validation error: procedure test.bad_width expects 1 fixture columns, found 0"
         );
+    }
+
+    #[test]
+    fn compact_graph_root_reopens_through_ordinary_api_and_rematerializes() {
+        let project = tempfile::tempdir().unwrap();
+        let graph = GraphForge::new(Some(project.path().to_str().unwrap())).unwrap();
+        graph
+            .execute("CREATE (:Person {name: 'Ada'})")
+            .expect("create compact-root fixture");
+        publish_compact_graph_workspace(project.path(), &graph.dir);
+        drop(graph);
+
+        let reopened = GraphForge::new(Some(project.path().to_str().unwrap())).unwrap();
+        let result = reopened
+            .execute("MATCH (n:Person) RETURN n.name AS name")
+            .expect("ordinary query over compact-root generation");
+        assert_eq!(result.stats.rows_produced, 1);
+        assert_eq!(reopened.graph_open_evidence().files_copied, 0);
+        assert!(reopened.graph_open_evidence().files_reused > 0);
+        assert!(!reopened.dir.join("files").exists());
+        assert!(reopened.dir.join("topology").is_dir());
+
+        let resolved = graphforge_storage::resolve_project_generation(project.path()).unwrap();
+        let (read_only_dir, read_only_guard, read_only_evidence) =
+            hydrate_graph_workspace(&resolved, true).unwrap();
+        assert!(read_only_dir.join("topology").is_dir());
+        assert!(read_only_evidence.files_reused > 0);
+        assert_eq!(read_only_evidence.files_opened_in_place, 0);
+
+        let rematerialized_owner = tempfile::tempdir().unwrap();
+        let rematerialized = rematerialized_owner.path().join("workspace");
+        std::fs::create_dir(&rematerialized).unwrap();
+        rematerialize_graph_workspace(&resolved, &rematerialized).unwrap();
+        let (expected, _) = graphforge_storage::capture_graph_files(&reopened.dir).unwrap();
+        let (actual, _) = graphforge_storage::capture_graph_files(&rematerialized).unwrap();
+        assert_eq!(actual, expected);
+
+        let inventory = resolved.graph_files_inventory().unwrap().unwrap();
+        let victim_entry = inventory
+            .files
+            .iter()
+            .find(|entry| entry.byte_length > 0)
+            .expect("compact fixture contains a nonempty graph object");
+        let victim =
+            graphforge_storage::graph_object_path(project.path(), &victim_entry.content_sha256)
+                .unwrap();
+        drop(read_only_guard);
+        drop(reopened);
+        let mut permissions = std::fs::metadata(&victim).unwrap().permissions();
+        permissions.set_readonly(false);
+        std::fs::set_permissions(&victim, permissions).unwrap();
+        std::fs::write(&victim, vec![0_u8; victim_entry.byte_length as usize]).unwrap();
+        assert!(GraphForge::new(Some(project.path().to_str().unwrap())).is_err());
+    }
+
+    #[test]
+    fn compact_graph_root_replays_authoritative_deltas_into_distinct_workspace() {
+        use graphforge_storage::{
+            GraphDeltaJournalLimits, GraphDeltaOp, GraphDeltaOpKind, GraphDeltaPayload,
+            GraphDeltaPublishRequest,
+        };
+
+        let project = tempfile::tempdir().unwrap();
+        let graph = GraphForge::new(Some(project.path().to_str().unwrap())).unwrap();
+        graph.execute("CREATE (:Person {name: 'Ada'})").unwrap();
+        drop(graph);
+        graphforge_storage::publish_graph_delta(
+            project.path(),
+            &GraphDeltaPublishRequest {
+                transaction_uuid: uuid::Uuid::new_v4(),
+                generation_uuid: uuid::Uuid::new_v4(),
+                run_uuid: uuid::Uuid::new_v4(),
+                operations: vec![GraphDeltaOp {
+                    operation_uuid: uuid::Uuid::new_v4(),
+                    kind: GraphDeltaOpKind::UpsertNode,
+                    payload: GraphDeltaPayload::UpsertNodeV2 {
+                        node_uuid: uuid::Uuid::new_v4().hyphenated().to_string(),
+                        node_id: 2,
+                        type_ids: vec![1],
+                        created_at_micros: 2,
+                        updated_at_micros: 2,
+                    },
+                }],
+                limits: GraphDeltaJournalLimits::default(),
+            },
+        )
+        .unwrap();
+        let delta_generation =
+            graphforge_storage::resolve_project_generation(project.path()).unwrap();
+        assert!(delta_generation.graph_tree_root().join("deltas").is_dir());
+        publish_compact_graph_workspace(project.path(), &delta_generation.graph_tree_root());
+        drop(delta_generation);
+
+        let reopened = GraphForge::new(Some(project.path().to_str().unwrap())).unwrap();
+        let result = reopened
+            .execute("MATCH (n) RETURN count(n) AS total")
+            .unwrap();
+        let total = result.batches[0]
+            .column_by_name("total")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0);
+        assert_eq!(total, 2);
+        assert!(!reopened.dir.join("deltas").exists());
+        assert!(reopened.graph_open_evidence().files_reused > 0);
+        assert!(reopened.graph_open_evidence().files_copied > 0);
     }
 
     #[test]

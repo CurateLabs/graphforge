@@ -31,6 +31,7 @@ const PARTICIPANTS_DIR: &str = "participants";
 const LEASE_FILE: &str = "lease.lock";
 const MANIFEST_FILE: &str = "manifest.json";
 const MAX_JOURNAL_BYTES: u64 = 1024 * 1024;
+const MAX_GRAPH_MANIFEST_SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Persisted participant encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -1021,7 +1022,10 @@ fn stage_optional_graph_tree(
         return Ok(());
     };
     if files_participant.capability_version != crate::GRAPH_CAPABILITY_VERSION
-        || files_participant.record_version != crate::GRAPH_FILES_RECORD_VERSION
+        || !matches!(
+            files_participant.record_version,
+            crate::GRAPH_FILES_RECORD_VERSION | crate::GRAPH_FILES_V2_RECORD_VERSION
+        )
         || files_participant.encoding != ProjectParticipantEncoding::Json.extension()
     {
         return Err(project_error(
@@ -1032,8 +1036,24 @@ fn stage_optional_graph_tree(
     let inventory_path = generation_root
         .join(PARTICIPANTS_DIR)
         .join(&files_participant.relative_path);
-    let inventory =
-        crate::decode_inventory(&std::fs::read(inventory_path).map_err(publication_io)?)?;
+    let participant = crate::decode_versioned_graph_files_participant(
+        files_participant.record_version,
+        &std::fs::read(inventory_path).map_err(publication_io)?,
+    )?;
+    let inventory = match participant {
+        crate::GraphFilesParticipant::V1(inventory) => inventory,
+        crate::GraphFilesParticipant::V2(root) => {
+            if graph_tree.is_some() {
+                return Err(project_error(
+                    ProjectErrorCode::PublicationFailed,
+                    "graph/files v2 root must reference project objects, not a generation graph tree",
+                ));
+            }
+            verify_compact_graph_root(parent.container_root(), &root)?;
+            sync_directory(generation_root)?;
+            return Ok(());
+        }
+    };
     let parent_tree = parent.graph_tree_root();
     let source = match graph_tree {
         Some(path) => path,
@@ -1053,7 +1073,7 @@ fn stage_optional_graph_tree(
     Ok(())
 }
 
-fn verify_optional_graph_tree(
+fn verify_optional_generation_graph_tree(
     generation_root: &Path,
     participants: &[StagedParticipant],
 ) -> Result<(), GfError> {
@@ -1067,8 +1087,81 @@ fn verify_optional_graph_tree(
         .join(PARTICIPANTS_DIR)
         .join(&files.relative_path);
     let bytes = std::fs::read(&path).map_err(publication_io)?;
-    let inventory = crate::decode_inventory(&bytes)?;
-    crate::verify_graph_tree(&crate::graph_tree_root(generation_root), &inventory)
+    match crate::decode_versioned_graph_files_participant(files.record_version, &bytes)? {
+        crate::GraphFilesParticipant::V1(inventory) => {
+            crate::verify_graph_tree(&crate::graph_tree_root(generation_root), &inventory)
+        }
+        // Compact payloads live outside this generation. Staging verifies the
+        // complete named root once, and publication repeats that verification
+        // while holding the CAS lease immediately before CURRENT. Intermediate
+        // generation validation must not re-read every immutable payload byte.
+        crate::GraphFilesParticipant::V2(_) => Ok(()),
+    }
+}
+
+fn verify_optional_graph_tree_with_lease(
+    generation_root: &Path,
+    participants: &[StagedParticipant],
+    lease: &crate::GraphObjectPublicationLease,
+) -> Result<(), GfError> {
+    let Some(files) = participants.iter().find(|participant| {
+        participant.capability_id == crate::GRAPH_CAPABILITY_ID
+            && participant.record_family_id == crate::GRAPH_FILES_FAMILY
+    }) else {
+        return Ok(());
+    };
+    let path = generation_root
+        .join(PARTICIPANTS_DIR)
+        .join(&files.relative_path);
+    let bytes = std::fs::read(&path).map_err(publication_io)?;
+    match crate::decode_versioned_graph_files_participant(files.record_version, &bytes)? {
+        crate::GraphFilesParticipant::V1(inventory) => {
+            crate::verify_graph_tree(&crate::graph_tree_root(generation_root), &inventory)
+        }
+        crate::GraphFilesParticipant::V2(root) => {
+            verify_compact_graph_root_with_lease(lease, &root)
+        }
+    }
+}
+
+fn verify_compact_graph_root(
+    container_root: &Path,
+    root: &crate::GraphFilesRootV2,
+) -> Result<(), GfError> {
+    let (files, _) =
+        crate::resolve_graph_manifest(root, crate::GraphManifestLimits::default(), |digest| {
+            crate::read_graph_object_by_digest(
+                container_root,
+                digest,
+                MAX_GRAPH_MANIFEST_SEGMENT_BYTES,
+            )
+        })?;
+    for entry in files {
+        crate::verify_graph_object(container_root, &entry.content_sha256, entry.byte_length)?;
+    }
+    Ok(())
+}
+
+fn verify_compact_graph_root_with_lease(
+    lease: &crate::GraphObjectPublicationLease,
+    root: &crate::GraphFilesRootV2,
+) -> Result<(), GfError> {
+    let (files, _) =
+        crate::resolve_graph_manifest(root, crate::GraphManifestLimits::default(), |digest| {
+            crate::graph_object_store::read_graph_object_by_digest_with_lease(
+                lease,
+                digest,
+                MAX_GRAPH_MANIFEST_SEGMENT_BYTES,
+            )
+        })?;
+    for entry in files {
+        crate::graph_object_store::verify_graph_object_with_lease(
+            lease,
+            &entry.content_sha256,
+            entry.byte_length,
+        )?;
+    }
+    Ok(())
 }
 
 fn stage_participant_files(
@@ -1185,7 +1278,7 @@ impl StagedProjectGeneration {
                 participant,
             )?;
         }
-        verify_optional_graph_tree(&self.generation_root, &self.participants)?;
+        verify_optional_generation_graph_tree(&self.generation_root, &self.participants)?;
         domain_validation(&self.participants)?;
         project_failpoint::hit(
             "project.after_domain_validation",
@@ -1261,6 +1354,22 @@ impl ValidatedProjectGeneration {
     /// Returns a stable publication error whose diagnostic states whether the
     /// commit point was crossed.
     pub fn publish(mut self) -> Result<ProjectPublicationReceipt, GfError> {
+        self.publish_with_optional_graph_objects(None)
+    }
+
+    /// Publish a compact graph generation while holding its CAS lease through
+    /// the final closure and named-root validation immediately before CURRENT.
+    pub fn publish_with_graph_objects(
+        mut self,
+        lease: &crate::GraphObjectPublicationLease,
+    ) -> Result<ProjectPublicationReceipt, GfError> {
+        self.publish_with_optional_graph_objects(Some(lease))
+    }
+
+    fn publish_with_optional_graph_objects(
+        &mut self,
+        graph_object_lease: Option<&crate::GraphObjectPublicationLease>,
+    ) -> Result<ProjectPublicationReceipt, GfError> {
         self.0.admission.revalidate_identity()?;
         let lifecycle_admission = self.0.admission.readmit_for_publish()?;
         let commit_lock = self.prepare_commit_lock()?;
@@ -1269,19 +1378,21 @@ impl ValidatedProjectGeneration {
         } else {
             self.0.admission.revalidate_identity()?;
         }
-        let result = self.publish_inner().map_err(|error| {
-            if matches!(error, GfError::Project { .. }) {
-                error
-            } else {
-                publication_error_from_parts(
-                    self.0.transaction_uuid,
-                    self.0.generation_uuid,
-                    "DURABLE",
-                    false,
-                    &error.to_string(),
-                )
-            }
-        });
+        let result = self
+            .publish_inner(graph_object_lease, lifecycle_admission.as_ref())
+            .map_err(|error| {
+                if matches!(error, GfError::Project { .. }) {
+                    error
+                } else {
+                    publication_error_from_parts(
+                        self.0.transaction_uuid,
+                        self.0.generation_uuid,
+                        "DURABLE",
+                        false,
+                        &error.to_string(),
+                    )
+                }
+            });
         drop(commit_lock);
         drop(lifecycle_admission);
         result
@@ -1317,10 +1428,37 @@ impl ValidatedProjectGeneration {
         Ok(Some(writer_lock))
     }
 
-    fn publish_inner(&self) -> Result<ProjectPublicationReceipt, GfError> {
+    fn publish_inner(
+        &self,
+        graph_object_lease: Option<&crate::GraphObjectPublicationLease>,
+        lifecycle_admission: Option<&crate::filesystem_admission::ProjectLifecycleAdmission>,
+    ) -> Result<ProjectPublicationReceipt, GfError> {
         let staged = &self.0;
+        let compact_graph = has_compact_graph_participant(staged)?;
+        if compact_graph && graph_object_lease.is_none() {
+            return Err(project_error(
+                ProjectErrorCode::PublicationFailed,
+                "compact graph publication requires its graph object lease through CURRENT",
+            ));
+        }
+        if let Some(lease) = graph_object_lease {
+            lease.revalidate_for_root(staged.parent.container_root())?;
+        }
         let manifest_sha256 = make_generation_durable(staged)?;
-        replace_current(staged, manifest_sha256)?;
+        if let Some(lease) = graph_object_lease {
+            verify_optional_graph_tree_with_lease(
+                &staged.generation_root,
+                &staged.participants,
+                lease,
+            )?;
+            lease.revalidate_for_root(staged.parent.container_root())?;
+        }
+        replace_current(
+            staged,
+            manifest_sha256,
+            graph_object_lease,
+            lifecycle_admission,
+        )?;
         finish_published_generation(staged, manifest_sha256)?;
         Ok(ProjectPublicationReceipt {
             transaction_uuid: staged.transaction_uuid,
@@ -1328,6 +1466,28 @@ impl ValidatedProjectGeneration {
             generation_manifest_sha256: manifest_sha256,
             idempotent_replay: false,
         })
+    }
+}
+
+fn has_compact_graph_participant(staged: &StagedProjectGeneration) -> Result<bool, GfError> {
+    let Some(files) = staged.participants.iter().find(|participant| {
+        participant.capability_id == crate::GRAPH_CAPABILITY_ID
+            && participant.record_family_id == crate::GRAPH_FILES_FAMILY
+    }) else {
+        return Ok(false);
+    };
+    let path = staged
+        .generation_root
+        .join(PARTICIPANTS_DIR)
+        .join(&files.relative_path);
+    let bytes = std::fs::read(&path).map_err(publication_io)?;
+    if matches!(
+        crate::decode_versioned_graph_files_participant(files.record_version, &bytes)?,
+        crate::GraphFilesParticipant::V2(_)
+    ) {
+        Ok(true)
+    } else {
+        Ok(false)
     }
 }
 
@@ -1408,7 +1568,7 @@ fn make_generation_durable(staged: &StagedProjectGeneration) -> Result<[u8; 32],
             participant,
         )?;
     }
-    verify_optional_graph_tree(&staged.generation_root, &staged.participants)?;
+    verify_optional_generation_graph_tree(&staged.generation_root, &staged.participants)?;
     verify_exact_file(&manifest_path, &manifest_bytes)?;
     sync_participant_directories(
         &staged.generation_root.join(PARTICIPANTS_DIR),
@@ -1475,6 +1635,8 @@ fn promote_optimistic_generation(staged: &StagedProjectGeneration) -> Result<(),
 fn replace_current(
     staged: &StagedProjectGeneration,
     manifest_sha256: [u8; 32],
+    graph_object_lease: Option<&crate::GraphObjectPublicationLease>,
+    lifecycle_admission: Option<&crate::filesystem_admission::ProjectLifecycleAdmission>,
 ) -> Result<(), GfError> {
     let current = CurrentRecord {
         format: "graphforge-project".into(),
@@ -1484,8 +1646,12 @@ fn replace_current(
     };
     let current_bytes = canonical_line(&current)?;
     let current_path = staged.root.join(CURRENT_FILE);
-    let replace_result = publish_atomic_bytes(
+    let stable_root =
+        graphforge_filesystem::StableDirectory::open(&staged.root).map_err(publication_io)?;
+    let replace_result = publish_atomic_bytes_in(
+        &stable_root,
         &current_path,
+        std::ffi::OsStr::new(CURRENT_FILE),
         &current_bytes,
         || {
             failpoint_as_io(
@@ -1512,7 +1678,23 @@ fn replace_current(
                 staged.generation_uuid,
                 "CURRENT",
                 false,
-            )
+            )?;
+            if let Some(admission) = lifecycle_admission {
+                admission
+                    .revalidate_identity()
+                    .map_err(std::io::Error::other)?;
+            } else {
+                staged
+                    .admission
+                    .revalidate_identity()
+                    .map_err(std::io::Error::other)?;
+            }
+            if let Some(lease) = graph_object_lease {
+                lease
+                    .revalidate_for_root(staged.parent.container_root())
+                    .map_err(std::io::Error::other)?;
+            }
+            Ok(())
         },
     );
     if let Err(error) = replace_result {
@@ -2254,6 +2436,43 @@ pub(crate) fn publish_atomic_bytes(
     result
 }
 
+fn publish_atomic_bytes_in(
+    directory: &graphforge_filesystem::StableDirectory,
+    diagnostic_path: &Path,
+    target_name: &std::ffi::OsStr,
+    bytes: &[u8],
+    after_write: impl FnOnce() -> std::io::Result<()>,
+    after_sync: impl FnOnce() -> std::io::Result<()>,
+    before_replace: impl FnOnce() -> std::io::Result<()>,
+) -> Result<(), AtomicPublishError> {
+    let target_text = target_name
+        .to_str()
+        .ok_or_else(|| std::io::Error::other("atomic publication target is not UTF-8"))?;
+    let temp_name = std::ffi::OsString::from(unique_atomic_temp_name(target_text));
+    let mut temp = directory.create_replaceable_child_file(&temp_name)?;
+    let temp_identity = graphforge_filesystem::file_identity(&temp)?;
+    let publish = || -> Result<(), AtomicPublishError> {
+        crate::file_lock::lock_exclusive(&temp)?;
+        temp.write_all(bytes)?;
+        after_write()?;
+        temp.sync_all()?;
+        after_sync()?;
+        before_replace()?;
+        let namespace_lock = lock_atomic_publish_target(diagnostic_path);
+        let _namespace_guard = namespace_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        directory.replace_child(&temp_name, temp_identity, target_name)?;
+        crate::file_lock::unlock(&temp)?;
+        Ok(())
+    };
+    let result = publish();
+    if result.is_err() {
+        let _ = directory.unlink_child_if_identity(&temp_name, temp_identity);
+    }
+    result
+}
+
 fn unique_atomic_temp_name(target_text: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(target_text.as_bytes());
@@ -2601,6 +2820,175 @@ mod tests {
             .unwrap()
             .publish()
             .unwrap()
+    }
+
+    #[test]
+    fn publishes_and_reopens_compact_graph_files_v2_root() {
+        let root = project();
+        let workspace = tempfile::tempdir().unwrap();
+        let relative = std::path::PathBuf::from("topology/edges/knows.parquet");
+        fs::create_dir_all(workspace.path().join(relative.parent().unwrap())).unwrap();
+        fs::write(
+            workspace.path().join(&relative),
+            b"immutable topology payload",
+        )
+        .unwrap();
+        let mut state = crate::GraphManifestState::empty();
+        let lease = crate::begin_graph_object_publication(root.path()).unwrap();
+        let (files_root, _) =
+            crate::append_graph_files_v2(&lease, workspace.path(), &mut state, &[relative], &[])
+                .unwrap();
+        let request = request(vec![
+            crate::graph_files_root_participant(&files_root).unwrap(),
+        ]);
+        let ProjectStageOutcome::Staged(staged) =
+            stage_project_generation(root.path(), &request).unwrap()
+        else {
+            panic!("new request unexpectedly replayed");
+        };
+        staged
+            .validate(|_| Ok(()), |_, _| Ok(()))
+            .unwrap()
+            .publish_with_graph_objects(&lease)
+            .unwrap();
+        drop(lease);
+
+        let reopened = resolve_project_generation(root.path()).unwrap();
+        let inventory = reopened.graph_files_inventory().unwrap().unwrap();
+        assert_eq!(
+            inventory.files,
+            state.entries().cloned().collect::<Vec<_>>()
+        );
+        assert!(!reopened.graph_tree_root().exists());
+    }
+
+    #[test]
+    fn corrupt_compact_root_never_advances_current() {
+        let root = project();
+        let prior = resolve_project_generation(root.path())
+            .unwrap()
+            .generation_uuid();
+        let compact = crate::GraphFilesRootV2 {
+            format: crate::GRAPH_FILES_V2_FORMAT.into(),
+            format_version: crate::GRAPH_FILES_V2_VERSION,
+            root_node_sha256: "0".repeat(64),
+            logical_file_count: 1,
+            logical_byte_length: 1,
+        };
+        let request = request(vec![crate::graph_files_root_participant(&compact).unwrap()]);
+        assert!(stage_project_generation(root.path(), &request).is_err());
+        assert_eq!(
+            resolve_project_generation(root.path())
+                .unwrap()
+                .generation_uuid(),
+            prior
+        );
+    }
+
+    #[test]
+    fn compact_payload_is_reverified_only_at_the_lease_backed_commit_boundary() {
+        let root = project();
+        let parent = resolve_project_generation(root.path())
+            .unwrap()
+            .generation_uuid();
+        let workspace = tempfile::tempdir().unwrap();
+        let relative = std::path::PathBuf::from("topology/edges/knows.parquet");
+        fs::create_dir_all(workspace.path().join(relative.parent().unwrap())).unwrap();
+        fs::write(
+            workspace.path().join(&relative),
+            b"immutable topology payload",
+        )
+        .unwrap();
+        let mut state = crate::GraphManifestState::empty();
+        let lease = crate::begin_graph_object_publication(root.path()).unwrap();
+        let (files_root, _) =
+            crate::append_graph_files_v2(&lease, workspace.path(), &mut state, &[relative], &[])
+                .unwrap();
+        let payload_digest = state
+            .entries()
+            .next()
+            .expect("one compact payload")
+            .content_sha256
+            .clone();
+        let request = request(vec![
+            crate::graph_files_root_participant(&files_root).unwrap(),
+        ]);
+        let ProjectStageOutcome::Staged(staged) =
+            stage_project_generation(root.path(), &request).unwrap()
+        else {
+            panic!("new request unexpectedly replayed");
+        };
+
+        fs::write(
+            crate::graph_object_path(root.path(), &payload_digest).unwrap(),
+            b"corrupt",
+        )
+        .unwrap();
+        let validated = staged
+            .validate(|_| Ok(()), |_, _| Ok(()))
+            .expect("intermediate validation must not rehash compact payloads");
+        let error = validated
+            .publish_with_graph_objects(&lease)
+            .expect_err("final lease-backed verification must reject corruption");
+        assert_eq!(error.code(), "GF_PUBLICATION_FAILED");
+        assert_eq!(
+            resolve_project_generation(root.path())
+                .unwrap()
+                .generation_uuid(),
+            parent
+        );
+        assert!(
+            root.path()
+                .join(GENERATIONS_DIR)
+                .join(request.generation_uuid.hyphenated().to_string())
+                .exists()
+        );
+
+        drop(lease);
+        let report = crate::recover_project_transactions(root.path()).unwrap();
+        assert_eq!(report.aborted_journals, 1);
+        assert_eq!(report.removed_generations, 1);
+        assert!(
+            !root
+                .path()
+                .join(GENERATIONS_DIR)
+                .join(request.generation_uuid.hyphenated().to_string())
+                .exists()
+        );
+        assert_eq!(
+            resolve_project_generation(root.path())
+                .unwrap()
+                .generation_uuid(),
+            parent
+        );
+    }
+
+    #[test]
+    fn expanded_graph_tree_corruption_still_fails_intermediate_validation() {
+        let root = project();
+        let workspace = tempfile::tempdir().unwrap();
+        let relative = std::path::PathBuf::from("topology/edges/knows.parquet");
+        fs::create_dir_all(workspace.path().join(relative.parent().unwrap())).unwrap();
+        fs::write(workspace.path().join(&relative), b"expanded graph payload").unwrap();
+        let (_, files) = crate::capture_graph_files(workspace.path()).unwrap();
+        let request = request(vec![files]);
+        let ProjectStageOutcome::Staged(staged) =
+            stage_project_generation_with_graph_tree(root.path(), &request, Some(workspace.path()))
+                .unwrap()
+        else {
+            panic!("new request unexpectedly replayed");
+        };
+        fs::write(
+            crate::graph_tree_root(&staged.generation_root).join(relative),
+            b"corrupt",
+        )
+        .unwrap();
+
+        let error = match staged.validate(|_| Ok(()), |_, _| Ok(())) {
+            Ok(_) => panic!("expanded generation tree must remain verified"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code(), "GF_PROJECT_CORRUPT");
     }
 
     fn journal_path(root: &Path, transaction_uuid: Uuid) -> PathBuf {

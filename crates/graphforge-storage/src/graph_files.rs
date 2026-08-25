@@ -26,6 +26,8 @@ pub const GRAPH_CAPABILITY_VERSION: u32 = 1;
 pub const GRAPH_FILES_FAMILY: &str = "files";
 /// Record contract version for [`GRAPH_FILES_FAMILY`].
 pub const GRAPH_FILES_RECORD_VERSION: u32 = 1;
+/// Record version for compact content-addressed graph roots.
+pub const GRAPH_FILES_V2_RECORD_VERSION: u32 = 2;
 /// Generation-owned directory holding graph workspace files.
 pub const GRAPH_TREE_DIR: &str = "graph";
 
@@ -35,6 +37,9 @@ const MAX_GRAPH_FILES: usize = 100_000;
 const HASH_BUFFER_BYTES: usize = 64 * 1024;
 const GRAPH_FILES_SCHEMA_CANONICAL_BYTES: &[u8] =
     b"graphforge-graph-files/1|relative_path|byte_length|content_sha256|role";
+#[cfg(test)]
+const GRAPH_FILES_V2_SCHEMA_CANONICAL_BYTES: &[u8] =
+    b"graphforge-graph-files-root/2|root_node_sha256|logical_file_count|logical_byte_length";
 
 /// Logical role inferred from a contained relative workspace path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -82,6 +87,15 @@ pub struct GraphFilesInventory {
     pub total_byte_length: u64,
 }
 
+/// Explicitly decoded `graph/files` participant generation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum GraphFilesParticipant {
+    /// Expanded generation-owned v1 inventory.
+    V1(GraphFilesInventory),
+    /// Compact project-object-store v2 manifest root.
+    V2(crate::GraphFilesRootV2),
+}
+
 /// Structural evidence recorded while validating or materializing a graph tree.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GraphFilesOpenEvidence {
@@ -97,6 +111,10 @@ pub struct GraphFilesOpenEvidence {
     pub bytes_copied: u64,
     /// Files opened or mapped in place (no copy).
     pub files_opened_in_place: u64,
+    /// Immutable files reused from the content-addressed object store.
+    pub files_reused: u64,
+    /// Logical bytes represented by reused immutable objects.
+    pub bytes_reused: u64,
 }
 
 /// Open/materialization strategy for a file-backed graph.
@@ -149,6 +167,28 @@ pub fn inventory_participant(
     })
 }
 
+/// Encode a compact v2 root as the registered `graph`/`files` participant.
+#[cfg(test)]
+pub(crate) fn graph_files_root_participant(
+    root: &crate::GraphFilesRootV2,
+) -> Result<ProjectParticipant, GfError> {
+    Ok(ProjectParticipant {
+        capability_id: GRAPH_CAPABILITY_ID.into(),
+        capability_version: GRAPH_CAPABILITY_VERSION,
+        record_family_id: GRAPH_FILES_FAMILY.into(),
+        record_version: GRAPH_FILES_V2_RECORD_VERSION,
+        encoding: ProjectParticipantEncoding::Json,
+        schema_fingerprint: fingerprint(
+            CanonicalDomain::Schema,
+            CANONICAL_CONTRACT_VERSION,
+            GRAPH_FILES_V2_SCHEMA_CANONICAL_BYTES,
+        )
+        .map_err(|error| GfError::Validation(error.to_string()))?,
+        row_count: root.logical_file_count,
+        bytes: crate::encode_graph_files_root_v2(root)?,
+    })
+}
+
 /// Decode and mechanically validate inventory JSON bytes.
 ///
 /// # Errors
@@ -173,6 +213,55 @@ pub fn decode_inventory(bytes: &[u8]) -> Result<GraphFilesInventory, GfError> {
         return Err(validation("graph files inventory is not in canonical form"));
     }
     Ok(inventory)
+}
+
+/// Decode either the legacy expanded inventory or compact v2 root.
+/// Unknown format tags and future versions fail closed.
+pub(crate) fn decode_graph_files_participant(
+    bytes: &[u8],
+) -> Result<GraphFilesParticipant, GfError> {
+    let value: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|error| validation(format!("invalid graph files participant JSON: {error}")))?;
+    let format = value
+        .get("format")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| validation("graph files participant format is missing"))?;
+    let version = value
+        .get("format_version")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| validation("graph files participant format_version is missing"))?;
+    match (format, version) {
+        (GRAPH_FILES_FORMAT, version) if version == u64::from(GRAPH_FILES_FORMAT_VERSION) => {
+            decode_inventory(bytes).map(GraphFilesParticipant::V1)
+        }
+        (crate::GRAPH_FILES_V2_FORMAT, version)
+            if version == u64::from(crate::GRAPH_FILES_V2_VERSION) =>
+        {
+            crate::decode_graph_files_root_v2(bytes).map(GraphFilesParticipant::V2)
+        }
+        _ => Err(GfError::Project {
+            code: ProjectErrorCode::UnsupportedProjectFormat,
+            message: format!("unsupported graph files participant {format}/{version}"),
+        }),
+    }
+}
+
+/// Decode a participant and enforce the descriptor/payload version pairing.
+pub(crate) fn decode_versioned_graph_files_participant(
+    record_version: u32,
+    bytes: &[u8],
+) -> Result<GraphFilesParticipant, GfError> {
+    let participant = decode_graph_files_participant(bytes)?;
+    if !matches!(
+        (record_version, &participant),
+        (GRAPH_FILES_RECORD_VERSION, GraphFilesParticipant::V1(_))
+            | (GRAPH_FILES_V2_RECORD_VERSION, GraphFilesParticipant::V2(_))
+    ) {
+        return Err(validation(
+            "graph files descriptor version does not match its encoded payload",
+        ));
+    }
+    Ok(participant)
 }
 
 /// Encode inventory as one canonical JSON line ending in LF.
@@ -364,6 +453,8 @@ pub fn pinned_open_evidence(inventory: &GraphFilesInventory) -> GraphFilesOpenEv
         files_copied: 0,
         bytes_copied: 0,
         files_opened_in_place: u64::try_from(inventory.files.len()).unwrap_or(u64::MAX),
+        files_reused: 0,
+        bytes_reused: 0,
     }
 }
 
@@ -391,19 +482,27 @@ pub fn infer_role(relative: &Path) -> GraphFileRole {
 fn build_inventory(source_root: &Path) -> Result<GraphFilesInventory, GfError> {
     let mut paths = Vec::new();
     collect_source_files(source_root, &mut paths)?;
-    paths.sort();
     if paths.len() > MAX_GRAPH_FILES {
         return Err(resource_limit("graph files count exceeds limit"));
     }
+    let mut paths = paths
+        .into_iter()
+        .map(|path| {
+            let relative = path
+                .strip_prefix(source_root)
+                .map_err(|_| validation("graph file path escaped workspace"))?;
+            validate_relative_path(relative)?;
+            Ok((path_text(relative)?, path))
+        })
+        .collect::<Result<Vec<_>, GfError>>()?;
+    paths.sort_by(|(left, _), (right, _)| left.cmp(right));
     let mut files = Vec::with_capacity(paths.len());
     let mut total = 0_u64;
     let mut seen = HashSet::new();
-    for path in paths {
+    for (relative_text, path) in paths {
         let relative = path
             .strip_prefix(source_root)
             .map_err(|_| validation("graph file path escaped workspace"))?;
-        validate_relative_path(relative)?;
-        let relative_text = path_text(relative)?;
         if !seen.insert(relative_text.clone()) {
             return Err(validation("graph files inventory contains duplicate paths"));
         }
@@ -430,6 +529,25 @@ fn build_inventory(source_root: &Path) -> Result<GraphFilesInventory, GfError> {
         format_version: GRAPH_FILES_FORMAT_VERSION,
         file_count: u64::try_from(files.len()).unwrap_or(u64::MAX),
         total_byte_length: total,
+        files,
+    };
+    validate_inventory_contract(&inventory)?;
+    Ok(inventory)
+}
+
+pub(crate) fn inventory_from_entries(
+    files: Vec<GraphFileEntry>,
+) -> Result<GraphFilesInventory, GfError> {
+    let total_byte_length = files.iter().try_fold(0_u64, |total, entry| {
+        total
+            .checked_add(entry.byte_length)
+            .ok_or_else(|| validation("graph files total size overflow"))
+    })?;
+    let inventory = GraphFilesInventory {
+        format: GRAPH_FILES_FORMAT.into(),
+        format_version: GRAPH_FILES_FORMAT_VERSION,
+        file_count: u64::try_from(files.len()).unwrap_or(u64::MAX),
+        total_byte_length,
         files,
     };
     validate_inventory_contract(&inventory)?;
@@ -741,6 +859,34 @@ mod tests {
     }
 
     #[test]
+    fn legacy_monolith_and_shards_sort_by_canonical_wire_path() {
+        let source = tempfile::tempdir().unwrap();
+        fs::create_dir_all(source.path().join("topology/nodes")).unwrap();
+        fs::write(source.path().join("topology/nodes.parquet"), b"legacy").unwrap();
+        fs::write(
+            source
+                .path()
+                .join("topology/nodes/00000000000000000001.parquet"),
+            b"shard",
+        )
+        .unwrap();
+
+        let (inventory, participant) = capture_graph_files(source.path()).unwrap();
+        assert_eq!(
+            inventory
+                .files
+                .iter()
+                .map(|entry| entry.relative_path.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "topology/nodes.parquet",
+                "topology/nodes/00000000000000000001.parquet",
+            ]
+        );
+        assert_eq!(decode_inventory(&participant.bytes).unwrap(), inventory);
+    }
+
+    #[test]
     fn stage_and_materialize_never_assembles_one_payload() {
         let source = tempfile::tempdir().unwrap();
         fs::create_dir_all(source.path().join("properties")).unwrap();
@@ -1019,5 +1165,27 @@ mod tests {
             row_count: wire.row_count,
             bytes: wire.bytes,
         }
+    }
+
+    #[test]
+    fn descriptor_record_version_must_match_graph_files_payload_version() {
+        let inventory = inventory_from_entries(Vec::new()).unwrap();
+        let v1 = encode_inventory(&inventory).unwrap();
+        let v2 = crate::encode_graph_files_root_v2(&crate::GraphFilesRootV2 {
+            format: crate::GRAPH_FILES_V2_FORMAT.into(),
+            format_version: crate::GRAPH_FILES_V2_VERSION,
+            root_node_sha256: "0".repeat(64),
+            logical_file_count: 0,
+            logical_byte_length: 0,
+        })
+        .unwrap();
+        assert!(decode_versioned_graph_files_participant(GRAPH_FILES_RECORD_VERSION, &v1).is_ok());
+        assert!(
+            decode_versioned_graph_files_participant(GRAPH_FILES_V2_RECORD_VERSION, &v2).is_ok()
+        );
+        assert!(decode_versioned_graph_files_participant(GRAPH_FILES_RECORD_VERSION, &v2).is_err());
+        assert!(
+            decode_versioned_graph_files_participant(GRAPH_FILES_V2_RECORD_VERSION, &v1).is_err()
+        );
     }
 }

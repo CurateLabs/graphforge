@@ -6,7 +6,7 @@
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Stable filesystem identity suitable for Windows and Unix filesystems.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,6 +15,660 @@ pub struct FileIdentity {
     pub volume_serial: u64,
     /// Full native file identity (128-bit on Windows; zero-extended inode on Unix).
     pub file_id: [u8; 16],
+}
+
+/// Retained directory capability whose children are opened without following
+/// links or reparse points.
+#[derive(Debug)]
+pub struct StableDirectory {
+    path: PathBuf,
+    file: File,
+    identity: FileIdentity,
+}
+
+impl StableDirectory {
+    /// Acquire a cooperative shared lock on this retained Unix directory inode.
+    ///
+    /// Windows directory handles cannot be byte-range locked; callers use a
+    /// retained regular coordination file there instead.
+    #[cfg(unix)]
+    pub fn lock_shared(&self) -> io::Result<()> {
+        <File as fs4::FileExt>::lock_shared(&self.file)
+    }
+
+    /// Acquire a cooperative exclusive lock on this retained Unix directory inode.
+    #[cfg(unix)]
+    pub fn lock_exclusive(&self) -> io::Result<()> {
+        <File as fs4::FileExt>::lock(&self.file)
+    }
+
+    /// Try to acquire a cooperative exclusive lock on this retained Unix directory inode.
+    #[cfg(unix)]
+    pub fn try_lock_exclusive(&self) -> io::Result<bool> {
+        match <File as fs4::FileExt>::try_lock(&self.file) {
+            Ok(()) => Ok(true),
+            Err(fs4::TryLockError::WouldBlock) => Ok(false),
+            Err(fs4::TryLockError::Error(error)) => Err(error),
+        }
+    }
+
+    /// Release this retained Unix directory inode's cooperative lock.
+    #[cfg(unix)]
+    pub fn unlock(&self) -> io::Result<()> {
+        <File as fs4::FileExt>::unlock(&self.file)
+    }
+
+    /// Open and retain a real directory at `path`.
+    pub fn open(path: &Path) -> io::Result<Self> {
+        let file = stable_open_directory(path)?;
+        let identity = file_identity(&file)?;
+        let directory = Self {
+            path: path.to_path_buf(),
+            file,
+            identity,
+        };
+        directory.revalidate_named()?;
+        Ok(directory)
+    }
+
+    /// Require that the named path still identifies this retained directory.
+    pub fn revalidate_named(&self) -> io::Result<()> {
+        let metadata = std::fs::symlink_metadata(&self.path)?;
+        if !metadata.is_dir() || is_link_or_reparse(&metadata) {
+            return Err(io::Error::other(
+                "stable directory path is linked or special",
+            ));
+        }
+        if path_identity(&self.path)? != self.identity {
+            return Err(io::Error::other("stable directory identity changed"));
+        }
+        Ok(())
+    }
+
+    /// Open one real child directory relative to this capability.
+    pub fn open_child_directory(&self, name: &OsStr) -> io::Result<Self> {
+        validate_child_name(name)?;
+        self.revalidate_named()?;
+        let path = self.path.join(name);
+        let file = stable_open_child_directory(&self.file, &path, name)?;
+        let child = Self {
+            identity: file_identity(&file)?,
+            path,
+            file,
+        };
+        child.revalidate_named()?;
+        self.revalidate_named()?;
+        Ok(child)
+    }
+
+    /// Create one child directory if absent, then retain it.
+    pub fn create_child_directory(&self, name: &OsStr) -> io::Result<Self> {
+        validate_child_name(name)?;
+        self.revalidate_named()?;
+        stable_create_child_directory(&self.file, &self.path.join(name), name)?;
+        self.open_child_directory(name)
+    }
+
+    /// Open one regular child without following links or reparse points.
+    pub fn open_child_file(&self, name: &OsStr) -> io::Result<File> {
+        validate_child_name(name)?;
+        self.revalidate_named()?;
+        let path = self.path.join(name);
+        let file = stable_open_child_file(&self.file, &path, name, false)?;
+        validate_stable_child_file(&file, &path)?;
+        self.revalidate_named()?;
+        Ok(file)
+    }
+
+    /// Create one new regular child without following links or reparse points.
+    pub fn create_child_file(&self, name: &OsStr) -> io::Result<File> {
+        validate_child_name(name)?;
+        self.revalidate_named()?;
+        let path = self.path.join(name);
+        let file = stable_open_child_file(&self.file, &path, name, true)?;
+        validate_stable_child_file(&file, &path)?;
+        self.revalidate_named()?;
+        Ok(file)
+    }
+
+    /// Create a new regular child whose retained handle permits an atomic
+    /// namespace replacement while it remains open.
+    pub fn create_replaceable_child_file(&self, name: &OsStr) -> io::Result<File> {
+        validate_child_name(name)?;
+        self.revalidate_named()?;
+        let path = self.path.join(name);
+        let file = stable_open_replaceable_child_file(&self.file, &path, name)?;
+        validate_stable_child_file(&file, &path)?;
+        self.revalidate_named()?;
+        Ok(file)
+    }
+
+    /// Open an existing regular child for read/write, or create it once.
+    pub fn open_or_create_child_file(&self, name: &OsStr) -> io::Result<File> {
+        validate_child_name(name)?;
+        self.revalidate_named()?;
+        let path = self.path.join(name);
+        let file = stable_open_or_create_child_file(&self.file, &path, name)?;
+        validate_stable_child_file(&file, &path)?;
+        self.revalidate_named()?;
+        Ok(file)
+    }
+
+    /// Enumerate child names while retaining this directory capability.
+    pub fn child_names(&self) -> io::Result<Vec<std::ffi::OsString>> {
+        self.revalidate_named()?;
+        stable_child_names(&self.file, &self.path)
+    }
+
+    /// Create a hard link between retained source and destination directories.
+    pub fn link_child_into(
+        &self,
+        source_name: &OsStr,
+        source: &File,
+        expected_source: FileIdentity,
+        destination: &Self,
+        destination_name: &OsStr,
+    ) -> io::Result<(File, FileIdentity)> {
+        validate_child_name(source_name)?;
+        validate_child_name(destination_name)?;
+        self.revalidate_named()?;
+        destination.revalidate_named()?;
+        validate_stable_child_file(source, &self.path.join(source_name))?;
+        if file_identity(source)? != expected_source {
+            return Err(io::Error::other("hard-link source identity changed"));
+        }
+        stable_link_child(
+            &self.file,
+            &self.path,
+            source_name,
+            &destination.file,
+            &destination.path,
+            destination_name,
+        )?;
+        self.revalidate_named()?;
+        destination.revalidate_named()?;
+        let installed = destination.open_child_file(destination_name)?;
+        let installed_identity = file_identity(&installed)?;
+        if installed_identity != expected_source {
+            return Err(io::Error::other("hard-link destination identity mismatch"));
+        }
+        Ok((installed, installed_identity))
+    }
+
+    /// Remove a child under the caller's held cooperative exclusive lifecycle
+    /// guard, only while its current named identity matches `expected`.
+    pub fn unlink_child_if_identity(&self, name: &OsStr, expected: FileIdentity) -> io::Result<()> {
+        validate_child_name(name)?;
+        self.revalidate_named()?;
+        stable_unlink_child_if_identity(&self.file, &self.path, name, expected)?;
+        self.revalidate_named()
+    }
+
+    /// Atomically publish a retained temporary child as `target` within this
+    /// retained directory. Cooperative publishers must serialize the target.
+    pub fn replace_child(
+        &self,
+        temporary: &OsStr,
+        expected_temporary: FileIdentity,
+        target: &OsStr,
+    ) -> io::Result<()> {
+        validate_child_name(temporary)?;
+        validate_child_name(target)?;
+        self.revalidate_named()?;
+        let temporary_file = self.open_child_file(temporary)?;
+        if file_identity(&temporary_file)? != expected_temporary
+            || file_link_count(&temporary_file)? != 1
+        {
+            return Err(io::Error::other(
+                "atomic temporary child identity or link count changed",
+            ));
+        }
+        drop(temporary_file);
+        let target_exists = match self.open_child_file(target) {
+            Ok(target_file) => {
+                drop(target_file);
+                true
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+            Err(error) => return Err(error),
+        };
+        let result = if target_exists {
+            replace_file_platform(&self.file, temporary, target, Some(expected_temporary))
+                .map_err(|error| io::Error::other(error.to_string()))
+        } else {
+            install_new_file_platform(&self.file, temporary, target, Some(expected_temporary))
+        };
+        result?;
+        self.revalidate_named()?;
+        self.open_child_file(target).map(|_| ())
+    }
+
+    /// Flush this retained directory capability.
+    pub fn sync(&self) -> io::Result<()> {
+        self.revalidate_named()?;
+        #[cfg(windows)]
+        {
+            let directory = stable_open_directory_for_sync(&self.path)?;
+            if file_identity(&directory)? != self.identity {
+                return Err(io::Error::other(
+                    "stable directory identity changed before sync",
+                ));
+            }
+            directory.sync_all()?;
+            self.revalidate_named()
+        }
+        #[cfg(not(windows))]
+        {
+            self.file.sync_all()?;
+            self.revalidate_named()
+        }
+    }
+
+    /// Return the retained native identity.
+    #[must_use]
+    pub fn identity(&self) -> FileIdentity {
+        self.identity
+    }
+}
+
+fn validate_child_name(name: &OsStr) -> io::Result<()> {
+    let path = Path::new(name);
+    if name.is_empty()
+        || path.is_absolute()
+        || path.components().count() != 1
+        || matches!(name.to_str(), Some("." | ".."))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid child name",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_stable_child_file(file: &File, path: &Path) -> io::Result<()> {
+    let metadata = file.metadata()?;
+    let named = std::fs::symlink_metadata(path)?;
+    if !metadata.is_file()
+        || !named.is_file()
+        || is_link_or_reparse(&named)
+        || file_identity(file)? != path_identity(path)?
+    {
+        return Err(io::Error::other(
+            "stable child is linked, special, or substituted",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn stable_open_directory(path: &Path) -> io::Result<File> {
+    use rustix::fs::{Mode, OFlags};
+    rustix::fs::open(
+        path,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(io::Error::from)
+}
+
+#[cfg(unix)]
+fn stable_open_child_directory(parent: &File, _path: &Path, name: &OsStr) -> io::Result<File> {
+    use rustix::fs::{Mode, OFlags};
+    rustix::fs::openat(
+        parent,
+        name,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(io::Error::from)
+}
+
+#[cfg(unix)]
+fn stable_create_child_directory(parent: &File, _path: &Path, name: &OsStr) -> io::Result<()> {
+    use rustix::fs::Mode;
+    match rustix::fs::mkdirat(parent, name, Mode::from_bits_truncate(0o700)) {
+        Ok(()) | Err(rustix::io::Errno::EXIST) => Ok(()),
+        Err(error) => Err(io::Error::from(error)),
+    }
+}
+
+#[cfg(unix)]
+fn stable_open_child_file(
+    parent: &File,
+    _path: &Path,
+    name: &OsStr,
+    create_new: bool,
+) -> io::Result<File> {
+    use rustix::fs::{Mode, OFlags};
+    let flags = if create_new {
+        OFlags::RDWR | OFlags::CREATE | OFlags::EXCL
+    } else {
+        OFlags::RDONLY
+    } | OFlags::NOFOLLOW
+        | OFlags::NONBLOCK
+        | OFlags::CLOEXEC;
+    rustix::fs::openat(parent, name, flags, Mode::from_bits_truncate(0o600))
+        .map(File::from)
+        .map_err(io::Error::from)
+}
+
+#[cfg(unix)]
+fn stable_open_replaceable_child_file(
+    parent: &File,
+    path: &Path,
+    name: &OsStr,
+) -> io::Result<File> {
+    stable_open_child_file(parent, path, name, true)
+}
+
+#[cfg(unix)]
+fn stable_open_or_create_child_file(parent: &File, _path: &Path, name: &OsStr) -> io::Result<File> {
+    use rustix::fs::{Mode, OFlags};
+    rustix::fs::openat(
+        parent,
+        name,
+        OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::from_bits_truncate(0o600),
+    )
+    .map(File::from)
+    .map_err(io::Error::from)
+}
+
+#[cfg(unix)]
+fn stable_child_names(parent: &File, _path: &Path) -> io::Result<Vec<std::ffi::OsString>> {
+    use std::os::unix::ffi::OsStrExt as _;
+    let directory = rustix::fs::Dir::read_from(parent).map_err(io::Error::from)?;
+    directory
+        .map(|entry| {
+            let entry = entry.map_err(io::Error::from)?;
+            let name = OsStr::from_bytes(entry.file_name().to_bytes());
+            Ok(name.to_os_string())
+        })
+        .filter(|entry| {
+            !matches!(entry, Ok(name) if name == OsStr::new(".") || name == OsStr::new(".."))
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+fn stable_link_child(
+    source: &File,
+    _source_path: &Path,
+    source_name: &OsStr,
+    destination: &File,
+    _destination_path: &Path,
+    destination_name: &OsStr,
+) -> io::Result<()> {
+    rustix::fs::linkat(
+        source,
+        source_name,
+        destination,
+        destination_name,
+        rustix::fs::AtFlags::empty(),
+    )
+    .map_err(io::Error::from)
+}
+
+#[cfg(unix)]
+fn stable_unlink_child_if_identity(
+    parent: &File,
+    _path: &Path,
+    name: &OsStr,
+    expected: FileIdentity,
+) -> io::Result<()> {
+    use rustix::fs::{AtFlags, Mode, OFlags};
+    let opened = rustix::fs::openat(
+        parent,
+        name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(io::Error::from)?;
+    if !opened.metadata()?.is_file() {
+        return Err(io::Error::other("child is not a regular file"));
+    }
+    if file_identity(&opened)? != expected {
+        return Err(io::Error::other("child identity changed before unlink"));
+    }
+    let named =
+        rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW).map_err(io::Error::from)?;
+    // `dev_t` is an opaque device bit pattern. It is unsigned on Linux and
+    // signed on Darwin, so preserving the bits requires a target-dependent
+    // no-op/sign cast that Clippy cannot express portably without allowances.
+    #[allow(clippy::cast_sign_loss, clippy::unnecessary_cast)]
+    let volume_serial = named.st_dev as u64;
+    let named_identity = FileIdentity {
+        volume_serial,
+        file_id: u128::from(named.st_ino).to_le_bytes(),
+    };
+    if named_identity != expected {
+        return Err(io::Error::other("child identity changed before unlink"));
+    }
+    rustix::fs::unlinkat(parent, name, AtFlags::empty()).map_err(io::Error::from)
+}
+
+#[cfg(windows)]
+fn stable_open_directory(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    const FILE_SHARE_READ: u32 = 0x0000_0001;
+    const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+#[cfg(windows)]
+fn stable_open_directory_for_sync(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    const FILE_SHARE_READ: u32 = 0x0000_0001;
+    const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+#[cfg(windows)]
+fn stable_open_child_directory(_parent: &File, path: &Path, _name: &OsStr) -> io::Result<File> {
+    stable_open_directory(path)
+}
+
+#[cfg(windows)]
+fn stable_create_child_directory(_parent: &File, path: &Path, _name: &OsStr) -> io::Result<()> {
+    match create_private_directory(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(windows)]
+fn stable_open_child_file(
+    _parent: &File,
+    path: &Path,
+    _name: &OsStr,
+    create_new: bool,
+) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    const FILE_SHARE_READ: u32 = 0x0000_0001;
+    const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    let mut options = std::fs::OpenOptions::new();
+    options
+        .read(true)
+        .write(create_new)
+        .create_new(create_new)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    options.open(path)
+}
+
+#[cfg(windows)]
+fn stable_open_replaceable_child_file(
+    _parent: &File,
+    path: &Path,
+    _name: &OsStr,
+) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    const FILE_SHARE_READ: u32 = 0x0000_0001;
+    const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+    const FILE_SHARE_DELETE: u32 = 0x0000_0004;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+#[cfg(windows)]
+fn stable_open_or_create_child_file(
+    _parent: &File,
+    path: &Path,
+    _name: &OsStr,
+) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    const FILE_SHARE_READ: u32 = 0x0000_0001;
+    const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+#[cfg(windows)]
+fn stable_child_names(_parent: &File, path: &Path) -> io::Result<Vec<std::ffi::OsString>> {
+    std::fs::read_dir(path)?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect()
+}
+
+#[cfg(windows)]
+fn stable_link_child(
+    _source: &File,
+    source_path: &Path,
+    source_name: &OsStr,
+    _destination: &File,
+    destination_path: &Path,
+    destination_name: &OsStr,
+) -> io::Result<()> {
+    std::fs::hard_link(
+        source_path.join(source_name),
+        destination_path.join(destination_name),
+    )
+}
+
+#[cfg(windows)]
+fn stable_unlink_child_if_identity(
+    _parent: &File,
+    path: &Path,
+    name: &OsStr,
+    expected: FileIdentity,
+) -> io::Result<()> {
+    let child = path.join(name);
+    windows::delete_file_by_handle(&child, expected)
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn stable_open_directory(_path: &Path) -> io::Result<File> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "stable directories unsupported",
+    ))
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn stable_open_child_directory(_parent: &File, _path: &Path, _name: &OsStr) -> io::Result<File> {
+    stable_open_directory(Path::new(""))
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn stable_open_or_create_child_file(
+    _parent: &File,
+    _path: &Path,
+    _name: &OsStr,
+) -> io::Result<File> {
+    stable_open_directory(Path::new(""))
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn stable_open_replaceable_child_file(
+    _parent: &File,
+    _path: &Path,
+    _name: &OsStr,
+) -> io::Result<File> {
+    stable_open_directory(Path::new(""))
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn stable_child_names(_parent: &File, _path: &Path) -> io::Result<Vec<std::ffi::OsString>> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "stable directories unsupported",
+    ))
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn stable_link_child(
+    _source: &File,
+    _source_path: &Path,
+    _source_name: &OsStr,
+    _destination: &File,
+    _destination_path: &Path,
+    _destination_name: &OsStr,
+) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "stable directories unsupported",
+    ))
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn stable_unlink_child_if_identity(
+    _parent: &File,
+    _path: &Path,
+    _name: &OsStr,
+    _expected: FileIdentity,
+) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "stable directories unsupported",
+    ))
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn stable_create_child_directory(_parent: &File, _path: &Path, _name: &OsStr) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "stable directories unsupported",
+    ))
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn stable_open_child_file(
+    _parent: &File,
+    _path: &Path,
+    _name: &OsStr,
+    _create_new: bool,
+) -> io::Result<File> {
+    stable_open_directory(Path::new(""))
 }
 
 /// Native Windows volume facts needed by the durability admission policy.
@@ -134,7 +788,7 @@ pub fn replace_file(
 ) -> Result<(), ReplaceFileError> {
     verify_single_component(source_name).map_err(ReplaceFileError::NotReplaced)?;
     verify_single_component(target_name).map_err(ReplaceFileError::NotReplaced)?;
-    replace_file_platform(directory, source_name, target_name)
+    replace_file_platform(directory, source_name, target_name, None)
 }
 
 /// Atomically install a new regular file without replacing an existing entry.
@@ -148,7 +802,7 @@ pub fn install_new_file(
 ) -> io::Result<()> {
     verify_single_component(source_name)?;
     verify_single_component(target_name)?;
-    install_new_file_platform(directory, source_name, target_name)
+    install_new_file_platform(directory, source_name, target_name, None)
 }
 
 fn verify_single_component(name: &OsStr) -> io::Result<()> {
@@ -208,13 +862,14 @@ fn replace_file_platform(
     directory: &File,
     source_name: &OsStr,
     target_name: &OsStr,
+    expected_source: Option<FileIdentity>,
 ) -> Result<(), ReplaceFileError> {
     use rustix::fs::{AtFlags, Mode, OFlags, openat, renameat, statat};
 
     let source = openat(
         directory,
         source_name,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
         Mode::empty(),
     )
     .map(File::from)
@@ -223,7 +878,7 @@ fn replace_file_platform(
     let target = openat(
         directory,
         target_name,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
         Mode::empty(),
     )
     .map(File::from)
@@ -234,17 +889,28 @@ fn replace_file_platform(
     verify_regular_metadata(&target.metadata().map_err(ReplaceFileError::NotReplaced)?)
         .map_err(ReplaceFileError::NotReplaced)?;
     let source_identity = unix_identity(&source).map_err(ReplaceFileError::NotReplaced)?;
+    if expected_source.is_some_and(|expected| expected != source_identity) {
+        return Err(ReplaceFileError::NotReplaced(io::Error::other(
+            "rename source differs from the retained expected identity",
+        )));
+    }
     renameat(directory, source_name, directory, target_name)
         .map_err(io::Error::from)
         .map_err(ReplaceFileError::NotReplaced)?;
     let replaced = openat(
         directory,
         target_name,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
         Mode::empty(),
     )
     .map(File::from)
     .map_err(io::Error::from)
+    .map_err(ReplaceFileError::StateUnknown)?;
+    verify_regular_metadata(
+        &replaced
+            .metadata()
+            .map_err(ReplaceFileError::StateUnknown)?,
+    )
     .map_err(ReplaceFileError::StateUnknown)?;
     if unix_identity(&replaced).map_err(ReplaceFileError::StateUnknown)? != source_identity
         || statat(directory, source_name, AtFlags::SYMLINK_NOFOLLOW).is_ok()
@@ -326,19 +992,25 @@ fn install_new_file_platform(
     directory: &File,
     source_name: &OsStr,
     target_name: &OsStr,
+    expected_source: Option<FileIdentity>,
 ) -> io::Result<()> {
     use rustix::fs::{Mode, OFlags, RenameFlags, openat, renameat_with};
 
     let source = openat(
         directory,
         source_name,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
         Mode::empty(),
     )
     .map(File::from)
     .map_err(io::Error::from)?;
     verify_regular_metadata(&source.metadata()?)?;
     let source_identity = unix_identity(&source)?;
+    if expected_source.is_some_and(|expected| expected != source_identity) {
+        return Err(io::Error::other(
+            "rename source differs from the retained expected identity",
+        ));
+    }
     renameat_with(
         directory,
         source_name,
@@ -350,11 +1022,12 @@ fn install_new_file_platform(
     let installed = openat(
         directory,
         target_name,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
         Mode::empty(),
     )
     .map(File::from)
     .map_err(io::Error::from)?;
+    verify_regular_metadata(&installed.metadata()?)?;
     if unix_identity(&installed)? != source_identity {
         return Err(io::Error::other("atomic creation state did not reconcile"));
     }
@@ -366,8 +1039,9 @@ fn replace_file_platform(
     directory: &File,
     source_name: &OsStr,
     target_name: &OsStr,
+    expected_source: Option<FileIdentity>,
 ) -> Result<(), ReplaceFileError> {
-    windows::replace_file(directory, source_name, target_name)
+    windows::replace_file(directory, source_name, target_name, expected_source)
 }
 
 #[cfg(windows)]
@@ -375,10 +1049,11 @@ fn install_new_file_platform(
     directory: &File,
     source_name: &OsStr,
     target_name: &OsStr,
+    expected_source: Option<FileIdentity>,
 ) -> io::Result<()> {
     // The native handle-scoped rename is the race-free no-replace authority;
     // identity reconciliation supplies a stable AlreadyExists class.
-    windows::install_new_file(directory, source_name, target_name)
+    windows::install_new_file(directory, source_name, target_name, expected_source)
 }
 
 #[cfg(windows)]
@@ -391,6 +1066,7 @@ fn replace_file_platform(
     _directory: &File,
     _source_name: &OsStr,
     _target_name: &OsStr,
+    _expected_source: Option<FileIdentity>,
 ) -> Result<(), ReplaceFileError> {
     Err(ReplaceFileError::NotReplaced(io::Error::new(
         io::ErrorKind::Unsupported,
@@ -403,6 +1079,7 @@ fn install_new_file_platform(
     _directory: &File,
     _source_name: &OsStr,
     _target_name: &OsStr,
+    _expected_source: Option<FileIdentity>,
 ) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
@@ -473,12 +1150,13 @@ mod windows {
     use windows_sys::Win32::Security::{DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION};
     use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
     use windows_sys::Win32::Storage::FileSystem::{
-        BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, DELETE, FILE_FLAG_BACKUP_SEMANTICS,
-        FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_WRITE_THROUGH, FILE_ID_INFO, FILE_NAME_NORMALIZED,
-        FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ,
-        FILE_SHARE_WRITE, FileIdInfo, FileRenameInfo, FileRenameInfoEx, GetDriveTypeW,
-        GetFileInformationByHandle, GetFileInformationByHandleEx, GetFinalPathNameByHandleW,
-        GetVolumeInformationW, GetVolumePathNameW, SetFileInformationByHandle, VOLUME_NAME_DOS,
+        BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, DELETE, FILE_DISPOSITION_INFO,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_WRITE_THROUGH,
+        FILE_ID_INFO, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileDispositionInfo, FileIdInfo,
+        FileRenameInfo, FileRenameInfoEx, GetDriveTypeW, GetFileInformationByHandle,
+        GetFileInformationByHandleEx, GetFinalPathNameByHandleW, GetVolumeInformationW,
+        GetVolumePathNameW, SetFileInformationByHandle, VOLUME_NAME_DOS,
     };
 
     #[cfg(test)]
@@ -499,6 +1177,7 @@ mod windows {
         directory: &File,
         source_name: &OsStr,
         target_name: &OsStr,
+        expected_source: Option<FileIdentity>,
     ) -> Result<(), ReplaceFileError> {
         let (_directory_guard, directory_path) =
             guarded_directory_path(directory).map_err(ReplaceFileError::NotReplaced)?;
@@ -508,6 +1187,11 @@ mod windows {
         verify_open_regular(&source).map_err(ReplaceFileError::NotReplaced)?;
         source.sync_all().map_err(ReplaceFileError::NotReplaced)?;
         let source_before = file_identity(&source).map_err(ReplaceFileError::NotReplaced)?;
+        if expected_source.is_some_and(|expected| expected != source_before) {
+            return Err(ReplaceFileError::NotReplaced(io::Error::other(
+                "rename source differs from the retained expected identity",
+            )));
+        }
         if identity(&source_path).map_err(ReplaceFileError::NotReplaced)? != source_before {
             return Err(ReplaceFileError::NotReplaced(io::Error::other(
                 "rename source identity changed during open",
@@ -559,14 +1243,16 @@ mod windows {
         directory: &File,
         source_name: &OsStr,
         target_name: &OsStr,
+        expected_source: Option<FileIdentity>,
     ) -> io::Result<()> {
-        install_new_file_before_rename(directory, source_name, target_name, || {})
+        install_new_file_before_rename(directory, source_name, target_name, expected_source, || {})
     }
 
     fn install_new_file_before_rename(
         directory: &File,
         source_name: &OsStr,
         target_name: &OsStr,
+        expected_source: Option<FileIdentity>,
         before_rename: impl FnOnce(),
     ) -> io::Result<()> {
         let (_directory_guard, directory_path) = guarded_directory_path(directory)?;
@@ -576,6 +1262,11 @@ mod windows {
         verify_open_regular(&source)?;
         source.sync_all()?;
         let source_identity = file_identity(&source)?;
+        if expected_source.is_some_and(|expected| expected != source_identity) {
+            return Err(io::Error::other(
+                "rename source differs from the retained expected identity",
+            ));
+        }
         if identity(&source_path)? != source_identity {
             return Err(io::Error::other(
                 "rename source identity changed during open",
@@ -639,6 +1330,35 @@ mod windows {
             .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH)
             .open(path)
+    }
+
+    pub(super) fn delete_file_by_handle(path: &Path, expected: FileIdentity) -> io::Result<()> {
+        let file = std::fs::OpenOptions::new()
+            .access_mode(DELETE | FILE_READ_ATTRIBUTES)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH)
+            .open(path)?;
+        if file_identity(&file)? != expected || identity(path)? != expected {
+            return Err(io::Error::other("child identity changed before unlink"));
+        }
+        let mut disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
+        // SAFETY: `file` is an exact retained handle opened with DELETE access,
+        // and `disposition` is the initialized structure required by
+        // FileDispositionInfo for the duration of the call.
+        let deleted = unsafe {
+            SetFileInformationByHandle(
+                file.as_raw_handle(),
+                FileDispositionInfo,
+                (&mut disposition as *mut FILE_DISPOSITION_INFO).cast(),
+                u32::try_from(std::mem::size_of::<FILE_DISPOSITION_INFO>())
+                    .expect("FILE_DISPOSITION_INFO size fits u32"),
+            )
+        };
+        if deleted == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
     }
 
     fn rename_handle(
@@ -1186,6 +1906,7 @@ mod windows {
                 &handle,
                 OsStr::new("source"),
                 OsStr::new("target"),
+                None,
                 || std::fs::write(&target, b"contender").unwrap(),
             )
             .unwrap_err();
@@ -1209,7 +1930,7 @@ mod windows {
             let target = directory.path().join(target_name);
             let handle = super::super::tests::directory_handle(directory.path());
 
-            install_new_file(&handle, OsStr::new("source"), target_name).unwrap();
+            install_new_file(&handle, OsStr::new("source"), target_name, None).unwrap();
 
             assert_eq!(std::fs::read(target).unwrap(), b"source");
             assert!(cwd_decoy.path().is_dir());
@@ -1233,6 +1954,7 @@ mod windows {
                 &caller,
                 OsStr::new("source"),
                 OsStr::new("target"),
+                None,
                 || assert!(std::fs::rename(&directory, &moved).is_err()),
             )
             .unwrap();
@@ -1264,12 +1986,39 @@ mod windows {
                 .open(&junction)
                 .unwrap();
 
-            let error = install_new_file(&caller, OsStr::new("source"), OsStr::new("published"))
-                .unwrap_err();
+            let error =
+                install_new_file(&caller, OsStr::new("source"), OsStr::new("published"), None)
+                    .unwrap_err();
 
             assert_eq!(error.kind(), io::ErrorKind::Other);
             assert_eq!(std::fs::read(source).unwrap(), b"source");
             assert!(!published.exists());
+        }
+
+        #[test]
+        fn install_rejects_source_substituted_after_expected_identity_was_recorded() {
+            let directory = tempfile::tempdir().unwrap();
+            let source = directory.path().join("source");
+            let original = directory.path().join("original");
+            let target = directory.path().join("target");
+            std::fs::write(&source, b"authenticated").unwrap();
+            let expected = identity(&source).unwrap();
+            std::fs::rename(&source, &original).unwrap();
+            std::fs::write(&source, b"substitute").unwrap();
+            let handle = super::super::tests::directory_handle(directory.path());
+
+            let error = install_new_file(
+                &handle,
+                OsStr::new("source"),
+                OsStr::new("target"),
+                Some(expected),
+            )
+            .unwrap_err();
+
+            assert_eq!(error.kind(), io::ErrorKind::Other);
+            assert_eq!(std::fs::read(source).unwrap(), b"substitute");
+            assert_eq!(std::fs::read(original).unwrap(), b"authenticated");
+            assert!(!target.exists());
         }
     }
 }
@@ -1277,6 +2026,12 @@ mod windows {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    const FIFO_CHILD_ENV: &str = "GRAPHFORGE_FILESYSTEM_FIFO_CHILD";
+
+    #[cfg(unix)]
+    const FIFO_ROOT_ENV: &str = "GRAPHFORGE_FILESYSTEM_FIFO_ROOT";
 
     pub(super) fn directory_handle(path: &Path) -> File {
         #[cfg(unix)]
@@ -1295,6 +2050,133 @@ mod tests {
                 .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
                 .open(path)
                 .unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn peerless_fifo_child() {
+        let Ok(operation) = std::env::var(FIFO_CHILD_ENV) else {
+            return;
+        };
+        let root = PathBuf::from(std::env::var_os(FIFO_ROOT_ENV).expect("FIFO test root"));
+        let stable = StableDirectory::open(&root).unwrap();
+        let fifo_identity = path_identity(&root.join("fifo")).unwrap();
+        let regular_identity = path_identity(&root.join("regular")).unwrap();
+        let result = match operation.as_str() {
+            "open" => stable.open_child_file(OsStr::new("fifo")).map(drop),
+            "open-or-create" => stable
+                .open_or_create_child_file(OsStr::new("fifo"))
+                .map(drop),
+            "unlink" => stable.unlink_child_if_identity(OsStr::new("fifo"), fifo_identity),
+            "replace-source" => {
+                stable.replace_child(OsStr::new("fifo"), fifo_identity, OsStr::new("regular"))
+            }
+            "replace-target" => {
+                stable.replace_child(OsStr::new("regular"), regular_identity, OsStr::new("fifo"))
+            }
+            "native-replace-source" => replace_file(
+                &directory_handle(&root),
+                OsStr::new("fifo"),
+                OsStr::new("regular"),
+            )
+            .map_err(|error| io::Error::other(error.to_string())),
+            "native-replace-target" => replace_file(
+                &directory_handle(&root),
+                OsStr::new("regular"),
+                OsStr::new("fifo"),
+            )
+            .map_err(|error| io::Error::other(error.to_string())),
+            "native-install-source" => install_new_file(
+                &directory_handle(&root),
+                OsStr::new("fifo"),
+                OsStr::new("absent"),
+            ),
+            other => panic!("unknown FIFO operation {other}"),
+        };
+        assert!(
+            result.is_err(),
+            "peerless FIFO must fail closed: {operation}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn every_regular_child_operation_rejects_peerless_fifo_without_blocking() {
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+
+        for operation in [
+            "open",
+            "open-or-create",
+            "unlink",
+            "replace-source",
+            "replace-target",
+            "native-replace-source",
+            "native-replace-target",
+            "native-install-source",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            std::fs::write(root.path().join("regular"), b"regular").unwrap();
+            let status = Command::new("mkfifo")
+                .arg(root.path().join("fifo"))
+                .status()
+                .unwrap();
+            assert!(status.success(), "mkfifo failed for {operation}");
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "tests::peerless_fifo_child", "--nocapture"])
+                .env(FIFO_CHILD_ENV, operation)
+                .env(FIFO_ROOT_ENV, root.path())
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let started = Instant::now();
+            loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    assert!(
+                        status.success(),
+                        "FIFO child failed for {operation}: {status}"
+                    );
+                    break;
+                }
+                if started.elapsed() >= Duration::from_secs(2) {
+                    child.kill().unwrap();
+                    let _ = child.wait();
+                    panic!("regular-child operation blocked on peerless FIFO: {operation}");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn regular_child_operations_reject_symlinks_and_unix_sockets() {
+        use std::os::unix::fs::symlink;
+        use std::os::unix::net::UnixDatagram;
+
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("regular"), b"regular").unwrap();
+        symlink("regular", root.path().join("linked")).unwrap();
+        let _socket = UnixDatagram::bind(root.path().join("socket")).unwrap();
+        let stable = StableDirectory::open(root.path()).unwrap();
+
+        for special in ["linked", "socket"] {
+            assert!(stable.open_child_file(OsStr::new(special)).is_err());
+            assert!(
+                stable
+                    .open_or_create_child_file(OsStr::new(special))
+                    .is_err()
+            );
+            let identity = path_identity(&root.path().join(special)).unwrap();
+            assert!(
+                stable
+                    .unlink_child_if_identity(OsStr::new(special), identity)
+                    .is_err()
+            );
+            assert!(root.path().join(special).exists());
         }
     }
 
@@ -1416,5 +2298,151 @@ mod tests {
                 0o700
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stable_directory_fails_closed_after_named_child_substitution() {
+        let root = tempfile::tempdir().unwrap();
+        let stable_root = StableDirectory::open(root.path()).unwrap();
+        let child = stable_root
+            .create_child_directory(OsStr::new("objects"))
+            .unwrap();
+        let file = child.create_child_file(OsStr::new("payload")).unwrap();
+        drop(file);
+        let displaced = root.path().join("displaced");
+        std::fs::rename(root.path().join("objects"), &displaced).unwrap();
+        std::fs::create_dir(root.path().join("objects")).unwrap();
+
+        assert!(child.revalidate_named().is_err());
+        assert!(child.open_child_file(OsStr::new("payload")).is_err());
+        assert_eq!(std::fs::read(displaced.join("payload")).unwrap(), b"");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stable_directory_rejects_symlink_child() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        symlink(outside.path(), root.path().join("objects")).unwrap();
+        let stable_root = StableDirectory::open(root.path()).unwrap();
+        assert!(
+            stable_root
+                .open_child_directory(OsStr::new("objects"))
+                .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stable_directory_enumerates_and_links_only_retained_regular_source() {
+        use std::io::Write as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let stable = StableDirectory::open(root.path()).unwrap();
+        let source_dir = stable.create_child_directory(OsStr::new("source")).unwrap();
+        let destination = stable
+            .create_child_directory(OsStr::new("destination"))
+            .unwrap();
+        let mut source = source_dir.create_child_file(OsStr::new("payload")).unwrap();
+        source.write_all(b"payload").unwrap();
+        let identity = file_identity(&source).unwrap();
+        assert_eq!(
+            source_dir.child_names().unwrap(),
+            [std::ffi::OsString::from("payload")]
+        );
+        let (installed, installed_identity) = source_dir
+            .link_child_into(
+                OsStr::new("payload"),
+                &source,
+                identity,
+                &destination,
+                OsStr::new("copy"),
+            )
+            .unwrap();
+        assert_eq!(installed_identity, identity);
+        assert_eq!(file_identity(&installed).unwrap(), identity);
+
+        std::fs::rename(
+            root.path().join("source/payload"),
+            root.path().join("source/old"),
+        )
+        .unwrap();
+        std::fs::write(root.path().join("source/payload"), b"replacement").unwrap();
+        assert!(
+            source_dir
+                .link_child_into(
+                    OsStr::new("payload"),
+                    &source,
+                    identity,
+                    &destination,
+                    OsStr::new("bad")
+                )
+                .is_err()
+        );
+        assert!(!root.path().join("destination/bad").exists());
+    }
+
+    #[test]
+    fn stable_directory_rejects_non_child_names_and_identity_mismatch_cleanup() {
+        let root = tempfile::tempdir().unwrap();
+        let stable = StableDirectory::open(root.path()).unwrap();
+        assert!(stable.open_child_file(OsStr::new("../escape")).is_err());
+        let file = stable.create_child_file(OsStr::new("payload")).unwrap();
+        let identity = file_identity(&file).unwrap();
+        drop(file);
+        std::fs::rename(root.path().join("payload"), root.path().join("old")).unwrap();
+        std::fs::write(root.path().join("payload"), b"replacement").unwrap();
+        assert!(
+            stable
+                .unlink_child_if_identity(OsStr::new("payload"), identity)
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("payload")).unwrap(),
+            b"replacement"
+        );
+    }
+
+    #[test]
+    fn stable_directory_rejects_replaced_atomic_temporary_child() {
+        use std::io::Write as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let stable = StableDirectory::open(root.path()).unwrap();
+        let mut temporary = stable
+            .create_replaceable_child_file(OsStr::new("temporary"))
+            .unwrap();
+        temporary.write_all(b"authenticated").unwrap();
+        temporary.sync_all().unwrap();
+        let expected = file_identity(&temporary).unwrap();
+        drop(temporary);
+        std::fs::rename(root.path().join("temporary"), root.path().join("original")).unwrap();
+        std::fs::write(root.path().join("temporary"), b"substitute").unwrap();
+
+        assert!(
+            stable
+                .replace_child(OsStr::new("temporary"), expected, OsStr::new("CURRENT"))
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("temporary")).unwrap(),
+            b"substitute"
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("original")).unwrap(),
+            b"authenticated"
+        );
+        assert!(!root.path().join("CURRENT").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stable_directory_sync_uses_an_identity_checked_write_handle() {
+        let root = tempfile::tempdir().unwrap();
+        let stable = StableDirectory::open(root.path()).unwrap();
+        stable.sync().unwrap();
     }
 }

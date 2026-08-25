@@ -167,6 +167,14 @@ There are four CI surfaces for concurrency and durability contracts:
    reachability oracle as recovery: CURRENT, configured ancestors, and checkpoint
    roots. Live leases skip without waiting; concurrent publication returns
    `GF_WRITER_BUSY`; unknown or linked paths are quarantined and never deleted.
+   Generation-entry classification and project graph-object sweeping have
+   separate evidence. `skipped_live` counts only generation entries. The
+   graph-object sweep reports whether it completed or did not run because the
+   request was a dry run, generation cleanup remained bounded, the GC guard was
+   busy, a graph-object publication was live, or a project publication attempt
+   remained active. Completed sweeps also report objects marked, objects
+   removed, and physical bytes removed; deferred sweeps retain objects and
+   report zero physical-work counters.
    Graph delta compaction (`compact_graph_delta` / `preview_graph_delta_compaction`)
    publishes a new Parquet generation through the same CURRENT path and reclaims
    subsumed inputs only after acknowledgement via that shared oracle.

@@ -579,6 +579,10 @@ where
     let admission = admit_existing_project(container_root.as_ref(), mode)?;
     let root = canonical_project_root(admission.root())?;
     let transaction_uuid = revert_transaction_uuid(request.operation_uuid);
+    // Global lifecycle order is CAS -> writer -> checkpoint. Retain the
+    // shared CAS publication guard before acquiring either mutation lock;
+    // compact sources need it through CURRENT, while v1 holds it unused.
+    let graph_object_lease = crate::begin_graph_object_publication(&root)?;
     let mut locks = acquire_mutation_locks(&root)?;
     let checkpoint_root = checkpoint_root(&root)?;
     recover_pair(&checkpoint_root)?;
@@ -751,14 +755,16 @@ where
     // the parent's tree (CURRENT) would verify the restored inventory against
     // post-checkpoint mutations and fail closed with length/digest mismatch.
     let source_graph_tree = source.graph_tree_root();
-    let graph_tree = publication
-        .participants
-        .iter()
-        .any(|participant| {
-            participant.capability_id == crate::GRAPH_CAPABILITY_ID
-                && participant.record_family_id == crate::GRAPH_FILES_FAMILY
-        })
-        .then_some(source_graph_tree.as_path());
+    let source_graph_files = source.declared_graph_files_participant()?;
+    let compact_graph_objects = matches!(
+        source_graph_files,
+        Some(crate::GraphFilesParticipant::V2(_))
+    );
+    let graph_tree = matches!(
+        source_graph_files,
+        Some(crate::GraphFilesParticipant::V1(_))
+    )
+    .then_some(source_graph_tree.as_path());
     let receipt = match stage_project_generation_with_lock(
         identity,
         root.clone(),
@@ -770,7 +776,7 @@ where
     )? {
         ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
         ProjectStageOutcome::Staged(staged) => {
-            staged
+            let validated = staged
                 .validate(
                     |rows| {
                         let actual = rows
@@ -809,8 +815,12 @@ where
                         }
                         Ok(())
                     },
-                )?
-                .publish()?
+                )?;
+            if compact_graph_objects {
+                validated.publish_with_graph_objects(&graph_object_lease)?
+            } else {
+                validated.publish()?
+            }
         }
     };
     let resolved = resolve_verified_generation(
@@ -1317,7 +1327,7 @@ fn read_regular_bounded(path: &Path, max: u64) -> Result<Vec<u8>, GfError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW);
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
     let file = options.open(path).map_err(|_| {
         registry_corrupt("checkpoint registry file could not be opened without following links")
@@ -2459,6 +2469,146 @@ mod tests {
             "action=revert published-replay conflict return",
             false,
         );
+    }
+
+    #[test]
+    fn compact_graph_checkpoint_revert_reopens_without_a_graph_tree() {
+        let directory = tempdir().unwrap();
+        crate::open_or_initialize_project(directory.path()).unwrap();
+
+        let publish_compact = |payload: &[u8]| {
+            let selected = crate::resolve_project_generation(directory.path()).unwrap();
+            let workspace = tempdir().unwrap();
+            let relative = PathBuf::from("topology/nodes/000001.parquet");
+            fs::create_dir_all(workspace.path().join(relative.parent().unwrap())).unwrap();
+            fs::write(workspace.path().join(&relative), payload).unwrap();
+            let lease = crate::begin_graph_object_publication(directory.path()).unwrap();
+            let mut state = crate::GraphManifestState::empty();
+            let (graph_root, _) = crate::append_graph_files_v2(
+                &lease,
+                workspace.path(),
+                &mut state,
+                &[relative],
+                &[],
+            )
+            .unwrap();
+            let mut participants = selected
+                .participant_snapshots()
+                .unwrap()
+                .into_iter()
+                .filter(|entry| {
+                    !(entry.capability_id == crate::GRAPH_CAPABILITY_ID
+                        && entry.record_family_id == crate::GRAPH_FILES_FAMILY)
+                })
+                .map(snapshot_to_participant)
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            participants.push(crate::graph_files_root_participant(&graph_root).unwrap());
+            let request = crate::ProjectGenerationRequest {
+                transaction_uuid: Uuid::now_v7(),
+                generation_uuid: Uuid::now_v7(),
+                capabilities: selected
+                    .capabilities()
+                    .into_iter()
+                    .map(|entry| crate::ProjectCapability {
+                        capability_id: entry.capability_id,
+                        capability_version: entry.capability_version,
+                    })
+                    .collect(),
+                participants,
+            };
+            let crate::ProjectStageOutcome::Staged(staged) =
+                crate::stage_project_generation(directory.path(), &request).unwrap()
+            else {
+                panic!("fresh compact publication replayed")
+            };
+            staged
+                .validate(|_| Ok(()), |_, _| Ok(()))
+                .unwrap()
+                .publish_with_graph_objects(&lease)
+                .unwrap();
+            request.generation_uuid
+        };
+
+        let checkpoint_generation = publish_compact(b"checkpoint");
+        create_checkpoint(
+            directory.path(),
+            &create_request(Uuid::from_u128(140), "Compact"),
+        )
+        .unwrap();
+        let newer_generation = publish_compact(b"newer");
+        assert_ne!(checkpoint_generation, newer_generation);
+        let (_, restored) = revert_checkpoint(
+            directory.path(),
+            &CheckpointRevertRequest {
+                operation_uuid: Uuid::from_u128(141),
+                name: "Compact".into(),
+                reason: "restore compact root".into(),
+                actor_uuid: None,
+            },
+            || Ok(1_720_000_000_123_456),
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert!(!restored.graph_tree_root().exists());
+        let inventory = restored.graph_files_inventory().unwrap().unwrap();
+        assert_eq!(inventory.files.len(), 1);
+        let bytes = crate::read_graph_object(
+            directory.path(),
+            &inventory.files[0].content_sha256,
+            inventory.files[0].byte_length,
+        )
+        .unwrap();
+        assert_eq!(bytes, b"checkpoint");
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let revert_root = directory.path().to_path_buf();
+        let revert_barrier = barrier.clone();
+        let revert_sender = sender.clone();
+        let revert_thread = std::thread::spawn(move || {
+            revert_barrier.wait();
+            let result = revert_checkpoint(
+                &revert_root,
+                &CheckpointRevertRequest {
+                    operation_uuid: Uuid::from_u128(142),
+                    name: "Compact".into(),
+                    reason: "concurrent compact restore".into(),
+                    actor_uuid: None,
+                },
+                || Ok(1_720_000_000_123_457),
+                |_| Ok(()),
+            );
+            revert_sender.send(("revert", result.map(|_| ()))).unwrap();
+        });
+        let cleanup_root = directory.path().to_path_buf();
+        let cleanup_barrier = barrier.clone();
+        let cleanup_sender = sender.clone();
+        let cleanup_thread = std::thread::spawn(move || {
+            cleanup_barrier.wait();
+            let result = crate::execute_project_cleanup(
+                &cleanup_root,
+                crate::ProjectRetentionPolicy::default(),
+                crate::ProjectRetentionLimits::default(),
+            );
+            cleanup_sender
+                .send(("cleanup", result.map(|_| ())))
+                .unwrap();
+        });
+        barrier.wait();
+        let mut outcomes = BTreeMap::new();
+        for _ in 0..2 {
+            let (operation, result) = receiver
+                .recv_timeout(Duration::from_secs(5))
+                .expect("compact revert/retention lock ordering deadlocked");
+            outcomes.insert(operation, result);
+        }
+        revert_thread.join().unwrap();
+        cleanup_thread.join().unwrap();
+        outcomes.remove("revert").unwrap().unwrap();
+        if let Err(error) = outcomes.remove("cleanup").unwrap() {
+            assert_eq!(error.code(), "GF_WRITER_BUSY");
+        }
     }
 
     #[test]

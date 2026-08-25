@@ -75,6 +75,13 @@ test("maintenance preview and execution reconcile candidate identities", async (
     seed.commit();
     const preview = forge.previewProjectCleanup({ retainedAncestors: 2 });
     const executed = forge.executeProjectCleanup({ retainedAncestors: 2 });
+    assert.deepEqual(preview.graphObjectSweep, {
+      disposition: "not_run_dry_run",
+      objectsMarked: 0n,
+      objectsRemoved: 0n,
+      bytesRemoved: 0n,
+    });
+    assert.equal(executed.graphObjectSweep.disposition, "completed");
     assert.equal(preview.candidates, executed.candidates);
     assert.equal(preview.reachableCount, executed.reachableCount);
     assert.deepEqual(

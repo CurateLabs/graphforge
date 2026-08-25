@@ -29,13 +29,50 @@ pub use graph_projection::{
 };
 
 pub mod graph_files;
+#[cfg(test)]
+pub(crate) use graph_files::graph_files_root_participant;
 pub use graph_files::{
     GRAPH_CAPABILITY_ID, GRAPH_CAPABILITY_VERSION, GRAPH_FILES_FAMILY, GRAPH_FILES_RECORD_VERSION,
-    GRAPH_TREE_DIR, GraphFileEntry, GraphFileRole, GraphFilesInventory, GraphFilesOpenEvidence,
-    GraphFilesOpenStrategy, capture_graph_files, decode_inventory, encode_inventory,
-    graph_tree_root, inventory_participant, materialize_graph_tree, pinned_open_evidence,
-    stage_graph_tree, verify_graph_tree,
+    GRAPH_FILES_V2_RECORD_VERSION, GRAPH_TREE_DIR, GraphFileEntry, GraphFileRole,
+    GraphFilesInventory, GraphFilesOpenEvidence, GraphFilesOpenStrategy, capture_graph_files,
+    decode_inventory, encode_inventory, graph_tree_root, inventory_participant,
+    materialize_graph_tree, pinned_open_evidence, stage_graph_tree, verify_graph_tree,
 };
+pub(crate) use graph_files::{GraphFilesParticipant, decode_versioned_graph_files_participant};
+
+#[allow(
+    dead_code,
+    reason = "private node-v2 construction is consumed by the staged #932 integration"
+)]
+mod graph_manifest;
+#[cfg(any(test, feature = "test-support"))]
+pub use graph_manifest::encode_root as encode_graph_files_root_v2;
+pub(crate) use graph_manifest::{
+    GRAPH_FILES_V2_FORMAT, GRAPH_FILES_V2_VERSION, GRAPH_MANIFEST_NODE_FORMAT,
+    GRAPH_MANIFEST_NODE_VERSION, GRAPH_RADIX_DEPTH, GraphFilesRootV2, GraphManifestLimits,
+    GraphManifestNode, GraphManifestNodeKind, GraphManifestResolveEvidence,
+    decode_node as decode_graph_manifest_node, decode_root as decode_graph_files_root_v2,
+    encode_node as encode_graph_manifest_node, resolve_manifest as resolve_graph_manifest,
+};
+
+#[allow(
+    dead_code,
+    reason = "private CAS construction is consumed by the staged #932 integration"
+)]
+mod graph_object_store;
+pub use graph_object_store::materialize_graph_objects;
+#[cfg(any(test, feature = "test-support"))]
+pub use graph_object_store::{
+    GraphManifestState, append_graph_files_v2, install_graph_object_bytes, read_graph_object,
+};
+pub(crate) use graph_object_store::{
+    GraphObjectPublicationLease, graph_object_publication_is_live, read_graph_object_by_digest,
+    verify_graph_object,
+};
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use graph_object_store::{begin_graph_object_publication, graph_object_path};
+#[cfg(any(test, feature = "test-support"))]
+pub use graph_object_store::{begin_graph_object_publication, graph_object_path};
 
 pub mod semantic_bindings;
 pub use semantic_bindings::{
@@ -125,10 +162,10 @@ pub mod project_retention;
 pub use project_retention::{
     DEFAULT_RETENTION_CLEANUP_BATCH, DEFAULT_RETENTION_MAX_BYTES, DEFAULT_RETENTION_MAX_ENTRIES,
     DEFAULT_RETENTION_MAX_WORK_UNITS, ProjectCleanupDisposition, ProjectCleanupEntry,
-    ProjectCleanupLocation, ProjectCleanupReport, ProjectReachabilityReport,
-    ProjectRetentionLimits, ProjectRetentionPolicy, execute_project_cleanup,
-    execute_project_cleanup_with_mode, inspect_project_reachability,
-    inspect_project_reachability_with_mode, preview_project_cleanup,
+    ProjectCleanupLocation, ProjectCleanupReport, ProjectGraphObjectSweepDisposition,
+    ProjectGraphObjectSweepReport, ProjectReachabilityReport, ProjectRetentionLimits,
+    ProjectRetentionPolicy, execute_project_cleanup, execute_project_cleanup_with_mode,
+    inspect_project_reachability, inspect_project_reachability_with_mode, preview_project_cleanup,
     preview_project_cleanup_with_mode,
 };
 

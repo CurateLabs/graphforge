@@ -211,6 +211,12 @@ fn cleanup_json(report: &graphforge_api::ProjectCleanupReport) -> serde_json::Va
         "entries_scanned": report.entries_scanned,
         "work_units": report.work_units,
         "bounded": report.bounded,
+        "graph_object_sweep": {
+            "disposition": report.graph_object_sweep.disposition.as_str(),
+            "objects_marked": report.graph_object_sweep.objects_marked,
+            "objects_removed": report.graph_object_sweep.objects_removed,
+            "bytes_removed": report.graph_object_sweep.bytes_removed,
+        },
         "elapsed_ms": report.elapsed_ms,
         "entries": report.entries.iter().map(|entry| serde_json::json!({
             "generation_uuid": entry.generation_uuid.map(|uuid| uuid.to_string()),
