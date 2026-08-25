@@ -27,12 +27,84 @@ const ACTIVE_DIR: &str = "active";
 const LIFECYCLE_LOCK: &str = "lifecycle.lock";
 const BUFFER_BYTES: usize = 64 * 1024;
 
+#[cfg(test)]
+thread_local! {
+    static RETURNED_ERROR_BOUNDARY: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn returned_error_boundary(name: &str) -> Result<(), GfError> {
+    if RETURNED_ERROR_BOUNDARY.with(|boundary| boundary.borrow().as_deref() == Some(name)) {
+        return Err(GfError::Storage(format!(
+            "injected graph object returned error at {name}"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(not(test))]
+#[allow(clippy::unnecessary_wraps)]
+fn returned_error_boundary(_name: &str) -> Result<(), GfError> {
+    Ok(())
+}
+
 /// Kernel-visible lease protecting CAS objects installed by one publication.
 pub struct GraphObjectPublicationLease {
     cas: CasRoot,
     lease_name: std::ffi::OsString,
     lease_identity: graphforge_filesystem::FileIdentity,
-    file: File,
+    file: Option<File>,
+}
+
+struct HeldCasLocks<'a> {
+    objects: &'a StableDirectory,
+    lifecycle: &'a File,
+    objects_locked: bool,
+    lifecycle_locked: bool,
+}
+
+impl HeldCasLocks<'_> {
+    fn disarm(mut self) {
+        self.lifecycle_locked = false;
+        self.objects_locked = false;
+    }
+}
+
+impl Drop for HeldCasLocks<'_> {
+    fn drop(&mut self) {
+        if self.lifecycle_locked {
+            let _ = crate::file_lock::unlock(self.lifecycle);
+        }
+        if self.objects_locked {
+            let _ = self.objects.unlock();
+        }
+    }
+}
+
+struct PendingPublication<'a> {
+    cas: &'a CasRoot,
+    lease_name: std::ffi::OsString,
+    lease_identity: Option<graphforge_filesystem::FileIdentity>,
+    file: Option<File>,
+    lease_locked: bool,
+}
+
+impl Drop for PendingPublication<'_> {
+    fn drop(&mut self) {
+        if self.lease_locked
+            && let Some(file) = self.file.as_ref()
+        {
+            let _ = crate::file_lock::unlock(file);
+        }
+        self.file.take();
+        if let Some(identity) = self.lease_identity {
+            let _ = self
+                .cas
+                .active
+                .unlink_child_if_identity(&self.lease_name, identity);
+            let _ = self.cas.active.sync();
+        }
+    }
 }
 
 /// Exclusive guard spanning GC root discovery through sweep.
@@ -58,6 +130,63 @@ struct ReadOnlyCasRoot {
     sha256: StableDirectory,
     lifecycle: File,
     lifecycle_identity: graphforge_filesystem::FileIdentity,
+    locks_held: bool,
+}
+
+fn lock_cas_shared<'a>(
+    objects: &'a StableDirectory,
+    lifecycle: &'a File,
+    root: &Path,
+    action: &str,
+) -> Result<HeldCasLocks<'a>, GfError> {
+    objects.lock_shared().map_err(|error| {
+        storage(
+            &format!("lock graph object directory for {action}"),
+            root,
+            error,
+        )
+    })?;
+    let mut held = HeldCasLocks {
+        objects,
+        lifecycle,
+        objects_locked: true,
+        lifecycle_locked: false,
+    };
+    #[cfg(test)]
+    returned_error_boundary(&format!("{action}:objects-lock"))?;
+    crate::file_lock::lock_shared(lifecycle).map_err(|error| {
+        storage(
+            &format!("lock graph object {action} lifecycle"),
+            root,
+            error,
+        )
+    })?;
+    held.lifecycle_locked = true;
+    #[cfg(test)]
+    returned_error_boundary(&format!("{action}:lifecycle-lock"))?;
+    Ok(held)
+}
+
+fn lock_cas_exclusive<'a>(
+    objects: &'a StableDirectory,
+    lifecycle: &'a File,
+    root: &Path,
+) -> Result<HeldCasLocks<'a>, GfError> {
+    objects
+        .lock_exclusive()
+        .map_err(|error| storage("lock graph object directory for GC", root, error))?;
+    let mut held = HeldCasLocks {
+        objects,
+        lifecycle,
+        objects_locked: true,
+        lifecycle_locked: false,
+    };
+    returned_error_boundary("gc:objects-lock")?;
+    crate::file_lock::lock_exclusive(lifecycle)
+        .map_err(|error| storage("lock graph object GC lifecycle", root, error))?;
+    held.lifecycle_locked = true;
+    returned_error_boundary("gc:lifecycle-lock")?;
+    Ok(held)
 }
 
 impl CasRoot {
@@ -170,14 +299,6 @@ impl ReadOnlyCasRoot {
         }
         let lifecycle_identity = graphforge_filesystem::file_identity(&lifecycle)
             .map_err(|error| storage("inspect graph object lifecycle identity", root, error))?;
-        objects
-            .lock_shared()
-            .map_err(|error| storage("lock graph object directory for reading", root, error))?;
-        crate::file_lock::lock_shared(&lifecycle)
-            .inspect_err(|_| {
-                let _ = objects.unlock();
-            })
-            .map_err(|error| storage("lock graph object read lifecycle", root, error))?;
         let cas = Self {
             diagnostic_root: root.to_path_buf(),
             project,
@@ -185,8 +306,14 @@ impl ReadOnlyCasRoot {
             sha256,
             lifecycle,
             lifecycle_identity,
+            locks_held: false,
         };
+        let locks = lock_cas_shared(&cas.objects, &cas.lifecycle, root, "reading")?;
         cas.revalidate_named()?;
+        returned_error_boundary("reading:revalidate")?;
+        locks.disarm();
+        let mut cas = cas;
+        cas.locks_held = true;
         Ok(cas)
     }
 
@@ -235,8 +362,10 @@ impl ReadOnlyCasRoot {
 
 impl Drop for ReadOnlyCasRoot {
     fn drop(&mut self) {
-        let _ = crate::file_lock::unlock(&self.lifecycle);
-        let _ = self.objects.unlock();
+        if self.locks_held {
+            let _ = crate::file_lock::unlock(&self.lifecycle);
+            let _ = self.objects.unlock();
+        }
     }
 }
 
@@ -249,11 +378,15 @@ impl Drop for GraphObjectGcGuard {
 
 impl Drop for GraphObjectPublicationLease {
     fn drop(&mut self) {
-        let _ = crate::file_lock::unlock(&self.file);
+        if let Some(file) = self.file.take() {
+            let _ = crate::file_lock::unlock(&file);
+            drop(file);
+        }
         let _ = self
             .cas
             .active
             .unlink_child_if_identity(&self.lease_name, self.lease_identity);
+        let _ = self.cas.active.sync();
         let _ = crate::file_lock::unlock(&self.cas.lifecycle);
         let _ = self.cas.objects.unlock();
     }
@@ -283,34 +416,51 @@ impl GraphObjectPublicationLease {
 /// Begin a CAS installation attempt and hold its lease through CURRENT.
 pub fn begin_graph_object_publication(root: &Path) -> Result<GraphObjectPublicationLease, GfError> {
     let cas = CasRoot::open_mutable(root)?;
-    cas.objects
-        .lock_shared()
-        .map_err(|error| storage("lock graph object directory for publication", root, error))?;
-    crate::file_lock::lock_shared(&cas.lifecycle)
-        .inspect_err(|_| {
-            let _ = cas.objects.unlock();
-        })
-        .map_err(|error| storage("lock graph object publication lifecycle", root, error))?;
+    let locks = lock_cas_shared(&cas.objects, &cas.lifecycle, root, "publication")?;
     cas.revalidate_named()?;
+    returned_error_boundary("publication:revalidate")?;
     let lease_name = std::ffi::OsString::from(format!("{}.lock", Uuid::new_v4().hyphenated()));
     let file = cas
         .active
         .create_child_file(&lease_name)
         .map_err(|error| storage("create graph object publication lease", root, error))?;
-    let lease_identity = graphforge_filesystem::file_identity(&file)
+    let mut pending = PendingPublication {
+        cas: &cas,
+        lease_name: lease_name.clone(),
+        lease_identity: None,
+        file: Some(file),
+        lease_locked: false,
+    };
+    returned_error_boundary("publication:lease-create")?;
+    let lease_identity = graphforge_filesystem::file_identity(pending.file.as_ref().unwrap())
         .map_err(|error| storage("inspect graph object publication lease", root, error))?;
-    crate::file_lock::lock_exclusive(&file)
+    pending.lease_identity = Some(lease_identity);
+    returned_error_boundary("publication:lease-identity")?;
+    crate::file_lock::lock_exclusive(pending.file.as_ref().unwrap())
         .map_err(|error| storage("lock graph object publication lease", root, error))?;
-    file.sync_all()
+    pending.lease_locked = true;
+    returned_error_boundary("publication:lease-lock")?;
+    pending
+        .file
+        .as_ref()
+        .unwrap()
+        .sync_all()
         .map_err(|error| storage("sync graph object publication lease", root, error))?;
+    returned_error_boundary("publication:lease-sync")?;
     cas.active
         .sync()
         .map_err(|error| storage("sync graph object active directory", root, error))?;
+    returned_error_boundary("publication:active-sync")?;
+    let file = pending.file.take().unwrap();
+    pending.lease_locked = false;
+    pending.lease_identity = None;
+    drop(pending);
+    locks.disarm();
     Ok(GraphObjectPublicationLease {
         cas,
         lease_name,
         lease_identity,
-        file,
+        file: Some(file),
     })
 }
 
@@ -348,9 +498,13 @@ pub fn graph_object_publication_is_live(root: &Path) -> Result<bool, GfError> {
         {
             crate::file_lock::unlock(&file)
                 .map_err(|error| storage("unlock graph object lease", root, error))?;
+            drop(file);
             cas.active
                 .unlink_child_if_identity(&entry, identity)
                 .map_err(|error| storage("remove stale graph object lease", root, error))?;
+            cas.active
+                .sync()
+                .map_err(|error| storage("sync graph object active directory", root, error))?;
         } else {
             live = true;
         }
@@ -479,15 +633,10 @@ pub fn gc_graph_objects(
 #[cfg(test)]
 pub(crate) fn begin_graph_object_gc(root: &Path) -> Result<GraphObjectGcGuard, GfError> {
     let cas = CasRoot::open_mutable(root)?;
-    cas.objects
-        .lock_exclusive()
-        .map_err(|error| storage("lock graph object directory for GC", root, error))?;
-    crate::file_lock::lock_exclusive(&cas.lifecycle)
-        .inspect_err(|_| {
-            let _ = cas.objects.unlock();
-        })
-        .map_err(|error| storage("lock graph object GC lifecycle", root, error))?;
+    let locks = lock_cas_exclusive(&cas.objects, &cas.lifecycle, root)?;
     cas.revalidate_named()?;
+    returned_error_boundary("gc:revalidate")?;
+    locks.disarm();
     Ok(GraphObjectGcGuard { cas })
 }
 
@@ -502,13 +651,23 @@ pub(crate) fn try_begin_graph_object_gc(
     {
         return Ok(None);
     }
+    let mut locks = HeldCasLocks {
+        objects: &cas.objects,
+        lifecycle: &cas.lifecycle,
+        objects_locked: true,
+        lifecycle_locked: false,
+    };
+    returned_error_boundary("try-gc:objects-lock")?;
     if !crate::file_lock::try_lock_exclusive(&cas.lifecycle)
         .map_err(|error| storage("try graph object GC lifecycle", root, error))?
     {
-        let _ = cas.objects.unlock();
         return Ok(None);
     }
+    locks.lifecycle_locked = true;
+    returned_error_boundary("try-gc:lifecycle-lock")?;
     cas.revalidate_named()?;
+    returned_error_boundary("try-gc:revalidate")?;
+    locks.disarm();
     Ok(Some(GraphObjectGcGuard { cas }))
 }
 
@@ -2008,6 +2167,93 @@ fn storage(action: &str, path: &Path, error: impl std::fmt::Display) -> GfError 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn inject_returned_error(boundary: Option<&str>) {
+        RETURNED_ERROR_BOUNDARY.with(|current| {
+            *current.borrow_mut() = boundary.map(str::to_owned);
+        });
+    }
+
+    fn assert_injected_error(error: GfError, boundary: &str) {
+        match error {
+            GfError::Storage(message) => assert_eq!(
+                message,
+                format!("injected graph object returned error at {boundary}")
+            ),
+            other => panic!("unexpected injected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn returned_errors_release_every_cas_lock_and_pending_lease_boundary() {
+        let root = tempfile::tempdir().unwrap();
+        drop(begin_graph_object_publication(root.path()).unwrap());
+
+        for boundary in [
+            "reading:objects-lock",
+            "reading:lifecycle-lock",
+            "reading:revalidate",
+        ] {
+            inject_returned_error(Some(boundary));
+            let error = ReadOnlyCasRoot::open(root.path()).err().unwrap();
+            assert_injected_error(error, boundary);
+            inject_returned_error(None);
+            drop(try_begin_graph_object_gc(root.path()).unwrap().unwrap());
+        }
+
+        for boundary in ["gc:objects-lock", "gc:lifecycle-lock", "gc:revalidate"] {
+            inject_returned_error(Some(boundary));
+            let error = begin_graph_object_gc(root.path()).err().unwrap();
+            assert_injected_error(error, boundary);
+            inject_returned_error(None);
+            drop(try_begin_graph_object_gc(root.path()).unwrap().unwrap());
+        }
+
+        for boundary in [
+            "try-gc:objects-lock",
+            "try-gc:lifecycle-lock",
+            "try-gc:revalidate",
+        ] {
+            inject_returned_error(Some(boundary));
+            let error = try_begin_graph_object_gc(root.path()).err().unwrap();
+            assert_injected_error(error, boundary);
+            inject_returned_error(None);
+            drop(try_begin_graph_object_gc(root.path()).unwrap().unwrap());
+        }
+
+        for boundary in [
+            "publication:objects-lock",
+            "publication:lifecycle-lock",
+            "publication:revalidate",
+            "publication:lease-create",
+            "publication:lease-identity",
+            "publication:lease-lock",
+            "publication:lease-sync",
+            "publication:active-sync",
+        ] {
+            inject_returned_error(Some(boundary));
+            let error = begin_graph_object_publication(root.path()).err().unwrap();
+            assert_injected_error(error, boundary);
+            inject_returned_error(None);
+            let residue_count = fs::read_dir(root.path().join(GRAPH_OBJECTS_DIR).join(ACTIVE_DIR))
+                .unwrap()
+                .count();
+            assert_eq!(
+                residue_count,
+                usize::from(boundary == "publication:lease-create")
+            );
+            assert!(!graph_object_publication_is_live(root.path()).unwrap());
+            assert_eq!(
+                fs::read_dir(root.path().join(GRAPH_OBJECTS_DIR).join(ACTIVE_DIR))
+                    .unwrap()
+                    .count(),
+                0
+            );
+            drop(begin_graph_object_publication(root.path()).unwrap());
+            drop(try_begin_graph_object_gc(root.path()).unwrap().unwrap());
+            drop(ReadOnlyCasRoot::open(root.path()).unwrap());
+        }
+    }
 
     #[test]
     fn pure_reads_require_only_existing_digest_namespace_and_never_create() {

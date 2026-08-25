@@ -952,6 +952,12 @@ jobs:
           cargo test -p graphforge-storage --lib \
             graph_object_store::tests::read_only_lifecycle_rejects_multiple_links \
             -- --exact --nocapture
+          cargo test -p graphforge-storage --lib \
+            graph_object_store::tests::returned_errors_release_every_cas_lock_and_pending_lease_boundary \
+            -- --exact --nocapture
+          cargo test -p graphforge-storage --lib \
+            graph_object_store::tests::publication_and_gc_lifecycles_are_mutually_exclusive \
+            -- --exact --nocapture
 
       - name: Cross-check Windows publication-kill results against the fault oracle
         shell: bash
