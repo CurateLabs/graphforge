@@ -2446,6 +2446,7 @@ dependencies = [
  "arrow",
  "async-trait",
  "atomicwrites",
+ "bytes",
  "codspeed-divan-compat",
  "datafusion",
  "datafusion-catalog",

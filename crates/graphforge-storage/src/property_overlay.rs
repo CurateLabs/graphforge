@@ -9,9 +9,16 @@ use std::collections::{BTreeMap, BinaryHeap};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
+use arrow::array::{Array, BooleanArray, RecordBatch};
+use bytes::Bytes;
 use graphforge_core::GfError;
 use graphforge_ir::IrLiteral;
+use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
+use parquet::errors::ParquetError;
+use parquet::file::reader::{ChunkReader, Length};
 use serde::{Deserialize, Serialize};
 
 /// On-disk property overlay format marker.
@@ -20,6 +27,10 @@ pub const PROPERTY_OVERLAY_FORMAT: &str = "full-snapshot-v1";
 pub const PROPERTY_OVERLAY_FORMAT_KEY: &str = "graphforge.property_overlay";
 /// Reserved non-user column marking whole-row deletion.
 pub const PROPERTY_TOMBSTONE_FIELD: &str = "__gf_property_tombstone";
+const PROPERTY_ROUTE_KEY: &str = "graphforge.property_route";
+const PROPERTY_KIND_KEY: &str = "graphforge.property_kind";
+const PROPERTY_GENERATION_KEY: &str = "graphforge.property_generation";
+const PROPERTY_ORDINAL_KEY: &str = "graphforge.property_ordinal";
 
 /// Node and edge property namespaces are disjoint authorities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +47,78 @@ impl PropertyRouteKind {
             Self::Node => "properties",
             Self::Edge => "edge_properties",
         }
+    }
+
+    fn metadata_value(self) -> &'static str {
+        match self {
+            Self::Node => "node",
+            Self::Edge => "edge",
+        }
+    }
+
+    fn uuid_field(self) -> &'static str {
+        match self {
+            Self::Node => "node_uuid",
+            Self::Edge => "edge_uuid",
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct ReadCounts {
+    bytes: AtomicU64,
+    blocks: AtomicU64,
+}
+
+#[derive(Debug)]
+struct CountingChunkReader {
+    file: File,
+    length: u64,
+    counts: Arc<ReadCounts>,
+}
+
+struct CountingRead<R> {
+    inner: R,
+    counts: Arc<ReadCounts>,
+}
+
+impl<R: std::io::Read> std::io::Read for CountingRead<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let read = self.inner.read(buffer)?;
+        if read != 0 {
+            self.counts
+                .bytes
+                .fetch_add(u64::try_from(read).unwrap_or(u64::MAX), Ordering::Relaxed);
+            self.counts.blocks.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(read)
+    }
+}
+
+impl Length for CountingChunkReader {
+    fn len(&self) -> u64 {
+        self.length
+    }
+}
+
+impl ChunkReader for CountingChunkReader {
+    type T = CountingRead<BufReader<File>>;
+
+    fn get_read(&self, start: u64) -> parquet::errors::Result<Self::T> {
+        use std::io::{Seek, SeekFrom};
+        let mut file = self.file.try_clone()?;
+        file.seek(SeekFrom::Start(start))?;
+        Ok(CountingRead {
+            inner: BufReader::new(file),
+            counts: Arc::clone(&self.counts),
+        })
+    }
+
+    fn get_bytes(&self, start: u64, length: usize) -> parquet::errors::Result<Bytes> {
+        let mut reader = self.get_read(start)?;
+        let mut buffer = vec![0; length];
+        std::io::Read::read_exact(&mut reader, &mut buffer)?;
+        Ok(Bytes::from(buffer))
     }
 }
 
@@ -143,6 +226,213 @@ pub struct PropertyOverlayLimits {
     pub max_buffered_rows: usize,
     /// Maximum runs opened in one merge pass.
     pub max_open_runs: usize,
+}
+
+struct PropertyParquetRows {
+    reader: ParquetRecordBatchReader,
+    current: std::vec::IntoIter<PropertySnapshotRow>,
+    uuid_field: &'static str,
+    failed: Arc<Mutex<Option<GfError>>>,
+}
+
+impl Iterator for PropertyParquetRows {
+    type Item = PropertySnapshotRow;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(row) = self.current.next() {
+                return Some(row);
+            }
+            let batch = match self.reader.next()? {
+                Ok(batch) => batch,
+                Err(error) => {
+                    *self.failed.lock().expect("property failure lock") =
+                        Some(GfError::Storage(format!("property overlay Arrow: {error}")));
+                    return None;
+                }
+            };
+            match decode_snapshot_batch(&batch, self.uuid_field) {
+                Ok(rows) => self.current = rows.into_iter(),
+                Err(error) => {
+                    *self.failed.lock().expect("property failure lock") = Some(error);
+                    return None;
+                }
+            }
+        }
+    }
+}
+
+struct AuthenticatedFragmentRows {
+    id: PropertyFragmentId,
+    rows: PropertyParquetRows,
+    counts: Arc<ReadCounts>,
+    failed: Arc<Mutex<Option<GfError>>>,
+}
+
+/// Scan a route through authenticated retained file handles and emit its
+/// full-snapshot-v1 newest live rows. This is the production authority; the
+/// generic external merge helper remains crate-internal.
+pub fn visit_authenticated_property_snapshots<F>(
+    project: &Path,
+    kind: PropertyRouteKind,
+    route: &str,
+    scratch: &Path,
+    limits: PropertyOverlayLimits,
+    emit: F,
+) -> Result<PropertyOverlayMetrics, GfError>
+where
+    F: FnMut(PropertySnapshotRow) -> Result<(), GfError>,
+{
+    let fragments = enumerate_property_fragments(project, kind, route)?;
+    let mut admitted = Vec::with_capacity(fragments.len());
+    for fragment in fragments {
+        admitted.push(open_authenticated_fragment(fragment, kind, route)?);
+    }
+    let counters = admitted
+        .iter()
+        .map(|fragment| Arc::clone(&fragment.counts))
+        .collect::<Vec<_>>();
+    let failures = admitted
+        .iter_mut()
+        .map(|fragment| Arc::clone(&fragment.failed))
+        .collect::<Vec<_>>();
+    let inputs = admitted
+        .into_iter()
+        .map(|fragment| (fragment.id, 0, 0, fragment.rows));
+    let mut metrics = visit_newest_property_snapshots(inputs, scratch, limits, emit)?;
+    if let Some(error) = failures
+        .iter()
+        .find_map(|failure| failure.lock().expect("property failure lock").take())
+    {
+        return Err(error);
+    }
+    metrics.physical_bytes = counters
+        .iter()
+        .map(|counts| counts.bytes.load(Ordering::Relaxed))
+        .sum();
+    metrics.blocks_read = counters
+        .iter()
+        .map(|counts| counts.blocks.load(Ordering::Relaxed))
+        .sum();
+    Ok(metrics)
+}
+
+fn open_authenticated_fragment(
+    fragment: PropertyFragment,
+    kind: PropertyRouteKind,
+    route: &str,
+) -> Result<AuthenticatedFragmentRows, GfError> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options.open(&fragment.path).map_err(io_error)?;
+    let metadata = file.metadata().map_err(io_error)?;
+    if !metadata.file_type().is_file() {
+        return Err(corrupt("property fragment handle is not a regular file"));
+    }
+    let counts = Arc::new(ReadCounts::default());
+    let source = CountingChunkReader {
+        file,
+        length: metadata.len(),
+        counts: Arc::clone(&counts),
+    };
+    let builder = ParquetRecordBatchReaderBuilder::try_new(source).map_err(parquet_error)?;
+    validate_fragment_schema(builder.schema().as_ref(), fragment.id, kind, route)?;
+    let reader = builder
+        .with_batch_size(4096)
+        .build()
+        .map_err(parquet_error)?;
+    let failed = Arc::new(Mutex::new(None));
+    Ok(AuthenticatedFragmentRows {
+        id: fragment.id,
+        rows: PropertyParquetRows {
+            reader,
+            current: Vec::new().into_iter(),
+            uuid_field: kind.uuid_field(),
+            failed: Arc::clone(&failed),
+        },
+        counts,
+        failed,
+    })
+}
+
+fn validate_fragment_schema(
+    schema: &arrow::datatypes::Schema,
+    id: PropertyFragmentId,
+    kind: PropertyRouteKind,
+    route: &str,
+) -> Result<(), GfError> {
+    let uuid = schema
+        .field_with_name(kind.uuid_field())
+        .map_err(|_| corrupt("property fragment lacks its UUID field"))?;
+    if uuid.is_nullable() || uuid.data_type() != &arrow::datatypes::DataType::FixedSizeBinary(16) {
+        return Err(corrupt(
+            "property UUID field is nullable or not fixed binary(16)",
+        ));
+    }
+    if id.generation == 0 && id.ordinal == 0 {
+        return Ok(());
+    }
+    let expected = [
+        (
+            PROPERTY_OVERLAY_FORMAT_KEY,
+            PROPERTY_OVERLAY_FORMAT.to_owned(),
+        ),
+        (PROPERTY_ROUTE_KEY, route.to_owned()),
+        (PROPERTY_KIND_KEY, kind.metadata_value().to_owned()),
+        (PROPERTY_GENERATION_KEY, id.generation.to_string()),
+        (PROPERTY_ORDINAL_KEY, id.ordinal.to_string()),
+    ];
+    for (key, value) in expected {
+        if schema.metadata().get(key) != Some(&value) {
+            return Err(corrupt(
+                "property fragment metadata conflicts with its identity",
+            ));
+        }
+    }
+    let tombstone = schema
+        .field_with_name(PROPERTY_TOMBSTONE_FIELD)
+        .map_err(|_| corrupt("property snapshot fragment lacks tombstone field"))?;
+    if tombstone.is_nullable() || tombstone.data_type() != &arrow::datatypes::DataType::Boolean {
+        return Err(corrupt(
+            "property tombstone field is nullable or not boolean",
+        ));
+    }
+    Ok(())
+}
+
+fn decode_snapshot_batch(
+    batch: &RecordBatch,
+    uuid_field: &str,
+) -> Result<Vec<PropertySnapshotRow>, GfError> {
+    let tombstones = batch
+        .column_by_name(PROPERTY_TOMBSTONE_FIELD)
+        .map(|column| {
+            column
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .ok_or_else(|| corrupt("property tombstone column is not boolean"))
+        })
+        .transpose()?;
+    let mut rows = Vec::with_capacity(batch.num_rows());
+    crate::writer::decode_property_batch(batch, uuid_field, |uuid, mut values| {
+        values.remove(PROPERTY_TOMBSTONE_FIELD);
+        let index = rows.len();
+        rows.push(PropertySnapshotRow {
+            uuid,
+            tombstone: tombstones.is_some_and(|values| values.value(index)),
+            values: values.into_iter().collect(),
+        });
+    })?;
+    Ok(rows)
+}
+
+fn parquet_error(error: ParquetError) -> GfError {
+    GfError::Storage(format!("property overlay Parquet: {error}"))
 }
 
 impl Default for PropertyOverlayLimits {
@@ -324,6 +614,9 @@ where
         .iter()
         .flatten()
         .fold(0_u64, |total, row| total.saturating_add(record_charge(row)));
+    metrics.peak_buffered_rows = metrics
+        .peak_buffered_rows
+        .max(u64::try_from(current.iter().flatten().count()).unwrap_or(u64::MAX));
     metrics.peak_buffered_bytes = metrics.peak_buffered_bytes.max(cursor_bytes);
     let mut writer = (emit.is_none())
         .then(|| File::create(output).map(BufWriter::new).map_err(io_error))
@@ -357,6 +650,9 @@ where
         let cursor_bytes = current.iter().flatten().fold(0_u64, |total, candidate| {
             total.saturating_add(record_charge(candidate))
         });
+        metrics.peak_buffered_rows = metrics
+            .peak_buffered_rows
+            .max(u64::try_from(current.iter().flatten().count()).unwrap_or(u64::MAX));
         metrics.peak_buffered_bytes = metrics.peak_buffered_bytes.max(cursor_bytes);
         if let Some(next) = &current[index] {
             heap.push(Reverse((next.sort_key(), index)));
@@ -456,6 +752,10 @@ fn corrupt(message: &str) -> GfError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow::array::{ArrayRef, BooleanArray, FixedSizeBinaryArray, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use parquet::arrow::ArrowWriter;
+    use std::collections::HashMap;
     use tempfile::TempDir;
 
     #[test]
@@ -589,9 +889,78 @@ mod tests {
         assert_eq!(metrics.tombstones, 1);
         assert!(metrics.spill_runs >= 5);
         assert!(metrics.merge_passes >= 2);
-        assert_eq!(metrics.peak_buffered_rows, 1);
+        // One decoded spill row or one cursor per open run, whichever is larger.
+        assert_eq!(metrics.peak_buffered_rows, 2);
         assert!(metrics.peak_buffered_bytes > 33);
         assert!(metrics.peak_buffered_bytes < metrics.spill_bytes);
+        assert_eq!(metrics.per_record_seeks, 0);
+    }
+
+    #[test]
+    fn authenticated_reader_reports_actual_io_and_decodes_snapshot() {
+        let dir = TempDir::new().unwrap();
+        let scratch = TempDir::new().unwrap();
+        let id = PropertyFragmentId {
+            generation: 7,
+            ordinal: 3,
+        };
+        let route_dir = dir.path().join("properties/Person");
+        fs::create_dir_all(&route_dir).unwrap();
+        let metadata = HashMap::from([
+            (
+                PROPERTY_OVERLAY_FORMAT_KEY.into(),
+                PROPERTY_OVERLAY_FORMAT.into(),
+            ),
+            (PROPERTY_ROUTE_KEY.into(), "Person".into()),
+            (PROPERTY_KIND_KEY.into(), "node".into()),
+            (PROPERTY_GENERATION_KEY.into(), "7".into()),
+            (PROPERTY_ORDINAL_KEY.into(), "3".into()),
+        ]);
+        let schema = Arc::new(Schema::new_with_metadata(
+            vec![
+                Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+                Field::new(PROPERTY_TOMBSTONE_FIELD, DataType::Boolean, false),
+                Field::new("name", DataType::Utf8, true),
+            ],
+            metadata,
+        ));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(
+                    FixedSizeBinaryArray::try_from_iter(vec![vec![4; 16]].into_iter()).unwrap(),
+                ) as ArrayRef,
+                Arc::new(BooleanArray::from(vec![false])) as ArrayRef,
+                Arc::new(StringArray::from(vec![Some("Ada")])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        let path = route_dir.join(id.file_name());
+        let mut writer = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+
+        let mut rows = Vec::new();
+        let metrics = visit_authenticated_property_snapshots(
+            dir.path(),
+            PropertyRouteKind::Node,
+            "Person",
+            scratch.path(),
+            PropertyOverlayLimits::default(),
+            |row| {
+                rows.push(row);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].values.get("name"),
+            Some(&IrLiteral::Str("Ada".into()))
+        );
+        assert_eq!(metrics.physical_rows, 1);
+        assert!(metrics.physical_bytes > 0);
+        assert!(metrics.blocks_read > 0);
         assert_eq!(metrics.per_record_seeks, 0);
     }
 }

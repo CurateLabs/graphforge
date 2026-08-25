@@ -3118,7 +3118,7 @@ pub fn count_entity_properties<S: std::hash::BuildHasher>(
     clippy::too_many_lines,
     reason = "one decode arm per Arrow type, plus per-shape struct dispatch; clearest inline"
 )]
-fn decode_property_batch(
+pub(crate) fn decode_property_batch(
     batch: &RecordBatch,
     uuid_field_name: &str,
     mut emit: impl FnMut([u8; 16], HashMap<String, IrLiteral>),
