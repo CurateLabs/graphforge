@@ -349,10 +349,10 @@ pub use uuid_membership::{
 
 pub mod property_overlay;
 pub use property_overlay::{
-    PROPERTY_OVERLAY_FORMAT, PROPERTY_OVERLAY_FORMAT_KEY, PROPERTY_TOMBSTONE_FIELD,
-    PropertyFragmentId, PropertyOverlayLimits, PropertyOverlayMetrics, PropertyRouteKind,
-    PropertySnapshotRow, enumerate_property_fragments, read_authenticated_property_snapshots_for,
-    visit_authenticated_property_snapshots,
+    AuthenticatedPropertyInventory, PROPERTY_OVERLAY_FORMAT, PROPERTY_OVERLAY_FORMAT_KEY,
+    PROPERTY_TOMBSTONE_FIELD, PropertyFragmentId, PropertyOverlayLimits, PropertyOverlayMetrics,
+    PropertyRouteKind, PropertySnapshotRow, enumerate_property_fragments,
+    read_authenticated_property_snapshots_for, visit_authenticated_property_snapshots,
 };
 
 pub mod catalog;

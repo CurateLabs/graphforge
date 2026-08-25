@@ -20,6 +20,7 @@ use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchR
 use parquet::errors::ParquetError;
 use parquet::file::reader::{ChunkReader, Length};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// On-disk property overlay format marker.
 pub const PROPERTY_OVERLAY_FORMAT: &str = "full-snapshot-v1";
@@ -179,6 +180,290 @@ pub struct PropertyFragment {
     pub id: PropertyFragmentId,
     /// Canonical fragment path.
     pub path: PathBuf,
+}
+
+/// Property fragments resolved from a committed graph-files inventory and
+/// retained through no-follow directory capabilities.
+#[derive(Debug)]
+pub struct AuthenticatedPropertyInventory {
+    root: Option<graphforge_filesystem::StableDirectory>,
+    routes: BTreeMap<(PropertyRouteKind, String), Vec<AuthenticatedPropertyFragment>>,
+}
+
+#[derive(Debug)]
+struct AuthenticatedPropertyFragment {
+    id: PropertyFragmentId,
+    entry: crate::GraphFileEntry,
+    physical_relative: PathBuf,
+}
+
+impl AuthenticatedPropertyInventory {
+    /// Resolve property authority from a pinned project generation.
+    ///
+    /// Expanded V1 generations retain files beneath their authenticated graph
+    /// tree. Compact V2 generations retain the exact digest-addressed CAS
+    /// object named by each authenticated manifest entry.
+    pub fn from_resolved_generation(
+        generation: &crate::ResolvedProjectGeneration,
+    ) -> Result<Self, GfError> {
+        let Some(participant) = generation.declared_graph_files_participant()? else {
+            return Ok(Self {
+                root: None,
+                routes: BTreeMap::new(),
+            });
+        };
+        let inventory = generation.graph_files_inventory()?.ok_or_else(|| {
+            corrupt("declared graph-files participant has no authenticated inventory")
+        })?;
+        match participant {
+            crate::graph_files::GraphFilesParticipant::V1(_) => {
+                Self::from_entries_at_root(&generation.graph_tree_root(), inventory.files)
+            }
+            crate::graph_files::GraphFilesParticipant::V2(_) => {
+                let root = generation.container_root();
+                let entries = inventory
+                    .files
+                    .into_iter()
+                    .map(|entry| {
+                        let path = crate::graph_object_path(root, &entry.content_sha256)?;
+                        let relative = path
+                            .strip_prefix(root)
+                            .map_err(|_| corrupt("graph object path escaped its container"))?;
+                        Ok((entry, relative.to_path_buf()))
+                    })
+                    .collect::<Result<Vec<_>, GfError>>()?;
+                Self::admit_entries(root, entries)
+            }
+        }
+    }
+
+    fn from_entries_at_root(
+        root: &Path,
+        entries: Vec<crate::GraphFileEntry>,
+    ) -> Result<Self, GfError> {
+        let entries = entries
+            .into_iter()
+            .map(|entry| {
+                let relative = PathBuf::from(&entry.relative_path);
+                (entry, relative)
+            })
+            .collect();
+        Self::admit_entries(root, entries)
+    }
+
+    fn admit_entries(
+        root_path: &Path,
+        entries: Vec<(crate::GraphFileEntry, PathBuf)>,
+    ) -> Result<Self, GfError> {
+        let root = graphforge_filesystem::StableDirectory::open(root_path).map_err(io_error)?;
+        let mut routes: BTreeMap<(PropertyRouteKind, String), Vec<AuthenticatedPropertyFragment>> =
+            BTreeMap::new();
+        for (entry, physical_relative) in entries {
+            let parsed = parse_inventory_property_path(&entry.relative_path)?;
+            if entry.role != crate::GraphFileRole::Properties {
+                if parsed.is_some() {
+                    return Err(corrupt("property inventory entry has the wrong role"));
+                }
+                continue;
+            }
+            let Some((kind, route, id)) = parsed else {
+                return Err(corrupt("properties role names a non-property path"));
+            };
+            let file = open_retained_under(&root, &physical_relative)?;
+            authenticate_inventory_file(&file, &entry)?;
+            let builder =
+                ParquetRecordBatchReaderBuilder::try_new(file.try_clone().map_err(io_error)?)
+                    .map_err(parquet_error)?;
+            validate_fragment_schema(builder.schema().as_ref(), id, kind, &route)?;
+            let fragments = routes.entry((kind, route)).or_default();
+            if fragments.iter().any(|fragment| fragment.id == id) {
+                return Err(corrupt("property inventory contains duplicate authority"));
+            }
+            fragments.push(AuthenticatedPropertyFragment {
+                id,
+                entry,
+                physical_relative,
+            });
+        }
+        for fragments in routes.values_mut() {
+            fragments.sort_unstable_by_key(|fragment| fragment.id);
+        }
+        Ok(Self {
+            root: Some(root),
+            routes,
+        })
+    }
+
+    /// Visit one authenticated route through the retained generation
+    /// capability, opening and closing one Parquet decoder at a time.
+    pub fn visit_route<F>(
+        &self,
+        kind: PropertyRouteKind,
+        route: &str,
+        scratch: &Path,
+        limits: PropertyOverlayLimits,
+        emit: F,
+    ) -> Result<PropertyOverlayMetrics, GfError>
+    where
+        F: FnMut(PropertySnapshotRow) -> Result<(), GfError>,
+    {
+        let Some(fragments) = self.routes.get(&(kind, route.to_owned())) else {
+            return Ok(PropertyOverlayMetrics::default());
+        };
+        let root = self
+            .root
+            .as_ref()
+            .ok_or_else(|| corrupt("property inventory lost its retained root"))?;
+        let counts = Arc::new(ReadCounts::default());
+        let failed = Arc::new(Mutex::new(None));
+        let decoded = Arc::new(Mutex::new(DecodedRetention::default()));
+        let inputs = fragments.iter().map(|fragment| {
+            let reader = (|| {
+                let file = open_retained_under(root, &fragment.physical_relative)?;
+                authenticate_inventory_file(&file, &fragment.entry)?;
+                let source = CountingChunkReader {
+                    length: fragment.entry.byte_length,
+                    file,
+                    counts: Arc::clone(&counts),
+                };
+                let builder =
+                    ParquetRecordBatchReaderBuilder::try_new(source).map_err(parquet_error)?;
+                validate_fragment_schema(builder.schema().as_ref(), fragment.id, kind, route)?;
+                builder.with_batch_size(4096).build().map_err(parquet_error)
+            })();
+            let reader = match reader {
+                Ok(reader) => Some(reader),
+                Err(error) => {
+                    *failed.lock().expect("property failure lock") = Some(error);
+                    None
+                }
+            };
+            (
+                fragment.id,
+                0,
+                0,
+                PropertyParquetRows {
+                    reader,
+                    fragment: None,
+                    kind,
+                    route: route.to_owned(),
+                    counts: Arc::clone(&counts),
+                    current: Vec::new().into_iter(),
+                    uuid_field: kind.uuid_field(),
+                    failed: Arc::clone(&failed),
+                    decoded: Arc::clone(&decoded),
+                    #[cfg(test)]
+                    opened: false,
+                },
+            )
+        });
+        let mut metrics = visit_newest_property_snapshots(inputs, scratch, limits, emit)?;
+        if let Some(error) = failed.lock().expect("property failure lock").take() {
+            return Err(error);
+        }
+        metrics.physical_bytes = counts.bytes.load(Ordering::Relaxed);
+        metrics.blocks_read = counts.blocks.load(Ordering::Relaxed);
+        metrics.range_seeks = counts.range_seeks.load(Ordering::Relaxed);
+        let decoded = decoded.lock().expect("property retention lock");
+        metrics.decoder_peak_rows = decoded.peak_rows;
+        metrics.decoder_peak_bytes = decoded.peak_bytes;
+        metrics.emitted_batches = decoded.batches;
+        metrics.merge_peak_rows = metrics.peak_buffered_rows;
+        metrics.merge_peak_bytes = metrics.peak_buffered_bytes;
+        metrics.peak_buffered_rows = metrics
+            .decoder_peak_rows
+            .saturating_add(metrics.merge_peak_rows);
+        metrics.peak_buffered_bytes = metrics
+            .decoder_peak_bytes
+            .saturating_add(metrics.merge_peak_bytes);
+        Ok(metrics)
+    }
+}
+
+fn parse_inventory_property_path(
+    relative: &str,
+) -> Result<Option<(PropertyRouteKind, String, PropertyFragmentId)>, GfError> {
+    let parts = relative.split('/').collect::<Vec<_>>();
+    let kind = match parts.first().copied() {
+        Some("properties") => PropertyRouteKind::Node,
+        Some("edge_properties") => PropertyRouteKind::Edge,
+        _ => return Ok(None),
+    };
+    match parts.as_slice() {
+        [_, legacy] => {
+            let route = legacy
+                .strip_suffix(".parquet")
+                .filter(|route| !route.is_empty())
+                .ok_or_else(|| corrupt("legacy property inventory path is malformed"))?;
+            Ok(Some((
+                kind,
+                route.to_owned(),
+                PropertyFragmentId {
+                    generation: 0,
+                    ordinal: 0,
+                },
+            )))
+        }
+        [_, route, name] if !route.is_empty() => Ok(Some((
+            kind,
+            (*route).to_owned(),
+            PropertyFragmentId::parse(name)?,
+        ))),
+        _ => Err(corrupt("property inventory path is not canonical")),
+    }
+}
+
+fn open_retained_under(
+    root: &graphforge_filesystem::StableDirectory,
+    relative: &Path,
+) -> Result<File, GfError> {
+    let mut components = relative.components().peekable();
+    let mut retained = Vec::new();
+    while let Some(component) = components.next() {
+        let std::path::Component::Normal(name) = component else {
+            return Err(corrupt("property inventory path is not contained"));
+        };
+        let directory = retained.last().unwrap_or(root);
+        if components.peek().is_none() {
+            return directory.open_child_file(name).map_err(io_error);
+        }
+        let child = directory.open_child_directory(name).map_err(io_error)?;
+        retained.push(child);
+    }
+    Err(corrupt("property inventory path is empty"))
+}
+
+fn authenticate_inventory_file(file: &File, entry: &crate::GraphFileEntry) -> Result<(), GfError> {
+    let metadata = file.metadata().map_err(io_error)?;
+    if !metadata.is_file() || metadata.len() != entry.byte_length {
+        return Err(corrupt(
+            "property handle length or kind conflicts with inventory",
+        ));
+    }
+    let mut clone = file.try_clone().map_err(io_error)?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = std::io::Read::read(&mut clone, &mut buffer).map_err(io_error)?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    if digest_hex(&digest.finalize()) != entry.content_sha256 {
+        return Err(corrupt("property handle digest conflicts with inventory"));
+    }
+    Ok(())
+}
+
+fn digest_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(char::from(HEX[usize::from(byte >> 4)]));
+        out.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    out
 }
 
 /// Exact work performed by one property overlay operation.
@@ -1231,7 +1516,7 @@ mod tests {
         )
         .unwrap();
         let path = route_dir.join(id.file_name());
-        let mut writer = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
+        let mut writer = ArrowWriter::try_new(File::create(&path).unwrap(), schema, None).unwrap();
         writer.write(&batch).unwrap();
         writer.close().unwrap();
 
@@ -1261,5 +1546,44 @@ mod tests {
         assert_eq!(metrics.per_record_seeks, 0);
         assert_eq!(OPEN_FRAGMENT_READERS.load(Ordering::SeqCst), 0);
         assert_eq!(PEAK_OPEN_FRAGMENT_READERS.load(Ordering::SeqCst), 1);
+
+        let bytes = fs::read(&path).unwrap();
+        let inventory = AuthenticatedPropertyInventory::from_entries_at_root(
+            dir.path(),
+            vec![crate::GraphFileEntry {
+                relative_path: format!("properties/Person/{}", id.file_name()),
+                byte_length: u64::try_from(bytes.len()).unwrap(),
+                content_sha256: digest_hex(&Sha256::digest(&bytes)),
+                role: crate::GraphFileRole::Properties,
+            }],
+        )
+        .unwrap();
+        let mut inventory_rows = Vec::new();
+        inventory
+            .visit_route(
+                PropertyRouteKind::Node,
+                "Person",
+                scratch.path(),
+                PropertyOverlayLimits::default(),
+                |row| {
+                    inventory_rows.push(row);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(inventory_rows.len(), 1);
+
+        fs::write(&path, b"same-name attacker replacement").unwrap();
+        assert!(
+            inventory
+                .visit_route(
+                    PropertyRouteKind::Node,
+                    "Person",
+                    scratch.path(),
+                    PropertyOverlayLimits::default(),
+                    |_| Ok(()),
+                )
+                .is_err()
+        );
     }
 }
