@@ -613,7 +613,7 @@ fn collect_source_files(directory: &Path, paths: &mut Vec<PathBuf>) -> Result<()
 /// but are never generation data. Keep this list structural and exact: a
 /// basename suffix/prefix rule would let unauthenticated data disappear from
 /// inventory reconciliation while topology readers consume it.
-fn is_graph_operational_file(relative: &Path) -> bool {
+pub(crate) fn is_graph_operational_file(relative: &Path) -> bool {
     let Some(components) = relative
         .components()
         .map(|component| match component {
