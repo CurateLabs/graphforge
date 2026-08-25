@@ -212,6 +212,7 @@ pub struct PropertyFragment {
 /// retained through no-follow directory capabilities.
 #[derive(Debug)]
 pub struct AuthenticatedPropertyInventory {
+    _generation: Option<crate::ResolvedProjectGeneration>,
     _root: Option<graphforge_filesystem::StableDirectory>,
     routes: BTreeMap<(PropertyRouteKind, String), Vec<AuthenticatedPropertyFragment>>,
     schemas: BTreeMap<(PropertyRouteKind, String), arrow::datatypes::SchemaRef>,
@@ -265,6 +266,7 @@ impl AuthenticatedPropertyInventory {
         let Some(participant) = generation.declared_graph_files_participant()? else {
             return Ok(Self {
                 _root: None,
+                _generation: Some(generation.clone()),
                 routes: BTreeMap::new(),
                 schemas: BTreeMap::new(),
                 authority_bytes: 0,
@@ -274,7 +276,7 @@ impl AuthenticatedPropertyInventory {
         let inventory = generation.graph_files_inventory()?.ok_or_else(|| {
             corrupt("declared graph-files participant has no authenticated inventory")
         })?;
-        match participant {
+        let mut admitted = match participant {
             crate::graph_files::GraphFilesParticipant::V1(_) => {
                 let root = generation.graph_tree_root();
                 let entries = inventory
@@ -302,7 +304,9 @@ impl AuthenticatedPropertyInventory {
                     .collect::<Result<Vec<_>, GfError>>()?;
                 Self::admit_entries(root, entries, requested_route)
             }
-        }
+        }?;
+        admitted._generation = Some(generation.clone());
+        Ok(admitted)
     }
 
     #[cfg(test)]
@@ -385,6 +389,7 @@ impl AuthenticatedPropertyInventory {
             validate_fragment_id_sequence(fragments.iter().map(|fragment| fragment.id))?;
         }
         Ok(Self {
+            _generation: None,
             _root: Some(root),
             routes,
             schemas: schemas
