@@ -4844,6 +4844,156 @@ mod tests {
         assert!(!properties.contains_key("remove"));
     }
 
+    #[test]
+    fn legacy_flat_baseline_survives_set_remove_and_reopen() {
+        let dir = TempDir::new().unwrap();
+        let (updated, untouched) = (new_v7(), new_v7());
+        let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
+        writer.create_node(updated, TypeId(0)).unwrap();
+        writer.create_node(untouched, TypeId(0)).unwrap();
+        writer.flush().unwrap();
+
+        let legacy_rows = vec![
+            crate::property_overlay::PropertySnapshotRow {
+                uuid: to_bytes(&updated),
+                tombstone: false,
+                values: BTreeMap::from([
+                    ("keep".into(), IrLiteral::Int(1)),
+                    ("remove".into(), IrLiteral::Int(2)),
+                ]),
+            },
+            crate::property_overlay::PropertySnapshotRow {
+                uuid: to_bytes(&untouched),
+                tombstone: false,
+                values: BTreeMap::from([(
+                    "legacy_only".into(),
+                    IrLiteral::Str("preserved".into()),
+                )]),
+            },
+        ];
+        let legacy = property_snapshots_to_batch("_untyped", false, legacy_rows)
+            .unwrap()
+            .unwrap();
+        fs::create_dir_all(dir.path().join("properties")).unwrap();
+        let mut parquet = parquet::arrow::ArrowWriter::try_new(
+            File::create(dir.path().join("properties/_untyped.parquet")).unwrap(),
+            legacy.schema(),
+            None,
+        )
+        .unwrap();
+        parquet.write(&legacy).unwrap();
+        parquet.close().unwrap();
+
+        set_node_properties(
+            dir.path(),
+            "_untyped",
+            &HashMap::from([(
+                to_bytes(&updated),
+                HashMap::from([("new".into(), IrLiteral::Int(3))]),
+            )]),
+        )
+        .unwrap();
+        remove_node_properties(
+            dir.path(),
+            "_untyped",
+            &HashMap::from([(to_bytes(&updated), HashSet::from(["remove".into()]))]),
+        )
+        .unwrap();
+
+        let fragments = crate::property_overlay::enumerate_property_fragments(
+            dir.path(),
+            crate::property_overlay::PropertyRouteKind::Node,
+            "_untyped",
+        )
+        .unwrap();
+        assert_eq!(fragments.first().unwrap().id.generation, 0);
+        assert_eq!(fragments.first().unwrap().id.ordinal, 0);
+        assert!(fragments.len() >= 3);
+        let reopened = read_node_props(dir.path(), "_untyped");
+        assert_eq!(reopened[&to_bytes(&updated)]["keep"], IrLiteral::Int(1));
+        assert_eq!(reopened[&to_bytes(&updated)]["new"], IrLiteral::Int(3));
+        assert!(!reopened[&to_bytes(&updated)].contains_key("remove"));
+        assert_eq!(
+            reopened[&to_bytes(&untouched)]["legacy_only"],
+            IrLiteral::Str("preserved".into())
+        );
+
+        let project = TempDir::new().unwrap();
+        let parent_generation = crate::open_or_initialize_project(project.path()).unwrap();
+        let (_, inventory) = crate::capture_graph_files(dir.path()).unwrap();
+        let mut participants = crate::empty_workspace_participants().unwrap();
+        participants.insert(0, inventory);
+        let request = crate::ProjectGenerationRequest {
+            transaction_uuid: uuid::Uuid::now_v7(),
+            generation_uuid: uuid::Uuid::now_v7(),
+            capabilities: vec![
+                crate::ProjectCapability {
+                    capability_id: "graph".into(),
+                    capability_version: 1,
+                },
+                crate::ProjectCapability {
+                    capability_id: "workspace".into(),
+                    capability_version: 1,
+                },
+            ],
+            participants,
+        };
+        let crate::ProjectStageOutcome::Staged(staged) =
+            crate::stage_project_generation_with_graph_tree(
+                project.path(),
+                &request,
+                Some(dir.path()),
+            )
+            .unwrap()
+        else {
+            panic!("fresh migration generation replayed");
+        };
+        staged
+            .validate(|_| Ok(()), |_, _| Ok(()))
+            .unwrap()
+            .publish()
+            .unwrap();
+        drop(parent_generation);
+        let generation = crate::resolve_project_generation(project.path()).unwrap();
+        let limits = crate::PortableV2ExportLimits::default();
+        let plan = crate::plan_complete_portable_v2(&generation, limits).unwrap();
+        let package_parent = TempDir::new().unwrap();
+        let package = package_parent.path().join("legacy-migration.gfproject");
+        crate::export_complete_portable_v2(
+            &plan,
+            &package,
+            crate::PortableV2Output::Expanded,
+            limits,
+            &std::sync::atomic::AtomicBool::new(false),
+            |_| {},
+        )
+        .unwrap();
+        crate::verify_portable_v2(&package, crate::PortableV2Mode::Full, limits, None).unwrap();
+        let supported = generation
+            .capabilities()
+            .into_iter()
+            .map(|capability| crate::ProjectCapability {
+                capability_id: capability.capability_id,
+                capability_version: capability.capability_version,
+            })
+            .collect::<Vec<_>>();
+        let imported_parent = TempDir::new().unwrap();
+        let imported = imported_parent.path().join("clean-import");
+        crate::import_complete_portable_v2(
+            &package,
+            &imported,
+            uuid::Uuid::now_v7(),
+            uuid::Uuid::now_v7(),
+            &supported,
+            limits,
+            None,
+        )
+        .unwrap();
+        let imported_generation = crate::resolve_project_generation(&imported).unwrap();
+        let imported_props = read_node_props(&imported_generation.graph_tree_root(), "_untyped");
+        assert_eq!(imported_props, reopened);
+    }
+
     // -----------------------------------------------------------------------
     // Pending-buffer API (#792)
     // -----------------------------------------------------------------------

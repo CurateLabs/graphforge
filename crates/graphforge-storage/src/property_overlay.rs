@@ -569,8 +569,16 @@ pub struct PropertyOverlayMetrics {
     pub physical_rows: u64,
     /// Authenticated fragment bytes read.
     pub physical_bytes: u64,
+    /// Bytes read while validating canonical UUID/tombstone authority.
+    pub validation_bytes: u64,
+    /// Bytes read while decoding values from selected row groups.
+    pub selected_value_bytes: u64,
     /// Non-empty input reads, each capped at 64 KiB.
     pub read_calls: u64,
+    /// Read calls used by the validation pass.
+    pub validation_read_calls: u64,
+    /// Read calls used by selected value decoding.
+    pub selected_value_read_calls: u64,
     /// Retained-handle range starts requested by the Parquet decoder.
     pub range_seeks: u64,
     /// Parquet row groups whose authenticated statistics were considered.
@@ -798,9 +806,19 @@ pub fn read_authenticated_property_snapshots_for(
                     .ok_or_else(|| corrupt("property UUID column has wrong physical type"))?;
                 let tombstones = batch
                     .column_by_name(PROPERTY_TOMBSTONE_FIELD)
-                    .and_then(|column| column.as_any().downcast_ref::<BooleanArray>())
-                    .ok_or_else(|| corrupt("property tombstone column is not boolean"))?;
-                if uuids.null_count() != 0 || tombstones.null_count() != 0 {
+                    .map(|column| {
+                        column
+                            .as_any()
+                            .downcast_ref::<BooleanArray>()
+                            .ok_or_else(|| corrupt("property tombstone column is not boolean"))
+                    })
+                    .transpose()?;
+                if tombstones.is_none() && fragment.id.generation != 0 {
+                    return Err(corrupt("property snapshot fragment lacks tombstone field"));
+                }
+                if uuids.null_count() != 0
+                    || tombstones.is_some_and(|values| values.null_count() != 0)
+                {
                     return Err(corrupt("property identity columns contain null slots"));
                 }
                 for row in 0..batch.num_rows() {
@@ -815,7 +833,7 @@ pub fn read_authenticated_property_snapshots_for(
                     }
                     prior_uuid = Some(uuid);
                     selected |= unresolved.contains(&uuid);
-                    if tombstones.value(row)
+                    if tombstones.is_some_and(|values| values.value(row))
                         && batch
                             .columns()
                             .iter()
@@ -833,6 +851,8 @@ pub fn read_authenticated_property_snapshots_for(
                 row_groups.push(index);
             }
         }
+        let validation_bytes = counts.bytes.load(Ordering::Relaxed);
+        let validation_read_calls = counts.blocks.load(Ordering::Relaxed);
         if !row_groups.is_empty() {
             metrics.row_groups_selected = metrics
                 .row_groups_selected
@@ -862,13 +882,21 @@ pub fn read_authenticated_property_snapshots_for(
                 }
             }
         }
+        let total_bytes = counts.bytes.load(Ordering::Relaxed);
+        let total_read_calls = counts.blocks.load(Ordering::Relaxed);
         metrics.fragments_considered = metrics.fragments_considered.saturating_add(1);
-        metrics.physical_bytes = metrics
-            .physical_bytes
-            .saturating_add(counts.bytes.load(Ordering::Relaxed));
-        metrics.read_calls = metrics
-            .read_calls
-            .saturating_add(counts.blocks.load(Ordering::Relaxed));
+        metrics.physical_bytes = metrics.physical_bytes.saturating_add(total_bytes);
+        metrics.validation_bytes = metrics.validation_bytes.saturating_add(validation_bytes);
+        metrics.selected_value_bytes = metrics
+            .selected_value_bytes
+            .saturating_add(total_bytes.saturating_sub(validation_bytes));
+        metrics.read_calls = metrics.read_calls.saturating_add(total_read_calls);
+        metrics.validation_read_calls = metrics
+            .validation_read_calls
+            .saturating_add(validation_read_calls);
+        metrics.selected_value_read_calls = metrics
+            .selected_value_read_calls
+            .saturating_add(total_read_calls.saturating_sub(validation_read_calls));
         metrics.range_seeks = metrics
             .range_seeks
             .saturating_add(counts.range_seeks.load(Ordering::Relaxed));
@@ -1356,11 +1384,6 @@ fn validate_fragment_id_sequence(
     let mut prior: Option<PropertyFragmentId> = None;
     for id in ids {
         if let Some(previous) = prior {
-            if previous.generation == 0 && id.generation != 0 {
-                return Err(corrupt(
-                    "legacy and immutable property authorities are mixed",
-                ));
-            }
             if id.generation == previous.generation
                 && Some(id.ordinal) != previous.ordinal.checked_add(1)
             {
@@ -1434,12 +1457,17 @@ mod tests {
             b"immutable",
         )
         .unwrap();
-        assert!(
-            enumerate_property_fragments(mixed.path(), PropertyRouteKind::Node, "Person")
-                .unwrap_err()
-                .to_string()
-                .contains("mixed")
+        let migrated =
+            enumerate_property_fragments(mixed.path(), PropertyRouteKind::Node, "Person").unwrap();
+        assert_eq!(migrated.len(), 2);
+        assert_eq!(
+            migrated[0].id,
+            PropertyFragmentId {
+                generation: 0,
+                ordinal: 0,
+            }
         );
+        assert_eq!(migrated[1].id.generation, 1);
 
         let gap = TempDir::new().unwrap();
         fs::create_dir_all(gap.path().join("properties/Person")).unwrap();
@@ -1468,7 +1496,7 @@ mod tests {
             generation,
             ordinal,
         };
-        assert!(validate_fragment_id_sequence([id(0, 0), id(1, 0)]).is_err());
+        assert!(validate_fragment_id_sequence([id(0, 0), id(1, 0)]).is_ok());
         assert!(validate_fragment_id_sequence([id(7, 1)]).is_err());
         assert!(validate_fragment_id_sequence([id(7, 0), id(7, 2)]).is_err());
         assert!(validate_fragment_id_sequence([id(7, 0), id(8, 1)]).is_err());
@@ -1843,6 +1871,7 @@ mod tests {
     #[test]
     fn targeted_reader_n_2n_4n_has_bounded_retention_and_exact_work() {
         let mut prior_bytes = 0;
+        let mut byte_deltas = Vec::new();
         for rows in [128_usize, 256, 512] {
             let dir = TempDir::new().unwrap();
             let route_dir = dir.path().join("properties/Person");
@@ -1912,9 +1941,31 @@ mod tests {
             assert_eq!(metrics.peak_buffered_rows, 64);
             assert!(metrics.peak_buffered_bytes < 64 * 1024);
             assert!(metrics.physical_bytes > prior_bytes);
+            assert_eq!(
+                metrics.physical_bytes,
+                metrics.validation_bytes + metrics.selected_value_bytes
+            );
             assert!(metrics.read_calls > 0);
+            assert_eq!(
+                metrics.read_calls,
+                metrics.validation_read_calls + metrics.selected_value_read_calls
+            );
+            assert!(metrics.validation_bytes > 0);
+            assert!(metrics.selected_value_bytes > 0);
+            if prior_bytes != 0 {
+                byte_deltas.push(metrics.physical_bytes - prior_bytes);
+                assert!(
+                    metrics.physical_bytes <= prior_bytes.saturating_mul(2).saturating_add(16_384),
+                    "doubling rows must remain linear within fixed Parquet metadata tolerance"
+                );
+            }
             assert_eq!(metrics.per_record_seeks, 0);
             prior_bytes = metrics.physical_bytes;
         }
+        assert_eq!(byte_deltas.len(), 2);
+        assert!(
+            byte_deltas[1] <= byte_deltas[0].saturating_mul(2).saturating_add(8_192),
+            "first differences must reject superlinear repeated reads"
+        );
     }
 }
