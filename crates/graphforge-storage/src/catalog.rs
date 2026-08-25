@@ -1092,39 +1092,41 @@ where
     } else {
         crate::property_overlay::PropertyRouteKind::Node
     };
-    let schema = crate::property_overlay::authenticated_property_route_schema(dir, kind, stem)
-        .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+    let inventory =
+        crate::property_overlay::authenticated_property_inventory_for_route(dir, kind, stem)
+            .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+    let schema = inventory.route_schema(kind, stem);
     let scratch = tempfile::tempdir().map_err(|error| io_err(&error))?;
     let mut rows = Vec::with_capacity(batch_size.max(1));
     let mut stopped = false;
-    crate::property_overlay::visit_authenticated_property_snapshots(
-        dir,
-        kind,
-        stem,
-        scratch.path(),
-        crate::property_overlay::PropertyOverlayLimits::default(),
-        |row| {
-            if stopped {
-                return Ok(());
-            }
-            rows.push(row);
-            if rows.len() >= batch_size.max(1) {
-                let batch = crate::writer::property_snapshots_to_batch(
-                    stem,
-                    is_edge,
-                    std::mem::take(&mut rows),
-                )?
-                .ok_or_else(|| {
-                    graphforge_core::GfError::Storage("property batch disappeared".into())
-                })?;
-                let batch = normalize_property_batch(batch, schema.as_ref())?;
-                stopped = !visit(&batch)
-                    .map_err(|error| graphforge_core::GfError::Storage(error.to_string()))?;
-            }
-            Ok(())
-        },
-    )
-    .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+    inventory
+        .visit_route(
+            kind,
+            stem,
+            scratch.path(),
+            crate::property_overlay::PropertyOverlayLimits::default(),
+            |row| {
+                if stopped {
+                    return Ok(());
+                }
+                rows.push(row);
+                if rows.len() >= batch_size.max(1) {
+                    let batch = crate::writer::property_snapshots_to_batch(
+                        stem,
+                        is_edge,
+                        std::mem::take(&mut rows),
+                    )?
+                    .ok_or_else(|| {
+                        graphforge_core::GfError::Storage("property batch disappeared".into())
+                    })?;
+                    let batch = normalize_property_batch(batch, schema.as_ref())?;
+                    stopped = !visit(&batch)
+                        .map_err(|error| graphforge_core::GfError::Storage(error.to_string()))?;
+                }
+                Ok(())
+            },
+        )
+        .map_err(|error| DataFusionError::Execution(error.to_string()))?;
     if !stopped && !rows.is_empty() {
         let batch = crate::writer::property_snapshots_to_batch(stem, is_edge, rows)
             .map_err(|error| DataFusionError::Execution(error.to_string()))?

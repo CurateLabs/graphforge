@@ -243,6 +243,23 @@ impl AuthenticatedPropertyInventory {
     pub fn from_resolved_generation(
         generation: &crate::ResolvedProjectGeneration,
     ) -> Result<Self, GfError> {
+        Self::from_resolved_generation_route(generation, None)
+    }
+
+    /// Resolve one route without opening or hashing authenticated entries for
+    /// unrelated routes in the pinned generation inventory.
+    pub fn from_resolved_generation_for_route(
+        generation: &crate::ResolvedProjectGeneration,
+        kind: PropertyRouteKind,
+        route: &str,
+    ) -> Result<Self, GfError> {
+        Self::from_resolved_generation_route(generation, Some((kind, route)))
+    }
+
+    fn from_resolved_generation_route(
+        generation: &crate::ResolvedProjectGeneration,
+        requested_route: Option<(PropertyRouteKind, &str)>,
+    ) -> Result<Self, GfError> {
         let Some(participant) = generation.declared_graph_files_participant()? else {
             return Ok(Self {
                 _root: None,
@@ -255,7 +272,16 @@ impl AuthenticatedPropertyInventory {
         })?;
         match participant {
             crate::graph_files::GraphFilesParticipant::V1(_) => {
-                Self::from_entries_at_root(&generation.graph_tree_root(), inventory.files)
+                let root = generation.graph_tree_root();
+                let entries = inventory
+                    .files
+                    .into_iter()
+                    .map(|entry| {
+                        let relative = PathBuf::from(&entry.relative_path);
+                        (entry, relative)
+                    })
+                    .collect();
+                Self::admit_entries(&root, entries, requested_route)
             }
             crate::graph_files::GraphFilesParticipant::V2(_) => {
                 let root = generation.container_root();
@@ -270,11 +296,12 @@ impl AuthenticatedPropertyInventory {
                         Ok((entry, relative.to_path_buf()))
                     })
                     .collect::<Result<Vec<_>, GfError>>()?;
-                Self::admit_entries(root, entries)
+                Self::admit_entries(root, entries, requested_route)
             }
         }
     }
 
+    #[cfg(test)]
     fn from_entries_at_root(
         root: &Path,
         entries: Vec<crate::GraphFileEntry>,
@@ -286,12 +313,29 @@ impl AuthenticatedPropertyInventory {
                 (entry, relative)
             })
             .collect();
-        Self::admit_entries(root, entries)
+        Self::admit_entries(root, entries, None)
+    }
+
+    fn from_entries_at_root_for_route(
+        root: &Path,
+        entries: Vec<crate::GraphFileEntry>,
+        kind: PropertyRouteKind,
+        route: &str,
+    ) -> Result<Self, GfError> {
+        let entries = entries
+            .into_iter()
+            .map(|entry| {
+                let relative = PathBuf::from(&entry.relative_path);
+                (entry, relative)
+            })
+            .collect();
+        Self::admit_entries(root, entries, Some((kind, route)))
     }
 
     fn admit_entries(
         root_path: &Path,
         entries: Vec<(crate::GraphFileEntry, PathBuf)>,
+        requested_route: Option<(PropertyRouteKind, &str)>,
     ) -> Result<Self, GfError> {
         let root = graphforge_filesystem::StableDirectory::open(root_path).map_err(io_error)?;
         let mut routes: BTreeMap<(PropertyRouteKind, String), Vec<AuthenticatedPropertyFragment>> =
@@ -308,6 +352,9 @@ impl AuthenticatedPropertyInventory {
             let Some((kind, route, id)) = parsed else {
                 return Err(corrupt("properties role names a non-property path"));
             };
+            if requested_route.is_some_and(|requested| (kind, route.as_str()) != requested) {
+                continue;
+            }
             let file = open_retained_under(&root, &physical_relative)?;
             let (authentication_bytes, authentication_blocks) =
                 authenticate_inventory_file(&file, &entry)?;
@@ -443,6 +490,7 @@ impl AuthenticatedPropertyInventory {
                     budget: Arc::clone(&budget),
                     max_row_bytes: limits.max_row_bytes,
                     page_reservation_bytes,
+                    batch_reservation_bytes: limits.max_buffered_bytes / 4,
                     #[cfg(test)]
                     opened,
                 },
@@ -780,6 +828,7 @@ struct PropertyParquetRows {
     budget: Arc<LiveByteBudget>,
     max_row_bytes: u64,
     page_reservation_bytes: u64,
+    batch_reservation_bytes: u64,
     #[cfg(test)]
     opened: bool,
 }
@@ -821,24 +870,35 @@ impl Iterator for PropertyParquetRows {
                 decoded.current_bytes = decoded.current_bytes.saturating_sub(snapshot_charge(&row));
                 return Some(row);
             }
-            let batch = match self.reader.as_mut()?.next()? {
+            self.reader.as_ref()?;
+            if let Err(error) = self.budget.charge(self.batch_reservation_bytes) {
+                *self.failed.lock().expect("property failure lock") = Some(error);
+                return None;
+            }
+            let Some(next_batch) = self.reader.as_mut().expect("reader checked").next() else {
+                self.budget.release(self.batch_reservation_bytes);
+                return None;
+            };
+            let batch = match next_batch {
                 Ok(batch) => batch,
                 Err(error) => {
+                    self.budget.release(self.batch_reservation_bytes);
                     *self.failed.lock().expect("property failure lock") =
                         Some(GfError::Storage(format!("property overlay Arrow: {error}")));
                     return None;
                 }
             };
             let arrow_bytes = u64::try_from(batch.get_array_memory_size()).unwrap_or(u64::MAX);
-            if let Err(error) = self.budget.charge(arrow_bytes) {
-                *self.failed.lock().expect("property failure lock") = Some(error);
+            if arrow_bytes > self.batch_reservation_bytes {
+                self.budget.release(self.batch_reservation_bytes);
+                *self.failed.lock().expect("property failure lock") = Some(corrupt(
+                    "property Arrow batch exceeds pre-decode live-byte admission",
+                ));
                 return None;
             }
-            let decode_reservation = self
-                .max_row_bytes
-                .saturating_mul(u64::try_from(batch.num_rows()).unwrap_or(u64::MAX));
+            let decode_reservation = self.batch_reservation_bytes;
             if let Err(error) = self.budget.charge(decode_reservation) {
-                self.budget.release(arrow_bytes);
+                self.budget.release(self.batch_reservation_bytes);
                 *self.failed.lock().expect("property failure lock") = Some(error);
                 return None;
             }
@@ -849,7 +909,7 @@ impl Iterator for PropertyParquetRows {
                         .any(|row| snapshot_charge(row) > self.max_row_bytes)
                     {
                         self.budget.release(decode_reservation);
-                        self.budget.release(arrow_bytes);
+                        self.budget.release(self.batch_reservation_bytes);
                         *self.failed.lock().expect("property failure lock") =
                             Some(corrupt("property snapshot row exceeds byte limit"));
                         return None;
@@ -859,11 +919,11 @@ impl Iterator for PropertyParquetRows {
                     });
                     self.budget.release(decode_reservation);
                     if let Err(error) = self.budget.charge(bytes) {
-                        self.budget.release(arrow_bytes);
+                        self.budget.release(self.batch_reservation_bytes);
                         *self.failed.lock().expect("property failure lock") = Some(error);
                         return None;
                     }
-                    self.budget.release(arrow_bytes);
+                    self.budget.release(self.batch_reservation_bytes);
                     let mut decoded = self.decoded.lock().expect("property retention lock");
                     decoded.current_rows = u64::try_from(rows.len()).unwrap_or(u64::MAX);
                     decoded.current_bytes = bytes;
@@ -875,7 +935,7 @@ impl Iterator for PropertyParquetRows {
                 }
                 Err(error) => {
                     self.budget.release(decode_reservation);
-                    self.budget.release(arrow_bytes);
+                    self.budget.release(self.batch_reservation_bytes);
                     *self.failed.lock().expect("property failure lock") = Some(error);
                     return None;
                 }
@@ -898,9 +958,30 @@ pub fn visit_authenticated_property_snapshots<F>(
 where
     F: FnMut(PropertySnapshotRow) -> Result<(), GfError>,
 {
-    let (inventory, _) = crate::capture_graph_files(project)?;
-    AuthenticatedPropertyInventory::from_entries_at_root(project, inventory.files)?
+    authenticated_property_inventory_for_route(project, kind, route)?
         .visit_route(kind, route, scratch, limits, emit)
+}
+
+pub(crate) fn authenticated_property_inventory_for_route(
+    project: &Path,
+    kind: PropertyRouteKind,
+    route: &str,
+) -> Result<AuthenticatedPropertyInventory, GfError> {
+    if project.join(crate::CURRENT_FILE).is_file() {
+        let generation = crate::resolve_project_generation(project)?;
+        return AuthenticatedPropertyInventory::from_resolved_generation_for_route(
+            &generation,
+            kind,
+            route,
+        );
+    }
+    let (inventory, _) = crate::capture_graph_files(project)?;
+    AuthenticatedPropertyInventory::from_entries_at_root_for_route(
+        project,
+        inventory.files,
+        kind,
+        route,
+    )
 }
 
 /// Resolve the canonical authenticated logical schema for one route.
@@ -909,8 +990,7 @@ pub(crate) fn authenticated_property_route_schema(
     kind: PropertyRouteKind,
     route: &str,
 ) -> Result<Option<arrow::datatypes::SchemaRef>, GfError> {
-    let (inventory, _) = crate::capture_graph_files(project)?;
-    AuthenticatedPropertyInventory::from_entries_at_root(project, inventory.files)
+    authenticated_property_inventory_for_route(project, kind, route)
         .map(|inventory| inventory.route_schema(kind, route))
 }
 
@@ -935,9 +1015,7 @@ pub fn read_authenticated_property_snapshots_for(
     let mut unresolved = targets.clone();
     let mut found = BTreeMap::new();
     let mut metrics = PropertyOverlayMetrics::default();
-    let (graph_inventory, _) = crate::capture_graph_files(project)?;
-    let inventory =
-        AuthenticatedPropertyInventory::from_entries_at_root(project, graph_inventory.files)?;
+    let inventory = authenticated_property_inventory_for_route(project, kind, route)?;
     let Some(fragments) = inventory.routes.get(&(kind, route.to_owned())) else {
         return Ok((found, metrics));
     };
@@ -1186,6 +1264,10 @@ fn validate_fragment_schema(
     Ok(())
 }
 
+#[allow(
+    deprecated,
+    reason = "Parquet 58 exposes raw compact-Thrift page type and sizes only here"
+)]
 fn validate_parquet_resource_admission(
     metadata: &parquet::file::metadata::ParquetMetaData,
     limits: PropertyOverlayLimits,
@@ -1194,13 +1276,16 @@ fn validate_parquet_resource_admission(
 ) -> Result<u64, GfError> {
     use std::io::{Seek, SeekFrom};
     const MAX_PAGE_HEADER_BYTES: usize = 64 * 1024;
-    let max_page_bytes = limits.max_buffered_bytes / 3;
+    let max_page_bytes = limits.max_buffered_bytes / 4;
     if max_page_bytes == 0 {
         return Err(corrupt("property page byte budget is too small"));
     }
-    let mut largest_page = 0_u64;
+    let mut largest_group_exposure = 0_u64;
     for group in metadata.row_groups() {
+        let mut group_exposure = 0_u64;
         for column in group.columns() {
+            let mut dictionary_exposure = 0_u64;
+            let mut data_exposure = 0_u64;
             let _uncompressed = u64::try_from(column.uncompressed_size())
                 .map_err(|_| corrupt("property column chunk has negative uncompressed size"))?;
             let compressed = u64::try_from(column.compressed_size())
@@ -1249,7 +1334,11 @@ fn validate_parquet_resource_admission(
                 {
                     return Err(corrupt("property page exceeds pre-decode byte admission"));
                 }
-                largest_page = largest_page.max(uncompressed_page);
+                if header.type_ == parquet::format::PageType::DICTIONARY_PAGE {
+                    dictionary_exposure = dictionary_exposure.max(uncompressed_page);
+                } else {
+                    data_exposure = data_exposure.max(uncompressed_page);
+                }
                 position = position
                     .checked_add(header_bytes)
                     .and_then(|offset| offset.checked_add(compressed_page))
@@ -1263,13 +1352,36 @@ fn validate_parquet_resource_admission(
                     "property page sequence does not cover its column chunk",
                 ));
             }
+            group_exposure = group_exposure
+                .checked_add(data_exposure)
+                .and_then(|bytes| {
+                    dictionary_exposure
+                        .checked_mul(u64::try_from(admitted_batch_rows(limits)).ok()?)
+                        .and_then(|decoded_dictionary| bytes.checked_add(decoded_dictionary))
+                })
+                .and_then(|bytes| {
+                    // Validity, offsets, and values buffers are live together.
+                    // Sixteen bytes/value/column deliberately over-reserves the
+                    // fixed Arrow bookkeeping before the builder allocates it.
+                    u64::try_from(admitted_batch_rows(limits))
+                        .ok()?
+                        .checked_mul(16)
+                        .and_then(|overhead| bytes.checked_add(overhead))
+                })
+                .ok_or_else(|| corrupt("property projected page exposure overflows"))?;
+            if group_exposure > max_page_bytes {
+                return Err(corrupt(
+                    "property projected pages exceed pre-decode live-byte admission",
+                ));
+            }
         }
+        largest_group_exposure = largest_group_exposure.max(group_exposure);
     }
-    Ok(largest_page)
+    Ok(largest_group_exposure)
 }
 
 fn admitted_batch_rows(limits: PropertyOverlayLimits) -> usize {
-    let row_budget = limits.max_buffered_bytes / 3;
+    let row_budget = limits.max_buffered_bytes / 4;
     let byte_limited = usize::try_from(row_budget / limits.max_row_bytes)
         .unwrap_or(usize::MAX)
         .max(1);
@@ -2180,6 +2292,35 @@ mod tests {
             .unwrap();
         assert_eq!(inventory_rows.len(), 1);
 
+        let unrelated_dir = dir.path().join("properties/Unrelated");
+        fs::create_dir_all(&unrelated_dir).unwrap();
+        let unrelated_path = unrelated_dir.join(id.file_name());
+        let unrelated_bytes = b"authenticated but deliberately not parquet";
+        fs::write(&unrelated_path, unrelated_bytes).unwrap();
+        let unrelated_entry = crate::GraphFileEntry {
+            relative_path: format!("properties/Unrelated/{}", id.file_name()),
+            byte_length: u64::try_from(unrelated_bytes.len()).unwrap(),
+            content_sha256: digest_hex(&Sha256::digest(unrelated_bytes)),
+            role: crate::GraphFileRole::Properties,
+        };
+        let selected = AuthenticatedPropertyInventory::from_entries_at_root_for_route(
+            dir.path(),
+            vec![entry.clone(), unrelated_entry],
+            PropertyRouteKind::Node,
+            "Person",
+        )
+        .unwrap();
+        let selected_metrics = selected
+            .visit_route(
+                PropertyRouteKind::Node,
+                "Person",
+                scratch.path(),
+                PropertyOverlayLimits::default(),
+                |_| Ok(()),
+            )
+            .unwrap();
+        assert_eq!(selected_metrics.authentication_bytes, entry.byte_length);
+
         let conflicting_id = PropertyFragmentId {
             generation: 8,
             ordinal: 0,
@@ -2247,6 +2388,73 @@ mod tests {
                     |_| Ok(()),
                 )
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn retained_reader_rejects_wide_projected_pages_before_arrow_allocation() {
+        let dir = TempDir::new().unwrap();
+        let scratch = TempDir::new().unwrap();
+        let route_dir = dir.path().join("properties/Wide");
+        fs::create_dir_all(&route_dir).unwrap();
+        let id = PropertyFragmentId {
+            generation: 1,
+            ordinal: 0,
+        };
+        let mut fields = vec![
+            Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+            Field::new(PROPERTY_TOMBSTONE_FIELD, DataType::Boolean, false),
+        ];
+        let mut columns = vec![
+            Arc::new(FixedSizeBinaryArray::try_from_iter(vec![vec![7; 16]].into_iter()).unwrap())
+                as ArrayRef,
+            Arc::new(BooleanArray::from(vec![false])) as ArrayRef,
+        ];
+        let value = "x".repeat(256);
+        for index in 0..32 {
+            fields.push(Field::new(
+                format!("value_{index:02}"),
+                DataType::Utf8,
+                true,
+            ));
+            columns.push(Arc::new(StringArray::from(vec![Some(value.as_str())])) as ArrayRef);
+        }
+        let schema = Arc::new(Schema::new_with_metadata(
+            fields,
+            HashMap::from([
+                (
+                    PROPERTY_OVERLAY_FORMAT_KEY.into(),
+                    PROPERTY_OVERLAY_FORMAT.into(),
+                ),
+                (PROPERTY_ROUTE_KEY.into(), "Wide".into()),
+                (PROPERTY_KIND_KEY.into(), "node".into()),
+                (PROPERTY_GENERATION_KEY.into(), "1".into()),
+                (PROPERTY_ORDINAL_KEY.into(), "0".into()),
+            ]),
+        ));
+        let batch = RecordBatch::try_new(Arc::clone(&schema), columns).unwrap();
+        let path = route_dir.join(id.file_name());
+        let mut writer = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+
+        let error = visit_authenticated_property_snapshots(
+            dir.path(),
+            PropertyRouteKind::Node,
+            "Wide",
+            scratch.path(),
+            PropertyOverlayLimits {
+                max_buffered_rows: 8,
+                max_open_runs: 2,
+                max_buffered_bytes: 16 * 1024,
+                max_row_bytes: 12 * 1024,
+            },
+            |_| Ok(()),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("projected pages exceed"),
+            "{error}"
         );
     }
 
