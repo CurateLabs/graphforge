@@ -13,9 +13,7 @@ use tempfile::TempDir;
 use graphforge_core::uuid::new_v7;
 use graphforge_core::{OntologyMode, TypeId};
 use graphforge_ir::{IrLiteral, RuntimeCatalog};
-use graphforge_storage::{
-    EdgePropertyTable, GraphCatalog, GraphWriter, PropertyTable, read_topology_generation,
-};
+use graphforge_storage::{GraphCatalog, GraphWriter, read_topology_generation};
 
 /// Fixed timestamp so written Parquet is deterministic.
 const TS: i64 = 1_700_000_000_000_000;
@@ -179,7 +177,7 @@ async fn localdatetime_property_round_trips_through_storage() {
     w2.flush().unwrap();
 
     // Read back: `ts` is a Struct{date, time} carrying the original values.
-    let batch = read_property_batch(dir.path(), "_untyped").await;
+    let batch = read_property_batch(dir.path(), "_untyped");
     let ts = batch.column_by_name("ts").expect("ts column");
     let s = ts.as_any().downcast_ref::<StructArray>().expect("struct");
     let date = s
@@ -246,7 +244,7 @@ async fn datetime_and_time_properties_round_trip_through_storage() {
     .unwrap();
     w2.flush().unwrap();
 
-    let batch = read_property_batch(dir.path(), "_untyped").await;
+    let batch = read_property_batch(dir.path(), "_untyped");
 
     // `t` is a native Time64(ns) column.
     let t = batch.column_by_name("t").expect("t column");
@@ -324,7 +322,7 @@ async fn list_of_temporals_property_round_trips_through_storage() {
 
     // Read back: `dates` is a List<Struct{epoch_day}> with the original element
     // values (i64 days).
-    let batch = read_property_batch(dir.path(), "_untyped").await;
+    let batch = read_property_batch(dir.path(), "_untyped");
     let col = batch.column_by_name("dates").expect("dates column");
     let list = col.as_any().downcast_ref::<ListArray>().expect("list");
     let elems = list.value(0);
@@ -347,39 +345,25 @@ async fn list_of_temporals_property_round_trips_through_storage() {
 // ---------------------------------------------------------------------------
 
 /// Read `properties/<stem>.parquet` into its single batch (panics if absent).
-async fn read_property_batch(dir: &std::path::Path, stem: &str) -> arrow::array::RecordBatch {
-    let ctx = SessionContext::new();
-    ctx.register_table(
-        "properties",
-        Arc::new(PropertyTable::open_discovered(dir, stem)),
-    )
-    .unwrap();
-    let batches = ctx
-        .sql("SELECT * FROM properties")
-        .await
+fn read_property_batch(dir: &std::path::Path, stem: &str) -> arrow::array::RecordBatch {
+    let path = dir.join(format!("properties/{stem}.parquet"));
+    let file = File::open(&path).unwrap_or_else(|e| panic!("open {path:?}: {e}"));
+    let mut reader = ParquetRecordBatchReaderBuilder::try_new(file)
         .unwrap()
-        .collect()
-        .await
+        .build()
         .unwrap();
-    arrow::compute::concat_batches(&batches[0].schema(), &batches).unwrap()
+    reader.next().unwrap().unwrap()
 }
 
 /// Read `edge_properties/<stem>.parquet` into its single batch (panics if absent).
-async fn read_edge_property_batch(dir: &std::path::Path, stem: &str) -> arrow::array::RecordBatch {
-    let ctx = SessionContext::new();
-    ctx.register_table(
-        "edge_properties",
-        Arc::new(EdgePropertyTable::open_discovered(dir, stem)),
-    )
-    .unwrap();
-    let batches = ctx
-        .sql("SELECT * FROM edge_properties")
-        .await
+fn read_edge_property_batch(dir: &std::path::Path, stem: &str) -> arrow::array::RecordBatch {
+    let path = dir.join(format!("edge_properties/{stem}.parquet"));
+    let file = File::open(&path).unwrap_or_else(|e| panic!("open {path:?}: {e}"));
+    let mut reader = ParquetRecordBatchReaderBuilder::try_new(file)
         .unwrap()
-        .collect()
-        .await
+        .build()
         .unwrap();
-    arrow::compute::concat_batches(&batches[0].schema(), &batches).unwrap()
+    reader.next().unwrap().unwrap()
 }
 
 #[tokio::test]
@@ -467,7 +451,7 @@ async fn append_property_merge_adds_new_column() {
     .unwrap();
     w2.flush().unwrap();
 
-    let batch = read_property_batch(dir.path(), "_untyped").await;
+    let batch = read_property_batch(dir.path(), "_untyped");
     assert_eq!(batch.num_rows(), 2, "both rows retained");
     let age = batch
         .column_by_name("age")
@@ -475,8 +459,9 @@ async fn append_property_merge_adds_new_column() {
         .as_any()
         .downcast_ref::<arrow::array::Int64Array>()
         .unwrap();
-    assert_eq!(age.null_count(), 1);
-    assert!((0..age.len()).any(|row| age.is_valid(row) && age.value(row) == 10));
+    // First row (A) has no age → null; second (B) → 10.
+    assert!(age.is_null(0));
+    assert_eq!(age.value(1), 10);
 }
 
 #[tokio::test]
@@ -505,7 +490,7 @@ async fn append_property_merge_preserves_heterogeneous_scalar_types() {
     w2.flush().unwrap();
 
     // Mixed Int (flush 1) + Str (flush 2) retain their original scalar types.
-    let batch = read_property_batch(dir.path(), "_untyped").await;
+    let batch = read_property_batch(dir.path(), "_untyped");
     let x = batch
         .column_by_name("x")
         .unwrap()
@@ -518,11 +503,25 @@ async fn append_property_merge_preserves_heterogeneous_scalar_types() {
         .as_any()
         .downcast_ref::<arrow::array::Int8Array>()
         .unwrap();
-    let mut observed = (0..tags.len())
-        .map(|row| tags.value(row))
-        .collect::<Vec<_>>();
-    observed.sort_unstable();
-    assert_eq!(observed, vec![0, 2]);
+    assert_eq!((tags.value(0), tags.value(1)), (0, 2));
+    assert_eq!(
+        x.column_by_name("__het_int")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .unwrap()
+            .value(0),
+        1
+    );
+    assert_eq!(
+        x.column_by_name("__het_str")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .unwrap()
+            .value(1),
+        "two"
+    );
 }
 
 #[tokio::test]
@@ -552,13 +551,13 @@ async fn append_property_merge_null_first_across_flushes() {
     .unwrap();
     w2.flush().unwrap();
 
-    let batch = read_property_batch(dir.path(), "_untyped").await;
+    let batch = read_property_batch(dir.path(), "_untyped");
     let score = batch
         .column_by_name("score")
         .unwrap()
         .as_any()
-        .downcast_ref::<arrow::array::StructArray>()
-        .expect("cross-shard null and Int normalize to tagged scalars");
+        .downcast_ref::<arrow::array::Int64Array>()
+        .expect("score infers Int64, not pinned to Utf8 by the leading null");
     assert_eq!(batch.num_rows(), 2);
     // Exactly one concrete value (42); the all-null first flush stays null.
     assert_eq!(score.null_count(), 1);
@@ -576,8 +575,8 @@ async fn append_edge_stems_are_isolated() {
 
     // Second session writes only LIKES — KNOWS.parquet must be left intact.
     let mut w2 = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
-    w2.register_existing_node(a, 1).unwrap();
-    w2.register_existing_node(b, 2).unwrap();
+    w2.create_node(a, TypeId(0)).unwrap();
+    w2.create_node(b, TypeId(0)).unwrap();
     w2.create_edge(new_v7(), "LIKES", &a, &b).unwrap();
     w2.flush().unwrap();
 
@@ -634,7 +633,7 @@ async fn edge_property_round_trip_persists_value() {
     assert!(dir.path().join("edge_properties/KNOWS.parquet").exists());
     assert!(!dir.path().join("properties/KNOWS.parquet").exists());
 
-    let batch = read_edge_property_batch(dir.path(), "KNOWS").await;
+    let batch = read_edge_property_batch(dir.path(), "KNOWS");
     assert_eq!(batch.num_rows(), 1);
     assert!(
         batch.schema().field_with_name("edge_uuid").is_ok(),
@@ -682,7 +681,7 @@ async fn append_edge_property_merge_adds_new_column() {
         ]),
     );
 
-    let batch = read_edge_property_batch(dir.path(), "KNOWS").await;
+    let batch = read_edge_property_batch(dir.path(), "KNOWS");
     assert_eq!(batch.num_rows(), 2, "both edge rows retained");
     let weight = batch
         .column_by_name("weight")
@@ -690,8 +689,9 @@ async fn append_edge_property_merge_adds_new_column() {
         .as_any()
         .downcast_ref::<arrow::array::Float64Array>()
         .unwrap();
-    assert_eq!(weight.null_count(), 1);
-    assert!((0..weight.len()).any(|row| weight.is_valid(row) && weight.value(row) == 0.5));
+    // First row has no weight → null; second → 0.5.
+    assert!(weight.is_null(0));
+    assert_eq!(weight.value(1), 0.5);
 }
 
 #[tokio::test]
@@ -708,7 +708,7 @@ async fn append_edge_property_merge_preserves_heterogeneous_scalar_types() {
         std::collections::HashMap::from([("x".to_owned(), IrLiteral::Str("two".to_owned()))]),
     );
 
-    let batch = read_edge_property_batch(dir.path(), "KNOWS").await;
+    let batch = read_edge_property_batch(dir.path(), "KNOWS");
     let x = batch
         .column_by_name("x")
         .unwrap()
@@ -721,11 +721,7 @@ async fn append_edge_property_merge_preserves_heterogeneous_scalar_types() {
         .as_any()
         .downcast_ref::<arrow::array::Int8Array>()
         .unwrap();
-    let mut observed = (0..tags.len())
-        .map(|row| tags.value(row))
-        .collect::<Vec<_>>();
-    observed.sort_unstable();
-    assert_eq!(observed, vec![0, 2]);
+    assert_eq!((tags.value(0), tags.value(1)), (0, 2));
 }
 
 #[tokio::test]
@@ -745,13 +741,13 @@ async fn append_edge_property_merge_null_first_across_flushes() {
         std::collections::HashMap::from([("score".to_owned(), IrLiteral::Int(42))]),
     );
 
-    let batch = read_edge_property_batch(dir.path(), "KNOWS").await;
+    let batch = read_edge_property_batch(dir.path(), "KNOWS");
     let score = batch
         .column_by_name("score")
         .unwrap()
         .as_any()
-        .downcast_ref::<arrow::array::StructArray>()
-        .expect("cross-shard null and Int normalize to tagged scalars");
+        .downcast_ref::<arrow::array::Int64Array>()
+        .expect("score infers Int64, not pinned to Utf8 by the leading null");
     assert_eq!(batch.num_rows(), 2);
     assert_eq!(score.null_count(), 1);
 }
@@ -780,14 +776,14 @@ async fn edge_property_stems_are_isolated() {
     .unwrap();
     w.flush().unwrap();
 
-    let knows = read_edge_property_batch(dir.path(), "KNOWS").await;
+    let knows = read_edge_property_batch(dir.path(), "KNOWS");
     assert_eq!(knows.num_rows(), 1);
     assert!(knows.schema().field_with_name("since").is_ok());
     assert!(
         knows.schema().field_with_name("rating").is_err(),
         "KNOWS file must not gain LIKES' column"
     );
-    let likes = read_edge_property_batch(dir.path(), "LIKES").await;
+    let likes = read_edge_property_batch(dir.path(), "LIKES");
     assert_eq!(likes.num_rows(), 1);
     assert!(likes.schema().field_with_name("rating").is_ok());
 }

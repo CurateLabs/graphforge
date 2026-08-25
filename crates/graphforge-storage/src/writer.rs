@@ -2615,17 +2615,18 @@ impl GraphWriter {
         }
         let buffered: Vec<(String, Vec<PropRow>)> = self.properties.drain().collect();
         for (stem, new_rows) in buffered {
-            let before = staged
-                .staged_paths()
-                .map(Path::to_path_buf)
-                .collect::<HashSet<_>>();
-            let updates = new_rows
-                .into_iter()
-                .map(|row| (row.node_uuid, row.props))
-                .collect::<HashMap<_, _>>();
-            stage_set_node_properties(staged, &self.dir, &stem, &updates)?;
-            self.authenticate_new_property_fragments(staged, &before, &stem)?;
-            self.record_new_property_work(staged, &before)?;
+            let existing = crate::mutator::property_parquet_files(&self.dir, "properties", &stem)?;
+            let existing_metadata = existing
+                .first()
+                .and_then(|path| crate::catalog::discover_parquet_schema(path))
+                .map(|schema| schema.metadata().clone());
+            let (schema, cols) = build_property_columns(&stem, &new_rows)?;
+            let schema = self.authenticated_route_schema(Arc::new(schema), &stem);
+            let schema = preserve_semantic_route_metadata(schema, existing_metadata.as_ref());
+            let batch = RecordBatch::try_new(schema.clone(), cols).map_err(pq_err)?;
+            let path = property_append_path(&self.dir, "properties", &stem, &existing)?;
+            staged.stage(&path, schema, &batch)?;
+            self.record_topology_shard(staged, &path, batch.num_rows() as u64)?;
         }
         Ok(())
     }
@@ -2639,68 +2640,24 @@ impl GraphWriter {
         }
         let buffered: Vec<(String, Vec<EdgePropRow>)> = self.edge_properties.drain().collect();
         for (stem, new_rows) in buffered {
-            let before = staged
-                .staged_paths()
-                .map(Path::to_path_buf)
-                .collect::<HashSet<_>>();
-            let updates = new_rows
-                .into_iter()
-                .map(|row| (row.edge_uuid, row.props))
-                .collect::<HashMap<_, _>>();
-            stage_set_edge_properties(staged, &self.dir, &stem, &updates)?;
-            self.authenticate_new_property_fragments(staged, &before, &stem)?;
-            self.record_new_property_work(staged, &before)?;
-        }
-        Ok(())
-    }
-
-    fn record_new_property_work(
-        &mut self,
-        staged: &RewriteBatch,
-        before: &HashSet<PathBuf>,
-    ) -> Result<(), GfError> {
-        let paths = staged
-            .staged_paths()
-            .filter(|path| !before.contains(*path))
-            .map(Path::to_path_buf)
-            .collect::<Vec<_>>();
-        for path in paths {
-            let temp = staged
-                .staged_temp(&path)
-                .ok_or_else(|| GfError::Storage("staged property fragment is missing".into()))?;
-            let file = fs::File::open(temp).map_err(|error| io_err(&error))?;
-            let reader = ParquetRecordBatchReaderBuilder::try_new(file).map_err(pq_err)?;
-            let rows = u64::try_from(reader.metadata().file_metadata().num_rows())
-                .map_err(|_| GfError::Storage("property row count is negative".into()))?;
-            self.record_topology_shard(staged, &path, rows)?;
-        }
-        Ok(())
-    }
-
-    fn authenticate_new_property_fragments(
-        &self,
-        staged: &mut RewriteBatch,
-        before: &HashSet<PathBuf>,
-        stem: &str,
-    ) -> Result<(), GfError> {
-        let paths = staged
-            .staged_paths()
-            .filter(|path| !before.contains(*path))
-            .map(Path::to_path_buf)
-            .collect::<Vec<_>>();
-        for path in paths {
-            let temp = staged
-                .staged_temp(&path)
-                .ok_or_else(|| GfError::Storage("staged property fragment is missing".into()))?;
-            let physical = crate::catalog::discover_parquet_schema(temp)
-                .ok_or_else(|| GfError::Storage("staged property schema is unreadable".into()))?;
-            let batches =
-                crate::catalog::read_parquet_or_empty(temp, physical.clone()).map_err(pq_err)?;
-            let batch = arrow::compute::concat_batches(&physical, &batches).map_err(pq_err)?;
-            let authenticated = self.authenticated_route_schema(physical, stem);
-            let batch = RecordBatch::try_new(authenticated.clone(), batch.columns().to_vec())
-                .map_err(pq_err)?;
-            staged.restage(&path, authenticated, &batch)?;
+            let existing =
+                crate::mutator::property_parquet_files(&self.dir, "edge_properties", &stem)?;
+            let existing_metadata = existing
+                .first()
+                .and_then(|path| crate::catalog::discover_parquet_schema(path))
+                .map(|schema| schema.metadata().clone());
+            let (schema, cols) = build_property_columns_keyed(
+                EDGE_PROPERTY_UUID_FIELD,
+                "graphforge.rel_type",
+                &stem,
+                &new_rows,
+            )?;
+            let schema = self.authenticated_route_schema(Arc::new(schema), &stem);
+            let schema = preserve_semantic_route_metadata(schema, existing_metadata.as_ref());
+            let batch = RecordBatch::try_new(schema.clone(), cols).map_err(pq_err)?;
+            let path = property_append_path(&self.dir, "edge_properties", &stem, &existing)?;
+            staged.stage(&path, schema, &batch)?;
+            self.record_topology_shard(staged, &path, batch.num_rows() as u64)?;
         }
         Ok(())
     }
@@ -4389,16 +4346,13 @@ pub fn stage_set_node_properties(
         stage_node_property_path(staged, stem, &path, &rows, metadata.as_ref())?;
     }
     if !remaining.is_empty() {
-        let existing = crate::mutator::property_parquet_files(dir, "properties", stem)?;
+        let path = node_props_path(dir, stem);
+        let existing = read_props_through(staged, &path)?;
         let metadata = existing
             .first()
-            .and_then(|path| crate::catalog::discover_parquet_schema(path))
-            .map(|schema| schema.metadata().clone());
-        let rows = remaining
-            .into_iter()
-            .map(|(node_uuid, props)| PropRow { node_uuid, props })
-            .collect::<Vec<_>>();
-        let path = property_append_path(dir, "properties", stem, &existing)?;
+            .map(|batch| batch.schema().metadata().clone());
+        let rows = decode_property_rows(&existing)?;
+        let (rows, _) = apply_property_updates(rows, &remaining);
         stage_node_property_path(staged, stem, &path, &rows, metadata.as_ref())?;
     }
     let touched = updates.values().filter(|props| !props.is_empty()).count() as u64;
@@ -4479,16 +4433,13 @@ pub fn stage_set_edge_properties(
         stage_edge_property_path(staged, rel_stem, &path, &rows, metadata.as_ref())?;
     }
     if !remaining.is_empty() {
-        let existing = crate::mutator::property_parquet_files(dir, "edge_properties", rel_stem)?;
+        let path = edge_props_path(dir, rel_stem);
+        let existing = read_props_through(staged, &path)?;
         let metadata = existing
             .first()
-            .and_then(|path| crate::catalog::discover_parquet_schema(path))
-            .map(|schema| schema.metadata().clone());
-        let rows = remaining
-            .into_iter()
-            .map(|(edge_uuid, props)| EdgePropRow { edge_uuid, props })
-            .collect::<Vec<_>>();
-        let path = property_append_path(dir, "edge_properties", rel_stem, &existing)?;
+            .map(|batch| batch.schema().metadata().clone());
+        let rows = decode_edge_property_rows(&existing)?;
+        let (rows, _) = apply_property_updates(rows, &remaining);
         stage_edge_property_path(staged, rel_stem, &path, &rows, metadata.as_ref())?;
     }
     let touched = updates.values().filter(|props| !props.is_empty()).count() as u64;
@@ -4631,6 +4582,16 @@ fn stage_edge_property_path(
     let schema = preserve_semantic_route_metadata(Arc::new(schema), metadata);
     let batch = RecordBatch::try_new(schema.clone(), cols).map_err(pq_err)?;
     staged.restage(path, schema, &batch)
+}
+
+/// `properties/<stem>.parquet` under `dir`.
+fn node_props_path(dir: &Path, stem: &str) -> PathBuf {
+    dir.join("properties").join(format!("{stem}.parquet"))
+}
+
+/// `edge_properties/<stem>.parquet` under `dir`.
+fn edge_props_path(dir: &Path, stem: &str) -> PathBuf {
+    dir.join("edge_properties").join(format!("{stem}.parquet"))
 }
 
 fn property_paths_through(
@@ -6390,10 +6351,9 @@ mod tests {
             .unwrap();
         writer.flush().unwrap();
 
-        let node_schema = crate::catalog::discover_parquet_schema(
-            &dir.path().join("properties/_untyped.parquet"),
-        )
-        .unwrap();
+        let node_schema =
+            crate::catalog::discover_parquet_schema(&node_props_path(dir.path(), "_untyped"))
+                .unwrap();
         for (name, extension_name) in [
             ("point", "geoarrow.point"),
             ("line", "geoarrow.linestring"),
