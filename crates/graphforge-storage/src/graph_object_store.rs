@@ -1498,31 +1498,25 @@ fn materialize_from_cas(
         )
     })?;
     let path = Path::new(&entry.relative_path);
-    let mut parent = target
-        .create_child_directory(std::ffi::OsStr::new("files"))
-        .map_err(|error| {
-            storage(
-                "create stable materialization files root",
-                &cas.diagnostic_root,
-                error,
-            )
-        })?;
+    let mut parent: Option<StableDirectory> = None;
     let mut components = path.components().peekable();
     while let Some(component) = components.next() {
         let Component::Normal(name) = component else {
             return Err(validation("invalid materialization path component"));
         };
         if components.peek().is_some() {
-            parent = parent.create_child_directory(name).map_err(|error| {
+            let directory = parent.as_ref().unwrap_or(target);
+            parent = Some(directory.create_child_directory(name).map_err(|error| {
                 storage(
                     "create stable materialization directory",
                     &cas.diagnostic_root,
                     error,
                 )
-            })?;
+            })?);
         } else {
+            let parent = parent.as_ref().unwrap_or(target);
             let (installed, installed_identity) = bucket
-                .link_child_into(source_name, &source, source_identity, &parent, name)
+                .link_child_into(source_name, &source, source_identity, parent, name)
                 .map_err(|error| {
                     storage(
                         "install stable materialized object",
@@ -2678,6 +2672,33 @@ mod tests {
             .is_err()
         );
         assert!(!outside.path().join("payload.bin").exists());
+    }
+
+    #[test]
+    fn materialization_preserves_ordinary_workspace_relative_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let payload = b"ordinary topology payload";
+        let (digest, _) = install_graph_object_bytes(root.path(), payload).unwrap();
+        let inventory = crate::graph_files::inventory_from_entries(vec![crate::GraphFileEntry {
+            relative_path: "topology/edges/knows.parquet".into(),
+            byte_length: payload.len() as u64,
+            content_sha256: digest,
+            role: crate::GraphFileRole::Topology,
+        }])
+        .unwrap();
+        let owner = tempfile::tempdir().unwrap();
+        let target = owner.path().join("workspace");
+
+        let evidence = materialize_graph_objects(root.path(), &inventory, &target).unwrap();
+
+        assert_eq!(
+            fs::read(target.join("topology/edges/knows.parquet")).unwrap(),
+            payload
+        );
+        assert!(!target.join("files").exists());
+        assert_eq!(evidence.files_reused, 1);
+        assert_eq!(evidence.bytes_reused, payload.len() as u64);
+        assert_eq!(evidence.files_copied, 0);
     }
 
     #[cfg(unix)]

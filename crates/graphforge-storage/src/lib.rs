@@ -45,8 +45,8 @@ pub(crate) use graph_files::{GraphFilesParticipant, decode_versioned_graph_files
     reason = "private node-v2 construction is consumed by the staged #932 integration"
 )]
 mod graph_manifest;
-#[cfg(test)]
-pub(crate) use graph_manifest::encode_root as encode_graph_files_root_v2;
+#[cfg(any(test, feature = "test-support"))]
+pub use graph_manifest::encode_root as encode_graph_files_root_v2;
 pub(crate) use graph_manifest::{
     GRAPH_FILES_V2_FORMAT, GRAPH_FILES_V2_VERSION, GRAPH_MANIFEST_NODE_FORMAT,
     GRAPH_MANIFEST_NODE_VERSION, GRAPH_RADIX_DEPTH, GraphFilesRootV2, GraphManifestLimits,
@@ -60,14 +60,19 @@ pub(crate) use graph_manifest::{
     reason = "private CAS construction is consumed by the staged #932 integration"
 )]
 mod graph_object_store;
-#[cfg(test)]
-pub(crate) use graph_object_store::{
+pub use graph_object_store::materialize_graph_objects;
+#[cfg(any(test, feature = "test-support"))]
+pub use graph_object_store::{
     GraphManifestState, append_graph_files_v2, install_graph_object_bytes, read_graph_object,
 };
 pub(crate) use graph_object_store::{
-    GraphObjectPublicationLease, begin_graph_object_publication, graph_object_path,
-    graph_object_publication_is_live, read_graph_object_by_digest, verify_graph_object,
+    GraphObjectPublicationLease, graph_object_publication_is_live, read_graph_object_by_digest,
+    verify_graph_object,
 };
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use graph_object_store::{begin_graph_object_publication, graph_object_path};
+#[cfg(any(test, feature = "test-support"))]
+pub use graph_object_store::{begin_graph_object_publication, graph_object_path};
 
 pub mod semantic_bindings;
 pub use semantic_bindings::{

@@ -12,6 +12,8 @@ default = []
 # Enables the existing cookie-protected subprocess failpoints for higher-level
 # workspace tests. Production consumers do not enable this feature.
 test-failpoints = []
+# Exposes compact-root builders only to higher-level cross-crate tests.
+test-support = []
 
 [dependencies]
 graphforge-core = { version = "0.5.2", path = "../graphforge-core" }

@@ -144,8 +144,13 @@ update writes only changed payloads and the compressed path-copy root path while
 unchanged objects are reused byte-for-byte. A storage-owned root-bound state
 authenticates an existing inventory once per publication sequence; individual
 updates cannot substitute a caller-owned cache and do not rescan all prior
-descriptors. Open resolves the bounded manifest and
-verifies every selected payload before exposing the generation. Version 1
+descriptors. Open resolves the bounded manifest and verifies every selected
+payload before exposing the generation. Ordinary API open and restore dispatch
+on the declared participant version: version 1 keeps its pinned-tree/copy
+behavior, while version 2 materializes authenticated CAS objects at the same
+workspace-relative paths and replays authoritative deltas into a distinct
+private workspace so immutable CAS hard links are never modified in place.
+Version 1
 expanded inventories remain readable and can be migrated without changing
 `CURRENT` until the complete version-2 generation is durable.
 
