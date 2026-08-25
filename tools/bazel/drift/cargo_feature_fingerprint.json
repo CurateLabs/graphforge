@@ -1,6 +1,6 @@
 {
   "schema": "graphforge.cargo-feature-fingerprint.v1",
-  "sha256": "578c0de5c055fbdfe3406ebbcbff82dc48187ffb212dabdf291a61e8bd583f51",
+  "sha256": "b3be2fa948ad685b8e34b042fd7da99037da33e4edb464242913107d4e4baf61",
   "entries": [
     {
       "name": "graphforge-api",
@@ -175,7 +175,8 @@
           "name": "graphforge-storage",
           "req": "*",
           "features": [
-            "test-failpoints"
+            "test-failpoints",
+            "test-support"
           ],
           "optional": false,
           "uses_default_features": true,
@@ -1863,7 +1864,8 @@
       "version": "0.5.2",
       "features": [
         "default",
-        "test-failpoints"
+        "test-failpoints",
+        "test-support"
       ],
       "dependencies": [
         {
