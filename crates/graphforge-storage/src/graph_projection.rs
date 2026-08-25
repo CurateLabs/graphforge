@@ -697,51 +697,57 @@ fn fingerprint_graph_paths_with_runtime_names(
     paths: Vec<PathBuf>,
     runtime_entity_names: Option<&BTreeMap<u32, String>>,
 ) -> Result<[u8; 32], GfError> {
-    let (node_paths, paths): (Vec<_>, Vec<_>) = paths.into_iter().partition(|path| {
-        path.strip_prefix(root).is_ok_and(|relative| {
-            relative == Path::new("topology/nodes.parquet")
-                || relative.starts_with("topology/nodes")
-        })
-    });
+    let mut logical_tables = BTreeMap::<String, Vec<PathBuf>>::new();
+    for path in paths {
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|_| validation("graph projection path escaped target"))?;
+        let components = relative
+            .components()
+            .map(|component| match component {
+                std::path::Component::Normal(value) => value
+                    .to_str()
+                    .ok_or_else(|| validation("graph projection path is not UTF-8")),
+                _ => Err(validation("graph projection path is not canonical")),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let logical = match components.as_slice() {
+            ["topology", "nodes.parquet"] | ["topology", "nodes", _] => {
+                "topology/nodes.parquet".to_owned()
+            }
+            ["topology", "edges", file] => format!("topology/edges/{file}"),
+            ["topology", "edges", stem, _] => format!("topology/edges/{stem}.parquet"),
+            [domain @ ("properties" | "edge_properties"), file] => {
+                format!("{domain}/{file}")
+            }
+            [domain @ ("properties" | "edge_properties"), stem, _] => {
+                format!("{domain}/{stem}.parquet")
+            }
+            ["topology", "runtime_catalog.parquet"] => {
+                "topology/runtime_catalog.parquet".to_owned()
+            }
+            _ => return Err(validation("graph projection path has no logical table")),
+        };
+        logical_tables.entry(logical).or_default().push(path);
+    }
     let mut writer = CanonicalWriter::new();
     writer.raw(b"GFGP1").map_err(canonical_error)?;
     writer
-        .u32(exact_u32(
-            paths.len() + usize::from(!node_paths.is_empty()),
-            "graph table count",
-        )?)
+        .u32(exact_u32(logical_tables.len(), "graph table count")?)
         .map_err(canonical_error)?;
-    if !node_paths.is_empty() {
-        writer
-            .text("topology/nodes.parquet")
-            .map_err(canonical_error)?;
+    for (relative, mut table_paths) in logical_tables {
+        table_paths.sort();
+        writer.text(&relative).map_err(canonical_error)?;
         let mut batches = Vec::new();
-        for path in node_paths {
+        for path in table_paths {
             batches.extend(read_parquet(&path)?);
         }
         let schema = batches
             .first()
             .map(RecordBatch::schema)
-            .ok_or_else(|| validation("graph projection node table has no schema"))?;
-        let batch = concat_batches(&schema, &batches).map_err(storage)?;
-        let logical =
-            logical_fingerprint_batch("topology/nodes.parquet", &batch, runtime_entity_names)?;
-        encode_table(&mut writer, &logical)?;
-    }
-    for path in paths {
-        let relative = path
-            .strip_prefix(root)
-            .map_err(|_| validation("graph projection path escaped target"))?
-            .to_str()
-            .ok_or_else(|| validation("graph projection path is not UTF-8"))?;
-        writer.text(relative).map_err(canonical_error)?;
-        let batches = read_parquet(&path)?;
-        let schema = batches
-            .first()
-            .map(RecordBatch::schema)
             .ok_or_else(|| validation("graph projection table has no schema"))?;
         let batch = concat_batches(&schema, &batches).map_err(storage)?;
-        let logical = logical_fingerprint_batch(relative, &batch, runtime_entity_names)?;
+        let logical = logical_fingerprint_batch(&relative, &batch, runtime_entity_names)?;
         encode_table(&mut writer, &logical)?;
     }
     fingerprint(
@@ -2687,6 +2693,51 @@ mod tests {
         assert_eq!(
             portable_graph_data_fingerprint(source.path()).unwrap(),
             portable_graph_data_fingerprint(&projected).unwrap(),
+        );
+    }
+
+    #[test]
+    fn portable_fingerprint_unions_legacy_and_immutable_node_fragments() {
+        fn graph(split: bool) -> TempDir {
+            let root = TempDir::new().unwrap();
+            let mut catalog = RuntimeCatalog::new();
+            let storage_id = graphforge_ir::runtime_entity_type_id(catalog.intern_label("Person"));
+            let mut writer =
+                GraphWriter::open_at(root.path(), OntologyMode::Exploratory, TS).unwrap();
+            writer.create_node(uuid(91), storage_id).unwrap();
+            writer.create_node(uuid(92), storage_id).unwrap();
+            writer.flush().unwrap();
+            write_parquet(
+                &root.path().join("topology/runtime_catalog.parquet"),
+                &catalog.to_record_batch(),
+            )
+            .unwrap();
+            if split {
+                let legacy = root.path().join("topology/nodes.parquet");
+                let batches = read_parquet(&legacy).unwrap();
+                let batch = concat_batches(&batches[0].schema(), &batches).unwrap();
+                let shards = root.path().join("topology/nodes");
+                fs::create_dir_all(&shards).unwrap();
+                write_parquet(
+                    &shards.join("00000000000000000001-00000000000000000001.parquet"),
+                    &batch.slice(0, 1),
+                )
+                .unwrap();
+                write_parquet(
+                    &shards.join("00000000000000000002-00000000000000000002.parquet"),
+                    &batch.slice(1, 1),
+                )
+                .unwrap();
+                fs::remove_file(legacy).unwrap();
+            }
+            root
+        }
+
+        let legacy = graph(false);
+        let sharded = graph(true);
+        assert_eq!(
+            portable_graph_data_fingerprint(legacy.path()).unwrap(),
+            portable_graph_data_fingerprint(sharded.path()).unwrap()
         );
     }
 
