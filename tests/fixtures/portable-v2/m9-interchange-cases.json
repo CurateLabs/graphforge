@@ -12,7 +12,7 @@
       "package_class": "complete",
       "expected_query_rows": ["00000000-0000-0000-0000-000000000001", "00000000-0000-0000-0000-000000000002", "00000000-0000-0000-0000-000000000003"],
       "expected_query_fingerprint": "sha256:bbb672f255891facbe5850b261c02d8b771ffc370d64c6c4387b7689aeb754a4",
-      "expected_data_fingerprint": "sha256:d5f47903b9d6703225562f90cf3553710a4de0da93cb760c51b14bc145e1f68d"
+      "expected_data_fingerprint": "sha256:f6895f68ffba0161ba9376616123fdb256abe1c59544f1292b61e8b3c042e8af"
     },
     {
       "package_class": "ontology-only",

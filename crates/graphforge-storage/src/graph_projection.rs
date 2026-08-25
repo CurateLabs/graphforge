@@ -605,16 +605,67 @@ pub(crate) fn projected_graph_fingerprint(root: &Path) -> Result<[u8; 32], GfErr
 /// retaining decoded topology, edges, node properties, and edge properties.
 pub(crate) fn portable_graph_data_fingerprint(root: &Path) -> Result<[u8; 32], GfError> {
     let runtime_entity_names = portable_runtime_entity_names(root)?;
-    let mut paths = Vec::new();
+    let mut tables = Vec::<(String, RecordBatch)>::new();
     let nodes = root.join("topology/nodes.parquet");
     if nodes.exists() {
-        paths.push(nodes);
+        let batches = read_parquet(&nodes)?;
+        let schema = batches[0].schema();
+        tables.push((
+            "topology/nodes.parquet".into(),
+            concat_batches(&schema, &batches).map_err(storage)?,
+        ));
     }
-    for directory in ["topology/edges", "properties", "edge_properties"] {
-        paths.extend(sorted_parquet_files(&root.join(directory))?);
+    for path in sorted_parquet_files(&root.join("topology/edges"))? {
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|_| validation("graph projection path escaped target"))?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let batches = read_parquet(&path)?;
+        let schema = batches[0].schema();
+        tables.push((
+            relative,
+            concat_batches(&schema, &batches).map_err(storage)?,
+        ));
     }
-    paths.sort();
-    fingerprint_graph_paths_with_runtime_names(root, paths, Some(&runtime_entity_names))
+    for (directory, is_edge) in [("properties", false), ("edge_properties", true)] {
+        let stems = if is_edge {
+            crate::catalog::list_edge_property_stems(root)
+        } else {
+            crate::catalog::list_property_stems(root)
+        };
+        for stem in stems {
+            let batches = if is_edge {
+                crate::catalog::read_edge_properties(root, &stem)
+            } else {
+                crate::catalog::read_properties(root, &stem)
+            }
+            .map_err(storage)?;
+            if let Some(schema) = batches.first().map(RecordBatch::schema) {
+                tables.push((
+                    format!("{directory}/{stem}.parquet"),
+                    concat_batches(&schema, &batches).map_err(storage)?,
+                ));
+            }
+        }
+    }
+    tables.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut writer = CanonicalWriter::new();
+    writer.raw(b"GFGP1").map_err(canonical_error)?;
+    writer
+        .u32(exact_u32(tables.len(), "graph table count")?)
+        .map_err(canonical_error)?;
+    for (relative, batch) in tables {
+        writer.text(&relative).map_err(canonical_error)?;
+        let logical = logical_fingerprint_batch(&relative, &batch, Some(&runtime_entity_names))?;
+        encode_table(&mut writer, &logical)?;
+    }
+    fingerprint(
+        CanonicalDomain::GraphProjection,
+        CANONICAL_CONTRACT_VERSION,
+        &writer.finish(),
+    )
+    .map_err(canonical_error)
 }
 
 fn fingerprint_graph_paths(root: &Path, paths: Vec<PathBuf>) -> Result<[u8; 32], GfError> {
@@ -2477,6 +2528,39 @@ mod tests {
                 assert_eq!(handle.join().unwrap(), expected);
             }
         });
+    }
+
+    #[test]
+    fn portable_fingerprint_is_stable_across_immutable_overlay_projection() {
+        let source = TempDir::new().unwrap();
+        let node = uuid(93);
+        let mut writer = GraphWriter::open_at(source.path(), OntologyMode::Strict, TS).unwrap();
+        writer
+            .create_node(node, graphforge_core::TypeId(1))
+            .unwrap();
+        writer
+            .set_properties(
+                &node,
+                Some("Person"),
+                HashMap::from([("name".into(), graphforge_ir::IrLiteral::Str("Ada".into()))]),
+            )
+            .unwrap();
+        writer.flush().unwrap();
+        let parent = TempDir::new().unwrap();
+        let projected = parent.path().join("projected");
+        materialize_portable_graph_tree_projection(
+            source.path(),
+            &projected,
+            &GraphProjectionSelection {
+                node_uuids: BTreeSet::from([*node.as_bytes()]),
+                ..GraphProjectionSelection::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            portable_graph_data_fingerprint(source.path()).unwrap(),
+            portable_graph_data_fingerprint(&projected).unwrap(),
+        );
     }
 
     #[test]
