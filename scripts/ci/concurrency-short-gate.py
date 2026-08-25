@@ -25,6 +25,7 @@ NODE_TEST = ROOT / "crates/graphforge-bindings-node/tests/concurrency-parity.tes
 CASE_TIMEOUT_SECONDS = 300
 FORBIDDEN_TIMING = re.compile(r"\b(?:time\.sleep|asyncio\.sleep|setTimeout)\s*\(")
 PERSISTENT_ADMISSION_LOCK_NAME = re.compile(r"\.graphforge-admission-[0-9a-f]{64}\.lock\Z")
+PERSISTENT_REWRITE_LOCK_NAME = ".graphforge-rewrite.lock"
 
 # Required id → (surface, argv). Additional cases are allowed; these must match exactly.
 REQUIRED_CASES: dict[str, tuple[str, list[str]]] = {
@@ -279,7 +280,14 @@ def unexpected_lock_artifacts(work: Path) -> list[str]:
         is_symlink = path.is_symlink()
         if not is_file and not is_symlink:
             continue
-        if is_file and not is_symlink and PERSISTENT_ADMISSION_LOCK_NAME.fullmatch(path.name):
+        if (
+            is_file
+            and not is_symlink
+            and (
+                PERSISTENT_ADMISSION_LOCK_NAME.fullmatch(path.name)
+                or path.name == PERSISTENT_REWRITE_LOCK_NAME
+            )
+        ):
             continue
         unexpected.append(str(path.relative_to(work)))
     return sorted(unexpected)

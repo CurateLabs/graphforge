@@ -1990,10 +1990,7 @@ mod tests {
 
     #[test]
     fn participant_inventory_ignores_only_canonical_operational_files() {
-        let root = tempfile::Builder::new()
-            .prefix("gf")
-            .tempdir_in("/tmp")
-            .unwrap();
+        let root = tempfile::tempdir().unwrap();
         let resolved = open_or_initialize_project(root.path()).unwrap();
         let participants = resolved.participants_root();
 
