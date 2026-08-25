@@ -11,8 +11,11 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use arrow::array::RecordBatch;
-use arrow::datatypes::SchemaRef;
+use arrow::array::{
+    Array, ArrayRef, BooleanArray, Float64Array, Int8Array, Int64Array, RecordBatch, StringArray,
+    StructArray, new_null_array,
+};
+use arrow::datatypes::{DataType, SchemaRef};
 use datafusion::common::stats::Precision;
 use datafusion::common::{ColumnStatistics, Statistics};
 use datafusion::error::DataFusionError;
@@ -42,6 +45,8 @@ pub struct ParquetFragment {
     pub rel_type_name: Option<String>,
     /// Apply [`normalize_topology_nodes`] after decode (legacy `type_id` files).
     pub normalize_topology: bool,
+    /// Normalize dynamic-property columns by name and scalar representation.
+    pub normalize_properties: bool,
     /// Footer-only row count when known (no row-group decode).
     pub exact_rows: Option<usize>,
 }
@@ -65,6 +70,7 @@ impl ParquetFragment {
             exists,
             rel_type_name: None,
             normalize_topology,
+            normalize_properties: false,
             exact_rows,
         }
     }
@@ -78,8 +84,17 @@ impl ParquetFragment {
             exists: true,
             rel_type_name: Some(rel_type_name),
             normalize_topology: false,
+            normalize_properties: false,
             exact_rows,
         }
+    }
+
+    /// Dynamic-property fragment whose physical schema may differ from peers.
+    #[must_use]
+    pub fn for_property_path(path: PathBuf) -> Self {
+        let mut fragment = Self::for_path(path, false);
+        fragment.normalize_properties = true;
+        fragment
     }
 }
 
@@ -405,7 +420,9 @@ fn read_fragment_batches(
 
     // Projection in the reader is only safe when we do not post-process columns
     // (topology normalize / union rel_type_name tagging need the full row first).
-    let post_process = fragment.normalize_topology || fragment.rel_type_name.is_some();
+    let post_process = fragment.normalize_topology
+        || fragment.normalize_properties
+        || fragment.rel_type_name.is_some();
     let builder = if post_process {
         builder.with_batch_size(batch_size)
     } else if let Some(indices) = projection {
@@ -434,7 +451,10 @@ fn read_fragment_batches(
         if let Some(stem) = fragment.rel_type_name.as_deref() {
             batch = tag_rel_type_name(&batch, stem)?;
         }
-        if post_process && let Some(indices) = projection {
+        if post_process
+            && !fragment.normalize_properties
+            && let Some(indices) = projection
+        {
             batch = batch.project(indices).map_err(|e| {
                 DataFusionError::ArrowError(Box::new(e), Some("post-process projection".into()))
             })?;
@@ -463,16 +483,124 @@ fn align_schema(
     if batch.schema().as_ref() == target.as_ref() {
         return Ok(batch);
     }
-    // Rebuild with the canonical schema when field order/names match.
-    if batch.num_columns() != target.fields().len() {
+    let columns = target
+        .fields()
+        .iter()
+        .map(|field| {
+            let Some((index, _)) = batch.schema().column_with_name(field.name()) else {
+                return Ok(new_null_array(field.data_type(), batch.num_rows()));
+            };
+            normalize_property_array(batch.column(index), field.data_type())
+        })
+        .collect::<Result<Vec<_>, DataFusionError>>()?;
+    RecordBatch::try_new(target, columns)
+        .map_err(|e| DataFusionError::ArrowError(Box::new(e), Some("align schema".into())))
+}
+
+fn normalize_property_array(
+    source: &ArrayRef,
+    target: &DataType,
+) -> Result<ArrayRef, DataFusionError> {
+    if source.data_type() == target {
+        return Ok(Arc::clone(source));
+    }
+    let DataType::Struct(fields) = target else {
+        return arrow::compute::cast(source, target).map_err(|error| {
+            DataFusionError::ArrowError(Box::new(error), Some("property cast".into()))
+        });
+    };
+    let names = fields
+        .iter()
+        .map(|field| field.name().as_str())
+        .collect::<Vec<_>>();
+    if names
+        != [
+            "__het_tag",
+            "__het_int",
+            "__het_float",
+            "__het_str",
+            "__het_bool",
+        ]
+    {
         return Err(DataFusionError::Plan(format!(
-            "parquet batch column count {} != schema {}",
-            batch.num_columns(),
-            target.fields().len()
+            "cannot normalize {:?} to non-heterogeneous struct",
+            source.data_type()
         )));
     }
-    RecordBatch::try_new(target, batch.columns().to_vec())
-        .map_err(|e| DataFusionError::ArrowError(Box::new(e), Some("align schema".into())))
+    let len = source.len();
+    let mut tags = vec![None; len];
+    let mut ints = vec![None; len];
+    let mut floats = vec![None; len];
+    let mut strings = vec![None; len];
+    let mut bools = vec![None; len];
+    match source.data_type() {
+        DataType::Int64 => {
+            let values = source
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .expect("type checked");
+            for row in 0..len {
+                if values.is_valid(row) {
+                    tags[row] = Some(0);
+                    ints[row] = Some(values.value(row));
+                }
+            }
+        }
+        DataType::Float64 => {
+            let values = source
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .expect("type checked");
+            for row in 0..len {
+                if values.is_valid(row) {
+                    tags[row] = Some(1);
+                    floats[row] = Some(values.value(row));
+                }
+            }
+        }
+        DataType::Utf8 => {
+            let values = source
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("type checked");
+            for row in 0..len {
+                if values.is_valid(row) {
+                    tags[row] = Some(2);
+                    strings[row] = Some(values.value(row).to_owned());
+                }
+            }
+        }
+        DataType::Boolean => {
+            let values = source
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .expect("type checked");
+            for row in 0..len {
+                if values.is_valid(row) {
+                    tags[row] = Some(3);
+                    bools[row] = Some(values.value(row));
+                }
+            }
+        }
+        DataType::Null => {}
+        other => {
+            return Err(DataFusionError::Plan(format!(
+                "unsupported heterogeneous property source {other:?}"
+            )));
+        }
+    }
+    let children: Vec<ArrayRef> = vec![
+        Arc::new(Int8Array::from(tags)),
+        Arc::new(Int64Array::from(ints)),
+        Arc::new(Float64Array::from(floats)),
+        Arc::new(StringArray::from(strings)),
+        Arc::new(BooleanArray::from(bools)),
+    ];
+    Ok(Arc::new(StructArray::new(
+        fields.clone(),
+        children,
+        source.nulls().cloned(),
+    )))
 }
 
 fn path_label(path: &Path) -> String {
@@ -737,6 +865,7 @@ mod tests {
             exists: true,
             rel_type_name: None,
             normalize_topology: false,
+            normalize_properties: false,
             exact_rows: None,
         };
         let plan =

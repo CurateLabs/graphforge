@@ -1960,7 +1960,7 @@ impl TableProvider for EdgePropertyTable {
         let fragments = crate::mutator::property_parquet_files(dir, "edge_properties", stem)
             .map_err(|error| DataFusionError::Execution(error.to_string()))?
             .into_iter()
-            .map(|path| ParquetFragment::for_path(path, false))
+            .map(ParquetFragment::for_property_path)
             .collect();
         scan_fragments(
             self.schema.clone(),
@@ -2001,12 +2001,65 @@ fn discover_property_schema(
         .filter_map(|path| discover_parquet_schema(path))
         .map(|schema| schema.as_ref().clone())
         .collect::<Vec<_>>();
-    if schemas.is_empty() {
-        fallback
-    } else {
-        let first = Arc::new(schemas[0].clone());
-        Schema::try_merge(schemas).map_or(first, Arc::new)
+    merge_property_fragment_schemas(&schemas).unwrap_or(fallback)
+}
+
+fn merge_property_fragment_schemas(schemas: &[Schema]) -> Option<SchemaRef> {
+    let first = schemas.first()?;
+    let mut names = Vec::new();
+    for schema in schemas {
+        for field in schema.fields() {
+            if !names.iter().any(|name| name == field.name()) {
+                names.push(field.name().clone());
+            }
+        }
     }
+    let fields = names
+        .into_iter()
+        .map(|name| {
+            let present = schemas
+                .iter()
+                .filter_map(|schema| schema.field_with_name(&name).ok())
+                .collect::<Vec<_>>();
+            let first_field = present[0];
+            let mut concrete = present
+                .iter()
+                .map(|field| field.data_type())
+                .filter(|data_type| **data_type != DataType::Null)
+                .collect::<Vec<_>>();
+            concrete.dedup();
+            let data_type = if concrete.len() <= 1 {
+                concrete
+                    .first()
+                    .map_or(DataType::Null, |value| (*value).clone())
+            } else if concrete.iter().all(|value| {
+                matches!(
+                    value,
+                    DataType::Int64 | DataType::Float64 | DataType::Utf8 | DataType::Boolean
+                )
+            }) {
+                DataType::Struct(arrow::datatypes::Fields::from(vec![
+                    Field::new("__het_tag", DataType::Int8, false),
+                    Field::new("__het_int", DataType::Int64, true),
+                    Field::new("__het_float", DataType::Float64, true),
+                    Field::new("__het_str", DataType::Utf8, true),
+                    Field::new("__het_bool", DataType::Boolean, true),
+                ]))
+            } else {
+                first_field.data_type().clone()
+            };
+            let nullable = present.len() != schemas.len()
+                || present.iter().any(|field| field.is_nullable())
+                || present
+                    .iter()
+                    .any(|field| field.data_type() == &DataType::Null);
+            Field::new(name, data_type, nullable).with_metadata(first_field.metadata().clone())
+        })
+        .collect::<Vec<_>>();
+    Some(Arc::new(Schema::new_with_metadata(
+        fields,
+        first.metadata().clone(),
+    )))
 }
 
 #[async_trait]
@@ -2039,7 +2092,7 @@ impl TableProvider for PropertyTable {
         let fragments = crate::mutator::property_parquet_files(dir, "properties", stem)
             .map_err(|error| DataFusionError::Execution(error.to_string()))?
             .into_iter()
-            .map(|path| ParquetFragment::for_path(path, false))
+            .map(ParquetFragment::for_property_path)
             .collect();
         scan_fragments(
             self.schema.clone(),
