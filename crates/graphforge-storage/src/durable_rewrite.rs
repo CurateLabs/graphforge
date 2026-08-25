@@ -656,6 +656,14 @@ pub(crate) fn recover(root: &Path) -> Result<(), GfError> {
     )
 }
 
+pub(crate) fn recovery_required(root: &Path) -> Result<bool, GfError> {
+    match std::fs::symlink_metadata(root.join(JOURNAL)) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(storage(format!("rewrite journal probe failed: {error}"))),
+    }
+}
+
 #[cfg(test)]
 static FAIL_AFTER_DURABLE_INTENT: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);

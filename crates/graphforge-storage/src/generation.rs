@@ -126,7 +126,9 @@ pub(crate) fn encode_generation_state(topology: u64, search: u64) -> Result<Vec<
 }
 
 fn read_generation_state(project_dir: &Path) -> Result<GenerationState, GfError> {
-    crate::durable_rewrite::recover(project_dir)?;
+    if crate::durable_rewrite::recovery_required(project_dir)? {
+        crate::durable_rewrite::recover(project_dir)?;
+    }
     read_generation_state_raw(project_dir)
 }
 
@@ -251,6 +253,12 @@ mod tests {
         let dir = TempDir::new().unwrap();
         assert_eq!(read_topology_generation(dir.path()).unwrap(), 0);
         assert_eq!(read_search_generation(dir.path()).unwrap(), 0);
+        assert!(!dir.path().join(".graphforge-rewrite.lock").exists());
+
+        let missing = dir.path().join("missing-project");
+        assert_eq!(read_topology_generation(&missing).unwrap(), 0);
+        assert_eq!(read_search_generation(&missing).unwrap(), 0);
+        assert!(!missing.exists());
     }
 
     #[test]
