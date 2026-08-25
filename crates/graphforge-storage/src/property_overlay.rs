@@ -33,7 +33,7 @@ pub(crate) const PROPERTY_GENERATION_KEY: &str = "graphforge.property_generation
 pub(crate) const PROPERTY_ORDINAL_KEY: &str = "graphforge.property_ordinal";
 
 /// Node and edge property namespaces are disjoint authorities.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum PropertyRouteKind {
     /// `properties/<route>/...`
     Node,

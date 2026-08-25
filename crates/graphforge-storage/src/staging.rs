@@ -33,6 +33,7 @@ use arrow::datatypes::SchemaRef;
 use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::file::properties::WriterProperties;
+use std::collections::{BTreeMap, HashMap};
 use tempfile::NamedTempFile;
 
 use graphforge_core::GfError;
@@ -114,6 +115,20 @@ pub(crate) fn is_staged_temp_name(name: &std::ffi::OsStr) -> bool {
 pub struct RewriteBatch {
     /// `(staged temp, final destination)` in insertion = commit order.
     staged: Vec<(NamedTempFile, PathBuf)>,
+    property_windows: BTreeMap<PropertyWindowKey, PendingPropertyWindow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct PropertyWindowKey {
+    pub(crate) kind: crate::property_overlay::PropertyRouteKind,
+    pub(crate) route: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PendingPropertyWindow {
+    pub(crate) project_root: PathBuf,
+    pub(crate) rows: BTreeMap<[u8; 16], crate::property_overlay::PropertySnapshotRow>,
+    pub(crate) metadata: HashMap<String, String>,
 }
 
 impl RewriteBatch {
@@ -271,6 +286,15 @@ impl RewriteBatch {
     /// failure stay committed (see the module docs for the consistency bound),
     /// and the remaining temps are removed on drop.
     pub fn commit(self) -> Result<(), GfError> {
+        if let Some(root) = self
+            .property_windows
+            .values()
+            .next()
+            .map(|window| window.project_root.clone())
+        {
+            crate::generation::commit_topology_aware(self, &root)?;
+            return Ok(());
+        }
         let non_empty = !self.staged.is_empty();
         for (tmp, final_path) in self.staged {
             tmp.persist(&final_path)
@@ -291,7 +315,72 @@ impl RewriteBatch {
     /// Whether nothing has been staged.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.staged.is_empty()
+        self.staged.is_empty() && self.property_windows.is_empty()
+    }
+
+    pub(crate) fn has_property_windows(&self) -> bool {
+        !self.property_windows.is_empty()
+    }
+
+    pub(crate) fn has_node_property_windows(&self) -> bool {
+        self.property_windows
+            .keys()
+            .any(|key| key.kind == crate::property_overlay::PropertyRouteKind::Node)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn property_window_count(&self) -> usize {
+        self.property_windows.len()
+    }
+
+    pub(crate) fn accumulate_property_window(
+        &mut self,
+        project_root: &Path,
+        kind: crate::property_overlay::PropertyRouteKind,
+        route: &str,
+        rows: impl IntoIterator<Item = crate::property_overlay::PropertySnapshotRow>,
+        metadata: HashMap<String, String>,
+    ) -> Result<(), GfError> {
+        let key = PropertyWindowKey {
+            kind,
+            route: route.to_owned(),
+        };
+        let window = self
+            .property_windows
+            .entry(key)
+            .or_insert_with(|| PendingPropertyWindow {
+                project_root: project_root.to_path_buf(),
+                rows: BTreeMap::new(),
+                metadata: metadata.clone(),
+            });
+        if window.project_root != project_root || window.metadata != metadata {
+            return Err(GfError::Storage(
+                "property window root or semantic metadata conflicts".into(),
+            ));
+        }
+        for row in rows {
+            window.rows.insert(row.uuid, row);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn property_window_rows(
+        &self,
+        kind: crate::property_overlay::PropertyRouteKind,
+        route: &str,
+    ) -> Option<&BTreeMap<[u8; 16], crate::property_overlay::PropertySnapshotRow>> {
+        self.property_windows
+            .get(&PropertyWindowKey {
+                kind,
+                route: route.to_owned(),
+            })
+            .map(|window| &window.rows)
+    }
+
+    pub(crate) fn take_property_windows(
+        &mut self,
+    ) -> BTreeMap<PropertyWindowKey, PendingPropertyWindow> {
+        std::mem::take(&mut self.property_windows)
     }
 
     pub(crate) fn into_staged(self) -> Vec<(NamedTempFile, PathBuf)> {
