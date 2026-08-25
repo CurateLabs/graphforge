@@ -1810,12 +1810,13 @@ fn snapshot_tree_excluding_reserved(root: &Path) -> HashMap<PathBuf, Vec<u8>> {
     snapshot_tree(root)
         .into_iter()
         .filter(|(path, _)| {
-            !matches!(
-                path.components()
-                    .next()
-                    .and_then(|part| part.as_os_str().to_str()),
-                Some("provenance" | "knowledge")
-            )
+            path != Path::new(".graphforge-rewrite.lock")
+                && !matches!(
+                    path.components()
+                        .next()
+                        .and_then(|part| part.as_os_str().to_str()),
+                    Some("provenance" | "knowledge")
+                )
         })
         .collect()
 }

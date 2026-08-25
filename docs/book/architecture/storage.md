@@ -209,6 +209,38 @@ knowledge, or epistemic tables. Semantic table ownership remains with the
 domain crates defined by
 [ADR 0012](../../adr/0012-knowledge-domain-ownership.md).
 
+#### Mutable topology rewrite recovery
+
+Before a graph workspace becomes an immutable project participant, topology,
+property, search, and index maintenance may replace several fixed-path files.
+Those files advance through one authenticated durable rewrite, never through a
+sequence of independently committed renames. The engine retains the admitted
+project-root identity and each destination parent directory, holds the named
+rewrite lock exclusively, and binds every staged/final relative path,
+temporary-file identity, exact length, and SHA-256 digest in a checksummed
+intent. Paths must be canonical descendants; substitution, traversal,
+duplicate names, and cross-root state fail closed, while the named rewrite lock
+also requires one link.
+
+The intent is bounded to 16,384 entries and 8 MiB. Its sole generation-authority
+entry is `topology/generation.json`, whose JSON is bounded to 4 KiB and must
+encode the exact next topology/search pair. Data files are installed and
+authenticated first, directory namespace barriers are completed, retained
+root/lock identities are revalidated, and generation authority is installed
+last. Only then is the intent removed durably. This makes an existing matching
+destination an idempotent completed step while refusing a missing or changed
+temporary instead of accepting a partial batch.
+
+An interrupted `preparing` intent cleans up only identity-matched retained
+temporaries. An interrupted `durable` intent always rolls forward from either
+the exact prior or exact next generation; any other generation state is
+corruption. The #931 UUID-to-surrogate index must participate through a typed
+auxiliary receipt that names and authenticates one exact staged receipt entry,
+so topology shards and index authority recover atomically. This internal
+topology/search generation is not project publication authority: a recovered
+workspace is still invisible to new project readers until the complete
+generation is selected by `CURRENT`.
+
 Unless a root is shown explicitly, graph paths in the sections below are
 relative to the pinned generation's `participants/graph/`; primary workbench
 paths are relative to `participants/workbench/`; derived index paths are

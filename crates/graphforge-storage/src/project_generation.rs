@@ -486,6 +486,9 @@ impl ResolvedProjectGeneration {
                     let relative = path
                         .strip_prefix(&root)
                         .map_err(|_| transaction_failed("participant path is not contained"))?;
+                    if crate::graph_files::is_graph_operational_file(relative) {
+                        continue;
+                    }
                     validate_relative_path(relative)
                         .map_err(|_| transaction_failed("participant path is invalid"))?;
                     let relative = relative
@@ -1983,6 +1986,24 @@ mod tests {
                 "GF_TRANSACTION_FAILED",
             );
         }
+    }
+
+    #[test]
+    fn participant_inventory_ignores_only_canonical_operational_files() {
+        let root = tempfile::tempdir().unwrap();
+        let resolved = open_or_initialize_project(root.path()).unwrap();
+        let participants = resolved.participants_root();
+
+        fs::write(participants.join(".graphforge-rewrite.lock"), b"").unwrap();
+        resolved.validate_complete_participant_inventory().unwrap();
+
+        fs::write(participants.join("writer.lock"), b"").unwrap();
+        assert_code(
+            resolved
+                .validate_complete_participant_inventory()
+                .unwrap_err(),
+            "GF_TRANSACTION_FAILED",
+        );
     }
 
     #[test]

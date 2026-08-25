@@ -20,13 +20,11 @@
 //! `rename` is atomic) with a `.tmp` extension — invisible to every reader in
 //! this crate, which match on the `parquet` extension or exact file names.
 //!
-//! Atomicity envelope, stated honestly: failures during the **stage** phase
-//! (the realistic class — allocation, encode, ENOSPC while writing data) are
-//! all-or-nothing. A failure during the **commit** phase (rename — rare:
-//! permissions, exotic filesystems) can apply a prefix of the batch; the
-//! insertion-order rules bound that prefix to a consistent graph (at worst
-//! orphaned-but-unreferenced rows, never dangling references). Durability
-//! (fsync) is out of scope for this non-production engine.
+//! [`crate::generation::commit_topology_aware`] upgrades a batch into a durable
+//! transaction: it records authenticated, deterministic recovery inputs before
+//! replacing any destination and publishes generation authority last.  The
+//! plain [`commit`](RewriteBatch::commit) remains for tests and explicitly
+//! ephemeral callers; persistent graph mutations use the topology-aware path.
 
 use std::path::{Path, PathBuf};
 
@@ -59,6 +57,9 @@ fn pq_err(e: impl std::fmt::Display) -> GfError {
 /// Returns [`GfError::Storage`] when a graph-owned directory cannot be read or
 /// a recognized stale temp cannot be removed.
 pub fn remove_stale_temps(project_dir: &Path) -> Result<usize, GfError> {
+    // Recovery owns temp-looking durable inputs after intent. It must run
+    // before the stale-temp sweep can remove any graph-owned file.
+    let _ = crate::generation::read_topology_generation(project_dir)?;
     let mut removed = 0;
     for relative in STAGED_TEMP_DIRS {
         removed += remove_stale_temps_under(&project_dir.join(relative))?;
@@ -291,6 +292,10 @@ impl RewriteBatch {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.staged.is_empty()
+    }
+
+    pub(crate) fn into_staged(self) -> Vec<(NamedTempFile, PathBuf)> {
+        self.staged
     }
 }
 

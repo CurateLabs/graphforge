@@ -41,6 +41,8 @@ def assert_persistent_admission_lock_contract() -> None:
         nested.mkdir()
         admission_lock = nested / f".graphforge-admission-{'a' * 64}.lock"
         admission_lock.touch()
+        rewrite_lock = nested / ".graphforge-rewrite.lock"
+        rewrite_lock.touch()
         assert GATE.unexpected_lock_artifacts(work) == []
 
         uppercase_dir = work / "uppercase"
@@ -50,6 +52,7 @@ def assert_persistent_admission_lock_contract() -> None:
             nested / f".graphforge-admission-{'a' * 63}.lock",
             uppercase_dir / f".graphforge-admission-{'A' * 64}.lock",
             nested / ".graphforge-admission-not-a-digest.lock",
+            nested / ".graphforge-rewrite-extra.lock",
         ]
         for path in unexpected:
             path.touch()
@@ -66,6 +69,17 @@ def assert_persistent_admission_lock_contract() -> None:
             assert GATE.unexpected_lock_artifacts(work) == sorted(
                 [*expected, str(symlink.relative_to(work))]
             )
+
+        rewrite_symlink = uppercase_dir / ".graphforge-rewrite.lock"
+        try:
+            rewrite_symlink.symlink_to(rewrite_lock)
+        except (NotImplementedError, OSError):
+            pass
+        else:
+            expected_symlinks = [str(rewrite_symlink.relative_to(work))]
+            if symlink.is_symlink():
+                expected_symlinks.append(str(symlink.relative_to(work)))
+            assert GATE.unexpected_lock_artifacts(work) == sorted([*expected, *expected_symlinks])
 
 
 def main() -> None:
