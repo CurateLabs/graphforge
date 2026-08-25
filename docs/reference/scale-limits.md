@@ -24,8 +24,10 @@ first fragment and immutable bounded fragments thereafter. The writer encodes
 each accepted row once; increasing total row count must increase aggregate
 input rows, rows encoded, shard bytes, and shard count linearly while prior
 rows decoded remains zero. Writer reopen uses one persisted surrogate-tail
-record, and edge endpoint resolution uses logarithmic seeks in the
-authenticated disk UUID-to-surrogate index; neither operation scans retained
+record. Edge endpoint resolution retains one authenticated UUID-index snapshot,
+sorts and deduplicates each request, selects bounded blocks from authenticated
+fences, and merge-scans each selected block once. It reports block reads/bytes
+and exactly zero per-record filesystem seeks; neither operation scans retained
 topology. Peak construction RSS is therefore a configured batch/shard-window
 property. Continued RSS growth proportional to retained edge count is a
 correctness failure, not a reason to raise the M5 memory ceiling.

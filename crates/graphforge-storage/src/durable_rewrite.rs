@@ -822,7 +822,8 @@ pub(crate) fn commit_with_participant(
         topology: recovered.topology,
         search: recovered.search,
     };
-    if batch.is_empty() && !bump_topology && !bump_search && auxiliary.is_none() {
+    if batch.is_empty() && !bump_topology && !bump_search && auxiliary.is_none() && !has_participant
+    {
         return Ok(prior);
     }
     let next = GenerationPair {

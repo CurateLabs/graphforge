@@ -642,12 +642,13 @@ fn committed_uuid_generation(
 ) -> Result<Option<u64>, GfError> {
     match outcome {
         crate::uuid_membership::CommittedUuidTopologyRewrite::NoTopologyChange => Ok(None),
-        crate::uuid_membership::CommittedUuidTopologyRewrite::Committed(generation) => {
+        crate::uuid_membership::CommittedUuidTopologyRewrite::Committed { generation, .. } => {
             Ok(Some(generation))
         }
         crate::uuid_membership::CommittedUuidTopologyRewrite::CommittedNeedsRefresh {
             generation,
             error,
+            ..
         } => Err(GfError::Storage(format!(
             "topology generation {generation} committed but UUID index snapshot refresh failed: {error}"
         ))),

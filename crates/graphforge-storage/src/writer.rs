@@ -1235,6 +1235,40 @@ pub struct TopologyWriteWork {
     pub peak_buffered_bytes: u64,
     /// Conservative peak scratch bytes required while encoding a flush.
     pub peak_flush_scratch_bytes: u64,
+    /// Authenticated UUID-index block-positioning seeks for endpoint lookup.
+    pub uuid_block_seeks: u64,
+    /// Authenticated identity blocks read for endpoint lookup.
+    pub uuid_identity_blocks_read: u64,
+    /// Authenticated identity bytes read for endpoint lookup.
+    pub uuid_identity_bytes_read: u64,
+    /// Authenticated reverse-surrogate blocks read for pair validation.
+    pub uuid_surrogate_blocks_read: u64,
+    /// Authenticated reverse-surrogate bytes read for pair validation.
+    pub uuid_surrogate_bytes_read: u64,
+    /// Immutable UUID runs considered with newest-run shadowing.
+    pub uuid_runs_considered: u64,
+    /// Per-record filesystem seeks. This remains zero for batched lookup.
+    pub uuid_per_record_seeks: u64,
+    /// UUID identity/tombstone records accepted by committed index deltas.
+    pub uuid_input_records: u64,
+    /// Prior topology rows decoded by UUID index publication; ordinary append is zero.
+    pub uuid_prior_topology_rows_decoded: u64,
+    /// Physical UUID run and manifest bytes written by committed deltas.
+    pub uuid_physical_bytes_written: u64,
+    /// UUID output blocks submitted by committed deltas.
+    pub uuid_write_blocks: u64,
+    /// UUID output bytes submitted by committed deltas.
+    pub uuid_write_bytes: u64,
+    /// Peak fixed-width UUID records buffered by a committed delta.
+    pub uuid_peak_buffered_records: u64,
+    /// Peak charged fixed-width UUID bytes buffered by a committed delta.
+    pub uuid_peak_buffered_bytes: u64,
+    /// Retained UUID validation blocks read by committed deltas.
+    pub uuid_validation_blocks: u64,
+    /// Retained UUID validation bytes read by committed deltas.
+    pub uuid_validation_bytes: u64,
+    /// Per-record random seeks during UUID publication validation; always zero.
+    pub uuid_validation_random_seeks: u64,
 }
 
 /// Explicit capability limits for graph construction state.
@@ -1352,7 +1386,6 @@ impl GraphWriter {
     /// Returns [`GfError::Storage`] if the directory cannot be created.
     pub fn open_at(dir: &Path, mode: OntologyMode, now_micros: i64) -> Result<Self, GfError> {
         fs::create_dir_all(dir).map_err(|e| io_err(&e))?;
-        crate::uuid_membership::ensure_uuid_membership_migrated(dir)?;
         // Continue surrogate assignment from the on-disk maximum so a writer
         // opened on an existing project appends rather than colliding with /
         // overwriting prior rows. Absent files → max 0 → start at 1.
@@ -1646,15 +1679,32 @@ impl GraphWriter {
         Ok(())
     }
 
-    /// Resolve and register persisted edge endpoints through the authenticated
-    /// disk index. This performs logarithmic index seeks and decodes zero
-    /// topology rows, so repeated construction batches do not rescan nodes.
+    /// Resolve and register persisted edge endpoints through the writer-owned
+    /// authenticated disk-index snapshot. UUIDs are sorted/deduplicated and
+    /// resolved with bounded block merge scans, so repeated construction
+    /// batches decode zero topology rows and perform zero per-record seeks.
     pub fn register_existing_endpoints(
         &mut self,
-        index: &mut crate::UuidMembershipIndex,
         node_uuids: &[Uuid],
     ) -> Result<crate::UuidProbeMetrics, GfError> {
-        let (surrogates, metrics) = index.lookup_node_surrogates(node_uuids)?;
+        if let Some(generation) = self.uuid_snapshot_refresh_needed {
+            self.uuid_index_snapshot = Some(
+                crate::AuthenticatedUuidIndexSnapshot::open_at_generation(&self.dir, generation)?,
+            );
+            self.uuid_snapshot_refresh_needed = None;
+        }
+        if self.uuid_index_snapshot.is_none() {
+            crate::uuid_membership::ensure_uuid_membership_migrated(&self.dir)?;
+            let generation = crate::read_topology_generation(&self.dir)?;
+            self.uuid_index_snapshot = Some(
+                crate::AuthenticatedUuidIndexSnapshot::open_at_generation(&self.dir, generation)?,
+            );
+        }
+        let (surrogates, metrics) = self
+            .uuid_index_snapshot
+            .as_mut()
+            .expect("snapshot initialized")
+            .lookup_node_surrogates(node_uuids)?;
         let mut resolved = Vec::new();
         for (uuid, surrogate) in node_uuids.iter().zip(surrogates) {
             let surrogate = surrogate.ok_or_else(|| {
@@ -1674,6 +1724,34 @@ impl GraphWriter {
         for (uuid, surrogate) in resolved {
             self.uuid_to_node_id.insert(to_bytes(&uuid), surrogate);
         }
+        self.topology_work.uuid_block_seeks = self
+            .topology_work
+            .uuid_block_seeks
+            .saturating_add(metrics.file_seeks);
+        self.topology_work.uuid_identity_blocks_read = self
+            .topology_work
+            .uuid_identity_blocks_read
+            .saturating_add(metrics.identity_blocks_read);
+        self.topology_work.uuid_identity_bytes_read = self
+            .topology_work
+            .uuid_identity_bytes_read
+            .saturating_add(metrics.identity_bytes_read);
+        self.topology_work.uuid_surrogate_blocks_read = self
+            .topology_work
+            .uuid_surrogate_blocks_read
+            .saturating_add(metrics.surrogate_blocks_read);
+        self.topology_work.uuid_surrogate_bytes_read = self
+            .topology_work
+            .uuid_surrogate_bytes_read
+            .saturating_add(metrics.surrogate_bytes_read);
+        self.topology_work.uuid_runs_considered = self
+            .topology_work
+            .uuid_runs_considered
+            .saturating_add(metrics.runs_considered);
+        self.topology_work.uuid_per_record_seeks = self
+            .topology_work
+            .uuid_per_record_seeks
+            .saturating_add(metrics.per_record_seeks);
         Ok(metrics)
     }
 
@@ -2266,15 +2344,21 @@ impl GraphWriter {
         )?;
         match committed {
             crate::uuid_membership::CommittedUuidTopologyRewrite::NoTopologyChange => Ok(None),
-            crate::uuid_membership::CommittedUuidTopologyRewrite::Committed(generation) => {
+            crate::uuid_membership::CommittedUuidTopologyRewrite::Committed {
+                generation,
+                metrics,
+            } => {
+                self.record_uuid_append_work(&metrics);
                 self.pending_index_nodes.clear();
                 self.pending_index_edges.clear();
                 Ok(Some(generation))
             }
             crate::uuid_membership::CommittedUuidTopologyRewrite::CommittedNeedsRefresh {
                 generation,
+                metrics,
                 error,
             } => {
+                self.record_uuid_append_work(&metrics);
                 self.pending_index_nodes.clear();
                 self.pending_index_edges.clear();
                 self.uuid_snapshot_refresh_needed = Some(generation);
@@ -2283,6 +2367,36 @@ impl GraphWriter {
                 )))
             }
         }
+    }
+
+    fn record_uuid_append_work(&mut self, metrics: &crate::UuidIndexAppendMetrics) {
+        let work = &mut self.topology_work;
+        work.uuid_input_records = work
+            .uuid_input_records
+            .saturating_add(metrics.input_records);
+        work.uuid_prior_topology_rows_decoded = work
+            .uuid_prior_topology_rows_decoded
+            .saturating_add(metrics.prior_topology_rows_decoded);
+        work.uuid_physical_bytes_written = work
+            .uuid_physical_bytes_written
+            .saturating_add(metrics.physical_bytes_written);
+        work.uuid_write_blocks = work.uuid_write_blocks.saturating_add(metrics.write_blocks);
+        work.uuid_write_bytes = work.uuid_write_bytes.saturating_add(metrics.write_bytes);
+        work.uuid_peak_buffered_records = work
+            .uuid_peak_buffered_records
+            .max(u64::try_from(metrics.peak_buffered_records).unwrap_or(u64::MAX));
+        work.uuid_peak_buffered_bytes = work
+            .uuid_peak_buffered_bytes
+            .max(u64::try_from(metrics.peak_buffered_bytes).unwrap_or(u64::MAX));
+        work.uuid_validation_blocks = work
+            .uuid_validation_blocks
+            .saturating_add(metrics.validation_scan_blocks);
+        work.uuid_validation_bytes = work
+            .uuid_validation_bytes
+            .saturating_add(metrics.validation_scan_bytes);
+        work.uuid_validation_random_seeks = work
+            .uuid_validation_random_seeks
+            .saturating_add(metrics.validation_random_seeks);
     }
 
     /// Best-effort write of the delta segment for `generation` — only when the
@@ -4625,16 +4739,14 @@ mod tests {
         .unwrap();
 
         crate::io_stats::reset();
-        let mut index = crate::UuidMembershipIndex::open(dir.path()).unwrap();
         let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS + 1).unwrap();
-        let metrics = writer
-            .register_existing_endpoints(&mut index, &[left, right])
-            .unwrap();
+        let metrics = writer.register_existing_endpoints(&[left, right]).unwrap();
         assert_eq!(metrics.found, 2);
-        assert!(
-            metrics.file_seeks <= 8,
-            "two v3 endpoint lookups perform bounded identity and reverse-surrogate probes"
-        );
+        assert_eq!(metrics.per_record_seeks, 0);
+        assert_eq!(metrics.identity_blocks_read, 1);
+        assert_eq!(metrics.surrogate_blocks_read, 1);
+        assert_eq!(writer.topology_write_work().uuid_per_record_seeks, 0);
+        assert_eq!(writer.topology_write_work().uuid_block_seeks, 2);
         writer
             .create_edge(new_v7(), "KNOWS", &left, &right)
             .unwrap();
@@ -5004,10 +5116,25 @@ mod tests {
 
     #[test]
     fn cumulative_topology_and_index_work_doubles_with_bounded_windows() {
-        fn run(batches: u64) -> (u64, u64, TopologyWriteWork) {
+        fn retained_bytes(path: &Path) -> u64 {
+            fs::read_dir(path)
+                .unwrap()
+                .map(|entry| {
+                    let entry = entry.unwrap();
+                    let metadata = entry.metadata().unwrap();
+                    if metadata.is_dir() {
+                        retained_bytes(&entry.path())
+                    } else {
+                        metadata.len()
+                    }
+                })
+                .sum()
+        }
+
+        fn run(batches: u64) -> (u64, u64, u64, TopologyWriteWork) {
             let dir = TempDir::new().unwrap();
             crate::io_stats::reset();
-            let mut physical = 0_u64;
+            let mut cumulative_write_bytes = 0_u64;
             let mut aggregate = TopologyWriteWork::default();
             for batch in 0..batches {
                 let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS)
@@ -5020,8 +5147,8 @@ mod tests {
                 let left = Uuid::from_u128(10_000 + u128::from(batch) * 3);
                 let right = Uuid::from_u128(10_001 + u128::from(batch) * 3);
                 let edge = Uuid::from_u128(10_002 + u128::from(batch) * 3);
-                let left_id = writer.create_node(left, TypeId(0)).unwrap();
-                let right_id = writer.create_node(right, TypeId(0)).unwrap();
+                writer.create_node(left, TypeId(0)).unwrap();
+                writer.create_node(right, TypeId(0)).unwrap();
                 writer
                     .set_properties(
                         &left,
@@ -5032,7 +5159,9 @@ mod tests {
                 writer.create_edge(edge, "KNOWS", &left, &right).unwrap();
                 writer.flush().unwrap();
                 let work = writer.topology_write_work();
-                physical = physical.saturating_add(work.output_bytes);
+                cumulative_write_bytes = cumulative_write_bytes
+                    .saturating_add(work.output_bytes)
+                    .saturating_add(work.uuid_physical_bytes_written);
                 aggregate.input_rows += work.input_rows;
                 aggregate.prior_rows_decoded += work.prior_rows_decoded;
                 aggregate.rows_encoded += work.rows_encoded;
@@ -5046,38 +5175,76 @@ mod tests {
                 aggregate.peak_flush_scratch_bytes = aggregate
                     .peak_flush_scratch_bytes
                     .max(work.peak_flush_scratch_bytes);
-                let generation = crate::read_topology_generation(dir.path()).unwrap();
-                let index = crate::uuid_membership::append_uuid_membership_delta(
-                    dir.path(),
-                    generation,
-                    &[(left, left_id), (right, right_id)],
-                    &[edge],
-                )
-                .unwrap();
-                physical = physical.saturating_add(index.physical_bytes_written);
+                aggregate.uuid_input_records += work.uuid_input_records;
+                aggregate.uuid_prior_topology_rows_decoded += work.uuid_prior_topology_rows_decoded;
+                aggregate.uuid_physical_bytes_written += work.uuid_physical_bytes_written;
+                aggregate.uuid_write_blocks += work.uuid_write_blocks;
+                aggregate.uuid_write_bytes += work.uuid_write_bytes;
+                aggregate.uuid_peak_buffered_records = aggregate
+                    .uuid_peak_buffered_records
+                    .max(work.uuid_peak_buffered_records);
+                aggregate.uuid_peak_buffered_bytes = aggregate
+                    .uuid_peak_buffered_bytes
+                    .max(work.uuid_peak_buffered_bytes);
+                aggregate.uuid_validation_random_seeks += work.uuid_validation_random_seeks;
             }
             let io = crate::io_stats::snapshot();
             (
-                physical,
+                retained_bytes(dir.path()),
+                cumulative_write_bytes,
                 io.node_full_reads + io.node_filtered_reads,
                 aggregate,
             )
         }
 
-        let (small_bytes, small_reads, small) = run(8);
-        let (large_bytes, large_reads, large) = run(16);
-        assert_eq!(small_reads, 0);
-        assert_eq!(large_reads, 0);
-        assert_eq!(small.prior_rows_decoded, 0);
-        assert_eq!(large.prior_rows_decoded, 0);
-        assert_eq!(large.input_rows, small.input_rows * 2);
-        assert_eq!(large.rows_encoded, small.rows_encoded * 2);
-        assert!(large_bytes <= small_bytes.saturating_mul(3));
-        assert_eq!(large.peak_buffered_rows, small.peak_buffered_rows);
-        assert!(small.peak_buffered_bytes <= 8 * 1024);
-        assert!(large.peak_buffered_bytes <= 8 * 1024);
-        assert!(small.peak_flush_scratch_bytes <= 8 * 1024);
-        assert!(large.peak_flush_scratch_bytes <= 8 * 1024);
+        let (n_bytes, n_writes, n_reads, n) = run(8);
+        let (twice_bytes, twice_writes, twice_reads, twice) = run(16);
+        let (four_bytes, four_writes, four_reads, four) = run(32);
+        let first_difference = twice_bytes.saturating_sub(n_bytes);
+        let second_difference = four_bytes.saturating_sub(twice_bytes);
+        let expected_second = first_difference.saturating_mul(2);
+        let tolerance = expected_second.div_ceil(10); // fixed metadata overhead: 10%
+        assert!(second_difference.abs_diff(expected_second) <= tolerance);
+        // Cumulative write amplification is reported independently from the
+        // retained-footprint slope; it is not hidden inside the linear bound.
+        assert!(n_writes > 0);
+        assert!(twice_writes > n_writes);
+        assert!(four_writes > twice_writes);
+        assert_eq!((n_reads, twice_reads, four_reads), (0, 0, 0));
+        assert_eq!(
+            (
+                n.prior_rows_decoded,
+                twice.prior_rows_decoded,
+                four.prior_rows_decoded,
+                n.uuid_prior_topology_rows_decoded,
+                twice.uuid_prior_topology_rows_decoded,
+                four.uuid_prior_topology_rows_decoded,
+                n.uuid_validation_random_seeks,
+                twice.uuid_validation_random_seeks,
+                four.uuid_validation_random_seeks,
+            ),
+            (0, 0, 0, 0, 0, 0, 0, 0, 0)
+        );
+        assert_eq!(twice.input_rows, n.input_rows * 2);
+        assert_eq!(four.input_rows, n.input_rows * 4);
+        assert_eq!(twice.rows_encoded, n.rows_encoded * 2);
+        assert_eq!(four.rows_encoded, n.rows_encoded * 4);
+        assert_eq!(twice.uuid_input_records, n.uuid_input_records * 2);
+        assert_eq!(four.uuid_input_records, n.uuid_input_records * 4);
+        assert_eq!(
+            (
+                n.peak_buffered_rows,
+                twice.peak_buffered_rows,
+                four.peak_buffered_rows
+            ),
+            (
+                n.peak_buffered_rows,
+                n.peak_buffered_rows,
+                n.peak_buffered_rows
+            )
+        );
+        assert!(four.peak_buffered_bytes <= 8 * 1024);
+        assert!(four.peak_flush_scratch_bytes <= 8 * 1024);
     }
 
     #[test]
