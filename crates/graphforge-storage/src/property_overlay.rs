@@ -880,6 +880,9 @@ pub fn enumerate_property_fragments(
     };
     for entry in entries {
         let entry = entry.map_err(|error| GfError::Storage(error.to_string()))?;
+        if crate::staging::is_staged_temp_name(&entry.file_name()) {
+            continue;
+        }
         let metadata = fs::symlink_metadata(entry.path())
             .map_err(|error| GfError::Storage(error.to_string()))?;
         if !metadata.file_type().is_file() {

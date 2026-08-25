@@ -1943,6 +1943,7 @@ impl GraphWriter {
                 &stem,
                 schema,
                 cols,
+                false,
             )?;
         }
         Ok(())
@@ -1972,6 +1973,7 @@ impl GraphWriter {
                 &stem,
                 schema,
                 cols,
+                false,
             )?;
         }
         Ok(())
@@ -3880,6 +3882,7 @@ fn stage_node_property_file(
         stem,
         schema,
         cols,
+        false,
     )
 }
 
@@ -3905,6 +3908,7 @@ fn stage_edge_property_file(
         stem,
         schema,
         cols,
+        false,
     )
 }
 
@@ -3934,6 +3938,43 @@ fn merge_edge_property_window(rows: Vec<EdgePropRow>) -> Vec<EdgePropRow> {
         .collect()
 }
 
+pub(crate) fn stage_property_tombstones<S: std::hash::BuildHasher>(
+    staged: &mut RewriteBatch,
+    dir: &Path,
+    kind: crate::property_overlay::PropertyRouteKind,
+    route: &str,
+    uuids: &HashSet<[u8; 16], S>,
+) -> Result<(), GfError> {
+    if uuids.is_empty() {
+        return Ok(());
+    }
+    let mut uuids = uuids.iter().copied().collect::<Vec<_>>();
+    uuids.sort_unstable();
+    let uuid_field = match kind {
+        crate::property_overlay::PropertyRouteKind::Node => NODE_PROPERTY_UUID_FIELD,
+        crate::property_overlay::PropertyRouteKind::Edge => EDGE_PROPERTY_UUID_FIELD,
+    };
+    let route_key = match kind {
+        crate::property_overlay::PropertyRouteKind::Node => "graphforge.entity_type",
+        crate::property_overlay::PropertyRouteKind::Edge => "graphforge.rel_type",
+    };
+    let schema = Arc::new(Schema::new_with_metadata(
+        vec![Field::new(uuid_field, DataType::FixedSizeBinary(16), false)],
+        HashMap::from([(route_key.to_owned(), route.to_owned())]),
+    ));
+    let column = FixedSizeBinaryArray::try_from_iter(uuids.into_iter().map(|uuid| uuid.to_vec()))
+        .map_err(pq_err)?;
+    stage_property_fragment(
+        staged,
+        dir,
+        kind,
+        route,
+        schema,
+        vec![Arc::new(column)],
+        true,
+    )
+}
+
 fn stage_property_fragment(
     staged: &mut RewriteBatch,
     dir: &Path,
@@ -3941,6 +3982,7 @@ fn stage_property_fragment(
     route: &str,
     schema: SchemaRef,
     mut cols: Vec<ArrayRef>,
+    tombstone: bool,
 ) -> Result<(), GfError> {
     use crate::property_overlay::{
         PROPERTY_GENERATION_KEY, PROPERTY_KIND_KEY, PROPERTY_ORDINAL_KEY, PROPERTY_OVERLAY_FORMAT,
@@ -3969,7 +4011,7 @@ fn stage_property_fragment(
         Field::new(PROPERTY_TOMBSTONE_FIELD, DataType::Boolean, false),
     );
     let rows = cols.first().map_or(0, |column| column.len());
-    cols.insert(1, Arc::new(BooleanArray::from(vec![false; rows])));
+    cols.insert(1, Arc::new(BooleanArray::from(vec![tombstone; rows])));
     let mut metadata = schema.metadata().clone();
     metadata.insert(
         PROPERTY_OVERLAY_FORMAT_KEY.into(),

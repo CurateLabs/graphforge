@@ -87,7 +87,7 @@ fn remove_stale_temps_under(dir: &Path) -> Result<usize, GfError> {
     Ok(removed)
 }
 
-fn is_staged_temp_name(name: &std::ffi::OsStr) -> bool {
+pub(crate) fn is_staged_temp_name(name: &std::ffi::OsStr) -> bool {
     let Some(name) = name.to_str() else {
         return false;
     };

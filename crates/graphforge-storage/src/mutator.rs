@@ -285,11 +285,16 @@ pub fn stage_delete_nodes<S: BuildHasher>(
     if node_uuids.is_empty() {
         return Ok(0);
     }
-    // Drop the deleted nodes' property rows so they don't dangle.
-    for path in parquet_files_in(dir, "properties")? {
-        if let Some(schema) = discover_parquet_schema(&path) {
-            stage_rewrite_dropping(staged, &path, schema, "node_uuid", node_uuids)?;
-        }
+    // Immutable property history is never rewritten; whole-row tombstones
+    // suppress deleted entities before topology authority commits.
+    for route in crate::catalog::list_property_stems(dir) {
+        crate::writer::stage_property_tombstones(
+            staged,
+            dir,
+            crate::property_overlay::PropertyRouteKind::Node,
+            &route,
+            node_uuids,
+        )?;
     }
     stage_rewrite_nodes_dropping(
         staged,
@@ -319,12 +324,14 @@ pub fn stage_delete_edges<S: BuildHasher>(
             removed += stage_rewrite_dropping(staged, &path, schema, "edge_uuid", edge_uuids)?;
         }
     }
-    // Drop edge-property rows (the `edge_properties/` dir exists once edge
-    // properties have been written, #784).
-    for path in parquet_files_in(dir, "edge_properties")? {
-        if let Some(schema) = discover_parquet_schema(&path) {
-            stage_rewrite_dropping(staged, &path, schema, "edge_uuid", edge_uuids)?;
-        }
+    for route in crate::catalog::list_edge_property_stems(dir) {
+        crate::writer::stage_property_tombstones(
+            staged,
+            dir,
+            crate::property_overlay::PropertyRouteKind::Edge,
+            &route,
+            edge_uuids,
+        )?;
     }
     Ok(removed)
 }
