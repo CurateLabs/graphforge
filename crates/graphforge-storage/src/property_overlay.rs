@@ -68,6 +68,7 @@ impl PropertyRouteKind {
 struct ReadCounts {
     bytes: AtomicU64,
     blocks: AtomicU64,
+    range_seeks: AtomicU64,
 }
 
 #[derive(Debug)]
@@ -110,6 +111,7 @@ impl ChunkReader for CountingChunkReader {
         use std::io::{Seek, SeekFrom};
         let mut file = self.file.try_clone()?;
         file.seek(SeekFrom::Start(start))?;
+        self.counts.range_seeks.fetch_add(1, Ordering::Relaxed);
         Ok(CountingRead {
             inner: BufReader::new(file),
             counts: Arc::clone(&self.counts),
@@ -188,6 +190,14 @@ pub struct PropertyOverlayMetrics {
     pub physical_bytes: u64,
     /// Non-empty input reads, each capped at 64 KiB.
     pub blocks_read: u64,
+    /// Retained-handle range starts requested by the Parquet decoder.
+    pub range_seeks: u64,
+    /// Parquet row groups whose authenticated statistics were considered.
+    pub row_groups_considered: u64,
+    /// Parquet row groups selected for decode.
+    pub row_groups_selected: u64,
+    /// Bounded Arrow batches emitted to the consumer.
+    pub emitted_batches: u64,
     /// Canonical fragments considered for authority.
     pub fragments_considered: u64,
     /// Live newest snapshot rows emitted.
@@ -236,6 +246,10 @@ pub struct PropertyOverlayLimits {
     pub max_buffered_rows: usize,
     /// Maximum runs opened in one merge pass.
     pub max_open_runs: usize,
+    /// Maximum charged decoded bytes in one spill buffer.
+    pub max_buffered_bytes: u64,
+    /// Maximum charged bytes for one snapshot row.
+    pub max_row_bytes: u64,
 }
 
 struct PropertyParquetRows {
@@ -252,6 +266,7 @@ struct DecodedRetention {
     current_bytes: u64,
     peak_rows: u64,
     peak_bytes: u64,
+    batches: u64,
 }
 
 impl Iterator for PropertyParquetRows {
@@ -283,6 +298,7 @@ impl Iterator for PropertyParquetRows {
                     decoded.current_bytes = bytes;
                     decoded.peak_rows = decoded.peak_rows.max(decoded.current_rows);
                     decoded.peak_bytes = decoded.peak_bytes.max(decoded.current_bytes);
+                    decoded.batches = decoded.batches.saturating_add(1);
                     drop(decoded);
                     self.current = rows.into_iter();
                 }
@@ -352,12 +368,17 @@ where
         .iter()
         .map(|counts| counts.blocks.load(Ordering::Relaxed))
         .sum();
+    metrics.range_seeks = counters
+        .iter()
+        .map(|counts| counts.range_seeks.load(Ordering::Relaxed))
+        .sum();
     metrics.merge_peak_rows = metrics.peak_buffered_rows;
     metrics.merge_peak_bytes = metrics.peak_buffered_bytes;
     for retention in decoded {
         let retention = retention.lock().expect("property retention lock");
         metrics.decoder_peak_rows = metrics.decoder_peak_rows.max(retention.peak_rows);
         metrics.decoder_peak_bytes = metrics.decoder_peak_bytes.max(retention.peak_bytes);
+        metrics.emitted_batches = metrics.emitted_batches.saturating_add(retention.batches);
     }
     metrics.peak_buffered_rows = metrics
         .decoder_peak_rows
@@ -412,12 +433,12 @@ pub fn read_authenticated_property_snapshots_for(
         let mut builder =
             ParquetRecordBatchReaderBuilder::try_new(source).map_err(parquet_error)?;
         validate_fragment_schema(builder.schema().as_ref(), fragment.id, kind, route)?;
-        let uuid_index = builder
-            .schema()
-            .fields()
-            .iter()
-            .position(|field| field.name() == kind.uuid_field())
-            .ok_or_else(|| corrupt("property fragment lacks its UUID field"))?;
+        // Canonical overlay schemas require the non-nested UUID as leaf zero;
+        // never substitute an Arrow top-level index for a Parquet leaf index.
+        let uuid_index = 0;
+        metrics.row_groups_considered = metrics
+            .row_groups_considered
+            .saturating_add(u64::try_from(builder.metadata().num_row_groups()).unwrap_or(u64::MAX));
         let mut row_groups = Vec::new();
         for (index, group) in builder.metadata().row_groups().iter().enumerate() {
             let statistics = group
@@ -439,6 +460,9 @@ pub fn read_authenticated_property_snapshots_for(
             }
         }
         if !row_groups.is_empty() {
+            metrics.row_groups_selected = metrics
+                .row_groups_selected
+                .saturating_add(u64::try_from(row_groups.len()).unwrap_or(u64::MAX));
             builder = builder.with_row_groups(row_groups);
             let reader = builder
                 .with_batch_size(4096)
@@ -465,6 +489,9 @@ pub fn read_authenticated_property_snapshots_for(
         metrics.blocks_read = metrics
             .blocks_read
             .saturating_add(counts.blocks.load(Ordering::Relaxed));
+        metrics.range_seeks = metrics
+            .range_seeks
+            .saturating_add(counts.range_seeks.load(Ordering::Relaxed));
     }
     metrics.logical_rows = u64::try_from(found.len()).unwrap_or(u64::MAX);
     Ok((found, metrics))
@@ -530,6 +557,9 @@ fn validate_fragment_schema(
             "property UUID field is nullable or not fixed binary(16)",
         ));
     }
+    if schema.fields().first().map(|field| field.name().as_str()) != Some(kind.uuid_field()) {
+        return Err(corrupt("property UUID field is not canonical first field"));
+    }
     if id.generation == 0 && id.ordinal == 0 {
         return Ok(());
     }
@@ -558,6 +588,9 @@ fn validate_fragment_schema(
             "property tombstone field is nullable or not boolean",
         ));
     }
+    if schema.fields().get(1).map(|field| field.name().as_str()) != Some(PROPERTY_TOMBSTONE_FIELD) {
+        return Err(corrupt("property tombstone is not canonical second field"));
+    }
     Ok(())
 }
 
@@ -565,6 +598,12 @@ fn decode_snapshot_batch(
     batch: &RecordBatch,
     uuid_field: &str,
 ) -> Result<Vec<PropertySnapshotRow>, GfError> {
+    let uuid = batch
+        .column_by_name(uuid_field)
+        .ok_or_else(|| corrupt("property batch lacks UUID column"))?;
+    if uuid.null_count() != 0 {
+        return Err(corrupt("property UUID column contains null slots"));
+    }
     let tombstones = batch
         .column_by_name(PROPERTY_TOMBSTONE_FIELD)
         .map(|column| {
@@ -574,6 +613,9 @@ fn decode_snapshot_batch(
                 .ok_or_else(|| corrupt("property tombstone column is not boolean"))
         })
         .transpose()?;
+    if tombstones.is_some_and(|values| values.null_count() != 0) {
+        return Err(corrupt("property tombstone column contains null slots"));
+    }
     let mut rows = Vec::with_capacity(batch.num_rows());
     crate::writer::decode_property_batch(batch, uuid_field, |uuid, mut values| {
         values.remove(PROPERTY_TOMBSTONE_FIELD);
@@ -596,6 +638,8 @@ impl Default for PropertyOverlayLimits {
         Self {
             max_buffered_rows: 4096,
             max_open_runs: 32,
+            max_buffered_bytes: 64 * 1024 * 1024,
+            max_row_bytes: 8 * 1024 * 1024,
         }
     }
 }
@@ -632,7 +676,12 @@ where
     R: IntoIterator<Item = PropertySnapshotRow>,
     F: FnMut(PropertySnapshotRow) -> Result<(), GfError>,
 {
-    if limits.max_buffered_rows == 0 || limits.max_open_runs < 2 {
+    if limits.max_buffered_rows == 0
+        || limits.max_open_runs < 2
+        || limits.max_buffered_bytes == 0
+        || limits.max_row_bytes == 0
+        || limits.max_row_bytes > limits.max_buffered_bytes
+    {
         return Err(corrupt("property overlay merge limits are invalid"));
     }
     fs::create_dir_all(scratch).map_err(io_error)?;
@@ -665,7 +714,26 @@ where
                 tombstone: row.tombstone,
                 values: row.values,
             };
-            buffered_bytes = buffered_bytes.saturating_add(record_charge(&record));
+            let charge = record_charge(&record);
+            if charge > limits.max_row_bytes {
+                return Err(corrupt("property snapshot row exceeds byte limit"));
+            }
+            if !buffer.is_empty()
+                && buffered_bytes
+                    .checked_add(charge)
+                    .is_none_or(|bytes| bytes > limits.max_buffered_bytes)
+            {
+                runs.push(write_sorted_run(
+                    temp.path(),
+                    runs.len(),
+                    &mut buffer,
+                    &mut metrics,
+                )?);
+                buffered_bytes = 0;
+            }
+            buffered_bytes = buffered_bytes
+                .checked_add(charge)
+                .ok_or_else(|| corrupt("property snapshot byte charge overflows"))?;
             buffer.push(record);
             metrics.peak_buffered_rows = metrics
                 .peak_buffered_rows
@@ -1034,6 +1102,8 @@ mod tests {
             PropertyOverlayLimits {
                 max_buffered_rows: 1,
                 max_open_runs: 2,
+                max_buffered_bytes: 1024,
+                max_row_bytes: 512,
             },
             |row| {
                 rows.push(row);

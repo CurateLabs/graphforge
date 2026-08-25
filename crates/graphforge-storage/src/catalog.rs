@@ -1227,6 +1227,7 @@ fn list_parquet_stems(dir: &Path) -> Vec<String> {
         })
         .collect();
     stems.sort();
+    stems.dedup();
     stems
 }
 

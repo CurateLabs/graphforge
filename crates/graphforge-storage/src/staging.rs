@@ -137,12 +137,12 @@ impl RewriteBatch {
         schema: SchemaRef,
         batch: &RecordBatch,
     ) -> Result<(), GfError> {
-        debug_assert!(
-            !self.staged.iter().any(|(_, p)| p == final_path),
-            "{} staged twice in one RewriteBatch — the second write would win \
-             and the first would be silently lost",
-            final_path.display()
-        );
+        if self.staged.iter().any(|(_, path)| path == final_path) {
+            return Err(GfError::Storage(format!(
+                "destination staged twice in one rewrite batch: {}",
+                final_path.display()
+            )));
+        }
         let tmp = stage_parquet_temp(final_path, schema, batch)?;
         self.staged.push((tmp, final_path.to_path_buf()));
         Ok(())

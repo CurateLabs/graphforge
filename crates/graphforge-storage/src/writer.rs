@@ -3989,14 +3989,27 @@ fn stage_property_fragment(
         PROPERTY_OVERLAY_FORMAT_KEY, PROPERTY_ROUTE_KEY, PROPERTY_TOMBSTONE_FIELD,
         PropertyFragmentId, enumerate_property_fragments,
     };
-    let generation = crate::generation::read_topology_generation(dir)?.max(1);
+    let current_generation = crate::generation::read_topology_generation(dir)?;
+    let generation = if crate::generation::touches_topology(staged, dir) {
+        current_generation
+            .checked_add(1)
+            .ok_or_else(|| GfError::Storage("property generation overflows u64".into()))?
+    } else {
+        current_generation.max(1)
+    };
     let fragments = enumerate_property_fragments(dir, kind, route)?;
     let ordinal = fragments
         .iter()
         .filter(|fragment| fragment.id.generation == generation)
         .map(|fragment| fragment.id.ordinal)
         .max()
-        .map_or(0, |ordinal| ordinal.saturating_add(1));
+        .map(|ordinal| {
+            ordinal
+                .checked_add(1)
+                .ok_or_else(|| GfError::Storage("property fragment ordinal overflows u64".into()))
+        })
+        .transpose()?
+        .unwrap_or(0);
     let id = PropertyFragmentId {
         generation,
         ordinal,
