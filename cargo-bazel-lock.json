@@ -1,5 +1,5 @@
 {
-  "checksum": "b21d3280c7ad6cd450e752d4bd6e74303ecf1c990af629ad88bd4f9b6fb2a933",
+  "checksum": "fe4bbb22b622431d2ea688eb1e16afb598a481ed90e3849b1efc6b28f784cb7d",
   "crates": {
     "adler2 2.0.1": {
       "name": "adler2",
@@ -12897,6 +12897,10 @@
               "target": "clap"
             },
             {
+              "id": "fs4 1.1.0",
+              "target": "fs4"
+            },
+            {
               "id": "libc 0.2.189",
               "target": "libc"
             },
@@ -13275,7 +13279,12 @@
           "**"
         ],
         "deps": {
-          "common": [],
+          "common": [
+            {
+              "id": "fs4 1.1.0",
+              "target": "fs4"
+            }
+          ],
           "selects": {
             "cfg(unix)": [
               {
@@ -13903,7 +13912,8 @@
         "crate_features": {
           "common": [
             "default",
-            "test-failpoints"
+            "test-failpoints",
+            "test-support"
           ],
           "selects": {}
         },
@@ -13916,6 +13926,10 @@
             {
               "id": "atomicwrites 0.4.4",
               "target": "atomicwrites"
+            },
+            {
+              "id": "bytes 1.11.1",
+              "target": "bytes"
             },
             {
               "id": "datafusion 54.1.0",
@@ -34320,6 +34334,7 @@
     "arrow-data 58.3.0",
     "async-trait 0.1.92",
     "atomicwrites 0.4.4",
+    "bytes 1.11.1",
     "chrono 0.4.45",
     "chrono-tz 0.10.4",
     "clap 4.6.6",

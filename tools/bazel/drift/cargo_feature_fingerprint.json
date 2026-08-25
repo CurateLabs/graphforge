@@ -1,6 +1,6 @@
 {
   "schema": "graphforge.cargo-feature-fingerprint.v1",
-  "sha256": "b3be2fa948ad685b8e34b042fd7da99037da33e4edb464242913107d4e4baf61",
+  "sha256": "399e50bde02c265c723f76701c8faa65d270cbeaeb5dff0ccfe418d7edc0877e",
   "entries": [
     {
       "name": "graphforge-api",
@@ -1891,6 +1891,15 @@
         {
           "name": "atomicwrites",
           "req": "^0.4.4",
+          "features": [],
+          "optional": false,
+          "uses_default_features": true,
+          "kind": null,
+          "target": null
+        },
+        {
+          "name": "bytes",
+          "req": "^1",
           "features": [],
           "optional": false,
           "uses_default_features": true,
