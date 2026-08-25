@@ -298,6 +298,7 @@ impl AuthenticatedPropertyInventory {
         }
         for fragments in routes.values_mut() {
             fragments.sort_unstable_by_key(|fragment| fragment.id);
+            validate_fragment_id_sequence(fragments.iter().map(|fragment| fragment.id))?;
         }
         Ok(Self {
             root: Some(root),
@@ -1341,40 +1342,43 @@ pub fn enumerate_property_fragments(
             path: entry.path(),
         });
     }
-    if fragments
-        .first()
-        .is_some_and(|fragment| fragment.id.generation == 0)
-        && fragments.len() > 1
-    {
-        return Err(corrupt(
-            "legacy and immutable property authorities are mixed",
-        ));
-    }
     fragments.sort_unstable_by_key(|fragment| fragment.id);
     if fragments.windows(2).any(|pair| pair[0].id == pair[1].id) {
         return Err(corrupt("duplicate property fragment identity"));
     }
+    validate_fragment_id_sequence(fragments.iter().map(|fragment| fragment.id))?;
+    Ok(fragments)
+}
+
+fn validate_fragment_id_sequence(
+    ids: impl IntoIterator<Item = PropertyFragmentId>,
+) -> Result<(), GfError> {
     let mut prior: Option<PropertyFragmentId> = None;
-    for fragment in &fragments {
+    for id in ids {
         if let Some(previous) = prior {
-            if fragment.id.generation == previous.generation
-                && Some(fragment.id.ordinal) != previous.ordinal.checked_add(1)
+            if previous.generation == 0 && id.generation != 0 {
+                return Err(corrupt(
+                    "legacy and immutable property authorities are mixed",
+                ));
+            }
+            if id.generation == previous.generation
+                && Some(id.ordinal) != previous.ordinal.checked_add(1)
             {
                 return Err(corrupt("property fragment ordinal sequence has a gap"));
             }
-            if fragment.id.generation != previous.generation && fragment.id.ordinal != 0 {
+            if id.generation != previous.generation && id.ordinal != 0 {
                 return Err(corrupt(
                     "property fragment generation does not start at ordinal zero",
                 ));
             }
-        } else if fragment.id.generation != 0 && fragment.id.ordinal != 0 {
+        } else if id.generation != 0 && id.ordinal != 0 {
             return Err(corrupt(
                 "property fragment generation does not start at ordinal zero",
             ));
         }
-        prior = Some(fragment.id);
+        prior = Some(id);
     }
-    Ok(fragments)
+    Ok(())
 }
 
 fn validate_route(route: &str) -> Result<(), GfError> {
@@ -1455,6 +1459,23 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("ordinal zero")
+        );
+    }
+
+    #[test]
+    fn authenticated_fragment_sequence_rejects_mixed_gapped_and_nonzero_starts() {
+        let id = |generation, ordinal| PropertyFragmentId {
+            generation,
+            ordinal,
+        };
+        assert!(validate_fragment_id_sequence([id(0, 0), id(1, 0)]).is_err());
+        assert!(validate_fragment_id_sequence([id(7, 1)]).is_err());
+        assert!(validate_fragment_id_sequence([id(7, 0), id(7, 2)]).is_err());
+        assert!(validate_fragment_id_sequence([id(7, 0), id(8, 1)]).is_err());
+        assert!(validate_fragment_id_sequence([id(7, 0), id(7, 1), id(8, 0)]).is_ok());
+        assert!(
+            validate_fragment_id_sequence([id(7, u64::MAX - 1), id(7, u64::MAX), id(7, 0),])
+                .is_err()
         );
     }
 
