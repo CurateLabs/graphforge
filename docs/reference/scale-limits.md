@@ -28,9 +28,12 @@ record. Edge endpoint resolution retains one authenticated UUID-index snapshot,
 sorts and deduplicates each request, selects bounded blocks from authenticated
 fences, and merge-scans each selected block once. It reports block reads/bytes
 and exactly zero per-record filesystem seeks; neither operation scans retained
-topology. Peak construction RSS is therefore a configured batch/shard-window
-property. Continued RSS growth proportional to retained edge count is a
-correctness failure, not a reason to raise the M5 memory ceiling.
+topology. The writer's charged retained state and flush scratch are therefore
+bounded by the configured batch/shard window. Process RSS is separate runtime
+evidence: the public construction/S20 sampler must measure it at each phase and
+show that it plateaus as retained edge count rises. Continued material RSS
+growth proportional to retained edge count is a correctness failure, not a
+reason to raise the M5 memory ceiling.
 
 ## Rust 0.5.0 Fixed-Hop LIMIT Contract
 
