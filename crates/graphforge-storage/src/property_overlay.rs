@@ -5,7 +5,7 @@
 //! filename; directory order and mtimes never select a winner.
 
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BinaryHeap};
+use std::collections::{BTreeMap, BinaryHeap, HashMap};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -188,6 +188,7 @@ pub struct PropertyFragment {
 pub struct AuthenticatedPropertyInventory {
     root: Option<graphforge_filesystem::StableDirectory>,
     routes: BTreeMap<(PropertyRouteKind, String), Vec<AuthenticatedPropertyFragment>>,
+    schemas: BTreeMap<(PropertyRouteKind, String), arrow::datatypes::SchemaRef>,
 }
 
 #[derive(Debug)]
@@ -195,6 +196,13 @@ struct AuthenticatedPropertyFragment {
     id: PropertyFragmentId,
     entry: crate::GraphFileEntry,
     physical_relative: PathBuf,
+}
+
+#[derive(Debug)]
+struct RouteSchemaBuilder {
+    uuid: arrow::datatypes::FieldRef,
+    fields: BTreeMap<String, arrow::datatypes::FieldRef>,
+    metadata: HashMap<String, String>,
 }
 
 impl AuthenticatedPropertyInventory {
@@ -210,6 +218,7 @@ impl AuthenticatedPropertyInventory {
             return Ok(Self {
                 root: None,
                 routes: BTreeMap::new(),
+                schemas: BTreeMap::new(),
             });
         };
         let inventory = generation.graph_files_inventory()?.ok_or_else(|| {
@@ -258,6 +267,7 @@ impl AuthenticatedPropertyInventory {
         let root = graphforge_filesystem::StableDirectory::open(root_path).map_err(io_error)?;
         let mut routes: BTreeMap<(PropertyRouteKind, String), Vec<AuthenticatedPropertyFragment>> =
             BTreeMap::new();
+        let mut schemas = BTreeMap::new();
         for (entry, physical_relative) in entries {
             let parsed = parse_inventory_property_path(&entry.relative_path)?;
             if entry.role != crate::GraphFileRole::Properties {
@@ -275,6 +285,7 @@ impl AuthenticatedPropertyInventory {
                 ParquetRecordBatchReaderBuilder::try_new(file.try_clone().map_err(io_error)?)
                     .map_err(parquet_error)?;
             validate_fragment_schema(builder.schema().as_ref(), id, kind, &route)?;
+            merge_route_schema(&mut schemas, kind, &route, builder.schema().as_ref())?;
             let fragments = routes.entry((kind, route)).or_default();
             if fragments.iter().any(|fragment| fragment.id == id) {
                 return Err(corrupt("property inventory contains duplicate authority"));
@@ -291,7 +302,31 @@ impl AuthenticatedPropertyInventory {
         Ok(Self {
             root: Some(root),
             routes,
+            schemas: schemas
+                .into_iter()
+                .map(|(key, schema): (_, RouteSchemaBuilder)| {
+                    let mut fields = vec![schema.uuid];
+                    fields.extend(schema.fields.into_values());
+                    (
+                        key,
+                        Arc::new(arrow::datatypes::Schema::new_with_metadata(
+                            fields,
+                            schema.metadata,
+                        )),
+                    )
+                })
+                .collect(),
         })
+    }
+
+    /// Canonical logical schema authenticated across every fragment in a route.
+    #[must_use]
+    pub fn route_schema(
+        &self,
+        kind: PropertyRouteKind,
+        route: &str,
+    ) -> Option<arrow::datatypes::SchemaRef> {
+        self.schemas.get(&(kind, route.to_owned())).cloned()
     }
 
     /// Visit one authenticated route through the retained generation
@@ -378,6 +413,61 @@ impl AuthenticatedPropertyInventory {
             .saturating_add(metrics.merge_peak_bytes);
         Ok(metrics)
     }
+}
+
+fn merge_route_schema(
+    schemas: &mut BTreeMap<(PropertyRouteKind, String), RouteSchemaBuilder>,
+    kind: PropertyRouteKind,
+    route: &str,
+    fragment: &arrow::datatypes::Schema,
+) -> Result<(), GfError> {
+    const IDENTITY_KEYS: [&str; 5] = [
+        PROPERTY_OVERLAY_FORMAT_KEY,
+        PROPERTY_ROUTE_KEY,
+        PROPERTY_KIND_KEY,
+        PROPERTY_GENERATION_KEY,
+        PROPERTY_ORDINAL_KEY,
+    ];
+    let uuid = Arc::clone(&fragment.fields()[0]);
+    let schema = schemas
+        .entry((kind, route.to_owned()))
+        .or_insert_with(|| RouteSchemaBuilder {
+            uuid: Arc::clone(&uuid),
+            fields: BTreeMap::new(),
+            metadata: HashMap::new(),
+        });
+    if schema.uuid.as_ref() != uuid.as_ref() {
+        return Err(corrupt("property route UUID schemas conflict"));
+    }
+    for (name, value) in fragment.metadata() {
+        if IDENTITY_KEYS.contains(&name.as_str()) {
+            continue;
+        }
+        if schema
+            .metadata
+            .insert(name.clone(), value.clone())
+            .is_some_and(|prior| prior != *value)
+        {
+            return Err(corrupt("property route semantic metadata conflicts"));
+        }
+    }
+    for field in fragment.fields().iter().skip(1) {
+        if field.name() == PROPERTY_TOMBSTONE_FIELD {
+            continue;
+        }
+        if let Some(prior) = schema.fields.get(field.name()) {
+            if prior.as_ref() != field.as_ref() {
+                return Err(corrupt(
+                    "property route field type or semantic metadata conflicts",
+                ));
+            }
+        } else {
+            schema
+                .fields
+                .insert(field.name().clone(), Arc::clone(field));
+        }
+    }
+    Ok(())
 }
 
 fn parse_inventory_property_path(
@@ -1327,7 +1417,7 @@ fn corrupt(message: &str) -> GfError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{ArrayRef, BooleanArray, FixedSizeBinaryArray, StringArray};
+    use arrow::array::{ArrayRef, BooleanArray, FixedSizeBinaryArray, Int64Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
     use parquet::arrow::ArrowWriter;
     use std::collections::HashMap;
@@ -1548,16 +1638,15 @@ mod tests {
         assert_eq!(PEAK_OPEN_FRAGMENT_READERS.load(Ordering::SeqCst), 1);
 
         let bytes = fs::read(&path).unwrap();
-        let inventory = AuthenticatedPropertyInventory::from_entries_at_root(
-            dir.path(),
-            vec![crate::GraphFileEntry {
-                relative_path: format!("properties/Person/{}", id.file_name()),
-                byte_length: u64::try_from(bytes.len()).unwrap(),
-                content_sha256: digest_hex(&Sha256::digest(&bytes)),
-                role: crate::GraphFileRole::Properties,
-            }],
-        )
-        .unwrap();
+        let entry = crate::GraphFileEntry {
+            relative_path: format!("properties/Person/{}", id.file_name()),
+            byte_length: u64::try_from(bytes.len()).unwrap(),
+            content_sha256: digest_hex(&Sha256::digest(&bytes)),
+            role: crate::GraphFileRole::Properties,
+        };
+        let inventory =
+            AuthenticatedPropertyInventory::from_entries_at_root(dir.path(), vec![entry.clone()])
+                .unwrap();
         let mut inventory_rows = Vec::new();
         inventory
             .visit_route(
@@ -1572,6 +1661,62 @@ mod tests {
             )
             .unwrap();
         assert_eq!(inventory_rows.len(), 1);
+
+        let conflicting_id = PropertyFragmentId {
+            generation: 8,
+            ordinal: 0,
+        };
+        let conflicting_schema = Arc::new(Schema::new_with_metadata(
+            vec![
+                Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+                Field::new(PROPERTY_TOMBSTONE_FIELD, DataType::Boolean, false),
+                Field::new("name", DataType::Int64, true),
+            ],
+            HashMap::from([
+                (
+                    PROPERTY_OVERLAY_FORMAT_KEY.into(),
+                    PROPERTY_OVERLAY_FORMAT.into(),
+                ),
+                (PROPERTY_ROUTE_KEY.into(), "Person".into()),
+                (PROPERTY_KIND_KEY.into(), "node".into()),
+                (PROPERTY_GENERATION_KEY.into(), "8".into()),
+                (PROPERTY_ORDINAL_KEY.into(), "0".into()),
+            ]),
+        ));
+        let conflicting_batch = RecordBatch::try_new(
+            Arc::clone(&conflicting_schema),
+            vec![
+                Arc::new(
+                    FixedSizeBinaryArray::try_from_iter(vec![vec![5; 16]].into_iter()).unwrap(),
+                ),
+                Arc::new(BooleanArray::from(vec![false])),
+                Arc::new(Int64Array::from(vec![Some(9)])),
+            ],
+        )
+        .unwrap();
+        let conflicting_path = route_dir.join(conflicting_id.file_name());
+        let mut conflicting_writer = ArrowWriter::try_new(
+            File::create(&conflicting_path).unwrap(),
+            conflicting_schema,
+            None,
+        )
+        .unwrap();
+        conflicting_writer.write(&conflicting_batch).unwrap();
+        conflicting_writer.close().unwrap();
+        let conflicting_bytes = fs::read(&conflicting_path).unwrap();
+        let conflicting_entry = crate::GraphFileEntry {
+            relative_path: format!("properties/Person/{}", conflicting_id.file_name()),
+            byte_length: u64::try_from(conflicting_bytes.len()).unwrap(),
+            content_sha256: digest_hex(&Sha256::digest(&conflicting_bytes)),
+            role: crate::GraphFileRole::Properties,
+        };
+        assert!(
+            AuthenticatedPropertyInventory::from_entries_at_root(
+                dir.path(),
+                vec![entry, conflicting_entry],
+            )
+            .is_err()
+        );
 
         fs::write(&path, b"same-name attacker replacement").unwrap();
         assert!(
