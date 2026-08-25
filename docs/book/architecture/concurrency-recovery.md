@@ -60,6 +60,32 @@ Recovery resolves an exact valid `CURRENT` only. Journals and directory scans
 are advisory cleanup input. Corrupt or ambiguous pointers fail closed as
 `GF_PROJECT_CORRUPT` without electing a newest generation.
 
+Mutable graph-workspace rewrites have a second, subordinate recovery boundary.
+One exclusive `.graphforge-rewrite.lock` protects the exact admitted project
+root while the engine derives prior/next topology and search generations,
+installs a bounded batch, and switches `topology/generation.json` last. The
+authenticated intent binds the retained root and parent-directory identities,
+every canonical staged/final basename, temporary identity, byte length and
+digest, and exactly one bounded generation-authority record. It cannot publish
+a project generation; `CURRENT` remains the sole project authority.
+
+A `preparing` intent is safe only for identity-matched temporary cleanup. A
+`durable` intent is an unconditional roll-forward obligation: recovery accepts
+only the exact prior or next generation pair, authenticates an already-installed
+destination or its retained temporary, installs all data first, revalidates the
+root and named lock, and publishes generation authority last. Missing,
+substituted, truncated, non-canonical, cross-root, duplicate, or
+generation-divergent state fails closed without guessing or deleting ambiguous
+evidence; the named lock also has a single-link invariant. Reopen is idempotent
+before, during, and after the authority switch. The journal is bounded to
+16,384 entries and 8 MiB, with a 4 KiB generation authority.
+
+The same intent can bind one typed auxiliary receipt to one exact staged data
+entry by schema kind/version, length, and digest. #931 must use that
+participation point for its authenticated UUID-to-surrogate manifest/runs,
+ensuring topology and lookup authority recover together rather than through a
+later best-effort repair.
+
 ## Write modes and isolation
 
 Project mutation has three explicit embedded modes. Every mode gives readers
@@ -116,6 +142,13 @@ Recovery after a writer is killed selects either the previous complete
 generation or the newly published complete generation according to the durable
 publication phase. Graph, provenance, knowledge-layer, and epistemic state move together; mixed
 generations are unsupported and treated as corruption.
+
+Within a private mutable graph workspace, the equivalent finite rule is:
+before durable rewrite intent the prior topology/search generation remains
+selected; at or after durable intent recovery rolls every staged destination
+forward and installs `topology/generation.json` last. That internal authority is
+fully recovered before the workspace can participate in a `CURRENT`
+publication.
 
 Exact retry after acknowledgement returns the prior receipt without restaging.
 Same-identity content changes return `GF_IDEMPOTENCY_CONFLICT`. Failures before

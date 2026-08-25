@@ -5,6 +5,7 @@
 //! final authority switch.  Journal paths are bounded, canonical relative
 //! paths and every recovery input is authenticated before it is used.
 
+use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{Read, Seek, Write};
 use std::path::{Component, Path};
@@ -80,6 +81,15 @@ struct Entry {
     sha256: String,
     temporary_volume: u64,
     temporary_file: String,
+    prior_destination: Option<AuthenticatedFile>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct AuthenticatedFile {
+    volume: u64,
+    file: String,
+    bytes: u64,
+    sha256: String,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -93,7 +103,13 @@ fn storage(error: impl std::fmt::Display) -> GfError {
     GfError::Storage(error.to_string())
 }
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    bytes.iter().fold(
+        String::with_capacity(bytes.len().saturating_mul(2)),
+        |mut encoded, byte| {
+            write!(encoded, "{byte:02x}").expect("writing to a String cannot fail");
+            encoded
+        },
+    )
 }
 
 fn canonical_relative(root: &Path, path: &Path) -> Result<String, GfError> {
@@ -115,16 +131,11 @@ fn canonical_relative(root: &Path, path: &Path) -> Result<String, GfError> {
         .ok_or_else(|| storage("rewrite destination is not UTF-8"))
 }
 
-fn identity(path: &Path) -> Result<(u64, String), GfError> {
-    let id = graphforge_filesystem::path_identity(path).map_err(storage)?;
-    Ok((id.volume_serial, hex(&id.file_id)))
-}
-
 fn hash_reader(mut file: File) -> Result<(u64, String), GfError> {
     file.rewind().map_err(storage)?;
     let mut hash = Sha256::new();
     let mut bytes = 0_u64;
-    let mut buffer = [0_u8; 1024 * 1024];
+    let mut buffer = vec![0_u8; 1024 * 1024].into_boxed_slice();
     loop {
         let count = file.read(&mut buffer).map_err(storage)?;
         if count == 0 {
@@ -138,16 +149,15 @@ fn hash_reader(mut file: File) -> Result<(u64, String), GfError> {
     Ok((bytes, hex(&hash.finalize())))
 }
 
-fn sync_dir(path: &Path) -> Result<(), GfError> {
-    #[cfg(unix)]
-    {
-        File::open(path).and_then(|f| f.sync_all()).map_err(storage)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-        Ok(())
-    }
+fn authenticated_file(file: &File) -> Result<AuthenticatedFile, GfError> {
+    let identity = graphforge_filesystem::file_identity(file).map_err(storage)?;
+    let (bytes, sha256) = hash_reader(file.try_clone().map_err(storage)?)?;
+    Ok(AuthenticatedFile {
+        volume: identity.volume_serial,
+        file: hex(&identity.file_id),
+        bytes,
+        sha256,
+    })
 }
 
 struct RewriteGuard {
@@ -172,13 +182,18 @@ fn acquire(root: &Path) -> Result<RewriteGuard, GfError> {
         ProjectLifecycleMode::Ephemeral,
         ProjectRootRequirement::Existing,
     )?;
-    let directory = StableDirectory::open(root).map_err(storage)?;
+    let directory = StableDirectory::open(root)
+        .map_err(|error| storage(format!("rewrite root open failed: {error}")))?;
     let lock = directory
         .open_or_create_child_file(std::ffi::OsStr::new(LOCK))
-        .map_err(storage)?;
-    lock.sync_all().map_err(storage)?;
-    directory.sync().map_err(storage)?;
-    crate::file_lock::lock_exclusive(&lock).map_err(storage)?;
+        .map_err(|error| storage(format!("rewrite lock open failed: {error}")))?;
+    lock.sync_all()
+        .map_err(|error| storage(format!("rewrite lock sync failed: {error}")))?;
+    directory
+        .sync()
+        .map_err(|error| storage(format!("rewrite root sync failed: {error}")))?;
+    crate::file_lock::lock_exclusive(&lock)
+        .map_err(|error| storage(format!("rewrite lock acquisition failed: {error}")))?;
     admission.revalidate_identity()?;
     let lifecycle_identity = graphforge_filesystem::file_identity(&lock).map_err(storage)?;
     Ok(RewriteGuard {
@@ -233,6 +248,12 @@ fn checksum(intent: &Intent) -> Result<String, GfError> {
                 sha256: e.sha256.clone(),
                 temporary_volume: e.temporary_volume,
                 temporary_file: e.temporary_file.clone(),
+                prior_destination: e.prior_destination.as_ref().map(|prior| AuthenticatedFile {
+                    volume: prior.volume,
+                    file: prior.file.clone(),
+                    bytes: prior.bytes,
+                    sha256: prior.sha256.clone(),
+                }),
             })
             .collect(),
     };
@@ -249,7 +270,7 @@ fn publish_journal(root: &StableDirectory, intent: &Intent) -> Result<(), GfErro
         .create_replaceable_child_file(std::ffi::OsStr::new(&name))
         .map_err(storage)?;
     temp.write_all(&bytes)
-        .and_then(|_| temp.sync_all())
+        .and_then(|()| temp.sync_all())
         .map_err(storage)?;
     let expected = graphforge_filesystem::file_identity(&temp).map_err(storage)?;
     root.replace_child(
@@ -263,44 +284,87 @@ fn publish_journal(root: &StableDirectory, intent: &Intent) -> Result<(), GfErro
 
 fn install(root_path: &Path, root: &StableDirectory, entry: &Entry) -> Result<(), GfError> {
     let (parent, target) = retained_parent_at(root_path, root, &entry.destination)?;
-    let (_, temporary) = retained_parent_at(root_path, root, &entry.temporary)?;
+    let (temporary_parent, temporary) = retained_parent_at(root_path, root, &entry.temporary)?;
     let parent_id = parent.identity();
     if (parent_id.volume_serial, hex(&parent_id.file_id))
         != (entry.parent_volume, entry.parent_file.clone())
     {
         return Err(storage("rewrite parent identity changed"));
     }
-    if let Ok(destination) = parent.open_child_file(&target) {
-        if hash_reader(destination)? == (entry.bytes, entry.sha256.clone()) {
-            if let Ok(temp) = parent.open_child_file(&temporary) {
-                let id = graphforge_filesystem::file_identity(&temp).map_err(storage)?;
-                drop(temp);
-                parent
-                    .unlink_child_if_identity(&temporary, id)
-                    .map_err(storage)?;
-                parent.sync().map_err(storage)?;
-            }
-            return Ok(());
-        }
+    if temporary_parent.identity() != parent_id {
+        return Err(storage("rewrite temporary and destination parents differ"));
     }
-    let temp = parent.open_child_file(&temporary).map_err(storage)?;
-    let temp_id = graphforge_filesystem::file_identity(&temp).map_err(storage)?;
-    if (temp_id.volume_serial, hex(&temp_id.file_id))
+
+    match parent.open_child_file(&temporary) {
+        Ok(temp) => {
+            authenticate_staged_file(&temp, entry)?;
+            authenticate_prior_destination(&parent, &target, entry.prior_destination.as_ref())?;
+            let expected = graphforge_filesystem::file_identity(&temp).map_err(storage)?;
+            drop(temp);
+            parent
+                .replace_child(&temporary, expected, &target)
+                .map_err(storage)?;
+            parent.sync().map_err(storage)?;
+            authenticate_installed_destination(&parent, &target, entry)?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // A missing retained temporary is valid only after its exact file
+            // identity was installed at the destination by an earlier pass.
+            authenticate_installed_destination(&parent, &target, entry)?;
+        }
+        Err(error) => return Err(storage(error)),
+    }
+    Ok(())
+}
+
+fn authenticate_staged_file(file: &File, entry: &Entry) -> Result<(), GfError> {
+    let identity = graphforge_filesystem::file_identity(file).map_err(storage)?;
+    if (identity.volume_serial, hex(&identity.file_id))
         != (entry.temporary_volume, entry.temporary_file.clone())
     {
         return Err(storage("rewrite temporary identity changed"));
     }
-    if hash_reader(temp.try_clone().map_err(storage)?)? != (entry.bytes, entry.sha256.clone()) {
+    if hash_reader(file.try_clone().map_err(storage)?)? != (entry.bytes, entry.sha256.clone()) {
         return Err(storage("rewrite recovery input is missing or corrupt"));
     }
-    let expected = graphforge_filesystem::file_identity(&temp).map_err(storage)?;
-    drop(temp);
-    parent
-        .replace_child(&temporary, expected, &target)
-        .map_err(storage)?;
-    parent.sync().map_err(storage)?;
-    if hash_reader(parent.open_child_file(&target).map_err(storage)?)?
-        != (entry.bytes, entry.sha256.clone())
+    Ok(())
+}
+
+fn authenticate_prior_destination(
+    parent: &StableDirectory,
+    target: &std::ffi::OsStr,
+    prior: Option<&AuthenticatedFile>,
+) -> Result<(), GfError> {
+    match (parent.open_child_file(target), prior) {
+        (Err(error), None) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        (Ok(file), Some(prior)) => {
+            let identity = graphforge_filesystem::file_identity(&file).map_err(storage)?;
+            if (identity.volume_serial, hex(&identity.file_id))
+                != (prior.volume, prior.file.clone())
+                || hash_reader(file)? != (prior.bytes, prior.sha256.clone())
+            {
+                return Err(storage("rewrite destination changed after intent"));
+            }
+            Ok(())
+        }
+        (Err(error), Some(_)) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err(storage("rewrite destination disappeared after intent"))
+        }
+        (Ok(_), None) => Err(storage("rewrite destination appeared after intent")),
+        (Err(error), _) => Err(storage(error)),
+    }
+}
+
+fn authenticate_installed_destination(
+    parent: &StableDirectory,
+    target: &std::ffi::OsStr,
+    entry: &Entry,
+) -> Result<(), GfError> {
+    let destination = parent.open_child_file(target).map_err(storage)?;
+    let identity = graphforge_filesystem::file_identity(&destination).map_err(storage)?;
+    if (identity.volume_serial, hex(&identity.file_id))
+        != (entry.temporary_volume, entry.temporary_file.clone())
+        || hash_reader(destination)? != (entry.bytes, entry.sha256.clone())
     {
         return Err(storage(
             "installed rewrite destination failed authentication",
@@ -354,7 +418,9 @@ fn read_journal(root: &StableDirectory) -> Result<Option<(Vec<u8>, FileIdentity)
     if metadata.len() > MAX_JOURNAL_BYTES {
         return Err(storage("rewrite journal exceeds bound"));
     }
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    let capacity = usize::try_from(metadata.len())
+        .map_err(|_| storage("rewrite journal length exceeds address space"))?;
+    let mut bytes = Vec::with_capacity(capacity);
     file.take(MAX_JOURNAL_BYTES + 1)
         .read_to_end(&mut bytes)
         .map_err(storage)?;
@@ -451,6 +517,12 @@ fn cleanup_preparing_input(
     entry: &Entry,
 ) -> Result<(), GfError> {
     let (parent, temporary) = retained_parent_at(root_path, root, &entry.temporary)?;
+    let parent_id = parent.identity();
+    if (parent_id.volume_serial, hex(&parent_id.file_id))
+        != (entry.parent_volume, entry.parent_file.clone())
+    {
+        return Err(storage("preparing rewrite parent identity changed"));
+    }
     let file = match parent.open_child_file(&temporary) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -584,6 +656,11 @@ pub(crate) fn recover(root: &Path) -> Result<(), GfError> {
     )
 }
 
+#[cfg(test)]
+static FAIL_AFTER_DURABLE_INTENT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[allow(clippy::too_many_lines)]
 pub(crate) fn commit(
     batch: RewriteBatch,
     root: &Path,
@@ -604,6 +681,9 @@ pub(crate) fn commit(
         topology: recovered.topology,
         search: recovered.search,
     };
+    if batch.is_empty() && !bump_topology && !bump_search && auxiliary.is_none() {
+        return Ok(prior);
+    }
     let next = GenerationPair {
         topology: if bump_topology {
             prior
@@ -625,7 +705,7 @@ pub(crate) fn commit(
     let generation_bytes = crate::generation::encode_generation_state(next.topology, next.search)?;
     guard.revalidate()?;
     let transaction = Uuid::now_v7().simple().to_string();
-    let root_identity = identity(root)?;
+    let root_identity = guard.directory.identity();
     let mut entries = Vec::new();
     let mut staged = batch.into_staged();
     let generation_path = root.join("topology/generation.json");
@@ -638,7 +718,7 @@ pub(crate) fn commit(
         .map_err(storage)?;
     generation
         .write_all(&generation_bytes)
-        .and_then(|_| generation.as_file().sync_all())
+        .and_then(|()| generation.as_file().sync_all())
         .map_err(storage)?;
     staged.push((generation, generation_path));
     if staged.len() > MAX_ENTRIES {
@@ -646,20 +726,28 @@ pub(crate) fn commit(
     }
     let last = staged.len().saturating_sub(1);
     for (ordinal, (temp, destination)) in staged.iter().enumerate() {
-        let relative = canonical_relative(root, &destination)?;
-        let parent = destination
-            .parent()
-            .ok_or_else(|| storage("rewrite destination has no parent"))?;
-        let parent_identity = identity(parent)?;
+        let relative = canonical_relative(root, destination)?;
+        let (parent, target) = retained_parent_at(root, &guard.directory, &relative)?;
+        let parent_identity = parent.identity();
         temp.as_file().sync_all().map_err(storage)?;
         let original = graphforge_filesystem::file_identity(temp.as_file()).map_err(storage)?;
         let durable = temp.path().to_path_buf();
-        if graphforge_filesystem::path_identity(&durable).map_err(storage)? != original {
+        let temp_relative = canonical_relative(root, &durable)?;
+        let (temp_parent, temp_name) = retained_parent_at(root, &guard.directory, &temp_relative)?;
+        if temp_parent.identity() != parent_identity {
+            return Err(storage("rewrite temporary and destination parents differ"));
+        }
+        let named_temp = temp_parent.open_child_file(&temp_name).map_err(storage)?;
+        if graphforge_filesystem::file_identity(&named_temp).map_err(storage)? != original {
             return Err(storage("rewrite temporary identity changed before intent"));
         }
-        sync_dir(parent)?;
+        parent.sync().map_err(storage)?;
         let (bytes, sha256) = hash_reader(temp.as_file().try_clone().map_err(storage)?)?;
-        let temp_relative = canonical_relative(root, &durable)?;
+        let prior_destination = match parent.open_child_file(&target) {
+            Ok(file) => Some(authenticated_file(&file)?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(storage(error)),
+        };
         entries.push(Entry {
             class: if ordinal == last {
                 EntryClass::GenerationAuthority
@@ -668,20 +756,21 @@ pub(crate) fn commit(
             },
             destination: relative,
             temporary: temp_relative,
-            parent_volume: parent_identity.0,
-            parent_file: parent_identity.1,
+            parent_volume: parent_identity.volume_serial,
+            parent_file: hex(&parent_identity.file_id),
             bytes,
             sha256,
             temporary_volume: original.volume_serial,
             temporary_file: hex(&original.file_id),
+            prior_destination,
         });
     }
     let mut intent = Intent {
         version: 1,
         state: IntentState::Preparing,
         transaction,
-        root_volume: root_identity.0,
-        root_file: root_identity.1,
+        root_volume: root_identity.volume_serial,
+        root_file: hex(&root_identity.file_id),
         prior,
         next,
         auxiliary,
@@ -749,6 +838,8 @@ mod tests {
 
     use super::*;
 
+    static DURABLE_INTENT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn entry(destination: &str, class: EntryClass) -> Entry {
         Entry {
             class,
@@ -760,6 +851,7 @@ mod tests {
             sha256: "aa".repeat(32),
             temporary_volume: 1,
             temporary_file: "02".to_owned(),
+            prior_destination: None,
         }
     }
 
@@ -785,6 +877,42 @@ mod tests {
             ],
             checksum: String::new(),
         }
+    }
+
+    fn leave_durable_intent(root: &Path) -> Intent {
+        let _test_guard = DURABLE_INTENT_TEST_LOCK.lock().unwrap();
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, false)]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![Arc::new(Int64Array::from(vec![7_i64]))],
+        )
+        .unwrap();
+        let mut rewrite = RewriteBatch::new();
+        rewrite
+            .stage(&root.join("topology/nodes.parquet"), schema, &batch)
+            .unwrap();
+        FAIL_AFTER_DURABLE_INTENT.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(commit(rewrite, root, true, true, None).is_err());
+        let stable = StableDirectory::open(root).unwrap();
+        let (bytes, _) = read_journal(&stable).unwrap().unwrap();
+        let value: Intent = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value.state, IntentState::Durable);
+        value
+    }
+
+    fn republish_intent(root: &Path, intent: &mut Intent) {
+        intent.checksum = checksum(intent).unwrap();
+        publish_journal(&StableDirectory::open(root).unwrap(), intent).unwrap();
+    }
+
+    fn assert_recovery_fails_before_authority(root: &Path) {
+        assert!(recover(root).is_err());
+        assert_eq!(
+            crate::generation::read_generation_state_raw(root)
+                .unwrap()
+                .topology,
+            0
+        );
     }
 
     #[test]
@@ -829,19 +957,107 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_error_after_durable_intent_rolls_forward_on_double_reopen() {
+    fn hostile_root_traversal_and_stale_intents_fail_closed() {
+        for mutation in ["root", "traversal", "stale"] {
+            let root = TempDir::new().unwrap();
+            let mut value = leave_durable_intent(root.path());
+            match mutation {
+                "root" => value.root_file = "00".repeat(16),
+                "traversal" => value.entries[0].destination = "../escape.parquet".to_owned(),
+                "stale" => {
+                    value.prior = GenerationPair {
+                        topology: 7,
+                        search: 7,
+                    };
+                    value.next = GenerationPair {
+                        topology: 8,
+                        search: 8,
+                    };
+                }
+                _ => unreachable!(),
+            }
+            republish_intent(root.path(), &mut value);
+            assert_recovery_fails_before_authority(root.path());
+        }
+    }
+
+    #[test]
+    fn substituted_or_truncated_temporary_fails_closed() {
+        for mutation in ["substitute", "truncate"] {
+            let root = TempDir::new().unwrap();
+            let value = leave_durable_intent(root.path());
+            let data = value
+                .entries
+                .iter()
+                .find(|entry| entry.class == EntryClass::Data)
+                .unwrap();
+            let temporary = root.path().join(&data.temporary);
+            let bytes = std::fs::read(&temporary).unwrap();
+            if mutation == "substitute" {
+                let replacement = temporary.with_extension("replacement");
+                std::fs::write(&replacement, bytes).unwrap();
+                std::fs::remove_file(&temporary).unwrap();
+                std::fs::rename(replacement, &temporary).unwrap();
+            } else {
+                std::fs::write(&temporary, &bytes[..bytes.len() / 2]).unwrap();
+            }
+            assert_recovery_fails_before_authority(root.path());
+        }
+    }
+
+    #[test]
+    fn byte_identical_final_substitution_fails_closed() {
         let root = TempDir::new().unwrap();
-        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, false)]));
-        let batch = RecordBatch::try_new(
-            Arc::clone(&schema),
-            vec![Arc::new(Int64Array::from(vec![7_i64]))],
+        let value = leave_durable_intent(root.path());
+        let data = value
+            .entries
+            .iter()
+            .find(|entry| entry.class == EntryClass::Data)
+            .unwrap();
+        let stable = StableDirectory::open(root.path()).unwrap();
+        install(root.path(), &stable, data).unwrap();
+        let destination = root.path().join(&data.destination);
+        let bytes = std::fs::read(&destination).unwrap();
+        let replacement = destination.with_extension("replacement");
+        std::fs::write(&replacement, bytes).unwrap();
+        std::fs::remove_file(&destination).unwrap();
+        std::fs::rename(replacement, &destination).unwrap();
+        assert_recovery_fails_before_authority(root.path());
+    }
+
+    #[test]
+    fn parent_substitution_and_cross_root_temp_move_fail_closed() {
+        let root = TempDir::new().unwrap();
+        let _value = leave_durable_intent(root.path());
+        std::fs::rename(
+            root.path().join("topology"),
+            root.path().join("old-topology"),
         )
         .unwrap();
+        std::fs::create_dir(root.path().join("topology")).unwrap();
+        assert_recovery_fails_before_authority(root.path());
+
+        let root = TempDir::new().unwrap();
+        let value = leave_durable_intent(root.path());
+        let data = value
+            .entries
+            .iter()
+            .find(|entry| entry.class == EntryClass::Data)
+            .unwrap();
+        let outside = TempDir::new().unwrap();
+        std::fs::rename(
+            root.path().join(&data.temporary),
+            outside.path().join("moved-input"),
+        )
+        .unwrap();
+        assert_recovery_fails_before_authority(root.path());
+    }
+
+    #[test]
+    fn ordinary_error_after_durable_intent_rolls_forward_on_double_reopen() {
+        let root = TempDir::new().unwrap();
         let destination = root.path().join("topology/nodes.parquet");
-        let mut rewrite = RewriteBatch::new();
-        rewrite.stage(&destination, schema, &batch).unwrap();
-        FAIL_AFTER_DURABLE_INTENT.store(true, std::sync::atomic::Ordering::SeqCst);
-        assert!(commit(rewrite, root.path(), true, true, None).is_err());
+        let _intent = leave_durable_intent(root.path());
         assert!(root.path().join(JOURNAL).is_file());
         assert_eq!(
             crate::generation::read_topology_generation(root.path()).unwrap(),
@@ -870,7 +1086,9 @@ mod tests {
             for (index, relative) in destinations.iter().enumerate() {
                 let batch = RecordBatch::try_new(
                     Arc::clone(&schema),
-                    vec![Arc::new(Int64Array::from(vec![index as i64 + 10]))],
+                    vec![Arc::new(Int64Array::from(vec![
+                        i64::try_from(index).unwrap() + 10,
+                    ]))],
                 )
                 .unwrap();
                 rewrite
@@ -931,7 +1149,11 @@ mod tests {
                         .as_any()
                         .downcast_ref::<Int64Array>()
                         .unwrap();
-                    assert_eq!(values.value(0), index as i64 + 10, "{phase}: {relative}");
+                    assert_eq!(
+                        values.value(0),
+                        i64::try_from(index).unwrap() + 10,
+                        "{phase}: {relative}"
+                    );
                     assert!(reader.next().is_none(), "{phase}: duplicate payload");
                 }
             }
@@ -948,7 +1170,3 @@ mod tests {
         }
     }
 }
-
-#[cfg(test)]
-static FAIL_AFTER_DURABLE_INTENT: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);

@@ -169,6 +169,70 @@ Derived caches may remain under root `cache/` only when they are keyed by the
 canonical source fingerprint and their absence or corruption cannot change
 results.
 
+### Durable mutable-topology rewrite transaction
+
+The graph workspace still contains mutable topology, property, and search files
+while a complete project generation is being constructed. A rewrite of more
+than one such file uses one authenticated, generation-last transaction. This
+transaction is subordinate to project-generation publication: its
+`topology/generation.json` record selects one internally consistent graph
+workspace state, but only `CURRENT` can publish that workspace as a project
+generation.
+
+The transaction retains the admitted project-root directory identity and an
+open, exclusively locked `.graphforge-rewrite.lock` handle. After locking it
+revalidates the named lock, its single-link invariant, the admitted root, and
+every opened descendant directory. The lock is held from recovery and
+prior-generation selection through installation, the generation-authority
+switch, namespace barriers, and journal removal. Prior and next topology/search
+generations are therefore derived inside the same critical section; standalone
+counter changes use this authority rather than racing a rewrite.
+
+Each destination is a canonical UTF-8 project-relative path containing only
+normal components. Caller paths, absolute paths, traversal, duplicate
+destinations or temporaries, and the rewrite journal/lock names are rejected.
+Before intent publication, each staged file is flushed and bound to:
+
+- its exact byte length and SHA-256 digest;
+- its retained parent-directory volume and file identity; and
+- its temporary basename, volume, and file identity.
+
+The authenticated journal also binds the project-root identity, transaction
+identifier, exact prior and next generation pair, entry class, and a checksum
+over every recovery control. It is limited to 16,384 entries and 8 MiB; the
+encoded generation authority is limited to 4 KiB. Work above those limits fails
+before authority changes.
+
+Intent publication has two durable states. `preparing` permits only
+identity-matched temporary cleanup if retaining all staged names was
+interrupted. Once every staged file has been deliberately retained, `durable`
+means recovery must roll forward. Recovery authenticates the journal and root,
+accepts only the exact prior or next generation pair, then installs and verifies
+all data destinations descriptor-relatively. A destination already containing
+the authenticated bytes is an idempotent completed install; otherwise the
+exact authenticated temporary must still exist. Missing, substituted,
+truncated, cross-root, or ambiguous state fails closed and preserves evidence;
+the named rewrite lock additionally requires one link.
+
+Exactly one entry is the generation authority and its destination is
+`topology/generation.json`. Its bounded JSON bytes must encode the journal's
+exact next topology/search pair. It is installed only after every data entry and
+after the retained root and rewrite-lock identities are revalidated. Directory
+namespace barriers follow each installation. The journal is removed and the
+root namespace made durable only after the authority switch. Thus a crash
+before durable intent leaves the prior generation; a crash at or after durable
+intent deterministically rolls forward; and repeated recovery neither
+duplicates rows nor elects state by scanning files.
+
+An auxiliary storage participant may join the transaction with one typed
+receipt. The receipt names one exact staged data destination and binds its
+schema kind/version, byte length, and SHA-256 digest; recovery verifies that
+binding before installation. The #931 authenticated UUID-to-surrogate index
+must use this hook so its manifest/run receipt and topology shards advance under
+the same generation-last authority. Auxiliary metadata alone, an unlisted
+receipt, or a digest that differs from the staged entry is not participation
+and fails closed.
+
 ### Container creation
 
 An absent path, or an explicitly supplied empty directory, may become a new
@@ -498,8 +562,9 @@ identity after locking to prevent path substitution.
 - Recovery is deterministic because it never elects a generation.
 - Windows NTFS and POSIX implementations must meet their documented
   platform-native barriers or fail before mutation; ReFS is unsupported.
-- Existing fixed-path `RewriteBatch` and standalone generation counters are
-  transitional internals to be replaced and related knowledge-layer issues.
+- Multi-file topology rewrites and standalone topology/search generation
+  changes share the authenticated generation-last rewrite transaction; they do
+  not expose a committed prefix or a counter that names partial bytes.
 
 The cost is duplicate immutable snapshot data until later content-addressed
 deduplication. Correctness and a finite recovery proof take precedence.

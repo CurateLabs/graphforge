@@ -365,16 +365,22 @@ fn stable_open_replaceable_child_file(
 }
 
 #[cfg(unix)]
-fn stable_open_or_create_child_file(parent: &File, _path: &Path, name: &OsStr) -> io::Result<File> {
-    use rustix::fs::{Mode, OFlags};
-    rustix::fs::openat(
-        parent,
-        name,
-        OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
-        Mode::from_bits_truncate(0o600),
-    )
-    .map(File::from)
-    .map_err(io::Error::from)
+fn stable_open_or_create_child_file(parent: &File, path: &Path, name: &OsStr) -> io::Result<File> {
+    match stable_open_child_file(parent, path, name, true) {
+        Ok(file) => Ok(file),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            use rustix::fs::{Mode, OFlags};
+            rustix::fs::openat(
+                parent,
+                name,
+                OFlags::RDWR | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map(File::from)
+            .map_err(io::Error::from)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(unix)]
@@ -535,22 +541,23 @@ fn stable_open_replaceable_child_file(
 }
 
 #[cfg(windows)]
-fn stable_open_or_create_child_file(
-    _parent: &File,
-    path: &Path,
-    _name: &OsStr,
-) -> io::Result<File> {
-    use std::os::windows::fs::OpenOptionsExt as _;
-    const FILE_SHARE_READ: u32 = 0x0000_0001;
-    const FILE_SHARE_WRITE: u32 = 0x0000_0002;
-    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-    std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)
+fn stable_open_or_create_child_file(parent: &File, path: &Path, name: &OsStr) -> io::Result<File> {
+    match stable_open_child_file(parent, path, name, true) {
+        Ok(file) => Ok(file),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            use std::os::windows::fs::OpenOptionsExt as _;
+            const FILE_SHARE_READ: u32 = 0x0000_0001;
+            const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+            const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+                .open(path)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(windows)]
@@ -2051,6 +2058,37 @@ mod tests {
                 .open(path)
                 .unwrap();
         }
+    }
+
+    #[test]
+    fn concurrent_open_or_create_has_one_stable_named_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let root = std::sync::Arc::new(root);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(9));
+        let workers = (0..8)
+            .map(|_| {
+                let root = std::sync::Arc::clone(&root);
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let directory = StableDirectory::open(root.path()).unwrap();
+                    barrier.wait();
+                    let file = directory
+                        .open_or_create_child_file(OsStr::new("lifecycle.lock"))
+                        .unwrap();
+                    file_identity(&file).unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        let identities = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>();
+        assert!(identities.windows(2).all(|pair| pair[0] == pair[1]));
+        assert_eq!(
+            file_link_count(&File::open(root.path().join("lifecycle.lock")).unwrap()).unwrap(),
+            1
+        );
     }
 
     #[cfg(unix)]
