@@ -4117,11 +4117,6 @@ pub(crate) fn seal_property_windows(
     Ok(())
 }
 
-/// `properties/<stem>.parquet` under `dir`.
-fn node_props_path(dir: &Path, stem: &str) -> PathBuf {
-    dir.join("properties").join(format!("{stem}.parquet"))
-}
-
 // ---------------------------------------------------------------------------
 // Parquet write helper
 // ---------------------------------------------------------------------------
@@ -4366,7 +4361,11 @@ mod tests {
         .unwrap();
         w.flush().unwrap();
 
-        let path = dir.path().join("properties").join("_untyped.parquet");
+        let path = newest_property_fragment(
+            dir.path(),
+            crate::property_overlay::PropertyRouteKind::Node,
+            "_untyped",
+        );
         let file = File::open(&path).unwrap();
         let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
         let schema = builder.schema().clone();
@@ -4421,7 +4420,11 @@ mod tests {
         .unwrap();
         w.flush().unwrap();
 
-        let path = dir.path().join("properties").join("_untyped.parquet");
+        let path = newest_property_fragment(
+            dir.path(),
+            crate::property_overlay::PropertyRouteKind::Node,
+            "_untyped",
+        );
         let file = File::open(&path).unwrap();
         let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
         let schema = builder.schema().clone();
@@ -4481,6 +4484,18 @@ mod tests {
             out.insert(row.edge_uuid, row.props);
         }
         out
+    }
+
+    fn newest_property_fragment(
+        dir: &Path,
+        kind: crate::property_overlay::PropertyRouteKind,
+        route: &str,
+    ) -> PathBuf {
+        crate::property_overlay::enumerate_property_fragments(dir, kind, route)
+            .unwrap()
+            .pop()
+            .expect("property route has a committed fragment")
+            .path
     }
 
     #[test]
@@ -4568,10 +4583,13 @@ mod tests {
         set_node_properties(dir.path(), "Person", &updates).unwrap();
 
         assert!(
-            dir.path()
-                .join("properties")
-                .join("Person.parquet")
-                .exists()
+            !crate::property_overlay::enumerate_property_fragments(
+                dir.path(),
+                crate::property_overlay::PropertyRouteKind::Node,
+                "Person",
+            )
+            .unwrap()
+            .is_empty()
         );
         let props = read_node_props(dir.path(), "Person");
         assert_eq!(props[&ab]["age"], IrLiteral::Int(99));
@@ -5329,9 +5347,12 @@ mod tests {
             .unwrap();
         writer.flush().unwrap();
 
-        let node_schema =
-            crate::catalog::discover_parquet_schema(&node_props_path(dir.path(), "_untyped"))
-                .unwrap();
+        let node_schema = crate::catalog::discover_parquet_schema(&newest_property_fragment(
+            dir.path(),
+            crate::property_overlay::PropertyRouteKind::Node,
+            "_untyped",
+        ))
+        .unwrap();
         for (name, extension_name) in [
             ("point", "geoarrow.point"),
             ("line", "geoarrow.linestring"),
