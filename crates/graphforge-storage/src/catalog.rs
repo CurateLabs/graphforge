@@ -1066,27 +1066,94 @@ fn read_property_overlay(
     stem: &str,
     is_edge: bool,
 ) -> Result<Vec<RecordBatch>, DataFusionError> {
+    let mut batches = Vec::new();
+    visit_property_overlay_batched(dir, stem, is_edge, 8_192, |batch| {
+        batches.push(batch.clone());
+        Ok(true)
+    })?;
+    Ok(batches)
+}
+
+fn visit_property_overlay_batched<F>(
+    dir: &Path,
+    stem: &str,
+    is_edge: bool,
+    batch_size: usize,
+    mut visit: F,
+) -> Result<(), DataFusionError>
+where
+    F: FnMut(&RecordBatch) -> Result<bool, DataFusionError>,
+{
+    let kind = if is_edge {
+        crate::property_overlay::PropertyRouteKind::Edge
+    } else {
+        crate::property_overlay::PropertyRouteKind::Node
+    };
+    let schema = crate::property_overlay::authenticated_property_route_schema(dir, kind, stem)
+        .map_err(|error| DataFusionError::Execution(error.to_string()))?;
     let scratch = tempfile::tempdir().map_err(|error| io_err(&error))?;
-    let mut rows = Vec::new();
+    let mut rows = Vec::with_capacity(batch_size.max(1));
+    let mut stopped = false;
     crate::property_overlay::visit_authenticated_property_snapshots(
         dir,
-        if is_edge {
-            crate::property_overlay::PropertyRouteKind::Edge
-        } else {
-            crate::property_overlay::PropertyRouteKind::Node
-        },
+        kind,
         stem,
         scratch.path(),
         crate::property_overlay::PropertyOverlayLimits::default(),
         |row| {
+            if stopped {
+                return Ok(());
+            }
             rows.push(row);
+            if rows.len() >= batch_size.max(1) {
+                let batch = crate::writer::property_snapshots_to_batch(
+                    stem,
+                    is_edge,
+                    std::mem::take(&mut rows),
+                )?
+                .ok_or_else(|| {
+                    graphforge_core::GfError::Storage("property batch disappeared".into())
+                })?;
+                let batch = normalize_property_batch(batch, schema.as_ref())?;
+                stopped = !visit(&batch)
+                    .map_err(|error| graphforge_core::GfError::Storage(error.to_string()))?;
+            }
             Ok(())
         },
     )
     .map_err(|error| DataFusionError::Execution(error.to_string()))?;
-    crate::writer::property_snapshots_to_batch(stem, is_edge, rows)
-        .map(|batch| batch.into_iter().collect())
-        .map_err(|error| DataFusionError::Execution(error.to_string()))
+    if !stopped && !rows.is_empty() {
+        let batch = crate::writer::property_snapshots_to_batch(stem, is_edge, rows)
+            .map_err(|error| DataFusionError::Execution(error.to_string()))?
+            .ok_or_else(|| DataFusionError::Execution("property batch disappeared".into()))?;
+        let batch = normalize_property_batch(batch, schema.as_ref())
+            .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+        let _ = visit(&batch)?;
+    }
+    Ok(())
+}
+
+fn normalize_property_batch(
+    batch: RecordBatch,
+    schema: Option<&SchemaRef>,
+) -> Result<RecordBatch, graphforge_core::GfError> {
+    let Some(schema) = schema else {
+        return Ok(batch);
+    };
+    let columns = schema
+        .fields()
+        .iter()
+        .map(|field| {
+            batch
+                .column_by_name(field.name())
+                .cloned()
+                .unwrap_or_else(|| {
+                    arrow::array::new_null_array(field.data_type(), batch.num_rows())
+                })
+        })
+        .collect::<Vec<_>>();
+    RecordBatch::try_new(Arc::clone(schema), columns)
+        .map_err(|error| graphforge_core::GfError::Storage(error.to_string()))
 }
 
 /// Stream `properties/<stem>.parquet` as bounded batches without concatenating
@@ -1122,18 +1189,12 @@ pub fn visit_properties_batched<F>(
     dir: &Path,
     stem: &str,
     batch_size: usize,
-    mut visit: F,
+    visit: F,
 ) -> Result<(), DataFusionError>
 where
     F: FnMut(&RecordBatch) -> Result<bool, DataFusionError>,
 {
-    let _ = batch_size;
-    for batch in read_properties(dir, stem)? {
-        if !visit(&batch)? {
-            break;
-        }
-    }
-    Ok(())
+    visit_property_overlay_batched(dir, stem, false, batch_size, visit)
 }
 
 /// Visit `topology/nodes.parquet` one bounded batch at a time (#706).
@@ -1991,7 +2052,43 @@ mod tests {
     use datafusion::prelude::SessionContext;
     use parquet::arrow::ArrowWriter;
     use parquet::file::properties::WriterProperties;
+    use std::collections::HashMap;
     use tempfile::TempDir;
+
+    #[test]
+    fn property_overlay_batches_honor_bound_and_canonical_schema() {
+        let dir = TempDir::new().unwrap();
+        let mut writer =
+            crate::GraphWriter::open_at(dir.path(), graphforge_core::OntologyMode::Strict, 1)
+                .unwrap();
+        for (index, name) in ["Ada", "Grace", "Katherine"].into_iter().enumerate() {
+            let uuid = graphforge_core::uuid::new_v7();
+            writer
+                .create_node(uuid, graphforge_core::TypeId(1))
+                .unwrap();
+            let mut values = HashMap::from([(
+                "name".to_owned(),
+                graphforge_ir::IrLiteral::Str(name.to_owned()),
+            )]);
+            if index == 0 {
+                values.insert("year".into(), graphforge_ir::IrLiteral::Int(1815));
+            }
+            writer
+                .set_properties(&uuid, Some("Person"), values)
+                .unwrap();
+        }
+        writer.flush().unwrap();
+
+        let batches = read_properties_batched(dir.path(), "Person", 1).unwrap();
+        assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 3);
+        assert!(batches.iter().all(|batch| batch.num_rows() <= 1));
+        assert!(
+            batches
+                .iter()
+                .all(|batch| batch.schema() == batches[0].schema())
+        );
+        assert!(batches[0].column_by_name("year").is_some());
+    }
 
     #[test]
     fn parquet_and_io_error_helpers_preserve_external_messages() {

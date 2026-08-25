@@ -804,6 +804,17 @@ where
     Ok(metrics)
 }
 
+/// Resolve the canonical authenticated logical schema for one route.
+pub(crate) fn authenticated_property_route_schema(
+    project: &Path,
+    kind: PropertyRouteKind,
+    route: &str,
+) -> Result<Option<arrow::datatypes::SchemaRef>, GfError> {
+    let (inventory, _) = crate::capture_graph_files(project)?;
+    AuthenticatedPropertyInventory::from_entries_at_root(project, inventory.files)
+        .map(|inventory| inventory.route_schema(kind, route))
+}
+
 /// Resolve a bounded UUID batch newest-first without decoding unrelated row
 /// groups. Caller order is restored by the returned map lookup.
 pub fn read_authenticated_property_snapshots_for(
