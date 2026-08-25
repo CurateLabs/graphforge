@@ -1,0 +1,168 @@
+//! Bounded DataFusion execution for authenticated immutable property overlays.
+
+use std::fmt;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use arrow::datatypes::SchemaRef;
+use datafusion::error::DataFusionError;
+use datafusion::execution::TaskContext;
+use datafusion::physical_expr::EquivalenceProperties;
+use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
+use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+use datafusion::physical_plan::{
+    DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
+    SendableRecordBatchStream,
+};
+use futures::stream;
+
+#[derive(Clone)]
+pub(crate) struct PropertyOverlayExec {
+    project: PathBuf,
+    route: String,
+    is_edge: bool,
+    schema: SchemaRef,
+    projection: Option<Vec<usize>>,
+    limit: Option<usize>,
+    batch_size: usize,
+    props: Arc<PlanProperties>,
+}
+
+impl fmt::Debug for PropertyOverlayExec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PropertyOverlayExec")
+            .field("route", &self.route)
+            .field("is_edge", &self.is_edge)
+            .field("limit", &self.limit)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PropertyOverlayExec {
+    pub(crate) fn try_new(
+        project: PathBuf,
+        route: String,
+        is_edge: bool,
+        base_schema: SchemaRef,
+        projection: Option<&Vec<usize>>,
+        limit: Option<usize>,
+        batch_size: usize,
+    ) -> Result<Self, DataFusionError> {
+        let projection = projection.cloned();
+        let schema = projection.as_ref().map_or_else(
+            || Ok(Arc::clone(&base_schema)),
+            |indices| {
+                base_schema
+                    .project(indices)
+                    .map(Arc::new)
+                    .map_err(|error| DataFusionError::ArrowError(Box::new(error), None))
+            },
+        )?;
+        let props = Arc::new(PlanProperties::new(
+            EquivalenceProperties::new(Arc::clone(&schema)),
+            Partitioning::UnknownPartitioning(1),
+            EmissionType::Incremental,
+            Boundedness::Bounded,
+        ));
+        Ok(Self {
+            project,
+            route,
+            is_edge,
+            schema,
+            projection,
+            limit,
+            batch_size: batch_size.max(1),
+            props,
+        })
+    }
+}
+
+impl DisplayAs for PropertyOverlayExec {
+    fn fmt_as(&self, _: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "PropertyOverlayExec: route={}", self.route)
+    }
+}
+
+impl ExecutionPlan for PropertyOverlayExec {
+    fn name(&self) -> &'static str {
+        "PropertyOverlayExec"
+    }
+
+    fn properties(&self) -> &Arc<PlanProperties> {
+        &self.props
+    }
+
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![]
+    }
+
+    fn with_new_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
+        if !children.is_empty() {
+            return Err(DataFusionError::Internal(
+                "PropertyOverlayExec cannot have children".into(),
+            ));
+        }
+        Ok(self)
+    }
+
+    fn execute(
+        &self,
+        partition: usize,
+        _context: Arc<TaskContext>,
+    ) -> Result<SendableRecordBatchStream, DataFusionError> {
+        if partition != 0 {
+            return Err(DataFusionError::Internal(
+                "PropertyOverlayExec has one partition".into(),
+            ));
+        }
+        let (sender, receiver) = tokio::sync::mpsc::channel(2);
+        let project = self.project.clone();
+        let route = self.route.clone();
+        let is_edge = self.is_edge;
+        let projection = self.projection.clone();
+        let mut remaining = self.limit;
+        let batch_size = self.batch_size;
+        tokio::task::spawn_blocking(move || {
+            let result = crate::catalog::visit_property_overlay_batched(
+                &project,
+                &route,
+                is_edge,
+                batch_size,
+                |batch| {
+                    let mut batch = projection.as_ref().map_or_else(
+                        || Ok(batch.clone()),
+                        |indices| {
+                            batch
+                                .project(indices)
+                                .map_err(|error| DataFusionError::ArrowError(Box::new(error), None))
+                        },
+                    )?;
+                    if let Some(rows) = remaining.as_mut() {
+                        if *rows == 0 {
+                            return Ok(true);
+                        }
+                        if batch.num_rows() > *rows {
+                            batch = batch.slice(0, *rows);
+                        }
+                        *rows -= batch.num_rows();
+                    }
+                    sender.blocking_send(Ok(batch)).map_err(|_| {
+                        DataFusionError::Execution("property scan consumer closed".into())
+                    })?;
+                    Ok(true)
+                },
+            );
+            if let Err(error) = result {
+                let _ = sender.blocking_send(Err(error));
+            }
+        });
+        let schema = Arc::clone(&self.schema);
+        let output = stream::unfold(receiver, |mut receiver| async move {
+            receiver.recv().await.map(|item| (item, receiver))
+        });
+        Ok(Box::pin(RecordBatchStreamAdapter::new(schema, output)))
+    }
+}

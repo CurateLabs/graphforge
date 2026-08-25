@@ -348,6 +348,7 @@ pub use uuid_membership::{
 };
 
 pub mod property_overlay;
+mod property_scan;
 pub use property_overlay::{
     AuthenticatedPropertyInventory, PROPERTY_OVERLAY_FORMAT, PROPERTY_OVERLAY_FORMAT_KEY,
     PROPERTY_TOMBSTONE_FIELD, PropertyFragmentId, PropertyOverlayLimits, PropertyOverlayMetrics,

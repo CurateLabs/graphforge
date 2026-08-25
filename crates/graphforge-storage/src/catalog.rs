@@ -1074,7 +1074,7 @@ fn read_property_overlay(
     Ok(batches)
 }
 
-fn visit_property_overlay_batched<F>(
+pub(crate) fn visit_property_overlay_batched<F>(
     dir: &Path,
     stem: &str,
     is_edge: bool,
@@ -1084,6 +1084,9 @@ fn visit_property_overlay_batched<F>(
 where
     F: FnMut(&RecordBatch) -> Result<bool, DataFusionError>,
 {
+    if !dir.exists() {
+        return Ok(());
+    }
     let kind = if is_edge {
         crate::property_overlay::PropertyRouteKind::Edge
     } else {
@@ -1472,7 +1475,8 @@ impl TableProvider for UnionEdgeTable {
 /// [`TableProvider`] for `properties/ENTITY_TYPE.parquet`.
 #[derive(Debug, Clone)]
 pub struct PropertyTable {
-    path: PathBuf,
+    project: PathBuf,
+    route: String,
     schema: SchemaRef,
 }
 
@@ -1483,10 +1487,11 @@ impl PropertyTable {
     /// correct schema.
     #[must_use]
     pub fn open(dir: &Path, entity_type: &str, schema: SchemaRef) -> Self {
-        let path = dir
-            .join("properties")
-            .join(format!("{entity_type}.parquet"));
-        Self { path, schema }
+        Self {
+            project: dir.to_path_buf(),
+            route: entity_type.to_owned(),
+            schema,
+        }
     }
 
     /// Open a property table for `stem` (an entity type name, or `"_untyped"`),
@@ -1501,9 +1506,20 @@ impl PropertyTable {
     #[must_use]
     pub fn open_discovered(dir: &Path, stem: &str) -> Self {
         let path = dir.join("properties").join(format!("{stem}.parquet"));
-        let schema = discover_parquet_schema(&path)
-            .unwrap_or_else(|| crate::schemas::PROPERTY_BASE_SCHEMA.clone());
-        Self { path, schema }
+        let schema = crate::property_overlay::authenticated_property_route_schema(
+            dir,
+            crate::property_overlay::PropertyRouteKind::Node,
+            stem,
+        )
+        .ok()
+        .flatten()
+        .or_else(|| discover_parquet_schema(&path))
+        .unwrap_or_else(|| crate::schemas::PROPERTY_BASE_SCHEMA.clone());
+        Self {
+            project: dir.to_path_buf(),
+            route: stem.to_owned(),
+            schema,
+        }
     }
 
     /// The property column schema (including the `node_uuid` join key).
@@ -1524,7 +1540,8 @@ impl PropertyTable {
 /// with a same-named node label under `properties/`.
 #[derive(Debug, Clone)]
 pub struct EdgePropertyTable {
-    path: PathBuf,
+    project: PathBuf,
+    route: String,
     schema: SchemaRef,
 }
 
@@ -1542,9 +1559,20 @@ impl EdgePropertyTable {
         let path = dir
             .join("edge_properties")
             .join(format!("{rel_type}.parquet"));
-        let schema = discover_parquet_schema(&path)
-            .unwrap_or_else(|| crate::schemas::EDGE_PROPERTY_BASE_SCHEMA.clone());
-        Self { path, schema }
+        let schema = crate::property_overlay::authenticated_property_route_schema(
+            dir,
+            crate::property_overlay::PropertyRouteKind::Edge,
+            rel_type,
+        )
+        .ok()
+        .flatten()
+        .or_else(|| discover_parquet_schema(&path))
+        .unwrap_or_else(|| crate::schemas::EDGE_PROPERTY_BASE_SCHEMA.clone());
+        Self {
+            project: dir.to_path_buf(),
+            route: rel_type.to_owned(),
+            schema,
+        }
     }
 
     /// The property column schema (including the `edge_uuid` join key).
@@ -1571,14 +1599,17 @@ impl TableProvider for EdgePropertyTable {
         _filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
-        let fragment = ParquetFragment::for_path(self.path.clone(), false);
-        scan_fragments(
-            self.schema.clone(),
-            vec![fragment],
-            projection,
-            limit,
-            state.config().batch_size(),
-        )
+        Ok(Arc::new(
+            crate::property_scan::PropertyOverlayExec::try_new(
+                self.project.clone(),
+                self.route.clone(),
+                true,
+                self.schema.clone(),
+                projection,
+                limit,
+                state.config().batch_size(),
+            )?,
+        ))
     }
 }
 
@@ -1614,14 +1645,17 @@ impl TableProvider for PropertyTable {
         _filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
-        let fragment = ParquetFragment::for_path(self.path.clone(), false);
-        scan_fragments(
-            self.schema.clone(),
-            vec![fragment],
-            projection,
-            limit,
-            state.config().batch_size(),
-        )
+        Ok(Arc::new(
+            crate::property_scan::PropertyOverlayExec::try_new(
+                self.project.clone(),
+                self.route.clone(),
+                false,
+                self.schema.clone(),
+                projection,
+                limit,
+                state.config().batch_size(),
+            )?,
+        ))
     }
 }
 
@@ -2045,7 +2079,8 @@ fn register_property_tables(
 mod tests {
     use super::*;
     use arrow::array::{
-        FixedSizeBinaryArray, StringArray, TimestampMicrosecondArray, UInt32Array, UInt64Array,
+        Array, FixedSizeBinaryArray, StringArray, TimestampMicrosecondArray, UInt32Array,
+        UInt64Array,
     };
     use arrow::buffer::OffsetBuffer;
     use arrow::datatypes::{DataType, Field, Schema};
@@ -2088,6 +2123,72 @@ mod tests {
                 .all(|batch| batch.schema() == batches[0].schema())
         );
         assert!(batches[0].column_by_name("year").is_some());
+    }
+
+    #[tokio::test]
+    async fn property_sql_and_direct_reads_share_newest_overlay_authority() {
+        let dir = TempDir::new().unwrap();
+        let uuid = graphforge_core::uuid::new_v7();
+        let mut writer =
+            crate::GraphWriter::open_at(dir.path(), graphforge_core::OntologyMode::Strict, 1)
+                .unwrap();
+        writer
+            .create_node(uuid, graphforge_core::TypeId(1))
+            .unwrap();
+        writer
+            .set_properties(
+                &uuid,
+                Some("Person"),
+                HashMap::from([(
+                    "name".to_owned(),
+                    graphforge_ir::IrLiteral::Str("old".into()),
+                )]),
+            )
+            .unwrap();
+        writer.flush().unwrap();
+        writer
+            .set_properties(
+                &uuid,
+                Some("Person"),
+                HashMap::from([(
+                    "name".to_owned(),
+                    graphforge_ir::IrLiteral::Str("new".into()),
+                )]),
+            )
+            .unwrap();
+        writer.flush().unwrap();
+
+        let direct = read_properties(dir.path(), "Person").unwrap();
+        let direct_names = direct[0]
+            .column_by_name("name")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(direct_names.len(), 1);
+        assert_eq!(direct_names.value(0), "new");
+
+        let ctx = SessionContext::new();
+        ctx.register_table(
+            "props",
+            Arc::new(PropertyTable::open_discovered(dir.path(), "Person")),
+        )
+        .unwrap();
+        let sql = ctx
+            .sql("SELECT name FROM props LIMIT 1")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let sql_names = sql[0]
+            .column_by_name("name")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(sql_names.len(), 1);
+        assert_eq!(sql_names.value(0), "new");
     }
 
     #[test]
@@ -2402,9 +2503,14 @@ mod tests {
             let text = datafusion::physical_plan::displayable(plan.as_ref())
                 .indent(false)
                 .to_string();
+            let expected = if matches!(label, "props" | "edge_props") {
+                "PropertyOverlayExec"
+            } else {
+                "GraphForgeParquetExec"
+            };
             assert!(
-                text.contains("GraphForgeParquetExec"),
-                "{label}: expected GraphForgeParquetExec, got:\n{text}"
+                text.contains(expected),
+                "{label}: expected {expected}, got:\n{text}"
             );
             assert!(
                 !text.contains("MemoryExec") && !text.contains("MemTable"),
