@@ -397,7 +397,7 @@ impl AuthenticatedPropertyInventory {
             return Err(error);
         }
         metrics.physical_bytes = counts.bytes.load(Ordering::Relaxed);
-        metrics.blocks_read = counts.blocks.load(Ordering::Relaxed);
+        metrics.read_calls = counts.blocks.load(Ordering::Relaxed);
         metrics.range_seeks = counts.range_seeks.load(Ordering::Relaxed);
         let decoded = decoded.lock().expect("property retention lock");
         metrics.decoder_peak_rows = decoded.peak_rows;
@@ -564,7 +564,7 @@ pub struct PropertyOverlayMetrics {
     /// Authenticated fragment bytes read.
     pub physical_bytes: u64,
     /// Non-empty input reads, each capped at 64 KiB.
-    pub blocks_read: u64,
+    pub read_calls: u64,
     /// Retained-handle range starts requested by the Parquet decoder.
     pub range_seeks: u64,
     /// Parquet row groups whose authenticated statistics were considered.
@@ -779,7 +779,7 @@ where
         .iter()
         .map(|counts| counts.bytes.load(Ordering::Relaxed))
         .sum();
-    metrics.blocks_read = counters
+    metrics.read_calls = counters
         .iter()
         .map(|counts| counts.blocks.load(Ordering::Relaxed))
         .sum();
@@ -853,12 +853,13 @@ pub fn read_authenticated_property_snapshots_for(
         for index in 0..builder.metadata().num_row_groups() {
             let validation = open_counted_property_builder(&fragment.path, Arc::clone(&counts))?
                 .with_row_groups(vec![index])
-                .with_batch_size(4096)
+                .with_batch_size(64)
                 .build()
                 .map_err(parquet_error)?;
             let mut selected = false;
             for batch in validation {
                 let batch = batch.map_err(|error| GfError::Storage(error.to_string()))?;
+                charge_target_batch(&mut metrics, &batch);
                 let uuids = batch
                     .column_by_name(kind.uuid_field())
                     .and_then(|column| column.as_any().downcast_ref::<FixedSizeBinaryArray>())
@@ -906,12 +907,17 @@ pub fn read_authenticated_property_snapshots_for(
                 .saturating_add(u64::try_from(row_groups.len()).unwrap_or(u64::MAX));
             let reader = open_counted_property_builder(&fragment.path, Arc::clone(&counts))?
                 .with_row_groups(row_groups)
-                .with_batch_size(4096)
+                .with_batch_size(64)
                 .build()
                 .map_err(parquet_error)?;
             for batch in reader {
                 let batch = batch.map_err(|error| GfError::Storage(error.to_string()))?;
-                for row in decode_snapshot_batch(&batch, kind.uuid_field())? {
+                charge_target_batch(&mut metrics, &batch);
+                let decoded = decode_snapshot_batch(&batch, kind.uuid_field())?;
+                metrics.decoder_peak_bytes = metrics
+                    .decoder_peak_bytes
+                    .max(decoded.iter().map(snapshot_charge).sum::<u64>());
+                for row in decoded {
                     metrics.physical_rows = metrics.physical_rows.saturating_add(1);
                     if unresolved.remove(&row.uuid) {
                         if row.tombstone {
@@ -927,15 +933,27 @@ pub fn read_authenticated_property_snapshots_for(
         metrics.physical_bytes = metrics
             .physical_bytes
             .saturating_add(counts.bytes.load(Ordering::Relaxed));
-        metrics.blocks_read = metrics
-            .blocks_read
+        metrics.read_calls = metrics
+            .read_calls
             .saturating_add(counts.blocks.load(Ordering::Relaxed));
         metrics.range_seeks = metrics
             .range_seeks
             .saturating_add(counts.range_seeks.load(Ordering::Relaxed));
     }
     metrics.logical_rows = u64::try_from(found.len()).unwrap_or(u64::MAX);
+    metrics.peak_buffered_rows = metrics.decoder_peak_rows;
+    metrics.peak_buffered_bytes = metrics.decoder_peak_bytes;
     Ok((found, metrics))
+}
+
+fn charge_target_batch(metrics: &mut PropertyOverlayMetrics, batch: &RecordBatch) {
+    metrics.emitted_batches = metrics.emitted_batches.saturating_add(1);
+    metrics.decoder_peak_rows = metrics
+        .decoder_peak_rows
+        .max(u64::try_from(batch.num_rows()).unwrap_or(u64::MAX));
+    metrics.decoder_peak_bytes = metrics
+        .decoder_peak_bytes
+        .max(u64::try_from(batch.get_array_memory_size()).unwrap_or(u64::MAX));
 }
 
 #[allow(
@@ -1190,10 +1208,10 @@ where
     let mut buffer = Vec::with_capacity(limits.max_buffered_rows);
     let mut runs = Vec::new();
     let mut buffered_bytes = 0_u64;
-    for (id, physical_bytes, blocks_read, rows) in inputs {
+    for (id, physical_bytes, read_calls, rows) in inputs {
         metrics.fragments_considered = metrics.fragments_considered.saturating_add(1);
         metrics.physical_bytes = metrics.physical_bytes.saturating_add(physical_bytes);
-        metrics.blocks_read = metrics.blocks_read.saturating_add(blocks_read);
+        metrics.read_calls = metrics.read_calls.saturating_add(read_calls);
         let mut prior = None;
         for row in rows {
             if row.tombstone && !row.values.is_empty() {
@@ -1470,9 +1488,38 @@ pub fn enumerate_property_fragments(
             path: entry.path(),
         });
     }
+    if fragments
+        .first()
+        .is_some_and(|fragment| fragment.id.generation == 0)
+        && fragments.len() > 1
+    {
+        return Err(corrupt(
+            "legacy and immutable property authorities are mixed",
+        ));
+    }
     fragments.sort_unstable_by_key(|fragment| fragment.id);
     if fragments.windows(2).any(|pair| pair[0].id == pair[1].id) {
         return Err(corrupt("duplicate property fragment identity"));
+    }
+    let mut prior: Option<PropertyFragmentId> = None;
+    for fragment in &fragments {
+        if let Some(previous) = prior {
+            if fragment.id.generation == previous.generation
+                && Some(fragment.id.ordinal) != previous.ordinal.checked_add(1)
+            {
+                return Err(corrupt("property fragment ordinal sequence has a gap"));
+            }
+            if fragment.id.generation != previous.generation && fragment.id.ordinal != 0 {
+                return Err(corrupt(
+                    "property fragment generation does not start at ordinal zero",
+                ));
+            }
+        } else if fragment.id.generation != 0 && fragment.id.ordinal != 0 {
+            return Err(corrupt(
+                "property fragment generation does not start at ordinal zero",
+            ));
+        }
+        prior = Some(fragment.id);
     }
     Ok(fragments)
 }
@@ -1512,6 +1559,50 @@ mod tests {
         ] {
             assert!(PropertyFragmentId::parse(invalid).is_err(), "{invalid}");
         }
+    }
+
+    #[test]
+    fn route_inventory_rejects_mixed_authority_and_noncanonical_ordinals() {
+        let mixed = TempDir::new().unwrap();
+        fs::create_dir_all(mixed.path().join("properties/Person")).unwrap();
+        fs::write(mixed.path().join("properties/Person.parquet"), b"legacy").unwrap();
+        fs::write(
+            mixed.path().join("properties/Person").join(
+                PropertyFragmentId {
+                    generation: 1,
+                    ordinal: 0,
+                }
+                .file_name(),
+            ),
+            b"immutable",
+        )
+        .unwrap();
+        assert!(
+            enumerate_property_fragments(mixed.path(), PropertyRouteKind::Node, "Person")
+                .unwrap_err()
+                .to_string()
+                .contains("mixed")
+        );
+
+        let gap = TempDir::new().unwrap();
+        fs::create_dir_all(gap.path().join("properties/Person")).unwrap();
+        fs::write(
+            gap.path().join("properties/Person").join(
+                PropertyFragmentId {
+                    generation: 4,
+                    ordinal: 1,
+                }
+                .file_name(),
+            ),
+            b"gap",
+        )
+        .unwrap();
+        assert!(
+            enumerate_property_fragments(gap.path(), PropertyRouteKind::Node, "Person")
+                .unwrap_err()
+                .to_string()
+                .contains("ordinal zero")
+        );
     }
 
     #[test]
@@ -1624,7 +1715,7 @@ mod tests {
         assert!(rows[1].values.is_empty());
         assert_eq!(metrics.physical_rows, 5);
         assert_eq!(metrics.physical_bytes, 606);
-        assert_eq!(metrics.blocks_read, 9);
+        assert_eq!(metrics.read_calls, 9);
         assert_eq!(metrics.logical_rows, 2);
         assert_eq!(metrics.shadowed_rows, 2);
         assert_eq!(metrics.tombstones, 1);
@@ -1645,7 +1736,7 @@ mod tests {
         let scratch = TempDir::new().unwrap();
         let id = PropertyFragmentId {
             generation: 7,
-            ordinal: 3,
+            ordinal: 0,
         };
         let route_dir = dir.path().join("properties/Person");
         fs::create_dir_all(&route_dir).unwrap();
@@ -1657,7 +1748,7 @@ mod tests {
             (PROPERTY_ROUTE_KEY.into(), "Person".into()),
             (PROPERTY_KIND_KEY.into(), "node".into()),
             (PROPERTY_GENERATION_KEY.into(), "7".into()),
-            (PROPERTY_ORDINAL_KEY.into(), "3".into()),
+            (PROPERTY_ORDINAL_KEY.into(), "0".into()),
         ]);
         let schema = Arc::new(Schema::new_with_metadata(
             vec![
@@ -1704,7 +1795,7 @@ mod tests {
         );
         assert_eq!(metrics.physical_rows, 1);
         assert!(metrics.physical_bytes > 0);
-        assert!(metrics.blocks_read > 0);
+        assert!(metrics.read_calls > 0);
         assert!(metrics.decoder_peak_bytes > 100_000);
         assert!(metrics.peak_buffered_bytes >= metrics.decoder_peak_bytes);
         assert_eq!(metrics.per_record_seeks, 0);
@@ -1872,6 +1963,84 @@ mod tests {
             )
             .unwrap_err();
             assert!(error.to_string().contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn targeted_reader_n_2n_4n_has_bounded_retention_and_exact_work() {
+        let mut prior_bytes = 0;
+        for rows in [128_usize, 256, 512] {
+            let dir = TempDir::new().unwrap();
+            let route_dir = dir.path().join("properties/Person");
+            fs::create_dir_all(&route_dir).unwrap();
+            let id = PropertyFragmentId {
+                generation: 1,
+                ordinal: 0,
+            };
+            let schema = Arc::new(Schema::new_with_metadata(
+                vec![
+                    Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+                    Field::new(PROPERTY_TOMBSTONE_FIELD, DataType::Boolean, false),
+                    Field::new("name", DataType::Utf8, true),
+                ],
+                HashMap::from([
+                    (
+                        PROPERTY_OVERLAY_FORMAT_KEY.into(),
+                        PROPERTY_OVERLAY_FORMAT.into(),
+                    ),
+                    (PROPERTY_ROUTE_KEY.into(), "Person".into()),
+                    (PROPERTY_KIND_KEY.into(), "node".into()),
+                    (PROPERTY_GENERATION_KEY.into(), "1".into()),
+                    (PROPERTY_ORDINAL_KEY.into(), "0".into()),
+                ]),
+            ));
+            let uuids = (0..rows)
+                .map(|value| {
+                    let mut uuid = [0_u8; 16];
+                    uuid[14..].copy_from_slice(&u16::try_from(value).unwrap().to_be_bytes());
+                    uuid
+                })
+                .collect::<Vec<_>>();
+            let batch = RecordBatch::try_new(
+                Arc::clone(&schema),
+                vec![
+                    Arc::new(
+                        FixedSizeBinaryArray::try_from_iter(uuids.iter().map(|uuid| uuid.to_vec()))
+                            .unwrap(),
+                    ),
+                    Arc::new(BooleanArray::from(vec![false; rows])),
+                    Arc::new(StringArray::from(vec![Some("value"); rows])),
+                ],
+            )
+            .unwrap();
+            let mut writer = ArrowWriter::try_new(
+                File::create(route_dir.join(id.file_name())).unwrap(),
+                schema,
+                None,
+            )
+            .unwrap();
+            writer.write(&batch).unwrap();
+            writer.close().unwrap();
+
+            let (found, metrics) = read_authenticated_property_snapshots_for(
+                dir.path(),
+                PropertyRouteKind::Node,
+                "Person",
+                &BTreeSet::from([uuids[0]]),
+            )
+            .unwrap();
+            assert_eq!(found.len(), 1);
+            assert_eq!(metrics.physical_rows, u64::try_from(rows * 2).unwrap());
+            assert_eq!(metrics.fragments_considered, 1);
+            assert_eq!(metrics.row_groups_considered, 1);
+            assert_eq!(metrics.row_groups_selected, 1);
+            assert_eq!(metrics.decoder_peak_rows, 64);
+            assert_eq!(metrics.peak_buffered_rows, 64);
+            assert!(metrics.peak_buffered_bytes < 64 * 1024);
+            assert!(metrics.physical_bytes > prior_bytes);
+            assert!(metrics.read_calls > 0);
+            assert_eq!(metrics.per_record_seeks, 0);
+            prior_bytes = metrics.physical_bytes;
         }
     }
 }

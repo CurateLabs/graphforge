@@ -154,6 +154,30 @@ Version 1
 expanded inventories remain readable and can be migrated without changing
 `CURRENT` until the complete version-2 generation is durable.
 
+### Immutable property snapshots
+
+Node and edge properties use `full-snapshot-v1` fragments under
+`properties/<route>/g-<generation>-o-<ordinal>.parquet` and the corresponding
+`edge_properties` tree. Each row is the complete property state for one UUID;
+the newest canonical fragment identity wins, and an explicit tombstone deletes
+the whole row. A write window composes repeated SET/REMOVE operations once and
+publishes one complete snapshot without rewriting prior fragments.
+
+Readers derive route authority from the committed graph-files inventory,
+validate canonical fragment identity, schema/semantic metadata, strictly sorted
+unique non-null UUIDs, and tombstone invariants, then perform a bounded
+disk-backed newest-wins merge. SQL and direct APIs share that scanner. SQL emits
+bounded Arrow batches; `LIMIT` changes emission only after authority validation.
+Operational evidence distinguishes authenticated bytes/read calls/range seeks,
+physical and shadowed rows, fragments and row groups considered/selected,
+spill runs/bytes/passes, decoder and merge retention peaks, and the invariant
+`per_record_seeks = 0`.
+
+Property-only commits reserve a checked monotonic property generation under the
+durable-rewrite lock. Legacy state initializes it from the maximum topology and
+search generation. Portable fingerprints consume the logical overlay once per
+route, so immutable and flattened projections have the same semantic identity.
+
 Pure CAS reads open the existing `graph-objects/sha256` namespace and existing
 `lifecycle.lock` with read-only capabilities. They create neither lifecycle
 state nor `tmp`/`active`. The authenticated regular `lifecycle.lock` is the
