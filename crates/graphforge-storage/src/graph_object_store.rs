@@ -139,6 +139,7 @@ struct ReadOnlyCasRoot {
     locks_held: bool,
 }
 
+#[cfg_attr(windows, allow(unused_variables))]
 fn lock_cas_shared<'a>(
     objects: &'a StableDirectory,
     lifecycle: &'a File,
@@ -176,6 +177,7 @@ fn lock_cas_shared<'a>(
     Ok(held)
 }
 
+#[cfg_attr(windows, allow(unused_variables))]
 fn lock_cas_exclusive<'a>(
     objects: &'a StableDirectory,
     lifecycle: &'a File,

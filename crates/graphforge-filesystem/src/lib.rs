@@ -245,7 +245,23 @@ impl StableDirectory {
 
     /// Flush this retained directory capability.
     pub fn sync(&self) -> io::Result<()> {
-        self.file.sync_all()
+        self.revalidate_named()?;
+        #[cfg(windows)]
+        {
+            let directory = stable_open_directory_for_sync(&self.path)?;
+            if file_identity(&directory)? != self.identity {
+                return Err(io::Error::other(
+                    "stable directory identity changed before sync",
+                ));
+            }
+            directory.sync_all()?;
+            self.revalidate_named()
+        }
+        #[cfg(not(windows))]
+        {
+            self.file.sync_all()?;
+            self.revalidate_named()
+        }
     }
 
     /// Return the retained native identity.
@@ -444,6 +460,20 @@ fn stable_open_directory(path: &Path) -> io::Result<File> {
     const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
     std::fs::OpenOptions::new()
         .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+#[cfg(windows)]
+fn stable_open_directory_for_sync(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    const FILE_SHARE_READ: u32 = 0x0000_0001;
+    const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    std::fs::OpenOptions::new()
+        .write(true)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)
@@ -2406,5 +2436,13 @@ mod tests {
             b"authenticated"
         );
         assert!(!root.path().join("CURRENT").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stable_directory_sync_uses_an_identity_checked_write_handle() {
+        let root = tempfile::tempdir().unwrap();
+        let stable = StableDirectory::open(root.path()).unwrap();
+        stable.sync().unwrap();
     }
 }
