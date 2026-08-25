@@ -1091,6 +1091,10 @@ impl SemanticStorageBindings {
     /// Validate routed files against the authenticated generation inventory.
     /// Callers opening a committed generation must provide its `graph/files`
     /// record; directory enumeration alone is not publication authority.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "route and fragment authority checks stay atomic"
+    )]
     pub fn validate_physical_routes_with_inventory(
         &self,
         graph_root: &Path,

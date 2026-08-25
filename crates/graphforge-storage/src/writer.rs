@@ -3688,6 +3688,10 @@ pub fn stage_set_node_properties(
     Ok(touched)
 }
 
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "keeps staging lookup contract aligned with authenticated lookup"
+)]
 fn pending_property_snapshots(
     staged: &RewriteBatch,
     _dir: &Path,
@@ -4011,6 +4015,10 @@ pub(crate) fn stage_property_tombstones<S: std::hash::BuildHasher>(
     )
 }
 
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "staging consumes the logical schema contract"
+)]
 fn stage_property_fragment(
     staged: &mut RewriteBatch,
     dir: &Path,

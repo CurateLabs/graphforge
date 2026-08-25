@@ -532,7 +532,7 @@ fn authenticate_inventory_file(file: &File, entry: &crate::GraphFileEntry) -> Re
     }
     let mut clone = file.try_clone().map_err(io_error)?;
     let mut digest = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
+    let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
     loop {
         let read = std::io::Read::read(&mut clone, &mut buffer).map_err(io_error)?;
         if read == 0 {
@@ -817,6 +817,10 @@ pub(crate) fn authenticated_property_route_schema(
 
 /// Resolve a bounded UUID batch newest-first without decoding unrelated row
 /// groups. Caller order is restored by the returned map lookup.
+#[allow(
+    clippy::too_many_lines,
+    reason = "validation and selected decode share exact counters"
+)]
 pub fn read_authenticated_property_snapshots_for(
     project: &Path,
     kind: PropertyRouteKind,
@@ -910,10 +914,10 @@ pub fn read_authenticated_property_snapshots_for(
                 for row in decode_snapshot_batch(&batch, kind.uuid_field())? {
                     metrics.physical_rows = metrics.physical_rows.saturating_add(1);
                     if unresolved.remove(&row.uuid) {
-                        if !row.tombstone {
-                            found.insert(row.uuid, row);
-                        } else {
+                        if row.tombstone {
                             metrics.tombstones = metrics.tombstones.saturating_add(1);
+                        } else {
+                            found.insert(row.uuid, row);
                         }
                     }
                 }
@@ -934,6 +938,10 @@ pub fn read_authenticated_property_snapshots_for(
     Ok((found, metrics))
 }
 
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "constructor remains fallible-compatible with admitted readers"
+)]
 fn open_authenticated_fragment(
     fragment: PropertyFragment,
     kind: PropertyRouteKind,
@@ -964,6 +972,10 @@ fn open_authenticated_fragment(
     })
 }
 
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "reader owns a shared counter handle"
+)]
 fn open_fragment_reader(
     fragment: &PropertyFragment,
     kind: PropertyRouteKind,
@@ -1106,6 +1118,10 @@ pub(crate) fn decode_snapshot_batch(
     Ok(rows)
 }
 
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "used directly as Result::map_err adapter"
+)]
 fn parquet_error(error: ParquetError) -> GfError {
     GfError::Storage(format!("property overlay Parquet: {error}"))
 }
@@ -1142,6 +1158,10 @@ impl SpoolRecord {
 /// UUID and descending numeric fragment authority. The final pass emits at
 /// most one live row per UUID and suppresses a newest tombstone. No input path
 /// is sought per record.
+#[allow(
+    clippy::too_many_lines,
+    reason = "bounded merge accounting stays co-located"
+)]
 pub(crate) fn visit_newest_property_snapshots<I, R, F>(
     inputs: I,
     scratch: &Path,
@@ -1383,10 +1403,18 @@ fn read_spool(reader: &mut BufReader<File>) -> Result<Option<SpoolRecord>, GfErr
     serde_json::from_str(&line).map(Some).map_err(json_error)
 }
 
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "used directly as Result::map_err adapter"
+)]
 fn io_error(error: std::io::Error) -> GfError {
     GfError::Storage(format!("property overlay I/O: {error}"))
 }
 
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "used directly as Result::map_err adapter"
+)]
 fn json_error(error: serde_json::Error) -> GfError {
     GfError::Storage(format!("property overlay spool: {error}"))
 }

@@ -333,6 +333,10 @@ impl RewriteBatch {
         self.property_windows.len()
     }
 
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "window takes ownership of first-route metadata"
+    )]
     pub(crate) fn accumulate_property_window(
         &mut self,
         project_root: &Path,

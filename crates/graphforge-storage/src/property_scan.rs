@@ -39,6 +39,10 @@ impl fmt::Debug for PropertyOverlayExec {
 }
 
 impl PropertyOverlayExec {
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "execution plan takes shared schema ownership"
+    )]
     pub(crate) fn try_new(
         project: PathBuf,
         route: String,
