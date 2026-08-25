@@ -17,11 +17,15 @@ _STORAGE_DEPS = [
 gf_rust_library(
     name = "graphforge_storage",
     # Enable failpoint hooks so api/cli unit tests that spawn subprocesses can
-    # inject protocol faults. Hooks remain no-ops unless the exact env cookie is
-    # set (same as Cargo `[dev-dependencies] features = ["test-failpoints"]`
-    # unification). Residual vs Cargo release builds: Bazel links the env-gated
-    # bodies instead of the const no-op; document for #6 parity.
-    crate_features = ["test-failpoints"],
+    # inject protocol faults and compile API unit-test compact-root fixtures.
+    # Hooks remain no-ops unless the exact env cookie is set; fixture builders
+    # are not exposed by the host bindings. Cargo's published Rust library does
+    # not enable either dev-only feature. Bazel uses one shared first-party
+    # storage target, so it models Cargo dev-feature unification here.
+    crate_features = [
+        "test-failpoints",
+        "test-support",
+    ],
     deps = _STORAGE_DEPS,
 )
 
