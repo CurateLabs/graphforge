@@ -253,11 +253,31 @@ pub struct PropertyOverlayLimits {
 }
 
 struct PropertyParquetRows {
-    reader: ParquetRecordBatchReader,
+    reader: Option<ParquetRecordBatchReader>,
+    fragment: Option<PropertyFragment>,
+    kind: PropertyRouteKind,
+    route: String,
+    counts: Arc<ReadCounts>,
     current: std::vec::IntoIter<PropertySnapshotRow>,
     uuid_field: &'static str,
     failed: Arc<Mutex<Option<GfError>>>,
     decoded: Arc<Mutex<DecodedRetention>>,
+    #[cfg(test)]
+    opened: bool,
+}
+
+#[cfg(test)]
+static OPEN_FRAGMENT_READERS: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+static PEAK_OPEN_FRAGMENT_READERS: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+impl Drop for PropertyParquetRows {
+    fn drop(&mut self) {
+        if self.opened {
+            OPEN_FRAGMENT_READERS.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -273,6 +293,26 @@ impl Iterator for PropertyParquetRows {
     type Item = PropertySnapshotRow;
 
     fn next(&mut self) -> Option<Self::Item> {
+        if self.reader.is_none() {
+            let fragment = self.fragment.take()?;
+            let opened =
+                open_fragment_reader(&fragment, self.kind, &self.route, Arc::clone(&self.counts));
+            match opened {
+                Ok(reader) => {
+                    self.reader = Some(reader);
+                    #[cfg(test)]
+                    {
+                        self.opened = true;
+                        let current = OPEN_FRAGMENT_READERS.fetch_add(1, Ordering::SeqCst) + 1;
+                        PEAK_OPEN_FRAGMENT_READERS.fetch_max(current, Ordering::SeqCst);
+                    }
+                }
+                Err(error) => {
+                    *self.failed.lock().expect("property failure lock") = Some(error);
+                    return None;
+                }
+            }
+        }
         loop {
             if let Some(row) = self.current.next() {
                 let mut decoded = self.decoded.lock().expect("property retention lock");
@@ -280,7 +320,7 @@ impl Iterator for PropertyParquetRows {
                 decoded.current_bytes = decoded.current_bytes.saturating_sub(snapshot_charge(&row));
                 return Some(row);
             }
-            let batch = match self.reader.next()? {
+            let batch = match self.reader.as_mut()?.next()? {
                 Ok(batch) => batch,
                 Err(error) => {
                     *self.failed.lock().expect("property failure lock") =
@@ -502,6 +542,37 @@ fn open_authenticated_fragment(
     kind: PropertyRouteKind,
     route: &str,
 ) -> Result<AuthenticatedFragmentRows, GfError> {
+    let id = fragment.id;
+    let counts = Arc::new(ReadCounts::default());
+    let failed = Arc::new(Mutex::new(None));
+    let decoded = Arc::new(Mutex::new(DecodedRetention::default()));
+    Ok(AuthenticatedFragmentRows {
+        id,
+        rows: PropertyParquetRows {
+            reader: None,
+            fragment: Some(fragment),
+            kind,
+            route: route.to_owned(),
+            counts: Arc::clone(&counts),
+            current: Vec::new().into_iter(),
+            uuid_field: kind.uuid_field(),
+            failed: Arc::clone(&failed),
+            decoded: Arc::clone(&decoded),
+            #[cfg(test)]
+            opened: false,
+        },
+        counts,
+        failed,
+        decoded,
+    })
+}
+
+fn open_fragment_reader(
+    fragment: &PropertyFragment,
+    kind: PropertyRouteKind,
+    route: &str,
+    counts: Arc<ReadCounts>,
+) -> Result<ParquetRecordBatchReader, GfError> {
     let mut options = fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -514,7 +585,6 @@ fn open_authenticated_fragment(
     if !metadata.file_type().is_file() {
         return Err(corrupt("property fragment handle is not a regular file"));
     }
-    let counts = Arc::new(ReadCounts::default());
     let source = CountingChunkReader {
         file,
         length: metadata.len(),
@@ -526,21 +596,7 @@ fn open_authenticated_fragment(
         .with_batch_size(4096)
         .build()
         .map_err(parquet_error)?;
-    let failed = Arc::new(Mutex::new(None));
-    let decoded = Arc::new(Mutex::new(DecodedRetention::default()));
-    Ok(AuthenticatedFragmentRows {
-        id: fragment.id,
-        rows: PropertyParquetRows {
-            reader,
-            current: Vec::new().into_iter(),
-            uuid_field: kind.uuid_field(),
-            failed: Arc::clone(&failed),
-            decoded: Arc::clone(&decoded),
-        },
-        counts,
-        failed,
-        decoded,
-    })
+    Ok(reader)
 }
 
 fn validate_fragment_schema(
@@ -1134,6 +1190,8 @@ mod tests {
 
     #[test]
     fn authenticated_reader_reports_actual_io_and_decodes_snapshot() {
+        OPEN_FRAGMENT_READERS.store(0, Ordering::SeqCst);
+        PEAK_OPEN_FRAGMENT_READERS.store(0, Ordering::SeqCst);
         let dir = TempDir::new().unwrap();
         let scratch = TempDir::new().unwrap();
         let id = PropertyFragmentId {
@@ -1201,5 +1259,7 @@ mod tests {
         assert!(metrics.decoder_peak_bytes > 100_000);
         assert!(metrics.peak_buffered_bytes >= metrics.decoder_peak_bytes);
         assert_eq!(metrics.per_record_seeks, 0);
+        assert_eq!(OPEN_FRAGMENT_READERS.load(Ordering::SeqCst), 0);
+        assert_eq!(PEAK_OPEN_FRAGMENT_READERS.load(Ordering::SeqCst), 1);
     }
 }
