@@ -347,6 +347,12 @@ pub use uuid_membership::{
     uuid_membership_index_present,
 };
 
+pub mod property_overlay;
+pub use property_overlay::{
+    PROPERTY_OVERLAY_FORMAT, PROPERTY_OVERLAY_FORMAT_KEY, PROPERTY_TOMBSTONE_FIELD,
+    PropertyFragmentId, PropertyOverlayMetrics, PropertyRouteKind, enumerate_property_fragments,
+};
+
 pub mod catalog;
 pub use catalog::{
     EdgePropertyTable, GraphCatalog, PropertyTable, TopologyNodeTable, TypedEdgeTable,
