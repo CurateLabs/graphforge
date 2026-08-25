@@ -5119,6 +5119,41 @@ mod tests {
     // describe one production write sequence.
     #[allow(clippy::too_many_lines)]
     fn cumulative_topology_and_index_work_doubles_with_bounded_windows() {
+        const CHILD: &str = "GRAPHFORGE_931_SCALING_EVIDENCE_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg("writer::tests::cumulative_topology_and_index_work_doubles_with_bounded_windows")
+                .arg("--nocapture")
+                .env(CHILD, "1")
+                .status()
+                .unwrap();
+            assert!(status.success(), "isolated #931 scaling evidence failed");
+            return;
+        }
+        let _measurement = crate::io_stats::test_measurement_guard();
+
+        fn assert_linear_first_differences(label: &str, n: u64, twice: u64, four: u64) {
+            let first = twice
+                .checked_sub(n)
+                .unwrap_or_else(|| panic!("{label}: 2N bytes regressed below N"));
+            let second = four
+                .checked_sub(twice)
+                .unwrap_or_else(|| panic!("{label}: 4N bytes regressed below 2N"));
+            assert!(first > 0, "{label}: N to 2N added no physical bytes");
+            // The 4N-minus-2N increment represents twice as many new input
+            // windows as the 2N-minus-N increment. Permit ten percent for
+            // fixed Parquet and manifest metadata, but reject both
+            // sub-linear omission and super-linear retained/output growth.
+            let expected = first.saturating_mul(2);
+            let tolerance = expected.div_ceil(10);
+            assert!(
+                second.abs_diff(expected) <= tolerance,
+                "{label}: physical-byte first differences are not linear: N={n}, 2N={twice}, \
+                 4N={four}, first={first}, second={second}, expected={expected} +/- {tolerance}"
+            );
+        }
+
         fn retained_bytes(path: &Path) -> u64 {
             fs::read_dir(path)
                 .unwrap()
@@ -5134,10 +5169,9 @@ mod tests {
                 .sum()
         }
 
-        fn run(batches: u64) -> (u64, u64, u64, TopologyWriteWork) {
+        fn run(batches: u64) -> (u64, u64, u64, u64, TopologyWriteWork) {
             let dir = TempDir::new().unwrap();
             crate::io_stats::reset();
-            let mut cumulative_write_bytes = 0_u64;
             let mut aggregate = TopologyWriteWork::default();
             for batch in 0..batches {
                 let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS)
@@ -5162,9 +5196,6 @@ mod tests {
                 writer.create_edge(edge, "KNOWS", &left, &right).unwrap();
                 writer.flush().unwrap();
                 let work = writer.topology_write_work();
-                cumulative_write_bytes = cumulative_write_bytes
-                    .saturating_add(work.output_bytes)
-                    .saturating_add(work.uuid_physical_bytes_written);
                 aggregate.input_rows += work.input_rows;
                 aggregate.prior_rows_decoded += work.prior_rows_decoded;
                 aggregate.rows_encoded += work.rows_encoded;
@@ -5194,25 +5225,38 @@ mod tests {
             let io = crate::io_stats::snapshot();
             (
                 retained_bytes(dir.path()),
-                cumulative_write_bytes,
+                aggregate.output_bytes,
+                aggregate.uuid_physical_bytes_written,
                 io.node_full_reads + io.node_filtered_reads,
                 aggregate,
             )
         }
 
-        let (n_bytes, n_writes, n_reads, n) = run(8);
-        let (twice_bytes, twice_writes, twice_reads, twice) = run(16);
-        let (four_bytes, four_writes, four_reads, four) = run(32);
-        let first_difference = twice_bytes.saturating_sub(n_bytes);
-        let second_difference = four_bytes.saturating_sub(twice_bytes);
-        let expected_second = first_difference.saturating_mul(2);
-        let tolerance = expected_second.div_ceil(10); // fixed metadata overhead: 10%
-        assert!(second_difference.abs_diff(expected_second) <= tolerance);
-        // Cumulative write amplification is reported independently from the
-        // retained-footprint slope; it is not hidden inside the linear bound.
-        assert!(n_writes > 0);
-        assert!(twice_writes > n_writes);
-        assert!(four_writes > twice_writes);
+        let (n_bytes, n_topology_writes, n_uuid_writes, n_reads, n) = run(8);
+        let (twice_bytes, twice_topology_writes, twice_uuid_writes, twice_reads, twice) = run(16);
+        let (four_bytes, four_topology_writes, four_uuid_writes, four_reads, four) = run(32);
+        assert_linear_first_differences("retained footprint", n_bytes, twice_bytes, four_bytes);
+        assert_linear_first_differences(
+            "topology staged output",
+            n_topology_writes,
+            twice_topology_writes,
+            four_topology_writes,
+        );
+        // The authenticated UUID LSM rewrites binary-carry merge outputs, so
+        // its cumulative physical writes include disclosed external-merge
+        // amplification rather than pretending to be retained topology bytes.
+        // Each doubling must remain decisively below quadratic (4x) growth.
+        assert!(n_uuid_writes > 0);
+        assert!(
+            twice_uuid_writes < n_uuid_writes.saturating_mul(3),
+            "UUID external-merge amplification exceeded the 2N bound: N={n_uuid_writes}, \
+             2N={twice_uuid_writes}"
+        );
+        assert!(
+            four_uuid_writes < twice_uuid_writes.saturating_mul(3),
+            "UUID external-merge amplification exceeded the 4N bound: 2N={twice_uuid_writes}, \
+             4N={four_uuid_writes}"
+        );
         assert_eq!((n_reads, twice_reads, four_reads), (0, 0, 0));
         assert_eq!(
             (
