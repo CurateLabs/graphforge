@@ -57,8 +57,10 @@ pub struct GraphObjectPublicationLease {
 }
 
 struct HeldCasLocks<'a> {
+    #[cfg(unix)]
     objects: &'a StableDirectory,
     lifecycle: &'a File,
+    #[cfg(unix)]
     objects_locked: bool,
     lifecycle_locked: bool,
 }
@@ -66,7 +68,10 @@ struct HeldCasLocks<'a> {
 impl HeldCasLocks<'_> {
     fn disarm(mut self) {
         self.lifecycle_locked = false;
-        self.objects_locked = false;
+        #[cfg(unix)]
+        {
+            self.objects_locked = false;
+        }
     }
 }
 
@@ -75,6 +80,7 @@ impl Drop for HeldCasLocks<'_> {
         if self.lifecycle_locked {
             let _ = crate::file_lock::unlock(self.lifecycle);
         }
+        #[cfg(unix)]
         if self.objects_locked {
             let _ = self.objects.unlock();
         }
@@ -139,6 +145,7 @@ fn lock_cas_shared<'a>(
     root: &Path,
     action: &str,
 ) -> Result<HeldCasLocks<'a>, GfError> {
+    #[cfg(unix)]
     objects.lock_shared().map_err(|error| {
         storage(
             &format!("lock graph object directory for {action}"),
@@ -147,12 +154,14 @@ fn lock_cas_shared<'a>(
         )
     })?;
     let mut held = HeldCasLocks {
+        #[cfg(unix)]
         objects,
         lifecycle,
+        #[cfg(unix)]
         objects_locked: true,
         lifecycle_locked: false,
     };
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     returned_error_boundary(&format!("{action}:objects-lock"))?;
     crate::file_lock::lock_shared(lifecycle).map_err(|error| {
         storage(
@@ -172,21 +181,40 @@ fn lock_cas_exclusive<'a>(
     lifecycle: &'a File,
     root: &Path,
 ) -> Result<HeldCasLocks<'a>, GfError> {
+    #[cfg(unix)]
     objects
         .lock_exclusive()
         .map_err(|error| storage("lock graph object directory for GC", root, error))?;
     let mut held = HeldCasLocks {
+        #[cfg(unix)]
         objects,
         lifecycle,
+        #[cfg(unix)]
         objects_locked: true,
         lifecycle_locked: false,
     };
+    #[cfg(all(test, unix))]
     returned_error_boundary("gc:objects-lock")?;
     crate::file_lock::lock_exclusive(lifecycle)
         .map_err(|error| storage("lock graph object GC lifecycle", root, error))?;
     held.lifecycle_locked = true;
     returned_error_boundary("gc:lifecycle-lock")?;
     Ok(held)
+}
+
+fn revalidate_lifecycle(
+    objects: &StableDirectory,
+    lifecycle: &File,
+    expected_identity: graphforge_filesystem::FileIdentity,
+) -> std::io::Result<()> {
+    if graphforge_filesystem::file_link_count(lifecycle)? != 1 {
+        return Err(std::io::Error::other("lifecycle lock is multiply linked"));
+    }
+    let named = objects.open_child_file(std::ffi::OsStr::new(LIFECYCLE_LOCK))?;
+    if graphforge_filesystem::file_identity(&named)? != expected_identity {
+        return Err(std::io::Error::other("lifecycle identity changed"));
+    }
+    Ok(())
 }
 
 impl CasRoot {
@@ -236,13 +264,7 @@ impl CasRoot {
             .and_then(|()| self.tmp.revalidate_named())
             .and_then(|()| self.active.revalidate_named())
             .and_then(|()| {
-                self.objects
-                    .open_child_file(std::ffi::OsStr::new(LIFECYCLE_LOCK))
-                    .and_then(|file| {
-                        (graphforge_filesystem::file_identity(&file)? == self.lifecycle_identity)
-                            .then_some(())
-                            .ok_or_else(|| std::io::Error::other("lifecycle identity changed"))
-                    })
+                revalidate_lifecycle(&self.objects, &self.lifecycle, self.lifecycle_identity)
             })
             .map_err(|error| {
                 storage(
@@ -323,13 +345,7 @@ impl ReadOnlyCasRoot {
             .and_then(|()| self.objects.revalidate_named())
             .and_then(|()| self.sha256.revalidate_named())
             .and_then(|()| {
-                self.objects
-                    .open_child_file(std::ffi::OsStr::new(LIFECYCLE_LOCK))
-                    .and_then(|file| {
-                        (graphforge_filesystem::file_identity(&file)? == self.lifecycle_identity)
-                            .then_some(())
-                            .ok_or_else(|| std::io::Error::other("lifecycle identity changed"))
-                    })
+                revalidate_lifecycle(&self.objects, &self.lifecycle, self.lifecycle_identity)
             })
             .map_err(|error| {
                 storage(
@@ -364,6 +380,7 @@ impl Drop for ReadOnlyCasRoot {
     fn drop(&mut self) {
         if self.locks_held {
             let _ = crate::file_lock::unlock(&self.lifecycle);
+            #[cfg(unix)]
             let _ = self.objects.unlock();
         }
     }
@@ -372,6 +389,7 @@ impl Drop for ReadOnlyCasRoot {
 impl Drop for GraphObjectGcGuard {
     fn drop(&mut self) {
         let _ = crate::file_lock::unlock(&self.cas.lifecycle);
+        #[cfg(unix)]
         let _ = self.cas.objects.unlock();
     }
 }
@@ -388,6 +406,7 @@ impl Drop for GraphObjectPublicationLease {
             .unlink_child_if_identity(&self.lease_name, self.lease_identity);
         let _ = self.cas.active.sync();
         let _ = crate::file_lock::unlock(&self.cas.lifecycle);
+        #[cfg(unix)]
         let _ = self.cas.objects.unlock();
     }
 }
@@ -644,6 +663,7 @@ pub(crate) fn try_begin_graph_object_gc(
     root: &Path,
 ) -> Result<Option<GraphObjectGcGuard>, GfError> {
     let cas = CasRoot::open_mutable(root)?;
+    #[cfg(unix)]
     if !cas
         .objects
         .try_lock_exclusive()
@@ -652,11 +672,14 @@ pub(crate) fn try_begin_graph_object_gc(
         return Ok(None);
     }
     let mut locks = HeldCasLocks {
+        #[cfg(unix)]
         objects: &cas.objects,
         lifecycle: &cas.lifecycle,
+        #[cfg(unix)]
         objects_locked: true,
         lifecycle_locked: false,
     };
+    #[cfg(all(test, unix))]
     returned_error_boundary("try-gc:objects-lock")?;
     if !crate::file_lock::try_lock_exclusive(&cas.lifecycle)
         .map_err(|error| storage("try graph object GC lifecycle", root, error))?
@@ -2189,11 +2212,16 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         drop(begin_graph_object_publication(root.path()).unwrap());
 
-        for boundary in [
+        #[cfg(unix)]
+        let reading_boundaries = [
             "reading:objects-lock",
             "reading:lifecycle-lock",
             "reading:revalidate",
-        ] {
+        ]
+        .as_slice();
+        #[cfg(not(unix))]
+        let reading_boundaries = ["reading:lifecycle-lock", "reading:revalidate"].as_slice();
+        for &boundary in reading_boundaries {
             inject_returned_error(Some(boundary));
             let error = ReadOnlyCasRoot::open(root.path()).err().unwrap();
             assert_injected_error(error, boundary);
@@ -2201,7 +2229,11 @@ mod tests {
             drop(try_begin_graph_object_gc(root.path()).unwrap().unwrap());
         }
 
-        for boundary in ["gc:objects-lock", "gc:lifecycle-lock", "gc:revalidate"] {
+        #[cfg(unix)]
+        let gc_boundaries = ["gc:objects-lock", "gc:lifecycle-lock", "gc:revalidate"].as_slice();
+        #[cfg(not(unix))]
+        let gc_boundaries = ["gc:lifecycle-lock", "gc:revalidate"].as_slice();
+        for &boundary in gc_boundaries {
             inject_returned_error(Some(boundary));
             let error = begin_graph_object_gc(root.path()).err().unwrap();
             assert_injected_error(error, boundary);
@@ -2209,11 +2241,16 @@ mod tests {
             drop(try_begin_graph_object_gc(root.path()).unwrap().unwrap());
         }
 
-        for boundary in [
+        #[cfg(unix)]
+        let try_gc_boundaries = [
             "try-gc:objects-lock",
             "try-gc:lifecycle-lock",
             "try-gc:revalidate",
-        ] {
+        ]
+        .as_slice();
+        #[cfg(not(unix))]
+        let try_gc_boundaries = ["try-gc:lifecycle-lock", "try-gc:revalidate"].as_slice();
+        for &boundary in try_gc_boundaries {
             inject_returned_error(Some(boundary));
             let error = try_begin_graph_object_gc(root.path()).err().unwrap();
             assert_injected_error(error, boundary);
@@ -2221,7 +2258,8 @@ mod tests {
             drop(try_begin_graph_object_gc(root.path()).unwrap().unwrap());
         }
 
-        for boundary in [
+        #[cfg(unix)]
+        let publication_boundaries = [
             "publication:objects-lock",
             "publication:lifecycle-lock",
             "publication:revalidate",
@@ -2230,7 +2268,20 @@ mod tests {
             "publication:lease-lock",
             "publication:lease-sync",
             "publication:active-sync",
-        ] {
+        ]
+        .as_slice();
+        #[cfg(not(unix))]
+        let publication_boundaries = [
+            "publication:lifecycle-lock",
+            "publication:revalidate",
+            "publication:lease-create",
+            "publication:lease-identity",
+            "publication:lease-lock",
+            "publication:lease-sync",
+            "publication:active-sync",
+        ]
+        .as_slice();
+        for &boundary in publication_boundaries {
             inject_returned_error(Some(boundary));
             let error = begin_graph_object_publication(root.path()).err().unwrap();
             assert_injected_error(error, boundary);

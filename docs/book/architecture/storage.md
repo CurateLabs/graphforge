@@ -151,8 +151,14 @@ expanded inventories remain readable and can be migrated without changing
 
 Pure CAS reads open the existing `graph-objects/sha256` namespace and existing
 `lifecycle.lock` with read-only capabilities. They create neither lifecycle
-state nor `tmp`/`active`, and shared directory/lifecycle locks pin the immutable
-objects against collection for the read guard's lifetime. Publication,
+state nor `tmp`/`active`. The authenticated regular `lifecycle.lock` is the
+cross-platform coordination authority: reads and publications hold it shared,
+while collection holds it exclusively. On Unix, the same operations also lock
+the retained `graph-objects` directory so replacing the still-open lifecycle
+pathname cannot split cooperative coordination. Windows instead relies on the
+retained lifecycle handle's delete/rename denial because directory handles do
+not support byte-range locking. Post-lock identity and link validation closes
+namespace substitution races on both platforms. Publication,
 materialization, lease cleanup, and GC use the distinct mutable open-or-create
 capability; materialization remains there because installing hard links mutates
 the source inode's link state.

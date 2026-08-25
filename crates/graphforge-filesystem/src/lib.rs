@@ -27,17 +27,23 @@ pub struct StableDirectory {
 }
 
 impl StableDirectory {
-    /// Acquire a cooperative shared lock on this retained directory inode.
+    /// Acquire a cooperative shared lock on this retained Unix directory inode.
+    ///
+    /// Windows directory handles cannot be byte-range locked; callers use a
+    /// retained regular coordination file there instead.
+    #[cfg(unix)]
     pub fn lock_shared(&self) -> io::Result<()> {
         <File as fs4::FileExt>::lock_shared(&self.file)
     }
 
-    /// Acquire a cooperative exclusive lock on this retained directory inode.
+    /// Acquire a cooperative exclusive lock on this retained Unix directory inode.
+    #[cfg(unix)]
     pub fn lock_exclusive(&self) -> io::Result<()> {
         <File as fs4::FileExt>::lock(&self.file)
     }
 
-    /// Try to acquire a cooperative exclusive lock on this retained directory inode.
+    /// Try to acquire a cooperative exclusive lock on this retained Unix directory inode.
+    #[cfg(unix)]
     pub fn try_lock_exclusive(&self) -> io::Result<bool> {
         match <File as fs4::FileExt>::try_lock(&self.file) {
             Ok(()) => Ok(true),
@@ -46,7 +52,8 @@ impl StableDirectory {
         }
     }
 
-    /// Release this retained directory inode's cooperative lock.
+    /// Release this retained Unix directory inode's cooperative lock.
+    #[cfg(unix)]
     pub fn unlock(&self) -> io::Result<()> {
         <File as fs4::FileExt>::unlock(&self.file)
     }
