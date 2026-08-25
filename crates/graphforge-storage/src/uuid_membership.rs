@@ -292,7 +292,7 @@ fn authenticated_probe_block(
         _ => return Err(storage_err("unsupported UUID probe record width")),
     };
     if bytes.is_empty()
-        || bytes.len() % width != 0
+        || !bytes.len().is_multiple_of(width)
         || hex_sha256(&bytes) != block.sha256
         || hex_sha256_key(&bytes[..key_width]) != block.first_key
         || hex_sha256_key(&bytes[bytes.len() - width..bytes.len() - width + key_width])

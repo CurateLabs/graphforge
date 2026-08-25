@@ -6777,6 +6777,9 @@ mod tests {
     }
 
     #[test]
+    // Keep the three size points together so the bounded-doubling assertions
+    // describe one production write sequence.
+    #[allow(clippy::too_many_lines)]
     fn cumulative_topology_and_index_work_doubles_with_bounded_windows() {
         fn retained_bytes(path: &Path) -> u64 {
             fs::read_dir(path)
