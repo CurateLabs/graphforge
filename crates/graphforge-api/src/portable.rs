@@ -1108,18 +1108,17 @@ mod tests {
                 "{\"crs\":\"EPSG:4326\",\"crs_type\":\"authority_code\"}"
             );
         }
-        assert!(
-            before.batches[0]
-                .column_by_name("removed_node")
-                .unwrap()
-                .is_null(0)
-        );
-        assert!(
-            before.batches[0]
-                .column_by_name("removed_edge")
-                .unwrap()
-                .is_null(0)
-        );
+        let assert_logical_null = |batch: &arrow::record_batch::RecordBatch, name: &str| {
+            let column = batch.column_by_name(name).unwrap();
+            assert_eq!(column.len(), 1);
+            // Arrow's `NullArray` carries logical nullness in `DataType::Null`
+            // rather than a physical validity bitmap, so `Array::is_null(0)`
+            // is not the semantic predicate for this canonical representation.
+            assert_eq!(column.data_type(), &arrow::datatypes::DataType::Null);
+        };
+        for name in ["removed_node", "removed_edge"] {
+            assert_logical_null(&before.batches[0], name);
+        }
         let logical_fingerprint = |batches: &[arrow::record_batch::RecordBatch]| {
             let logical = batches
                 .iter()
@@ -1185,6 +1184,9 @@ mod tests {
         }
         let imported = GraphForge::new(imported_path.to_str()).unwrap();
         let after = imported.execute(query).unwrap();
+        for name in ["removed_node", "removed_edge"] {
+            assert_logical_null(&after.batches[0], name);
+        }
         assert_eq!(after.schema.fields(), before.schema.fields());
         let stable_schema_metadata = |schema: &arrow::datatypes::Schema| {
             let mut metadata = schema.metadata().clone();
