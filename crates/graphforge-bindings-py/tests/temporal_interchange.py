@@ -18,10 +18,14 @@ def check_temporal_interchange() -> None:
     import graphforge as gf
 
     forge = gf.GraphForge()
-    forge.add_node("Temporal", **{case["name"]: case["value"] for case in FIXTURE["cases"]})
-    forge.add_node("Temporal")
+    populated = {case["name"]: case["value"] for case in FIXTURE["cases"]}
+    populated["fixture_ordinal"] = 0
+    forge.add_node("Temporal", **populated)
+    forge.add_node("Temporal", fixture_ordinal=1)
     projection = ", ".join(f"n.{case['name']} AS {case['name']}" for case in FIXTURE["cases"])
-    table = forge.execute(f"MATCH (n:Temporal) RETURN {projection}")
+    table = forge.execute(
+        f"MATCH (n:Temporal) RETURN {projection} ORDER BY n.fixture_ordinal"
+    )
     assert isinstance(table, pa.Table)
     assert table.num_rows == 2
     for case in FIXTURE["cases"]:
