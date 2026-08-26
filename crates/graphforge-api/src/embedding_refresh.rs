@@ -233,15 +233,16 @@ impl GraphForge {
                         .find(|runtime| runtime.compatibility_id() == lease.compatibility_id())
                         .cloned()
                 });
-            let completion = match runtime {
+            let (completion, covered_source) = match runtime {
                 Some(runtime) => {
                     let result = runtime.refresh(self);
-                    ConfiguredProviderRefreshRuntime::completion(&result)
+                    let completion = ConfiguredProviderRefreshRuntime::completion(&result);
+                    (completion, result.ok())
                 }
-                None => graphforge_search::EmbeddingRefreshCompletion::Failed,
+                None => (graphforge_search::EmbeddingRefreshCompletion::Failed, None),
             };
             if let Ok(mut scheduler) = self.embedding_refresh_scheduler.lock() {
-                let _ = scheduler.complete(lease, completion, || Ok(()));
+                let _ = scheduler.complete_through(lease, completion, covered_source, || Ok(()));
             }
         }
     }
