@@ -876,6 +876,11 @@ struct ReplayPropertyFragmentWriter {
     writer: parquet::arrow::ArrowWriter<fs::File>,
 }
 
+type ReplayPropertyRows = (
+    BTreeMap<[u8; 16], crate::PropertySnapshotRow>,
+    Vec<crate::PropertySnapshotRow>,
+);
+
 struct ReplayPropertyRouteContext<'a> {
     target: &'a Path,
     inventory: &'a crate::AuthenticatedPropertyInventory,
@@ -888,6 +893,7 @@ struct ReplayPropertyRouteContext<'a> {
     overlay_bytes: usize,
     retained_target_bytes: usize,
     writer_reservation_bytes: usize,
+    logical_schema: SchemaRef,
 }
 
 impl ReplayPropertyRouteContext<'_> {
@@ -898,12 +904,11 @@ impl ReplayPropertyRouteContext<'_> {
         if fragment.is_none() {
             *fragment = Some(open_replay_property_fragment(
                 self.target,
-                self.inventory,
-                self.operations,
                 self.kind,
                 self.edge,
                 self.route,
                 self.limits.max_batch_rows,
+                &self.logical_schema,
             )?);
         }
         Ok(fragment
@@ -916,6 +921,42 @@ impl ReplayPropertyRouteContext<'_> {
         names: &[&str],
         fragment: &mut Option<ReplayPropertyFragmentWriter>,
     ) -> Result<(), GfError> {
+        let (before, rows) = self.property_rows(names)?;
+        drop(before);
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let output_bytes = rows.iter().try_fold(0_usize, |sum, row| {
+            let charge = usize::try_from(crate::property_overlay::snapshot_charge(row))
+                .map_err(|_| replay_resource_limit("property replay output row bytes"))?;
+            sum.checked_add(charge.saturating_mul(3))
+                .ok_or_else(|| replay_resource_limit("property replay output memory overflow"))
+        })?;
+        if self
+            .overlay_bytes
+            .checked_add(self.retained_target_bytes)
+            .and_then(|bytes| bytes.checked_add(output_bytes))
+            .and_then(|bytes| bytes.checked_add(self.writer_reservation_bytes))
+            .is_none_or(|bytes| bytes > self.limits.max_replay_memory_bytes)
+        {
+            return Err(replay_resource_limit(
+                "property replay Arrow and writer memory bound exceeded",
+            ));
+        }
+        let output = self.fragment_writer(fragment)?;
+        for row in rows {
+            write_replay_property_snapshot(
+                &mut output.writer,
+                &output.logical_schema,
+                &output.physical_schema,
+                row,
+            )?;
+        }
+        output.writer.flush().map_err(pq_err)?;
+        Ok(())
+    }
+
+    fn property_rows(&self, names: &[&str]) -> Result<ReplayPropertyRows, GfError> {
         let targets = names
             .iter()
             .map(|uuid| {
@@ -931,6 +972,7 @@ impl ReplayPropertyRouteContext<'_> {
                 self.route,
                 &targets,
             )?;
+        let mut before = BTreeMap::new();
         let baseline_bytes = baseline.values().fold(0_usize, |sum, row| {
             sum.saturating_add(
                 usize::try_from(crate::property_overlay::snapshot_charge(row))
@@ -952,7 +994,11 @@ impl ReplayPropertyRouteContext<'_> {
             let uuid = uuid::Uuid::parse_str(entity_uuid)
                 .map_err(pq_err)?
                 .into_bytes();
+            let prior = baseline.remove(&uuid);
             if replay_entity_deleted(self.overlay, self.edge, entity_uuid) {
+                if let Some(prior) = prior {
+                    before.insert(uuid, prior);
+                }
                 rows.push(crate::PropertySnapshotRow {
                     uuid,
                     tombstone: true,
@@ -960,14 +1006,17 @@ impl ReplayPropertyRouteContext<'_> {
                 });
                 continue;
             }
-            let existed = baseline.contains_key(&uuid);
-            let mut values: HashMap<String, IrLiteral> = baseline
-                .remove(&uuid)
-                .map(|row| row.values.into_iter().collect())
+            let existed = prior.is_some();
+            let mut values: HashMap<String, IrLiteral> = prior
+                .as_ref()
+                .map(|row| row.values.clone().into_iter().collect())
                 .unwrap_or_default();
             let prior_values = values.clone();
             apply_streamed_property_ops(entity_uuid, self.route, self.operations, &mut values);
             if (existed || !values.is_empty()) && values != prior_values {
+                if let Some(prior) = prior {
+                    before.insert(uuid, prior);
+                }
                 rows.push(crate::PropertySnapshotRow {
                     uuid,
                     tombstone: false,
@@ -975,68 +1024,52 @@ impl ReplayPropertyRouteContext<'_> {
                 });
             }
         }
-        if rows.is_empty() {
-            return Ok(());
-        }
-        let output_bytes = rows.iter().try_fold(0_usize, |sum, row| {
+        let retained_baseline_bytes = baseline.values().try_fold(0_usize, |sum, row| {
             let charge = usize::try_from(crate::property_overlay::snapshot_charge(row))
-                .map_err(|_| replay_resource_limit("property replay output row bytes"))?;
-            sum.checked_add(charge.saturating_mul(3))
-                .ok_or_else(|| replay_resource_limit("property replay output memory overflow"))
+                .map_err(|_| replay_resource_limit("property replay baseline row bytes"))?;
+            sum.checked_add(charge)
+                .ok_or_else(|| replay_resource_limit("property replay baseline memory overflow"))
+        })?;
+        let before_bytes = before.values().try_fold(0_usize, |sum, row| {
+            let charge = usize::try_from(crate::property_overlay::snapshot_charge(row))
+                .map_err(|_| replay_resource_limit("property replay prior row bytes"))?;
+            sum.checked_add(charge)
+                .ok_or_else(|| replay_resource_limit("property replay prior memory overflow"))
+        })?;
+        let after_bytes = rows.iter().try_fold(0_usize, |sum, row| {
+            let charge = usize::try_from(crate::property_overlay::snapshot_charge(row))
+                .map_err(|_| replay_resource_limit("property replay updated row bytes"))?;
+            sum.checked_add(charge)
+                .ok_or_else(|| replay_resource_limit("property replay updated memory overflow"))
         })?;
         if resident_before_output
-            .checked_add(output_bytes)
-            .and_then(|bytes| bytes.checked_add(self.writer_reservation_bytes))
+            .checked_sub(baseline_bytes)
+            .and_then(|bytes| bytes.checked_add(retained_baseline_bytes))
+            .and_then(|bytes| bytes.checked_add(before_bytes))
+            .and_then(|bytes| bytes.checked_add(after_bytes))
             .is_none_or(|bytes| bytes > self.limits.max_replay_memory_bytes)
         {
             return Err(replay_resource_limit(
-                "property replay Arrow and writer memory bound exceeded",
+                "property replay schema prepass memory bound exceeded",
             ));
         }
-        let output = self.fragment_writer(fragment)?;
-        for row in rows {
-            write_replay_property_snapshot(
-                &mut output.writer,
-                &output.logical_schema,
-                &output.physical_schema,
-                row,
-            )?;
-        }
-        output.writer.flush().map_err(pq_err)?;
-        Ok(())
+        Ok((before, rows))
     }
 }
 
 fn open_replay_property_fragment(
     target: &Path,
-    inventory: &crate::AuthenticatedPropertyInventory,
-    operations: &std::collections::BTreeMap<(String, String, String), Option<IrLiteral>>,
     kind: crate::PropertyRouteKind,
     edge: bool,
     route: &str,
     max_batch_rows: usize,
+    logical_schema: &SchemaRef,
 ) -> Result<ReplayPropertyFragmentWriter, GfError> {
     use crate::property_overlay::{
         PROPERTY_GENERATION_KEY, PROPERTY_KIND_KEY, PROPERTY_ORDINAL_KEY, PROPERTY_OVERLAY_FORMAT,
         PROPERTY_OVERLAY_FORMAT_KEY, PROPERTY_ROUTE_KEY, PROPERTY_TOMBSTONE_FIELD,
         PropertyFragmentId,
     };
-    let join_field = if edge {
-        EDGE_PROPERTY_UUID_FIELD
-    } else {
-        NODE_PROPERTY_UUID_FIELD
-    };
-    let base_schema = inventory
-        .route_schema(kind, route)
-        .unwrap_or_else(|| Arc::new(Schema::new(vec![uuid_field(join_field)])));
-    let logical_schema = replay_property_schema(
-        kind,
-        route,
-        base_schema.as_ref(),
-        operations
-            .iter()
-            .filter(|((_, operation_route, _), _)| operation_route == route),
-    )?;
     let prior_generation =
         crate::property_overlay::enumerate_property_fragments(target, kind, route)?
             .last()
@@ -1086,7 +1119,7 @@ fn open_replay_property_fragment(
     )
     .map_err(pq_err)?;
     Ok(ReplayPropertyFragmentWriter {
-        logical_schema,
+        logical_schema: logical_schema.as_ref().clone(),
         physical_schema,
         writer,
     })
@@ -1104,7 +1137,10 @@ fn stream_replay_property_route(
     let (kind, operations) = replay_property_route_context(overlay, edge);
     let target_names = replay_property_target_names(overlay, operations, edge, route);
     let touched_rows = u64::try_from(target_names.len()).unwrap_or(u64::MAX);
-    if touched_rows > limits.max_work_rows
+    let replay_work_rows = touched_rows
+        .checked_mul(2)
+        .ok_or_else(|| replay_resource_limit("property replay work rows overflow"))?;
+    if replay_work_rows > limits.max_work_rows
         || target_names.len() > limits.max_records_per_run
         || limits.max_batch_rows == 0
     {
@@ -1151,13 +1187,7 @@ fn stream_replay_property_route(
             .iter()
             .filter(|((_, operation_route, _), _)| operation_route == route),
     )?;
-    let writer_reservation_bytes = replay_writer_reservation(
-        &logical_schema,
-        target_names.len(),
-        0,
-        limits.max_batch_rows,
-    )?;
-    let context = ReplayPropertyRouteContext {
+    let mut context = ReplayPropertyRouteContext {
         target,
         inventory,
         overlay,
@@ -1168,8 +1198,27 @@ fn stream_replay_property_route(
         route,
         overlay_bytes,
         retained_target_bytes,
-        writer_reservation_bytes,
+        writer_reservation_bytes: 0,
+        logical_schema: Arc::new(logical_schema),
     };
+    let inferred = Arc::clone(&context.logical_schema);
+    let mut authority = Arc::clone(&base_schema);
+    for names in target_names.chunks(limits.max_batch_rows) {
+        let (before, after) = context.property_rows(names)?;
+        authority = crate::property_overlay::update_live_route_schema(
+            Some(&authority),
+            Arc::clone(&inferred),
+            &before,
+            &after,
+        )?;
+    }
+    context.logical_schema = authority;
+    context.writer_reservation_bytes = replay_writer_reservation(
+        context.logical_schema.as_ref(),
+        target_names.len(),
+        0,
+        limits.max_batch_rows,
+    )?;
     for names in target_names.chunks(limits.max_batch_rows) {
         context.process_chunk(names, &mut fragment)?;
     }
