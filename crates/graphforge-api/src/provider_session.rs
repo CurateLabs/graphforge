@@ -538,12 +538,12 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                ConfiguredProviderRefreshRuntime::completion(&Err(error)),
+                ConfiguredProviderRefreshRuntime::completion::<()>(&Err(error)),
                 EmbeddingRefreshCompletion::Cancelled
             );
         }
         assert_eq!(
-            ConfiguredProviderRefreshRuntime::completion(&Err(
+            ConfiguredProviderRefreshRuntime::completion::<()>(&Err(
                 ProviderEmbeddingExecutionError::Api(GfError::Validation("invalid".into()))
             )),
             EmbeddingRefreshCompletion::Failed
