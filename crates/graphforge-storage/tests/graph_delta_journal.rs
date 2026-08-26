@@ -1,6 +1,6 @@
 //! Integration tests for the authoritative graph delta journal (#752).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 
 use graphforge_core::{OntologyMode, TypeId};
@@ -9,13 +9,74 @@ use graphforge_storage::{
     GRAPH_CAPABILITY_ID, GRAPH_CAPABILITY_VERSION, GraphDeltaJournalLimits, GraphDeltaOp,
     GraphDeltaOpKind, GraphDeltaPayload, GraphDeltaPublishRequest, GraphFileEntry, GraphFileRole,
     GraphFilesInventory, GraphWriter, ProjectCapability, ProjectGenerationRequest,
-    ProjectStageOutcome, capture_graph_files, decode_delta_run, decode_graph_delta_value,
-    delta_run_relative_path, empty_workspace_participants, encode_delta_run,
-    encode_graph_delta_value, list_delta_runs, materialize_replayed_graph_tree,
-    open_or_initialize_project, publish_graph_delta, read_edges, read_nodes, read_properties,
+    ProjectStageOutcome, PropertyOverlayLimits, PropertyRouteKind, PropertySnapshotRow,
+    capture_graph_files, decode_delta_run, decode_graph_delta_value, delta_run_relative_path,
+    empty_workspace_participants, encode_delta_run, encode_graph_delta_value,
+    enumerate_property_fragments, list_delta_runs, materialize_replayed_graph_tree,
+    open_or_initialize_project, publish_graph_delta, read_edges, read_nodes,
     reconstruct_graph_state, resolve_project_generation, stage_project_generation_with_graph_tree,
+    visit_authenticated_property_snapshots,
 };
 use uuid::Uuid;
+
+fn authenticated_property_rows(
+    graph_root: &std::path::Path,
+    kind: PropertyRouteKind,
+    route: &str,
+    scratch_root: &std::path::Path,
+) -> Vec<PropertySnapshotRow> {
+    let mut rows = Vec::new();
+    visit_authenticated_property_snapshots(
+        graph_root,
+        kind,
+        route,
+        scratch_root,
+        PropertyOverlayLimits::default(),
+        |row| {
+            rows.push(row);
+            Ok(())
+        },
+    )
+    .unwrap();
+    rows
+}
+
+fn assert_small_write_property_evidence(view: &std::path::Path, src_uuid: &str) {
+    let scratch = tempfile::tempdir().unwrap();
+    let person =
+        authenticated_property_rows(view, PropertyRouteKind::Node, "Person", scratch.path());
+    let untyped =
+        authenticated_property_rows(view, PropertyRouteKind::Node, "_untyped", scratch.path());
+    assert_eq!(person.len(), 1, "one base entity property snapshot");
+    assert_eq!(
+        person[0].values.len(),
+        2,
+        "score and active remain composed"
+    );
+    assert_eq!(untyped.len(), 1, "one journal property snapshot");
+    assert_eq!(
+        untyped[0].uuid,
+        *Uuid::parse_str(src_uuid).unwrap().as_bytes()
+    );
+    assert_eq!(untyped[0].values.get("rank"), Some(&IrLiteral::Int(7)));
+    assert_eq!(
+        person[0].values.len() + untyped[0].values.len(),
+        3,
+        "three logical property values occupy two canonical UUID snapshot rows"
+    );
+    assert_eq!(
+        enumerate_property_fragments(view, PropertyRouteKind::Node, "Person")
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        enumerate_property_fragments(view, PropertyRouteKind::Node, "_untyped")
+            .unwrap()
+            .len(),
+        1
+    );
+}
 
 fn sample_ops() -> Vec<GraphDeltaOp> {
     let edge = Uuid::now_v7();
@@ -281,6 +342,10 @@ fn torn_truncated_reordered_and_checksum_invalid_fail_closed() {
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the regression proves one end-to-end publish, reopen, and authenticated replay story"
+)]
 fn small_write_preserves_unchanged_parquet_and_reopen_replays() {
     let root = tempfile::tempdir().unwrap();
     let _base = publish_base(root.path());
@@ -293,10 +358,20 @@ fn small_write_preserves_unchanged_parquet_and_reopen_replays() {
         .unwrap()
         .content_sha256
         .clone();
+    let parent_parquet = parent_inventory
+        .files
+        .iter()
+        .filter(|entry| entry.relative_path.ends_with(".parquet"))
+        .map(|entry| (entry.relative_path.clone(), entry.content_sha256.clone()))
+        .collect::<BTreeMap<_, _>>();
 
     let ops = sample_ops();
     let edge_uuid = match &ops[2].payload {
         GraphDeltaPayload::UpsertEdgeV2 { edge_uuid, .. } => edge_uuid.clone(),
+        _ => unreachable!(),
+    };
+    let src_uuid = match &ops[0].payload {
+        GraphDeltaPayload::UpsertNodeV2 { node_uuid, .. } => node_uuid.clone(),
         _ => unreachable!(),
     };
     let receipt = publish_graph_delta(
@@ -323,6 +398,18 @@ fn small_write_preserves_unchanged_parquet_and_reopen_replays() {
         .content_sha256
         .clone();
     assert_eq!(parent_nodes_digest, child_nodes_digest);
+    let child_files = inventory
+        .files
+        .iter()
+        .map(|entry| (entry.relative_path.as_str(), entry.content_sha256.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    for (path, digest) in &parent_parquet {
+        assert_eq!(
+            child_files.get(path.as_str()),
+            Some(&digest.as_str()),
+            "small journal write must preserve authenticated base artifact {path}"
+        );
+    }
 
     let (state, evidence) = reconstruct_graph_state(
         &reopened.graph_tree_root(),
@@ -332,6 +419,25 @@ fn small_write_preserves_unchanged_parquet_and_reopen_replays() {
     .unwrap();
     assert_eq!(evidence.runs_replayed, 1);
     assert!(state.edges.contains_key(&edge_uuid));
+    assert_eq!(
+        state.node_properties.len(),
+        3,
+        "two base keys plus one journal key survive authenticated replay"
+    );
+    assert_eq!(
+        state
+            .node_property_stems
+            .get(&(src_uuid.clone(), "rank".into()))
+            .map(String::as_str),
+        Some("_untyped")
+    );
+    assert_eq!(
+        state
+            .node_properties
+            .get(&(src_uuid.clone(), "rank".into()))
+            .map(|value| decode_graph_delta_value(value).unwrap()),
+        Some(IrLiteral::Int(7))
+    );
     assert_ne!(receipt.state_fingerprint, [0; 32]);
 
     let view = tempfile::tempdir().unwrap();
@@ -359,19 +465,70 @@ fn small_write_preserves_unchanged_parquet_and_reopen_replays() {
             .sum::<usize>(),
         2
     );
-    assert_eq!(
-        ["Person", "_untyped"]
-            .into_iter()
-            .map(|stem| {
-                read_properties(view.path(), stem)
-                    .unwrap()
-                    .iter()
-                    .map(arrow::record_batch::RecordBatch::num_rows)
-                    .sum::<usize>()
-            })
-            .sum::<usize>(),
-        3
-    );
+    assert_small_write_property_evidence(view.path(), &src_uuid);
+}
+
+#[test]
+fn entity_delete_rewrites_each_affected_property_route_with_tombstones() {
+    let root = tempfile::tempdir().unwrap();
+    publish_base(root.path());
+    let node = Uuid::parse_str("00000000-0000-7000-8000-000000000001").unwrap();
+    let edge = Uuid::parse_str("00000000-0000-7000-8000-000000000003").unwrap();
+    publish_graph_delta(
+        root.path(),
+        &GraphDeltaPublishRequest {
+            transaction_uuid: Uuid::now_v7(),
+            generation_uuid: Uuid::now_v7(),
+            run_uuid: Uuid::now_v7(),
+            operations: vec![
+                GraphDeltaOp {
+                    operation_uuid: Uuid::now_v7(),
+                    kind: GraphDeltaOpKind::DeleteEdge,
+                    payload: GraphDeltaPayload::DeleteEdge {
+                        edge_uuid: edge.hyphenated().to_string(),
+                    },
+                },
+                GraphDeltaOp {
+                    operation_uuid: Uuid::now_v7(),
+                    kind: GraphDeltaOpKind::DeleteNode,
+                    payload: GraphDeltaPayload::DeleteNode {
+                        node_uuid: node.hyphenated().to_string(),
+                    },
+                },
+            ],
+            limits: GraphDeltaJournalLimits::default(),
+        },
+    )
+    .unwrap();
+    let generation = resolve_project_generation(root.path()).unwrap();
+    let inventory = generation.graph_files_inventory().unwrap().unwrap();
+    let view = tempfile::tempdir().unwrap();
+    materialize_replayed_graph_tree(
+        &generation.graph_tree_root(),
+        &inventory,
+        view.path(),
+        GraphDeltaJournalLimits::default(),
+    )
+    .unwrap();
+
+    let scratch = tempfile::tempdir().unwrap();
+    for (kind, route) in [
+        (PropertyRouteKind::Node, "Person"),
+        (PropertyRouteKind::Edge, "KNOWS"),
+    ] {
+        let rows = authenticated_property_rows(view.path(), kind, route, scratch.path());
+        assert!(
+            rows.is_empty(),
+            "deleted entity must not survive authenticated {kind:?}/{route} replay"
+        );
+        assert_eq!(
+            enumerate_property_fragments(view.path(), kind, route)
+                .unwrap()
+                .len(),
+            2,
+            "copied base plus one authoritative tombstone fragment"
+        );
+    }
 }
 
 #[test]

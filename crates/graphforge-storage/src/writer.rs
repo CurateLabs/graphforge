@@ -659,11 +659,22 @@ fn stream_replay_properties(
     } else {
         crate::PropertyRouteKind::Node
     };
-    let mut fragment_routes = inventory
-        .routes(kind)
-        .map(str::to_owned)
+    let mut fragment_routes = operations
+        .keys()
+        .map(|(_, route, _)| route.clone())
         .collect::<std::collections::BTreeSet<_>>();
-    fragment_routes.extend(operations.keys().map(|(_, route, _)| route.clone()));
+    let deletes_entity_with_unknown_routes = if edge {
+        overlay.edges.values().any(Option::is_none)
+    } else {
+        overlay.nodes.values().any(Option::is_none)
+    };
+    if deletes_entity_with_unknown_routes {
+        // Entity deletion must remove its property row from every route. Other
+        // mutations affect only their explicitly routed property fragments;
+        // rewriting all authenticated routes would duplicate unchanged full
+        // snapshots on every journal materialization.
+        fragment_routes.extend(inventory.routes(kind).map(str::to_owned));
+    }
     if !fragment_routes.is_empty() {
         return stream_replay_property_fragments(
             target,
@@ -974,7 +985,15 @@ fn stream_replay_property_route(
                 overlay.nodes.get(&uuid).is_some_and(Option::is_none)
             };
             if deleted {
-                return Ok(());
+                row.tombstone = true;
+                row.values.clear();
+                seen.insert(uuid);
+                return write_replay_property_snapshot(
+                    &mut fragment.writer,
+                    &fragment.logical_schema,
+                    &fragment.physical_schema,
+                    row,
+                );
             }
             let mut values = std::mem::take(&mut row.values)
                 .into_iter()
