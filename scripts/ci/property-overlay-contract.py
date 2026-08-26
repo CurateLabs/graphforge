@@ -151,7 +151,10 @@ def validate(root: Path, contract_path: Path) -> None:
     if contract["contract"] != "graphforge-property-overlay/1" or contract["issue"] != 940:
         raise ContractError("contract identity/version is not frozen v1 for #940")
     expected_platform = {
-        "rss": "Unix getrusage RUSAGE_SELF ru_maxrss with macOS bytes and other Unix KiB normalization",
+        "rss": (
+            "Unix getrusage RUSAGE_SELF ru_maxrss with macOS bytes and other "
+            + "Unix KiB normalization"
+        ),
         "unsupported": "production RSS scale evidence is not compiled outside Unix",
     }
     if contract["platform"] != expected_platform:
@@ -162,8 +165,14 @@ def validate(root: Path, contract_path: Path) -> None:
         "winner": "maximum numeric (generation, ordinal) per UUID",
         "unchanged_uuid": "an older row remains live until superseded",
         "tombstone": "a newer tombstone suppresses the UUID",
-        "write_window": "compose repeated SET and REMOVE operations once, then append only changed UUID snapshots",
-        "prior_fragments": "must not be fully decoded or rewritten; only snapshots for changed UUIDs may be decoded",
+        "write_window": (
+            "compose repeated SET and REMOVE operations once, then append only "
+            + "changed UUID snapshots"
+        ),
+        "prior_fragments": (
+            "must not be fully decoded or rewritten; only snapshots for changed "
+            + "UUIDs may be decoded"
+        ),
     }
     if contract["authority"] != expected_authority:
         raise ContractError("incremental all-generation authority differs from frozen v1")
