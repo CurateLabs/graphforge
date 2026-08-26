@@ -33,6 +33,15 @@ and plain-string property representation are not losslessly migratable and are
 rejected with `GF_UNSUPPORTED_PROJECT_FORMAT`; GraphForge never silently
 reinterprets them.
 
+Portable-v2 selection is dependency-closed for graph semantic bindings. When
+the selected participant set includes the graph semantic-bindings participant,
+the bundle must also contain the exact workspace ontology-composition
+participant whose fingerprint those bindings name. Import authenticates and
+reconstructs the composition, compares the fingerprint, and stages composition
+plus bindings in the same generation. A missing or mismatched authority fails
+before publication; import never drops the bindings or fabricates composition
+state.
+
 ## Knowledge-layer implementation boundary
 
 The knowledge layer starts from the v0.5 graph and project contracts on `main`.
@@ -212,8 +221,12 @@ record families may appear:
   files live under the generation-owned `graph/` directory beside
   `participants/`. Open validates the inventory and either pins that tree
   (read-only) or materializes file-by-file into a private workspace. New
-  publications use this path. Unsupported inventory versions return
-  `GF_UNSUPPORTED_PROJECT_FORMAT`.
+  publications use this path. For `full-snapshot-v1` property fragments, open
+  authenticates every canonical generation and ordinal in this inventory, then
+  merges all fragments by UUID and descending `(generation, ordinal)` identity.
+  Each newer row is a complete map or tombstone for that UUID; unchanged UUIDs
+  remain live in older immutable fragments. Unsupported inventory versions
+  return `GF_UNSUPPORTED_PROJECT_FORMAT`.
 
 Portable interchange does not yet encode the generation-owned `graph/` tree and
 returns a structured unsupported error for `files` generations; copy the project

@@ -159,9 +159,18 @@ expanded inventories remain readable and can be migrated without changing
 Node and edge properties use `full-snapshot-v1` fragments under
 `properties/<route>/<generation>-<ordinal>.parquet` (fixed-width decimal identity) and the corresponding
 `edge_properties` tree. Each row is the complete property state for one UUID;
-the newest canonical fragment identity wins, and an explicit tombstone deletes
-the whole row. A write window composes repeated SET/REMOVE operations once and
-publishes one complete snapshot without rewriting prior fragments.
+an explicit tombstone deletes the whole row. Admission authenticates every
+canonical generation and ordinal named by the committed graph-files inventory.
+Readers merge all authenticated fragments by UUID and descending
+`(generation, ordinal)` authority; the first row for a UUID is its complete
+current map or tombstone. Unchanged UUIDs remain authoritative in older
+immutable fragments, while a newer tombstone prevents a deleted UUID from
+resurfacing. A write window composes repeated SET/REMOVE operations once and
+publishes only its changed UUID snapshots without a full-route decode or any
+prior-fragment rewrite. A PATCH/REMOVE producer performs at most one
+authenticated targeted batch lookup for the window's UUID set, with the same
+zero-per-record-seek scanner; sealing consumes those complete staged rows and
+does not read historical fragments again.
 
 Readers derive route authority from the committed graph-files inventory,
 validate canonical fragment identity, schema/semantic metadata, strictly sorted
@@ -174,11 +183,20 @@ compressed/uncompressed sizes must remain within the authenticated chunk/file
 ranges and the configured live-byte limit. One shared budget covers Arrow
 batches, decoded rows, spill buffers, and merge cursors; rolling fan-in levels
 keep run references logarithmic and unlink merged inputs immediately.
-Operational evidence distinguishes authentication bytes/64 KiB blocks,
-validation and selected-value decoder bytes/read calls, range seeks,
-physical and shadowed rows, fragments and row groups considered/selected,
-spill runs/bytes/passes and peak run references, the shared live-byte peak, and the invariant
-`per_record_seeks = 0`.
+Operational evidence separates raw graph-files authority authentication from
+retained property-fragment authentication. Each has distinct byte totals,
+64 KiB block-equivalents (`ceil(file_bytes / 64 KiB)` per file), and actual
+non-empty read-call counters; block-equivalents are not read calls. Aggregate
+authentication bytes, equivalents, and calls equal their authority plus
+property components. `physical_blocks` is an actual-operation count: authentication
+read calls plus decoder read calls. Evidence also distinguishes validation and
+selected-value decoder bytes/calls, range seeks, physical row-decode visits (a
+row decoded by validation and selected-value passes contributes once to each
+pass), shadowed rows, fragments and row groups considered/selected, and the
+shared live-byte peak. External-merge evidence reports first-level encoded
+spool input separately from total spill bytes, runs, and passes so amplification
+is a checked ratio rather than a worst-case row-size estimate. The invariant
+`per_record_seeks = 0` remains exact.
 
 Property-only commits reserve a checked monotonic property generation under the
 durable-rewrite lock. Legacy state initializes it from the maximum topology and
@@ -223,6 +241,21 @@ folds a verified contiguous prefix back into canonical Parquet via a new
 immutable generation (`compact_graph_delta`) and reclaims unreachable inputs
 only through the shared retention/GC oracle. They are
 distinct from rebuildable `indexes/adjacency/deltas/` accelerators.
+
+Replay materializes only UUIDs touched by property operations or entity
+deletions; unchanged UUIDs remain in prior immutable fragments. During overlay
+construction the memory ceiling charges decoded runs, idempotency payloads,
+typed operation values, and the overlay simultaneously. Runs are released
+before materialization. Materialization then charges the retained overlay,
+node endpoint/identity authority, target references, baseline and output rows,
+Arrow arrays, and schema-width × row-group column metadata plus the active
+Parquet writer buffer. Replay writers disable dictionary encoding and
+compression variability and bound row groups by `max_batch_rows`. Legacy flat
+generation-zero properties enter this same authenticated, sparse-fragment
+materialization path. `max_records_per_run` and `max_work_rows` independently
+bound mutation and physical work. Limit failures use the typed
+`GF_RESOURCE_LIMIT` code. Removing an absent key or setting an identical value
+is a no-op and creates no new property fragment.
 
 For explicit bounded composite property set/remove requests, the Rust facade
 selects GFDR before mutating its private workspace. Storage prepares an owning
