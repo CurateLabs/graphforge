@@ -423,7 +423,8 @@ fn import_materialized(
             capability_version: capability.capability_version,
         })
         .collect();
-    let mut participants = Vec::with_capacity(runtime.participants.len());
+    let mut participants = Vec::with_capacity(runtime.participants.len() + 2);
+    let mut semantic_composition_fingerprint = None;
     for participant in runtime.participants {
         let source = find_participant_file(stage, &participant.participant_id, limits)?;
         let metadata = fs::metadata(&source).map_err(|_| {
@@ -433,6 +434,18 @@ fn import_materialized(
             )
         })?;
         let content_sha256: [u8; 32] = hash_file(&source, limits.copy_buffer_bytes, cancelled)?;
+        if participant.capability_id == crate::GRAPH_CAPABILITY_ID
+            && participant.record_family_id == crate::GRAPH_SEMANTIC_BINDINGS_FAMILY
+        {
+            let bytes = read_bounded_payload(
+                &source,
+                crate::semantic_bindings::MAX_SEMANTIC_BINDING_BYTES as u64,
+                "semantic bindings",
+            )?;
+            let bindings =
+                crate::SemanticStorageBindings::from_canonical_json(&bytes).map_err(storage)?;
+            semantic_composition_fingerprint = Some(bindings.composition_fingerprint);
+        }
         let encoding = match participant.encoding.as_str() {
             "json" => ProjectParticipantEncoding::Json,
             "parquet" => ProjectParticipantEncoding::Parquet,
@@ -463,9 +476,32 @@ fn import_materialized(
     }
     let staged_composition = if report.ontology_composition.is_some() {
         let (candidate, receipt) = build_staged_composition(stage, report, limits)?;
+        if let Some(expected) = semantic_composition_fingerprint.as_deref() {
+            let staged_bytes = read_bounded_payload(
+                &candidate.source,
+                limits.max_manifest_bytes,
+                "staged composition",
+            )?;
+            let staged =
+                crate::WorkspacePortableOntologyStaging::from_canonical_json(&staged_bytes)
+                    .map_err(storage)?;
+            if staged.composition.composition_fingerprint != expected {
+                return Err(PortableV2Error::new(
+                    PortableV2ErrorCode::Incompatible,
+                    "semantic bindings and portable composition fingerprints disagree",
+                ));
+            }
+            participants.push(persist_composition_authority(stage, &staged.composition)?);
+        }
         participants.push(candidate);
         Some(receipt)
     } else {
+        if semantic_composition_fingerprint.is_some() {
+            return Err(PortableV2Error::new(
+                PortableV2ErrorCode::Incompatible,
+                "semantic bindings require portable composition authority",
+            ));
+        }
         None
     };
     participants.sort_by(|left, right| {
@@ -813,6 +849,43 @@ fn persist_staged_composition(
     Ok((participant, source, bytes))
 }
 
+fn persist_composition_authority(
+    stage: &Path,
+    composition: &crate::WorkspaceOntologyComposition,
+) -> Result<ProjectFileParticipant, PortableV2Error> {
+    let participant = composition.to_project_participant().map_err(storage)?;
+    let bytes = participant.bytes.clone();
+    let source = stage.join("ontology-composition-authority.json");
+    let mut output = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&source)
+        .map_err(|_| {
+            PortableV2Error::new(
+                PortableV2ErrorCode::Io,
+                "cannot stage composition authority",
+            )
+        })?;
+    output.write_all(&bytes).map_err(|_| {
+        PortableV2Error::new(
+            PortableV2ErrorCode::Io,
+            "cannot write composition authority",
+        )
+    })?;
+    output.sync_all().map_err(|_| {
+        PortableV2Error::new(PortableV2ErrorCode::Io, "cannot sync composition authority")
+    })?;
+    Ok(ProjectFileParticipant {
+        participant: ProjectParticipant {
+            bytes: Vec::new(),
+            ..participant
+        },
+        source,
+        byte_length: bytes.len() as u64,
+        content_sha256: Sha256::digest(&bytes).into(),
+    })
+}
+
 fn read_bounded_payload(
     path: &Path,
     limit: u64,
@@ -1018,6 +1091,15 @@ mod tests {
             .unwrap()
             .unwrap();
         let mut participants = crate::empty_workspace_participants().unwrap();
+        participants.push(
+            crate::SemanticStorageBindings::new(
+                composition.composition_fingerprint.clone(),
+                Vec::new(),
+            )
+            .unwrap()
+            .to_project_participant()
+            .unwrap(),
+        );
         participants.push(composition.to_project_participant().unwrap());
         participants.sort_by(|left, right| {
             (&left.capability_id, &left.record_family_id)
@@ -1085,9 +1167,14 @@ mod tests {
                 .participant_snapshots()
                 .unwrap()
                 .iter()
-                .all(|entry| {
-                    entry.record_family_id != crate::WORKSPACE_ONTOLOGY_COMPOSITION_FAMILY
+                .any(|entry| {
+                    entry.record_family_id == crate::WORKSPACE_ONTOLOGY_COMPOSITION_FAMILY
                 })
+        );
+        assert!(
+            crate::semantic_storage_bindings(&reopened)
+                .unwrap()
+                .is_some()
         );
 
         let replay = import_complete_portable_v2(

@@ -251,6 +251,13 @@ pub fn preview_portable_v2_selection(
         }));
     }
     let selected = requested.union(&auto).cloned().collect::<BTreeSet<_>>();
+    let semantic_bindings = PortableV2ParticipantId {
+        capability_id: crate::GRAPH_CAPABILITY_ID.to_owned(),
+        record_family_id: crate::GRAPH_SEMANTIC_BINDINGS_FAMILY.to_owned(),
+    };
+    if selected.contains(&semantic_bindings) {
+        crate::semantic_storage_bindings(generation).map_err(storage)?;
+    }
     validate_settings(generation, &selected, limits)?;
 
     let mut included = Vec::new();
@@ -652,4 +659,104 @@ fn hex(digest: [u8; 32]) -> String {
             write!(output, "{byte:02x}").expect("writing to String cannot fail");
             output
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+
+    fn semantic_generation(
+        composition: Option<crate::WorkspaceOntologyComposition>,
+        binding_fingerprint: String,
+    ) -> (tempfile::TempDir, crate::ResolvedProjectGeneration) {
+        let root = tempfile::tempdir().unwrap();
+        let parent = crate::open_or_initialize_project(root.path()).unwrap();
+        let mut participants = crate::empty_workspace_participants().unwrap();
+        participants.push(
+            crate::SemanticStorageBindings::new(binding_fingerprint, Vec::new())
+                .unwrap()
+                .to_project_participant()
+                .unwrap(),
+        );
+        if let Some(composition) = composition {
+            participants.push(composition.to_project_participant().unwrap());
+        }
+        participants.sort_by(|left, right| {
+            (&left.capability_id, &left.record_family_id)
+                .cmp(&(&right.capability_id, &right.record_family_id))
+        });
+        let request = crate::ProjectGenerationRequest {
+            transaction_uuid: Uuid::new_v4(),
+            generation_uuid: Uuid::new_v4(),
+            capabilities: vec![
+                crate::ProjectCapability {
+                    capability_id: crate::GRAPH_CAPABILITY_ID.into(),
+                    capability_version: crate::GRAPH_CAPABILITY_VERSION,
+                },
+                crate::ProjectCapability {
+                    capability_id: crate::WORKSPACE_CAPABILITY_ID.into(),
+                    capability_version: crate::WORKSPACE_CAPABILITY_VERSION,
+                },
+            ],
+            participants,
+        };
+        let crate::ProjectStageOutcome::Staged(staged) =
+            crate::stage_project_generation(root.path(), &request).unwrap()
+        else {
+            panic!("fresh semantic generation replayed");
+        };
+        staged
+            .validate(|_| Ok(()), |_, _| Ok(()))
+            .unwrap()
+            .publish()
+            .unwrap();
+        drop(parent);
+        let generation = crate::resolve_project_generation(root.path()).unwrap();
+        (root, generation)
+    }
+
+    fn composition() -> crate::WorkspaceOntologyComposition {
+        let legacy = crate::WorkspaceOntology {
+            contract_version: 1,
+            mode: crate::WorkspaceOntologyMode::Strict,
+            source_format: Some(crate::WorkspaceOntologySourceFormat::Json),
+            canonical_ontology_sha256: Some("a".repeat(64)),
+            canonical_ontology: Some(
+                serde_json::to_value(graphforge_ontology::OntologyDoc {
+                    ontology_id: "https://graphforge.dev/ontology/selection-closure".into(),
+                    version: "1".into(),
+                    entity_types: Vec::new(),
+                    relation_types: Vec::new(),
+                    properties: Vec::new(),
+                    constraints: Vec::new(),
+                    migrations: Vec::new(),
+                })
+                .unwrap(),
+            ),
+        };
+        crate::WorkspaceOntologyComposition::virtual_legacy(&legacy)
+            .unwrap()
+            .unwrap()
+    }
+
+    #[test]
+    fn semantic_selection_fails_closed_without_matching_composition_authority() {
+        for (authority, fingerprint) in [
+            (None, "b".repeat(64)),
+            (Some(composition()), "c".repeat(64)),
+        ] {
+            let (_root, generation) = semantic_generation(authority, fingerprint);
+            let error = preview_portable_v2_selection(
+                &generation,
+                &PortableV2SelectionRequest {
+                    profile: PortableV2SelectionProfile::Complete,
+                    strict: false,
+                },
+                PortableV2Limits::default(),
+            )
+            .unwrap_err();
+            assert_eq!(error.code, PortableV2ErrorCode::Io);
+        }
+    }
 }
