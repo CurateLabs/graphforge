@@ -75,7 +75,7 @@ struct ReadCounts {
 
 #[derive(Debug)]
 struct CountingChunkReader {
-    file: File,
+    file: Arc<File>,
     length: u64,
     counts: Arc<ReadCounts>,
 }
@@ -86,7 +86,8 @@ struct CountingRead<R> {
 }
 
 struct HeaderRead {
-    file: File,
+    file: Arc<File>,
+    position: u64,
     remaining: usize,
     consumed: Arc<AtomicU64>,
     counts: Arc<ReadCounts>,
@@ -98,7 +99,10 @@ impl Read for HeaderRead {
         if limit == 0 {
             return Ok(0);
         }
-        let read = self.file.read(&mut buffer[..limit])?;
+        let read = retained_read_at(&self.file, &mut buffer[..limit], self.position)?;
+        self.position = self
+            .position
+            .saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
         self.remaining -= read;
         if read != 0 {
             let read = u64::try_from(read).unwrap_or(u64::MAX);
@@ -108,6 +112,32 @@ impl Read for HeaderRead {
         }
         Ok(read)
     }
+}
+
+struct PositionedRead {
+    file: Arc<File>,
+    position: u64,
+}
+
+impl Read for PositionedRead {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let read = retained_read_at(&self.file, buffer, self.position)?;
+        self.position = self
+            .position
+            .checked_add(u64::try_from(read).unwrap_or(u64::MAX))
+            .ok_or_else(|| std::io::Error::other("retained read offset overflow"))?;
+        Ok(read)
+    }
+}
+
+#[cfg(unix)]
+fn retained_read_at(file: &File, buffer: &mut [u8], offset: u64) -> std::io::Result<usize> {
+    std::os::unix::fs::FileExt::read_at(file, buffer, offset)
+}
+
+#[cfg(windows)]
+fn retained_read_at(file: &File, buffer: &mut [u8], offset: u64) -> std::io::Result<usize> {
+    std::os::windows::fs::FileExt::seek_read(file, buffer, offset)
 }
 
 impl<R: std::io::Read> std::io::Read for CountingRead<R> {
@@ -132,15 +162,15 @@ impl Length for CountingChunkReader {
 }
 
 impl ChunkReader for CountingChunkReader {
-    type T = CountingRead<BufReader<File>>;
+    type T = CountingRead<BufReader<PositionedRead>>;
 
     fn get_read(&self, start: u64) -> parquet::errors::Result<Self::T> {
-        use std::io::{Seek, SeekFrom};
-        let mut file = self.file.try_clone()?;
-        file.seek(SeekFrom::Start(start))?;
         self.counts.range_seeks.fetch_add(1, Ordering::Relaxed);
         Ok(CountingRead {
-            inner: BufReader::new(file),
+            inner: BufReader::new(PositionedRead {
+                file: Arc::clone(&self.file),
+                position: start,
+            }),
             counts: Arc::clone(&self.counts),
         })
     }
@@ -465,7 +495,7 @@ impl AuthenticatedPropertyInventory {
             let reader = (|| {
                 let source = CountingChunkReader {
                     length: fragment.entry.byte_length,
-                    file: fragment.file.try_clone().map_err(io_error)?,
+                    file: Arc::new(fragment.file.try_clone().map_err(io_error)?),
                     counts: Arc::clone(&counts),
                 };
                 let builder =
@@ -686,12 +716,11 @@ fn authenticate_inventory_file(
             "property handle length or kind conflicts with inventory",
         ));
     }
-    let mut clone = file.try_clone().map_err(io_error)?;
     let mut digest = Sha256::new();
     let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
     let mut bytes = 0_u64;
     loop {
-        let read = std::io::Read::read(&mut clone, &mut buffer).map_err(io_error)?;
+        let read = retained_read_at(file, &mut buffer, bytes).map_err(io_error)?;
         if read == 0 {
             break;
         }
@@ -1267,7 +1296,7 @@ fn open_counted_retained_property_builder(
     counts: Arc<ReadCounts>,
 ) -> Result<ParquetRecordBatchReaderBuilder<CountingChunkReader>, GfError> {
     ParquetRecordBatchReaderBuilder::try_new(CountingChunkReader {
-        file: fragment.file.try_clone().map_err(io_error)?,
+        file: Arc::new(fragment.file.try_clone().map_err(io_error)?),
         length: fragment.entry.byte_length,
         counts,
     })
@@ -1339,7 +1368,6 @@ fn validate_parquet_resource_admission(
     file: &File,
     counts: &Arc<ReadCounts>,
 ) -> Result<u64, GfError> {
-    use std::io::{Seek, SeekFrom};
     const MAX_PAGE_HEADER_BYTES: usize = 64 * 1024;
     let max_page_bytes = limits.max_buffered_bytes / 4;
     if max_page_bytes == 0 {
@@ -1373,11 +1401,10 @@ fn validate_parquet_resource_admission(
             }
             let mut position = start;
             while position < end {
-                let mut clone = file.try_clone().map_err(io_error)?;
-                clone.seek(SeekFrom::Start(position)).map_err(io_error)?;
                 let consumed = Arc::new(AtomicU64::new(0));
                 let transport = HeaderRead {
-                    file: clone,
+                    file: Arc::new(file.try_clone().map_err(io_error)?),
+                    position,
                     remaining: MAX_PAGE_HEADER_BYTES,
                     consumed: Arc::clone(&consumed),
                     counts: Arc::clone(counts),
@@ -2339,9 +2366,10 @@ mod tests {
             content_sha256: digest_hex(&Sha256::digest(&bytes)),
             role: crate::GraphFileRole::Properties,
         };
-        let inventory =
+        let inventory = Arc::new(
             AuthenticatedPropertyInventory::from_entries_at_root(dir.path(), vec![entry.clone()])
-                .unwrap();
+                .unwrap(),
+        );
         let mut inventory_rows = Vec::new();
         inventory
             .visit_route(
@@ -2375,6 +2403,33 @@ mod tests {
             .unwrap();
             assert_eq!(rows.len(), 1);
             assert_eq!(metrics.per_record_seeks, 0);
+        }
+        let concurrent = (0..8)
+            .map(|_| {
+                let inventory = Arc::clone(&inventory);
+                std::thread::spawn(move || {
+                    let scratch = TempDir::new().unwrap();
+                    for _ in 0..8 {
+                        let mut rows = Vec::new();
+                        inventory
+                            .visit_route(
+                                PropertyRouteKind::Node,
+                                "Person",
+                                scratch.path(),
+                                PropertyOverlayLimits::default(),
+                                |row| {
+                                    rows.push(row);
+                                    Ok(())
+                                },
+                            )
+                            .unwrap();
+                        assert_eq!(rows.len(), 1);
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        for thread in concurrent {
+            thread.join().unwrap();
         }
 
         let unrelated_dir = dir.path().join("properties/Unrelated");
