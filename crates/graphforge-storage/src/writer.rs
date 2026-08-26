@@ -1172,17 +1172,14 @@ fn stream_replay_property_route(
     }
     let mut fragment = None;
     let target_names = target_names.into_iter().collect::<Vec<_>>();
-    let base_schema = inventory.route_schema(kind, route).unwrap_or_else(|| {
-        let join_field = match kind {
-            crate::PropertyRouteKind::Node => NODE_PROPERTY_UUID_FIELD,
-            crate::PropertyRouteKind::Edge => EDGE_PROPERTY_UUID_FIELD,
-        };
-        Arc::new(Schema::new(vec![uuid_field(join_field)]))
-    });
+    let authority = inventory.route_schema(kind, route);
+    let schema_base = authority
+        .clone()
+        .unwrap_or_else(|| replay_property_base_schema(kind));
     let logical_schema = replay_property_schema(
         kind,
         route,
-        base_schema.as_ref(),
+        schema_base.as_ref(),
         operations
             .iter()
             .filter(|((_, operation_route, _), _)| operation_route == route),
@@ -1202,19 +1199,20 @@ fn stream_replay_property_route(
         logical_schema: Arc::new(logical_schema),
     };
     let inferred = Arc::clone(&context.logical_schema);
-    let mut authority = Arc::clone(&base_schema);
+    let mut authority = authority;
     for names in target_names.chunks(limits.max_batch_rows) {
         let (before, after) = context.property_rows(names)?;
-        authority = crate::property_overlay::update_live_route_schema(
+        authority = Some(crate::property_overlay::update_live_route_schema(
             kind,
             route,
-            Some(&authority),
+            authority.as_ref(),
             Arc::clone(&inferred),
             &before,
             &after,
-        )?;
+        )?);
     }
-    context.logical_schema = authority;
+    context.logical_schema =
+        authority.ok_or_else(|| pq_err("property replay route has no touched schema authority"))?;
     context.writer_reservation_bytes = replay_writer_reservation(
         context.logical_schema.as_ref(),
         target_names.len(),
@@ -1248,6 +1246,14 @@ fn replay_property_route_context(
     } else {
         (crate::PropertyRouteKind::Node, &overlay.node_properties)
     }
+}
+
+fn replay_property_base_schema(kind: crate::PropertyRouteKind) -> SchemaRef {
+    let join_field = match kind {
+        crate::PropertyRouteKind::Node => NODE_PROPERTY_UUID_FIELD,
+        crate::PropertyRouteKind::Edge => EDGE_PROPERTY_UUID_FIELD,
+    };
+    Arc::new(Schema::new(vec![uuid_field(join_field)]))
 }
 
 fn replay_entity_deleted(
@@ -5387,6 +5393,148 @@ mod tests {
     use tempfile::TempDir;
 
     const TS: i64 = 1_700_000_000_000_000;
+
+    #[test]
+    fn delta_replay_new_routes_start_and_continue_live_schema_authority() {
+        let project = TempDir::new().unwrap();
+        let (empty_files, _) = crate::capture_graph_files(project.path()).unwrap();
+        let empty = crate::AuthenticatedPropertyInventory::from_entries_at_root(
+            project.path(),
+            empty_files.files,
+        )
+        .unwrap();
+        let mut limits = crate::GraphDeltaJournalLimits::default();
+        limits.max_batch_rows = 1;
+        let node_ids = [
+            new_v7().hyphenated().to_string(),
+            new_v7().hyphenated().to_string(),
+        ];
+        let edge_ids = [
+            new_v7().hyphenated().to_string(),
+            new_v7().hyphenated().to_string(),
+        ];
+        let populated = |ids: &[String], route: &str, key: &str| {
+            ids.iter()
+                .enumerate()
+                .map(|(index, uuid)| {
+                    (
+                        (uuid.clone(), route.to_owned(), key.to_owned()),
+                        Some(IrLiteral::Int(index as i64)),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
+        let mut overlay = crate::graph_delta_journal::ReplayOverlay::default();
+        overlay.node_properties = populated(&node_ids, "NewNodeRoute", "score");
+        overlay.edge_properties = populated(&edge_ids, "NewEdgeRoute", "weight");
+        stream_replay_property_route(
+            project.path(),
+            &empty,
+            &overlay,
+            limits,
+            false,
+            "NewNodeRoute",
+            project.path(),
+        )
+        .unwrap();
+        stream_replay_property_route(
+            project.path(),
+            &empty,
+            &overlay,
+            limits,
+            true,
+            "NewEdgeRoute",
+            project.path(),
+        )
+        .unwrap();
+
+        let (files, _) = crate::capture_graph_files(project.path()).unwrap();
+        let created = crate::AuthenticatedPropertyInventory::from_entries_at_root(
+            project.path(),
+            files.files,
+        )
+        .unwrap();
+        let summary_count = |schema: &SchemaRef, key: &str| {
+            serde_json::from_str::<serde_json::Value>(
+                &schema.metadata()[crate::property_overlay::PROPERTY_LIVE_SCHEMA_KEY],
+            )
+            .unwrap()["counts"][key]
+                .as_u64()
+        };
+        assert_eq!(
+            summary_count(
+                &created
+                    .route_schema(crate::PropertyRouteKind::Node, "NewNodeRoute")
+                    .unwrap(),
+                "score"
+            ),
+            Some(2)
+        );
+        assert_eq!(
+            summary_count(
+                &created
+                    .route_schema(crate::PropertyRouteKind::Edge, "NewEdgeRoute")
+                    .unwrap(),
+                "weight"
+            ),
+            Some(2)
+        );
+
+        let mut removed = crate::graph_delta_journal::ReplayOverlay::default();
+        removed.node_properties = node_ids
+            .iter()
+            .map(|uuid| ((uuid.clone(), "NewNodeRoute".into(), "score".into()), None))
+            .collect();
+        removed.edge_properties = edge_ids
+            .iter()
+            .map(|uuid| ((uuid.clone(), "NewEdgeRoute".into(), "weight".into()), None))
+            .collect();
+        stream_replay_property_route(
+            project.path(),
+            &created,
+            &removed,
+            limits,
+            false,
+            "NewNodeRoute",
+            project.path(),
+        )
+        .unwrap();
+        stream_replay_property_route(
+            project.path(),
+            &created,
+            &removed,
+            limits,
+            true,
+            "NewEdgeRoute",
+            project.path(),
+        )
+        .unwrap();
+
+        let (files, _) = crate::capture_graph_files(project.path()).unwrap();
+        let reopened = crate::AuthenticatedPropertyInventory::from_entries_at_root(
+            project.path(),
+            files.files,
+        )
+        .unwrap();
+        assert_eq!(
+            summary_count(
+                &reopened
+                    .route_schema(crate::PropertyRouteKind::Node, "NewNodeRoute")
+                    .unwrap(),
+                "score"
+            ),
+            None
+        );
+        assert_eq!(
+            summary_count(
+                &reopened
+                    .route_schema(crate::PropertyRouteKind::Edge, "NewEdgeRoute")
+                    .unwrap(),
+                "weight"
+            ),
+            None
+        );
+    }
 
     #[test]
     fn replay_writer_reservation_scales_with_columns_and_row_groups() {
