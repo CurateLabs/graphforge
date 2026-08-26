@@ -344,6 +344,33 @@ impl EmbeddingRefreshScheduler {
         &mut self,
         lease: EmbeddingRefreshLease,
         completion: EmbeddingRefreshCompletion,
+        checkpoint: C,
+    ) -> Result<(), SearchArtifactError>
+    where
+        C: FnMut() -> Result<(), SearchArtifactError>,
+    {
+        let covered_source =
+            (completion == EmbeddingRefreshCompletion::Succeeded).then_some(lease.source);
+        self.complete_through(lease, completion, covered_source, checkpoint)
+    }
+
+    /// Release one exact active lease and acknowledge the newest source covered
+    /// by a successful refresh.
+    ///
+    /// A provider may publish a source newer than the source originally leased
+    /// because mutations can coalesce while provider work is in flight. Any
+    /// follow-up already covered by that exact published source is discarded;
+    /// genuinely newer work remains queued. Failed and cancelled leases do not
+    /// claim source coverage and retain their follow-up.
+    ///
+    /// # Errors
+    /// As [`Self::complete`], and rejects missing/regressed/conflicting success
+    /// coverage or coverage attached to a non-success completion.
+    pub fn complete_through<C>(
+        &mut self,
+        lease: EmbeddingRefreshLease,
+        completion: EmbeddingRefreshCompletion,
+        covered_source: Option<EmbeddingSourceState>,
         mut checkpoint: C,
     ) -> Result<(), SearchArtifactError>
     where
@@ -359,6 +386,34 @@ impl EmbeddingRefreshScheduler {
                 "does not match the active lease",
             ));
         }
+        let retained_follow_up = match (completion, covered_source) {
+            (EmbeddingRefreshCompletion::Succeeded, Some(covered)) => {
+                validate_source_progress(lease.source, covered)?;
+                active
+                    .follow_up
+                    .map(|follow_up| retain_follow_up_after_coverage(follow_up, covered))
+                    .transpose()?
+                    .flatten()
+            }
+            (EmbeddingRefreshCompletion::Succeeded, None) => {
+                return Err(invalid(
+                    "embedding scheduler completion coverage",
+                    "is required for success",
+                ));
+            }
+            (EmbeddingRefreshCompletion::Failed | EmbeddingRefreshCompletion::Cancelled, None) => {
+                active.follow_up
+            }
+            (
+                EmbeddingRefreshCompletion::Failed | EmbeddingRefreshCompletion::Cancelled,
+                Some(_),
+            ) => {
+                return Err(invalid(
+                    "embedding scheduler completion coverage",
+                    "is only valid for success",
+                ));
+            }
+        };
         let completed = match completion {
             EmbeddingRefreshCompletion::Succeeded => {
                 next_counter(self.succeeded, "embedding_scheduler_succeeded")?
@@ -370,8 +425,7 @@ impl EmbeddingRefreshScheduler {
                 next_counter(self.cancelled, "embedding_scheduler_cancelled")?
             }
         };
-        let active = self
-            .active
+        self.active
             .remove(&lease.compatibility_id)
             .expect("validated active lease must remain present");
         match completion {
@@ -380,7 +434,7 @@ impl EmbeddingRefreshScheduler {
             EmbeddingRefreshCompletion::Cancelled => self.cancelled = completed,
         }
         if self.state == EmbeddingSchedulerState::Running
-            && let Some(follow_up) = active.follow_up
+            && let Some(follow_up) = retained_follow_up
         {
             self.queued.insert(lease.compatibility_id, follow_up);
         }
@@ -460,6 +514,25 @@ impl EmbeddingRefreshScheduler {
             ));
         }
         Ok(())
+    }
+}
+
+fn retain_follow_up_after_coverage(
+    follow_up: QueuedRefresh,
+    covered: EmbeddingSourceState,
+) -> Result<Option<QueuedRefresh>, SearchArtifactError> {
+    match follow_up
+        .source
+        .graph_generation()
+        .cmp(&covered.graph_generation())
+    {
+        std::cmp::Ordering::Less => Ok(None),
+        std::cmp::Ordering::Equal if follow_up.source == covered => Ok(None),
+        std::cmp::Ordering::Equal => Err(invalid(
+            "embedding scheduler completion coverage",
+            "conflicts with queued source at the same graph generation",
+        )),
+        std::cmp::Ordering::Greater => Ok(Some(follow_up)),
     }
 }
 
@@ -685,6 +758,54 @@ mod tests {
             source(12, 3)
         );
         assert_eq!(scheduler.snapshot().unwrap().failed, 1);
+    }
+
+    #[test]
+    fn successful_refresh_discards_only_follow_up_covered_by_published_source() {
+        let mut covered = new_scheduler();
+        covered
+            .enqueue(id(1), source(10, 1), Duration::ZERO, || Ok(()))
+            .unwrap();
+        let lease = covered
+            .claim_ready(Duration::from_millis(10), || Ok(()))
+            .unwrap()
+            .unwrap();
+        covered
+            .enqueue(id(1), source(11, 2), Duration::from_millis(11), || Ok(()))
+            .unwrap();
+        covered
+            .complete_through(
+                lease,
+                EmbeddingRefreshCompletion::Succeeded,
+                Some(source(11, 2)),
+                || Ok(()),
+            )
+            .unwrap();
+        let snapshot = covered.snapshot().unwrap();
+        assert!(snapshot.queued.is_empty());
+        assert!(snapshot.in_flight.is_empty());
+        assert_eq!(snapshot.succeeded, 1);
+
+        let mut newer = new_scheduler();
+        newer
+            .enqueue(id(1), source(10, 1), Duration::ZERO, || Ok(()))
+            .unwrap();
+        let lease = newer
+            .claim_ready(Duration::from_millis(10), || Ok(()))
+            .unwrap()
+            .unwrap();
+        newer
+            .enqueue(id(1), source(12, 3), Duration::from_millis(12), || Ok(()))
+            .unwrap();
+        newer
+            .complete_through(
+                lease,
+                EmbeddingRefreshCompletion::Succeeded,
+                Some(source(11, 2)),
+                || Ok(()),
+            )
+            .unwrap();
+        assert_eq!(newer.snapshot().unwrap().queued[0].source, source(12, 3));
     }
 
     #[test]

@@ -212,12 +212,13 @@ impl GraphForge {
     }
 
     fn drive_ready_provider_refreshes(&self) {
+        self.drive_ready_provider_refreshes_at(self.embedding_refresh_epoch.elapsed());
+    }
+
+    pub(crate) fn drive_ready_provider_refreshes_at(&self, now: Duration) {
         loop {
             let lease = match self.embedding_refresh_scheduler.lock() {
-                Ok(mut scheduler) => scheduler
-                    .claim_ready(self.embedding_refresh_epoch.elapsed(), || Ok(()))
-                    .ok()
-                    .flatten(),
+                Ok(mut scheduler) => scheduler.claim_ready(now, || Ok(())).ok().flatten(),
                 Err(_) => None,
             };
             let Some(lease) = lease else {
@@ -233,15 +234,16 @@ impl GraphForge {
                         .find(|runtime| runtime.compatibility_id() == lease.compatibility_id())
                         .cloned()
                 });
-            let completion = match runtime {
+            let (completion, covered_source) = match runtime {
                 Some(runtime) => {
                     let result = runtime.refresh(self);
-                    ConfiguredProviderRefreshRuntime::completion(&result)
+                    let completion = ConfiguredProviderRefreshRuntime::completion(&result);
+                    (completion, result.ok())
                 }
-                None => graphforge_search::EmbeddingRefreshCompletion::Failed,
+                None => (graphforge_search::EmbeddingRefreshCompletion::Failed, None),
             };
             if let Ok(mut scheduler) = self.embedding_refresh_scheduler.lock() {
-                let _ = scheduler.complete(lease, completion, || Ok(()));
+                let _ = scheduler.complete_through(lease, completion, covered_source, || Ok(()));
             }
         }
     }
