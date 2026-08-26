@@ -23,6 +23,8 @@ sh_test(
         "//crates/graphforge-storage:src/lib.rs",
         "//crates/graphforge-storage:src/property_overlay.rs",
         "//crates/graphforge-storage:src/writer.rs",
+        "//crates/graphforge-storage:tests/property_overlay_scale.rs",
+        "//crates/graphforge-storage:BUILD.bazel",
         "//tests/contracts:property-overlay-v1.json",
     ],
 )
@@ -35,6 +37,8 @@ sh_test(
         "//crates/graphforge-storage:src/lib.rs",
         "//crates/graphforge-storage:src/property_overlay.rs",
         "//crates/graphforge-storage:src/writer.rs",
+        "//crates/graphforge-storage:tests/property_overlay_scale.rs",
+        "//crates/graphforge-storage:BUILD.bazel",
         "//tests/contracts:property-overlay-v1.json",
     ],
 )

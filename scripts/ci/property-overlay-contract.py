@@ -15,6 +15,7 @@ CONTRACT = ROOT / "tests/contracts/property-overlay-v1.json"
 OVERLAY = Path("crates/graphforge-storage/src/property_overlay.rs")
 LIB = Path("crates/graphforge-storage/src/lib.rs")
 WRITER = Path("crates/graphforge-storage/src/writer.rs")
+STORAGE_BUILD = Path("crates/graphforge-storage/BUILD.bazel")
 
 
 class ContractError(ValueError):
@@ -51,6 +52,22 @@ def block(text: str, start_pattern: str) -> str:
             if depth == 0:
                 return text[opening + 1 : index]
     raise ContractError(f"unterminated Rust block: {start_pattern}")
+
+
+def call_block(text: str, start_pattern: str) -> str:
+    match = re.search(start_pattern, text)
+    if match is None:
+        raise ContractError(f"missing Bazel call: {start_pattern}")
+    opening = text.rfind("(", match.start(), match.end())
+    depth = 0
+    for index in range(opening, len(text)):
+        if text[index] == "(":
+            depth += 1
+        elif text[index] == ")":
+            depth -= 1
+            if depth == 0:
+                return text[opening + 1 : index]
+    raise ContractError(f"unterminated Bazel call: {start_pattern}")
 
 
 def pub_use_members(text: str, module: str) -> set[str]:
@@ -105,11 +122,17 @@ def test_body(text: str, symbol: str) -> str:
 def validate(root: Path, contract_path: Path) -> None:
     contract = load(contract_path)
     if set(contract) != {
-        "contract", "issue", "authority", "format", "exports", "limits", "metrics", "evidence"
+        "contract", "issue", "platform", "authority", "format", "exports", "limits", "metrics", "evidence"
     }:
         raise ContractError("contract members differ from the frozen v1 schema")
     if contract["contract"] != "graphforge-property-overlay/1" or contract["issue"] != 940:
         raise ContractError("contract identity/version is not frozen v1 for #940")
+    expected_platform = {
+        "rss": "Unix getrusage RUSAGE_SELF ru_maxrss with macOS bytes and other Unix KiB normalization",
+        "unsupported": "production RSS scale evidence is not compiled outside Unix",
+    }
+    if contract["platform"] != expected_platform:
+        raise ContractError("production RSS platform scope differs from frozen v1")
     expected_authority = {
         "row_contract": "each fragment row is the complete property map for one changed UUID",
         "read_scope": "all authenticated generations and ordinals",
@@ -117,7 +140,7 @@ def validate(root: Path, contract_path: Path) -> None:
         "unchanged_uuid": "an older row remains live until superseded",
         "tombstone": "a newer tombstone suppresses the UUID",
         "write_window": "compose repeated SET and REMOVE operations once, then append only changed UUID snapshots",
-        "prior_fragments": "must not be decoded or rewritten to publish an ordinary write window",
+        "prior_fragments": "must not be fully decoded or rewritten; only snapshots for changed UUIDs may be decoded",
     }
     if contract["authority"] != expected_authority:
         raise ContractError("incremental all-generation authority differs from frozen v1")
@@ -125,6 +148,7 @@ def validate(root: Path, contract_path: Path) -> None:
     overlay = (root / OVERLAY).read_text(encoding="utf-8")
     lib = (root / LIB).read_text(encoding="utf-8")
     writer = (root / WRITER).read_text(encoding="utf-8")
+    storage_build = (root / STORAGE_BUILD).read_text(encoding="utf-8")
 
     expected_format = {
         "PROPERTY_OVERLAY_FORMAT": "full-snapshot-v1",
@@ -160,6 +184,17 @@ def validate(root: Path, contract_path: Path) -> None:
     for name in staged:
         if re.search(rf"pub fn {re.escape(name)}\s*\(", writer) is None:
             raise ContractError(f"authenticated staging implementation missing: {name}")
+    for helper in (
+        "stage_set_node_properties_from_inventory",
+        "stage_remove_node_properties_from_inventory",
+        "stage_set_edge_properties_from_inventory",
+        "stage_remove_edge_properties_from_inventory",
+    ):
+        body_text = block(writer, rf"fn\s+{helper}\s*\(")
+        if "read_authenticated_property_snapshots_for_inventory" not in body_text:
+            raise ContractError(f"{helper} no longer uses targeted authenticated reads")
+        if "visit_route" in body_text or "visit_authenticated_property_snapshots" in body_text:
+            raise ContractError(f"{helper} introduced a full prior-fragment decode")
 
     limits = contract["limits"]
     source_limits = rust_struct(overlay, "PropertyOverlayLimits")
@@ -205,6 +240,19 @@ def validate(root: Path, contract_path: Path) -> None:
         for marker in reference["markers"]:
             if marker not in body:
                 raise ContractError(f"evidence marker missing: {case}/{marker}")
+
+    scale_source = (root / "crates/graphforge-storage/tests/property_overlay_scale.rs").read_text(
+        encoding="utf-8"
+    )
+    if "#![cfg(unix)]" not in scale_source or "libc::RUSAGE_SELF" not in scale_source:
+        raise ContractError("production RSS evidence lost explicit Unix getrusage scope")
+
+    scale_target = call_block(storage_build, r"gf_rust_integration_test\(\s*name\s*=\s*\"property_overlay_scale\"")
+    if 'srcs = ["tests/property_overlay_scale.rs"]' not in scale_target:
+        raise ContractError("property-overlay production scale Bazel source mapping drifted")
+    suite = call_block(storage_build, r"test_suite\(\s*name\s*=\s*\"storage_integration_tests\"")
+    if '":property_overlay_scale"' not in suite:
+        raise ContractError("production scale target left storage integration suite")
 
 
 def main() -> int:

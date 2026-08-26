@@ -1,6 +1,10 @@
 {
   "contract": "graphforge-property-overlay/1",
   "issue": 940,
+  "platform": {
+    "rss": "Unix getrusage RUSAGE_SELF ru_maxrss with macOS bytes and other Unix KiB normalization",
+    "unsupported": "production RSS scale evidence is not compiled outside Unix"
+  },
   "authority": {
     "row_contract": "each fragment row is the complete property map for one changed UUID",
     "read_scope": "all authenticated generations and ordinals",
@@ -8,7 +12,7 @@
     "unchanged_uuid": "an older row remains live until superseded",
     "tombstone": "a newer tombstone suppresses the UUID",
     "write_window": "compose repeated SET and REMOVE operations once, then append only changed UUID snapshots",
-    "prior_fragments": "must not be decoded or rewritten to publish an ordinary write window"
+    "prior_fragments": "must not be fully decoded or rewritten; only snapshots for changed UUIDs may be decoded"
   },
   "format": {
     "PROPERTY_OVERLAY_FORMAT": "full-snapshot-v1",
@@ -96,6 +100,7 @@
     "unselected_validation":{"path":"crates/graphforge-storage/src/property_overlay.rs", "symbol":"targeted_reader_validates_unselected_rows_before_value_pruning", "markers":["read_authenticated_property_snapshots_for", "strictly sorted"]},
     "incremental_all_generation_authority":{"path":"crates/graphforge-storage/src/property_overlay.rs", "symbol":"bounded_external_merge_emits_exact_newest_snapshot_and_tombstone", "markers":["uuid_b", "keep", "tombstone"]},
     "bounded_scale":{"path":"crates/graphforge-storage/src/property_overlay.rs", "symbol":"targeted_reader_n_2n_4n_has_bounded_retention_and_exact_work", "markers":["peak_buffered_bytes", "physical_rows"]},
+    "production_bounded_scale":{"path":"crates/graphforge-storage/tests/property_overlay_scale.rs", "symbol":"production_property_overlay_n_2n_4n_is_disk_growing_and_memory_bounded", "markers":["property_fragment_allocated_bytes", "graph_tree_allocated_bytes", "prior_fragments_unchanged", "RSS_STARTUP_ALLOWANCE_BYTES", "MAX_READ_AMPLIFICATION", "spill_bound", "per_record_seeks"]},
     "authenticated_writeback":{"path":"crates/graphforge-storage/src/writer.rs", "symbol":"reopened_property_patch_seals_a_complete_authenticated_snapshot", "markers":["AuthenticatedPropertyInventory", "patched"]},
     "bounded_write_window":{"path":"crates/graphforge-storage/src/writer.rs", "symbol":"same_window_set_then_remove_seals_one_ordered_snapshot", "markers":["property_window_count", "prior_property_generation"]}
   }

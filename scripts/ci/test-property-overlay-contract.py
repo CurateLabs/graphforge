@@ -39,6 +39,8 @@ def main() -> None:
             "crates/graphforge-storage/src/property_overlay.rs",
             "crates/graphforge-storage/src/lib.rs",
             "crates/graphforge-storage/src/writer.rs",
+            "crates/graphforge-storage/tests/property_overlay_scale.rs",
+            "crates/graphforge-storage/BUILD.bazel",
         ):
             destination = root / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -63,6 +65,24 @@ def main() -> None:
         mutated["authority"]["read_scope"] = "newest generation only"
         write_contract(contract_path, mutated)
         expect_failure("all-generation authority", lambda: GATE.validate(root, contract_path))
+
+        mutated = copy.deepcopy(contract)
+        mutated["platform"]["unsupported"] = "return zero RSS"
+        write_contract(contract_path, mutated)
+        expect_failure("zero-evidence platform", lambda: GATE.validate(root, contract_path))
+        write_contract(contract_path, contract)
+
+        writer = root / "crates/graphforge-storage/src/writer.rs"
+        writer_source = writer.read_text(encoding="utf-8")
+        writer.write_text(
+            writer_source.replace(
+                "read_authenticated_property_snapshots_for_inventory",
+                "visit_authenticated_property_snapshots",
+            ),
+            encoding="utf-8",
+        )
+        expect_failure("full prior decode", lambda: GATE.validate(root, contract_path))
+        writer.write_text(writer_source, encoding="utf-8")
 
         mutated = copy.deepcopy(contract)
         del mutated["metrics"]["range_seeks"]
@@ -90,6 +110,14 @@ def main() -> None:
         evidence_source = evidence_path.read_text(encoding="utf-8")
         evidence_path.write_text(evidence_source.replace("fragment_identity_is_numeric_canonical_and_total", "fragment_identity_drifted", 1), encoding="utf-8")
         expect_failure("stale evidence symbol", lambda: GATE.validate(root, contract_path))
+
+        storage_build = root / "crates/graphforge-storage/BUILD.bazel"
+        build_source = storage_build.read_text(encoding="utf-8")
+        storage_build.write_text(
+            build_source.replace('\n        ":property_overlay_scale",', "", 1),
+            encoding="utf-8",
+        )
+        expect_failure("scale Bazel mapping", lambda: GATE.validate(root, contract_path))
 
     print("property overlay contract mutation tests passed")
 
