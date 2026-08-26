@@ -434,13 +434,18 @@ struct DenseNodeLayout {
     pages_considered: u64,
 }
 
+struct DenseNodeGroups {
+    group_rows: Vec<usize>,
+    group_pages: Vec<Vec<usize>>,
+    rows_seen: usize,
+    pages_considered: u64,
+}
+
 /// Prove the canonical dense node layout from row-group and page metadata.
 fn dense_node_layout(
     metadata: &parquet::file::metadata::ParquetMetaData,
     key_leaf: usize,
 ) -> Option<DenseNodeLayout> {
-    use parquet::basic::BoundaryOrder;
-    use parquet::file::page_index::column_index::ColumnIndexMetaData;
     use parquet::file::statistics::Statistics;
 
     let total_rows = usize::try_from(metadata.file_metadata().num_rows()).ok()?;
@@ -454,10 +459,6 @@ fn dense_node_layout(
         return None;
     }
 
-    let mut group_rows = Vec::with_capacity(row_groups.len());
-    let mut group_pages = Vec::with_capacity(row_groups.len());
-    let mut file_row_offset = 0usize;
-    let mut pages_considered = 0u64;
     let Statistics::Int64(first_stats) = row_groups.first()?.column(key_leaf).statistics()? else {
         return None;
     };
@@ -465,6 +466,38 @@ fn dense_node_layout(
     if first_id == 0 {
         return None;
     }
+
+    let groups = dense_node_groups(metadata, key_leaf, first_id)?;
+    if groups.rows_seen != total_rows {
+        return None;
+    }
+
+    Some(DenseNodeLayout {
+        first_id,
+        group_rows: groups.group_rows,
+        group_pages: groups.group_pages,
+        total_rows,
+        pages_considered: groups.pages_considered,
+    })
+}
+
+/// Validate every row group and page against the dense id sequence.
+fn dense_node_groups(
+    metadata: &parquet::file::metadata::ParquetMetaData,
+    key_leaf: usize,
+    first_id: u64,
+) -> Option<DenseNodeGroups> {
+    use parquet::basic::BoundaryOrder;
+    use parquet::file::page_index::column_index::ColumnIndexMetaData;
+    use parquet::file::statistics::Statistics;
+
+    let row_groups = metadata.row_groups();
+    let column_indexes = metadata.column_index()?;
+    let offset_indexes = metadata.offset_index()?;
+    let mut group_rows = Vec::with_capacity(row_groups.len());
+    let mut group_pages = Vec::with_capacity(row_groups.len());
+    let mut file_row_offset = 0usize;
+    let mut pages_considered = 0u64;
 
     for (group_idx, row_group) in row_groups.iter().enumerate() {
         let rows = usize::try_from(row_group.num_rows()).ok()?;
@@ -546,15 +579,10 @@ fn dense_node_layout(
         group_pages.push(first_rows);
         file_row_offset = file_row_offset.checked_add(rows)?;
     }
-    if file_row_offset != total_rows {
-        return None;
-    }
-
-    Some(DenseNodeLayout {
-        first_id,
+    Some(DenseNodeGroups {
         group_rows,
         group_pages,
-        total_rows,
+        rows_seen: file_row_offset,
         pages_considered,
     })
 }

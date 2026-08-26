@@ -697,18 +697,18 @@ fn is_reserved_authority(relative: &Path) -> bool {
         .collect::<Vec<_>>();
     matches!(
         components.as_slice(),
-        [".graphforge-rewrite-v1.json"]
-            | [".graphforge-rewrite.lock"]
-            | ["topology", "generation.json"]
-            | ["topology", "nodes.parquet"]
-            | ["topology", "surrogate_tails.parquet"]
-            | ["topology", "runtime_entity_label_encoding.json"]
-            | ["topology", "nodes", ..]
-            | ["topology", "edges", ..]
-            | ["topology", "uuid-membership", ..]
+        [".graphforge-rewrite-v1.json" | ".graphforge-rewrite.lock"]
+            | [
+                "topology",
+                "generation.json"
+                    | "nodes.parquet"
+                    | "surrogate_tails.parquet"
+                    | "runtime_entity_label_encoding.json",
+            ]
+            | ["topology", "nodes" | "edges" | "uuid-membership", ..]
     ) || (components.len() == 1
         && components[0].starts_with("..graphforge-rewrite-v1.json.")
-        && components[0].ends_with(".tmp"))
+        && Path::new(components[0]).extension() == Some(std::ffi::OsStr::new("tmp")))
 }
 
 /// Parquet row-group size for all staged files. Smaller than the 1 M-row

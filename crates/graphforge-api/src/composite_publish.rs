@@ -1122,17 +1122,17 @@ fn apply_graph_mutations(
         inventory,
         &delete_nodes,
     )?;
-    let deleted_nodes = delete_nodes
+    let node_uuid_removals = delete_nodes
         .iter()
         .copied()
         .map(Uuid::from_bytes)
         .collect::<Vec<_>>();
-    let deleted_edges = delete_edges
+    let edge_uuid_removals = delete_edges
         .iter()
         .copied()
         .map(Uuid::from_bytes)
         .collect::<Vec<_>>();
-    writer.commit_topology_aware_with_uuid_index(staged, deleted_nodes, deleted_edges)?;
+    writer.commit_topology_aware_with_uuid_index(staged, node_uuid_removals, edge_uuid_removals)?;
     Ok(())
 }
 
