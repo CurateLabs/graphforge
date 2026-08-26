@@ -251,6 +251,8 @@ pub struct AuthenticatedPropertyInventory {
     authority_read_calls: u64,
     #[cfg(test)]
     handle_counts: Arc<FragmentHandleCounts>,
+    #[cfg(test)]
+    late_decoder_failure_row_countdown: Arc<AtomicU64>,
 }
 
 /// One-time I/O performed while admitting and authenticating an immutable
@@ -356,6 +358,13 @@ impl AuthenticatedPropertyInventory {
     fn reset_peak_fragment_handles(&self) {
         assert_eq!(self.live_fragment_handles(), 0);
         self.handle_counts.peak.store(0, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_decoder_on_row(&self, row: u64) {
+        assert!(row > 0);
+        self.late_decoder_failure_row_countdown
+            .store(row, Ordering::SeqCst);
     }
 
     fn open_fragment(
@@ -496,6 +505,8 @@ impl AuthenticatedPropertyInventory {
                 authority_read_calls: 0,
                 #[cfg(test)]
                 handle_counts: Arc::new(FragmentHandleCounts::default()),
+                #[cfg(test)]
+                late_decoder_failure_row_countdown: Arc::new(AtomicU64::new(0)),
             });
         };
         let inventory = generation.graph_files_inventory()?.ok_or_else(|| {
@@ -648,6 +659,8 @@ impl AuthenticatedPropertyInventory {
             authority_read_calls: 0,
             #[cfg(test)]
             handle_counts,
+            #[cfg(test)]
+            late_decoder_failure_row_countdown: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -702,7 +715,6 @@ impl AuthenticatedPropertyInventory {
         let authentication_block_equivalents = Arc::new(AtomicU64::new(0));
         let authentication_read_calls = Arc::new(AtomicU64::new(0));
         let budget = Arc::new(LiveByteBudget::new(limits.max_buffered_bytes));
-        let failed = Arc::new(Mutex::new(None));
         let decoded = Arc::new(Mutex::new(DecodedRetention::default()));
         let inputs = fragments.iter().map(|fragment| {
             let reader = (|| {
@@ -737,14 +749,11 @@ impl AuthenticatedPropertyInventory {
                     .map_err(parquet_error)?;
                 Ok((reader, page_reservation_bytes, opened.handle))
             })();
-            let (reader, page_reservation_bytes, handle) = match reader {
+            let (reader, pending_error, page_reservation_bytes, handle) = match reader {
                 Ok((reader, page_reservation_bytes, handle)) => {
-                    (Some(reader), page_reservation_bytes, Some(handle))
+                    (Some(reader), None, page_reservation_bytes, Some(handle))
                 }
-                Err(error) => {
-                    *failed.lock().expect("property failure lock") = Some(error);
-                    (None, 0, None)
-                }
+                Err(error) => (None, Some(error), 0, None),
             };
             (
                 fragment.id,
@@ -754,21 +763,22 @@ impl AuthenticatedPropertyInventory {
                     reader,
                     current: Vec::new().into_iter(),
                     uuid_field: kind.uuid_field(),
-                    failed: Arc::clone(&failed),
+                    pending_error,
                     decoded: Arc::clone(&decoded),
                     budget: Arc::clone(&budget),
                     max_row_bytes: limits.max_row_bytes,
                     page_reservation_bytes,
                     batch_reservation_bytes: limits.max_buffered_bytes / 4,
                     _handle: handle,
+                    #[cfg(test)]
+                    late_failure_row_countdown: Arc::clone(
+                        &self.late_decoder_failure_row_countdown,
+                    ),
                 },
             )
         });
         let mut metrics =
             visit_newest_property_snapshots(inputs, scratch, limits, budget.as_ref(), emit)?;
-        if let Some(error) = failed.lock().expect("property failure lock").take() {
-            return Err(error);
-        }
         metrics.authentication_bytes = authentication_bytes.load(Ordering::Relaxed);
         metrics.authentication_block_equivalents =
             authentication_block_equivalents.load(Ordering::Relaxed);
@@ -1182,13 +1192,15 @@ struct PropertyParquetRows {
     reader: Option<ParquetRecordBatchReader>,
     current: std::vec::IntoIter<PropertySnapshotRow>,
     uuid_field: &'static str,
-    failed: Arc<Mutex<Option<GfError>>>,
+    pending_error: Option<GfError>,
     decoded: Arc<Mutex<DecodedRetention>>,
     budget: Arc<LiveByteBudget>,
     max_row_bytes: u64,
     page_reservation_bytes: u64,
     batch_reservation_bytes: u64,
     _handle: Option<FragmentHandleGuard>,
+    #[cfg(test)]
+    late_failure_row_countdown: Arc<AtomicU64>,
 }
 
 impl Drop for PropertyParquetRows {
@@ -1208,21 +1220,47 @@ struct DecodedRetention {
 }
 
 impl Iterator for PropertyParquetRows {
-    type Item = PropertySnapshotRow;
+    type Item = Result<PropertySnapshotRow, GfError>;
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "fallible decoder state, reservations, and release paths stay auditable together"
+    )]
     fn next(&mut self) -> Option<Self::Item> {
         loop {
+            if let Some(error) = self.pending_error.take() {
+                self.reader = None;
+                return Some(Err(error));
+            }
             if let Some(row) = self.current.next() {
+                #[cfg(test)]
+                if self
+                    .late_failure_row_countdown
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                        if remaining > 0 {
+                            Some(remaining - 1)
+                        } else {
+                            None
+                        }
+                    })
+                    .is_ok_and(|remaining| remaining == 1)
+                {
+                    self.budget.release(snapshot_charge(&row));
+                    self.reader = None;
+                    return Some(Err(corrupt(
+                        "injected late authenticated property decoder failure",
+                    )));
+                }
                 self.budget.release(snapshot_charge(&row));
                 let mut decoded = self.decoded.lock().expect("property retention lock");
                 decoded.current_rows = decoded.current_rows.saturating_sub(1);
                 decoded.current_bytes = decoded.current_bytes.saturating_sub(snapshot_charge(&row));
-                return Some(row);
+                return Some(Ok(row));
             }
             self.reader.as_ref()?;
             if let Err(error) = self.budget.charge(self.batch_reservation_bytes) {
-                *self.failed.lock().expect("property failure lock") = Some(error);
-                return None;
+                self.reader = None;
+                return Some(Err(error));
             }
             let Some(next_batch) = self.reader.as_mut().expect("reader checked").next() else {
                 self.budget.release(self.batch_reservation_bytes);
@@ -1232,24 +1270,25 @@ impl Iterator for PropertyParquetRows {
                 Ok(batch) => batch,
                 Err(error) => {
                     self.budget.release(self.batch_reservation_bytes);
-                    *self.failed.lock().expect("property failure lock") =
-                        Some(GfError::Storage(format!("property overlay Arrow: {error}")));
-                    return None;
+                    self.reader = None;
+                    return Some(Err(GfError::Storage(format!(
+                        "property overlay Arrow: {error}"
+                    ))));
                 }
             };
             let arrow_bytes = u64::try_from(batch.get_array_memory_size()).unwrap_or(u64::MAX);
             if arrow_bytes > self.batch_reservation_bytes {
                 self.budget.release(self.batch_reservation_bytes);
-                *self.failed.lock().expect("property failure lock") = Some(corrupt(
+                self.reader = None;
+                return Some(Err(corrupt(
                     "property Arrow batch exceeds pre-decode live-byte admission",
-                ));
-                return None;
+                )));
             }
             let decode_reservation = self.batch_reservation_bytes;
             if let Err(error) = self.budget.charge(decode_reservation) {
                 self.budget.release(self.batch_reservation_bytes);
-                *self.failed.lock().expect("property failure lock") = Some(error);
-                return None;
+                self.reader = None;
+                return Some(Err(error));
             }
             match decode_snapshot_batch(&batch, self.uuid_field) {
                 Ok(rows) => {
@@ -1259,9 +1298,8 @@ impl Iterator for PropertyParquetRows {
                     {
                         self.budget.release(decode_reservation);
                         self.budget.release(self.batch_reservation_bytes);
-                        *self.failed.lock().expect("property failure lock") =
-                            Some(corrupt("property snapshot row exceeds byte limit"));
-                        return None;
+                        self.reader = None;
+                        return Some(Err(corrupt("property snapshot row exceeds byte limit")));
                     }
                     let bytes = rows.iter().fold(0_u64, |total, row| {
                         total.saturating_add(snapshot_charge(row))
@@ -1269,8 +1307,8 @@ impl Iterator for PropertyParquetRows {
                     self.budget.release(decode_reservation);
                     if let Err(error) = self.budget.charge(bytes) {
                         self.budget.release(self.batch_reservation_bytes);
-                        *self.failed.lock().expect("property failure lock") = Some(error);
-                        return None;
+                        self.reader = None;
+                        return Some(Err(error));
                     }
                     self.budget.release(self.batch_reservation_bytes);
                     let mut decoded = self.decoded.lock().expect("property retention lock");
@@ -1285,8 +1323,8 @@ impl Iterator for PropertyParquetRows {
                 Err(error) => {
                     self.budget.release(decode_reservation);
                     self.budget.release(self.batch_reservation_bytes);
-                    *self.failed.lock().expect("property failure lock") = Some(error);
-                    return None;
+                    self.reader = None;
+                    return Some(Err(error));
                 }
             }
         }
@@ -2031,6 +2069,22 @@ impl SpoolRecord {
     }
 }
 
+pub(crate) trait IntoPropertySnapshotResult {
+    fn into_property_snapshot_result(self) -> Result<PropertySnapshotRow, GfError>;
+}
+
+impl IntoPropertySnapshotResult for PropertySnapshotRow {
+    fn into_property_snapshot_result(self) -> Result<PropertySnapshotRow, GfError> {
+        Ok(self)
+    }
+}
+
+impl IntoPropertySnapshotResult for Result<PropertySnapshotRow, GfError> {
+    fn into_property_snapshot_result(self) -> Result<PropertySnapshotRow, GfError> {
+        self
+    }
+}
+
 /// Bounded disk-backed newest-snapshot merge shared by property consumers.
 ///
 /// Input rows may arrive in any fragment order. Runs are externally sorted by
@@ -2050,7 +2104,8 @@ pub(crate) fn visit_newest_property_snapshots<I, R, F>(
 ) -> Result<PropertyOverlayMetrics, GfError>
 where
     I: IntoIterator<Item = (PropertyFragmentId, u64, u64, R)>,
-    R: IntoIterator<Item = PropertySnapshotRow>,
+    R: IntoIterator,
+    R::Item: IntoPropertySnapshotResult,
     F: FnMut(PropertySnapshotRow) -> Result<(), GfError>,
 {
     if limits.max_buffered_rows == 0
@@ -2077,6 +2132,7 @@ where
         metrics.read_calls = metrics.read_calls.saturating_add(read_calls);
         let mut prior = None;
         for row in rows {
+            let row = row.into_property_snapshot_result()?;
             if row.tombstone && !row.values.is_empty() {
                 return Err(corrupt("property tombstone carries live values"));
             }
@@ -2460,7 +2516,9 @@ mod tests {
         Int64Array, StringArray,
     };
     use arrow::datatypes::{DataType, Field, Schema};
+    use datafusion::prelude::{SessionConfig, SessionContext};
     use parquet::arrow::ArrowWriter;
+    use parquet::file::properties::WriterProperties;
     use std::collections::{BTreeSet, HashMap};
     use tempfile::TempDir;
 
@@ -3289,6 +3347,107 @@ mod tests {
             "{error}"
         );
         assert_eq!(inventory.live_fragment_handles(), 0);
+    }
+
+    #[tokio::test]
+    async fn late_authenticated_decoder_failure_emits_nothing_direct_or_through_limit() {
+        let dir = TempDir::new().unwrap();
+        let scratch = TempDir::new().unwrap();
+        let id = PropertyFragmentId {
+            generation: 1,
+            ordinal: 0,
+        };
+        let route_dir = dir.path().join("properties/Person");
+        fs::create_dir_all(&route_dir).unwrap();
+        let schema = Arc::new(Schema::new_with_metadata(
+            vec![
+                Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+                Field::new(PROPERTY_TOMBSTONE_FIELD, DataType::Boolean, false),
+                Field::new("value", DataType::Int64, true),
+            ],
+            HashMap::from([
+                (
+                    PROPERTY_OVERLAY_FORMAT_KEY.into(),
+                    PROPERTY_OVERLAY_FORMAT.into(),
+                ),
+                (PROPERTY_ROUTE_KEY.into(), "Person".into()),
+                (PROPERTY_KIND_KEY.into(), "node".into()),
+                (PROPERTY_GENERATION_KEY.into(), "1".into()),
+                (PROPERTY_ORDINAL_KEY.into(), "0".into()),
+            ]),
+        ));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(
+                    FixedSizeBinaryArray::try_from_iter([vec![1; 16], vec![2; 16]].into_iter())
+                        .unwrap(),
+                ),
+                Arc::new(BooleanArray::from(vec![false, false])),
+                Arc::new(Int64Array::from(vec![Some(1), Some(2)])),
+            ],
+        )
+        .unwrap();
+        let path = route_dir.join(id.file_name());
+        let properties = WriterProperties::builder()
+            .set_max_row_group_row_count(Some(1))
+            .build();
+        let mut writer =
+            ArrowWriter::try_new(File::create(&path).unwrap(), schema, Some(properties)).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        let bytes = fs::read(&path).unwrap();
+        let inventory = Arc::new(
+            AuthenticatedPropertyInventory::from_entries_at_root(
+                dir.path(),
+                vec![crate::GraphFileEntry {
+                    relative_path: format!("properties/Person/{}", id.file_name()),
+                    byte_length: u64::try_from(bytes.len()).unwrap(),
+                    content_sha256: digest_hex(&Sha256::digest(&bytes)),
+                    role: crate::GraphFileRole::Properties,
+                }],
+            )
+            .unwrap(),
+        );
+
+        inventory.fail_decoder_on_row(2);
+        let emitted = std::cell::Cell::new(0_usize);
+        let error = inventory
+            .visit_route(
+                PropertyRouteKind::Node,
+                "Person",
+                scratch.path(),
+                PropertyOverlayLimits::default(),
+                |_| {
+                    emitted.set(emitted.get() + 1);
+                    Ok(())
+                },
+            )
+            .unwrap_err();
+        assert_eq!(emitted.get(), 0);
+        assert!(error.to_string().contains("injected late authenticated"));
+
+        inventory.fail_decoder_on_row(2);
+        let config = SessionConfig::new().with_batch_size(1);
+        let context = SessionContext::new_with_config(config);
+        context
+            .register_table(
+                "props",
+                Arc::new(crate::catalog::PropertyTable::open_authenticated(
+                    dir.path(),
+                    "Person",
+                    Arc::clone(&inventory),
+                )),
+            )
+            .unwrap();
+        let error = context
+            .sql("SELECT value FROM props LIMIT 1")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("injected late authenticated"));
     }
 
     #[test]

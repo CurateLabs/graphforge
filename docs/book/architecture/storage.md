@@ -177,6 +177,12 @@ validate canonical fragment identity, schema/semantic metadata, strictly sorted
 unique non-null UUIDs, and tombstone invariants, then perform a bounded
 disk-backed newest-wins merge. SQL and direct APIs share that scanner. SQL emits
 bounded Arrow batches; `LIMIT` changes emission only after authority validation.
+Decoded rows enter fallible bounded scratch runs. The final emitting merge does
+not begin until every authenticated fragment reaches clean EOF and all page,
+Arrow, row-order, tombstone, and live-byte checks succeed. A late decoder or
+resource failure therefore discards the runs and returns a typed error with zero
+rows observed by direct callbacks or DataFusion—even for a projected `LIMIT 1`
+plan.
 Admission retains the stable root capability plus each fragment's authenticated
 path, native file identity, length, digest, and schema—not one OS handle per
 historical fragment. A scan opens fragments on demand without following links,
