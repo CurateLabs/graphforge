@@ -27,7 +27,11 @@ const IDENTITY_RECORD_BYTES: u64 = 32;
 const NODE_LOOKUP_RECORD_WIDTH: usize = 24;
 const IDENTITY_RECORD_WIDTH: usize = 32;
 const BULK_IO_BYTES: usize = 1 << 20;
-const INDEX_DIR: &str = ".graphforge-cache/uuid-membership";
+// Persistent authenticated authority for UUID-to-surrogate resolution. Keeping
+// it in the immutable topology generation is what lets writer reopen avoid
+// decoding historical topology shards; `.graphforge-cache` is only for data
+// that can be discarded and reconstructed without violating that contract.
+const INDEX_DIR: &str = "topology/uuid-membership";
 const MANIFEST: &str = "manifest.json";
 
 fn storage_err(error: impl std::fmt::Display) -> GfError {
@@ -1029,14 +1033,14 @@ fn collect_uuid_orphans_locked(
     project: &graphforge_filesystem::StableDirectory,
     maximum: usize,
 ) -> Result<UuidIndexOrphanGcWork, GfError> {
-    let cache = match project.open_child_directory(std::ffi::OsStr::new(".graphforge-cache")) {
+    let topology = match project.open_child_directory(std::ffi::OsStr::new("topology")) {
         Ok(value) => value,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(UuidIndexOrphanGcWork::default());
         }
         Err(error) => return Err(storage_err(error)),
     };
-    let index = match cache.open_child_directory(std::ffi::OsStr::new("uuid-membership")) {
+    let index = match topology.open_child_directory(std::ffi::OsStr::new("uuid-membership")) {
         Ok(value) => value,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(UuidIndexOrphanGcWork::default());
@@ -1083,7 +1087,7 @@ fn collect_uuid_orphans_locked(
         index.sync().map_err(storage_err)?;
     }
     index.revalidate_named().map_err(storage_err)?;
-    cache.revalidate_named().map_err(storage_err)?;
+    topology.revalidate_named().map_err(storage_err)?;
     project.revalidate_named().map_err(storage_err)?;
     Ok(work)
 }
@@ -1395,10 +1399,10 @@ fn reconcile_uuid_auxiliary(
         return Ok(outcome);
     }
     let project = graphforge_filesystem::StableDirectory::open(project_dir).map_err(storage_err)?;
-    let cache = project
-        .open_child_directory(std::ffi::OsStr::new(".graphforge-cache"))
+    let topology = project
+        .open_child_directory(std::ffi::OsStr::new("topology"))
         .map_err(storage_err)?;
-    let index = cache
+    let index = topology
         .open_child_directory(std::ffi::OsStr::new("uuid-membership"))
         .map_err(storage_err)?;
     let mut receipt_file = index
@@ -1412,7 +1416,7 @@ fn reconcile_uuid_auxiliary(
         .map_err(storage_err)?;
     let manifest_body = read_bounded(&mut manifest_file, MAX_MANIFEST_BYTES)?;
     project.revalidate_named().map_err(storage_err)?;
-    cache.revalidate_named().map_err(storage_err)?;
+    topology.revalidate_named().map_err(storage_err)?;
     index.revalidate_named().map_err(storage_err)?;
     if receipt.expected_generation != next.topology
         || receipt.manifest_sha256 != hex_sha256(&manifest_body)

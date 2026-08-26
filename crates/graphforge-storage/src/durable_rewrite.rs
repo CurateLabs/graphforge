@@ -907,7 +907,7 @@ pub(crate) fn commit_with_participant(
         return Err(storage("rewrite has multiple auxiliary participants"));
     }
     let auxiliary = participant_auxiliary.or(auxiliary);
-    let reserved = root.join(".graphforge-cache/uuid-membership");
+    let reserved = root.join("topology/uuid-membership");
     if has_participant
         && batch
             .staged_paths()
@@ -930,7 +930,7 @@ pub(crate) fn commit_with_participant(
         && auxiliary.as_ref().is_none_or(|receipt| {
             receipt.kind != "uuid-membership/v3"
                 || receipt.schema_version != 3
-                || receipt.path != ".graphforge-cache/uuid-membership/topology-receipt.json"
+                || receipt.path != "topology/uuid-membership/topology-receipt.json"
         })
     {
         return Err(storage(

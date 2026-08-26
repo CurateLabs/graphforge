@@ -490,7 +490,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_members(&dir, &[(1, vec![9])]);
         corrupt_node_surrogate_to_null(dir.path());
-        std::fs::remove_dir_all(dir.path().join(".graphforge-cache/uuid-membership")).unwrap();
+        std::fs::remove_dir_all(dir.path().join("topology/uuid-membership")).unwrap();
         assert!(matches!(
             project_label_members(dir.path(), 9, VectorLifecycleLimits::default(), || Ok(())),
             Err(SearchArtifactError::SourceSnapshot { .. })

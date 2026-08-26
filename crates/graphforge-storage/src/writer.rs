@@ -6634,11 +6634,8 @@ mod tests {
             crate::uuid_membership_index_is_fresh(dir.path()).unwrap(),
             "generation={} manifest={}",
             crate::read_topology_generation(dir.path()).unwrap(),
-            std::fs::read_to_string(
-                dir.path()
-                    .join(".graphforge-cache/uuid-membership/manifest.json")
-            )
-            .unwrap()
+            std::fs::read_to_string(dir.path().join("topology/uuid-membership/manifest.json"))
+                .unwrap()
         );
 
         let second = new_v7();
@@ -6649,11 +6646,8 @@ mod tests {
             crate::uuid_membership_index_is_fresh(dir.path()).unwrap(),
             "generation={} manifest={}",
             crate::read_topology_generation(dir.path()).unwrap(),
-            std::fs::read_to_string(
-                dir.path()
-                    .join(".graphforge-cache/uuid-membership/manifest.json")
-            )
-            .unwrap()
+            std::fs::read_to_string(dir.path().join("topology/uuid-membership/manifest.json"))
+                .unwrap()
         );
         let mut index = crate::UuidMembershipIndex::open(dir.path()).unwrap();
         assert_eq!(
@@ -8341,7 +8335,7 @@ mod tests {
         assert_eq!(committed_generation, 1);
         assert!(
             dir.path()
-                .join(".graphforge-cache/uuid-membership/topology-receipt.json")
+                .join("topology/uuid-membership/topology-receipt.json")
                 .is_file()
         );
 

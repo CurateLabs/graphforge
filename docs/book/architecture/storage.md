@@ -592,8 +592,9 @@ the same commit as every topology append. Writer reopen reads this bounded
 record rather than enumerating or decoding the accumulated topology fragments;
 legacy projects without it use the bounded tail migration path once.
 
-Bulk endpoint resolution uses the derived
-`.graphforge-cache/uuid-membership/` snapshot. Its manifest authenticates the
+Bulk endpoint resolution uses the persistent authenticated
+`topology/uuid-membership/` snapshot published with each immutable graph
+generation. Its manifest authenticates the
 topology generation, record counts, lengths, and SHA-256 digests. Nodes have a
 sorted fixed-width `UUID -> node_id` file; edges have a sorted UUID membership
 file. Builds use bounded external sort runs and bounded-fan-in merges. Probes

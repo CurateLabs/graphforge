@@ -537,8 +537,8 @@ mod tests {
 
     use graphforge_search::{
         DocumentEmbeddingOutput, DocumentEmbeddingRequest, ProviderBatchLimits, ProviderBatchShape,
-        ProviderCapabilities, ProviderCapability, ProviderExecutionLimits, ProviderRequestLimits,
-        StandardProviderExecutionRuntime,
+        ProviderCapabilities, ProviderCapability, ProviderCheckpoint, ProviderExecutionLimits,
+        ProviderExecutionRuntime, ProviderRequestLimits, StandardProviderExecutionRuntime,
     };
     use graphforge_storage::{TokenCountClass, TokenizerIdentity};
 
@@ -842,6 +842,23 @@ mod tests {
         calls: usize,
     }
 
+    #[derive(Default)]
+    struct DeterministicRuntime;
+
+    impl ProviderExecutionRuntime for DeterministicRuntime {
+        fn elapsed(&self) -> Duration {
+            Duration::ZERO
+        }
+
+        fn wait(
+            &mut self,
+            _duration: Duration,
+            checkpoint: &mut ProviderCheckpoint<'_>,
+        ) -> ProviderResult<()> {
+            checkpoint()
+        }
+    }
+
     impl DocumentEmbeddingProvider for FakeProvider<'_> {
         fn contract(&self) -> &ProviderModelContract {
             &self.contract
@@ -926,7 +943,7 @@ mod tests {
         request: &ProviderEmbeddingPlanRequest,
         provider: &mut FakeProvider<'_>,
     ) -> Result<EmbeddingSpaceInfo, ProviderEmbeddingExecutionError> {
-        let mut runtime = StandardProviderExecutionRuntime::new();
+        let mut runtime = DeterministicRuntime;
         let mut count_tokens =
             |_: &ProviderModelContract, text: &str| Ok(u64::try_from(text.len()).unwrap());
         let mut estimate_cost =
@@ -949,7 +966,7 @@ mod tests {
         request: &ProviderEmbeddingPlanRequest,
         provider: &mut FakeProvider<'_>,
     ) -> Result<EmbeddingRefreshInspection, ProviderEmbeddingExecutionError> {
-        let mut runtime = StandardProviderExecutionRuntime::new();
+        let mut runtime = DeterministicRuntime;
         let mut count_tokens =
             |_: &ProviderModelContract, text: &str| Ok(u64::try_from(text.len()).unwrap());
         let mut estimate_cost =
@@ -1026,12 +1043,15 @@ mod tests {
             calls: 0,
         };
         let error = publish(&another, &request, &mut twice).unwrap_err();
-        assert!(matches!(
-            error,
-            ProviderEmbeddingExecutionError::Publication(ProviderPublicationError::Artifact(
-                SearchArtifactError::ConcurrentMutation
-            ))
-        ));
+        assert!(
+            matches!(
+                error,
+                ProviderEmbeddingExecutionError::Publication(ProviderPublicationError::Artifact(
+                    SearchArtifactError::ConcurrentMutation
+                ))
+            ),
+            "unexpected publication error: {error:?}"
+        );
         assert_eq!(twice.calls, 2);
         assert!(another.embedding_spaces().unwrap().is_empty());
     }

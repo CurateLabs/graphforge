@@ -2738,7 +2738,9 @@ mod tests {
             .collect::<Vec<_>>()
             .join(", ");
         let result = graph
-            .execute(&format!("MATCH (n:Geometry) RETURN {projection}"))
+            .execute(&format!(
+                "MATCH (n:Geometry) RETURN {projection} ORDER BY n.node_uuid"
+            ))
             .unwrap();
         let mut ipc = Vec::new();
         write_result(&result, &mut ipc).unwrap();
