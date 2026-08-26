@@ -565,8 +565,19 @@ fn hex(digest: [u8; 32]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AdoptOntologyRequest, CheckpointRequest, ClearOntologyRequest, WriteContext};
-    use graphforge_core::OntologyMode;
+    use crate::{
+        AdoptOntologyRequest, CheckpointRequest, ClearOntologyRequest, ModuleAdoptionRequest,
+        OntologyAuthorityExpectation, PropValue, WriteContext,
+    };
+    use graphforge_core::{
+        OntologyMode, SpatialCoordinates, SpatialCrs, SpatialGeometryType, SpatialType,
+        SpatialValue, TemporalValue,
+    };
+    use graphforge_ontology::{
+        EntityTypeDef, OntologyDoc, PropertyDef, PropertyValueType, RelationTypeDef, SemanticFlags,
+        SpatialCrs as OntologySpatialCrs, SpatialGeometryType as OntologySpatialGeometryType,
+        SpatialType as OntologySpatialType,
+    };
 
     const ONTOLOGY: &str = "ontology_id: portable-authority\nversion: \"1\"\nentity_types:\n  - name: Person\n    abstract: false\nrelation_types: []\n";
 
@@ -757,6 +768,456 @@ mod tests {
                 .resolved_generation
                 .generation_uuid(),
             imported.generation_uuid
+        );
+    }
+
+    #[test]
+    fn ordinary_graph_lifecycle_preserves_properties_metadata_and_fingerprints() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        let mut graph = GraphForge::new(source.to_str()).unwrap();
+        let authority = graph.ontology_authority_state().unwrap();
+        let candidate = graph
+            .create_ontology_module(
+                OntologyDoc {
+                    ontology_id: "urn:graphforge:portable-lifecycle".into(),
+                    version: "1".into(),
+                    entity_types: vec![EntityTypeDef {
+                        name: "Person".into(),
+                        r#abstract: false,
+                        parent: None,
+                    }],
+                    relation_types: vec![RelationTypeDef {
+                        name: "KNOWS".into(),
+                        src: "Person".into(),
+                        dst: "Person".into(),
+                        inverse: None,
+                        semantic: SemanticFlags::default(),
+                    }],
+                    properties: [
+                        ("Person", "name", PropertyValueType::Utf8),
+                        ("Person", "active", PropertyValueType::Bool),
+                        ("Person", "score", PropertyValueType::Int64),
+                        ("Person", "ratio", PropertyValueType::Float64),
+                        ("Person", "duration", PropertyValueType::Duration),
+                        ("Person", "observed_at", PropertyValueType::DateTime),
+                        (
+                            "Person",
+                            "location",
+                            PropertyValueType::Spatial(OntologySpatialType {
+                                geometry: OntologySpatialGeometryType::Point,
+                                crs: OntologySpatialCrs::Epsg4326,
+                            }),
+                        ),
+                        ("KNOWS", "obsolete", PropertyValueType::Bool),
+                        ("Person", "obsolete", PropertyValueType::Utf8),
+                        ("KNOWS", "weight", PropertyValueType::Float64),
+                        (
+                            "KNOWS",
+                            "location",
+                            PropertyValueType::Spatial(OntologySpatialType {
+                                geometry: OntologySpatialGeometryType::Point,
+                                crs: OntologySpatialCrs::Epsg4326,
+                            }),
+                        ),
+                    ]
+                    .into_iter()
+                    .map(|(owner, name, value_type)| PropertyDef {
+                        owner: owner.into(),
+                        name: name.into(),
+                        value_type,
+                        nullable: true,
+                        multivalued: false,
+                        default_json: None,
+                    })
+                    .collect(),
+                    constraints: Vec::new(),
+                    migrations: Vec::new(),
+                },
+                Vec::new(),
+                None,
+            )
+            .unwrap();
+        let adopted = graph
+            .adopt_ontology_module(
+                &ModuleAdoptionRequest {
+                    authority: OntologyAuthorityExpectation {
+                        context: write_context(9_400),
+                        expected_project_generation_uuid: authority.project_generation_uuid,
+                        expected_composition_fingerprint: authority.composition_fingerprint,
+                    },
+                    candidate,
+                },
+                None,
+            )
+            .unwrap();
+        let point = PropValue::Spatial(SpatialValue {
+            spatial_type: SpatialType {
+                geometry: SpatialGeometryType::Point,
+                crs: SpatialCrs::Epsg4326,
+            },
+            coordinates: SpatialCoordinates::Point([-104.9903, 39.7392]),
+            extension_name: None,
+            extension_metadata: None,
+        });
+        graph
+            .add_node(
+                "Person",
+                &std::collections::HashMap::from([
+                    ("name".into(), PropValue::Str("Ada".into())),
+                    ("active".into(), PropValue::Bool(true)),
+                    ("score".into(), PropValue::Int(7)),
+                    ("ratio".into(), PropValue::Float(1.5)),
+                    (
+                        "duration".into(),
+                        PropValue::Temporal(TemporalValue::Duration {
+                            months: -2,
+                            days: 3,
+                            seconds: -4,
+                            nanos: 500_000_001,
+                        }),
+                    ),
+                    (
+                        "observed_at".into(),
+                        PropValue::Temporal(TemporalValue::UtcDateTime {
+                            epoch_micros: 1_700_000_000_123_456,
+                        }),
+                    ),
+                    ("location".into(), point.clone()),
+                    ("obsolete".into(), PropValue::Str("remove-me".into())),
+                ]),
+            )
+            .unwrap();
+        graph
+            .add_node(
+                "Person",
+                &std::collections::HashMap::from([("name".into(), PropValue::Str("Bob".into()))]),
+            )
+            .unwrap();
+        let edge = graph
+            .execute_with_params(
+                "MATCH (a:Person {name:'Ada'}), (b:Person {name:'Bob'}) \
+                 CREATE (a)-[r:KNOWS {weight:$weight, location:$location, obsolete:$obsolete}]->(b) \
+                 RETURN r.edge_uuid AS edge_uuid",
+                &std::collections::HashMap::from([
+                    ("weight".into(), crate::IrLiteral::Float(2.5)),
+                    (
+                        "location".into(),
+                        crate::construction::prop_literal(&point).unwrap(),
+                    ),
+                    ("obsolete".into(), crate::IrLiteral::Bool(true)),
+                ]),
+            )
+            .unwrap();
+        let edge_uuid = Uuid::from_slice(
+            edge.batches[0]
+                .column_by_name("edge_uuid")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
+                .unwrap()
+                .value(0),
+        )
+        .unwrap();
+        assert_eq!(
+            graph
+                .execute("MATCH ()-[r:KNOWS]->() RETURN r")
+                .unwrap()
+                .stats
+                .rows_produced,
+            1
+        );
+        graph
+            .execute("MATCH (a:Person {name:'Ada'}) SET a.score = 8 REMOVE a.obsolete")
+            .unwrap();
+        assert_eq!(
+            graph
+                .execute("MATCH ()-[r:KNOWS]->() RETURN r")
+                .unwrap()
+                .stats
+                .rows_produced,
+            1
+        );
+        let generation = graphforge_storage::resolve_project_generation(&source).unwrap();
+        let inventory =
+            graphforge_storage::AuthenticatedPropertyInventory::from_resolved_generation(
+                &generation,
+            )
+            .unwrap();
+        let edge_route = inventory
+            .routes(graphforge_storage::PropertyRouteKind::Edge)
+            .find(|route| {
+                inventory
+                    .route_schema(graphforge_storage::PropertyRouteKind::Edge, route)
+                    .is_some_and(|schema| schema.field_with_name("weight").is_ok())
+            })
+            .unwrap()
+            .to_owned();
+        let read_edge_properties = || {
+            graphforge_storage::read_authenticated_property_snapshots_for(
+                &graph.dir,
+                graphforge_storage::PropertyRouteKind::Edge,
+                &edge_route,
+                &std::collections::BTreeSet::from([edge_uuid.into_bytes()]),
+            )
+            .unwrap()
+            .0
+            .remove(&edge_uuid.into_bytes())
+            .unwrap()
+            .values
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        let mut staged = graphforge_storage::RewriteBatch::new();
+        assert_eq!(
+            graphforge_storage::stage_set_edge_properties_authenticated(
+                &mut staged,
+                &graph.dir,
+                &inventory,
+                &edge_route,
+                &std::collections::HashMap::from([(
+                    edge_uuid.into_bytes(),
+                    std::collections::HashMap::from([(
+                        "weight".into(),
+                        crate::IrLiteral::Float(3.5),
+                    )]),
+                )]),
+            )
+            .unwrap(),
+            1
+        );
+        graphforge_storage::commit_topology_aware(staged, &graph.dir).unwrap();
+        let set_properties = read_edge_properties();
+        assert_eq!(
+            set_properties.get("weight"),
+            Some(&crate::IrLiteral::Float(3.5))
+        );
+        assert_eq!(
+            set_properties.get("obsolete"),
+            Some(&crate::IrLiteral::Bool(true))
+        );
+        graph
+            .publish_graph_mutation(&graphforge_exec::MutationReceipt::default())
+            .unwrap();
+        assert_eq!(
+            graph
+                .execute("MATCH ()-[r:KNOWS]->() RETURN r")
+                .unwrap()
+                .stats
+                .rows_produced,
+            1
+        );
+        let generation = graphforge_storage::resolve_project_generation(&source).unwrap();
+        let inventory =
+            graphforge_storage::AuthenticatedPropertyInventory::from_resolved_generation(
+                &generation,
+            )
+            .unwrap();
+        let mut staged = graphforge_storage::RewriteBatch::new();
+        assert_eq!(
+            graphforge_storage::stage_remove_edge_properties_authenticated(
+                &mut staged,
+                &graph.dir,
+                &inventory,
+                &edge_route,
+                &std::collections::HashMap::from([(
+                    edge_uuid.into_bytes(),
+                    std::collections::HashSet::from(["obsolete".into()]),
+                )]),
+            )
+            .unwrap(),
+            1
+        );
+        graphforge_storage::commit_topology_aware(staged, &graph.dir).unwrap();
+        let removed_properties = read_edge_properties();
+        assert_eq!(
+            removed_properties.get("weight"),
+            Some(&crate::IrLiteral::Float(3.5))
+        );
+        assert!(!removed_properties.contains_key("obsolete"));
+        graph
+            .publish_graph_mutation(&graphforge_exec::MutationReceipt::default())
+            .unwrap();
+        assert_eq!(
+            graph
+                .execute("MATCH ()-[r:KNOWS]->() RETURN r")
+                .unwrap()
+                .stats
+                .rows_produced,
+            1
+        );
+        drop(graph);
+
+        let reopened = GraphForge::new(source.to_str()).unwrap();
+        let query = "MATCH (a:Person)-[r:KNOWS]->(b:Person) \
+                     RETURN a.name AS name, a.active AS active, a.score AS score, \
+                     a.ratio AS ratio, a.duration AS duration, a.observed_at AS observed_at, \
+                     a.location AS node_location, a.obsolete AS removed_node, \
+                     r.weight AS weight, r.location AS edge_location, \
+                     r.obsolete AS removed_edge, b.name AS target";
+        let before = reopened.execute(query).unwrap();
+        assert_eq!(before.stats.rows_produced, 1);
+        let source_inventory =
+            graphforge_storage::AuthenticatedPropertyInventory::from_resolved_generation(
+                &reopened.resolved_generation,
+            )
+            .unwrap();
+        let route_schemas = |inventory: &graphforge_storage::AuthenticatedPropertyInventory,
+                             kind| {
+            inventory
+                .routes(kind)
+                .map(|route| {
+                    (
+                        route.to_owned(),
+                        inventory.route_schema(kind, route).unwrap(),
+                    )
+                })
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        let source_node_schemas = route_schemas(
+            &source_inventory,
+            graphforge_storage::PropertyRouteKind::Node,
+        );
+        let source_edge_schemas = route_schemas(
+            &source_inventory,
+            graphforge_storage::PropertyRouteKind::Edge,
+        );
+        assert!(!source_node_schemas.is_empty());
+        assert!(!source_edge_schemas.is_empty());
+        let semantic_fingerprints = source_node_schemas
+            .values()
+            .chain(source_edge_schemas.values())
+            .filter_map(|schema| {
+                schema
+                    .metadata()
+                    .get(graphforge_storage::SEMANTIC_COMPOSITION_METADATA_KEY)
+            })
+            .collect::<Vec<_>>();
+        assert!(!semantic_fingerprints.is_empty());
+        assert!(
+            semantic_fingerprints
+                .iter()
+                .all(|fingerprint| *fingerprint == &adopted.composition_fingerprint)
+        );
+        for field_name in ["node_location", "edge_location"] {
+            let field = before.schema.field_with_name(field_name).unwrap();
+            assert_eq!(field.metadata()["ARROW:extension:name"], "geoarrow.point");
+            assert_eq!(
+                field.metadata()["ARROW:extension:metadata"],
+                "{\"crs\":\"EPSG:4326\",\"crs_type\":\"authority_code\"}"
+            );
+        }
+        assert!(
+            before.batches[0]
+                .column_by_name("removed_node")
+                .unwrap()
+                .is_null(0)
+        );
+        assert!(
+            before.batches[0]
+                .column_by_name("removed_edge")
+                .unwrap()
+                .is_null(0)
+        );
+        let logical_fingerprint = |batches: &[arrow::record_batch::RecordBatch]| {
+            let logical = batches
+                .iter()
+                .map(|batch| {
+                    arrow::record_batch::RecordBatch::try_new(
+                        std::sync::Arc::new(arrow::datatypes::Schema::new(
+                            batch.schema().fields().clone(),
+                        )),
+                        batch.columns().to_vec(),
+                    )
+                    .unwrap()
+                })
+                .collect::<Vec<_>>();
+            crate::canonical_arrow::result_fingerprint(&logical).unwrap()
+        };
+        let before_fingerprint = logical_fingerprint(&before.batches);
+        let limits = graphforge_storage::PortableV2Limits::default();
+        let graph_fingerprint =
+            graphforge_storage::portable_v2_graph_data_fingerprint(&reopened.dir, limits).unwrap();
+        let package = root.path().join("lifecycle.gfpb");
+        let exported = reopened
+            .export_portable_v2(
+                &PortableV2ExportRequest {
+                    selection: PortableSelection::Current,
+                    output_path: package.clone(),
+                    representation: graphforge_storage::PortableV2Output::Bundle,
+                    profile: graphforge_storage::PortableV2SelectionProfile::Complete,
+                    subset: None,
+                    limits,
+                },
+                None,
+                |_| {},
+            )
+            .unwrap();
+        let verified = verify_portable_v2(
+            &PortableVerifyRequest {
+                input: package.clone(),
+                mode: graphforge_storage::PortableV2Mode::Full,
+                limits,
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(verified.package_digest, exported.package_digest);
+        drop(reopened);
+
+        let imported_path = root.path().join("clean-import");
+        assert!(!imported_path.exists());
+        let import = GraphForge::import_portable_v2(
+            &imported_path,
+            &PortableV2ImportRequest {
+                input: package,
+                operation_id: OperationId(Uuid::from_u128(9_401)),
+                limits,
+            },
+            None,
+        );
+        if let Err(error) = import {
+            panic!(
+                "portable import failed: {error}; direct reopen: {:?}",
+                GraphForge::new(imported_path.to_str()).err()
+            );
+        }
+        let imported = GraphForge::new(imported_path.to_str()).unwrap();
+        let after = imported.execute(query).unwrap();
+        assert_eq!(after.schema.fields(), before.schema.fields());
+        let stable_schema_metadata = |schema: &arrow::datatypes::Schema| {
+            let mut metadata = schema.metadata().clone();
+            metadata.remove("graphforge.query_id");
+            metadata
+        };
+        assert_eq!(
+            stable_schema_metadata(&after.schema),
+            stable_schema_metadata(&before.schema)
+        );
+        assert_eq!(logical_fingerprint(&after.batches), before_fingerprint);
+        assert_eq!(
+            graphforge_storage::portable_v2_graph_data_fingerprint(&imported.dir, limits).unwrap(),
+            graph_fingerprint
+        );
+        let imported_inventory =
+            graphforge_storage::AuthenticatedPropertyInventory::from_resolved_generation(
+                &imported.resolved_generation,
+            )
+            .unwrap();
+        assert_eq!(
+            route_schemas(
+                &imported_inventory,
+                graphforge_storage::PropertyRouteKind::Node
+            ),
+            source_node_schemas
+        );
+        assert_eq!(
+            route_schemas(
+                &imported_inventory,
+                graphforge_storage::PropertyRouteKind::Edge
+            ),
+            source_edge_schemas
         );
     }
 
