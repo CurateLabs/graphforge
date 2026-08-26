@@ -65,7 +65,9 @@ def main() -> None:
         mutated = copy.deepcopy(contract)
         mutated["metrics"]["authentication_read_calls"]["unit"] = "64 KiB block-equivalents"
         write_contract(contract_path, mutated)
-        expect_failure("authentication call/equivalent conflation", lambda: GATE.validate(root, contract_path))
+        expect_failure(
+            "authentication call/equivalent conflation", lambda: GATE.validate(root, contract_path)
+        )
 
         mutated = copy.deepcopy(contract)
         mutated["authority"]["read_scope"] = "newest generation only"
@@ -98,23 +100,36 @@ def main() -> None:
         write_contract(contract_path, contract)
         overlay = root / "crates/graphforge-storage/src/property_overlay.rs"
         original_overlay = overlay.read_text(encoding="utf-8")
-        overlay.write_text(original_overlay.replace("pub physical_rows: u64", "pub decoded_rows: u64", 1), encoding="utf-8")
+        overlay.write_text(
+            original_overlay.replace("pub physical_rows: u64", "pub decoded_rows: u64", 1),
+            encoding="utf-8",
+        )
         expect_failure("Rust metric drift", lambda: GATE.validate(root, contract_path))
         overlay.write_text(original_overlay, encoding="utf-8")
 
         library = root / "crates/graphforge-storage/src/lib.rs"
         original_library = library.read_text(encoding="utf-8")
-        library.write_text(original_library.replace("PropertyOverlayMetrics, ", "", 1), encoding="utf-8")
+        library.write_text(
+            original_library.replace("PropertyOverlayMetrics, ", "", 1), encoding="utf-8"
+        )
         expect_failure("Rust export drift", lambda: GATE.validate(root, contract_path))
         library.write_text(original_library, encoding="utf-8")
 
-        overlay.write_text(original_overlay.replace("max_buffered_rows: 4096", "max_buffered_rows: 4097", 1), encoding="utf-8")
+        overlay.write_text(
+            original_overlay.replace("max_buffered_rows: 4096", "max_buffered_rows: 4097", 1),
+            encoding="utf-8",
+        )
         expect_failure("Rust limit drift", lambda: GATE.validate(root, contract_path))
         overlay.write_text(original_overlay, encoding="utf-8")
 
         evidence_path = root / contract["evidence"]["canonical_fragment_identity"]["path"]
         evidence_source = evidence_path.read_text(encoding="utf-8")
-        evidence_path.write_text(evidence_source.replace("fragment_identity_is_numeric_canonical_and_total", "fragment_identity_drifted", 1), encoding="utf-8")
+        evidence_path.write_text(
+            evidence_source.replace(
+                "fragment_identity_is_numeric_canonical_and_total", "fragment_identity_drifted", 1
+            ),
+            encoding="utf-8",
+        )
         expect_failure("stale evidence symbol", lambda: GATE.validate(root, contract_path))
         evidence_path.write_text(evidence_source, encoding="utf-8")
 

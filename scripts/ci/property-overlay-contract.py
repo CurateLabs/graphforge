@@ -137,7 +137,15 @@ def normalized_source(text: str) -> str:
 def validate(root: Path, contract_path: Path) -> None:
     contract = load(contract_path)
     if set(contract) != {
-        "contract", "issue", "platform", "authority", "format", "exports", "limits", "metrics", "evidence"
+        "contract",
+        "issue",
+        "platform",
+        "authority",
+        "format",
+        "exports",
+        "limits",
+        "metrics",
+        "evidence",
     }:
         raise ContractError("contract members differ from the frozen v1 schema")
     if contract["contract"] != "graphforge-property-overlay/1" or contract["issue"] != 940:
@@ -276,9 +284,13 @@ def validate(root: Path, contract_path: Path) -> None:
             if marker not in body:
                 raise ContractError(f"evidence marker missing: {case}/{marker}")
         if case == "production_bounded_scale":
-            digest = hashlib.sha256(normalized_source(path.read_text(encoding="utf-8")).encode()).hexdigest()
+            digest = hashlib.sha256(
+                normalized_source(path.read_text(encoding="utf-8")).encode()
+            ).hexdigest()
             if digest != reference["source_sha256"]:
-                raise ContractError("transitive production scale evidence differs from frozen ledger")
+                raise ContractError(
+                    "transitive production scale evidence differs from frozen ledger"
+                )
 
     scale_source = (root / "crates/graphforge-storage/tests/property_overlay_scale.rs").read_text(
         encoding="utf-8"
@@ -286,7 +298,9 @@ def validate(root: Path, contract_path: Path) -> None:
     if "#![cfg(unix)]" not in scale_source or "libc::RUSAGE_SELF" not in scale_source:
         raise ContractError("production RSS evidence lost explicit Unix getrusage scope")
     storage_rules = re.sub(r"#[^\n]*", "", storage_build)
-    scale_target = call_block(storage_rules, r"gf_rust_integration_test\(\s*name\s*=\s*\"property_overlay_scale\"")
+    scale_target = call_block(
+        storage_rules, r"gf_rust_integration_test\(\s*name\s*=\s*\"property_overlay_scale\""
+    )
     if bazel_list(scale_target, "srcs") != {"tests/property_overlay_scale.rs"}:
         raise ContractError("property-overlay production scale Bazel source mapping drifted")
     suite = call_block(storage_rules, r"test_suite\(\s*name\s*=\s*\"storage_integration_tests\"")
