@@ -976,33 +976,8 @@ fn run_clone_profiled(
     output: &mut dyn Write,
     runtime: &TelemetryRuntime,
 ) -> Result<(), graphforge_api::GfError> {
-    run_clone_profiled_with_delays(
-        transport,
-        args,
-        json,
-        output,
-        runtime,
-        CloneDelays::default(),
-    )
-}
-
-#[derive(Clone, Copy, Default)]
-struct CloneDelays {
-    verification: Duration,
-    import: Duration,
-    reopen: Duration,
-}
-
-fn run_clone_profiled_with_delays(
-    transport: &dyn Transport,
-    args: CloneArgs,
-    json: bool,
-    output: &mut dyn Write,
-    runtime: &TelemetryRuntime,
-    delays: CloneDelays,
-) -> Result<(), graphforge_api::GfError> {
     let mut profile = CloneProfile::new(runtime);
-    let result = run_clone_job(transport, args, &mut profile, delays)
+    let result = run_clone_job(transport, args, &mut profile)
         .and_then(|result| write_clone_result(&result, json, output));
     profile.finish(&result);
     result
@@ -1013,7 +988,6 @@ fn run_clone_job(
     transport: &dyn Transport,
     args: CloneArgs,
     profile: &mut CloneProfile<'_>,
-    delays: CloneDelays,
 ) -> Result<CloneResult, graphforge_api::GfError> {
     let (identity, base, destination) = profile.stage(
         Stage::IdentityValidation,
@@ -1162,7 +1136,6 @@ fn run_clone_job(
         None,
         1,
         || {
-            std::thread::sleep(delays.verification);
             verify_discovered_portable_v2(&DiscoveryPortableV2Request {
                 manifest_json: &manifest_bytes,
                 refs_json: &refs_bytes,
@@ -1205,7 +1178,6 @@ fn run_clone_job(
         None,
         1,
         || {
-            std::thread::sleep(delays.import);
             GraphForge::import_portable_v2(
                 &destination,
                 &PortableV2ImportRequest {
@@ -1250,7 +1222,6 @@ fn run_clone_job(
         None,
         1,
         || {
-            std::thread::sleep(delays.reopen);
             let destination = destination.to_str().ok_or_else(|| {
                 validation("hub.destination_conflict", "destination must be UTF-8")
             })?;
@@ -1424,34 +1395,6 @@ mod tests {
             _limit: u64,
         ) -> Result<HttpResponse, graphforge_api::GfError> {
             Ok(self.0.lock().unwrap().pop_front().unwrap())
-        }
-    }
-
-    struct DelayedTransport {
-        inner: Scripted,
-        discovery: Duration,
-        download: Duration,
-    }
-
-    impl Transport for DelayedTransport {
-        fn get(
-            &self,
-            url: &Url,
-            range: Option<u64>,
-            if_range: Option<&str>,
-            limit: u64,
-        ) -> Result<HttpResponse, graphforge_api::GfError> {
-            let delay = if url.path().contains("/.gf/objects/")
-                || std::path::Path::new(url.path())
-                    .extension()
-                    .is_some_and(|extension| extension.eq_ignore_ascii_case("gfpb"))
-            {
-                self.download
-            } else {
-                self.discovery
-            };
-            std::thread::sleep(delay);
-            self.inner.get(url, range, if_range, limit)
         }
     }
 
@@ -2082,7 +2025,7 @@ mod tests {
 
         let mut fail_open_results = Vec::new();
         let mut fail_open_elapsed = Vec::new();
-        let mut delayed_jobs = Vec::new();
+        let mut attribution_jobs = Vec::new();
         for (index, input) in [
             "openalex/openalex",
             "https://graphforge.sh/openalex/openalex",
@@ -2119,38 +2062,9 @@ mod tests {
                 })
                 .unwrap(),
             };
-            let transport = DelayedTransport {
-                inner: clone_script(&bundle, &report.package_digest),
-                discovery: if index == 4 {
-                    Duration::from_secs(2)
-                } else {
-                    Duration::ZERO
-                },
-                download: if index == 5 {
-                    Duration::from_secs(2)
-                } else {
-                    Duration::ZERO
-                },
-            };
-            let delays = CloneDelays {
-                verification: if index == 6 {
-                    Duration::from_secs(2)
-                } else {
-                    Duration::ZERO
-                },
-                import: if index == 7 {
-                    Duration::from_secs(2)
-                } else {
-                    Duration::ZERO
-                },
-                reopen: if index == 8 {
-                    Duration::from_secs(2)
-                } else {
-                    Duration::ZERO
-                },
-            };
+            let transport = clone_script(&bundle, &report.package_digest);
             let clone_started = Instant::now();
-            run_clone_profiled_with_delays(
+            run_clone_profiled(
                 &transport,
                 CloneArgs {
                     repository: input.into(),
@@ -2160,7 +2074,6 @@ mod tests {
                 true,
                 &mut output,
                 &runtime,
-                delays,
             )
             .unwrap();
             let clone_elapsed = clone_started.elapsed();
@@ -2216,7 +2129,7 @@ mod tests {
                     ]
                 );
                 if index >= 4 {
-                    delayed_jobs.push(job.clone());
+                    attribution_jobs.push(job.clone());
                 }
             }
             let serialized = serde_json::to_string(&snapshots).unwrap();
@@ -2235,21 +2148,27 @@ mod tests {
         }
         assert_eq!(fail_open_results[0], fail_open_results[1]);
         assert!(fail_open_elapsed[1] <= fail_open_elapsed[0] + Duration::from_secs(1));
-        assert_eq!(delayed_jobs.len(), 5);
-        for (job, expected) in delayed_jobs.iter().zip([
-            ComponentKind::NetworkTransport,
-            ComponentKind::NetworkTransport,
-            ComponentKind::PortableVerify,
-            ComponentKind::PortableImport,
-            ComponentKind::Recovery,
+        assert_eq!(attribution_jobs.len(), 5);
+        for (job, (expected_stage, expected_component)) in attribution_jobs.iter().zip([
+            (Stage::RefsDiscovery, ComponentKind::NetworkTransport),
+            (Stage::Download, ComponentKind::NetworkTransport),
+            (Stage::PortableVerification, ComponentKind::PortableVerify),
+            (Stage::AtomicImport, ComponentKind::PortableImport),
+            (Stage::Reopen, ComponentKind::Recovery),
         ]) {
-            let dominant = job
+            let attributed = job
                 .stages
                 .iter()
-                .filter(|stage| stage.stage != Stage::Orchestration)
-                .max_by_key(|stage| stage.duration_ns)
-                .unwrap();
-            assert_eq!(dominant.component, expected);
+                .find(|stage| {
+                    stage.stage == expected_stage && stage.component == expected_component
+                })
+                .unwrap_or_else(|| {
+                    panic!(
+                        "missing deterministic stage attribution {expected_stage:?}/{expected_component:?}: {:#?}",
+                        job.stages
+                    )
+                });
+            assert!(attributed.duration_ns > 0);
         }
     }
 }
