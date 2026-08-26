@@ -1669,9 +1669,11 @@ impl TableProvider for EdgePropertyTable {
                 self.route.clone(),
                 true,
                 self.schema.clone(),
-                projection,
-                limit,
-                state.config().batch_size(),
+                crate::property_scan::PropertyScanOptions {
+                    projection,
+                    limit,
+                    batch_size: state.config().batch_size(),
+                },
             )?,
         ))
     }
@@ -1716,9 +1718,11 @@ impl TableProvider for PropertyTable {
                 self.route.clone(),
                 false,
                 self.schema.clone(),
-                projection,
-                limit,
-                state.config().batch_size(),
+                crate::property_scan::PropertyScanOptions {
+                    projection,
+                    limit,
+                    batch_size: state.config().batch_size(),
+                },
             )?,
         ))
     }
@@ -1836,7 +1840,13 @@ impl GraphCatalog {
         runtime_catalog: &RuntimeCatalog,
         inventory: Arc<crate::AuthenticatedPropertyInventory>,
     ) -> Result<Self, DataFusionError> {
-        Self::open_with_authority(dir, ontology, runtime_catalog, None, Some(inventory))
+        Ok(Self::open_with_authority(
+            dir,
+            ontology,
+            runtime_catalog,
+            None,
+            Some(inventory),
+        ))
     }
 
     /// Open with exact generation-pinned qualified storage bindings.
@@ -1847,7 +1857,13 @@ impl GraphCatalog {
         runtime_catalog: &RuntimeCatalog,
         semantic: Option<&crate::SemanticStorageBindings>,
     ) -> Result<Self, DataFusionError> {
-        Self::open_with_authority(dir, ontology, runtime_catalog, semantic, None)
+        Ok(Self::open_with_authority(
+            dir,
+            ontology,
+            runtime_catalog,
+            semantic,
+            None,
+        ))
     }
 
     /// Open with semantic bindings and one already-authenticated property authority.
@@ -1858,7 +1874,13 @@ impl GraphCatalog {
         semantic: Option<&crate::SemanticStorageBindings>,
         inventory: Arc<crate::AuthenticatedPropertyInventory>,
     ) -> Result<Self, DataFusionError> {
-        Self::open_with_authority(dir, ontology, runtime_catalog, semantic, Some(inventory))
+        Ok(Self::open_with_authority(
+            dir,
+            ontology,
+            runtime_catalog,
+            semantic,
+            Some(inventory),
+        ))
     }
 
     #[allow(clippy::too_many_lines)]
@@ -1868,7 +1890,7 @@ impl GraphCatalog {
         runtime_catalog: &RuntimeCatalog,
         semantic: Option<&crate::SemanticStorageBindings>,
         inventory: Option<Arc<crate::AuthenticatedPropertyInventory>>,
-    ) -> Result<Self, DataFusionError> {
+    ) -> Self {
         let mut schema = GraphSchema::new();
 
         // ---- topology nodes ----
@@ -2035,7 +2057,7 @@ impl GraphCatalog {
             }
         }
 
-        Ok(Self {
+        Self {
             schema: Arc::new(schema),
             property_inventory: inventory,
             prop_names,
@@ -2048,7 +2070,7 @@ impl GraphCatalog {
                 .map(|bindings| bindings.composition_fingerprint.clone()),
             semantic_edge_tables,
             semantic_edge_property_tables,
-        })
+        }
     }
 
     /// Node-property provider pinned to this catalog's generation authority.

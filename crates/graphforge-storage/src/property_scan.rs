@@ -16,6 +16,12 @@ use datafusion::physical_plan::{
 };
 use futures::stream;
 
+pub(crate) struct PropertyScanOptions<'a> {
+    pub(crate) projection: Option<&'a Vec<usize>>,
+    pub(crate) limit: Option<usize>,
+    pub(crate) batch_size: usize,
+}
+
 #[derive(Clone)]
 pub(crate) struct PropertyOverlayExec {
     project: PathBuf,
@@ -50,11 +56,9 @@ impl PropertyOverlayExec {
         route: String,
         is_edge: bool,
         base_schema: SchemaRef,
-        projection: Option<&Vec<usize>>,
-        limit: Option<usize>,
-        batch_size: usize,
+        options: PropertyScanOptions<'_>,
     ) -> Result<Self, DataFusionError> {
-        let projection = projection.cloned();
+        let projection = options.projection.cloned();
         let schema = projection.as_ref().map_or_else(
             || Ok(Arc::clone(&base_schema)),
             |indices| {
@@ -77,8 +81,8 @@ impl PropertyOverlayExec {
             is_edge,
             schema,
             projection,
-            limit,
-            batch_size: batch_size.max(1),
+            limit: options.limit,
+            batch_size: options.batch_size.max(1),
             props,
         })
     }

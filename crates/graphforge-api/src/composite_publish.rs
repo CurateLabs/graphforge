@@ -571,7 +571,7 @@ fn capture_rebase_field(
     } else {
         graphforge_storage::PropertyRouteKind::Node
     };
-    let inventory = graph.property_inventory_for_session()?;
+    let inventory = graph.property_inventory_for_session();
     let (rows, _) = graphforge_storage::read_authenticated_property_snapshots_for_inventory(
         &inventory,
         kind,
@@ -1066,7 +1066,7 @@ fn apply_graph_mutations(
     }
 
     let mut staged = RewriteBatch::new();
-    let inventory = graph.property_inventory_for_session()?;
+    let inventory = graph.property_inventory_for_session();
     for (stem, updates) in &node_sets {
         graphforge_storage::stage_set_node_properties_authenticated(
             &mut staged,

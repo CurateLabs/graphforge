@@ -351,10 +351,10 @@ pub mod property_overlay;
 mod property_scan;
 pub use property_overlay::{
     AuthenticatedPropertyInventory, PROPERTY_OVERLAY_FORMAT, PROPERTY_OVERLAY_FORMAT_KEY,
-    PROPERTY_TOMBSTONE_FIELD, PropertyFragmentId, PropertyOverlayLimits, PropertyOverlayMetrics,
-    PropertyRouteKind, PropertySnapshotRow, enumerate_property_fragments,
-    read_authenticated_property_snapshots_for, read_authenticated_property_snapshots_for_inventory,
-    visit_authenticated_property_snapshots,
+    PROPERTY_TOMBSTONE_FIELD, PropertyFragmentId, PropertyInventoryOpenMetrics,
+    PropertyOverlayLimits, PropertyOverlayMetrics, PropertyRouteKind, PropertySnapshotRow,
+    enumerate_property_fragments, read_authenticated_property_snapshots_for,
+    read_authenticated_property_snapshots_for_inventory, visit_authenticated_property_snapshots,
 };
 
 pub mod catalog;

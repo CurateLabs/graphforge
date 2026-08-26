@@ -403,6 +403,11 @@ impl RecordBatch {
 // GraphForge
 // ---------------------------------------------------------------------------
 
+struct GenerationPropertyAuthority {
+    generation_uuid: uuid::Uuid,
+    inventory: Arc<graphforge_storage::AuthenticatedPropertyInventory>,
+}
+
 /// The GraphForge engine — the public entry point for openCypher execution.
 ///
 /// Built with [`new`](Self::new) (in-memory or Parquet-backed), then queried via
@@ -419,10 +424,9 @@ pub struct GraphForge {
     lifecycle_mode: graphforge_storage::filesystem_admission::ProjectLifecycleMode,
     /// One immutable committed generation selected exactly once at open.
     resolved_generation: ResolvedProjectGeneration,
-    /// Atomically replaceable authenticated property authority. Each session
-    /// clones one immutable snapshot, which also retains its generation lease.
-    property_inventory:
-        Arc<std::sync::RwLock<Arc<graphforge_storage::AuthenticatedPropertyInventory>>>,
+    /// Canonical property generation identity and authenticated inventory,
+    /// replaced together under one lock.
+    property_authority: Arc<Mutex<GenerationPropertyAuthority>>,
     /// Whether this facade is an immutable historical checkpoint view.
     read_only: bool,
     /// Generation UUID whose graph snapshot was hydrated into `dir`.
@@ -589,11 +593,11 @@ impl GraphForge {
         let (resolved_generation, project_open_recovery) =
             graphforge_storage::open_or_initialize_ephemeral_project_with_recovery(tmp.path())?;
         let generation_uuid = resolved_generation.generation_uuid();
-        let property_inventory = Arc::new(std::sync::RwLock::new(Arc::new(
+        let property_inventory = Arc::new(
             graphforge_storage::AuthenticatedPropertyInventory::from_resolved_generation(
                 &resolved_generation,
             )?,
-        )));
+        );
         let (ontology_mode, ontology, ontology_document) =
             load_workspace_ontology(&resolved_generation)?;
         let (dir, workspace, graph_open_evidence) =
@@ -604,7 +608,10 @@ impl GraphForge {
             lifecycle_mode:
                 graphforge_storage::filesystem_admission::ProjectLifecycleMode::Ephemeral,
             resolved_generation,
-            property_inventory,
+            property_authority: Arc::new(Mutex::new(GenerationPropertyAuthority {
+                generation_uuid,
+                inventory: property_inventory,
+            })),
             read_only: false,
             current_generation_uuid: Arc::new(Mutex::new(generation_uuid)),
             uuid_membership_index: Mutex::new(None),
@@ -731,11 +738,11 @@ impl GraphForge {
         project_open_recovery: graphforge_storage::ProjectOpenRecoveryEvidence,
     ) -> Result<Self, GfError> {
         let generation_uuid = resolved_generation.generation_uuid();
-        let property_inventory = Arc::new(std::sync::RwLock::new(Arc::new(
+        let property_inventory = Arc::new(
             graphforge_storage::AuthenticatedPropertyInventory::from_resolved_generation(
                 &resolved_generation,
             )?,
-        )));
+        );
         let (ontology_mode, ontology, ontology_document) =
             load_workspace_ontology(&resolved_generation)?;
         let (dir, workspace, graph_open_evidence) =
@@ -811,7 +818,10 @@ impl GraphForge {
             path: Some(container_dir),
             lifecycle_mode: graphforge_storage::filesystem_admission::ProjectLifecycleMode::Durable,
             resolved_generation,
-            property_inventory,
+            property_authority: Arc::new(Mutex::new(GenerationPropertyAuthority {
+                generation_uuid,
+                inventory: property_inventory,
+            })),
             read_only,
             current_generation_uuid: Arc::new(Mutex::new(generation_uuid)),
             uuid_membership_index: Mutex::new(None),
@@ -910,41 +920,16 @@ impl GraphForge {
 
     fn property_inventory_for_session(
         &self,
-    ) -> Result<Arc<graphforge_storage::AuthenticatedPropertyInventory>, GfError> {
-        let expected = *self
-            .current_generation_uuid
+    ) -> Arc<graphforge_storage::AuthenticatedPropertyInventory> {
+        let authority = self
+            .property_authority
             .lock()
-            .expect("generation UUID lock poisoned");
-        {
-            let current = self
-                .property_inventory
-                .read()
-                .expect("property inventory lock poisoned");
-            if current.generation_uuid() == Some(expected) {
-                return Ok(Arc::clone(&current));
-            }
-        }
-        let generation = graphforge_storage::resolve_project_generation(
-            self.resolved_generation.container_root(),
-        )?;
-        if generation.generation_uuid() != expected {
-            return Err(GfError::Storage(
-                "committed generation changed while refreshing property authority".into(),
-            ));
-        }
-        let replacement = Arc::new(
-            graphforge_storage::AuthenticatedPropertyInventory::from_resolved_generation(
-                &generation,
-            )?,
+            .expect("property authority lock poisoned");
+        debug_assert_eq!(
+            authority.inventory.generation_uuid(),
+            Some(authority.generation_uuid)
         );
-        let mut current = self
-            .property_inventory
-            .write()
-            .expect("property inventory lock poisoned");
-        if current.generation_uuid() != Some(expected) {
-            *current = Arc::clone(&replacement);
-        }
-        Ok(Arc::clone(&current))
+        Arc::clone(&authority.inventory)
     }
 
     fn install_property_generation(
@@ -957,9 +942,12 @@ impl GraphForge {
             )?,
         );
         *self
-            .property_inventory
-            .write()
-            .expect("property inventory lock poisoned") = replacement;
+            .property_authority
+            .lock()
+            .expect("property authority lock poisoned") = GenerationPropertyAuthority {
+            generation_uuid: generation.generation_uuid(),
+            inventory: replacement,
+        };
         *self
             .current_generation_uuid
             .lock()
@@ -1383,7 +1371,7 @@ impl GraphForge {
                 self.ontology.as_ref(),
                 &rc,
                 candidate_bindings.or(installed.as_ref()),
-                self.property_inventory_for_session()?,
+                self.property_inventory_for_session(),
             )
             .map_err(|e| GfError::Storage(e.to_string()))?
         };
@@ -1808,7 +1796,7 @@ impl GraphForge {
                 &self.dir,
                 self.ontology.as_ref(),
                 &rc,
-                self.property_inventory_for_session()?,
+                self.property_inventory_for_session(),
             )
             .map_err(|e| GfError::Storage(e.to_string()))?
         };
@@ -3264,7 +3252,7 @@ impl GraphForge {
                 &self.dir,
                 self.ontology.as_ref(),
                 &rc,
-                self.property_inventory_for_session()?,
+                self.property_inventory_for_session(),
             )
             .map_err(|e| GfError::Storage(e.to_string()))?
         };
@@ -6933,13 +6921,13 @@ mod tests {
         graph
             .execute("CREATE (:Person {name: 'old'})")
             .expect("publish initial property generation");
-        let old = graph.property_inventory_for_session().unwrap();
+        let old = graph.property_inventory_for_session();
         let old_generation = old.generation_uuid().expect("generation-backed inventory");
 
         graph
             .execute("MATCH (n:Person) SET n.name = 'new' RETURN n.name")
             .expect("publish replacement property generation");
-        let new = graph.property_inventory_for_session().unwrap();
+        let new = graph.property_inventory_for_session();
         let new_generation = new.generation_uuid().expect("generation-backed inventory");
 
         assert_ne!(old_generation, new_generation);
@@ -6949,6 +6937,54 @@ mod tests {
             new_generation
         );
         assert!(!Arc::ptr_eq(&old, &new));
+    }
+
+    #[test]
+    fn concurrent_property_authority_read_never_observes_a_split_generation_pair() {
+        let graph = GraphForge::new(None).expect("open ephemeral project");
+        graph.execute("CREATE (:Person {name: 'old'})").unwrap();
+        let old = graph.property_inventory_for_session();
+        let old_uuid = old.generation_uuid().unwrap();
+        graph
+            .execute("MATCH (n:Person) SET n.name = 'new'")
+            .unwrap();
+        let new = graph.property_inventory_for_session();
+        let new_uuid = new.generation_uuid().unwrap();
+
+        for _ in 0..64 {
+            *graph.property_authority.lock().unwrap() = GenerationPropertyAuthority {
+                generation_uuid: old_uuid,
+                inventory: Arc::clone(&old),
+            };
+            let barrier = Arc::new(std::sync::Barrier::new(3));
+            let authority_for_install = Arc::clone(&graph.property_authority);
+            let install_barrier = Arc::clone(&barrier);
+            let new_inventory = Arc::clone(&new);
+            let installer = std::thread::spawn(move || {
+                install_barrier.wait();
+                *authority_for_install.lock().unwrap() = GenerationPropertyAuthority {
+                    generation_uuid: new_uuid,
+                    inventory: new_inventory,
+                };
+            });
+            let authority_for_read = Arc::clone(&graph.property_authority);
+            let read_barrier = Arc::clone(&barrier);
+            let reader = std::thread::spawn(move || {
+                read_barrier.wait();
+                let authority = authority_for_read.lock().unwrap();
+                (
+                    authority.generation_uuid,
+                    authority.inventory.generation_uuid(),
+                )
+            });
+            barrier.wait();
+            installer.join().unwrap();
+            let observed = reader.join().unwrap();
+            assert!(
+                observed == (old_uuid, Some(old_uuid)) || observed == (new_uuid, Some(new_uuid)),
+                "authority snapshot was split: {observed:?}"
+            );
+        }
     }
 
     #[test]

@@ -83,7 +83,7 @@ impl GraphForge {
                 &catalog_batch,
             )?;
         }
-        let inventory = self.property_inventory_for_session()?;
+        let inventory = self.property_inventory_for_session();
         let touched = graphforge_storage::stage_set_node_properties_authenticated(
             &mut staged,
             &self.dir,

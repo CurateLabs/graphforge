@@ -242,12 +242,22 @@ pub struct PropertyFragment {
 /// retained through no-follow directory capabilities.
 #[derive(Debug)]
 pub struct AuthenticatedPropertyInventory {
-    _generation: Option<crate::ResolvedProjectGeneration>,
+    generation_lease: Option<crate::ResolvedProjectGeneration>,
     _root: Option<graphforge_filesystem::StableDirectory>,
     routes: BTreeMap<(PropertyRouteKind, String), Vec<AuthenticatedPropertyFragment>>,
     schemas: BTreeMap<(PropertyRouteKind, String), arrow::datatypes::SchemaRef>,
     authority_bytes: u64,
     authority_blocks: u64,
+}
+
+/// One-time I/O performed while admitting and authenticating an immutable
+/// property inventory. Cached scans never repeat or re-report this work.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PropertyInventoryOpenMetrics {
+    /// Bytes read to capture and authenticate inventory authority.
+    pub authentication_bytes: u64,
+    /// Fixed 64 KiB authentication reads.
+    pub authentication_blocks: u64,
 }
 
 #[derive(Debug)]
@@ -271,7 +281,7 @@ impl AuthenticatedPropertyInventory {
     /// Committed generation retained by this inventory, when generation-backed.
     #[must_use]
     pub fn generation_uuid(&self) -> Option<uuid::Uuid> {
-        self._generation
+        self.generation_lease
             .as_ref()
             .map(crate::ResolvedProjectGeneration::generation_uuid)
     }
@@ -282,6 +292,23 @@ impl AuthenticatedPropertyInventory {
             .keys()
             .filter(move |(candidate, _)| *candidate == kind)
             .map(|(_, route)| route.as_str())
+    }
+
+    /// Exact one-time admission evidence for this cached inventory.
+    #[must_use]
+    pub fn open_metrics(&self) -> PropertyInventoryOpenMetrics {
+        PropertyInventoryOpenMetrics {
+            authentication_bytes: self.authority_bytes.saturating_add(
+                self.routes.values().flatten().fold(0_u64, |sum, fragment| {
+                    sum.saturating_add(fragment.authentication_bytes)
+                }),
+            ),
+            authentication_blocks: self.authority_blocks.saturating_add(
+                self.routes.values().flatten().fold(0_u64, |sum, fragment| {
+                    sum.saturating_add(fragment.authentication_blocks)
+                }),
+            ),
+        }
     }
 
     /// Resolve property authority from a pinned project generation.
@@ -312,7 +339,7 @@ impl AuthenticatedPropertyInventory {
         let Some(participant) = generation.declared_graph_files_participant()? else {
             return Ok(Self {
                 _root: None,
-                _generation: Some(generation.clone()),
+                generation_lease: Some(generation.clone()),
                 routes: BTreeMap::new(),
                 schemas: BTreeMap::new(),
                 authority_bytes: 0,
@@ -351,7 +378,7 @@ impl AuthenticatedPropertyInventory {
                 Self::admit_entries(root, entries, requested_route)
             }
         }?;
-        admitted._generation = Some(generation.clone());
+        admitted.generation_lease = Some(generation.clone());
         Ok(admitted)
     }
 
@@ -435,7 +462,7 @@ impl AuthenticatedPropertyInventory {
             validate_fragment_id_sequence(fragments.iter().map(|fragment| fragment.id))?;
         }
         Ok(Self {
-            _generation: None,
+            generation_lease: None,
             _root: Some(root),
             routes,
             schemas: schemas
@@ -558,27 +585,11 @@ impl AuthenticatedPropertyInventory {
         if let Some(error) = failed.lock().expect("property failure lock").take() {
             return Err(error);
         }
-        metrics.authentication_bytes = fragments
-            .iter()
-            .fold(0_u64, |sum, fragment| {
-                sum.saturating_add(fragment.authentication_bytes)
-            })
-            .saturating_add(self.authority_bytes);
-        metrics.authentication_blocks = fragments
-            .iter()
-            .fold(0_u64, |sum, fragment| {
-                sum.saturating_add(fragment.authentication_blocks)
-            })
-            .saturating_add(self.authority_blocks);
         metrics.validation_bytes = counts.bytes.load(Ordering::Relaxed);
-        metrics.physical_bytes = metrics
-            .authentication_bytes
-            .saturating_add(metrics.validation_bytes);
+        metrics.physical_bytes = metrics.validation_bytes;
         metrics.read_calls = counts.blocks.load(Ordering::Relaxed);
         metrics.validation_read_calls = metrics.read_calls;
-        metrics.physical_blocks = metrics
-            .authentication_blocks
-            .saturating_add(metrics.read_calls);
+        metrics.physical_blocks = metrics.read_calls;
         metrics.range_seeks = counts.range_seeks.load(Ordering::Relaxed);
         let decoded = decoded.lock().expect("property retention lock");
         metrics.decoder_peak_rows = decoded.peak_rows;
@@ -750,19 +761,21 @@ fn digest_hex(bytes: &[u8]) -> String {
 pub struct PropertyOverlayMetrics {
     /// Physical snapshot rows decoded.
     pub physical_rows: u64,
-    /// Total authentication plus decoder bytes read.
+    /// Total one-time admission plus decoder bytes read. Cached inventory scans
+    /// contain decoder work only.
     pub physical_bytes: u64,
-    /// Full-file bytes read exactly once for SHA-256 authentication.
+    /// Full-file bytes read exactly once for SHA-256 authentication by a raw
+    /// one-shot adapter. Cached inventory scans report zero.
     pub authentication_bytes: u64,
     /// Bytes read while validating canonical UUID/tombstone authority.
     pub validation_bytes: u64,
     /// Bytes read while decoding values from selected row groups.
     pub selected_value_bytes: u64,
-    /// Total fixed-size authentication blocks plus decoder reads.
+    /// Total one-time admission blocks plus decoder reads.
     pub physical_blocks: u64,
     /// Decoder-only non-empty reads, each capped at 64 KiB.
     pub read_calls: u64,
-    /// Fixed-size 64 KiB authentication blocks.
+    /// Fixed-size 64 KiB authentication blocks from a raw one-shot adapter.
     pub authentication_blocks: u64,
     /// Read calls used by the validation pass.
     pub validation_read_calls: u64,
@@ -1020,8 +1033,22 @@ pub fn visit_authenticated_property_snapshots<F>(
 where
     F: FnMut(PropertySnapshotRow) -> Result<(), GfError>,
 {
-    authenticated_property_inventory_for_route(project, kind, route)?
-        .visit_route(kind, route, scratch, limits, emit)
+    let inventory = authenticated_property_inventory_for_route(project, kind, route)?;
+    let open = inventory.open_metrics();
+    let mut metrics = inventory.visit_route(kind, route, scratch, limits, emit)?;
+    add_open_metrics(&mut metrics, open);
+    Ok(metrics)
+}
+
+fn add_open_metrics(metrics: &mut PropertyOverlayMetrics, open: PropertyInventoryOpenMetrics) {
+    metrics.authentication_bytes = open.authentication_bytes;
+    metrics.authentication_blocks = open.authentication_blocks;
+    metrics.physical_bytes = metrics
+        .physical_bytes
+        .saturating_add(open.authentication_bytes);
+    metrics.physical_blocks = metrics
+        .physical_blocks
+        .saturating_add(open.authentication_blocks);
 }
 
 pub(crate) fn authenticated_property_inventory_for_route(
@@ -1082,7 +1109,11 @@ pub fn read_authenticated_property_snapshots_for(
     GfError,
 > {
     let inventory = authenticated_property_inventory_for_route(project, kind, route)?;
-    read_authenticated_property_snapshots_for_inventory(&inventory, kind, route, targets)
+    let open = inventory.open_metrics();
+    let (rows, mut metrics) =
+        read_authenticated_property_snapshots_for_inventory(&inventory, kind, route, targets)?;
+    add_open_metrics(&mut metrics, open);
+    Ok((rows, metrics))
 }
 
 /// Resolve a bounded UUID batch from an already authenticated generation
@@ -1102,20 +1133,10 @@ pub fn read_authenticated_property_snapshots_for_inventory(
     let mut unresolved = targets.clone();
     let mut found = BTreeMap::new();
     let mut metrics = PropertyOverlayMetrics::default();
-    metrics.authentication_bytes = inventory.authority_bytes;
-    metrics.authentication_blocks = inventory.authority_blocks;
-    metrics.physical_bytes = inventory.authority_bytes;
-    metrics.physical_blocks = inventory.authority_blocks;
     let Some(fragments) = inventory.routes.get(&(kind, route.to_owned())) else {
         return Ok((found, metrics));
     };
     for fragment in fragments.iter().rev() {
-        metrics.authentication_bytes = metrics
-            .authentication_bytes
-            .saturating_add(fragment.authentication_bytes);
-        metrics.authentication_blocks = metrics
-            .authentication_blocks
-            .saturating_add(fragment.authentication_blocks);
         let counts = Arc::new(ReadCounts::default());
         let builder = open_counted_retained_property_builder(fragment, Arc::clone(&counts))?;
         validate_fragment_schema(builder.schema().as_ref(), fragment.id, kind, route)?;
@@ -1132,111 +1153,39 @@ pub fn read_authenticated_property_snapshots_for_inventory(
         metrics.row_groups_considered = metrics
             .row_groups_considered
             .saturating_add(u64::try_from(builder.metadata().num_row_groups()).unwrap_or(u64::MAX));
-        let mut row_groups = Vec::new();
-        let mut prior_uuid = None;
-        for index in 0..builder.metadata().num_row_groups() {
-            let validation = open_counted_retained_property_builder(fragment, Arc::clone(&counts))?
-                .with_row_groups(vec![index])
-                .with_batch_size(targeted_batch_rows)
-                .build()
-                .map_err(parquet_error)?;
-            let mut selected = false;
-            for batch in validation {
-                let batch = batch.map_err(|error| GfError::Storage(error.to_string()))?;
-                charge_target_batch(&mut metrics, &batch, page_reservation_bytes)?;
-                let uuids = batch
-                    .column_by_name(kind.uuid_field())
-                    .and_then(|column| column.as_any().downcast_ref::<FixedSizeBinaryArray>())
-                    .ok_or_else(|| corrupt("property UUID column has wrong physical type"))?;
-                let tombstones = batch
-                    .column_by_name(PROPERTY_TOMBSTONE_FIELD)
-                    .map(|column| {
-                        column
-                            .as_any()
-                            .downcast_ref::<BooleanArray>()
-                            .ok_or_else(|| corrupt("property tombstone column is not boolean"))
-                    })
-                    .transpose()?;
-                if tombstones.is_none() && fragment.id.generation != 0 {
-                    return Err(corrupt("property snapshot fragment lacks tombstone field"));
-                }
-                if uuids.null_count() != 0
-                    || tombstones.is_some_and(|values| values.null_count() != 0)
-                {
-                    return Err(corrupt("property identity columns contain null slots"));
-                }
-                for row in 0..batch.num_rows() {
-                    let uuid: [u8; 16] = uuids
-                        .value(row)
-                        .try_into()
-                        .map_err(|_| corrupt("property UUID value has wrong width"))?;
-                    if prior_uuid.is_some_and(|prior| prior >= uuid) {
-                        return Err(corrupt(
-                            "property fragment UUIDs are not strictly sorted and unique",
-                        ));
-                    }
-                    prior_uuid = Some(uuid);
-                    selected |= !unresolved.is_empty() && unresolved.contains(&uuid);
-                    if tombstones.is_some_and(|values| values.value(row))
-                        && batch
-                            .columns()
-                            .iter()
-                            .skip(2)
-                            .any(|column| !column.is_null(row))
-                    {
-                        return Err(corrupt("property tombstone carries values"));
-                    }
-                }
-                metrics.physical_rows = metrics
-                    .physical_rows
-                    .saturating_add(u64::try_from(batch.num_rows()).unwrap_or(u64::MAX));
-            }
-            if selected {
-                row_groups.push(index);
-            }
-        }
+        let row_groups = select_target_row_groups(
+            fragment,
+            kind,
+            &unresolved,
+            &counts,
+            &mut metrics,
+            page_reservation_bytes,
+            targeted_batch_rows,
+        )?;
         let validation_bytes = counts.bytes.load(Ordering::Relaxed);
         let validation_read_calls = counts.blocks.load(Ordering::Relaxed);
         if !row_groups.is_empty() {
             metrics.row_groups_selected = metrics
                 .row_groups_selected
                 .saturating_add(u64::try_from(row_groups.len()).unwrap_or(u64::MAX));
-            let reader = open_counted_retained_property_builder(fragment, Arc::clone(&counts))?
-                .with_row_groups(row_groups)
-                .with_batch_size(targeted_batch_rows)
-                .build()
-                .map_err(parquet_error)?;
-            for batch in reader {
-                let batch = batch.map_err(|error| GfError::Storage(error.to_string()))?;
-                charge_target_batch(&mut metrics, &batch, page_reservation_bytes)?;
-                let decoded = decode_snapshot_batch(&batch, kind.uuid_field())?;
-                if decoded.iter().any(|row| {
-                    snapshot_charge(row) > PropertyOverlayLimits::default().max_row_bytes
-                }) {
-                    return Err(corrupt("property snapshot row exceeds byte limit"));
-                }
-                metrics.decoder_peak_bytes = metrics
-                    .decoder_peak_bytes
-                    .max(decoded.iter().map(snapshot_charge).sum::<u64>());
-                for row in decoded {
-                    metrics.physical_rows = metrics.physical_rows.saturating_add(1);
-                    if unresolved.remove(&row.uuid) {
-                        if row.tombstone {
-                            metrics.tombstones = metrics.tombstones.saturating_add(1);
-                        } else {
-                            found.insert(row.uuid, row);
-                        }
-                    }
-                }
-            }
+            decode_target_row_groups(
+                TargetDecodeOptions {
+                    fragment,
+                    kind,
+                    row_groups,
+                    batch_rows: targeted_batch_rows,
+                    page_reservation_bytes,
+                },
+                &counts,
+                &mut unresolved,
+                &mut found,
+                &mut metrics,
+            )?;
         }
         let total_bytes = counts.bytes.load(Ordering::Relaxed);
         let total_read_calls = counts.blocks.load(Ordering::Relaxed);
         metrics.fragments_considered = metrics.fragments_considered.saturating_add(1);
-        metrics.physical_bytes = metrics
-            .physical_bytes
-            .saturating_add(fragment.authentication_bytes)
-            .saturating_add(total_bytes);
+        metrics.physical_bytes = metrics.physical_bytes.saturating_add(total_bytes);
         metrics.validation_bytes = metrics.validation_bytes.saturating_add(validation_bytes);
         metrics.selected_value_bytes = metrics
             .selected_value_bytes
@@ -1248,10 +1197,7 @@ pub fn read_authenticated_property_snapshots_for_inventory(
         metrics.selected_value_read_calls = metrics
             .selected_value_read_calls
             .saturating_add(total_read_calls.saturating_sub(validation_read_calls));
-        metrics.physical_blocks = metrics
-            .physical_blocks
-            .saturating_add(fragment.authentication_blocks)
-            .saturating_add(total_read_calls);
+        metrics.physical_blocks = metrics.physical_blocks.saturating_add(total_read_calls);
         metrics.range_seeks = metrics
             .range_seeks
             .saturating_add(counts.range_seeks.load(Ordering::Relaxed));
@@ -1259,6 +1205,128 @@ pub fn read_authenticated_property_snapshots_for_inventory(
     metrics.logical_rows = u64::try_from(found.len()).unwrap_or(u64::MAX);
     metrics.peak_buffered_rows = metrics.decoder_peak_rows;
     Ok((found, metrics))
+}
+
+fn select_target_row_groups(
+    fragment: &AuthenticatedPropertyFragment,
+    kind: PropertyRouteKind,
+    unresolved: &std::collections::BTreeSet<[u8; 16]>,
+    counts: &Arc<ReadCounts>,
+    metrics: &mut PropertyOverlayMetrics,
+    page_reservation_bytes: u64,
+    targeted_batch_rows: usize,
+) -> Result<Vec<usize>, GfError> {
+    let builder = open_counted_retained_property_builder(fragment, Arc::clone(counts))?;
+    let mut selected_groups = Vec::new();
+    let mut prior_uuid = None;
+    for index in 0..builder.metadata().num_row_groups() {
+        let validation = open_counted_retained_property_builder(fragment, Arc::clone(counts))?
+            .with_row_groups(vec![index])
+            .with_batch_size(targeted_batch_rows)
+            .build()
+            .map_err(parquet_error)?;
+        let mut selected = false;
+        for batch in validation {
+            let batch = batch.map_err(|error| GfError::Storage(error.to_string()))?;
+            charge_target_batch(metrics, &batch, page_reservation_bytes)?;
+            let uuids = batch
+                .column_by_name(kind.uuid_field())
+                .and_then(|column| column.as_any().downcast_ref::<FixedSizeBinaryArray>())
+                .ok_or_else(|| corrupt("property UUID column has wrong physical type"))?;
+            let tombstones = batch
+                .column_by_name(PROPERTY_TOMBSTONE_FIELD)
+                .map(|column| {
+                    column
+                        .as_any()
+                        .downcast_ref::<BooleanArray>()
+                        .ok_or_else(|| corrupt("property tombstone column is not boolean"))
+                })
+                .transpose()?;
+            if tombstones.is_none() && fragment.id.generation != 0 {
+                return Err(corrupt("property snapshot fragment lacks tombstone field"));
+            }
+            if uuids.null_count() != 0 || tombstones.is_some_and(|values| values.null_count() != 0)
+            {
+                return Err(corrupt("property identity columns contain null slots"));
+            }
+            for row in 0..batch.num_rows() {
+                let uuid: [u8; 16] = uuids
+                    .value(row)
+                    .try_into()
+                    .map_err(|_| corrupt("property UUID value has wrong width"))?;
+                if prior_uuid.is_some_and(|prior| prior >= uuid) {
+                    return Err(corrupt(
+                        "property fragment UUIDs are not strictly sorted and unique",
+                    ));
+                }
+                prior_uuid = Some(uuid);
+                selected |= !unresolved.is_empty() && unresolved.contains(&uuid);
+                if tombstones.is_some_and(|values| values.value(row))
+                    && batch
+                        .columns()
+                        .iter()
+                        .skip(2)
+                        .any(|column| !column.is_null(row))
+                {
+                    return Err(corrupt("property tombstone carries values"));
+                }
+            }
+            metrics.physical_rows = metrics
+                .physical_rows
+                .saturating_add(u64::try_from(batch.num_rows()).unwrap_or(u64::MAX));
+        }
+        if selected {
+            selected_groups.push(index);
+        }
+    }
+    Ok(selected_groups)
+}
+
+struct TargetDecodeOptions<'a> {
+    fragment: &'a AuthenticatedPropertyFragment,
+    kind: PropertyRouteKind,
+    row_groups: Vec<usize>,
+    batch_rows: usize,
+    page_reservation_bytes: u64,
+}
+
+fn decode_target_row_groups(
+    options: TargetDecodeOptions<'_>,
+    counts: &Arc<ReadCounts>,
+    unresolved: &mut std::collections::BTreeSet<[u8; 16]>,
+    found: &mut BTreeMap<[u8; 16], PropertySnapshotRow>,
+    metrics: &mut PropertyOverlayMetrics,
+) -> Result<(), GfError> {
+    let reader = open_counted_retained_property_builder(options.fragment, Arc::clone(counts))?
+        .with_row_groups(options.row_groups)
+        .with_batch_size(options.batch_rows)
+        .build()
+        .map_err(parquet_error)?;
+    for batch in reader {
+        let batch = batch.map_err(|error| GfError::Storage(error.to_string()))?;
+        charge_target_batch(metrics, &batch, options.page_reservation_bytes)?;
+        let decoded = decode_snapshot_batch(&batch, options.kind.uuid_field())?;
+        if decoded
+            .iter()
+            .any(|row| snapshot_charge(row) > PropertyOverlayLimits::default().max_row_bytes)
+        {
+            return Err(corrupt("property snapshot row exceeds byte limit"));
+        }
+        metrics.decoder_peak_bytes = metrics
+            .decoder_peak_bytes
+            .max(decoded.iter().map(snapshot_charge).sum::<u64>());
+        for row in decoded {
+            metrics.physical_rows = metrics.physical_rows.saturating_add(1);
+            if unresolved.remove(&row.uuid) {
+                if row.tombstone {
+                    metrics.tombstones = metrics.tombstones.saturating_add(1);
+                } else {
+                    found.insert(row.uuid, row);
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn charge_target_batch(
@@ -2393,6 +2461,9 @@ mod tests {
                 .is_some()
         );
         let targets = BTreeSet::from([[4; 16]]);
+        let open_metrics = inventory.open_metrics();
+        assert!(open_metrics.authentication_bytes > 0);
+        let mut repeated_scan_metrics = Vec::new();
         for _ in 0..2 {
             let (rows, metrics) = read_authenticated_property_snapshots_for_inventory(
                 &inventory,
@@ -2403,7 +2474,15 @@ mod tests {
             .unwrap();
             assert_eq!(rows.len(), 1);
             assert_eq!(metrics.per_record_seeks, 0);
+            assert_eq!(metrics.authentication_bytes, 0);
+            assert_eq!(metrics.authentication_blocks, 0);
+            assert_eq!(
+                metrics.physical_bytes,
+                metrics.validation_bytes + metrics.selected_value_bytes
+            );
+            repeated_scan_metrics.push(metrics);
         }
+        assert_eq!(repeated_scan_metrics[0], repeated_scan_metrics[1]);
         let concurrent = (0..8)
             .map(|_| {
                 let inventory = Arc::clone(&inventory);
@@ -2459,7 +2538,12 @@ mod tests {
                 |_| Ok(()),
             )
             .unwrap();
-        assert_eq!(selected_metrics.authentication_bytes, entry.byte_length);
+        assert_eq!(
+            selected.open_metrics().authentication_bytes,
+            entry.byte_length
+        );
+        assert_eq!(selected_metrics.authentication_bytes, 0);
+        assert_eq!(selected_metrics.authentication_blocks, 0);
 
         let conflicting_id = PropertyFragmentId {
             generation: 8,
