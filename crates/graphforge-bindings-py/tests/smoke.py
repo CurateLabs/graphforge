@@ -4111,8 +4111,16 @@ def check_minimum_spanning_tree() -> None:
         else:
             raise SystemExit(f"expected strict {property_name} ValidationError")
 
-    for property_name in ["null_cost", "infinite_cost"]:
-        expect_strict_weight_error(property_name)
+    expect_message(
+        'edge weight property "null_cost" does not exist',
+        lambda: invalid.analyze(
+            by="minimum_spanning_tree",
+            via="ROAD",
+            directed=False,
+            weight="null_cost",
+        ),
+    )
+    expect_strict_weight_error("infinite_cost")
     expect_message(
         "is_dag does not accept an edge weight property",
         lambda: invalid.analyze(by="is_dag", weight="cost"),
