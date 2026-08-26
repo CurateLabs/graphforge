@@ -4201,6 +4201,14 @@ fn replacement_live_schema_counts_last_owner_for_nodes_and_edges() {
             .data_type(),
         &DataType::Int64
     );
+    let one_edge_owner = rows(&gf, "MATCH ()-[r:R]->() RETURN r.shared AS shared");
+    assert_eq!(
+        one_edge_owner.batches[0]
+            .column_by_name("shared")
+            .unwrap()
+            .data_type(),
+        &DataType::Int64
+    );
 
     gf.execute("MATCH (n:N {name:'b'}) SET n = {name:n.name}")
         .expect("replace final node map");

@@ -679,6 +679,11 @@ impl AuthenticatedPropertyInventory {
         for ((kind, route), fragments) in &mut routes {
             fragments.sort_unstable_by_key(|fragment| fragment.id);
             validate_fragment_id_sequence(fragments.iter().map(|fragment| fragment.id))?;
+            let summary_inputs = fragments
+                .iter()
+                .map(|fragment| (fragment.schema.as_ref(), fragment.physical_rows))
+                .collect::<Vec<_>>();
+            validate_live_schema_sequence(&summary_inputs)?;
             for fragment in fragments {
                 merge_route_schema(&mut schemas, *kind, route, fragment.schema.as_ref())?;
             }
@@ -901,6 +906,37 @@ fn apply_authenticated_live_schema(
         PROPERTY_LIVE_SCHEMA_KEY.to_owned(),
         encode_live_schema_summary(summary.counts)?,
     );
+    Ok(())
+}
+
+fn validate_live_schema_sequence(
+    fragments: &[(&arrow::datatypes::Schema, usize)],
+) -> Result<(), GfError> {
+    let physical_rows = fragments.iter().try_fold(0_u64, |total, (_, rows)| {
+        total
+            .checked_add(
+                u64::try_from(*rows)
+                    .map_err(|_| corrupt("property route row count is not representable"))?,
+            )
+            .ok_or_else(|| corrupt("property route row count overflows"))
+    })?;
+    let mut summary_started = false;
+    for (schema, _) in fragments {
+        match decode_live_schema_summary(schema)? {
+            Some(summary) => {
+                summary_started = true;
+                if summary.counts.values().any(|count| *count > physical_rows) {
+                    return Err(corrupt(
+                        "property live schema count exceeds physical row bound",
+                    ));
+                }
+            }
+            None if summary_started => {
+                return Err(corrupt("property live schema authority regresses"));
+            }
+            None => {}
+        }
+    }
     Ok(())
 }
 
@@ -4733,5 +4769,46 @@ mod tests {
             )
             .is_err()
         );
+
+        for (uuid_field, route_key) in [
+            ("node_uuid", "graphforge.entity_type"),
+            ("edge_uuid", "graphforge.rel_type"),
+        ] {
+            let route_metadata = |summary: Option<BTreeMap<String, u64>>| {
+                let mut metadata = HashMap::from([(route_key.to_owned(), "Route".to_owned())]);
+                if let Some(counts) = summary {
+                    metadata.insert(
+                        PROPERTY_LIVE_SCHEMA_KEY.to_owned(),
+                        encode_live_schema_summary(counts).unwrap(),
+                    );
+                }
+                Schema::new_with_metadata(
+                    vec![
+                        Field::new(uuid_field, DataType::FixedSizeBinary(16), false),
+                        Field::new("shared", DataType::Int64, true),
+                    ],
+                    metadata,
+                )
+            };
+            let legacy = route_metadata(None);
+            let exact = route_metadata(Some(BTreeMap::from([("shared".into(), 2)])));
+            let missing_after = route_metadata(None);
+            assert!(validate_live_schema_sequence(&[(&legacy, 1), (&exact, 1)]).is_ok());
+            assert!(
+                validate_live_schema_sequence(&[(&exact, 1), (&missing_after, 1)]).is_err(),
+                "{uuid_field} summary authority cannot disappear"
+            );
+
+            let impossible = route_metadata(Some(BTreeMap::from([("shared".into(), u64::MAX)])));
+            assert!(
+                validate_live_schema_sequence(&[(&impossible, 2)]).is_err(),
+                "{uuid_field} impossible owner count must fail closed"
+            );
+            let boundary = route_metadata(Some(BTreeMap::from([("shared".into(), 2)])));
+            assert!(
+                validate_live_schema_sequence(&[(&boundary, 2)]).is_ok(),
+                "{uuid_field} exact physical-row boundary is valid"
+            );
+        }
     }
 }
