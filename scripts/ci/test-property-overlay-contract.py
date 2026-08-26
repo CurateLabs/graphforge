@@ -41,6 +41,7 @@ def main() -> None:
             "crates/graphforge-storage/src/writer.rs",
             "crates/graphforge-storage/tests/property_overlay_scale.rs",
             "crates/graphforge-storage/BUILD.bazel",
+            "BUILD.bazel",
         ):
             destination = root / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -110,6 +111,7 @@ def main() -> None:
         evidence_source = evidence_path.read_text(encoding="utf-8")
         evidence_path.write_text(evidence_source.replace("fragment_identity_is_numeric_canonical_and_total", "fragment_identity_drifted", 1), encoding="utf-8")
         expect_failure("stale evidence symbol", lambda: GATE.validate(root, contract_path))
+        evidence_path.write_text(evidence_source, encoding="utf-8")
 
         scale = root / "crates/graphforge-storage/tests/property_overlay_scale.rs"
         scale_source = scale.read_text(encoding="utf-8")
@@ -154,6 +156,24 @@ def main() -> None:
             encoding="utf-8",
         )
         expect_failure("comment-only Bazel mapping", lambda: GATE.validate(root, contract_path))
+        storage_build.write_text(build_source, encoding="utf-8")
+
+        root_build = root / "BUILD.bazel"
+        root_build_source = root_build.read_text(encoding="utf-8")
+        root_build.write_text(
+            root_build_source.replace(
+                '"//crates/graphforge-storage:storage_integration_tests",',
+                "",
+                1,
+            ),
+            encoding="utf-8",
+        )
+        expect_failure("root integration suite mapping", lambda: GATE.validate(root, contract_path))
+        root_build.write_text(
+            root_build_source.replace('\n        ":integration_tests",', "", 1),
+            encoding="utf-8",
+        )
+        expect_failure("ci Rust suite mapping", lambda: GATE.validate(root, contract_path))
 
     print("property overlay contract mutation tests passed")
 

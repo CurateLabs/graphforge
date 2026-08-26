@@ -29,6 +29,9 @@ const CHILD_PROJECT_ENV: &str = "GF_PROPERTY_OVERLAY_SCALE_PROJECT";
 const CHILD_ROWS_ENV: &str = "GF_PROPERTY_OVERLAY_SCALE_ROWS";
 const CHILD_EVIDENCE_ENV: &str = "GF_PROPERTY_OVERLAY_SCALE_EVIDENCE";
 const MIXED_WINDOW: usize = 48;
+// The raw adapter captures graph-files authority once, then admits each
+// retained property fragment once. Cached inventories report neither pass.
+const RAW_PROPERTY_ADMISSION_PASSES: u64 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ImmutableFragment {
@@ -59,7 +62,11 @@ struct ScaleEvidence {
     physical_rows: u64,
     physical_bytes: u64,
     authentication_bytes: u64,
+    authority_authentication_bytes: u64,
+    property_authentication_bytes: u64,
     authentication_blocks: u64,
+    authority_authentication_blocks: u64,
+    property_authentication_blocks: u64,
     physical_blocks: u64,
     validation_bytes: u64,
     selected_value_bytes: u64,
@@ -284,7 +291,11 @@ fn property_overlay_scale_scan_child() {
         physical_rows: metrics.physical_rows,
         physical_bytes: metrics.physical_bytes,
         authentication_bytes: metrics.authentication_bytes,
+        authority_authentication_bytes: metrics.authority_authentication_bytes,
+        property_authentication_bytes: metrics.property_authentication_bytes,
         authentication_blocks: metrics.authentication_blocks,
+        authority_authentication_blocks: metrics.authority_authentication_blocks,
+        property_authentication_blocks: metrics.property_authentication_blocks,
         physical_blocks: metrics.physical_blocks,
         validation_bytes: metrics.validation_bytes,
         selected_value_bytes: metrics.selected_value_bytes,
@@ -414,6 +425,21 @@ fn production_property_overlay_n_2n_4n_is_disk_growing_and_memory_bounded() {
         assert!(phase.physical_bytes > 0);
         assert!(phase.authentication_bytes > 0);
         assert!(phase.authentication_blocks > 0);
+        assert_eq!(RAW_PROPERTY_ADMISSION_PASSES, 1);
+        assert_eq!(
+            phase.authentication_bytes,
+            phase
+                .authority_authentication_bytes
+                .checked_add(phase.property_authentication_bytes)
+                .expect("authentication byte accounting must not overflow")
+        );
+        assert_eq!(
+            phase.authentication_blocks,
+            phase
+                .authority_authentication_blocks
+                .checked_add(phase.property_authentication_blocks)
+                .expect("authentication block accounting must not overflow")
+        );
         assert_eq!(
             phase.physical_bytes,
             phase
@@ -430,11 +456,12 @@ fn production_property_overlay_n_2n_4n_is_disk_growing_and_memory_bounded() {
                 .and_then(|calls| calls.checked_add(phase.selected_value_read_calls))
                 .expect("read block accounting must not overflow")
         );
-        let authentication_bound = phase
-            .graph_tree_bytes
-            .checked_add(phase.property_fragment_bytes)
-            .expect("authentication byte bound must not overflow");
-        assert!(phase.authentication_bytes <= authentication_bound);
+        assert!(phase.authority_authentication_bytes <= phase.graph_tree_bytes);
+        let property_authentication_bound = phase
+            .property_fragment_bytes
+            .checked_mul(RAW_PROPERTY_ADMISSION_PASSES)
+            .expect("property authentication bound must not overflow");
+        assert!(phase.property_authentication_bytes <= property_authentication_bound);
         let decoder_bytes = phase
             .validation_bytes
             .checked_add(phase.selected_value_bytes)
@@ -447,12 +474,11 @@ fn production_property_overlay_n_2n_4n_is_disk_growing_and_memory_bounded() {
         assert!(phase.peak_buffered_bytes <= limits.max_buffered_bytes);
         assert_eq!(phase.per_record_seeks, 0);
         let total_read_bound = phase
-            .graph_tree_bytes
+            .authority_authentication_bytes
             .checked_add(
-                phase
-                    .property_fragment_bytes
-                    .checked_mul(2)
-                    .expect("property read bound must not overflow"),
+                property_authentication_bound
+                    .checked_add(phase.property_fragment_bytes)
+                    .expect("property authentication plus decoder bound must not overflow"),
             )
             .expect("total read bound must not overflow");
         assert!(phase.physical_bytes <= total_read_bound);

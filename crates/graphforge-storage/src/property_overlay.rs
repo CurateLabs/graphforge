@@ -254,6 +254,14 @@ pub struct AuthenticatedPropertyInventory {
 /// property inventory. Cached scans never repeat or re-report this work.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PropertyInventoryOpenMetrics {
+    /// Bytes read once while capturing the complete raw graph-files authority.
+    pub(crate) authority_authentication_bytes: u64,
+    /// Fixed 64 KiB reads used to capture raw graph-files authority.
+    pub(crate) authority_authentication_blocks: u64,
+    /// Bytes read while authenticating retained property fragments.
+    pub(crate) property_authentication_bytes: u64,
+    /// Fixed 64 KiB reads used to authenticate retained property fragments.
+    pub(crate) property_authentication_blocks: u64,
     /// Bytes read to capture and authenticate inventory authority.
     pub authentication_bytes: u64,
     /// Fixed 64 KiB authentication reads.
@@ -308,17 +316,25 @@ impl AuthenticatedPropertyInventory {
     /// Exact one-time admission evidence for this cached inventory.
     #[must_use]
     pub fn open_metrics(&self) -> PropertyInventoryOpenMetrics {
+        let property_authentication_bytes =
+            self.routes.values().flatten().fold(0_u64, |sum, fragment| {
+                sum.saturating_add(fragment.authentication_bytes)
+            });
+        let property_authentication_blocks =
+            self.routes.values().flatten().fold(0_u64, |sum, fragment| {
+                sum.saturating_add(fragment.authentication_blocks)
+            });
         PropertyInventoryOpenMetrics {
-            authentication_bytes: self.authority_bytes.saturating_add(
-                self.routes.values().flatten().fold(0_u64, |sum, fragment| {
-                    sum.saturating_add(fragment.authentication_bytes)
-                }),
-            ),
-            authentication_blocks: self.authority_blocks.saturating_add(
-                self.routes.values().flatten().fold(0_u64, |sum, fragment| {
-                    sum.saturating_add(fragment.authentication_blocks)
-                }),
-            ),
+            authority_authentication_bytes: self.authority_bytes,
+            authority_authentication_blocks: self.authority_blocks,
+            property_authentication_bytes,
+            property_authentication_blocks,
+            authentication_bytes: self
+                .authority_bytes
+                .saturating_add(property_authentication_bytes),
+            authentication_blocks: self
+                .authority_blocks
+                .saturating_add(property_authentication_blocks),
         }
     }
 
@@ -882,6 +898,10 @@ pub struct PropertyOverlayMetrics {
     /// Full-file bytes read exactly once for SHA-256 authentication by a raw
     /// one-shot adapter. Cached inventory scans report zero.
     pub authentication_bytes: u64,
+    /// Raw graph-files authority bytes included in authentication bytes.
+    pub authority_authentication_bytes: u64,
+    /// Retained property-fragment bytes included in authentication bytes.
+    pub property_authentication_bytes: u64,
     /// Bytes read while validating canonical UUID/tombstone authority.
     pub validation_bytes: u64,
     /// Bytes read while decoding values from selected row groups.
@@ -892,6 +912,10 @@ pub struct PropertyOverlayMetrics {
     pub read_calls: u64,
     /// Fixed-size 64 KiB authentication blocks from a raw one-shot adapter.
     pub authentication_blocks: u64,
+    /// Raw graph-files authority blocks included in authentication blocks.
+    pub authority_authentication_blocks: u64,
+    /// Retained property-fragment blocks included in authentication blocks.
+    pub property_authentication_blocks: u64,
     /// Read calls used by the validation pass.
     pub validation_read_calls: u64,
     /// Read calls used by selected value decoding.
@@ -1161,6 +1185,10 @@ where
 fn add_open_metrics(metrics: &mut PropertyOverlayMetrics, open: PropertyInventoryOpenMetrics) {
     metrics.authentication_bytes = open.authentication_bytes;
     metrics.authentication_blocks = open.authentication_blocks;
+    metrics.authority_authentication_bytes = open.authority_authentication_bytes;
+    metrics.authority_authentication_blocks = open.authority_authentication_blocks;
+    metrics.property_authentication_bytes = open.property_authentication_bytes;
+    metrics.property_authentication_blocks = open.property_authentication_blocks;
     metrics.physical_bytes = metrics
         .physical_bytes
         .saturating_add(open.authentication_bytes);

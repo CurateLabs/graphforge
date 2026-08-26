@@ -20,6 +20,7 @@ sh_test(
     name = "property_overlay_contract",
     srcs = ["property-overlay-contract.py"],
     data = [
+        "//:root_build_contract",
         "//crates/graphforge-storage:src/lib.rs",
         "//crates/graphforge-storage:src/property_overlay.rs",
         "//crates/graphforge-storage:src/writer.rs",
@@ -33,6 +34,7 @@ sh_test(
     name = "test_property_overlay_contract",
     srcs = ["test-property-overlay-contract.py"],
     data = [
+        "//:root_build_contract",
         "property-overlay-contract.py",
         "//crates/graphforge-storage:src/lib.rs",
         "//crates/graphforge-storage:src/property_overlay.rs",

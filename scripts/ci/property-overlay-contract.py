@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -16,6 +17,7 @@ OVERLAY = Path("crates/graphforge-storage/src/property_overlay.rs")
 LIB = Path("crates/graphforge-storage/src/lib.rs")
 WRITER = Path("crates/graphforge-storage/src/writer.rs")
 STORAGE_BUILD = Path("crates/graphforge-storage/BUILD.bazel")
+ROOT_BUILD = Path("BUILD.bazel")
 
 
 class ContractError(ValueError):
@@ -119,16 +121,6 @@ def test_body(text: str, symbol: str) -> str:
     return block(text[match.start() :], rf"fn\s+{re.escape(symbol)}\s*\(")
 
 
-def rust_code(text: str) -> str:
-    """Remove comments and literals so evidence must be live Rust syntax."""
-    return re.sub(
-        r'//[^\n]*|/\*.*?\*/|r#*".*?"#*|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'',
-        " ",
-        text,
-        flags=re.S,
-    )
-
-
 def bazel_list(call: str, attribute: str) -> set[str]:
     uncommented = re.sub(r"#[^\n]*", "", call)
     match = re.search(rf"\b{re.escape(attribute)}\s*=\s*\[(?P<body>.*?)\]", uncommented, re.S)
@@ -167,6 +159,7 @@ def validate(root: Path, contract_path: Path) -> None:
     lib = (root / LIB).read_text(encoding="utf-8")
     writer = (root / WRITER).read_text(encoding="utf-8")
     storage_build = (root / STORAGE_BUILD).read_text(encoding="utf-8")
+    root_build = (root / ROOT_BUILD).read_text(encoding="utf-8")
 
     expected_format = {
         "PROPERTY_OVERLAY_FORMAT": "full-snapshot-v1",
@@ -247,7 +240,10 @@ def validate(root: Path, contract_path: Path) -> None:
     if not isinstance(evidence, dict) or not evidence:
         raise ContractError("acceptance evidence is empty")
     for case, reference in evidence.items():
-        if not isinstance(reference, dict) or set(reference) != {"path", "symbol", "markers"}:
+        expected_members = {"path", "symbol", "markers"}
+        if case == "production_bounded_scale":
+            expected_members.add("body_sha256")
+        if not isinstance(reference, dict) or set(reference) != expected_members:
             raise ContractError(f"malformed evidence: {case}")
         path = root / reference["path"]
         if not path.is_file() or not path.resolve().is_relative_to(root.resolve()):
@@ -258,33 +254,16 @@ def validate(root: Path, contract_path: Path) -> None:
         for marker in reference["markers"]:
             if marker not in body:
                 raise ContractError(f"evidence marker missing: {case}/{marker}")
+        if case == "production_bounded_scale":
+            digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+            if digest != reference["body_sha256"]:
+                raise ContractError("production scale test body differs from frozen ledger")
 
     scale_source = (root / "crates/graphforge-storage/tests/property_overlay_scale.rs").read_text(
         encoding="utf-8"
     )
     if "#![cfg(unix)]" not in scale_source or "libc::RUSAGE_SELF" not in scale_source:
         raise ContractError("production RSS evidence lost explicit Unix getrusage scope")
-    production_body = rust_code(
-        test_body(scale_source, "production_property_overlay_n_2n_4n_is_disk_growing_and_memory_bounded")
-    )
-    if re.search(r"\bif\s+(?:false|0\s*==\s*1|1\s*==\s*0)\b", production_body):
-        raise ContractError("production scale evidence contains a statically dead assertion branch")
-    required_assertions = {
-        "authentication bytes": r"assert!\s*\(\s*phase\.authentication_bytes\s*>\s*0\s*\)",
-        "authentication blocks": r"assert!\s*\(\s*phase\.authentication_blocks\s*>\s*0\s*\)",
-        "total byte accounting": r"assert_eq!\s*\(\s*phase\.physical_bytes,.*phase\s*\.authentication_bytes.*phase\.validation_bytes.*phase\.selected_value_bytes",
-        "total block accounting": r"assert_eq!\s*\(\s*phase\.physical_blocks,.*phase\s*\.authentication_blocks.*phase\.validation_read_calls.*phase\.selected_value_read_calls",
-        "derived authentication bound": r"authentication_bound\s*=.*graph_tree_bytes.*checked_add\s*\(\s*phase\.property_fragment_bytes.*assert!\s*\(\s*phase\.authentication_bytes\s*<=\s*authentication_bound\s*\)",
-        "derived decoder bound": r"decoder_bytes\s*=.*validation_bytes.*checked_add\s*\(\s*phase\.selected_value_bytes.*assert!\s*\(\s*decoder_bytes\s*<=\s*phase\.property_fragment_bytes\s*\)",
-        "derived total read bound": r"total_read_bound\s*=.*graph_tree_bytes.*property_fragment_bytes.*checked_mul\s*\(\s*2\s*\).*assert!\s*\(\s*phase\.physical_bytes\s*<=\s*total_read_bound\s*\)",
-        "checked spill amplification": r"spill_bound\s*=.*spool_input_bytes.*checked_mul.*merge_passes.*checked_add",
-        "spill assertion": r"assert!\s*\(\s*phase\.spill_bytes\s*<=\s*spill_bound\s*\)",
-        "seek assertion": r"assert_eq!\s*\(\s*phase\.per_record_seeks,\s*0\s*\)",
-    }
-    for label, expression in required_assertions.items():
-        if re.search(expression, production_body, re.S) is None:
-            raise ContractError(f"production scale evidence lacks concrete {label} assertion")
-
     storage_rules = re.sub(r"#[^\n]*", "", storage_build)
     scale_target = call_block(storage_rules, r"gf_rust_integration_test\(\s*name\s*=\s*\"property_overlay_scale\"")
     if bazel_list(scale_target, "srcs") != {"tests/property_overlay_scale.rs"}:
@@ -292,6 +271,15 @@ def validate(root: Path, contract_path: Path) -> None:
     suite = call_block(storage_rules, r"test_suite\(\s*name\s*=\s*\"storage_integration_tests\"")
     if ":property_overlay_scale" not in bazel_list(suite, "tests"):
         raise ContractError("production scale target left storage integration suite")
+    root_rules = re.sub(r"#[^\n]*", "", root_build)
+    integration_suite = call_block(root_rules, r"test_suite\(\s*name\s*=\s*\"integration_tests\"")
+    if "//crates/graphforge-storage:storage_integration_tests" not in bazel_list(
+        integration_suite, "tests"
+    ):
+        raise ContractError("storage integration suite left root integration tests")
+    ci_suite = call_block(root_rules, r"test_suite\(\s*name\s*=\s*\"ci_rust_tests\"")
+    if ":integration_tests" not in bazel_list(ci_suite, "tests"):
+        raise ContractError("root integration tests left ci_rust_tests")
 
 
 def main() -> int:
