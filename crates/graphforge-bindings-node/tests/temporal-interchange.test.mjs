@@ -18,15 +18,12 @@ const fixture = JSON.parse(
 
 test("temporal values remain typed Arrow with exact zone and calendar components", () => {
   const forge = new GraphForge();
-  forge.addNode(
-    "Temporal",
-    {
-      ...Object.fromEntries(
-        fixture.cases.map((entry) => [entry.name, entry.value]),
-      ),
-      fixture_ordinal: 0,
-    },
-  );
+  forge.addNode("Temporal", {
+    ...Object.fromEntries(
+      fixture.cases.map((entry) => [entry.name, entry.value]),
+    ),
+    fixture_ordinal: 0,
+  });
   forge.addNode("Temporal", { fixture_ordinal: 1 });
   const projection = fixture.cases
     .map((entry) => `n.${entry.name} AS ${entry.name}`)

@@ -23,9 +23,7 @@ def check_temporal_interchange() -> None:
     forge.add_node("Temporal", **populated)
     forge.add_node("Temporal", fixture_ordinal=1)
     projection = ", ".join(f"n.{case['name']} AS {case['name']}" for case in FIXTURE["cases"])
-    table = forge.execute(
-        f"MATCH (n:Temporal) RETURN {projection} ORDER BY n.fixture_ordinal"
-    )
+    table = forge.execute(f"MATCH (n:Temporal) RETURN {projection} ORDER BY n.fixture_ordinal")
     assert isinstance(table, pa.Table)
     assert table.num_rows == 2
     for case in FIXTURE["cases"]:

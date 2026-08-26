@@ -43,15 +43,12 @@ const flattenCoordinates = (value) => {
 
 test("GeoArrow metadata values nulls and errors remain Rust-owned", () => {
   const forge = new GraphForge();
-  forge.addNode(
-    "Geometry",
-    {
-      ...Object.fromEntries(
-        fixture.cases.map((entry) => [entry.name, spatialValue(entry)]),
-      ),
-      fixture_ordinal: 0,
-    },
-  );
+  forge.addNode("Geometry", {
+    ...Object.fromEntries(
+      fixture.cases.map((entry) => [entry.name, spatialValue(entry)]),
+    ),
+    fixture_ordinal: 0,
+  });
   forge.addNode("Geometry", { fixture_ordinal: 1 });
   const projection = fixture.cases
     .map((entry) => `n.${entry.name} AS ${entry.name}`)
