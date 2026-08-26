@@ -5,10 +5,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
+use datafusion::common::stats::Precision;
+use datafusion::common::{ColumnStatistics, Statistics};
 use datafusion::error::DataFusionError;
 use datafusion::execution::TaskContext;
 use datafusion::physical_expr::EquivalenceProperties;
-use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
+use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType, SchedulingType};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
@@ -32,6 +34,7 @@ pub(crate) struct PropertyOverlayExec {
     projection: Option<Vec<usize>>,
     limit: Option<usize>,
     batch_size: usize,
+    row_upper_bound: Option<usize>,
     props: Arc<PlanProperties>,
 }
 
@@ -68,12 +71,26 @@ impl PropertyOverlayExec {
                     .map_err(|error| DataFusionError::ArrowError(Box::new(error), None))
             },
         )?;
-        let props = Arc::new(PlanProperties::new(
-            EquivalenceProperties::new(Arc::clone(&schema)),
-            Partitioning::UnknownPartitioning(1),
-            EmissionType::Incremental,
-            Boundedness::Bounded,
-        ));
+        let kind = if is_edge {
+            crate::PropertyRouteKind::Edge
+        } else {
+            crate::PropertyRouteKind::Node
+        };
+        let row_upper_bound = inventory.as_ref().map(|inventory| {
+            let rows = inventory.route_row_upper_bound(kind, &route);
+            options.limit.map_or(rows, |limit| rows.min(limit))
+        });
+        let props = Arc::new(
+            PlanProperties::new(
+                EquivalenceProperties::new(Arc::clone(&schema)),
+                Partitioning::UnknownPartitioning(1),
+                EmissionType::Incremental,
+                Boundedness::Bounded,
+            )
+            // Decode runs on the blocking pool and hands bounded batches to a
+            // backpressured channel, so polling never blocks the async worker.
+            .with_scheduling_type(SchedulingType::Cooperative),
+        );
         Ok(Self {
             project,
             inventory,
@@ -83,6 +100,7 @@ impl PropertyOverlayExec {
             projection,
             limit: options.limit,
             batch_size: options.batch_size.max(1),
+            row_upper_bound,
             props,
         })
     }
@@ -117,6 +135,33 @@ impl ExecutionPlan for PropertyOverlayExec {
             ));
         }
         Ok(self)
+    }
+
+    fn partition_statistics(
+        &self,
+        partition: Option<usize>,
+    ) -> Result<Arc<Statistics>, DataFusionError> {
+        let rows = match partition {
+            None | Some(0) => self.row_upper_bound,
+            Some(_) => None,
+        };
+        let num_rows = match rows {
+            Some(0) => Precision::Exact(0),
+            // Physical footer rows are a sound upper bound, but overlays and
+            // tombstones can reduce the logical output.
+            Some(rows) => Precision::Inexact(rows),
+            None => Precision::Absent,
+        };
+        Ok(Arc::new(Statistics {
+            num_rows,
+            total_byte_size: Precision::Absent,
+            column_statistics: self
+                .schema
+                .fields()
+                .iter()
+                .map(|_| ColumnStatistics::new_unknown())
+                .collect(),
+        }))
     }
 
     fn execute(

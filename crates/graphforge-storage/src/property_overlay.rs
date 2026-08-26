@@ -266,6 +266,7 @@ struct AuthenticatedPropertyFragment {
     entry: crate::GraphFileEntry,
     _physical_relative: PathBuf,
     file: File,
+    physical_rows: usize,
     authentication_bytes: u64,
     authentication_blocks: u64,
 }
@@ -441,6 +442,8 @@ impl AuthenticatedPropertyInventory {
             let builder =
                 ParquetRecordBatchReaderBuilder::try_new(file.try_clone().map_err(io_error)?)
                     .map_err(parquet_error)?;
+            let physical_rows = usize::try_from(builder.metadata().file_metadata().num_rows())
+                .map_err(|_| corrupt("property fragment row count is not representable"))?;
             validate_fragment_schema(builder.schema().as_ref(), id, kind, &route)?;
             merge_route_schema(&mut schemas, kind, &route, builder.schema().as_ref())?;
             let fragments = routes.entry((kind, route)).or_default();
@@ -452,6 +455,7 @@ impl AuthenticatedPropertyInventory {
                 entry,
                 _physical_relative: physical_relative,
                 file,
+                physical_rows,
                 authentication_bytes,
                 authentication_blocks,
             });
@@ -491,6 +495,22 @@ impl AuthenticatedPropertyInventory {
         route: &str,
     ) -> Option<arrow::datatypes::SchemaRef> {
         self.schemas.get(&(kind, route.to_owned())).cloned()
+    }
+
+    /// Sound upper bound on logical rows for one route.
+    ///
+    /// The newest-wins merge and tombstones can only remove physical fragment
+    /// rows, so their admitted footer counts are a safe planning estimate. It
+    /// is deliberately not advertised as an exact logical count.
+    #[must_use]
+    pub fn route_row_upper_bound(&self, kind: PropertyRouteKind, route: &str) -> usize {
+        self.routes
+            .get(&(kind, route.to_owned()))
+            .into_iter()
+            .flatten()
+            .fold(0usize, |rows, fragment| {
+                rows.saturating_add(fragment.physical_rows)
+            })
     }
 
     /// Visit one authenticated route through the retained generation
@@ -1110,14 +1130,27 @@ pub(crate) fn authenticated_property_inventory_for_route(
     Ok(admitted)
 }
 
-/// Resolve the canonical authenticated logical schema for one route.
-pub(crate) fn authenticated_property_route_schema(
+/// Admit one complete property authority for a raw project tree.
+///
+/// Catalog construction uses this once and shares the retained inventory with
+/// every property provider, avoiding route-count-multiplied authentication.
+pub(crate) fn authenticated_property_inventory(
     project: &Path,
-    kind: PropertyRouteKind,
-    route: &str,
-) -> Result<Option<arrow::datatypes::SchemaRef>, GfError> {
-    authenticated_property_inventory_for_route(project, kind, route)
-        .map(|inventory| inventory.route_schema(kind, route))
+) -> Result<AuthenticatedPropertyInventory, GfError> {
+    if project.join(crate::CURRENT_FILE).is_file() {
+        let generation = crate::resolve_project_generation(project)?;
+        return AuthenticatedPropertyInventory::from_resolved_generation(&generation);
+    }
+    let (inventory, _) = crate::capture_graph_files(project)?;
+    let authority_bytes = inventory.total_byte_length;
+    let authority_blocks = inventory.files.iter().fold(0_u64, |blocks, entry| {
+        blocks.saturating_add(entry.byte_length.div_ceil(64 * 1024))
+    });
+    let mut admitted =
+        AuthenticatedPropertyInventory::from_entries_at_root(project, inventory.files)?;
+    admitted.authority_bytes = authority_bytes;
+    admitted.authority_blocks = authority_blocks;
+    Ok(admitted)
 }
 
 /// Resolve a bounded UUID batch newest-first without decoding unrelated row

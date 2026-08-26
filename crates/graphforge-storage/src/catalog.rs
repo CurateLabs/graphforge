@@ -1530,18 +1530,15 @@ impl PropertyTable {
     #[must_use]
     pub fn open_discovered(dir: &Path, stem: &str) -> Self {
         let path = dir.join("properties").join(format!("{stem}.parquet"));
-        let schema = crate::property_overlay::authenticated_property_route_schema(
-            dir,
-            crate::property_overlay::PropertyRouteKind::Node,
-            stem,
-        )
-        .ok()
-        .flatten()
-        .or_else(|| discover_parquet_schema(&path))
-        .unwrap_or_else(|| crate::schemas::PROPERTY_BASE_SCHEMA.clone());
+        let inventory = admitted_property_route(dir, crate::PropertyRouteKind::Node, stem);
+        let schema = inventory
+            .as_ref()
+            .and_then(|inventory| inventory.route_schema(crate::PropertyRouteKind::Node, stem))
+            .or_else(|| discover_parquet_schema(&path))
+            .unwrap_or_else(|| crate::schemas::PROPERTY_BASE_SCHEMA.clone());
         Self {
             project: dir.to_path_buf(),
-            inventory: None,
+            inventory,
             route: stem.to_owned(),
             schema,
         }
@@ -1603,18 +1600,15 @@ impl EdgePropertyTable {
         let path = dir
             .join("edge_properties")
             .join(format!("{rel_type}.parquet"));
-        let schema = crate::property_overlay::authenticated_property_route_schema(
-            dir,
-            crate::property_overlay::PropertyRouteKind::Edge,
-            rel_type,
-        )
-        .ok()
-        .flatten()
-        .or_else(|| discover_parquet_schema(&path))
-        .unwrap_or_else(|| crate::schemas::EDGE_PROPERTY_BASE_SCHEMA.clone());
+        let inventory = admitted_property_route(dir, crate::PropertyRouteKind::Edge, rel_type);
+        let schema = inventory
+            .as_ref()
+            .and_then(|inventory| inventory.route_schema(crate::PropertyRouteKind::Edge, rel_type))
+            .or_else(|| discover_parquet_schema(&path))
+            .unwrap_or_else(|| crate::schemas::EDGE_PROPERTY_BASE_SCHEMA.clone());
         Self {
             project: dir.to_path_buf(),
-            inventory: None,
+            inventory,
             route: rel_type.to_owned(),
             schema,
         }
@@ -1643,6 +1637,16 @@ impl EdgePropertyTable {
     pub fn schema_ref(&self) -> SchemaRef {
         self.schema.clone()
     }
+}
+
+fn admitted_property_route(
+    dir: &Path,
+    kind: crate::PropertyRouteKind,
+    route: &str,
+) -> Option<Arc<crate::AuthenticatedPropertyInventory>> {
+    crate::property_overlay::authenticated_property_inventory_for_route(dir, kind, route)
+        .ok()
+        .map(Arc::new)
 }
 
 #[async_trait]
@@ -1840,13 +1844,7 @@ impl GraphCatalog {
         runtime_catalog: &RuntimeCatalog,
         inventory: Arc<crate::AuthenticatedPropertyInventory>,
     ) -> Result<Self, DataFusionError> {
-        Ok(Self::open_with_authority(
-            dir,
-            ontology,
-            runtime_catalog,
-            None,
-            Some(inventory),
-        ))
+        Self::open_with_authority(dir, ontology, runtime_catalog, None, Some(inventory))
     }
 
     /// Open with exact generation-pinned qualified storage bindings.
@@ -1857,13 +1855,7 @@ impl GraphCatalog {
         runtime_catalog: &RuntimeCatalog,
         semantic: Option<&crate::SemanticStorageBindings>,
     ) -> Result<Self, DataFusionError> {
-        Ok(Self::open_with_authority(
-            dir,
-            ontology,
-            runtime_catalog,
-            semantic,
-            None,
-        ))
+        Self::open_with_authority(dir, ontology, runtime_catalog, semantic, None)
     }
 
     /// Open with semantic bindings and one already-authenticated property authority.
@@ -1874,13 +1866,7 @@ impl GraphCatalog {
         semantic: Option<&crate::SemanticStorageBindings>,
         inventory: Arc<crate::AuthenticatedPropertyInventory>,
     ) -> Result<Self, DataFusionError> {
-        Ok(Self::open_with_authority(
-            dir,
-            ontology,
-            runtime_catalog,
-            semantic,
-            Some(inventory),
-        ))
+        Self::open_with_authority(dir, ontology, runtime_catalog, semantic, Some(inventory))
     }
 
     #[allow(clippy::too_many_lines)]
@@ -1890,7 +1876,15 @@ impl GraphCatalog {
         runtime_catalog: &RuntimeCatalog,
         semantic: Option<&crate::SemanticStorageBindings>,
         inventory: Option<Arc<crate::AuthenticatedPropertyInventory>>,
-    ) -> Self {
+    ) -> Result<Self, DataFusionError> {
+        let inventory = match inventory {
+            Some(inventory) => Some(inventory),
+            None if !dir.exists() => None,
+            None => Some(Arc::new(
+                crate::property_overlay::authenticated_property_inventory(dir)
+                    .map_err(|error| DataFusionError::Execution(error.to_string()))?,
+            )),
+        };
         let mut schema = GraphSchema::new();
 
         // ---- topology nodes ----
@@ -2057,7 +2051,7 @@ impl GraphCatalog {
             }
         }
 
-        Self {
+        Ok(Self {
             schema: Arc::new(schema),
             property_inventory: inventory,
             prop_names,
@@ -2070,7 +2064,7 @@ impl GraphCatalog {
                 .map(|bindings| bindings.composition_fingerprint.clone()),
             semantic_edge_tables,
             semantic_edge_property_tables,
-        }
+        })
     }
 
     /// Node-property provider pinned to this catalog's generation authority.
@@ -2279,6 +2273,26 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    fn raw_catalog_shares_one_authenticated_property_inventory() {
+        let dir = TempDir::new().unwrap();
+        let catalog = GraphCatalog::open(dir.path(), None, &RuntimeCatalog::new()).unwrap();
+        let authority = catalog
+            .property_inventory
+            .as_ref()
+            .expect("raw catalog admits one complete property authority");
+        let node = catalog.property_table(dir.path(), "Person");
+        let edge = catalog.edge_property_table(dir.path(), "KNOWS");
+        assert!(Arc::ptr_eq(
+            authority,
+            node.inventory.as_ref().expect("node authority")
+        ));
+        assert!(Arc::ptr_eq(
+            authority,
+            edge.inventory.as_ref().expect("edge authority")
+        ));
+    }
+
+    #[test]
     fn property_overlay_batches_honor_bound_and_canonical_schema() {
         let dir = TempDir::new().unwrap();
         let mut writer =
@@ -2357,11 +2371,31 @@ mod tests {
         assert_eq!(direct_names.value(0), "new");
 
         let ctx = SessionContext::new();
-        ctx.register_table(
-            "props",
-            Arc::new(PropertyTable::open_discovered(dir.path(), "Person")),
-        )
-        .unwrap();
+        let table = PropertyTable::open_discovered(dir.path(), "Person");
+        let state = ctx.state();
+        let full_plan = table
+            .scan(&state as &dyn Session, None, &[], None)
+            .await
+            .unwrap();
+        assert_eq!(
+            full_plan.partition_statistics(None).unwrap().num_rows,
+            datafusion::common::stats::Precision::Inexact(2),
+            "two snapshots for one UUID are only a physical-row upper bound"
+        );
+        let plan = table
+            .scan(&state as &dyn Session, None, &[], Some(1))
+            .await
+            .unwrap();
+        assert_eq!(
+            plan.properties().scheduling_type,
+            datafusion::physical_plan::execution_plan::SchedulingType::Cooperative
+        );
+        assert_eq!(
+            plan.partition_statistics(None).unwrap().num_rows,
+            datafusion::common::stats::Precision::Inexact(1),
+            "two physical snapshots are a non-exact upper bound capped by LIMIT"
+        );
+        ctx.register_table("props", Arc::new(table)).unwrap();
         let sql = ctx
             .sql("SELECT name FROM props LIMIT 1")
             .await
