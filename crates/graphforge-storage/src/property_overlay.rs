@@ -1446,26 +1446,17 @@ pub(crate) fn rename_live_schema_summary(
 /// summary. `None` means a legacy route without incremental summary authority;
 /// callers preserve its historical union rather than inventing exact counts.
 pub(crate) fn update_live_route_schema(
+    kind: PropertyRouteKind,
+    route: &str,
     authority: Option<&arrow::datatypes::SchemaRef>,
     inferred: arrow::datatypes::SchemaRef,
     before: &BTreeMap<[u8; 16], PropertySnapshotRow>,
     after: &[PropertySnapshotRow],
 ) -> Result<arrow::datatypes::SchemaRef, GfError> {
     let mut schema = match authority {
-        Some(authority) => merge_property_route_schemas(
-            if inferred.field_with_name("edge_uuid").is_ok() {
-                PropertyRouteKind::Edge
-            } else {
-                PropertyRouteKind::Node
-            },
-            inferred
-                .metadata()
-                .get(PROPERTY_ROUTE_KEY)
-                .or_else(|| inferred.metadata().get("graphforge.entity_type"))
-                .or_else(|| inferred.metadata().get("graphforge.rel_type"))
-                .ok_or_else(|| corrupt("property live schema route is missing"))?,
-            [authority.as_ref(), inferred.as_ref()],
-        )?,
+        Some(authority) => {
+            merge_property_route_schemas(kind, route, [authority.as_ref(), inferred.as_ref()])?
+        }
         None => inferred,
     };
     let existing = authority
@@ -4682,12 +4673,15 @@ mod tests {
 
     #[test]
     fn live_schema_summary_tracks_last_owner_and_fails_closed() {
+        // Maintenance/GFDR producers can begin from the canonical UUID-only
+        // schema, which intentionally carries no route metadata. Route identity
+        // is authenticated by the caller/inventory rather than inferred here.
         let inferred = Arc::new(Schema::new_with_metadata(
             vec![
                 Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
                 Field::new("shared", DataType::Int64, true),
             ],
-            HashMap::from([("graphforge.entity_type".into(), "Person".into())]),
+            HashMap::new(),
         ));
         let first = PropertySnapshotRow {
             uuid: [1; 16],
@@ -4700,6 +4694,8 @@ mod tests {
             values: BTreeMap::from([("shared".into(), IrLiteral::Int(2))]),
         };
         let authority = update_live_route_schema(
+            PropertyRouteKind::Node,
+            "Person",
             None,
             Arc::clone(&inferred),
             &BTreeMap::new(),
@@ -4715,6 +4711,8 @@ mod tests {
         );
 
         let one_owner = update_live_route_schema(
+            PropertyRouteKind::Node,
+            "Person",
             Some(&authority),
             Arc::clone(&inferred),
             &BTreeMap::from([(first.uuid, first.clone())]),
@@ -4738,6 +4736,8 @@ mod tests {
         );
 
         let no_owner = update_live_route_schema(
+            PropertyRouteKind::Node,
+            "Person",
             Some(&one_owner),
             inferred,
             &BTreeMap::from([(second.uuid, second.clone())]),
@@ -4782,6 +4782,8 @@ mod tests {
         ));
         assert!(
             update_live_route_schema(
+                PropertyRouteKind::Node,
+                "Person",
                 Some(&inconsistent),
                 Arc::new(Schema::new_with_metadata(
                     vec![Field::new(

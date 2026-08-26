@@ -1206,6 +1206,8 @@ fn stream_replay_property_route(
     for names in target_names.chunks(limits.max_batch_rows) {
         let (before, after) = context.property_rows(names)?;
         authority = crate::property_overlay::update_live_route_schema(
+            kind,
+            route,
             Some(&authority),
             Arc::clone(&inferred),
             &before,
@@ -4751,6 +4753,8 @@ fn stage_node_property_file(
             })
             .collect::<Vec<_>>();
         crate::property_overlay::update_live_route_schema(
+            crate::PropertyRouteKind::Node,
+            stem,
             authority.as_ref(),
             inferred,
             before,
@@ -4804,6 +4808,8 @@ fn stage_edge_property_file(
             })
             .collect::<Vec<_>>();
         crate::property_overlay::update_live_route_schema(
+            crate::PropertyRouteKind::Edge,
+            stem,
             authority.as_ref(),
             inferred,
             before,
@@ -4946,6 +4952,8 @@ fn complete_node_property_window(
         .property_window_schema(crate::PropertyRouteKind::Node, route)
         .or_else(|| inventory.route_schema(crate::PropertyRouteKind::Node, route));
     let schema = crate::property_overlay::update_live_route_schema(
+        crate::PropertyRouteKind::Node,
+        route,
         authority.as_ref(),
         Arc::new(inferred),
         &before,
@@ -5019,6 +5027,8 @@ fn complete_edge_property_window(
         .property_window_schema(crate::PropertyRouteKind::Edge, route)
         .or_else(|| inventory.route_schema(crate::PropertyRouteKind::Edge, route));
     let schema = crate::property_overlay::update_live_route_schema(
+        crate::PropertyRouteKind::Edge,
+        route,
         authority.as_ref(),
         Arc::new(inferred),
         &before,
@@ -5104,6 +5114,8 @@ fn stage_property_tombstones_from_inventory<S: std::hash::BuildHasher>(
         .property_window_schema(kind, route)
         .or_else(|| inventory.route_schema(kind, route));
     let schema = crate::property_overlay::update_live_route_schema(
+        kind,
+        route,
         authority.as_ref(),
         inferred,
         &before,
