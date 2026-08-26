@@ -475,7 +475,9 @@ mod tests {
 
     use super::*;
 
-    fn failing_refresh_session() -> (OpenRouterProviderSession, thread::JoinHandle<()>) {
+    fn refresh_session(
+        refresh_succeeds: bool,
+    ) -> (OpenRouterProviderSession, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let server = thread::spawn(move || {
@@ -516,6 +518,25 @@ mod tests {
                         "data":[
                             {"index":0,"embedding":[1.0,0.0]},
                             {"index":1,"embedding":[0.0,1.0]}
+                        ]
+                    }))
+                    .unwrap();
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        response.len()
+                    )
+                    .unwrap();
+                    stream.write_all(&response).unwrap();
+                } else if refresh_succeeds {
+                    assert_eq!(payload["input"].as_array().unwrap().len(), 4);
+                    let response = serde_json::to_vec(&json!({
+                        "model":"vendor/model",
+                        "data":[
+                            {"index":0,"embedding":[1.0,0.0]},
+                            {"index":1,"embedding":[0.0,1.0]},
+                            {"index":2,"embedding":[0.5,0.5]},
+                            {"index":3,"embedding":[0.25,0.75]}
                         ]
                     }))
                     .unwrap();
@@ -586,7 +607,7 @@ mod tests {
 
     #[test]
     fn proactive_failure_completion_is_driven_without_wall_clock_polling() {
-        let (session, server) = failing_refresh_session();
+        let (session, server) = refresh_session(false);
         let graph = GraphForge::new(None).unwrap();
         for title in ["First", "Second"] {
             graph
@@ -654,6 +675,123 @@ mod tests {
             .unwrap();
         assert_eq!(active.generation_id, original.generation_id);
         assert_eq!(active.vector_count, original.vector_count);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn proactive_success_coalesces_real_mutations_without_wall_clock_polling() {
+        let (session, server) = refresh_session(true);
+        let graph = GraphForge::new(None).unwrap();
+        for title in ["First", "Second"] {
+            graph
+                .add_node(
+                    "Paper",
+                    &HashMap::from([("title".into(), crate::PropValue::Str(title.into()))]),
+                )
+                .unwrap();
+        }
+        let request = ProviderEmbeddingPlanRequest {
+            display_name: "semantic".into(),
+            label: "Paper".into(),
+            properties: vec!["title".into()],
+            contract: session.contract().clone(),
+            dimensions: 2,
+            normalization: crate::ProviderEmbeddingNormalization::None,
+            distance: crate::ProviderEmbeddingDistance::Cosine,
+            request_limits: ProviderRequestLimits::default(),
+            batch_limits: crate::ProviderBatchLimits::default(),
+            execution_limits: session.config.execution_limits,
+            replace_alias: false,
+        };
+        session.publish_embeddings(&graph, &request).unwrap();
+        let initial_generation = graph
+            .embedding_space(Some("semantic"))
+            .unwrap()
+            .active
+            .unwrap()
+            .generation_id;
+
+        // Own the driver token before either mutation so both notices are
+        // deterministically observed inside one debounce window. The real
+        // scheduler queue is then driven at an injected monotonic instant.
+        graph
+            .provider_refresh_driver_active
+            .store(true, Ordering::Release);
+        for title in ["Third", "Fourth"] {
+            graph
+                .add_node(
+                    "Paper",
+                    &HashMap::from([("title".into(), crate::PropValue::Str(title.into()))]),
+                )
+                .unwrap();
+        }
+        let queued = graph.inspect_embedding_refresh(Some("semantic")).unwrap();
+        assert!(queued.worker.selected_lineage_queued);
+        assert!(!queued.worker.selected_lineage_in_flight);
+        assert_eq!(queued.worker.coalesced_notices, 1);
+        assert_eq!(queued.worker.succeeded, 0);
+        assert_eq!(queued.worker.failed, 0);
+
+        graph.drive_ready_provider_refreshes_at(Duration::MAX);
+
+        let refreshed = graph.inspect_embedding_refresh(Some("semantic")).unwrap();
+        assert!(!refreshed.worker.selected_lineage_queued);
+        assert!(!refreshed.worker.selected_lineage_in_flight);
+        assert_eq!(refreshed.worker.coalesced_notices, 1);
+        assert_eq!(refreshed.worker.succeeded, 1);
+        assert_eq!(refreshed.worker.failed, 0);
+        assert!(matches!(
+            refreshed.last_outcome.map(|outcome| outcome.status),
+            Some(graphforge_storage::EmbeddingRefreshOutcomeStatus::Succeeded)
+        ));
+        let active = graph
+            .embedding_space(Some("semantic"))
+            .unwrap()
+            .active
+            .unwrap();
+        assert_eq!(active.vector_count, 4);
+        assert_ne!(active.generation_id, initial_generation);
+
+        graph
+            .add_node(
+                "Other",
+                &HashMap::from([("note".into(), crate::PropValue::Str("Unrelated".into()))]),
+            )
+            .unwrap();
+        graph
+            .execute("MATCH (n:Other) SET n.note = 'still not selected'")
+            .unwrap();
+        let unrelated = graph.inspect_embedding_refresh(Some("semantic")).unwrap();
+        assert!(!unrelated.worker.selected_lineage_queued);
+        assert_eq!(unrelated.worker.succeeded, 1);
+        assert_eq!(unrelated.worker.failed, 0);
+
+        graph
+            .set_embedding_refresh_project_policy(
+                graphforge_storage::EmbeddingRefreshProjectPolicy {
+                    proactive: false,
+                    debounce: Duration::from_millis(500),
+                    max_concurrent_jobs: 2,
+                },
+            )
+            .unwrap();
+        graph
+            .add_node(
+                "Paper",
+                &HashMap::from([("title".into(), crate::PropValue::Str("Fifth".into()))]),
+            )
+            .unwrap();
+        let disabled = graph.inspect_embedding_refresh(Some("semantic")).unwrap();
+        assert!(!disabled.worker.selected_lineage_queued);
+        assert_eq!(disabled.worker.succeeded, 0);
+        assert_eq!(disabled.worker.failed, 0);
+        assert!(matches!(
+            disabled.freshness.map(|freshness| freshness.state),
+            Some(crate::EmbeddingSpaceFreshnessState::SubstantiallyStale)
+        ));
+        graph
+            .provider_refresh_driver_active
+            .store(false, Ordering::Release);
         server.join().unwrap();
     }
 

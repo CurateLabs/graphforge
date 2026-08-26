@@ -21,7 +21,7 @@ fn mock_openrouter() -> (String, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
     let server = thread::spawn(move || {
-        for call in 0..4 {
+        for call in 0..3 {
             let (mut stream, _) = listener.accept().unwrap();
             let request = read_request(&mut stream);
             let (headers, body) = request.split_once("\r\n\r\n").unwrap();
@@ -53,16 +53,6 @@ fn mock_openrouter() -> (String, thread::JoinHandle<()>) {
                     json!({"model":"vendor/model","results":[
                         {"index":0,"relevance_score":0.1},
                         {"index":1,"relevance_score":0.9}
-                    ]})
-                }
-                3 => {
-                    assert!(headers.starts_with("POST /api/v1/embeddings HTTP/1.1"));
-                    assert_eq!(payload["input"].as_array().unwrap().len(), 4);
-                    json!({"model":"vendor/model","data":[
-                        {"index":0,"embedding":[1.0,0.0]},
-                        {"index":1,"embedding":[0.0,1.0]},
-                        {"index":2,"embedding":[0.5,0.5]},
-                        {"index":3,"embedding":[0.25,0.75]}
                     ]})
                 }
                 _ => unreachable!(),
@@ -249,72 +239,7 @@ fn configured_session_composes_embedding_query_rerank_and_advisory() {
         .unwrap();
     assert_eq!(uuids.value(0), second);
     assert_eq!(uuids.value(1), first);
-
-    let initial_generation = graph
-        .embedding_space(Some("semantic"))
-        .unwrap()
-        .active
-        .unwrap()
-        .generation_id;
-    node(&graph, "Third");
-    node(&graph, "Fourth");
-    let deadline = std::time::Instant::now() + Duration::from_secs(3);
-    let refreshed = loop {
-        let inspection = graph.inspect_embedding_refresh(Some("semantic")).unwrap();
-        if inspection.worker.succeeded == 1 {
-            break inspection;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "proactive provider refresh did not complete"
-        );
-        thread::sleep(Duration::from_millis(25));
-    };
-    assert!(refreshed.worker.coalesced_notices >= 1);
-    assert_eq!(refreshed.worker.failed, 0);
-    assert!(matches!(
-        refreshed.last_outcome.map(|outcome| outcome.status),
-        Some(graphforge_api::EmbeddingRefreshOutcomeStatus::Succeeded)
-    ));
-    let active = graph
-        .embedding_space(Some("semantic"))
-        .unwrap()
-        .active
-        .unwrap();
-    assert_eq!(active.vector_count, 4);
-    assert_ne!(active.generation_id, initial_generation);
     server.join().unwrap();
-
-    graph
-        .add_node(
-            "Other",
-            &HashMap::from([("note".to_owned(), PropValue::Str("Unrelated".to_owned()))]),
-        )
-        .unwrap();
-    graph
-        .execute("MATCH (n:Other) SET n.note = 'still not selected'")
-        .unwrap();
-    thread::sleep(Duration::from_millis(600));
-    let unrelated = graph.inspect_embedding_refresh(Some("semantic")).unwrap();
-    assert_eq!(unrelated.worker.succeeded, 1);
-    assert_eq!(unrelated.worker.failed, 0);
-
-    graph
-        .set_embedding_refresh_project_policy(graphforge_api::EmbeddingRefreshProjectPolicy {
-            proactive: false,
-            debounce: Duration::from_millis(500),
-            max_concurrent_jobs: 2,
-        })
-        .unwrap();
-    node(&graph, "Fifth");
-    thread::sleep(Duration::from_millis(600));
-    let disabled = graph.inspect_embedding_refresh(Some("semantic")).unwrap();
-    assert_eq!(disabled.worker.succeeded, 0);
-    assert_eq!(disabled.worker.failed, 0);
-    assert!(matches!(
-        disabled.freshness.map(|freshness| freshness.state),
-        Some(graphforge_api::EmbeddingSpaceFreshnessState::SubstantiallyStale)
-    ));
 }
 
 #[test]
