@@ -1014,7 +1014,7 @@ pub fn write_manifest(project_dir: &Path, rows: &[AdjacencyManifestRow]) -> Resu
         Arc::clone(&ADJACENCY_MANIFEST_SCHEMA),
         &batch,
     )?;
-    staged.commit()
+    staged.commit_at(project_dir)
 }
 
 /// Read `index_manifest.parquet`. An absent manifest (or absent
@@ -2955,7 +2955,7 @@ mod tests {
         staged
             .stage(&manifest_path(dir.path()), schema, &batch)
             .unwrap();
-        staged.commit().unwrap();
+        staged.commit_at(dir.path()).unwrap();
 
         assert!(matches!(
             read_manifest(dir.path()),
@@ -3327,7 +3327,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_diamond(dir.path());
         build_adjacency_index(dir.path(), BUILD_TS).unwrap();
-        crate::generation::bump_topology_generation(dir.path()).unwrap();
+        crate::generation::force_bump_topology_generation_for_test(dir.path()).unwrap();
 
         let inspection = inspect_adjacency_index(dir.path()).unwrap();
         assert_eq!(inspection.state, AdjacencyFreshnessState::Stale);
@@ -3478,7 +3478,7 @@ mod tests {
         build_adjacency_index(dir.path(), BUILD_TS).unwrap();
         // Bump the counter without touching topology content: the index is
         // stale but its content still matches the (unchanged) edge files.
-        crate::generation::bump_topology_generation(dir.path()).unwrap();
+        crate::generation::force_bump_topology_generation_for_test(dir.path()).unwrap();
 
         let issues = validate_adjacency_index(dir.path()).unwrap();
         assert_eq!(

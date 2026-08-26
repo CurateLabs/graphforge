@@ -7669,7 +7669,7 @@ mod tests {
             IrLiteral::Int(2000)
         );
 
-        staged.commit().unwrap();
+        staged.commit_at(dir.path()).unwrap();
         assert_eq!(
             read_node_props(dir.path(), "_untyped")[&ab]["name"],
             IrLiteral::Str("new".into())
@@ -7720,7 +7720,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(staged.property_window_count(), 1);
-        staged.commit().unwrap();
+        staged.commit_at(dir.path()).unwrap();
         assert_eq!(
             crate::generation::read_property_generation(dir.path()).unwrap(),
             prior_property_generation + 1
@@ -7777,7 +7777,7 @@ mod tests {
             )]),
         )
         .unwrap();
-        staged.commit().unwrap();
+        staged.commit_at(dir.path()).unwrap();
 
         let properties = read_node_props(dir.path(), "_untyped");
         assert!(!properties.contains_key(&removed));

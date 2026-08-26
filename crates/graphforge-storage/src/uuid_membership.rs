@@ -1194,15 +1194,14 @@ pub(crate) fn commit_uuid_topology_rewrite(
                 return Ok(None);
             }
             let orphan_gc = collect_uuid_orphans_locked(context.project, DEFAULT_ORPHAN_GC_LIMIT)?;
-            if context.prior.topology != 0 && !uuid_membership_index_present(context.project_root) {
+            if !uuid_membership_index_present(context.project_root) {
                 return Err(storage_err(
                     "UUID membership index migration is required before topology mutation",
                 ));
             }
-            if context.prior.topology != 0
-                && snapshot
-                    .as_ref()
-                    .is_none_or(|value| value.topology_generation() != context.prior.topology)
+            if snapshot
+                .as_ref()
+                .is_none_or(|value| value.topology_generation() != context.prior.topology)
             {
                 *snapshot = Some(AuthenticatedUuidIndexSnapshot::open_at_generation(
                     context.project_root,
@@ -1303,6 +1302,34 @@ pub(crate) fn commit_uuid_topology_rewrite(
             metrics: committed_metrics,
         },
     ))
+}
+
+/// Commit a topology rewrite that changes no UUID membership while advancing
+/// the authenticated membership manifest to the new topology generation.
+pub(crate) fn commit_uuid_neutral_topology_rewrite(
+    project_dir: &Path,
+    staged: crate::staging::RewriteBatch,
+) -> Result<Option<u64>, GfError> {
+    let mut snapshot = None;
+    match commit_uuid_topology_rewrite(
+        project_dir,
+        staged,
+        &UuidTopologyDelta {
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            deleted_nodes: Vec::new(),
+            deleted_edges: Vec::new(),
+        },
+        &mut snapshot,
+    )? {
+        CommittedUuidTopologyRewrite::NoTopologyChange => Ok(None),
+        CommittedUuidTopologyRewrite::Committed { generation, .. } => Ok(Some(generation)),
+        CommittedUuidTopologyRewrite::CommittedNeedsRefresh {
+            generation, error, ..
+        } => Err(GfError::Storage(format!(
+            "topology generation {generation} committed but UUID index snapshot refresh failed: {error}"
+        ))),
+    }
 }
 
 /// Stage one bounded v3 UUID-index delta and its authenticated receipt into the
@@ -1448,7 +1475,13 @@ fn plan_uuid_membership_delta(
     ),
     GfError,
 > {
-    let mut manifest = if current == 0 {
+    let mut manifest = if let Some(retained) = snapshot.as_deref_mut() {
+        retained.revalidate()?;
+        if retained.manifest.current_generation != current {
+            return Err(storage_err("retained manifest generation is stale"));
+        }
+        retained.manifest.clone()
+    } else if current == 0 {
         Manifest {
             format_version: FORMAT_VERSION,
             base_generation: 0,
@@ -1458,14 +1491,7 @@ fn plan_uuid_membership_delta(
             runs: Vec::new(),
         }
     } else {
-        let retained = snapshot
-            .as_deref_mut()
-            .ok_or_else(|| storage_err("authenticated UUID snapshot is required"))?;
-        retained.revalidate()?;
-        if retained.manifest.current_generation != current {
-            return Err(storage_err("retained manifest generation is stale"));
-        }
-        retained.manifest.clone()
+        return Err(storage_err("authenticated UUID snapshot is required"));
     };
 
     let prior_names = manifest_file_names(&manifest);
@@ -1527,7 +1553,7 @@ fn plan_uuid_membership_delta(
         (identity_record.name.clone(), identity_path),
         (surrogate_record.name.clone(), surrogate_path),
     ]);
-    if current == 0 {
+    if current == 0 && manifest.runs.is_empty() {
         let empty_identity_path = scratch.join("identities-base.run");
         let empty_surrogate_path = scratch.join("surrogates-base.run");
         let empty_identity = create_uuid_file(&empty_identity_path)?;
@@ -4049,12 +4075,12 @@ mod tests {
     #[test]
     fn batch_lookup_restores_duplicates_and_applies_newest_tombstones() {
         let dir = tempfile::tempdir().unwrap();
-        crate::generation::bump_topology_generation(dir.path()).unwrap();
+        crate::generation::force_bump_topology_generation_for_test(dir.path()).unwrap();
         let retained = (1_u64..=40_000)
             .map(|value| (Uuid::from_u128(u128::from(value)), value))
             .collect::<Vec<_>>();
         append_uuid_membership_delta(dir.path(), 1, &retained, &[]).unwrap();
-        crate::generation::bump_topology_generation(dir.path()).unwrap();
+        crate::generation::force_bump_topology_generation_for_test(dir.path()).unwrap();
         append_uuid_membership_delta_with_tombstones(
             dir.path(),
             2,
@@ -4110,7 +4136,7 @@ mod tests {
         let nodes = (1_u64..=40_000)
             .map(|value| (Uuid::from_u128(u128::from(value)), value))
             .collect::<Vec<_>>();
-        crate::generation::bump_topology_generation(dir.path()).unwrap();
+        crate::generation::force_bump_topology_generation_for_test(dir.path()).unwrap();
         append_uuid_membership_delta(dir.path(), 1, &nodes, &[]).unwrap();
         let root = dir.path().join(INDEX_DIR);
         let mut snapshot =
@@ -4172,7 +4198,7 @@ mod tests {
         assert!(UuidMembershipIndex::open(dir.path()).is_err());
         rebuild_uuid_membership_indexes(dir.path(), UuidIndexBuildLimits::default()).unwrap();
         assert!(uuid_membership_index_is_fresh(dir.path()).unwrap());
-        crate::generation::bump_topology_generation(dir.path()).unwrap();
+        crate::generation::force_bump_topology_generation_for_test(dir.path()).unwrap();
         assert!(!uuid_membership_index_is_fresh(dir.path()).unwrap());
         assert!(
             UuidMembershipIndex::open(dir.path())
@@ -4281,7 +4307,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut bytes = 0;
         for generation in 1..=batches {
-            crate::generation::bump_topology_generation(dir.path()).unwrap();
+            crate::generation::force_bump_topology_generation_for_test(dir.path()).unwrap();
             let metrics = append_uuid_membership_delta(
                 dir.path(),
                 generation,
@@ -4321,7 +4347,7 @@ mod tests {
     #[test]
     fn append_rejects_cross_run_uuid_and_surrogate_collisions_before_publication() {
         let dir = tempfile::tempdir().unwrap();
-        crate::generation::bump_topology_generation(dir.path()).unwrap();
+        crate::generation::force_bump_topology_generation_for_test(dir.path()).unwrap();
         append_uuid_membership_delta(
             dir.path(),
             1,
@@ -4331,7 +4357,7 @@ mod tests {
         .unwrap();
         let manifest_before = fs::read(dir.path().join(INDEX_DIR).join(MANIFEST)).unwrap();
 
-        crate::generation::bump_topology_generation(dir.path()).unwrap();
+        crate::generation::force_bump_topology_generation_for_test(dir.path()).unwrap();
         assert!(
             append_uuid_membership_delta(dir.path(), 2, &[], &[Uuid::from_u128(1)],)
                 .unwrap_err()
@@ -4350,9 +4376,9 @@ mod tests {
         );
 
         let reverse = tempfile::tempdir().unwrap();
-        crate::generation::bump_topology_generation(reverse.path()).unwrap();
+        crate::generation::force_bump_topology_generation_for_test(reverse.path()).unwrap();
         append_uuid_membership_delta(reverse.path(), 1, &[], &[Uuid::from_u128(9)]).unwrap();
-        crate::generation::bump_topology_generation(reverse.path()).unwrap();
+        crate::generation::force_bump_topology_generation_for_test(reverse.path()).unwrap();
         assert!(
             append_uuid_membership_delta(reverse.path(), 2, &[(Uuid::from_u128(9), 9)], &[])
                 .unwrap_err()
@@ -4364,7 +4390,7 @@ mod tests {
     #[test]
     fn orphan_maintenance_is_bounded_and_preserves_linked_and_live_runs() {
         let dir = tempfile::tempdir().unwrap();
-        crate::generation::bump_topology_generation(dir.path()).unwrap();
+        crate::generation::force_bump_topology_generation_for_test(dir.path()).unwrap();
         append_uuid_membership_delta(
             dir.path(),
             1,
@@ -4399,10 +4425,10 @@ mod tests {
         let retained = (1_u64..=40_000)
             .map(|value| (Uuid::from_u128(u128::from(value)), value))
             .collect::<Vec<_>>();
-        crate::generation::bump_topology_generation(dir.path()).unwrap();
+        crate::generation::force_bump_topology_generation_for_test(dir.path()).unwrap();
         append_uuid_membership_delta(dir.path(), 1, &retained, &[]).unwrap();
 
-        crate::generation::bump_topology_generation(dir.path()).unwrap();
+        crate::generation::force_bump_topology_generation_for_test(dir.path()).unwrap();
         let metrics =
             append_uuid_membership_delta(dir.path(), 2, &[(Uuid::from_u128(50_000), 50_000)], &[])
                 .unwrap();
@@ -4435,7 +4461,7 @@ mod tests {
         // Two empty base files, two L0 files, manifest, and receipt. No copy of
         // any retained corpus exists on the initial plan.
         assert_eq!(first.staged_paths().count(), 6);
-        first.commit().unwrap();
+        first.commit_unsealed_for_test().unwrap();
         fs::create_dir_all(dir.path().join("topology")).unwrap();
         fs::write(
             crate::generation::generation_path(dir.path()),
@@ -4491,7 +4517,7 @@ mod tests {
         install
             .stage_bytes(&root.join(MANIFEST), &serde_json::to_vec(&planned).unwrap())
             .unwrap();
-        install.commit().unwrap();
+        install.commit_unsealed_for_test().unwrap();
         snapshot.advance_to(planned).unwrap();
 
         let scratch = tempfile::tempdir_in(dir.path()).unwrap();

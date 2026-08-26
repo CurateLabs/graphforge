@@ -919,7 +919,7 @@ mod tests {
             stage_mutate_node_labels(&mut staged, dir.path(), &additions, &removals).unwrap(),
             (1, 0)
         );
-        staged.commit().unwrap();
+        staged.commit_unsealed_for_test().unwrap();
 
         let mut observed = HashMap::new();
         for batch in crate::read_nodes(dir.path()).unwrap() {

@@ -16,6 +16,19 @@ use graphforge_storage::adjacency::build_adjacency_index;
 
 const TS: i64 = 1_700_000_000_000_000;
 
+fn force_stale_generation_fixture(dir: &Path) {
+    let topology = graphforge_storage::read_topology_generation(dir).unwrap() + 1;
+    let search = graphforge_storage::read_search_generation(dir).unwrap();
+    let property = graphforge_storage::generation::read_property_generation(dir).unwrap();
+    std::fs::write(
+        dir.join("topology/generation.json"),
+        format!(
+            r#"{{"topology_generation":{topology},"search_generation":{search},"property_generation":{property}}}"#
+        ),
+    )
+    .unwrap();
+}
+
 fn bind(query: &str, rc: &Arc<Mutex<RuntimeCatalog>>) -> GraphPlan {
     let binder = Binder::new(None, Arc::clone(rc), OntologyMode::Advisory);
     let ast = graphforge_cypher::parse(query).expect("parse");
@@ -217,7 +230,7 @@ async fn stale_between_plan_and_execute_is_correct() {
         .unwrap();
     // Create a generation gap with no delta segment so the provider reports a
     // genuine Miss rather than serving the write's valid overlay chain.
-    graphforge_storage::generation::bump_topology_generation(dir.path()).unwrap();
+    force_stale_generation_fixture(dir.path());
 
     let plan = bind(
         "MATCH (a:Person)-[r:KNOWS]->(b:Person) RETURN b.name AS bn",

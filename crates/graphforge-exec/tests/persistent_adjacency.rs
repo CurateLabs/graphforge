@@ -21,6 +21,19 @@ use graphforge_exec::{
 const TS: i64 = 1_700_000_000_000_000;
 const PERSON: TypeId = TypeId(0);
 
+fn force_stale_generation_fixture(dir: &Path) {
+    let topology = graphforge_storage::read_topology_generation(dir).unwrap() + 1;
+    let search = graphforge_storage::read_search_generation(dir).unwrap();
+    let property = graphforge_storage::generation::read_property_generation(dir).unwrap();
+    std::fs::write(
+        dir.join("topology/generation.json"),
+        format!(
+            r#"{{"topology_generation":{topology},"search_generation":{search},"property_generation":{property}}}"#
+        ),
+    )
+    .unwrap();
+}
+
 /// Strict-mode diamond a→b, a→c, b→d, c→d plus a parallel a→b and a self-loop
 /// d→d, all KNOWS — the fixture whose self-loop pins the undirected merge
 /// order. Returns the surrogate node ids.
@@ -625,7 +638,7 @@ fn revalidate_drops_cache_on_external_generation_bump() {
     provider.adjacency("KNOWS", Direction::Out).unwrap();
 
     // Simulate an external writer: bump the counter directly.
-    graphforge_storage::generation::bump_topology_generation(dir.path()).unwrap();
+    force_stale_generation_fixture(dir.path());
 
     // Without revalidation the memoized state still says Hit…
     assert_eq!(
