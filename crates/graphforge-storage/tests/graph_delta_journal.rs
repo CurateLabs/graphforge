@@ -261,7 +261,16 @@ fn streaming_resource_ladder_is_independent_of_base_rows() {
             replay.materialization_batch_row_bound,
         ));
     }
-    assert!(evidence.windows(2).all(|pair| pair[0] == pair[1]));
+    let (minimum, maximum) = evidence
+        .iter()
+        .map(|(bytes, _)| *bytes)
+        .fold((u64::MAX, 0_u64), |(minimum, maximum), bytes| {
+            (minimum.min(bytes), maximum.max(bytes))
+        });
+    assert!(
+        maximum - minimum <= 128,
+        "only variable-width operation encoding may change replay memory, not base rows"
+    );
     assert_eq!(evidence[0].1, 7);
 }
 
@@ -532,6 +541,68 @@ fn entity_delete_rewrites_each_affected_property_route_with_tombstones() {
 }
 
 #[test]
+fn remove_absent_property_key_does_not_emit_replay_fragment() {
+    let root = tempfile::tempdir().unwrap();
+    publish_base(root.path());
+    let node = "00000000-0000-7000-8000-000000000001";
+    let edge = "00000000-0000-7000-8000-000000000003";
+    let operations = vec![
+        GraphDeltaOp {
+            operation_uuid: Uuid::now_v7(),
+            kind: GraphDeltaOpKind::RemoveNodeProperty,
+            payload: GraphDeltaPayload::RemoveNodeProperty {
+                node_uuid: node.into(),
+                property_stem: "Person".into(),
+                key: "absent".into(),
+            },
+        },
+        GraphDeltaOp {
+            operation_uuid: Uuid::now_v7(),
+            kind: GraphDeltaOpKind::RemoveEdgeProperty,
+            payload: GraphDeltaPayload::RemoveEdgeProperty {
+                edge_uuid: edge.into(),
+                property_stem: "KNOWS".into(),
+                key: "absent".into(),
+            },
+        },
+    ];
+    publish_graph_delta(
+        root.path(),
+        &GraphDeltaPublishRequest {
+            transaction_uuid: Uuid::now_v7(),
+            generation_uuid: Uuid::now_v7(),
+            run_uuid: Uuid::now_v7(),
+            operations,
+            limits: GraphDeltaJournalLimits::default(),
+        },
+    )
+    .unwrap();
+    let generation = resolve_project_generation(root.path()).unwrap();
+    let inventory = generation.graph_files_inventory().unwrap().unwrap();
+    let view = tempfile::tempdir().unwrap();
+    materialize_replayed_graph_tree(
+        &generation.graph_tree_root(),
+        &inventory,
+        view.path(),
+        GraphDeltaJournalLimits::default(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        enumerate_property_fragments(view.path(), PropertyRouteKind::Node, "Person")
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        enumerate_property_fragments(view.path(), PropertyRouteKind::Edge, "KNOWS")
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn exact_retry_transaction_is_idempotent_and_conflict_is_typed() {
     let root = tempfile::tempdir().unwrap();
     publish_base(root.path());
@@ -631,7 +702,7 @@ fn resource_limits_reject_tiny_run_accumulation() {
         },
     )
     .unwrap_err();
-    assert!(err.to_string().contains("GF_RESOURCE_LIMIT"));
+    assert_eq!(err.code(), "GF_RESOURCE_LIMIT");
 }
 
 #[test]
