@@ -733,7 +733,7 @@ fn acquire_writer_lock_for_parts(
     Ok(writer_lock)
 }
 
-fn wait_for_writer_lock(root: &Path) -> Result<File, GfError> {
+pub(crate) fn wait_for_writer_lock(root: &Path) -> Result<File, GfError> {
     let lock_dir = ensure_machine_directory(root, Path::new(LOCKS_DIR))?;
     sync_directory(root)?;
     let writer_lock = open_regular_lock(&lock_dir.join(WRITER_LOCK_FILE))?;

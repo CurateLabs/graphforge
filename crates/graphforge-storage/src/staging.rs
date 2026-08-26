@@ -344,6 +344,22 @@ impl RewriteBatch {
         !self.property_windows.is_empty()
     }
 
+    pub(crate) fn property_authority_root(&self) -> Result<Option<&Path>, GfError> {
+        let mut roots = self.property_windows.values().filter_map(|window| {
+            window
+                .authority_generation_uuid
+                .as_ref()
+                .map(|(_, root)| root.as_path())
+        });
+        let first = roots.next();
+        if roots.any(|root| Some(root) != first) {
+            return Err(GfError::Storage(
+                "property batch spans generation authority roots".into(),
+            ));
+        }
+        Ok(first)
+    }
+
     pub(crate) fn has_node_property_windows(&self) -> bool {
         self.property_windows
             .keys()

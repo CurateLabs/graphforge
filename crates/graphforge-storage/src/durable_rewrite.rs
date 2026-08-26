@@ -681,6 +681,12 @@ pub(crate) fn commit(
     bump_property: bool,
     auxiliary: Option<AuxiliaryReceipt>,
 ) -> Result<GenerationPair, GfError> {
+    // Serialize the pinned-generation precondition with CURRENT replacement.
+    // Project publication takes this same lock before it can replace CURRENT.
+    let _project_authority_guard = batch
+        .property_authority_root()?
+        .map(crate::project_publication::wait_for_writer_lock)
+        .transpose()?;
     let guard = acquire(root)?;
     guard.revalidate()?;
     let prior_state = crate::generation::read_generation_state_raw(root)?;
