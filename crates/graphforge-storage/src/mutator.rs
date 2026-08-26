@@ -443,9 +443,10 @@ pub(crate) fn property_parquet_files(
 }
 
 /// Stage the deletion of the given nodes into `staged`: every
-/// `properties/*.parquet` first, then `topology/nodes.parquet` **last** — the
-/// authoritative existence record commits only after everything that refers
-/// to those nodes (#790). Returns the node rows that will be removed.
+/// node-property tombstones first, then every matching canonical legacy or
+/// immutable topology node fragment — authoritative existence commits only
+/// after everything that refers to those nodes (#790). Returns the node rows
+/// that will be removed.
 ///
 /// # Errors
 /// Returns [`GfError::Storage`] on any I/O, Arrow, or Parquet failure.
@@ -469,11 +470,11 @@ pub fn stage_delete_nodes<S: BuildHasher>(
             node_uuids,
         )?;
     }
-    stage_rewrite_nodes_dropping(
-        staged,
-        &dir.join("topology").join("nodes.parquet"),
-        node_uuids,
-    )
+    let mut removed = 0_u64;
+    for path in node_parquet_files(dir)? {
+        removed = removed.saturating_add(stage_rewrite_nodes_dropping(staged, &path, node_uuids)?);
+    }
+    Ok(removed)
 }
 
 /// Stage node deletion while binding every property tombstone to `inventory`.
@@ -575,12 +576,11 @@ pub fn stage_delete_edges_authenticated<S: BuildHasher>(
     Ok(removed)
 }
 
-/// Delete the given nodes by `node_uuid`, rewriting `topology/nodes.parquet` and
-/// dropping the same nodes' rows from every `properties/*.parquet` file.
+/// Delete the given nodes by `node_uuid`, rewriting matching canonical node
+/// fragments and publishing property-overlay tombstones for the same nodes.
 ///
-/// All rewrites stage and commit as one batch, `topology/nodes.parquet` last
-/// (#790): a failure while building the replacement files leaves the prior
-/// state fully intact.
+/// All rewrites stage and commit as one batch, with topology authority last
+/// (#790): a failure while building replacements leaves the prior state intact.
 ///
 /// Returns the number of node rows removed. Does **not** touch edges — callers
 /// enforce openCypher's "no relationships without DETACH" rule (see

@@ -3132,39 +3132,58 @@ mod tests {
             )
             .unwrap();
         writer.flush().unwrap();
-        let flat = dir
-            .path()
-            .join("properties")
-            .join(format!("{}.parquet", entity.route));
-        let shard = dir
-            .path()
-            .join("properties")
-            .join(&entity.route)
-            .join("00000000000000000001.parquet");
-        std::fs::create_dir_all(shard.parent().unwrap()).unwrap();
-        std::fs::rename(&flat, &shard).unwrap();
+        let mut second =
+            crate::GraphWriter::open_at(dir.path(), graphforge_core::OntologyMode::Strict, 2)
+                .unwrap()
+                .with_semantic_composition_fingerprint(Some(composition.fingerprint.clone()));
+        second
+            .set_properties(
+                &node,
+                Some(&entity.route),
+                HashMap::from([("name".into(), graphforge_ir::IrLiteral::Str("Grace".into()))]),
+            )
+            .unwrap();
+        second.flush().unwrap();
+
+        let fragments = crate::property_overlay::enumerate_property_fragments(
+            dir.path(),
+            crate::PropertyRouteKind::Node,
+            &entity.route,
+        )
+        .unwrap();
+        assert_eq!(fragments.len(), 2);
+        let rows = crate::catalog::read_properties(dir.path(), &entity.route).unwrap();
+        let names = rows[0]
+            .column_by_name("name")
+            .and_then(|column| column.as_any().downcast_ref::<arrow::array::StringArray>())
+            .unwrap();
+        assert_eq!(names.value(0), "Grace");
 
         bindings.validate_physical_routes(dir.path()).unwrap();
         let (inventory, _) = crate::capture_graph_files(dir.path()).unwrap();
         bindings
             .validate_physical_routes_with_inventory(dir.path(), Some(&inventory))
             .unwrap();
-        let relative = shard
-            .strip_prefix(dir.path())
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .to_owned();
-        let mut omitted = inventory;
-        omitted
-            .files
-            .retain(|entry| entry.relative_path != relative);
-        omitted.file_count = omitted.files.len() as u64;
-        assert!(
-            bindings
-                .validate_physical_routes_with_inventory(dir.path(), Some(&omitted))
-                .is_err()
-        );
+        for fragment in fragments {
+            let relative = fragment
+                .path
+                .strip_prefix(dir.path())
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_owned();
+            let mut omitted = inventory.clone();
+            omitted
+                .files
+                .retain(|entry| entry.relative_path != relative);
+            omitted.file_count = omitted.files.len() as u64;
+            assert!(
+                bindings
+                    .validate_physical_routes_with_inventory(dir.path(), Some(&omitted))
+                    .is_err(),
+                "omitting authenticated property fragment {relative} must fail closed"
+            );
+        }
     }
 
     #[test]

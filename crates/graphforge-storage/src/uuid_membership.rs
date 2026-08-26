@@ -4429,7 +4429,7 @@ mod tests {
         fs::create_dir_all(dir.path().join("topology")).unwrap();
         fs::write(
             crate::generation::generation_path(dir.path()),
-            crate::generation::encode_generation_state(1, 1).unwrap(),
+            crate::generation::encode_generation_state(1, 1, 0).unwrap(),
         )
         .unwrap();
         let before = manifest_file_names(
