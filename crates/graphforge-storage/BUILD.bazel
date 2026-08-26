@@ -114,6 +114,11 @@ gf_rust_integration_test(
     srcs = ["tests/property_overlay_scale.rs"],
     crate = ":graphforge_storage",
     size = "medium",
+    # This is a phase-level RSS and external-merge scaling qualification, not
+    # an ordinary functional test. Local co-scheduling distorted its unchanged
+    # N/2N/4N workload from 53s to 283s and nearly exhausted the medium timeout.
+    # Keep local measurements isolated while retaining remote execution.
+    tags = ["exclusive-if-local"],
     deps = _STORAGE_DEPS,
 )
 
