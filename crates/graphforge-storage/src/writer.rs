@@ -114,6 +114,30 @@ fn replay_writer_properties(max_batch_rows: usize) -> parquet::file::properties:
 
 const REPLAY_WRITER_FIXED_BYTES: usize = 256 * 1024;
 const REPLAY_COLUMN_CHUNK_METADATA_BYTES: usize = 512;
+const REPLAY_NODE_FIXED_ROW_BYTES: usize = 128;
+
+fn parquet_reader_metadata_reservation(path: &Path) -> Result<usize, GfError> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = fs::File::open(path).map_err(|error| io_err(&error))?;
+    let length = file.metadata().map_err(|error| io_err(&error))?.len();
+    if length < 8 {
+        return Err(pq_err("canonical Parquet footer is truncated"));
+    }
+    file.seek(SeekFrom::End(-8))
+        .map_err(|error| io_err(&error))?;
+    let mut footer = [0_u8; 8];
+    file.read_exact(&mut footer)
+        .map_err(|error| io_err(&error))?;
+    if &footer[4..] != b"PAR1" {
+        return Err(pq_err("canonical Parquet footer magic is invalid"));
+    }
+    let encoded = usize::try_from(u32::from_le_bytes(footer[..4].try_into().unwrap()))
+        .map_err(|_| replay_resource_limit("Parquet metadata length overflows memory"))?;
+    encoded
+        .checked_mul(2)
+        .and_then(|bytes| bytes.checked_add(64 * 1024))
+        .ok_or_else(|| replay_resource_limit("Parquet reader metadata reservation overflow"))
+}
 
 fn replay_writer_reservation(
     schema: &Schema,
@@ -215,6 +239,22 @@ pub(crate) fn write_replay_overlay_streaming(
     let node_path = source.join("topology/nodes.parquet");
     let output_node_path = target.join("topology/nodes.parquet");
     let node_scan = scan_replay_node_authority(&node_path, overlay, limits)?;
+    fs::create_dir_all(output_node_path.parent().expect("node output has parent"))
+        .map_err(|error| io_err(&error))?;
+    let maximum_node_rows = node_scan.base_rows.saturating_add(overlay.nodes.len());
+    let node_writer_reservation = replay_writer_reservation(
+        TOPOLOGY_NODES_SCHEMA.as_ref(),
+        maximum_node_rows,
+        node_scan.maximum_row_bytes,
+        limits.max_batch_rows,
+    )?;
+    admit_replay_writer(
+        overlay.estimated_memory(),
+        node_scan.estimated_memory(),
+        node_writer_reservation,
+        limits.max_replay_memory_bytes,
+        "topology node",
+    )?;
     let reader = if node_path.exists() {
         let node_file = fs::File::open(&node_path).map_err(|error| {
             GfError::Storage(format!(
@@ -232,22 +272,6 @@ pub(crate) fn write_replay_overlay_streaming(
     } else {
         None
     };
-    fs::create_dir_all(output_node_path.parent().expect("node output has parent"))
-        .map_err(|error| io_err(&error))?;
-    let maximum_node_rows = node_scan.base_rows.saturating_add(overlay.nodes.len());
-    let node_writer_reservation = replay_writer_reservation(
-        TOPOLOGY_NODES_SCHEMA.as_ref(),
-        maximum_node_rows,
-        128,
-        limits.max_batch_rows,
-    )?;
-    admit_replay_writer(
-        overlay.estimated_memory(),
-        node_scan.estimated_memory(),
-        node_writer_reservation,
-        limits.max_replay_memory_bytes,
-        "topology node",
-    )?;
     let output = fs::File::create(&output_node_path).map_err(|error| io_err(&error))?;
     let mut writer = parquet::arrow::ArrowWriter::try_new(
         output,
@@ -307,6 +331,8 @@ struct ReplayNodeAuthority {
     endpoint_ids: HashMap<String, u64>,
     deleted_nodes: HashSet<String>,
     base_rows: usize,
+    maximum_row_bytes: usize,
+    reader_metadata_bytes: usize,
 }
 
 impl ReplayNodeAuthority {
@@ -321,6 +347,7 @@ impl ReplayNodeAuthority {
             .saturating_add(self.endpoint_ids.iter().fold(0_usize, |sum, (uuid, _)| {
                 sum.saturating_add(80).saturating_add(uuid.len())
             }))
+            .saturating_add(self.reader_metadata_bytes)
     }
 }
 
@@ -356,6 +383,17 @@ fn scan_replay_node_authority(
                 .map(|(uuid, _)| uuid.clone())
                 .collect(),
             base_rows: 0,
+            maximum_row_bytes: overlay
+                .nodes
+                .values()
+                .filter_map(Option::as_ref)
+                .map(|row| {
+                    REPLAY_NODE_FIXED_ROW_BYTES
+                        .saturating_add(row.type_ids.len().saturating_mul(size_of::<u32>()))
+                })
+                .max()
+                .unwrap_or(REPLAY_NODE_FIXED_ROW_BYTES),
+            reader_metadata_bytes: 0,
         });
     }
     let input = fs::File::open(node_path).map_err(|error| {
@@ -374,6 +412,7 @@ fn scan_replay_node_authority(
     let mut prior_id = 0_u64;
     let mut base_max = 0_u64;
     let mut base_rows = 0_usize;
+    let mut maximum_row_bytes = REPLAY_NODE_FIXED_ROW_BYTES;
     for batch in reader {
         let batch = batch.map_err(pq_err)?;
         base_rows = base_rows.saturating_add(batch.num_rows());
@@ -385,7 +424,17 @@ fn scan_replay_node_authority(
             .column_by_name("node_id")
             .and_then(|column| column.as_any().downcast_ref::<UInt64Array>())
             .ok_or_else(|| pq_err("canonical node_id column is incompatible"))?;
+        let type_ids = batch
+            .column_by_name("type_ids")
+            .and_then(|column| column.as_any().downcast_ref::<arrow::array::ListArray>())
+            .ok_or_else(|| pq_err("canonical type_ids column is incompatible"))?;
         for row in 0..batch.num_rows() {
+            let type_count = usize::try_from(type_ids.value_length(row))
+                .map_err(|_| replay_resource_limit("topology node type_ids row width"))?;
+            maximum_row_bytes = maximum_row_bytes.max(
+                REPLAY_NODE_FIXED_ROW_BYTES
+                    .saturating_add(type_count.saturating_mul(size_of::<u32>())),
+            );
             let uuid = uuid::Uuid::from_slice(uuids.value(row))
                 .map_err(|error| pq_err(format!("canonical node_uuid is invalid: {error}")))?
                 .hyphenated()
@@ -436,6 +485,19 @@ fn scan_replay_node_authority(
             .map(|(uuid, _)| uuid.clone())
             .collect(),
         base_rows,
+        maximum_row_bytes: maximum_row_bytes.max(
+            overlay
+                .nodes
+                .values()
+                .filter_map(Option::as_ref)
+                .map(|row| {
+                    REPLAY_NODE_FIXED_ROW_BYTES
+                        .saturating_add(row.type_ids.len().saturating_mul(size_of::<u32>()))
+                })
+                .max()
+                .unwrap_or(REPLAY_NODE_FIXED_ROW_BYTES),
+        ),
+        reader_metadata_bytes: parquet_reader_metadata_reservation(node_path)?,
     })
 }
 
@@ -540,6 +602,9 @@ fn stream_replay_edges(
             .filter_map(Option::as_ref)
             .map(|edge| edge.rel_type.clone()),
     );
+    let relation_authority_bytes = relations.iter().fold(0_usize, |sum, relation| {
+        sum.saturating_add(64).saturating_add(relation.len())
+    });
     for relation in relations {
         let source_path = source_dir.join(format!("{relation}.parquet"));
         let target_path = target_dir.join(format!("{relation}.parquet"));
@@ -580,9 +645,11 @@ fn stream_replay_edges(
                         return Err(pq_err("canonical edge_id order is not strictly increasing"));
                     }
                     base_max = id;
-                    if overlay.edges.contains_key(&edge_uuid) {
-                        existing_overlay.insert(edge_uuid.clone());
-                        if let Some(Some(replacement)) = overlay.edges.get(&edge_uuid)
+                    if let Some((overlay_uuid, overlay_row)) =
+                        overlay.edges.get_key_value(&edge_uuid)
+                    {
+                        existing_overlay.insert(overlay_uuid.as_str());
+                        if let Some(replacement) = overlay_row
                             && replacement.edge_id != id
                         {
                             return Err(pq_err(
@@ -597,7 +664,7 @@ fn stream_replay_edges(
         for (uuid, row) in &overlay.edges {
             if let Some(row) = row
                 && row.rel_type == relation
-                && !existing_overlay.contains(uuid)
+                && !existing_overlay.contains(uuid.as_str())
                 && (row.edge_id <= base_max || !new_ids.insert(row.edge_id))
             {
                 return Err(pq_err(
@@ -612,9 +679,20 @@ fn stream_replay_edges(
             128,
             limits.max_batch_rows,
         )?;
+        let route_authority_bytes = existing_overlay
+            .capacity()
+            .saturating_mul(std::mem::size_of::<&str>() + 8)
+            .saturating_add(relation_authority_bytes)
+            .saturating_add(if source_path.exists() {
+                parquet_reader_metadata_reservation(&source_path)?
+            } else {
+                0
+            });
         admit_replay_writer(
             overlay.estimated_memory(),
-            nodes.estimated_memory(),
+            nodes
+                .estimated_memory()
+                .saturating_add(route_authority_bytes),
             edge_writer_reservation,
             limits.max_replay_memory_bytes,
             "topology edge",
@@ -659,7 +737,7 @@ fn stream_replay_edges(
             .iter()
             .filter(|(uuid, row)| {
                 row.as_ref().is_some_and(|edge| edge.rel_type == relation)
-                    && !existing_overlay.contains(*uuid)
+                    && !existing_overlay.contains(uuid.as_str())
             })
             .filter_map(|(_, row)| row.as_ref())
             .collect();
@@ -5107,6 +5185,8 @@ mod tests {
                 .collect(),
             deleted_nodes: (0..count).map(|index| format!("deleted-{index}")).collect(),
             base_rows: count,
+            maximum_row_bytes: REPLAY_NODE_FIXED_ROW_BYTES,
+            reader_metadata_bytes: 0,
         };
         let n = authority(64).estimated_memory();
         let two_n = authority(128).estimated_memory();

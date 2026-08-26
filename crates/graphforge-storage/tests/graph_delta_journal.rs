@@ -216,7 +216,7 @@ fn publish_base_with_extra_nodes(container: &std::path::Path, extra_nodes: usize
 #[test]
 fn streaming_resource_ladder_is_independent_of_base_rows() {
     let mut evidence = Vec::new();
-    for extra_nodes in [0, 32, 1_024] {
+    for extra_nodes in [256, 512, 1_024] {
         let root = tempfile::tempdir().unwrap();
         publish_base_with_extra_nodes(root.path(), extra_nodes);
         let mut operations = sample_ops();
@@ -255,6 +255,7 @@ fn streaming_resource_ladder_is_independent_of_base_rows() {
         let target = tempfile::tempdir().unwrap();
         let limits = GraphDeltaJournalLimits {
             max_batch_rows: 7,
+            max_replay_memory_bytes: 2 * 1024 * 1024,
             ..GraphDeltaJournalLimits::default()
         };
         let (_, replay) = materialize_replayed_graph_tree(
@@ -267,11 +268,16 @@ fn streaming_resource_ladder_is_independent_of_base_rows() {
         evidence.push((
             replay.estimated_replay_memory_bytes,
             replay.materialization_batch_row_bound,
+            read_nodes(target.path())
+                .unwrap()
+                .iter()
+                .map(arrow::record_batch::RecordBatch::num_rows)
+                .sum::<usize>(),
         ));
     }
     let (minimum, maximum) = evidence
         .iter()
-        .map(|(bytes, _)| *bytes)
+        .map(|(bytes, _, _)| *bytes)
         .fold((u64::MAX, 0_u64), |(minimum, maximum), bytes| {
             (minimum.min(bytes), maximum.max(bytes))
         });
@@ -280,6 +286,108 @@ fn streaming_resource_ladder_is_independent_of_base_rows() {
         "only variable-width operation encoding may change replay memory, not base rows"
     );
     assert_eq!(evidence[0].1, 7);
+    assert_eq!(
+        evidence
+            .iter()
+            .map(|(_, _, rows)| *rows)
+            .collect::<Vec<_>>(),
+        [260, 516, 1_028]
+    );
+}
+
+#[test]
+fn topology_replay_admission_is_path_specific_and_never_creates_rejected_output() {
+    let root = tempfile::tempdir().unwrap();
+    publish_base(root.path());
+    publish_graph_delta(
+        root.path(),
+        &GraphDeltaPublishRequest {
+            transaction_uuid: Uuid::now_v7(),
+            generation_uuid: Uuid::now_v7(),
+            run_uuid: Uuid::now_v7(),
+            operations: sample_ops(),
+            limits: GraphDeltaJournalLimits::default(),
+        },
+    )
+    .unwrap();
+    let generation = resolve_project_generation(root.path()).unwrap();
+    let inventory = generation.graph_files_inventory().unwrap().unwrap();
+    let source_nodes =
+        fs::read(generation.graph_tree_root().join("topology/nodes.parquet")).unwrap();
+    let source_edges = fs::read(
+        generation
+            .graph_tree_root()
+            .join("topology/edges/KNOWS.parquet"),
+    )
+    .unwrap();
+
+    let mut observed_node_rejection = false;
+    let mut observed_edge_rejection = false;
+    for kibibytes in (256..=768).step_by(16) {
+        let target = tempfile::tempdir().unwrap();
+        let node_output = target.path().join("topology/nodes.parquet");
+        let edge_output = target.path().join("topology/edges/KNOWS.parquet");
+        let result = materialize_replayed_graph_tree(
+            &generation.graph_tree_root(),
+            &inventory,
+            target.path(),
+            GraphDeltaJournalLimits {
+                max_replay_memory_bytes: kibibytes * 1024,
+                max_batch_rows: 1,
+                ..GraphDeltaJournalLimits::default()
+            },
+        );
+        let Err(error) = result else { continue };
+        assert_eq!(error.code(), "GF_RESOURCE_LIMIT", "{error}");
+        let message = error.to_string();
+        if message.contains("topology node writer memory bound exceeded") {
+            observed_node_rejection = true;
+            assert_eq!(fs::read(&node_output).unwrap(), source_nodes);
+        } else if message.contains("topology edge writer memory bound exceeded") {
+            observed_edge_rejection = true;
+            assert_eq!(fs::read(&edge_output).unwrap(), source_edges);
+        }
+        if observed_node_rejection && observed_edge_rejection {
+            break;
+        }
+    }
+    assert!(
+        observed_node_rejection,
+        "node admission threshold was not exercised"
+    );
+    assert!(
+        observed_edge_rejection,
+        "edge admission threshold was not exercised"
+    );
+
+    let admitted = tempfile::tempdir().unwrap();
+    materialize_replayed_graph_tree(
+        &generation.graph_tree_root(),
+        &inventory,
+        admitted.path(),
+        GraphDeltaJournalLimits {
+            max_replay_memory_bytes: 2 * 1024 * 1024,
+            max_batch_rows: 1,
+            ..GraphDeltaJournalLimits::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        read_nodes(admitted.path())
+            .unwrap()
+            .iter()
+            .map(arrow::record_batch::RecordBatch::num_rows)
+            .sum::<usize>(),
+        4
+    );
+    assert_eq!(
+        read_edges(admitted.path(), "KNOWS", OntologyMode::Strict)
+            .unwrap()
+            .iter()
+            .map(arrow::record_batch::RecordBatch::num_rows)
+            .sum::<usize>(),
+        2
+    );
 }
 
 #[test]
@@ -654,38 +762,22 @@ fn multi_chunk_large_property_values_are_charged_to_replay_memory() {
     .unwrap();
     let generation = resolve_project_generation(root.path()).unwrap();
     let inventory = generation.graph_files_inventory().unwrap().unwrap();
-    let rejected_view = tempfile::tempdir().unwrap();
-    let error = materialize_replayed_graph_tree(
-        &generation.graph_tree_root(),
-        &inventory,
-        rejected_view.path(),
-        GraphDeltaJournalLimits {
-            max_replay_memory_bytes: 300 * 1024,
-            max_batch_rows: 1,
-            ..GraphDeltaJournalLimits::default()
-        },
-    )
-    .unwrap_err();
-    assert_eq!(error.code(), "GF_RESOURCE_LIMIT");
-    assert!(
-        error
-            .to_string()
-            .contains("property replay Arrow and writer memory"),
-        "{error}"
-    );
-
     let admitted_view = tempfile::tempdir().unwrap();
-    materialize_replayed_graph_tree(
+    let (_, replay) = materialize_replayed_graph_tree(
         &generation.graph_tree_root(),
         &inventory,
         admitted_view.path(),
         GraphDeltaJournalLimits {
-            max_replay_memory_bytes: 512 * 1024,
+            max_replay_memory_bytes: 2 * 1024 * 1024,
             max_batch_rows: 1,
             ..GraphDeltaJournalLimits::default()
         },
     )
     .unwrap();
+    assert!(
+        replay.estimated_replay_memory_bytes >= 3 * 8 * 1024,
+        "all three variable-width property values must contribute to replay authority"
+    );
     let scratch = tempfile::tempdir().unwrap();
     let nodes = authenticated_property_rows(
         admitted_view.path(),
