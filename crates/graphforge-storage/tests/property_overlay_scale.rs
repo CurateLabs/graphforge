@@ -62,6 +62,7 @@ struct ScaleEvidence {
     authentication_bytes: u64,
     authority_authentication_bytes: u64,
     property_authentication_bytes: u64,
+    authenticated_snapshot_bytes: u64,
     authentication_block_equivalents: u64,
     authority_authentication_block_equivalents: u64,
     property_authentication_block_equivalents: u64,
@@ -304,6 +305,7 @@ fn property_overlay_scale_scan_child() {
         authentication_bytes: metrics.authentication_bytes,
         authority_authentication_bytes: metrics.authority_authentication_bytes,
         property_authentication_bytes: metrics.property_authentication_bytes,
+        authenticated_snapshot_bytes: metrics.authenticated_snapshot_bytes,
         authentication_block_equivalents: metrics.authentication_block_equivalents,
         authority_authentication_block_equivalents: metrics
             .authority_authentication_block_equivalents,
@@ -483,20 +485,24 @@ fn production_property_overlay_n_2n_4n_is_disk_growing_and_memory_bounded() {
         assert!(phase.authority_authentication_bytes <= phase.graph_tree_bytes);
         // Admission authenticates every historical fragment without retaining
         // its file descriptor; the bounded on-demand decoder authenticates the
-        // reopened handle before use and verifies it again after decode.
+        // reopened handle while creating its immutable decode snapshot.
         assert_eq!(
             phase.property_authentication_bytes,
             phase
                 .property_fragment_bytes
-                .checked_mul(3)
+                .checked_mul(2)
                 .expect("property authentication byte accounting must not overflow")
         );
         assert_eq!(
             phase.property_authentication_block_equivalents,
             phase
                 .property_fragment_block_equivalents
-                .checked_mul(3)
+                .checked_mul(2)
                 .expect("property authentication block accounting must not overflow")
+        );
+        assert_eq!(
+            phase.authenticated_snapshot_bytes,
+            phase.property_fragment_bytes
         );
         let decoder_bytes = phase
             .validation_bytes

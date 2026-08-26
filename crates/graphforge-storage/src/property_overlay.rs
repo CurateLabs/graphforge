@@ -7,7 +7,7 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap, HashMap};
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, BufWriter, Read, Write};
+use std::io::{BufRead, BufReader, BufWriter, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -322,6 +322,8 @@ struct FragmentHandleCounts {
 struct TestMutationBarrier {
     authenticated: std::sync::Barrier,
     proceed: std::sync::Barrier,
+    copied: std::sync::Barrier,
+    restored: std::sync::Barrier,
 }
 
 impl FragmentHandleGuard {
@@ -381,6 +383,8 @@ impl AuthenticatedPropertyInventory {
         let barrier = Arc::new(TestMutationBarrier {
             authenticated: std::sync::Barrier::new(2),
             proceed: std::sync::Barrier::new(2),
+            copied: std::sync::Barrier::new(2),
+            restored: std::sync::Barrier::new(2),
         });
         *self.mutation_barrier.lock().expect("mutation barrier lock") = Some(Arc::clone(&barrier));
         barrier
@@ -404,20 +408,26 @@ impl AuthenticatedPropertyInventory {
                 "property fragment identity changed after admission",
             ));
         }
-        let (authentication_bytes, authentication_block_equivalents, authentication_read_calls) =
-            authenticate_inventory_file(&file, &fragment.entry)?;
         #[cfg(test)]
-        if let Some(barrier) = self
+        let mutation_barrier = self
             .mutation_barrier
             .lock()
             .expect("mutation barrier lock")
-            .take()
-        {
-            barrier.authenticated.wait();
-            barrier.proceed.wait();
-        }
+            .take();
+        let (
+            snapshot,
+            authentication_bytes,
+            authentication_block_equivalents,
+            authentication_read_calls,
+        ) = authenticated_snapshot_file(
+            &file,
+            fragment.identity,
+            &fragment.entry,
+            #[cfg(test)]
+            mutation_barrier,
+        )?;
         Ok(OpenPropertyFragment {
-            file: Arc::new(file),
+            file: Arc::new(snapshot),
             authentication_bytes,
             authentication_block_equivalents,
             authentication_read_calls,
@@ -782,17 +792,12 @@ impl AuthenticatedPropertyInventory {
                     .map_err(parquet_error)?;
                 Ok((reader, page_reservation_bytes, opened.file, opened.handle))
             })();
-            let (reader, pending_error, page_reservation_bytes, authentication_file, handle) =
-                match reader {
-                    Ok((reader, page_reservation_bytes, file, handle)) => (
-                        Some(reader),
-                        None,
-                        page_reservation_bytes,
-                        Some(file),
-                        Some(handle),
-                    ),
-                    Err(error) => (None, Some(error), 0, None, None),
-                };
+            let (reader, pending_error, page_reservation_bytes, handle) = match reader {
+                Ok((reader, page_reservation_bytes, _file, handle)) => {
+                    (Some(reader), None, page_reservation_bytes, Some(handle))
+                }
+                Err(error) => (None, Some(error), 0, None),
+            };
             (
                 fragment.id,
                 0,
@@ -808,11 +813,6 @@ impl AuthenticatedPropertyInventory {
                     page_reservation_bytes,
                     batch_reservation_bytes: limits.max_buffered_bytes / 4,
                     _handle: handle,
-                    authentication_file,
-                    authentication_entry: fragment.entry.clone(),
-                    authentication_bytes: Arc::clone(&authentication_bytes),
-                    authentication_block_equivalents: Arc::clone(&authentication_block_equivalents),
-                    authentication_read_calls: Arc::clone(&authentication_read_calls),
                     #[cfg(test)]
                     late_failure_row_countdown: Arc::clone(
                         &self.late_decoder_failure_row_countdown,
@@ -827,6 +827,7 @@ impl AuthenticatedPropertyInventory {
             authentication_block_equivalents.load(Ordering::Relaxed);
         metrics.authentication_read_calls = authentication_read_calls.load(Ordering::Relaxed);
         metrics.property_authentication_bytes = metrics.authentication_bytes;
+        metrics.authenticated_snapshot_bytes = metrics.authentication_bytes;
         metrics.property_authentication_block_equivalents =
             metrics.authentication_block_equivalents;
         metrics.property_authentication_read_calls = metrics.authentication_read_calls;
@@ -1067,6 +1068,72 @@ fn authenticate_inventory_file(
     Ok((bytes, bytes.div_ceil(64 * 1024), read_calls))
 }
 
+fn authenticated_snapshot_file(
+    source: &File,
+    expected_identity: graphforge_filesystem::FileIdentity,
+    entry: &crate::GraphFileEntry,
+    #[cfg(test)] mutation_barrier: Option<Arc<TestMutationBarrier>>,
+) -> Result<(File, u64, u64, u64), GfError> {
+    let metadata = source.metadata().map_err(io_error)?;
+    if !metadata.is_file() || metadata.len() != entry.byte_length {
+        return Err(corrupt(
+            "property handle length or kind conflicts with inventory",
+        ));
+    }
+    if graphforge_filesystem::file_identity(source).map_err(io_error)? != expected_identity {
+        return Err(corrupt(
+            "property fragment identity changed during snapshot",
+        ));
+    }
+    // `tempfile()` creates an unnamed/unlinked file where supported and an
+    // unpredictable, exclusively-created file elsewhere, so an attacker
+    // cannot plant or redirect the authenticated decode snapshot.
+    let mut snapshot = tempfile::tempfile().map_err(io_error)?;
+    let mut digest = Sha256::new();
+    let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
+    let mut bytes = 0_u64;
+    let mut read_calls = 0_u64;
+    loop {
+        let read = retained_read_at(source, &mut buffer, bytes).map_err(io_error)?;
+        if read == 0 {
+            break;
+        }
+        snapshot.write_all(&buffer[..read]).map_err(io_error)?;
+        bytes = bytes
+            .checked_add(u64::try_from(read).map_err(|_| corrupt("authentication byte overflow"))?)
+            .ok_or_else(|| corrupt("authentication byte overflow"))?;
+        read_calls = read_calls
+            .checked_add(1)
+            .ok_or_else(|| corrupt("authentication read call overflow"))?;
+        digest.update(&buffer[..read]);
+        #[cfg(test)]
+        if read_calls == 1
+            && let Some(barrier) = mutation_barrier.as_ref()
+        {
+            barrier.authenticated.wait();
+            barrier.proceed.wait();
+        } else if read_calls == 2
+            && let Some(barrier) = mutation_barrier.as_ref()
+        {
+            barrier.copied.wait();
+            barrier.restored.wait();
+        }
+    }
+    if bytes != entry.byte_length || digest_hex(&digest.finalize()) != entry.content_sha256 {
+        return Err(corrupt("property handle digest conflicts with inventory"));
+    }
+    if graphforge_filesystem::file_identity(source).map_err(io_error)? != expected_identity
+        || source.metadata().map_err(io_error)?.len() != entry.byte_length
+    {
+        return Err(corrupt(
+            "property fragment identity changed during snapshot",
+        ));
+    }
+    snapshot.sync_data().map_err(io_error)?;
+    snapshot.rewind().map_err(io_error)?;
+    Ok((snapshot, bytes, bytes.div_ceil(64 * 1024), read_calls))
+}
+
 fn digest_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -1085,12 +1152,14 @@ pub struct PropertyOverlayMetrics {
     /// Total authentication plus decoder bytes read.
     pub physical_bytes: u64,
     /// Full-file bytes read for SHA-256 authentication. Cached inventories
-    /// reauthenticate each bounded on-demand handle before decoding it.
+    /// stream each bounded on-demand handle into an authenticated immutable snapshot.
     pub authentication_bytes: u64,
     /// Raw graph-files authority bytes included in authentication bytes.
     pub authority_authentication_bytes: u64,
     /// Retained property-fragment bytes included in authentication bytes.
     pub property_authentication_bytes: u64,
+    /// Bytes durably written to immutable authenticated decode snapshots.
+    pub authenticated_snapshot_bytes: u64,
     /// Bytes read while validating canonical UUID/tombstone authority.
     pub validation_bytes: u64,
     /// Bytes read while decoding values from selected row groups.
@@ -1242,11 +1311,6 @@ struct PropertyParquetRows {
     page_reservation_bytes: u64,
     batch_reservation_bytes: u64,
     _handle: Option<FragmentHandleGuard>,
-    authentication_file: Option<Arc<File>>,
-    authentication_entry: crate::GraphFileEntry,
-    authentication_bytes: Arc<AtomicU64>,
-    authentication_block_equivalents: Arc<AtomicU64>,
-    authentication_read_calls: Arc<AtomicU64>,
     #[cfg(test)]
     late_failure_row_countdown: Arc<AtomicU64>,
 }
@@ -1313,22 +1377,7 @@ impl Iterator for PropertyParquetRows {
             let Some(next_batch) = self.reader.as_mut().expect("reader checked").next() else {
                 self.budget.release(self.batch_reservation_bytes);
                 self.reader = None;
-                let file = self
-                    .authentication_file
-                    .take()
-                    .expect("successful reader retains authentication file");
-                match authenticate_inventory_file(file.as_ref(), &self.authentication_entry) {
-                    Ok((bytes, block_equivalents, read_calls)) => {
-                        self.authentication_bytes
-                            .fetch_add(bytes, Ordering::Relaxed);
-                        self.authentication_block_equivalents
-                            .fetch_add(block_equivalents, Ordering::Relaxed);
-                        self.authentication_read_calls
-                            .fetch_add(read_calls, Ordering::Relaxed);
-                        return None;
-                    }
-                    Err(error) => return Some(Err(error)),
-                }
+                return None;
             };
             let batch = match next_batch {
                 Ok(batch) => batch,
@@ -1571,6 +1620,9 @@ pub fn read_authenticated_property_snapshots_for_inventory(
         metrics.property_authentication_bytes = metrics
             .property_authentication_bytes
             .saturating_add(opened.authentication_bytes);
+        metrics.authenticated_snapshot_bytes = metrics
+            .authenticated_snapshot_bytes
+            .saturating_add(opened.authentication_bytes);
         metrics.property_authentication_block_equivalents = metrics
             .property_authentication_block_equivalents
             .saturating_add(opened.authentication_block_equivalents);
@@ -1624,26 +1676,6 @@ pub fn read_authenticated_property_snapshots_for_inventory(
                 &mut metrics,
             )?;
         }
-        let (post_authentication_bytes, post_block_equivalents, post_read_calls) =
-            authenticate_inventory_file(opened.file.as_ref(), &fragment.entry)?;
-        metrics.authentication_bytes = metrics
-            .authentication_bytes
-            .saturating_add(post_authentication_bytes);
-        metrics.authentication_block_equivalents = metrics
-            .authentication_block_equivalents
-            .saturating_add(post_block_equivalents);
-        metrics.authentication_read_calls = metrics
-            .authentication_read_calls
-            .saturating_add(post_read_calls);
-        metrics.property_authentication_bytes = metrics
-            .property_authentication_bytes
-            .saturating_add(post_authentication_bytes);
-        metrics.property_authentication_block_equivalents = metrics
-            .property_authentication_block_equivalents
-            .saturating_add(post_block_equivalents);
-        metrics.property_authentication_read_calls = metrics
-            .property_authentication_read_calls
-            .saturating_add(post_read_calls);
         let total_bytes = counts.bytes.load(Ordering::Relaxed);
         let total_read_calls = counts.blocks.load(Ordering::Relaxed);
         metrics.fragments_considered = metrics.fragments_considered.saturating_add(1);
@@ -1659,11 +1691,9 @@ pub fn read_authenticated_property_snapshots_for_inventory(
         metrics.selected_value_read_calls = metrics
             .selected_value_read_calls
             .saturating_add(total_read_calls.saturating_sub(validation_read_calls));
-        metrics.physical_blocks = metrics.physical_blocks.saturating_add(
-            total_read_calls
-                .saturating_add(opened.authentication_read_calls)
-                .saturating_add(post_read_calls),
-        );
+        metrics.physical_blocks = metrics
+            .physical_blocks
+            .saturating_add(total_read_calls.saturating_add(opened.authentication_read_calls));
         metrics.range_seeks = metrics
             .range_seeks
             .saturating_add(counts.range_seeks.load(Ordering::Relaxed));
@@ -3072,11 +3102,11 @@ mod tests {
             .unwrap();
             assert_eq!(rows.len(), 1);
             assert_eq!(metrics.per_record_seeks, 0);
-            assert_eq!(metrics.authentication_bytes, entry.byte_length * 2);
+            assert_eq!(metrics.authentication_bytes, entry.byte_length);
             assert!(metrics.authentication_read_calls > 0);
             assert_eq!(
                 metrics.authentication_block_equivalents,
-                entry.byte_length.div_ceil(64 * 1024) * 2
+                entry.byte_length.div_ceil(64 * 1024)
             );
             assert_eq!(
                 metrics.physical_bytes,
@@ -3146,14 +3176,11 @@ mod tests {
             selected.open_metrics().authentication_bytes,
             entry.byte_length
         );
-        assert_eq!(
-            selected_metrics.authentication_bytes,
-            entry.byte_length.saturating_mul(2)
-        );
+        assert_eq!(selected_metrics.authentication_bytes, entry.byte_length);
         assert!(selected_metrics.authentication_read_calls > 0);
         assert_eq!(
             selected_metrics.authentication_block_equivalents,
-            entry.byte_length.div_ceil(64 * 1024).saturating_mul(2)
+            entry.byte_length.div_ceil(64 * 1024)
         );
 
         let conflicting_id = PropertyFragmentId {
@@ -3472,6 +3499,7 @@ mod tests {
                 (PROPERTY_ORDINAL_KEY.into(), "0".into()),
             ]),
         ));
+        let first_value = "x".repeat(70 * 1024);
         let batch = RecordBatch::try_new(
             Arc::clone(&schema),
             vec![
@@ -3481,7 +3509,7 @@ mod tests {
                 ),
                 Arc::new(BooleanArray::from(vec![false, false])),
                 Arc::new(StringArray::from(vec![
-                    Some("authenticated-one"),
+                    Some(first_value.as_str()),
                     Some("authenticated-two"),
                 ])),
             ],
@@ -3552,8 +3580,8 @@ mod tests {
 
         let tampered_bytes = || {
             let mut tampered = bytes.clone();
-            let needle = b"authenticated-one";
-            let replacement = b"tampered-value-01";
+            let needle = b"authenticated-two";
+            let replacement = b"tampered-value-02";
             assert_eq!(needle.len(), replacement.len());
             let offset = tampered
                 .windows(needle.len())
@@ -3584,6 +3612,9 @@ mod tests {
         barrier.authenticated.wait();
         fs::write(&path, tampered_bytes()).unwrap();
         barrier.proceed.wait();
+        barrier.copied.wait();
+        fs::write(&path, &bytes).unwrap();
+        barrier.restored.wait();
         let (result, emitted) = direct.join().unwrap();
         let error = result.unwrap_err();
         assert_eq!(error.code(), "GF_PROJECT_CORRUPT");
@@ -3603,6 +3634,9 @@ mod tests {
         barrier.authenticated.wait();
         fs::write(&path, tampered_bytes()).unwrap();
         barrier.proceed.wait();
+        barrier.copied.wait();
+        fs::write(&path, &bytes).unwrap();
+        barrier.restored.wait();
         let error = targeted.join().unwrap().unwrap_err();
         assert_eq!(error.code(), "GF_PROJECT_CORRUPT");
 
@@ -3619,10 +3653,14 @@ mod tests {
         });
         let mutation_path = path.clone();
         let mutation_bytes = tampered_bytes();
+        let original_bytes = bytes.clone();
         tokio::task::spawn_blocking(move || {
             barrier.authenticated.wait();
-            fs::write(mutation_path, mutation_bytes).unwrap();
+            fs::write(&mutation_path, mutation_bytes).unwrap();
             barrier.proceed.wait();
+            barrier.copied.wait();
+            fs::write(mutation_path, original_bytes).unwrap();
+            barrier.restored.wait();
         })
         .await
         .unwrap();
@@ -4223,11 +4261,11 @@ mod tests {
             // before plus verifies after decoding.
             assert_eq!(
                 metrics.authentication_bytes,
-                expected_authentication_bytes * 4
+                expected_authentication_bytes * 3
             );
             assert_eq!(
                 metrics.authentication_block_equivalents,
-                expected_authentication_bytes.div_ceil(64 * 1024) * 4
+                expected_authentication_bytes.div_ceil(64 * 1024) * 3
             );
             assert_eq!(metrics.row_groups_considered, 1);
             assert_eq!(metrics.row_groups_selected, 1);

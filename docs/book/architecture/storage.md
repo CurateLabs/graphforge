@@ -187,12 +187,14 @@ Admission retains the stable root capability plus each fragment's authenticated
 path, native file identity, length, digest, and schema—not one OS handle per
 historical fragment. A scan opens fragments on demand without following links,
 requires the admitted device/file identity, and rehashes the complete file
-before decoding. It rechecks length and the complete digest on the same handle
-after clean decoder EOF, before the final emitting merge; targeted reads do the
-same before returning values. The handle then closes. Consequently live
+while streaming those exact bytes into an exclusively created, unnamed scratch
+file. Identity, length, and digest must match before Parquet sees the scratch
+handle; full, targeted, and SQL readers never decode the mutable source handle.
+The source handle then closes. Consequently live
 fragment handles are bounded by `max_open_runs` rather than total history, and
-same-name replacement, in-place mutation, symlink, and path substitution all
-fail closed. Parquet page headers are then parsed through a bounded
+same-name replacement, transient in-place mutation (even if restored), symlink,
+scratch planting, and path substitution all fail closed. Parquet page headers
+are then parsed through a bounded
 compact-protocol reader before Arrow allocation. Declared
 compressed/uncompressed sizes must remain within the authenticated chunk/file
 ranges and the configured live-byte limit. One shared budget covers Arrow
@@ -205,7 +207,7 @@ non-empty read-call counters; block-equivalents are not read calls. Aggregate
 authentication bytes, equivalents, and calls equal their authority plus
 property components. `physical_blocks` is an actual-operation count: authentication
 read calls plus decoder read calls. Evidence also distinguishes validation and
-selected-value decoder bytes/calls, range seeks, physical row-decode visits (a
+selected-value decoder bytes/calls, authenticated scratch bytes written, range seeks, physical row-decode visits (a
 row decoded by validation and selected-value passes contributes once to each
 pass), shadowed rows, fragments and row groups considered/selected, and the
 shared live-byte peak. External-merge evidence reports first-level encoded
