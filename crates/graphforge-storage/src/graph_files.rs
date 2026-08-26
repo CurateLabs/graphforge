@@ -139,10 +139,19 @@ pub enum GraphFilesOpenStrategy {
 pub fn capture_graph_files(
     source_root: &Path,
 ) -> Result<(GraphFilesInventory, ProjectParticipant), GfError> {
-    let inventory = build_inventory(source_root)?;
+    let (inventory, _) = build_inventory(source_root)?;
     let bytes = encode_inventory(&inventory)?;
     let participant = inventory_participant(bytes, inventory.file_count)?;
     Ok((inventory, participant))
+}
+
+pub(crate) fn capture_graph_files_with_read_calls(
+    source_root: &Path,
+) -> Result<(GraphFilesInventory, ProjectParticipant, u64), GfError> {
+    let (inventory, read_calls) = build_inventory(source_root)?;
+    let bytes = encode_inventory(&inventory)?;
+    let participant = inventory_participant(bytes, inventory.file_count)?;
+    Ok((inventory, participant, read_calls))
 }
 
 /// Encode inventory bytes as the registered `graph`/`files` participant.
@@ -479,7 +488,7 @@ pub fn infer_role(relative: &Path) -> GraphFileRole {
     }
 }
 
-fn build_inventory(source_root: &Path) -> Result<GraphFilesInventory, GfError> {
+fn build_inventory(source_root: &Path) -> Result<(GraphFilesInventory, u64), GfError> {
     let mut paths = Vec::new();
     collect_source_files(source_root, &mut paths)?;
     if paths.len() > MAX_GRAPH_FILES {
@@ -498,6 +507,7 @@ fn build_inventory(source_root: &Path) -> Result<GraphFilesInventory, GfError> {
     paths.sort_by(|(left, _), (right, _)| left.cmp(right));
     let mut files = Vec::with_capacity(paths.len());
     let mut total = 0_u64;
+    let mut read_calls = 0_u64;
     let mut seen = HashSet::new();
     for (relative_text, path) in paths {
         let relative = path
@@ -516,7 +526,10 @@ fn build_inventory(source_root: &Path) -> Result<GraphFilesInventory, GfError> {
         total = total
             .checked_add(byte_length)
             .ok_or_else(|| resource_limit("graph files total size overflow"))?;
-        let digest = hash_file(&path)?;
+        let (digest, file_read_calls) = hash_file_counted(&path)?;
+        read_calls = read_calls
+            .checked_add(file_read_calls)
+            .ok_or_else(|| resource_limit("graph files authentication read calls overflow"))?;
         files.push(GraphFileEntry {
             relative_path: relative_text,
             byte_length,
@@ -532,7 +545,7 @@ fn build_inventory(source_root: &Path) -> Result<GraphFilesInventory, GfError> {
         files,
     };
     validate_inventory_contract(&inventory)?;
-    Ok(inventory)
+    Ok((inventory, read_calls))
 }
 
 pub(crate) fn inventory_from_entries(
@@ -774,8 +787,13 @@ fn copy_regular_file(source: &Path, destination: &Path) -> Result<[u8; 32], GfEr
 }
 
 fn hash_file(path: &Path) -> Result<[u8; 32], GfError> {
+    hash_file_counted(path).map(|(digest, _)| digest)
+}
+
+fn hash_file_counted(path: &Path) -> Result<([u8; 32], u64), GfError> {
     let mut file = File::open(path).map_err(|error| storage("open graph file", path, error))?;
     let mut hasher = Sha256::new();
+    let mut read_calls = 0_u64;
     let mut buffer = vec![0_u8; HASH_BUFFER_BYTES];
     loop {
         let read = file
@@ -784,9 +802,12 @@ fn hash_file(path: &Path) -> Result<[u8; 32], GfError> {
         if read == 0 {
             break;
         }
+        read_calls = read_calls
+            .checked_add(1)
+            .ok_or_else(|| resource_limit("graph file authentication read calls overflow"))?;
         hasher.update(&buffer[..read]);
     }
-    Ok(hasher.finalize().into())
+    Ok((hasher.finalize().into(), read_calls))
 }
 
 fn sync_file(path: &Path) -> Result<(), GfError> {

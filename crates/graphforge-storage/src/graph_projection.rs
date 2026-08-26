@@ -12,8 +12,8 @@ use std::sync::Arc;
 use arrow::array::{
     Array, ArrayRef, BinaryArray, BooleanArray, FixedSizeBinaryArray, FixedSizeListArray,
     Float32Array, Float64Array, Int32Array, Int64Array, LargeBinaryArray, LargeListArray,
-    LargeStringArray, ListArray, ListBuilder, StringArray, StringBuilder, StructArray, UInt32Array,
-    UInt64Array,
+    LargeStringArray, ListArray, ListBuilder, NullArray, StringArray, StringBuilder, StructArray,
+    UInt32Array, UInt64Array,
 };
 use arrow::compute::{concat_batches, take};
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
@@ -135,16 +135,18 @@ fn materialize_graph_projection_with_options(
         &selected_edges,
         &BTreeSet::new(),
     )?;
-    project_parquet_directory(
-        &source.join("properties"),
-        &target.join("properties"),
+    project_property_directory(
+        source,
+        target,
+        false,
         "node_uuid",
         &selected_nodes,
         &selection.exclude_properties,
     )?;
-    project_parquet_directory(
-        &source.join("edge_properties"),
-        &target.join("edge_properties"),
+    project_property_directory(
+        source,
+        target,
+        true,
         "edge_uuid",
         &selected_edges,
         &selection.exclude_properties,
@@ -280,7 +282,57 @@ fn project_parquet_file(
     } else {
         concat_batches(&schema, &batches).map_err(storage)?
     };
-    let keys = uuid_column(&combined, key)?;
+    project_record_batch(&combined, target, key, selected, exclude_properties)
+}
+
+fn project_property_directory(
+    source: &Path,
+    target: &Path,
+    edge: bool,
+    key: &str,
+    selected: &BTreeSet<[u8; 16]>,
+    exclude_properties: &BTreeSet<String>,
+) -> Result<(), GfError> {
+    let routes = if edge {
+        crate::catalog::list_edge_property_stems(source)
+    } else {
+        crate::catalog::list_property_stems(source)
+    };
+    let directory = if edge {
+        "edge_properties"
+    } else {
+        "properties"
+    };
+    for route in routes {
+        let batches = if edge {
+            crate::catalog::read_edge_properties(source, &route)
+        } else {
+            crate::catalog::read_properties(source, &route)
+        }
+        .map_err(|error| GfError::Storage(error.to_string()))?;
+        let Some(schema) = batches.first().map(RecordBatch::schema) else {
+            continue;
+        };
+        let combined = concat_batches(&schema, &batches).map_err(storage)?;
+        project_record_batch(
+            &combined,
+            &target.join(directory).join(format!("{route}.parquet")),
+            key,
+            selected,
+            exclude_properties,
+        )?;
+    }
+    Ok(())
+}
+
+fn project_record_batch(
+    combined: &RecordBatch,
+    target: &Path,
+    key: &str,
+    selected: &BTreeSet<[u8; 16]>,
+    exclude_properties: &BTreeSet<String>,
+) -> Result<(), GfError> {
+    let keys = uuid_column(combined, key)?;
     let mut rows = Vec::new();
     for row in 0..combined.num_rows() {
         let uuid = uuid_at(keys, row)?;
@@ -310,7 +362,13 @@ fn project_parquet_file(
         .iter()
         .map(|index| combined.schema().field(*index).clone())
         .collect::<Vec<_>>();
-    let projected_schema = Arc::new(Schema::new(fields));
+    let mut metadata = combined.schema().metadata().clone();
+    // A subset changes UUID ownership counts, so it cannot inherit the source
+    // route's incremental live-schema authority. The projected flat snapshot
+    // remains a valid legacy complete snapshot and can be upgraded by a full
+    // migration, rather than publishing false counts.
+    metadata.remove(crate::property_overlay::PROPERTY_LIVE_SCHEMA_KEY);
+    let projected_schema = Arc::new(Schema::new_with_metadata(fields, metadata));
     let columns = keep_columns
         .into_iter()
         .map(|index| take(combined.column(index).as_ref(), &indices, None).map_err(storage))
@@ -550,16 +608,67 @@ pub(crate) fn projected_graph_fingerprint(root: &Path) -> Result<[u8; 32], GfErr
 /// retaining decoded topology, edges, node properties, and edge properties.
 pub(crate) fn portable_graph_data_fingerprint(root: &Path) -> Result<[u8; 32], GfError> {
     let runtime_entity_names = portable_runtime_entity_names(root)?;
-    let mut paths = Vec::new();
+    let mut tables = Vec::<(String, RecordBatch)>::new();
     let nodes = root.join("topology/nodes.parquet");
     if nodes.exists() {
-        paths.push(nodes);
+        let batches = read_parquet(&nodes)?;
+        let schema = batches[0].schema();
+        tables.push((
+            "topology/nodes.parquet".into(),
+            concat_batches(&schema, &batches).map_err(storage)?,
+        ));
     }
-    for directory in ["topology/edges", "properties", "edge_properties"] {
-        paths.extend(sorted_parquet_files(&root.join(directory))?);
+    for path in sorted_parquet_files(&root.join("topology/edges"))? {
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|_| validation("graph projection path escaped target"))?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let batches = read_parquet(&path)?;
+        let schema = batches[0].schema();
+        tables.push((
+            relative,
+            concat_batches(&schema, &batches).map_err(storage)?,
+        ));
     }
-    paths.sort();
-    fingerprint_graph_paths_with_runtime_names(root, paths, Some(&runtime_entity_names))
+    for (directory, is_edge) in [("properties", false), ("edge_properties", true)] {
+        let stems = if is_edge {
+            crate::catalog::list_edge_property_stems(root)
+        } else {
+            crate::catalog::list_property_stems(root)
+        };
+        for stem in stems {
+            let batches = if is_edge {
+                crate::catalog::read_edge_properties(root, &stem)
+            } else {
+                crate::catalog::read_properties(root, &stem)
+            }
+            .map_err(storage)?;
+            if let Some(schema) = batches.first().map(RecordBatch::schema) {
+                tables.push((
+                    format!("{directory}/{stem}.parquet"),
+                    concat_batches(&schema, &batches).map_err(storage)?,
+                ));
+            }
+        }
+    }
+    tables.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut writer = CanonicalWriter::new();
+    writer.raw(b"GFGP1").map_err(canonical_error)?;
+    writer
+        .u32(exact_u32(tables.len(), "graph table count")?)
+        .map_err(canonical_error)?;
+    for (relative, batch) in tables {
+        writer.text(&relative).map_err(canonical_error)?;
+        let logical = logical_fingerprint_batch(&relative, &batch, Some(&runtime_entity_names))?;
+        encode_table(&mut writer, &logical)?;
+    }
+    fingerprint(
+        CanonicalDomain::GraphProjection,
+        CANONICAL_CONTRACT_VERSION,
+        &writer.finish(),
+    )
+    .map_err(canonical_error)
 }
 
 fn fingerprint_graph_paths(root: &Path, paths: Vec<PathBuf>) -> Result<[u8; 32], GfError> {
@@ -643,10 +752,11 @@ fn logical_fingerprint_batch(
             columns.push(Arc::clone(batch.column(index)));
         }
     }
-    let schema = Arc::new(Schema::new_with_metadata(
-        fields,
-        source_schema.metadata().clone(),
-    ));
+    let mut metadata = source_schema.metadata().clone();
+    // Incremental live-owner counts are authenticated operational authority,
+    // not graph data. Portable semantic identity is representation-neutral.
+    metadata.remove(crate::property_overlay::PROPERTY_LIVE_SCHEMA_KEY);
+    let schema = Arc::new(Schema::new_with_metadata(fields, metadata));
     RecordBatch::try_new(schema, columns).map_err(storage)
 }
 
@@ -823,6 +933,7 @@ fn encode_field(writer: &mut CanonicalWriter, field: &Field) -> Result<(), GfErr
 
 fn encode_type(writer: &mut CanonicalWriter, data_type: &DataType) -> Result<(), GfError> {
     match data_type {
+        DataType::Null => writer.u8(0x01),
         DataType::Boolean => writer.u8(0x02),
         DataType::Int32 => writer.u8(0x12),
         DataType::Int64 => writer.u8(0x13),
@@ -884,6 +995,14 @@ fn encode_value(
     row: usize,
     nullable: bool,
 ) -> Result<(), GfError> {
+    if data_type == &DataType::Null {
+        let _ = downcast::<NullArray>(array)?;
+        if !nullable {
+            return Err(validation("non-nullable graph field contains null"));
+        }
+        writer.u8(0).map_err(canonical_error)?;
+        return Ok(());
+    }
     if array.is_null(row) {
         if !nullable {
             return Err(validation("non-nullable graph field contains null"));
@@ -1563,14 +1682,23 @@ mod tests {
             materialize_graph_projection(source.path(), baseline_target.path(), &selection)
                 .unwrap();
 
-        for relative in [
-            "topology/nodes.parquet",
-            "topology/edges/_exploratory.parquet",
-            "properties/_untyped.parquet",
-            "edge_properties/KNOWS.parquet",
-            "topology/runtime_catalog.parquet",
+        let mut paths = vec![
+            source.path().join("topology/nodes.parquet"),
+            source.path().join("topology/edges/_exploratory.parquet"),
+            source.path().join("topology/runtime_catalog.parquet"),
+        ];
+        for (kind, route) in [
+            (crate::property_overlay::PropertyRouteKind::Node, "_untyped"),
+            (crate::property_overlay::PropertyRouteKind::Edge, "KNOWS"),
         ] {
-            let path = source.path().join(relative);
+            paths.extend(
+                crate::property_overlay::enumerate_property_fragments(source.path(), kind, route)
+                    .unwrap()
+                    .into_iter()
+                    .map(|fragment| fragment.path),
+            );
+        }
+        for path in paths {
             let batches = read_parquet(&path).unwrap();
             let schema = batches[0].schema();
             let replacement = path.with_extension("rewritten");
@@ -2009,6 +2137,7 @@ mod tests {
         );
 
         let supported = [
+            DataType::Null,
             DataType::Boolean,
             DataType::Int32,
             DataType::Int64,
@@ -2115,6 +2244,19 @@ mod tests {
         let mut writer = CanonicalWriter::new();
         assert_eq!(
             encode_present_value(&mut writer, &DataType::UInt64, &strings, 0)
+                .unwrap_err()
+                .code(),
+            "GF_VALIDATION"
+        );
+
+        let nulls: ArrayRef = Arc::new(NullArray::new(2));
+        let mut writer = CanonicalWriter::new();
+        encode_value(&mut writer, &DataType::Null, &nulls, 0, true).unwrap();
+        encode_value(&mut writer, &DataType::Null, &nulls, 1, true).unwrap();
+        assert_eq!(writer.finish(), vec![0, 0]);
+        let mut writer = CanonicalWriter::new();
+        assert_eq!(
+            encode_value(&mut writer, &DataType::Null, &nulls, 0, false)
                 .unwrap_err()
                 .code(),
             "GF_VALIDATION"
@@ -2413,6 +2555,39 @@ mod tests {
                 assert_eq!(handle.join().unwrap(), expected);
             }
         });
+    }
+
+    #[test]
+    fn portable_fingerprint_is_stable_across_immutable_overlay_projection() {
+        let source = TempDir::new().unwrap();
+        let node = uuid(93);
+        let mut writer = GraphWriter::open_at(source.path(), OntologyMode::Strict, TS).unwrap();
+        writer
+            .create_node(node, graphforge_core::TypeId(1))
+            .unwrap();
+        writer
+            .set_properties(
+                &node,
+                Some("Person"),
+                HashMap::from([("name".into(), graphforge_ir::IrLiteral::Str("Ada".into()))]),
+            )
+            .unwrap();
+        writer.flush().unwrap();
+        let parent = TempDir::new().unwrap();
+        let projected = parent.path().join("projected");
+        materialize_portable_graph_tree_projection(
+            source.path(),
+            &projected,
+            &GraphProjectionSelection {
+                node_uuids: BTreeSet::from([*node.as_bytes()]),
+                ..GraphProjectionSelection::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            portable_graph_data_fingerprint(source.path()).unwrap(),
+            portable_graph_data_fingerprint(&projected).unwrap(),
+        );
     }
 
     #[test]

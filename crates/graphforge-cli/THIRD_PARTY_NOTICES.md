@@ -17,7 +17,7 @@ python3 scripts/generate_third_party_notices.py
 
 ## License overview
 
-- Apache License 2.0 (319)
+- Apache License 2.0 (322)
 - MIT License (73)
 - Unicode License v3 (19)
 - BSD 3-Clause "New" or "Revised" License (7)
@@ -5076,6 +5076,7 @@ Used by:
 - hashbrown 0.16.1
 - hashbrown 0.17.1
 - heck 0.5.0
+- hermit-abi 0.5.2
 - httparse 1.10.1
 - idna 1.1.0
 - idna_adapter 1.2.2
@@ -5093,6 +5094,7 @@ Used by:
 - num-complex 0.4.6
 - num-integer 0.1.46
 - num-traits 0.2.19
+- num_cpus 1.17.0
 - object 0.37.3
 - once_cell 1.21.4
 - parking_lot 0.12.5
@@ -5119,6 +5121,7 @@ Used by:
 - stable_deref_trait 1.2.1
 - stacker 0.1.24
 - tempfile 3.27.0
+- threadpool 1.8.1
 - unicode-normalization 0.1.25
 - unicode-segmentation 1.13.2
 - unicode-width 0.2.2

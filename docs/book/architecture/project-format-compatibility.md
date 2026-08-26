@@ -24,11 +24,23 @@ v1.0 format freeze.
   the v0.5 public construction or ingest surface.
 
 Within a supported v0.5 generation, base-only canonical Parquet remains
-readable. Typed GFDR records use the current versioned framing and typed value
+readable. A legacy single canonical property Parquet snapshot remains the
+oldest `(0, 0)` authority when later `full-snapshot-v1` immutable fragments are
+published; it is authenticated and retained rather than rewritten or silently
+deleted. Typed GFDR records use the current versioned framing and typed value
 encoding. The superseded prototype's routing-free topology/property payloads
 and plain-string property representation are not losslessly migratable and are
 rejected with `GF_UNSUPPORTED_PROJECT_FORMAT`; GraphForge never silently
 reinterprets them.
+
+Portable-v2 selection is dependency-closed for graph semantic bindings. When
+the selected participant set includes the graph semantic-bindings participant,
+the bundle must also contain the exact workspace ontology-composition
+participant whose fingerprint those bindings name. Import authenticates and
+reconstructs the composition, compares the fingerprint, and stages composition
+plus bindings in the same generation. A missing or mismatched authority fails
+before publication; import never drops the bindings or fabricates composition
+state.
 
 ## Knowledge-layer implementation boundary
 
@@ -209,8 +221,17 @@ record families may appear:
   files live under the generation-owned `graph/` directory beside
   `participants/`. Open validates the inventory and either pins that tree
   (read-only) or materializes file-by-file into a private workspace. New
-  publications use this path. Unsupported inventory versions return
-  `GF_UNSUPPORTED_PROJECT_FORMAT`.
+  publications use this path. For `full-snapshot-v1` property fragments, open
+  authenticates every canonical generation and ordinal in this inventory, then
+  merges all fragments by UUID and descending `(generation, ordinal)` identity.
+  Each newer row is a complete map or tombstone for that UUID; unchanged UUIDs
+  remain live in older immutable fragments. New fragments authenticate an exact
+  per-route live-key count summary. The newest summary selects the logical
+  schema without scanning total rows/history; zero-owner historical keys read
+  as Arrow `Null`, while old physical fields remain decodable. A missing summary
+  denotes a legacy route and preserves its historical schema union rather than
+  guessing from a targeted mutation. Unsupported inventory versions
+  return `GF_UNSUPPORTED_PROJECT_FORMAT`.
 
 Portable interchange does not yet encode the generation-owned `graph/` tree and
 returns a structured unsupported error for `files` generations; copy the project

@@ -254,6 +254,7 @@ impl GraphForge {
             path: self.path.clone(),
             lifecycle_mode: self.lifecycle_mode,
             resolved_generation: self.resolved_generation.clone(),
+            property_authority: Arc::clone(&self.property_authority),
             read_only: self.read_only,
             current_generation_uuid: Arc::clone(&self.current_generation_uuid),
             uuid_membership_index: std::sync::Mutex::new(None),

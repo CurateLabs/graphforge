@@ -83,8 +83,14 @@ impl GraphForge {
                 &catalog_batch,
             )?;
         }
-        let touched =
-            graphforge_storage::stage_set_node_properties(&mut staged, &self.dir, stem, &updates)?;
+        let inventory = self.property_inventory_for_session();
+        let touched = graphforge_storage::stage_set_node_properties_authenticated(
+            &mut staged,
+            &self.dir,
+            &inventory,
+            stem,
+            &updates,
+        )?;
         staged.commit()?;
         *catalog = next_catalog;
         drop(catalog);
@@ -255,6 +261,7 @@ fn reject_property_collision(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::sync::Arc;
 
     use arrow::array::{FixedSizeBinaryArray, Float64Array, Int64Array, StringArray};
@@ -286,6 +293,20 @@ mod tests {
         .unwrap()
     }
 
+    fn authenticated_properties(
+        graph: &GraphForge,
+        uuid: [u8; 16],
+    ) -> graphforge_storage::PropertySnapshotRow {
+        let (mut rows, _) = graphforge_storage::read_authenticated_property_snapshots_for(
+            &graph.dir,
+            graphforge_storage::PropertyRouteKind::Node,
+            "_untyped",
+            &BTreeSet::from([uuid]),
+        )
+        .unwrap();
+        rows.remove(&uuid).expect("authenticated property row")
+    }
+
     fn write(
         graph: &GraphForge,
         algorithm: Algorithm,
@@ -309,7 +330,15 @@ mod tests {
             write(&graph, rank_algorithm, Some("ranked"), &empty).unwrap(),
             0
         );
-        assert!(!graph.dir.join("properties/_untyped.parquet").exists());
+        assert!(
+            graphforge_storage::enumerate_property_fragments(
+                &graph.dir,
+                graphforge_storage::PropertyRouteKind::Node,
+                "_untyped",
+            )
+            .unwrap()
+            .is_empty()
+        );
         write(&graph, rank_algorithm, Some("ranked"), &rank).unwrap();
         write(&graph, cluster_algorithm, Some("group"), &cluster).unwrap();
         assert_eq!(
@@ -335,8 +364,14 @@ mod tests {
         graph
             .execute("MATCH (n:Person) SET n.metric = 'old'")
             .unwrap();
-        let path = graph.dir.join("properties/_untyped.parquet");
-        let before = std::fs::read(&path).unwrap();
+        let before = authenticated_properties(&graph, uuid);
+        assert_eq!(before.values["metric"], IrLiteral::Str("old".into()));
+        let fragments_before = graphforge_storage::enumerate_property_fragments(
+            &graph.dir,
+            graphforge_storage::PropertyRouteKind::Node,
+            "_untyped",
+        )
+        .unwrap();
         let rank = result(&[uuid], "score", Arc::new(Float64Array::from(vec![1.0])));
         let algorithm = Algorithm::Rank(RankAlgorithm::Degree);
         assert!(write(&graph, algorithm, Some("metric"), &rank).is_err());
@@ -349,6 +384,16 @@ mod tests {
         );
         assert!(write(&graph, algorithm, Some("ranked"), &partial).is_err());
         assert!(write(&graph, algorithm, Some(""), &rank).is_err());
-        assert_eq!(std::fs::read(path).unwrap(), before);
+        assert_eq!(authenticated_properties(&graph, uuid), before);
+        assert_eq!(
+            graphforge_storage::enumerate_property_fragments(
+                &graph.dir,
+                graphforge_storage::PropertyRouteKind::Node,
+                "_untyped",
+            )
+            .unwrap(),
+            fragments_before,
+            "validation failures must not publish property authority"
+        );
     }
 }

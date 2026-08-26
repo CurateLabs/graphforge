@@ -1,6 +1,6 @@
 //! Integration tests for the authoritative graph delta journal (#752).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 
 use graphforge_core::{OntologyMode, TypeId};
@@ -9,13 +9,82 @@ use graphforge_storage::{
     GRAPH_CAPABILITY_ID, GRAPH_CAPABILITY_VERSION, GraphDeltaJournalLimits, GraphDeltaOp,
     GraphDeltaOpKind, GraphDeltaPayload, GraphDeltaPublishRequest, GraphFileEntry, GraphFileRole,
     GraphFilesInventory, GraphWriter, ProjectCapability, ProjectGenerationRequest,
-    ProjectStageOutcome, capture_graph_files, decode_delta_run, decode_graph_delta_value,
-    delta_run_relative_path, empty_workspace_participants, encode_delta_run,
-    encode_graph_delta_value, list_delta_runs, materialize_replayed_graph_tree,
-    open_or_initialize_project, publish_graph_delta, read_edges, read_nodes, read_properties,
+    ProjectStageOutcome, PropertyOverlayLimits, PropertyRouteKind, PropertySnapshotRow,
+    capture_graph_files, decode_delta_run, decode_graph_delta_value, delta_run_relative_path,
+    empty_workspace_participants, encode_delta_run, encode_graph_delta_value,
+    enumerate_property_fragments, list_delta_runs, materialize_replayed_graph_tree,
+    open_or_initialize_project, publish_graph_delta, read_edges, read_nodes,
     reconstruct_graph_state, resolve_project_generation, stage_project_generation_with_graph_tree,
+    visit_authenticated_property_snapshots,
 };
 use uuid::Uuid;
+
+fn authenticated_property_rows(
+    graph_root: &std::path::Path,
+    kind: PropertyRouteKind,
+    route: &str,
+    scratch_root: &std::path::Path,
+) -> Vec<PropertySnapshotRow> {
+    let mut rows = Vec::new();
+    let result = visit_authenticated_property_snapshots(
+        graph_root,
+        kind,
+        route,
+        scratch_root,
+        PropertyOverlayLimits::default(),
+        |row| {
+            rows.push(row);
+            Ok(())
+        },
+    );
+    if let Err(error) = result {
+        let files = graph_root
+            .read_dir()
+            .into_iter()
+            .flatten()
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<Result<Vec<_>, _>>();
+        panic!("authenticated {kind:?}/{route} failed: {error}; root={files:?}");
+    }
+    rows
+}
+
+fn assert_small_write_property_evidence(view: &std::path::Path, src_uuid: &str) {
+    let scratch = tempfile::tempdir().unwrap();
+    let person =
+        authenticated_property_rows(view, PropertyRouteKind::Node, "Person", scratch.path());
+    let untyped =
+        authenticated_property_rows(view, PropertyRouteKind::Node, "_untyped", scratch.path());
+    assert_eq!(person.len(), 1, "one base entity property snapshot");
+    assert_eq!(
+        person[0].values.len(),
+        2,
+        "score and active remain composed"
+    );
+    assert_eq!(untyped.len(), 1, "one journal property snapshot");
+    assert_eq!(
+        untyped[0].uuid,
+        *Uuid::parse_str(src_uuid).unwrap().as_bytes()
+    );
+    assert_eq!(untyped[0].values.get("rank"), Some(&IrLiteral::Int(7)));
+    assert_eq!(
+        person[0].values.len() + untyped[0].values.len(),
+        3,
+        "three logical property values occupy two canonical UUID snapshot rows"
+    );
+    assert_eq!(
+        enumerate_property_fragments(view, PropertyRouteKind::Node, "Person")
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        enumerate_property_fragments(view, PropertyRouteKind::Node, "_untyped")
+            .unwrap()
+            .len(),
+        1
+    );
+}
 
 fn sample_ops() -> Vec<GraphDeltaOp> {
     let edge = Uuid::now_v7();
@@ -147,7 +216,7 @@ fn publish_base_with_extra_nodes(container: &std::path::Path, extra_nodes: usize
 #[test]
 fn streaming_resource_ladder_is_independent_of_base_rows() {
     let mut evidence = Vec::new();
-    for extra_nodes in [0, 32, 1_024] {
+    for extra_nodes in [256, 512, 1_024] {
         let root = tempfile::tempdir().unwrap();
         publish_base_with_extra_nodes(root.path(), extra_nodes);
         let mut operations = sample_ops();
@@ -186,6 +255,7 @@ fn streaming_resource_ladder_is_independent_of_base_rows() {
         let target = tempfile::tempdir().unwrap();
         let limits = GraphDeltaJournalLimits {
             max_batch_rows: 7,
+            max_replay_memory_bytes: 2 * 1024 * 1024,
             ..GraphDeltaJournalLimits::default()
         };
         let (_, replay) = materialize_replayed_graph_tree(
@@ -198,10 +268,126 @@ fn streaming_resource_ladder_is_independent_of_base_rows() {
         evidence.push((
             replay.estimated_replay_memory_bytes,
             replay.materialization_batch_row_bound,
+            read_nodes(target.path())
+                .unwrap()
+                .iter()
+                .map(arrow::record_batch::RecordBatch::num_rows)
+                .sum::<usize>(),
         ));
     }
-    assert!(evidence.windows(2).all(|pair| pair[0] == pair[1]));
+    let (minimum, maximum) = evidence
+        .iter()
+        .map(|(bytes, _, _)| *bytes)
+        .fold((u64::MAX, 0_u64), |(minimum, maximum), bytes| {
+            (minimum.min(bytes), maximum.max(bytes))
+        });
+    assert!(
+        maximum - minimum <= 128,
+        "only variable-width operation encoding may change replay memory, not base rows"
+    );
     assert_eq!(evidence[0].1, 7);
+    assert_eq!(
+        evidence
+            .iter()
+            .map(|(_, _, rows)| *rows)
+            .collect::<Vec<_>>(),
+        [260, 516, 1_028]
+    );
+}
+
+#[test]
+fn topology_replay_admission_is_path_specific_and_never_creates_rejected_output() {
+    let root = tempfile::tempdir().unwrap();
+    publish_base(root.path());
+    publish_graph_delta(
+        root.path(),
+        &GraphDeltaPublishRequest {
+            transaction_uuid: Uuid::now_v7(),
+            generation_uuid: Uuid::now_v7(),
+            run_uuid: Uuid::now_v7(),
+            operations: sample_ops(),
+            limits: GraphDeltaJournalLimits::default(),
+        },
+    )
+    .unwrap();
+    let generation = resolve_project_generation(root.path()).unwrap();
+    let inventory = generation.graph_files_inventory().unwrap().unwrap();
+    let source_nodes =
+        fs::read(generation.graph_tree_root().join("topology/nodes.parquet")).unwrap();
+    let source_edges = fs::read(
+        generation
+            .graph_tree_root()
+            .join("topology/edges/KNOWS.parquet"),
+    )
+    .unwrap();
+
+    let mut observed_node_rejection = false;
+    let mut observed_edge_rejection = false;
+    for kibibytes in (256..=768).step_by(16) {
+        let target = tempfile::tempdir().unwrap();
+        let node_output = target.path().join("topology/nodes.parquet");
+        let edge_output = target.path().join("topology/edges/KNOWS.parquet");
+        let result = materialize_replayed_graph_tree(
+            &generation.graph_tree_root(),
+            &inventory,
+            target.path(),
+            GraphDeltaJournalLimits {
+                max_replay_memory_bytes: kibibytes * 1024,
+                max_batch_rows: 1,
+                ..GraphDeltaJournalLimits::default()
+            },
+        );
+        let Err(error) = result else { continue };
+        assert_eq!(error.code(), "GF_RESOURCE_LIMIT", "{error}");
+        let message = error.to_string();
+        if message.contains("topology node writer memory bound exceeded") {
+            observed_node_rejection = true;
+            assert_eq!(fs::read(&node_output).unwrap(), source_nodes);
+        } else if message.contains("topology edge writer memory bound exceeded") {
+            observed_edge_rejection = true;
+            assert_eq!(fs::read(&edge_output).unwrap(), source_edges);
+        }
+        if observed_node_rejection && observed_edge_rejection {
+            break;
+        }
+    }
+    assert!(
+        observed_node_rejection,
+        "node admission threshold was not exercised"
+    );
+    assert!(
+        observed_edge_rejection,
+        "edge admission threshold was not exercised"
+    );
+
+    let admitted = tempfile::tempdir().unwrap();
+    materialize_replayed_graph_tree(
+        &generation.graph_tree_root(),
+        &inventory,
+        admitted.path(),
+        GraphDeltaJournalLimits {
+            max_replay_memory_bytes: 2 * 1024 * 1024,
+            max_batch_rows: 1,
+            ..GraphDeltaJournalLimits::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        read_nodes(admitted.path())
+            .unwrap()
+            .iter()
+            .map(arrow::record_batch::RecordBatch::num_rows)
+            .sum::<usize>(),
+        4
+    );
+    assert_eq!(
+        read_edges(admitted.path(), "KNOWS", OntologyMode::Strict)
+            .unwrap()
+            .iter()
+            .map(arrow::record_batch::RecordBatch::num_rows)
+            .sum::<usize>(),
+        2
+    );
 }
 
 #[test]
@@ -281,6 +467,10 @@ fn torn_truncated_reordered_and_checksum_invalid_fail_closed() {
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the regression proves one end-to-end publish, reopen, and authenticated replay story"
+)]
 fn small_write_preserves_unchanged_parquet_and_reopen_replays() {
     let root = tempfile::tempdir().unwrap();
     let _base = publish_base(root.path());
@@ -293,10 +483,20 @@ fn small_write_preserves_unchanged_parquet_and_reopen_replays() {
         .unwrap()
         .content_sha256
         .clone();
+    let parent_parquet = parent_inventory
+        .files
+        .iter()
+        .filter(|entry| entry.relative_path.ends_with(".parquet"))
+        .map(|entry| (entry.relative_path.clone(), entry.content_sha256.clone()))
+        .collect::<BTreeMap<_, _>>();
 
     let ops = sample_ops();
     let edge_uuid = match &ops[2].payload {
         GraphDeltaPayload::UpsertEdgeV2 { edge_uuid, .. } => edge_uuid.clone(),
+        _ => unreachable!(),
+    };
+    let src_uuid = match &ops[0].payload {
+        GraphDeltaPayload::UpsertNodeV2 { node_uuid, .. } => node_uuid.clone(),
         _ => unreachable!(),
     };
     let receipt = publish_graph_delta(
@@ -323,6 +523,18 @@ fn small_write_preserves_unchanged_parquet_and_reopen_replays() {
         .content_sha256
         .clone();
     assert_eq!(parent_nodes_digest, child_nodes_digest);
+    let child_files = inventory
+        .files
+        .iter()
+        .map(|entry| (entry.relative_path.as_str(), entry.content_sha256.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    for (path, digest) in &parent_parquet {
+        assert_eq!(
+            child_files.get(path.as_str()),
+            Some(&digest.as_str()),
+            "small journal write must preserve authenticated base artifact {path}"
+        );
+    }
 
     let (state, evidence) = reconstruct_graph_state(
         &reopened.graph_tree_root(),
@@ -332,6 +544,25 @@ fn small_write_preserves_unchanged_parquet_and_reopen_replays() {
     .unwrap();
     assert_eq!(evidence.runs_replayed, 1);
     assert!(state.edges.contains_key(&edge_uuid));
+    assert_eq!(
+        state.node_properties.len(),
+        3,
+        "two base keys plus one journal key survive authenticated replay"
+    );
+    assert_eq!(
+        state
+            .node_property_stems
+            .get(&(src_uuid.clone(), "rank".into()))
+            .map(String::as_str),
+        Some("_untyped")
+    );
+    assert_eq!(
+        state
+            .node_properties
+            .get(&(src_uuid.clone(), "rank".into()))
+            .map(|value| decode_graph_delta_value(value).unwrap()),
+        Some(IrLiteral::Int(7))
+    );
     assert_ne!(receipt.state_fingerprint, [0; 32]);
 
     let view = tempfile::tempdir().unwrap();
@@ -359,18 +590,217 @@ fn small_write_preserves_unchanged_parquet_and_reopen_replays() {
             .sum::<usize>(),
         2
     );
+    assert_small_write_property_evidence(view.path(), &src_uuid);
+}
+
+#[test]
+fn entity_delete_rewrites_each_affected_property_route_with_tombstones() {
+    let root = tempfile::tempdir().unwrap();
+    publish_base(root.path());
+    let node = Uuid::parse_str("00000000-0000-7000-8000-000000000001").unwrap();
+    let edge = Uuid::parse_str("00000000-0000-7000-8000-000000000003").unwrap();
+    publish_graph_delta(
+        root.path(),
+        &GraphDeltaPublishRequest {
+            transaction_uuid: Uuid::now_v7(),
+            generation_uuid: Uuid::now_v7(),
+            run_uuid: Uuid::now_v7(),
+            operations: vec![
+                GraphDeltaOp {
+                    operation_uuid: Uuid::now_v7(),
+                    kind: GraphDeltaOpKind::DeleteEdge,
+                    payload: GraphDeltaPayload::DeleteEdge {
+                        edge_uuid: edge.hyphenated().to_string(),
+                    },
+                },
+                GraphDeltaOp {
+                    operation_uuid: Uuid::now_v7(),
+                    kind: GraphDeltaOpKind::DeleteNode,
+                    payload: GraphDeltaPayload::DeleteNode {
+                        node_uuid: node.hyphenated().to_string(),
+                    },
+                },
+            ],
+            limits: GraphDeltaJournalLimits::default(),
+        },
+    )
+    .unwrap();
+    let generation = resolve_project_generation(root.path()).unwrap();
+    let inventory = generation.graph_files_inventory().unwrap().unwrap();
+    let view = tempfile::tempdir().unwrap();
+    materialize_replayed_graph_tree(
+        &generation.graph_tree_root(),
+        &inventory,
+        view.path(),
+        GraphDeltaJournalLimits::default(),
+    )
+    .unwrap();
+
+    let scratch = tempfile::tempdir().unwrap();
+    for (kind, route) in [
+        (PropertyRouteKind::Node, "Person"),
+        (PropertyRouteKind::Edge, "KNOWS"),
+    ] {
+        let rows = authenticated_property_rows(view.path(), kind, route, scratch.path());
+        assert!(
+            rows.is_empty(),
+            "deleted entity must not survive authenticated {kind:?}/{route} replay"
+        );
+        assert_eq!(
+            enumerate_property_fragments(view.path(), kind, route)
+                .unwrap()
+                .len(),
+            2,
+            "copied base plus one authoritative tombstone fragment"
+        );
+    }
+}
+
+#[test]
+fn remove_absent_property_key_does_not_emit_replay_fragment() {
+    let root = tempfile::tempdir().unwrap();
+    publish_base(root.path());
+    let node = "00000000-0000-7000-8000-000000000001";
+    let edge = "00000000-0000-7000-8000-000000000003";
+    let operations = vec![
+        GraphDeltaOp {
+            operation_uuid: Uuid::now_v7(),
+            kind: GraphDeltaOpKind::RemoveNodeProperty,
+            payload: GraphDeltaPayload::RemoveNodeProperty {
+                node_uuid: node.into(),
+                property_stem: "Person".into(),
+                key: "absent".into(),
+            },
+        },
+        GraphDeltaOp {
+            operation_uuid: Uuid::now_v7(),
+            kind: GraphDeltaOpKind::RemoveEdgeProperty,
+            payload: GraphDeltaPayload::RemoveEdgeProperty {
+                edge_uuid: edge.into(),
+                property_stem: "KNOWS".into(),
+                key: "absent".into(),
+            },
+        },
+    ];
+    publish_graph_delta(
+        root.path(),
+        &GraphDeltaPublishRequest {
+            transaction_uuid: Uuid::now_v7(),
+            generation_uuid: Uuid::now_v7(),
+            run_uuid: Uuid::now_v7(),
+            operations,
+            limits: GraphDeltaJournalLimits::default(),
+        },
+    )
+    .unwrap();
+    let generation = resolve_project_generation(root.path()).unwrap();
+    let inventory = generation.graph_files_inventory().unwrap().unwrap();
+    let view = tempfile::tempdir().unwrap();
+    materialize_replayed_graph_tree(
+        &generation.graph_tree_root(),
+        &inventory,
+        view.path(),
+        GraphDeltaJournalLimits::default(),
+    )
+    .unwrap();
+
     assert_eq!(
-        ["Person", "_untyped"]
-            .into_iter()
-            .map(|stem| {
-                read_properties(view.path(), stem)
-                    .unwrap()
-                    .iter()
-                    .map(arrow::record_batch::RecordBatch::num_rows)
-                    .sum::<usize>()
-            })
-            .sum::<usize>(),
-        3
+        enumerate_property_fragments(view.path(), PropertyRouteKind::Node, "Person")
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        enumerate_property_fragments(view.path(), PropertyRouteKind::Edge, "KNOWS")
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn multi_chunk_large_property_values_are_charged_to_replay_memory() {
+    let root = tempfile::tempdir().unwrap();
+    publish_base(root.path());
+    let value = encode_graph_delta_value(&IrLiteral::Str("x".repeat(8 * 1024))).unwrap();
+    let mut operations = [
+        "00000000-0000-7000-8000-000000000001",
+        "00000000-0000-7000-8000-000000000002",
+    ]
+    .into_iter()
+    .map(|node_uuid| GraphDeltaOp {
+        operation_uuid: Uuid::now_v7(),
+        kind: GraphDeltaOpKind::SetNodeProperty,
+        payload: GraphDeltaPayload::SetNodeProperty {
+            node_uuid: node_uuid.into(),
+            property_stem: "Person".into(),
+            key: "large".into(),
+            value: value.clone(),
+        },
+    })
+    .collect::<Vec<_>>();
+    operations.push(GraphDeltaOp {
+        operation_uuid: Uuid::now_v7(),
+        kind: GraphDeltaOpKind::SetEdgeProperty,
+        payload: GraphDeltaPayload::SetEdgeProperty {
+            edge_uuid: "00000000-0000-7000-8000-000000000003".into(),
+            property_stem: "KNOWS".into(),
+            key: "large".into(),
+            value: value.clone(),
+        },
+    });
+    publish_graph_delta(
+        root.path(),
+        &GraphDeltaPublishRequest {
+            transaction_uuid: Uuid::now_v7(),
+            generation_uuid: Uuid::now_v7(),
+            run_uuid: Uuid::now_v7(),
+            operations,
+            limits: GraphDeltaJournalLimits::default(),
+        },
+    )
+    .unwrap();
+    let generation = resolve_project_generation(root.path()).unwrap();
+    let inventory = generation.graph_files_inventory().unwrap().unwrap();
+    let admitted_view = tempfile::tempdir().unwrap();
+    let (_, replay) = materialize_replayed_graph_tree(
+        &generation.graph_tree_root(),
+        &inventory,
+        admitted_view.path(),
+        GraphDeltaJournalLimits {
+            max_replay_memory_bytes: 2 * 1024 * 1024,
+            max_batch_rows: 1,
+            ..GraphDeltaJournalLimits::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        replay.estimated_replay_memory_bytes >= 3 * 8 * 1024,
+        "all three variable-width property values must contribute to replay authority"
+    );
+    let scratch = tempfile::tempdir().unwrap();
+    let nodes = authenticated_property_rows(
+        admitted_view.path(),
+        PropertyRouteKind::Node,
+        "Person",
+        scratch.path(),
+    );
+    assert_eq!(nodes.len(), 2);
+    assert!(
+        nodes
+            .iter()
+            .all(|row| { row.values.get("large") == Some(&IrLiteral::Str("x".repeat(8 * 1024))) })
+    );
+    let edges = authenticated_property_rows(
+        admitted_view.path(),
+        PropertyRouteKind::Edge,
+        "KNOWS",
+        scratch.path(),
+    );
+    assert_eq!(edges.len(), 1);
+    assert_eq!(
+        edges[0].values.get("large"),
+        Some(&IrLiteral::Str("x".repeat(8 * 1024)))
     );
 }
 
@@ -474,7 +904,7 @@ fn resource_limits_reject_tiny_run_accumulation() {
         },
     )
     .unwrap_err();
-    assert!(err.to_string().contains("GF_RESOURCE_LIMIT"));
+    assert_eq!(err.code(), "GF_RESOURCE_LIMIT");
 }
 
 #[test]

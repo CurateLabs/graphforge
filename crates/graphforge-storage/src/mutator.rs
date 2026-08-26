@@ -285,11 +285,48 @@ pub fn stage_delete_nodes<S: BuildHasher>(
     if node_uuids.is_empty() {
         return Ok(0);
     }
-    // Drop the deleted nodes' property rows so they don't dangle.
-    for path in parquet_files_in(dir, "properties")? {
-        if let Some(schema) = discover_parquet_schema(&path) {
-            stage_rewrite_dropping(staged, &path, schema, "node_uuid", node_uuids)?;
-        }
+    // Immutable property history is never rewritten; whole-row tombstones
+    // suppress deleted entities before topology authority commits.
+    for route in crate::catalog::list_property_stems(dir) {
+        crate::writer::stage_property_tombstones(
+            staged,
+            dir,
+            crate::property_overlay::PropertyRouteKind::Node,
+            &route,
+            node_uuids,
+        )?;
+    }
+    stage_rewrite_nodes_dropping(
+        staged,
+        &dir.join("topology").join("nodes.parquet"),
+        node_uuids,
+    )
+}
+
+/// Stage node deletion while binding every property tombstone to `inventory`.
+#[allow(clippy::implicit_hasher)]
+pub fn stage_delete_nodes_authenticated<S: BuildHasher>(
+    staged: &mut RewriteBatch,
+    dir: &Path,
+    inventory: &crate::AuthenticatedPropertyInventory,
+    node_uuids: &HashSet<[u8; 16], S>,
+) -> Result<u64, GfError> {
+    if node_uuids.is_empty() {
+        return Ok(0);
+    }
+    let routes = inventory
+        .routes(crate::PropertyRouteKind::Node)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    for route in routes {
+        crate::writer::stage_property_tombstones_authenticated(
+            staged,
+            dir,
+            inventory,
+            crate::PropertyRouteKind::Node,
+            &route,
+            node_uuids,
+        )?;
     }
     stage_rewrite_nodes_dropping(
         staged,
@@ -319,12 +356,48 @@ pub fn stage_delete_edges<S: BuildHasher>(
             removed += stage_rewrite_dropping(staged, &path, schema, "edge_uuid", edge_uuids)?;
         }
     }
-    // Drop edge-property rows (the `edge_properties/` dir exists once edge
-    // properties have been written, #784).
-    for path in parquet_files_in(dir, "edge_properties")? {
+    for route in crate::catalog::list_edge_property_stems(dir) {
+        crate::writer::stage_property_tombstones(
+            staged,
+            dir,
+            crate::property_overlay::PropertyRouteKind::Edge,
+            &route,
+            edge_uuids,
+        )?;
+    }
+    Ok(removed)
+}
+
+/// Stage edge deletion while binding every property tombstone to `inventory`.
+#[allow(clippy::implicit_hasher)]
+pub fn stage_delete_edges_authenticated<S: BuildHasher>(
+    staged: &mut RewriteBatch,
+    dir: &Path,
+    inventory: &crate::AuthenticatedPropertyInventory,
+    edge_uuids: &HashSet<[u8; 16], S>,
+) -> Result<u64, GfError> {
+    if edge_uuids.is_empty() {
+        return Ok(0);
+    }
+    let mut removed = 0u64;
+    for path in parquet_files_in(dir, "topology/edges")? {
         if let Some(schema) = discover_parquet_schema(&path) {
-            stage_rewrite_dropping(staged, &path, schema, "edge_uuid", edge_uuids)?;
+            removed += stage_rewrite_dropping(staged, &path, schema, "edge_uuid", edge_uuids)?;
         }
+    }
+    let routes = inventory
+        .routes(crate::PropertyRouteKind::Edge)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    for route in routes {
+        crate::writer::stage_property_tombstones_authenticated(
+            staged,
+            dir,
+            inventory,
+            crate::PropertyRouteKind::Edge,
+            &route,
+            edge_uuids,
+        )?;
     }
     Ok(removed)
 }
@@ -512,6 +585,15 @@ mod tests {
             .sum()
     }
 
+    fn logical_property_rows(dir: &Path, route: &str, edge: bool) -> usize {
+        let batches = if edge {
+            crate::catalog::read_edge_properties(dir, route).unwrap()
+        } else {
+            crate::catalog::read_properties(dir, route).unwrap()
+        };
+        batches.iter().map(RecordBatch::num_rows).sum()
+    }
+
     fn set(uuids: &[Uuid]) -> HashSet<[u8; 16]> {
         uuids.iter().map(to_bytes).collect()
     }
@@ -580,11 +662,11 @@ mod tests {
         )
         .unwrap();
         w.flush().unwrap();
-        assert_eq!(row_count(dir.path(), "properties/_untyped.parquet"), 2);
+        assert_eq!(logical_property_rows(dir.path(), "_untyped", false), 2);
 
         delete_nodes(dir.path(), &set(&[a])).unwrap();
         assert_eq!(
-            row_count(dir.path(), "properties/_untyped.parquet"),
+            logical_property_rows(dir.path(), "_untyped", false),
             1,
             "the deleted node's property row is dropped too"
         );
@@ -707,6 +789,12 @@ mod tests {
         let mut staged = RewriteBatch::new();
         stage_delete_edges(&mut staged, dir.path(), &set(&[e_ab])).unwrap();
         stage_delete_nodes(&mut staged, dir.path(), &set(&[a])).unwrap();
+        let property_generation = crate::generation::read_property_generation(dir.path())
+            .unwrap()
+            .checked_add(1)
+            .unwrap();
+        crate::writer::seal_property_windows(&mut staged, dir.path(), property_generation).unwrap();
+        staged.move_staged_destination_to_end(&dir.path().join("topology/nodes.parquet"));
 
         let order: Vec<_> = staged.staged_paths().collect();
         assert!(
@@ -745,8 +833,8 @@ mod tests {
             row_count(dir.path(), "topology/edges/_exploratory.parquet"),
             1
         );
-        assert_eq!(row_count(dir.path(), "properties/_untyped.parquet"), 0);
-        assert_eq!(row_count(dir.path(), "edge_properties/KNOWS.parquet"), 0);
+        assert_eq!(logical_property_rows(dir.path(), "_untyped", false), 0);
+        assert_eq!(logical_property_rows(dir.path(), "KNOWS", true), 0);
 
         // No temp residue anywhere the delete touched.
         for sub in [
@@ -780,7 +868,7 @@ mod tests {
             row_count(dir.path(), "topology/edges/_exploratory.parquet"),
             2
         );
-        assert_eq!(row_count(dir.path(), "properties/_untyped.parquet"), 1);
-        assert_eq!(row_count(dir.path(), "edge_properties/KNOWS.parquet"), 1);
+        assert_eq!(logical_property_rows(dir.path(), "_untyped", false), 1);
+        assert_eq!(logical_property_rows(dir.path(), "KNOWS", true), 1);
     }
 }

@@ -154,6 +154,89 @@ Version 1
 expanded inventories remain readable and can be migrated without changing
 `CURRENT` until the complete version-2 generation is durable.
 
+### Immutable property snapshots
+
+Node and edge properties use `full-snapshot-v1` fragments under
+`properties/<route>/<generation>-<ordinal>.parquet` (fixed-width decimal identity) and the corresponding
+`edge_properties` tree. Each row is the complete property state for one UUID;
+an explicit tombstone deletes the whole row. Admission authenticates every
+canonical generation and ordinal named by the committed graph-files inventory.
+Readers merge all authenticated fragments by UUID and descending
+`(generation, ordinal)` authority; the first row for a UUID is its complete
+current map or tombstone. Unchanged UUIDs remain authoritative in older
+immutable fragments, while a newer tombstone prevents a deleted UUID from
+resurfacing. A write window composes repeated SET/REMOVE operations once and
+publishes only its changed UUID snapshots without a full-route decode or any
+prior-fragment rewrite. A PATCH/REMOVE producer performs at most one
+authenticated targeted batch lookup for the window's UUID set, with the same
+zero-per-record-seek scanner; sealing consumes those complete staged rows and
+does not read historical fragments again.
+
+Each fragment also carries the authenticated `graphforge-property-live-schema/1`
+route summary: an exact live-UUID count for every currently present property
+key. Mutation preparation updates those counts from the targeted UUIDs' old
+complete maps to their new complete maps; work is bounded by the mutation
+window and schema width, never total rows or fragment history. Repeated writes
+in one window consume the already-staged summary. The newest fragment summary
+is the logical schema authority: keys with a positive count retain their
+authenticated physical type, while historical keys whose count reached zero
+surface as Arrow `Null`. Physical historical schemas remain available for
+decoding older UUID snapshots. Malformed counts, underflow/overflow, a live key
+without an authenticated physical field, or conflicting semantic/type metadata
+fail closed. Legacy routes without this summary retain their historical schema
+union until rewritten by an explicit migration; targeted writes never invent
+counts for untouched UUIDs.
+
+Readers derive route authority from the committed graph-files inventory,
+validate canonical fragment identity, schema/semantic metadata, strictly sorted
+unique non-null UUIDs, and tombstone invariants, then perform a bounded
+disk-backed newest-wins merge. SQL and direct APIs share that scanner. SQL emits
+bounded Arrow batches; `LIMIT` changes emission only after authority validation.
+Decoded rows enter fallible bounded scratch runs. The final emitting merge does
+not begin until every authenticated fragment reaches clean EOF and all page,
+Arrow, row-order, tombstone, and live-byte checks succeed. A late decoder or
+resource failure therefore discards the runs and returns a typed error with zero
+rows observed by direct callbacks or DataFusion—even for a projected `LIMIT 1`
+plan.
+Admission retains the stable root capability plus each fragment's authenticated
+path, native file identity, length, digest, and schema—not one OS handle per
+historical fragment. A scan opens fragments on demand without following links,
+requires the admitted device/file identity, and rehashes the complete file
+while streaming those exact bytes into an exclusively created, unnamed scratch
+file. Identity, length, and digest must match before Parquet sees the scratch
+handle; full, targeted, and SQL readers never decode the mutable source handle.
+The source handle then closes. Consequently live
+fragment handles are bounded by `max_open_runs` rather than total history, and
+same-name replacement, transient in-place mutation (even if restored), symlink,
+scratch planting, and path substitution all fail closed. Parquet page headers
+are then parsed through a bounded
+compact-protocol reader before Arrow allocation. Declared
+compressed/uncompressed sizes must remain within the authenticated chunk/file
+ranges and the configured live-byte limit. One shared budget covers Arrow
+batches, decoded rows, spill buffers, and merge cursors; rolling fan-in levels
+keep run references logarithmic and unlink merged inputs immediately.
+Operational evidence separates raw graph-files authority authentication from
+retained property-fragment authentication. Each has distinct byte totals,
+64 KiB block-equivalents (`ceil(file_bytes / 64 KiB)` per file), and actual
+non-empty read-call counters; block-equivalents are not read calls. Aggregate
+authentication bytes, equivalents, and calls equal their authority plus
+property components. `physical_blocks` is an actual-operation count: authentication
+read calls plus decoder read calls. Evidence also distinguishes validation and
+selected-value decoder bytes/calls, authenticated scratch bytes written, and the
+largest single-snapshot coexistence peak admitted against live scratch free
+space, plus range seeks and physical row-decode visits (a
+row decoded by validation and selected-value passes contributes once to each
+pass), shadowed rows, fragments and row groups considered/selected, and the
+shared live-byte peak. External-merge evidence reports first-level encoded
+spool input separately from total spill bytes, runs, and passes so amplification
+is a checked ratio rather than a worst-case row-size estimate. The invariant
+`per_record_seeks = 0` remains exact.
+
+Property-only commits reserve a checked monotonic property generation under the
+durable-rewrite lock. Legacy state initializes it from the maximum topology and
+search generation. Portable fingerprints consume the logical overlay once per
+route, so immutable and flattened projections have the same semantic identity.
+
 Pure CAS reads open the existing `graph-objects/sha256` namespace and existing
 `lifecycle.lock` with read-only capabilities. They create neither lifecycle
 state nor `tmp`/`active`. The authenticated regular `lifecycle.lock` is the
@@ -192,6 +275,21 @@ folds a verified contiguous prefix back into canonical Parquet via a new
 immutable generation (`compact_graph_delta`) and reclaims unreachable inputs
 only through the shared retention/GC oracle. They are
 distinct from rebuildable `indexes/adjacency/deltas/` accelerators.
+
+Replay materializes only UUIDs touched by property operations or entity
+deletions; unchanged UUIDs remain in prior immutable fragments. During overlay
+construction the memory ceiling charges decoded runs, idempotency payloads,
+typed operation values, and the overlay simultaneously. Runs are released
+before materialization. Materialization then charges the retained overlay,
+node endpoint/identity authority, target references, baseline and output rows,
+Arrow arrays, and schema-width × row-group column metadata plus the active
+Parquet writer buffer. Replay writers disable dictionary encoding and
+compression variability and bound row groups by `max_batch_rows`. Legacy flat
+generation-zero properties enter this same authenticated, sparse-fragment
+materialization path. `max_records_per_run` and `max_work_rows` independently
+bound mutation and physical work. Limit failures use the typed
+`GF_RESOURCE_LIMIT` code. Removing an absent key or setting an identical value
+is a no-op and creates no new property fragment.
 
 For explicit bounded composite property set/remove requests, the Rust facade
 selects GFDR before mutating its private workspace. Storage prepares an owning

@@ -33,11 +33,13 @@ use crate::staging::RewriteBatch;
 const GENERATION_KEY: &str = "topology_generation";
 /// JSON key holding the graph-native search source counter.
 const SEARCH_GENERATION_KEY: &str = "search_generation";
+const PROPERTY_GENERATION_KEY: &str = "property_generation";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct GenerationState {
     pub(crate) topology: u64,
     pub(crate) search: u64,
+    pub(crate) property: u64,
 }
 
 fn storage_err(e: impl std::fmt::Display) -> GfError {
@@ -80,6 +82,14 @@ pub fn read_search_generation(project_dir: &Path) -> Result<u64, GfError> {
     Ok(read_generation_state(project_dir)?.search)
 }
 
+/// Return the latest committed property-fragment generation.
+///
+/// Legacy authorities without an explicit property counter migrate logically
+/// from the greater of the topology and search counters.
+pub fn read_property_generation(project_dir: &Path) -> Result<u64, GfError> {
+    Ok(read_generation_state(project_dir)?.property)
+}
+
 pub(crate) fn read_generation_state_raw(project_dir: &Path) -> Result<GenerationState, GfError> {
     let path = generation_path(project_dir);
     let contents = match std::fs::read_to_string(&path) {
@@ -114,13 +124,31 @@ pub(crate) fn read_generation_state_raw(project_dir: &Path) -> Result<Generation
         })?,
         None => topology,
     };
-    Ok(GenerationState { topology, search })
+    let property = match value.get(PROPERTY_GENERATION_KEY) {
+        Some(value) => value.as_u64().ok_or_else(|| {
+            GfError::Storage(format!(
+                "corrupt {}: expected \"{PROPERTY_GENERATION_KEY}\" to be a u64",
+                path.display()
+            ))
+        })?,
+        None => topology.max(search),
+    };
+    Ok(GenerationState {
+        topology,
+        search,
+        property,
+    })
 }
 
-pub(crate) fn encode_generation_state(topology: u64, search: u64) -> Result<Vec<u8>, GfError> {
+pub(crate) fn encode_generation_state(
+    topology: u64,
+    search: u64,
+    property: u64,
+) -> Result<Vec<u8>, GfError> {
     serde_json::to_vec(&serde_json::json!({
         GENERATION_KEY: topology,
         SEARCH_GENERATION_KEY: search,
+        PROPERTY_GENERATION_KEY: property,
     }))
     .map_err(storage_err)
 }
@@ -140,7 +168,7 @@ fn read_generation_state(project_dir: &Path) -> Result<GenerationState, GfError>
 /// file) or on I/O failure; on failure the prior file is untouched.
 pub fn bump_topology_generation(project_dir: &Path) -> Result<u64, GfError> {
     Ok(
-        crate::durable_rewrite::commit(RewriteBatch::new(), project_dir, true, false, None)?
+        crate::durable_rewrite::commit(RewriteBatch::new(), project_dir, true, false, false, None)?
             .topology,
     )
 }
@@ -151,7 +179,10 @@ pub fn bump_topology_generation(project_dir: &Path) -> Result<u64, GfError> {
 /// Returns [`GfError::Storage`] if the existing generation is corrupt or the
 /// replacement cannot be persisted.
 pub fn bump_search_generation(project_dir: &Path) -> Result<u64, GfError> {
-    Ok(crate::durable_rewrite::commit(RewriteBatch::new(), project_dir, false, true, None)?.search)
+    Ok(
+        crate::durable_rewrite::commit(RewriteBatch::new(), project_dir, false, true, false, None)?
+            .search,
+    )
 }
 
 /// Whether any staged destination in `staged` rewrites topology:
@@ -176,9 +207,10 @@ pub fn touches_topology(staged: &RewriteBatch, project_dir: &Path) -> bool {
 pub fn touches_search_source(staged: &RewriteBatch, project_dir: &Path) -> bool {
     let nodes = project_dir.join("topology").join("nodes.parquet");
     let properties = project_dir.join("properties");
-    staged
-        .staged_paths()
-        .any(|path| path == nodes || path.starts_with(&properties))
+    staged.has_node_property_windows()
+        || staged
+            .staged_paths()
+            .any(|path| path == nodes || path.starts_with(&properties))
 }
 
 /// Durably commit `staged`, publishing each affected generation **last** (see
@@ -210,8 +242,9 @@ pub fn commit_topology_aware_with_auxiliary(
 ) -> Result<Option<u64>, GfError> {
     let topology = touches_topology(&staged, project_dir);
     let search = touches_search_source(&staged, project_dir);
+    let property = staged.has_property_windows();
     let generations =
-        crate::durable_rewrite::commit(staged, project_dir, topology, search, auxiliary)?;
+        crate::durable_rewrite::commit(staged, project_dir, topology, search, property, auxiliary)?;
     Ok(topology.then_some(generations.topology))
 }
 
@@ -253,11 +286,13 @@ mod tests {
         let dir = TempDir::new().unwrap();
         assert_eq!(read_topology_generation(dir.path()).unwrap(), 0);
         assert_eq!(read_search_generation(dir.path()).unwrap(), 0);
+        assert_eq!(read_property_generation(dir.path()).unwrap(), 0);
         assert!(!dir.path().join(".graphforge-rewrite.lock").exists());
 
         let missing = dir.path().join("missing-project");
         assert_eq!(read_topology_generation(&missing).unwrap(), 0);
         assert_eq!(read_search_generation(&missing).unwrap(), 0);
+        assert_eq!(read_property_generation(&missing).unwrap(), 0);
         assert!(!missing.exists());
     }
 
@@ -384,5 +419,22 @@ mod tests {
         assert_eq!(read_search_generation(dir.path()).unwrap(), 7);
         assert_eq!(bump_search_generation(dir.path()).unwrap(), 8);
         assert_eq!(read_topology_generation(dir.path()).unwrap(), 7);
+        assert_eq!(read_property_generation(dir.path()).unwrap(), 7);
+    }
+
+    #[test]
+    fn legacy_counter_seeds_property_generation_from_highest_authority() {
+        let dir = TempDir::new().unwrap();
+        let path = generation_path(dir.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, r#"{"topology_generation":7,"search_generation":11}"#).unwrap();
+
+        assert_eq!(read_property_generation(dir.path()).unwrap(), 11);
+        bump_topology_generation(dir.path()).unwrap();
+        let state = read_generation_state_raw(dir.path()).unwrap();
+        assert_eq!(state.property, 11);
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(persisted[PROPERTY_GENERATION_KEY], 11);
     }
 }

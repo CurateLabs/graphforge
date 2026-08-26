@@ -1091,16 +1091,32 @@ impl SemanticStorageBindings {
     /// Validate routed files against the authenticated generation inventory.
     /// Callers opening a committed generation must provide its `graph/files`
     /// record; directory enumeration alone is not publication authority.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "route and fragment authority checks stay atomic"
+    )]
     pub fn validate_physical_routes_with_inventory(
         &self,
         graph_root: &Path,
         inventory: Option<&crate::GraphFilesInventory>,
     ) -> Result<(), GfError> {
-        let expected = self
+        let mut expected = self
             .bindings
             .iter()
             .filter_map(|binding| binding.physical_path(graph_root))
             .collect::<BTreeSet<_>>();
+        expected.extend(
+            self.bindings
+                .iter()
+                .filter(|binding| {
+                    matches!(
+                        binding.route_kind,
+                        SemanticRouteKind::NodeProperty | SemanticRouteKind::EdgeProperty
+                    )
+                })
+                .filter_map(|binding| binding.physical_path(graph_root))
+                .map(|path| path.with_extension("")),
+        );
         let inventory_paths = inventory.map(|inventory| {
             inventory
                 .files
@@ -1120,7 +1136,9 @@ impl SemanticStorageBindings {
                 if path
                     .file_name()
                     .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.starts_with("s-") && name.ends_with(".parquet"))
+                    .is_some_and(|name| {
+                        name.starts_with("s-") && (name.ends_with(".parquet") || path.is_dir())
+                    })
                     && !expected.contains(&path)
                 {
                     return Err(corrupt("unlisted opaque semantic route file is present"));
@@ -1131,56 +1149,59 @@ impl SemanticStorageBindings {
             let Some(path) = binding.physical_path(graph_root) else {
                 continue;
             };
-            let relative = path
-                .strip_prefix(graph_root)
-                .map_err(|_| corrupt("semantic route escapes graph inventory"))?
-                .to_string_lossy()
-                .replace('\\', "/");
-            if path.exists()
-                && inventory_paths
-                    .as_ref()
-                    .is_some_and(|paths| !paths.contains(relative.as_str()))
-            {
-                return Err(corrupt(
-                    "semantic route is absent from authenticated graph inventory",
-                ));
-            }
-            if !path.exists() {
+            let route_files = semantic_route_files(&path)?;
+            if route_files.is_empty() {
                 continue;
             }
-            preflight_parquet_footer(&path)?;
-            let file = File::open(&path).map_err(|_| corrupt("semantic route file is missing"))?;
-            let builder =
-                parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)
-                    .map_err(|_| corrupt("semantic route Parquet metadata is invalid"))?;
-            let schema = builder.schema();
-            if schema.fields().len() > MAX_SEMANTIC_PARQUET_COLUMNS {
-                return Err(corrupt("semantic route column count exceeds limit"));
-            }
-            if schema.metadata().get(SEMANTIC_ROUTE_METADATA_KEY) != Some(&binding.route)
-                || schema.metadata().get(SEMANTIC_COMPOSITION_METADATA_KEY)
-                    != Some(&self.composition_fingerprint)
-            {
-                return Err(corrupt(&format!(
-                    "semantic route metadata does not match binding for {relative}: expected route {} and composition {}, found route {:?} and composition {:?}",
-                    binding.route,
-                    self.composition_fingerprint,
-                    schema.metadata().get(SEMANTIC_ROUTE_METADATA_KEY),
-                    schema.metadata().get(SEMANTIC_COMPOSITION_METADATA_KEY),
-                )));
-            }
-            let join_key = match binding.route_kind {
-                SemanticRouteKind::NodeProperty => "node_uuid",
-                SemanticRouteKind::Relation | SemanticRouteKind::EdgeProperty => "edge_uuid",
-                SemanticRouteKind::Entity => unreachable!(),
-            };
-            let join_field = schema
-                .field_with_name(join_key)
-                .map_err(|_| corrupt("semantic route join key is missing"))?;
-            if join_field.is_nullable()
-                || join_field.data_type() != &arrow::datatypes::DataType::FixedSizeBinary(16)
-            {
-                return Err(corrupt("semantic route join key is missing"));
+            for path in route_files {
+                let relative = path
+                    .strip_prefix(graph_root)
+                    .map_err(|_| corrupt("semantic route escapes graph inventory"))?
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                if inventory_paths
+                    .as_ref()
+                    .is_some_and(|paths| !paths.contains(relative.as_str()))
+                {
+                    return Err(corrupt(
+                        "semantic route is absent from authenticated graph inventory",
+                    ));
+                }
+                preflight_parquet_footer(&path)?;
+                let file =
+                    File::open(&path).map_err(|_| corrupt("semantic route file is missing"))?;
+                let builder =
+                    parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)
+                        .map_err(|_| corrupt("semantic route Parquet metadata is invalid"))?;
+                let schema = builder.schema();
+                if schema.fields().len() > MAX_SEMANTIC_PARQUET_COLUMNS {
+                    return Err(corrupt("semantic route column count exceeds limit"));
+                }
+                if schema.metadata().get(SEMANTIC_ROUTE_METADATA_KEY) != Some(&binding.route)
+                    || schema.metadata().get(SEMANTIC_COMPOSITION_METADATA_KEY)
+                        != Some(&self.composition_fingerprint)
+                {
+                    return Err(corrupt(&format!(
+                        "semantic route metadata does not match binding for {relative}: expected route {} and composition {}, found route {:?} and composition {:?}",
+                        binding.route,
+                        self.composition_fingerprint,
+                        schema.metadata().get(SEMANTIC_ROUTE_METADATA_KEY),
+                        schema.metadata().get(SEMANTIC_COMPOSITION_METADATA_KEY),
+                    )));
+                }
+                let join_key = match binding.route_kind {
+                    SemanticRouteKind::NodeProperty => "node_uuid",
+                    SemanticRouteKind::Relation | SemanticRouteKind::EdgeProperty => "edge_uuid",
+                    SemanticRouteKind::Entity => unreachable!(),
+                };
+                let join_field = schema
+                    .field_with_name(join_key)
+                    .map_err(|_| corrupt("semantic route join key is missing"))?;
+                if join_field.is_nullable()
+                    || join_field.data_type() != &arrow::datatypes::DataType::FixedSizeBinary(16)
+                {
+                    return Err(corrupt("semantic route join key is missing"));
+                }
             }
         }
         self.validate_topology_ids(graph_root)?;
@@ -1659,13 +1680,40 @@ pub fn materialize_semantic_migration(
             checkpoint()?;
             let source = source_graph_root.join(&entry.relative_path);
             let relative = PathBuf::from(&entry.relative_path);
-            let old_route = source
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .filter(|stem| stem.starts_with("s-"));
+            let old_route =
+                semantic_route_from_relative(&relative).filter(|route| route.starts_with("s-"));
             let target_relative = if let Some(old_route) = old_route {
                 if let Some(new_route) = route_moves.get(old_route) {
-                    relative.with_file_name(format!("{new_route}.parquet"))
+                    let old_component = relative
+                        .components()
+                        .position(|component| component.as_os_str() == old_route)
+                        .or_else(|| {
+                            relative.components().position(|component| {
+                                component.as_os_str().to_str()
+                                    == Some(format!("{old_route}.parquet").as_str())
+                            })
+                        });
+                    if let Some(index) = old_component {
+                        let mut rebuilt = PathBuf::new();
+                        for (position, component) in relative.components().enumerate() {
+                            if position == index {
+                                let is_file = component
+                                    .as_os_str()
+                                    .to_str()
+                                    .is_some_and(|value| value.ends_with(".parquet"));
+                                rebuilt.push(if is_file {
+                                    format!("{new_route}.parquet")
+                                } else {
+                                    new_route.clone()
+                                });
+                            } else {
+                                rebuilt.push(component.as_os_str());
+                            }
+                        }
+                        rebuilt
+                    } else {
+                        return Err(corrupt("migration semantic route path is malformed"));
+                    }
                 } else {
                     relative.clone()
                 }
@@ -1733,12 +1781,18 @@ pub fn materialize_semantic_migration(
                 })
                 .collect::<Vec<_>>();
             let mut metadata = schema_metadata;
+            if let Some(renames) = renames {
+                crate::property_overlay::rename_live_schema_summary(&mut metadata, renames)?;
+            }
             metadata.insert(
                 SEMANTIC_COMPOSITION_METADATA_KEY.into(),
                 plan.to_composition_fingerprint.clone(),
             );
             if let Some(route) = new_route {
-                metadata.insert(SEMANTIC_ROUTE_METADATA_KEY.into(), route);
+                metadata.insert(SEMANTIC_ROUTE_METADATA_KEY.into(), route.clone());
+                if metadata.contains_key(crate::property_overlay::PROPERTY_OVERLAY_FORMAT_KEY) {
+                    metadata.insert(crate::property_overlay::PROPERTY_ROUTE_KEY.into(), route);
+                }
             }
             let schema = std::sync::Arc::new(arrow::datatypes::Schema::new_with_metadata(
                 fields, metadata,
@@ -1919,6 +1973,51 @@ fn preflight_parquet_footer(path: &Path) -> Result<(), GfError> {
     Ok(())
 }
 
+fn semantic_route_files(path: &Path) -> Result<Vec<PathBuf>, GfError> {
+    if path.is_file() {
+        return Ok(vec![path.to_path_buf()]);
+    }
+    let directory = if path.exists() {
+        path.to_path_buf()
+    } else {
+        path.with_extension("")
+    };
+    if !directory.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut files = std::fs::read_dir(directory)
+        .map_err(|_| corrupt("semantic route directory cannot be read"))?
+        .map(|entry| {
+            entry
+                .map_err(|_| corrupt("semantic route directory entry cannot be read"))
+                .map(|entry| entry.path())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    files.retain(|file| file.extension().and_then(|value| value.to_str()) == Some("parquet"));
+    files.sort();
+    Ok(files)
+}
+
+fn semantic_route_from_relative(relative: &Path) -> Option<&str> {
+    let mut components = relative.components();
+    let family = components.next()?.as_os_str().to_str()?;
+    if !matches!(family, "properties" | "edge_properties" | "topology") {
+        return None;
+    }
+    let second = components.next()?.as_os_str().to_str()?;
+    if family == "topology" && second == "edges" {
+        return components
+            .next()?
+            .as_os_str()
+            .to_str()?
+            .strip_suffix(".parquet");
+    }
+    if matches!(family, "properties" | "edge_properties") {
+        return second.strip_suffix(".parquet").or(Some(second));
+    }
+    None
+}
+
 fn legacy_ambiguous(message: &str) -> GfError {
     GfError::Validation(format!(
         "GF_SEMANTIC_LEGACY_AMBIGUOUS: {message}; qualify module ownership or migrate explicitly"
@@ -1995,14 +2094,10 @@ fn binding_has_retained_data(
     let Some(path) = binding.physical_path(graph_root) else {
         return Ok(false);
     };
-    if !path.exists() {
+    let route_files = semantic_route_files(&path)?;
+    if route_files.is_empty() {
         return Ok(false);
     }
-    preflight_parquet_footer(&path)?;
-    let builder = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
-        File::open(path).map_err(|_| corrupt("removal route cannot be opened"))?,
-    )
-    .map_err(|_| corrupt("removal route metadata is invalid"))?;
     if matches!(
         binding.route_kind,
         SemanticRouteKind::NodeProperty | SemanticRouteKind::EdgeProperty
@@ -2013,30 +2108,33 @@ fn binding_has_retained_data(
             .split_once(':')
             .map(|(_, property)| property)
             .ok_or_else(|| corrupt("removal property has no qualified column"))?;
-        if !builder
-            .schema()
-            .fields()
-            .iter()
-            .any(|field| field.name() == column)
-        {
-            return Ok(false);
+        let batches = if binding.route_kind == SemanticRouteKind::NodeProperty {
+            crate::catalog::read_properties(graph_root, &binding.route)
+        } else {
+            crate::catalog::read_edge_properties(graph_root, &binding.route)
         }
-        for batch in builder
-            .with_batch_size(8192)
-            .build()
-            .map_err(|_| corrupt("removal property reader cannot be built"))?
-        {
-            let batch = batch.map_err(|_| corrupt("removal property batch is invalid"))?;
-            let values = batch
-                .column_by_name(column)
-                .ok_or_else(|| corrupt("removal property column disappeared"))?;
+        .map_err(|_| corrupt("removal property overlay cannot be read"))?;
+        for batch in batches {
+            let Some(values) = batch.column_by_name(column) else {
+                continue;
+            };
             if values.null_count() < values.len() {
                 return Ok(true);
             }
         }
         return Ok(false);
     }
-    Ok(builder.metadata().file_metadata().num_rows() > 0)
+    for path in route_files {
+        preflight_parquet_footer(&path)?;
+        let builder = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+            File::open(path).map_err(|_| corrupt("removal route cannot be opened"))?,
+        )
+        .map_err(|_| corrupt("removal route metadata is invalid"))?;
+        if builder.metadata().file_metadata().num_rows() > 0 {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn binding_key(
@@ -2381,30 +2479,12 @@ mod tests {
         .unwrap();
         assert_eq!(evidence.plan_digest, first.plan_digest);
         first.bindings.validate_physical_routes(&candidate).unwrap();
-        let path = candidate
-            .join("properties")
-            .join(format!("{}.parquet", renamed_entity.route));
-        let schema = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
-            File::open(path).unwrap(),
-        )
-        .unwrap()
-        .schema()
-        .clone();
+        let batches = crate::catalog::read_properties(&candidate, &renamed_entity.route).unwrap();
+        let schema = batches.first().unwrap().schema();
         assert!(schema.field_with_name("display_name").is_ok());
         assert!(schema.field_with_name("birth_year").is_ok());
         assert!(schema.field_with_name("name").is_err());
-        let mut reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
-            File::open(
-                candidate
-                    .join("properties")
-                    .join(format!("{}.parquet", renamed_entity.route)),
-            )
-            .unwrap(),
-        )
-        .unwrap()
-        .build()
-        .unwrap();
-        let batch = reader.next().unwrap().unwrap();
+        let batch = batches.first().unwrap();
         let birth_year = batch
             .column_by_name("birth_year")
             .unwrap()
@@ -2887,13 +2967,7 @@ mod tests {
         assert!(require_atomic_legacy_migration(dir.path()).is_err());
 
         let injected = dir.path().join("properties/s-deadbeef.parquet");
-        std::fs::copy(
-            dir.path()
-                .join("properties")
-                .join(format!("{}.parquet", entity.route)),
-            injected,
-        )
-        .unwrap();
+        std::fs::write(injected, b"unlisted route must be rejected before decode").unwrap();
         assert!(bindings.validate_physical_routes(dir.path()).is_err());
     }
 }

@@ -433,13 +433,44 @@ pub(crate) struct ReplayOverlay {
 }
 
 impl ReplayOverlay {
-    fn estimated_memory(&self) -> usize {
-        self.nodes
-            .len()
-            .saturating_mul(192)
-            .saturating_add(self.edges.len().saturating_mul(256))
-            .saturating_add(self.node_properties.len().saturating_mul(192))
-            .saturating_add(self.edge_properties.len().saturating_mul(192))
+    pub(crate) fn estimated_memory(&self) -> usize {
+        let strings = |parts: &[&str]| {
+            parts
+                .iter()
+                .fold(0_usize, |sum, value| sum.saturating_add(value.len()))
+        };
+        let nodes = self.nodes.iter().fold(0_usize, |sum, (uuid, row)| {
+            sum.saturating_add(192)
+                .saturating_add(uuid.len())
+                .saturating_add(row.as_ref().map_or(0, |row| {
+                    row.node_uuid
+                        .len()
+                        .saturating_add(row.type_ids.len().saturating_mul(size_of::<u32>()))
+                }))
+        });
+        let edges = self.edges.iter().fold(0_usize, |sum, (uuid, row)| {
+            sum.saturating_add(256)
+                .saturating_add(uuid.len())
+                .saturating_add(row.as_ref().map_or(0, |row| {
+                    strings(&[&row.edge_uuid, &row.src_uuid, &row.dst_uuid, &row.rel_type])
+                }))
+        });
+        let properties = |values: &BTreeMap<(String, String, String), Option<IrLiteral>>| {
+            values
+                .iter()
+                .fold(0_usize, |sum, ((uuid, route, key), value)| {
+                    let value_bytes = value.as_ref().map_or(0, |value| {
+                        serde_json::to_vec(value).map_or(usize::MAX, |encoded| encoded.len())
+                    });
+                    sum.saturating_add(192)
+                        .saturating_add(strings(&[uuid, route, key]))
+                        .saturating_add(value_bytes)
+                })
+        };
+        nodes
+            .saturating_add(edges)
+            .saturating_add(properties(&self.node_properties))
+            .saturating_add(properties(&self.edge_properties))
     }
 }
 
@@ -936,6 +967,11 @@ fn build_replay_overlay(
     let mut overlay = ReplayOverlay::default();
     let mut evidence = GraphDeltaReplayEvidence::default();
     let mut operations = BTreeMap::<Uuid, GraphDeltaPayload>::new();
+    let retained_run_bytes = runs.iter().fold(0_usize, |sum, run| {
+        sum.saturating_add(run.bytes.len())
+            .saturating_add(run.records.len().saturating_mul(64))
+    });
+    let mut retained_operation_bytes = 0_usize;
     for run in runs {
         evidence.runs_replayed = evidence.runs_replayed.saturating_add(1);
         evidence.run_bytes_validated = evidence
@@ -951,6 +987,9 @@ fn build_replay_overlay(
                 }
                 continue;
             }
+            retained_operation_bytes = retained_operation_bytes
+                .checked_add(record.payload.encode()?.len().saturating_add(64))
+                .ok_or_else(|| resource_limit("graph delta replay operation memory"))?;
             operations.insert(record.operation_uuid, record.payload.clone());
             match &record.payload {
                 GraphDeltaPayload::UpsertNodeV2 {
@@ -1062,7 +1101,10 @@ fn build_replay_overlay(
                     });
                 }
             }
-            let memory = overlay.estimated_memory();
+            let memory = retained_run_bytes
+                .checked_add(retained_operation_bytes)
+                .and_then(|bytes| bytes.checked_add(overlay.estimated_memory()))
+                .ok_or_else(|| resource_limit("graph delta replay overlay memory"))?;
             if memory > limits.max_replay_memory_bytes {
                 return Err(resource_limit("graph delta replay overlay memory"));
             }
@@ -1184,12 +1226,13 @@ pub fn materialize_replayed_graph_tree(
     preflight_canonical_parquet(graph_root, inventory, limits)?;
     let runs = load_verified_delta_runs(graph_root, inventory, limits)?;
     let (overlay, mut evidence) = build_replay_overlay(&runs, limits)?;
+    drop(runs);
     evidence.materialization_batch_row_bound = limits.max_batch_rows as u64;
     let open_evidence = crate::graph_files::materialize_graph_tree(graph_root, inventory, target)?;
     if evidence.runs_replayed == 0 {
         return Ok((open_evidence, evidence));
     }
-    crate::writer::write_replay_overlay_streaming(graph_root, target, &overlay, limits)?;
+    crate::writer::write_replay_overlay_streaming(graph_root, inventory, target, &overlay, limits)?;
     let deltas = target.join(GRAPH_DELTA_DIR);
     if deltas.exists() {
         fs::remove_dir_all(&deltas)
@@ -1815,7 +1858,10 @@ fn unsupported_run_version(version: u32) -> GfError {
 }
 
 fn resource_limit(message: impl Into<String>) -> GfError {
-    GfError::Execution(format!("GF_RESOURCE_LIMIT: {}", message.into()))
+    GfError::Project {
+        code: ProjectErrorCode::ResourceLimit,
+        message: message.into(),
+    }
 }
 
 fn idempotency_conflict(message: impl Into<String>) -> GfError {
@@ -1854,7 +1900,7 @@ mod crash_oracle_tests {
             ..GraphDeltaJournalLimits::default()
         };
         let error = preflight_canonical_parquet(root.path(), &inventory, limits).unwrap_err();
-        assert!(error.to_string().contains("GF_RESOURCE_LIMIT"));
+        assert_eq!(error.code(), "GF_RESOURCE_LIMIT");
         assert!(error.to_string().contains("footer metadata bytes"));
     }
 

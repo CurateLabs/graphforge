@@ -1,6 +1,6 @@
 {
   "schema": "graphforge.cargo-feature-fingerprint.v1",
-  "sha256": "b3be2fa948ad685b8e34b042fd7da99037da33e4edb464242913107d4e4baf61",
+  "sha256": "e9a7b05aa171a3b8277548a70c8d91df4d67620c525352d752312fc20015cbf3",
   "entries": [
     {
       "name": "graphforge-api",
@@ -1898,6 +1898,15 @@
           "target": null
         },
         {
+          "name": "bytes",
+          "req": "^1",
+          "features": [],
+          "optional": false,
+          "uses_default_features": true,
+          "kind": null,
+          "target": null
+        },
+        {
           "name": "codspeed-divan-compat",
           "req": "^5",
           "features": [],
@@ -2077,6 +2086,15 @@
         {
           "name": "thiserror",
           "req": "^2",
+          "features": [],
+          "optional": false,
+          "uses_default_features": true,
+          "kind": null,
+          "target": null
+        },
+        {
+          "name": "thrift",
+          "req": "^0.17",
           "features": [],
           "optional": false,
           "uses_default_features": true,

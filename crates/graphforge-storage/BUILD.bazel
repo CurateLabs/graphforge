@@ -38,8 +38,11 @@ gf_rust_test(
         "//tests/fixtures/portable-v2:m9-interchange-cases.json",
         "//tests/fixtures/portable-v2:ontology-only.manifest.json",
     ],
-    # Unit suite exercises filesystem/async paths; default "small" is too tight.
-    size = "medium",
+    # This 681-test aggregate includes subprocess crash/recovery matrices and
+    # can exceed the medium 300-second envelope when the full workspace gate
+    # co-schedules the similarly large API aggregate. Classify its real gate
+    # workload instead of relying on standalone-machine timing.
+    size = "large",
     deps = _STORAGE_DEPS,
 )
 
@@ -106,6 +109,19 @@ gf_rust_integration_test(
     deps = _STORAGE_DEPS,
 )
 
+gf_rust_integration_test(
+    name = "property_overlay_scale",
+    srcs = ["tests/property_overlay_scale.rs"],
+    crate = ":graphforge_storage",
+    size = "medium",
+    # This is a phase-level RSS and external-merge scaling qualification, not
+    # an ordinary functional test. Local co-scheduling distorted its unchanged
+    # N/2N/4N workload from 53s to 283s and nearly exhausted the medium timeout.
+    # Keep local measurements isolated while retaining remote execution.
+    tags = ["exclusive-if-local"],
+    deps = _STORAGE_DEPS,
+)
+
 test_suite(
     name = "storage_integration_tests",
     tests = [
@@ -116,6 +132,7 @@ test_suite(
         ":graph_delta_journal",
         ":graph_writer",
         ":io_stats",
+        ":property_overlay_scale",
     ],
 )
 

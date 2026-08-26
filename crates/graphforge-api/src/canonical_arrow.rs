@@ -6,7 +6,7 @@ use std::sync::Arc;
 use arrow::array::{
     Array, ArrayRef, BinaryArray, BooleanArray, FixedSizeBinaryArray, FixedSizeListArray,
     Float32Array, Float64Array, Int32Array, Int64Array, LargeBinaryArray, LargeListArray,
-    LargeStringArray, ListArray, StringArray, StructArray, UInt32Array, UInt64Array,
+    LargeStringArray, ListArray, NullArray, StringArray, StructArray, UInt32Array, UInt64Array,
 };
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
@@ -228,6 +228,19 @@ fn encode_value(
     row: usize,
     nullable: bool,
 ) -> Result<(), CanonicalArrowError> {
+    // `NullArray` has no physical validity buffer, so Arrow's `is_null` is
+    // false even though every logical value is null. Encode its intrinsic
+    // logical nullness using the same v1 null marker as nullable typed arrays.
+    if data_type == &DataType::Null {
+        let _ = downcast::<NullArray>(array)?;
+        if !nullable {
+            return Err(CanonicalArrowError::Schema(
+                "non-nullable Arrow field contains null",
+            ));
+        }
+        writer.u8(0)?;
+        return Ok(());
+    }
     if array.is_null(row) {
         if !nullable {
             return Err(CanonicalArrowError::Schema(
@@ -613,16 +626,64 @@ mod tests {
         let mut null_writer = CanonicalWriter::new();
         encode_type(&mut null_writer, &DataType::Null).unwrap();
         assert_eq!(null_writer.finish(), vec![0x01]);
+        let null_schema = Arc::new(Schema::new(vec![Field::new(
+            "absent",
+            DataType::Null,
+            true,
+        )]));
         let null_batch = RecordBatch::try_new(
+            Arc::clone(&null_schema),
+            vec![Arc::new(arrow::array::NullArray::new(2)) as ArrayRef],
+        )
+        .unwrap();
+        let split_null_batches = [
+            RecordBatch::try_new(
+                Arc::clone(&null_schema),
+                vec![Arc::new(arrow::array::NullArray::new(1)) as ArrayRef],
+            )
+            .unwrap(),
+            RecordBatch::try_new(
+                null_schema,
+                vec![Arc::new(arrow::array::NullArray::new(1)) as ArrayRef],
+            )
+            .unwrap(),
+        ];
+        let null_fingerprint = result_fingerprint(&[null_batch.clone()]).unwrap();
+        assert_eq!(
+            null_fingerprint,
+            result_fingerprint(&split_null_batches).unwrap()
+        );
+        assert_eq!(
+            canonical_table_bytes(&[null_batch])
+                .unwrap()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>(),
+            "47465431000000000000002047465331000000010000000000000006616273656e740101000000000000000000000000000000020000"
+        );
+        assert_eq!(
+            null_fingerprint,
+            [
+                0x0b, 0x37, 0x96, 0xea, 0xa9, 0x76, 0xe5, 0x09, 0x2e, 0x1e, 0x4a, 0xc7, 0x74, 0x95,
+                0xa5, 0xe8, 0x67, 0x21, 0x77, 0xd1, 0xc6, 0x5c, 0x39, 0x10, 0x91, 0x9b, 0x9c, 0x6f,
+                0x34, 0x2c, 0x95, 0x50,
+            ]
+        );
+        let invalid_null_batch = RecordBatch::try_new(
             Arc::new(Schema::new(vec![Field::new(
                 "absent",
                 DataType::Null,
-                true,
+                false,
             )])),
-            vec![Arc::new(arrow::array::NullArray::new(0)) as ArrayRef],
+            vec![Arc::new(arrow::array::NullArray::new(1)) as ArrayRef],
         )
         .unwrap();
-        assert_ne!(result_fingerprint(&[null_batch]).unwrap(), [0; 32]);
+        assert!(matches!(
+            result_fingerprint(&[invalid_null_batch]),
+            Err(CanonicalArrowError::Schema(
+                "non-nullable Arrow field contains null"
+            ))
+        ));
     }
 
     #[test]

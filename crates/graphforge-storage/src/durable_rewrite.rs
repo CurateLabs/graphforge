@@ -47,6 +47,8 @@ pub struct AuxiliaryReceipt {
 pub(crate) struct GenerationPair {
     pub topology: u64,
     pub search: u64,
+    #[serde(default)]
+    pub property: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -652,6 +654,7 @@ pub(crate) fn recover(root: &Path) -> Result<(), GfError> {
         GenerationPair {
             topology: current.topology,
             search: current.search,
+            property: current.property,
         },
     )
 }
@@ -671,26 +674,35 @@ thread_local! {
 
 #[allow(clippy::too_many_lines)]
 pub(crate) fn commit(
-    batch: RewriteBatch,
+    mut batch: RewriteBatch,
     root: &Path,
     bump_topology: bool,
     bump_search: bool,
+    bump_property: bool,
     auxiliary: Option<AuxiliaryReceipt>,
 ) -> Result<GenerationPair, GfError> {
+    // Serialize the pinned-generation precondition with CURRENT replacement.
+    // Project publication takes this same lock before it can replace CURRENT.
+    let _project_authority_guard = batch
+        .property_authority_root()?
+        .map(crate::project_publication::wait_for_writer_lock)
+        .transpose()?;
     let guard = acquire(root)?;
     guard.revalidate()?;
     let prior_state = crate::generation::read_generation_state_raw(root)?;
     let prior = GenerationPair {
         topology: prior_state.topology,
         search: prior_state.search,
+        property: prior_state.property,
     };
     recover_locked(root, &guard.directory, prior)?;
     let recovered = crate::generation::read_generation_state_raw(root)?;
     let prior = GenerationPair {
         topology: recovered.topology,
         search: recovered.search,
+        property: recovered.property,
     };
-    if batch.is_empty() && !bump_topology && !bump_search && auxiliary.is_none() {
+    if batch.is_empty() && !bump_topology && !bump_search && !bump_property && auxiliary.is_none() {
         return Ok(prior);
     }
     let next = GenerationPair {
@@ -710,8 +722,21 @@ pub(crate) fn commit(
         } else {
             prior.search
         },
+        property: if bump_property {
+            prior
+                .property
+                .checked_add(1)
+                .ok_or_else(|| storage("property generation counter overflow"))?
+        } else {
+            prior.property
+        },
     };
-    let generation_bytes = crate::generation::encode_generation_state(next.topology, next.search)?;
+    if bump_property {
+        crate::writer::seal_property_windows(&mut batch, root, next.property)?;
+        batch.move_staged_destination_to_end(&root.join("topology/nodes.parquet"));
+    }
+    let generation_bytes =
+        crate::generation::encode_generation_state(next.topology, next.search, next.property)?;
     guard.revalidate()?;
     let transaction = Uuid::now_v7().simple().to_string();
     let root_identity = guard.directory.identity();
@@ -872,10 +897,12 @@ mod tests {
             prior: GenerationPair {
                 topology: 4,
                 search: 3,
+                property: 4,
             },
             next: GenerationPair {
                 topology: 5,
                 search: 4,
+                property: 5,
             },
             auxiliary: None,
             entries: vec![
@@ -898,7 +925,7 @@ mod tests {
             .stage(&root.join("topology/nodes.parquet"), schema, &batch)
             .unwrap();
         FAIL_AFTER_DURABLE_INTENT.set(true);
-        assert!(commit(rewrite, root, true, true, None).is_err());
+        assert!(commit(rewrite, root, true, true, true, None).is_err());
         let stable = StableDirectory::open(root).unwrap();
         let (bytes, _) = read_journal(&stable).unwrap().unwrap();
         let value: Intent = serde_json::from_slice(&bytes).unwrap();
@@ -988,10 +1015,12 @@ mod tests {
                     value.prior = GenerationPair {
                         topology: 7,
                         search: 7,
+                        property: 7,
                     };
                     value.next = GenerationPair {
                         topology: 8,
                         search: 8,
+                        property: 8,
                     };
                 }
                 _ => unreachable!(),
@@ -1101,12 +1130,12 @@ mod tests {
         FAIL_AFTER_DURABLE_INTENT.set(true);
         let unrelated_path = unrelated_root.path().to_path_buf();
         std::thread::spawn(move || {
-            commit(unrelated_rewrite, &unrelated_path, true, true, None).unwrap();
+            commit(unrelated_rewrite, &unrelated_path, true, true, false, None).unwrap();
         })
         .join()
         .unwrap();
 
-        let error = commit(armed_rewrite, armed_root.path(), true, true, None).unwrap_err();
+        let error = commit(armed_rewrite, armed_root.path(), true, true, false, None).unwrap_err();
         assert!(
             error
                 .to_string()
@@ -1115,7 +1144,7 @@ mod tests {
         recover(armed_root.path()).unwrap();
 
         let next = single_value_rewrite(armed_root.path(), 13);
-        commit(next, armed_root.path(), true, true, None).unwrap();
+        commit(next, armed_root.path(), true, true, false, None).unwrap();
     }
 
     #[test]
@@ -1142,7 +1171,7 @@ mod tests {
                     .stage(&root.join(relative), Arc::clone(&schema), &batch)
                     .unwrap();
             }
-            let _ = commit(rewrite, root, true, true, None);
+            let _ = commit(rewrite, root, true, true, true, None);
             panic!("child failpoint did not terminate the process");
         }
 

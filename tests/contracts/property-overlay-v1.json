@@ -1,0 +1,117 @@
+{
+  "contract": "graphforge-property-overlay/1",
+  "issue": 940,
+  "platform": {
+    "rss": "Unix getrusage RUSAGE_SELF ru_maxrss with macOS bytes and other Unix KiB normalization",
+    "unsupported": "production RSS scale evidence is not compiled outside Unix"
+  },
+  "authority": {
+    "row_contract": "each fragment row is the complete property map for one changed UUID",
+    "read_scope": "all authenticated generations and ordinals",
+    "winner": "maximum numeric (generation, ordinal) per UUID",
+    "unchanged_uuid": "an older row remains live until superseded",
+    "tombstone": "a newer tombstone suppresses the UUID",
+    "write_window": "compose repeated SET and REMOVE operations once, then append only changed UUID snapshots",
+    "prior_fragments": "must not be fully decoded or rewritten; only snapshots for changed UUIDs may be decoded"
+  },
+  "format": {
+    "PROPERTY_OVERLAY_FORMAT": "full-snapshot-v1",
+    "PROPERTY_OVERLAY_FORMAT_KEY": "graphforge.property_overlay",
+    "PROPERTY_TOMBSTONE_FIELD": "__gf_property_tombstone",
+    "fragment_filename": "{generation:020}-{ordinal:020}.parquet"
+  },
+  "exports": {
+    "property_overlay": [
+      "AuthenticatedPropertyInventory", "PROPERTY_OVERLAY_FORMAT",
+      "PROPERTY_OVERLAY_FORMAT_KEY", "PROPERTY_TOMBSTONE_FIELD",
+      "PropertyFragmentId", "PropertyInventoryOpenMetrics", "PropertyOverlayLimits",
+      "PropertyOverlayMetrics", "PropertyRouteKind", "PropertySnapshotRow",
+      "enumerate_property_fragments", "read_authenticated_property_snapshots_for",
+      "read_authenticated_property_snapshots_for_inventory",
+      "visit_authenticated_property_snapshots"
+    ],
+    "property_overlay_module": [
+      "AuthenticatedPropertyInventory", "AuthenticatedPropertyInventory::from_materialized_generation",
+      "AuthenticatedPropertyInventory::from_resolved_generation",
+      "AuthenticatedPropertyInventory::from_resolved_generation_for_route",
+      "AuthenticatedPropertyInventory::generation_uuid", "AuthenticatedPropertyInventory::open_metrics",
+      "AuthenticatedPropertyInventory::route_row_upper_bound", "AuthenticatedPropertyInventory::route_schema",
+      "AuthenticatedPropertyInventory::routes", "AuthenticatedPropertyInventory::visit_route",
+      "PROPERTY_OVERLAY_FORMAT", "PROPERTY_OVERLAY_FORMAT_KEY", "PROPERTY_TOMBSTONE_FIELD",
+      "PropertyFragment", "PropertyFragmentId", "PropertyFragmentId::file_name",
+      "PropertyFragmentId::parse", "PropertyInventoryOpenMetrics", "PropertyOverlayLimits",
+      "PropertyOverlayMetrics", "PropertyRouteKind", "PropertySnapshotRow",
+      "enumerate_property_fragments", "read_authenticated_property_snapshots_for",
+      "read_authenticated_property_snapshots_for_inventory",
+      "visit_authenticated_property_snapshots"
+    ],
+    "authenticated_staging": [
+      "stage_remove_edge_properties_authenticated",
+      "stage_remove_node_properties_authenticated",
+      "stage_set_edge_properties_authenticated",
+      "stage_set_node_properties_authenticated"
+    ]
+  },
+  "limits": {
+    "max_buffered_rows": {"rust_type":"usize", "unit":"rows", "default_expression":"4096"},
+    "max_open_runs": {"rust_type":"usize", "unit":"runs", "default_expression":"32"},
+    "max_buffered_bytes": {"rust_type":"u64", "unit":"bytes", "default_expression":"64 * 1024 * 1024"},
+    "max_row_bytes": {"rust_type":"u64", "unit":"bytes", "default_expression":"8 * 1024 * 1024"}
+  },
+  "metrics": {
+    "physical_rows":{"unit":"row-decode visits", "aggregation":"sum across every decoded physical snapshot row, including rows later shadowed or tombstoned", "source_markers":["Physical snapshot rows decoded"]},
+    "physical_bytes":{"unit":"bytes", "aggregation":"sum of admission and bounded authenticated-snapshot bytes plus decoder bytes", "source_markers":["authentication", "decoder bytes"]},
+    "authentication_bytes":{"unit":"bytes", "aggregation":"sum of full-file bytes read for SHA-256 admission and bounded immutable snapshot authentication", "source_markers":["SHA-256 authentication", "authenticated immutable snapshot"]},
+    "authority_authentication_bytes":{"unit":"bytes", "aggregation":"raw graph-files authority bytes included in authentication_bytes", "source_markers":["Raw graph-files authority bytes", "authentication bytes"]},
+    "property_authentication_bytes":{"unit":"bytes", "aggregation":"property-fragment bytes read during admission and bounded immutable snapshot authentication", "source_markers":["Retained property-fragment bytes", "authentication bytes"]},
+    "authenticated_snapshot_bytes":{"unit":"bytes", "aggregation":"sum of bytes written to immutable authenticated decode snapshots", "source_markers":["authenticated decode snapshots"]},
+    "authenticated_snapshot_peak_bytes":{"unit":"bytes", "aggregation":"largest single immutable snapshot that must coexist with its authenticated source", "source_markers":["Largest single immutable snapshot"]},
+    "validation_bytes":{"unit":"bytes", "aggregation":"sum of bytes read while validating UUID and tombstone authority", "source_markers":["validating canonical UUID/tombstone authority"]},
+    "selected_value_bytes":{"unit":"bytes", "aggregation":"sum of bytes read while decoding selected values", "source_markers":["selected row groups"]},
+    "physical_blocks":{"unit":"non-empty read operations", "aggregation":"sum of actual non-empty authentication reads and decoder reads", "source_markers":["actual non-empty authentication", "decoder reads"]},
+    "read_calls":{"unit":"non-empty reads", "aggregation":"sum of decoder-only non-empty reads, each capped at 64 KiB", "source_markers":["Decoder-only", "64 KiB"]},
+    "authentication_block_equivalents":{"unit":"64 KiB block-equivalents", "aggregation":"sum of ceiling(file bytes / 64 KiB) for files authenticated by the raw adapter; not a read-call count", "source_markers":["64 KiB authentication block-equivalents"]},
+    "authority_authentication_block_equivalents":{"unit":"64 KiB block-equivalents", "aggregation":"sum of ceiling(file bytes / 64 KiB) across raw graph-files authority", "source_markers":["Raw graph-files authority block-equivalents", "authentication blocks"]},
+    "property_authentication_block_equivalents":{"unit":"64 KiB block-equivalents", "aggregation":"sum of ceiling(fragment bytes / 64 KiB) for admission and bounded immutable snapshot authentication", "source_markers":["Retained property-fragment block-equivalents", "authentication blocks"]},
+    "authentication_read_calls":{"unit":"non-empty reads", "aggregation":"sum of actual non-empty reads performed by raw authority and retained-property authentication", "source_markers":["Actual non-empty authentication reads"]},
+    "authority_authentication_read_calls":{"unit":"non-empty reads", "aggregation":"sum of actual non-empty reads used to capture raw graph-files authority", "source_markers":["Actual non-empty raw graph-files authority reads"]},
+    "property_authentication_read_calls":{"unit":"non-empty reads", "aggregation":"sum of actual non-empty reads used to authenticate retained property fragments", "source_markers":["Actual non-empty retained property-fragment authentication reads"]},
+    "validation_read_calls":{"unit":"read calls", "aggregation":"sum of reads performed by the validation pass", "source_markers":["validation pass"]},
+    "selected_value_read_calls":{"unit":"read calls", "aggregation":"sum of reads performed by selected-value decoding", "source_markers":["selected value decoding"]},
+    "range_seeks":{"unit":"range starts", "aggregation":"sum of retained-handle range starts requested by Parquet", "source_markers":["range starts", "Parquet decoder"]},
+    "row_groups_considered":{"unit":"row groups", "aggregation":"sum of authenticated-statistics row groups considered", "source_markers":["statistics were considered"]},
+    "row_groups_selected":{"unit":"row groups", "aggregation":"sum of row groups selected for decoding", "source_markers":["selected for decode"]},
+    "emitted_batches":{"unit":"Arrow batches", "aggregation":"sum of bounded batches emitted to the consumer", "source_markers":["Bounded Arrow batches"]},
+    "fragments_considered":{"unit":"fragments", "aggregation":"sum of canonical fragments considered for authority", "source_markers":["fragments considered for authority"]},
+    "logical_rows":{"unit":"rows", "aggregation":"sum of live newest snapshot rows emitted", "source_markers":["Live newest snapshot rows"]},
+    "shadowed_rows":{"unit":"rows", "aggregation":"sum of older rows suppressed by newer snapshots or tombstones", "source_markers":["Older rows suppressed"]},
+    "tombstones":{"unit":"rows", "aggregation":"sum of newest tombstone rows observed", "source_markers":["Newest tombstone rows"]},
+    "spill_bytes":{"unit":"bytes", "aggregation":"sum of bytes written to external merge runs", "source_markers":["external merge runs"]},
+    "spool_input_bytes":{"unit":"bytes", "aggregation":"sum of encoded first-level spill-run bytes before merge amplification, including one newline per physical row", "source_markers":["first-level spill runs", "newline delimiter"]},
+    "spill_runs":{"unit":"runs", "aggregation":"sum of external merge runs written", "source_markers":["External merge runs written"]},
+    "peak_run_references":{"unit":"path references", "aggregation":"maximum simultaneous in-memory spill-run path references", "source_markers":["Maximum in-memory spill-run path references"]},
+    "merge_passes":{"unit":"passes", "aggregation":"sum of bounded fan-in merge passes", "source_markers":["fan-in merge passes"]},
+    "peak_buffered_rows":{"unit":"rows", "aggregation":"maximum simultaneous decoded rows retained", "source_markers":["Maximum decoded rows"]},
+    "peak_buffered_bytes":{"unit":"bytes", "aggregation":"maximum simultaneous charged decoded bytes retained", "source_markers":["Maximum charged decoded bytes"]},
+    "decoder_peak_rows":{"unit":"rows", "aggregation":"maximum rows retained by one decoded Parquet batch", "source_markers":["one decoded Parquet batch"]},
+    "decoder_peak_bytes":{"unit":"bytes", "aggregation":"maximum charged row bytes retained by one decoded Parquet batch", "source_markers":["charged row bytes", "decoded Parquet batch"]},
+    "decoder_page_reservation_bytes":{"unit":"bytes", "aggregation":"maximum declared uncompressed page bytes reserved before decode", "source_markers":["uncompressed page bytes reserved"]},
+    "merge_peak_rows":{"unit":"rows", "aggregation":"maximum rows retained by spill sorting or k-way cursors", "source_markers":["spill sorting or k-way cursors"]},
+    "merge_peak_bytes":{"unit":"bytes", "aggregation":"maximum charged bytes retained by spill sorting or k-way cursors", "source_markers":["charged bytes", "spill sorting or k-way cursors"]},
+    "per_record_seeks":{"unit":"seeks", "aggregation":"sum of forbidden random per-record seeks; must remain zero", "source_markers":["forbidden and remain zero"]}
+  },
+  "evidence": {
+    "canonical_fragment_identity":{"path":"crates/graphforge-storage/src/property_overlay.rs", "symbol":"fragment_identity_is_numeric_canonical_and_total", "markers":["PropertyFragmentId::parse", "file_name"]},
+    "authenticated_sequence":{"path":"crates/graphforge-storage/src/property_overlay.rs", "symbol":"authenticated_fragment_sequence_rejects_mixed_gapped_and_nonzero_starts", "markers":["validate_fragment_id_sequence", "is_err"]},
+    "newest_wins_tombstone":{"path":"crates/graphforge-storage/src/property_overlay.rs", "symbol":"bounded_external_merge_emits_exact_newest_snapshot_and_tombstone", "markers":["shadowed_rows", "tombstones"]},
+    "bounded_fan_in":{"path":"crates/graphforge-storage/src/property_overlay.rs", "symbol":"rolling_fan_in_keeps_run_references_logarithmic", "markers":["peak_run_references", "spill_runs"]},
+    "authenticated_io":{"path":"crates/graphforge-storage/src/property_overlay.rs", "symbol":"authenticated_reader_reports_actual_io_and_decodes_snapshot", "markers":["authentication_bytes", "physical_bytes"]},
+    "page_admission":{"path":"crates/graphforge-storage/src/property_overlay.rs", "symbol":"retained_reader_rejects_wide_projected_pages_before_arrow_allocation", "markers":["visit_authenticated_property_snapshots", "projected pages exceed"]},
+    "unselected_validation":{"path":"crates/graphforge-storage/src/property_overlay.rs", "symbol":"targeted_reader_validates_unselected_rows_before_value_pruning", "markers":["read_authenticated_property_snapshots_for", "strictly sorted"]},
+    "incremental_all_generation_authority":{"path":"crates/graphforge-storage/src/property_overlay.rs", "symbol":"bounded_external_merge_emits_exact_newest_snapshot_and_tombstone", "markers":["uuid_b", "keep", "tombstone"]},
+    "bounded_scale":{"path":"crates/graphforge-storage/src/property_overlay.rs", "symbol":"targeted_reader_n_2n_4n_has_bounded_retention_and_exact_work", "markers":["peak_buffered_bytes", "physical_rows"]},
+    "production_bounded_scale":{"path":"crates/graphforge-storage/tests/property_overlay_scale.rs", "symbol":"production_property_overlay_n_2n_4n_is_disk_growing_and_memory_bounded", "markers":["property_fragment_allocated_bytes", "property_fragment_block_equivalents", "graph_tree_allocated_bytes", "prior_fragments_unchanged", "authentication_bytes", "authentication_block_equivalents", "authentication_read_calls", "authority_authentication_bytes", "property_authentication_bytes", "authenticated_snapshot_bytes", "authenticated_snapshot_peak_bytes", "RSS_STARTUP_ALLOWANCE_BYTES", "decoder_bytes", "total_read_bound", "spool_input_bytes", "checked_mul", "spill_bound", "per_record_seeks"], "source_sha256":"8216bf97ce5172155aa27cc36fee80662a2a245ef273dbf6d8c327b0e73a9236"},
+    "authenticated_writeback":{"path":"crates/graphforge-storage/src/writer.rs", "symbol":"reopened_property_patch_seals_a_complete_authenticated_snapshot", "markers":["AuthenticatedPropertyInventory", "patched"]},
+    "bounded_write_window":{"path":"crates/graphforge-storage/src/writer.rs", "symbol":"same_window_set_then_remove_seals_one_ordered_snapshot", "markers":["property_window_count", "prior_property_generation"]}
+  }
+}

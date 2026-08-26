@@ -363,7 +363,10 @@ impl<'a> GraphPlanLowerer<'a> {
         let Some(stem) = self.prop_table_stem(ty) else {
             return Vec::new();
         };
-        let prop_table = graphforge_storage::PropertyTable::open_discovered(dir, &stem);
+        let prop_table = self.catalog.map_or_else(
+            || graphforge_storage::PropertyTable::open_discovered(dir, &stem),
+            |catalog| catalog.property_table(dir, &stem),
+        );
         prop_table
             .schema_ref()
             .fields()
@@ -415,7 +418,10 @@ impl<'a> GraphPlanLowerer<'a> {
             return Ok(scan); // no single property table applies (see prop_table_stem)
         };
 
-        let prop_table = graphforge_storage::PropertyTable::open_discovered(dir, &stem);
+        let prop_table = self.catalog.map_or_else(
+            || graphforge_storage::PropertyTable::open_discovered(dir, &stem),
+            |catalog| catalog.property_table(dir, &stem),
+        );
         let prop_schema = prop_table.schema_ref();
         let node_alias = var_alias(var);
 
@@ -4267,8 +4273,9 @@ fn join_edge_properties(
     let mut push_source =
         |stem: String, registered: Option<Arc<dyn datafusion::datasource::TableProvider>>| {
             let table = registered.unwrap_or_else(|| {
-                Arc::new(graphforge_storage::EdgePropertyTable::open_discovered(
-                    dir, &stem,
+                Arc::new(catalog.map_or_else(
+                    || graphforge_storage::EdgePropertyTable::open_discovered(dir, &stem),
+                    |catalog| catalog.edge_property_table(dir, &stem),
                 ))
             });
             let prop_cols: Vec<String> = table

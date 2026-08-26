@@ -393,19 +393,26 @@ function checkMinimumSpanningTree() {
       "text_cost",
     ),
   );
-  for (const property of ["null_cost", "infinite_cost"]) {
-    expectValidation(
-      /^edge weight is missing, NULL, NaN, or infinite for edge [0-9a-f-]{36}$/,
-      () =>
-        invalid.analyze(
-          "minimum_spanning_tree",
-          undefined,
-          "ROAD",
-          false,
-          property,
-        ),
-    );
-  }
+  expectValidation('edge weight property "null_cost" does not exist', () =>
+    invalid.analyze(
+      "minimum_spanning_tree",
+      undefined,
+      "ROAD",
+      false,
+      "null_cost",
+    ),
+  );
+  expectValidation(
+    /^edge weight is missing, NULL, NaN, or infinite for edge [0-9a-f-]{36}$/,
+    () =>
+      invalid.analyze(
+        "minimum_spanning_tree",
+        undefined,
+        "ROAD",
+        false,
+        "infinite_cost",
+      ),
+  );
   expectValidation("is_dag does not accept an edge weight property", () =>
     invalid.analyze("is_dag", undefined, undefined, true, "cost"),
   );

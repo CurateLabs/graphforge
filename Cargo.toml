@@ -57,6 +57,7 @@ arrow-data = "58"
 datafusion = "54"
 datafusion-datasource = "54"
 parquet = "58"
+thrift = "0.17"
 tantivy = { version = "=0.26.1", default-features = false, features = ["mmap", "lz4-compression"] }
 
 # Parser / lexer

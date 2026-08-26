@@ -11,6 +11,12 @@ exports_files([
     "project-skills/manifest.json",
 ])
 
+filegroup(
+    name = "root_build_contract",
+    srcs = ["BUILD.bazel"],
+    visibility = ["//scripts/ci:__pkg__"],
+)
+
 # Canonical skill bundle for CLI embedding (#7/#8). Kept at the workspace root so
 # `project-skills/` stays a pure distribution tree (no BUILD.bazel payload).
 filegroup(

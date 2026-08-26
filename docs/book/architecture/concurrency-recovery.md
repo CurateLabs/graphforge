@@ -161,6 +161,46 @@ the same publication vocabulary: stage, validate, durable generation,
 linearize, acknowledge, publish, abort, and recover. See ADR 0018 and the
 [repository integration guide](../../guides/repository-integration.md).
 
+### Property snapshot publication and session isolation
+
+Property publication stages authenticated full-map snapshots for the UUIDs
+changed in one write window. A generation may contain multiple ordinal
+fragments, but publication exposes the set atomically: the catalog replaces one
+immutable authority value containing both the generation UUID and its validated
+inventory. It never updates a provider list and inventory in separate steps.
+
+Sessions and already-planned queries pin the prior immutable authority value.
+New sessions observe the replacement after the publication linearization
+point. Admission authenticates every fragment named by the selected graph-files
+inventory. Logical reads merge them by UUID and descending canonical fragment
+identity, so a newer full-map row or tombstone overrides that UUID only and an
+unchanged UUID remains live in its older immutable fragment. A partial or failed
+publication cannot enter the selected inventory or mix uncommitted ordinals,
+schemas, or metadata with the prior authority.
+The same immutable value authenticates the newest per-route live-schema
+summary. A write window applies old-complete-map to new-complete-map count
+deltas for touched UUIDs and publishes the resulting summary with its fragment.
+Later operations in that window consume the staged summary, so SET/REMOVE order
+cannot lose a newly introduced key or retain a last-owner deletion. Readers
+never combine a new fragment with an old summary; prior sessions retain both
+the prior fragments and prior logical schema.
+
+Mutation windows also pin the authority generation used to resolve complete
+property maps. Commit rechecks that precondition while holding the publication
+lock. If another generation won first, the stale window fails with a typed
+conflict before any candidate becomes visible; it is never silently rebased or
+allowed to overwrite keys from the winner.
+
+Before linearization, failure removes staged property files and leaves the
+catalog authority unchanged. After linearization, recovery selects the newly
+published complete generation through the ordinary durable publication rules;
+it does not rebuild authority by scanning filenames. Replayed property deltas
+publish new snapshots only for affected UUIDs and routes. Entity deletion emits
+authoritative tombstones on every authenticated route for that entity kind.
+Mutation preparation may use one bounded authenticated lookup for the touched
+UUID set; sealing does not reread historical fragments, and publication never
+rewrites them.
+
 ## Correctness gates versus stress observations
 
 There are four CI surfaces for concurrency and durability contracts:

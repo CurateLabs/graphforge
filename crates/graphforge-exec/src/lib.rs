@@ -1209,6 +1209,7 @@ fn write_batch_creates(
                 let mut props: HashMap<String, graphforge_ir::IrLiteral> =
                     spec.properties.iter().cloned().collect();
                 merge_computed(extras.computed, spec.var, row, &mut props)?;
+                props.retain(|_, value| !matches!(value, graphforge_ir::IrLiteral::Null));
                 tally.properties_set += count_set_props(&props);
                 if !props.is_empty() {
                     writer.set_properties(
@@ -1250,6 +1251,7 @@ fn write_batch_creates(
             let mut props: HashMap<String, graphforge_ir::IrLiteral> =
                 spec.properties.iter().cloned().collect();
             merge_computed(extras.computed, spec.var, row, &mut props)?;
+            props.retain(|_, value| !matches!(value, graphforge_ir::IrLiteral::Null));
             writer.create_edge(edge_uuid, rel_name, &storage_src, &storage_dst)?;
             tally.properties_set += count_set_props(&props);
             if !props.is_empty() {
@@ -4506,13 +4508,21 @@ impl ExecutionSession {
             },
         );
         let provider: Arc<dyn AdjacencyProvider> = Arc::clone(&adjacency_provider) as _;
-        let config = datafusion::prelude::SessionConfig::new()
+        let mut config = datafusion::prelude::SessionConfig::new()
             .with_extension(Arc::new(AdjacencyProviderExt(provider)))
             .with_extension(Arc::new(graphforge_storage::IoConcurrencyExt::new(
                 resources.io_concurrency,
             )))
             .with_target_partitions(resources.target_partitions)
             .with_batch_size(resources.batch_size);
+        // Authenticated overlay scans publish sound physical-row upper bounds.
+        // Let DataFusion use those estimates so a small one-partition source is
+        // not eagerly repartitioned merely because newest-wins makes its exact
+        // logical cardinality unavailable without executing the scan.
+        config
+            .options_mut()
+            .execution
+            .use_row_number_estimates_to_optimize_partitioning = true;
 
         let memory_budget = usize::try_from(resources.memory_budget_bytes).unwrap_or(usize::MAX);
         let mut runtime_builder = datafusion::execution::runtime_env::RuntimeEnvBuilder::new()
@@ -4855,6 +4865,9 @@ impl ExecutionSession {
             None => None,
         };
         write_driver::commit_statement(&mut wctx, &self.dir)?;
+        self.catalog
+            .refresh_property_inventory(&self.dir)
+            .map_err(|error| GfError::Execution(error.to_string()))?;
         self.adjacency_provider.invalidate();
 
         let c = wctx.counters;
@@ -5379,6 +5392,19 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let catalog = GraphCatalog::open(dir.path(), None, &RuntimeCatalog::new()).unwrap();
         ExecutionSession::new(catalog, None).unwrap()
+    }
+
+    #[test]
+    fn session_uses_sound_row_estimates_for_partition_planning() {
+        let session = make_session();
+        assert!(
+            session
+                .ctx
+                .state()
+                .config_options()
+                .execution
+                .use_row_number_estimates_to_optimize_partitioning
+        );
     }
 
     #[test]
