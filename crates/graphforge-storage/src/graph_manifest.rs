@@ -394,17 +394,12 @@ fn validate_path(value: &str) -> Result<(), GfError> {
     {
         return Err(validation("invalid graph manifest relative path"));
     }
-    let components = path.components().collect::<Vec<_>>();
-    if components
-        .first()
+    if path
+        .components()
+        .next()
         .is_some_and(|component| component.as_os_str() == std::ffi::OsStr::new(".graphforge-cache"))
-        && !components.get(1).is_some_and(|component| {
-            component.as_os_str() == std::ffi::OsStr::new("uuid-membership")
-        })
     {
-        return Err(validation(
-            "unauthoritative derived cache path cannot be authoritative",
-        ));
+        return Err(validation("derived cache path cannot be authoritative"));
     }
     Ok(())
 }

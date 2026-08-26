@@ -7092,6 +7092,26 @@ mod tests {
         let Ok(root) = std::env::var("GF_CONSTRUCTION_CRASH_ROOT") else {
             return;
         };
+        if std::env::var_os("GF_CONSTRUCTION_PUBLICATION_CRASH").is_some() {
+            crate::open_or_initialize_project(Path::new(&root)).unwrap();
+            let mut session = GraphConstructionSession::open(
+                Path::new(&root),
+                Uuid::from_u128(9_470),
+                0,
+                GraphConstructionBudgets::default(),
+            )
+            .unwrap();
+            session
+                .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 2))
+                .unwrap();
+            session.seal().unwrap();
+            let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
+            let encoding = session.encode_canonical(&shape, 1).unwrap();
+            session
+                .publish_canonical(&encoding, Uuid::from_u128(9_471), Uuid::from_u128(9_472))
+                .unwrap();
+            return;
+        }
         let mut session = GraphConstructionSession::open(
             Path::new(&root),
             Uuid::from_u128(600),
@@ -7114,6 +7134,69 @@ mod tests {
             session.seal().unwrap();
             session.shape_canonical_with_cancellation(|| false).unwrap();
         }
+    }
+
+    #[test]
+    fn publication_crash_after_current_finalizes_same_target_on_reopen() {
+        let root = TempDir::new().unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("graph_construction::tests::crash_subprocess_helper")
+            .arg("--nocapture")
+            .env("GF_CONSTRUCTION_CRASH_ROOT", root.path())
+            .env("GF_CONSTRUCTION_PUBLICATION_CRASH", "1")
+            .env(
+                "GF_CONSTRUCTION_FAILPOINT_COOKIE",
+                "graphforge-construction-test-v1",
+            )
+            .env(
+                "GF_CONSTRUCTION_FAILPOINT",
+                "publication.after_current_before_receipt",
+            )
+            .status()
+            .unwrap();
+        assert_eq!(status.code(), Some(86));
+
+        let target = Uuid::from_u128(9_471);
+        assert_eq!(
+            crate::resolve_project_generation(root.path())
+                .unwrap()
+                .generation_uuid(),
+            target
+        );
+        let operation = Uuid::from_u128(9_470);
+        let operation_root = root
+            .path()
+            .join(PRIVATE_ROOT)
+            .join(operation.simple().to_string());
+        assert!(!operation_root.join(PUBLICATION_RECEIPT).exists());
+        let encoding: GraphConstructionEncoding = serde_json::from_slice(
+            &std::fs::read(operation_root.join("encoded-v1/inventory.json")).unwrap(),
+        )
+        .unwrap();
+        let mut resumed = GraphConstructionSession::open(
+            root.path(),
+            operation,
+            0,
+            GraphConstructionBudgets::default(),
+        )
+        .unwrap();
+        let receipt = resumed
+            .publish_canonical(&encoding, target, Uuid::from_u128(9_472))
+            .unwrap();
+        assert_eq!(receipt.generation_uuid, target);
+        assert!(receipt.idempotent_replay);
+        assert!(operation_root.join(PUBLICATION_RECEIPT).is_file());
+
+        let current = crate::resolve_project_generation(root.path()).unwrap();
+        assert_eq!(current.generation_uuid(), target);
+        let inventory = current.graph_files_inventory().unwrap().unwrap();
+        let materialized = TempDir::new().unwrap();
+        let graph = materialized.path().join("graph");
+        std::fs::create_dir(&graph).unwrap();
+        crate::materialize_graph_objects(root.path(), &inventory, &graph).unwrap();
+        let uuid_index = crate::UuidMembershipIndex::open(&graph).unwrap();
+        assert_eq!(uuid_index.count(crate::UuidIndexKind::Node), 2);
     }
 
     #[test]
@@ -7160,7 +7243,7 @@ mod tests {
                 .path()
                 .join(PRIVATE_ROOT)
                 .join(Uuid::from_u128(600).simple().to_string())
-                .join("encoded-v1/graph/.graphforge-cache/uuid-membership");
+                .join("encoded-v1/graph/topology/uuid-membership");
             assert!(!membership.join(".construction-intent.json").exists());
             assert!(std::fs::read_dir(membership).unwrap().all(|entry| {
                 !entry
@@ -7369,11 +7452,6 @@ mod tests {
             .join(operation.simple().to_string())
             .join(&encoding.root)
             .join("graph");
-        std::fs::write(
-            graph.join("topology/generation.json"),
-            br#"{"topology_generation":1,"search_generation":0}"#,
-        )
-        .unwrap();
         let nodes = crate::read_nodes(&graph).unwrap();
         assert_eq!(nodes.iter().map(RecordBatch::num_rows).sum::<usize>(), 3);
         let edges = crate::read_edges(
@@ -7733,7 +7811,7 @@ mod tests {
             .path()
             .join(PRIVATE_ROOT)
             .join(operation.simple().to_string())
-            .join("encoded-v1/graph/.graphforge-cache/uuid-membership");
+            .join("encoded-v1/graph/topology/uuid-membership");
         if uuid_private.exists() {
             assert_eq!(std::fs::read_dir(&uuid_private).unwrap().count(), 0);
         }
@@ -8060,11 +8138,6 @@ mod tests {
             )
             .unwrap();
         }
-        std::fs::write(
-            assembled.join("topology/generation.json"),
-            br#"{"topology_generation":3,"search_generation":0}"#,
-        )
-        .unwrap();
         let opened = crate::UuidMembershipIndex::open(&assembled).unwrap();
         assert_eq!(opened.count(crate::UuidIndexKind::Node), 4);
     }
@@ -8128,8 +8201,8 @@ mod tests {
             .join(operation.simple().to_string())
             .join(&encoded.root)
             .join("graph");
-        let parent_index = project.path().join(".graphforge-cache/uuid-membership");
-        let encoded_index = graph.join(".graphforge-cache/uuid-membership");
+        let parent_index = project.path().join("topology/uuid-membership");
+        let encoded_index = graph.join("topology/uuid-membership");
         let parent_manifest: serde_json::Value =
             serde_json::from_slice(&std::fs::read(parent_index.join("manifest.json")).unwrap())
                 .unwrap();
@@ -8143,11 +8216,6 @@ mod tests {
                 std::fs::copy(parent_index.join(name), encoded_index.join(name)).unwrap();
             }
         }
-        std::fs::write(
-            graph.join("topology/generation.json"),
-            br#"{"topology_generation":2,"search_generation":0}"#,
-        )
-        .unwrap();
         let index = crate::UuidMembershipIndex::open(&graph).unwrap();
         assert_eq!(index.count(crate::UuidIndexKind::Node), 3);
         assert_eq!(index.count(crate::UuidIndexKind::Edge), 1);
@@ -8170,7 +8238,7 @@ mod tests {
             .unwrap();
         session.seal().unwrap();
         let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
-        let membership = project.path().join(".graphforge-cache/uuid-membership");
+        let membership = project.path().join("topology/uuid-membership");
         let victim = std::fs::read_dir(&membership)
             .unwrap()
             .map(Result::unwrap)
@@ -8315,6 +8383,19 @@ mod tests {
                 .iter()
                 .any(|entry| entry.relative_path.starts_with("topology/nodes/"))
         );
+        assert!(
+            inventory
+                .files
+                .iter()
+                .any(|entry| { entry.relative_path == "topology/uuid-membership/manifest.json" })
+        );
+        let materialized = TempDir::new().unwrap();
+        let materialized_graph = materialized.path().join("graph");
+        std::fs::create_dir(&materialized_graph).unwrap();
+        crate::materialize_graph_objects(root.path(), &inventory, &materialized_graph).unwrap();
+        let uuid_index = crate::UuidMembershipIndex::open(&materialized_graph).unwrap();
+        assert_eq!(uuid_index.count(crate::UuidIndexKind::Node), 2);
+        assert_eq!(uuid_index.count(crate::UuidIndexKind::Edge), 0);
         drop(current);
         let receipt_path = root
             .path()

@@ -476,13 +476,6 @@ pub fn infer_role(relative: &Path) -> GraphFileRole {
                 "topology" => GraphFileRole::Topology,
                 "properties" | "edge_properties" => GraphFileRole::Properties,
                 "indexes" | "index" => GraphFileRole::Index,
-                ".graphforge-cache"
-                    if components.next().is_some_and(|component| {
-                        component.as_os_str() == std::ffi::OsStr::new("uuid-membership")
-                    }) =>
-                {
-                    GraphFileRole::Index
-                }
                 "deltas" => GraphFileRole::Delta,
                 "runtime_catalog.parquet" => GraphFileRole::Catalog,
                 _ if first.starts_with("runtime_catalog") => GraphFileRole::Catalog,

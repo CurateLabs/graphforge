@@ -15,8 +15,8 @@ use std::sync::Arc;
 use std::cell::RefCell;
 
 use arrow::array::{
-    Array, ArrayRef, FixedSizeBinaryArray, ListArray, StringArray, TimestampMicrosecondArray,
-    UInt32Array, UInt64Array,
+    Array, ArrayRef, BooleanArray, FixedSizeBinaryArray, ListArray, StringArray,
+    TimestampMicrosecondArray, UInt32Array, UInt64Array,
 };
 use arrow::compute::take;
 use arrow::datatypes::{DataType, Field, Schema};
@@ -36,6 +36,10 @@ use uuid::Uuid;
 use crate::graph_construction::{
     ArtifactReceipt, ConstructionSemanticAuthority, ConstructionShape, CountingChunkReader,
     GraphConstructionBudgets, IoCounter, open_authenticated_shape_source, shaped_output_sha256,
+};
+use crate::property_overlay::{
+    PROPERTY_GENERATION_KEY, PROPERTY_KIND_KEY, PROPERTY_ORDINAL_KEY, PROPERTY_OVERLAY_FORMAT,
+    PROPERTY_OVERLAY_FORMAT_KEY, PROPERTY_ROUTE_KEY, PROPERTY_TOMBSTONE_FIELD, PropertyRouteKind,
 };
 use crate::schemas::{
     TOPOLOGY_NODES_SCHEMA, TYPED_EDGE_SCHEMA, uuid_field, with_semantic_route_metadata,
@@ -577,7 +581,7 @@ fn retained_artifact(value: ConstructionIndexReference) -> ConstructionRetainedA
 
 fn index_artifact(value: ConstructionIndexOutput) -> ConstructionEncodedArtifact {
     ConstructionEncodedArtifact {
-        path: format!(".graphforge-cache/uuid-membership/{}", value.name),
+        path: format!("topology/uuid-membership/{}", value.name),
         bytes: value.bytes,
         sha256: value.sha256,
     }
@@ -813,7 +817,7 @@ fn encode_node_properties(
     artifacts: &mut Vec<ConstructionEncodedArtifact>,
     evidence: &mut GraphConstructionEncodingEvidence,
 ) -> Result<(), GfError> {
-    let mut ordinal = 0_u64;
+    let mut ordinals = BTreeMap::<String, u64>::new();
     for name in &shape.node_rows {
         if cancelled() {
             return Err(storage("construction encoding cancelled"));
@@ -869,6 +873,7 @@ fn encode_node_properties(
                     semantic_bindings,
                 )?;
                 for (route, fields) in projections {
+                    let ordinal = ordinals.entry(route.clone()).or_default();
                     let property = property_batch(
                         &input,
                         "node_uuid",
@@ -876,6 +881,10 @@ fn encode_node_properties(
                         &owner.topology_route,
                         &indexes,
                         &fields,
+                        PropertyRouteKind::Node,
+                        &route,
+                        shape.parent_topology_generation + 1,
+                        *ordinal,
                     )?;
                     let property = if owner.symbol.is_some() {
                         with_route_metadata_batch(
@@ -893,7 +902,7 @@ fn encode_node_properties(
                         shape.parent_topology_generation + 1
                     );
                     artifacts.push(write_parquet(output, &path, &property, evidence)?);
-                    ordinal = ordinal.saturating_add(1);
+                    *ordinal = ordinal.saturating_add(1);
                 }
             }
         }
@@ -1101,7 +1110,7 @@ fn encode_edge_properties(
     artifacts: &mut Vec<ConstructionEncodedArtifact>,
     evidence: &mut GraphConstructionEncodingEvidence,
 ) -> Result<(), GfError> {
-    let mut ordinal = 0_u64;
+    let mut ordinals = BTreeMap::<String, u64>::new();
     for name in &shape.edge_rows {
         if cancelled() {
             return Err(storage("construction encoding cancelled"));
@@ -1157,6 +1166,7 @@ fn encode_edge_properties(
                     semantic_bindings,
                 )?;
                 for (property_route, fields) in projections {
+                    let ordinal = ordinals.entry(property_route.clone()).or_default();
                     let property = property_batch(
                         &input,
                         "edge_uuid",
@@ -1164,6 +1174,10 @@ fn encode_edge_properties(
                         &owner.topology_route,
                         &indexes,
                         &fields,
+                        PropertyRouteKind::Edge,
+                        &property_route,
+                        shape.parent_topology_generation + 1,
+                        *ordinal,
                     )?;
                     let property = if owner.symbol.is_some() {
                         with_route_metadata_batch(
@@ -1181,7 +1195,7 @@ fn encode_edge_properties(
                         shape.parent_topology_generation + 1
                     );
                     artifacts.push(write_parquet(output, &path, &property, evidence)?);
-                    ordinal = ordinal.saturating_add(1);
+                    *ordinal = ordinal.saturating_add(1);
                 }
             }
         }
@@ -1271,23 +1285,47 @@ fn property_batch(
     owner: &str,
     indexes: &[u32],
     field_indexes: &[usize],
+    kind: PropertyRouteKind,
+    route: &str,
+    generation: u64,
+    ordinal: u64,
 ) -> Result<RecordBatch, GfError> {
     let indexes = UInt32Array::from(indexes.to_vec());
-    let mut fields = vec![uuid_field(uuid_name)];
+    let mut fields = vec![
+        uuid_field(uuid_name),
+        Field::new(PROPERTY_TOMBSTONE_FIELD, DataType::Boolean, false),
+    ];
     fields.extend(
         field_indexes
             .iter()
             .map(|index| input.schema().field(*index).clone()),
     );
     let schema = Schema::new(fields).with_metadata(
-        [(metadata_key.to_owned(), owner.to_owned())]
-            .into_iter()
-            .collect(),
+        [
+            (metadata_key.to_owned(), owner.to_owned()),
+            (
+                PROPERTY_OVERLAY_FORMAT_KEY.to_owned(),
+                PROPERTY_OVERLAY_FORMAT.to_owned(),
+            ),
+            (PROPERTY_ROUTE_KEY.to_owned(), route.to_owned()),
+            (
+                PROPERTY_KIND_KEY.to_owned(),
+                kind.metadata_value().to_owned(),
+            ),
+            (PROPERTY_GENERATION_KEY.to_owned(), generation.to_string()),
+            (PROPERTY_ORDINAL_KEY.to_owned(), ordinal.to_string()),
+        ]
+        .into_iter()
+        .collect(),
     );
-    let columns = std::iter::once(input.column(0))
+    let mut columns = std::iter::once(input.column(0))
         .chain(field_indexes.iter().map(|index| input.column(*index)))
         .map(|array| take(array.as_ref(), &indexes, None).map_err(storage))
         .collect::<Result<Vec<ArrayRef>, _>>()?;
+    columns.insert(
+        1,
+        Arc::new(BooleanArray::from(vec![false; indexes.len()])) as ArrayRef,
+    );
     RecordBatch::try_new(Arc::new(schema), columns).map_err(storage)
 }
 

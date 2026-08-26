@@ -1537,10 +1537,10 @@ fn encode_construction_index_inner(
     let graph = encoded
         .create_child_directory(std::ffi::OsStr::new("graph"))
         .map_err(storage_err)?;
-    let cache = graph
-        .create_child_directory(std::ffi::OsStr::new(".graphforge-cache"))
+    let topology = graph
+        .create_child_directory(std::ffi::OsStr::new("topology"))
         .map_err(storage_err)?;
-    let index = cache
+    let index = topology
         .create_child_directory(std::ffi::OsStr::new("uuid-membership"))
         .map_err(storage_err)?;
     let mut manifest = if parent_generation == 0 {
@@ -1882,7 +1882,7 @@ fn encode_construction_index_inner(
         .map_err(storage_err)?;
     crate::graph_construction::construction_failpoint("uuid_encode.after_intent_removal");
     index.sync().map_err(storage_err)?;
-    cache.sync().map_err(storage_err)?;
+    topology.sync().map_err(storage_err)?;
     graph.sync().map_err(storage_err)?;
     encoded.sync().map_err(storage_err)?;
     work.fsync_operations = work.fsync_operations.saturating_add(4);
@@ -1912,12 +1912,12 @@ fn cleanup_private_construction_index(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(storage_err(error)),
     };
-    let cache = match graph.open_child_directory(std::ffi::OsStr::new(".graphforge-cache")) {
+    let topology = match graph.open_child_directory(std::ffi::OsStr::new("topology")) {
         Ok(value) => value,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(storage_err(error)),
     };
-    let index = match cache.open_child_directory(std::ffi::OsStr::new("uuid-membership")) {
+    let index = match topology.open_child_directory(std::ffi::OsStr::new("uuid-membership")) {
         Ok(value) => value,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(storage_err(error)),
@@ -1963,7 +1963,7 @@ fn cleanup_private_construction_index(
             .map_err(storage_err)?;
     }
     index.sync().map_err(storage_err)?;
-    cache.sync().map_err(storage_err)?;
+    topology.sync().map_err(storage_err)?;
     graph.sync().map_err(storage_err)?;
     encoded.sync().map_err(storage_err)
 }
