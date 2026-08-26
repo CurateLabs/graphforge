@@ -1341,23 +1341,23 @@ fn col_type_from_data_type(data_type: &DataType) -> Option<ColType> {
         DataType::List(field) => {
             col_type_from_data_type(field.data_type()).map(|inner| ColType::List(Box::new(inner)))
         }
-        DataType::Struct(fields) if fields.iter().any(|field| field.name() == "__het_int") => {
+        DataType::Struct(fields) if *fields == heterogeneous_scalar_fields() => {
             Some(ColType::HetScalar)
         }
-        DataType::Struct(fields) if fields.iter().any(|field| field.name() == "months") => {
+        DataType::Struct(fields) if *fields == crate::schemas::duration_struct_fields() => {
             Some(ColType::Duration)
         }
-        DataType::Struct(fields) if fields.iter().any(|field| field.name() == "epoch_day") => {
+        DataType::Struct(fields) if *fields == crate::schemas::date_struct_fields() => {
             Some(ColType::Date)
         }
-        DataType::Struct(fields) if fields.iter().any(|field| field.name() == "offset_seconds") => {
+        DataType::Struct(fields) if *fields == crate::schemas::localdatetime_struct_fields() => {
+            Some(ColType::LocalDateTime)
+        }
+        DataType::Struct(fields) if *fields == crate::schemas::time_struct_fields() => {
             Some(ColType::ZonedTime)
         }
-        DataType::Struct(fields) if fields.iter().any(|field| field.name() == "timezone") => {
+        DataType::Struct(fields) if *fields == crate::schemas::datetime_struct_fields() => {
             Some(ColType::ZonedDateTime)
-        }
-        DataType::Struct(fields) if fields.iter().any(|field| field.name() == "date") => {
-            Some(ColType::LocalDateTime)
         }
         _ => None,
     }
@@ -6861,6 +6861,43 @@ mod tests {
             read_node_props(dir.path(), "_untyped")[&to_bytes(&node)],
             values
         );
+    }
+
+    #[test]
+    fn canonical_temporal_schema_dispatch_preserves_distinct_struct_shapes() {
+        assert!(matches!(
+            col_type_from_data_type(&DataType::Struct(crate::schemas::date_struct_fields())),
+            Some(ColType::Date)
+        ));
+        assert!(matches!(
+            col_type_from_data_type(&DataType::Struct(
+                crate::schemas::localdatetime_struct_fields()
+            )),
+            Some(ColType::LocalDateTime)
+        ));
+        assert!(matches!(
+            col_type_from_data_type(&DataType::Struct(crate::schemas::time_struct_fields())),
+            Some(ColType::ZonedTime)
+        ));
+        assert!(matches!(
+            col_type_from_data_type(&DataType::Struct(crate::schemas::datetime_struct_fields())),
+            Some(ColType::ZonedDateTime)
+        ));
+        assert!(matches!(
+            col_type_from_data_type(&DataType::List(Arc::new(Field::new(
+                "item",
+                DataType::Struct(crate::schemas::datetime_struct_fields()),
+                true,
+            )))),
+            Some(ColType::List(inner)) if matches!(*inner, ColType::ZonedDateTime)
+        ));
+
+        let noncanonical = DataType::Struct(arrow::datatypes::Fields::from(vec![
+            Field::new("date", DataType::Int64, true),
+            Field::new("time", DataType::Time64(TimeUnit::Nanosecond), true),
+            Field::new("unexpected", DataType::Utf8, true),
+        ]));
+        assert!(col_type_from_data_type(&noncanonical).is_none());
     }
 
     #[test]
