@@ -58,6 +58,14 @@ gf_rust_test(
     deps = _API_DEPS,
 )
 
+gf_rust_integration_test(
+    name = "resumable_construction_surface",
+    srcs = ["tests/resumable_construction_surface.rs"],
+    crate = ":graphforge_api",
+    size = "small",
+    deps = [],
+)
+
 _API_TEST_DATA = [
     "//docs/contracts/examples:fixtures",
     "//docs/reference:schema_inventory_fixtures",

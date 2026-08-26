@@ -135,6 +135,40 @@ fn current_parent_generation_authority(project_dir: &Path) -> Result<(Uuid, Stri
     }
 }
 
+fn compact_parent_inventory(
+    parent: &crate::ResolvedProjectGeneration,
+) -> Result<Option<crate::GraphFilesInventory>, GfError> {
+    let Some(crate::GraphFilesParticipant::V2(root)) = parent.declared_graph_files_participant()?
+    else {
+        return Ok(None);
+    };
+    let (entries, _) =
+        crate::resolve_graph_manifest(&root, crate::GraphManifestLimits::default(), |digest| {
+            crate::read_graph_object_by_digest(parent.container_root(), digest, 64 * 1024 * 1024)
+        })?;
+    crate::graph_files::inventory_from_entries(entries).map(Some)
+}
+
+fn compact_parent_surrogate_tails(project_dir: &Path) -> Result<Option<(u64, u64)>, GfError> {
+    let parent = crate::resolve_project_generation(project_dir)?;
+    let Some(inventory) = compact_parent_inventory(&parent)? else {
+        return Ok(None);
+    };
+    let Some(entry) = inventory
+        .files
+        .iter()
+        .find(|entry| entry.relative_path == "topology/surrogate_tails.parquet")
+    else {
+        return Ok(None);
+    };
+    let file = crate::graph_object_store::open_graph_object_by_digest(
+        project_dir,
+        &entry.content_sha256,
+        entry.byte_length,
+    )?;
+    crate::writer::read_surrogate_tails_file(file).map(Some)
+}
+
 fn authenticate_exact_parent_generation(
     project_dir: &Path,
     checkpoint: &Checkpoint,
@@ -693,6 +727,7 @@ pub struct GraphConstructionSession {
     checkpoint: Checkpoint,
     base_snapshot: Option<AuthenticatedUuidIndexSnapshot>,
     parent_catalog: RuntimeCatalog,
+    compact_parent: bool,
     semantic_authority: Option<ConstructionSemanticAuthority>,
     _reservation: ProcessReservation,
 }
@@ -1422,6 +1457,12 @@ impl GraphConstructionSession {
                 )
             )
         });
+        let compact_inventory = if publication_replay || project_dir == graph_source_dir {
+            None
+        } else {
+            let parent = crate::resolve_project_generation(project_dir)?;
+            compact_parent_inventory(&parent)?
+        };
         let (base_snapshot, base_work) = if publication_replay {
             (
                 None,
@@ -1433,10 +1474,18 @@ impl GraphConstructionSession {
         } else if parent_topology_generation == 0 {
             (None, UuidConstructionSnapshotWork::default())
         } else {
-            let mut snapshot = AuthenticatedUuidIndexSnapshot::open_at_generation(
-                graph_source_dir,
-                parent_topology_generation,
-            )?;
+            let mut snapshot = if let Some(inventory) = &compact_inventory {
+                AuthenticatedUuidIndexSnapshot::open_from_compact_inventory(
+                    project_dir,
+                    inventory,
+                    parent_topology_generation,
+                )?
+            } else {
+                AuthenticatedUuidIndexSnapshot::open_at_generation(
+                    graph_source_dir,
+                    parent_topology_generation,
+                )?
+            };
             let max_node_surrogate = crate::writer::read_surrogate_tails(graph_source_dir)?
                 .ok_or_else(|| storage("nonempty parent lacks surrogate tails"))?
                 .0;
@@ -1460,6 +1509,13 @@ impl GraphConstructionSession {
                     .clone(),
                 ReadWork::default(),
             )
+        } else if let Some(inventory) = &compact_inventory {
+            load_parent_runtime_catalog_from_compact(
+                project_dir,
+                inventory,
+                parent_topology_generation,
+                budgets,
+            )?
         } else {
             let graph_source = StableDirectory::open(graph_source_dir).map_err(storage)?;
             load_parent_runtime_catalog(&graph_source, parent_topology_generation, budgets)?
@@ -1525,6 +1581,7 @@ impl GraphConstructionSession {
             parent_generation_uuid,
             &parent_generation_manifest_sha256,
         )?;
+        let compact_parent = compact_inventory.is_some();
         let mut session = Self {
             project_path: project_dir.to_path_buf(),
             project,
@@ -1532,6 +1589,7 @@ impl GraphConstructionSession {
             checkpoint,
             base_snapshot,
             parent_catalog,
+            compact_parent,
             semantic_authority,
             _reservation: reservation,
         };
@@ -2047,10 +2105,15 @@ impl GraphConstructionSession {
         )?;
         let (base_max_node, base_max_edge) = match self.checkpoint.parent_topology_generation {
             0 => (0, 0),
-            _ => crate::writer::read_surrogate_tails(
+            _ => (if self.compact_parent {
+                compact_parent_surrogate_tails(&self.project_path)?
+            } else {
+                None
+            })
+            .or(crate::writer::read_surrogate_tails(
                 // The retained project directory is revalidated immediately above.
                 &self.project_path,
-            )?
+            )?)
             .ok_or_else(|| storage("nonempty parent lacks surrogate tails"))?,
         };
         if base_max_node != self.checkpoint.base_work.max_node_surrogate {
@@ -4406,6 +4469,79 @@ fn load_parent_runtime_catalog(
     topology.revalidate_named().map_err(storage)?;
     project.revalidate_named().map_err(storage)?;
     Ok((catalog, Some(hex(&digest.finalize())), work))
+}
+
+fn load_parent_runtime_catalog_from_compact(
+    container_root: &Path,
+    inventory: &crate::GraphFilesInventory,
+    parent_generation: u64,
+    budgets: GraphConstructionBudgets,
+) -> Result<(RuntimeCatalog, Option<String>, ReadWork), GfError> {
+    if parent_generation == 0 {
+        return Ok((RuntimeCatalog::new(), None, ReadWork::default()));
+    }
+    let Some(entry) = inventory
+        .files
+        .iter()
+        .find(|entry| entry.relative_path == "topology/runtime_catalog.parquet")
+    else {
+        return Ok((RuntimeCatalog::new(), None, ReadWork::default()));
+    };
+    let file = crate::graph_object_store::open_graph_object_by_digest(
+        container_root,
+        &entry.content_sha256,
+        entry.byte_length,
+    )?;
+    decode_parent_runtime_catalog_file(file, &entry.content_sha256, budgets)
+}
+
+fn decode_parent_runtime_catalog_file(
+    file: File,
+    digest: &str,
+    budgets: GraphConstructionBudgets,
+) -> Result<(RuntimeCatalog, Option<String>, ReadWork), GfError> {
+    let counter = IoCounter::default();
+    let reader = ParquetRecordBatchReaderBuilder::try_new(CountingChunkReader {
+        file,
+        counter: counter.clone(),
+    })
+    .map_err(storage)?
+    .with_batch_size(4_096.min(budgets.max_catalog_entries))
+    .build()
+    .map_err(storage)?;
+    let mut catalog = RuntimeCatalog::new();
+    let mut entries = 0_usize;
+    let mut decoded_bytes = 0_usize;
+    for batch in reader {
+        let batch = batch.map_err(storage)?;
+        entries = entries
+            .checked_add(batch.num_rows())
+            .ok_or_else(|| storage("parent runtime catalog entry count overflow"))?;
+        decoded_bytes = decoded_bytes
+            .checked_add(batch.get_array_memory_size())
+            .ok_or_else(|| storage("parent runtime catalog decoded size overflow"))?;
+        if entries > budgets.max_catalog_entries
+            || decoded_bytes > budgets.max_catalog_decoded_bytes
+        {
+            return Err(storage("parent runtime catalog admission budget exhausted"));
+        }
+        catalog.extend_from_record_batch(&batch).map_err(storage)?;
+        if catalog.retained_identifier_bytes() > budgets.max_catalog_identifier_bytes {
+            return Err(storage(
+                "parent runtime catalog identifier budget exhausted",
+            ));
+        }
+    }
+    let bytes = counter.bytes.load(Ordering::Relaxed);
+    let operations = counter.operations.load(Ordering::Relaxed);
+    if !is_canonical_sha256(digest) {
+        return Err(storage("parent runtime catalog CAS authority changed"));
+    }
+    Ok((
+        catalog,
+        Some(digest.to_owned()),
+        ReadWork { bytes, operations },
+    ))
 }
 
 fn read_fixed<const N: usize>(reader: &mut impl Read) -> Result<Option<[u8; N]>, GfError> {

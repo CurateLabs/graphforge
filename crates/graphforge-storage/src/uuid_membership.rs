@@ -8,7 +8,7 @@
 //! counts, and SHA-256 before serving bounded binary-search probes.
 
 use std::cmp::Reverse;
-use std::collections::{BTreeSet, BinaryHeap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap};
 use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
@@ -586,6 +586,7 @@ pub struct AuthenticatedUuidIndexSnapshot {
     runs: Vec<AuthenticatedRun>,
     authenticated_bytes: u64,
     authenticated_blocks: u64,
+    cas_source_paths: Option<BTreeMap<String, (String, String, u64)>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1088,9 +1089,11 @@ impl AuthenticatedUuidIndexSnapshot {
             })
             .ok_or_else(|| storage_err("retained UUID descriptor is not authenticated"))?;
         let mut file = held.try_clone().map_err(storage_err)?;
-        if graphforge_filesystem::file_identity(&file).map_err(storage_err)? != expected
-            || graphforge_filesystem::file_link_count(&file).map_err(storage_err)? != 1
-        {
+        let identity_changed =
+            graphforge_filesystem::file_identity(&file).map_err(storage_err)? != expected;
+        let path_native_link_changed = self.cas_source_paths.is_none()
+            && graphforge_filesystem::file_link_count(&file).map_err(storage_err)? != 1;
+        if identity_changed || path_native_link_changed {
             return Err(storage_err("retained UUID run identity changed"));
         }
         file.seek(SeekFrom::Start(0)).map_err(storage_err)?;
@@ -1103,11 +1106,19 @@ impl AuthenticatedUuidIndexSnapshot {
     ) -> Result<ConstructionIndexReference, GfError> {
         let file = self.open_retained_file(record)?;
         let identity = graphforge_filesystem::file_identity(&file).map_err(storage_err)?;
+        let source_path = self
+            .cas_source_paths
+            .as_ref()
+            .and_then(|paths| paths.get(&record.name))
+            .map_or_else(
+                || format!("{INDEX_DIR}/{}", record.name),
+                |(path, _, _)| path.clone(),
+            );
         Ok(ConstructionIndexReference {
             source_root: self.graph_root_path.to_string_lossy().into_owned(),
             source_root_volume: self.graph_root_identity.volume_serial,
             source_root_file_id: hex_bytes(&self.graph_root_identity.file_id),
-            source_path: format!("{INDEX_DIR}/{}", record.name),
+            source_path,
             source_volume: identity.volume_serial,
             source_file_id: hex_bytes(&identity.file_id),
             target_path: format!("{INDEX_DIR}/{}", record.name),
@@ -1142,16 +1153,23 @@ impl AuthenticatedUuidIndexSnapshot {
             || source_root_volume != self.graph_root_identity.volume_serial
             || source_root_file_id != hex_bytes(&self.graph_root_identity.file_id)
             || parent_manifest_sha256 != self.manifest_sha256
-            || source_path != target_path
-            || !source_path.starts_with(&format!("{INDEX_DIR}/"))
+            || !target_path.starts_with(&format!("{INDEX_DIR}/"))
         {
             return Err(storage_err(
                 "retained construction reference authority changed",
             ));
         }
-        let name = source_path
+        let name = target_path
             .strip_prefix(&format!("{INDEX_DIR}/"))
-            .ok_or_else(|| storage_err("retained construction source path is invalid"))?;
+            .ok_or_else(|| storage_err("retained construction target path is invalid"))?;
+        let expected_source = self
+            .cas_source_paths
+            .as_ref()
+            .and_then(|paths| paths.get(name))
+            .map_or(target_path, |(path, _, _)| path.as_str());
+        if source_path != expected_source {
+            return Err(storage_err("retained construction source path changed"));
+        }
         let record = self
             .manifest
             .runs
@@ -1257,6 +1275,140 @@ impl AuthenticatedUuidIndexSnapshot {
             runs,
             authenticated_bytes,
             authenticated_blocks,
+            cas_source_paths: None,
+        })
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one descriptor-lifetime authentication pass keeps every CAS file and manifest binding in scope"
+    )]
+    pub(crate) fn open_from_compact_inventory(
+        container_root: &Path,
+        inventory: &crate::GraphFilesInventory,
+        generation: u64,
+    ) -> Result<Self, GfError> {
+        let graph_root =
+            graphforge_filesystem::StableDirectory::open(container_root).map_err(storage_err)?;
+        let graph_root_identity = graph_root.identity();
+        let root =
+            graphforge_filesystem::StableDirectory::open(container_root).map_err(storage_err)?;
+        let root_identity = root.identity();
+        let manifest_path = format!("{INDEX_DIR}/{MANIFEST}");
+        let manifest_entry = inventory
+            .files
+            .iter()
+            .find(|entry| entry.relative_path == manifest_path)
+            .ok_or_else(|| storage_err("compact UUID manifest is absent"))?;
+        let mut manifest_file = crate::graph_object_store::open_graph_object_by_digest(
+            container_root,
+            &manifest_entry.content_sha256,
+            manifest_entry.byte_length,
+        )?;
+        let manifest_identity =
+            graphforge_filesystem::file_identity(&manifest_file).map_err(storage_err)?;
+        let body = read_bounded(&mut manifest_file, MAX_MANIFEST_BYTES)?;
+        let manifest_sha256 = hex_sha256(&body);
+        let manifest: Manifest = serde_json::from_slice(&body).map_err(storage_err)?;
+        if manifest.format_version != FORMAT_VERSION || manifest.current_generation != generation {
+            return Err(storage_err(
+                "authenticated compact snapshot generation is stale",
+            ));
+        }
+        validate_run_descriptors(&manifest)?;
+        let mut runs = Vec::with_capacity(manifest.runs.len());
+        let mut paths = BTreeMap::new();
+        let manifest_physical =
+            crate::graph_object_path(container_root, &manifest_entry.content_sha256)?;
+        paths.insert(
+            MANIFEST.to_owned(),
+            (
+                manifest_physical
+                    .strip_prefix(container_root)
+                    .map_err(storage_err)?
+                    .to_string_lossy()
+                    .into_owned(),
+                manifest_entry.content_sha256.clone(),
+                manifest_entry.byte_length,
+            ),
+        );
+        let mut authenticated_bytes = body.len() as u64;
+        let mut authenticated_blocks = 1_u64;
+        for descriptor in &manifest.runs {
+            let mut open_record = |record: &FileRecord, width: u64| -> Result<File, GfError> {
+                let logical = format!("{INDEX_DIR}/{}", record.name);
+                let entry = inventory
+                    .files
+                    .iter()
+                    .find(|entry| entry.relative_path == logical)
+                    .ok_or_else(|| storage_err("compact UUID run is absent"))?;
+                if entry.content_sha256 != record.sha256
+                    || entry.byte_length != record.count.saturating_mul(width)
+                {
+                    return Err(storage_err("compact UUID run authority changed"));
+                }
+                let file = crate::graph_object_store::open_graph_object_by_digest(
+                    container_root,
+                    &entry.content_sha256,
+                    entry.byte_length,
+                )?;
+                let physical = crate::graph_object_path(container_root, &entry.content_sha256)?;
+                let relative = physical
+                    .strip_prefix(container_root)
+                    .map_err(storage_err)?
+                    .to_string_lossy()
+                    .into_owned();
+                paths.insert(
+                    record.name.clone(),
+                    (relative, entry.content_sha256.clone(), entry.byte_length),
+                );
+                Ok(file)
+            };
+            let identities = open_record(&descriptor.identities, IDENTITY_RECORD_BYTES)?;
+            let node_surrogates =
+                open_record(&descriptor.node_surrogates, NODE_LOOKUP_RECORD_BYTES)?;
+            authenticate_file_blocks(
+                &mut identities.try_clone().map_err(storage_err)?,
+                &descriptor.identities,
+                IDENTITY_RECORD_BYTES,
+                None,
+            )?;
+            authenticate_file_blocks(
+                &mut node_surrogates.try_clone().map_err(storage_err)?,
+                &descriptor.node_surrogates,
+                NODE_LOOKUP_RECORD_BYTES,
+                None,
+            )?;
+            authenticated_bytes = authenticated_bytes
+                .saturating_add(descriptor.identities.count * IDENTITY_RECORD_BYTES)
+                .saturating_add(descriptor.node_surrogates.count * NODE_LOOKUP_RECORD_BYTES);
+            authenticated_blocks = authenticated_blocks
+                .saturating_add(descriptor.identities.blocks.len() as u64)
+                .saturating_add(descriptor.node_surrogates.blocks.len() as u64);
+            runs.push(AuthenticatedRun {
+                identities_identity: graphforge_filesystem::file_identity(&identities)
+                    .map_err(storage_err)?,
+                node_surrogates_identity: graphforge_filesystem::file_identity(&node_surrogates)
+                    .map_err(storage_err)?,
+                identities,
+                node_surrogates,
+                descriptor: descriptor.clone(),
+            });
+        }
+        Ok(Self {
+            graph_root,
+            graph_root_path: container_root.to_path_buf(),
+            graph_root_identity,
+            root,
+            root_identity,
+            manifest_file,
+            manifest_identity,
+            manifest_sha256,
+            manifest,
+            runs,
+            authenticated_bytes,
+            authenticated_blocks,
+            cas_source_paths: Some(paths),
         })
     }
 
@@ -1285,6 +1437,50 @@ impl AuthenticatedUuidIndexSnapshot {
         self.graph_root.revalidate_named().map_err(storage_err)?;
         if self.graph_root.identity() != self.graph_root_identity {
             return Err(storage_err("UUID graph root identity changed"));
+        }
+        if let Some(objects) = &self.cas_source_paths {
+            let (_, manifest_digest, manifest_length) = objects
+                .get(MANIFEST)
+                .ok_or_else(|| storage_err("compact UUID manifest authority is absent"))?;
+            let mut manifest = crate::graph_object_store::open_graph_object_by_digest(
+                &self.graph_root_path,
+                manifest_digest,
+                *manifest_length,
+            )?;
+            if graphforge_filesystem::file_identity(&manifest).map_err(storage_err)?
+                != self.manifest_identity
+            {
+                return Err(storage_err("compact UUID manifest identity changed"));
+            }
+            let body = read_bounded(&mut manifest, MAX_MANIFEST_BYTES)?;
+            if hex_sha256(&body) != self.manifest_sha256
+                || serde_json::from_slice::<Manifest>(&body).map_err(storage_err)? != self.manifest
+            {
+                return Err(storage_err("compact UUID manifest authentication changed"));
+            }
+            for run in &self.runs {
+                for (record, identity) in [
+                    (&run.descriptor.identities, run.identities_identity),
+                    (
+                        &run.descriptor.node_surrogates,
+                        run.node_surrogates_identity,
+                    ),
+                ] {
+                    let (_, digest, length) = objects
+                        .get(&record.name)
+                        .ok_or_else(|| storage_err("compact UUID run authority is absent"))?;
+                    let file = crate::graph_object_store::open_graph_object_by_digest(
+                        &self.graph_root_path,
+                        digest,
+                        *length,
+                    )?;
+                    if graphforge_filesystem::file_identity(&file).map_err(storage_err)? != identity
+                    {
+                        return Err(storage_err("compact UUID run identity changed"));
+                    }
+                }
+            }
+            return Ok(());
         }
         self.root.revalidate_named().map_err(storage_err)?;
         if self.root.identity() != self.root_identity {

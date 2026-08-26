@@ -50,6 +50,10 @@ pub use graphforge_ontology::{
 use graphforge_ontology::{OntologyCompiler, OntologyHandle, OntologyLoader};
 use graphforge_storage::GraphCatalog;
 use graphforge_storage::ResolvedProjectGeneration;
+pub use graphforge_storage::{
+    CONSTRUCTION_EDGE_SCHEMA, CONSTRUCTION_NODE_SCHEMA, ConstructionChunkReceipt,
+    GraphConstructionBudgets, GraphConstructionEvidence, GraphConstructionState,
+};
 use sha2::{Digest, Sha256};
 
 #[cfg(test)]

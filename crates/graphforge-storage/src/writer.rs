@@ -93,14 +93,18 @@ fn surrogate_tails_schema() -> SchemaRef {
 }
 
 pub(crate) fn read_surrogate_tails(dir: &Path) -> Result<Option<(u64, u64)>, GfError> {
-    use arrow::array::Array;
-
     let path = dir.join(SURROGATE_TAILS_FILE);
     let input = match fs::File::open(&path) {
         Ok(input) => input,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(io_err(&error)),
     };
+    read_surrogate_tails_file(input).map(Some)
+}
+
+pub(crate) fn read_surrogate_tails_file(input: fs::File) -> Result<(u64, u64), GfError> {
+    use arrow::array::Array;
+
     let mut reader = ParquetRecordBatchReaderBuilder::try_new(input)
         .map_err(pq_err)?
         .with_batch_size(2)
@@ -125,7 +129,7 @@ pub(crate) fn read_surrogate_tails(dir: &Path) -> Result<Option<(u64, u64)>, GfE
         }
         Ok(column.value(0))
     };
-    Ok(Some((value("max_node_id")?, value("max_edge_id")?)))
+    Ok((value("max_node_id")?, value("max_edge_id")?))
 }
 
 // ---------------------------------------------------------------------------

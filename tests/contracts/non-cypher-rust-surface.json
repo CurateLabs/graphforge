@@ -304,6 +304,14 @@
         {
           "path": "crates/graphforge-api/src/resumable_construction.rs",
           "symbol": "graphforge_multi_chunk_construction_publishes_once_and_reopens"
+        },
+        {
+          "path": "crates/graphforge-api/src/resumable_construction.rs",
+          "symbol": "refresh_boundaries_preserve_the_prior_workspace_on_failure"
+        },
+        {
+          "path": "crates/graphforge-api/tests/resumable_construction_surface.rs",
+          "symbol": "construction_contract_is_nameable_from_graphforge_api_alone"
         }
       ]
     },

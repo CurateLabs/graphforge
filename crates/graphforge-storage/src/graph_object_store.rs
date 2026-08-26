@@ -1936,6 +1936,43 @@ pub fn read_graph_object_by_digest(
     read_graph_object_by_digest_from_read_only_cas(&cas, digest, max_length)
 }
 
+/// Open and stream-authenticate one immutable CAS object without allocating its payload.
+pub(crate) fn open_graph_object_by_digest(
+    root: &Path,
+    digest: &str,
+    expected_length: u64,
+) -> Result<File, GfError> {
+    let cas = ReadOnlyCasRoot::open(root)?;
+    let mut file = cas.open_digest(digest)?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| storage("inspect stable graph object", root, error))?;
+    // CAS payloads are deliberately hard-linked into private materializations,
+    // so their link count is not an authority signal. The stable no-follow CAS
+    // traversal, exact digest address, exact length, and streamed digest bind
+    // this descriptor without relaxing path-native child-file admission.
+    if !metadata.is_file() || metadata.len() != expected_length {
+        return Err(validation("graph object authority changed"));
+    }
+    let mut hasher = Sha256::new();
+    let mut block = vec![0_u8; 1 << 20];
+    loop {
+        let count = file
+            .read(&mut block)
+            .map_err(|error| storage("authenticate graph object", root, error))?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&block[..count]);
+    }
+    if hex_digest(hasher.finalize().into()) != digest {
+        return Err(validation("graph object digest does not match its address"));
+    }
+    file.rewind()
+        .map_err(|error| storage("rewind graph object", root, error))?;
+    Ok(file)
+}
+
 fn read_graph_object_by_digest_from_read_only_cas(
     cas: &ReadOnlyCasRoot,
     digest: &str,
