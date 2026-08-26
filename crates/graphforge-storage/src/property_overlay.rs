@@ -1786,7 +1786,10 @@ pub(crate) fn decode_snapshot_batch(
     reason = "used directly as Result::map_err adapter"
 )]
 fn parquet_error(error: ParquetError) -> GfError {
-    GfError::Storage(format!("property overlay Parquet: {error}"))
+    GfError::Project {
+        code: graphforge_core::ProjectErrorCode::ProjectCorrupt,
+        message: format!("property overlay Parquet is corrupt: {error}"),
+    }
 }
 
 impl Default for PropertyOverlayLimits {
@@ -2274,13 +2277,19 @@ fn validate_route(route: &str) -> Result<(), GfError> {
 }
 
 fn corrupt(message: &str) -> GfError {
-    GfError::Storage(format!("property overlay: {message}"))
+    GfError::Project {
+        code: graphforge_core::ProjectErrorCode::ProjectCorrupt,
+        message: format!("property overlay: {message}"),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{ArrayRef, BooleanArray, FixedSizeBinaryArray, Int64Array, StringArray};
+    use arrow::array::{
+        ArrayRef, BinaryArray, BooleanArray, FixedSizeBinaryArray, FixedSizeBinaryBuilder,
+        Int64Array, StringArray,
+    };
     use arrow::datatypes::{DataType, Field, Schema};
     use parquet::arrow::ArrowWriter;
     use std::collections::{BTreeSet, HashMap};
@@ -2927,6 +2936,235 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn hostile_authenticated_property_matrix_fails_closed_before_projection_or_limit() {
+        fn write_fragment(
+            root: &Path,
+            kind: PropertyRouteKind,
+            route: &str,
+            id: PropertyFragmentId,
+            uuid_field: Field,
+            uuid: ArrayRef,
+            property_field: Field,
+            property: ArrayRef,
+            extra_metadata: impl IntoIterator<Item = (String, String)>,
+        ) -> PathBuf {
+            let route_dir = root.join(kind.subdir()).join(route);
+            fs::create_dir_all(&route_dir).unwrap();
+            let mut metadata = HashMap::from([
+                (
+                    PROPERTY_OVERLAY_FORMAT_KEY.into(),
+                    PROPERTY_OVERLAY_FORMAT.into(),
+                ),
+                (PROPERTY_ROUTE_KEY.into(), route.into()),
+                (PROPERTY_KIND_KEY.into(), kind.metadata_value().into()),
+                (PROPERTY_GENERATION_KEY.into(), id.generation.to_string()),
+                (PROPERTY_ORDINAL_KEY.into(), id.ordinal.to_string()),
+            ]);
+            metadata.extend(extra_metadata);
+            let schema = Arc::new(Schema::new_with_metadata(
+                vec![
+                    uuid_field,
+                    Field::new(PROPERTY_TOMBSTONE_FIELD, DataType::Boolean, false),
+                    property_field,
+                ],
+                metadata,
+            ));
+            let rows = uuid.len();
+            let batch = RecordBatch::try_new(
+                Arc::clone(&schema),
+                vec![
+                    uuid,
+                    Arc::new(BooleanArray::from(vec![false; rows])),
+                    property,
+                ],
+            )
+            .unwrap();
+            let path = route_dir.join(id.file_name());
+            let mut writer =
+                ArrowWriter::try_new(File::create(&path).unwrap(), schema, None).unwrap();
+            writer.write(&batch).unwrap();
+            writer.close().unwrap();
+            path
+        }
+
+        fn assert_corrupt(error: &GfError, expected: &str) {
+            assert_eq!(error.code(), "GF_PROJECT_CORRUPT", "{error}");
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+
+        let id = PropertyFragmentId {
+            generation: 1,
+            ordinal: 0,
+        };
+        let targets = BTreeSet::from([[1; 16]]);
+
+        // A singleton target is the strongest projection/LIMIT-shaped direct
+        // read. Admission must still reject a nullable UUID authority before
+        // it can prune the later null slot.
+        let null_uuid = TempDir::new().unwrap();
+        let mut uuids = FixedSizeBinaryBuilder::new(16);
+        uuids.append_value([1; 16]).unwrap();
+        uuids.append_null();
+        write_fragment(
+            null_uuid.path(),
+            PropertyRouteKind::Node,
+            "Person",
+            id,
+            Field::new("node_uuid", DataType::FixedSizeBinary(16), true),
+            Arc::new(uuids.finish()),
+            Field::new("name", DataType::Utf8, true),
+            Arc::new(StringArray::from(vec![Some("selected"), Some("hidden")])),
+            [],
+        );
+        let error = read_authenticated_property_snapshots_for(
+            null_uuid.path(),
+            PropertyRouteKind::Node,
+            "Person",
+            &targets,
+        )
+        .unwrap_err();
+        assert_corrupt(&error, "UUID field is nullable");
+
+        let wrong_width = TempDir::new().unwrap();
+        write_fragment(
+            wrong_width.path(),
+            PropertyRouteKind::Node,
+            "Person",
+            id,
+            Field::new("node_uuid", DataType::FixedSizeBinary(15), false),
+            Arc::new(FixedSizeBinaryArray::try_from_iter(vec![vec![1; 15]].into_iter()).unwrap()),
+            Field::new("name", DataType::Utf8, true),
+            Arc::new(StringArray::from(vec![Some("selected")])),
+            [],
+        );
+        let error = read_authenticated_property_snapshots_for(
+            wrong_width.path(),
+            PropertyRouteKind::Node,
+            "Person",
+            &targets,
+        )
+        .unwrap_err();
+        assert_corrupt(&error, "not fixed binary(16)");
+
+        let cross_kind = TempDir::new().unwrap();
+        write_fragment(
+            cross_kind.path(),
+            PropertyRouteKind::Node,
+            "Person",
+            id,
+            Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+            Arc::new(FixedSizeBinaryArray::try_from_iter(vec![vec![1; 16]].into_iter()).unwrap()),
+            Field::new("name", DataType::Utf8, true),
+            Arc::new(StringArray::from(vec![Some("selected")])),
+            [(PROPERTY_KIND_KEY.into(), "edge".into())],
+        );
+        let error = read_authenticated_property_snapshots_for(
+            cross_kind.path(),
+            PropertyRouteKind::Node,
+            "Person",
+            &targets,
+        )
+        .unwrap_err();
+        assert_corrupt(&error, "metadata conflicts with its identity");
+
+        // Authentication is authoritative: matching hostile bytes become a
+        // typed corrupt-Parquet failure, while a mismatched committed digest
+        // fails before the decoder sees those bytes.
+        let hostile = TempDir::new().unwrap();
+        let relative = format!("properties/Person/{}", id.file_name());
+        let path = hostile.path().join(&relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let bytes = b"authenticated but not Parquet";
+        fs::write(&path, bytes).unwrap();
+        let entry = crate::GraphFileEntry {
+            relative_path: relative,
+            byte_length: u64::try_from(bytes.len()).unwrap(),
+            content_sha256: digest_hex(&Sha256::digest(bytes)),
+            role: crate::GraphFileRole::Properties,
+        };
+        let error = AuthenticatedPropertyInventory::from_entries_at_root(
+            hostile.path(),
+            vec![entry.clone()],
+        )
+        .unwrap_err();
+        assert_corrupt(&error, "Parquet is corrupt");
+        let mut conflicting_digest = entry;
+        conflicting_digest.content_sha256 = "00".repeat(32);
+        let error = AuthenticatedPropertyInventory::from_entries_at_root(
+            hostile.path(),
+            vec![conflicting_digest],
+        )
+        .unwrap_err();
+        assert_corrupt(&error, "digest conflicts with inventory");
+
+        for semantic_conflict in [false, true] {
+            let dir = TempDir::new().unwrap();
+            for generation in [1_u64, 2] {
+                let id = PropertyFragmentId {
+                    generation,
+                    ordinal: 0,
+                };
+                let (field, values): (Field, ArrayRef) = if semantic_conflict {
+                    (
+                        Field::new("name", DataType::Utf8, true),
+                        Arc::new(StringArray::from(vec![Some("selected")])),
+                    )
+                } else if generation == 1 {
+                    (
+                        Field::new("name", DataType::Utf8, true),
+                        Arc::new(StringArray::from(vec![Some("older")])),
+                    )
+                } else {
+                    (
+                        Field::new("name", DataType::Binary, true),
+                        Arc::new(BinaryArray::from(vec![Some(b"newer".as_slice())])),
+                    )
+                };
+                write_fragment(
+                    dir.path(),
+                    PropertyRouteKind::Node,
+                    "Person",
+                    id,
+                    Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+                    Arc::new(
+                        FixedSizeBinaryArray::try_from_iter(
+                            vec![vec![u8::try_from(generation).unwrap(); 16]].into_iter(),
+                        )
+                        .unwrap(),
+                    ),
+                    field,
+                    values,
+                    semantic_conflict.then(|| {
+                        (
+                            "ARROW:extension:name".into(),
+                            format!("graphforge.semantic.{generation}"),
+                        )
+                    }),
+                );
+            }
+            let emitted = std::cell::Cell::new(0_usize);
+            let error = visit_authenticated_property_snapshots(
+                dir.path(),
+                PropertyRouteKind::Node,
+                "Person",
+                dir.path(),
+                PropertyOverlayLimits::default(),
+                |_| {
+                    emitted.set(emitted.get() + 1);
+                    Ok(())
+                },
+            )
+            .unwrap_err();
+            assert_eq!(emitted.get(), 0, "LIMIT-like consumer observed a row");
+            if semantic_conflict {
+                assert_corrupt(&error, "semantic metadata conflicts");
+            } else {
+                assert_corrupt(&error, "field type or semantic metadata conflicts");
+            }
+        }
     }
 
     #[test]
