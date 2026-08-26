@@ -34,6 +34,33 @@ fn storage_err(error: impl std::fmt::Display) -> GfError {
     GfError::Storage(format!("UUID membership index: {error}"))
 }
 
+fn open_uuid_file(path: &Path) -> Result<File, GfError> {
+    let file = File::open(path).map_err(storage_err)?;
+    crate::io_stats::record_uuid_file_open();
+    Ok(file)
+}
+
+fn create_uuid_file(path: &Path) -> Result<File, GfError> {
+    let file = File::create(path).map_err(storage_err)?;
+    crate::io_stats::record_uuid_file_open();
+    Ok(file)
+}
+
+fn sync_uuid_file(file: &File) -> Result<(), GfError> {
+    file.sync_all().map_err(storage_err)?;
+    crate::io_stats::record_uuid_file_sync();
+    Ok(())
+}
+
+fn open_uuid_child_file(
+    directory: &graphforge_filesystem::StableDirectory,
+    name: &std::ffi::OsStr,
+) -> Result<File, GfError> {
+    let file = directory.open_child_file(name).map_err(storage_err)?;
+    crate::io_stats::record_uuid_file_open();
+    Ok(file)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 /// Selects the canonical identity domain to probe.
 pub enum UuidIndexKind {
@@ -558,9 +585,7 @@ impl AuthenticatedUuidIndexSnapshot {
         let root_path = project_dir.join(INDEX_DIR);
         let root = graphforge_filesystem::StableDirectory::open(&root_path).map_err(storage_err)?;
         let root_identity = root.identity();
-        let mut manifest_file = root
-            .open_child_file(std::ffi::OsStr::new(MANIFEST))
-            .map_err(storage_err)?;
+        let mut manifest_file = open_uuid_child_file(&root, std::ffi::OsStr::new(MANIFEST))?;
         let manifest_identity =
             graphforge_filesystem::file_identity(&manifest_file).map_err(storage_err)?;
         let body = read_bounded(&mut manifest_file, MAX_MANIFEST_BYTES)?;
@@ -630,10 +655,7 @@ impl AuthenticatedUuidIndexSnapshot {
         {
             return Err(storage_err("retained UUID manifest identity changed"));
         }
-        let mut named_manifest = self
-            .root
-            .open_child_file(std::ffi::OsStr::new(MANIFEST))
-            .map_err(storage_err)?;
+        let mut named_manifest = open_uuid_child_file(&self.root, std::ffi::OsStr::new(MANIFEST))?;
         if graphforge_filesystem::file_identity(&named_manifest).map_err(storage_err)?
             != self.manifest_identity
             || graphforge_filesystem::file_link_count(&named_manifest).map_err(storage_err)? != 1
@@ -654,10 +676,7 @@ impl AuthenticatedUuidIndexSnapshot {
                     run.node_surrogates_identity,
                 ),
             ] {
-                let named = self
-                    .root
-                    .open_child_file(std::ffi::OsStr::new(&record.name))
-                    .map_err(storage_err)?;
+                let named = open_uuid_child_file(&self.root, std::ffi::OsStr::new(&record.name))?;
                 if graphforge_filesystem::file_identity(&named).map_err(storage_err)? != identity
                     || graphforge_filesystem::file_link_count(&named).map_err(storage_err)? != 1
                 {
@@ -670,10 +689,7 @@ impl AuthenticatedUuidIndexSnapshot {
 
     fn advance_to(&mut self, manifest: Manifest) -> Result<u64, GfError> {
         self.root.revalidate_named().map_err(storage_err)?;
-        let mut manifest_file = self
-            .root
-            .open_child_file(std::ffi::OsStr::new(MANIFEST))
-            .map_err(storage_err)?;
+        let mut manifest_file = open_uuid_child_file(&self.root, std::ffi::OsStr::new(MANIFEST))?;
         let body = read_bounded(&mut manifest_file, MAX_MANIFEST_BYTES)?;
         if hex_sha256(&body) != hex_sha256(&serde_json::to_vec(&manifest).map_err(storage_err)?) {
             return Err(storage_err("committed UUID manifest differs from plan"));
@@ -1513,12 +1529,10 @@ fn plan_uuid_membership_delta(
     if current == 0 {
         let empty_identity_path = scratch.join("identities-base.run");
         let empty_surrogate_path = scratch.join("surrogates-base.run");
-        File::create(&empty_identity_path)
-            .and_then(|file| file.sync_all())
-            .map_err(storage_err)?;
-        File::create(&empty_surrogate_path)
-            .and_then(|file| file.sync_all())
-            .map_err(storage_err)?;
+        let empty_identity = create_uuid_file(&empty_identity_path)?;
+        sync_uuid_file(&empty_identity)?;
+        let empty_surrogate = create_uuid_file(&empty_surrogate_path)?;
+        sync_uuid_file(&empty_surrogate)?;
         let base_identities = describe_run(
             &empty_identity_path,
             "identities-v3-base",
@@ -1632,10 +1646,7 @@ fn plan_uuid_membership_delta(
     let mut superseded = Vec::new();
     if let Some(snapshot) = snapshot.as_deref() {
         for name in prior_names.difference(&retained) {
-            let file = snapshot
-                .root
-                .open_child_file(std::ffi::OsStr::new(name))
-                .map_err(storage_err)?;
+            let file = open_uuid_child_file(&snapshot.root, std::ffi::OsStr::new(name))?;
             superseded.push((
                 name.clone(),
                 graphforge_filesystem::file_identity(&file).map_err(storage_err)?,
@@ -1654,9 +1665,7 @@ fn open_verified_at(
     if Path::new(&record.name).components().count() != 1 {
         return Err(storage_err("manifest contains a non-local index filename"));
     }
-    let mut file = directory
-        .open_child_file(std::ffi::OsStr::new(&record.name))
-        .map_err(storage_err)?;
+    let mut file = open_uuid_child_file(directory, std::ffi::OsStr::new(&record.name))?;
     let expected = record
         .count
         .checked_mul(record_bytes)
@@ -1763,7 +1772,7 @@ fn describe_run(
     if length % width != 0 {
         return Err(storage_err("internal run has a partial index record"));
     }
-    let (sha256, blocks) = describe_blocks(&mut File::open(path).map_err(storage_err)?, width)?;
+    let (sha256, blocks) = describe_blocks(&mut open_uuid_file(path)?, width)?;
     Ok(FileRecord {
         name: format!("{kind}-{generation}-{}.uuidx", &sha256[..16]),
         count: length / width,
@@ -1927,7 +1936,7 @@ fn planned_file(
     identities: bool,
 ) -> Result<File, GfError> {
     if let Some(path) = sources.get(name) {
-        return File::open(path).map_err(storage_err);
+        return open_uuid_file(path);
     }
     if let Some(snapshot) = snapshot {
         for run in &snapshot.runs {
@@ -1940,7 +1949,7 @@ fn planned_file(
         }
         return Err(storage_err("planned compaction input is not retained"));
     }
-    File::open(root.join(name)).map_err(storage_err)
+    open_uuid_file(&root.join(name))
 }
 
 struct VerifiedBlockReader {
@@ -2028,7 +2037,7 @@ fn merge_identity_handles(
             heap.push(Reverse((record, index)));
         }
     }
-    let mut out = File::create(output).map_err(storage_err)?;
+    let mut out = create_uuid_file(output)?;
     let mut block = Vec::with_capacity(BULK_IO_BYTES);
     while let Some(Reverse((mut record, index))) = heap.pop() {
         let key: [u8; 16] = record[..16].try_into().expect("fixed");
@@ -2058,7 +2067,7 @@ fn merge_identity_handles(
     if !block.is_empty() {
         out.write_all(&block).map_err(storage_err)?;
     }
-    out.sync_all().map_err(storage_err)?;
+    sync_uuid_file(&out)?;
     for reader in readers {
         metrics.validation_scan_bytes = metrics
             .validation_scan_bytes
@@ -2085,7 +2094,7 @@ fn merge_surrogate_handles(
             heap.push(Reverse((record, index)));
         }
     }
-    let mut out = File::create(output).map_err(storage_err)?;
+    let mut out = create_uuid_file(output)?;
     let mut block = Vec::with_capacity(BULK_IO_BYTES);
     while let Some(Reverse((mut record, index))) = heap.pop() {
         let key: [u8; 8] = record[..8].try_into().expect("fixed");
@@ -2115,7 +2124,7 @@ fn merge_surrogate_handles(
     if !block.is_empty() {
         out.write_all(&block).map_err(storage_err)?;
     }
-    out.sync_all().map_err(storage_err)?;
+    sync_uuid_file(&out)?;
     for reader in readers {
         metrics.validation_scan_bytes = metrics
             .validation_scan_bytes
@@ -2538,7 +2547,7 @@ fn reject_surrogate_collisions(
 
 fn write_identity_records(path: &Path, records: &[(Uuid, u8, u64)]) -> Result<(), GfError> {
     let mut bytes = Vec::with_capacity(BULK_IO_BYTES);
-    let mut file = File::create(path).map_err(storage_err)?;
+    let mut file = create_uuid_file(path)?;
     for (uuid, kind, surrogate) in records {
         if bytes.len() + 32 > BULK_IO_BYTES {
             file.write_all(&bytes).map_err(storage_err)?;
@@ -2552,12 +2561,12 @@ fn write_identity_records(path: &Path, records: &[(Uuid, u8, u64)]) -> Result<()
     if !bytes.is_empty() {
         file.write_all(&bytes).map_err(storage_err)?;
     }
-    file.sync_all().map_err(storage_err)
+    sync_uuid_file(&file)
 }
 
 fn write_surrogate_records(path: &Path, records: &[(u64, Uuid)]) -> Result<(), GfError> {
     let mut bytes = Vec::with_capacity(BULK_IO_BYTES);
-    let mut file = File::create(path).map_err(storage_err)?;
+    let mut file = create_uuid_file(path)?;
     for (surrogate, uuid) in records {
         if bytes.len() + 24 > BULK_IO_BYTES {
             file.write_all(&bytes).map_err(storage_err)?;
@@ -2569,7 +2578,7 @@ fn write_surrogate_records(path: &Path, records: &[(u64, Uuid)]) -> Result<(), G
     if !bytes.is_empty() {
         file.write_all(&bytes).map_err(storage_err)?;
     }
-    file.sync_all().map_err(storage_err)
+    sync_uuid_file(&file)
 }
 
 #[cfg(test)]

@@ -6816,6 +6816,29 @@ mod tests {
             );
         }
 
+        fn assert_linear_first_differences_with_fixed_overhead(
+            label: &str,
+            n: u64,
+            twice: u64,
+            four: u64,
+            fixed_overhead: u64,
+        ) {
+            let first = twice
+                .checked_sub(n)
+                .unwrap_or_else(|| panic!("{label}: 2N bytes regressed below N"));
+            let second = four
+                .checked_sub(twice)
+                .unwrap_or_else(|| panic!("{label}: 4N bytes regressed below 2N"));
+            assert!(first > 0, "{label}: N to 2N added no physical bytes");
+            let expected = first.saturating_mul(2);
+            assert!(
+                second.abs_diff(expected) <= fixed_overhead,
+                "{label}: physical-work first differences are not linear within fixed format \
+                 overhead: N={n}, 2N={twice}, 4N={four}, first={first}, second={second}, \
+                 expected={expected} +/- {fixed_overhead}"
+            );
+        }
+
         fn retained_bytes(path: &Path) -> u64 {
             fs::read_dir(path)
                 .unwrap()
@@ -6831,7 +6854,7 @@ mod tests {
                 .sum()
         }
 
-        fn run(batches: u64) -> (u64, u64, u64, u64, TopologyWriteWork) {
+        fn run(batches: u64) -> (u64, u64, u64, u64, u64, u64, TopologyWriteWork) {
             let dir = TempDir::new().unwrap();
             crate::io_stats::reset();
             let mut aggregate = TopologyWriteWork::default();
@@ -6882,6 +6905,12 @@ mod tests {
                 aggregate.uuid_peak_buffered_bytes = aggregate
                     .uuid_peak_buffered_bytes
                     .max(work.uuid_peak_buffered_bytes);
+                aggregate.uuid_validation_blocks = aggregate
+                    .uuid_validation_blocks
+                    .saturating_add(work.uuid_validation_blocks);
+                aggregate.uuid_validation_bytes = aggregate
+                    .uuid_validation_bytes
+                    .saturating_add(work.uuid_validation_bytes);
                 aggregate.uuid_validation_random_seeks += work.uuid_validation_random_seeks;
             }
             let io = crate::io_stats::snapshot();
@@ -6890,13 +6919,31 @@ mod tests {
                 aggregate.output_bytes,
                 aggregate.uuid_physical_bytes_written,
                 io.node_full_reads + io.node_filtered_reads,
+                io.uuid_files_opened,
+                io.uuid_files_synced,
                 aggregate,
             )
         }
 
-        let (n_bytes, n_topology_writes, n_uuid_writes, n_reads, n) = run(8);
-        let (twice_bytes, twice_topology_writes, twice_uuid_writes, twice_reads, twice) = run(16);
-        let (four_bytes, four_topology_writes, four_uuid_writes, four_reads, four) = run(32);
+        let (n_bytes, n_topology_writes, n_uuid_writes, n_reads, n_opens, n_syncs, n) = run(8);
+        let (
+            twice_bytes,
+            twice_topology_writes,
+            twice_uuid_writes,
+            twice_reads,
+            twice_opens,
+            twice_syncs,
+            twice,
+        ) = run(16);
+        let (
+            four_bytes,
+            four_topology_writes,
+            four_uuid_writes,
+            four_reads,
+            four_opens,
+            four_syncs,
+            four,
+        ) = run(32);
         assert_linear_first_differences("retained footprint", n_bytes, twice_bytes, four_bytes);
         assert_linear_first_differences(
             "topology staged output",
@@ -6904,22 +6951,51 @@ mod tests {
             twice_topology_writes,
             four_topology_writes,
         );
-        // The authenticated UUID LSM rewrites binary-carry merge outputs, so
-        // its cumulative physical writes include disclosed external-merge
-        // amplification rather than pretending to be retained topology bytes.
-        // Each doubling must remain decisively below quadratic (4x) growth.
+        // This fixture's binary-carry merge levels add run-header, fence, and
+        // manifest writes to an otherwise linear adjacent doubling interval.
+        // Cap that disclosed amplification at a fixed 4 KiB for all size
+        // points: a percentage or multiplicative bound would widen with input
+        // and could conceal increasing super-linear index work.
+        const UUID_INDEX_FIXED_OVERHEAD_BYTES: u64 = 4 * 1024;
         assert!(n_uuid_writes > 0);
-        assert!(
-            twice_uuid_writes < n_uuid_writes.saturating_mul(3),
-            "UUID external-merge amplification exceeded the 2N bound: N={n_uuid_writes}, \
-             2N={twice_uuid_writes}"
-        );
-        assert!(
-            four_uuid_writes < twice_uuid_writes.saturating_mul(3),
-            "UUID external-merge amplification exceeded the 4N bound: 2N={twice_uuid_writes}, \
-             4N={four_uuid_writes}"
+        assert_linear_first_differences_with_fixed_overhead(
+            "UUID index physical writes",
+            n_uuid_writes,
+            twice_uuid_writes,
+            four_uuid_writes,
+            UUID_INDEX_FIXED_OVERHEAD_BYTES,
         );
         assert_eq!((n_reads, twice_reads, four_reads), (0, 0, 0));
+        assert!(n.uuid_validation_blocks > 0 && n.uuid_validation_bytes > 0);
+        assert!(n_opens > 0 && n_syncs > 0);
+        assert_linear_first_differences_with_fixed_overhead(
+            "UUID validation blocks",
+            n.uuid_validation_blocks,
+            twice.uuid_validation_blocks,
+            four.uuid_validation_blocks,
+            0,
+        );
+        assert_linear_first_differences_with_fixed_overhead(
+            "UUID validation bytes",
+            n.uuid_validation_bytes,
+            twice.uuid_validation_bytes,
+            four.uuid_validation_bytes,
+            4 * 1024,
+        );
+        assert_linear_first_differences_with_fixed_overhead(
+            "UUID file opens",
+            n_opens,
+            twice_opens,
+            four_opens,
+            32,
+        );
+        assert_linear_first_differences_with_fixed_overhead(
+            "UUID file syncs",
+            n_syncs,
+            twice_syncs,
+            four_syncs,
+            0,
+        );
         assert_eq!(
             (
                 n.prior_rows_decoded,

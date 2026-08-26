@@ -139,6 +139,8 @@ static TOPOLOGY_REWRITE_EXISTING_ROWS: AtomicU64 = AtomicU64::new(0);
 static TOPOLOGY_REWRITE_NEW_ROWS: AtomicU64 = AtomicU64::new(0);
 static TOPOLOGY_REWRITE_OUTPUT_ROWS: AtomicU64 = AtomicU64::new(0);
 static TOPOLOGY_REWRITE_PEAK_BATCH_ROWS: AtomicU64 = AtomicU64::new(0);
+static UUID_FILES_OPENED: AtomicU64 = AtomicU64::new(0);
+static UUID_FILES_SYNCED: AtomicU64 = AtomicU64::new(0);
 
 /// A point-in-time copy of the process-global I/O counters. Difference two
 /// snapshots — or [`reset`] then [`snapshot`] — to attribute work to a region.
@@ -197,6 +199,10 @@ pub struct IoSnapshot {
     pub topology_rewrite_output_rows: u64,
     /// Largest decoded or newly supplied batch held by a topology rewrite.
     pub topology_rewrite_peak_batch_rows: u64,
+    /// Successful physical file opens/creates on the UUID publication path.
+    pub uuid_files_opened: u64,
+    /// Successful physical file durability syncs on the UUID publication path.
+    pub uuid_files_synced: u64,
 }
 
 /// Capture the current process-global counters.
@@ -227,6 +233,8 @@ pub fn snapshot() -> IoSnapshot {
         topology_rewrite_new_rows: TOPOLOGY_REWRITE_NEW_ROWS.load(Ordering::Relaxed),
         topology_rewrite_output_rows: TOPOLOGY_REWRITE_OUTPUT_ROWS.load(Ordering::Relaxed),
         topology_rewrite_peak_batch_rows: TOPOLOGY_REWRITE_PEAK_BATCH_ROWS.load(Ordering::Relaxed),
+        uuid_files_opened: UUID_FILES_OPENED.load(Ordering::Relaxed),
+        uuid_files_synced: UUID_FILES_SYNCED.load(Ordering::Relaxed),
     }
 }
 
@@ -257,9 +265,19 @@ pub fn reset() {
         &TOPOLOGY_REWRITE_NEW_ROWS,
         &TOPOLOGY_REWRITE_OUTPUT_ROWS,
         &TOPOLOGY_REWRITE_PEAK_BATCH_ROWS,
+        &UUID_FILES_OPENED,
+        &UUID_FILES_SYNCED,
     ] {
         c.store(0, Ordering::Relaxed);
     }
+}
+
+pub(crate) fn record_uuid_file_open() {
+    UUID_FILES_OPENED.fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn record_uuid_file_sync() {
+    UUID_FILES_SYNCED.fetch_add(1, Ordering::Relaxed);
 }
 
 pub(crate) fn record_edge_full_read(rows: u64) {

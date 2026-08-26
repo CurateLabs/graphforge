@@ -147,8 +147,17 @@ impl RewriteBatch {
             .ok_or_else(|| GfError::Storage("staged control record has no parent".into()))?;
         std::fs::create_dir_all(parent).map_err(|error| io_err(&error))?;
         let mut temp = NamedTempFile::new_in(parent).map_err(|error| io_err(&error))?;
+        let uuid_participant = final_path
+            .components()
+            .any(|component| component.as_os_str() == "uuid-membership");
+        if uuid_participant {
+            crate::io_stats::record_uuid_file_open();
+        }
         std::io::Write::write_all(&mut temp, bytes).map_err(|error| io_err(&error))?;
         temp.as_file().sync_all().map_err(|error| io_err(&error))?;
+        if uuid_participant {
+            crate::io_stats::record_uuid_file_sync();
+        }
         self.staged.push((temp, final_path.to_path_buf()));
         Ok(())
     }
@@ -161,6 +170,13 @@ impl RewriteBatch {
         std::fs::create_dir_all(parent).map_err(|error| io_err(&error))?;
         let mut input = std::fs::File::open(source).map_err(|error| io_err(&error))?;
         let mut temp = NamedTempFile::new_in(parent).map_err(|error| io_err(&error))?;
+        let uuid_participant = final_path
+            .components()
+            .any(|component| component.as_os_str() == "uuid-membership");
+        if uuid_participant {
+            crate::io_stats::record_uuid_file_open();
+            crate::io_stats::record_uuid_file_open();
+        }
         let mut block = vec![0_u8; 1024 * 1024];
         loop {
             let count =
@@ -172,6 +188,9 @@ impl RewriteBatch {
                 .map_err(|error| io_err(&error))?;
         }
         temp.as_file().sync_all().map_err(|error| io_err(&error))?;
+        if uuid_participant {
+            crate::io_stats::record_uuid_file_sync();
+        }
         self.staged.push((temp, final_path.to_path_buf()));
         Ok(())
     }

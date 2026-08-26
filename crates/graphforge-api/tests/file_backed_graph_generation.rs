@@ -163,21 +163,15 @@ fn sharded_graph_uses_ordinary_reopen_query_and_portable_round_trip() {
         .iter()
         .filter(|(path, digest)| properties_after.get(*path) == Some(*digest))
         .count();
-    let changed_properties = properties_before
-        .iter()
-        .filter(|(path, digest)| {
-            properties_after
-                .get(*path)
-                .is_some_and(|after| after != *digest)
-        })
-        .count();
     assert_eq!(
-        changed_properties, 1,
-        "only the affected shard is rewritten"
+        properties_after.len(),
+        properties_before.len() + 1,
+        "the property update appends one authoritative immutable fragment"
     );
     assert_eq!(
-        unchanged_properties, 1,
-        "the unaffected shard remains byte-identical"
+        unchanged_properties,
+        properties_before.len(),
+        "property updates must not rewrite any prior immutable fragment"
     );
 
     reopened.rebuild_adjacency(None).unwrap();
