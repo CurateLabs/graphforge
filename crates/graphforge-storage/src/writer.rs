@@ -6415,6 +6415,87 @@ mod tests {
     }
 
     #[test]
+    fn label_only_topology_commits_keep_endpoint_authority_current() {
+        let dir = TempDir::new().unwrap();
+        let left = new_v7();
+        let right = new_v7();
+        let mut seed = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
+        seed.create_node(left, TypeId(0)).unwrap();
+        seed.create_node(right, TypeId(0)).unwrap();
+        seed.flush().unwrap();
+
+        let mut additions = HashMap::new();
+        additions.insert(to_bytes(&left), HashSet::from([7]));
+        let mut add_labels =
+            GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS + 1).unwrap();
+        let mut staged = RewriteBatch::new();
+        crate::stage_mutate_node_labels(
+            &mut staged,
+            dir.path(),
+            &additions,
+            &HashMap::<[u8; 16], HashSet<u32>>::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            add_labels
+                .commit_topology_aware_with_uuid_index(staged, Vec::new(), Vec::new())
+                .unwrap(),
+            Some(2)
+        );
+        assert_eq!(
+            add_labels
+                .topology_write_work()
+                .uuid_prior_topology_rows_decoded,
+            0
+        );
+        assert!(crate::uuid_membership_index_is_fresh(dir.path()).unwrap());
+        let mut after_add =
+            GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS + 2).unwrap();
+        assert_eq!(
+            after_add
+                .register_existing_endpoints(&[left, right])
+                .unwrap()
+                .found,
+            2
+        );
+
+        let mut removals = HashMap::new();
+        removals.insert(to_bytes(&left), HashSet::from([7]));
+        let mut remove_labels =
+            GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS + 3).unwrap();
+        let mut staged = RewriteBatch::new();
+        crate::stage_mutate_node_labels(
+            &mut staged,
+            dir.path(),
+            &HashMap::<[u8; 16], HashSet<u32>>::new(),
+            &removals,
+        )
+        .unwrap();
+        assert_eq!(
+            remove_labels
+                .commit_topology_aware_with_uuid_index(staged, Vec::new(), Vec::new())
+                .unwrap(),
+            Some(3)
+        );
+        assert_eq!(
+            remove_labels
+                .topology_write_work()
+                .uuid_prior_topology_rows_decoded,
+            0
+        );
+        assert!(crate::uuid_membership_index_is_fresh(dir.path()).unwrap());
+        let mut after_remove =
+            GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS + 4).unwrap();
+        assert_eq!(
+            after_remove
+                .register_existing_endpoints(&[left, right])
+                .unwrap()
+                .found,
+            2
+        );
+    }
+
+    #[test]
     fn edge_appends_create_immutable_shards_without_prior_row_replay() {
         let dir = TempDir::new().unwrap();
         let left = new_v7();

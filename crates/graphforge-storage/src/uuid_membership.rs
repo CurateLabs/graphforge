@@ -1172,17 +1172,6 @@ pub(crate) fn commit_uuid_topology_rewrite(
         return Ok(CommittedUuidTopologyRewrite::NoTopologyChange);
     }
     ensure_uuid_membership_migrated(project_dir)?;
-    if delta_is_empty {
-        return crate::generation::commit_topology_aware(staged, project_dir).map(|generation| {
-            generation.map_or(
-                CommittedUuidTopologyRewrite::NoTopologyChange,
-                |generation| CommittedUuidTopologyRewrite::Committed {
-                    generation,
-                    metrics: UuidIndexAppendMetrics::default(),
-                },
-            )
-        });
-    }
     let prepared = std::rc::Rc::new(std::cell::RefCell::new(None));
     let prepared_from_callback = std::rc::Rc::clone(&prepared);
     let generations = std::rc::Rc::new(std::cell::Cell::new(None));
@@ -1196,6 +1185,14 @@ pub(crate) fn commit_uuid_topology_rewrite(
             }
             context.project.revalidate_named().map_err(storage_err)?;
             generations_from_callback.set(Some((context.prior, context.next)));
+            if context.next.topology == context.prior.topology {
+                if !delta_is_empty {
+                    return Err(storage_err(
+                        "UUID identity delta did not stage a topology transition",
+                    ));
+                }
+                return Ok(None);
+            }
             let orphan_gc = collect_uuid_orphans_locked(context.project, DEFAULT_ORPHAN_GC_LIMIT)?;
             if context.prior.topology != 0 && !uuid_membership_index_present(context.project_root) {
                 return Err(storage_err(
@@ -3990,7 +3987,7 @@ mod tests {
         assert_eq!(status.code(), Some(crate::project_failpoint::exit_code()));
 
         assert_eq!(crate::read_topology_generation(dir.path()).unwrap(), 0);
-        assert_eq!(crate::read_topology_generation(dir.path()).unwrap(), 0);
+        assert_eq!(crate::read_search_generation(dir.path()).unwrap(), 0);
         let installed_digest = receipt_manifest_digest(dir.path());
         assert_ne!(installed_digest, stale_digest);
         assert!(!dir.path().join(".graphforge-rewrite-v1.json").exists());
