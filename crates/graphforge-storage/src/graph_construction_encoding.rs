@@ -1278,6 +1278,7 @@ fn edge_batch(
     .map_err(storage)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn property_batch(
     input: &RecordBatch,
     uuid_name: &str,
@@ -1626,7 +1627,9 @@ fn authenticate_file(path: &str, file: &mut File) -> Result<ConstructionEncodedA
     })
 }
 
-fn read_inventory(root: &StableDirectory) -> Result<Option<GraphConstructionEncoding>, GfError> {
+pub(crate) fn read_inventory(
+    root: &StableDirectory,
+) -> Result<Option<GraphConstructionEncoding>, GfError> {
     let mut file = match root.open_child_file(OsStr::new(INVENTORY)) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),

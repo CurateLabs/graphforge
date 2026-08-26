@@ -54,6 +54,34 @@ const NODE_DETAIL_WIDTH: usize = 272;
 const EDGE_DETAIL_WIDTH: usize = 304;
 const BASE_IDENTITY_WIDTH: usize = 32;
 
+const fn durable_lifecycle_mode() -> crate::filesystem_admission::ProjectLifecycleMode {
+    crate::filesystem_admission::ProjectLifecycleMode::Durable
+}
+
+fn resume_parent_topology_generation(
+    project_dir: &Path,
+    operation_uuid: Uuid,
+) -> Result<u64, GfError> {
+    let project = StableDirectory::open(project_dir).map_err(storage)?;
+    let private = project
+        .open_child_directory(OsStr::new(PRIVATE_ROOT))
+        .map_err(storage)?;
+    let operation = private
+        .open_child_directory(OsStr::new(&operation_uuid.simple().to_string()))
+        .map_err(storage)?;
+    let mut checkpoint_file = operation
+        .open_child_file(OsStr::new(CHECKPOINT))
+        .map_err(storage)?;
+    let checkpoint: Checkpoint = decode_bounded(&mut checkpoint_file)?;
+    if checkpoint.operation_uuid != operation_uuid
+        || !checkpoint.project_identity.matches(project.identity())
+        || !checkpoint.session_identity.matches(operation.identity())
+    {
+        return Err(storage("construction resume identity changed"));
+    }
+    Ok(checkpoint.parent_topology_generation)
+}
+
 /// Storage-normalized node input. API validation resolves nullable/generated
 /// identities before this boundary; trailing columns are normalized properties.
 pub static CONSTRUCTION_NODE_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
@@ -535,6 +563,8 @@ struct Checkpoint {
     parent_generation_uuid: Uuid,
     parent_generation_manifest_sha256: String,
     ontology_mode: graphforge_core::OntologyMode,
+    #[serde(default = "durable_lifecycle_mode")]
+    lifecycle_mode: crate::filesystem_admission::ProjectLifecycleMode,
     semantic_authority_sha256: Option<String>,
     /// One authority-bound timestamp used by every catalog/topology row produced
     /// by this operation. Reopen never consults the wall clock again.
@@ -848,6 +878,7 @@ impl GraphConstructionSession {
     /// Install the authenticated canonical inventory into the project CAS and
     /// publish exactly one project generation from the session's pinned parent.
     /// The CAS lease remains held through the sole `CURRENT` replacement.
+    #[allow(clippy::too_many_lines)]
     pub fn publish_canonical(
         &mut self,
         encoding: &GraphConstructionEncoding,
@@ -900,7 +931,7 @@ impl GraphConstructionSession {
 
         let admission = crate::filesystem_admission::admit_project_lifecycle(
             &self.project_path,
-            crate::filesystem_admission::ProjectLifecycleMode::Durable,
+            self.checkpoint.lifecycle_mode,
             crate::filesystem_admission::ProjectRootRequirement::Existing,
         )?;
         admission.revalidate_identity()?;
@@ -1059,13 +1090,105 @@ impl GraphConstructionSession {
                 "strict or advisory construction requires pinned semantic authority",
             ));
         }
+        Self::open_with_mode_and_lifecycle(
+            project_dir,
+            operation_uuid,
+            parent_topology_generation,
+            ontology_mode,
+            budgets,
+            crate::filesystem_admission::ProjectLifecycleMode::Durable,
+        )
+    }
+
+    /// Open an exploratory construction under the facade's admitted lifecycle.
+    pub fn open_with_mode_and_lifecycle(
+        project_dir: &Path,
+        operation_uuid: Uuid,
+        parent_topology_generation: u64,
+        ontology_mode: graphforge_core::OntologyMode,
+        budgets: GraphConstructionBudgets,
+        lifecycle_mode: crate::filesystem_admission::ProjectLifecycleMode,
+    ) -> Result<Self, GfError> {
+        if ontology_mode != graphforge_core::OntologyMode::Exploratory {
+            return Err(storage(
+                "strict or advisory construction requires pinned semantic authority",
+            ));
+        }
+        Self::open_with_mode_and_lifecycle_from_graph(
+            project_dir,
+            project_dir,
+            operation_uuid,
+            parent_topology_generation,
+            ontology_mode,
+            budgets,
+            lifecycle_mode,
+        )
+    }
+
+    /// Open using a separately materialized authenticated graph workspace.
+    pub fn open_with_mode_and_lifecycle_from_graph(
+        project_dir: &Path,
+        graph_source_dir: &Path,
+        operation_uuid: Uuid,
+        parent_topology_generation: u64,
+        ontology_mode: graphforge_core::OntologyMode,
+        budgets: GraphConstructionBudgets,
+        lifecycle_mode: crate::filesystem_admission::ProjectLifecycleMode,
+    ) -> Result<Self, GfError> {
+        if ontology_mode != graphforge_core::OntologyMode::Exploratory {
+            return Err(storage(
+                "strict or advisory construction requires pinned semantic authority",
+            ));
+        }
         Self::open_internal(
             project_dir,
+            graph_source_dir,
             operation_uuid,
             parent_topology_generation,
             ontology_mode,
             None,
             budgets,
+            lifecycle_mode,
+        )
+    }
+
+    /// Resume an exploratory session using its authenticated pinned parent.
+    pub fn resume_with_mode_and_lifecycle(
+        project_dir: &Path,
+        operation_uuid: Uuid,
+        ontology_mode: graphforge_core::OntologyMode,
+        budgets: GraphConstructionBudgets,
+        lifecycle_mode: crate::filesystem_admission::ProjectLifecycleMode,
+    ) -> Result<Self, GfError> {
+        Self::resume_with_mode_and_lifecycle_from_graph(
+            project_dir,
+            project_dir,
+            operation_uuid,
+            ontology_mode,
+            budgets,
+            lifecycle_mode,
+        )
+    }
+
+    /// Resume using a separately materialized authenticated graph workspace.
+    pub fn resume_with_mode_and_lifecycle_from_graph(
+        project_dir: &Path,
+        graph_source_dir: &Path,
+        operation_uuid: Uuid,
+        ontology_mode: graphforge_core::OntologyMode,
+        budgets: GraphConstructionBudgets,
+        lifecycle_mode: crate::filesystem_admission::ProjectLifecycleMode,
+    ) -> Result<Self, GfError> {
+        let parent_topology_generation =
+            resume_parent_topology_generation(project_dir, operation_uuid)?;
+        Self::open_with_mode_and_lifecycle_from_graph(
+            project_dir,
+            graph_source_dir,
+            operation_uuid,
+            parent_topology_generation,
+            ontology_mode,
+            budgets,
+            lifecycle_mode,
         )
     }
 
@@ -1078,24 +1201,126 @@ impl GraphConstructionSession {
         budgets: GraphConstructionBudgets,
     ) -> Result<Self, GfError> {
         authority.validate()?;
-        Self::open_internal(
+        Self::open_with_semantic_authority_and_lifecycle(
             project_dir,
             operation_uuid,
             parent_topology_generation,
             authority.mode(),
-            Some(authority),
             budgets,
+            authority,
+            crate::filesystem_admission::ProjectLifecycleMode::Durable,
         )
     }
 
-    #[allow(clippy::too_many_lines)]
+    /// Open a semantically bound construction under the admitted lifecycle.
+    pub fn open_with_semantic_authority_and_lifecycle(
+        project_dir: &Path,
+        operation_uuid: Uuid,
+        parent_topology_generation: u64,
+        ontology_mode: graphforge_core::OntologyMode,
+        budgets: GraphConstructionBudgets,
+        authority: ConstructionSemanticAuthority,
+        lifecycle_mode: crate::filesystem_admission::ProjectLifecycleMode,
+    ) -> Result<Self, GfError> {
+        authority.validate()?;
+        if authority.mode() != ontology_mode {
+            return Err(storage("construction semantic authority mode changed"));
+        }
+        Self::open_with_semantic_authority_and_lifecycle_from_graph(
+            project_dir,
+            project_dir,
+            operation_uuid,
+            parent_topology_generation,
+            ontology_mode,
+            budgets,
+            authority,
+            lifecycle_mode,
+        )
+    }
+
+    /// Open a semantically bound session from a materialized graph workspace.
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_with_semantic_authority_and_lifecycle_from_graph(
+        project_dir: &Path,
+        graph_source_dir: &Path,
+        operation_uuid: Uuid,
+        parent_topology_generation: u64,
+        ontology_mode: graphforge_core::OntologyMode,
+        budgets: GraphConstructionBudgets,
+        authority: ConstructionSemanticAuthority,
+        lifecycle_mode: crate::filesystem_admission::ProjectLifecycleMode,
+    ) -> Result<Self, GfError> {
+        authority.validate()?;
+        if authority.mode() != ontology_mode {
+            return Err(storage("construction semantic authority mode changed"));
+        }
+        Self::open_internal(
+            project_dir,
+            graph_source_dir,
+            operation_uuid,
+            parent_topology_generation,
+            ontology_mode,
+            Some(authority),
+            budgets,
+            lifecycle_mode,
+        )
+    }
+
+    /// Resume a semantically bound session using its authenticated pinned parent.
+    pub fn resume_with_semantic_authority_and_lifecycle(
+        project_dir: &Path,
+        operation_uuid: Uuid,
+        ontology_mode: graphforge_core::OntologyMode,
+        budgets: GraphConstructionBudgets,
+        authority: ConstructionSemanticAuthority,
+        lifecycle_mode: crate::filesystem_admission::ProjectLifecycleMode,
+    ) -> Result<Self, GfError> {
+        Self::resume_with_semantic_authority_and_lifecycle_from_graph(
+            project_dir,
+            project_dir,
+            operation_uuid,
+            ontology_mode,
+            budgets,
+            authority,
+            lifecycle_mode,
+        )
+    }
+
+    /// Resume a semantically bound session from a materialized graph workspace.
+    #[allow(clippy::too_many_arguments)]
+    pub fn resume_with_semantic_authority_and_lifecycle_from_graph(
+        project_dir: &Path,
+        graph_source_dir: &Path,
+        operation_uuid: Uuid,
+        ontology_mode: graphforge_core::OntologyMode,
+        budgets: GraphConstructionBudgets,
+        authority: ConstructionSemanticAuthority,
+        lifecycle_mode: crate::filesystem_admission::ProjectLifecycleMode,
+    ) -> Result<Self, GfError> {
+        let parent_topology_generation =
+            resume_parent_topology_generation(project_dir, operation_uuid)?;
+        Self::open_with_semantic_authority_and_lifecycle_from_graph(
+            project_dir,
+            graph_source_dir,
+            operation_uuid,
+            parent_topology_generation,
+            ontology_mode,
+            budgets,
+            authority,
+            lifecycle_mode,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     fn open_internal(
         project_dir: &Path,
+        graph_source_dir: &Path,
         operation_uuid: Uuid,
         parent_topology_generation: u64,
         ontology_mode: graphforge_core::OntologyMode,
         semantic_authority: Option<ConstructionSemanticAuthority>,
         budgets: GraphConstructionBudgets,
+        lifecycle_mode: crate::filesystem_admission::ProjectLifecycleMode,
     ) -> Result<Self, GfError> {
         let budgets = budgets.validate()?;
         let semantic_authority_sha256 = semantic_authority
@@ -1182,7 +1407,7 @@ impl GraphConstructionSession {
                         | ConstructionPublicationState::Published
                 )
             )
-        }) && crate::read_topology_generation(project_dir)? != parent_topology_generation
+        }) && crate::read_topology_generation(graph_source_dir)? != parent_topology_generation
         {
             return Err(storage(
                 "requested parent generation is not current at session open",
@@ -1209,10 +1434,10 @@ impl GraphConstructionSession {
             (None, UuidConstructionSnapshotWork::default())
         } else {
             let mut snapshot = AuthenticatedUuidIndexSnapshot::open_at_generation(
-                project_dir,
+                graph_source_dir,
                 parent_topology_generation,
             )?;
-            let max_node_surrogate = crate::writer::read_surrogate_tails(project_dir)?
+            let max_node_surrogate = crate::writer::read_surrogate_tails(graph_source_dir)?
                 .ok_or_else(|| storage("nonempty parent lacks surrogate tails"))?
                 .0;
             let (authentication_bytes, authentication_blocks) = snapshot.take_authentication_work();
@@ -1236,7 +1461,8 @@ impl GraphConstructionSession {
                 ReadWork::default(),
             )
         } else {
-            load_parent_runtime_catalog(&project, parent_topology_generation, budgets)?
+            let graph_source = StableDirectory::open(graph_source_dir).map_err(storage)?;
+            load_parent_runtime_catalog(&graph_source, parent_topology_generation, budgets)?
         };
         let checkpoint = if let Some(checkpoint) = recovered_checkpoint {
             checkpoint
@@ -1259,6 +1485,7 @@ impl GraphConstructionSession {
                 parent_generation_uuid,
                 parent_generation_manifest_sha256: parent_generation_manifest_sha256.clone(),
                 ontology_mode,
+                lifecycle_mode,
                 semantic_authority_sha256: semantic_authority_sha256.clone(),
                 session_now_micros: SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -1291,6 +1518,7 @@ impl GraphConstructionSession {
             session_identity,
             parent_topology_generation,
             ontology_mode,
+            lifecycle_mode,
             semantic_authority_sha256.as_deref(),
             budgets,
             parent_catalog_sha256.as_deref(),
@@ -1311,6 +1539,31 @@ impl GraphConstructionSession {
         session.recover_intent()?;
         session.revalidate_authority()?;
         Ok(session)
+    }
+
+    /// Reopen or create the canonical encoded inventory for a sealed session.
+    pub fn prepare_canonical_encoding(
+        &mut self,
+        generation: u64,
+    ) -> Result<GraphConstructionEncoding, GfError> {
+        self.revalidate_authority()?;
+        if self.checkpoint.state != GraphConstructionState::Sealed {
+            return Err(storage("only a sealed session can be prepared"));
+        }
+        if self.checkpoint.encoding_inventory_sha256.is_some() {
+            let encoded = self
+                .root
+                .open_child_directory(OsStr::new("encoded-v1"))
+                .map_err(storage)?;
+            let inventory = crate::graph_construction_encoding::read_inventory(&encoded)?
+                .ok_or_else(|| storage("encoded inventory is absent"))?;
+            if inventory.generation != generation {
+                return Err(storage("encoded inventory generation changed"));
+            }
+            return Ok(inventory);
+        }
+        let shape = self.shape_canonical_with_cancellation(|| false)?;
+        self.encode_canonical(&shape, generation)
     }
 
     #[cfg(test)]
@@ -5126,6 +5379,7 @@ fn validate_checkpoint(
     session: FileIdentity,
     generation: u64,
     ontology_mode: graphforge_core::OntologyMode,
+    lifecycle_mode: crate::filesystem_admission::ProjectLifecycleMode,
     semantic_authority_sha256: Option<&str>,
     budgets: GraphConstructionBudgets,
     parent_catalog_sha256: Option<&str>,
@@ -5146,6 +5400,7 @@ fn validate_checkpoint(
         )
         .is_err()
         || checkpoint.ontology_mode != ontology_mode
+        || checkpoint.lifecycle_mode != lifecycle_mode
         || checkpoint.semantic_authority_sha256.as_deref() != semantic_authority_sha256
         || checkpoint
             .semantic_authority_sha256
