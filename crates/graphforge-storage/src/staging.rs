@@ -130,7 +130,7 @@ pub(crate) struct PendingPropertyWindow {
     pub(crate) project_root: PathBuf,
     pub(crate) rows: BTreeMap<[u8; 16], crate::property_overlay::PropertySnapshotRow>,
     pub(crate) schema: SchemaRef,
-    pub(crate) authority_generation_uuid: Option<uuid::Uuid>,
+    pub(crate) authority_generation_uuid: Option<(uuid::Uuid, PathBuf)>,
 }
 
 impl RewriteBatch {
@@ -366,7 +366,7 @@ impl RewriteBatch {
         route: &str,
         rows: impl IntoIterator<Item = crate::property_overlay::PropertySnapshotRow>,
         schema: SchemaRef,
-        authority_generation_uuid: Option<uuid::Uuid>,
+        authority_generation_uuid: Option<(uuid::Uuid, PathBuf)>,
     ) -> Result<(), GfError> {
         let key = PropertyWindowKey {
             kind,
@@ -379,7 +379,7 @@ impl RewriteBatch {
                 project_root: project_root.to_path_buf(),
                 rows: BTreeMap::new(),
                 schema: Arc::clone(&schema),
-                authority_generation_uuid,
+                authority_generation_uuid: authority_generation_uuid.clone(),
             });
         if window.project_root != project_root {
             return Err(GfError::Storage("property window root conflicts".into()));
@@ -597,7 +597,7 @@ mod tests {
                 "Person",
                 vec![row.clone()],
                 Arc::clone(&schema),
-                Some(first),
+                Some((first, dir.path().to_path_buf())),
             )
             .unwrap();
         let error = staged
@@ -607,7 +607,7 @@ mod tests {
                 "Person",
                 vec![row],
                 schema,
-                Some(second),
+                Some((second, dir.path().to_path_buf())),
             )
             .unwrap_err();
         assert!(error.to_string().contains("generation authority conflicts"));

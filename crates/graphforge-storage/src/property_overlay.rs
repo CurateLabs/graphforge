@@ -288,6 +288,15 @@ impl AuthenticatedPropertyInventory {
             .map(crate::ResolvedProjectGeneration::generation_uuid)
     }
 
+    pub(crate) fn generation_authority(&self) -> Option<(uuid::Uuid, PathBuf)> {
+        self.generation_lease.as_ref().map(|generation| {
+            (
+                generation.generation_uuid(),
+                generation.container_root().to_path_buf(),
+            )
+        })
+    }
+
     /// Canonical property routes admitted into this immutable snapshot.
     pub fn routes(&self, kind: PropertyRouteKind) -> impl Iterator<Item = &str> {
         self.routes

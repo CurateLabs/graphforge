@@ -63,8 +63,8 @@ use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 
 use graphforge_core::uuid::{Uuid, to_bytes};
 use graphforge_core::{
-    GfError, OntologyMode, SpatialCoordinates, SpatialCrs, SpatialGeometryType, SpatialType,
-    SpatialValue, TypeId,
+    GfError, OntologyMode, ProjectErrorCode, SpatialCoordinates, SpatialCrs, SpatialGeometryType,
+    SpatialType, SpatialValue, TypeId,
 };
 use graphforge_ir::IrLiteral;
 
@@ -721,6 +721,8 @@ fn stream_replay_properties(
             )
         };
         let schema = replay_property_schema(
+            kind,
+            &stem,
             base_schema.as_ref(),
             operations
                 .iter()
@@ -892,6 +894,8 @@ fn open_replay_property_fragment(
         .route_schema(kind, route)
         .unwrap_or_else(|| Arc::new(Schema::new(vec![uuid_field(join_field)])));
     let logical_schema = replay_property_schema(
+        kind,
+        route,
         base_schema.as_ref(),
         operations
             .iter()
@@ -966,7 +970,6 @@ fn stream_replay_property_route(
     } else {
         &overlay.node_properties
     };
-    let _ = limits; // targeted lookup is bounded by the touched UUID set.
     let is_deleted = |uuid: &str| {
         if edge {
             overlay.edges.get(uuid).is_some_and(Option::is_none)
@@ -977,7 +980,7 @@ fn stream_replay_property_route(
     let mut target_names = operations
         .keys()
         .filter(|(_, operation_route, _)| operation_route == route)
-        .map(|(uuid, _, _)| uuid.clone())
+        .map(|(uuid, _, _)| uuid.as_str())
         .collect::<std::collections::BTreeSet<_>>();
     if edge {
         target_names.extend(
@@ -985,7 +988,7 @@ fn stream_replay_property_route(
                 .edges
                 .iter()
                 .filter(|(_, row)| row.is_none())
-                .map(|(uuid, _)| uuid.clone()),
+                .map(|(uuid, _)| uuid.as_str()),
         );
     } else {
         target_names.extend(
@@ -993,63 +996,102 @@ fn stream_replay_property_route(
                 .nodes
                 .iter()
                 .filter(|(_, row)| row.is_none())
-                .map(|(uuid, _)| uuid.clone()),
+                .map(|(uuid, _)| uuid.as_str()),
         );
     }
-    let targets = target_names
-        .iter()
-        .map(|uuid| {
-            uuid::Uuid::parse_str(uuid)
-                .map(uuid::Uuid::into_bytes)
-                .map_err(pq_err)
-        })
-        .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
-    let (mut baseline, _) =
-        crate::property_overlay::read_authenticated_property_snapshots_for_inventory(
-            inventory, kind, route, &targets,
-        )?;
-    let mut rows = Vec::with_capacity(target_names.len());
-    for entity_uuid in target_names {
-        let uuid = uuid::Uuid::parse_str(&entity_uuid)
-            .map_err(pq_err)?
-            .into_bytes();
-        if is_deleted(&entity_uuid) {
-            rows.push(crate::PropertySnapshotRow {
-                uuid,
-                tombstone: true,
-                values: BTreeMap::new(),
-            });
-            continue;
+    let touched_rows = u64::try_from(target_names.len()).unwrap_or(u64::MAX);
+    if touched_rows > limits.max_work_rows
+        || target_names.len() > limits.max_records_per_run
+        || limits.max_batch_rows == 0
+    {
+        return Err(pq_err(
+            "GF_RESOURCE_LIMIT: property replay touched UUID bound exceeded",
+        ));
+    }
+    let target_bytes = target_names.iter().fold(0_usize, |sum, uuid| {
+        sum.saturating_add(uuid.len()).saturating_add(16)
+    });
+    if target_bytes > limits.max_replay_memory_bytes {
+        return Err(pq_err(
+            "GF_RESOURCE_LIMIT: property replay target memory bound exceeded",
+        ));
+    }
+    let mut fragment = None;
+    let target_names = target_names.into_iter().collect::<Vec<_>>();
+    for names in target_names.chunks(limits.max_batch_rows) {
+        let targets = names
+            .iter()
+            .map(|uuid| {
+                uuid::Uuid::parse_str(uuid)
+                    .map(uuid::Uuid::into_bytes)
+                    .map_err(pq_err)
+            })
+            .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
+        let (mut baseline, _) =
+            crate::property_overlay::read_authenticated_property_snapshots_for_inventory(
+                inventory, kind, route, &targets,
+            )?;
+        let baseline_bytes = baseline.values().fold(0_usize, |sum, row| {
+            sum.saturating_add(
+                usize::try_from(crate::property_overlay::snapshot_charge(row))
+                    .unwrap_or(usize::MAX),
+            )
+        });
+        if target_bytes.saturating_add(baseline_bytes) > limits.max_replay_memory_bytes {
+            return Err(pq_err(
+                "GF_RESOURCE_LIMIT: property replay decoded memory bound exceeded",
+            ));
         }
-        let existed = baseline.contains_key(&uuid);
-        let mut values = baseline
-            .remove(&uuid)
-            .map(|row| row.values.into_iter().collect())
-            .unwrap_or_default();
-        apply_streamed_property_ops(&entity_uuid, route, operations, &mut values);
-        // A REMOVE against a UUID with no prior row remains a no-op.
-        if existed || !values.is_empty() {
-            rows.push(crate::PropertySnapshotRow {
-                uuid,
-                tombstone: false,
-                values: values.into_iter().collect(),
-            });
+        let mut rows = Vec::with_capacity(names.len());
+        for entity_uuid in names {
+            let uuid = uuid::Uuid::parse_str(entity_uuid)
+                .map_err(pq_err)?
+                .into_bytes();
+            if is_deleted(entity_uuid) {
+                rows.push(crate::PropertySnapshotRow {
+                    uuid,
+                    tombstone: true,
+                    values: BTreeMap::new(),
+                });
+                continue;
+            }
+            let existed = baseline.contains_key(&uuid);
+            let mut values = baseline
+                .remove(&uuid)
+                .map(|row| row.values.into_iter().collect())
+                .unwrap_or_default();
+            apply_streamed_property_ops(entity_uuid, route, operations, &mut values);
+            if existed || !values.is_empty() {
+                rows.push(crate::PropertySnapshotRow {
+                    uuid,
+                    tombstone: false,
+                    values: values.into_iter().collect(),
+                });
+            }
+        }
+        if !rows.is_empty() {
+            let output = fragment.get_or_insert(open_replay_property_fragment(
+                target, inventory, operations, kind, edge, route,
+            )?);
+            for row in rows {
+                write_replay_property_snapshot(
+                    &mut output.writer,
+                    &output.logical_schema,
+                    &output.physical_schema,
+                    row,
+                )?;
+            }
         }
     }
-    if rows.is_empty() {
+    if fragment.is_none() {
         return Ok(());
     }
-    let mut fragment =
-        open_replay_property_fragment(target, inventory, operations, kind, edge, route)?;
-    for row in rows {
-        write_replay_property_snapshot(
-            &mut fragment.writer,
-            &fragment.logical_schema,
-            &fragment.physical_schema,
-            row,
-        )?;
-    }
-    fragment.writer.close().map_err(pq_err)?;
+    fragment
+        .take()
+        .expect("property replay writer exists")
+        .writer
+        .close()
+        .map_err(pq_err)?;
     Ok(())
 }
 
@@ -1107,35 +1149,39 @@ fn apply_streamed_property_ops(
 }
 
 fn replay_property_schema<'a>(
+    kind: crate::PropertyRouteKind,
+    route: &str,
     base: &Schema,
     operations: impl Iterator<Item = (&'a (String, String, String), &'a Option<IrLiteral>)>,
 ) -> Result<Schema, GfError> {
-    let mut fields: Vec<Field> = base
-        .fields()
-        .iter()
-        .map(|field| field.as_ref().clone())
-        .collect();
+    let mut additions = BTreeMap::<String, ColType>::new();
     for ((_, _, key), value) in operations {
         let Some(value) = value else { continue };
         reject_map_property_value(key, value)?;
         let Some(value_type) = ColType::of(value) else {
             continue;
         };
-        if let Some(existing) = fields.iter().find(|field| field.name() == key) {
-            let existing_type = col_type_from_field(existing)
-                .ok_or_else(|| pq_err(format!("unsupported canonical property type for {key}")))?;
-            if existing_type != value_type
-                && !(existing_type == ColType::HetScalar && value_type.is_scalar())
-            {
-                return Err(pq_err(format!(
-                    "GF_UNSUPPORTED_PROJECT_FORMAT: property {key} changes canonical type"
-                )));
-            }
-        } else {
-            fields.push(Field::new(key, value_type.data_type(), true));
-        }
+        additions
+            .entry(key.clone())
+            .and_modify(|prior| {
+                if *prior != value_type && prior.is_scalar() && value_type.is_scalar() {
+                    *prior = ColType::HetScalar;
+                }
+            })
+            .or_insert(value_type);
     }
-    Ok(Schema::new(fields).with_metadata(base.metadata().clone()))
+    let inferred = Schema::new_with_metadata(
+        std::iter::once(base.field(0).clone())
+            .chain(
+                additions
+                    .into_iter()
+                    .map(|(name, column_type)| Field::new(name, column_type.data_type(), true)),
+            )
+            .collect::<Vec<_>>(),
+        base.metadata().clone(),
+    );
+    crate::property_overlay::merge_property_route_schemas(kind, route, [base, &inferred])
+        .map(|schema| schema.as_ref().clone())
 }
 
 fn col_type_from_data_type(data_type: &DataType) -> Option<ColType> {
@@ -4121,7 +4167,7 @@ fn stage_set_node_properties_from_inventory(
         stem,
         &rows,
         inventory.route_schema(crate::PropertyRouteKind::Node, stem),
-        inventory.generation_uuid(),
+        inventory.generation_authority(),
     )?;
     Ok(touched)
 }
@@ -4226,7 +4272,7 @@ fn stage_remove_node_properties_from_inventory(
         stem,
         &rows,
         inventory.route_schema(crate::PropertyRouteKind::Node, stem),
-        inventory.generation_uuid(),
+        inventory.generation_authority(),
     )?;
     Ok(touched)
 }
@@ -4311,7 +4357,7 @@ fn stage_set_edge_properties_from_inventory(
         rel_stem,
         &rows,
         inventory.route_schema(crate::PropertyRouteKind::Edge, rel_stem),
-        inventory.generation_uuid(),
+        inventory.generation_authority(),
     )?;
     Ok(touched)
 }
@@ -4399,7 +4445,7 @@ fn stage_remove_edge_properties_from_inventory(
         rel_stem,
         &rows,
         inventory.route_schema(crate::PropertyRouteKind::Edge, rel_stem),
-        inventory.generation_uuid(),
+        inventory.generation_authority(),
     )?;
     Ok(touched)
 }
@@ -4483,7 +4529,7 @@ fn stage_node_property_file(
     stem: &str,
     rows: &[PropRow],
     authority: Option<SchemaRef>,
-    authority_generation_uuid: Option<uuid::Uuid>,
+    authority_generation_uuid: Option<(uuid::Uuid, PathBuf)>,
 ) -> Result<(), GfError> {
     if rows.is_empty() {
         return Ok(());
@@ -4519,7 +4565,7 @@ fn stage_edge_property_file(
     stem: &str,
     rows: &[EdgePropRow],
     authority: Option<SchemaRef>,
-    authority_generation_uuid: Option<uuid::Uuid>,
+    authority_generation_uuid: Option<(uuid::Uuid, PathBuf)>,
 ) -> Result<(), GfError> {
     if rows.is_empty() {
         return Ok(());
@@ -4594,7 +4640,14 @@ fn complete_node_property_window(
     dir: &Path,
     route: &str,
     rows: Vec<PropRow>,
-) -> Result<(Vec<PropRow>, Option<SchemaRef>, Option<uuid::Uuid>), GfError> {
+) -> Result<
+    (
+        Vec<PropRow>,
+        Option<SchemaRef>,
+        Option<(uuid::Uuid, PathBuf)>,
+    ),
+    GfError,
+> {
     let rows = merge_node_property_window(rows);
     let targets = rows.iter().map(|row| row.node_uuid).collect();
     let inventory = crate::property_overlay::authenticated_property_inventory_for_route(
@@ -4636,7 +4689,7 @@ fn complete_node_property_window(
             })
             .collect(),
         inventory.route_schema(crate::PropertyRouteKind::Node, route),
-        inventory.generation_uuid(),
+        inventory.generation_authority(),
     ))
 }
 
@@ -4645,7 +4698,14 @@ fn complete_edge_property_window(
     dir: &Path,
     route: &str,
     rows: Vec<EdgePropRow>,
-) -> Result<(Vec<EdgePropRow>, Option<SchemaRef>, Option<uuid::Uuid>), GfError> {
+) -> Result<
+    (
+        Vec<EdgePropRow>,
+        Option<SchemaRef>,
+        Option<(uuid::Uuid, PathBuf)>,
+    ),
+    GfError,
+> {
     let rows = merge_edge_property_window(rows);
     let targets = rows.iter().map(|row| row.edge_uuid).collect();
     let inventory = crate::property_overlay::authenticated_property_inventory_for_route(
@@ -4687,7 +4747,7 @@ fn complete_edge_property_window(
             })
             .collect(),
         inventory.route_schema(crate::PropertyRouteKind::Edge, route),
-        inventory.generation_uuid(),
+        inventory.generation_authority(),
     ))
 }
 
@@ -4728,7 +4788,7 @@ pub(crate) fn stage_property_tombstones<S: std::hash::BuildHasher>(
         schema.as_ref(),
         vec![Arc::new(column)],
         PropertyFragmentStage::tombstone(),
-        inventory.generation_uuid(),
+        inventory.generation_authority(),
     )
 }
 
@@ -4760,7 +4820,7 @@ fn stage_property_fragment(
     input_schema: &Schema,
     cols: Vec<ArrayRef>,
     stage: PropertyFragmentStage,
-    authority_generation_uuid: Option<uuid::Uuid>,
+    authority_generation_uuid: Option<(uuid::Uuid, PathBuf)>,
 ) -> Result<(), GfError> {
     use crate::property_overlay::PROPERTY_TOMBSTONE_FIELD;
     if input_schema.fields().len() != cols.len() {
@@ -4904,6 +4964,19 @@ pub(crate) fn seal_property_windows(
             return Err(GfError::Storage(
                 "property window project root changed".into(),
             ));
+        }
+        if let Some((expected, container_root)) = &window.authority_generation_uuid {
+            let current = crate::resolve_project_generation(container_root)?;
+            if current.generation_uuid() != *expected {
+                return Err(GfError::Project {
+                    code: ProjectErrorCode::TransactionConflict,
+                    message: format!(
+                        "property mutation authority changed: expected={} current={}",
+                        expected,
+                        current.generation_uuid()
+                    ),
+                });
+            }
         }
         if enumerate_property_fragments(dir, key.kind, &key.route)?
             .iter()
