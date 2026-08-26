@@ -28,6 +28,30 @@
       "uuid_v8": "3cc432a3-1081-8554-811f-6eb272fead2c"
     },
     {
+      "id": "null-column-batch-independence",
+      "domain": "graphforge/arrow-result",
+      "canonical_version": 1,
+      "logical_variants": [
+        "two logical nulls in one NullArray batch",
+        "two logical nulls split across two NullArray batches"
+      ],
+      "source_cases": [
+        {
+          "kind": "table",
+          "fields": [{"name": "absent", "nullable": true, "type": "null"}],
+          "batches": [[[null], [null]]]
+        },
+        {
+          "kind": "table",
+          "fields": [{"name": "absent", "nullable": true, "type": "null"}],
+          "batches": [[[null]], [[null]]]
+        }
+      ],
+      "canonical_payload_hex": "47465431000000000000002047465331000000010000000000000006616273656e740101000000000000000000000000000000020000",
+      "fingerprint_preimage_hex": "474646500100176772617068666f7267652f6172726f772d726573756c7400000001000000000000003647465431000000000000002047465331000000010000000000000006616273656e740101000000000000000000000000000000020000",
+      "sha256": "0b3796eaa976e5092e1e4ac77495a5e8672177d1c65c3910919b9c6f342c9550"
+    },
+    {
       "id": "dictionary-and-chunk-independence",
       "domain": "graphforge/arrow-result",
       "canonical_version": 1,

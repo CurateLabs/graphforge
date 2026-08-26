@@ -12,8 +12,8 @@ use std::sync::Arc;
 use arrow::array::{
     Array, ArrayRef, BinaryArray, BooleanArray, FixedSizeBinaryArray, FixedSizeListArray,
     Float32Array, Float64Array, Int32Array, Int64Array, LargeBinaryArray, LargeListArray,
-    LargeStringArray, ListArray, ListBuilder, StringArray, StringBuilder, StructArray, UInt32Array,
-    UInt64Array,
+    LargeStringArray, ListArray, ListBuilder, NullArray, StringArray, StringBuilder, StructArray,
+    UInt32Array, UInt64Array,
 };
 use arrow::compute::{concat_batches, take};
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
@@ -933,6 +933,7 @@ fn encode_field(writer: &mut CanonicalWriter, field: &Field) -> Result<(), GfErr
 
 fn encode_type(writer: &mut CanonicalWriter, data_type: &DataType) -> Result<(), GfError> {
     match data_type {
+        DataType::Null => writer.u8(0x01),
         DataType::Boolean => writer.u8(0x02),
         DataType::Int32 => writer.u8(0x12),
         DataType::Int64 => writer.u8(0x13),
@@ -994,6 +995,14 @@ fn encode_value(
     row: usize,
     nullable: bool,
 ) -> Result<(), GfError> {
+    if data_type == &DataType::Null {
+        let _ = downcast::<NullArray>(array)?;
+        if !nullable {
+            return Err(validation("non-nullable graph field contains null"));
+        }
+        writer.u8(0).map_err(canonical_error)?;
+        return Ok(());
+    }
     if array.is_null(row) {
         if !nullable {
             return Err(validation("non-nullable graph field contains null"));
@@ -2128,6 +2137,7 @@ mod tests {
         );
 
         let supported = [
+            DataType::Null,
             DataType::Boolean,
             DataType::Int32,
             DataType::Int64,
@@ -2234,6 +2244,19 @@ mod tests {
         let mut writer = CanonicalWriter::new();
         assert_eq!(
             encode_present_value(&mut writer, &DataType::UInt64, &strings, 0)
+                .unwrap_err()
+                .code(),
+            "GF_VALIDATION"
+        );
+
+        let nulls: ArrayRef = Arc::new(NullArray::new(2));
+        let mut writer = CanonicalWriter::new();
+        encode_value(&mut writer, &DataType::Null, &nulls, 0, true).unwrap();
+        encode_value(&mut writer, &DataType::Null, &nulls, 1, true).unwrap();
+        assert_eq!(writer.finish(), vec![0, 0]);
+        let mut writer = CanonicalWriter::new();
+        assert_eq!(
+            encode_value(&mut writer, &DataType::Null, &nulls, 0, false)
                 .unwrap_err()
                 .code(),
             "GF_VALIDATION"
