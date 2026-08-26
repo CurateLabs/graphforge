@@ -2158,7 +2158,7 @@ fn spatial_field(
     ]))
 }
 
-fn heterogeneous_scalar_fields() -> arrow::datatypes::Fields {
+pub(crate) fn heterogeneous_scalar_fields() -> arrow::datatypes::Fields {
     arrow::datatypes::Fields::from(vec![
         Field::new("__het_tag", DataType::Int8, false),
         Field::new("__het_int", DataType::Int64, true),
@@ -2205,11 +2205,15 @@ fn build_property_columns_keyed<R: PropRowLike>(
     let mut order: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     let mut col_types: HashMap<String, ColType> = HashMap::new();
+    let mut explicit_nulls: HashSet<String> = HashSet::new();
     for row in rows {
         for (name, lit) in row.props() {
             reject_map_property_value(name, lit)?;
             if seen.insert(name.clone()) {
                 order.push(name.clone());
+            }
+            if matches!(lit, IrLiteral::Null) {
+                explicit_nulls.insert(name.clone());
             }
             // Only concrete literals contribute a type; `Null` contributes
             // none, so the first *non-null* value determines the column type.
@@ -2229,6 +2233,14 @@ fn build_property_columns_keyed<R: PropRowLike>(
                     })
                     .or_insert(t);
             }
+        }
+    }
+    for name in explicit_nulls {
+        match col_types.get(&name) {
+            None | Some(ColType::Int | ColType::Float | ColType::Bool | ColType::Str) => {
+                col_types.insert(name, ColType::HetScalar);
+            }
+            Some(_) => {}
         }
     }
 
@@ -2845,6 +2857,13 @@ fn build_heterogeneous_scalar_array<R: PropRowLike>(name: &str, rows: &[R]) -> A
                 bools.append_value(*value);
                 Some(3)
             }
+            Some(IrLiteral::Null) => {
+                ints.append_null();
+                floats.append_null();
+                strings.append_null();
+                bools.append_null();
+                Some(4)
+            }
             _ => {
                 ints.append_null();
                 floats.append_null();
@@ -3235,6 +3254,7 @@ fn decode_value(
                                 })?
                                 .value(r),
                         ),
+                        4 => IrLiteral::Null,
                         _ => {
                             return Err(GfError::Storage(format!(
                                 "unsupported heterogeneous property tag {tag}"
@@ -4197,7 +4217,18 @@ pub(crate) fn seal_property_windows(
         PROPERTY_OVERLAY_FORMAT_KEY, PROPERTY_ROUTE_KEY, PROPERTY_TOMBSTONE_FIELD,
         PropertyFragmentId, enumerate_property_fragments,
     };
-    for (key, window) in staged.take_property_windows() {
+    let windows = staged.take_property_windows();
+    let has_baseline = windows.keys().any(|key| {
+        enumerate_property_fragments(dir, key.kind, &key.route).is_ok_and(|rows| !rows.is_empty())
+    });
+    let inventory = has_baseline
+        .then(|| {
+            let (captured, _) = crate::capture_graph_files(dir)?;
+            crate::AuthenticatedPropertyInventory::from_entries_at_root(dir, captured.files)
+        })
+        .transpose()?;
+    let scratch = tempfile::tempdir().map_err(|error| io_err(&error))?;
+    for (key, window) in windows {
         if window.project_root != dir {
             return Err(GfError::Storage(
                 "property window project root changed".into(),
@@ -4211,7 +4242,29 @@ pub(crate) fn seal_property_windows(
                 "property fragment generation is not strictly monotonic".into(),
             ));
         }
-        let rows = window.rows.into_values().collect::<Vec<_>>();
+        let mut composed = BTreeMap::new();
+        if let Some(inventory) = inventory.as_ref() {
+            inventory.visit_route(
+                key.kind,
+                &key.route,
+                scratch.path(),
+                crate::PropertyOverlayLimits::default(),
+                |row| {
+                    composed.insert(row.uuid, row);
+                    Ok(())
+                },
+            )?;
+        }
+        for (uuid, staged_row) in window.rows {
+            if staged_row.tombstone {
+                composed.insert(uuid, staged_row);
+            } else if let Some(prior) = composed.get_mut(&uuid) {
+                prior.values.extend(staged_row.values);
+            } else {
+                composed.insert(uuid, staged_row);
+            }
+        }
+        let rows = composed.into_values().collect::<Vec<_>>();
         let tombstones = rows.iter().map(|row| row.tombstone).collect::<Vec<_>>();
         let batch = property_snapshots_to_batch(
             &key.route,
@@ -4316,6 +4369,60 @@ mod tests {
         assert_eq!(w.create_node(new_v7(), TypeId(0)).unwrap(), 1);
         assert_eq!(w.create_node(new_v7(), TypeId(0)).unwrap(), 2);
         assert_eq!(w.create_node(new_v7(), TypeId(0)).unwrap(), 3);
+    }
+
+    #[test]
+    fn reopened_property_patch_seals_a_complete_authenticated_snapshot() {
+        let dir = TempDir::new().unwrap();
+        let node = new_v7();
+        let mut first = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
+        first.create_node(node, TypeId(0)).unwrap();
+        first
+            .set_properties(
+                &node,
+                None,
+                HashMap::from([
+                    ("name".to_owned(), IrLiteral::Str("kept".to_owned())),
+                    ("ts".to_owned(), IrLiteral::Int(7)),
+                ]),
+            )
+            .unwrap();
+        first.flush().unwrap();
+
+        let mut reopened =
+            GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS + 1).unwrap();
+        reopened
+            .set_properties(
+                &node,
+                None,
+                HashMap::from([("patched".to_owned(), IrLiteral::Bool(true))]),
+            )
+            .unwrap();
+        reopened.flush().unwrap();
+
+        let (captured, _) = crate::capture_graph_files(dir.path()).unwrap();
+        let inventory =
+            crate::AuthenticatedPropertyInventory::from_entries_at_root(dir.path(), captured.files)
+                .unwrap();
+        let scratch = TempDir::new().unwrap();
+        let mut rows = Vec::new();
+        inventory
+            .visit_route(
+                crate::PropertyRouteKind::Node,
+                "_untyped",
+                scratch.path(),
+                crate::PropertyOverlayLimits::default(),
+                |row| {
+                    rows.push(row);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].uuid, node.into_bytes());
+        assert_eq!(rows[0].values["name"], IrLiteral::Str("kept".into()));
+        assert_eq!(rows[0].values["ts"], IrLiteral::Int(7));
+        assert_eq!(rows[0].values["patched"], IrLiteral::Bool(true));
     }
 
     #[test]
@@ -4471,8 +4578,7 @@ mod tests {
     }
 
     #[test]
-    fn null_first_property_column_infers_later_concrete_type() {
-        use arrow::array::Array;
+    fn explicit_null_and_later_scalar_share_a_lossless_tagged_column() {
         use arrow::datatypes::DataType;
         use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
@@ -4513,7 +4619,8 @@ mod tests {
         let file = File::open(&path).unwrap();
         let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
         let schema = builder.schema().clone();
-        // Exactly one `score` column (no duplicate from the null row), typed Int64.
+        // Exactly one tagged `score` column distinguishes explicit Null from a
+        // missing property while retaining the later integer values.
         let score_fields: Vec<_> = schema
             .fields()
             .iter()
@@ -4522,22 +4629,23 @@ mod tests {
         assert_eq!(score_fields.len(), 1, "expected a single score column");
         assert_eq!(
             score_fields[0].data_type(),
-            &DataType::Int64,
-            "null-first then Int should infer Int64, not Utf8"
+            &DataType::Struct(heterogeneous_scalar_fields()),
+            "explicit null plus Int must use the lossless scalar union"
         );
 
         // Round-trip: 3 rows, first null then 10, 20.
         let mut reader = builder.build().unwrap();
         let batch = reader.next().unwrap().unwrap();
         assert_eq!(batch.num_rows(), 3);
-        let scores = batch
-            .column(schema.index_of("score").unwrap())
-            .as_any()
-            .downcast_ref::<arrow::array::Int64Array>()
-            .unwrap();
-        assert!(scores.is_null(0));
-        assert_eq!(scores.value(1), 10);
-        assert_eq!(scores.value(2), 20);
+        let mut decoded = Vec::new();
+        decode_property_batch(&batch, NODE_PROPERTY_UUID_FIELD, |_, values| {
+            decoded.push(values["score"].clone());
+        })
+        .unwrap();
+        assert_eq!(
+            decoded,
+            vec![IrLiteral::Null, IrLiteral::Int(10), IrLiteral::Int(20)]
+        );
     }
 
     #[test]

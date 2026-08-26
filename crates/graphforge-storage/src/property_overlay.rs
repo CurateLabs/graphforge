@@ -382,8 +382,7 @@ impl AuthenticatedPropertyInventory {
         Ok(admitted)
     }
 
-    #[cfg(test)]
-    fn from_entries_at_root(
+    pub(crate) fn from_entries_at_root(
         root: &Path,
         entries: Vec<crate::GraphFileEntry>,
     ) -> Result<Self, GfError> {
@@ -651,9 +650,40 @@ fn merge_route_schema(
         }
         if let Some(prior) = schema.fields.get(field.name()) {
             if prior.as_ref() != field.as_ref() {
-                return Err(corrupt(
-                    "property route field type or semantic metadata conflicts",
-                ));
+                let compatible_scalar = |data_type: &arrow::datatypes::DataType| {
+                    matches!(
+                        data_type,
+                        arrow::datatypes::DataType::Int64
+                            | arrow::datatypes::DataType::Float64
+                            | arrow::datatypes::DataType::Boolean
+                            | arrow::datatypes::DataType::Utf8
+                    ) || data_type
+                        == &arrow::datatypes::DataType::Struct(
+                            crate::writer::heterogeneous_scalar_fields(),
+                        )
+                };
+                if prior.name() != field.name()
+                    || prior.metadata() != field.metadata()
+                    || !compatible_scalar(prior.data_type())
+                    || !compatible_scalar(field.data_type())
+                {
+                    return Err(corrupt(
+                        "property route field type or semantic metadata conflicts",
+                    ));
+                }
+                schema.fields.insert(
+                    field.name().clone(),
+                    Arc::new(
+                        arrow::datatypes::Field::new(
+                            field.name(),
+                            arrow::datatypes::DataType::Struct(
+                                crate::writer::heterogeneous_scalar_fields(),
+                            ),
+                            prior.is_nullable() || field.is_nullable(),
+                        )
+                        .with_metadata(prior.metadata().clone()),
+                    ),
+                );
             }
         } else {
             schema
@@ -2593,12 +2623,19 @@ mod tests {
             content_sha256: digest_hex(&Sha256::digest(&conflicting_bytes)),
             role: crate::GraphFileRole::Properties,
         };
-        assert!(
-            AuthenticatedPropertyInventory::from_entries_at_root(
-                dir.path(),
-                vec![entry, conflicting_entry],
-            )
-            .is_err()
+        let evolved = AuthenticatedPropertyInventory::from_entries_at_root(
+            dir.path(),
+            vec![entry, conflicting_entry],
+        );
+        let evolved = evolved.unwrap();
+        assert_eq!(
+            evolved
+                .route_schema(PropertyRouteKind::Node, "Person")
+                .unwrap()
+                .field_with_name("name")
+                .unwrap()
+                .data_type(),
+            &DataType::Struct(crate::writer::heterogeneous_scalar_fields())
         );
 
         fs::write(&path, b"same-name attacker replacement").unwrap();
