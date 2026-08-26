@@ -212,12 +212,13 @@ impl GraphForge {
     }
 
     fn drive_ready_provider_refreshes(&self) {
+        self.drive_ready_provider_refreshes_at(self.embedding_refresh_epoch.elapsed());
+    }
+
+    pub(crate) fn drive_ready_provider_refreshes_at(&self, now: Duration) {
         loop {
             let lease = match self.embedding_refresh_scheduler.lock() {
-                Ok(mut scheduler) => scheduler
-                    .claim_ready(self.embedding_refresh_epoch.elapsed(), || Ok(()))
-                    .ok()
-                    .flatten(),
+                Ok(mut scheduler) => scheduler.claim_ready(now, || Ok(())).ok().flatten(),
                 Err(_) => None,
             };
             let Some(lease) = lease else {

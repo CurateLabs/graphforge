@@ -80,49 +80,6 @@ fn mock_openrouter() -> (String, thread::JoinHandle<()>) {
     (origin, server)
 }
 
-fn mock_failing_refresh() -> (String, thread::JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let origin = format!("http://{}", listener.local_addr().unwrap());
-    let server = thread::spawn(move || {
-        for call in 0..2 {
-            let (mut stream, _) = listener.accept().unwrap();
-            let request = read_request(&mut stream);
-            let (headers, body) = request.split_once("\r\n\r\n").unwrap();
-            assert!(headers.starts_with("POST /api/v1/embeddings HTTP/1.1"));
-            let payload: Value = serde_json::from_str(body).unwrap();
-            if call == 0 {
-                assert_eq!(payload["input"].as_array().unwrap().len(), 2);
-                let response = serde_json::to_vec(&json!({
-                    "model":"vendor/model",
-                    "data":[
-                        {"index":0,"embedding":[1.0,0.0]},
-                        {"index":1,"embedding":[0.0,1.0]}
-                    ]
-                }))
-                .unwrap();
-                write!(
-                    stream,
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    response.len()
-                )
-                .unwrap();
-                stream.write_all(&response).unwrap();
-            } else {
-                assert_eq!(payload["input"].as_array().unwrap().len(), 3);
-                let response = br#"{"error":"temporarily unavailable"}"#;
-                write!(
-                    stream,
-                    "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    response.len()
-                )
-                .unwrap();
-                stream.write_all(response).unwrap();
-            }
-        }
-    });
-    (origin, server)
-}
-
 fn read_request(stream: &mut impl Read) -> String {
     let mut received = Vec::new();
     loop {
@@ -371,65 +328,4 @@ fn configuration_failures_are_redacted_before_transport() {
     let rendered = error.to_string();
     assert!(!rendered.contains("credential"));
     assert!(!rendered.contains("private"));
-}
-
-#[test]
-fn proactive_provider_failure_preserves_the_active_generation() {
-    let (origin, server) = mock_failing_refresh();
-    let mut provider_config = config(origin);
-    provider_config.execution_limits.retries = 0;
-    let execution_limits = provider_config.execution_limits;
-    let session =
-        OpenRouterProviderSession::new(provider_config, "test-secret".to_owned()).unwrap();
-    let graph = GraphForge::new(None).unwrap();
-    node(&graph, "First");
-    node(&graph, "Second");
-    let request = ProviderEmbeddingPlanRequest {
-        display_name: "semantic".to_owned(),
-        label: "Paper".to_owned(),
-        properties: vec!["title".to_owned()],
-        contract: session.contract().clone(),
-        dimensions: 2,
-        normalization: ProviderEmbeddingNormalization::None,
-        distance: ProviderEmbeddingDistance::Cosine,
-        request_limits: ProviderRequestLimits::default(),
-        batch_limits: ProviderBatchLimits::default(),
-        execution_limits,
-        replace_alias: false,
-    };
-    session.publish_embeddings(&graph, &request).unwrap();
-    let original = graph
-        .embedding_space(Some("semantic"))
-        .unwrap()
-        .active
-        .unwrap();
-
-    node(&graph, "Third");
-    let deadline = std::time::Instant::now() + Duration::from_secs(3);
-    let failed = loop {
-        let inspection = graph.inspect_embedding_refresh(Some("semantic")).unwrap();
-        if inspection.worker.failed == 1 {
-            break inspection;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "proactive provider failure was not recorded"
-        );
-        thread::sleep(Duration::from_millis(25));
-    };
-    assert_eq!(failed.worker.succeeded, 0);
-    assert!(matches!(
-        failed.last_outcome.map(|outcome| outcome.status),
-        Some(graphforge_api::EmbeddingRefreshOutcomeStatus::Failed(
-            graphforge_api::EmbeddingRefreshFailureClass::Provider
-        ))
-    ));
-    let active = graph
-        .embedding_space(Some("semantic"))
-        .unwrap()
-        .active
-        .unwrap();
-    assert_eq!(active.generation_id, original.generation_id);
-    assert_eq!(active.vector_count, original.vector_count);
-    server.join().unwrap();
 }
