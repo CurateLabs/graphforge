@@ -638,7 +638,8 @@ pub(crate) fn is_graph_operational_file(relative: &Path) -> bool {
         return false;
     };
     match components.as_slice() {
-        [".graphforge-rewrite.lock"]
+        [".graphforge-cache", ..]
+        | [".graphforge-rewrite.lock"]
         | ["embeddings", ".catalog.lock" | ".refresh.lock"]
         | ["graph-objects", "lifecycle.lock"]
         | ["indexes", "search", .., ".writer.lock"] => true,
@@ -932,6 +933,14 @@ mod tests {
         fs::write(source.path().join("topology/nodes.parquet"), b"nodes").unwrap();
         fs::write(source.path().join("topology/edges/knows.parquet"), b"edges").unwrap();
         fs::write(source.path().join(".graphforge-rewrite.lock"), b"ignored").unwrap();
+        fs::create_dir_all(source.path().join(".graphforge-cache/uuid-membership")).unwrap();
+        fs::write(
+            source
+                .path()
+                .join(".graphforge-cache/uuid-membership/manifest.json"),
+            b"derived",
+        )
+        .unwrap();
 
         let (inventory, participant) = capture_graph_files(source.path()).unwrap();
         assert_eq!(inventory.file_count, 2);

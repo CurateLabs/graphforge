@@ -4,12 +4,12 @@
 //! presents its Parquet files as DataFusion tables under the address
 //! `graph.graph.<table_name>`:
 //!
-//! | Table name | File | Schema |
+//! | Table name | Logical source | Schema |
 //! |---|---|---|
-//! | `topology_nodes` | `topology/nodes.parquet` | `TOPOLOGY_NODES_SCHEMA` |
-//! | `edges_TYPENAME` | `topology/edges/TYPENAME.parquet` | `TYPED_EDGE_SCHEMA` |
-//! | `edges__exploratory` | `topology/edges/_exploratory.parquet` | `EXPLORATORY_EDGE_SCHEMA` |
-//! | `properties_ENTITY` | `properties/ENTITY.parquet` | `property_schema(entity, defs)` |
+//! | `topology_nodes` | legacy `topology/nodes.parquet` plus canonical `topology/nodes/*.parquet` shards | `TOPOLOGY_NODES_SCHEMA` |
+//! | `edges_TYPENAME` | legacy `topology/edges/TYPENAME.parquet` plus canonical `topology/edges/TYPENAME/*.parquet` shards | `TYPED_EDGE_SCHEMA` |
+//! | `edges__exploratory` | legacy and canonical `_exploratory` edge shards | `EXPLORATORY_EDGE_SCHEMA` |
+//! | `properties_ENTITY` | authenticated newest-wins overlay of legacy and canonical property fragments | `property_schema(entity, defs)` |
 //!
 //! # Scan implementation
 //!
@@ -20,7 +20,8 @@
 //! (default filter pushdown is unsupported / non-exact).
 //!
 //! Direct readers (`read_edges`, `read_nodes`, …) used by ExpandExec and writers
-//! still eagerly materialize; they are outside the query-provider scan path.
+//! consume the same canonical shard union; they are outside the query-provider
+//! scan path.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -412,18 +413,21 @@ impl From<FilteredReadKind> for crate::io_stats::FilteredReadTable {
     }
 }
 
-/// Exact row selection for the canonical dense `node_id == row_ordinal + 1`
-/// layout. The selection is relative to the concatenation of `row_groups`, as
-/// required by Parquet after row-group filtering.
+/// Exact row selection for a canonical dense contiguous `node_id` range. The
+/// selection is relative to the concatenation of `row_groups`, as required by
+/// Parquet after row-group filtering.
 struct DenseNodeSelection {
     row_groups: Vec<usize>,
     selection: parquet::arrow::arrow_reader::RowSelection,
     pages_considered: u64,
     pages_selected: u64,
     exact_rows_selected: u64,
+    first_id: u64,
+    last_id: u64,
 }
 
 struct DenseNodeLayout {
+    first_id: u64,
     group_rows: Vec<usize>,
     group_pages: Vec<Vec<usize>>,
     total_rows: usize,
@@ -454,14 +458,25 @@ fn dense_node_layout(
     let mut group_pages = Vec::with_capacity(row_groups.len());
     let mut file_row_offset = 0usize;
     let mut pages_considered = 0u64;
+    let Statistics::Int64(first_stats) = row_groups.first()?.column(key_leaf).statistics()? else {
+        return None;
+    };
+    let first_id = u64::try_from(*first_stats.min_opt()?).ok()?;
+    if first_id == 0 {
+        return None;
+    }
 
     for (group_idx, row_group) in row_groups.iter().enumerate() {
         let rows = usize::try_from(row_group.num_rows()).ok()?;
         if rows == 0 {
             return None;
         }
-        let expected_min = i64::try_from(file_row_offset.checked_add(1)?).ok()?;
-        let expected_max = i64::try_from(file_row_offset.checked_add(rows)?).ok()?;
+        let expected_min =
+            i64::try_from(first_id.checked_add(u64::try_from(file_row_offset).ok()?)?).ok()?;
+        let expected_max = i64::try_from(
+            first_id.checked_add(u64::try_from(file_row_offset.checked_add(rows - 1)?).ok()?)?,
+        )
+        .ok()?;
         let Statistics::Int64(group_stats) = row_group.column(key_leaf).statistics()? else {
             return None;
         };
@@ -504,10 +519,21 @@ fn dense_node_layout(
         for (page_idx, &first) in first_rows.iter().enumerate() {
             let end = first_rows.get(page_idx + 1).copied().unwrap_or(rows);
             let page_rows = end.checked_sub(first)?;
-            let page_min =
-                i64::try_from(file_row_offset.checked_add(first)?.checked_add(1)?).ok()?;
-            let page_max =
-                i64::try_from(file_row_offset.checked_add(first)?.checked_add(page_rows)?).ok()?;
+            let page_min = i64::try_from(
+                first_id.checked_add(u64::try_from(file_row_offset.checked_add(first)?).ok()?)?,
+            )
+            .ok()?;
+            let page_max = i64::try_from(
+                first_id.checked_add(
+                    u64::try_from(
+                        file_row_offset
+                            .checked_add(first)?
+                            .checked_add(page_rows - 1)?,
+                    )
+                    .ok()?,
+                )?,
+            )
+            .ok()?;
             if page_stats.min_value(page_idx) != Some(&page_min)
                 || page_stats.max_value(page_idx) != Some(&page_max)
             {
@@ -525,6 +551,7 @@ fn dense_node_layout(
     }
 
     Some(DenseNodeLayout {
+        first_id,
         group_rows,
         group_pages,
         total_rows,
@@ -541,18 +568,19 @@ fn dense_node_selection(
     sorted_ids: &[u64],
 ) -> Option<DenseNodeSelection> {
     let DenseNodeLayout {
+        first_id,
         group_rows,
         group_pages,
         total_rows,
         pages_considered,
     } = dense_node_layout(metadata, key_leaf)?;
 
-    let max_id = u64::try_from(total_rows).ok()?;
+    let max_id = first_id.checked_add(u64::try_from(total_rows.checked_sub(1)?).ok()?)?;
     let ordinals: Vec<usize> = sorted_ids
         .iter()
         .copied()
-        .filter(|&id| id != 0 && id <= max_id)
-        .map(|id| usize::try_from(id - 1).ok())
+        .filter(|&id| id >= first_id && id <= max_id)
+        .map(|id| usize::try_from(id.checked_sub(first_id)?).ok())
         .collect::<Option<_>>()?;
     let mut selected_groups = Vec::new();
     let mut ranges = Vec::with_capacity(ordinals.len());
@@ -594,6 +622,8 @@ fn dense_node_selection(
         pages_considered,
         pages_selected: selected_pages,
         exact_rows_selected: u64::try_from(ordinals.len()).ok()?,
+        first_id,
+        last_id: max_id,
     })
 }
 
@@ -755,6 +785,7 @@ fn read_parquet_filtered_u64_attempt(
         .then(|| dense_node_selection(builder.metadata(), key_leaf, &sorted))
         .flatten();
     let metadata_fallbacks = u64::from(dense_requested && dense.is_none());
+    let dense_id_range = dense.as_ref().map(|dense| (dense.first_id, dense.last_id));
 
     // Exact ordinal selection is node-only. Edges and noncanonical node files
     // retain the conservative row-group min/max behavior.
@@ -856,11 +887,12 @@ fn read_parquet_filtered_u64_attempt(
     let returned = total_rows(&batches);
     record_filtered(kind, returned);
     if used_dense_selection {
-        let max_id = u64::try_from(total).unwrap_or(0);
+        let (first_id, max_id) =
+            dense_id_range.expect("dense selection has an authenticated range");
         let expected: std::collections::HashSet<u64> = ids
             .iter()
             .copied()
-            .filter(|&id| id != 0 && id <= max_id)
+            .filter(|&id| id >= first_id && id <= max_id)
             .collect();
         if !filtered_keys_match(&batches, key_column, &expected) {
             pruning.validation_fallbacks = 1;
@@ -923,10 +955,10 @@ fn record_pruning(
     observation.pruning(pruning);
 }
 
-/// Read all node rows from `topology/nodes.parquet` in the project at `dir`.
+/// Enumerate the logical node topology's legacy flat file and canonical shards.
 ///
-/// Returns a single (possibly empty) [`RecordBatch`] with
-/// [`TOPOLOGY_NODES_SCHEMA`]; a missing file yields an empty batch.
+/// Paths are returned in canonical topology order. An absent node topology
+/// yields an empty vector; malformed canonical shard entries fail closed.
 ///
 /// # Errors
 /// Propagates Parquet / Arrow errors encountered while reading.
@@ -1732,12 +1764,12 @@ fn hash_admitted_source(
     })
 }
 
-/// Visit `topology/nodes.parquet` one bounded batch at a time (#706).
+/// Visit the canonical node-topology shard union one bounded batch at a time (#706).
 ///
 /// Applies the same legacy `type_id` → `type_ids` normalization as
 /// [`read_nodes`]. `visit` returns `Ok(true)` to continue or `Ok(false)` to
-/// stop early. A missing file yields a single empty schema-shaped batch (parity
-/// with [`read_nodes`]).
+/// stop early. An absent node topology yields a single empty schema-shaped
+/// batch (parity with [`read_nodes`]).
 ///
 /// # Errors
 /// Propagates Parquet / Arrow / normalization errors, or any error from `visit`.
@@ -1835,14 +1867,14 @@ fn list_parquet_stems(dir: &Path) -> Vec<String> {
 // TopologyNodeTable
 // ---------------------------------------------------------------------------
 
-/// [`TableProvider`] for `topology/nodes.parquet`.
+/// [`TableProvider`] for the logical legacy-plus-canonical node shard union.
 #[derive(Debug, Clone)]
 pub struct TopologyNodeTable {
     paths: Vec<PathBuf>,
 }
 
 impl TopologyNodeTable {
-    /// Create a table backed by the given Parquet file path.
+    /// Create a table backed by one legacy or canonical Parquet fragment.
     #[must_use]
     pub fn new(path: PathBuf) -> Self {
         Self { paths: vec![path] }

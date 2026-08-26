@@ -3104,15 +3104,23 @@ fn incremental_create_accumulates() {
     // All three names are readable.
     let names_result = rows(&gf, "MATCH (n:Person) RETURN n.name AS name");
     assert_eq!(names_result.stats.rows_produced, 3);
-    let col = names_result.batches[0]
-        .column_by_name("name")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .unwrap();
-    let mut names: Vec<&str> = (0..col.len()).map(|i| col.value(i)).collect();
+    let mut names = names_result
+        .batches
+        .iter()
+        .flat_map(|batch| {
+            let values = batch
+                .column_by_name("name")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            (0..values.len())
+                .map(|row| values.value(row).to_owned())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
     names.sort_unstable();
-    assert_eq!(names, vec!["A", "B", "C"]);
+    assert_eq!(names, ["A", "B", "C"]);
 }
 
 #[test]

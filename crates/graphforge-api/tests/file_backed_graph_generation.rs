@@ -18,7 +18,6 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use arrow::array::{FixedSizeBinaryArray, Int64Array};
@@ -43,9 +42,6 @@ use uuid::Uuid;
 const LEGACY_SNAPSHOT_ENVELOPE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// Deterministic oversize padding used for the manual large-class proof.
 const OVERSIZE_PADDING_BYTES: u64 = LEGACY_SNAPSHOT_ENVELOPE_BYTES + 64 * 1024 * 1024;
-
-/// Serializes the process-global storage counters used by the acceptance proof.
-static IO_STATS_LOCK: Mutex<()> = Mutex::new(());
 
 fn result_fingerprint(result: &graphforge_api::ExecutionResult) -> String {
     let mut hasher = Sha256::new();
@@ -113,7 +109,6 @@ fn property_digests(root: &Path) -> BTreeMap<String, String> {
 
 #[test]
 fn sharded_graph_uses_ordinary_reopen_query_and_portable_round_trip() {
-    let _io_guard = IO_STATS_LOCK.lock().expect("I/O stats lock");
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("source");
     let source_path = source.to_str().unwrap();
@@ -292,9 +287,27 @@ fn sharded_graph_uses_ordinary_reopen_query_and_portable_round_trip() {
         result_fingerprint(&imported_query),
         source_query_fingerprint
     );
+}
 
-    // The writer's direct evidence proves the second shard encodes only new
-    // input and never decodes or rewrites the first shard.
+#[test]
+fn sharded_append_io_evidence_is_process_isolated() {
+    const CHILD: &str = "GRAPHFORGE_931_SHARDED_APPEND_IO_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let status = Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("sharded_append_io_evidence_is_process_isolated")
+            .arg("--nocapture")
+            .env(CHILD, "1")
+            .status()
+            .unwrap();
+        assert!(status.success(), "isolated sharded append I/O proof failed");
+        return;
+    }
+
+    // These counters are process-global. Run this direct writer proof in a
+    // one-test child process so parallel integration tests cannot contribute
+    // unrelated reads between reset and snapshot.
+    let root = tempfile::tempdir().unwrap();
     let direct = root.path().join("direct-work-evidence");
     fs::create_dir(&direct).unwrap();
     let first_uuid = Uuid::now_v7();

@@ -104,10 +104,13 @@ impl GraphForge {
         props: &HashMap<String, PropValue>,
     ) -> Result<EdgeHandle, GfError> {
         validate_identifier("relationship type", rel_type)?;
-        let src_uuid =
-            self.resolve_node_selector(&graphforge_core::NodeSelector::Handle(src.clone()))?;
-        let dst_uuid =
-            self.resolve_node_selector(&graphforge_core::NodeSelector::Handle(dst.clone()))?;
+        if !src.belongs_to(&self.identity) || !dst.belongs_to(&self.identity) {
+            return Err(validation("node handle belongs to another graph instance"));
+        }
+        // Same-instance ownership admits the opaque handles; the writer-owned
+        // authenticated batch lookup below proves both UUIDs are present.
+        let src_uuid = src.uuid;
+        let dst_uuid = dst.uuid;
         let mut properties = HashMap::with_capacity(props.len());
         for (name, value) in props {
             validate_identifier("property", name)?;
@@ -134,8 +137,16 @@ impl GraphForge {
         let now = (self.clock.lock().expect("clock lock poisoned"))()?;
         let mut writer =
             graphforge_storage::GraphWriter::open_at(&self.dir, self.ontology_mode, now)?;
-        register_endpoint(&mut writer, &self.dir, src_uuid)?;
-        register_endpoint(&mut writer, &self.dir, dst_uuid)?;
+        writer
+            .register_existing_endpoints(&[src_uuid, dst_uuid])
+            .map_err(|error| match error {
+                GfError::Storage(message)
+                    if message.contains("is absent from the authenticated node index") =>
+                {
+                    validation("edge endpoint is not present in this graph")
+                }
+                other => other,
+            })?;
         let edge_uuid = Uuid::now_v7();
         writer.create_edge(edge_uuid, rel_type, &src_uuid, &dst_uuid)?;
         if !properties.is_empty() {
@@ -176,26 +187,6 @@ impl GraphForge {
         self.adjacency_provider.invalidate();
         Ok(EdgeHandle::new(edge_uuid, rel_type))
     }
-}
-
-fn register_endpoint(
-    writer: &mut graphforge_storage::GraphWriter,
-    dir: &std::path::Path,
-    uuid: Uuid,
-) -> Result<(), GfError> {
-    if !graphforge_storage::uuid_membership_index_present(dir) {
-        graphforge_storage::rebuild_uuid_membership_indexes(
-            dir,
-            graphforge_storage::UuidIndexBuildLimits::default(),
-        )?;
-    }
-    if !graphforge_storage::uuid_membership_index_is_fresh(dir)? {
-        return Err(GfError::Storage("edge endpoint index is stale".into()));
-    }
-    let mut index = graphforge_storage::UuidMembershipIndex::open(dir)?;
-    let surrogate = index.lookup_node_surrogates(&[uuid])?.0[0]
-        .ok_or_else(|| validation("edge endpoint is not present in this graph"))?;
-    writer.register_existing_node(uuid, surrogate)
 }
 
 fn validate_identifier(kind: &str, name: &str) -> Result<(), GfError> {
@@ -373,6 +364,38 @@ mod tests {
                 1
             );
         }
+    }
+
+    #[test]
+    fn public_add_edge_resolves_both_endpoints_without_topology_decode() {
+        const CHILD: &str = "GRAPHFORGE_ADD_EDGE_ENDPOINT_IO_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg("construction::tests::public_add_edge_resolves_both_endpoints_without_topology_decode")
+                .arg("--nocapture")
+                .env(CHILD, "1")
+                .status()
+                .unwrap();
+            assert!(
+                status.success(),
+                "isolated public add-edge I/O proof failed"
+            );
+            return;
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let graph = GraphForge::new(Some(directory.path().to_str().unwrap())).unwrap();
+        let source = graph.add_node("Person", &HashMap::new()).unwrap();
+        let target = graph.add_node("Person", &HashMap::new()).unwrap();
+
+        graphforge_storage::io_stats::reset();
+        graph
+            .add_edge(&source, "KNOWS", &target, &HashMap::new())
+            .unwrap();
+        let io = graphforge_storage::io_stats::snapshot();
+        assert_eq!(io.node_full_reads, 0, "endpoint resolution decoded nodes");
+        assert_eq!(io.edge_full_reads, 0, "endpoint resolution decoded edges");
     }
 
     #[test]

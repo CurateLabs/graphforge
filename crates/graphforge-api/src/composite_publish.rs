@@ -2018,7 +2018,13 @@ mod tests {
         let rows = reopened
             .execute("MATCH (n:Person) RETURN n.node_uuid AS id")
             .unwrap();
-        assert_eq!(rows.batches[0].num_rows(), 2);
+        assert_eq!(
+            rows.batches
+                .iter()
+                .map(RecordBatch::num_rows)
+                .sum::<usize>(),
+            2
+        );
     }
 
     #[test]
@@ -2334,12 +2340,14 @@ mod tests {
             })
             .unwrap();
 
+        let rows = graph
+            .execute("MATCH (n:Person) RETURN n.node_uuid AS id")
+            .unwrap();
         assert_eq!(
-            graph
-                .execute("MATCH (n:Person) RETURN n.node_uuid AS id")
-                .unwrap()
-                .batches[0]
-                .num_rows(),
+            rows.batches
+                .iter()
+                .map(RecordBatch::num_rows)
+                .sum::<usize>(),
             2
         );
     }

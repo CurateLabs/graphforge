@@ -4,10 +4,12 @@
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use arrow::datatypes::DataType;
 use arrow::ipc::writer::StreamWriter;
+use arrow::record_batch::RecordBatch;
 use clap::{Args, Parser, Subcommand, ValueEnum, error::ErrorKind};
 use graphforge_api::{
     CheckpointDiffDetail, CheckpointDiffScope, CheckpointRequest, CheckpointSelector,
@@ -644,14 +646,20 @@ fn write_result(
     result: &ExecutionResult,
     output: &mut dyn Write,
 ) -> Result<(), graphforge_api::GfError> {
+    // The CLI IPC contract is one logical result batch. Engine/storage batches
+    // remain streaming internally; normalize only at this serialization edge.
+    let logical = if result.batches.is_empty() {
+        RecordBatch::new_empty(Arc::clone(&result.schema))
+    } else {
+        arrow::compute::concat_batches(&result.schema, &result.batches)
+            .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?
+    };
     {
         let mut writer = StreamWriter::try_new(&mut *output, result.schema.as_ref())
             .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
-        for batch in &result.batches {
-            writer
-                .write(batch)
-                .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
-        }
+        writer
+            .write(&logical)
+            .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
         writer
             .finish()
             .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;

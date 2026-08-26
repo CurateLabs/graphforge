@@ -133,7 +133,14 @@ async fn create_edge_then_plain_delete_errors_with_nothing_persisted() {
     let dir = TempDir::new().unwrap();
     let rt = Arc::new(Mutex::new(RuntimeCatalog::new()));
     seed(dir.path(), &rt, &["CREATE (:P {name:'a'})"]).await;
-    assert_eq!(rows(&dir.path().join("topology/nodes.parquet")), 1);
+    assert_eq!(
+        graphforge_storage::read_nodes(dir.path())
+            .unwrap()
+            .iter()
+            .map(arrow::record_batch::RecordBatch::num_rows)
+            .sum::<usize>(),
+        1
+    );
 
     let err = run(
         dir.path(),
@@ -171,7 +178,14 @@ async fn create_edge_then_detach_delete_drops_pending_edge() {
     // and deleted both count; T is a newly introduced label token.
     assert_eq!(counters(&r), [1, 1, 1, 1, 0, 1]);
     // b survives alone; the edge never hit disk.
-    assert_eq!(rows(&dir.path().join("topology/nodes.parquet")), 1);
+    assert_eq!(
+        graphforge_storage::read_nodes(dir.path())
+            .unwrap()
+            .iter()
+            .map(arrow::record_batch::RecordBatch::num_rows)
+            .sum::<usize>(),
+        1
+    );
     assert_eq!(
         rows(&dir.path().join("topology/edges/_exploratory.parquet")),
         0

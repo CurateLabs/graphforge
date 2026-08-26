@@ -645,13 +645,16 @@ digests, ordering, duplicate references, wrong depth, and corrupt objects.
 | `node_uuid` | `FixedSizeBinary(16)` | Join key back to `topology/nodes.parquet` |
 | *(property columns)* | *(per ontology)* | e.g. `name Utf8`, `age Int64`, `email Utf8` |
 
-Property access is a join: `topology/nodes JOIN properties/PERSON ON node_uuid`.
-The catalog and direct readers union the flat fragment and all immutable
-fragments. Edge properties use the same layout under `edge_properties/`.
-Construction appends encode only the new
-bounded property window; ordinary mutation rewrites remain localized mutation
-operations rather than construction behavior. The separation allows graph
-traversal to skip property I/O entirely.
+Property access joins the logical node-topology shard union to the logical
+property overlay on `node_uuid`. Catalog, direct, SQL, export, verification,
+and import readers authenticate the legacy flat fragment and every canonical
+immutable fragment, then expose one newest-authority complete snapshot per
+UUID; they do not concatenate physical rows. A newest tombstone suppresses the
+UUID, and the newest live-schema summary determines which property keys remain
+logically present. Edge properties use the identical authority model under
+`edge_properties/`. Construction and ordinary SET/REMOVE mutations append only
+the changed bounded window without rewriting prior fragments. The separation
+still lets topology-only traversal skip property I/O entirely.
 
 ### Provenance and knowledge participants
 

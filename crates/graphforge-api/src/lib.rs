@@ -4550,24 +4550,6 @@ mod tests {
     const ABSENT_TARGET_COOKIE: &str = "graphforge-absent-target-open-v1";
     const ABSENT_TARGET_DEADLINE: Duration = Duration::from_secs(10);
 
-    fn regular_files_beneath(root: &Path) -> Vec<PathBuf> {
-        let mut pending = vec![root.to_path_buf()];
-        let mut files = Vec::new();
-        while let Some(directory) = pending.pop() {
-            for entry in std::fs::read_dir(&directory).unwrap() {
-                let entry = entry.unwrap();
-                let kind = entry.file_type().unwrap();
-                if kind.is_dir() {
-                    pending.push(entry.path());
-                } else if kind.is_file() {
-                    files.push(entry.path().strip_prefix(root).unwrap().to_path_buf());
-                }
-            }
-        }
-        files.sort();
-        files
-    }
-
     fn publish_compact_graph_workspace(project: &Path, workspace: &Path) {
         use graphforge_core::canonical::{
             CANONICAL_CONTRACT_VERSION, CanonicalDomain, fingerprint,
@@ -4579,7 +4561,12 @@ mod tests {
 
         let lease = graphforge_storage::begin_graph_object_publication(project).unwrap();
         let mut state = graphforge_storage::GraphManifestState::empty();
-        let paths = regular_files_beneath(workspace);
+        let (inventory, _) = graphforge_storage::capture_graph_files(workspace).unwrap();
+        let paths = inventory
+            .files
+            .into_iter()
+            .map(|entry| PathBuf::from(entry.relative_path))
+            .collect::<Vec<_>>();
         let (root, _) =
             graphforge_storage::append_graph_files_v2(&lease, workspace, &mut state, &paths, &[])
                 .unwrap();
@@ -6603,30 +6590,35 @@ mod tests {
                 "MATCH (source)-[edge:{rel_type}]->(target) RETURN source, edge, target"
             ))
             .unwrap();
-        let batch = &result.batches[0];
-        let uuid_column = |column: &str, field: &str| {
-            batch
-                .column_by_name(column)
-                .unwrap()
-                .as_any()
-                .downcast_ref::<StructArray>()
-                .unwrap()
-                .column_by_name(field)
-                .unwrap()
-                .as_any()
-                .downcast_ref::<FixedSizeBinaryArray>()
-                .unwrap()
-        };
-        let edges = uuid_column("edge", "edge_uuid");
-        let sources = uuid_column("source", "node_uuid");
-        let targets = uuid_column("target", "node_uuid");
-        (0..batch.num_rows())
-            .map(|row| {
-                (
-                    edges.value(row).try_into().unwrap(),
-                    sources.value(row).try_into().unwrap(),
-                    targets.value(row).try_into().unwrap(),
-                )
+        result
+            .batches
+            .iter()
+            .flat_map(|batch| {
+                let uuid_column = |column: &str, field: &str| {
+                    batch
+                        .column_by_name(column)
+                        .unwrap()
+                        .as_any()
+                        .downcast_ref::<StructArray>()
+                        .unwrap()
+                        .column_by_name(field)
+                        .unwrap()
+                        .as_any()
+                        .downcast_ref::<FixedSizeBinaryArray>()
+                        .unwrap()
+                };
+                let edges = uuid_column("edge", "edge_uuid");
+                let sources = uuid_column("source", "node_uuid");
+                let targets = uuid_column("target", "node_uuid");
+                (0..batch.num_rows())
+                    .map(|row| {
+                        (
+                            edges.value(row).try_into().unwrap(),
+                            sources.value(row).try_into().unwrap(),
+                            targets.value(row).try_into().unwrap(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
             })
             .collect()
     }
