@@ -29,9 +29,6 @@ const CHILD_PROJECT_ENV: &str = "GF_PROPERTY_OVERLAY_SCALE_PROJECT";
 const CHILD_ROWS_ENV: &str = "GF_PROPERTY_OVERLAY_SCALE_ROWS";
 const CHILD_EVIDENCE_ENV: &str = "GF_PROPERTY_OVERLAY_SCALE_EVIDENCE";
 const MIXED_WINDOW: usize = 48;
-// One authentication pass plus bounded validation/value decoder passes. The
-// numerator is measured bytes, while the denominator is immutable payload.
-const MAX_READ_AMPLIFICATION: u64 = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ImmutableFragment {
@@ -61,7 +58,15 @@ struct ScaleEvidence {
     rss_after_scan_bytes: u64,
     physical_rows: u64,
     physical_bytes: u64,
+    authentication_bytes: u64,
+    authentication_blocks: u64,
+    physical_blocks: u64,
+    validation_bytes: u64,
+    selected_value_bytes: u64,
+    validation_read_calls: u64,
+    selected_value_read_calls: u64,
     spill_bytes: u64,
+    spool_input_bytes: u64,
     spill_runs: u64,
     merge_passes: u64,
     peak_buffered_rows: u64,
@@ -278,7 +283,15 @@ fn property_overlay_scale_scan_child() {
         rss_after_scan_bytes,
         physical_rows: metrics.physical_rows,
         physical_bytes: metrics.physical_bytes,
+        authentication_bytes: metrics.authentication_bytes,
+        authentication_blocks: metrics.authentication_blocks,
+        physical_blocks: metrics.physical_blocks,
+        validation_bytes: metrics.validation_bytes,
+        selected_value_bytes: metrics.selected_value_bytes,
+        validation_read_calls: metrics.validation_read_calls,
+        selected_value_read_calls: metrics.selected_value_read_calls,
         spill_bytes: metrics.spill_bytes,
+        spool_input_bytes: metrics.spool_input_bytes,
         spill_runs: metrics.spill_runs,
         merge_passes: metrics.merge_passes,
         peak_buffered_rows: metrics.peak_buffered_rows,
@@ -399,22 +412,60 @@ fn production_property_overlay_n_2n_4n_is_disk_growing_and_memory_bounded() {
         phase.rss_before_write_bytes = write.rss_before_bytes;
         phase.rss_after_write_bytes = write.rss_after_bytes;
         assert!(phase.physical_bytes > 0);
+        assert!(phase.authentication_bytes > 0);
+        assert!(phase.authentication_blocks > 0);
+        assert_eq!(
+            phase.physical_bytes,
+            phase
+                .authentication_bytes
+                .checked_add(phase.validation_bytes)
+                .and_then(|bytes| bytes.checked_add(phase.selected_value_bytes))
+                .expect("read byte accounting must not overflow")
+        );
+        assert_eq!(
+            phase.physical_blocks,
+            phase
+                .authentication_blocks
+                .checked_add(phase.validation_read_calls)
+                .and_then(|calls| calls.checked_add(phase.selected_value_read_calls))
+                .expect("read block accounting must not overflow")
+        );
+        let authentication_bound = phase
+            .graph_tree_bytes
+            .checked_add(phase.property_fragment_bytes)
+            .expect("authentication byte bound must not overflow");
+        assert!(phase.authentication_bytes <= authentication_bound);
+        let decoder_bytes = phase
+            .validation_bytes
+            .checked_add(phase.selected_value_bytes)
+            .expect("decoder byte accounting must not overflow");
+        assert!(decoder_bytes <= phase.property_fragment_bytes);
         assert!(phase.spill_bytes > 0);
         assert!(phase.spill_runs > 0);
         assert!(phase.merge_passes > 0);
         assert!(phase.peak_buffered_rows <= u64::try_from(limits.max_buffered_rows * 2).unwrap());
         assert!(phase.peak_buffered_bytes <= limits.max_buffered_bytes);
         assert_eq!(phase.per_record_seeks, 0);
-        assert!(
-            phase.physical_bytes
-                <= phase
+        let total_read_bound = phase
+            .graph_tree_bytes
+            .checked_add(
+                phase
                     .property_fragment_bytes
-                    .saturating_mul(MAX_READ_AMPLIFICATION)
-        );
+                    .checked_mul(2)
+                    .expect("property read bound must not overflow"),
+            )
+            .expect("total read bound must not overflow");
+        assert!(phase.physical_bytes <= total_read_bound);
+        assert!(phase.spool_input_bytes > 0);
         let spill_bound = phase
-            .physical_rows
-            .saturating_mul(limits.max_row_bytes)
-            .saturating_mul(phase.merge_passes.saturating_add(1));
+            .spool_input_bytes
+            .checked_mul(
+                phase
+                    .merge_passes
+                    .checked_add(1)
+                    .expect("merge pass bound must not overflow"),
+            )
+            .expect("spill amplification bound must not overflow");
         assert!(phase.spill_bytes <= spill_bound);
         evidence.push(phase);
     }
@@ -466,6 +517,7 @@ fn production_property_overlay_n_2n_4n_is_disk_growing_and_memory_bounded() {
             && pair[1].prior_fragments_unchanged
             && pair[1].physical_bytes > pair[0].physical_bytes
             && pair[1].spill_bytes > pair[0].spill_bytes
+            && pair[1].spool_input_bytes > pair[0].spool_input_bytes
             && pair[1].physical_rows > pair[0].physical_rows
             && pair[1].spill_runs >= pair[0].spill_runs
             && pair[1].merge_passes >= pair[0].merge_passes

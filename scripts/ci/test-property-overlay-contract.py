@@ -111,6 +111,33 @@ def main() -> None:
         evidence_path.write_text(evidence_source.replace("fragment_identity_is_numeric_canonical_and_total", "fragment_identity_drifted", 1), encoding="utf-8")
         expect_failure("stale evidence symbol", lambda: GATE.validate(root, contract_path))
 
+        scale = root / "crates/graphforge-storage/tests/property_overlay_scale.rs"
+        scale_source = scale.read_text(encoding="utf-8")
+        assertion = "assert!(phase.authentication_bytes > 0);"
+        if assertion not in scale_source:
+            raise AssertionError("scale fixture lost authentication assertion")
+        scale.write_text(
+            scale_source.replace(assertion, f"// {assertion}", 1),
+            encoding="utf-8",
+        )
+        expect_failure("comment-only metric assertion", lambda: GATE.validate(root, contract_path))
+        scale.write_text(
+            scale_source.replace(assertion, f"if false {{ {assertion} }}", 1),
+            encoding="utf-8",
+        )
+        expect_failure("dead metric assertion", lambda: GATE.validate(root, contract_path))
+        scale.write_text(scale_source, encoding="utf-8")
+
+        total_assertion = "assert!(phase.physical_bytes <= total_read_bound);"
+        if total_assertion not in scale_source:
+            raise AssertionError("scale fixture lost derived total read assertion")
+        scale.write_text(
+            scale_source.replace(total_assertion, f"// {total_assertion}", 1),
+            encoding="utf-8",
+        )
+        expect_failure("comment-only total read bound", lambda: GATE.validate(root, contract_path))
+        scale.write_text(scale_source, encoding="utf-8")
+
         storage_build = root / "crates/graphforge-storage/BUILD.bazel"
         build_source = storage_build.read_text(encoding="utf-8")
         storage_build.write_text(
@@ -118,6 +145,15 @@ def main() -> None:
             encoding="utf-8",
         )
         expect_failure("scale Bazel mapping", lambda: GATE.validate(root, contract_path))
+        storage_build.write_text(
+            build_source.replace(
+                '":property_overlay_scale",',
+                '# ":property_overlay_scale",',
+                1,
+            ),
+            encoding="utf-8",
+        )
+        expect_failure("comment-only Bazel mapping", lambda: GATE.validate(root, contract_path))
 
     print("property overlay contract mutation tests passed")
 

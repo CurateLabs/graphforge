@@ -78,6 +78,7 @@
     "shadowed_rows":{"unit":"rows", "aggregation":"sum of older rows suppressed by newer snapshots or tombstones", "source_markers":["Older rows suppressed"]},
     "tombstones":{"unit":"rows", "aggregation":"sum of newest tombstone rows observed", "source_markers":["Newest tombstone rows"]},
     "spill_bytes":{"unit":"bytes", "aggregation":"sum of bytes written to external merge runs", "source_markers":["external merge runs"]},
+    "spool_input_bytes":{"unit":"bytes", "aggregation":"sum of encoded first-level spill-run bytes before merge amplification, including one newline per physical row", "source_markers":["first-level spill runs", "newline delimiter"]},
     "spill_runs":{"unit":"runs", "aggregation":"sum of external merge runs written", "source_markers":["External merge runs written"]},
     "peak_run_references":{"unit":"path references", "aggregation":"maximum simultaneous in-memory spill-run path references", "source_markers":["Maximum in-memory spill-run path references"]},
     "merge_passes":{"unit":"passes", "aggregation":"sum of bounded fan-in merge passes", "source_markers":["fan-in merge passes"]},
@@ -100,7 +101,7 @@
     "unselected_validation":{"path":"crates/graphforge-storage/src/property_overlay.rs", "symbol":"targeted_reader_validates_unselected_rows_before_value_pruning", "markers":["read_authenticated_property_snapshots_for", "strictly sorted"]},
     "incremental_all_generation_authority":{"path":"crates/graphforge-storage/src/property_overlay.rs", "symbol":"bounded_external_merge_emits_exact_newest_snapshot_and_tombstone", "markers":["uuid_b", "keep", "tombstone"]},
     "bounded_scale":{"path":"crates/graphforge-storage/src/property_overlay.rs", "symbol":"targeted_reader_n_2n_4n_has_bounded_retention_and_exact_work", "markers":["peak_buffered_bytes", "physical_rows"]},
-    "production_bounded_scale":{"path":"crates/graphforge-storage/tests/property_overlay_scale.rs", "symbol":"production_property_overlay_n_2n_4n_is_disk_growing_and_memory_bounded", "markers":["property_fragment_allocated_bytes", "graph_tree_allocated_bytes", "prior_fragments_unchanged", "RSS_STARTUP_ALLOWANCE_BYTES", "MAX_READ_AMPLIFICATION", "spill_bound", "per_record_seeks"]},
+    "production_bounded_scale":{"path":"crates/graphforge-storage/tests/property_overlay_scale.rs", "symbol":"production_property_overlay_n_2n_4n_is_disk_growing_and_memory_bounded", "markers":["property_fragment_allocated_bytes", "graph_tree_allocated_bytes", "prior_fragments_unchanged", "authentication_bytes", "authentication_blocks", "RSS_STARTUP_ALLOWANCE_BYTES", "authentication_bound", "decoder_bytes", "total_read_bound", "spool_input_bytes", "checked_mul", "spill_bound", "per_record_seeks"]},
     "authenticated_writeback":{"path":"crates/graphforge-storage/src/writer.rs", "symbol":"reopened_property_patch_seals_a_complete_authenticated_snapshot", "markers":["AuthenticatedPropertyInventory", "patched"]},
     "bounded_write_window":{"path":"crates/graphforge-storage/src/writer.rs", "symbol":"same_window_set_then_remove_seals_one_ordered_snapshot", "markers":["property_window_count", "prior_property_generation"]}
   }

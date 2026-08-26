@@ -914,6 +914,9 @@ pub struct PropertyOverlayMetrics {
     pub tombstones: u64,
     /// Bytes written to external merge runs.
     pub spill_bytes: u64,
+    /// Encoded bytes written into first-level spill runs before merge
+    /// amplification. Includes one newline delimiter per physical row.
+    pub spool_input_bytes: u64,
     /// External merge runs written.
     pub spill_runs: u64,
     /// Maximum in-memory spill-run path references retained.
@@ -1968,6 +1971,10 @@ fn write_sorted_run(
     let bytes = writer.get_ref().metadata().map_err(io_error)?.len();
     metrics.spill_runs = metrics.spill_runs.saturating_add(1);
     metrics.spill_bytes = metrics.spill_bytes.saturating_add(bytes);
+    metrics.spool_input_bytes = metrics
+        .spool_input_bytes
+        .checked_add(bytes)
+        .ok_or_else(|| corrupt("property spool input byte metric overflows"))?;
     Ok(path)
 }
 

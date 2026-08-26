@@ -119,6 +119,24 @@ def test_body(text: str, symbol: str) -> str:
     return block(text[match.start() :], rf"fn\s+{re.escape(symbol)}\s*\(")
 
 
+def rust_code(text: str) -> str:
+    """Remove comments and literals so evidence must be live Rust syntax."""
+    return re.sub(
+        r'//[^\n]*|/\*.*?\*/|r#*".*?"#*|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'',
+        " ",
+        text,
+        flags=re.S,
+    )
+
+
+def bazel_list(call: str, attribute: str) -> set[str]:
+    uncommented = re.sub(r"#[^\n]*", "", call)
+    match = re.search(rf"\b{re.escape(attribute)}\s*=\s*\[(?P<body>.*?)\]", uncommented, re.S)
+    if match is None:
+        raise ContractError(f"Bazel call lacks {attribute} list")
+    return set(re.findall(r'["\']([^"\']+)["\']', match.group("body")))
+
+
 def validate(root: Path, contract_path: Path) -> None:
     contract = load(contract_path)
     if set(contract) != {
@@ -246,12 +264,33 @@ def validate(root: Path, contract_path: Path) -> None:
     )
     if "#![cfg(unix)]" not in scale_source or "libc::RUSAGE_SELF" not in scale_source:
         raise ContractError("production RSS evidence lost explicit Unix getrusage scope")
+    production_body = rust_code(
+        test_body(scale_source, "production_property_overlay_n_2n_4n_is_disk_growing_and_memory_bounded")
+    )
+    if re.search(r"\bif\s+(?:false|0\s*==\s*1|1\s*==\s*0)\b", production_body):
+        raise ContractError("production scale evidence contains a statically dead assertion branch")
+    required_assertions = {
+        "authentication bytes": r"assert!\s*\(\s*phase\.authentication_bytes\s*>\s*0\s*\)",
+        "authentication blocks": r"assert!\s*\(\s*phase\.authentication_blocks\s*>\s*0\s*\)",
+        "total byte accounting": r"assert_eq!\s*\(\s*phase\.physical_bytes,.*phase\s*\.authentication_bytes.*phase\.validation_bytes.*phase\.selected_value_bytes",
+        "total block accounting": r"assert_eq!\s*\(\s*phase\.physical_blocks,.*phase\s*\.authentication_blocks.*phase\.validation_read_calls.*phase\.selected_value_read_calls",
+        "derived authentication bound": r"authentication_bound\s*=.*graph_tree_bytes.*checked_add\s*\(\s*phase\.property_fragment_bytes.*assert!\s*\(\s*phase\.authentication_bytes\s*<=\s*authentication_bound\s*\)",
+        "derived decoder bound": r"decoder_bytes\s*=.*validation_bytes.*checked_add\s*\(\s*phase\.selected_value_bytes.*assert!\s*\(\s*decoder_bytes\s*<=\s*phase\.property_fragment_bytes\s*\)",
+        "derived total read bound": r"total_read_bound\s*=.*graph_tree_bytes.*property_fragment_bytes.*checked_mul\s*\(\s*2\s*\).*assert!\s*\(\s*phase\.physical_bytes\s*<=\s*total_read_bound\s*\)",
+        "checked spill amplification": r"spill_bound\s*=.*spool_input_bytes.*checked_mul.*merge_passes.*checked_add",
+        "spill assertion": r"assert!\s*\(\s*phase\.spill_bytes\s*<=\s*spill_bound\s*\)",
+        "seek assertion": r"assert_eq!\s*\(\s*phase\.per_record_seeks,\s*0\s*\)",
+    }
+    for label, expression in required_assertions.items():
+        if re.search(expression, production_body, re.S) is None:
+            raise ContractError(f"production scale evidence lacks concrete {label} assertion")
 
-    scale_target = call_block(storage_build, r"gf_rust_integration_test\(\s*name\s*=\s*\"property_overlay_scale\"")
-    if 'srcs = ["tests/property_overlay_scale.rs"]' not in scale_target:
+    storage_rules = re.sub(r"#[^\n]*", "", storage_build)
+    scale_target = call_block(storage_rules, r"gf_rust_integration_test\(\s*name\s*=\s*\"property_overlay_scale\"")
+    if bazel_list(scale_target, "srcs") != {"tests/property_overlay_scale.rs"}:
         raise ContractError("property-overlay production scale Bazel source mapping drifted")
-    suite = call_block(storage_build, r"test_suite\(\s*name\s*=\s*\"storage_integration_tests\"")
-    if '":property_overlay_scale"' not in suite:
+    suite = call_block(storage_rules, r"test_suite\(\s*name\s*=\s*\"storage_integration_tests\"")
+    if ":property_overlay_scale" not in bazel_list(suite, "tests"):
         raise ContractError("production scale target left storage integration suite")
 
 
