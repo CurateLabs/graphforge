@@ -1,3 +1,5 @@
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
 package(default_visibility = ["//visibility:public"])
 
 exports_files([
@@ -10,7 +12,32 @@ exports_files([
     "test-cargo-bazel-parity-check.py",
     "bazel-cache-perf.py",
     "test-bazel-cache-perf.py",
+    "property-overlay-contract.py",
+    "test-property-overlay-contract.py",
 ])
+
+sh_test(
+    name = "property_overlay_contract",
+    srcs = ["property-overlay-contract.py"],
+    data = [
+        "//crates/graphforge-storage:src/lib.rs",
+        "//crates/graphforge-storage:src/property_overlay.rs",
+        "//crates/graphforge-storage:src/writer.rs",
+        "//tests/contracts:property-overlay-v1.json",
+    ],
+)
+
+sh_test(
+    name = "test_property_overlay_contract",
+    srcs = ["test-property-overlay-contract.py"],
+    data = [
+        "property-overlay-contract.py",
+        "//crates/graphforge-storage:src/lib.rs",
+        "//crates/graphforge-storage:src/property_overlay.rs",
+        "//crates/graphforge-storage:src/writer.rs",
+        "//tests/contracts:property-overlay-v1.json",
+    ],
+)
 filegroup(
     name = "cargo_bazel_drift_check_py",
     srcs = ["cargo-bazel-drift-check.py"],

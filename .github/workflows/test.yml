@@ -98,6 +98,11 @@ jobs:
       - name: Validate multi-ontology four-surface parity
         run: python3 scripts/ci/multi-ontology-surface-gate.py
 
+      - name: Validate frozen property-overlay surface and counters
+        run: |
+          python3 scripts/ci/property-overlay-contract.py
+          python3 scripts/ci/test-property-overlay-contract.py
+
       - name: Test aggregate merge gate
         run: scripts/ci/test-require-gates.sh
 

@@ -213,6 +213,9 @@ pre-push-fast:  ## Run fast checks only — format, lint, type, security, docstr
 	@python3 scripts/ci/multi-ontology-surface-gate.py
 	@python3 scripts/ci/test-compare-multi-ontology-parity.py
 	@python3 scripts/ci/test-compare-multi-ontology-certification.py
+	@echo "━━━ Property-overlay contract ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	@python3 scripts/ci/property-overlay-contract.py
+	@python3 scripts/ci/test-property-overlay-contract.py
 	@echo "━━━ Format check ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@$(MAKE) format-check
 	@echo "━━━ Lint ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
