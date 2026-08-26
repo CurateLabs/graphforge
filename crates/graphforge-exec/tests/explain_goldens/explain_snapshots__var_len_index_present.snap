@@ -4,14 +4,13 @@ assertion_line: 141
 ---
 ProjectionExec: expr=[1 as one]
   HashJoinExec: mode=CollectLeft, join_type=Right, on=[(node_uuid@0, node_uuid@0)]
-    GraphForgeParquetExec: fragments=1, batch_size=8192, limit=none
+    PropertyOverlayExec: route=_untyped
     FilterExec: array_has(type_ids@1, 1073741824), projection=[node_uuid@0]
       RepartitionExec: partitioning=RoundRobinBatch(<N>), input_partitions=1
         ProjectionExec: expr=[node_uuid@7 as node_uuid, type_ids@10 as type_ids]
           VarLenExpandExec: rel=KNOWS, hops=1..2, adjacency=hit
             FilterExec: name@6 = Alice
-              RepartitionExec: partitioning=RoundRobinBatch(<N>), input_partitions=1
-                HashJoinExec: mode=CollectLeft, join_type=Left, on=[(node_uuid@0, node_uuid@0)], projection=[node_uuid@0, node_id@1, type_id@2, type_ids@3, created_at@4, updated_at@5, name@7]
-                  FilterExec: array_has(type_ids@3, 1073741824)
-                    GraphForgeParquetExec: fragments=1, batch_size=8192, limit=none
+              HashJoinExec: mode=CollectLeft, join_type=Left, on=[(node_uuid@0, node_uuid@0)], projection=[node_uuid@0, node_id@1, type_id@2, type_ids@3, created_at@4, updated_at@5, name@7]
+                FilterExec: array_has(type_ids@3, 1073741824)
                   GraphForgeParquetExec: fragments=1, batch_size=8192, limit=none
+                PropertyOverlayExec: route=_untyped
