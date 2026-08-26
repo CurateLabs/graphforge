@@ -2081,17 +2081,18 @@ where
         .map(|path| File::open(path).map(BufReader::new).map_err(io_error))
         .collect::<Result<Vec<_>, _>>()?;
     let mut current = Vec::with_capacity(readers.len());
+    let mut current_charges = Vec::with_capacity(readers.len());
     let mut heap = BinaryHeap::new();
     for (index, reader) in readers.iter_mut().enumerate() {
         current.push(read_spool(reader, budget.max)?);
+        current_charges.push(current[index].as_ref().map_or(0, record_charge));
         if let Some(row) = &current[index] {
             heap.push(Reverse((row.sort_key(), index)));
         }
     }
-    let cursor_bytes = current
+    let mut cursor_bytes = current_charges
         .iter()
-        .flatten()
-        .fold(0_u64, |total, row| total.saturating_add(record_charge(row)));
+        .fold(0_u64, |total, charge| total.saturating_add(*charge));
     budget.charge(cursor_bytes)?;
     metrics.peak_buffered_rows = metrics
         .peak_buffered_rows
@@ -2100,14 +2101,21 @@ where
     let mut writer = (emit.is_none())
         .then(|| File::create(output).map(BufWriter::new).map_err(io_error))
         .transpose()?;
+    // Every run is ordered by UUID and newest authority first. Resolve a UUID
+    // in every merge, rather than carrying all of its shadowed history through
+    // each level. This keeps intermediate I/O proportional to the live sparse
+    // overlay instead of multiplying historical rows by the number of merge
+    // levels.
     let mut resolved_uuid = None;
     while let Some(Reverse((_, index))) = heap.pop() {
         let row = current[index].take().expect("heap row exists");
-        budget.release(record_charge(&row));
-        if emit.is_some() {
-            let newest = resolved_uuid != Some(row.uuid);
-            if newest {
-                resolved_uuid = Some(row.uuid);
+        let prior_charge = std::mem::take(&mut current_charges[index]);
+        budget.release(prior_charge);
+        cursor_bytes = cursor_bytes.saturating_sub(prior_charge);
+        let newest = resolved_uuid != Some(row.uuid);
+        if newest {
+            resolved_uuid = Some(row.uuid);
+            if emit.is_some() {
                 if row.tombstone {
                     metrics.tombstones = metrics.tombstones.saturating_add(1);
                 } else if let Some(visitor) = emit.as_deref_mut() {
@@ -2118,21 +2126,21 @@ where
                     })?;
                     metrics.logical_rows = metrics.logical_rows.saturating_add(1);
                 }
-            } else {
-                metrics.shadowed_rows = metrics.shadowed_rows.saturating_add(1);
             }
+        } else {
+            metrics.shadowed_rows = metrics.shadowed_rows.saturating_add(1);
         }
-        if let Some(out) = writer.as_mut() {
+        if newest && let Some(out) = writer.as_mut() {
             serde_json::to_writer(&mut *out, &row).map_err(json_error)?;
             out.write_all(b"\n").map_err(io_error)?;
         }
         current[index] = read_spool(&mut readers[index], budget.max)?;
         if let Some(next) = &current[index] {
-            budget.charge(record_charge(next))?;
+            let next_charge = record_charge(next);
+            budget.charge(next_charge)?;
+            current_charges[index] = next_charge;
+            cursor_bytes = cursor_bytes.saturating_add(next_charge);
         }
-        let cursor_bytes = current.iter().flatten().fold(0_u64, |total, candidate| {
-            total.saturating_add(record_charge(candidate))
-        });
         metrics.peak_buffered_rows = metrics
             .peak_buffered_rows
             .max(u64::try_from(current.iter().flatten().count()).unwrap_or(u64::MAX));
@@ -2561,6 +2569,59 @@ mod tests {
         assert_eq!(metrics.physical_rows, 1024);
         assert!(metrics.spill_runs > 1024);
         assert!(metrics.peak_run_references <= 11);
+        assert!(budget.peak() <= 1024);
+    }
+
+    #[test]
+    fn intermediate_merges_discard_shadowed_history() {
+        let dir = TempDir::new().unwrap();
+        let uuid = [7_u8; 16];
+        let inputs = (0_u64..1024)
+            .map(|generation| {
+                (
+                    PropertyFragmentId {
+                        generation,
+                        ordinal: 0,
+                    },
+                    0,
+                    0,
+                    vec![PropertySnapshotRow {
+                        uuid,
+                        tombstone: false,
+                        values: BTreeMap::from([(
+                            "generation".into(),
+                            IrLiteral::Int(i64::try_from(generation).unwrap()),
+                        )]),
+                    }],
+                )
+            })
+            .collect::<Vec<_>>();
+        let budget = LiveByteBudget::new(1024);
+        let mut emitted = Vec::new();
+        let metrics = visit_newest_property_snapshots(
+            inputs,
+            dir.path(),
+            PropertyOverlayLimits {
+                max_buffered_rows: 1,
+                max_open_runs: 2,
+                max_buffered_bytes: 1024,
+                max_row_bytes: 512,
+            },
+            &budget,
+            |row| {
+                emitted.push(row);
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(emitted.len(), 1);
+        assert_eq!(emitted[0].values["generation"], IrLiteral::Int(1023));
+        assert_eq!(metrics.shadowed_rows, 1023);
+        assert!(
+            metrics.spill_bytes <= metrics.spool_input_bytes.saturating_mul(3),
+            "intermediate merge output must remain linear in input: {metrics:#?}"
+        );
         assert!(budget.peak() <= 1024);
     }
 
