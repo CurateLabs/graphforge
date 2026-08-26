@@ -303,7 +303,15 @@ impl GraphForge {
             } else {
                 None
             };
-            apply_graph_mutations(self, request, &mut next_catalog, recorded_at)?;
+            let property_inventory =
+                crate::property_inventory_for_hydrated_generation(parent, &self.dir)?;
+            apply_graph_mutations(
+                self,
+                request,
+                &mut next_catalog,
+                recorded_at,
+                property_inventory.as_ref(),
+            )?;
             if self.path.is_some() {
                 crate::persist_runtime_catalog(&self.dir, &next_catalog)?;
             }
@@ -911,6 +919,7 @@ fn apply_graph_mutations(
     request: &CompositeTransactionRequest,
     catalog: &mut RuntimeCatalog,
     recorded_at: i64,
+    inventory: &graphforge_storage::AuthenticatedPropertyInventory,
 ) -> Result<(), GfError> {
     if request.graph_mutations.is_empty() {
         return Ok(());
@@ -931,8 +940,6 @@ fn apply_graph_mutations(
         .flatten()
         .collect::<BTreeSet<_>>();
     register_existing_endpoints(&mut writer, &graph.dir, &endpoints)?;
-    let mut created_nodes = HashSet::new();
-    let mut created_edges = HashSet::new();
     let mut node_sets: HashMap<String, HashMap<[u8; 16], HashMap<String, IrLiteral>>> =
         HashMap::new();
     let mut edge_sets: HashMap<String, HashMap<[u8; 16], HashMap<String, IrLiteral>>> =
@@ -957,7 +964,6 @@ fn apply_graph_mutations(
                         graphforge_ir::runtime_entity_type_id(catalog.intern_label(label))
                     });
                 writer.create_node(*node_uuid, type_id)?;
-                created_nodes.insert(*node_uuid);
                 if !properties.is_empty() {
                     let props = properties
                         .iter()
@@ -966,7 +972,10 @@ fn apply_graph_mutations(
                             Ok((name.clone(), prop_literal(value)?))
                         })
                         .collect::<Result<HashMap<_, _>, GfError>>()?;
-                    writer.set_properties(node_uuid, Some(label), props)?;
+                    node_sets
+                        .entry(label.clone())
+                        .or_default()
+                        .insert(node_uuid.into_bytes(), props);
                 }
             }
             CompositeGraphMutation::CreateEdge {
@@ -978,7 +987,6 @@ fn apply_graph_mutations(
             } => {
                 catalog.intern_relation_type(rel_type);
                 writer.create_edge(*edge_uuid, rel_type, source_uuid, target_uuid)?;
-                created_edges.insert(*edge_uuid);
                 if !properties.is_empty() {
                     let props = properties
                         .iter()
@@ -987,7 +995,10 @@ fn apply_graph_mutations(
                             Ok((name.clone(), prop_literal(value)?))
                         })
                         .collect::<Result<HashMap<_, _>, GfError>>()?;
-                    writer.set_edge_properties(edge_uuid, Some(rel_type), props)?;
+                    edge_sets
+                        .entry(rel_type.clone())
+                        .or_default()
+                        .insert(edge_uuid.into_bytes(), props);
                 }
             }
             CompositeGraphMutation::SetNodeProperty {
@@ -997,20 +1008,12 @@ fn apply_graph_mutations(
             } => {
                 catalog.intern_property(property, None);
                 let literal = prop_literal(value)?;
-                if created_nodes.contains(node_uuid) {
-                    writer.set_properties(
-                        node_uuid,
-                        None,
-                        HashMap::from([(property.clone(), literal)]),
-                    )?;
-                } else {
-                    node_sets
-                        .entry("_untyped".into())
-                        .or_default()
-                        .entry(node_uuid.into_bytes())
-                        .or_default()
-                        .insert(property.clone(), literal);
-                }
+                node_sets
+                    .entry("_untyped".into())
+                    .or_default()
+                    .entry(node_uuid.into_bytes())
+                    .or_default()
+                    .insert(property.clone(), literal);
             }
             CompositeGraphMutation::SetEdgeProperty {
                 edge_uuid,
@@ -1019,20 +1022,12 @@ fn apply_graph_mutations(
             } => {
                 catalog.intern_property(property, None);
                 let literal = prop_literal(value)?;
-                if created_edges.contains(edge_uuid) {
-                    writer.set_edge_properties(
-                        edge_uuid,
-                        None,
-                        HashMap::from([(property.clone(), literal)]),
-                    )?;
-                } else {
-                    edge_sets
-                        .entry("_untyped".into())
-                        .or_default()
-                        .entry(edge_uuid.into_bytes())
-                        .or_default()
-                        .insert(property.clone(), literal);
-                }
+                edge_sets
+                    .entry("_untyped".into())
+                    .or_default()
+                    .entry(edge_uuid.into_bytes())
+                    .or_default()
+                    .insert(property.clone(), literal);
             }
             CompositeGraphMutation::RemoveNodeProperty {
                 node_uuid,
@@ -1066,12 +1061,12 @@ fn apply_graph_mutations(
     }
 
     let mut staged = RewriteBatch::new();
-    let inventory = graph.property_inventory_for_session();
+    writer.flush_into(&mut staged)?;
     for (stem, updates) in &node_sets {
         graphforge_storage::stage_set_node_properties_authenticated(
             &mut staged,
             &graph.dir,
-            &inventory,
+            inventory,
             stem,
             updates,
         )?;
@@ -1080,7 +1075,7 @@ fn apply_graph_mutations(
         graphforge_storage::stage_set_edge_properties_authenticated(
             &mut staged,
             &graph.dir,
-            &inventory,
+            inventory,
             stem,
             updates,
         )?;
@@ -1089,7 +1084,7 @@ fn apply_graph_mutations(
         graphforge_storage::stage_remove_node_properties_authenticated(
             &mut staged,
             &graph.dir,
-            &inventory,
+            inventory,
             stem,
             removals,
         )?;
@@ -1098,14 +1093,23 @@ fn apply_graph_mutations(
         graphforge_storage::stage_remove_edge_properties_authenticated(
             &mut staged,
             &graph.dir,
-            &inventory,
+            inventory,
             stem,
             removals,
         )?;
     }
-    graphforge_storage::stage_delete_edges(&mut staged, &graph.dir, &delete_edges)?;
-    graphforge_storage::stage_delete_nodes(&mut staged, &graph.dir, &delete_nodes)?;
-    writer.flush_into(&mut staged)?;
+    graphforge_storage::stage_delete_edges_authenticated(
+        &mut staged,
+        &graph.dir,
+        inventory,
+        &delete_edges,
+    )?;
+    graphforge_storage::stage_delete_nodes_authenticated(
+        &mut staged,
+        &graph.dir,
+        inventory,
+        &delete_nodes,
+    )?;
     graphforge_storage::commit_topology_aware(staged, &graph.dir)?;
     Ok(())
 }
@@ -1959,6 +1963,11 @@ mod tests {
         enable(&graph, CapabilityId::Provenance, 123);
         let root = graph.resolved_generation.container_root();
         let parent = graphforge_storage::resolve_project_generation(root).unwrap();
+        assert_ne!(
+            graph.property_inventory_for_session().generation_uuid(),
+            Some(parent.generation_uuid()),
+            "capability-only publication deliberately leaves the prior graph inventory cached"
+        );
         let parent_graph = parent.graph_files_inventory().unwrap().unwrap();
         let unrelated = parent
             .participant_snapshots()

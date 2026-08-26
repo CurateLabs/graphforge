@@ -4912,6 +4912,53 @@ pub(crate) fn stage_property_tombstones<S: std::hash::BuildHasher>(
     )
 }
 
+/// Stage whole-row tombstones using an already authenticated generation inventory.
+///
+/// This is the publication-safe analogue of the workspace convenience path:
+/// the caller pins one project generation for every property operation in the
+/// batch, so sealing can reject a stale window if CURRENT changes.
+pub fn stage_property_tombstones_authenticated<S: std::hash::BuildHasher>(
+    staged: &mut RewriteBatch,
+    dir: &Path,
+    inventory: &crate::AuthenticatedPropertyInventory,
+    kind: crate::property_overlay::PropertyRouteKind,
+    route: &str,
+    uuids: &HashSet<[u8; 16], S>,
+) -> Result<(), GfError> {
+    if uuids.is_empty() {
+        return Ok(());
+    }
+    let mut uuids = uuids.iter().copied().collect::<Vec<_>>();
+    uuids.sort_unstable();
+    let uuid_field = match kind {
+        crate::property_overlay::PropertyRouteKind::Node => NODE_PROPERTY_UUID_FIELD,
+        crate::property_overlay::PropertyRouteKind::Edge => EDGE_PROPERTY_UUID_FIELD,
+    };
+    let route_key = match kind {
+        crate::property_overlay::PropertyRouteKind::Node => "graphforge.entity_type",
+        crate::property_overlay::PropertyRouteKind::Edge => "graphforge.rel_type",
+    };
+    let schema = Arc::new(Schema::new_with_metadata(
+        vec![Field::new(uuid_field, DataType::FixedSizeBinary(16), false)],
+        HashMap::from([(route_key.to_owned(), route.to_owned())]),
+    ));
+    let column = FixedSizeBinaryArray::try_from_iter(uuids.into_iter().map(|uuid| uuid.to_vec()))
+        .map_err(pq_err)?;
+    stage_property_fragment(
+        staged,
+        dir,
+        PropertyFragmentInput {
+            kind,
+            route,
+            schema: &schema,
+            input_schema: schema.as_ref(),
+            columns: vec![Arc::new(column)],
+            tombstone: true,
+            authority: inventory.generation_authority(),
+        },
+    )
+}
+
 struct PropertyFragmentInput<'a> {
     kind: crate::property_overlay::PropertyRouteKind,
     route: &'a str,

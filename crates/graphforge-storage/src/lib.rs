@@ -390,16 +390,18 @@ pub use writer::{
     GraphWriter, count_entity_properties, decode_spatial_property_value, read_entity_properties,
     read_entity_property_keys, read_node_property_rows, remove_edge_properties,
     remove_node_properties, set_edge_properties_rewrite, set_node_properties,
-    stage_remove_edge_properties, stage_remove_edge_properties_authenticated,
-    stage_remove_node_properties, stage_remove_node_properties_authenticated,
-    stage_set_edge_properties, stage_set_edge_properties_authenticated, stage_set_node_properties,
+    stage_property_tombstones_authenticated, stage_remove_edge_properties,
+    stage_remove_edge_properties_authenticated, stage_remove_node_properties,
+    stage_remove_node_properties_authenticated, stage_set_edge_properties,
+    stage_set_edge_properties_authenticated, stage_set_node_properties,
     stage_set_node_properties_authenticated,
 };
 
 pub mod mutator;
 pub use mutator::{
     delete_edges, delete_nodes, delete_nodes_and_edges, incident_edge_uuids, stage_add_node_labels,
-    stage_delete_edges, stage_delete_nodes, stage_mutate_node_labels,
+    stage_delete_edges, stage_delete_edges_authenticated, stage_delete_nodes,
+    stage_delete_nodes_authenticated, stage_mutate_node_labels,
 };
 
 pub mod staging;

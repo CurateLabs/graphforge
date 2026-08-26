@@ -303,6 +303,38 @@ pub fn stage_delete_nodes<S: BuildHasher>(
     )
 }
 
+/// Stage node deletion while binding every property tombstone to `inventory`.
+#[allow(clippy::implicit_hasher)]
+pub fn stage_delete_nodes_authenticated<S: BuildHasher>(
+    staged: &mut RewriteBatch,
+    dir: &Path,
+    inventory: &crate::AuthenticatedPropertyInventory,
+    node_uuids: &HashSet<[u8; 16], S>,
+) -> Result<u64, GfError> {
+    if node_uuids.is_empty() {
+        return Ok(0);
+    }
+    let routes = inventory
+        .routes(crate::PropertyRouteKind::Node)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    for route in routes {
+        crate::writer::stage_property_tombstones_authenticated(
+            staged,
+            dir,
+            inventory,
+            crate::PropertyRouteKind::Node,
+            &route,
+            node_uuids,
+        )?;
+    }
+    stage_rewrite_nodes_dropping(
+        staged,
+        &dir.join("topology").join("nodes.parquet"),
+        node_uuids,
+    )
+}
+
 /// Stage the deletion of the given edges into `staged`: every
 /// `topology/edges/*.parquet`, then any `edge_properties/*.parquet`. Returns
 /// the edge rows that will be removed.
@@ -329,6 +361,40 @@ pub fn stage_delete_edges<S: BuildHasher>(
             staged,
             dir,
             crate::property_overlay::PropertyRouteKind::Edge,
+            &route,
+            edge_uuids,
+        )?;
+    }
+    Ok(removed)
+}
+
+/// Stage edge deletion while binding every property tombstone to `inventory`.
+#[allow(clippy::implicit_hasher)]
+pub fn stage_delete_edges_authenticated<S: BuildHasher>(
+    staged: &mut RewriteBatch,
+    dir: &Path,
+    inventory: &crate::AuthenticatedPropertyInventory,
+    edge_uuids: &HashSet<[u8; 16], S>,
+) -> Result<u64, GfError> {
+    if edge_uuids.is_empty() {
+        return Ok(0);
+    }
+    let mut removed = 0u64;
+    for path in parquet_files_in(dir, "topology/edges")? {
+        if let Some(schema) = discover_parquet_schema(&path) {
+            removed += stage_rewrite_dropping(staged, &path, schema, "edge_uuid", edge_uuids)?;
+        }
+    }
+    let routes = inventory
+        .routes(crate::PropertyRouteKind::Edge)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    for route in routes {
+        crate::writer::stage_property_tombstones_authenticated(
+            staged,
+            dir,
+            inventory,
+            crate::PropertyRouteKind::Edge,
             &route,
             edge_uuids,
         )?;
