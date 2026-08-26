@@ -11,8 +11,11 @@ use tempfile::TempDir;
 
 use graphforge_core::GfError;
 use graphforge_exec::{ExecutionResult, ExecutionSession, MutationKind, MutationSubjectKind};
-use graphforge_ir::{Binder, GraphPlan, OntologyMode, RuntimeCatalog};
-use graphforge_storage::GraphCatalog;
+use graphforge_ir::{Binder, GraphPlan, IrLiteral, OntologyMode, RuntimeCatalog};
+use graphforge_storage::{
+    GraphCatalog, PropertyOverlayLimits, PropertyRouteKind, enumerate_property_fragments,
+    visit_authenticated_property_snapshots,
+};
 
 /// Bind `query` in Exploratory mode against the shared runtime catalog.
 fn bind(query: &str, rt: &Arc<Mutex<RuntimeCatalog>>) -> GraphPlan {
@@ -76,6 +79,25 @@ fn rows(path: &Path) -> usize {
         .unwrap()
         .map(|b| b.unwrap().num_rows())
         .sum()
+}
+
+fn logical_property_rows(dir: &Path, route: &str) -> Vec<graphforge_storage::PropertySnapshotRow> {
+    let scratch = TempDir::new().unwrap();
+    let mut rows = Vec::new();
+    visit_authenticated_property_snapshots(
+        dir,
+        PropertyRouteKind::Node,
+        route,
+        scratch.path(),
+        PropertyOverlayLimits::default(),
+        |row| {
+            assert!(!row.tombstone);
+            rows.push(row);
+            Ok(())
+        },
+    )
+    .unwrap();
+    rows
 }
 
 #[tokio::test]
@@ -166,8 +188,19 @@ async fn set_on_created_node_lands_in_buffer() {
         .unwrap();
     assert_eq!(counters(&r), [1, 0, 0, 0, 1, 0]);
     assert_eq!(rows(&dir.path().join("topology/nodes.parquet")), 1);
-    // The property merged into the buffered row and flushed with it.
-    assert_eq!(rows(&dir.path().join("properties/_untyped.parquet")), 1);
+    // The property merged into the buffered row and became authenticated
+    // immutable logical authority.
+    let fragments =
+        enumerate_property_fragments(dir.path(), PropertyRouteKind::Node, "_untyped").unwrap();
+    assert_eq!(fragments.len(), 1);
+    assert_ne!(fragments[0].id.generation, 0);
+    assert_eq!(
+        fragments[0].path.file_name().unwrap().to_str().unwrap(),
+        fragments[0].id.file_name()
+    );
+    let properties = logical_property_rows(dir.path(), "_untyped");
+    assert_eq!(properties.len(), 1);
+    assert_eq!(properties[0].values["age"], IrLiteral::Int(41));
 }
 
 #[tokio::test]

@@ -1,19 +1,22 @@
 //! Integration tests for [`GraphWriter`] (#579): write → flush → reload through
-//! the public `GraphCatalog` reader (or, for the not-yet-registered `_untyped`
-//! property file, a direct Parquet read).
+//! the public `GraphCatalog` reader and authenticated immutable property
+//! authority.
 
-use std::fs::File;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use arrow::array::Array;
 use datafusion::prelude::SessionContext;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use tempfile::TempDir;
 
 use graphforge_core::uuid::new_v7;
 use graphforge_core::{OntologyMode, TypeId};
 use graphforge_ir::{IrLiteral, RuntimeCatalog};
-use graphforge_storage::{GraphCatalog, GraphWriter, read_topology_generation};
+use graphforge_storage::{
+    GraphCatalog, GraphWriter, PropertyOverlayLimits, PropertyRouteKind, PropertySnapshotRow,
+    PropertyTable, enumerate_property_fragments, read_topology_generation,
+    visit_authenticated_property_snapshots,
+};
 
 /// Fixed timestamp so written Parquet is deterministic.
 const TS: i64 = 1_700_000_000_000_000;
@@ -102,7 +105,7 @@ async fn exploratory_mode_routes_to_catch_all_files() {
             .join("topology/edges/_exploratory.parquet")
             .exists()
     );
-    assert!(dir.path().join("properties/_untyped.parquet").exists());
+    assert_canonical_fragments(dir.path(), PropertyRouteKind::Node, "_untyped", 1);
 
     // The exploratory edge file is auto-registered as `edges__exploratory`.
     let gc = GraphCatalog::open(dir.path(), None, &RuntimeCatalog::new()).unwrap();
@@ -125,20 +128,18 @@ async fn exploratory_mode_routes_to_catch_all_files() {
         .unwrap();
     assert_eq!(col.value(0), "UNKNOWN_REL");
 
-    // `_untyped` properties are NOT auto-registered by GraphCatalog yet
-    // (register_property_tables only covers known entity types), so read the
-    // Parquet file directly to verify the round-trip.
-    let path = dir.path().join("properties/_untyped.parquet");
-    let file = File::open(&path).unwrap();
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
-    let schema = builder.schema().clone();
+    let schema = PropertyTable::open_discovered(dir.path(), "_untyped").schema_ref();
     assert!(schema.field_with_name("node_uuid").is_ok());
     assert!(schema.field_with_name("name").is_ok());
     assert!(schema.field_with_name("age").is_ok());
 
-    let mut reader = builder.build().unwrap();
-    let batch = reader.next().unwrap().unwrap();
-    assert_eq!(batch.num_rows(), 1);
+    let rows = read_property_rows(dir.path(), "_untyped");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[src.as_bytes()].values["name"],
+        IrLiteral::Str("alice".into())
+    );
+    assert_eq!(rows[src.as_bytes()].values["age"], IrLiteral::Int(30));
 }
 
 #[tokio::test]
@@ -147,7 +148,6 @@ async fn localdatetime_property_round_trips_through_storage() {
     // set → flush → re-open(DECODE) → set → flush → read, as a typed
     // Struct{date: Date32, time: Time64(ns)} — and is NOT mis-decoded as a
     // duration (the high-risk struct-shape dispatch).
-    use arrow::array::{Int64Array, StructArray, Time64NanosecondArray};
     let dir = TempDir::new().unwrap();
     let node = new_v7();
     let (days, nanos) = (5_393_i64, 45_074_645_876_123_i64); // 1984-10-11T12:31:14.645876123
@@ -176,30 +176,12 @@ async fn localdatetime_property_round_trips_through_storage() {
     .unwrap();
     w2.flush().unwrap();
 
-    // Read back: `ts` is a Struct{date, time} carrying the original values.
-    let batch = read_property_batch(dir.path(), "_untyped");
-    let ts = batch.column_by_name("ts").expect("ts column");
-    let s = ts.as_any().downcast_ref::<StructArray>().expect("struct");
-    let date = s
-        .column(0)
-        .as_any()
-        .downcast_ref::<Int64Array>()
-        .expect("date child");
-    let time = s
-        .column(1)
-        .as_any()
-        .downcast_ref::<Time64NanosecondArray>()
-        .expect("time child");
+    let rows = read_property_rows(dir.path(), "_untyped");
     assert_eq!(
-        date.value(0),
-        days,
-        "localdatetime date survives round-trip"
+        rows[node.as_bytes()].values["ts"],
+        IrLiteral::LocalDateTime { days, nanos }
     );
-    assert_eq!(
-        time.value(0),
-        nanos,
-        "localdatetime time survives round-trip"
-    );
+    assert_eq!(rows[node.as_bytes()].values["n"], IrLiteral::Int(7));
 }
 
 #[tokio::test]
@@ -207,7 +189,6 @@ async fn datetime_and_time_properties_round_trip_through_storage() {
     // #920: a `datetime` (Struct{date,time,offset,zone}, zone = None ⇒ NULL child)
     // and a `localtime` (native Time64) survive set → flush → re-open(DECODE) →
     // set → flush → read, NOT mis-decoded as a duration/localdatetime.
-    use arrow::array::{Int32Array, Int64Array, StringArray, StructArray, Time64NanosecondArray};
     let dir = TempDir::new().unwrap();
     let node = new_v7();
     let (days, nanos, offset) = (5_393_i64, 45_074_645_876_123_i64, -3_600_i32);
@@ -244,45 +225,17 @@ async fn datetime_and_time_properties_round_trip_through_storage() {
     .unwrap();
     w2.flush().unwrap();
 
-    let batch = read_property_batch(dir.path(), "_untyped");
-
-    // `t` is a native Time64(ns) column.
-    let t = batch.column_by_name("t").expect("t column");
-    let tarr = t
-        .as_any()
-        .downcast_ref::<Time64NanosecondArray>()
-        .expect("time64");
-    assert_eq!(tarr.value(0), nanos);
-
-    // `dt` is a Struct{date, time, offset, zone}; zone is NULL (offset-only).
-    let dt = batch.column_by_name("dt").expect("dt column");
-    let s = dt.as_any().downcast_ref::<StructArray>().expect("struct");
+    let rows = read_property_rows(dir.path(), "_untyped");
+    assert_eq!(rows[node.as_bytes()].values["t"], IrLiteral::Time(nanos));
     assert_eq!(
-        s.column(0)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap()
-            .value(0),
-        days
+        rows[node.as_bytes()].values["dt"],
+        IrLiteral::ZonedDateTime {
+            days,
+            nanos,
+            offset,
+            zone: None,
+        }
     );
-    assert_eq!(
-        s.column(1)
-            .as_any()
-            .downcast_ref::<Time64NanosecondArray>()
-            .unwrap()
-            .value(0),
-        nanos
-    );
-    assert_eq!(
-        s.column(2)
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .unwrap()
-            .value(0),
-        offset
-    );
-    let zone = s.column(3).as_any().downcast_ref::<StringArray>().unwrap();
-    assert!(zone.is_null(0), "offset-only datetime stores a NULL zone");
 }
 
 #[tokio::test]
@@ -292,7 +245,6 @@ async fn list_of_temporals_property_round_trips_through_storage() {
     // List<Struct{epoch_day}> — exercising the IrLiteral::List build + the decode
     // arm (which recurses on the element type). Dates are wide i64-days structs
     // (#1011).
-    use arrow::array::{Int64Array, ListArray, StructArray};
     let dir = TempDir::new().unwrap();
     let node = new_v7();
     let (d0, d1) = (5_393_i64, 5_394_i64);
@@ -320,50 +272,70 @@ async fn list_of_temporals_property_round_trips_through_storage() {
     .unwrap();
     w2.flush().unwrap();
 
-    // Read back: `dates` is a List<Struct{epoch_day}> with the original element
-    // values (i64 days).
-    let batch = read_property_batch(dir.path(), "_untyped");
-    let col = batch.column_by_name("dates").expect("dates column");
-    let list = col.as_any().downcast_ref::<ListArray>().expect("list");
-    let elems = list.value(0);
-    let dates = elems
-        .as_any()
-        .downcast_ref::<StructArray>()
-        .expect("date elements");
-    assert_eq!(dates.len(), 2, "list length survives round-trip");
-    let epoch_day = dates
-        .column(0)
-        .as_any()
-        .downcast_ref::<Int64Array>()
-        .expect("epoch_day child");
-    assert_eq!(epoch_day.value(0), d0);
-    assert_eq!(epoch_day.value(1), d1);
+    let rows = read_property_rows(dir.path(), "_untyped");
+    assert_eq!(
+        rows[node.as_bytes()].values["dates"],
+        IrLiteral::List(vec![IrLiteral::Date(d0), IrLiteral::Date(d1)])
+    );
 }
 
 // ---------------------------------------------------------------------------
 // Append / merge across separate write sessions (#733)
 // ---------------------------------------------------------------------------
 
-/// Read `properties/<stem>.parquet` into its single batch (panics if absent).
-fn read_property_batch(dir: &std::path::Path, stem: &str) -> arrow::array::RecordBatch {
-    let path = dir.join(format!("properties/{stem}.parquet"));
-    let file = File::open(&path).unwrap_or_else(|e| panic!("open {path:?}: {e}"));
-    let mut reader = ParquetRecordBatchReaderBuilder::try_new(file)
-        .unwrap()
-        .build()
-        .unwrap();
-    reader.next().unwrap().unwrap()
+fn read_rows(
+    dir: &std::path::Path,
+    kind: PropertyRouteKind,
+    route: &str,
+) -> BTreeMap<[u8; 16], PropertySnapshotRow> {
+    let scratch = TempDir::new().unwrap();
+    let mut rows = BTreeMap::new();
+    visit_authenticated_property_snapshots(
+        dir,
+        kind,
+        route,
+        scratch.path(),
+        PropertyOverlayLimits::default(),
+        |row| {
+            assert!(!row.tombstone, "logical visitor must omit tombstones");
+            assert!(rows.insert(row.uuid, row).is_none(), "UUIDs are unique");
+            Ok(())
+        },
+    )
+    .unwrap();
+    rows
 }
 
-/// Read `edge_properties/<stem>.parquet` into its single batch (panics if absent).
-fn read_edge_property_batch(dir: &std::path::Path, stem: &str) -> arrow::array::RecordBatch {
-    let path = dir.join(format!("edge_properties/{stem}.parquet"));
-    let file = File::open(&path).unwrap_or_else(|e| panic!("open {path:?}: {e}"));
-    let mut reader = ParquetRecordBatchReaderBuilder::try_new(file)
-        .unwrap()
-        .build()
-        .unwrap();
-    reader.next().unwrap().unwrap()
+fn read_property_rows(
+    dir: &std::path::Path,
+    route: &str,
+) -> BTreeMap<[u8; 16], PropertySnapshotRow> {
+    read_rows(dir, PropertyRouteKind::Node, route)
+}
+
+fn read_edge_property_rows(
+    dir: &std::path::Path,
+    route: &str,
+) -> BTreeMap<[u8; 16], PropertySnapshotRow> {
+    read_rows(dir, PropertyRouteKind::Edge, route)
+}
+
+fn assert_canonical_fragments(
+    dir: &std::path::Path,
+    kind: PropertyRouteKind,
+    route: &str,
+    minimum: usize,
+) {
+    let fragments = enumerate_property_fragments(dir, kind, route).unwrap();
+    assert!(fragments.len() >= minimum, "missing immutable fragments");
+    for fragment in fragments {
+        assert_ne!(fragment.id.generation, 0, "new writes are not legacy files");
+        assert_eq!(
+            fragment.path.file_name().unwrap().to_str().unwrap(),
+            fragment.id.file_name()
+        );
+        assert_eq!(fragment.path.parent().unwrap().file_name().unwrap(), route);
+    }
 }
 
 #[tokio::test]
@@ -451,17 +423,19 @@ async fn append_property_merge_adds_new_column() {
     .unwrap();
     w2.flush().unwrap();
 
-    let batch = read_property_batch(dir.path(), "_untyped");
-    assert_eq!(batch.num_rows(), 2, "both rows retained");
-    let age = batch
-        .column_by_name("age")
-        .expect("age column added on the second flush")
-        .as_any()
-        .downcast_ref::<arrow::array::Int64Array>()
-        .unwrap();
-    // First row (A) has no age → null; second (B) → 10.
-    assert!(age.is_null(0));
-    assert_eq!(age.value(1), 10);
+    let rows = read_property_rows(dir.path(), "_untyped");
+    assert_eq!(rows.len(), 2, "both rows retained");
+    assert!(!rows[a.as_bytes()].values.contains_key("age"));
+    assert_eq!(rows[b.as_bytes()].values["age"], IrLiteral::Int(10));
+    assert_eq!(
+        rows[a.as_bytes()].values["name"],
+        IrLiteral::Str("A".into())
+    );
+    assert_eq!(
+        rows[b.as_bytes()].values["name"],
+        IrLiteral::Str("B".into())
+    );
+    assert_canonical_fragments(dir.path(), PropertyRouteKind::Node, "_untyped", 2);
 }
 
 #[tokio::test]
@@ -489,39 +463,10 @@ async fn append_property_merge_preserves_heterogeneous_scalar_types() {
     .unwrap();
     w2.flush().unwrap();
 
-    // Mixed Int (flush 1) + Str (flush 2) retain their original scalar types.
-    let batch = read_property_batch(dir.path(), "_untyped");
-    let x = batch
-        .column_by_name("x")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<arrow::array::StructArray>()
-        .expect("x uses tagged heterogeneous scalars");
-    let tags = x
-        .column_by_name("__het_tag")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<arrow::array::Int8Array>()
-        .unwrap();
-    assert_eq!((tags.value(0), tags.value(1)), (0, 2));
-    assert_eq!(
-        x.column_by_name("__het_int")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<arrow::array::Int64Array>()
-            .unwrap()
-            .value(0),
-        1
-    );
-    assert_eq!(
-        x.column_by_name("__het_str")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
-            .unwrap()
-            .value(1),
-        "two"
-    );
+    // Mixed Int (flush 1) + Str (flush 2) retain their logical scalar types.
+    let rows = read_property_rows(dir.path(), "_untyped");
+    assert_eq!(rows[a.as_bytes()].values["x"], IrLiteral::Int(1));
+    assert_eq!(rows[b.as_bytes()].values["x"], IrLiteral::Str("two".into()));
 }
 
 #[tokio::test]
@@ -551,16 +496,10 @@ async fn append_property_merge_null_first_across_flushes() {
     .unwrap();
     w2.flush().unwrap();
 
-    let batch = read_property_batch(dir.path(), "_untyped");
-    let score = batch
-        .column_by_name("score")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<arrow::array::Int64Array>()
-        .expect("score infers Int64, not pinned to Utf8 by the leading null");
-    assert_eq!(batch.num_rows(), 2);
-    // Exactly one concrete value (42); the all-null first flush stays null.
-    assert_eq!(score.null_count(), 1);
+    let rows = read_property_rows(dir.path(), "_untyped");
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[a.as_bytes()].values["score"], IrLiteral::Null);
+    assert_eq!(rows[b.as_bytes()].values["score"], IrLiteral::Int(42));
 }
 
 #[tokio::test]
@@ -608,7 +547,7 @@ fn write_knows_edge_with_props(
     dir: &std::path::Path,
     mode: OntologyMode,
     props: std::collections::HashMap<String, IrLiteral>,
-) {
+) -> uuid::Uuid {
     let (a, b) = (new_v7(), new_v7());
     let mut w = GraphWriter::open_at(dir, mode, TS).unwrap();
     w.create_node(a, TypeId(0)).unwrap();
@@ -617,12 +556,13 @@ fn write_knows_edge_with_props(
     w.create_edge(edge, "KNOWS", &a, &b).unwrap();
     w.set_edge_properties(&edge, Some("KNOWS"), props).unwrap();
     w.flush().unwrap();
+    edge
 }
 
 #[tokio::test]
 async fn edge_property_round_trip_persists_value() {
     let dir = TempDir::new().unwrap();
-    write_knows_edge_with_props(
+    let edge = write_knows_edge_with_props(
         dir.path(),
         OntologyMode::Strict,
         std::collections::HashMap::from([("since".to_owned(), IrLiteral::Int(2020))]),
@@ -630,22 +570,16 @@ async fn edge_property_round_trip_persists_value() {
 
     // Edge properties land in the dedicated `edge_properties/` dir, keyed by the
     // relation name — never under `properties/` (which is node-only).
-    assert!(dir.path().join("edge_properties/KNOWS.parquet").exists());
-    assert!(!dir.path().join("properties/KNOWS.parquet").exists());
-
-    let batch = read_edge_property_batch(dir.path(), "KNOWS");
-    assert_eq!(batch.num_rows(), 1);
+    assert_canonical_fragments(dir.path(), PropertyRouteKind::Edge, "KNOWS", 1);
     assert!(
-        batch.schema().field_with_name("edge_uuid").is_ok(),
-        "edge-property file is keyed by edge_uuid"
+        enumerate_property_fragments(dir.path(), PropertyRouteKind::Node, "KNOWS")
+            .unwrap()
+            .is_empty()
     );
-    let since = batch
-        .column_by_name("since")
-        .expect("since column")
-        .as_any()
-        .downcast_ref::<arrow::array::Int64Array>()
-        .expect("since is Int64");
-    assert_eq!(since.value(0), 2020);
+
+    let rows = read_edge_property_rows(dir.path(), "KNOWS");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[edge.as_bytes()].values["since"], IrLiteral::Int(2020));
 }
 
 #[tokio::test]
@@ -659,20 +593,24 @@ async fn edge_property_routes_by_rel_name_even_in_exploratory_mode() {
         OntologyMode::Exploratory,
         std::collections::HashMap::from([("since".to_owned(), IrLiteral::Int(1999))]),
     );
-    assert!(dir.path().join("edge_properties/KNOWS.parquet").exists());
-    assert!(!dir.path().join("edge_properties/_untyped.parquet").exists());
+    assert_canonical_fragments(dir.path(), PropertyRouteKind::Edge, "KNOWS", 1);
+    assert!(
+        enumerate_property_fragments(dir.path(), PropertyRouteKind::Edge, "_untyped")
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
 async fn append_edge_property_merge_adds_new_column() {
     let dir = TempDir::new().unwrap();
-    write_knows_edge_with_props(
+    let first = write_knows_edge_with_props(
         dir.path(),
         OntologyMode::Strict,
         std::collections::HashMap::from([("since".to_owned(), IrLiteral::Int(2020))]),
     );
     // Second session: a new KNOWS edge with an extra `weight` property.
-    write_knows_edge_with_props(
+    let second = write_knows_edge_with_props(
         dir.path(),
         OntologyMode::Strict,
         std::collections::HashMap::from([
@@ -681,47 +619,36 @@ async fn append_edge_property_merge_adds_new_column() {
         ]),
     );
 
-    let batch = read_edge_property_batch(dir.path(), "KNOWS");
-    assert_eq!(batch.num_rows(), 2, "both edge rows retained");
-    let weight = batch
-        .column_by_name("weight")
-        .expect("weight column added on the second flush")
-        .as_any()
-        .downcast_ref::<arrow::array::Float64Array>()
-        .unwrap();
-    // First row has no weight → null; second → 0.5.
-    assert!(weight.is_null(0));
-    assert_eq!(weight.value(1), 0.5);
+    let rows = read_edge_property_rows(dir.path(), "KNOWS");
+    assert_eq!(rows.len(), 2, "both edge rows retained");
+    assert!(!rows[first.as_bytes()].values.contains_key("weight"));
+    assert_eq!(
+        rows[second.as_bytes()].values["weight"],
+        IrLiteral::Float(0.5)
+    );
+    assert_canonical_fragments(dir.path(), PropertyRouteKind::Edge, "KNOWS", 2);
 }
 
 #[tokio::test]
 async fn append_edge_property_merge_preserves_heterogeneous_scalar_types() {
     let dir = TempDir::new().unwrap();
-    write_knows_edge_with_props(
+    let first = write_knows_edge_with_props(
         dir.path(),
         OntologyMode::Strict,
         std::collections::HashMap::from([("x".to_owned(), IrLiteral::Int(1))]),
     );
-    write_knows_edge_with_props(
+    let second = write_knows_edge_with_props(
         dir.path(),
         OntologyMode::Strict,
         std::collections::HashMap::from([("x".to_owned(), IrLiteral::Str("two".to_owned()))]),
     );
 
-    let batch = read_edge_property_batch(dir.path(), "KNOWS");
-    let x = batch
-        .column_by_name("x")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<arrow::array::StructArray>()
-        .expect("x uses tagged heterogeneous scalars");
-    let tags = x
-        .column_by_name("__het_tag")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<arrow::array::Int8Array>()
-        .unwrap();
-    assert_eq!((tags.value(0), tags.value(1)), (0, 2));
+    let rows = read_edge_property_rows(dir.path(), "KNOWS");
+    assert_eq!(rows[first.as_bytes()].values["x"], IrLiteral::Int(1));
+    assert_eq!(
+        rows[second.as_bytes()].values["x"],
+        IrLiteral::Str("two".into())
+    );
 }
 
 #[tokio::test]
@@ -730,26 +657,21 @@ async fn append_edge_property_merge_null_first_across_flushes() {
     // Utf8 — a concrete value in the next flush fixes the type (mirror of the
     // node-property null-first test).
     let dir = TempDir::new().unwrap();
-    write_knows_edge_with_props(
+    let first = write_knows_edge_with_props(
         dir.path(),
         OntologyMode::Strict,
         std::collections::HashMap::from([("score".to_owned(), IrLiteral::Null)]),
     );
-    write_knows_edge_with_props(
+    let second = write_knows_edge_with_props(
         dir.path(),
         OntologyMode::Strict,
         std::collections::HashMap::from([("score".to_owned(), IrLiteral::Int(42))]),
     );
 
-    let batch = read_edge_property_batch(dir.path(), "KNOWS");
-    let score = batch
-        .column_by_name("score")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<arrow::array::Int64Array>()
-        .expect("score infers Int64, not pinned to Utf8 by the leading null");
-    assert_eq!(batch.num_rows(), 2);
-    assert_eq!(score.null_count(), 1);
+    let rows = read_edge_property_rows(dir.path(), "KNOWS");
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[first.as_bytes()].values["score"], IrLiteral::Null);
+    assert_eq!(rows[second.as_bytes()].values["score"], IrLiteral::Int(42));
 }
 
 #[tokio::test]
@@ -776,16 +698,15 @@ async fn edge_property_stems_are_isolated() {
     .unwrap();
     w.flush().unwrap();
 
-    let knows = read_edge_property_batch(dir.path(), "KNOWS");
-    assert_eq!(knows.num_rows(), 1);
-    assert!(knows.schema().field_with_name("since").is_ok());
-    assert!(
-        knows.schema().field_with_name("rating").is_err(),
-        "KNOWS file must not gain LIKES' column"
-    );
-    let likes = read_edge_property_batch(dir.path(), "LIKES");
-    assert_eq!(likes.num_rows(), 1);
-    assert!(likes.schema().field_with_name("rating").is_ok());
+    let knows = read_edge_property_rows(dir.path(), "KNOWS");
+    assert_eq!(knows.len(), 1);
+    assert!(knows.values().all(|row| row.values.contains_key("since")));
+    assert!(knows.values().all(|row| !row.values.contains_key("rating")));
+    let likes = read_edge_property_rows(dir.path(), "LIKES");
+    assert_eq!(likes.len(), 1);
+    assert_eq!(likes[edge.as_bytes()].values["rating"], IrLiteral::Int(5));
+    assert_canonical_fragments(dir.path(), PropertyRouteKind::Edge, "KNOWS", 1);
+    assert_canonical_fragments(dir.path(), PropertyRouteKind::Edge, "LIKES", 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -832,7 +753,11 @@ fn property_only_flush_does_not_bump_topology_generation() {
     )
     .unwrap();
     w.flush().unwrap();
-    assert!(dir.path().join("properties/_untyped.parquet").exists());
+    assert_canonical_fragments(dir.path(), PropertyRouteKind::Node, "_untyped", 1);
+    assert_eq!(
+        read_property_rows(dir.path(), "_untyped")[a.as_bytes()].values["name"],
+        IrLiteral::Str("A".into())
+    );
     assert_eq!(read_topology_generation(dir.path()).unwrap(), 1);
 
     // An empty flush stages nothing and must not bump either.
