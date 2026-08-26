@@ -371,18 +371,14 @@ impl RewriteBatch {
         self.property_windows.len()
     }
 
-    #[allow(
-        clippy::needless_pass_by_value,
-        reason = "window takes ownership of first-route metadata"
-    )]
     pub(crate) fn accumulate_property_window(
         &mut self,
         project_root: &Path,
         kind: crate::property_overlay::PropertyRouteKind,
         route: &str,
         rows: impl IntoIterator<Item = crate::property_overlay::PropertySnapshotRow>,
-        schema: SchemaRef,
-        authority_generation_uuid: Option<(uuid::Uuid, PathBuf)>,
+        schema: &SchemaRef,
+        authority_generation_uuid: Option<&(uuid::Uuid, PathBuf)>,
     ) -> Result<(), GfError> {
         let key = PropertyWindowKey {
             kind,
@@ -394,13 +390,13 @@ impl RewriteBatch {
             .or_insert_with(|| PendingPropertyWindow {
                 project_root: project_root.to_path_buf(),
                 rows: BTreeMap::new(),
-                schema: Arc::clone(&schema),
-                authority_generation_uuid: authority_generation_uuid.clone(),
+                schema: Arc::clone(schema),
+                authority_generation_uuid: authority_generation_uuid.cloned(),
             });
         if window.project_root != project_root {
             return Err(GfError::Storage("property window root conflicts".into()));
         }
-        if window.authority_generation_uuid != authority_generation_uuid {
+        if window.authority_generation_uuid.as_ref() != authority_generation_uuid {
             return Err(GfError::Storage(
                 "property window generation authority conflicts".into(),
             ));
@@ -605,6 +601,8 @@ mod tests {
         };
         let first = uuid::Uuid::now_v7();
         let second = uuid::Uuid::now_v7();
+        let first_authority = (first, dir.path().to_path_buf());
+        let second_authority = (second, dir.path().to_path_buf());
         let mut staged = RewriteBatch::new();
         staged
             .accumulate_property_window(
@@ -612,8 +610,8 @@ mod tests {
                 crate::PropertyRouteKind::Node,
                 "Person",
                 vec![row.clone()],
-                Arc::clone(&schema),
-                Some((first, dir.path().to_path_buf())),
+                &schema,
+                Some(&first_authority),
             )
             .unwrap();
         let error = staged
@@ -622,8 +620,8 @@ mod tests {
                 crate::PropertyRouteKind::Node,
                 "Person",
                 vec![row],
-                schema,
-                Some((second, dir.path().to_path_buf())),
+                &schema,
+                Some(&second_authority),
             )
             .unwrap_err();
         assert!(error.to_string().contains("generation authority conflicts"));

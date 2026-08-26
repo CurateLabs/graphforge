@@ -130,6 +130,9 @@ struct EdgePropRow {
     props: HashMap<String, IrLiteral>,
 }
 
+type PropertyGenerationAuthority = Option<(uuid::Uuid, PathBuf)>;
+type CompletedPropertyWindow<R> = (Vec<R>, Option<SchemaRef>, PropertyGenerationAuthority);
+
 type TypedPropertyRow = (String, [u8; 16], HashMap<String, IrLiteral>);
 #[cfg(test)]
 type ReconstructedEdge<'a> = (&'a String, &'a (String, String, String));
@@ -960,45 +963,8 @@ fn stream_replay_property_route(
     route: &str,
     _scratch: &Path,
 ) -> Result<(), GfError> {
-    let kind = if edge {
-        crate::PropertyRouteKind::Edge
-    } else {
-        crate::PropertyRouteKind::Node
-    };
-    let operations = if edge {
-        &overlay.edge_properties
-    } else {
-        &overlay.node_properties
-    };
-    let is_deleted = |uuid: &str| {
-        if edge {
-            overlay.edges.get(uuid).is_some_and(Option::is_none)
-        } else {
-            overlay.nodes.get(uuid).is_some_and(Option::is_none)
-        }
-    };
-    let mut target_names = operations
-        .keys()
-        .filter(|(_, operation_route, _)| operation_route == route)
-        .map(|(uuid, _, _)| uuid.as_str())
-        .collect::<std::collections::BTreeSet<_>>();
-    if edge {
-        target_names.extend(
-            overlay
-                .edges
-                .iter()
-                .filter(|(_, row)| row.is_none())
-                .map(|(uuid, _)| uuid.as_str()),
-        );
-    } else {
-        target_names.extend(
-            overlay
-                .nodes
-                .iter()
-                .filter(|(_, row)| row.is_none())
-                .map(|(uuid, _)| uuid.as_str()),
-        );
-    }
+    let (kind, operations) = replay_property_route_context(overlay, edge);
+    let target_names = replay_property_target_names(overlay, operations, edge, route);
     let touched_rows = u64::try_from(target_names.len()).unwrap_or(u64::MAX);
     if touched_rows > limits.max_work_rows
         || target_names.len() > limits.max_records_per_run
@@ -1047,7 +1013,7 @@ fn stream_replay_property_route(
             let uuid = uuid::Uuid::parse_str(entity_uuid)
                 .map_err(pq_err)?
                 .into_bytes();
-            if is_deleted(entity_uuid) {
+            if replay_entity_deleted(overlay, edge, entity_uuid) {
                 rows.push(crate::PropertySnapshotRow {
                     uuid,
                     tombstone: true,
@@ -1093,6 +1059,62 @@ fn stream_replay_property_route(
         .close()
         .map_err(pq_err)?;
     Ok(())
+}
+
+type ReplayPropertyOperations =
+    std::collections::BTreeMap<(String, String, String), Option<IrLiteral>>;
+
+fn replay_property_route_context(
+    overlay: &crate::graph_delta_journal::ReplayOverlay,
+    edge: bool,
+) -> (crate::PropertyRouteKind, &ReplayPropertyOperations) {
+    if edge {
+        (crate::PropertyRouteKind::Edge, &overlay.edge_properties)
+    } else {
+        (crate::PropertyRouteKind::Node, &overlay.node_properties)
+    }
+}
+
+fn replay_entity_deleted(
+    overlay: &crate::graph_delta_journal::ReplayOverlay,
+    edge: bool,
+    uuid: &str,
+) -> bool {
+    if edge {
+        overlay.edges.get(uuid).is_some_and(Option::is_none)
+    } else {
+        overlay.nodes.get(uuid).is_some_and(Option::is_none)
+    }
+}
+
+fn replay_property_target_names<'a>(
+    overlay: &'a crate::graph_delta_journal::ReplayOverlay,
+    operations: &'a ReplayPropertyOperations,
+    edge: bool,
+    route: &str,
+) -> std::collections::BTreeSet<&'a str> {
+    let mut target_names = operations
+        .keys()
+        .filter(|(_, operation_route, _)| operation_route == route)
+        .map(|(uuid, _, _)| uuid.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let deleted = if edge {
+        overlay
+            .edges
+            .iter()
+            .filter(|(_, row)| row.is_none())
+            .map(|(uuid, _)| uuid.as_str())
+            .collect::<Vec<_>>()
+    } else {
+        overlay
+            .nodes
+            .iter()
+            .filter(|(_, row)| row.is_none())
+            .map(|(uuid, _)| uuid.as_str())
+            .collect::<Vec<_>>()
+    };
+    target_names.extend(deleted);
+    target_names
 }
 
 fn write_replay_property_snapshot(
@@ -2349,13 +2371,15 @@ impl GraphWriter {
             stage_property_fragment(
                 staged,
                 &self.dir,
-                crate::property_overlay::PropertyRouteKind::Node,
-                &stem,
-                &schema,
-                schema.as_ref(),
-                cols,
-                PropertyFragmentStage::live(),
-                authority_generation_uuid,
+                PropertyFragmentInput {
+                    kind: crate::property_overlay::PropertyRouteKind::Node,
+                    route: &stem,
+                    schema: &schema,
+                    input_schema: schema.as_ref(),
+                    columns: cols,
+                    tombstone: false,
+                    authority: authority_generation_uuid,
+                },
             )?;
         }
         Ok(())
@@ -2392,13 +2416,15 @@ impl GraphWriter {
             stage_property_fragment(
                 staged,
                 &self.dir,
-                crate::property_overlay::PropertyRouteKind::Edge,
-                &stem,
-                &schema,
-                schema.as_ref(),
-                cols,
-                PropertyFragmentStage::live(),
-                authority_generation_uuid,
+                PropertyFragmentInput {
+                    kind: crate::property_overlay::PropertyRouteKind::Edge,
+                    route: &stem,
+                    schema: &schema,
+                    input_schema: schema.as_ref(),
+                    columns: cols,
+                    tombstone: false,
+                    authority: authority_generation_uuid,
+                },
             )?;
         }
         Ok(())
@@ -4125,16 +4151,15 @@ fn stage_set_node_properties_from_inventory(
 ) -> Result<u64, GfError> {
     let targets = updates.keys().copied().collect();
     let owned_inventory;
-    let inventory = match inventory {
-        Some(inventory) => inventory,
-        None => {
-            owned_inventory = crate::property_overlay::authenticated_property_inventory_for_route(
-                dir,
-                crate::PropertyRouteKind::Node,
-                stem,
-            )?;
-            &owned_inventory
-        }
+    let inventory = if let Some(inventory) = inventory {
+        inventory
+    } else {
+        owned_inventory = crate::property_overlay::authenticated_property_inventory_for_route(
+            dir,
+            crate::PropertyRouteKind::Node,
+            stem,
+        )?;
+        &owned_inventory
     };
     let (mut existing, _) =
         crate::property_overlay::read_authenticated_property_snapshots_for_inventory(
@@ -4228,16 +4253,15 @@ fn stage_remove_node_properties_from_inventory(
 ) -> Result<u64, GfError> {
     let targets = removals.keys().copied().collect();
     let owned_inventory;
-    let inventory = match inventory {
-        Some(inventory) => inventory,
-        None => {
-            owned_inventory = crate::property_overlay::authenticated_property_inventory_for_route(
-                dir,
-                crate::PropertyRouteKind::Node,
-                stem,
-            )?;
-            &owned_inventory
-        }
+    let inventory = if let Some(inventory) = inventory {
+        inventory
+    } else {
+        owned_inventory = crate::property_overlay::authenticated_property_inventory_for_route(
+            dir,
+            crate::PropertyRouteKind::Node,
+            stem,
+        )?;
+        &owned_inventory
     };
     let (mut existing, _) =
         crate::property_overlay::read_authenticated_property_snapshots_for_inventory(
@@ -4315,16 +4339,15 @@ fn stage_set_edge_properties_from_inventory(
 ) -> Result<u64, GfError> {
     let targets = updates.keys().copied().collect();
     let owned_inventory;
-    let inventory = match inventory {
-        Some(inventory) => inventory,
-        None => {
-            owned_inventory = crate::property_overlay::authenticated_property_inventory_for_route(
-                dir,
-                crate::PropertyRouteKind::Edge,
-                rel_stem,
-            )?;
-            &owned_inventory
-        }
+    let inventory = if let Some(inventory) = inventory {
+        inventory
+    } else {
+        owned_inventory = crate::property_overlay::authenticated_property_inventory_for_route(
+            dir,
+            crate::PropertyRouteKind::Edge,
+            rel_stem,
+        )?;
+        &owned_inventory
     };
     let (mut existing, _) =
         crate::property_overlay::read_authenticated_property_snapshots_for_inventory(
@@ -4399,16 +4422,15 @@ fn stage_remove_edge_properties_from_inventory(
 ) -> Result<u64, GfError> {
     let targets = removals.keys().copied().collect();
     let owned_inventory;
-    let inventory = match inventory {
-        Some(inventory) => inventory,
-        None => {
-            owned_inventory = crate::property_overlay::authenticated_property_inventory_for_route(
-                dir,
-                crate::PropertyRouteKind::Edge,
-                rel_stem,
-            )?;
-            &owned_inventory
-        }
+    let inventory = if let Some(inventory) = inventory {
+        inventory
+    } else {
+        owned_inventory = crate::property_overlay::authenticated_property_inventory_for_route(
+            dir,
+            crate::PropertyRouteKind::Edge,
+            rel_stem,
+        )?;
+        &owned_inventory
     };
     let (mut existing, _) =
         crate::property_overlay::read_authenticated_property_snapshots_for_inventory(
@@ -4547,13 +4569,15 @@ fn stage_node_property_file(
     stage_property_fragment(
         staged,
         dir,
-        crate::property_overlay::PropertyRouteKind::Node,
-        stem,
-        &schema,
-        schema.as_ref(),
-        cols,
-        PropertyFragmentStage::live(),
-        authority_generation_uuid,
+        PropertyFragmentInput {
+            kind: crate::property_overlay::PropertyRouteKind::Node,
+            route: stem,
+            schema: &schema,
+            input_schema: schema.as_ref(),
+            columns: cols,
+            tombstone: false,
+            authority: authority_generation_uuid,
+        },
     )
 }
 
@@ -4584,13 +4608,15 @@ fn stage_edge_property_file(
     stage_property_fragment(
         staged,
         dir,
-        crate::property_overlay::PropertyRouteKind::Edge,
-        stem,
-        &schema,
-        schema.as_ref(),
-        cols,
-        PropertyFragmentStage::live(),
-        authority_generation_uuid,
+        PropertyFragmentInput {
+            kind: crate::property_overlay::PropertyRouteKind::Edge,
+            route: stem,
+            schema: &schema,
+            input_schema: schema.as_ref(),
+            columns: cols,
+            tombstone: false,
+            authority: authority_generation_uuid,
+        },
     )
 }
 
@@ -4640,14 +4666,7 @@ fn complete_node_property_window(
     dir: &Path,
     route: &str,
     rows: Vec<PropRow>,
-) -> Result<
-    (
-        Vec<PropRow>,
-        Option<SchemaRef>,
-        Option<(uuid::Uuid, PathBuf)>,
-    ),
-    GfError,
-> {
+) -> Result<CompletedPropertyWindow<PropRow>, GfError> {
     let rows = merge_node_property_window(rows);
     let targets = rows.iter().map(|row| row.node_uuid).collect();
     let inventory = crate::property_overlay::authenticated_property_inventory_for_route(
@@ -4698,14 +4717,7 @@ fn complete_edge_property_window(
     dir: &Path,
     route: &str,
     rows: Vec<EdgePropRow>,
-) -> Result<
-    (
-        Vec<EdgePropRow>,
-        Option<SchemaRef>,
-        Option<(uuid::Uuid, PathBuf)>,
-    ),
-    GfError,
-> {
+) -> Result<CompletedPropertyWindow<EdgePropRow>, GfError> {
     let rows = merge_edge_property_window(rows);
     let targets = rows.iter().map(|row| row.edge_uuid).collect();
     let inventory = crate::property_overlay::authenticated_property_inventory_for_route(
@@ -4782,47 +4794,44 @@ pub(crate) fn stage_property_tombstones<S: std::hash::BuildHasher>(
     stage_property_fragment(
         staged,
         dir,
-        kind,
-        route,
-        &schema,
-        schema.as_ref(),
-        vec![Arc::new(column)],
-        PropertyFragmentStage::tombstone(),
-        inventory.generation_authority(),
+        PropertyFragmentInput {
+            kind,
+            route,
+            schema: &schema,
+            input_schema: schema.as_ref(),
+            columns: vec![Arc::new(column)],
+            tombstone: true,
+            authority: inventory.generation_authority(),
+        },
     )
 }
 
-#[allow(
-    clippy::needless_pass_by_value,
-    reason = "staging consumes the logical schema contract"
-)]
-#[derive(Clone, Copy)]
-struct PropertyFragmentStage {
+struct PropertyFragmentInput<'a> {
+    kind: crate::property_overlay::PropertyRouteKind,
+    route: &'a str,
+    schema: &'a SchemaRef,
+    input_schema: &'a Schema,
+    columns: Vec<ArrayRef>,
     tombstone: bool,
-}
-
-impl PropertyFragmentStage {
-    const fn live() -> Self {
-        Self { tombstone: false }
-    }
-
-    const fn tombstone() -> Self {
-        Self { tombstone: true }
-    }
+    authority: PropertyGenerationAuthority,
 }
 
 fn stage_property_fragment(
     staged: &mut RewriteBatch,
     dir: &Path,
-    kind: crate::property_overlay::PropertyRouteKind,
-    route: &str,
-    schema: &SchemaRef,
-    input_schema: &Schema,
-    cols: Vec<ArrayRef>,
-    stage: PropertyFragmentStage,
-    authority_generation_uuid: Option<(uuid::Uuid, PathBuf)>,
+    input: PropertyFragmentInput<'_>,
 ) -> Result<(), GfError> {
     use crate::property_overlay::PROPERTY_TOMBSTONE_FIELD;
+    let PropertyFragmentInput {
+        kind,
+        route,
+        schema,
+        input_schema,
+        columns,
+        tombstone,
+        authority,
+    } = input;
+    let cols = columns;
     if input_schema.fields().len() != cols.len() {
         return Err(pq_err("property fragment schema/column count mismatch"));
     }
@@ -4864,7 +4873,7 @@ fn stage_property_fragment(
         Field::new(PROPERTY_TOMBSTONE_FIELD, DataType::Boolean, false),
     );
     let rows = cols.first().map_or(0, |column| column.len());
-    cols.insert(1, Arc::new(BooleanArray::from(vec![stage.tombstone; rows])));
+    cols.insert(1, Arc::new(BooleanArray::from(vec![tombstone; rows])));
     let logical_schema = Arc::clone(schema);
     let schema = Arc::new(Schema::new_with_metadata(
         fields,
@@ -4876,14 +4885,7 @@ fn stage_property_fragment(
         crate::property_overlay::PropertyRouteKind::Edge => EDGE_PROPERTY_UUID_FIELD,
     };
     let rows = crate::property_overlay::decode_snapshot_batch(&batch, uuid_field)?;
-    staged.accumulate_property_window(
-        dir,
-        kind,
-        route,
-        rows,
-        logical_schema,
-        authority_generation_uuid,
-    )
+    staged.accumulate_property_window(dir, kind, route, rows, &logical_schema, authority.as_ref())
 }
 
 fn property_snapshot_fragment_schema(
@@ -5853,6 +5855,107 @@ mod tests {
         assert_eq!(
             properties[&resurrected]["name"],
             IrLiteral::Str("after".into())
+        );
+    }
+
+    #[test]
+    fn staged_property_mutation_conflicts_after_intervening_project_publication() {
+        let graph = TempDir::new().unwrap();
+        let node = new_v7();
+        let node_bytes = to_bytes(&node);
+        let mut writer = GraphWriter::open_at(graph.path(), OntologyMode::Exploratory, TS).unwrap();
+        writer.create_node(node, TypeId(0)).unwrap();
+        writer
+            .set_properties(
+                &node,
+                None,
+                HashMap::from([("name".into(), IrLiteral::Str("baseline".into()))]),
+            )
+            .unwrap();
+        writer.flush().unwrap();
+
+        let container = TempDir::new().unwrap();
+        crate::open_or_initialize_project(container.path()).unwrap();
+        let publish_graph = || {
+            let (_, graph_files) = crate::capture_graph_files(graph.path()).unwrap();
+            let mut participants = crate::empty_workspace_participants().unwrap();
+            participants.insert(0, graph_files);
+            let request = crate::ProjectGenerationRequest {
+                transaction_uuid: uuid::Uuid::now_v7(),
+                generation_uuid: uuid::Uuid::now_v7(),
+                capabilities: vec![
+                    crate::ProjectCapability {
+                        capability_id: "graph".into(),
+                        capability_version: 1,
+                    },
+                    crate::ProjectCapability {
+                        capability_id: "workspace".into(),
+                        capability_version: 1,
+                    },
+                ],
+                participants,
+            };
+            let crate::ProjectStageOutcome::Staged(staged) =
+                crate::stage_project_generation_with_graph_tree(
+                    container.path(),
+                    &request,
+                    Some(graph.path()),
+                )
+                .unwrap()
+            else {
+                panic!("fresh publication unexpectedly replayed");
+            };
+            staged
+                .validate(|_| Ok(()), |_, _| Ok(()))
+                .unwrap()
+                .publish()
+                .unwrap()
+        };
+
+        publish_graph();
+        let authority = crate::resolve_project_generation(container.path()).unwrap();
+        let inventory =
+            crate::AuthenticatedPropertyInventory::from_resolved_generation(&authority).unwrap();
+        let mut mutation_a = RewriteBatch::new();
+        stage_set_node_properties_authenticated(
+            &mut mutation_a,
+            graph.path(),
+            &inventory,
+            "_untyped",
+            &HashMap::from([(
+                node_bytes,
+                HashMap::from([("name".into(), IrLiteral::Str("stale-a".into()))]),
+            )]),
+        )
+        .unwrap();
+
+        publish_graph();
+        let generation_b = crate::resolve_project_generation(container.path())
+            .unwrap()
+            .generation_uuid();
+        let current_b = fs::read(container.path().join(crate::CURRENT_FILE)).unwrap();
+        let error = crate::generation::commit_topology_aware(mutation_a, graph.path()).unwrap_err();
+
+        assert!(matches!(
+            error,
+            GfError::Project {
+                code: ProjectErrorCode::TransactionConflict,
+                ..
+            }
+        ));
+        assert_eq!(
+            crate::resolve_project_generation(container.path())
+                .unwrap()
+                .generation_uuid(),
+            generation_b
+        );
+        assert_eq!(
+            fs::read(container.path().join(crate::CURRENT_FILE)).unwrap(),
+            current_b
+        );
+        assert_eq!(
+            read_node_props(graph.path(), "_untyped")[&node_bytes]["name"],
+            IrLiteral::Str("baseline".into())
         );
     }
 
