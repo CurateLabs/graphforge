@@ -287,6 +287,7 @@ pub struct PropertyInventoryOpenMetrics {
 #[derive(Debug)]
 struct AuthenticatedPropertyFragment {
     id: PropertyFragmentId,
+    layout: PropertyFragmentLayout,
     entry: crate::GraphFileEntry,
     physical_relative: PathBuf,
     identity: graphforge_filesystem::FileIdentity,
@@ -295,6 +296,12 @@ struct AuthenticatedPropertyFragment {
     authentication_bytes: u64,
     authentication_block_equivalents: u64,
     authentication_read_calls: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PropertyFragmentLayout {
+    LegacyFlat,
+    CanonicalNested,
 }
 
 /// One live, revalidated fragment capability. The inventory retains only the
@@ -640,7 +647,7 @@ impl AuthenticatedPropertyInventory {
                 }
                 continue;
             }
-            let Some((kind, route, id)) = parsed else {
+            let Some((kind, route, id, layout)) = parsed else {
                 return Err(corrupt("properties role names a non-property path"));
             };
             if requested_route.is_some_and(|requested| (kind, route.as_str()) != requested) {
@@ -657,7 +664,7 @@ impl AuthenticatedPropertyInventory {
             let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(parquet_error)?;
             let physical_rows = usize::try_from(builder.metadata().file_metadata().num_rows())
                 .map_err(|_| corrupt("property fragment row count is not representable"))?;
-            validate_fragment_schema(builder.schema().as_ref(), id, kind, &route)?;
+            validate_fragment_schema(builder.schema().as_ref(), id, layout, kind, &route)?;
             let schema = builder.schema().clone();
             let fragments = routes.entry((kind, route)).or_default();
             if fragments.iter().any(|fragment| fragment.id == id) {
@@ -665,6 +672,7 @@ impl AuthenticatedPropertyInventory {
             }
             fragments.push(AuthenticatedPropertyFragment {
                 id,
+                layout,
                 entry,
                 physical_relative,
                 identity,
@@ -790,7 +798,13 @@ impl AuthenticatedPropertyInventory {
                 };
                 let builder =
                     ParquetRecordBatchReaderBuilder::try_new(source).map_err(parquet_error)?;
-                validate_fragment_schema(builder.schema().as_ref(), fragment.id, kind, route)?;
+                validate_fragment_schema(
+                    builder.schema().as_ref(),
+                    fragment.id,
+                    fragment.layout,
+                    kind,
+                    route,
+                )?;
                 let page_reservation_bytes = validate_parquet_resource_admission(
                     builder.metadata(),
                     limits,
@@ -1075,7 +1089,15 @@ pub(crate) fn merge_property_route_schemas<'a>(
 
 fn parse_inventory_property_path(
     relative: &str,
-) -> Result<Option<(PropertyRouteKind, String, PropertyFragmentId)>, GfError> {
+) -> Result<
+    Option<(
+        PropertyRouteKind,
+        String,
+        PropertyFragmentId,
+        PropertyFragmentLayout,
+    )>,
+    GfError,
+> {
     let parts = relative.split('/').collect::<Vec<_>>();
     let kind = match parts.first().copied() {
         Some("properties") => PropertyRouteKind::Node,
@@ -1095,12 +1117,14 @@ fn parse_inventory_property_path(
                     generation: 0,
                     ordinal: 0,
                 },
+                PropertyFragmentLayout::LegacyFlat,
             )))
         }
         [_, route, name] if !route.is_empty() => Ok(Some((
             kind,
             (*route).to_owned(),
             PropertyFragmentId::parse(name)?,
+            PropertyFragmentLayout::CanonicalNested,
         ))),
         _ => Err(corrupt("property inventory path is not canonical")),
     }
@@ -1922,7 +1946,13 @@ pub fn read_authenticated_property_snapshots_for_inventory(
             .saturating_add(opened.authentication_read_calls);
         let builder =
             open_counted_retained_property_builder(fragment, &opened, Arc::clone(&counts))?;
-        validate_fragment_schema(builder.schema().as_ref(), fragment.id, kind, route)?;
+        validate_fragment_schema(
+            builder.schema().as_ref(),
+            fragment.id,
+            fragment.layout,
+            kind,
+            route,
+        )?;
         let page_reservation_bytes = validate_parquet_resource_admission(
             builder.metadata(),
             PropertyOverlayLimits::default(),
@@ -2176,6 +2206,7 @@ fn open_counted_retained_property_builder(
 fn validate_fragment_schema(
     schema: &arrow::datatypes::Schema,
     id: PropertyFragmentId,
+    layout: PropertyFragmentLayout,
     kind: PropertyRouteKind,
     route: &str,
 ) -> Result<(), GfError> {
@@ -2190,7 +2221,7 @@ fn validate_fragment_schema(
     if schema.fields().first().map(|field| field.name().as_str()) != Some(kind.uuid_field()) {
         return Err(corrupt("property UUID field is not canonical first field"));
     }
-    if id.generation == 0 && id.ordinal == 0 {
+    if layout == PropertyFragmentLayout::LegacyFlat {
         return Ok(());
     }
     let expected = [
@@ -4808,6 +4839,88 @@ mod tests {
             assert!(
                 validate_live_schema_sequence(&[(&boundary, 2)]).is_ok(),
                 "{uuid_field} exact physical-row boundary is valid"
+            );
+        }
+    }
+
+    #[test]
+    fn only_flat_property_inventory_entries_receive_legacy_validation() {
+        fn write_legacy_shape(
+            root: &Path,
+            kind: PropertyRouteKind,
+            relative: &str,
+        ) -> crate::GraphFileEntry {
+            let path = root.join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let schema = Arc::new(Schema::new(vec![
+                Field::new(kind.uuid_field(), DataType::FixedSizeBinary(16), false),
+                Field::new("value", DataType::Int64, true),
+            ]));
+            let batch = RecordBatch::try_new(
+                Arc::clone(&schema),
+                vec![
+                    Arc::new(
+                        FixedSizeBinaryArray::try_from_iter([vec![7; 16]].into_iter()).unwrap(),
+                    ),
+                    Arc::new(Int64Array::from(vec![Some(1)])),
+                ],
+            )
+            .unwrap();
+            let mut writer =
+                ArrowWriter::try_new(File::create(&path).unwrap(), schema, None).unwrap();
+            writer.write(&batch).unwrap();
+            writer.close().unwrap();
+            let bytes = fs::read(path).unwrap();
+            crate::GraphFileEntry {
+                relative_path: relative.to_owned(),
+                byte_length: u64::try_from(bytes.len()).unwrap(),
+                content_sha256: digest_hex(&Sha256::digest(&bytes)),
+                role: crate::GraphFileRole::Properties,
+            }
+        }
+
+        for kind in [PropertyRouteKind::Node, PropertyRouteKind::Edge] {
+            let flat = TempDir::new().unwrap();
+            let flat_relative = format!("{}/Route.parquet", kind.subdir());
+            let flat_entry = write_legacy_shape(flat.path(), kind, &flat_relative);
+            let inventory =
+                AuthenticatedPropertyInventory::from_entries_at_root(flat.path(), vec![flat_entry])
+                    .unwrap();
+            let (rows, _) = read_authenticated_property_snapshots_for_inventory(
+                &inventory,
+                kind,
+                "Route",
+                &BTreeSet::from([[7; 16]]),
+            )
+            .unwrap();
+            assert_eq!(
+                rows.len(),
+                1,
+                "flat {:?} layout remains legacy-compatible",
+                kind
+            );
+
+            let nested = TempDir::new().unwrap();
+            let nested_relative = format!(
+                "{}/Route/{}",
+                kind.subdir(),
+                PropertyFragmentId {
+                    generation: 0,
+                    ordinal: 0,
+                }
+                .file_name()
+            );
+            let nested_entry = write_legacy_shape(nested.path(), kind, &nested_relative);
+            let error = AuthenticatedPropertyInventory::from_entries_at_root(
+                nested.path(),
+                vec![nested_entry],
+            )
+            .unwrap_err();
+            assert_eq!(error.code(), "GF_PROJECT_CORRUPT");
+            assert!(
+                error.to_string().contains("metadata conflicts"),
+                "canonical {:?} fragment must not bypass metadata validation: {error}",
+                kind
             );
         }
     }
