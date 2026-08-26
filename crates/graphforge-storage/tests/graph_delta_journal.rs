@@ -603,6 +603,55 @@ fn remove_absent_property_key_does_not_emit_replay_fragment() {
 }
 
 #[test]
+fn multi_chunk_large_property_values_are_charged_to_replay_memory() {
+    let root = tempfile::tempdir().unwrap();
+    publish_base(root.path());
+    let value = encode_graph_delta_value(&IrLiteral::Str("x".repeat(8 * 1024))).unwrap();
+    let operations = [
+        "00000000-0000-7000-8000-000000000001",
+        "00000000-0000-7000-8000-000000000002",
+    ]
+    .into_iter()
+    .map(|node_uuid| GraphDeltaOp {
+        operation_uuid: Uuid::now_v7(),
+        kind: GraphDeltaOpKind::SetNodeProperty,
+        payload: GraphDeltaPayload::SetNodeProperty {
+            node_uuid: node_uuid.into(),
+            property_stem: "Person".into(),
+            key: "large".into(),
+            value: value.clone(),
+        },
+    })
+    .collect();
+    publish_graph_delta(
+        root.path(),
+        &GraphDeltaPublishRequest {
+            transaction_uuid: Uuid::now_v7(),
+            generation_uuid: Uuid::now_v7(),
+            run_uuid: Uuid::now_v7(),
+            operations,
+            limits: GraphDeltaJournalLimits::default(),
+        },
+    )
+    .unwrap();
+    let generation = resolve_project_generation(root.path()).unwrap();
+    let inventory = generation.graph_files_inventory().unwrap().unwrap();
+    let view = tempfile::tempdir().unwrap();
+    let error = materialize_replayed_graph_tree(
+        &generation.graph_tree_root(),
+        &inventory,
+        view.path(),
+        GraphDeltaJournalLimits {
+            max_replay_memory_bytes: 32 * 1024,
+            max_batch_rows: 1,
+            ..GraphDeltaJournalLimits::default()
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.code(), "GF_RESOURCE_LIMIT");
+}
+
+#[test]
 fn exact_retry_transaction_is_idempotent_and_conflict_is_typed() {
     let root = tempfile::tempdir().unwrap();
     publish_base(root.path());
