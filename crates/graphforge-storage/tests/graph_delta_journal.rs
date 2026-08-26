@@ -660,14 +660,19 @@ fn multi_chunk_large_property_values_are_charged_to_replay_memory() {
         &inventory,
         rejected_view.path(),
         GraphDeltaJournalLimits {
-            max_replay_memory_bytes: 256 * 1024,
+            max_replay_memory_bytes: 300 * 1024,
             max_batch_rows: 1,
             ..GraphDeltaJournalLimits::default()
         },
     )
     .unwrap_err();
     assert_eq!(error.code(), "GF_RESOURCE_LIMIT");
-    assert!(error.to_string().contains("Parquet writer memory"));
+    assert!(
+        error
+            .to_string()
+            .contains("property replay Arrow and writer memory"),
+        "{error}"
+    );
 
     let admitted_view = tempfile::tempdir().unwrap();
     materialize_replayed_graph_tree(

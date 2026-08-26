@@ -113,7 +113,7 @@ fn replay_writer_properties(max_batch_rows: usize) -> parquet::file::properties:
 }
 
 const REPLAY_WRITER_FIXED_BYTES: usize = 256 * 1024;
-const REPLAY_ROW_GROUP_METADATA_BYTES: usize = 4 * 1024;
+const REPLAY_COLUMN_CHUNK_METADATA_BYTES: usize = 512;
 
 fn replay_writer_reservation(
     schema: &Schema,
@@ -122,30 +122,41 @@ fn replay_writer_reservation(
     max_batch_rows: usize,
 ) -> Result<usize, GfError> {
     let groups = maximum_rows.div_ceil(max_batch_rows);
-    let schema_bytes = schema.fields().iter().fold(0_usize, |sum, field| {
-        sum.saturating_add(field.name().len()).saturating_add(128)
-    });
+    let fields = schema.fields().len();
+    let schema_bytes = schema.fields().iter().try_fold(0_usize, |sum, field| {
+        sum.checked_add(field.name().len().saturating_add(128))
+            .ok_or_else(|| replay_resource_limit("graph delta replay schema memory overflow"))
+    })?;
+    let metadata_bytes = groups
+        .checked_mul(fields)
+        .and_then(|chunks| chunks.checked_mul(REPLAY_COLUMN_CHUNK_METADATA_BYTES))
+        .ok_or_else(|| replay_resource_limit("graph delta replay metadata memory overflow"))?;
+    let active_rows = max_batch_rows.min(maximum_rows);
+    let active_buffer_bytes = maximum_row_bytes
+        .checked_mul(active_rows)
+        .ok_or_else(|| replay_resource_limit("graph delta replay active buffer overflow"))?;
     REPLAY_WRITER_FIXED_BYTES
         .checked_add(schema_bytes)
-        .and_then(|bytes| bytes.checked_add(groups.saturating_mul(REPLAY_ROW_GROUP_METADATA_BYTES)))
-        .and_then(|bytes| {
-            bytes.checked_add(maximum_row_bytes.saturating_mul(max_batch_rows.min(maximum_rows)))
-        })
+        .and_then(|bytes| bytes.checked_add(metadata_bytes))
+        .and_then(|bytes| bytes.checked_add(active_buffer_bytes))
         .ok_or_else(|| replay_resource_limit("graph delta replay writer reservation overflow"))
 }
 
 fn admit_replay_writer(
     overlay_bytes: usize,
+    authority_bytes: usize,
     reservation_bytes: usize,
     limit: usize,
+    context: &str,
 ) -> Result<(), GfError> {
     if overlay_bytes
-        .checked_add(reservation_bytes)
+        .checked_add(authority_bytes)
+        .and_then(|bytes| bytes.checked_add(reservation_bytes))
         .is_none_or(|bytes| bytes > limit)
     {
-        return Err(replay_resource_limit(
-            "graph delta replay Parquet writer memory bound exceeded",
-        ));
+        return Err(replay_resource_limit(format!(
+            "graph delta replay {context} writer memory bound exceeded"
+        )));
     }
     Ok(())
 }
@@ -232,8 +243,10 @@ pub(crate) fn write_replay_overlay_streaming(
     )?;
     admit_replay_writer(
         overlay.estimated_memory(),
+        node_scan.estimated_memory(),
         node_writer_reservation,
         limits.max_replay_memory_bytes,
+        "topology node",
     )?;
     let output = fs::File::create(&output_node_path).map_err(|error| io_err(&error))?;
     let mut writer = parquet::arrow::ArrowWriter::try_new(
@@ -294,6 +307,21 @@ struct ReplayNodeAuthority {
     endpoint_ids: HashMap<String, u64>,
     deleted_nodes: HashSet<String>,
     base_rows: usize,
+}
+
+impl ReplayNodeAuthority {
+    fn estimated_memory(&self) -> usize {
+        let set_bytes = |values: &HashSet<String>| {
+            values.iter().fold(0_usize, |sum, value| {
+                sum.saturating_add(64).saturating_add(value.len())
+            })
+        };
+        set_bytes(&self.existing_overlay)
+            .saturating_add(set_bytes(&self.deleted_nodes))
+            .saturating_add(self.endpoint_ids.iter().fold(0_usize, |sum, (uuid, _)| {
+                sum.saturating_add(80).saturating_add(uuid.len())
+            }))
+    }
 }
 
 #[allow(clippy::too_many_lines)] // One bounded authority scan validates all node invariants.
@@ -577,7 +605,6 @@ fn stream_replay_edges(
                 ));
             }
         }
-        let output = fs::File::create(&target_path).map_err(|error| io_err(&error))?;
         let maximum_edge_rows = base_rows.saturating_add(overlay.edges.len());
         let edge_writer_reservation = replay_writer_reservation(
             TYPED_EDGE_SCHEMA.as_ref(),
@@ -587,9 +614,12 @@ fn stream_replay_edges(
         )?;
         admit_replay_writer(
             overlay.estimated_memory(),
+            nodes.estimated_memory(),
             edge_writer_reservation,
             limits.max_replay_memory_bytes,
+            "topology edge",
         )?;
+        let output = fs::File::create(&target_path).map_err(|error| io_err(&error))?;
         let mut writer = parquet::arrow::ArrowWriter::try_new(
             output,
             TYPED_EDGE_SCHEMA.clone(),
@@ -5045,6 +5075,48 @@ mod tests {
     use tempfile::TempDir;
 
     const TS: i64 = 1_700_000_000_000_000;
+
+    #[test]
+    fn replay_writer_reservation_scales_with_columns_and_row_groups() {
+        let narrow = Schema::new(vec![Field::new("id", DataType::UInt64, false)]);
+        let wide = Schema::new(
+            (0..128)
+                .map(|index| Field::new(format!("field_{index}"), DataType::Utf8, true))
+                .collect::<Vec<_>>(),
+        );
+        let one_group = replay_writer_reservation(&wide, 8, 256, 8).unwrap();
+        let four_groups = replay_writer_reservation(&wide, 32, 256, 8).unwrap();
+        let narrow_four_groups = replay_writer_reservation(&narrow, 32, 256, 8).unwrap();
+
+        assert!(four_groups > one_group);
+        assert!(four_groups > narrow_four_groups);
+        assert_eq!(
+            four_groups - one_group,
+            3 * 128 * REPLAY_COLUMN_CHUNK_METADATA_BYTES
+        );
+    }
+
+    #[test]
+    fn replay_node_authority_charge_tracks_owned_entries() {
+        let authority = |count: usize| ReplayNodeAuthority {
+            existing_overlay: (0..count)
+                .map(|index| format!("existing-{index}"))
+                .collect(),
+            endpoint_ids: (0..count)
+                .map(|index| (format!("endpoint-{index}"), index as u64))
+                .collect(),
+            deleted_nodes: (0..count).map(|index| format!("deleted-{index}")).collect(),
+            base_rows: count,
+        };
+        let n = authority(64).estimated_memory();
+        let two_n = authority(128).estimated_memory();
+        let four_n = authority(256).estimated_memory();
+
+        assert!(n < two_n);
+        assert!(two_n < four_n);
+        assert!(two_n < n * 3);
+        assert!(four_n < n * 6);
+    }
 
     #[test]
     fn create_node_persists_complete_label_set_and_primary_label() {
