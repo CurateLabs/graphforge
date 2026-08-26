@@ -177,6 +177,13 @@ identity, so a newer full-map row or tombstone overrides that UUID only and an
 unchanged UUID remains live in its older immutable fragment. A partial or failed
 publication cannot enter the selected inventory or mix uncommitted ordinals,
 schemas, or metadata with the prior authority.
+The same immutable value authenticates the newest per-route live-schema
+summary. A write window applies old-complete-map to new-complete-map count
+deltas for touched UUIDs and publishes the resulting summary with its fragment.
+Later operations in that window consume the staged summary, so SET/REMOVE order
+cannot lose a newly introduced key or retain a last-owner deletion. Readers
+never combine a new fragment with an old summary; prior sessions retain both
+the prior fragments and prior logical schema.
 
 Mutation windows also pin the authority generation used to resolve complete
 property maps. Commit rechecks that precondition while holding the publication

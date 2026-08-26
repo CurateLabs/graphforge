@@ -403,11 +403,23 @@ impl RewriteBatch {
                 "property window generation authority conflicts".into(),
             ));
         }
+        let live_summary = schema
+            .metadata()
+            .get(crate::property_overlay::PROPERTY_LIVE_SCHEMA_KEY)
+            .cloned();
         window.schema = crate::property_overlay::merge_property_route_schemas(
             kind,
             route,
             [window.schema.as_ref(), schema.as_ref()],
         )?;
+        if let Some(summary) = live_summary {
+            let mut metadata = window.schema.metadata().clone();
+            metadata.insert(
+                crate::property_overlay::PROPERTY_LIVE_SCHEMA_KEY.to_owned(),
+                summary,
+            );
+            window.schema = Arc::new(window.schema.as_ref().clone().with_metadata(metadata));
+        }
         for row in rows {
             window.rows.insert(row.uuid, row);
         }
@@ -425,6 +437,19 @@ impl RewriteBatch {
                 route: route.to_owned(),
             })
             .map(|window| &window.rows)
+    }
+
+    pub(crate) fn property_window_schema(
+        &self,
+        kind: crate::property_overlay::PropertyRouteKind,
+        route: &str,
+    ) -> Option<SchemaRef> {
+        self.property_windows
+            .get(&PropertyWindowKey {
+                kind,
+                route: route.to_owned(),
+            })
+            .map(|window| Arc::clone(&window.schema))
     }
 
     pub(crate) fn take_property_windows(

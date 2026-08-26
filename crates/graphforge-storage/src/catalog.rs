@@ -1169,12 +1169,16 @@ fn normalize_property_batch(
         .fields()
         .iter()
         .map(|field| {
-            batch
-                .column_by_name(field.name())
-                .cloned()
-                .unwrap_or_else(|| {
-                    arrow::array::new_null_array(field.data_type(), batch.num_rows())
-                })
+            if field.data_type() == &arrow::datatypes::DataType::Null {
+                arrow::array::new_null_array(field.data_type(), batch.num_rows())
+            } else {
+                batch
+                    .column_by_name(field.name())
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        arrow::array::new_null_array(field.data_type(), batch.num_rows())
+                    })
+            }
         })
         .collect::<Vec<_>>();
     RecordBatch::try_new(Arc::clone(schema), columns)

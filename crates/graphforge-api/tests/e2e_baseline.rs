@@ -4072,6 +4072,33 @@ fn set_property_maps_merge_and_replace_nodes() {
         batch.column_by_name("stale").unwrap().data_type(),
         &DataType::Null
     );
+    drop(gf);
+    let reopened = GraphForge::new(dir.path().to_str()).expect("reopen replacement");
+    let reopened = rows(
+        &reopened,
+        "MATCH (p:Person) RETURN p.age AS age, p.city AS city, p.stale AS stale, p.active AS active",
+    );
+    assert_eq!(
+        reopened.batches[0]
+            .column_by_name("age")
+            .unwrap()
+            .data_type(),
+        &DataType::Null
+    );
+    assert_eq!(
+        reopened.batches[0]
+            .column_by_name("city")
+            .unwrap()
+            .data_type(),
+        &DataType::Null
+    );
+    assert_eq!(
+        reopened.batches[0]
+            .column_by_name("stale")
+            .unwrap()
+            .data_type(),
+        &DataType::Null
+    );
 }
 
 #[test]
@@ -4123,6 +4150,153 @@ fn set_property_maps_support_parameters_and_relationships() {
     assert_eq!(
         replaced.batches[0]
             .column_by_name("stale")
+            .unwrap()
+            .data_type(),
+        &DataType::Null
+    );
+    drop(gf);
+    let reopened = GraphForge::new(dir.path().to_str()).expect("reopen relationship replacement");
+    let reopened = rows(
+        &reopened,
+        "MATCH ()-[r:KNOWS]->() RETURN r.since AS since, r.weight AS weight, r.stale AS stale",
+    );
+    assert_eq!(
+        reopened.batches[0]
+            .column_by_name("since")
+            .unwrap()
+            .data_type(),
+        &DataType::Null
+    );
+    assert_eq!(
+        reopened.batches[0]
+            .column_by_name("stale")
+            .unwrap()
+            .data_type(),
+        &DataType::Null
+    );
+}
+
+#[test]
+fn replacement_live_schema_counts_last_owner_for_nodes_and_edges() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let gf = GraphForge::new(dir.path().to_str()).expect("persistent instance");
+    gf.execute(
+        "CREATE (a:N {name:'a', shared:1})-[:R {shared:1}]->(:N), \
+         (b:N {name:'b', shared:2})-[:R {shared:2}]->(:N)",
+    )
+    .expect("seed two owners of each property");
+
+    gf.execute("MATCH (n:N {name:'a'}) SET n = {name:n.name}")
+        .expect("replace first node map");
+    gf.execute("MATCH (n:N {name:'a'})-[r:R]->() SET r = {}")
+        .expect("replace first edge map");
+    let one_owner = rows(
+        &gf,
+        "MATCH (n:N) WHERE n.name IS NOT NULL RETURN n.shared AS shared ORDER BY n.name",
+    );
+    assert_eq!(
+        one_owner.batches[0]
+            .column_by_name("shared")
+            .unwrap()
+            .data_type(),
+        &DataType::Int64
+    );
+
+    gf.execute("MATCH (n:N {name:'b'}) SET n = {name:n.name}")
+        .expect("replace final node map");
+    gf.execute("MATCH (n:N {name:'b'})-[r:R]->() SET r = {}")
+        .expect("replace final edge map");
+    let nodes = rows(&gf, "MATCH (n:N) RETURN n.shared AS shared");
+    assert_eq!(
+        nodes.batches[0]
+            .column_by_name("shared")
+            .unwrap()
+            .data_type(),
+        &DataType::Null
+    );
+    let edges = rows(&gf, "MATCH ()-[r:R]->() RETURN r.shared AS shared");
+    assert_eq!(
+        edges.batches[0]
+            .column_by_name("shared")
+            .unwrap()
+            .data_type(),
+        &DataType::Null
+    );
+
+    drop(gf);
+    let reopened = GraphForge::new(dir.path().to_str()).expect("reopen live schema");
+    let nodes = rows(&reopened, "MATCH (n:N) RETURN n.shared AS shared");
+    assert_eq!(
+        nodes.batches[0]
+            .column_by_name("shared")
+            .unwrap()
+            .data_type(),
+        &DataType::Null
+    );
+    let edges = rows(&reopened, "MATCH ()-[r:R]->() RETURN r.shared AS shared");
+    assert_eq!(
+        edges.batches[0]
+            .column_by_name("shared")
+            .unwrap()
+            .data_type(),
+        &DataType::Null
+    );
+}
+
+#[test]
+fn deletion_live_schema_counts_last_owner_for_nodes_and_edges() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let gf = GraphForge::new(dir.path().to_str()).expect("persistent instance");
+    gf.execute(
+        "CREATE (a:N {name:'a', doomed:1})-[:R {doomed:1}]->(:T), \
+         (b:N {name:'b', doomed:2})-[:R {doomed:2}]->(:T)",
+    )
+    .expect("seed two owners of each property");
+
+    gf.execute("MATCH (n:N {name:'a'}) DETACH DELETE n")
+        .expect("delete first node and edge owner");
+    let nodes = rows(&gf, "MATCH (n:N) RETURN n.doomed AS doomed");
+    assert_eq!(
+        nodes.batches[0]
+            .column_by_name("doomed")
+            .unwrap()
+            .data_type(),
+        &DataType::Int64
+    );
+    let edges = rows(&gf, "MATCH ()-[r:R]->() RETURN r.doomed AS doomed");
+    assert_eq!(
+        edges.batches[0]
+            .column_by_name("doomed")
+            .unwrap()
+            .data_type(),
+        &DataType::Int64
+    );
+
+    gf.execute("MATCH (n:N {name:'b'}) DETACH DELETE n")
+        .expect("delete final node and edge owner");
+    let nodes = rows(&gf, "MATCH (n:N) RETURN n.doomed AS doomed");
+    assert_eq!(
+        nodes.batches[0]
+            .column_by_name("doomed")
+            .unwrap()
+            .data_type(),
+        &DataType::Null
+    );
+    let edges = rows(&gf, "MATCH ()-[r:R]->() RETURN r.doomed AS doomed");
+    assert_eq!(
+        edges.batches[0]
+            .column_by_name("doomed")
+            .unwrap()
+            .data_type(),
+        &DataType::Null
+    );
+
+    drop(gf);
+    let reopened = GraphForge::new(dir.path().to_str()).expect("reopen deleted live schema");
+    let nodes = rows(&reopened, "MATCH (n:N) RETURN n.doomed AS doomed");
+    assert_eq!(
+        nodes.batches[0]
+            .column_by_name("doomed")
             .unwrap()
             .data_type(),
         &DataType::Null

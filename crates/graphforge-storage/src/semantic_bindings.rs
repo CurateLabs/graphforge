@@ -1781,6 +1781,9 @@ pub fn materialize_semantic_migration(
                 })
                 .collect::<Vec<_>>();
             let mut metadata = schema_metadata;
+            if let Some(renames) = renames {
+                crate::property_overlay::rename_live_schema_summary(&mut metadata, renames)?;
+            }
             metadata.insert(
                 SEMANTIC_COMPOSITION_METADATA_KEY.into(),
                 plan.to_composition_fingerprint.clone(),

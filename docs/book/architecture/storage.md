@@ -172,6 +172,21 @@ authenticated targeted batch lookup for the window's UUID set, with the same
 zero-per-record-seek scanner; sealing consumes those complete staged rows and
 does not read historical fragments again.
 
+Each fragment also carries the authenticated `graphforge-property-live-schema/1`
+route summary: an exact live-UUID count for every currently present property
+key. Mutation preparation updates those counts from the targeted UUIDs' old
+complete maps to their new complete maps; work is bounded by the mutation
+window and schema width, never total rows or fragment history. Repeated writes
+in one window consume the already-staged summary. The newest fragment summary
+is the logical schema authority: keys with a positive count retain their
+authenticated physical type, while historical keys whose count reached zero
+surface as Arrow `Null`. Physical historical schemas remain available for
+decoding older UUID snapshots. Malformed counts, underflow/overflow, a live key
+without an authenticated physical field, or conflicting semantic/type metadata
+fail closed. Legacy routes without this summary retain their historical schema
+union until rewritten by an explicit migration; targeted writes never invent
+counts for untouched UUIDs.
+
 Readers derive route authority from the committed graph-files inventory,
 validate canonical fragment identity, schema/semantic metadata, strictly sorted
 unique non-null UUIDs, and tombstone invariants, then perform a bounded

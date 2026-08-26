@@ -225,7 +225,12 @@ record families may appear:
   authenticates every canonical generation and ordinal in this inventory, then
   merges all fragments by UUID and descending `(generation, ordinal)` identity.
   Each newer row is a complete map or tombstone for that UUID; unchanged UUIDs
-  remain live in older immutable fragments. Unsupported inventory versions
+  remain live in older immutable fragments. New fragments authenticate an exact
+  per-route live-key count summary. The newest summary selects the logical
+  schema without scanning total rows/history; zero-owner historical keys read
+  as Arrow `Null`, while old physical fields remain decodable. A missing summary
+  denotes a legacy route and preserves its historical schema union rather than
+  guessing from a targeted mutation. Unsupported inventory versions
   return `GF_UNSUPPORTED_PROJECT_FORMAT`.
 
 Portable interchange does not yet encode the generation-owned `graph/` tree and

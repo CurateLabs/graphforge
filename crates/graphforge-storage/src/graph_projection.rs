@@ -362,10 +362,13 @@ fn project_record_batch(
         .iter()
         .map(|index| combined.schema().field(*index).clone())
         .collect::<Vec<_>>();
-    let projected_schema = Arc::new(Schema::new_with_metadata(
-        fields,
-        combined.schema().metadata().clone(),
-    ));
+    let mut metadata = combined.schema().metadata().clone();
+    // A subset changes UUID ownership counts, so it cannot inherit the source
+    // route's incremental live-schema authority. The projected flat snapshot
+    // remains a valid legacy complete snapshot and can be upgraded by a full
+    // migration, rather than publishing false counts.
+    metadata.remove(crate::property_overlay::PROPERTY_LIVE_SCHEMA_KEY);
+    let projected_schema = Arc::new(Schema::new_with_metadata(fields, metadata));
     let columns = keep_columns
         .into_iter()
         .map(|index| take(combined.column(index).as_ref(), &indices, None).map_err(storage))
@@ -749,10 +752,11 @@ fn logical_fingerprint_batch(
             columns.push(Arc::clone(batch.column(index)));
         }
     }
-    let schema = Arc::new(Schema::new_with_metadata(
-        fields,
-        source_schema.metadata().clone(),
-    ));
+    let mut metadata = source_schema.metadata().clone();
+    // Incremental live-owner counts are authenticated operational authority,
+    // not graph data. Portable semantic identity is representation-neutral.
+    metadata.remove(crate::property_overlay::PROPERTY_LIVE_SCHEMA_KEY);
+    let schema = Arc::new(Schema::new_with_metadata(fields, metadata));
     RecordBatch::try_new(schema, columns).map_err(storage)
 }
 

@@ -47,7 +47,7 @@
 //!    baseline capabilities); capability-gated directories for other features
 //!    are deferred to when those capabilities exist.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -3713,6 +3713,9 @@ pub(crate) fn decode_property_batch(
             if field.name() == uuid_field_name {
                 continue;
             }
+            if field.data_type() == &DataType::Null {
+                continue;
+            }
             let col = batch.column(c);
             if col.is_null(r) {
                 continue; // null slot: omit the key (never fabricate a value)
@@ -4280,6 +4283,8 @@ fn stage_set_node_properties_from_inventory(
         crate::property_overlay::PropertyRouteKind::Node,
         stem,
     )?);
+    existing.retain(|uuid, _| targets.contains(uuid));
+    let before = existing.clone();
     let rows = existing
         .into_values()
         .map(|row| PropRow {
@@ -4292,13 +4297,17 @@ fn stage_set_node_properties_from_inventory(
         .into_iter()
         .filter(|row| updates.contains_key(&row.node_uuid))
         .collect::<Vec<_>>();
+    let route_schema = staged
+        .property_window_schema(crate::PropertyRouteKind::Node, stem)
+        .or_else(|| inventory.route_schema(crate::PropertyRouteKind::Node, stem));
     stage_node_property_file(
         staged,
         dir,
         stem,
         &rows,
-        inventory.route_schema(crate::PropertyRouteKind::Node, stem),
+        route_schema,
         inventory.generation_authority(),
+        Some(&before),
     )?;
     Ok(touched)
 }
@@ -4382,6 +4391,8 @@ fn stage_remove_node_properties_from_inventory(
         crate::property_overlay::PropertyRouteKind::Node,
         stem,
     )?);
+    existing.retain(|uuid, _| targets.contains(uuid));
+    let before = existing.clone();
     // Preserve a pending entity-delete tombstone across a later REMOVE.
     let rows = existing
         .into_values()
@@ -4396,13 +4407,17 @@ fn stage_remove_node_properties_from_inventory(
         .into_iter()
         .filter(|row| removals.contains_key(&row.node_uuid))
         .collect::<Vec<_>>();
+    let route_schema = staged
+        .property_window_schema(crate::PropertyRouteKind::Node, stem)
+        .or_else(|| inventory.route_schema(crate::PropertyRouteKind::Node, stem));
     stage_node_property_file(
         staged,
         dir,
         stem,
         &rows,
-        inventory.route_schema(crate::PropertyRouteKind::Node, stem),
+        route_schema,
         inventory.generation_authority(),
+        Some(&before),
     )?;
     Ok(touched)
 }
@@ -4468,6 +4483,8 @@ fn stage_set_edge_properties_from_inventory(
         crate::property_overlay::PropertyRouteKind::Edge,
         rel_stem,
     )?);
+    existing.retain(|uuid, _| targets.contains(uuid));
+    let before = existing.clone();
     let rows = existing
         .into_values()
         .map(|row| EdgePropRow {
@@ -4480,13 +4497,17 @@ fn stage_set_edge_properties_from_inventory(
         .into_iter()
         .filter(|row| updates.contains_key(&row.edge_uuid))
         .collect::<Vec<_>>();
+    let route_schema = staged
+        .property_window_schema(crate::PropertyRouteKind::Edge, rel_stem)
+        .or_else(|| inventory.route_schema(crate::PropertyRouteKind::Edge, rel_stem));
     stage_edge_property_file(
         staged,
         dir,
         rel_stem,
         &rows,
-        inventory.route_schema(crate::PropertyRouteKind::Edge, rel_stem),
+        route_schema,
         inventory.generation_authority(),
+        Some(&before),
     )?;
     Ok(touched)
 }
@@ -4551,6 +4572,8 @@ fn stage_remove_edge_properties_from_inventory(
         crate::property_overlay::PropertyRouteKind::Edge,
         rel_stem,
     )?);
+    existing.retain(|uuid, _| targets.contains(uuid));
+    let before = existing.clone();
     // REMOVE cannot resurrect a row deleted earlier in this transaction.  The
     // already-staged tombstone remains authoritative; only an explicit SET may
     // turn that UUID live again.
@@ -4567,13 +4590,17 @@ fn stage_remove_edge_properties_from_inventory(
         .into_iter()
         .filter(|row| removals.contains_key(&row.edge_uuid))
         .collect::<Vec<_>>();
+    let route_schema = staged
+        .property_window_schema(crate::PropertyRouteKind::Edge, rel_stem)
+        .or_else(|| inventory.route_schema(crate::PropertyRouteKind::Edge, rel_stem));
     stage_edge_property_file(
         staged,
         dir,
         rel_stem,
         &rows,
-        inventory.route_schema(crate::PropertyRouteKind::Edge, rel_stem),
+        route_schema,
         inventory.generation_authority(),
+        Some(&before),
     )?;
     Ok(touched)
 }
@@ -4658,17 +4685,31 @@ fn stage_node_property_file(
     rows: &[PropRow],
     authority: Option<SchemaRef>,
     authority_generation_uuid: Option<(uuid::Uuid, PathBuf)>,
+    before: Option<&BTreeMap<[u8; 16], crate::PropertySnapshotRow>>,
 ) -> Result<(), GfError> {
     if rows.is_empty() {
         return Ok(());
     }
     let (schema, _) = build_property_columns(stem, rows)?;
-    let schema = merge_property_write_schema(
-        crate::PropertyRouteKind::Node,
-        stem,
-        Arc::new(schema),
-        authority,
-    )?;
+    let inferred = Arc::new(schema);
+    let schema = if let Some(before) = before {
+        let after = rows
+            .iter()
+            .map(|row| crate::PropertySnapshotRow {
+                uuid: row.node_uuid,
+                tombstone: false,
+                values: row.props.clone().into_iter().collect(),
+            })
+            .collect::<Vec<_>>();
+        crate::property_overlay::update_live_route_schema(
+            authority.as_ref(),
+            inferred,
+            before,
+            &after,
+        )?
+    } else {
+        merge_property_write_schema(crate::PropertyRouteKind::Node, stem, inferred, authority)?
+    };
     let cols = property_rows_batch_with_schema(schema.as_ref(), NODE_PROPERTY_UUID_FIELD, rows)?
         .columns()
         .to_vec();
@@ -4696,18 +4737,32 @@ fn stage_edge_property_file(
     rows: &[EdgePropRow],
     authority: Option<SchemaRef>,
     authority_generation_uuid: Option<(uuid::Uuid, PathBuf)>,
+    before: Option<&BTreeMap<[u8; 16], crate::PropertySnapshotRow>>,
 ) -> Result<(), GfError> {
     if rows.is_empty() {
         return Ok(());
     }
     let (schema, _) =
         build_property_columns_keyed(EDGE_PROPERTY_UUID_FIELD, "graphforge.rel_type", stem, rows)?;
-    let schema = merge_property_write_schema(
-        crate::PropertyRouteKind::Edge,
-        stem,
-        Arc::new(schema),
-        authority,
-    )?;
+    let inferred = Arc::new(schema);
+    let schema = if let Some(before) = before {
+        let after = rows
+            .iter()
+            .map(|row| crate::PropertySnapshotRow {
+                uuid: row.edge_uuid,
+                tombstone: false,
+                values: row.props.clone().into_iter().collect(),
+            })
+            .collect::<Vec<_>>();
+        crate::property_overlay::update_live_route_schema(
+            authority.as_ref(),
+            inferred,
+            before,
+            &after,
+        )?
+    } else {
+        merge_property_write_schema(crate::PropertyRouteKind::Edge, stem, inferred, authority)?
+    };
     let cols = property_rows_batch_with_schema(schema.as_ref(), EDGE_PROPERTY_UUID_FIELD, rows)?
         .columns()
         .to_vec();
@@ -4758,13 +4813,28 @@ fn merge_property_write_schema(
     inferred: SchemaRef,
     authority: Option<SchemaRef>,
 ) -> Result<SchemaRef, GfError> {
+    let live_summary = authority.as_ref().and_then(|schema| {
+        schema
+            .metadata()
+            .get(crate::property_overlay::PROPERTY_LIVE_SCHEMA_KEY)
+            .cloned()
+    });
     let mut schemas = authority.into_iter().collect::<Vec<_>>();
     schemas.push(inferred);
-    crate::property_overlay::merge_property_route_schemas(
+    let mut merged = crate::property_overlay::merge_property_route_schemas(
         kind,
         route,
         schemas.iter().map(AsRef::as_ref),
-    )
+    )?;
+    if let Some(summary) = live_summary {
+        let mut metadata = merged.metadata().clone();
+        metadata.insert(
+            crate::property_overlay::PROPERTY_LIVE_SCHEMA_KEY.to_owned(),
+            summary,
+        );
+        merged = Arc::new(merged.as_ref().clone().with_metadata(metadata));
+    }
+    Ok(merged)
 }
 
 fn complete_node_property_window(
@@ -4792,6 +4862,8 @@ fn complete_node_property_window(
         crate::PropertyRouteKind::Node,
         route,
     )?);
+    complete.retain(|uuid, _| targets.contains(uuid));
+    let before = complete.clone();
     for row in rows {
         let complete =
             complete
@@ -4804,18 +4876,33 @@ fn complete_node_property_window(
         complete.tombstone = false;
         complete.values.extend(row.props);
     }
-    Ok((
-        targets
-            .into_iter()
-            .filter_map(|uuid| complete.remove(&uuid))
-            .map(|row| PropRow {
-                node_uuid: row.uuid,
-                props: row.values.into_iter().collect(),
-            })
-            .collect(),
-        inventory.route_schema(crate::PropertyRouteKind::Node, route),
-        inventory.generation_authority(),
-    ))
+    let rows = targets
+        .into_iter()
+        .filter_map(|uuid| complete.remove(&uuid))
+        .map(|row| PropRow {
+            node_uuid: row.uuid,
+            props: row.values.into_iter().collect(),
+        })
+        .collect::<Vec<_>>();
+    let (inferred, _) = build_property_columns(route, &rows)?;
+    let after = rows
+        .iter()
+        .map(|row| crate::PropertySnapshotRow {
+            uuid: row.node_uuid,
+            tombstone: false,
+            values: row.props.clone().into_iter().collect(),
+        })
+        .collect::<Vec<_>>();
+    let authority = staged
+        .property_window_schema(crate::PropertyRouteKind::Node, route)
+        .or_else(|| inventory.route_schema(crate::PropertyRouteKind::Node, route));
+    let schema = crate::property_overlay::update_live_route_schema(
+        authority.as_ref(),
+        Arc::new(inferred),
+        &before,
+        &after,
+    )?;
+    Ok((rows, Some(schema), inventory.generation_authority()))
 }
 
 fn complete_edge_property_window(
@@ -4843,6 +4930,8 @@ fn complete_edge_property_window(
         crate::PropertyRouteKind::Edge,
         route,
     )?);
+    complete.retain(|uuid, _| targets.contains(uuid));
+    let before = complete.clone();
     for row in rows {
         let complete =
             complete
@@ -4855,18 +4944,38 @@ fn complete_edge_property_window(
         complete.tombstone = false;
         complete.values.extend(row.props);
     }
-    Ok((
-        targets
-            .into_iter()
-            .filter_map(|uuid| complete.remove(&uuid))
-            .map(|row| EdgePropRow {
-                edge_uuid: row.uuid,
-                props: row.values.into_iter().collect(),
-            })
-            .collect(),
-        inventory.route_schema(crate::PropertyRouteKind::Edge, route),
-        inventory.generation_authority(),
-    ))
+    let rows = targets
+        .into_iter()
+        .filter_map(|uuid| complete.remove(&uuid))
+        .map(|row| EdgePropRow {
+            edge_uuid: row.uuid,
+            props: row.values.into_iter().collect(),
+        })
+        .collect::<Vec<_>>();
+    let (inferred, _) = build_property_columns_keyed(
+        EDGE_PROPERTY_UUID_FIELD,
+        "graphforge.rel_type",
+        route,
+        &rows,
+    )?;
+    let after = rows
+        .iter()
+        .map(|row| crate::PropertySnapshotRow {
+            uuid: row.edge_uuid,
+            tombstone: false,
+            values: row.props.clone().into_iter().collect(),
+        })
+        .collect::<Vec<_>>();
+    let authority = staged
+        .property_window_schema(crate::PropertyRouteKind::Edge, route)
+        .or_else(|| inventory.route_schema(crate::PropertyRouteKind::Edge, route));
+    let schema = crate::property_overlay::update_live_route_schema(
+        authority.as_ref(),
+        Arc::new(inferred),
+        &before,
+        &after,
+    )?;
+    Ok((rows, Some(schema), inventory.generation_authority()))
 }
 
 pub(crate) fn stage_property_tombstones<S: std::hash::BuildHasher>(
@@ -4881,35 +4990,7 @@ pub(crate) fn stage_property_tombstones<S: std::hash::BuildHasher>(
     }
     let inventory =
         crate::property_overlay::authenticated_property_inventory_for_route(dir, kind, route)?;
-    let mut uuids = uuids.iter().copied().collect::<Vec<_>>();
-    uuids.sort_unstable();
-    let uuid_field = match kind {
-        crate::property_overlay::PropertyRouteKind::Node => NODE_PROPERTY_UUID_FIELD,
-        crate::property_overlay::PropertyRouteKind::Edge => EDGE_PROPERTY_UUID_FIELD,
-    };
-    let route_key = match kind {
-        crate::property_overlay::PropertyRouteKind::Node => "graphforge.entity_type",
-        crate::property_overlay::PropertyRouteKind::Edge => "graphforge.rel_type",
-    };
-    let schema = Arc::new(Schema::new_with_metadata(
-        vec![Field::new(uuid_field, DataType::FixedSizeBinary(16), false)],
-        HashMap::from([(route_key.to_owned(), route.to_owned())]),
-    ));
-    let column = FixedSizeBinaryArray::try_from_iter(uuids.into_iter().map(|uuid| uuid.to_vec()))
-        .map_err(pq_err)?;
-    stage_property_fragment(
-        staged,
-        dir,
-        PropertyFragmentInput {
-            kind,
-            route,
-            schema: &schema,
-            input_schema: schema.as_ref(),
-            columns: vec![Arc::new(column)],
-            tombstone: true,
-            authority: inventory.generation_authority(),
-        },
-    )
+    stage_property_tombstones_from_inventory(staged, dir, &inventory, kind, route, uuids)
 }
 
 /// Stage whole-row tombstones using an already authenticated generation inventory.
@@ -4928,7 +5009,35 @@ pub fn stage_property_tombstones_authenticated<S: std::hash::BuildHasher>(
     if uuids.is_empty() {
         return Ok(());
     }
-    let mut uuids = uuids.iter().copied().collect::<Vec<_>>();
+    stage_property_tombstones_from_inventory(staged, dir, inventory, kind, route, uuids)
+}
+
+fn stage_property_tombstones_from_inventory<S: std::hash::BuildHasher>(
+    staged: &mut RewriteBatch,
+    dir: &Path,
+    inventory: &crate::AuthenticatedPropertyInventory,
+    kind: crate::property_overlay::PropertyRouteKind,
+    route: &str,
+    uuids: &HashSet<[u8; 16], S>,
+) -> Result<(), GfError> {
+    let targets = uuids.iter().copied().collect::<BTreeSet<_>>();
+    let (mut before, _) =
+        crate::property_overlay::read_authenticated_property_snapshots_for_inventory(
+            inventory, kind, route, &targets,
+        )?;
+    before.extend(pending_property_snapshots(staged, dir, kind, route)?);
+    before.retain(|uuid, _| targets.contains(uuid));
+    let after = targets
+        .iter()
+        .copied()
+        .map(|uuid| crate::PropertySnapshotRow {
+            uuid,
+            tombstone: true,
+            values: BTreeMap::new(),
+        })
+        .collect::<Vec<_>>();
+
+    let mut uuids = targets.into_iter().collect::<Vec<_>>();
     uuids.sort_unstable();
     let uuid_field = match kind {
         crate::property_overlay::PropertyRouteKind::Node => NODE_PROPERTY_UUID_FIELD,
@@ -4938,12 +5047,29 @@ pub fn stage_property_tombstones_authenticated<S: std::hash::BuildHasher>(
         crate::property_overlay::PropertyRouteKind::Node => "graphforge.entity_type",
         crate::property_overlay::PropertyRouteKind::Edge => "graphforge.rel_type",
     };
-    let schema = Arc::new(Schema::new_with_metadata(
+    let inferred = Arc::new(Schema::new_with_metadata(
         vec![Field::new(uuid_field, DataType::FixedSizeBinary(16), false)],
         HashMap::from([(route_key.to_owned(), route.to_owned())]),
     ));
+    let authority = staged
+        .property_window_schema(kind, route)
+        .or_else(|| inventory.route_schema(kind, route));
+    let schema = crate::property_overlay::update_live_route_schema(
+        authority.as_ref(),
+        inferred,
+        &before,
+        &after,
+    )?;
     let column = FixedSizeBinaryArray::try_from_iter(uuids.into_iter().map(|uuid| uuid.to_vec()))
         .map_err(pq_err)?;
+    let mut columns = Vec::with_capacity(schema.fields().len());
+    columns.push(Arc::new(column) as ArrayRef);
+    let rows = columns[0].len();
+    columns.extend(
+        schema.fields()[1..]
+            .iter()
+            .map(|field| arrow::array::new_null_array(field.data_type(), rows)),
+    );
     stage_property_fragment(
         staged,
         dir,
@@ -4952,7 +5078,7 @@ pub fn stage_property_tombstones_authenticated<S: std::hash::BuildHasher>(
             route,
             schema: &schema,
             input_schema: schema.as_ref(),
-            columns: vec![Arc::new(column)],
+            columns,
             tombstone: true,
             authority: inventory.generation_authority(),
         },

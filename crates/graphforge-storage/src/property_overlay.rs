@@ -5,7 +5,7 @@
 //! filename; directory order and mtimes never select a winner.
 
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BinaryHeap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Read, Seek, Write};
 use std::path::{Path, PathBuf};
@@ -33,6 +33,8 @@ pub(crate) const PROPERTY_ROUTE_KEY: &str = "graphforge.property_route";
 pub(crate) const PROPERTY_KIND_KEY: &str = "graphforge.property_kind";
 pub(crate) const PROPERTY_GENERATION_KEY: &str = "graphforge.property_generation";
 pub(crate) const PROPERTY_ORDINAL_KEY: &str = "graphforge.property_ordinal";
+pub(crate) const PROPERTY_LIVE_SCHEMA_KEY: &str = "graphforge.property_live_schema";
+const PROPERTY_LIVE_SCHEMA_FORMAT: &str = "graphforge-property-live-schema/1";
 
 /// Node and edge property namespaces are disjoint authorities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -681,25 +683,29 @@ impl AuthenticatedPropertyInventory {
                 merge_route_schema(&mut schemas, *kind, route, fragment.schema.as_ref())?;
             }
         }
+        let schemas = schemas
+            .into_iter()
+            .map(|(key, mut schema): (_, RouteSchemaBuilder)| {
+                if let Some(latest) = routes.get(&key).and_then(|fragments| fragments.last()) {
+                    apply_authenticated_live_schema(&mut schema, latest.schema.as_ref())?;
+                }
+                let mut fields = vec![schema.uuid];
+                fields.extend(schema.fields.into_values());
+                Ok((
+                    key,
+                    Arc::new(arrow::datatypes::Schema::new_with_metadata(
+                        fields,
+                        schema.metadata,
+                    )),
+                ))
+            })
+            .collect::<Result<_, GfError>>()?;
         Ok(Self {
             generation_lease: None,
             root: Some(root),
             root_path: Some(root_path.to_path_buf()),
             routes,
-            schemas: schemas
-                .into_iter()
-                .map(|(key, schema): (_, RouteSchemaBuilder)| {
-                    let mut fields = vec![schema.uuid];
-                    fields.extend(schema.fields.into_values());
-                    (
-                        key,
-                        Arc::new(arrow::datatypes::Schema::new_with_metadata(
-                            fields,
-                            schema.metadata,
-                        )),
-                    )
-                })
-                .collect(),
+            schemas,
             authority_bytes: 0,
             authority_block_equivalents: 0,
             authority_read_calls: 0,
@@ -869,18 +875,48 @@ impl AuthenticatedPropertyInventory {
     }
 }
 
+fn apply_authenticated_live_schema(
+    schema: &mut RouteSchemaBuilder,
+    latest: &arrow::datatypes::Schema,
+) -> Result<(), GfError> {
+    let Some(summary) = decode_live_schema_summary(latest)? else {
+        return Ok(());
+    };
+    for name in summary.counts.keys() {
+        if !schema.fields.contains_key(name) {
+            return Err(corrupt(
+                "property live schema names an absent physical field",
+            ));
+        }
+    }
+    for (name, field) in &mut schema.fields {
+        if !summary.counts.contains_key(name) {
+            *field = Arc::new(
+                arrow::datatypes::Field::new(name, arrow::datatypes::DataType::Null, true)
+                    .with_metadata(field.metadata().clone()),
+            );
+        }
+    }
+    schema.metadata.insert(
+        PROPERTY_LIVE_SCHEMA_KEY.to_owned(),
+        encode_live_schema_summary(summary.counts)?,
+    );
+    Ok(())
+}
+
 fn merge_route_schema(
     schemas: &mut BTreeMap<(PropertyRouteKind, String), RouteSchemaBuilder>,
     kind: PropertyRouteKind,
     route: &str,
     fragment: &arrow::datatypes::Schema,
 ) -> Result<(), GfError> {
-    const IDENTITY_KEYS: [&str; 5] = [
+    const IDENTITY_KEYS: [&str; 6] = [
         PROPERTY_OVERLAY_FORMAT_KEY,
         PROPERTY_ROUTE_KEY,
         PROPERTY_KIND_KEY,
         PROPERTY_GENERATION_KEY,
         PROPERTY_ORDINAL_KEY,
+        PROPERTY_LIVE_SCHEMA_KEY,
     ];
     let uuid = Arc::clone(&fragment.fields()[0]);
     let schema = schemas
@@ -911,6 +947,16 @@ fn merge_route_schema(
         }
         if let Some(prior) = schema.fields.get(field.name()) {
             if prior.as_ref() != field.as_ref() {
+                if prior.data_type() == &arrow::datatypes::DataType::Null {
+                    schema.fields.insert(
+                        field.name().clone(),
+                        Arc::new(field.as_ref().clone().with_nullable(true)),
+                    );
+                    continue;
+                }
+                if field.data_type() == &arrow::datatypes::DataType::Null {
+                    continue;
+                }
                 if prior.name() == field.name()
                     && prior.data_type() == field.data_type()
                     && prior.metadata() == field.metadata()
@@ -928,22 +974,10 @@ fn merge_route_schema(
                     );
                     continue;
                 }
-                let compatible_scalar = |data_type: &arrow::datatypes::DataType| {
-                    matches!(
-                        data_type,
-                        arrow::datatypes::DataType::Int64
-                            | arrow::datatypes::DataType::Float64
-                            | arrow::datatypes::DataType::Boolean
-                            | arrow::datatypes::DataType::Utf8
-                    ) || data_type
-                        == &arrow::datatypes::DataType::Struct(
-                            crate::writer::heterogeneous_scalar_fields(),
-                        )
-                };
                 if prior.name() != field.name()
                     || prior.metadata() != field.metadata()
-                    || !compatible_scalar(prior.data_type())
-                    || !compatible_scalar(field.data_type())
+                    || !is_compatible_scalar(prior.data_type())
+                    || !is_compatible_scalar(field.data_type())
                 {
                     return Err(corrupt(
                         "property route field type or semantic metadata conflicts",
@@ -970,6 +1004,17 @@ fn merge_route_schema(
         }
     }
     Ok(())
+}
+
+fn is_compatible_scalar(data_type: &arrow::datatypes::DataType) -> bool {
+    matches!(
+        data_type,
+        arrow::datatypes::DataType::Int64
+            | arrow::datatypes::DataType::Float64
+            | arrow::datatypes::DataType::Boolean
+            | arrow::datatypes::DataType::Utf8
+    ) || data_type
+        == &arrow::datatypes::DataType::Struct(crate::writer::heterogeneous_scalar_fields())
 }
 
 pub(crate) fn merge_property_route_schemas<'a>(
@@ -1273,6 +1318,167 @@ pub struct PropertySnapshotRow {
     pub tombstone: bool,
     /// Complete live property map. Tombstones must carry no values.
     pub values: BTreeMap<String, IrLiteral>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PropertyLiveSchemaSummary {
+    format: String,
+    /// Exact number of newest live UUID snapshots containing each key.
+    counts: BTreeMap<String, u64>,
+}
+
+fn decode_live_schema_summary(
+    schema: &arrow::datatypes::Schema,
+) -> Result<Option<PropertyLiveSchemaSummary>, GfError> {
+    let Some(encoded) = schema.metadata().get(PROPERTY_LIVE_SCHEMA_KEY) else {
+        return Ok(None);
+    };
+    let summary: PropertyLiveSchemaSummary = serde_json::from_str(encoded)
+        .map_err(|_| corrupt("property live schema summary is invalid"))?;
+    if summary.format != PROPERTY_LIVE_SCHEMA_FORMAT
+        || summary.counts.values().any(|count| *count == 0)
+    {
+        return Err(corrupt("property live schema summary is invalid"));
+    }
+    Ok(Some(summary))
+}
+
+fn encode_live_schema_summary(counts: BTreeMap<String, u64>) -> Result<String, GfError> {
+    serde_json::to_string(&PropertyLiveSchemaSummary {
+        format: PROPERTY_LIVE_SCHEMA_FORMAT.to_owned(),
+        counts,
+    })
+    .map_err(json_error)
+}
+
+pub(crate) fn rename_live_schema_summary(
+    metadata: &mut HashMap<String, String>,
+    renames: &BTreeMap<String, String>,
+) -> Result<(), GfError> {
+    let Some(encoded) = metadata.get(PROPERTY_LIVE_SCHEMA_KEY).cloned() else {
+        return Ok(());
+    };
+    let schema = arrow::datatypes::Schema::new_with_metadata(
+        Vec::<arrow::datatypes::Field>::new(),
+        HashMap::from([(PROPERTY_LIVE_SCHEMA_KEY.to_owned(), encoded)]),
+    );
+    let summary = decode_live_schema_summary(&schema)?
+        .ok_or_else(|| corrupt("property live schema summary disappeared"))?;
+    let mut counts = BTreeMap::<String, u64>::new();
+    for (name, count) in summary.counts {
+        let name = renames.get(&name).cloned().unwrap_or(name);
+        let next = counts
+            .get(&name)
+            .copied()
+            .unwrap_or(0)
+            .checked_add(count)
+            .ok_or_else(|| corrupt("property live schema count overflows"))?;
+        counts.insert(name, next);
+    }
+    metadata.insert(
+        PROPERTY_LIVE_SCHEMA_KEY.to_owned(),
+        encode_live_schema_summary(counts)?,
+    );
+    Ok(())
+}
+
+/// Apply an exact touched-UUID before/after delta to the authenticated route
+/// summary. `None` means a legacy route without incremental summary authority;
+/// callers preserve its historical union rather than inventing exact counts.
+pub(crate) fn update_live_route_schema(
+    authority: Option<&arrow::datatypes::SchemaRef>,
+    inferred: arrow::datatypes::SchemaRef,
+    before: &BTreeMap<[u8; 16], PropertySnapshotRow>,
+    after: &[PropertySnapshotRow],
+) -> Result<arrow::datatypes::SchemaRef, GfError> {
+    let mut schema = match authority {
+        Some(authority) => merge_property_route_schemas(
+            if inferred.field_with_name("edge_uuid").is_ok() {
+                PropertyRouteKind::Edge
+            } else {
+                PropertyRouteKind::Node
+            },
+            inferred
+                .metadata()
+                .get(PROPERTY_ROUTE_KEY)
+                .or_else(|| inferred.metadata().get("graphforge.entity_type"))
+                .or_else(|| inferred.metadata().get("graphforge.rel_type"))
+                .ok_or_else(|| corrupt("property live schema route is missing"))?,
+            [authority.as_ref(), inferred.as_ref()],
+        )?,
+        None => inferred,
+    };
+    let existing = authority
+        .map(|schema| decode_live_schema_summary(schema.as_ref()))
+        .transpose()?
+        .flatten();
+    // A pre-summary legacy route cannot be upgraded from a targeted window:
+    // untouched UUIDs may own any historical field. Preserve its union.
+    if authority.is_some() && existing.is_none() {
+        return Ok(schema);
+    }
+    let mut counts = existing.map_or_else(BTreeMap::new, |summary| summary.counts);
+    let after = after
+        .iter()
+        .map(|row| (row.uuid, row))
+        .collect::<BTreeMap<_, _>>();
+    let mut touched = before.keys().copied().collect::<BTreeSet<_>>();
+    touched.extend(after.keys().copied());
+    for uuid in touched {
+        let old = before.get(&uuid).filter(|row| !row.tombstone);
+        let new = after.get(&uuid).copied().filter(|row| !row.tombstone);
+        let mut keys = BTreeSet::new();
+        if let Some(row) = old {
+            keys.extend(row.values.keys().cloned());
+        }
+        if let Some(row) = new {
+            keys.extend(row.values.keys().cloned());
+        }
+        for key in keys {
+            let had = old.is_some_and(|row| row.values.contains_key(&key));
+            let has = new.is_some_and(|row| row.values.contains_key(&key));
+            match (had, has) {
+                (false, true) => {
+                    *counts.entry(key).or_default() = counts
+                        .get(&key)
+                        .copied()
+                        .unwrap_or(0)
+                        .checked_add(1)
+                        .ok_or_else(|| corrupt("property live schema count overflows"))?;
+                }
+                (true, false) => {
+                    let count = counts
+                        .get_mut(&key)
+                        .ok_or_else(|| corrupt("property live schema count underflows"))?;
+                    *count = count
+                        .checked_sub(1)
+                        .ok_or_else(|| corrupt("property live schema count underflows"))?;
+                    if *count == 0 {
+                        counts.remove(&key);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let live_keys = counts.keys().cloned().collect::<BTreeSet<_>>();
+    let encoded = encode_live_schema_summary(counts)?;
+    let mut metadata = schema.metadata().clone();
+    metadata.insert(PROPERTY_LIVE_SCHEMA_KEY.to_owned(), encoded);
+    let fields = schema
+        .fields()
+        .iter()
+        .filter(|field| {
+            field.name() == "node_uuid"
+                || field.name() == "edge_uuid"
+                || live_keys.contains(field.name())
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    schema = Arc::new(arrow::datatypes::Schema::new_with_metadata(
+        fields, metadata,
+    ));
+    Ok(schema)
 }
 
 /// Explicit bounded merge limits.
@@ -4405,5 +4611,127 @@ mod tests {
         let shared = merged.field_with_name("shared").unwrap();
         assert_eq!(shared.data_type(), &DataType::Int64);
         assert!(shared.is_nullable());
+    }
+
+    #[test]
+    fn live_schema_summary_tracks_last_owner_and_fails_closed() {
+        let inferred = Arc::new(Schema::new_with_metadata(
+            vec![
+                Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+                Field::new("shared", DataType::Int64, true),
+            ],
+            HashMap::from([("graphforge.entity_type".into(), "Person".into())]),
+        ));
+        let first = PropertySnapshotRow {
+            uuid: [1; 16],
+            tombstone: false,
+            values: BTreeMap::from([("shared".into(), IrLiteral::Int(1))]),
+        };
+        let second = PropertySnapshotRow {
+            uuid: [2; 16],
+            tombstone: false,
+            values: BTreeMap::from([("shared".into(), IrLiteral::Int(2))]),
+        };
+        let authority = update_live_route_schema(
+            None,
+            Arc::clone(&inferred),
+            &BTreeMap::new(),
+            &[first.clone(), second.clone()],
+        )
+        .unwrap();
+        assert_eq!(
+            decode_live_schema_summary(authority.as_ref())
+                .unwrap()
+                .unwrap()
+                .counts["shared"],
+            2
+        );
+
+        let one_owner = update_live_route_schema(
+            Some(&authority),
+            Arc::clone(&inferred),
+            &BTreeMap::from([(first.uuid, first.clone())]),
+            &[PropertySnapshotRow {
+                uuid: first.uuid,
+                tombstone: false,
+                values: BTreeMap::new(),
+            }],
+        )
+        .unwrap();
+        assert_eq!(
+            decode_live_schema_summary(one_owner.as_ref())
+                .unwrap()
+                .unwrap()
+                .counts["shared"],
+            1
+        );
+        assert_eq!(
+            one_owner.field_with_name("shared").unwrap().data_type(),
+            &DataType::Int64
+        );
+
+        let no_owner = update_live_route_schema(
+            Some(&one_owner),
+            inferred,
+            &BTreeMap::from([(second.uuid, second.clone())]),
+            &[PropertySnapshotRow {
+                uuid: second.uuid,
+                tombstone: false,
+                values: BTreeMap::new(),
+            }],
+        )
+        .unwrap();
+        assert!(
+            decode_live_schema_summary(no_owner.as_ref())
+                .unwrap()
+                .unwrap()
+                .counts
+                .is_empty()
+        );
+        assert!(no_owner.field_with_name("shared").is_err());
+
+        let malformed = Schema::new_with_metadata(
+            vec![Field::new(
+                "node_uuid",
+                DataType::FixedSizeBinary(16),
+                false,
+            )],
+            HashMap::from([(PROPERTY_LIVE_SCHEMA_KEY.into(), "{}".into())]),
+        );
+        assert!(decode_live_schema_summary(&malformed).is_err());
+
+        let inconsistent = Arc::new(Schema::new_with_metadata(
+            vec![
+                Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+                Field::new("shared", DataType::Int64, true),
+            ],
+            HashMap::from([
+                ("graphforge.entity_type".into(), "Person".into()),
+                (
+                    PROPERTY_LIVE_SCHEMA_KEY.into(),
+                    encode_live_schema_summary(BTreeMap::from([("other".into(), 1)])).unwrap(),
+                ),
+            ]),
+        ));
+        assert!(
+            update_live_route_schema(
+                Some(&inconsistent),
+                Arc::new(Schema::new_with_metadata(
+                    vec![Field::new(
+                        "node_uuid",
+                        DataType::FixedSizeBinary(16),
+                        false,
+                    )],
+                    HashMap::from([("graphforge.entity_type".into(), "Person".into())]),
+                )),
+                &BTreeMap::from([(second.uuid, second)]),
+                &[PropertySnapshotRow {
+                    uuid: [2; 16],
+                    tombstone: false,
+                    values: BTreeMap::new(),
+                }],
+            )
+            .is_err()
+        );
     }
 }
