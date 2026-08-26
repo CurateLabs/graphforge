@@ -243,12 +243,14 @@ pub struct PropertyFragment {
 #[derive(Debug)]
 pub struct AuthenticatedPropertyInventory {
     generation_lease: Option<crate::ResolvedProjectGeneration>,
-    _root: Option<graphforge_filesystem::StableDirectory>,
+    root: Option<graphforge_filesystem::StableDirectory>,
     routes: BTreeMap<(PropertyRouteKind, String), Vec<AuthenticatedPropertyFragment>>,
     schemas: BTreeMap<(PropertyRouteKind, String), arrow::datatypes::SchemaRef>,
     authority_bytes: u64,
     authority_block_equivalents: u64,
     authority_read_calls: u64,
+    #[cfg(test)]
+    handle_counts: Arc<FragmentHandleCounts>,
 }
 
 /// One-time I/O performed while admitting and authenticating an immutable
@@ -279,13 +281,57 @@ pub struct PropertyInventoryOpenMetrics {
 struct AuthenticatedPropertyFragment {
     id: PropertyFragmentId,
     entry: crate::GraphFileEntry,
-    _physical_relative: PathBuf,
-    file: File,
+    physical_relative: PathBuf,
+    identity: graphforge_filesystem::FileIdentity,
     physical_rows: usize,
     schema: arrow::datatypes::SchemaRef,
     authentication_bytes: u64,
     authentication_block_equivalents: u64,
     authentication_read_calls: u64,
+}
+
+/// One live, revalidated fragment capability. The inventory retains only the
+/// directory capability and immutable identity/digest authority; this guard
+/// keeps the corresponding OS handle scoped to one decoder.
+struct OpenPropertyFragment {
+    file: Arc<File>,
+    authentication_bytes: u64,
+    authentication_block_equivalents: u64,
+    authentication_read_calls: u64,
+    handle: FragmentHandleGuard,
+}
+
+struct FragmentHandleGuard {
+    #[cfg(test)]
+    counts: Arc<FragmentHandleCounts>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Default)]
+struct FragmentHandleCounts {
+    live: AtomicU64,
+    peak: AtomicU64,
+}
+
+impl FragmentHandleGuard {
+    fn acquired(#[cfg(test)] counts: &Arc<FragmentHandleCounts>) -> Self {
+        #[cfg(test)]
+        {
+            let current = counts.live.fetch_add(1, Ordering::SeqCst) + 1;
+            counts.peak.fetch_max(current, Ordering::SeqCst);
+        }
+        Self {
+            #[cfg(test)]
+            counts: Arc::clone(counts),
+        }
+    }
+}
+
+impl Drop for FragmentHandleGuard {
+    fn drop(&mut self) {
+        #[cfg(test)]
+        self.counts.live.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 #[derive(Debug)]
@@ -296,6 +342,51 @@ struct RouteSchemaBuilder {
 }
 
 impl AuthenticatedPropertyInventory {
+    #[cfg(test)]
+    fn live_fragment_handles(&self) -> u64 {
+        self.handle_counts.live.load(Ordering::SeqCst)
+    }
+
+    #[cfg(test)]
+    fn peak_fragment_handles(&self) -> u64 {
+        self.handle_counts.peak.load(Ordering::SeqCst)
+    }
+
+    #[cfg(test)]
+    fn reset_peak_fragment_handles(&self) {
+        assert_eq!(self.live_fragment_handles(), 0);
+        self.handle_counts.peak.store(0, Ordering::SeqCst);
+    }
+
+    fn open_fragment(
+        &self,
+        fragment: &AuthenticatedPropertyFragment,
+    ) -> Result<OpenPropertyFragment, GfError> {
+        let root = self
+            .root
+            .as_ref()
+            .ok_or_else(|| corrupt("property inventory lacks its retained root capability"))?;
+        let file = open_retained_under(root, &fragment.physical_relative)?;
+        let handle = FragmentHandleGuard::acquired(
+            #[cfg(test)]
+            &self.handle_counts,
+        );
+        if graphforge_filesystem::file_identity(&file).map_err(io_error)? != fragment.identity {
+            return Err(corrupt(
+                "property fragment identity changed after admission",
+            ));
+        }
+        let (authentication_bytes, authentication_block_equivalents, authentication_read_calls) =
+            authenticate_inventory_file(&file, &fragment.entry)?;
+        Ok(OpenPropertyFragment {
+            file: Arc::new(file),
+            authentication_bytes,
+            authentication_block_equivalents,
+            authentication_read_calls,
+            handle,
+        })
+    }
+
     /// Committed generation retained by this inventory, when generation-backed.
     #[must_use]
     pub fn generation_uuid(&self) -> Option<uuid::Uuid> {
@@ -396,13 +487,15 @@ impl AuthenticatedPropertyInventory {
     ) -> Result<Self, GfError> {
         let Some(participant) = generation.declared_graph_files_participant()? else {
             return Ok(Self {
-                _root: None,
+                root: None,
                 generation_lease: Some(generation.clone()),
                 routes: BTreeMap::new(),
                 schemas: BTreeMap::new(),
                 authority_bytes: 0,
                 authority_block_equivalents: 0,
                 authority_read_calls: 0,
+                #[cfg(test)]
+                handle_counts: Arc::new(FragmentHandleCounts::default()),
             });
         };
         let inventory = generation.graph_files_inventory()?.ok_or_else(|| {
@@ -477,6 +570,8 @@ impl AuthenticatedPropertyInventory {
         requested_route: Option<(PropertyRouteKind, &str)>,
     ) -> Result<Self, GfError> {
         let root = graphforge_filesystem::StableDirectory::open(root_path).map_err(io_error)?;
+        #[cfg(test)]
+        let handle_counts = Arc::new(FragmentHandleCounts::default());
         let mut routes: BTreeMap<(PropertyRouteKind, String), Vec<AuthenticatedPropertyFragment>> =
             BTreeMap::new();
         for (entry, physical_relative) in entries {
@@ -494,11 +589,14 @@ impl AuthenticatedPropertyInventory {
                 continue;
             }
             let file = open_retained_under(&root, &physical_relative)?;
+            let _handle = FragmentHandleGuard::acquired(
+                #[cfg(test)]
+                &handle_counts,
+            );
+            let identity = graphforge_filesystem::file_identity(&file).map_err(io_error)?;
             let (authentication_bytes, authentication_block_equivalents, authentication_read_calls) =
                 authenticate_inventory_file(&file, &entry)?;
-            let builder =
-                ParquetRecordBatchReaderBuilder::try_new(file.try_clone().map_err(io_error)?)
-                    .map_err(parquet_error)?;
+            let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(parquet_error)?;
             let physical_rows = usize::try_from(builder.metadata().file_metadata().num_rows())
                 .map_err(|_| corrupt("property fragment row count is not representable"))?;
             validate_fragment_schema(builder.schema().as_ref(), id, kind, &route)?;
@@ -510,8 +608,8 @@ impl AuthenticatedPropertyInventory {
             fragments.push(AuthenticatedPropertyFragment {
                 id,
                 entry,
-                _physical_relative: physical_relative,
-                file,
+                physical_relative,
+                identity,
                 physical_rows,
                 schema,
                 authentication_bytes,
@@ -529,7 +627,7 @@ impl AuthenticatedPropertyInventory {
         }
         Ok(Self {
             generation_lease: None,
-            _root: Some(root),
+            root: Some(root),
             routes,
             schemas: schemas
                 .into_iter()
@@ -548,6 +646,8 @@ impl AuthenticatedPropertyInventory {
             authority_bytes: 0,
             authority_block_equivalents: 0,
             authority_read_calls: 0,
+            #[cfg(test)]
+            handle_counts,
         })
     }
 
@@ -598,14 +698,23 @@ impl AuthenticatedPropertyInventory {
             return Ok(PropertyOverlayMetrics::default());
         };
         let counts = Arc::new(ReadCounts::default());
+        let authentication_bytes = Arc::new(AtomicU64::new(0));
+        let authentication_block_equivalents = Arc::new(AtomicU64::new(0));
+        let authentication_read_calls = Arc::new(AtomicU64::new(0));
         let budget = Arc::new(LiveByteBudget::new(limits.max_buffered_bytes));
         let failed = Arc::new(Mutex::new(None));
         let decoded = Arc::new(Mutex::new(DecodedRetention::default()));
         let inputs = fragments.iter().map(|fragment| {
             let reader = (|| {
+                let opened = self.open_fragment(fragment)?;
+                authentication_bytes.fetch_add(opened.authentication_bytes, Ordering::Relaxed);
+                authentication_block_equivalents
+                    .fetch_add(opened.authentication_block_equivalents, Ordering::Relaxed);
+                authentication_read_calls
+                    .fetch_add(opened.authentication_read_calls, Ordering::Relaxed);
                 let source = CountingChunkReader {
                     length: fragment.entry.byte_length,
-                    file: Arc::new(fragment.file.try_clone().map_err(io_error)?),
+                    file: Arc::clone(&opened.file),
                     counts: Arc::clone(&counts),
                 };
                 let builder =
@@ -614,7 +723,7 @@ impl AuthenticatedPropertyInventory {
                 let page_reservation_bytes = validate_parquet_resource_admission(
                     builder.metadata(),
                     limits,
-                    &fragment.file,
+                    opened.file.as_ref(),
                     &counts,
                 )?;
                 budget.charge(page_reservation_bytes)?;
@@ -626,24 +735,17 @@ impl AuthenticatedPropertyInventory {
                     .with_batch_size(admitted_batch_rows(limits))
                     .build()
                     .map_err(parquet_error)?;
-                Ok((reader, page_reservation_bytes))
+                Ok((reader, page_reservation_bytes, opened.handle))
             })();
-            let (reader, page_reservation_bytes) = match reader {
-                Ok((reader, page_reservation_bytes)) => {
-                    #[cfg(test)]
-                    {
-                        let current = OPEN_FRAGMENT_READERS.fetch_add(1, Ordering::SeqCst) + 1;
-                        PEAK_OPEN_FRAGMENT_READERS.fetch_max(current, Ordering::SeqCst);
-                    }
-                    (Some(reader), page_reservation_bytes)
+            let (reader, page_reservation_bytes, handle) = match reader {
+                Ok((reader, page_reservation_bytes, handle)) => {
+                    (Some(reader), page_reservation_bytes, Some(handle))
                 }
                 Err(error) => {
                     *failed.lock().expect("property failure lock") = Some(error);
-                    (None, 0)
+                    (None, 0, None)
                 }
             };
-            #[cfg(test)]
-            let opened = reader.is_some();
             (
                 fragment.id,
                 0,
@@ -658,8 +760,7 @@ impl AuthenticatedPropertyInventory {
                     max_row_bytes: limits.max_row_bytes,
                     page_reservation_bytes,
                     batch_reservation_bytes: limits.max_buffered_bytes / 4,
-                    #[cfg(test)]
-                    opened,
+                    _handle: handle,
                 },
             )
         });
@@ -668,11 +769,23 @@ impl AuthenticatedPropertyInventory {
         if let Some(error) = failed.lock().expect("property failure lock").take() {
             return Err(error);
         }
+        metrics.authentication_bytes = authentication_bytes.load(Ordering::Relaxed);
+        metrics.authentication_block_equivalents =
+            authentication_block_equivalents.load(Ordering::Relaxed);
+        metrics.authentication_read_calls = authentication_read_calls.load(Ordering::Relaxed);
+        metrics.property_authentication_bytes = metrics.authentication_bytes;
+        metrics.property_authentication_block_equivalents =
+            metrics.authentication_block_equivalents;
+        metrics.property_authentication_read_calls = metrics.authentication_read_calls;
         metrics.validation_bytes = counts.bytes.load(Ordering::Relaxed);
-        metrics.physical_bytes = metrics.validation_bytes;
+        metrics.physical_bytes = metrics
+            .authentication_bytes
+            .saturating_add(metrics.validation_bytes);
         metrics.read_calls = counts.blocks.load(Ordering::Relaxed);
         metrics.validation_read_calls = metrics.read_calls;
-        metrics.physical_blocks = metrics.read_calls;
+        metrics.physical_blocks = metrics
+            .authentication_read_calls
+            .saturating_add(metrics.read_calls);
         metrics.range_seeks = counts.range_seeks.load(Ordering::Relaxed);
         let decoded = decoded.lock().expect("property retention lock");
         metrics.decoder_peak_rows = decoded.peak_rows;
@@ -916,11 +1029,10 @@ fn digest_hex(bytes: &[u8]) -> String {
 pub struct PropertyOverlayMetrics {
     /// Physical snapshot rows decoded.
     pub physical_rows: u64,
-    /// Total one-time admission plus decoder bytes read. Cached inventory scans
-    /// contain decoder work only.
+    /// Total authentication plus decoder bytes read.
     pub physical_bytes: u64,
-    /// Full-file bytes read exactly once for SHA-256 authentication by a raw
-    /// one-shot adapter. Cached inventory scans report zero.
+    /// Full-file bytes read for SHA-256 authentication. Cached inventories
+    /// reauthenticate each bounded on-demand handle before decoding it.
     pub authentication_bytes: u64,
     /// Raw graph-files authority bytes included in authentication bytes.
     pub authority_authentication_bytes: u64,
@@ -1076,22 +1188,12 @@ struct PropertyParquetRows {
     max_row_bytes: u64,
     page_reservation_bytes: u64,
     batch_reservation_bytes: u64,
-    #[cfg(test)]
-    opened: bool,
+    _handle: Option<FragmentHandleGuard>,
 }
-
-#[cfg(test)]
-static OPEN_FRAGMENT_READERS: AtomicU64 = AtomicU64::new(0);
-#[cfg(test)]
-static PEAK_OPEN_FRAGMENT_READERS: AtomicU64 = AtomicU64::new(0);
 
 impl Drop for PropertyParquetRows {
     fn drop(&mut self) {
         self.budget.release(self.page_reservation_bytes);
-        #[cfg(test)]
-        if self.opened {
-            OPEN_FRAGMENT_READERS.fetch_sub(1, Ordering::SeqCst);
-        }
     }
 }
 
@@ -1213,17 +1315,33 @@ where
 }
 
 fn add_open_metrics(metrics: &mut PropertyOverlayMetrics, open: PropertyInventoryOpenMetrics) {
-    metrics.authentication_bytes = open.authentication_bytes;
-    metrics.authentication_block_equivalents = open.authentication_block_equivalents;
-    metrics.authentication_read_calls = open.authentication_read_calls;
-    metrics.authority_authentication_bytes = open.authority_authentication_bytes;
-    metrics.authority_authentication_block_equivalents =
-        open.authority_authentication_block_equivalents;
-    metrics.authority_authentication_read_calls = open.authority_authentication_read_calls;
-    metrics.property_authentication_bytes = open.property_authentication_bytes;
-    metrics.property_authentication_block_equivalents =
-        open.property_authentication_block_equivalents;
-    metrics.property_authentication_read_calls = open.property_authentication_read_calls;
+    metrics.authentication_bytes = metrics
+        .authentication_bytes
+        .saturating_add(open.authentication_bytes);
+    metrics.authentication_block_equivalents = metrics
+        .authentication_block_equivalents
+        .saturating_add(open.authentication_block_equivalents);
+    metrics.authentication_read_calls = metrics
+        .authentication_read_calls
+        .saturating_add(open.authentication_read_calls);
+    metrics.authority_authentication_bytes = metrics
+        .authority_authentication_bytes
+        .saturating_add(open.authority_authentication_bytes);
+    metrics.authority_authentication_block_equivalents = metrics
+        .authority_authentication_block_equivalents
+        .saturating_add(open.authority_authentication_block_equivalents);
+    metrics.authority_authentication_read_calls = metrics
+        .authority_authentication_read_calls
+        .saturating_add(open.authority_authentication_read_calls);
+    metrics.property_authentication_bytes = metrics
+        .property_authentication_bytes
+        .saturating_add(open.property_authentication_bytes);
+    metrics.property_authentication_block_equivalents = metrics
+        .property_authentication_block_equivalents
+        .saturating_add(open.property_authentication_block_equivalents);
+    metrics.property_authentication_read_calls = metrics
+        .property_authentication_read_calls
+        .saturating_add(open.property_authentication_read_calls);
     metrics.physical_bytes = metrics
         .physical_bytes
         .saturating_add(open.authentication_bytes);
@@ -1316,6 +1434,10 @@ pub fn read_authenticated_property_snapshots_for(
 
 /// Resolve a bounded UUID batch from an already authenticated generation
 /// inventory. This is the mutation-baseline path used by a live session.
+#[allow(
+    clippy::too_many_lines,
+    reason = "authenticated targeted admission and exact I/O accounting stay co-located"
+)]
 pub fn read_authenticated_property_snapshots_for_inventory(
     inventory: &AuthenticatedPropertyInventory,
     kind: PropertyRouteKind,
@@ -1336,12 +1458,32 @@ pub fn read_authenticated_property_snapshots_for_inventory(
     };
     for fragment in fragments.iter().rev() {
         let counts = Arc::new(ReadCounts::default());
-        let builder = open_counted_retained_property_builder(fragment, Arc::clone(&counts))?;
+        let opened = inventory.open_fragment(fragment)?;
+        metrics.authentication_bytes = metrics
+            .authentication_bytes
+            .saturating_add(opened.authentication_bytes);
+        metrics.authentication_block_equivalents = metrics
+            .authentication_block_equivalents
+            .saturating_add(opened.authentication_block_equivalents);
+        metrics.authentication_read_calls = metrics
+            .authentication_read_calls
+            .saturating_add(opened.authentication_read_calls);
+        metrics.property_authentication_bytes = metrics
+            .property_authentication_bytes
+            .saturating_add(opened.authentication_bytes);
+        metrics.property_authentication_block_equivalents = metrics
+            .property_authentication_block_equivalents
+            .saturating_add(opened.authentication_block_equivalents);
+        metrics.property_authentication_read_calls = metrics
+            .property_authentication_read_calls
+            .saturating_add(opened.authentication_read_calls);
+        let builder =
+            open_counted_retained_property_builder(fragment, &opened, Arc::clone(&counts))?;
         validate_fragment_schema(builder.schema().as_ref(), fragment.id, kind, route)?;
         let page_reservation_bytes = validate_parquet_resource_admission(
             builder.metadata(),
             PropertyOverlayLimits::default(),
-            &fragment.file,
+            opened.file.as_ref(),
             &counts,
         )?;
         metrics.decoder_page_reservation_bytes = metrics
@@ -1353,6 +1495,7 @@ pub fn read_authenticated_property_snapshots_for_inventory(
             .saturating_add(u64::try_from(builder.metadata().num_row_groups()).unwrap_or(u64::MAX));
         let row_groups = select_target_row_groups(
             fragment,
+            &opened,
             kind,
             &unresolved,
             &counts,
@@ -1369,6 +1512,7 @@ pub fn read_authenticated_property_snapshots_for_inventory(
             decode_target_row_groups(
                 TargetDecodeOptions {
                     fragment,
+                    opened: &opened,
                     kind,
                     row_groups,
                     batch_rows: targeted_batch_rows,
@@ -1395,18 +1539,28 @@ pub fn read_authenticated_property_snapshots_for_inventory(
         metrics.selected_value_read_calls = metrics
             .selected_value_read_calls
             .saturating_add(total_read_calls.saturating_sub(validation_read_calls));
-        metrics.physical_blocks = metrics.physical_blocks.saturating_add(total_read_calls);
+        metrics.physical_blocks = metrics
+            .physical_blocks
+            .saturating_add(total_read_calls.saturating_add(opened.authentication_read_calls));
         metrics.range_seeks = metrics
             .range_seeks
             .saturating_add(counts.range_seeks.load(Ordering::Relaxed));
     }
+    metrics.physical_bytes = metrics
+        .physical_bytes
+        .saturating_add(metrics.authentication_bytes);
     metrics.logical_rows = u64::try_from(found.len()).unwrap_or(u64::MAX);
     metrics.peak_buffered_rows = metrics.decoder_peak_rows;
     Ok((found, metrics))
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one authenticated capability and its bounded decode accounting are explicit"
+)]
 fn select_target_row_groups(
     fragment: &AuthenticatedPropertyFragment,
+    opened: &OpenPropertyFragment,
     kind: PropertyRouteKind,
     unresolved: &std::collections::BTreeSet<[u8; 16]>,
     counts: &Arc<ReadCounts>,
@@ -1414,15 +1568,16 @@ fn select_target_row_groups(
     page_reservation_bytes: u64,
     targeted_batch_rows: usize,
 ) -> Result<Vec<usize>, GfError> {
-    let builder = open_counted_retained_property_builder(fragment, Arc::clone(counts))?;
+    let builder = open_counted_retained_property_builder(fragment, opened, Arc::clone(counts))?;
     let mut selected_groups = Vec::new();
     let mut prior_uuid = None;
     for index in 0..builder.metadata().num_row_groups() {
-        let validation = open_counted_retained_property_builder(fragment, Arc::clone(counts))?
-            .with_row_groups(vec![index])
-            .with_batch_size(targeted_batch_rows)
-            .build()
-            .map_err(parquet_error)?;
+        let validation =
+            open_counted_retained_property_builder(fragment, opened, Arc::clone(counts))?
+                .with_row_groups(vec![index])
+                .with_batch_size(targeted_batch_rows)
+                .build()
+                .map_err(parquet_error)?;
         let mut selected = false;
         for batch in validation {
             let batch = batch.map_err(|error| GfError::Storage(error.to_string()))?;
@@ -1482,6 +1637,7 @@ fn select_target_row_groups(
 
 struct TargetDecodeOptions<'a> {
     fragment: &'a AuthenticatedPropertyFragment,
+    opened: &'a OpenPropertyFragment,
     kind: PropertyRouteKind,
     row_groups: Vec<usize>,
     batch_rows: usize,
@@ -1495,11 +1651,15 @@ fn decode_target_row_groups(
     found: &mut BTreeMap<[u8; 16], PropertySnapshotRow>,
     metrics: &mut PropertyOverlayMetrics,
 ) -> Result<(), GfError> {
-    let reader = open_counted_retained_property_builder(options.fragment, Arc::clone(counts))?
-        .with_row_groups(options.row_groups)
-        .with_batch_size(options.batch_rows)
-        .build()
-        .map_err(parquet_error)?;
+    let reader = open_counted_retained_property_builder(
+        options.fragment,
+        options.opened,
+        Arc::clone(counts),
+    )?
+    .with_row_groups(options.row_groups)
+    .with_batch_size(options.batch_rows)
+    .build()
+    .map_err(parquet_error)?;
     for batch in reader {
         let batch = batch.map_err(|error| GfError::Storage(error.to_string()))?;
         charge_target_batch(metrics, &batch, options.page_reservation_bytes)?;
@@ -1559,10 +1719,11 @@ fn charge_target_batch(
 
 fn open_counted_retained_property_builder(
     fragment: &AuthenticatedPropertyFragment,
+    opened: &OpenPropertyFragment,
     counts: Arc<ReadCounts>,
 ) -> Result<ParquetRecordBatchReaderBuilder<CountingChunkReader>, GfError> {
     ParquetRecordBatchReaderBuilder::try_new(CountingChunkReader {
-        file: Arc::new(fragment.file.try_clone().map_err(io_error)?),
+        file: Arc::clone(&opened.file),
         length: fragment.entry.byte_length,
         counts,
     })
@@ -2627,8 +2788,6 @@ mod tests {
 
     #[test]
     fn authenticated_reader_reports_actual_io_and_decodes_snapshot() {
-        OPEN_FRAGMENT_READERS.store(0, Ordering::SeqCst);
-        PEAK_OPEN_FRAGMENT_READERS.store(0, Ordering::SeqCst);
         let dir = TempDir::new().unwrap();
         let scratch = TempDir::new().unwrap();
         let id = PropertyFragmentId {
@@ -2696,8 +2855,6 @@ mod tests {
         assert!(metrics.decoder_peak_bytes > 100_000);
         assert!(metrics.peak_buffered_bytes >= metrics.decoder_peak_bytes);
         assert_eq!(metrics.per_record_seeks, 0);
-        assert_eq!(OPEN_FRAGMENT_READERS.load(Ordering::SeqCst), 0);
-        assert_eq!(PEAK_OPEN_FRAGMENT_READERS.load(Ordering::SeqCst), 1);
         let error = visit_authenticated_property_snapshots(
             dir.path(),
             PropertyRouteKind::Node,
@@ -2764,12 +2921,17 @@ mod tests {
             .unwrap();
             assert_eq!(rows.len(), 1);
             assert_eq!(metrics.per_record_seeks, 0);
-            assert_eq!(metrics.authentication_bytes, 0);
-            assert_eq!(metrics.authentication_read_calls, 0);
-            assert_eq!(metrics.authentication_block_equivalents, 0);
+            assert_eq!(metrics.authentication_bytes, entry.byte_length);
+            assert!(metrics.authentication_read_calls > 0);
+            assert_eq!(
+                metrics.authentication_block_equivalents,
+                entry.byte_length.div_ceil(64 * 1024)
+            );
             assert_eq!(
                 metrics.physical_bytes,
-                metrics.validation_bytes + metrics.selected_value_bytes
+                metrics.authentication_bytes
+                    + metrics.validation_bytes
+                    + metrics.selected_value_bytes
             );
             repeated_scan_metrics.push(metrics);
         }
@@ -2833,9 +2995,12 @@ mod tests {
             selected.open_metrics().authentication_bytes,
             entry.byte_length
         );
-        assert_eq!(selected_metrics.authentication_bytes, 0);
-        assert_eq!(selected_metrics.authentication_read_calls, 0);
-        assert_eq!(selected_metrics.authentication_block_equivalents, 0);
+        assert_eq!(selected_metrics.authentication_bytes, entry.byte_length);
+        assert!(selected_metrics.authentication_read_calls > 0);
+        assert_eq!(
+            selected_metrics.authentication_block_equivalents,
+            entry.byte_length.div_ceil(64 * 1024)
+        );
 
         let conflicting_id = PropertyFragmentId {
             generation: 8,
@@ -2997,6 +3162,133 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn many_fragment_inventory_bounds_all_live_handles_without_rlimit_assumptions() {
+        let dir = TempDir::new().unwrap();
+        let scratch = TempDir::new().unwrap();
+        let route_dir = dir.path().join("properties/Person");
+        fs::create_dir_all(&route_dir).unwrap();
+        let mut entries = Vec::new();
+        for ordinal in 0_u64..96 {
+            let id = PropertyFragmentId {
+                generation: 1,
+                ordinal,
+            };
+            let schema = Arc::new(Schema::new_with_metadata(
+                vec![
+                    Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+                    Field::new(PROPERTY_TOMBSTONE_FIELD, DataType::Boolean, false),
+                    Field::new("value", DataType::Int64, true),
+                ],
+                HashMap::from([
+                    (
+                        PROPERTY_OVERLAY_FORMAT_KEY.into(),
+                        PROPERTY_OVERLAY_FORMAT.into(),
+                    ),
+                    (PROPERTY_ROUTE_KEY.into(), "Person".into()),
+                    (PROPERTY_KIND_KEY.into(), "node".into()),
+                    (PROPERTY_GENERATION_KEY.into(), "1".into()),
+                    (PROPERTY_ORDINAL_KEY.into(), ordinal.to_string()),
+                ]),
+            ));
+            let mut uuid = [0_u8; 16];
+            uuid[8..].copy_from_slice(&ordinal.to_be_bytes());
+            let batch = RecordBatch::try_new(
+                Arc::clone(&schema),
+                vec![
+                    Arc::new(FixedSizeBinaryArray::try_from_iter([uuid].into_iter()).unwrap()),
+                    Arc::new(BooleanArray::from(vec![false])),
+                    Arc::new(Int64Array::from(vec![Some(
+                        i64::try_from(ordinal).unwrap(),
+                    )])),
+                ],
+            )
+            .unwrap();
+            let path = route_dir.join(id.file_name());
+            let mut writer =
+                ArrowWriter::try_new(File::create(&path).unwrap(), schema, None).unwrap();
+            writer.write(&batch).unwrap();
+            writer.close().unwrap();
+            let bytes = fs::read(&path).unwrap();
+            entries.push(crate::GraphFileEntry {
+                relative_path: format!("properties/Person/{}", id.file_name()),
+                byte_length: u64::try_from(bytes.len()).unwrap(),
+                content_sha256: digest_hex(&Sha256::digest(&bytes)),
+                role: crate::GraphFileRole::Properties,
+            });
+        }
+
+        let inventory =
+            AuthenticatedPropertyInventory::from_entries_at_root(dir.path(), entries).unwrap();
+        assert_eq!(inventory.live_fragment_handles(), 0);
+        assert_eq!(inventory.peak_fragment_handles(), 1);
+
+        inventory.reset_peak_fragment_handles();
+        let limits = PropertyOverlayLimits {
+            max_open_runs: 2,
+            ..PropertyOverlayLimits::default()
+        };
+        let mut rows = 0_usize;
+        let metrics = inventory
+            .visit_route(
+                PropertyRouteKind::Node,
+                "Person",
+                scratch.path(),
+                limits,
+                |_| {
+                    rows += 1;
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(rows, 96);
+        assert!(metrics.authentication_bytes > 0);
+        assert_eq!(inventory.live_fragment_handles(), 0);
+        assert!(inventory.peak_fragment_handles() <= 2);
+
+        inventory.reset_peak_fragment_handles();
+        let targets = BTreeSet::from([[0; 16]]);
+        let _ = read_authenticated_property_snapshots_for_inventory(
+            &inventory,
+            PropertyRouteKind::Node,
+            "Person",
+            &targets,
+        )
+        .unwrap();
+        assert_eq!(inventory.live_fragment_handles(), 0);
+        assert!(inventory.peak_fragment_handles() <= 1);
+
+        let attacked = route_dir.join(
+            PropertyFragmentId {
+                generation: 1,
+                ordinal: 0,
+            }
+            .file_name(),
+        );
+        let displaced = route_dir.join("displaced.parquet");
+        fs::rename(&attacked, &displaced).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&displaced, &attacked).unwrap();
+        #[cfg(windows)]
+        fs::copy(&displaced, &attacked).unwrap();
+        let error = inventory
+            .visit_route(
+                PropertyRouteKind::Node,
+                "Person",
+                scratch.path(),
+                limits,
+                |_| Ok(()),
+            )
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("linked")
+                || error.to_string().contains("symbolic links")
+                || error.to_string().contains("identity changed"),
+            "{error}"
+        );
+        assert_eq!(inventory.live_fragment_handles(), 0);
     }
 
     #[test]
@@ -3587,15 +3879,16 @@ mod tests {
             assert_eq!(found.len(), 1);
             assert_eq!(metrics.physical_rows, u64::try_from(rows * 2).unwrap());
             assert_eq!(metrics.fragments_considered, 1);
-            // Raw graph-tree adapters first capture/hash the authority and
-            // then authenticate the selected retained fragment.
+            // Raw graph-tree adapters capture/hash the authority, admission
+            // authenticates the fragment, and bounded reopening reauthenticates
+            // the on-demand handle before decoding.
             assert_eq!(
                 metrics.authentication_bytes,
-                expected_authentication_bytes * 2
+                expected_authentication_bytes * 3
             );
             assert_eq!(
                 metrics.authentication_block_equivalents,
-                expected_authentication_bytes.div_ceil(64 * 1024) * 2
+                expected_authentication_bytes.div_ceil(64 * 1024) * 3
             );
             assert_eq!(metrics.row_groups_considered, 1);
             assert_eq!(metrics.row_groups_selected, 1);

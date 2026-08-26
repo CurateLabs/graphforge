@@ -177,8 +177,15 @@ validate canonical fragment identity, schema/semantic metadata, strictly sorted
 unique non-null UUIDs, and tombstone invariants, then perform a bounded
 disk-backed newest-wins merge. SQL and direct APIs share that scanner. SQL emits
 bounded Arrow batches; `LIMIT` changes emission only after authority validation.
-Each retained file is hashed once, then its Parquet page headers are parsed
-through a bounded compact-protocol reader before Arrow allocation. Declared
+Admission retains the stable root capability plus each fragment's authenticated
+path, native file identity, length, digest, and schema—not one OS handle per
+historical fragment. A scan opens fragments on demand without following links,
+requires the admitted device/file identity, and rehashes the complete file
+before decoding; the handle closes with that decoder. Consequently live
+fragment handles are bounded by `max_open_runs` rather than total history, and
+same-name replacement, in-place mutation, symlink, and path substitution all
+fail closed. Parquet page headers are then parsed through a bounded
+compact-protocol reader before Arrow allocation. Declared
 compressed/uncompressed sizes must remain within the authenticated chunk/file
 ranges and the configured live-byte limit. One shared budget covers Arrow
 batches, decoded rows, spill buffers, and merge cursors; rolling fan-in levels

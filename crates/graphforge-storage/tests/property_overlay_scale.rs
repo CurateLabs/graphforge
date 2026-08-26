@@ -481,13 +481,22 @@ fn production_property_overlay_n_2n_4n_is_disk_growing_and_memory_bounded() {
                 .expect("read block accounting must not overflow")
         );
         assert!(phase.authority_authentication_bytes <= phase.graph_tree_bytes);
+        // Admission authenticates every historical fragment without retaining
+        // its file descriptor; the bounded on-demand decoder then reopens and
+        // reauthenticates the same immutable bytes before use.
         assert_eq!(
             phase.property_authentication_bytes,
-            phase.property_fragment_bytes
+            phase
+                .property_fragment_bytes
+                .checked_mul(2)
+                .expect("property authentication byte accounting must not overflow")
         );
         assert_eq!(
             phase.property_authentication_block_equivalents,
-            phase.property_fragment_block_equivalents
+            phase
+                .property_fragment_block_equivalents
+                .checked_mul(2)
+                .expect("property authentication block accounting must not overflow")
         );
         let decoder_bytes = phase
             .validation_bytes
