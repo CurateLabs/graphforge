@@ -602,8 +602,7 @@ mod tests {
     use arrow::array::{FixedSizeBinaryArray, StringArray};
     use graphforge_search::{
         DocumentEmbeddingOutput, DocumentEmbeddingProvider, DocumentEmbeddingRequest,
-        ProviderCapabilities, ProviderCapability, QueryEmbeddingOutput,
-        StandardProviderExecutionRuntime,
+        ProviderCapabilities, ProviderCapability, ProviderCheckpoint, QueryEmbeddingOutput,
     };
     use graphforge_storage::{TokenCountClass, TokenizerIdentity};
 
@@ -620,6 +619,23 @@ mod tests {
         query_vector: Vec<f32>,
         document_calls: usize,
         query_calls: usize,
+    }
+
+    #[derive(Default)]
+    struct DeterministicRuntime;
+
+    impl ProviderExecutionRuntime for DeterministicRuntime {
+        fn elapsed(&self) -> Duration {
+            Duration::ZERO
+        }
+
+        fn wait(
+            &mut self,
+            _duration: Duration,
+            checkpoint: &mut ProviderCheckpoint<'_>,
+        ) -> ProviderResult<()> {
+            checkpoint()
+        }
     }
 
     impl DocumentEmbeddingProvider for FakeProvider {
@@ -846,7 +862,7 @@ mod tests {
         property: &str,
     ) -> crate::EmbeddingSpaceInfo {
         let request = provider_request(display_name, property, provider.contract.clone());
-        let mut runtime = StandardProviderExecutionRuntime::new();
+        let mut runtime = DeterministicRuntime;
         let mut count_tokens =
             |_: &ProviderModelContract, text: &str| Ok(u64::try_from(text.len()).unwrap());
         let mut estimate_cost = |_: graphforge_search::ProviderBatchShape| Ok(0);
@@ -885,7 +901,7 @@ mod tests {
         provider: &mut FakeProvider,
         checkpoint: &mut ProviderArtifactCheckpoint<'_>,
     ) -> Result<RecordBatch, ProviderFindError> {
-        let mut runtime = StandardProviderExecutionRuntime::new();
+        let mut runtime = DeterministicRuntime;
         let mut count_tokens =
             |_: &ProviderModelContract, text: &str| Ok(u64::try_from(text.len()).unwrap());
         let mut estimate_cost =
@@ -907,7 +923,7 @@ mod tests {
     fn configured(provider: FakeProvider) -> ConfiguredProviderFindRuntime {
         ConfiguredProviderFindRuntime::new(
             provider,
-            StandardProviderExecutionRuntime::new(),
+            DeterministicRuntime,
             |_: &ProviderModelContract, text: &str| Ok(u64::try_from(text.len()).unwrap()),
             |_: ProviderQueryWorkShape| Ok(0),
             || Ok(()),
@@ -1095,7 +1111,7 @@ mod tests {
         let original = publish_provider_space_as(&graph, &mut provider, "semantic", "body");
         let replacement =
             publish_provider_space_as(&graph, &mut provider, "replacement", "summary");
-        let mut runtime = StandardProviderExecutionRuntime::new();
+        let mut runtime = DeterministicRuntime;
         let mut counts = 0;
         let replacement_id = replacement.compatibility_id;
         let mut count_tokens = |_: &ProviderModelContract, text: &str| {
@@ -1139,7 +1155,7 @@ mod tests {
         graph
             .bind_embedding_space_alias("semantic", &original.compatibility_id, true)
             .unwrap();
-        let mut runtime = StandardProviderExecutionRuntime::new();
+        let mut runtime = DeterministicRuntime;
         let mut counts = 0;
         let original_id = original.compatibility_id;
         let mut count_tokens = |_: &ProviderModelContract, text: &str| {

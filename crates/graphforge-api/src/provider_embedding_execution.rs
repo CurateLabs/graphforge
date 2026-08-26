@@ -538,7 +538,7 @@ mod tests {
     use graphforge_search::{
         DocumentEmbeddingOutput, DocumentEmbeddingRequest, ProviderBatchLimits, ProviderBatchShape,
         ProviderCapabilities, ProviderCapability, ProviderCheckpoint, ProviderExecutionLimits,
-        ProviderExecutionRuntime, ProviderRequestLimits, StandardProviderExecutionRuntime,
+        ProviderExecutionRuntime, ProviderRequestLimits,
     };
     use graphforge_storage::{TokenCountClass, TokenizerIdentity};
 
@@ -1104,7 +1104,7 @@ mod tests {
             failure: None,
             calls: 0,
         };
-        let mut runtime = StandardProviderExecutionRuntime::new();
+        let mut runtime = DeterministicRuntime;
         let mut count_tokens = |_: &ProviderModelContract, _: &str| Ok(1);
         let mut estimate_cost = |_: ProviderBatchShape| Ok(0);
         let mut checkpoint = || Err(SearchArtifactError::Cancelled);
