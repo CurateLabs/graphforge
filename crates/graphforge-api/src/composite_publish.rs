@@ -972,8 +972,12 @@ fn apply_graph_mutations(
                             Ok((name.clone(), prop_literal(value)?))
                         })
                         .collect::<Result<HashMap<_, _>, GfError>>()?;
+                    let property_route = match graph.ontology_mode {
+                        OntologyMode::Advisory | OntologyMode::Strict => label.clone(),
+                        OntologyMode::Exploratory => "_untyped".to_owned(),
+                    };
                     node_sets
-                        .entry(label.clone())
+                        .entry(property_route)
                         .or_default()
                         .insert(node_uuid.into_bytes(), props);
                 }
@@ -1951,6 +1955,25 @@ mod tests {
             .execute("MATCH (n:Person) RETURN n.node_uuid AS id")
             .unwrap();
         assert_eq!(rows.batches[0].num_rows(), 2);
+    }
+
+    #[test]
+    fn exploratory_composite_create_projects_properties_after_reopen() {
+        let directory = TempDir::new().unwrap();
+        let graph = GraphForge::new(directory.path().to_str()).unwrap();
+        graph
+            .publish_composite_transaction(graph_request(141, 142, "Ada"))
+            .unwrap();
+
+        let reopened = GraphForge::new(directory.path().to_str()).unwrap();
+        let result = reopened
+            .execute("MATCH (n:Person) RETURN n.name AS name")
+            .unwrap();
+        let names = result.batches[0]
+            .column_by_name("name")
+            .and_then(|column| column.as_any().downcast_ref::<StringArray>())
+            .unwrap();
+        assert_eq!(names.value(0), "Ada");
     }
 
     #[test]
