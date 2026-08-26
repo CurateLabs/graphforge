@@ -2,10 +2,10 @@
 //! the public `GraphCatalog` reader and authenticated immutable property
 //! authority.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
-use arrow::array::Array;
+use arrow::array::{Array, FixedSizeBinaryArray, Int64Array, StringArray};
 use datafusion::prelude::SessionContext;
 use tempfile::TempDir;
 
@@ -13,8 +13,9 @@ use graphforge_core::uuid::new_v7;
 use graphforge_core::{OntologyMode, TypeId};
 use graphforge_ir::{IrLiteral, RuntimeCatalog};
 use graphforge_storage::{
-    GraphCatalog, GraphWriter, PropertyOverlayLimits, PropertyRouteKind, PropertySnapshotRow,
-    PropertyTable, enumerate_property_fragments, read_topology_generation,
+    EdgePropertyTable, GraphCatalog, GraphWriter, PropertyOverlayLimits, PropertyRouteKind,
+    PropertySnapshotRow, PropertyTable, delete_edges, enumerate_property_fragments,
+    read_topology_generation, remove_edge_properties, set_edge_properties_rewrite,
     visit_authenticated_property_snapshots,
 };
 
@@ -707,6 +708,182 @@ async fn edge_property_stems_are_isolated() {
     assert_eq!(likes[edge.as_bytes()].values["rating"], IrLiteral::Int(5));
     assert_canonical_fragments(dir.path(), PropertyRouteKind::Edge, "KNOWS", 1);
     assert_canonical_fragments(dir.path(), PropertyRouteKind::Edge, "LIKES", 1);
+}
+
+#[tokio::test]
+async fn edge_property_table_sql_and_direct_reads_merge_cross_fragment_mutations() {
+    let dir = TempDir::new().unwrap();
+    let (src, dst) = (new_v7(), new_v7());
+    let (updated, retained, deleted) = (new_v7(), new_v7(), new_v7());
+
+    let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
+    writer.create_node(src, TypeId(0)).unwrap();
+    writer.create_node(dst, TypeId(0)).unwrap();
+    for (edge, properties) in [
+        (
+            updated,
+            HashMap::from([
+                ("since".to_owned(), IrLiteral::Int(2020)),
+                ("weight".to_owned(), IrLiteral::Int(7)),
+            ]),
+        ),
+        (
+            retained,
+            HashMap::from([
+                ("since".to_owned(), IrLiteral::Int(2019)),
+                ("status".to_owned(), IrLiteral::Str("old".into())),
+            ]),
+        ),
+        (
+            deleted,
+            HashMap::from([
+                ("since".to_owned(), IrLiteral::Int(2018)),
+                ("status".to_owned(), IrLiteral::Str("delete-me".into())),
+            ]),
+        ),
+    ] {
+        writer.create_edge(edge, "KNOWS", &src, &dst).unwrap();
+        writer
+            .set_edge_properties(&edge, Some("KNOWS"), properties)
+            .unwrap();
+    }
+    writer.flush().unwrap();
+
+    assert_eq!(
+        set_edge_properties_rewrite(
+            dir.path(),
+            "KNOWS",
+            &HashMap::from([
+                (
+                    *updated.as_bytes(),
+                    HashMap::from([
+                        ("since".to_owned(), IrLiteral::Int(2021)),
+                        ("note".to_owned(), IrLiteral::Str("new".into())),
+                    ]),
+                ),
+                (
+                    *retained.as_bytes(),
+                    HashMap::from([("status".to_owned(), IrLiteral::Str("current".into()),)]),
+                ),
+            ]),
+        )
+        .unwrap(),
+        2
+    );
+    assert_eq!(
+        remove_edge_properties(
+            dir.path(),
+            "KNOWS",
+            &HashMap::from([(*updated.as_bytes(), HashSet::from(["weight".to_owned()]))]),
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        delete_edges(dir.path(), &HashSet::from([*deleted.as_bytes()])).unwrap(),
+        1
+    );
+    assert_canonical_fragments(dir.path(), PropertyRouteKind::Edge, "KNOWS", 4);
+
+    let direct = read_edge_property_rows(dir.path(), "KNOWS");
+    assert_eq!(direct.len(), 2, "the deleted edge tombstone must win");
+    assert_eq!(
+        direct[updated.as_bytes()].values["since"],
+        IrLiteral::Int(2021)
+    );
+    assert_eq!(
+        direct[updated.as_bytes()].values["note"],
+        IrLiteral::Str("new".into())
+    );
+    assert!(!direct[updated.as_bytes()].values.contains_key("weight"));
+    assert_eq!(
+        direct[retained.as_bytes()].values["status"],
+        IrLiteral::Str("current".into())
+    );
+
+    let ctx = SessionContext::new();
+    ctx.register_table(
+        "edge_props",
+        Arc::new(EdgePropertyTable::open_discovered(dir.path(), "KNOWS")),
+    )
+    .unwrap();
+    let batches = ctx
+        .sql("SELECT edge_uuid, since, status FROM edge_props ORDER BY edge_uuid LIMIT 10")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    let mut sql = BTreeMap::new();
+    for batch in batches {
+        let uuids = batch
+            .column_by_name("edge_uuid")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<FixedSizeBinaryArray>()
+            .unwrap();
+        let since = batch
+            .column_by_name("since")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let status = batch
+            .column_by_name("status")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        for index in 0..batch.num_rows() {
+            let uuid: [u8; 16] = uuids.value(index).try_into().unwrap();
+            assert!(
+                sql.insert(
+                    uuid,
+                    (
+                        since.value(index),
+                        (!status.is_null(index)).then(|| status.value(index).to_owned()),
+                    ),
+                )
+                .is_none(),
+                "SQL overlay emitted more than one row for one edge UUID"
+            );
+        }
+    }
+    assert_eq!(sql.len(), direct.len());
+    for (uuid, row) in &direct {
+        let expected_since = match row.values["since"] {
+            IrLiteral::Int(value) => value,
+            ref value => panic!("unexpected since value: {value:?}"),
+        };
+        let expected_status = match row.values.get("status") {
+            Some(IrLiteral::Str(value)) => Some(value.clone()),
+            None => None,
+            value => panic!("unexpected status value: {value:?}"),
+        };
+        assert_eq!(sql[uuid], (expected_since, expected_status));
+    }
+
+    let projected = ctx
+        .sql("SELECT status FROM edge_props WHERE status IS NOT NULL LIMIT 1")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    assert_eq!(
+        projected
+            .iter()
+            .map(|batch| batch.num_rows())
+            .sum::<usize>(),
+        1
+    );
+    let status = projected[0]
+        .column_by_name("status")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(status.value(0), "current");
 }
 
 // ---------------------------------------------------------------------------
