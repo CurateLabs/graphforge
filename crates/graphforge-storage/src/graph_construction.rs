@@ -867,6 +867,21 @@ impl GraphConstructionSession {
             )?;
             return Ok(published);
         }
+        if self.checkpoint.publication_state == Some(ConstructionPublicationState::Publishing) {
+            self.begin_publication(target_generation_uuid, transaction_uuid)?;
+            if let Some(published) =
+                crate::published_project_transaction(&self.project_path, transaction_uuid)?
+            {
+                if published.generation_uuid != target_generation_uuid {
+                    return Err(storage("published construction target changed"));
+                }
+                self.finish_publication(
+                    target_generation_uuid,
+                    &hex(&published.generation_manifest_sha256),
+                )?;
+                return Ok(published);
+            }
+        }
         let expected_inventory = self
             .checkpoint
             .encoding_inventory_sha256
@@ -1023,6 +1038,7 @@ impl GraphConstructionSession {
                     .publish_with_graph_objects(&lease)?,
                 crate::ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
             };
+        construction_failpoint("publication.after_current_before_receipt");
         self.finish_publication(
             target_generation_uuid,
             &hex(&publication.generation_manifest_sha256),
@@ -8300,6 +8316,14 @@ mod tests {
                 .any(|entry| entry.relative_path.starts_with("topology/nodes/"))
         );
         drop(current);
+        let receipt_path = root
+            .path()
+            .join(PRIVATE_ROOT)
+            .join(operation.simple().to_string())
+            .join(PUBLICATION_RECEIPT);
+        std::fs::remove_file(receipt_path).unwrap();
+        session.checkpoint.publication_state = Some(ConstructionPublicationState::Publishing);
+        replace_control(&session.root, CHECKPOINT, &session.checkpoint).unwrap();
         drop(session);
 
         let mut resumed = GraphConstructionSession::open(
