@@ -353,7 +353,8 @@ pub use property_overlay::{
     AuthenticatedPropertyInventory, PROPERTY_OVERLAY_FORMAT, PROPERTY_OVERLAY_FORMAT_KEY,
     PROPERTY_TOMBSTONE_FIELD, PropertyFragmentId, PropertyOverlayLimits, PropertyOverlayMetrics,
     PropertyRouteKind, PropertySnapshotRow, enumerate_property_fragments,
-    read_authenticated_property_snapshots_for, visit_authenticated_property_snapshots,
+    read_authenticated_property_snapshots_for, read_authenticated_property_snapshots_for_inventory,
+    visit_authenticated_property_snapshots,
 };
 
 pub mod catalog;
@@ -389,8 +390,10 @@ pub use writer::{
     GraphWriter, count_entity_properties, decode_spatial_property_value, read_entity_properties,
     read_entity_property_keys, read_node_property_rows, remove_edge_properties,
     remove_node_properties, set_edge_properties_rewrite, set_node_properties,
-    stage_remove_edge_properties, stage_remove_node_properties, stage_set_edge_properties,
-    stage_set_node_properties,
+    stage_remove_edge_properties, stage_remove_edge_properties_authenticated,
+    stage_remove_node_properties, stage_remove_node_properties_authenticated,
+    stage_set_edge_properties, stage_set_edge_properties_authenticated, stage_set_node_properties,
+    stage_set_node_properties_authenticated,
 };
 
 pub mod mutator;

@@ -19,6 +19,7 @@ use futures::stream;
 #[derive(Clone)]
 pub(crate) struct PropertyOverlayExec {
     project: PathBuf,
+    inventory: Option<Arc<crate::AuthenticatedPropertyInventory>>,
     route: String,
     is_edge: bool,
     schema: SchemaRef,
@@ -45,6 +46,7 @@ impl PropertyOverlayExec {
     )]
     pub(crate) fn try_new(
         project: PathBuf,
+        inventory: Option<Arc<crate::AuthenticatedPropertyInventory>>,
         route: String,
         is_edge: bool,
         base_schema: SchemaRef,
@@ -70,6 +72,7 @@ impl PropertyOverlayExec {
         ));
         Ok(Self {
             project,
+            inventory,
             route,
             is_edge,
             schema,
@@ -124,14 +127,16 @@ impl ExecutionPlan for PropertyOverlayExec {
         }
         let (sender, receiver) = tokio::sync::mpsc::channel(2);
         let project = self.project.clone();
+        let inventory = self.inventory.clone();
         let route = self.route.clone();
         let is_edge = self.is_edge;
         let projection = self.projection.clone();
         let mut remaining = self.limit;
         let batch_size = self.batch_size;
         tokio::task::spawn_blocking(move || {
-            let result = crate::catalog::visit_property_overlay_batched(
+            let result = crate::catalog::visit_property_overlay_batched_with_inventory(
                 &project,
+                inventory.as_deref(),
                 &route,
                 is_edge,
                 batch_size,

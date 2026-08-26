@@ -3659,12 +3659,46 @@ pub fn stage_set_node_properties(
     stem: &str,
     updates: &HashMap<[u8; 16], HashMap<String, IrLiteral>>,
 ) -> Result<u64, GfError> {
+    stage_set_node_properties_from_inventory(staged, dir, None, stem, updates)
+}
+
+#[allow(clippy::implicit_hasher)]
+/// Stage node SET rows against a caller-pinned authenticated generation.
+pub fn stage_set_node_properties_authenticated(
+    staged: &mut RewriteBatch,
+    dir: &Path,
+    inventory: &crate::AuthenticatedPropertyInventory,
+    stem: &str,
+    updates: &HashMap<[u8; 16], HashMap<String, IrLiteral>>,
+) -> Result<u64, GfError> {
+    stage_set_node_properties_from_inventory(staged, dir, Some(inventory), stem, updates)
+}
+
+fn stage_set_node_properties_from_inventory(
+    staged: &mut RewriteBatch,
+    dir: &Path,
+    inventory: Option<&crate::AuthenticatedPropertyInventory>,
+    stem: &str,
+    updates: &HashMap<[u8; 16], HashMap<String, IrLiteral>>,
+) -> Result<u64, GfError> {
     let targets = updates.keys().copied().collect();
-    let (mut existing, _) = crate::property_overlay::read_authenticated_property_snapshots_for(
-        dir,
-        crate::property_overlay::PropertyRouteKind::Node,
-        stem,
-        &targets,
+    let (mut existing, _) = inventory.map_or_else(
+        || {
+            crate::property_overlay::read_authenticated_property_snapshots_for(
+                dir,
+                crate::PropertyRouteKind::Node,
+                stem,
+                &targets,
+            )
+        },
+        |inventory| {
+            crate::property_overlay::read_authenticated_property_snapshots_for_inventory(
+                inventory,
+                crate::PropertyRouteKind::Node,
+                stem,
+                &targets,
+            )
+        },
     )?;
     existing.extend(pending_property_snapshots(
         staged,
@@ -3716,12 +3750,46 @@ pub fn stage_remove_node_properties(
     stem: &str,
     removals: &HashMap<[u8; 16], HashSet<String>>,
 ) -> Result<u64, GfError> {
+    stage_remove_node_properties_from_inventory(staged, dir, None, stem, removals)
+}
+
+#[allow(clippy::implicit_hasher)]
+/// Stage node REMOVE rows against a caller-pinned authenticated generation.
+pub fn stage_remove_node_properties_authenticated(
+    staged: &mut RewriteBatch,
+    dir: &Path,
+    inventory: &crate::AuthenticatedPropertyInventory,
+    stem: &str,
+    removals: &HashMap<[u8; 16], HashSet<String>>,
+) -> Result<u64, GfError> {
+    stage_remove_node_properties_from_inventory(staged, dir, Some(inventory), stem, removals)
+}
+
+fn stage_remove_node_properties_from_inventory(
+    staged: &mut RewriteBatch,
+    dir: &Path,
+    inventory: Option<&crate::AuthenticatedPropertyInventory>,
+    stem: &str,
+    removals: &HashMap<[u8; 16], HashSet<String>>,
+) -> Result<u64, GfError> {
     let targets = removals.keys().copied().collect();
-    let (mut existing, _) = crate::property_overlay::read_authenticated_property_snapshots_for(
-        dir,
-        crate::property_overlay::PropertyRouteKind::Node,
-        stem,
-        &targets,
+    let (mut existing, _) = inventory.map_or_else(
+        || {
+            crate::property_overlay::read_authenticated_property_snapshots_for(
+                dir,
+                crate::PropertyRouteKind::Node,
+                stem,
+                &targets,
+            )
+        },
+        |inventory| {
+            crate::property_overlay::read_authenticated_property_snapshots_for_inventory(
+                inventory,
+                crate::PropertyRouteKind::Node,
+                stem,
+                &targets,
+            )
+        },
     )?;
     existing.extend(pending_property_snapshots(
         staged,
@@ -3759,12 +3827,46 @@ pub fn stage_set_edge_properties(
     rel_stem: &str,
     updates: &HashMap<[u8; 16], HashMap<String, IrLiteral>>,
 ) -> Result<u64, GfError> {
+    stage_set_edge_properties_from_inventory(staged, dir, None, rel_stem, updates)
+}
+
+#[allow(clippy::implicit_hasher)]
+/// Stage edge SET rows against a caller-pinned authenticated generation.
+pub fn stage_set_edge_properties_authenticated(
+    staged: &mut RewriteBatch,
+    dir: &Path,
+    inventory: &crate::AuthenticatedPropertyInventory,
+    rel_stem: &str,
+    updates: &HashMap<[u8; 16], HashMap<String, IrLiteral>>,
+) -> Result<u64, GfError> {
+    stage_set_edge_properties_from_inventory(staged, dir, Some(inventory), rel_stem, updates)
+}
+
+fn stage_set_edge_properties_from_inventory(
+    staged: &mut RewriteBatch,
+    dir: &Path,
+    inventory: Option<&crate::AuthenticatedPropertyInventory>,
+    rel_stem: &str,
+    updates: &HashMap<[u8; 16], HashMap<String, IrLiteral>>,
+) -> Result<u64, GfError> {
     let targets = updates.keys().copied().collect();
-    let (mut existing, _) = crate::property_overlay::read_authenticated_property_snapshots_for(
-        dir,
-        crate::property_overlay::PropertyRouteKind::Edge,
-        rel_stem,
-        &targets,
+    let (mut existing, _) = inventory.map_or_else(
+        || {
+            crate::property_overlay::read_authenticated_property_snapshots_for(
+                dir,
+                crate::PropertyRouteKind::Edge,
+                rel_stem,
+                &targets,
+            )
+        },
+        |inventory| {
+            crate::property_overlay::read_authenticated_property_snapshots_for_inventory(
+                inventory,
+                crate::PropertyRouteKind::Edge,
+                rel_stem,
+                &targets,
+            )
+        },
     )?;
     existing.extend(pending_property_snapshots(
         staged,
@@ -3801,12 +3903,46 @@ pub fn stage_remove_edge_properties(
     rel_stem: &str,
     removals: &HashMap<[u8; 16], HashSet<String>>,
 ) -> Result<u64, GfError> {
+    stage_remove_edge_properties_from_inventory(staged, dir, None, rel_stem, removals)
+}
+
+#[allow(clippy::implicit_hasher)]
+/// Stage edge REMOVE rows against a caller-pinned authenticated generation.
+pub fn stage_remove_edge_properties_authenticated(
+    staged: &mut RewriteBatch,
+    dir: &Path,
+    inventory: &crate::AuthenticatedPropertyInventory,
+    rel_stem: &str,
+    removals: &HashMap<[u8; 16], HashSet<String>>,
+) -> Result<u64, GfError> {
+    stage_remove_edge_properties_from_inventory(staged, dir, Some(inventory), rel_stem, removals)
+}
+
+fn stage_remove_edge_properties_from_inventory(
+    staged: &mut RewriteBatch,
+    dir: &Path,
+    inventory: Option<&crate::AuthenticatedPropertyInventory>,
+    rel_stem: &str,
+    removals: &HashMap<[u8; 16], HashSet<String>>,
+) -> Result<u64, GfError> {
     let targets = removals.keys().copied().collect();
-    let (mut existing, _) = crate::property_overlay::read_authenticated_property_snapshots_for(
-        dir,
-        crate::property_overlay::PropertyRouteKind::Edge,
-        rel_stem,
-        &targets,
+    let (mut existing, _) = inventory.map_or_else(
+        || {
+            crate::property_overlay::read_authenticated_property_snapshots_for(
+                dir,
+                crate::PropertyRouteKind::Edge,
+                rel_stem,
+                &targets,
+            )
+        },
+        |inventory| {
+            crate::property_overlay::read_authenticated_property_snapshots_for_inventory(
+                inventory,
+                crate::PropertyRouteKind::Edge,
+                rel_stem,
+                &targets,
+            )
+        },
     )?;
     existing.extend(pending_property_snapshots(
         staged,

@@ -238,6 +238,22 @@ struct RouteSchemaBuilder {
 }
 
 impl AuthenticatedPropertyInventory {
+    /// Committed generation retained by this inventory, when generation-backed.
+    #[must_use]
+    pub fn generation_uuid(&self) -> Option<uuid::Uuid> {
+        self._generation
+            .as_ref()
+            .map(crate::ResolvedProjectGeneration::generation_uuid)
+    }
+
+    /// Canonical property routes admitted into this immutable snapshot.
+    pub fn routes(&self, kind: PropertyRouteKind) -> impl Iterator<Item = &str> {
+        self.routes
+            .keys()
+            .filter(move |(candidate, _)| *candidate == kind)
+            .map(|(_, route)| route.as_str())
+    }
+
     /// Resolve property authority from a pinned project generation.
     ///
     /// Expanded V1 generations retain files beneath their authenticated graph
@@ -1036,10 +1052,27 @@ pub fn read_authenticated_property_snapshots_for(
     ),
     GfError,
 > {
+    let inventory = authenticated_property_inventory_for_route(project, kind, route)?;
+    read_authenticated_property_snapshots_for_inventory(&inventory, kind, route, targets)
+}
+
+/// Resolve a bounded UUID batch from an already authenticated generation
+/// inventory. This is the mutation-baseline path used by a live session.
+pub fn read_authenticated_property_snapshots_for_inventory(
+    inventory: &AuthenticatedPropertyInventory,
+    kind: PropertyRouteKind,
+    route: &str,
+    targets: &std::collections::BTreeSet<[u8; 16]>,
+) -> Result<
+    (
+        BTreeMap<[u8; 16], PropertySnapshotRow>,
+        PropertyOverlayMetrics,
+    ),
+    GfError,
+> {
     let mut unresolved = targets.clone();
     let mut found = BTreeMap::new();
     let mut metrics = PropertyOverlayMetrics::default();
-    let inventory = authenticated_property_inventory_for_route(project, kind, route)?;
     metrics.authentication_bytes = inventory.authority_bytes;
     metrics.authentication_blocks = inventory.authority_blocks;
     metrics.physical_bytes = inventory.authority_bytes;
@@ -2323,6 +2356,26 @@ mod tests {
             )
             .unwrap();
         assert_eq!(inventory_rows.len(), 1);
+        // Schema discovery and every targeted mutation baseline reuse this one
+        // admitted inventory; neither operation resolves CURRENT nor captures
+        // the project tree again.
+        assert!(
+            inventory
+                .route_schema(PropertyRouteKind::Node, "Person")
+                .is_some()
+        );
+        let targets = BTreeSet::from([[4; 16]]);
+        for _ in 0..2 {
+            let (rows, metrics) = read_authenticated_property_snapshots_for_inventory(
+                &inventory,
+                PropertyRouteKind::Node,
+                "Person",
+                &targets,
+            )
+            .unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(metrics.per_record_seeks, 0);
+        }
 
         let unrelated_dir = dir.path().join("properties/Unrelated");
         fs::create_dir_all(&unrelated_dir).unwrap();

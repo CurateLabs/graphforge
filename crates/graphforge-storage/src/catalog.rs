@@ -1079,6 +1079,20 @@ pub(crate) fn visit_property_overlay_batched<F>(
     stem: &str,
     is_edge: bool,
     batch_size: usize,
+    visit: F,
+) -> Result<(), DataFusionError>
+where
+    F: FnMut(&RecordBatch) -> Result<bool, DataFusionError>,
+{
+    visit_property_overlay_batched_with_inventory(dir, None, stem, is_edge, batch_size, visit)
+}
+
+pub(crate) fn visit_property_overlay_batched_with_inventory<F>(
+    dir: &Path,
+    inventory: Option<&crate::AuthenticatedPropertyInventory>,
+    stem: &str,
+    is_edge: bool,
+    batch_size: usize,
     mut visit: F,
 ) -> Result<(), DataFusionError>
 where
@@ -1092,9 +1106,15 @@ where
     } else {
         crate::property_overlay::PropertyRouteKind::Node
     };
-    let inventory =
-        crate::property_overlay::authenticated_property_inventory_for_route(dir, kind, stem)
-            .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+    let captured;
+    let inventory = if let Some(inventory) = inventory {
+        inventory
+    } else {
+        captured =
+            crate::property_overlay::authenticated_property_inventory_for_route(dir, kind, stem)
+                .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+        &captured
+    };
     let schema = inventory.route_schema(kind, stem);
     let scratch = tempfile::tempdir().map_err(|error| io_err(&error))?;
     let mut rows = Vec::with_capacity(batch_size.max(1));
@@ -1478,6 +1498,7 @@ impl TableProvider for UnionEdgeTable {
 #[derive(Debug, Clone)]
 pub struct PropertyTable {
     project: PathBuf,
+    inventory: Option<Arc<crate::AuthenticatedPropertyInventory>>,
     route: String,
     schema: SchemaRef,
 }
@@ -1491,6 +1512,7 @@ impl PropertyTable {
     pub fn open(dir: &Path, entity_type: &str, schema: SchemaRef) -> Self {
         Self {
             project: dir.to_path_buf(),
+            inventory: None,
             route: entity_type.to_owned(),
             schema,
         }
@@ -1519,6 +1541,25 @@ impl PropertyTable {
         .unwrap_or_else(|| crate::schemas::PROPERTY_BASE_SCHEMA.clone());
         Self {
             project: dir.to_path_buf(),
+            inventory: None,
+            route: stem.to_owned(),
+            schema,
+        }
+    }
+
+    /// Open from one already-authenticated immutable generation inventory.
+    #[must_use]
+    pub fn open_authenticated(
+        dir: &Path,
+        stem: &str,
+        inventory: Arc<crate::AuthenticatedPropertyInventory>,
+    ) -> Self {
+        let schema = inventory
+            .route_schema(crate::PropertyRouteKind::Node, stem)
+            .unwrap_or_else(|| crate::schemas::PROPERTY_BASE_SCHEMA.clone());
+        Self {
+            project: dir.to_path_buf(),
+            inventory: Some(inventory),
             route: stem.to_owned(),
             schema,
         }
@@ -1543,6 +1584,7 @@ impl PropertyTable {
 #[derive(Debug, Clone)]
 pub struct EdgePropertyTable {
     project: PathBuf,
+    inventory: Option<Arc<crate::AuthenticatedPropertyInventory>>,
     route: String,
     schema: SchemaRef,
 }
@@ -1572,7 +1614,26 @@ impl EdgePropertyTable {
         .unwrap_or_else(|| crate::schemas::EDGE_PROPERTY_BASE_SCHEMA.clone());
         Self {
             project: dir.to_path_buf(),
+            inventory: None,
             route: rel_type.to_owned(),
+            schema,
+        }
+    }
+
+    /// Open from one already-authenticated immutable generation inventory.
+    #[must_use]
+    pub fn open_authenticated(
+        dir: &Path,
+        route: &str,
+        inventory: Arc<crate::AuthenticatedPropertyInventory>,
+    ) -> Self {
+        let schema = inventory
+            .route_schema(crate::PropertyRouteKind::Edge, route)
+            .unwrap_or_else(|| crate::schemas::EDGE_PROPERTY_BASE_SCHEMA.clone());
+        Self {
+            project: dir.to_path_buf(),
+            inventory: Some(inventory),
+            route: route.to_owned(),
             schema,
         }
     }
@@ -1604,6 +1665,7 @@ impl TableProvider for EdgePropertyTable {
         Ok(Arc::new(
             crate::property_scan::PropertyOverlayExec::try_new(
                 self.project.clone(),
+                self.inventory.clone(),
                 self.route.clone(),
                 true,
                 self.schema.clone(),
@@ -1650,6 +1712,7 @@ impl TableProvider for PropertyTable {
         Ok(Arc::new(
             crate::property_scan::PropertyOverlayExec::try_new(
                 self.project.clone(),
+                self.inventory.clone(),
                 self.route.clone(),
                 false,
                 self.schema.clone(),
@@ -1716,6 +1779,7 @@ impl SchemaProvider for GraphSchema {
 /// Construct via [`GraphCatalog::open`].
 pub struct GraphCatalog {
     schema: Arc<GraphSchema>,
+    property_inventory: Option<Arc<crate::AuthenticatedPropertyInventory>>,
     /// Reverse map `PropId.0` → property name, merged from the ontology and the
     /// runtime catalog at [`open`](Self::open) time. The relational lowering
     /// layer borrows it to resolve numeric `PropertyAccess` IDs to real column
@@ -1764,6 +1828,17 @@ impl GraphCatalog {
         Self::open_with_semantic_bindings(dir, ontology, runtime_catalog, None)
     }
 
+    /// Open a catalog whose property tables all share one authenticated,
+    /// immutable committed-generation inventory.
+    pub fn open_authenticated(
+        dir: &Path,
+        ontology: Option<&OntologyHandle>,
+        runtime_catalog: &RuntimeCatalog,
+        inventory: Arc<crate::AuthenticatedPropertyInventory>,
+    ) -> Result<Self, DataFusionError> {
+        Self::open_with_authority(dir, ontology, runtime_catalog, None, Some(inventory))
+    }
+
     /// Open with exact generation-pinned qualified storage bindings.
     #[allow(clippy::too_many_lines)] // registration must build one internally consistent catalog
     pub fn open_with_semantic_bindings(
@@ -1771,6 +1846,28 @@ impl GraphCatalog {
         ontology: Option<&OntologyHandle>,
         runtime_catalog: &RuntimeCatalog,
         semantic: Option<&crate::SemanticStorageBindings>,
+    ) -> Result<Self, DataFusionError> {
+        Self::open_with_authority(dir, ontology, runtime_catalog, semantic, None)
+    }
+
+    /// Open with semantic bindings and one already-authenticated property authority.
+    pub fn open_authenticated_with_semantic_bindings(
+        dir: &Path,
+        ontology: Option<&OntologyHandle>,
+        runtime_catalog: &RuntimeCatalog,
+        semantic: Option<&crate::SemanticStorageBindings>,
+        inventory: Arc<crate::AuthenticatedPropertyInventory>,
+    ) -> Result<Self, DataFusionError> {
+        Self::open_with_authority(dir, ontology, runtime_catalog, semantic, Some(inventory))
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn open_with_authority(
+        dir: &Path,
+        ontology: Option<&OntologyHandle>,
+        runtime_catalog: &RuntimeCatalog,
+        semantic: Option<&crate::SemanticStorageBindings>,
+        inventory: Option<Arc<crate::AuthenticatedPropertyInventory>>,
     ) -> Result<Self, DataFusionError> {
         let mut schema = GraphSchema::new();
 
@@ -1843,20 +1940,38 @@ impl GraphCatalog {
                     {
                         schema.register(
                             format!("properties_{}", binding.route),
-                            Arc::new(PropertyTable::open_discovered(dir, &binding.route)),
+                            Arc::new(inventory.as_ref().map_or_else(
+                                || PropertyTable::open_discovered(dir, &binding.route),
+                                |inventory| {
+                                    PropertyTable::open_authenticated(
+                                        dir,
+                                        &binding.route,
+                                        Arc::clone(inventory),
+                                    )
+                                },
+                            )),
                         );
                     }
                     crate::SemanticRouteKind::EdgeProperty => {
                         schema.register(
                             format!("edge_properties_{}", binding.route),
-                            Arc::new(EdgePropertyTable::open_discovered(dir, &binding.route)),
+                            Arc::new(inventory.as_ref().map_or_else(
+                                || EdgePropertyTable::open_discovered(dir, &binding.route),
+                                |inventory| {
+                                    EdgePropertyTable::open_authenticated(
+                                        dir,
+                                        &binding.route,
+                                        Arc::clone(inventory),
+                                    )
+                                },
+                            )),
                         );
                     }
                     _ => {}
                 }
             }
         } else {
-            register_property_tables(dir, ontology, &mut schema);
+            register_property_tables(dir, ontology, &mut schema, inventory.as_ref());
         }
 
         // ---- name maps (for read-path property + relation resolution) ----
@@ -1905,7 +2020,16 @@ impl GraphCatalog {
                 }) {
                     semantic_edge_property_tables.insert(
                         relation.storage_id,
-                        Arc::new(EdgePropertyTable::open_discovered(dir, &relation.route)),
+                        Arc::new(inventory.as_ref().map_or_else(
+                            || EdgePropertyTable::open_discovered(dir, &relation.route),
+                            |inventory| {
+                                EdgePropertyTable::open_authenticated(
+                                    dir,
+                                    &relation.route,
+                                    Arc::clone(inventory),
+                                )
+                            },
+                        )),
                     );
                 }
             }
@@ -1913,6 +2037,7 @@ impl GraphCatalog {
 
         Ok(Self {
             schema: Arc::new(schema),
+            property_inventory: inventory,
             prop_names,
             rel_names,
             label_names,
@@ -1924,6 +2049,34 @@ impl GraphCatalog {
             semantic_edge_tables,
             semantic_edge_property_tables,
         })
+    }
+
+    /// Node-property provider pinned to this catalog's generation authority.
+    #[must_use]
+    pub fn property_table(&self, dir: &Path, route: &str) -> PropertyTable {
+        self.property_inventory.as_ref().map_or_else(
+            || PropertyTable::open_discovered(dir, route),
+            |inventory| PropertyTable::open_authenticated(dir, route, Arc::clone(inventory)),
+        )
+    }
+
+    /// Edge-property provider pinned to this catalog's generation authority.
+    #[must_use]
+    pub fn edge_property_table(&self, dir: &Path, route: &str) -> EdgePropertyTable {
+        self.property_inventory.as_ref().map_or_else(
+            || EdgePropertyTable::open_discovered(dir, route),
+            |inventory| EdgePropertyTable::open_authenticated(dir, route, Arc::clone(inventory)),
+        )
+    }
+
+    /// Canonical routes in this catalog's authenticated inventory.
+    #[must_use]
+    pub fn property_routes(&self, kind: crate::PropertyRouteKind) -> Vec<String> {
+        self.property_inventory
+            .as_ref()
+            .map_or_else(Vec::new, |inventory| {
+                inventory.routes(kind).map(str::to_owned).collect()
+            })
     }
 
     /// Reverse map `PropId.0` → property name (ontology + runtime catalog),
@@ -2053,13 +2206,19 @@ fn register_property_tables(
     dir: &Path,
     ontology: Option<&OntologyHandle>,
     schema: &mut GraphSchema,
+    inventory: Option<&Arc<crate::AuthenticatedPropertyInventory>>,
 ) {
     if let Some(handle) = ontology {
         for (entity_name, prop_defs) in handle.entity_property_defs() {
             let prop_schema = Arc::new(property_schema(entity_name, &prop_defs));
             schema.register(
                 format!("properties_{entity_name}"),
-                Arc::new(PropertyTable::open(dir, entity_name, prop_schema)),
+                Arc::new(inventory.map_or_else(
+                    || PropertyTable::open(dir, entity_name, prop_schema),
+                    |inventory| {
+                        PropertyTable::open_authenticated(dir, entity_name, Arc::clone(inventory))
+                    },
+                )),
             );
         }
     } else {
@@ -2068,7 +2227,12 @@ fn register_property_tables(
         // schema discovered from disk (just `node_uuid` until it is written).
         schema.register(
             "properties__untyped",
-            Arc::new(PropertyTable::open_discovered(dir, "_untyped")),
+            Arc::new(inventory.map_or_else(
+                || PropertyTable::open_discovered(dir, "_untyped"),
+                |inventory| {
+                    PropertyTable::open_authenticated(dir, "_untyped", Arc::clone(inventory))
+                },
+            )),
         );
     }
 }

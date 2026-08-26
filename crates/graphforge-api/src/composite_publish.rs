@@ -372,10 +372,13 @@ impl GraphForge {
                         .into(),
                 ));
             }
-            *self
-                .current_generation_uuid
-                .lock()
-                .expect("generation UUID lock poisoned") = outcome.generation_uuid;
+            let committed = graphforge_storage::resolve_project_generation(root)?;
+            if committed.generation_uuid() != outcome.generation_uuid {
+                return Err(GfError::Storage(
+                    "composite property authority did not resolve exact generation".into(),
+                ));
+            }
+            self.install_property_generation(&committed)?;
             Ok(receipt)
         })();
 
@@ -563,12 +566,21 @@ fn capture_rebase_field(
     property: &str,
     is_edge: bool,
 ) -> Result<(), GfError> {
-    let properties = graphforge_storage::read_entity_properties(
-        &graph.dir,
+    let kind = if is_edge {
+        graphforge_storage::PropertyRouteKind::Edge
+    } else {
+        graphforge_storage::PropertyRouteKind::Node
+    };
+    let inventory = graph.property_inventory_for_session()?;
+    let (rows, _) = graphforge_storage::read_authenticated_property_snapshots_for_inventory(
+        &inventory,
+        kind,
         "_untyped",
-        &uuid.into_bytes(),
-        is_edge,
+        &BTreeSet::from([uuid.into_bytes()]),
     )?;
+    let properties = rows
+        .get(&uuid.into_bytes())
+        .map_or_else(BTreeMap::new, |row| row.values.clone());
     let entity = if is_edge {
         RebaseEntity::Edge(uuid)
     } else {
@@ -649,10 +661,7 @@ fn reconcile_workspace_to(
         .runtime_catalog
         .lock()
         .expect("runtime catalog poisoned") = crate::load_runtime_catalog(&graph.dir)?;
-    *graph
-        .current_generation_uuid
-        .lock()
-        .expect("generation UUID lock poisoned") = generation.generation_uuid();
+    graph.install_property_generation(generation)?;
     graph.adjacency_provider.invalidate();
     Ok(())
 }
@@ -1057,17 +1066,42 @@ fn apply_graph_mutations(
     }
 
     let mut staged = RewriteBatch::new();
+    let inventory = graph.property_inventory_for_session()?;
     for (stem, updates) in &node_sets {
-        graphforge_storage::stage_set_node_properties(&mut staged, &graph.dir, stem, updates)?;
+        graphforge_storage::stage_set_node_properties_authenticated(
+            &mut staged,
+            &graph.dir,
+            &inventory,
+            stem,
+            updates,
+        )?;
     }
     for (stem, updates) in &edge_sets {
-        graphforge_storage::stage_set_edge_properties(&mut staged, &graph.dir, stem, updates)?;
+        graphforge_storage::stage_set_edge_properties_authenticated(
+            &mut staged,
+            &graph.dir,
+            &inventory,
+            stem,
+            updates,
+        )?;
     }
     for (stem, removals) in &node_removes {
-        graphforge_storage::stage_remove_node_properties(&mut staged, &graph.dir, stem, removals)?;
+        graphforge_storage::stage_remove_node_properties_authenticated(
+            &mut staged,
+            &graph.dir,
+            &inventory,
+            stem,
+            removals,
+        )?;
     }
     for (stem, removals) in &edge_removes {
-        graphforge_storage::stage_remove_edge_properties(&mut staged, &graph.dir, stem, removals)?;
+        graphforge_storage::stage_remove_edge_properties_authenticated(
+            &mut staged,
+            &graph.dir,
+            &inventory,
+            stem,
+            removals,
+        )?;
     }
     graphforge_storage::stage_delete_edges(&mut staged, &graph.dir, &delete_edges)?;
     graphforge_storage::stage_delete_nodes(&mut staged, &graph.dir, &delete_nodes)?;

@@ -83,8 +83,14 @@ impl GraphForge {
                 &catalog_batch,
             )?;
         }
-        let touched =
-            graphforge_storage::stage_set_node_properties(&mut staged, &self.dir, stem, &updates)?;
+        let inventory = self.property_inventory_for_session()?;
+        let touched = graphforge_storage::stage_set_node_properties_authenticated(
+            &mut staged,
+            &self.dir,
+            &inventory,
+            stem,
+            &updates,
+        )?;
         staged.commit()?;
         *catalog = next_catalog;
         drop(catalog);
