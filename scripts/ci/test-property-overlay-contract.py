@@ -130,6 +130,26 @@ def main() -> None:
         expect_failure("dead metric assertion", lambda: GATE.validate(root, contract_path))
         scale.write_text(scale_source, encoding="utf-8")
 
+        helper_line = "rss.saturating_mul(1024)"
+        if helper_line not in scale_source:
+            raise AssertionError("scale fixture lost RSS normalization helper")
+        scale.write_text(
+            scale_source.replace(helper_line, "rss.saturating_mul(2048)", 1),
+            encoding="utf-8",
+        )
+        expect_failure("scale helper drift", lambda: GATE.validate(root, contract_path))
+        scale.write_text(scale_source, encoding="utf-8")
+
+        child_line = "emitted_rows += 1;"
+        if child_line not in scale_source:
+            raise AssertionError("scale fixture lost child emission counter")
+        scale.write_text(
+            scale_source.replace(child_line, "emitted_rows += 2;", 1),
+            encoding="utf-8",
+        )
+        expect_failure("scale child drift", lambda: GATE.validate(root, contract_path))
+        scale.write_text(scale_source, encoding="utf-8")
+
         total_assertion = "assert!(phase.physical_bytes <= total_read_bound);"
         if total_assertion not in scale_source:
             raise AssertionError("scale fixture lost derived total read assertion")

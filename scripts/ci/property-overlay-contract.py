@@ -129,6 +129,11 @@ def bazel_list(call: str, attribute: str) -> set[str]:
     return set(re.findall(r'["\']([^"\']+)["\']', match.group("body")))
 
 
+def normalized_source(text: str) -> str:
+    """Normalize transport-only whitespace while freezing all executable evidence."""
+    return "\n".join(line.rstrip() for line in text.replace("\r\n", "\n").splitlines()) + "\n"
+
+
 def validate(root: Path, contract_path: Path) -> None:
     contract = load(contract_path)
     if set(contract) != {
@@ -242,7 +247,7 @@ def validate(root: Path, contract_path: Path) -> None:
     for case, reference in evidence.items():
         expected_members = {"path", "symbol", "markers"}
         if case == "production_bounded_scale":
-            expected_members.add("body_sha256")
+            expected_members.add("source_sha256")
         if not isinstance(reference, dict) or set(reference) != expected_members:
             raise ContractError(f"malformed evidence: {case}")
         path = root / reference["path"]
@@ -255,9 +260,9 @@ def validate(root: Path, contract_path: Path) -> None:
             if marker not in body:
                 raise ContractError(f"evidence marker missing: {case}/{marker}")
         if case == "production_bounded_scale":
-            digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
-            if digest != reference["body_sha256"]:
-                raise ContractError("production scale test body differs from frozen ledger")
+            digest = hashlib.sha256(normalized_source(path.read_text(encoding="utf-8")).encode()).hexdigest()
+            if digest != reference["source_sha256"]:
+                raise ContractError("transitive production scale evidence differs from frozen ledger")
 
     scale_source = (root / "crates/graphforge-storage/tests/property_overlay_scale.rs").read_text(
         encoding="utf-8"

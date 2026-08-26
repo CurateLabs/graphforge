@@ -256,15 +256,15 @@ pub struct AuthenticatedPropertyInventory {
 pub struct PropertyInventoryOpenMetrics {
     /// Bytes read once while capturing the complete raw graph-files authority.
     pub(crate) authority_authentication_bytes: u64,
-    /// Fixed 64 KiB reads used to capture raw graph-files authority.
+    /// 64 KiB block-equivalents covering raw graph-files authority.
     pub(crate) authority_authentication_blocks: u64,
     /// Bytes read while authenticating retained property fragments.
     pub(crate) property_authentication_bytes: u64,
-    /// Fixed 64 KiB reads used to authenticate retained property fragments.
+    /// 64 KiB block-equivalents covering retained property fragments.
     pub(crate) property_authentication_blocks: u64,
     /// Bytes read to capture and authenticate inventory authority.
     pub authentication_bytes: u64,
-    /// Fixed 64 KiB authentication reads.
+    /// 64 KiB authentication block-equivalents.
     pub authentication_blocks: u64,
 }
 
@@ -910,11 +910,11 @@ pub struct PropertyOverlayMetrics {
     pub physical_blocks: u64,
     /// Decoder-only non-empty reads, each capped at 64 KiB.
     pub read_calls: u64,
-    /// Fixed-size 64 KiB authentication blocks from a raw one-shot adapter.
+    /// 64 KiB authentication block-equivalents from a raw one-shot adapter.
     pub authentication_blocks: u64,
-    /// Raw graph-files authority blocks included in authentication blocks.
+    /// Raw graph-files authority block-equivalents included in authentication blocks.
     pub authority_authentication_blocks: u64,
-    /// Retained property-fragment blocks included in authentication blocks.
+    /// Retained property-fragment block-equivalents included in authentication blocks.
     pub property_authentication_blocks: u64,
     /// Read calls used by the validation pass.
     pub validation_read_calls: u64,
