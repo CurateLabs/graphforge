@@ -1189,7 +1189,7 @@ pub fn materialize_replayed_graph_tree(
     if evidence.runs_replayed == 0 {
         return Ok((open_evidence, evidence));
     }
-    crate::writer::write_replay_overlay_streaming(graph_root, target, &overlay, limits)?;
+    crate::writer::write_replay_overlay_streaming(graph_root, inventory, target, &overlay, limits)?;
     let deltas = target.join(GRAPH_DELTA_DIR);
     if deltas.exists() {
         fs::remove_dir_all(&deltas)

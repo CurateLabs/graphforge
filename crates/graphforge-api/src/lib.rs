@@ -593,15 +593,12 @@ impl GraphForge {
         let (resolved_generation, project_open_recovery) =
             graphforge_storage::open_or_initialize_ephemeral_project_with_recovery(tmp.path())?;
         let generation_uuid = resolved_generation.generation_uuid();
-        let property_inventory = Arc::new(
-            graphforge_storage::AuthenticatedPropertyInventory::from_resolved_generation(
-                &resolved_generation,
-            )?,
-        );
         let (ontology_mode, ontology, ontology_document) =
             load_workspace_ontology(&resolved_generation)?;
         let (dir, workspace, graph_open_evidence) =
             hydrate_graph_workspace(&resolved_generation, false)?;
+        let property_inventory =
+            property_inventory_for_hydrated_generation(&resolved_generation, &dir)?;
         Ok(Self {
             identity: GraphIdentity::new(),
             path: None,
@@ -738,15 +735,12 @@ impl GraphForge {
         project_open_recovery: graphforge_storage::ProjectOpenRecoveryEvidence,
     ) -> Result<Self, GfError> {
         let generation_uuid = resolved_generation.generation_uuid();
-        let property_inventory = Arc::new(
-            graphforge_storage::AuthenticatedPropertyInventory::from_resolved_generation(
-                &resolved_generation,
-            )?,
-        );
         let (ontology_mode, ontology, ontology_document) =
             load_workspace_ontology(&resolved_generation)?;
         let (dir, workspace, graph_open_evidence) =
             hydrate_graph_workspace(&resolved_generation, read_only)?;
+        let property_inventory =
+            property_inventory_for_hydrated_generation(&resolved_generation, &dir)?;
 
         let runtime_catalog = load_runtime_catalog(&dir)?;
         let semantic_storage_bindings =
@@ -3810,6 +3804,32 @@ fn build_runtime(
     policy
         .build_tokio_runtime()
         .map(|rt| Arc::new(OwnedRuntime(Some(rt))))
+}
+
+fn property_inventory_for_hydrated_generation(
+    generation: &ResolvedProjectGeneration,
+    hydrated_root: &Path,
+) -> Result<Arc<graphforge_storage::AuthenticatedPropertyInventory>, GfError> {
+    let inventory = generation.graph_files_inventory()?;
+    let has_deltas = match inventory.as_ref() {
+        Some(inventory) => !graphforge_storage::list_delta_runs(
+            inventory,
+            graphforge_storage::GraphDeltaJournalLimits::default(),
+        )?
+        .is_empty(),
+        None => false,
+    };
+    let admitted = if has_deltas {
+        let (materialized, _) = graphforge_storage::capture_graph_files(hydrated_root)?;
+        graphforge_storage::AuthenticatedPropertyInventory::from_materialized_generation(
+            generation,
+            hydrated_root,
+            materialized.files,
+        )?
+    } else {
+        graphforge_storage::AuthenticatedPropertyInventory::from_resolved_generation(generation)?
+    };
+    Ok(Arc::new(admitted))
 }
 
 fn hydrate_graph_workspace(

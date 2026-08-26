@@ -138,6 +138,7 @@ type ReconstructedEdge<'a> = (&'a String, &'a (String, String, String));
 /// Arrow batches. Only overlay identities are retained across batches.
 pub(crate) fn write_replay_overlay_streaming(
     source: &Path,
+    source_inventory: &crate::GraphFilesInventory,
     target: &Path,
     overlay: &crate::graph_delta_journal::ReplayOverlay,
     limits: crate::graph_delta_journal::GraphDeltaJournalLimits,
@@ -211,15 +212,28 @@ pub(crate) fn write_replay_overlay_streaming(
 
     validate_replay_edge_endpoints(overlay, &node_scan)?;
     stream_replay_edges(source, target, overlay, limits, &node_scan)?;
+    let property_inventory = crate::AuthenticatedPropertyInventory::from_entries_at_root(
+        source,
+        source_inventory.files.clone(),
+    )?;
     stream_replay_properties(
         source,
         target,
+        &property_inventory,
         overlay,
         limits,
         false,
         &node_scan.existing_overlay,
     )?;
-    stream_replay_properties(source, target, overlay, limits, true, &HashSet::new())?;
+    stream_replay_properties(
+        source,
+        target,
+        &property_inventory,
+        overlay,
+        limits,
+        true,
+        &HashSet::new(),
+    )?;
     Ok(())
 }
 
@@ -615,6 +629,7 @@ fn replay_edge_batch(
 fn stream_replay_properties(
     source: &Path,
     target: &Path,
+    inventory: &crate::AuthenticatedPropertyInventory,
     overlay: &crate::graph_delta_journal::ReplayOverlay,
     limits: crate::graph_delta_journal::GraphDeltaJournalLimits,
     edge: bool,
@@ -639,6 +654,26 @@ fn stream_replay_properties(
     } else {
         &overlay.node_properties
     };
+    let kind = if edge {
+        crate::PropertyRouteKind::Edge
+    } else {
+        crate::PropertyRouteKind::Node
+    };
+    let mut fragment_routes = inventory
+        .routes(kind)
+        .map(str::to_owned)
+        .collect::<std::collections::BTreeSet<_>>();
+    fragment_routes.extend(operations.keys().map(|(_, route, _)| route.clone()));
+    if !fragment_routes.is_empty() {
+        return stream_replay_property_fragments(
+            target,
+            inventory,
+            overlay,
+            limits,
+            edge,
+            fragment_routes,
+        );
+    }
     let mut stems = std::collections::BTreeSet::new();
     stems.extend(operations.keys().map(|(_, stem, _)| stem.clone()));
     let source_dir = source.join(directory);
@@ -795,6 +830,225 @@ fn stream_replay_properties(
     Ok(())
 }
 
+fn stream_replay_property_fragments(
+    target: &Path,
+    inventory: &crate::AuthenticatedPropertyInventory,
+    overlay: &crate::graph_delta_journal::ReplayOverlay,
+    limits: crate::graph_delta_journal::GraphDeltaJournalLimits,
+    edge: bool,
+    routes: std::collections::BTreeSet<String>,
+) -> Result<(), GfError> {
+    let scratch = tempfile::tempdir().map_err(|error| io_err(&error))?;
+    for route in routes {
+        stream_replay_property_route(
+            target,
+            inventory,
+            overlay,
+            limits,
+            edge,
+            &route,
+            scratch.path(),
+        )?;
+    }
+    Ok(())
+}
+
+struct ReplayPropertyFragmentWriter {
+    logical_schema: Schema,
+    physical_schema: SchemaRef,
+    writer: parquet::arrow::ArrowWriter<fs::File>,
+}
+
+fn open_replay_property_fragment(
+    target: &Path,
+    inventory: &crate::AuthenticatedPropertyInventory,
+    operations: &std::collections::BTreeMap<(String, String, String), Option<IrLiteral>>,
+    kind: crate::PropertyRouteKind,
+    edge: bool,
+    route: &str,
+) -> Result<ReplayPropertyFragmentWriter, GfError> {
+    use crate::property_overlay::{
+        PROPERTY_GENERATION_KEY, PROPERTY_KIND_KEY, PROPERTY_ORDINAL_KEY, PROPERTY_OVERLAY_FORMAT,
+        PROPERTY_OVERLAY_FORMAT_KEY, PROPERTY_ROUTE_KEY, PROPERTY_TOMBSTONE_FIELD,
+        PropertyFragmentId,
+    };
+    let join_field = if edge {
+        EDGE_PROPERTY_UUID_FIELD
+    } else {
+        NODE_PROPERTY_UUID_FIELD
+    };
+    let base_schema = inventory
+        .route_schema(kind, route)
+        .unwrap_or_else(|| Arc::new(Schema::new(vec![uuid_field(join_field)])));
+    let logical_schema = replay_property_schema(
+        base_schema.as_ref(),
+        operations
+            .iter()
+            .filter(|((_, operation_route, _), _)| operation_route == route),
+    )?;
+    let prior_generation =
+        crate::property_overlay::enumerate_property_fragments(target, kind, route)?
+            .last()
+            .map_or(0, |fragment| fragment.id.generation);
+    let generation = prior_generation
+        .checked_add(1)
+        .ok_or_else(|| GfError::Storage("property fragment generation overflow".into()))?;
+    let mut metadata = logical_schema.metadata().clone();
+    metadata.insert(
+        PROPERTY_OVERLAY_FORMAT_KEY.into(),
+        PROPERTY_OVERLAY_FORMAT.into(),
+    );
+    metadata.insert(PROPERTY_ROUTE_KEY.into(), route.to_owned());
+    metadata.insert(PROPERTY_KIND_KEY.into(), kind.metadata_value().into());
+    metadata.insert(PROPERTY_GENERATION_KEY.into(), generation.to_string());
+    metadata.insert(PROPERTY_ORDINAL_KEY.into(), "0".into());
+    let mut fields = logical_schema
+        .fields()
+        .iter()
+        .map(|field| field.as_ref().clone())
+        .collect::<Vec<_>>();
+    fields.insert(
+        1,
+        Field::new(PROPERTY_TOMBSTONE_FIELD, DataType::Boolean, false),
+    );
+    let physical_schema = Arc::new(Schema::new_with_metadata(fields, metadata));
+    let subdir = if edge {
+        "edge_properties"
+    } else {
+        "properties"
+    };
+    let path = target.join(subdir).join(route).join(
+        PropertyFragmentId {
+            generation,
+            ordinal: 0,
+        }
+        .file_name(),
+    );
+    fs::create_dir_all(path.parent().expect("fragment has parent"))
+        .map_err(|error| io_err(&error))?;
+    let output = fs::File::create(&path).map_err(|error| io_err(&error))?;
+    let writer = parquet::arrow::ArrowWriter::try_new(output, Arc::clone(&physical_schema), None)
+        .map_err(pq_err)?;
+    Ok(ReplayPropertyFragmentWriter {
+        logical_schema,
+        physical_schema,
+        writer,
+    })
+}
+
+fn stream_replay_property_route(
+    target: &Path,
+    inventory: &crate::AuthenticatedPropertyInventory,
+    overlay: &crate::graph_delta_journal::ReplayOverlay,
+    limits: crate::graph_delta_journal::GraphDeltaJournalLimits,
+    edge: bool,
+    route: &str,
+    scratch: &Path,
+) -> Result<(), GfError> {
+    let kind = if edge {
+        crate::PropertyRouteKind::Edge
+    } else {
+        crate::PropertyRouteKind::Node
+    };
+    let operations = if edge {
+        &overlay.edge_properties
+    } else {
+        &overlay.node_properties
+    };
+    let mut fragment =
+        open_replay_property_fragment(target, inventory, operations, kind, edge, route)?;
+    let mut seen = HashSet::new();
+    inventory.visit_route(
+        kind,
+        route,
+        scratch,
+        crate::PropertyOverlayLimits {
+            max_buffered_rows: limits.max_batch_rows,
+            ..crate::PropertyOverlayLimits::default()
+        },
+        |mut row| {
+            let uuid = uuid::Uuid::from_bytes(row.uuid).hyphenated().to_string();
+            let deleted = if edge {
+                overlay.edges.get(&uuid).is_some_and(Option::is_none)
+            } else {
+                overlay.nodes.get(&uuid).is_some_and(Option::is_none)
+            };
+            if deleted {
+                return Ok(());
+            }
+            let mut values = std::mem::take(&mut row.values)
+                .into_iter()
+                .collect::<HashMap<_, _>>();
+            apply_streamed_property_ops(&uuid, route, operations, &mut values);
+            row.values = values.into_iter().collect();
+            seen.insert(uuid);
+            write_replay_property_snapshot(
+                &mut fragment.writer,
+                &fragment.logical_schema,
+                &fragment.physical_schema,
+                row,
+            )
+        },
+    )?;
+    for (entity_uuid, operation_route, _) in operations.keys() {
+        if operation_route != route || seen.contains(entity_uuid) {
+            continue;
+        }
+        let mut values = HashMap::new();
+        apply_streamed_property_ops(entity_uuid, route, operations, &mut values);
+        if values.is_empty() {
+            continue;
+        }
+        let uuid = uuid::Uuid::parse_str(entity_uuid)
+            .map_err(pq_err)?
+            .into_bytes();
+        write_replay_property_snapshot(
+            &mut fragment.writer,
+            &fragment.logical_schema,
+            &fragment.physical_schema,
+            crate::PropertySnapshotRow {
+                uuid,
+                tombstone: false,
+                values: values.into_iter().collect(),
+            },
+        )?;
+    }
+    fragment.writer.close().map_err(pq_err)?;
+    Ok(())
+}
+
+fn write_replay_property_snapshot(
+    writer: &mut parquet::arrow::ArrowWriter<fs::File>,
+    logical_schema: &Schema,
+    physical_schema: &SchemaRef,
+    row: crate::PropertySnapshotRow,
+) -> Result<(), GfError> {
+    let values = row.values.into_iter().collect();
+    let mut columns: Vec<ArrayRef> = vec![Arc::new(
+        FixedSizeBinaryArray::try_from_iter([row.uuid.to_vec()].into_iter()).map_err(pq_err)?,
+    )];
+    columns.push(Arc::new(BooleanArray::from(vec![row.tombstone])));
+    let property_row = PropRow {
+        node_uuid: row.uuid,
+        props: values,
+    };
+    for field in logical_schema.fields().iter().skip(1) {
+        let column_type = col_type_from_data_type(field.data_type()).ok_or_else(|| {
+            pq_err(format!(
+                "unsupported canonical property type for {}",
+                field.name()
+            ))
+        })?;
+        columns.push(build_property_array(
+            field.name(),
+            column_type,
+            std::slice::from_ref(&property_row),
+        ));
+    }
+    let batch = RecordBatch::try_new(Arc::clone(physical_schema), columns).map_err(pq_err)?;
+    writer.write(&batch).map_err(pq_err)
+}
+
 fn apply_streamed_property_ops(
     entity_uuid: &str,
     stem: &str,
@@ -802,15 +1056,16 @@ fn apply_streamed_property_ops(
     props: &mut HashMap<String, IrLiteral>,
 ) {
     for ((uuid, operation_stem, key), value) in operations {
-        if uuid != entity_uuid {
+        if uuid != entity_uuid || operation_stem != stem {
             continue;
         }
-        if operation_stem == stem
-            && let Some(value) = value
-        {
-            props.insert(key.clone(), value.clone());
-        } else {
-            props.remove(key);
+        match value {
+            Some(value) => {
+                props.insert(key.clone(), value.clone());
+            }
+            None => {
+                props.remove(key);
+            }
         }
     }
 }

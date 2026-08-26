@@ -323,6 +323,20 @@ impl AuthenticatedPropertyInventory {
         Self::from_resolved_generation_route(generation, None)
     }
 
+    /// Admit the private replay workspace of a pinned delta-bearing generation.
+    ///
+    /// The retained files come from `root`, while the generation lease remains
+    /// the immutable authority that owns the verified base plus delta run.
+    pub fn from_materialized_generation(
+        generation: &crate::ResolvedProjectGeneration,
+        root: &Path,
+        entries: Vec<crate::GraphFileEntry>,
+    ) -> Result<Self, GfError> {
+        let mut admitted = Self::from_entries_at_root(root, entries)?;
+        admitted.generation_lease = Some(generation.clone());
+        Ok(admitted)
+    }
+
     /// Resolve one route without opening or hashing authenticated entries for
     /// unrelated routes in the pinned generation inventory.
     pub fn from_resolved_generation_for_route(
