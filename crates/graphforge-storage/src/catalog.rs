@@ -1737,7 +1737,12 @@ impl TableProvider for PropertyTable {
 // ---------------------------------------------------------------------------
 
 struct GraphSchema {
+    authority: std::sync::RwLock<GraphCatalogAuthority>,
+}
+
+struct GraphCatalogAuthority {
     tables: HashMap<String, Arc<dyn TableProvider>>,
+    property_inventory: Option<Arc<crate::AuthenticatedPropertyInventory>>,
 }
 
 impl fmt::Debug for GraphSchema {
@@ -1751,29 +1756,53 @@ impl fmt::Debug for GraphSchema {
 impl GraphSchema {
     fn new() -> Self {
         Self {
-            tables: HashMap::new(),
+            authority: std::sync::RwLock::new(GraphCatalogAuthority {
+                tables: HashMap::new(),
+                property_inventory: None,
+            }),
         }
     }
 
     fn register(&mut self, name: impl Into<String>, table: Arc<dyn TableProvider>) {
-        self.tables.insert(name.into(), table);
+        self.authority
+            .get_mut()
+            .expect("new graph schema lock is not poisoned")
+            .tables
+            .insert(name.into(), table);
     }
 }
 
 #[async_trait]
 impl SchemaProvider for GraphSchema {
     fn table_names(&self) -> Vec<String> {
-        let mut names: Vec<String> = self.tables.keys().cloned().collect();
+        let mut names: Vec<String> = self
+            .authority
+            .read()
+            .expect("graph schema lock poisoned")
+            .tables
+            .keys()
+            .cloned()
+            .collect();
         names.sort();
         names
     }
 
     async fn table(&self, name: &str) -> Result<Option<Arc<dyn TableProvider>>, DataFusionError> {
-        Ok(self.tables.get(name).cloned())
+        Ok(self
+            .authority
+            .read()
+            .expect("graph schema lock poisoned")
+            .tables
+            .get(name)
+            .cloned())
     }
 
     fn table_exist(&self, name: &str) -> bool {
-        self.tables.contains_key(name)
+        self.authority
+            .read()
+            .expect("graph schema lock poisoned")
+            .tables
+            .contains_key(name)
     }
 }
 
@@ -1787,7 +1816,6 @@ impl SchemaProvider for GraphSchema {
 /// Construct via [`GraphCatalog::open`].
 pub struct GraphCatalog {
     schema: Arc<GraphSchema>,
-    property_inventory: Option<Arc<crate::AuthenticatedPropertyInventory>>,
     /// Reverse map `PropId.0` → property name, merged from the ontology and the
     /// runtime catalog at [`open`](Self::open) time. The relational lowering
     /// layer borrows it to resolve numeric `PropertyAccess` IDs to real column
@@ -2051,9 +2079,13 @@ impl GraphCatalog {
             }
         }
 
+        schema
+            .authority
+            .get_mut()
+            .expect("new graph schema lock is not poisoned")
+            .property_inventory = inventory;
         Ok(Self {
             schema: Arc::new(schema),
-            property_inventory: inventory,
             prop_names,
             rel_names,
             label_names,
@@ -2070,29 +2102,101 @@ impl GraphCatalog {
     /// Node-property provider pinned to this catalog's generation authority.
     #[must_use]
     pub fn property_table(&self, dir: &Path, route: &str) -> PropertyTable {
-        self.property_inventory.as_ref().map_or_else(
-            || PropertyTable::open_discovered(dir, route),
-            |inventory| PropertyTable::open_authenticated(dir, route, Arc::clone(inventory)),
-        )
+        self.schema
+            .authority
+            .read()
+            .expect("property inventory lock poisoned")
+            .property_inventory
+            .as_ref()
+            .map_or_else(
+                || PropertyTable::open_discovered(dir, route),
+                |inventory| PropertyTable::open_authenticated(dir, route, Arc::clone(inventory)),
+            )
     }
 
     /// Edge-property provider pinned to this catalog's generation authority.
     #[must_use]
     pub fn edge_property_table(&self, dir: &Path, route: &str) -> EdgePropertyTable {
-        self.property_inventory.as_ref().map_or_else(
-            || EdgePropertyTable::open_discovered(dir, route),
-            |inventory| EdgePropertyTable::open_authenticated(dir, route, Arc::clone(inventory)),
-        )
+        self.schema
+            .authority
+            .read()
+            .expect("property inventory lock poisoned")
+            .property_inventory
+            .as_ref()
+            .map_or_else(
+                || EdgePropertyTable::open_discovered(dir, route),
+                |inventory| {
+                    EdgePropertyTable::open_authenticated(dir, route, Arc::clone(inventory))
+                },
+            )
     }
 
     /// Canonical routes in this catalog's authenticated inventory.
     #[must_use]
     pub fn property_routes(&self, kind: crate::PropertyRouteKind) -> Vec<String> {
-        self.property_inventory
+        self.schema
+            .authority
+            .read()
+            .expect("property inventory lock poisoned")
+            .property_inventory
             .as_ref()
             .map_or_else(Vec::new, |inventory| {
                 inventory.routes(kind).map(str::to_owned).collect()
             })
+    }
+
+    /// Replace the property authority and registered providers after a
+    /// successful same-session write commit.
+    ///
+    /// Plans already executing retain their provider and immutable inventory;
+    /// later plans resolve tables from this atomically refreshed catalog view.
+    pub fn refresh_property_inventory(&self, dir: &Path) -> Result<(), DataFusionError> {
+        let inventory = Arc::new(
+            crate::property_overlay::authenticated_property_inventory(dir)
+                .map_err(|error| DataFusionError::Execution(error.to_string()))?,
+        );
+        let replacements = {
+            let authority = self
+                .schema
+                .authority
+                .read()
+                .expect("graph schema lock poisoned");
+            authority
+                .tables
+                .keys()
+                .filter_map(|name| {
+                    name.strip_prefix("properties_")
+                        .map(|route| (name.clone(), route.to_owned(), false))
+                        .or_else(|| {
+                            name.strip_prefix("edge_properties_")
+                                .map(|route| (name.clone(), route.to_owned(), true))
+                        })
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut authority = self
+            .schema
+            .authority
+            .write()
+            .expect("graph schema lock poisoned");
+        for (name, route, edge) in replacements {
+            let table: Arc<dyn TableProvider> = if edge {
+                Arc::new(EdgePropertyTable::open_authenticated(
+                    dir,
+                    &route,
+                    Arc::clone(&inventory),
+                ))
+            } else {
+                Arc::new(PropertyTable::open_authenticated(
+                    dir,
+                    &route,
+                    Arc::clone(&inventory),
+                ))
+            };
+            authority.tables.insert(name, table);
+        }
+        authority.property_inventory = Some(inventory);
+        Ok(())
     }
 
     /// Reverse map `PropId.0` → property name (ontology + runtime catalog),
@@ -2276,7 +2380,12 @@ mod tests {
     fn raw_catalog_shares_one_authenticated_property_inventory() {
         let dir = TempDir::new().unwrap();
         let catalog = GraphCatalog::open(dir.path(), None, &RuntimeCatalog::new()).unwrap();
-        let authority = catalog
+        let catalog_authority = catalog
+            .schema
+            .authority
+            .read()
+            .expect("graph catalog authority lock");
+        let authority = catalog_authority
             .property_inventory
             .as_ref()
             .expect("raw catalog admits one complete property authority");

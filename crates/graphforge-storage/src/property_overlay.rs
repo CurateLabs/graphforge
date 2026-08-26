@@ -267,6 +267,7 @@ struct AuthenticatedPropertyFragment {
     _physical_relative: PathBuf,
     file: File,
     physical_rows: usize,
+    schema: arrow::datatypes::SchemaRef,
     authentication_bytes: u64,
     authentication_blocks: u64,
 }
@@ -435,7 +436,6 @@ impl AuthenticatedPropertyInventory {
         let root = graphforge_filesystem::StableDirectory::open(root_path).map_err(io_error)?;
         let mut routes: BTreeMap<(PropertyRouteKind, String), Vec<AuthenticatedPropertyFragment>> =
             BTreeMap::new();
-        let mut schemas = BTreeMap::new();
         for (entry, physical_relative) in entries {
             let parsed = parse_inventory_property_path(&entry.relative_path)?;
             if entry.role != crate::GraphFileRole::Properties {
@@ -459,7 +459,7 @@ impl AuthenticatedPropertyInventory {
             let physical_rows = usize::try_from(builder.metadata().file_metadata().num_rows())
                 .map_err(|_| corrupt("property fragment row count is not representable"))?;
             validate_fragment_schema(builder.schema().as_ref(), id, kind, &route)?;
-            merge_route_schema(&mut schemas, kind, &route, builder.schema().as_ref())?;
+            let schema = builder.schema().clone();
             let fragments = routes.entry((kind, route)).or_default();
             if fragments.iter().any(|fragment| fragment.id == id) {
                 return Err(corrupt("property inventory contains duplicate authority"));
@@ -470,13 +470,18 @@ impl AuthenticatedPropertyInventory {
                 _physical_relative: physical_relative,
                 file,
                 physical_rows,
+                schema,
                 authentication_bytes,
                 authentication_blocks,
             });
         }
-        for fragments in routes.values_mut() {
+        let mut schemas = BTreeMap::new();
+        for ((kind, route), fragments) in &mut routes {
             fragments.sort_unstable_by_key(|fragment| fragment.id);
             validate_fragment_id_sequence(fragments.iter().map(|fragment| fragment.id))?;
+            if let Some(newest) = fragments.last() {
+                merge_route_schema(&mut schemas, *kind, route, newest.schema.as_ref())?;
+            }
         }
         Ok(Self {
             generation_lease: None,

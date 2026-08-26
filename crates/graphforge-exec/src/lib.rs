@@ -1209,6 +1209,7 @@ fn write_batch_creates(
                 let mut props: HashMap<String, graphforge_ir::IrLiteral> =
                     spec.properties.iter().cloned().collect();
                 merge_computed(extras.computed, spec.var, row, &mut props)?;
+                props.retain(|_, value| !matches!(value, graphforge_ir::IrLiteral::Null));
                 tally.properties_set += count_set_props(&props);
                 if !props.is_empty() {
                     writer.set_properties(
@@ -1250,6 +1251,7 @@ fn write_batch_creates(
             let mut props: HashMap<String, graphforge_ir::IrLiteral> =
                 spec.properties.iter().cloned().collect();
             merge_computed(extras.computed, spec.var, row, &mut props)?;
+            props.retain(|_, value| !matches!(value, graphforge_ir::IrLiteral::Null));
             writer.create_edge(edge_uuid, rel_name, &storage_src, &storage_dst)?;
             tally.properties_set += count_set_props(&props);
             if !props.is_empty() {
@@ -4863,6 +4865,9 @@ impl ExecutionSession {
             None => None,
         };
         write_driver::commit_statement(&mut wctx, &self.dir)?;
+        self.catalog
+            .refresh_property_inventory(&self.dir)
+            .map_err(|error| GfError::Execution(error.to_string()))?;
         self.adjacency_provider.invalidate();
 
         let c = wctx.counters;
