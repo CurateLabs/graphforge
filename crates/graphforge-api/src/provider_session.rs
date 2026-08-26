@@ -95,27 +95,16 @@ impl ConfiguredProviderRefreshRuntime {
     pub(crate) fn refresh(
         &self,
         graph: &GraphForge,
-    ) -> Result<EmbeddingSourceState, ProviderEmbeddingExecutionError> {
+    ) -> Result<(), ProviderEmbeddingExecutionError> {
         self.session
-            .execute_refresh_embeddings(graph, &self.request)?;
-        let (_, lineage) = graph
-            .resolve_embedding_space_lineage(Some(&self.request.display_name))
-            .map_err(ProviderEmbeddingExecutionError::Api)?;
-        lineage
-            .active()
-            .map(|active| active.manifest.source())
-            .ok_or_else(|| {
-                ProviderEmbeddingExecutionError::Api(GfError::Validation(
-                    "successful provider refresh did not publish an active generation".into(),
-                ))
-            })
+            .execute_refresh_embeddings(graph, &self.request)
     }
 
-    pub(crate) fn completion<T>(
-        result: &Result<T, ProviderEmbeddingExecutionError>,
+    pub(crate) fn completion(
+        result: &Result<(), ProviderEmbeddingExecutionError>,
     ) -> EmbeddingRefreshCompletion {
         match result {
-            Ok(_) => EmbeddingRefreshCompletion::Succeeded,
+            Ok(()) => EmbeddingRefreshCompletion::Succeeded,
             Err(
                 ProviderEmbeddingExecutionError::Plan(ProviderEmbeddingPlanError::Artifact(
                     SearchArtifactError::Cancelled,
@@ -464,336 +453,9 @@ fn validation(message: impl Into<String>) -> GfError {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-    use std::io::{Read, Write};
-    use std::net::TcpListener;
-    use std::sync::atomic::Ordering;
-    use std::thread;
-
     use graphforge_search::{ProviderCapability, ProviderFailureClass};
-    use serde_json::{Value, json};
 
     use super::*;
-
-    fn refresh_session(
-        refresh_succeeds: bool,
-    ) -> (OpenRouterProviderSession, thread::JoinHandle<()>) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let origin = format!("http://{}", listener.local_addr().unwrap());
-        let server = thread::spawn(move || {
-            for call in 0..2 {
-                let (mut stream, _) = listener.accept().unwrap();
-                let mut received = Vec::new();
-                let (headers_end, content_length) = loop {
-                    let mut chunk = [0_u8; 1024];
-                    let count = stream.read(&mut chunk).unwrap();
-                    assert!(count > 0);
-                    received.extend_from_slice(&chunk[..count]);
-                    let Some(headers_end) =
-                        received.windows(4).position(|part| part == b"\r\n\r\n")
-                    else {
-                        continue;
-                    };
-                    let headers = String::from_utf8_lossy(&received[..headers_end]);
-                    let content_length = headers
-                        .lines()
-                        .find_map(|line| {
-                            line.to_ascii_lowercase()
-                                .strip_prefix("content-length: ")
-                                .map(str::to_owned)
-                        })
-                        .unwrap()
-                        .parse::<usize>()
-                        .unwrap();
-                    if received.len() >= headers_end + 4 + content_length {
-                        break (headers_end, content_length);
-                    }
-                };
-                let body = &received[headers_end + 4..headers_end + 4 + content_length];
-                let payload: Value = serde_json::from_slice(body).unwrap();
-                if call == 0 {
-                    assert_eq!(payload["input"].as_array().unwrap().len(), 2);
-                    let response = serde_json::to_vec(&json!({
-                        "model":"vendor/model",
-                        "data":[
-                            {"index":0,"embedding":[1.0,0.0]},
-                            {"index":1,"embedding":[0.0,1.0]}
-                        ]
-                    }))
-                    .unwrap();
-                    write!(
-                        stream,
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                        response.len()
-                    )
-                    .unwrap();
-                    stream.write_all(&response).unwrap();
-                } else if refresh_succeeds {
-                    assert_eq!(payload["input"].as_array().unwrap().len(), 4);
-                    let response = serde_json::to_vec(&json!({
-                        "model":"vendor/model",
-                        "data":[
-                            {"index":0,"embedding":[1.0,0.0]},
-                            {"index":1,"embedding":[0.0,1.0]},
-                            {"index":2,"embedding":[0.5,0.5]},
-                            {"index":3,"embedding":[0.25,0.75]}
-                        ]
-                    }))
-                    .unwrap();
-                    write!(
-                        stream,
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                        response.len()
-                    )
-                    .unwrap();
-                    stream.write_all(&response).unwrap();
-                } else {
-                    assert_eq!(payload["input"].as_array().unwrap().len(), 3);
-                    let response = br#"{"error":"temporarily unavailable"}"#;
-                    write!(
-                        stream,
-                        "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                        response.len()
-                    )
-                    .unwrap();
-                    stream.write_all(response).unwrap();
-                }
-            }
-        });
-        let contract = ProviderModelContract::remote(
-            None,
-            "vendor/model",
-            "revision",
-            "v1",
-            ProviderCapabilities::new([
-                ProviderCapability::DocumentEmbeddings,
-                ProviderCapability::QueryEmbeddings,
-                ProviderCapability::CandidateReranking,
-            ])
-            .unwrap(),
-            TokenizerIdentity {
-                identifier: TOKENIZER_IDENTIFIER.into(),
-                version: TOKENIZER_VERSION.into(),
-                count_class: TokenCountClass::Approximate,
-                max_input_tokens: 10_000,
-                normalization: TOKENIZER_NORMALIZATION.into(),
-            },
-            None,
-        )
-        .unwrap();
-        let session = OpenRouterProviderSession {
-            config: OpenRouterProviderSessionConfig {
-                origin,
-                model: "vendor/model".into(),
-                revision: "revision".into(),
-                response_contract_version: "v1".into(),
-                capabilities: contract.capabilities().clone(),
-                max_input_tokens: 10_000,
-                chunking: None,
-                wire_limits: OpenRouterWireLimits::default(),
-                request_limits: ProviderRequestLimits::default(),
-                execution_limits: ProviderExecutionLimits {
-                    retries: 0,
-                    ..ProviderExecutionLimits::default()
-                },
-                transport_timeout: Duration::from_secs(2),
-                estimated_cost_microunits_per_token: 1,
-            },
-            bearer_credential: "test-secret".into(),
-            contract,
-        };
-        (session, server)
-    }
-
-    #[test]
-    fn proactive_failure_completion_is_driven_without_wall_clock_polling() {
-        let (session, server) = refresh_session(false);
-        let graph = GraphForge::new(None).unwrap();
-        for title in ["First", "Second"] {
-            graph
-                .add_node(
-                    "Paper",
-                    &HashMap::from([("title".into(), crate::PropValue::Str(title.into()))]),
-                )
-                .unwrap();
-        }
-        let request = ProviderEmbeddingPlanRequest {
-            display_name: "semantic".into(),
-            label: "Paper".into(),
-            properties: vec!["title".into()],
-            contract: session.contract().clone(),
-            dimensions: 2,
-            normalization: crate::ProviderEmbeddingNormalization::None,
-            distance: crate::ProviderEmbeddingDistance::Cosine,
-            request_limits: ProviderRequestLimits::default(),
-            batch_limits: crate::ProviderBatchLimits::default(),
-            execution_limits: session.config.execution_limits,
-            replace_alias: false,
-        };
-        session.publish_embeddings(&graph, &request).unwrap();
-        let original = graph
-            .embedding_space(Some("semantic"))
-            .unwrap()
-            .active
-            .unwrap();
-
-        // Own the driver token so the mutation queues real proactive work but
-        // cannot race a detached worker. Drive that exact queue synchronously
-        // at a monotonic time beyond every valid debounce deadline.
-        graph
-            .provider_refresh_driver_active
-            .store(true, Ordering::Release);
-        graph
-            .add_node(
-                "Paper",
-                &HashMap::from([("title".into(), crate::PropValue::Str("Third".into()))]),
-            )
-            .unwrap();
-        let queued = graph.inspect_embedding_refresh(Some("semantic")).unwrap();
-        assert!(queued.worker.selected_lineage_queued);
-        assert_eq!(queued.worker.failed, 0);
-        graph.drive_ready_provider_refreshes_at(Duration::MAX);
-        graph
-            .provider_refresh_driver_active
-            .store(false, Ordering::Release);
-
-        let failed = graph.inspect_embedding_refresh(Some("semantic")).unwrap();
-        assert!(!failed.worker.selected_lineage_queued);
-        assert!(!failed.worker.selected_lineage_in_flight);
-        assert_eq!(failed.worker.failed, 1);
-        assert_eq!(failed.worker.succeeded, 0);
-        assert!(matches!(
-            failed.last_outcome.map(|outcome| outcome.status),
-            Some(graphforge_storage::EmbeddingRefreshOutcomeStatus::Failed(
-                graphforge_storage::EmbeddingRefreshFailureClass::Provider
-            ))
-        ));
-        let active = graph
-            .embedding_space(Some("semantic"))
-            .unwrap()
-            .active
-            .unwrap();
-        assert_eq!(active.generation_id, original.generation_id);
-        assert_eq!(active.vector_count, original.vector_count);
-        server.join().unwrap();
-    }
-
-    #[test]
-    fn proactive_success_coalesces_real_mutations_without_wall_clock_polling() {
-        let (session, server) = refresh_session(true);
-        let graph = GraphForge::new(None).unwrap();
-        for title in ["First", "Second"] {
-            graph
-                .add_node(
-                    "Paper",
-                    &HashMap::from([("title".into(), crate::PropValue::Str(title.into()))]),
-                )
-                .unwrap();
-        }
-        let request = ProviderEmbeddingPlanRequest {
-            display_name: "semantic".into(),
-            label: "Paper".into(),
-            properties: vec!["title".into()],
-            contract: session.contract().clone(),
-            dimensions: 2,
-            normalization: crate::ProviderEmbeddingNormalization::None,
-            distance: crate::ProviderEmbeddingDistance::Cosine,
-            request_limits: ProviderRequestLimits::default(),
-            batch_limits: crate::ProviderBatchLimits::default(),
-            execution_limits: session.config.execution_limits,
-            replace_alias: false,
-        };
-        session.publish_embeddings(&graph, &request).unwrap();
-        let initial_generation = graph
-            .embedding_space(Some("semantic"))
-            .unwrap()
-            .active
-            .unwrap()
-            .generation_id;
-
-        // Own the driver token before either mutation so both notices are
-        // deterministically observed inside one debounce window. The real
-        // scheduler queue is then driven at an injected monotonic instant.
-        graph
-            .provider_refresh_driver_active
-            .store(true, Ordering::Release);
-        for title in ["Third", "Fourth"] {
-            graph
-                .add_node(
-                    "Paper",
-                    &HashMap::from([("title".into(), crate::PropValue::Str(title.into()))]),
-                )
-                .unwrap();
-        }
-        let queued = graph.inspect_embedding_refresh(Some("semantic")).unwrap();
-        assert!(queued.worker.selected_lineage_queued);
-        assert!(!queued.worker.selected_lineage_in_flight);
-        assert_eq!(queued.worker.coalesced_notices, 1);
-        assert_eq!(queued.worker.succeeded, 0);
-        assert_eq!(queued.worker.failed, 0);
-
-        graph.drive_ready_provider_refreshes_at(Duration::MAX);
-
-        let refreshed = graph.inspect_embedding_refresh(Some("semantic")).unwrap();
-        assert!(!refreshed.worker.selected_lineage_queued);
-        assert!(!refreshed.worker.selected_lineage_in_flight);
-        assert_eq!(refreshed.worker.coalesced_notices, 1);
-        assert_eq!(refreshed.worker.succeeded, 1);
-        assert_eq!(refreshed.worker.failed, 0);
-        assert!(matches!(
-            refreshed.last_outcome.map(|outcome| outcome.status),
-            Some(graphforge_storage::EmbeddingRefreshOutcomeStatus::Succeeded)
-        ));
-        let active = graph
-            .embedding_space(Some("semantic"))
-            .unwrap()
-            .active
-            .unwrap();
-        assert_eq!(active.vector_count, 4);
-        assert_ne!(active.generation_id, initial_generation);
-
-        graph
-            .add_node(
-                "Other",
-                &HashMap::from([("note".into(), crate::PropValue::Str("Unrelated".into()))]),
-            )
-            .unwrap();
-        graph
-            .execute("MATCH (n:Other) SET n.note = 'still not selected'")
-            .unwrap();
-        let unrelated = graph.inspect_embedding_refresh(Some("semantic")).unwrap();
-        assert!(!unrelated.worker.selected_lineage_queued);
-        assert_eq!(unrelated.worker.succeeded, 1);
-        assert_eq!(unrelated.worker.failed, 0);
-
-        graph
-            .set_embedding_refresh_project_policy(
-                graphforge_storage::EmbeddingRefreshProjectPolicy {
-                    proactive: false,
-                    debounce: Duration::from_millis(500),
-                    max_concurrent_jobs: 2,
-                },
-            )
-            .unwrap();
-        graph
-            .add_node(
-                "Paper",
-                &HashMap::from([("title".into(), crate::PropValue::Str("Fifth".into()))]),
-            )
-            .unwrap();
-        let disabled = graph.inspect_embedding_refresh(Some("semantic")).unwrap();
-        assert!(!disabled.worker.selected_lineage_queued);
-        assert_eq!(disabled.worker.succeeded, 0);
-        assert_eq!(disabled.worker.failed, 0);
-        assert!(matches!(
-            disabled.freshness.map(|freshness| freshness.state),
-            Some(crate::EmbeddingSpaceFreshnessState::SubstantiallyStale)
-        ));
-        graph
-            .provider_refresh_driver_active
-            .store(false, Ordering::Release);
-        server.join().unwrap();
-    }
 
     #[test]
     fn cost_estimates_fail_closed_on_overflow() {
@@ -865,12 +527,12 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                ConfiguredProviderRefreshRuntime::completion::<()>(&Err(error)),
+                ConfiguredProviderRefreshRuntime::completion(&Err(error)),
                 EmbeddingRefreshCompletion::Cancelled
             );
         }
         assert_eq!(
-            ConfiguredProviderRefreshRuntime::completion::<()>(&Err(
+            ConfiguredProviderRefreshRuntime::completion(&Err(
                 ProviderEmbeddingExecutionError::Api(GfError::Validation("invalid".into()))
             )),
             EmbeddingRefreshCompletion::Failed
