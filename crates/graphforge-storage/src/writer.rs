@@ -107,7 +107,47 @@ fn replay_resource_limit(message: impl Into<String>) -> GfError {
 fn replay_writer_properties(max_batch_rows: usize) -> parquet::file::properties::WriterProperties {
     parquet::file::properties::WriterProperties::builder()
         .set_max_row_group_row_count(Some(max_batch_rows))
+        .set_dictionary_enabled(false)
+        .set_compression(parquet::basic::Compression::UNCOMPRESSED)
         .build()
+}
+
+const REPLAY_WRITER_FIXED_BYTES: usize = 256 * 1024;
+const REPLAY_ROW_GROUP_METADATA_BYTES: usize = 4 * 1024;
+
+fn replay_writer_reservation(
+    schema: &Schema,
+    maximum_rows: usize,
+    maximum_row_bytes: usize,
+    max_batch_rows: usize,
+) -> Result<usize, GfError> {
+    let groups = maximum_rows.div_ceil(max_batch_rows);
+    let schema_bytes = schema.fields().iter().fold(0_usize, |sum, field| {
+        sum.saturating_add(field.name().len()).saturating_add(128)
+    });
+    REPLAY_WRITER_FIXED_BYTES
+        .checked_add(schema_bytes)
+        .and_then(|bytes| bytes.checked_add(groups.saturating_mul(REPLAY_ROW_GROUP_METADATA_BYTES)))
+        .and_then(|bytes| {
+            bytes.checked_add(maximum_row_bytes.saturating_mul(max_batch_rows.min(maximum_rows)))
+        })
+        .ok_or_else(|| replay_resource_limit("graph delta replay writer reservation overflow"))
+}
+
+fn admit_replay_writer(
+    overlay_bytes: usize,
+    reservation_bytes: usize,
+    limit: usize,
+) -> Result<(), GfError> {
+    if overlay_bytes
+        .checked_add(reservation_bytes)
+        .is_none_or(|bytes| bytes > limit)
+    {
+        return Err(replay_resource_limit(
+            "graph delta replay Parquet writer memory bound exceeded",
+        ));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -183,6 +223,18 @@ pub(crate) fn write_replay_overlay_streaming(
     };
     fs::create_dir_all(output_node_path.parent().expect("node output has parent"))
         .map_err(|error| io_err(&error))?;
+    let maximum_node_rows = node_scan.base_rows.saturating_add(overlay.nodes.len());
+    let node_writer_reservation = replay_writer_reservation(
+        TOPOLOGY_NODES_SCHEMA.as_ref(),
+        maximum_node_rows,
+        128,
+        limits.max_batch_rows,
+    )?;
+    admit_replay_writer(
+        overlay.estimated_memory(),
+        node_writer_reservation,
+        limits.max_replay_memory_bytes,
+    )?;
     let output = fs::File::create(&output_node_path).map_err(|error| io_err(&error))?;
     let mut writer = parquet::arrow::ArrowWriter::try_new(
         output,
@@ -232,24 +284,8 @@ pub(crate) fn write_replay_overlay_streaming(
         source,
         source_inventory.files.clone(),
     )?;
-    stream_replay_properties(
-        source,
-        target,
-        &property_inventory,
-        overlay,
-        limits,
-        false,
-        &node_scan.existing_overlay,
-    )?;
-    stream_replay_properties(
-        source,
-        target,
-        &property_inventory,
-        overlay,
-        limits,
-        true,
-        &HashSet::new(),
-    )?;
+    stream_replay_properties(target, &property_inventory, overlay, limits, false)?;
+    stream_replay_properties(target, &property_inventory, overlay, limits, true)?;
     Ok(())
 }
 
@@ -257,6 +293,7 @@ struct ReplayNodeAuthority {
     existing_overlay: HashSet<String>,
     endpoint_ids: HashMap<String, u64>,
     deleted_nodes: HashSet<String>,
+    base_rows: usize,
 }
 
 #[allow(clippy::too_many_lines)] // One bounded authority scan validates all node invariants.
@@ -290,6 +327,7 @@ fn scan_replay_node_authority(
                 .filter(|(_, row)| row.is_none())
                 .map(|(uuid, _)| uuid.clone())
                 .collect(),
+            base_rows: 0,
         });
     }
     let input = fs::File::open(node_path).map_err(|error| {
@@ -307,8 +345,10 @@ fn scan_replay_node_authority(
     let mut endpoint_ids = HashMap::new();
     let mut prior_id = 0_u64;
     let mut base_max = 0_u64;
+    let mut base_rows = 0_usize;
     for batch in reader {
         let batch = batch.map_err(pq_err)?;
+        base_rows = base_rows.saturating_add(batch.num_rows());
         let uuids = batch
             .column_by_name("node_uuid")
             .and_then(|column| column.as_any().downcast_ref::<FixedSizeBinaryArray>())
@@ -367,6 +407,7 @@ fn scan_replay_node_authority(
             .filter(|(_, row)| row.is_none())
             .map(|(uuid, _)| uuid.clone())
             .collect(),
+        base_rows,
     })
 }
 
@@ -476,6 +517,7 @@ fn stream_replay_edges(
         let target_path = target_dir.join(format!("{relation}.parquet"));
         let mut existing_overlay = HashSet::new();
         let mut base_max = 0_u64;
+        let mut base_rows = 0_usize;
         if source_path.exists() {
             let input = fs::File::open(&source_path).map_err(|error| io_err(&error))?;
             let reader = ParquetRecordBatchReaderBuilder::try_new(input)
@@ -485,6 +527,7 @@ fn stream_replay_edges(
                 .map_err(pq_err)?;
             for batch in reader {
                 let batch = batch.map_err(pq_err)?;
+                base_rows = base_rows.saturating_add(batch.num_rows());
                 let uuids = required_uuid_column(&batch, "edge_uuid")?;
                 let srcs = required_uuid_column(&batch, "src_uuid")?;
                 let dsts = required_uuid_column(&batch, "dst_uuid")?;
@@ -535,6 +578,18 @@ fn stream_replay_edges(
             }
         }
         let output = fs::File::create(&target_path).map_err(|error| io_err(&error))?;
+        let maximum_edge_rows = base_rows.saturating_add(overlay.edges.len());
+        let edge_writer_reservation = replay_writer_reservation(
+            TYPED_EDGE_SCHEMA.as_ref(),
+            maximum_edge_rows,
+            128,
+            limits.max_batch_rows,
+        )?;
+        admit_replay_writer(
+            overlay.estimated_memory(),
+            edge_writer_reservation,
+            limits.max_replay_memory_bytes,
+        )?;
         let mut writer = parquet::arrow::ArrowWriter::try_new(
             output,
             TYPED_EDGE_SCHEMA.clone(),
@@ -643,28 +698,12 @@ fn replay_edge_batch(
 
 #[allow(clippy::too_many_lines)] // Node and edge property paths deliberately share one writer.
 fn stream_replay_properties(
-    source: &Path,
     target: &Path,
     inventory: &crate::AuthenticatedPropertyInventory,
     overlay: &crate::graph_delta_journal::ReplayOverlay,
     limits: crate::graph_delta_journal::GraphDeltaJournalLimits,
     edge: bool,
-    base_overlay_entities: &HashSet<String>,
 ) -> Result<(), GfError> {
-    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-    let (directory, join_field, metadata_key) = if edge {
-        (
-            "edge_properties",
-            EDGE_PROPERTY_UUID_FIELD,
-            "graphforge.rel_type",
-        )
-    } else {
-        (
-            "properties",
-            NODE_PROPERTY_UUID_FIELD,
-            "graphforge.entity_type",
-        )
-    };
     let operations = if edge {
         &overlay.edge_properties
     } else {
@@ -691,173 +730,13 @@ fn stream_replay_properties(
         // snapshots on every journal materialization.
         fragment_routes.extend(inventory.routes(kind).map(str::to_owned));
     }
-    if !fragment_routes.is_empty() {
-        return stream_replay_property_fragments(
-            target,
-            inventory,
-            overlay,
-            limits,
-            edge,
-            fragment_routes,
-        );
+    if fragment_routes.is_empty() {
+        return Ok(());
     }
-    let mut stems = std::collections::BTreeSet::new();
-    stems.extend(operations.keys().map(|(_, stem, _)| stem.clone()));
-    let source_dir = source.join(directory);
-    let target_dir = target.join(directory);
-    if !operations.is_empty() && source_dir.exists() {
-        for entry in fs::read_dir(&source_dir).map_err(|error| io_err(&error))? {
-            let path = entry.map_err(|error| io_err(&error))?.path();
-            if path
-                .extension()
-                .is_some_and(|extension| extension == "parquet")
-                && let Some(stem) = path.file_stem().and_then(std::ffi::OsStr::to_str)
-            {
-                stems.insert(stem.to_owned());
-            }
-        }
-    }
-    fs::create_dir_all(&target_dir).map_err(|error| io_err(&error))?;
-    for stem in stems {
-        let source_path = source_dir.join(format!("{stem}.parquet"));
-        let target_path = target_dir.join(format!("{stem}.parquet"));
-        let base_schema = if source_path.exists() {
-            let input = fs::File::open(&source_path).map_err(|error| io_err(&error))?;
-            ParquetRecordBatchReaderBuilder::try_new(input)
-                .map_err(pq_err)?
-                .schema()
-                .clone()
-        } else {
-            Arc::new(
-                Schema::new(vec![uuid_field(join_field)]).with_metadata(
-                    [(metadata_key.to_owned(), stem.clone())]
-                        .into_iter()
-                        .collect(),
-                ),
-            )
-        };
-        let schema = replay_property_schema(
-            kind,
-            &stem,
-            base_schema.as_ref(),
-            operations
-                .iter()
-                .filter(|((_, operation_stem, _), _)| operation_stem == &stem),
-        )?;
-        let output = fs::File::create(&target_path).map_err(|error| io_err(&error))?;
-        let mut writer = parquet::arrow::ArrowWriter::try_new(
-            output,
-            Arc::new(schema.clone()),
-            Some(replay_writer_properties(limits.max_batch_rows)),
-        )
-        .map_err(pq_err)?;
-        let mut seen = HashSet::<String>::new();
-        if source_path.exists() {
-            let input = fs::File::open(&source_path).map_err(|error| io_err(&error))?;
-            let reader = ParquetRecordBatchReaderBuilder::try_new(input)
-                .map_err(pq_err)?
-                .with_batch_size(limits.max_batch_rows)
-                .build()
-                .map_err(pq_err)?;
-            for batch in reader {
-                let batch = batch.map_err(pq_err)?;
-                if batch.num_rows() > limits.max_batch_rows {
-                    return Err(replay_resource_limit("graph delta replay batch rows"));
-                }
-                if edge {
-                    let mut rows = Vec::new();
-                    decode_property_batch(&batch, join_field, |uuid, mut props| {
-                        let key = uuid::Uuid::from_bytes(uuid).hyphenated().to_string();
-                        if overlay.edges.get(&key).is_some_and(Option::is_none) {
-                            return;
-                        }
-                        apply_streamed_property_ops(&key, &stem, operations, &mut props);
-                        seen.insert(key);
-                        rows.push(EdgePropRow {
-                            edge_uuid: uuid,
-                            props,
-                        });
-                    })?;
-                    write_property_rows_with_schema(&mut writer, &schema, join_field, &rows)?;
-                } else {
-                    let mut rows = Vec::new();
-                    decode_property_batch(&batch, join_field, |uuid, mut props| {
-                        let key = uuid::Uuid::from_bytes(uuid).hyphenated().to_string();
-                        if overlay.nodes.get(&key).is_some_and(Option::is_none) {
-                            return;
-                        }
-                        apply_streamed_property_ops(&key, &stem, operations, &mut props);
-                        seen.insert(key);
-                        rows.push(PropRow {
-                            node_uuid: uuid,
-                            props,
-                        });
-                    })?;
-                    write_property_rows_with_schema(&mut writer, &schema, join_field, &rows)?;
-                }
-            }
-        }
-        for (entity_uuid, operation_stem, _) in operations.keys() {
-            if operation_stem != &stem || seen.contains(entity_uuid) {
-                continue;
-            }
-            let mut props = HashMap::new();
-            apply_streamed_property_ops(entity_uuid, &stem, operations, &mut props);
-            if props.is_empty() {
-                continue;
-            }
-            let uuid = uuid::Uuid::parse_str(entity_uuid)
-                .map_err(pq_err)?
-                .into_bytes();
-            if edge {
-                write_property_rows_with_schema(
-                    &mut writer,
-                    &schema,
-                    join_field,
-                    &[EdgePropRow {
-                        edge_uuid: uuid,
-                        props,
-                    }],
-                )?;
-            } else {
-                write_property_rows_with_schema(
-                    &mut writer,
-                    &schema,
-                    join_field,
-                    &[PropRow {
-                        node_uuid: uuid,
-                        props,
-                    }],
-                )?;
-            }
-            seen.insert(entity_uuid.clone());
-        }
-        if !edge && stem == "_untyped" {
-            for (entity_uuid, row) in &overlay.nodes {
-                if row.is_none()
-                    || base_overlay_entities.contains(entity_uuid)
-                    || seen.contains(entity_uuid)
-                {
-                    continue;
-                }
-                let uuid = uuid::Uuid::parse_str(entity_uuid)
-                    .map_err(pq_err)?
-                    .into_bytes();
-                write_property_rows_with_schema(
-                    &mut writer,
-                    &schema,
-                    join_field,
-                    &[PropRow {
-                        node_uuid: uuid,
-                        props: HashMap::new(),
-                    }],
-                )?;
-                seen.insert(entity_uuid.clone());
-            }
-        }
-        writer.close().map_err(pq_err)?;
-    }
-    Ok(())
+    // Legacy flat baselines are admitted as generation zero fragments and are
+    // resolved through the same byte-charged chunk path. There is no second
+    // unbounded flat-file replay fallback.
+    stream_replay_property_fragments(target, inventory, overlay, limits, edge, fragment_routes)
 }
 
 fn stream_replay_property_fragments(
@@ -900,9 +779,30 @@ struct ReplayPropertyRouteContext<'a> {
     route: &'a str,
     overlay_bytes: usize,
     retained_target_bytes: usize,
+    writer_reservation_bytes: usize,
 }
 
 impl ReplayPropertyRouteContext<'_> {
+    fn fragment_writer<'a>(
+        &self,
+        fragment: &'a mut Option<ReplayPropertyFragmentWriter>,
+    ) -> Result<&'a mut ReplayPropertyFragmentWriter, GfError> {
+        if fragment.is_none() {
+            *fragment = Some(open_replay_property_fragment(
+                self.target,
+                self.inventory,
+                self.operations,
+                self.kind,
+                self.edge,
+                self.route,
+                self.limits.max_batch_rows,
+            )?);
+        }
+        Ok(fragment
+            .as_mut()
+            .expect("property replay fragment initialized"))
+    }
+
     fn process_chunk(
         &self,
         names: &[&str],
@@ -978,21 +878,14 @@ impl ReplayPropertyRouteContext<'_> {
         })?;
         if resident_before_output
             .checked_add(output_bytes)
+            .and_then(|bytes| bytes.checked_add(self.writer_reservation_bytes))
             .is_none_or(|bytes| bytes > self.limits.max_replay_memory_bytes)
         {
             return Err(replay_resource_limit(
                 "property replay Arrow and writer memory bound exceeded",
             ));
         }
-        let output = fragment.get_or_insert(open_replay_property_fragment(
-            self.target,
-            self.inventory,
-            self.operations,
-            self.kind,
-            self.edge,
-            self.route,
-            self.limits.max_batch_rows,
-        )?);
+        let output = self.fragment_writer(fragment)?;
         for row in rows {
             write_replay_property_snapshot(
                 &mut output.writer,
@@ -1135,6 +1028,27 @@ fn stream_replay_property_route(
     }
     let mut fragment = None;
     let target_names = target_names.into_iter().collect::<Vec<_>>();
+    let base_schema = inventory.route_schema(kind, route).unwrap_or_else(|| {
+        let join_field = match kind {
+            crate::PropertyRouteKind::Node => NODE_PROPERTY_UUID_FIELD,
+            crate::PropertyRouteKind::Edge => EDGE_PROPERTY_UUID_FIELD,
+        };
+        Arc::new(Schema::new(vec![uuid_field(join_field)]))
+    });
+    let logical_schema = replay_property_schema(
+        kind,
+        route,
+        base_schema.as_ref(),
+        operations
+            .iter()
+            .filter(|((_, operation_route, _), _)| operation_route == route),
+    )?;
+    let writer_reservation_bytes = replay_writer_reservation(
+        &logical_schema,
+        target_names.len(),
+        0,
+        limits.max_batch_rows,
+    )?;
     let context = ReplayPropertyRouteContext {
         target,
         inventory,
@@ -1146,6 +1060,7 @@ fn stream_replay_property_route(
         route,
         overlay_bytes,
         retained_target_bytes,
+        writer_reservation_bytes,
     };
     for names in target_names.chunks(limits.max_batch_rows) {
         context.process_chunk(names, &mut fragment)?;
@@ -1386,24 +1301,6 @@ fn col_type_from_field(field: &Field) -> Option<ColType> {
             Some(extension_metadata.clone()),
         )
     })
-}
-
-fn write_property_rows_with_schema<R: PropRowLike>(
-    writer: &mut parquet::arrow::ArrowWriter<fs::File>,
-    schema: &Schema,
-    uuid_field_name: &str,
-    rows: &[R],
-) -> Result<(), GfError> {
-    if rows.is_empty() {
-        return Ok(());
-    }
-    writer
-        .write(&property_rows_batch_with_schema(
-            schema,
-            uuid_field_name,
-            rows,
-        )?)
-        .map_err(pq_err)
 }
 
 fn property_rows_batch_with_schema<R: PropRowLike>(

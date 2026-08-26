@@ -26,7 +26,7 @@ fn authenticated_property_rows(
     scratch_root: &std::path::Path,
 ) -> Vec<PropertySnapshotRow> {
     let mut rows = Vec::new();
-    visit_authenticated_property_snapshots(
+    let result = visit_authenticated_property_snapshots(
         graph_root,
         kind,
         route,
@@ -36,8 +36,16 @@ fn authenticated_property_rows(
             rows.push(row);
             Ok(())
         },
-    )
-    .unwrap();
+    );
+    if let Err(error) = result {
+        let files = graph_root
+            .read_dir()
+            .into_iter()
+            .flatten()
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<Result<Vec<_>, _>>();
+        panic!("authenticated {kind:?}/{route} failed: {error}; root={files:?}");
+    }
     rows
 }
 
@@ -607,7 +615,7 @@ fn multi_chunk_large_property_values_are_charged_to_replay_memory() {
     let root = tempfile::tempdir().unwrap();
     publish_base(root.path());
     let value = encode_graph_delta_value(&IrLiteral::Str("x".repeat(8 * 1024))).unwrap();
-    let operations = [
+    let mut operations = [
         "00000000-0000-7000-8000-000000000001",
         "00000000-0000-7000-8000-000000000002",
     ]
@@ -622,7 +630,17 @@ fn multi_chunk_large_property_values_are_charged_to_replay_memory() {
             value: value.clone(),
         },
     })
-    .collect();
+    .collect::<Vec<_>>();
+    operations.push(GraphDeltaOp {
+        operation_uuid: Uuid::now_v7(),
+        kind: GraphDeltaOpKind::SetEdgeProperty,
+        payload: GraphDeltaPayload::SetEdgeProperty {
+            edge_uuid: "00000000-0000-7000-8000-000000000003".into(),
+            property_stem: "KNOWS".into(),
+            key: "large".into(),
+            value: value.clone(),
+        },
+    });
     publish_graph_delta(
         root.path(),
         &GraphDeltaPublishRequest {
@@ -636,19 +654,57 @@ fn multi_chunk_large_property_values_are_charged_to_replay_memory() {
     .unwrap();
     let generation = resolve_project_generation(root.path()).unwrap();
     let inventory = generation.graph_files_inventory().unwrap().unwrap();
-    let view = tempfile::tempdir().unwrap();
+    let rejected_view = tempfile::tempdir().unwrap();
     let error = materialize_replayed_graph_tree(
         &generation.graph_tree_root(),
         &inventory,
-        view.path(),
+        rejected_view.path(),
         GraphDeltaJournalLimits {
-            max_replay_memory_bytes: 32 * 1024,
+            max_replay_memory_bytes: 256 * 1024,
             max_batch_rows: 1,
             ..GraphDeltaJournalLimits::default()
         },
     )
     .unwrap_err();
     assert_eq!(error.code(), "GF_RESOURCE_LIMIT");
+    assert!(error.to_string().contains("Parquet writer memory"));
+
+    let admitted_view = tempfile::tempdir().unwrap();
+    materialize_replayed_graph_tree(
+        &generation.graph_tree_root(),
+        &inventory,
+        admitted_view.path(),
+        GraphDeltaJournalLimits {
+            max_replay_memory_bytes: 512 * 1024,
+            max_batch_rows: 1,
+            ..GraphDeltaJournalLimits::default()
+        },
+    )
+    .unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let nodes = authenticated_property_rows(
+        admitted_view.path(),
+        PropertyRouteKind::Node,
+        "Person",
+        scratch.path(),
+    );
+    assert_eq!(nodes.len(), 2);
+    assert!(
+        nodes
+            .iter()
+            .all(|row| { row.values.get("large") == Some(&IrLiteral::Str("x".repeat(8 * 1024))) })
+    );
+    let edges = authenticated_property_rows(
+        admitted_view.path(),
+        PropertyRouteKind::Edge,
+        "KNOWS",
+        scratch.path(),
+    );
+    assert_eq!(edges.len(), 1);
+    assert_eq!(
+        edges[0].values.get("large"),
+        Some(&IrLiteral::Str("x".repeat(8 * 1024)))
+    );
 }
 
 #[test]
