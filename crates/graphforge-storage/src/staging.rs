@@ -345,19 +345,21 @@ impl RewriteBatch {
     }
 
     pub(crate) fn property_authority_root(&self) -> Result<Option<&Path>, GfError> {
-        let mut roots = self.property_windows.values().filter_map(|window| {
-            window
-                .authority_generation_uuid
-                .as_ref()
-                .map(|(_, root)| root.as_path())
-        });
-        let first = roots.next();
-        if roots.any(|root| Some(root) != first) {
-            return Err(GfError::Storage(
-                "property batch spans generation authority roots".into(),
-            ));
+        let mut windows = self.property_windows.values();
+        let Some(first) = windows.next() else {
+            return Ok(None);
+        };
+        for window in windows {
+            if window.authority_generation_uuid != first.authority_generation_uuid {
+                return Err(GfError::Storage(
+                    "property batch mixes generation authorities".into(),
+                ));
+            }
         }
-        Ok(first)
+        Ok(first
+            .authority_generation_uuid
+            .as_ref()
+            .map(|(_, root)| root.as_path()))
     }
 
     pub(crate) fn has_node_property_windows(&self) -> bool {
@@ -625,6 +627,76 @@ mod tests {
             )
             .unwrap_err();
         assert!(error.to_string().contains("generation authority conflicts"));
+    }
+
+    #[test]
+    fn property_batch_rejects_mixed_or_distinct_route_authorities() {
+        let dir = TempDir::new().unwrap();
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "node_uuid",
+            DataType::FixedSizeBinary(16),
+            false,
+        )]));
+        let row = || crate::PropertySnapshotRow {
+            uuid: [1; 16],
+            tombstone: false,
+            values: BTreeMap::new(),
+        };
+        let first = (uuid::Uuid::now_v7(), dir.path().to_path_buf());
+        let second = (uuid::Uuid::now_v7(), dir.path().to_path_buf());
+
+        let mut mixed = RewriteBatch::new();
+        mixed
+            .accumulate_property_window(
+                dir.path(),
+                crate::PropertyRouteKind::Node,
+                "Person",
+                [row()],
+                &schema,
+                Some(&first),
+            )
+            .unwrap();
+        mixed
+            .accumulate_property_window(
+                dir.path(),
+                crate::PropertyRouteKind::Node,
+                "Company",
+                [row()],
+                &schema,
+                None,
+            )
+            .unwrap();
+        assert!(mixed.property_authority_root().is_err());
+
+        let mut distinct = RewriteBatch::new();
+        for (route, authority) in [("Person", &first), ("Company", &second)] {
+            distinct
+                .accumulate_property_window(
+                    dir.path(),
+                    crate::PropertyRouteKind::Node,
+                    route,
+                    [row()],
+                    &schema,
+                    Some(authority),
+                )
+                .unwrap();
+        }
+        assert!(distinct.property_authority_root().is_err());
+
+        let mut unpinned = RewriteBatch::new();
+        for route in ["Person", "Company"] {
+            unpinned
+                .accumulate_property_window(
+                    dir.path(),
+                    crate::PropertyRouteKind::Node,
+                    route,
+                    [row()],
+                    &schema,
+                    None,
+                )
+                .unwrap();
+        }
+        assert_eq!(unpinned.property_authority_root().unwrap(), None);
     }
 
     fn tmp_entries(dir: &Path) -> usize {

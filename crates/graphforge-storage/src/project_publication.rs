@@ -1404,6 +1404,8 @@ impl ValidatedProjectGeneration {
         }
         let staged = &self.0;
         let writer_lock = CommitLock(wait_for_writer_lock(&staged.root)?);
+        #[cfg(test)]
+        writer_lock_test_barrier(staged.transaction_uuid);
         project_failpoint::hit(
             "project.after_optimistic_commit_lock",
             Some(staged.transaction_uuid),
@@ -1467,6 +1469,45 @@ impl ValidatedProjectGeneration {
             idempotent_replay: false,
         })
     }
+}
+
+#[cfg(test)]
+struct WriterLockTestBarrier {
+    transaction: Uuid,
+    acquired: std::sync::mpsc::SyncSender<()>,
+    resume: std::sync::mpsc::Receiver<()>,
+}
+
+#[cfg(test)]
+static WRITER_LOCK_TEST_BARRIER: std::sync::Mutex<Option<WriterLockTestBarrier>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) fn install_writer_lock_test_barrier(
+    transaction: Uuid,
+    acquired: std::sync::mpsc::SyncSender<()>,
+    resume: std::sync::mpsc::Receiver<()>,
+) {
+    *WRITER_LOCK_TEST_BARRIER
+        .lock()
+        .expect("writer-lock test barrier lock") = Some(WriterLockTestBarrier {
+        transaction,
+        acquired,
+        resume,
+    });
+}
+
+#[cfg(test)]
+fn writer_lock_test_barrier(transaction: Uuid) {
+    let barrier = WRITER_LOCK_TEST_BARRIER
+        .lock()
+        .expect("writer-lock test barrier lock")
+        .take();
+    let Some(barrier) = barrier.filter(|barrier| barrier.transaction == transaction) else {
+        return;
+    };
+    barrier.acquired.send(()).expect("report writer lock held");
+    barrier.resume.recv().expect("release writer lock barrier");
 }
 
 fn has_compact_graph_participant(staged: &StagedProjectGeneration) -> Result<bool, GfError> {

@@ -5876,11 +5876,11 @@ mod tests {
 
         let container = TempDir::new().unwrap();
         crate::open_or_initialize_project(container.path()).unwrap();
-        let publish_graph = || {
+        let graph_request = || {
             let (_, graph_files) = crate::capture_graph_files(graph.path()).unwrap();
             let mut participants = crate::empty_workspace_participants().unwrap();
             participants.insert(0, graph_files);
-            let request = crate::ProjectGenerationRequest {
+            crate::ProjectGenerationRequest {
                 transaction_uuid: uuid::Uuid::now_v7(),
                 generation_uuid: uuid::Uuid::now_v7(),
                 capabilities: vec![
@@ -5894,25 +5894,25 @@ mod tests {
                     },
                 ],
                 participants,
-            };
-            let crate::ProjectStageOutcome::Staged(staged) =
-                crate::stage_project_generation_with_graph_tree(
-                    container.path(),
-                    &request,
-                    Some(graph.path()),
-                )
-                .unwrap()
-            else {
-                panic!("fresh publication unexpectedly replayed");
-            };
-            staged
-                .validate(|_| Ok(()), |_, _| Ok(()))
-                .unwrap()
-                .publish()
-                .unwrap()
+            }
         };
 
-        publish_graph();
+        let initial_request = graph_request();
+        let crate::ProjectStageOutcome::Staged(initial) =
+            crate::stage_project_generation_with_graph_tree(
+                container.path(),
+                &initial_request,
+                Some(graph.path()),
+            )
+            .unwrap()
+        else {
+            panic!("fresh publication unexpectedly replayed");
+        };
+        initial
+            .validate(|_| Ok(()), |_, _| Ok(()))
+            .unwrap()
+            .publish()
+            .unwrap();
         let authority = crate::resolve_project_generation(container.path()).unwrap();
         let inventory =
             crate::AuthenticatedPropertyInventory::from_resolved_generation(&authority).unwrap();
@@ -5929,13 +5929,52 @@ mod tests {
         )
         .unwrap();
 
-        publish_graph();
+        let request_b = graph_request();
+        let transaction_b = request_b.transaction_uuid;
+        let crate::ProjectStageOutcome::Staged(staged_b) =
+            crate::stage_project_generation_optimistic_with_graph_tree(
+                container.path(),
+                &request_b,
+                [7; 32],
+                Some(graph.path()),
+            )
+            .unwrap()
+        else {
+            panic!("fresh optimistic publication unexpectedly replayed");
+        };
+        let (locked_tx, locked_rx) = std::sync::mpsc::sync_channel(0);
+        let (resume_tx, resume_rx) = std::sync::mpsc::sync_channel(0);
+        crate::project_publication::install_writer_lock_test_barrier(
+            transaction_b,
+            locked_tx,
+            resume_rx,
+        );
+        let container_root = container.path().to_path_buf();
+        let publisher_b = std::thread::spawn(move || {
+            let receipt = staged_b
+                .validate(|_| Ok(()), |_, _| Ok(()))
+                .unwrap()
+                .publish()
+                .unwrap();
+            let current = fs::read(container_root.join(crate::CURRENT_FILE)).unwrap();
+            (receipt, current)
+        });
+        locked_rx.recv().unwrap();
+        let graph_root = graph.path().to_path_buf();
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
+        let mutation_a = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            crate::generation::commit_topology_aware(mutation_a, &graph_root)
+        });
+        started_rx.recv().unwrap();
+        resume_tx.send(()).unwrap();
+        let (published_b, current_b) = publisher_b.join().unwrap();
+        let error = mutation_a.join().unwrap().unwrap_err();
         let generation_b = crate::resolve_project_generation(container.path())
             .unwrap()
             .generation_uuid();
-        let current_b = fs::read(container.path().join(crate::CURRENT_FILE)).unwrap();
-        let error = crate::generation::commit_topology_aware(mutation_a, graph.path()).unwrap_err();
 
+        assert_eq!(generation_b, published_b.generation_uuid);
         assert!(matches!(
             error,
             GfError::Project {
