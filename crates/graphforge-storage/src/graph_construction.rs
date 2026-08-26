@@ -4525,10 +4525,12 @@ fn account_probe_work(
 ) {
     evidence.retained_probe_read_bytes = evidence
         .retained_probe_read_bytes
-        .saturating_add(work.read_bytes);
+        .saturating_add(work.identity_bytes_read)
+        .saturating_add(work.surrogate_bytes_read);
     evidence.retained_probe_block_loads = evidence
         .retained_probe_block_loads
-        .saturating_add(work.file_seeks);
+        .saturating_add(work.identity_blocks_read)
+        .saturating_add(work.surrogate_blocks_read);
 }
 
 #[derive(Clone, Copy, Debug, Default)]
