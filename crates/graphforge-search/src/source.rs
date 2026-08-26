@@ -285,11 +285,8 @@ where
     C: FnMut() -> Result<(), SearchArtifactError>,
 {
     let mut property_rows = 0_usize;
-    let mut seen_property_rows = BTreeSet::new();
     let mut observed_properties = BTreeSet::new();
     let mut fields_by_uuid = TextFieldsByUuid::new();
-    let fragments = graphforge_storage::node_property_source_fragments(project_dir)
-        .map_err(|error| source(error.to_string()))?;
     checkpoint()?;
     let remaining = limits.source_bytes.saturating_sub(*source_bytes);
     let projected_columns = explicit.map(|selected| {
@@ -298,8 +295,8 @@ where
         columns
     });
     let mut failure = None;
-    let admitted = graphforge_storage::visit_property_fragments_admitted(
-        &fragments,
+    let admitted = graphforge_storage::visit_node_property_overlay_admitted(
+        project_dir,
         8192,
         remaining,
         projected_columns.as_ref(),
@@ -329,11 +326,6 @@ where
                     })?;
                     if !eligible.contains(&node_uuid) {
                         continue;
-                    }
-                    if !seen_property_rows.insert(node_uuid) {
-                        return Err(source(format!(
-                            "eligible UUID {node_uuid:02x?} has duplicate property rows"
-                        )));
                     }
                     for (field, column) in batch.schema().fields().iter().zip(batch.columns()) {
                         let name = field.name();
@@ -487,9 +479,9 @@ mod tests {
     use std::cell::Cell;
     use std::collections::HashMap;
 
-    use graphforge_core::uuid::Uuid;
+    use graphforge_core::uuid::{Uuid, to_bytes};
     use graphforge_ir::{IrLiteral, OntologyMode, TypeId};
-    use graphforge_storage::GraphWriter;
+    use graphforge_storage::{GraphWriter, set_node_properties};
     use parquet::arrow::ArrowWriter;
     use tempfile::TempDir;
 
@@ -618,6 +610,91 @@ mod tests {
                 resource: "text_source_bytes",
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn projection_reads_newest_overlay_row_and_accounts_for_every_fragment() {
+        let dir = TempDir::new().unwrap();
+        let node = uuid(1);
+        let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, 1).unwrap();
+        writer.create_node(node, TypeId(9)).unwrap();
+        writer
+            .set_properties(
+                &node,
+                Some("Person"),
+                HashMap::from([("name".to_owned(), IrLiteral::Str("Alice".to_owned()))]),
+            )
+            .unwrap();
+        writer.flush().unwrap();
+        let updates = HashMap::from([(
+            to_bytes(&node),
+            HashMap::from([("name".to_owned(), IrLiteral::Str("Bob".to_owned()))]),
+        )]);
+        assert_eq!(
+            set_node_properties(dir.path(), "Person", &updates).unwrap(),
+            1
+        );
+
+        let property_files = graphforge_storage::node_property_files(dir.path(), "Person").unwrap();
+        assert_eq!(property_files.len(), 2);
+        let expected_bytes = graphforge_storage::topology_node_files(dir.path())
+            .unwrap()
+            .into_iter()
+            .chain(property_files)
+            .map(|path| std::fs::metadata(path).unwrap().len())
+            .sum::<u64>();
+        let projection =
+            project_text_source(dir.path(), 9, None, TextSearchLimits::default(), || Ok(()))
+                .unwrap();
+
+        assert_eq!(projection.source_bytes, expected_bytes);
+        assert_eq!(projection.documents.len(), 1);
+        assert_eq!(projection.documents[0].fields["name"], "Bob");
+    }
+
+    #[test]
+    fn projection_merges_disjoint_routes_and_rejects_property_collisions() {
+        let dir = TempDir::new().unwrap();
+        let node = uuid(1);
+        let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, 1).unwrap();
+        writer.create_node(node, TypeId(9)).unwrap();
+        writer
+            .set_properties(
+                &node,
+                Some("Primary"),
+                HashMap::from([("name".to_owned(), IrLiteral::Str("Alice".to_owned()))]),
+            )
+            .unwrap();
+        writer.flush().unwrap();
+        let updates = HashMap::from([(
+            to_bytes(&node),
+            HashMap::from([(
+                "summary".to_owned(),
+                IrLiteral::Str("Graph search".to_owned()),
+            )]),
+        )]);
+        assert_eq!(
+            set_node_properties(dir.path(), "Secondary", &updates).unwrap(),
+            1
+        );
+        let projection =
+            project_text_source(dir.path(), 9, None, TextSearchLimits::default(), || Ok(()))
+                .unwrap();
+        assert_eq!(projection.documents[0].fields.len(), 2);
+
+        let collision = HashMap::from([(
+            to_bytes(&node),
+            HashMap::from([("name".to_owned(), IrLiteral::Str("Other".to_owned()))]),
+        )]);
+        assert_eq!(
+            set_node_properties(dir.path(), "Secondary", &collision).unwrap(),
+            1
+        );
+        assert!(matches!(
+            project_text_source(dir.path(), 9, None, TextSearchLimits::default(), || Ok(())),
+            Err(SearchArtifactError::SourceSnapshot { reason })
+                if reason.contains("repeats property")
         ));
     }
 

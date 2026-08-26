@@ -1365,6 +1365,93 @@ where
     visit_property_overlay_batched(dir, stem, false, batch_size, visit)
 }
 
+/// Visit the authenticated newest-wins node-property overlay while retaining
+/// exact physical-fragment evidence for source-byte admission and snapshots.
+///
+/// Every physical fragment is admitted and authenticated once by storage, but
+/// `visit` receives only the newest live row for each UUID in a route. This
+/// keeps consumers from mistaking superseded immutable snapshots for duplicate
+/// logical rows.
+pub fn visit_node_property_overlay_admitted<F>(
+    dir: &Path,
+    batch_size: usize,
+    byte_limit: u64,
+    projected_columns: Option<&std::collections::BTreeSet<String>>,
+    evidence: &mut Vec<AdmittedSourceFile>,
+    mut visit: F,
+) -> Result<u64, DataFusionError>
+where
+    F: FnMut(&str, &RecordBatch) -> Result<bool, DataFusionError>,
+{
+    let inventory = crate::property_overlay::authenticated_property_inventory(dir)
+        .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+    let admitted = inventory
+        .admitted_source_files(crate::property_overlay::PropertyRouteKind::Node)
+        .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+    let total = admitted.iter().try_fold(0_u64, |sum, file| {
+        sum.checked_add(file.byte_length).ok_or_else(|| {
+            DataFusionError::ResourcesExhausted("property source bytes overflow".into())
+        })
+    })?;
+    if total > byte_limit {
+        return Err(DataFusionError::ResourcesExhausted(format!(
+            "property source bytes exceed {byte_limit}"
+        )));
+    }
+
+    let routes = inventory
+        .routes(crate::property_overlay::PropertyRouteKind::Node)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let scratch = tempfile::tempdir().map_err(|error| io_err(&error))?;
+    let mut stopped = false;
+    for route in routes {
+        let mut rows = Vec::with_capacity(batch_size.max(1));
+        inventory
+            .visit_route(
+                crate::property_overlay::PropertyRouteKind::Node,
+                &route,
+                scratch.path(),
+                crate::property_overlay::PropertyOverlayLimits::default(),
+                |mut row| {
+                    if stopped {
+                        return Ok(());
+                    }
+                    if let Some(columns) = projected_columns {
+                        row.values.retain(|name, _| columns.contains(name));
+                    }
+                    rows.push(row);
+                    if rows.len() >= batch_size.max(1) {
+                        let batch = crate::writer::property_snapshots_to_batch(
+                            &route,
+                            false,
+                            std::mem::take(&mut rows),
+                        )?
+                        .ok_or_else(|| {
+                            graphforge_core::GfError::Storage("property batch disappeared".into())
+                        })?;
+                        stopped = !visit(&route, &batch).map_err(|error| {
+                            graphforge_core::GfError::Storage(error.to_string())
+                        })?;
+                    }
+                    Ok(())
+                },
+            )
+            .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+        if !stopped && !rows.is_empty() {
+            let batch = crate::writer::property_snapshots_to_batch(&route, false, rows)
+                .map_err(|error| DataFusionError::Execution(error.to_string()))?
+                .ok_or_else(|| DataFusionError::Execution("property batch disappeared".into()))?;
+            stopped = !visit(&route, &batch)?;
+        }
+        if stopped {
+            break;
+        }
+    }
+    evidence.extend(admitted);
+    Ok(total)
+}
+
 /// Visit an already-enumerated property source set through the same stable file
 /// handles used for byte admission. This prevents pathname replacement between
 /// accounting and Parquet decode and bounds each compressed column chunk before
