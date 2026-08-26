@@ -109,6 +109,14 @@ gf_rust_integration_test(
     deps = _STORAGE_DEPS,
 )
 
+gf_rust_integration_test(
+    name = "property_overlay_scale",
+    srcs = ["tests/property_overlay_scale.rs"],
+    crate = ":graphforge_storage",
+    size = "medium",
+    deps = _STORAGE_DEPS,
+)
+
 test_suite(
     name = "storage_integration_tests",
     tests = [
@@ -119,6 +127,7 @@ test_suite(
         ":graph_delta_journal",
         ":graph_writer",
         ":io_stats",
+        ":property_overlay_scale",
     ],
 )
 

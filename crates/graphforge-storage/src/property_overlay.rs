@@ -479,8 +479,8 @@ impl AuthenticatedPropertyInventory {
         for ((kind, route), fragments) in &mut routes {
             fragments.sort_unstable_by_key(|fragment| fragment.id);
             validate_fragment_id_sequence(fragments.iter().map(|fragment| fragment.id))?;
-            if let Some(newest) = fragments.last() {
-                merge_route_schema(&mut schemas, *kind, route, newest.schema.as_ref())?;
+            for fragment in fragments {
+                merge_route_schema(&mut schemas, *kind, route, fragment.schema.as_ref())?;
             }
         }
         Ok(Self {
@@ -526,13 +526,9 @@ impl AuthenticatedPropertyInventory {
         self.routes
             .get(&(kind, route.to_owned()))
             .map_or(0, |fragments| {
-                let newest_generation = fragments.last().map(|fragment| fragment.id.generation);
-                fragments
-                    .iter()
-                    .filter(|fragment| Some(fragment.id.generation) == newest_generation)
-                    .fold(0usize, |rows, fragment| {
-                        rows.saturating_add(fragment.physical_rows)
-                    })
+                fragments.iter().fold(0usize, |rows, fragment| {
+                    rows.saturating_add(fragment.physical_rows)
+                })
             })
     }
 
@@ -560,76 +556,68 @@ impl AuthenticatedPropertyInventory {
         let budget = Arc::new(LiveByteBudget::new(limits.max_buffered_bytes));
         let failed = Arc::new(Mutex::new(None));
         let decoded = Arc::new(Mutex::new(DecodedRetention::default()));
-        let newest_generation = fragments
-            .last()
-            .expect("an admitted route has at least one fragment")
-            .id
-            .generation;
-        let inputs = fragments
-            .iter()
-            .filter(|fragment| fragment.id.generation == newest_generation)
-            .map(|fragment| {
-                let reader = (|| {
-                    let source = CountingChunkReader {
-                        length: fragment.entry.byte_length,
-                        file: Arc::new(fragment.file.try_clone().map_err(io_error)?),
-                        counts: Arc::clone(&counts),
-                    };
-                    let builder =
-                        ParquetRecordBatchReaderBuilder::try_new(source).map_err(parquet_error)?;
-                    validate_fragment_schema(builder.schema().as_ref(), fragment.id, kind, route)?;
-                    let page_reservation_bytes = validate_parquet_resource_admission(
-                        builder.metadata(),
-                        limits,
-                        &fragment.file,
-                        &counts,
-                    )?;
-                    budget.charge(page_reservation_bytes)?;
-                    {
-                        let mut retention = decoded.lock().expect("property retention lock");
-                        retention.page_peak = retention.page_peak.max(page_reservation_bytes);
-                    }
-                    let reader = builder
-                        .with_batch_size(admitted_batch_rows(limits))
-                        .build()
-                        .map_err(parquet_error)?;
-                    Ok((reader, page_reservation_bytes))
-                })();
-                let (reader, page_reservation_bytes) = match reader {
-                    Ok((reader, page_reservation_bytes)) => {
-                        #[cfg(test)]
-                        {
-                            let current = OPEN_FRAGMENT_READERS.fetch_add(1, Ordering::SeqCst) + 1;
-                            PEAK_OPEN_FRAGMENT_READERS.fetch_max(current, Ordering::SeqCst);
-                        }
-                        (Some(reader), page_reservation_bytes)
-                    }
-                    Err(error) => {
-                        *failed.lock().expect("property failure lock") = Some(error);
-                        (None, 0)
-                    }
+        let inputs = fragments.iter().map(|fragment| {
+            let reader = (|| {
+                let source = CountingChunkReader {
+                    length: fragment.entry.byte_length,
+                    file: Arc::new(fragment.file.try_clone().map_err(io_error)?),
+                    counts: Arc::clone(&counts),
                 };
-                #[cfg(test)]
-                let opened = reader.is_some();
-                (
-                    fragment.id,
-                    0,
-                    0,
-                    PropertyParquetRows {
-                        reader,
-                        current: Vec::new().into_iter(),
-                        uuid_field: kind.uuid_field(),
-                        failed: Arc::clone(&failed),
-                        decoded: Arc::clone(&decoded),
-                        budget: Arc::clone(&budget),
-                        max_row_bytes: limits.max_row_bytes,
-                        page_reservation_bytes,
-                        batch_reservation_bytes: limits.max_buffered_bytes / 4,
-                        #[cfg(test)]
-                        opened,
-                    },
-                )
-            });
+                let builder =
+                    ParquetRecordBatchReaderBuilder::try_new(source).map_err(parquet_error)?;
+                validate_fragment_schema(builder.schema().as_ref(), fragment.id, kind, route)?;
+                let page_reservation_bytes = validate_parquet_resource_admission(
+                    builder.metadata(),
+                    limits,
+                    &fragment.file,
+                    &counts,
+                )?;
+                budget.charge(page_reservation_bytes)?;
+                {
+                    let mut retention = decoded.lock().expect("property retention lock");
+                    retention.page_peak = retention.page_peak.max(page_reservation_bytes);
+                }
+                let reader = builder
+                    .with_batch_size(admitted_batch_rows(limits))
+                    .build()
+                    .map_err(parquet_error)?;
+                Ok((reader, page_reservation_bytes))
+            })();
+            let (reader, page_reservation_bytes) = match reader {
+                Ok((reader, page_reservation_bytes)) => {
+                    #[cfg(test)]
+                    {
+                        let current = OPEN_FRAGMENT_READERS.fetch_add(1, Ordering::SeqCst) + 1;
+                        PEAK_OPEN_FRAGMENT_READERS.fetch_max(current, Ordering::SeqCst);
+                    }
+                    (Some(reader), page_reservation_bytes)
+                }
+                Err(error) => {
+                    *failed.lock().expect("property failure lock") = Some(error);
+                    (None, 0)
+                }
+            };
+            #[cfg(test)]
+            let opened = reader.is_some();
+            (
+                fragment.id,
+                0,
+                0,
+                PropertyParquetRows {
+                    reader,
+                    current: Vec::new().into_iter(),
+                    uuid_field: kind.uuid_field(),
+                    failed: Arc::clone(&failed),
+                    decoded: Arc::clone(&decoded),
+                    budget: Arc::clone(&budget),
+                    max_row_bytes: limits.max_row_bytes,
+                    page_reservation_bytes,
+                    batch_reservation_bytes: limits.max_buffered_bytes / 4,
+                    #[cfg(test)]
+                    opened,
+                },
+            )
+        });
         let mut metrics =
             visit_newest_property_snapshots(inputs, scratch, limits, budget.as_ref(), emit)?;
         if let Some(error) = failed.lock().expect("property failure lock").take() {
@@ -701,6 +689,23 @@ fn merge_route_schema(
         }
         if let Some(prior) = schema.fields.get(field.name()) {
             if prior.as_ref() != field.as_ref() {
+                if prior.name() == field.name()
+                    && prior.data_type() == field.data_type()
+                    && prior.metadata() == field.metadata()
+                {
+                    schema.fields.insert(
+                        field.name().clone(),
+                        Arc::new(
+                            arrow::datatypes::Field::new(
+                                field.name(),
+                                field.data_type().clone(),
+                                prior.is_nullable() || field.is_nullable(),
+                            )
+                            .with_metadata(prior.metadata().clone()),
+                        ),
+                    );
+                    continue;
+                }
                 let compatible_scalar = |data_type: &arrow::datatypes::DataType| {
                     matches!(
                         data_type,
@@ -743,6 +748,26 @@ fn merge_route_schema(
         }
     }
     Ok(())
+}
+
+pub(crate) fn merge_property_route_schemas<'a>(
+    kind: PropertyRouteKind,
+    route: &str,
+    fragments: impl IntoIterator<Item = &'a arrow::datatypes::Schema>,
+) -> Result<arrow::datatypes::SchemaRef, GfError> {
+    let mut schemas = BTreeMap::new();
+    for fragment in fragments {
+        merge_route_schema(&mut schemas, kind, route, fragment)?;
+    }
+    let schema = schemas
+        .remove(&(kind, route.to_owned()))
+        .ok_or_else(|| corrupt("property route has no schema authority"))?;
+    let mut fields = vec![schema.uuid];
+    fields.extend(schema.fields.into_values());
+    Ok(Arc::new(arrow::datatypes::Schema::new_with_metadata(
+        fields,
+        schema.metadata,
+    )))
 }
 
 fn parse_inventory_property_path(
@@ -1230,16 +1255,7 @@ pub fn read_authenticated_property_snapshots_for_inventory(
     let Some(fragments) = inventory.routes.get(&(kind, route.to_owned())) else {
         return Ok((found, metrics));
     };
-    let newest_generation = fragments
-        .last()
-        .expect("an admitted route has at least one fragment")
-        .id
-        .generation;
-    for fragment in fragments
-        .iter()
-        .rev()
-        .filter(|fragment| fragment.id.generation == newest_generation)
-    {
+    for fragment in fragments.iter().rev() {
         let counts = Arc::new(ReadCounts::default());
         let builder = open_counted_retained_property_builder(fragment, Arc::clone(&counts))?;
         validate_fragment_schema(builder.schema().as_ref(), fragment.id, kind, route)?;
@@ -1957,7 +1973,7 @@ fn record_charge(record: &SpoolRecord) -> u64 {
         .saturating_add(values)
 }
 
-fn snapshot_charge(row: &PropertySnapshotRow) -> u64 {
+pub(crate) fn snapshot_charge(row: &PropertySnapshotRow) -> u64 {
     let values = serde_json::to_vec(&row.values).map_or(u64::MAX, |encoded| {
         u64::try_from(encoded.len()).unwrap_or(u64::MAX)
     });
@@ -2355,6 +2371,22 @@ mod tests {
                     values: BTreeMap::new(),
                 }],
             ),
+            (
+                PropertyFragmentId {
+                    generation: 2,
+                    ordinal: 1,
+                },
+                111,
+                1,
+                vec![PropertySnapshotRow {
+                    uuid: uuid_a,
+                    tombstone: false,
+                    values: BTreeMap::from([(
+                        "name".into(),
+                        IrLiteral::Str("later-ordinal".into()),
+                    )]),
+                }],
+            ),
         ];
         let mut rows = Vec::new();
         let budget = LiveByteBudget::new(1024);
@@ -2378,13 +2410,15 @@ mod tests {
             rows.iter().map(|row| row.uuid).collect::<Vec<_>>(),
             vec![uuid_a, uuid_c]
         );
-        assert_eq!(rows[0].values["name"], IrLiteral::Str("new".into()));
+        assert_eq!(
+            rows[0].values["name"],
+            IrLiteral::Str("later-ordinal".into())
+        );
         assert!(rows[1].values.is_empty());
-        assert_eq!(metrics.physical_rows, 5);
-        assert_eq!(metrics.physical_bytes, 606);
-        assert_eq!(metrics.read_calls, 9);
+        assert_eq!(metrics.physical_rows, 6);
+        assert_eq!(metrics.physical_bytes, 717);
         assert_eq!(metrics.logical_rows, 2);
-        assert_eq!(metrics.shadowed_rows, 2);
+        assert_eq!(metrics.shadowed_rows, 3);
         assert_eq!(metrics.tombstones, 1);
         assert!(metrics.spill_runs >= 5);
         assert!(metrics.peak_run_references <= 3);
@@ -2757,7 +2791,7 @@ mod tests {
                 .field_with_name("name")
                 .unwrap()
                 .data_type(),
-            &DataType::Int64
+            &DataType::Struct(crate::writer::heterogeneous_scalar_fields())
         );
         let mut evolved_rows = Vec::new();
         let evolved_metrics = evolved
@@ -2772,14 +2806,16 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_eq!(evolved_rows.len(), 1);
-        assert_eq!(evolved_rows[0].uuid, [5; 16]);
-        assert_eq!(evolved_metrics.fragments_considered, 2);
-        assert_eq!(evolved_metrics.physical_rows, 2);
+        assert_eq!(
+            evolved_rows.iter().map(|row| row.uuid).collect::<Vec<_>>(),
+            vec![[4; 16], [5; 16]]
+        );
+        assert_eq!(evolved_metrics.fragments_considered, 3);
+        assert_eq!(evolved_metrics.physical_rows, 3);
         assert_eq!(evolved_metrics.tombstones, 1);
         assert_eq!(
             evolved.route_row_upper_bound(PropertyRouteKind::Node, "Person"),
-            2
+            3
         );
         let (targeted, targeted_metrics) = read_authenticated_property_snapshots_for_inventory(
             &evolved,
@@ -2788,8 +2824,11 @@ mod tests {
             &BTreeSet::from([[4; 16], [5; 16], [6; 16]]),
         )
         .unwrap();
-        assert_eq!(targeted.keys().copied().collect::<Vec<_>>(), vec![[5; 16]]);
-        assert_eq!(targeted_metrics.fragments_considered, 2);
+        assert_eq!(
+            targeted.keys().copied().collect::<Vec<_>>(),
+            vec![[4; 16], [5; 16]]
+        );
+        assert_eq!(targeted_metrics.fragments_considered, 3);
 
         fs::write(&path, b"same-name attacker replacement").unwrap();
         assert!(
@@ -2941,7 +2980,7 @@ mod tests {
     }
 
     #[test]
-    fn targeted_reader_excludes_retired_generation_rows_from_logical_validation() {
+    fn targeted_reader_validates_older_generations_after_target_resolves() {
         let dir = TempDir::new().unwrap();
         let route_dir = dir.path().join("properties/Person");
         fs::create_dir_all(&route_dir).unwrap();
@@ -2988,19 +3027,14 @@ mod tests {
             writer.write(&batch).unwrap();
             writer.close().unwrap();
         }
-        let (rows, metrics) = read_authenticated_property_snapshots_for(
+        let error = read_authenticated_property_snapshots_for(
             dir.path(),
             PropertyRouteKind::Node,
             "Person",
             &BTreeSet::from([[9; 16]]),
         )
-        .unwrap();
-        assert_eq!(rows.keys().copied().collect::<Vec<_>>(), vec![[9; 16]]);
-        assert_eq!(metrics.fragments_considered, 1);
-        assert_eq!(
-            metrics.physical_rows, 2,
-            "one current row is validated and decoded"
-        );
+        .unwrap_err();
+        assert!(error.to_string().contains("strictly sorted"), "{error}");
     }
 
     #[test]
@@ -3221,5 +3255,27 @@ mod tests {
             byte_deltas[1] <= byte_deltas[0].saturating_mul(2).saturating_add(8_192),
             "first differences must reject superlinear repeated reads"
         );
+    }
+
+    #[test]
+    fn route_schema_unions_nullability_and_retains_historical_fields() {
+        let older = Schema::new(vec![
+            Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+            Field::new("historical", DataType::Utf8, false),
+            Field::new("shared", DataType::Int64, false),
+        ]);
+        let newer = Schema::new(vec![
+            Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+            Field::new("newer", DataType::Boolean, true),
+            Field::new("shared", DataType::Int64, true),
+        ]);
+        let merged =
+            merge_property_route_schemas(PropertyRouteKind::Node, "Person", [&older, &newer])
+                .unwrap();
+        assert!(merged.field_with_name("historical").is_ok());
+        assert!(merged.field_with_name("newer").is_ok());
+        let shared = merged.field_with_name("shared").unwrap();
+        assert_eq!(shared.data_type(), &DataType::Int64);
+        assert!(shared.is_nullable());
     }
 }

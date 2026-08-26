@@ -954,7 +954,7 @@ fn stream_replay_property_route(
     limits: crate::graph_delta_journal::GraphDeltaJournalLimits,
     edge: bool,
     route: &str,
-    scratch: &Path,
+    _scratch: &Path,
 ) -> Result<(), GfError> {
     let kind = if edge {
         crate::PropertyRouteKind::Edge
@@ -966,70 +966,87 @@ fn stream_replay_property_route(
     } else {
         &overlay.node_properties
     };
-    let mut fragment =
-        open_replay_property_fragment(target, inventory, operations, kind, edge, route)?;
-    let mut seen = HashSet::new();
-    inventory.visit_route(
-        kind,
-        route,
-        scratch,
-        crate::PropertyOverlayLimits {
-            max_buffered_rows: limits.max_batch_rows,
-            ..crate::PropertyOverlayLimits::default()
-        },
-        |mut row| {
-            let uuid = uuid::Uuid::from_bytes(row.uuid).hyphenated().to_string();
-            let deleted = if edge {
-                overlay.edges.get(&uuid).is_some_and(Option::is_none)
-            } else {
-                overlay.nodes.get(&uuid).is_some_and(Option::is_none)
-            };
-            if deleted {
-                row.tombstone = true;
-                row.values.clear();
-                seen.insert(uuid);
-                return write_replay_property_snapshot(
-                    &mut fragment.writer,
-                    &fragment.logical_schema,
-                    &fragment.physical_schema,
-                    row,
-                );
-            }
-            let mut values = std::mem::take(&mut row.values)
-                .into_iter()
-                .collect::<HashMap<_, _>>();
-            apply_streamed_property_ops(&uuid, route, operations, &mut values);
-            row.values = values.into_iter().collect();
-            seen.insert(uuid);
-            write_replay_property_snapshot(
-                &mut fragment.writer,
-                &fragment.logical_schema,
-                &fragment.physical_schema,
-                row,
-            )
-        },
-    )?;
-    for (entity_uuid, operation_route, _) in operations.keys() {
-        if operation_route != route || seen.contains(entity_uuid) {
-            continue;
+    let _ = limits; // targeted lookup is bounded by the touched UUID set.
+    let is_deleted = |uuid: &str| {
+        if edge {
+            overlay.edges.get(uuid).is_some_and(Option::is_none)
+        } else {
+            overlay.nodes.get(uuid).is_some_and(Option::is_none)
         }
-        let mut values = HashMap::new();
-        apply_streamed_property_ops(entity_uuid, route, operations, &mut values);
-        if values.is_empty() {
-            continue;
-        }
-        let uuid = uuid::Uuid::parse_str(entity_uuid)
+    };
+    let mut target_names = operations
+        .keys()
+        .filter(|(_, operation_route, _)| operation_route == route)
+        .map(|(uuid, _, _)| uuid.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    if edge {
+        target_names.extend(
+            overlay
+                .edges
+                .iter()
+                .filter(|(_, row)| row.is_none())
+                .map(|(uuid, _)| uuid.clone()),
+        );
+    } else {
+        target_names.extend(
+            overlay
+                .nodes
+                .iter()
+                .filter(|(_, row)| row.is_none())
+                .map(|(uuid, _)| uuid.clone()),
+        );
+    }
+    let targets = target_names
+        .iter()
+        .map(|uuid| {
+            uuid::Uuid::parse_str(uuid)
+                .map(uuid::Uuid::into_bytes)
+                .map_err(pq_err)
+        })
+        .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
+    let (mut baseline, _) =
+        crate::property_overlay::read_authenticated_property_snapshots_for_inventory(
+            inventory, kind, route, &targets,
+        )?;
+    let mut rows = Vec::with_capacity(target_names.len());
+    for entity_uuid in target_names {
+        let uuid = uuid::Uuid::parse_str(&entity_uuid)
             .map_err(pq_err)?
             .into_bytes();
+        if is_deleted(&entity_uuid) {
+            rows.push(crate::PropertySnapshotRow {
+                uuid,
+                tombstone: true,
+                values: BTreeMap::new(),
+            });
+            continue;
+        }
+        let existed = baseline.contains_key(&uuid);
+        let mut values = baseline
+            .remove(&uuid)
+            .map(|row| row.values.into_iter().collect())
+            .unwrap_or_default();
+        apply_streamed_property_ops(&entity_uuid, route, operations, &mut values);
+        // A REMOVE against a UUID with no prior row remains a no-op.
+        if existed || !values.is_empty() {
+            rows.push(crate::PropertySnapshotRow {
+                uuid,
+                tombstone: false,
+                values: values.into_iter().collect(),
+            });
+        }
+    }
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let mut fragment =
+        open_replay_property_fragment(target, inventory, operations, kind, edge, route)?;
+    for row in rows {
         write_replay_property_snapshot(
             &mut fragment.writer,
             &fragment.logical_schema,
             &fragment.physical_schema,
-            crate::PropertySnapshotRow {
-                uuid,
-                tombstone: false,
-                values: values.into_iter().collect(),
-            },
+            row,
         )?;
     }
     fragment.writer.close().map_err(pq_err)?;
@@ -1052,7 +1069,7 @@ fn write_replay_property_snapshot(
         props: values,
     };
     for field in logical_schema.fields().iter().skip(1) {
-        let column_type = col_type_from_data_type(field.data_type()).ok_or_else(|| {
+        let column_type = col_type_from_field(field).ok_or_else(|| {
             pq_err(format!(
                 "unsupported canonical property type for {}",
                 field.name()
@@ -1105,7 +1122,7 @@ fn replay_property_schema<'a>(
             continue;
         };
         if let Some(existing) = fields.iter().find(|field| field.name() == key) {
-            let existing_type = col_type_from_data_type(existing.data_type())
+            let existing_type = col_type_from_field(existing)
                 .ok_or_else(|| pq_err(format!("unsupported canonical property type for {key}")))?;
             if existing_type != value_type
                 && !(existing_type == ColType::HetScalar && value_type.is_scalar())
@@ -1154,6 +1171,54 @@ fn col_type_from_data_type(data_type: &DataType) -> Option<ColType> {
     }
 }
 
+fn col_type_from_field(field: &Field) -> Option<ColType> {
+    let Some(extension_name) = field.metadata().get("ARROW:extension:name") else {
+        return col_type_from_data_type(field.data_type());
+    };
+    let geometry = match extension_name.as_str() {
+        "geoarrow.point" => SpatialGeometryType::Point,
+        "geoarrow.linestring" => SpatialGeometryType::LineString,
+        "geoarrow.polygon" => SpatialGeometryType::Polygon,
+        "geoarrow.multipoint" => SpatialGeometryType::MultiPoint,
+        "geoarrow.multilinestring" => SpatialGeometryType::MultiLineString,
+        "geoarrow.multipolygon" => SpatialGeometryType::MultiPolygon,
+        _ => [
+            SpatialGeometryType::Point,
+            SpatialGeometryType::LineString,
+            SpatialGeometryType::Polygon,
+            SpatialGeometryType::MultiPoint,
+            SpatialGeometryType::MultiLineString,
+            SpatialGeometryType::MultiPolygon,
+        ]
+        .into_iter()
+        .find(|geometry| {
+            spatial_data_type(&SpatialType {
+                geometry: *geometry,
+                crs: SpatialCrs::Epsg4326,
+            }) == *field.data_type()
+        })?,
+    };
+    let extension_metadata = field.metadata().get("ARROW:extension:metadata")?;
+    let crs_name = serde_json::from_str::<serde_json::Value>(extension_metadata)
+        .ok()?
+        .get("crs")?
+        .as_str()?
+        .to_owned();
+    let crs = match crs_name.as_str() {
+        "EPSG:4326" => SpatialCrs::Epsg4326,
+        "EPSG:3857" => SpatialCrs::Epsg3857,
+        _ => SpatialCrs::Preserved(crs_name),
+    };
+    let spatial_type = SpatialType { geometry, crs };
+    (spatial_data_type(&spatial_type) == *field.data_type()).then(|| {
+        ColType::Spatial(
+            spatial_type,
+            Some(extension_name.clone()),
+            Some(extension_metadata.clone()),
+        )
+    })
+}
+
 fn write_property_rows_with_schema<R: PropRowLike>(
     writer: &mut parquet::arrow::ArrowWriter<fs::File>,
     schema: &Schema,
@@ -1163,13 +1228,27 @@ fn write_property_rows_with_schema<R: PropRowLike>(
     if rows.is_empty() {
         return Ok(());
     }
+    writer
+        .write(&property_rows_batch_with_schema(
+            schema,
+            uuid_field_name,
+            rows,
+        )?)
+        .map_err(pq_err)
+}
+
+fn property_rows_batch_with_schema<R: PropRowLike>(
+    schema: &Schema,
+    uuid_field_name: &str,
+    rows: &[R],
+) -> Result<RecordBatch, GfError> {
     let mut columns: Vec<ArrayRef> = Vec::with_capacity(schema.fields().len());
     columns.push(Arc::new(
         FixedSizeBinaryArray::try_from_iter(rows.iter().map(|row| row.uuid_bytes().to_vec()))
             .map_err(pq_err)?,
     ));
     for field in schema.fields().iter().skip(1) {
-        let column_type = col_type_from_data_type(field.data_type()).ok_or_else(|| {
+        let column_type = col_type_from_field(field).ok_or_else(|| {
             pq_err(format!(
                 "unsupported canonical property type for {}",
                 field.name()
@@ -1181,7 +1260,7 @@ fn write_property_rows_with_schema<R: PropRowLike>(
     if batch.schema().field(0).name() != uuid_field_name {
         return Err(pq_err("canonical property UUID field mismatch"));
     }
-    writer.write(&batch).map_err(pq_err)
+    Ok(batch)
 }
 
 /// Materialize a verified base-plus-GFDR logical state as canonical Parquet in
@@ -2207,17 +2286,30 @@ impl GraphWriter {
         }
         let buffered: Vec<(String, Vec<PropRow>)> = self.properties.drain().collect();
         for (stem, new_rows) in buffered {
-            let rows = merge_node_property_window(new_rows);
-            let (schema, cols) = build_property_columns(&stem, &rows)?;
-            let schema = self.authenticated_route_schema(Arc::new(schema), &stem);
+            let (rows, authority, authority_generation_uuid) =
+                complete_node_property_window(staged, &self.dir, &stem, new_rows)?;
+            let (inferred, _) = build_property_columns(&stem, &rows)?;
+            let inferred = self.authenticated_route_schema(Arc::new(inferred), &stem);
+            let schema = merge_property_write_schema(
+                crate::PropertyRouteKind::Node,
+                &stem,
+                inferred,
+                authority,
+            )?;
+            let cols =
+                property_rows_batch_with_schema(schema.as_ref(), NODE_PROPERTY_UUID_FIELD, &rows)?
+                    .columns()
+                    .to_vec();
             stage_property_fragment(
                 staged,
                 &self.dir,
                 crate::property_overlay::PropertyRouteKind::Node,
                 &stem,
                 &schema,
+                schema.as_ref(),
                 cols,
-                PropertyFragmentStage::patch(),
+                PropertyFragmentStage::live(),
+                authority_generation_uuid,
             )?;
         }
         Ok(())
@@ -2232,22 +2324,35 @@ impl GraphWriter {
         }
         let buffered: Vec<(String, Vec<EdgePropRow>)> = self.edge_properties.drain().collect();
         for (stem, new_rows) in buffered {
-            let rows = merge_edge_property_window(new_rows);
-            let (schema, cols) = build_property_columns_keyed(
+            let (rows, authority, authority_generation_uuid) =
+                complete_edge_property_window(staged, &self.dir, &stem, new_rows)?;
+            let (inferred, _) = build_property_columns_keyed(
                 EDGE_PROPERTY_UUID_FIELD,
                 "graphforge.rel_type",
                 &stem,
                 &rows,
             )?;
-            let schema = self.authenticated_route_schema(Arc::new(schema), &stem);
+            let inferred = self.authenticated_route_schema(Arc::new(inferred), &stem);
+            let schema = merge_property_write_schema(
+                crate::PropertyRouteKind::Edge,
+                &stem,
+                inferred,
+                authority,
+            )?;
+            let cols =
+                property_rows_batch_with_schema(schema.as_ref(), EDGE_PROPERTY_UUID_FIELD, &rows)?
+                    .columns()
+                    .to_vec();
             stage_property_fragment(
                 staged,
                 &self.dir,
                 crate::property_overlay::PropertyRouteKind::Edge,
                 &stem,
                 &schema,
+                schema.as_ref(),
                 cols,
-                PropertyFragmentStage::patch(),
+                PropertyFragmentStage::live(),
+                authority_generation_uuid,
             )?;
         }
         Ok(())
@@ -2271,27 +2376,6 @@ impl GraphWriter {
             _ => schema,
         }
     }
-}
-
-fn preserve_semantic_route_metadata(
-    schema: SchemaRef,
-    existing: Option<&HashMap<String, String>>,
-) -> SchemaRef {
-    let Some(existing) = existing else {
-        return schema;
-    };
-    let mut metadata = schema.metadata().clone();
-    for key in [
-        crate::SEMANTIC_ROUTE_METADATA_KEY,
-        crate::SEMANTIC_COMPOSITION_METADATA_KEY,
-    ] {
-        if !metadata.contains_key(key)
-            && let Some(value) = existing.get(key)
-        {
-            metadata.insert(key.to_owned(), value.clone());
-        }
-    }
-    Arc::new(Schema::new_with_metadata(schema.fields().clone(), metadata))
 }
 
 // ---------------------------------------------------------------------------
@@ -2928,6 +3012,18 @@ fn append_coordinate(builder: &mut arrow::array::StructBuilder, coordinate: [f64
     builder.append(true);
 }
 
+fn append_null_coordinate(builder: &mut arrow::array::StructBuilder) {
+    builder
+        .field_builder::<Float64Builder>(0)
+        .expect("canonical x builder")
+        .append_null();
+    builder
+        .field_builder::<Float64Builder>(1)
+        .expect("canonical y builder")
+        .append_null();
+    builder.append(false);
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "six canonical GeoArrow nesting shapes share one exhaustive writer"
@@ -2951,7 +3047,7 @@ fn build_spatial_array<R: PropRowLike>(
                     })) if observed == spatial_type => {
                         append_coordinate(&mut builder, *coordinate);
                     }
-                    _ => builder.append(false),
+                    _ => append_null_coordinate(&mut builder),
                 }
             }
             Arc::new(builder.finish())
@@ -3982,24 +4078,25 @@ fn stage_set_node_properties_from_inventory(
     updates: &HashMap<[u8; 16], HashMap<String, IrLiteral>>,
 ) -> Result<u64, GfError> {
     let targets = updates.keys().copied().collect();
-    let (mut existing, _) = inventory.map_or_else(
-        || {
-            crate::property_overlay::read_authenticated_property_snapshots_for(
+    let owned_inventory;
+    let inventory = match inventory {
+        Some(inventory) => inventory,
+        None => {
+            owned_inventory = crate::property_overlay::authenticated_property_inventory_for_route(
                 dir,
                 crate::PropertyRouteKind::Node,
                 stem,
-                &targets,
-            )
-        },
-        |inventory| {
-            crate::property_overlay::read_authenticated_property_snapshots_for_inventory(
-                inventory,
-                crate::PropertyRouteKind::Node,
-                stem,
-                &targets,
-            )
-        },
-    )?;
+            )?;
+            &owned_inventory
+        }
+    };
+    let (mut existing, _) =
+        crate::property_overlay::read_authenticated_property_snapshots_for_inventory(
+            inventory,
+            crate::PropertyRouteKind::Node,
+            stem,
+            &targets,
+        )?;
     existing.extend(pending_property_snapshots(
         staged,
         dir,
@@ -4018,7 +4115,14 @@ fn stage_set_node_properties_from_inventory(
         .into_iter()
         .filter(|row| updates.contains_key(&row.node_uuid))
         .collect::<Vec<_>>();
-    stage_node_property_file(staged, dir, stem, &rows, None)?;
+    stage_node_property_file(
+        staged,
+        dir,
+        stem,
+        &rows,
+        inventory.route_schema(crate::PropertyRouteKind::Node, stem),
+        inventory.generation_uuid(),
+    )?;
     Ok(touched)
 }
 
@@ -4036,7 +4140,7 @@ fn pending_property_snapshots(
         .property_window_rows(kind, route)
         .map(|rows| {
             rows.iter()
-                .map(|(uuid, row)| (*uuid, row.snapshot.clone()))
+                .map(|(uuid, row)| (*uuid, row.clone()))
                 .collect()
         })
         .unwrap_or_default())
@@ -4077,32 +4181,35 @@ fn stage_remove_node_properties_from_inventory(
     removals: &HashMap<[u8; 16], HashSet<String>>,
 ) -> Result<u64, GfError> {
     let targets = removals.keys().copied().collect();
-    let (mut existing, _) = inventory.map_or_else(
-        || {
-            crate::property_overlay::read_authenticated_property_snapshots_for(
+    let owned_inventory;
+    let inventory = match inventory {
+        Some(inventory) => inventory,
+        None => {
+            owned_inventory = crate::property_overlay::authenticated_property_inventory_for_route(
                 dir,
                 crate::PropertyRouteKind::Node,
                 stem,
-                &targets,
-            )
-        },
-        |inventory| {
-            crate::property_overlay::read_authenticated_property_snapshots_for_inventory(
-                inventory,
-                crate::PropertyRouteKind::Node,
-                stem,
-                &targets,
-            )
-        },
-    )?;
+            )?;
+            &owned_inventory
+        }
+    };
+    let (mut existing, _) =
+        crate::property_overlay::read_authenticated_property_snapshots_for_inventory(
+            inventory,
+            crate::PropertyRouteKind::Node,
+            stem,
+            &targets,
+        )?;
     existing.extend(pending_property_snapshots(
         staged,
         dir,
         crate::property_overlay::PropertyRouteKind::Node,
         stem,
     )?);
+    // Preserve a pending entity-delete tombstone across a later REMOVE.
     let rows = existing
         .into_values()
+        .filter(|row| !row.tombstone)
         .map(|row| PropRow {
             node_uuid: row.uuid,
             props: row.values.into_iter().collect(),
@@ -4113,7 +4220,14 @@ fn stage_remove_node_properties_from_inventory(
         .into_iter()
         .filter(|row| removals.contains_key(&row.node_uuid))
         .collect::<Vec<_>>();
-    stage_node_property_file(staged, dir, stem, &rows, None)?;
+    stage_node_property_file(
+        staged,
+        dir,
+        stem,
+        &rows,
+        inventory.route_schema(crate::PropertyRouteKind::Node, stem),
+        inventory.generation_uuid(),
+    )?;
     Ok(touched)
 }
 
@@ -4154,24 +4268,25 @@ fn stage_set_edge_properties_from_inventory(
     updates: &HashMap<[u8; 16], HashMap<String, IrLiteral>>,
 ) -> Result<u64, GfError> {
     let targets = updates.keys().copied().collect();
-    let (mut existing, _) = inventory.map_or_else(
-        || {
-            crate::property_overlay::read_authenticated_property_snapshots_for(
+    let owned_inventory;
+    let inventory = match inventory {
+        Some(inventory) => inventory,
+        None => {
+            owned_inventory = crate::property_overlay::authenticated_property_inventory_for_route(
                 dir,
                 crate::PropertyRouteKind::Edge,
                 rel_stem,
-                &targets,
-            )
-        },
-        |inventory| {
-            crate::property_overlay::read_authenticated_property_snapshots_for_inventory(
-                inventory,
-                crate::PropertyRouteKind::Edge,
-                rel_stem,
-                &targets,
-            )
-        },
-    )?;
+            )?;
+            &owned_inventory
+        }
+    };
+    let (mut existing, _) =
+        crate::property_overlay::read_authenticated_property_snapshots_for_inventory(
+            inventory,
+            crate::PropertyRouteKind::Edge,
+            rel_stem,
+            &targets,
+        )?;
     existing.extend(pending_property_snapshots(
         staged,
         dir,
@@ -4190,7 +4305,14 @@ fn stage_set_edge_properties_from_inventory(
         .into_iter()
         .filter(|row| updates.contains_key(&row.edge_uuid))
         .collect::<Vec<_>>();
-    stage_edge_property_file(staged, dir, rel_stem, &rows, None)?;
+    stage_edge_property_file(
+        staged,
+        dir,
+        rel_stem,
+        &rows,
+        inventory.route_schema(crate::PropertyRouteKind::Edge, rel_stem),
+        inventory.generation_uuid(),
+    )?;
     Ok(touched)
 }
 
@@ -4230,32 +4352,37 @@ fn stage_remove_edge_properties_from_inventory(
     removals: &HashMap<[u8; 16], HashSet<String>>,
 ) -> Result<u64, GfError> {
     let targets = removals.keys().copied().collect();
-    let (mut existing, _) = inventory.map_or_else(
-        || {
-            crate::property_overlay::read_authenticated_property_snapshots_for(
+    let owned_inventory;
+    let inventory = match inventory {
+        Some(inventory) => inventory,
+        None => {
+            owned_inventory = crate::property_overlay::authenticated_property_inventory_for_route(
                 dir,
                 crate::PropertyRouteKind::Edge,
                 rel_stem,
-                &targets,
-            )
-        },
-        |inventory| {
-            crate::property_overlay::read_authenticated_property_snapshots_for_inventory(
-                inventory,
-                crate::PropertyRouteKind::Edge,
-                rel_stem,
-                &targets,
-            )
-        },
-    )?;
+            )?;
+            &owned_inventory
+        }
+    };
+    let (mut existing, _) =
+        crate::property_overlay::read_authenticated_property_snapshots_for_inventory(
+            inventory,
+            crate::PropertyRouteKind::Edge,
+            rel_stem,
+            &targets,
+        )?;
     existing.extend(pending_property_snapshots(
         staged,
         dir,
         crate::property_overlay::PropertyRouteKind::Edge,
         rel_stem,
     )?);
+    // REMOVE cannot resurrect a row deleted earlier in this transaction.  The
+    // already-staged tombstone remains authoritative; only an explicit SET may
+    // turn that UUID live again.
     let rows = existing
         .into_values()
+        .filter(|row| !row.tombstone)
         .map(|row| EdgePropRow {
             edge_uuid: row.uuid,
             props: row.values.into_iter().collect(),
@@ -4266,7 +4393,14 @@ fn stage_remove_edge_properties_from_inventory(
         .into_iter()
         .filter(|row| removals.contains_key(&row.edge_uuid))
         .collect::<Vec<_>>();
-    stage_edge_property_file(staged, dir, rel_stem, &rows, None)?;
+    stage_edge_property_file(
+        staged,
+        dir,
+        rel_stem,
+        &rows,
+        inventory.route_schema(crate::PropertyRouteKind::Edge, rel_stem),
+        inventory.generation_uuid(),
+    )?;
     Ok(touched)
 }
 
@@ -4348,21 +4482,32 @@ fn stage_node_property_file(
     dir: &Path,
     stem: &str,
     rows: &[PropRow],
-    metadata: Option<&HashMap<String, String>>,
+    authority: Option<SchemaRef>,
+    authority_generation_uuid: Option<uuid::Uuid>,
 ) -> Result<(), GfError> {
     if rows.is_empty() {
         return Ok(());
     }
-    let (schema, cols) = build_property_columns(stem, rows)?;
-    let schema = preserve_semantic_route_metadata(Arc::new(schema), metadata);
+    let (schema, _) = build_property_columns(stem, rows)?;
+    let schema = merge_property_write_schema(
+        crate::PropertyRouteKind::Node,
+        stem,
+        Arc::new(schema),
+        authority,
+    )?;
+    let cols = property_rows_batch_with_schema(schema.as_ref(), NODE_PROPERTY_UUID_FIELD, rows)?
+        .columns()
+        .to_vec();
     stage_property_fragment(
         staged,
         dir,
         crate::property_overlay::PropertyRouteKind::Node,
         stem,
         &schema,
+        schema.as_ref(),
         cols,
-        PropertyFragmentStage::replace(),
+        PropertyFragmentStage::live(),
+        authority_generation_uuid,
     )
 }
 
@@ -4373,22 +4518,33 @@ fn stage_edge_property_file(
     dir: &Path,
     stem: &str,
     rows: &[EdgePropRow],
-    metadata: Option<&HashMap<String, String>>,
+    authority: Option<SchemaRef>,
+    authority_generation_uuid: Option<uuid::Uuid>,
 ) -> Result<(), GfError> {
     if rows.is_empty() {
         return Ok(());
     }
-    let (schema, cols) =
+    let (schema, _) =
         build_property_columns_keyed(EDGE_PROPERTY_UUID_FIELD, "graphforge.rel_type", stem, rows)?;
-    let schema = preserve_semantic_route_metadata(Arc::new(schema), metadata);
+    let schema = merge_property_write_schema(
+        crate::PropertyRouteKind::Edge,
+        stem,
+        Arc::new(schema),
+        authority,
+    )?;
+    let cols = property_rows_batch_with_schema(schema.as_ref(), EDGE_PROPERTY_UUID_FIELD, rows)?
+        .columns()
+        .to_vec();
     stage_property_fragment(
         staged,
         dir,
         crate::property_overlay::PropertyRouteKind::Edge,
         stem,
         &schema,
+        schema.as_ref(),
         cols,
-        PropertyFragmentStage::replace(),
+        PropertyFragmentStage::live(),
+        authority_generation_uuid,
     )
 }
 
@@ -4418,6 +4574,123 @@ fn merge_edge_property_window(rows: Vec<EdgePropRow>) -> Vec<EdgePropRow> {
         .collect()
 }
 
+fn merge_property_write_schema(
+    kind: crate::PropertyRouteKind,
+    route: &str,
+    inferred: SchemaRef,
+    authority: Option<SchemaRef>,
+) -> Result<SchemaRef, GfError> {
+    let mut schemas = authority.into_iter().collect::<Vec<_>>();
+    schemas.push(inferred);
+    crate::property_overlay::merge_property_route_schemas(
+        kind,
+        route,
+        schemas.iter().map(AsRef::as_ref),
+    )
+}
+
+fn complete_node_property_window(
+    staged: &RewriteBatch,
+    dir: &Path,
+    route: &str,
+    rows: Vec<PropRow>,
+) -> Result<(Vec<PropRow>, Option<SchemaRef>, Option<uuid::Uuid>), GfError> {
+    let rows = merge_node_property_window(rows);
+    let targets = rows.iter().map(|row| row.node_uuid).collect();
+    let inventory = crate::property_overlay::authenticated_property_inventory_for_route(
+        dir,
+        crate::PropertyRouteKind::Node,
+        route,
+    )?;
+    let (mut complete, _) = crate::read_authenticated_property_snapshots_for_inventory(
+        &inventory,
+        crate::PropertyRouteKind::Node,
+        route,
+        &targets,
+    )?;
+    complete.extend(pending_property_snapshots(
+        staged,
+        dir,
+        crate::PropertyRouteKind::Node,
+        route,
+    )?);
+    for row in rows {
+        let complete =
+            complete
+                .entry(row.node_uuid)
+                .or_insert_with(|| crate::PropertySnapshotRow {
+                    uuid: row.node_uuid,
+                    tombstone: false,
+                    values: BTreeMap::new(),
+                });
+        complete.tombstone = false;
+        complete.values.extend(row.props);
+    }
+    Ok((
+        targets
+            .into_iter()
+            .filter_map(|uuid| complete.remove(&uuid))
+            .map(|row| PropRow {
+                node_uuid: row.uuid,
+                props: row.values.into_iter().collect(),
+            })
+            .collect(),
+        inventory.route_schema(crate::PropertyRouteKind::Node, route),
+        inventory.generation_uuid(),
+    ))
+}
+
+fn complete_edge_property_window(
+    staged: &RewriteBatch,
+    dir: &Path,
+    route: &str,
+    rows: Vec<EdgePropRow>,
+) -> Result<(Vec<EdgePropRow>, Option<SchemaRef>, Option<uuid::Uuid>), GfError> {
+    let rows = merge_edge_property_window(rows);
+    let targets = rows.iter().map(|row| row.edge_uuid).collect();
+    let inventory = crate::property_overlay::authenticated_property_inventory_for_route(
+        dir,
+        crate::PropertyRouteKind::Edge,
+        route,
+    )?;
+    let (mut complete, _) = crate::read_authenticated_property_snapshots_for_inventory(
+        &inventory,
+        crate::PropertyRouteKind::Edge,
+        route,
+        &targets,
+    )?;
+    complete.extend(pending_property_snapshots(
+        staged,
+        dir,
+        crate::PropertyRouteKind::Edge,
+        route,
+    )?);
+    for row in rows {
+        let complete =
+            complete
+                .entry(row.edge_uuid)
+                .or_insert_with(|| crate::PropertySnapshotRow {
+                    uuid: row.edge_uuid,
+                    tombstone: false,
+                    values: BTreeMap::new(),
+                });
+        complete.tombstone = false;
+        complete.values.extend(row.props);
+    }
+    Ok((
+        targets
+            .into_iter()
+            .filter_map(|uuid| complete.remove(&uuid))
+            .map(|row| EdgePropRow {
+                edge_uuid: row.uuid,
+                props: row.values.into_iter().collect(),
+            })
+            .collect(),
+        inventory.route_schema(crate::PropertyRouteKind::Edge, route),
+        inventory.generation_uuid(),
+    ))
+}
+
 pub(crate) fn stage_property_tombstones<S: std::hash::BuildHasher>(
     staged: &mut RewriteBatch,
     dir: &Path,
@@ -4428,6 +4701,8 @@ pub(crate) fn stage_property_tombstones<S: std::hash::BuildHasher>(
     if uuids.is_empty() {
         return Ok(());
     }
+    let inventory =
+        crate::property_overlay::authenticated_property_inventory_for_route(dir, kind, route)?;
     let mut uuids = uuids.iter().copied().collect::<Vec<_>>();
     uuids.sort_unstable();
     let uuid_field = match kind {
@@ -4450,8 +4725,10 @@ pub(crate) fn stage_property_tombstones<S: std::hash::BuildHasher>(
         kind,
         route,
         &schema,
+        schema.as_ref(),
         vec![Arc::new(column)],
         PropertyFragmentStage::tombstone(),
+        inventory.generation_uuid(),
     )
 }
 
@@ -4462,29 +4739,15 @@ pub(crate) fn stage_property_tombstones<S: std::hash::BuildHasher>(
 #[derive(Clone, Copy)]
 struct PropertyFragmentStage {
     tombstone: bool,
-    mode: crate::staging::PropertyWindowMode,
 }
 
 impl PropertyFragmentStage {
-    const fn patch() -> Self {
-        Self {
-            tombstone: false,
-            mode: crate::staging::PropertyWindowMode::Patch,
-        }
-    }
-
-    const fn replace() -> Self {
-        Self {
-            tombstone: false,
-            mode: crate::staging::PropertyWindowMode::Replace,
-        }
+    const fn live() -> Self {
+        Self { tombstone: false }
     }
 
     const fn tombstone() -> Self {
-        Self {
-            tombstone: true,
-            mode: crate::staging::PropertyWindowMode::Replace,
-        }
+        Self { tombstone: true }
     }
 }
 
@@ -4494,10 +4757,43 @@ fn stage_property_fragment(
     kind: crate::property_overlay::PropertyRouteKind,
     route: &str,
     schema: &SchemaRef,
-    mut cols: Vec<ArrayRef>,
+    input_schema: &Schema,
+    cols: Vec<ArrayRef>,
     stage: PropertyFragmentStage,
+    authority_generation_uuid: Option<uuid::Uuid>,
 ) -> Result<(), GfError> {
     use crate::property_overlay::PROPERTY_TOMBSTONE_FIELD;
+    if input_schema.fields().len() != cols.len() {
+        return Err(pq_err("property fragment schema/column count mismatch"));
+    }
+    let mut by_name = HashMap::with_capacity(cols.len());
+    for (field, column) in input_schema.fields().iter().zip(cols) {
+        if column.data_type() != field.data_type() {
+            return Err(pq_err(
+                "property fragment column type conflicts with its field",
+            ));
+        }
+        if by_name.insert(field.name().as_str(), column).is_some() {
+            return Err(pq_err("property fragment contains duplicate fields"));
+        }
+    }
+    let mut cols = schema
+        .fields()
+        .iter()
+        .map(|field| {
+            by_name.remove(field.name().as_str()).ok_or_else(|| {
+                pq_err(format!(
+                    "property fragment is missing field {}",
+                    field.name()
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if !by_name.is_empty() {
+        return Err(pq_err(
+            "property fragment contains fields outside authority schema",
+        ));
+    }
     let mut fields = schema
         .fields()
         .iter()
@@ -4509,48 +4805,91 @@ fn stage_property_fragment(
     );
     let rows = cols.first().map_or(0, |column| column.len());
     cols.insert(1, Arc::new(BooleanArray::from(vec![stage.tombstone; rows])));
-    let metadata = schema.metadata().clone();
-    let schema = Arc::new(Schema::new_with_metadata(fields, metadata.clone()));
+    let logical_schema = Arc::clone(schema);
+    let schema = Arc::new(Schema::new_with_metadata(
+        fields,
+        logical_schema.metadata().clone(),
+    ));
     let batch = RecordBatch::try_new(schema, cols).map_err(pq_err)?;
     let uuid_field = match kind {
         crate::property_overlay::PropertyRouteKind::Node => NODE_PROPERTY_UUID_FIELD,
         crate::property_overlay::PropertyRouteKind::Edge => EDGE_PROPERTY_UUID_FIELD,
     };
     let rows = crate::property_overlay::decode_snapshot_batch(&batch, uuid_field)?;
-    staged.accumulate_property_window(dir, kind, route, rows, metadata, stage.mode)
+    staged.accumulate_property_window(
+        dir,
+        kind,
+        route,
+        rows,
+        logical_schema,
+        authority_generation_uuid,
+    )
 }
 
-fn compose_property_window_rows(
-    inventory: Option<&crate::AuthenticatedPropertyInventory>,
-    scratch: &Path,
-    key: &crate::staging::PropertyWindowKey,
-    staged_rows: BTreeMap<[u8; 16], crate::staging::PendingPropertyRow>,
-) -> Result<Vec<crate::PropertySnapshotRow>, GfError> {
-    let mut composed = BTreeMap::new();
-    if let Some(inventory) = inventory {
-        inventory.visit_route(
-            key.kind,
-            &key.route,
-            scratch,
-            crate::PropertyOverlayLimits::default(),
-            |row| {
-                composed.insert(row.uuid, row);
-                Ok(())
-            },
-        )?;
-    }
-    for (uuid, pending) in staged_rows {
-        let staged_row = pending.snapshot;
-        if pending.mode == crate::staging::PropertyWindowMode::Patch
-            && !staged_row.tombstone
-            && let Some(prior) = composed.get_mut(&uuid)
-        {
-            prior.values.extend(staged_row.values);
-        } else {
-            composed.insert(uuid, staged_row);
+fn property_snapshot_fragment_schema(
+    base: &Schema,
+    kind: crate::PropertyRouteKind,
+    route: &str,
+    generation: u64,
+) -> SchemaRef {
+    use crate::property_overlay::{
+        PROPERTY_GENERATION_KEY, PROPERTY_KIND_KEY, PROPERTY_ORDINAL_KEY, PROPERTY_OVERLAY_FORMAT,
+        PROPERTY_OVERLAY_FORMAT_KEY, PROPERTY_ROUTE_KEY, PROPERTY_TOMBSTONE_FIELD,
+    };
+    let mut fields = base
+        .fields()
+        .iter()
+        .map(|field| field.as_ref().clone())
+        .collect::<Vec<_>>();
+    fields.insert(
+        1,
+        Field::new(PROPERTY_TOMBSTONE_FIELD, DataType::Boolean, false),
+    );
+    let mut metadata = base.metadata().clone();
+    metadata.insert(
+        PROPERTY_OVERLAY_FORMAT_KEY.into(),
+        PROPERTY_OVERLAY_FORMAT.into(),
+    );
+    metadata.insert(PROPERTY_ROUTE_KEY.into(), route.to_owned());
+    metadata.insert(PROPERTY_KIND_KEY.into(), kind.metadata_value().into());
+    metadata.insert(PROPERTY_GENERATION_KEY.into(), generation.to_string());
+    metadata.insert(PROPERTY_ORDINAL_KEY.into(), "0".into());
+    Arc::new(Schema::new_with_metadata(fields, metadata))
+}
+
+fn property_snapshot_chunk_with_schema(
+    base: &Schema,
+    fragment_schema: SchemaRef,
+    kind: crate::PropertyRouteKind,
+    rows: &[crate::PropertySnapshotRow],
+) -> Result<RecordBatch, GfError> {
+    let tombstones = rows.iter().map(|row| row.tombstone).collect::<Vec<_>>();
+    let mut batch = match kind {
+        crate::PropertyRouteKind::Node => {
+            let rows = rows
+                .iter()
+                .map(|row| PropRow {
+                    node_uuid: row.uuid,
+                    props: row.values.clone().into_iter().collect(),
+                })
+                .collect::<Vec<_>>();
+            property_rows_batch_with_schema(base, NODE_PROPERTY_UUID_FIELD, &rows)?
         }
-    }
-    Ok(composed.into_values().collect())
+        crate::PropertyRouteKind::Edge => {
+            let rows = rows
+                .iter()
+                .map(|row| EdgePropRow {
+                    edge_uuid: row.uuid,
+                    props: row.values.clone().into_iter().collect(),
+                })
+                .collect::<Vec<_>>();
+            property_rows_batch_with_schema(base, EDGE_PROPERTY_UUID_FIELD, &rows)?
+        }
+    };
+    let mut columns = batch.columns().to_vec();
+    columns.insert(1, Arc::new(BooleanArray::from(tombstones)));
+    batch = RecordBatch::try_new(fragment_schema, columns).map_err(pq_err)?;
+    Ok(batch)
 }
 
 pub(crate) fn seal_property_windows(
@@ -4558,22 +4897,8 @@ pub(crate) fn seal_property_windows(
     dir: &Path,
     generation: u64,
 ) -> Result<(), GfError> {
-    use crate::property_overlay::{
-        PROPERTY_GENERATION_KEY, PROPERTY_KIND_KEY, PROPERTY_ORDINAL_KEY, PROPERTY_OVERLAY_FORMAT,
-        PROPERTY_OVERLAY_FORMAT_KEY, PROPERTY_ROUTE_KEY, PROPERTY_TOMBSTONE_FIELD,
-        PropertyFragmentId, enumerate_property_fragments,
-    };
+    use crate::property_overlay::{PropertyFragmentId, enumerate_property_fragments};
     let windows = staged.take_property_windows();
-    let has_baseline = windows.keys().any(|key| {
-        enumerate_property_fragments(dir, key.kind, &key.route).is_ok_and(|rows| !rows.is_empty())
-    });
-    let inventory = has_baseline
-        .then(|| {
-            let (captured, _) = crate::capture_graph_files(dir)?;
-            crate::AuthenticatedPropertyInventory::from_entries_at_root(dir, captured.files)
-        })
-        .transpose()?;
-    let scratch = tempfile::tempdir().map_err(|error| io_err(&error))?;
     for (key, window) in windows {
         if window.project_root != dir {
             return Err(GfError::Storage(
@@ -4588,52 +4913,41 @@ pub(crate) fn seal_property_windows(
                 "property fragment generation is not strictly monotonic".into(),
             ));
         }
-        let rows =
-            compose_property_window_rows(inventory.as_ref(), scratch.path(), &key, window.rows)?;
-        let tombstones = rows.iter().map(|row| row.tombstone).collect::<Vec<_>>();
-        let batch = property_snapshots_to_batch(
+        let rows = window.rows.into_values().collect::<Vec<_>>();
+        if rows.is_empty() {
+            return Err(GfError::Storage(
+                "property window cannot seal empty fragment".into(),
+            ));
+        }
+        let base_schema = window.schema;
+        let fragment_schema = property_snapshot_fragment_schema(
+            base_schema.as_ref(),
+            key.kind,
             &key.route,
-            matches!(key.kind, crate::property_overlay::PropertyRouteKind::Edge),
-            rows,
-        )?
-        .ok_or_else(|| GfError::Storage("property window cannot seal empty fragment".into()))?;
-        let mut fields = batch
-            .schema()
-            .fields()
-            .iter()
-            .map(|field| field.as_ref().clone())
-            .collect::<Vec<_>>();
-        fields.insert(
-            1,
-            Field::new(PROPERTY_TOMBSTONE_FIELD, DataType::Boolean, false),
+            generation,
         );
-        let mut columns = batch.columns().to_vec();
-        columns.insert(1, Arc::new(BooleanArray::from(tombstones)));
-        let mut metadata = window.metadata;
-        metadata.insert(
-            PROPERTY_OVERLAY_FORMAT_KEY.into(),
-            PROPERTY_OVERLAY_FORMAT.into(),
-        );
-        metadata.insert(PROPERTY_ROUTE_KEY.into(), key.route.clone());
-        metadata.insert(PROPERTY_KIND_KEY.into(), key.kind.metadata_value().into());
-        metadata.insert(PROPERTY_GENERATION_KEY.into(), generation.to_string());
-        metadata.insert(PROPERTY_ORDINAL_KEY.into(), "0".into());
-        let schema = Arc::new(Schema::new_with_metadata(fields, metadata));
-        let batch = RecordBatch::try_new(Arc::clone(&schema), columns).map_err(pq_err)?;
         let subdir = match key.kind {
             crate::property_overlay::PropertyRouteKind::Node => "properties",
             crate::property_overlay::PropertyRouteKind::Edge => "edge_properties",
         };
-        staged.stage(
-            &dir.join(subdir).join(&key.route).join(
-                PropertyFragmentId {
-                    generation,
-                    ordinal: 0,
-                }
-                .file_name(),
-            ),
-            schema,
-            &batch,
+        let destination = dir.join(subdir).join(&key.route).join(
+            PropertyFragmentId {
+                generation,
+                ordinal: 0,
+            }
+            .file_name(),
+        );
+        staged.stage_batches(
+            &destination,
+            Arc::clone(&fragment_schema),
+            rows.chunks(4096).map(|chunk| {
+                property_snapshot_chunk_with_schema(
+                    base_schema.as_ref(),
+                    Arc::clone(&fragment_schema),
+                    key.kind,
+                    chunk,
+                )
+            }),
         )?;
     }
     Ok(())
@@ -5411,6 +5725,62 @@ mod tests {
         assert_eq!(properties.get("base"), Some(&IrLiteral::Int(1)));
         assert_eq!(properties.get("keep"), Some(&IrLiteral::Int(2)));
         assert!(!properties.contains_key("remove"));
+    }
+
+    #[test]
+    fn same_window_delete_remove_stays_deleted_but_set_explicitly_resurrects() {
+        let dir = TempDir::new().unwrap();
+        let removed = new_v7();
+        let resurrected = new_v7();
+        let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
+        for node in [removed, resurrected] {
+            writer.create_node(node, TypeId(0)).unwrap();
+            writer
+                .set_properties(
+                    &node,
+                    None,
+                    HashMap::from([("name".into(), IrLiteral::Str("before".into()))]),
+                )
+                .unwrap();
+        }
+        writer.flush().unwrap();
+
+        let removed = to_bytes(&removed);
+        let resurrected = to_bytes(&resurrected);
+        let mut staged = RewriteBatch::new();
+        stage_property_tombstones(
+            &mut staged,
+            dir.path(),
+            crate::PropertyRouteKind::Node,
+            "_untyped",
+            &HashSet::from([removed, resurrected]),
+        )
+        .unwrap();
+        stage_remove_node_properties(
+            &mut staged,
+            dir.path(),
+            "_untyped",
+            &HashMap::from([(removed, HashSet::from(["name".into()]))]),
+        )
+        .unwrap();
+        stage_set_node_properties(
+            &mut staged,
+            dir.path(),
+            "_untyped",
+            &HashMap::from([(
+                resurrected,
+                HashMap::from([("name".into(), IrLiteral::Str("after".into()))]),
+            )]),
+        )
+        .unwrap();
+        staged.commit().unwrap();
+
+        let properties = read_node_props(dir.path(), "_untyped");
+        assert!(!properties.contains_key(&removed));
+        assert_eq!(
+            properties[&resurrected]["name"],
+            IrLiteral::Str("after".into())
+        );
     }
 
     #[test]

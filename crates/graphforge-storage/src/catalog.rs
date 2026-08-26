@@ -2488,8 +2488,8 @@ mod tests {
             .unwrap();
         assert_eq!(
             full_plan.partition_statistics(None).unwrap().num_rows,
-            datafusion::common::stats::Precision::Inexact(1),
-            "only the complete newest generation contributes physical rows"
+            datafusion::common::stats::Precision::Inexact(2),
+            "all immutable generations contribute a physical upper bound"
         );
         let plan = table
             .scan(&state as &dyn Session, None, &[], Some(1))

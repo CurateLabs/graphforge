@@ -33,7 +33,8 @@ use arrow::datatypes::SchemaRef;
 use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::file::properties::WriterProperties;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
+use std::sync::Arc;
 use tempfile::NamedTempFile;
 
 use graphforge_core::GfError;
@@ -127,20 +128,9 @@ pub(crate) struct PropertyWindowKey {
 #[derive(Debug, Clone)]
 pub(crate) struct PendingPropertyWindow {
     pub(crate) project_root: PathBuf,
-    pub(crate) rows: BTreeMap<[u8; 16], PendingPropertyRow>,
-    pub(crate) metadata: HashMap<String, String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PropertyWindowMode {
-    Patch,
-    Replace,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct PendingPropertyRow {
-    pub(crate) snapshot: crate::property_overlay::PropertySnapshotRow,
-    pub(crate) mode: PropertyWindowMode,
+    pub(crate) rows: BTreeMap<[u8; 16], crate::property_overlay::PropertySnapshotRow>,
+    pub(crate) schema: SchemaRef,
+    pub(crate) authority_generation_uuid: Option<uuid::Uuid>,
 }
 
 impl RewriteBatch {
@@ -171,6 +161,26 @@ impl RewriteBatch {
             )));
         }
         let tmp = stage_parquet_temp(final_path, schema, batch)?;
+        self.staged.push((tmp, final_path.to_path_buf()));
+        Ok(())
+    }
+
+    pub(crate) fn stage_batches<I>(
+        &mut self,
+        final_path: &Path,
+        schema: SchemaRef,
+        batches: I,
+    ) -> Result<(), GfError>
+    where
+        I: IntoIterator<Item = Result<RecordBatch, GfError>>,
+    {
+        if self.staged.iter().any(|(_, path)| path == final_path) {
+            return Err(GfError::Storage(format!(
+                "destination staged twice in one rewrite batch: {}",
+                final_path.display()
+            )));
+        }
+        let tmp = stage_parquet_batches_temp(final_path, schema, batches)?;
         self.staged.push((tmp, final_path.to_path_buf()));
         Ok(())
     }
@@ -355,8 +365,8 @@ impl RewriteBatch {
         kind: crate::property_overlay::PropertyRouteKind,
         route: &str,
         rows: impl IntoIterator<Item = crate::property_overlay::PropertySnapshotRow>,
-        metadata: HashMap<String, String>,
-        mode: PropertyWindowMode,
+        schema: SchemaRef,
+        authority_generation_uuid: Option<uuid::Uuid>,
     ) -> Result<(), GfError> {
         let key = PropertyWindowKey {
             kind,
@@ -368,31 +378,24 @@ impl RewriteBatch {
             .or_insert_with(|| PendingPropertyWindow {
                 project_root: project_root.to_path_buf(),
                 rows: BTreeMap::new(),
-                metadata: metadata.clone(),
+                schema: Arc::clone(&schema),
+                authority_generation_uuid,
             });
-        if window.project_root != project_root || window.metadata != metadata {
+        if window.project_root != project_root {
+            return Err(GfError::Storage("property window root conflicts".into()));
+        }
+        if window.authority_generation_uuid != authority_generation_uuid {
             return Err(GfError::Storage(
-                "property window root or semantic metadata conflicts".into(),
+                "property window generation authority conflicts".into(),
             ));
         }
+        window.schema = crate::property_overlay::merge_property_route_schemas(
+            kind,
+            route,
+            [window.schema.as_ref(), schema.as_ref()],
+        )?;
         for row in rows {
-            let uuid = row.uuid;
-            match (window.rows.get_mut(&uuid), mode, row.tombstone) {
-                (Some(pending), PropertyWindowMode::Patch, false)
-                    if !pending.snapshot.tombstone =>
-                {
-                    pending.snapshot.values.extend(row.values);
-                }
-                _ => {
-                    window.rows.insert(
-                        uuid,
-                        PendingPropertyRow {
-                            snapshot: row,
-                            mode,
-                        },
-                    );
-                }
-            }
+            window.rows.insert(row.uuid, row);
         }
         Ok(())
     }
@@ -401,7 +404,7 @@ impl RewriteBatch {
         &self,
         kind: crate::property_overlay::PropertyRouteKind,
         route: &str,
-    ) -> Option<&BTreeMap<[u8; 16], PendingPropertyRow>> {
+    ) -> Option<&BTreeMap<[u8; 16], crate::property_overlay::PropertySnapshotRow>> {
         self.property_windows
             .get(&PropertyWindowKey {
                 kind,
@@ -472,12 +475,49 @@ fn stage_parquet_temp(
     Ok(tmp)
 }
 
+fn stage_parquet_batches_temp<I>(
+    final_path: &Path,
+    schema: SchemaRef,
+    batches: I,
+) -> Result<NamedTempFile, GfError>
+where
+    I: IntoIterator<Item = Result<RecordBatch, GfError>>,
+{
+    let parent = final_path.parent().ok_or_else(|| {
+        GfError::Storage(format!(
+            "staged path {} has no parent directory",
+            final_path.display()
+        ))
+    })?;
+    std::fs::create_dir_all(parent).map_err(|error| io_err(&error))?;
+    let file_name = final_path.file_name().map_or_else(
+        || "staged".to_owned(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    let tmp = tempfile::Builder::new()
+        .prefix(&format!("{file_name}."))
+        .suffix(".tmp")
+        .tempfile_in(parent)
+        .map_err(|error| io_err(&error))?;
+    let properties = WriterProperties::builder()
+        .set_max_row_group_row_count(Some(ROW_GROUP_SIZE))
+        .build();
+    let mut writer =
+        ArrowWriter::try_new(tmp.as_file(), schema, Some(properties)).map_err(pq_err)?;
+    for batch in batches {
+        writer.write(&batch?).map_err(pq_err)?;
+    }
+    writer.close().map_err(pq_err)?;
+    Ok(tmp)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     use arrow::array::Int64Array;
@@ -513,6 +553,64 @@ mod tests {
             out.extend(col.values().iter().copied());
         }
         out
+    }
+
+    #[test]
+    fn streamed_batches_retain_one_output_handle_and_abort_removes_candidate() {
+        let dir = TempDir::new().unwrap();
+        let destination = dir.path().join("properties/route/1.parquet");
+        let (schema, first) = int_batch(&[1, 2]);
+        let (_, second) = int_batch(&[3, 4]);
+        let (_, third) = int_batch(&[5]);
+        let mut staged = RewriteBatch::new();
+        staged
+            .stage_batches(&destination, schema, [Ok(first), Ok(second), Ok(third)])
+            .unwrap();
+        assert_eq!(staged.staged.len(), 1);
+        assert_eq!(staged.staged_paths().collect::<Vec<_>>(), vec![destination]);
+        let candidate = staged.staged[0].0.path().to_path_buf();
+        assert_eq!(read_values(&candidate), vec![1, 2, 3, 4, 5]);
+        drop(staged);
+        assert!(!candidate.exists());
+    }
+
+    #[test]
+    fn property_window_rejects_generation_authority_drift() {
+        let dir = TempDir::new().unwrap();
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "node_uuid",
+            DataType::FixedSizeBinary(16),
+            false,
+        )]));
+        let row = crate::PropertySnapshotRow {
+            uuid: [1; 16],
+            tombstone: false,
+            values: BTreeMap::new(),
+        };
+        let first = uuid::Uuid::now_v7();
+        let second = uuid::Uuid::now_v7();
+        let mut staged = RewriteBatch::new();
+        staged
+            .accumulate_property_window(
+                dir.path(),
+                crate::PropertyRouteKind::Node,
+                "Person",
+                vec![row.clone()],
+                Arc::clone(&schema),
+                Some(first),
+            )
+            .unwrap();
+        let error = staged
+            .accumulate_property_window(
+                dir.path(),
+                crate::PropertyRouteKind::Node,
+                "Person",
+                vec![row],
+                schema,
+                Some(second),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("generation authority conflicts"));
     }
 
     fn tmp_entries(dir: &Path) -> usize {
