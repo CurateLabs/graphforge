@@ -95,16 +95,27 @@ impl ConfiguredProviderRefreshRuntime {
     pub(crate) fn refresh(
         &self,
         graph: &GraphForge,
-    ) -> Result<(), ProviderEmbeddingExecutionError> {
+    ) -> Result<EmbeddingSourceState, ProviderEmbeddingExecutionError> {
         self.session
-            .execute_refresh_embeddings(graph, &self.request)
+            .execute_refresh_embeddings(graph, &self.request)?;
+        let (_, lineage) = graph
+            .resolve_embedding_space_lineage(Some(&self.request.display_name))
+            .map_err(ProviderEmbeddingExecutionError::Api)?;
+        lineage
+            .active()
+            .map(|active| active.manifest.source())
+            .ok_or_else(|| {
+                ProviderEmbeddingExecutionError::Api(GfError::Validation(
+                    "successful provider refresh did not publish an active generation".into(),
+                ))
+            })
     }
 
-    pub(crate) fn completion(
-        result: &Result<(), ProviderEmbeddingExecutionError>,
+    pub(crate) fn completion<T>(
+        result: &Result<T, ProviderEmbeddingExecutionError>,
     ) -> EmbeddingRefreshCompletion {
         match result {
-            Ok(()) => EmbeddingRefreshCompletion::Succeeded,
+            Ok(_) => EmbeddingRefreshCompletion::Succeeded,
             Err(
                 ProviderEmbeddingExecutionError::Plan(ProviderEmbeddingPlanError::Artifact(
                     SearchArtifactError::Cancelled,
