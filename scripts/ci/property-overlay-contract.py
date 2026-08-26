@@ -240,6 +240,22 @@ def validate(root: Path, contract_path: Path) -> None:
                 raise ContractError(f"metric source semantics drifted: {name}/{marker}")
     if metrics["physical_rows"]["unit"] != "row-decode visits":
         raise ContractError("physical_rows must be frozen as row-decode visits")
+    if metrics["physical_blocks"]["unit"] != "non-empty read operations":
+        raise ContractError("physical_blocks must be frozen as actual non-empty reads")
+    for name in (
+        "authentication_block_equivalents",
+        "authority_authentication_block_equivalents",
+        "property_authentication_block_equivalents",
+    ):
+        if metrics[name]["unit"] != "64 KiB block-equivalents":
+            raise ContractError(f"{name} must remain a byte-derived block-equivalent")
+    for name in (
+        "authentication_read_calls",
+        "authority_authentication_read_calls",
+        "property_authentication_read_calls",
+    ):
+        if metrics[name]["unit"] != "non-empty reads":
+            raise ContractError(f"{name} must remain an actual non-empty read count")
 
     evidence = contract["evidence"]
     if not isinstance(evidence, dict) or not evidence:

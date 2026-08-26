@@ -63,6 +63,11 @@ def main() -> None:
         expect_failure("physical_rows unit", lambda: GATE.validate(root, contract_path))
 
         mutated = copy.deepcopy(contract)
+        mutated["metrics"]["authentication_read_calls"]["unit"] = "64 KiB block-equivalents"
+        write_contract(contract_path, mutated)
+        expect_failure("authentication call/equivalent conflation", lambda: GATE.validate(root, contract_path))
+
+        mutated = copy.deepcopy(contract)
         mutated["authority"]["read_scope"] = "newest generation only"
         write_contract(contract_path, mutated)
         expect_failure("all-generation authority", lambda: GATE.validate(root, contract_path))

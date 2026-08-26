@@ -247,7 +247,8 @@ pub struct AuthenticatedPropertyInventory {
     routes: BTreeMap<(PropertyRouteKind, String), Vec<AuthenticatedPropertyFragment>>,
     schemas: BTreeMap<(PropertyRouteKind, String), arrow::datatypes::SchemaRef>,
     authority_bytes: u64,
-    authority_blocks: u64,
+    authority_block_equivalents: u64,
+    authority_read_calls: u64,
 }
 
 /// One-time I/O performed while admitting and authenticating an immutable
@@ -257,15 +258,21 @@ pub struct PropertyInventoryOpenMetrics {
     /// Bytes read once while capturing the complete raw graph-files authority.
     pub(crate) authority_authentication_bytes: u64,
     /// 64 KiB block-equivalents covering raw graph-files authority.
-    pub(crate) authority_authentication_blocks: u64,
+    pub(crate) authority_authentication_block_equivalents: u64,
+    /// Actual non-empty reads used to capture raw graph-files authority.
+    pub(crate) authority_authentication_read_calls: u64,
     /// Bytes read while authenticating retained property fragments.
     pub(crate) property_authentication_bytes: u64,
     /// 64 KiB block-equivalents covering retained property fragments.
-    pub(crate) property_authentication_blocks: u64,
+    pub(crate) property_authentication_block_equivalents: u64,
+    /// Actual non-empty reads used to authenticate retained property fragments.
+    pub(crate) property_authentication_read_calls: u64,
     /// Bytes read to capture and authenticate inventory authority.
     pub authentication_bytes: u64,
     /// 64 KiB authentication block-equivalents.
-    pub authentication_blocks: u64,
+    pub authentication_block_equivalents: u64,
+    /// Actual non-empty authentication reads.
+    pub authentication_read_calls: u64,
 }
 
 #[derive(Debug)]
@@ -277,7 +284,8 @@ struct AuthenticatedPropertyFragment {
     physical_rows: usize,
     schema: arrow::datatypes::SchemaRef,
     authentication_bytes: u64,
-    authentication_blocks: u64,
+    authentication_block_equivalents: u64,
+    authentication_read_calls: u64,
 }
 
 #[derive(Debug)]
@@ -320,21 +328,30 @@ impl AuthenticatedPropertyInventory {
             self.routes.values().flatten().fold(0_u64, |sum, fragment| {
                 sum.saturating_add(fragment.authentication_bytes)
             });
-        let property_authentication_blocks =
+        let property_authentication_block_equivalents =
             self.routes.values().flatten().fold(0_u64, |sum, fragment| {
-                sum.saturating_add(fragment.authentication_blocks)
+                sum.saturating_add(fragment.authentication_block_equivalents)
+            });
+        let property_authentication_read_calls =
+            self.routes.values().flatten().fold(0_u64, |sum, fragment| {
+                sum.saturating_add(fragment.authentication_read_calls)
             });
         PropertyInventoryOpenMetrics {
             authority_authentication_bytes: self.authority_bytes,
-            authority_authentication_blocks: self.authority_blocks,
+            authority_authentication_block_equivalents: self.authority_block_equivalents,
+            authority_authentication_read_calls: self.authority_read_calls,
             property_authentication_bytes,
-            property_authentication_blocks,
+            property_authentication_block_equivalents,
+            property_authentication_read_calls,
             authentication_bytes: self
                 .authority_bytes
                 .saturating_add(property_authentication_bytes),
-            authentication_blocks: self
-                .authority_blocks
-                .saturating_add(property_authentication_blocks),
+            authentication_block_equivalents: self
+                .authority_block_equivalents
+                .saturating_add(property_authentication_block_equivalents),
+            authentication_read_calls: self
+                .authority_read_calls
+                .saturating_add(property_authentication_read_calls),
         }
     }
 
@@ -384,7 +401,8 @@ impl AuthenticatedPropertyInventory {
                 routes: BTreeMap::new(),
                 schemas: BTreeMap::new(),
                 authority_bytes: 0,
-                authority_blocks: 0,
+                authority_block_equivalents: 0,
+                authority_read_calls: 0,
             });
         };
         let inventory = generation.graph_files_inventory()?.ok_or_else(|| {
@@ -476,7 +494,7 @@ impl AuthenticatedPropertyInventory {
                 continue;
             }
             let file = open_retained_under(&root, &physical_relative)?;
-            let (authentication_bytes, authentication_blocks) =
+            let (authentication_bytes, authentication_block_equivalents, authentication_read_calls) =
                 authenticate_inventory_file(&file, &entry)?;
             let builder =
                 ParquetRecordBatchReaderBuilder::try_new(file.try_clone().map_err(io_error)?)
@@ -497,7 +515,8 @@ impl AuthenticatedPropertyInventory {
                 physical_rows,
                 schema,
                 authentication_bytes,
-                authentication_blocks,
+                authentication_block_equivalents,
+                authentication_read_calls,
             });
         }
         let mut schemas = BTreeMap::new();
@@ -527,7 +546,8 @@ impl AuthenticatedPropertyInventory {
                 })
                 .collect(),
             authority_bytes: 0,
-            authority_blocks: 0,
+            authority_block_equivalents: 0,
+            authority_read_calls: 0,
         })
     }
 
@@ -851,7 +871,7 @@ fn open_retained_under(
 fn authenticate_inventory_file(
     file: &File,
     entry: &crate::GraphFileEntry,
-) -> Result<(u64, u64), GfError> {
+) -> Result<(u64, u64, u64), GfError> {
     let metadata = file.metadata().map_err(io_error)?;
     if !metadata.is_file() || metadata.len() != entry.byte_length {
         return Err(corrupt(
@@ -861,6 +881,7 @@ fn authenticate_inventory_file(
     let mut digest = Sha256::new();
     let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
     let mut bytes = 0_u64;
+    let mut read_calls = 0_u64;
     loop {
         let read = retained_read_at(file, &mut buffer, bytes).map_err(io_error)?;
         if read == 0 {
@@ -869,12 +890,15 @@ fn authenticate_inventory_file(
         bytes = bytes
             .checked_add(u64::try_from(read).map_err(|_| corrupt("authentication byte overflow"))?)
             .ok_or_else(|| corrupt("authentication byte overflow"))?;
+        read_calls = read_calls
+            .checked_add(1)
+            .ok_or_else(|| corrupt("authentication read call overflow"))?;
         digest.update(&buffer[..read]);
     }
     if digest_hex(&digest.finalize()) != entry.content_sha256 {
         return Err(corrupt("property handle digest conflicts with inventory"));
     }
-    Ok((bytes, bytes.div_ceil(64 * 1024)))
+    Ok((bytes, bytes.div_ceil(64 * 1024), read_calls))
 }
 
 fn digest_hex(bytes: &[u8]) -> String {
@@ -906,16 +930,22 @@ pub struct PropertyOverlayMetrics {
     pub validation_bytes: u64,
     /// Bytes read while decoding values from selected row groups.
     pub selected_value_bytes: u64,
-    /// Total one-time admission blocks plus decoder reads.
+    /// Total actual non-empty authentication plus decoder reads.
     pub physical_blocks: u64,
     /// Decoder-only non-empty reads, each capped at 64 KiB.
     pub read_calls: u64,
     /// 64 KiB authentication block-equivalents from a raw one-shot adapter.
-    pub authentication_blocks: u64,
+    pub authentication_block_equivalents: u64,
+    /// Actual non-empty authentication reads from a raw one-shot adapter.
+    pub authentication_read_calls: u64,
     /// Raw graph-files authority block-equivalents included in authentication blocks.
-    pub authority_authentication_blocks: u64,
+    pub authority_authentication_block_equivalents: u64,
+    /// Actual non-empty raw graph-files authority reads.
+    pub authority_authentication_read_calls: u64,
     /// Retained property-fragment block-equivalents included in authentication blocks.
-    pub property_authentication_blocks: u64,
+    pub property_authentication_block_equivalents: u64,
+    /// Actual non-empty retained property-fragment authentication reads.
+    pub property_authentication_read_calls: u64,
     /// Read calls used by the validation pass.
     pub validation_read_calls: u64,
     /// Read calls used by selected value decoding.
@@ -1184,17 +1214,22 @@ where
 
 fn add_open_metrics(metrics: &mut PropertyOverlayMetrics, open: PropertyInventoryOpenMetrics) {
     metrics.authentication_bytes = open.authentication_bytes;
-    metrics.authentication_blocks = open.authentication_blocks;
+    metrics.authentication_block_equivalents = open.authentication_block_equivalents;
+    metrics.authentication_read_calls = open.authentication_read_calls;
     metrics.authority_authentication_bytes = open.authority_authentication_bytes;
-    metrics.authority_authentication_blocks = open.authority_authentication_blocks;
+    metrics.authority_authentication_block_equivalents =
+        open.authority_authentication_block_equivalents;
+    metrics.authority_authentication_read_calls = open.authority_authentication_read_calls;
     metrics.property_authentication_bytes = open.property_authentication_bytes;
-    metrics.property_authentication_blocks = open.property_authentication_blocks;
+    metrics.property_authentication_block_equivalents =
+        open.property_authentication_block_equivalents;
+    metrics.property_authentication_read_calls = open.property_authentication_read_calls;
     metrics.physical_bytes = metrics
         .physical_bytes
         .saturating_add(open.authentication_bytes);
     metrics.physical_blocks = metrics
         .physical_blocks
-        .saturating_add(open.authentication_blocks);
+        .saturating_add(open.authentication_read_calls);
 }
 
 pub(crate) fn authenticated_property_inventory_for_route(
@@ -1210,9 +1245,10 @@ pub(crate) fn authenticated_property_inventory_for_route(
             route,
         );
     }
-    let (inventory, _) = crate::capture_graph_files(project)?;
+    let (inventory, _, authority_read_calls) =
+        crate::graph_files::capture_graph_files_with_read_calls(project)?;
     let authority_bytes = inventory.total_byte_length;
-    let authority_blocks = inventory.files.iter().fold(0_u64, |blocks, entry| {
+    let authority_block_equivalents = inventory.files.iter().fold(0_u64, |blocks, entry| {
         blocks.saturating_add(entry.byte_length.div_ceil(64 * 1024))
     });
     let mut admitted = AuthenticatedPropertyInventory::from_entries_at_root_for_route(
@@ -1222,7 +1258,8 @@ pub(crate) fn authenticated_property_inventory_for_route(
         route,
     )?;
     admitted.authority_bytes = authority_bytes;
-    admitted.authority_blocks = authority_blocks;
+    admitted.authority_block_equivalents = authority_block_equivalents;
+    admitted.authority_read_calls = authority_read_calls;
     Ok(admitted)
 }
 
@@ -1237,15 +1274,17 @@ pub(crate) fn authenticated_property_inventory(
         let generation = crate::resolve_project_generation(project)?;
         return AuthenticatedPropertyInventory::from_resolved_generation(&generation);
     }
-    let (inventory, _) = crate::capture_graph_files(project)?;
+    let (inventory, _, authority_read_calls) =
+        crate::graph_files::capture_graph_files_with_read_calls(project)?;
     let authority_bytes = inventory.total_byte_length;
-    let authority_blocks = inventory.files.iter().fold(0_u64, |blocks, entry| {
+    let authority_block_equivalents = inventory.files.iter().fold(0_u64, |blocks, entry| {
         blocks.saturating_add(entry.byte_length.div_ceil(64 * 1024))
     });
     let mut admitted =
         AuthenticatedPropertyInventory::from_entries_at_root(project, inventory.files)?;
     admitted.authority_bytes = authority_bytes;
-    admitted.authority_blocks = authority_blocks;
+    admitted.authority_block_equivalents = authority_block_equivalents;
+    admitted.authority_read_calls = authority_read_calls;
     Ok(admitted)
 }
 
@@ -2656,7 +2695,8 @@ mod tests {
             assert_eq!(rows.len(), 1);
             assert_eq!(metrics.per_record_seeks, 0);
             assert_eq!(metrics.authentication_bytes, 0);
-            assert_eq!(metrics.authentication_blocks, 0);
+            assert_eq!(metrics.authentication_read_calls, 0);
+            assert_eq!(metrics.authentication_block_equivalents, 0);
             assert_eq!(
                 metrics.physical_bytes,
                 metrics.validation_bytes + metrics.selected_value_bytes
@@ -2724,7 +2764,8 @@ mod tests {
             entry.byte_length
         );
         assert_eq!(selected_metrics.authentication_bytes, 0);
-        assert_eq!(selected_metrics.authentication_blocks, 0);
+        assert_eq!(selected_metrics.authentication_read_calls, 0);
+        assert_eq!(selected_metrics.authentication_block_equivalents, 0);
 
         let conflicting_id = PropertyFragmentId {
             generation: 8,
@@ -3254,7 +3295,7 @@ mod tests {
                 expected_authentication_bytes * 2
             );
             assert_eq!(
-                metrics.authentication_blocks,
+                metrics.authentication_block_equivalents,
                 expected_authentication_bytes.div_ceil(64 * 1024) * 2
             );
             assert_eq!(metrics.row_groups_considered, 1);
@@ -3278,7 +3319,7 @@ mod tests {
             assert!(metrics.read_calls > 0);
             assert_eq!(
                 metrics.physical_blocks,
-                metrics.authentication_blocks
+                metrics.authentication_read_calls
                     + metrics.validation_read_calls
                     + metrics.selected_value_read_calls
             );

@@ -62,9 +62,12 @@ struct ScaleEvidence {
     authentication_bytes: u64,
     authority_authentication_bytes: u64,
     property_authentication_bytes: u64,
-    authentication_blocks: u64,
-    authority_authentication_blocks: u64,
-    property_authentication_blocks: u64,
+    authentication_block_equivalents: u64,
+    authority_authentication_block_equivalents: u64,
+    property_authentication_block_equivalents: u64,
+    authentication_read_calls: u64,
+    authority_authentication_read_calls: u64,
+    property_authentication_read_calls: u64,
     physical_blocks: u64,
     validation_bytes: u64,
     selected_value_bytes: u64,
@@ -301,9 +304,14 @@ fn property_overlay_scale_scan_child() {
         authentication_bytes: metrics.authentication_bytes,
         authority_authentication_bytes: metrics.authority_authentication_bytes,
         property_authentication_bytes: metrics.property_authentication_bytes,
-        authentication_blocks: metrics.authentication_blocks,
-        authority_authentication_blocks: metrics.authority_authentication_blocks,
-        property_authentication_blocks: metrics.property_authentication_blocks,
+        authentication_block_equivalents: metrics.authentication_block_equivalents,
+        authority_authentication_block_equivalents: metrics
+            .authority_authentication_block_equivalents,
+        property_authentication_block_equivalents: metrics
+            .property_authentication_block_equivalents,
+        authentication_read_calls: metrics.authentication_read_calls,
+        authority_authentication_read_calls: metrics.authority_authentication_read_calls,
+        property_authentication_read_calls: metrics.property_authentication_read_calls,
         physical_blocks: metrics.physical_blocks,
         validation_bytes: metrics.validation_bytes,
         selected_value_bytes: metrics.selected_value_bytes,
@@ -434,7 +442,7 @@ fn production_property_overlay_n_2n_4n_is_disk_growing_and_memory_bounded() {
         phase.rss_after_write_bytes = write.rss_after_bytes;
         assert!(phase.physical_bytes > 0);
         assert!(phase.authentication_bytes > 0);
-        assert!(phase.authentication_blocks > 0);
+        assert!(phase.authentication_read_calls > 0);
         assert_eq!(
             phase.authentication_bytes,
             phase
@@ -443,11 +451,18 @@ fn production_property_overlay_n_2n_4n_is_disk_growing_and_memory_bounded() {
                 .expect("authentication byte accounting must not overflow")
         );
         assert_eq!(
-            phase.authentication_blocks,
+            phase.authentication_block_equivalents,
             phase
-                .authority_authentication_blocks
-                .checked_add(phase.property_authentication_blocks)
+                .authority_authentication_block_equivalents
+                .checked_add(phase.property_authentication_block_equivalents)
                 .expect("authentication block accounting must not overflow")
+        );
+        assert_eq!(
+            phase.authentication_read_calls,
+            phase
+                .authority_authentication_read_calls
+                .checked_add(phase.property_authentication_read_calls)
+                .expect("authentication read-call accounting must not overflow")
         );
         assert_eq!(
             phase.physical_bytes,
@@ -460,7 +475,7 @@ fn production_property_overlay_n_2n_4n_is_disk_growing_and_memory_bounded() {
         assert_eq!(
             phase.physical_blocks,
             phase
-                .authentication_blocks
+                .authentication_read_calls
                 .checked_add(phase.validation_read_calls)
                 .and_then(|calls| calls.checked_add(phase.selected_value_read_calls))
                 .expect("read block accounting must not overflow")
@@ -471,7 +486,7 @@ fn production_property_overlay_n_2n_4n_is_disk_growing_and_memory_bounded() {
             phase.property_fragment_bytes
         );
         assert_eq!(
-            phase.property_authentication_blocks,
+            phase.property_authentication_block_equivalents,
             phase.property_fragment_block_equivalents
         );
         let decoder_bytes = phase
