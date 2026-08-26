@@ -127,8 +127,20 @@ pub(crate) struct PropertyWindowKey {
 #[derive(Debug, Clone)]
 pub(crate) struct PendingPropertyWindow {
     pub(crate) project_root: PathBuf,
-    pub(crate) rows: BTreeMap<[u8; 16], crate::property_overlay::PropertySnapshotRow>,
+    pub(crate) rows: BTreeMap<[u8; 16], PendingPropertyRow>,
     pub(crate) metadata: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PropertyWindowMode {
+    Patch,
+    Replace,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PendingPropertyRow {
+    pub(crate) snapshot: crate::property_overlay::PropertySnapshotRow,
+    pub(crate) mode: PropertyWindowMode,
 }
 
 impl RewriteBatch {
@@ -344,6 +356,7 @@ impl RewriteBatch {
         route: &str,
         rows: impl IntoIterator<Item = crate::property_overlay::PropertySnapshotRow>,
         metadata: HashMap<String, String>,
+        mode: PropertyWindowMode,
     ) -> Result<(), GfError> {
         let key = PropertyWindowKey {
             kind,
@@ -363,7 +376,23 @@ impl RewriteBatch {
             ));
         }
         for row in rows {
-            window.rows.insert(row.uuid, row);
+            let uuid = row.uuid;
+            match (window.rows.get_mut(&uuid), mode, row.tombstone) {
+                (Some(pending), PropertyWindowMode::Patch, false)
+                    if !pending.snapshot.tombstone =>
+                {
+                    pending.snapshot.values.extend(row.values);
+                }
+                _ => {
+                    window.rows.insert(
+                        uuid,
+                        PendingPropertyRow {
+                            snapshot: row,
+                            mode,
+                        },
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -372,7 +401,7 @@ impl RewriteBatch {
         &self,
         kind: crate::property_overlay::PropertyRouteKind,
         route: &str,
-    ) -> Option<&BTreeMap<[u8; 16], crate::property_overlay::PropertySnapshotRow>> {
+    ) -> Option<&BTreeMap<[u8; 16], PendingPropertyRow>> {
         self.property_windows
             .get(&PropertyWindowKey {
                 kind,

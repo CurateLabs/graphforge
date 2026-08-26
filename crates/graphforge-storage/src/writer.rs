@@ -1941,9 +1941,9 @@ impl GraphWriter {
                 &self.dir,
                 crate::property_overlay::PropertyRouteKind::Node,
                 &stem,
-                schema,
+                &schema,
                 cols,
-                false,
+                PropertyFragmentStage::patch(),
             )?;
         }
         Ok(())
@@ -1971,9 +1971,9 @@ impl GraphWriter {
                 &self.dir,
                 crate::property_overlay::PropertyRouteKind::Edge,
                 &stem,
-                schema,
+                &schema,
                 cols,
-                false,
+                PropertyFragmentStage::patch(),
             )?;
         }
         Ok(())
@@ -2206,6 +2206,7 @@ fn build_property_columns_keyed<R: PropRowLike>(
     let mut seen: HashSet<String> = HashSet::new();
     let mut col_types: HashMap<String, ColType> = HashMap::new();
     let mut explicit_nulls: HashSet<String> = HashSet::new();
+    let mut untyped_non_nulls: HashSet<String> = HashSet::new();
     for row in rows {
         for (name, lit) in row.props() {
             reject_map_property_value(name, lit)?;
@@ -2214,6 +2215,8 @@ fn build_property_columns_keyed<R: PropRowLike>(
             }
             if matches!(lit, IrLiteral::Null) {
                 explicit_nulls.insert(name.clone());
+            } else if ColType::of(lit).is_none() {
+                untyped_non_nulls.insert(name.clone());
             }
             // Only concrete literals contribute a type; `Null` contributes
             // none, so the first *non-null* value determines the column type.
@@ -2236,6 +2239,9 @@ fn build_property_columns_keyed<R: PropRowLike>(
         }
     }
     for name in explicit_nulls {
+        if untyped_non_nulls.contains(&name) {
+            continue;
+        }
         match col_types.get(&name) {
             None | Some(ColType::Int | ColType::Float | ColType::Bool | ColType::Str) => {
                 col_types.insert(name, ColType::HetScalar);
@@ -3754,7 +3760,11 @@ fn pending_property_snapshots(
 ) -> Result<BTreeMap<[u8; 16], crate::property_overlay::PropertySnapshotRow>, GfError> {
     Ok(staged
         .property_window_rows(kind, route)
-        .cloned()
+        .map(|rows| {
+            rows.iter()
+                .map(|(uuid, row)| (*uuid, row.snapshot.clone()))
+                .collect()
+        })
         .unwrap_or_default())
 }
 
@@ -4076,9 +4086,9 @@ fn stage_node_property_file(
         dir,
         crate::property_overlay::PropertyRouteKind::Node,
         stem,
-        schema,
+        &schema,
         cols,
-        false,
+        PropertyFragmentStage::replace(),
     )
 }
 
@@ -4102,9 +4112,9 @@ fn stage_edge_property_file(
         dir,
         crate::property_overlay::PropertyRouteKind::Edge,
         stem,
-        schema,
+        &schema,
         cols,
-        false,
+        PropertyFragmentStage::replace(),
     )
 }
 
@@ -4165,9 +4175,9 @@ pub(crate) fn stage_property_tombstones<S: std::hash::BuildHasher>(
         dir,
         kind,
         route,
-        schema,
+        &schema,
         vec![Arc::new(column)],
-        true,
+        PropertyFragmentStage::tombstone(),
     )
 }
 
@@ -4175,14 +4185,43 @@ pub(crate) fn stage_property_tombstones<S: std::hash::BuildHasher>(
     clippy::needless_pass_by_value,
     reason = "staging consumes the logical schema contract"
 )]
+#[derive(Clone, Copy)]
+struct PropertyFragmentStage {
+    tombstone: bool,
+    mode: crate::staging::PropertyWindowMode,
+}
+
+impl PropertyFragmentStage {
+    const fn patch() -> Self {
+        Self {
+            tombstone: false,
+            mode: crate::staging::PropertyWindowMode::Patch,
+        }
+    }
+
+    const fn replace() -> Self {
+        Self {
+            tombstone: false,
+            mode: crate::staging::PropertyWindowMode::Replace,
+        }
+    }
+
+    const fn tombstone() -> Self {
+        Self {
+            tombstone: true,
+            mode: crate::staging::PropertyWindowMode::Replace,
+        }
+    }
+}
+
 fn stage_property_fragment(
     staged: &mut RewriteBatch,
     dir: &Path,
     kind: crate::property_overlay::PropertyRouteKind,
     route: &str,
-    schema: SchemaRef,
+    schema: &SchemaRef,
     mut cols: Vec<ArrayRef>,
-    tombstone: bool,
+    stage: PropertyFragmentStage,
 ) -> Result<(), GfError> {
     use crate::property_overlay::PROPERTY_TOMBSTONE_FIELD;
     let mut fields = schema
@@ -4195,7 +4234,7 @@ fn stage_property_fragment(
         Field::new(PROPERTY_TOMBSTONE_FIELD, DataType::Boolean, false),
     );
     let rows = cols.first().map_or(0, |column| column.len());
-    cols.insert(1, Arc::new(BooleanArray::from(vec![tombstone; rows])));
+    cols.insert(1, Arc::new(BooleanArray::from(vec![stage.tombstone; rows])));
     let metadata = schema.metadata().clone();
     let schema = Arc::new(Schema::new_with_metadata(fields, metadata.clone()));
     let batch = RecordBatch::try_new(schema, cols).map_err(pq_err)?;
@@ -4204,7 +4243,40 @@ fn stage_property_fragment(
         crate::property_overlay::PropertyRouteKind::Edge => EDGE_PROPERTY_UUID_FIELD,
     };
     let rows = crate::property_overlay::decode_snapshot_batch(&batch, uuid_field)?;
-    staged.accumulate_property_window(dir, kind, route, rows, metadata)
+    staged.accumulate_property_window(dir, kind, route, rows, metadata, stage.mode)
+}
+
+fn compose_property_window_rows(
+    inventory: Option<&crate::AuthenticatedPropertyInventory>,
+    scratch: &Path,
+    key: &crate::staging::PropertyWindowKey,
+    staged_rows: BTreeMap<[u8; 16], crate::staging::PendingPropertyRow>,
+) -> Result<Vec<crate::PropertySnapshotRow>, GfError> {
+    let mut composed = BTreeMap::new();
+    if let Some(inventory) = inventory {
+        inventory.visit_route(
+            key.kind,
+            &key.route,
+            scratch,
+            crate::PropertyOverlayLimits::default(),
+            |row| {
+                composed.insert(row.uuid, row);
+                Ok(())
+            },
+        )?;
+    }
+    for (uuid, pending) in staged_rows {
+        let staged_row = pending.snapshot;
+        if pending.mode == crate::staging::PropertyWindowMode::Patch
+            && !staged_row.tombstone
+            && let Some(prior) = composed.get_mut(&uuid)
+        {
+            prior.values.extend(staged_row.values);
+        } else {
+            composed.insert(uuid, staged_row);
+        }
+    }
+    Ok(composed.into_values().collect())
 }
 
 pub(crate) fn seal_property_windows(
@@ -4242,29 +4314,8 @@ pub(crate) fn seal_property_windows(
                 "property fragment generation is not strictly monotonic".into(),
             ));
         }
-        let mut composed = BTreeMap::new();
-        if let Some(inventory) = inventory.as_ref() {
-            inventory.visit_route(
-                key.kind,
-                &key.route,
-                scratch.path(),
-                crate::PropertyOverlayLimits::default(),
-                |row| {
-                    composed.insert(row.uuid, row);
-                    Ok(())
-                },
-            )?;
-        }
-        for (uuid, staged_row) in window.rows {
-            if staged_row.tombstone {
-                composed.insert(uuid, staged_row);
-            } else if let Some(prior) = composed.get_mut(&uuid) {
-                prior.values.extend(staged_row.values);
-            } else {
-                composed.insert(uuid, staged_row);
-            }
-        }
-        let rows = composed.into_values().collect::<Vec<_>>();
+        let rows =
+            compose_property_window_rows(inventory.as_ref(), scratch.path(), &key, window.rows)?;
         let tombstones = rows.iter().map(|row| row.tombstone).collect::<Vec<_>>();
         let batch = property_snapshots_to_batch(
             &key.route,
@@ -5640,18 +5691,23 @@ mod tests {
         let actual = reopened.get(&to_bytes(&node)).unwrap();
         for (name, expected) in &values {
             if matches!(expected, IrLiteral::Null) {
-                assert!(!actual.contains_key(name));
+                assert_eq!(actual.get(name), Some(&IrLiteral::Null));
             } else if name == "empty" {
                 assert_eq!(actual.get(name), Some(&IrLiteral::Str("[]".into())));
             } else {
                 assert_eq!(actual.get(name), Some(expected), "property {name}");
             }
         }
-        assert!(
-            reopened
-                .get(&to_bytes(&propertyless))
-                .is_none_or(HashMap::is_empty)
-        );
+        let propertyless_values = reopened.get(&to_bytes(&propertyless)).unwrap();
+        for (name, value) in &values {
+            let retains_explicit_null = matches!(value, IrLiteral::Null)
+                || ColType::of(value).is_some_and(|column| column.is_scalar());
+            assert_eq!(
+                propertyless_values.get(name),
+                retains_explicit_null.then_some(&IrLiteral::Null),
+                "explicit-null presence for {name}"
+            );
+        }
     }
 
     #[test]
