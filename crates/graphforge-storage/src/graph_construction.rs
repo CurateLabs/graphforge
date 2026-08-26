@@ -845,6 +845,191 @@ impl GraphConstructionSession {
         Ok(encoded)
     }
 
+    /// Install the authenticated canonical inventory into the project CAS and
+    /// publish exactly one project generation from the session's pinned parent.
+    /// The CAS lease remains held through the sole `CURRENT` replacement.
+    pub fn publish_canonical(
+        &mut self,
+        encoding: &GraphConstructionEncoding,
+        target_generation_uuid: Uuid,
+        transaction_uuid: Uuid,
+    ) -> Result<crate::ProjectPublicationReceipt, GfError> {
+        if self.checkpoint.publication_state == Some(ConstructionPublicationState::Published) {
+            let published =
+                crate::published_project_transaction(&self.project_path, transaction_uuid)?
+                    .ok_or_else(|| storage("published construction transaction is absent"))?;
+            if published.generation_uuid != target_generation_uuid {
+                return Err(storage("published construction target changed"));
+            }
+            self.finish_publication(
+                target_generation_uuid,
+                &hex(&published.generation_manifest_sha256),
+            )?;
+            return Ok(published);
+        }
+        let expected_inventory = self
+            .checkpoint
+            .encoding_inventory_sha256
+            .as_deref()
+            .ok_or_else(|| storage("construction publication requires encoded inventory"))?;
+        if crate::graph_construction_encoding::inventory_authority_sha256(encoding)?
+            != expected_inventory
+        {
+            return Err(storage("publication encoding authority changed"));
+        }
+        if encoding.generation != self.checkpoint.parent_topology_generation.saturating_add(1) {
+            return Err(storage("publication topology generation changed"));
+        }
+        crate::graph_construction_encoding::authenticate_for_publication(&self.root, encoding)?;
+        self.begin_publication(target_generation_uuid, transaction_uuid)?;
+
+        let admission = crate::filesystem_admission::admit_project_lifecycle(
+            &self.project_path,
+            crate::filesystem_admission::ProjectLifecycleMode::Durable,
+            crate::filesystem_admission::ProjectRootRequirement::Existing,
+        )?;
+        admission.revalidate_identity()?;
+        let parent = crate::resolve_project_generation(admission.root())?;
+        if parent.generation_uuid() != self.checkpoint.parent_generation_uuid
+            || hex(&parent.manifest_sha256()) != self.checkpoint.parent_generation_manifest_sha256
+        {
+            return Err(storage("construction parent is no longer CURRENT"));
+        }
+
+        let lease = crate::begin_graph_object_publication(admission.root())?;
+        let mut manifest_state = match parent.declared_graph_files_participant()? {
+            Some(crate::GraphFilesParticipant::V2(root)) => {
+                crate::graph_object_store::GraphManifestState::open(
+                    &lease,
+                    root,
+                    crate::GraphManifestLimits::default(),
+                )?
+                .0
+            }
+            Some(crate::GraphFilesParticipant::V1(inventory)) if inventory.file_count == 0 => {
+                crate::graph_object_store::GraphManifestState::empty()
+            }
+            Some(crate::GraphFilesParticipant::V1(_)) => {
+                return Err(storage(
+                    "nonempty construction parent requires compact graph root",
+                ));
+            }
+            None => crate::graph_object_store::GraphManifestState::empty(),
+        };
+        for retained in &encoding.retained_artifacts {
+            let entry = manifest_state
+                .entries()
+                .find(|entry| entry.relative_path == retained.target_path)
+                .ok_or_else(|| storage("retained construction object is absent from parent"))?;
+            if entry.byte_length != retained.bytes || entry.content_sha256 != retained.sha256 {
+                return Err(storage("retained construction object authority changed"));
+            }
+        }
+
+        let workspace = self
+            .project_path
+            .join(PRIVATE_ROOT)
+            .join(self.checkpoint.operation_uuid.simple().to_string())
+            .join(&encoding.root)
+            .join("graph");
+        let workspace_identity =
+            graphforge_filesystem::path_identity(&workspace).map_err(storage)?;
+        let encoded_directory = self
+            .root
+            .open_child_directory(OsStr::new(&encoding.root))
+            .map_err(storage)?
+            .open_child_directory(OsStr::new("graph"))
+            .map_err(storage)?;
+        if workspace_identity != encoded_directory.identity() {
+            return Err(storage("encoded workspace path identity changed"));
+        }
+        let sealed_paths = encoding
+            .artifacts
+            .iter()
+            .map(|artifact| PathBuf::from(&artifact.path))
+            .collect::<Vec<_>>();
+        let (graph_root, _) = crate::graph_object_store::append_graph_files_v2(
+            &lease,
+            &workspace,
+            &mut manifest_state,
+            &sealed_paths,
+            &[],
+        )?;
+        if graphforge_filesystem::path_identity(&workspace).map_err(storage)?
+            != encoded_directory.identity()
+        {
+            return Err(storage(
+                "encoded workspace identity changed during CAS install",
+            ));
+        }
+        for artifact in &encoding.artifacts {
+            let entry = manifest_state
+                .entries()
+                .find(|entry| entry.relative_path == artifact.path)
+                .ok_or_else(|| storage("installed construction artifact is absent"))?;
+            if entry.byte_length != artifact.bytes || entry.content_sha256 != artifact.sha256 {
+                return Err(storage("installed construction artifact authority changed"));
+            }
+        }
+
+        let graph_participant = crate::graph_files::graph_files_root_participant(&graph_root)?;
+        let capabilities = parent
+            .capabilities()
+            .into_iter()
+            .map(|capability| crate::ProjectCapability {
+                capability_id: capability.capability_id,
+                capability_version: capability.capability_version,
+            })
+            .collect();
+        let mut participants = parent
+            .participant_snapshots()?
+            .into_iter()
+            .filter(|snapshot| {
+                snapshot.capability_id != crate::GRAPH_CAPABILITY_ID
+                    || snapshot.record_family_id != crate::GRAPH_FILES_FAMILY
+            })
+            .map(|snapshot| {
+                let encoding = match snapshot.encoding.as_str() {
+                    "parquet" => crate::ProjectParticipantEncoding::Parquet,
+                    "arrow" => crate::ProjectParticipantEncoding::Arrow,
+                    "json" => crate::ProjectParticipantEncoding::Json,
+                    _ => return Err(storage("parent participant encoding is unsupported")),
+                };
+                Ok(crate::ProjectParticipant {
+                    capability_id: snapshot.capability_id,
+                    capability_version: snapshot.capability_version,
+                    record_family_id: snapshot.record_family_id,
+                    record_version: snapshot.record_version,
+                    encoding,
+                    schema_fingerprint: snapshot.schema_fingerprint,
+                    row_count: snapshot.row_count,
+                    bytes: snapshot.bytes,
+                })
+            })
+            .collect::<Result<Vec<_>, GfError>>()?;
+        participants.push(graph_participant);
+        let request = crate::ProjectGenerationRequest {
+            transaction_uuid,
+            generation_uuid: target_generation_uuid,
+            capabilities,
+            participants,
+        };
+        let publication =
+            match crate::project_publication::stage_project_generation_from_admitted_parent(
+                admission, parent, &request, None,
+            )? {
+                crate::ProjectStageOutcome::Staged(staged) => staged
+                    .validate(|_| Ok(()), |_, _| Ok(()))?
+                    .publish_with_graph_objects(&lease)?,
+                crate::ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
+            };
+        self.finish_publication(
+            target_generation_uuid,
+            &hex(&publication.generation_manifest_sha256),
+        )?;
+        Ok(publication)
+    }
+
     /// Create or resume an operation pinned to one parent topology generation.
     pub fn open_with_mode(
         project_dir: &Path,
@@ -8070,6 +8255,117 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("result changed")
+        );
+    }
+
+    #[test]
+    fn canonical_publication_installs_compact_graph_and_advances_current_once() {
+        let root = TempDir::new().unwrap();
+        crate::open_or_initialize_project(root.path()).unwrap();
+        let operation = Uuid::from_u128(9_450);
+        let target = Uuid::from_u128(9_451);
+        let transaction = Uuid::from_u128(9_452);
+        let mut session = GraphConstructionSession::open(
+            root.path(),
+            operation,
+            0,
+            GraphConstructionBudgets::default(),
+        )
+        .unwrap();
+        session
+            .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 2))
+            .unwrap();
+        session.seal().unwrap();
+        let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
+        let encoding = session.encode_canonical(&shape, 1).unwrap();
+
+        let receipt = session
+            .publish_canonical(&encoding, target, transaction)
+            .unwrap();
+        assert_eq!(receipt.generation_uuid, target);
+        assert!(!receipt.idempotent_replay);
+        let current = crate::resolve_project_generation(root.path()).unwrap();
+        assert_eq!(current.generation_uuid(), target);
+        let inventory = current.graph_files_inventory().unwrap().unwrap();
+        assert!(
+            inventory
+                .files
+                .iter()
+                .any(|entry| entry.relative_path == "topology/generation.json")
+        );
+        assert!(
+            inventory
+                .files
+                .iter()
+                .any(|entry| entry.relative_path.starts_with("topology/nodes/"))
+        );
+        drop(current);
+        drop(session);
+
+        let mut resumed = GraphConstructionSession::open(
+            root.path(),
+            operation,
+            0,
+            GraphConstructionBudgets::default(),
+        )
+        .unwrap();
+        let replay = resumed
+            .publish_canonical(&encoding, target, transaction)
+            .unwrap();
+        assert_eq!(replay.generation_uuid, target);
+        assert_eq!(
+            crate::resolve_project_generation(root.path())
+                .unwrap()
+                .generation_uuid(),
+            target
+        );
+    }
+
+    #[test]
+    fn canonical_publication_rejects_tampered_artifact_before_current() {
+        let root = TempDir::new().unwrap();
+        let parent = crate::open_or_initialize_project(root.path()).unwrap();
+        let prior = parent.generation_uuid();
+        drop(parent);
+        let operation = Uuid::from_u128(9_460);
+        let mut session = GraphConstructionSession::open(
+            root.path(),
+            operation,
+            0,
+            GraphConstructionBudgets::default(),
+        )
+        .unwrap();
+        session
+            .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 1))
+            .unwrap();
+        session.seal().unwrap();
+        let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
+        let encoding = session.encode_canonical(&shape, 1).unwrap();
+        let victim = root
+            .path()
+            .join(PRIVATE_ROOT)
+            .join(operation.simple().to_string())
+            .join(&encoding.root)
+            .join("graph")
+            .join(&encoding.artifacts[0].path);
+        std::fs::write(victim, b"tampered").unwrap();
+
+        assert!(
+            session
+                .publish_canonical(&encoding, Uuid::from_u128(9_461), Uuid::from_u128(9_462),)
+                .unwrap_err()
+                .to_string()
+                .contains("artifact differs")
+        );
+        assert_eq!(
+            crate::resolve_project_generation(root.path())
+                .unwrap()
+                .generation_uuid(),
+            prior
+        );
+        assert_eq!(
+            session.checkpoint.publication_state,
+            Some(ConstructionPublicationState::Sealed)
         );
     }
 

@@ -494,6 +494,16 @@ pub(crate) fn encode(
         &mut artifacts,
         &mut evidence,
     )?;
+    let generation_bytes = format!(
+        "{{\"topology_generation\":{generation},\"search_generation\":{generation},\"property_generation\":{generation}}}\n"
+    );
+    copy_artifact(
+        std::io::Cursor::new(generation_bytes.into_bytes()),
+        &output,
+        "topology/generation.json",
+        &mut artifacts,
+        &mut evidence,
+    )?;
 
     let index = crate::uuid_membership::encode_construction_index(
         source,
@@ -1445,8 +1455,8 @@ fn write_parquet(
     Ok(artifact)
 }
 
-fn copy_artifact(
-    mut source_file: File,
+fn copy_artifact<R: Read + Seek>(
+    mut source_file: R,
     output: &StableDirectory,
     relative: &str,
     artifacts: &mut Vec<ConstructionEncodedArtifact>,
@@ -1756,6 +1766,32 @@ fn authenticate_inventory(
                 &retained.parent_manifest_sha256,
             )?;
             previous = Some(retained.target_path.as_str());
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn authenticate_for_publication(
+    source: &StableDirectory,
+    inventory: &GraphConstructionEncoding,
+) -> Result<(), GfError> {
+    let encoded = source
+        .open_child_directory(OsStr::new(ENCODED_ROOT))
+        .map_err(storage)?;
+    let recorded = read_inventory(&encoded)?
+        .ok_or_else(|| storage("canonical encoding inventory is absent"))?;
+    if &recorded != inventory {
+        return Err(storage(
+            "publication inventory differs from durable encoding",
+        ));
+    }
+    for expected in &inventory.artifacts {
+        let (directory, name) = directory_for(&encoded, &expected.path)?;
+        let mut file = directory
+            .open_child_file(OsStr::new(&name))
+            .map_err(storage)?;
+        if authenticate_file(&expected.path, &mut file)? != *expected {
+            return Err(storage("canonical artifact differs from durable inventory"));
         }
     }
     Ok(())

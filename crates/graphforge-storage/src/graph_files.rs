@@ -37,7 +37,6 @@ const MAX_GRAPH_FILES: usize = 100_000;
 const HASH_BUFFER_BYTES: usize = 64 * 1024;
 const GRAPH_FILES_SCHEMA_CANONICAL_BYTES: &[u8] =
     b"graphforge-graph-files/1|relative_path|byte_length|content_sha256|role";
-#[cfg(test)]
 const GRAPH_FILES_V2_SCHEMA_CANONICAL_BYTES: &[u8] =
     b"graphforge-graph-files-root/2|root_node_sha256|logical_file_count|logical_byte_length";
 
@@ -177,7 +176,6 @@ pub fn inventory_participant(
 }
 
 /// Encode a compact v2 root as the registered `graph`/`files` participant.
-#[cfg(test)]
 pub(crate) fn graph_files_root_participant(
     root: &crate::GraphFilesRootV2,
 ) -> Result<ProjectParticipant, GfError> {
@@ -194,7 +192,7 @@ pub(crate) fn graph_files_root_participant(
         )
         .map_err(|error| GfError::Validation(error.to_string()))?,
         row_count: root.logical_file_count,
-        bytes: crate::encode_graph_files_root_v2(root)?,
+        bytes: crate::graph_manifest::encode_root(root)?,
     })
 }
 
@@ -478,6 +476,13 @@ pub fn infer_role(relative: &Path) -> GraphFileRole {
                 "topology" => GraphFileRole::Topology,
                 "properties" | "edge_properties" => GraphFileRole::Properties,
                 "indexes" | "index" => GraphFileRole::Index,
+                ".graphforge-cache"
+                    if components.next().is_some_and(|component| {
+                        component.as_os_str() == std::ffi::OsStr::new("uuid-membership")
+                    }) =>
+                {
+                    GraphFileRole::Index
+                }
                 "deltas" => GraphFileRole::Delta,
                 "runtime_catalog.parquet" => GraphFileRole::Catalog,
                 _ if first.starts_with("runtime_catalog") => GraphFileRole::Catalog,
