@@ -207,7 +207,9 @@ non-empty read-call counters; block-equivalents are not read calls. Aggregate
 authentication bytes, equivalents, and calls equal their authority plus
 property components. `physical_blocks` is an actual-operation count: authentication
 read calls plus decoder read calls. Evidence also distinguishes validation and
-selected-value decoder bytes/calls, authenticated scratch bytes written, range seeks, physical row-decode visits (a
+selected-value decoder bytes/calls, authenticated scratch bytes written, and the
+largest single-snapshot coexistence peak admitted against live scratch free
+space, plus range seeks and physical row-decode visits (a
 row decoded by validation and selected-value passes contributes once to each
 pass), shadowed rows, fragments and row groups considered/selected, and the
 shared live-byte peak. External-merge evidence reports first-level encoded

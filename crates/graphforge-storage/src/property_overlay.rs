@@ -244,6 +244,7 @@ pub struct PropertyFragment {
 pub struct AuthenticatedPropertyInventory {
     generation_lease: Option<crate::ResolvedProjectGeneration>,
     root: Option<graphforge_filesystem::StableDirectory>,
+    root_path: Option<PathBuf>,
     routes: BTreeMap<(PropertyRouteKind, String), Vec<AuthenticatedPropertyFragment>>,
     schemas: BTreeMap<(PropertyRouteKind, String), arrow::datatypes::SchemaRef>,
     authority_bytes: u64,
@@ -393,6 +394,7 @@ impl AuthenticatedPropertyInventory {
     fn open_fragment(
         &self,
         fragment: &AuthenticatedPropertyFragment,
+        scratch: &Path,
     ) -> Result<OpenPropertyFragment, GfError> {
         let root = self
             .root
@@ -423,6 +425,7 @@ impl AuthenticatedPropertyInventory {
             &file,
             fragment.identity,
             &fragment.entry,
+            scratch,
             #[cfg(test)]
             mutation_barrier,
         )?;
@@ -536,6 +539,7 @@ impl AuthenticatedPropertyInventory {
         let Some(participant) = generation.declared_graph_files_participant()? else {
             return Ok(Self {
                 root: None,
+                root_path: None,
                 generation_lease: Some(generation.clone()),
                 routes: BTreeMap::new(),
                 schemas: BTreeMap::new(),
@@ -680,6 +684,7 @@ impl AuthenticatedPropertyInventory {
         Ok(Self {
             generation_lease: None,
             root: Some(root),
+            root_path: Some(root_path.to_path_buf()),
             routes,
             schemas: schemas
                 .into_iter()
@@ -761,7 +766,7 @@ impl AuthenticatedPropertyInventory {
         let decoded = Arc::new(Mutex::new(DecodedRetention::default()));
         let inputs = fragments.iter().map(|fragment| {
             let reader = (|| {
-                let opened = self.open_fragment(fragment)?;
+                let opened = self.open_fragment(fragment, scratch)?;
                 authentication_bytes.fetch_add(opened.authentication_bytes, Ordering::Relaxed);
                 authentication_block_equivalents
                     .fetch_add(opened.authentication_block_equivalents, Ordering::Relaxed);
@@ -828,6 +833,11 @@ impl AuthenticatedPropertyInventory {
         metrics.authentication_read_calls = authentication_read_calls.load(Ordering::Relaxed);
         metrics.property_authentication_bytes = metrics.authentication_bytes;
         metrics.authenticated_snapshot_bytes = metrics.authentication_bytes;
+        metrics.authenticated_snapshot_peak_bytes = fragments
+            .iter()
+            .map(|fragment| fragment.entry.byte_length)
+            .max()
+            .unwrap_or(0);
         metrics.property_authentication_block_equivalents =
             metrics.authentication_block_equivalents;
         metrics.property_authentication_read_calls = metrics.authentication_read_calls;
@@ -1072,6 +1082,7 @@ fn authenticated_snapshot_file(
     source: &File,
     expected_identity: graphforge_filesystem::FileIdentity,
     entry: &crate::GraphFileEntry,
+    scratch: &Path,
     #[cfg(test)] mutation_barrier: Option<Arc<TestMutationBarrier>>,
 ) -> Result<(File, u64, u64, u64), GfError> {
     let metadata = source.metadata().map_err(io_error)?;
@@ -1085,10 +1096,33 @@ fn authenticated_snapshot_file(
             "property fragment identity changed during snapshot",
         ));
     }
-    // `tempfile()` creates an unnamed/unlinked file where supported and an
-    // unpredictable, exclusively-created file elsewhere, so an attacker
-    // cannot plant or redirect the authenticated decode snapshot.
-    let mut snapshot = tempfile::tempfile().map_err(io_error)?;
+    fs::create_dir_all(scratch).map_err(io_error)?;
+    let scratch_capability =
+        graphforge_filesystem::StableDirectory::open(scratch).map_err(io_error)?;
+    let snapshot_available_bytes = fs4::available_space(scratch).map_err(io_error)?;
+    if snapshot_available_bytes < entry.byte_length {
+        return Err(GfError::Storage(format!(
+            "property snapshot scratch capacity is insufficient: available={snapshot_available_bytes} required={}",
+            entry.byte_length
+        )));
+    }
+    // Random exclusive creation plus immediate unlink makes planted names,
+    // symlinks, and FIFOs unable to redirect the authenticated snapshot.
+    let named = tempfile::Builder::new()
+        .prefix(".gf-property-snapshot-")
+        .tempfile_in(scratch)
+        .map_err(io_error)?;
+    scratch_capability.revalidate_named().map_err(io_error)?;
+    let mut snapshot = named.into_file();
+    if graphforge_filesystem::file_identity(&snapshot)
+        .map_err(io_error)?
+        .volume_serial
+        != expected_identity.volume_serial
+    {
+        return Err(corrupt(
+            "property snapshot scratch is not on the authenticated project volume",
+        ));
+    }
     let mut digest = Sha256::new();
     let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
     let mut bytes = 0_u64;
@@ -1129,7 +1163,6 @@ fn authenticated_snapshot_file(
             "property fragment identity changed during snapshot",
         ));
     }
-    snapshot.sync_data().map_err(io_error)?;
     snapshot.rewind().map_err(io_error)?;
     Ok((snapshot, bytes, bytes.div_ceil(64 * 1024), read_calls))
 }
@@ -1160,6 +1193,8 @@ pub struct PropertyOverlayMetrics {
     pub property_authentication_bytes: u64,
     /// Bytes durably written to immutable authenticated decode snapshots.
     pub authenticated_snapshot_bytes: u64,
+    /// Largest single immutable snapshot that had to coexist with its source.
+    pub authenticated_snapshot_peak_bytes: u64,
     /// Bytes read while validating canonical UUID/tombstone authority.
     pub validation_bytes: u64,
     /// Bytes read while decoding values from selected row groups.
@@ -1605,9 +1640,20 @@ pub fn read_authenticated_property_snapshots_for_inventory(
     let Some(fragments) = inventory.routes.get(&(kind, route.to_owned())) else {
         return Ok((found, metrics));
     };
+    let root_path = inventory
+        .root_path
+        .as_deref()
+        .ok_or_else(|| corrupt("property inventory lacks its retained root path"))?;
+    let scratch_parent = root_path
+        .parent()
+        .ok_or_else(|| corrupt("property inventory root lacks a project-volume parent"))?;
+    let targeted_scratch = tempfile::Builder::new()
+        .prefix(".gf-property-targeted-")
+        .tempdir_in(scratch_parent)
+        .map_err(io_error)?;
     for fragment in fragments.iter().rev() {
         let counts = Arc::new(ReadCounts::default());
-        let opened = inventory.open_fragment(fragment)?;
+        let opened = inventory.open_fragment(fragment, targeted_scratch.path())?;
         metrics.authentication_bytes = metrics
             .authentication_bytes
             .saturating_add(opened.authentication_bytes);
@@ -1623,6 +1669,9 @@ pub fn read_authenticated_property_snapshots_for_inventory(
         metrics.authenticated_snapshot_bytes = metrics
             .authenticated_snapshot_bytes
             .saturating_add(opened.authentication_bytes);
+        metrics.authenticated_snapshot_peak_bytes = metrics
+            .authenticated_snapshot_peak_bytes
+            .max(fragment.entry.byte_length);
         metrics.property_authentication_block_equivalents = metrics
             .property_authentication_block_equivalents
             .saturating_add(opened.authentication_block_equivalents);
@@ -3182,6 +3231,31 @@ mod tests {
             selected_metrics.authentication_block_equivalents,
             entry.byte_length.div_ceil(64 * 1024)
         );
+        assert_eq!(
+            selected_metrics.authenticated_snapshot_peak_bytes,
+            entry.byte_length
+        );
+        assert_eq!(fs::read_dir(scratch.path()).unwrap().count(), 0);
+
+        #[cfg(unix)]
+        {
+            let linked_scratch = dir.path().join("linked-scratch");
+            std::os::unix::fs::symlink(scratch.path(), &linked_scratch).unwrap();
+            let error = selected
+                .visit_route(
+                    PropertyRouteKind::Node,
+                    "Person",
+                    &linked_scratch,
+                    PropertyOverlayLimits::default(),
+                    |_| Ok(()),
+                )
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("linked")
+                    || error.to_string().contains("Not a directory"),
+                "{error}"
+            );
+        }
 
         let conflicting_id = PropertyFragmentId {
             generation: 8,

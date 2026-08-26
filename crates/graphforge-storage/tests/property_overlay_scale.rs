@@ -63,6 +63,7 @@ struct ScaleEvidence {
     authority_authentication_bytes: u64,
     property_authentication_bytes: u64,
     authenticated_snapshot_bytes: u64,
+    authenticated_snapshot_peak_bytes: u64,
     authentication_block_equivalents: u64,
     authority_authentication_block_equivalents: u64,
     property_authentication_block_equivalents: u64,
@@ -306,6 +307,7 @@ fn property_overlay_scale_scan_child() {
         authority_authentication_bytes: metrics.authority_authentication_bytes,
         property_authentication_bytes: metrics.property_authentication_bytes,
         authenticated_snapshot_bytes: metrics.authenticated_snapshot_bytes,
+        authenticated_snapshot_peak_bytes: metrics.authenticated_snapshot_peak_bytes,
         authentication_block_equivalents: metrics.authentication_block_equivalents,
         authority_authentication_block_equivalents: metrics
             .authority_authentication_block_equivalents,
@@ -504,6 +506,7 @@ fn production_property_overlay_n_2n_4n_is_disk_growing_and_memory_bounded() {
             phase.authenticated_snapshot_bytes,
             phase.property_fragment_bytes
         );
+        assert!(phase.authenticated_snapshot_peak_bytes <= phase.property_fragment_bytes);
         let decoder_bytes = phase
             .validation_bytes
             .checked_add(phase.selected_value_bytes)
