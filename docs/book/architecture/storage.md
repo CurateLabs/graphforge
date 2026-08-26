@@ -187,7 +187,9 @@ Admission retains the stable root capability plus each fragment's authenticated
 path, native file identity, length, digest, and schema—not one OS handle per
 historical fragment. A scan opens fragments on demand without following links,
 requires the admitted device/file identity, and rehashes the complete file
-before decoding; the handle closes with that decoder. Consequently live
+before decoding. It rechecks length and the complete digest on the same handle
+after clean decoder EOF, before the final emitting merge; targeted reads do the
+same before returning values. The handle then closes. Consequently live
 fragment handles are bounded by `max_open_runs` rather than total history, and
 same-name replacement, in-place mutation, symlink, and path substitution all
 fail closed. Parquet page headers are then parsed through a bounded

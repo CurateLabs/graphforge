@@ -253,6 +253,8 @@ pub struct AuthenticatedPropertyInventory {
     handle_counts: Arc<FragmentHandleCounts>,
     #[cfg(test)]
     late_decoder_failure_row_countdown: Arc<AtomicU64>,
+    #[cfg(test)]
+    mutation_barrier: Mutex<Option<Arc<TestMutationBarrier>>>,
 }
 
 /// One-time I/O performed while admitting and authenticating an immutable
@@ -315,6 +317,13 @@ struct FragmentHandleCounts {
     peak: AtomicU64,
 }
 
+#[cfg(test)]
+#[derive(Debug)]
+struct TestMutationBarrier {
+    authenticated: std::sync::Barrier,
+    proceed: std::sync::Barrier,
+}
+
 impl FragmentHandleGuard {
     fn acquired(#[cfg(test)] counts: &Arc<FragmentHandleCounts>) -> Self {
         #[cfg(test)]
@@ -367,6 +376,16 @@ impl AuthenticatedPropertyInventory {
             .store(row, Ordering::SeqCst);
     }
 
+    #[cfg(test)]
+    fn arm_mutation_after_authentication(&self) -> Arc<TestMutationBarrier> {
+        let barrier = Arc::new(TestMutationBarrier {
+            authenticated: std::sync::Barrier::new(2),
+            proceed: std::sync::Barrier::new(2),
+        });
+        *self.mutation_barrier.lock().expect("mutation barrier lock") = Some(Arc::clone(&barrier));
+        barrier
+    }
+
     fn open_fragment(
         &self,
         fragment: &AuthenticatedPropertyFragment,
@@ -387,6 +406,16 @@ impl AuthenticatedPropertyInventory {
         }
         let (authentication_bytes, authentication_block_equivalents, authentication_read_calls) =
             authenticate_inventory_file(&file, &fragment.entry)?;
+        #[cfg(test)]
+        if let Some(barrier) = self
+            .mutation_barrier
+            .lock()
+            .expect("mutation barrier lock")
+            .take()
+        {
+            barrier.authenticated.wait();
+            barrier.proceed.wait();
+        }
         Ok(OpenPropertyFragment {
             file: Arc::new(file),
             authentication_bytes,
@@ -507,6 +536,8 @@ impl AuthenticatedPropertyInventory {
                 handle_counts: Arc::new(FragmentHandleCounts::default()),
                 #[cfg(test)]
                 late_decoder_failure_row_countdown: Arc::new(AtomicU64::new(0)),
+                #[cfg(test)]
+                mutation_barrier: Mutex::new(None),
             });
         };
         let inventory = generation.graph_files_inventory()?.ok_or_else(|| {
@@ -661,6 +692,8 @@ impl AuthenticatedPropertyInventory {
             handle_counts,
             #[cfg(test)]
             late_decoder_failure_row_countdown: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            mutation_barrier: Mutex::new(None),
         })
     }
 
@@ -747,14 +780,19 @@ impl AuthenticatedPropertyInventory {
                     .with_batch_size(admitted_batch_rows(limits))
                     .build()
                     .map_err(parquet_error)?;
-                Ok((reader, page_reservation_bytes, opened.handle))
+                Ok((reader, page_reservation_bytes, opened.file, opened.handle))
             })();
-            let (reader, pending_error, page_reservation_bytes, handle) = match reader {
-                Ok((reader, page_reservation_bytes, handle)) => {
-                    (Some(reader), None, page_reservation_bytes, Some(handle))
-                }
-                Err(error) => (None, Some(error), 0, None),
-            };
+            let (reader, pending_error, page_reservation_bytes, authentication_file, handle) =
+                match reader {
+                    Ok((reader, page_reservation_bytes, file, handle)) => (
+                        Some(reader),
+                        None,
+                        page_reservation_bytes,
+                        Some(file),
+                        Some(handle),
+                    ),
+                    Err(error) => (None, Some(error), 0, None, None),
+                };
             (
                 fragment.id,
                 0,
@@ -770,6 +808,11 @@ impl AuthenticatedPropertyInventory {
                     page_reservation_bytes,
                     batch_reservation_bytes: limits.max_buffered_bytes / 4,
                     _handle: handle,
+                    authentication_file,
+                    authentication_entry: fragment.entry.clone(),
+                    authentication_bytes: Arc::clone(&authentication_bytes),
+                    authentication_block_equivalents: Arc::clone(&authentication_block_equivalents),
+                    authentication_read_calls: Arc::clone(&authentication_read_calls),
                     #[cfg(test)]
                     late_failure_row_countdown: Arc::clone(
                         &self.late_decoder_failure_row_countdown,
@@ -1199,6 +1242,11 @@ struct PropertyParquetRows {
     page_reservation_bytes: u64,
     batch_reservation_bytes: u64,
     _handle: Option<FragmentHandleGuard>,
+    authentication_file: Option<Arc<File>>,
+    authentication_entry: crate::GraphFileEntry,
+    authentication_bytes: Arc<AtomicU64>,
+    authentication_block_equivalents: Arc<AtomicU64>,
+    authentication_read_calls: Arc<AtomicU64>,
     #[cfg(test)]
     late_failure_row_countdown: Arc<AtomicU64>,
 }
@@ -1264,16 +1312,30 @@ impl Iterator for PropertyParquetRows {
             }
             let Some(next_batch) = self.reader.as_mut().expect("reader checked").next() else {
                 self.budget.release(self.batch_reservation_bytes);
-                return None;
+                self.reader = None;
+                let file = self
+                    .authentication_file
+                    .take()
+                    .expect("successful reader retains authentication file");
+                match authenticate_inventory_file(file.as_ref(), &self.authentication_entry) {
+                    Ok((bytes, block_equivalents, read_calls)) => {
+                        self.authentication_bytes
+                            .fetch_add(bytes, Ordering::Relaxed);
+                        self.authentication_block_equivalents
+                            .fetch_add(block_equivalents, Ordering::Relaxed);
+                        self.authentication_read_calls
+                            .fetch_add(read_calls, Ordering::Relaxed);
+                        return None;
+                    }
+                    Err(error) => return Some(Err(error)),
+                }
             };
             let batch = match next_batch {
                 Ok(batch) => batch,
                 Err(error) => {
                     self.budget.release(self.batch_reservation_bytes);
                     self.reader = None;
-                    return Some(Err(GfError::Storage(format!(
-                        "property overlay Arrow: {error}"
-                    ))));
+                    return Some(Err(authenticated_arrow_error(error)));
                 }
             };
             let arrow_bytes = u64::try_from(batch.get_array_memory_size()).unwrap_or(u64::MAX);
@@ -1562,6 +1624,26 @@ pub fn read_authenticated_property_snapshots_for_inventory(
                 &mut metrics,
             )?;
         }
+        let (post_authentication_bytes, post_block_equivalents, post_read_calls) =
+            authenticate_inventory_file(opened.file.as_ref(), &fragment.entry)?;
+        metrics.authentication_bytes = metrics
+            .authentication_bytes
+            .saturating_add(post_authentication_bytes);
+        metrics.authentication_block_equivalents = metrics
+            .authentication_block_equivalents
+            .saturating_add(post_block_equivalents);
+        metrics.authentication_read_calls = metrics
+            .authentication_read_calls
+            .saturating_add(post_read_calls);
+        metrics.property_authentication_bytes = metrics
+            .property_authentication_bytes
+            .saturating_add(post_authentication_bytes);
+        metrics.property_authentication_block_equivalents = metrics
+            .property_authentication_block_equivalents
+            .saturating_add(post_block_equivalents);
+        metrics.property_authentication_read_calls = metrics
+            .property_authentication_read_calls
+            .saturating_add(post_read_calls);
         let total_bytes = counts.bytes.load(Ordering::Relaxed);
         let total_read_calls = counts.blocks.load(Ordering::Relaxed);
         metrics.fragments_considered = metrics.fragments_considered.saturating_add(1);
@@ -1577,9 +1659,11 @@ pub fn read_authenticated_property_snapshots_for_inventory(
         metrics.selected_value_read_calls = metrics
             .selected_value_read_calls
             .saturating_add(total_read_calls.saturating_sub(validation_read_calls));
-        metrics.physical_blocks = metrics
-            .physical_blocks
-            .saturating_add(total_read_calls.saturating_add(opened.authentication_read_calls));
+        metrics.physical_blocks = metrics.physical_blocks.saturating_add(
+            total_read_calls
+                .saturating_add(opened.authentication_read_calls)
+                .saturating_add(post_read_calls),
+        );
         metrics.range_seeks = metrics
             .range_seeks
             .saturating_add(counts.range_seeks.load(Ordering::Relaxed));
@@ -1618,7 +1702,7 @@ fn select_target_row_groups(
                 .map_err(parquet_error)?;
         let mut selected = false;
         for batch in validation {
-            let batch = batch.map_err(|error| GfError::Storage(error.to_string()))?;
+            let batch = batch.map_err(authenticated_arrow_error)?;
             charge_target_batch(metrics, &batch, page_reservation_bytes)?;
             let uuids = batch
                 .column_by_name(kind.uuid_field())
@@ -1699,7 +1783,7 @@ fn decode_target_row_groups(
     .build()
     .map_err(parquet_error)?;
     for batch in reader {
-        let batch = batch.map_err(|error| GfError::Storage(error.to_string()))?;
+        let batch = batch.map_err(authenticated_arrow_error)?;
         charge_target_batch(metrics, &batch, options.page_reservation_bytes)?;
         let decoded = decode_snapshot_batch(&batch, options.kind.uuid_field())?;
         if decoded
@@ -1988,6 +2072,15 @@ fn parquet_error(error: ParquetError) -> GfError {
     GfError::Project {
         code: graphforge_core::ProjectErrorCode::ProjectCorrupt,
         message: format!("property overlay Parquet is corrupt: {error}"),
+    }
+}
+
+fn authenticated_arrow_error(error: arrow::error::ArrowError) -> GfError {
+    match error {
+        arrow::error::ArrowError::IoError(_, source) => io_error(source),
+        other => corrupt(&format!(
+            "authenticated property Arrow/Parquet data is corrupt: {other}"
+        )),
     }
 }
 
@@ -2979,11 +3072,11 @@ mod tests {
             .unwrap();
             assert_eq!(rows.len(), 1);
             assert_eq!(metrics.per_record_seeks, 0);
-            assert_eq!(metrics.authentication_bytes, entry.byte_length);
+            assert_eq!(metrics.authentication_bytes, entry.byte_length * 2);
             assert!(metrics.authentication_read_calls > 0);
             assert_eq!(
                 metrics.authentication_block_equivalents,
-                entry.byte_length.div_ceil(64 * 1024)
+                entry.byte_length.div_ceil(64 * 1024) * 2
             );
             assert_eq!(
                 metrics.physical_bytes,
@@ -3053,11 +3146,14 @@ mod tests {
             selected.open_metrics().authentication_bytes,
             entry.byte_length
         );
-        assert_eq!(selected_metrics.authentication_bytes, entry.byte_length);
+        assert_eq!(
+            selected_metrics.authentication_bytes,
+            entry.byte_length.saturating_mul(2)
+        );
         assert!(selected_metrics.authentication_read_calls > 0);
         assert_eq!(
             selected_metrics.authentication_block_equivalents,
-            entry.byte_length.div_ceil(64 * 1024)
+            entry.byte_length.div_ceil(64 * 1024).saturating_mul(2)
         );
 
         let conflicting_id = PropertyFragmentId {
@@ -3363,7 +3459,7 @@ mod tests {
             vec![
                 Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
                 Field::new(PROPERTY_TOMBSTONE_FIELD, DataType::Boolean, false),
-                Field::new("value", DataType::Int64, true),
+                Field::new("value", DataType::Utf8, true),
             ],
             HashMap::from([
                 (
@@ -3384,13 +3480,18 @@ mod tests {
                         .unwrap(),
                 ),
                 Arc::new(BooleanArray::from(vec![false, false])),
-                Arc::new(Int64Array::from(vec![Some(1), Some(2)])),
+                Arc::new(StringArray::from(vec![
+                    Some("authenticated-one"),
+                    Some("authenticated-two"),
+                ])),
             ],
         )
         .unwrap();
         let path = route_dir.join(id.file_name());
         let properties = WriterProperties::builder()
             .set_max_row_group_row_count(Some(1))
+            .set_dictionary_enabled(false)
+            .set_compression(parquet::basic::Compression::UNCOMPRESSED)
             .build();
         let mut writer =
             ArrowWriter::try_new(File::create(&path).unwrap(), schema, Some(properties)).unwrap();
@@ -3448,6 +3549,85 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("injected late authenticated"));
+
+        let tampered_bytes = || {
+            let mut tampered = bytes.clone();
+            let needle = b"authenticated-one";
+            let replacement = b"tampered-value-01";
+            assert_eq!(needle.len(), replacement.len());
+            let offset = tampered
+                .windows(needle.len())
+                .position(|window| window == needle)
+                .expect("uncompressed authenticated value is present");
+            tampered[offset..offset + needle.len()].copy_from_slice(replacement);
+            tampered
+        };
+
+        let barrier = inventory.arm_mutation_after_authentication();
+        let direct_inventory = Arc::clone(&inventory);
+        let direct = std::thread::spawn(move || {
+            let scratch = TempDir::new().unwrap();
+            let emitted = Arc::new(AtomicU64::new(0));
+            let observed = Arc::clone(&emitted);
+            let result = direct_inventory.visit_route(
+                PropertyRouteKind::Node,
+                "Person",
+                scratch.path(),
+                PropertyOverlayLimits::default(),
+                move |_| {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+            );
+            (result, emitted.load(Ordering::SeqCst))
+        });
+        barrier.authenticated.wait();
+        fs::write(&path, tampered_bytes()).unwrap();
+        barrier.proceed.wait();
+        let (result, emitted) = direct.join().unwrap();
+        let error = result.unwrap_err();
+        assert_eq!(error.code(), "GF_PROJECT_CORRUPT");
+        assert_eq!(emitted, 0);
+
+        fs::write(&path, &bytes).unwrap();
+        let barrier = inventory.arm_mutation_after_authentication();
+        let targeted_inventory = Arc::clone(&inventory);
+        let targeted = std::thread::spawn(move || {
+            read_authenticated_property_snapshots_for_inventory(
+                &targeted_inventory,
+                PropertyRouteKind::Node,
+                "Person",
+                &BTreeSet::from([[1; 16]]),
+            )
+        });
+        barrier.authenticated.wait();
+        fs::write(&path, tampered_bytes()).unwrap();
+        barrier.proceed.wait();
+        let error = targeted.join().unwrap().unwrap_err();
+        assert_eq!(error.code(), "GF_PROJECT_CORRUPT");
+
+        fs::write(&path, &bytes).unwrap();
+        let barrier = inventory.arm_mutation_after_authentication();
+        let limit_context = context.clone();
+        let limited = tokio::spawn(async move {
+            limit_context
+                .sql("SELECT value FROM props LIMIT 1")
+                .await
+                .unwrap()
+                .collect()
+                .await
+        });
+        let mutation_path = path.clone();
+        let mutation_bytes = tampered_bytes();
+        tokio::task::spawn_blocking(move || {
+            barrier.authenticated.wait();
+            fs::write(mutation_path, mutation_bytes).unwrap();
+            barrier.proceed.wait();
+        })
+        .await
+        .unwrap();
+        let error = limited.await.unwrap().unwrap_err();
+        assert!(error.to_string().contains("GF_PROJECT_CORRUPT"), "{error}");
     }
 
     #[test]
@@ -4039,15 +4219,15 @@ mod tests {
             assert_eq!(metrics.physical_rows, u64::try_from(rows * 2).unwrap());
             assert_eq!(metrics.fragments_considered, 1);
             // Raw graph-tree adapters capture/hash the authority, admission
-            // authenticates the fragment, and bounded reopening reauthenticates
-            // the on-demand handle before decoding.
+            // authenticates the fragment, and bounded reopening authenticates
+            // before plus verifies after decoding.
             assert_eq!(
                 metrics.authentication_bytes,
-                expected_authentication_bytes * 3
+                expected_authentication_bytes * 4
             );
             assert_eq!(
                 metrics.authentication_block_equivalents,
-                expected_authentication_bytes.div_ceil(64 * 1024) * 3
+                expected_authentication_bytes.div_ceil(64 * 1024) * 4
             );
             assert_eq!(metrics.row_groups_considered, 1);
             assert_eq!(metrics.row_groups_selected, 1);
