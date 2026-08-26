@@ -125,6 +125,7 @@ mod provider_rerank;
 mod provider_session;
 mod repository;
 mod resource_policy;
+mod resumable_construction;
 #[cfg(test)]
 mod same_process_concurrency_tests;
 #[cfg(test)]
@@ -169,6 +170,9 @@ pub use repository::{
     RepositoryInitReceipt, RepositoryRemoveReceipt, RepositorySourceDigest, RepositorySyncRequest,
     RepositorySyncResult, RepositorySyncStatus, SkillBundle, SkillBundleFile, SkillMutationReceipt,
     SkillStatus, SkillStatusReceipt,
+};
+pub use resumable_construction::{
+    GraphConstructionProgress, GraphConstructionPublicationReceipt, GraphConstructionSession,
 };
 
 // Re-export the foundational types callers need alongside the facade, so a

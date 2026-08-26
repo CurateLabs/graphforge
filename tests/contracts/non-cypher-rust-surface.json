@@ -1,11 +1,12 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "2d86746c592716a79fe12cb5471f1c9b90ce8e91bfca772b19110cdfafa468d1",
+  "public_method_digest": "f95b7cb7b6612d357fa4a9e9df165ff684910e93f3a48df46e997bae6a60ba64",
   "method_policy": {
     "receiver_defaults": {
       "GraphForge": "release-tested",
       "GraphImportSession": "release-tested",
+      "GraphConstructionSession": "release-tested",
       "GraphTransaction": "introspection",
       "RepositoryContext": "designed-only",
       "crate": "release-tested",
@@ -286,6 +287,23 @@
         {
           "path": "crates/graphforge-api/src/checkpoint_graph_diff.rs",
           "symbol": "extracts_uuid_ordered_logical_nodes_and_edges_from_pinned_generation"
+        }
+      ]
+    },
+    "resumable-construction": {
+      "ids": [
+        "GraphConstructionSession.abort",
+        "GraphConstructionSession.append_edges",
+        "GraphConstructionSession.append_nodes",
+        "GraphConstructionSession.progress",
+        "GraphConstructionSession.seal_and_publish",
+        "GraphForge.begin_graph_construction",
+        "GraphForge.resume_graph_construction"
+      ],
+      "test_refs": [
+        {
+          "path": "crates/graphforge-api/src/resumable_construction.rs",
+          "symbol": "graphforge_multi_chunk_construction_publishes_once_and_reopens"
         }
       ]
     },
