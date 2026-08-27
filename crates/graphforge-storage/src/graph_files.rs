@@ -444,6 +444,7 @@ pub fn materialize_graph_tree(
                 .map_err(|error| storage("create private graph directory", parent, error))?;
         }
         copy_regular_file(&source, &destination)?;
+        make_private_copy_owner_writable(&destination)?;
         evidence.files_copied = evidence.files_copied.saturating_add(1);
         evidence.bytes_copied = evidence.bytes_copied.saturating_add(entry.byte_length);
     }
@@ -785,6 +786,30 @@ fn copy_regular_file(source: &Path, destination: &Path) -> Result<[u8; 32], GfEr
     Ok(digest)
 }
 
+#[cfg(unix)]
+fn make_private_copy_owner_writable(path: &Path) -> Result<(), GfError> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let metadata = fs::metadata(path)
+        .map_err(|error| storage("inspect private graph file permissions", path, error))?;
+    let mut permissions = metadata.permissions();
+    permissions.set_mode(permissions.mode() | 0o200);
+    fs::set_permissions(path, permissions)
+        .map_err(|error| storage("make private graph file owner-writable", path, error))?;
+    sync_file(path)
+}
+
+#[cfg(not(unix))]
+fn make_private_copy_owner_writable(path: &Path) -> Result<(), GfError> {
+    let mut permissions = fs::metadata(path)
+        .map_err(|error| storage("inspect private graph file permissions", path, error))?
+        .permissions();
+    permissions.set_readonly(false);
+    fs::set_permissions(path, permissions)
+        .map_err(|error| storage("make private graph file owner-writable", path, error))?;
+    sync_file(path)
+}
+
 fn hash_file(path: &Path) -> Result<[u8; 32], GfError> {
     hash_file_counted(path).map(|(digest, _)| digest)
 }
@@ -1057,6 +1082,11 @@ mod tests {
         assert_eq!(evidence.files_copied, 2);
         assert_eq!(evidence.bytes_copied, inventory.total_byte_length);
 
+        let sealed_source = graph_tree_root(generation.path()).join("properties/Person.parquet");
+        let mut sealed_permissions = fs::metadata(&sealed_source).unwrap().permissions();
+        sealed_permissions.set_readonly(true);
+        fs::set_permissions(&sealed_source, sealed_permissions).unwrap();
+
         let private = tempfile::tempdir().unwrap();
         let opened = materialize_graph_tree(
             &graph_tree_root(generation.path()),
@@ -1066,10 +1096,35 @@ mod tests {
         .unwrap();
         assert_eq!(opened.strategy, GraphFilesOpenStrategy::PrivateMaterialize);
         assert_eq!(opened.files_copied, 2);
-        assert_eq!(
-            fs::read(private.path().join("properties/Person.parquet")).unwrap(),
-            b"person"
+        let private_copy = private.path().join("properties/Person.parquet");
+        assert!(
+            fs::metadata(&sealed_source)
+                .unwrap()
+                .permissions()
+                .readonly()
         );
+        assert!(
+            !fs::metadata(&private_copy)
+                .unwrap()
+                .permissions()
+                .readonly()
+        );
+        assert_eq!(fs::read(&private_copy).unwrap(), b"person");
+        assert_eq!(
+            hash_file(&private_copy).unwrap(),
+            hash_file(&sealed_source).unwrap()
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+
+            assert_ne!(
+                fs::metadata(&private_copy).unwrap().ino(),
+                fs::metadata(&sealed_source).unwrap().ino()
+            );
+        }
+        fs::write(&private_copy, b"private rewrite").unwrap();
+        assert_eq!(fs::read(&sealed_source).unwrap(), b"person");
         assert_eq!(pinned_open_evidence(&inventory).files_opened_in_place, 2);
     }
 
