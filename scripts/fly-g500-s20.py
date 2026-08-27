@@ -30,6 +30,15 @@ SAFE_REGION = re.compile(r"^[a-z0-9-]{2,20}$")
 CPUS = 2
 MEMORY_MB = 4096
 MAX_COST_USD = 10.0
+PRICING_SOURCE = "https://fly.io/docs/about/pricing/"
+# Largest currently published regional performance-2x/4GB price (2026-08-27).
+COMPUTE_USD_PER_SECOND = 0.00003864
+VOLUME_USD_PER_GB_MONTH = 0.15
+RUN_SECONDS = 14_400
+CLEANUP_RESERVE_SECONDS = 600
+VOLUME_BILLING_HOURS = 5
+EVIDENCE_PATH = "/work/s20-evidence.json"
+RESULT_PATH = "/work/container-result.json"
 
 
 class ControllerError(RuntimeError):
@@ -67,9 +76,11 @@ def validate_inputs(args: argparse.Namespace) -> str:
         raise ControllerError("volume must be in 1..500 GB")
     if not 60 <= args.timeout_s <= 14_400:
         raise ControllerError("timeout must be in 60..14400 seconds")
-    if not 0 < args.reserved_cost_usd <= MAX_COST_USD:
-        raise ControllerError("reserved cost must be positive and no more than $10")
-    for path, label in ((args.evidence_out, "evidence"), (args.ledger, "ledger")):
+    for path, label in (
+        (args.evidence_out, "evidence"),
+        (args.diagnostic_out, "diagnostic"),
+        (args.ledger, "ledger"),
+    ):
         if not path.parent.is_dir():
             raise ControllerError(f"{label} output parent directory does not exist")
     if args.execute and not args.confirm_disposable:
@@ -96,7 +107,23 @@ def check_source(expected_sha: str) -> None:
         raise ControllerError("exact expected SHA must be checked out in a clean tree")
 
 
-def reserve_budget(path: Path, run_id: str, amount: float) -> None:
+def price_reservation(volume_size_gb: int) -> dict[str, Any]:
+    compute = (RUN_SECONDS + CLEANUP_RESERVE_SECONDS) * COMPUTE_USD_PER_SECOND
+    volume = volume_size_gb * VOLUME_USD_PER_GB_MONTH / (30 * 24) * VOLUME_BILLING_HOURS
+    total_cents = int((compute + volume) * 100 + 0.999999999)
+    return {
+        "pricing_source": PRICING_SOURCE,
+        "compute_rate_usd_per_second": COMPUTE_USD_PER_SECOND,
+        "volume_rate_usd_per_gb_month": VOLUME_USD_PER_GB_MONTH,
+        "runtime_seconds": RUN_SECONDS,
+        "cleanup_reserve_seconds": CLEANUP_RESERVE_SECONDS,
+        "volume_billing_hours": VOLUME_BILLING_HOURS,
+        "volume_size_gb": volume_size_gb,
+        "reserved_usd": total_cents / 100,
+    }
+
+
+def reserve_budget(path: Path, run_id: str, reservation: dict[str, Any]) -> None:
     """Durably reserve before creation; reservations survive failed attempts."""
     state = {"schema": "graphforge-fly-cost-ledger/1", "limit_usd": MAX_COST_USD, "runs": []}
     if path.exists():
@@ -112,9 +139,10 @@ def reserve_budget(path: Path, run_id: str, amount: float) -> None:
     if any(run.get("run_id") == run_id for run in runs):
         raise ControllerError("run id is already reserved")
     used = sum(float(run.get("reserved_usd", MAX_COST_USD + 1)) for run in runs)
+    amount = float(reservation["reserved_usd"])
     if used + amount > MAX_COST_USD:
         raise ControllerError("durable cost reservations would exceed $10")
-    runs.append({"run_id": run_id, "reserved_usd": amount})
+    runs.append({"run_id": run_id, **reservation})
     with tempfile.NamedTemporaryFile(
         "w", dir=path.parent, delete=False, encoding="utf-8"
     ) as handle:
@@ -139,9 +167,13 @@ def machine_payload(args: argparse.Namespace, volume_id: str, digest: str) -> di
             "services": [],
             "env": {
                 "GF_G500_CERTIFICATION_SCALE": "20",
-                "GF_G500_CERTIFICATION_GIT_SHA": args.expected_sha,
-                "GF_G500_CERTIFICATION_IMAGE_DIGEST": digest,
-                "GF_G500_CERTIFICATION_REGION": args.region,
+                "GF_G500_S20_EXPECTED_SHA": args.expected_sha,
+                "GF_G500_S20_IMAGE_DIGEST": digest,
+                "GF_G500_S20_REGION": args.region,
+                "GF_G500_S20_VOLUME_GB": str(args.volume_size_gb),
+                "GF_G500_S20_EVIDENCE_OUT": EVIDENCE_PATH,
+                "GF_G500_S20_RESULT_OUT": RESULT_PATH,
+                "GF_G500_S20_TIMEOUT_SECONDS": str(RUN_SECONDS),
                 "TMPDIR": "/work/tmp",
             },
         },
@@ -205,6 +237,59 @@ def cleanup_owned(
             continue
 
 
+def verify_absent(
+    fly: Flyctl, app: str, machine_id: str | None, volume_id: str | None, app_created: bool
+) -> None:
+    if (
+        machine_id
+        and fly.run(["machine", "status", machine_id, "--app", app], check=False).returncode == 0
+    ):
+        raise ControllerError("owned Machine remains after cleanup")
+    if (
+        volume_id
+        and fly.run(["volumes", "show", volume_id, "--app", app], check=False).returncode == 0
+    ):
+        raise ControllerError("owned volume remains after cleanup")
+    if app_created:
+        apps = fly.json(["apps", "list"])
+        if any(item.get("Name") == app or item.get("name") == app for item in apps):
+            raise ControllerError("owned app remains after cleanup")
+
+
+def validate_container_result(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict) or set(value) - {"status", "code", "phase"}:
+        raise ControllerError("container result has unknown fields")
+    if value.get("status") not in {"success", "failure"}:
+        raise ControllerError("container result has invalid status")
+    diagnostic = {"schema": "graphforge-fly-g500-s20-diagnostic/1", "status": value["status"]}
+    if value["status"] == "failure":
+        for field in ("code", "phase"):
+            item = value.get(field)
+            if not isinstance(item, str) or not re.fullmatch(r"[a-zA-Z0-9_.-]{1,80}", item):
+                raise ControllerError(f"container failure has invalid {field}")
+            diagnostic[field] = item
+    return diagnostic
+
+
+def fetch(
+    fly: Flyctl, args: argparse.Namespace, machine_id: str, remote: str, local: Path
+) -> subprocess.CompletedProcess[str]:
+    return fly.run(
+        [
+            "ssh",
+            "sftp",
+            "get",
+            remote,
+            str(local),
+            "--app",
+            args.app_name,
+            "--machine",
+            machine_id,
+        ],
+        check=False,
+    )
+
+
 def execute(args: argparse.Namespace, fly: Flyctl, digest: str) -> None:
     app_created = False
     machine_id = volume_id = None
@@ -214,7 +299,7 @@ def execute(args: argparse.Namespace, fly: Flyctl, digest: str) -> None:
             item.get("Name") == args.app_name or item.get("name") == args.app_name for item in apps
         ):
             raise ControllerError("refusing to reuse an existing app")
-        reserve_budget(args.ledger, args.app_name, args.reserved_cost_usd)
+        reserve_budget(args.ledger, args.app_name, price_reservation(args.volume_size_gb))
         fly.run(["apps", "create", args.app_name, "--org", args.org])
         app_created = True
         volume = fly.json(
@@ -239,23 +324,21 @@ def execute(args: argparse.Namespace, fly: Flyctl, digest: str) -> None:
         deadline = time.monotonic() + args.timeout_s
         with tempfile.TemporaryDirectory(prefix="graphforge-s20-") as directory:
             local = Path(directory) / "evidence.json"
+            result_file = Path(directory) / "container-result.json"
             while time.monotonic() < deadline:
-                result = fly.run(
-                    [
-                        "ssh",
-                        "sftp",
-                        "get",
-                        "/work/evidence/g500-s20-evidence.json",
-                        str(local),
-                        "--app",
-                        args.app_name,
-                        "--machine",
-                        machine_id,
-                    ],
-                    check=False,
-                )
-                if result.returncode == 0 and local.is_file():
-                    break
+                result = fetch(fly, args, machine_id, RESULT_PATH, result_file)
+                if result.returncode == 0 and result_file.is_file():
+                    diagnostic = validate_container_result(json.loads(result_file.read_text()))
+                    if diagnostic["status"] == "failure":
+                        args.diagnostic_out.write_text(
+                            json.dumps(diagnostic, indent=2, sort_keys=True) + "\n"
+                        )
+                        raise ControllerError(
+                            f"container failed in {diagnostic['phase']} with {diagnostic['code']}"
+                        )
+                    evidence_result = fetch(fly, args, machine_id, EVIDENCE_PATH, local)
+                    if evidence_result.returncode == 0 and local.is_file():
+                        break
                 time.sleep(2)
             else:
                 raise ControllerError("timed out retrieving S20 evidence")
@@ -267,8 +350,20 @@ def execute(args: argparse.Namespace, fly: Flyctl, digest: str) -> None:
             evidence = json.loads(local.read_text(encoding="utf-8"))
             validator.validate(evidence, args.expected_sha, digest, args.region)
             args.evidence_out.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
+            fly.run(
+                [
+                    "machine",
+                    "exec",
+                    machine_id,
+                    "--app",
+                    args.app_name,
+                    "touch /work/controller-ack",
+                ],
+                check=False,
+            )
     finally:
         cleanup_owned(fly, args.app_name, machine_id, volume_id, app_created)
+        verify_absent(fly, args.app_name, machine_id, volume_id, app_created)
 
 
 def parser() -> argparse.ArgumentParser:
@@ -282,9 +377,9 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--machine-name", required=True)
     value.add_argument("--volume-size-gb", type=int, default=500)
     value.add_argument("--timeout-s", type=int, default=14_400)
-    value.add_argument("--reserved-cost-usd", type=float, required=True)
     value.add_argument("--ledger", type=Path, required=True)
     value.add_argument("--evidence-out", type=Path, required=True)
+    value.add_argument("--diagnostic-out", type=Path, required=True)
     value.add_argument("--execute", action="store_true")
     value.add_argument("--confirm-disposable", action="store_true")
     return value
@@ -303,6 +398,7 @@ def main() -> int:
             "region": args.region,
             "image_digest": digest,
             "maximum_total_cost_usd": MAX_COST_USD,
+            "reservation": price_reservation(args.volume_size_gb),
         }
         print(json.dumps(plan, sort_keys=True))
         if args.execute:

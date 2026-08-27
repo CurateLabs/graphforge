@@ -34,9 +34,9 @@ def args(tmp_path: Path, **changes):
         "machine_name": "gf-s20-machine",
         "volume_size_gb": 500,
         "timeout_s": 14_400,
-        "reserved_cost_usd": 5.0,
         "ledger": tmp_path / "ledger.json",
         "evidence_out": tmp_path / "evidence.json",
+        "diagnostic_out": tmp_path / "diagnostic.json",
         "execute": False,
         "confirm_disposable": False,
     }
@@ -52,28 +52,49 @@ def evidence(**changes):
         "provider": "fly.io",
         "region": "den",
         "scale": 20,
+        "machine": {"class": "performance", "cpus": 2, "memory_mb": 4096},
+        "volume_gb": 500,
         "result": "passed",
         "counts": {
             "generated_edges": 16_777_216,
             "source_edges": 16_777_216,
             "imported_edges": 16_777_216,
         },
-        "phase_peak_rss_bytes": {
-            "generate": 500_000_000,
-            "ingest": 800_000_000,
-            "source_reopen": 700_000_000,
-            "one_hop": 900_000_000,
-            "two_hop": 950_000_000,
-            "export": 700_000_000,
-            "verify": 600_000_000,
-            "import": 850_000_000,
-            "import_reopen": 700_000_000,
+        "phase_memory": {
+            phase: {
+                "rss_peak_bytes": 500_000_000,
+                "hwm_bytes": 600_000_000,
+                "anonymous_peak_bytes": 300_000_000,
+                "file_peak_bytes": 200_000_000,
+                "sample_interval_ms": 250,
+            }
+            for phase in (
+                "generate",
+                "ingest",
+                "source_reopen",
+                "source_query",
+                "export",
+                "verify",
+                "import",
+                "import_reopen",
+                "import_query",
+                "finalize",
+            )
         },
         "storage": {
             "logical_bytes": 10_000,
             "allocated_bytes": 12_288,
+            "peak_allocated_bytes": 16_384,
+            "generator_allocated_bytes": 4_096,
+            "construction_transient_peak_allocated_bytes": 4_096,
             "capacity_bytes": 500_000_000_000,
         },
+        "run": {"scale": 20, "edgefactor": 16, "seed": 1},
+        "rung": {"pass": True},
+        "lifecycle": {"source_edges": 16_777_216, "imported_edges": 16_777_216},
+        "memory": {"rss_bytes": 1},
+        "wall_time_s": 1.0,
+        "first_failure": None,
     }
     value.update(changes)
     return value
@@ -87,6 +108,11 @@ def test_contract_fixes_resources_and_rejects_mutable_image(tmp_path):
     assert payload["config"]["restart"] == {"policy": "no"}
     assert payload["config"]["mounts"] == [{"volume": "vol-id", "path": "/work"}]
     assert payload["config"]["env"]["GF_G500_CERTIFICATION_SCALE"] == "20"
+    assert payload["config"]["env"]["GF_G500_S20_EXPECTED_SHA"] == "a" * 40
+    assert payload["config"]["env"]["GF_G500_S20_VOLUME_GB"] == "500"
+    assert payload["config"]["env"]["GF_G500_S20_EVIDENCE_OUT"] == "/work/s20-evidence.json"
+    assert payload["config"]["env"]["GF_G500_S20_RESULT_OUT"] == "/work/container-result.json"
+    assert payload["config"]["env"]["GF_G500_S20_TIMEOUT_SECONDS"] == "14400"
     with pytest.raises(controller.ControllerError, match="immutable"):
         controller.validate_inputs(args(tmp_path, image="registry.example/graphforge:latest"))
 
@@ -97,23 +123,28 @@ def test_volume_is_explicitly_bounded_by_fly_limit(tmp_path, size):
         controller.validate_inputs(args(tmp_path, volume_size_gb=size))
 
 
-def test_execute_requires_confirmation_and_cost_never_exceeds_ten(tmp_path):
+def test_execute_requires_confirmation(tmp_path):
     with pytest.raises(controller.ControllerError, match="confirm-disposable"):
         controller.validate_inputs(args(tmp_path, execute=True))
-    with pytest.raises(controller.ControllerError, match=r"\$10"):
-        controller.validate_inputs(args(tmp_path, reserved_cost_usd=10.01))
 
 
 def test_durable_budget_reservations_survive_and_accumulate(tmp_path):
     ledger = tmp_path / "ledger.json"
-    controller.reserve_budget(ledger, "run-one", 6.0)
-    controller.reserve_budget(ledger, "run-two", 4.0)
+    first = controller.price_reservation(500)
+    assert first["reserved_usd"] == 1.11
+    assert first["runtime_seconds"] == 14_400
+    assert first["cleanup_reserve_seconds"] == 600
+    assert first["volume_billing_hours"] == 5
+    controller.reserve_budget(ledger, "run-one", first)
+    controller.reserve_budget(ledger, "run-two", first)
     state = json.loads(ledger.read_text())
-    assert sum(run["reserved_usd"] for run in state["runs"]) == 10.0
+    assert sum(run["reserved_usd"] for run in state["runs"]) == 2.22
+    assert state["runs"][0]["pricing_source"] == "https://fly.io/docs/about/pricing/"
+    oversized = {**first, "reserved_usd": 8.0}
     with pytest.raises(controller.ControllerError, match="exceed"):
-        controller.reserve_budget(ledger, "run-three", 0.01)
+        controller.reserve_budget(ledger, "run-three", oversized)
     with pytest.raises(controller.ControllerError, match="already reserved"):
-        controller.reserve_budget(ledger, "run-one", 1.0)
+        controller.reserve_budget(ledger, "run-one", first)
 
 
 def test_existing_app_is_refused_before_budget_or_creation(tmp_path):
@@ -146,6 +177,127 @@ def test_cleanup_only_uses_observed_owned_identifiers():
         ["volumes", "destroy"],
         ["apps", "destroy"],
     ]
+
+
+def test_post_cleanup_absence_is_verified_child_to_parent():
+    calls = []
+
+    class Fly:
+        def run(self, command, check=True):
+            calls.append(command)
+            return argparse.Namespace(returncode=1)
+
+        def json(self, command):
+            calls.append(command)
+            return []
+
+    controller.verify_absent(Fly(), "gf-s20-unique", "machine-observed", "volume-observed", True)
+    assert calls == [
+        ["machine", "status", "machine-observed", "--app", "gf-s20-unique"],
+        ["volumes", "show", "volume-observed", "--app", "gf-s20-unique"],
+        ["apps", "list"],
+    ]
+
+
+def test_post_cleanup_detects_each_surviving_owned_resource():
+    class Fly:
+        def __init__(self, survivor):
+            self.survivor = survivor
+
+        def run(self, command, check=True):
+            return argparse.Namespace(returncode=0 if command[0] == self.survivor else 1)
+
+        def json(self, _command):
+            return [{"name": "gf-s20-unique"}] if self.survivor == "app" else []
+
+    for survivor, message in (("machine", "Machine"), ("volumes", "volume"), ("app", "app")):
+        with pytest.raises(controller.ControllerError, match=message):
+            controller.verify_absent(
+                Fly(survivor), "gf-s20-unique", "machine-observed", "volume-observed", True
+            )
+
+
+def test_container_result_is_closed_typed_and_sanitized():
+    assert controller.validate_container_result({"status": "success"}) == {
+        "schema": "graphforge-fly-g500-s20-diagnostic/1",
+        "status": "success",
+    }
+    failure = controller.validate_container_result(
+        {"status": "failure", "phase": "ingest", "code": "GF_RESOURCE_EXHAUSTED"}
+    )
+    assert failure["phase"] == "ingest"
+    with pytest.raises(controller.ControllerError, match="unknown fields"):
+        controller.validate_container_result(
+            {"status": "failure", "phase": "ingest", "code": "failed", "path": "/secret"}
+        )
+    with pytest.raises(controller.ControllerError, match="invalid code"):
+        controller.validate_container_result(
+            {"status": "failure", "phase": "ingest", "code": "token=secret"}
+        )
+
+
+def test_fetch_binds_only_declared_runtime_paths(tmp_path):
+    calls = []
+
+    class Fly:
+        def run(self, command, check=True):
+            calls.append(command)
+            return argparse.Namespace(returncode=1)
+
+    run = args(tmp_path)
+    controller.fetch(Fly(), run, "machine-observed", controller.RESULT_PATH, tmp_path / "r")
+    controller.fetch(Fly(), run, "machine-observed", controller.EVIDENCE_PATH, tmp_path / "e")
+    assert [call[3] for call in calls] == ["/work/container-result.json", "/work/s20-evidence.json"]
+
+
+def test_terminal_failure_is_persisted_promptly_and_still_verified_cleaned(tmp_path, monkeypatch):
+    digest = "sha256:" + "b" * 64
+    machine = {
+        "id": "machine-observed",
+        "region": "den",
+        "image_ref": {"digest": digest},
+        "config": {
+            "guest": {"cpu_kind": "performance", "cpus": 2, "memory_mb": 4096},
+            "auto_destroy": True,
+            "restart": {"policy": "no"},
+            "services": [],
+            "mounts": [{"path": "/work"}],
+        },
+    }
+    monkeypatch.setattr(controller, "create_machine", lambda *_args: machine)
+
+    class Fly:
+        def __init__(self):
+            self.app_lists = 0
+
+        def json(self, command):
+            if command[:2] == ["apps", "list"]:
+                self.app_lists += 1
+                return []
+            if command[:2] == ["volumes", "create"]:
+                return {"id": "volume-observed"}
+            raise AssertionError(command)
+
+        def run(self, command, check=True):
+            if command[:3] == ["ssh", "sftp", "get"]:
+                assert command[3] == "/work/container-result.json"
+                Path(command[4]).write_text(
+                    json.dumps({"status": "failure", "phase": "ingest", "code": "GF_OOM"})
+                )
+                return argparse.Namespace(returncode=0)
+            return argparse.Namespace(returncode=1)
+
+    run = args(tmp_path, execute=True, confirm_disposable=True)
+    fly = Fly()
+    with pytest.raises(controller.ControllerError, match="GF_OOM"):
+        controller.execute(run, fly, digest)
+    assert json.loads(run.diagnostic_out.read_text()) == {
+        "schema": "graphforge-fly-g500-s20-diagnostic/1",
+        "status": "failure",
+        "phase": "ingest",
+        "code": "GF_OOM",
+    }
+    assert fly.app_lists == 2
 
 
 def test_observed_machine_must_match_private_fixed_plan(tmp_path):
