@@ -37,7 +37,7 @@ use uuid::Uuid;
 use crate::UuidIndexKind;
 use crate::uuid_membership::{AuthenticatedUuidIndexSnapshot, UuidConstructionSnapshotWork};
 
-const FORMAT_VERSION: u32 = 5;
+const FORMAT_VERSION: u32 = 6;
 const PRIVATE_ROOT: &str = ".graphforge-construction";
 const SESSION_LOCK: &str = "session.lock";
 const CHECKPOINT: &str = "checkpoint.json";
@@ -328,6 +328,15 @@ pub struct GraphConstructionEvidence {
     /// Staged artifact bytes plus structurally retained parent payload bytes.
     #[serde(default)]
     pub staged_and_retained_disk_bytes: u64,
+    /// Receipt-derived retained construction artifacts by semantic category.
+    /// Persisted in the checkpoint so resume never scans the session tree.
+    #[serde(default)]
+    pub storage_current: BTreeMap<crate::ArtifactCategory, crate::ArtifactStorageTotals>,
+    /// Per-category peak allocated bytes observed as receipt-backed staging
+    /// artifacts accumulated. These are transient construction bytes, not
+    /// committed-generation allocation.
+    #[serde(default)]
+    pub storage_transient_peak_allocated_bytes: BTreeMap<crate::ArtifactCategory, u64>,
     /// Rows accepted.
     pub input_rows: u64,
     /// Non-replay chunks accepted.
@@ -562,6 +571,7 @@ impl IdentityRecord {
 pub(crate) struct ArtifactReceipt {
     name: String,
     bytes: u64,
+    allocated_bytes: u64,
     sha256: String,
     identity: IdentityRecord,
     write_operations: u64,
@@ -2665,10 +2675,26 @@ impl GraphConstructionSession {
         evidence.peak_accounted_live_bytes = evidence
             .peak_accounted_live_bytes
             .max(receipt.accounted_live_bytes);
-        for artifact in [&receipt.parquet, &receipt.identities, &receipt.details]
-            .into_iter()
-            .chain(receipt.endpoints.iter())
-        {
+        let topology_category = if receipt.kind == ConstructionChunkKind::Node {
+            crate::ArtifactCategory::TopologyNodes
+        } else {
+            crate::ArtifactCategory::TopologyEdges
+        };
+        for (artifact, category) in [
+            (&receipt.parquet, topology_category),
+            (
+                &receipt.identities,
+                crate::ArtifactCategory::UuidAndSurrogates,
+            ),
+            (&receipt.details, topology_category),
+        ]
+        .into_iter()
+        .chain(
+            receipt
+                .endpoints
+                .iter()
+                .map(|artifact| (artifact, crate::ArtifactCategory::TopologyEdges)),
+        ) {
             evidence.immutable_artifacts = evidence.immutable_artifacts.saturating_add(1);
             evidence.write_bytes = evidence.write_bytes.saturating_add(artifact.bytes);
             evidence.write_operations = evidence
@@ -2677,6 +2703,20 @@ impl GraphConstructionSession {
             evidence.fsync_operations = evidence
                 .fsync_operations
                 .saturating_add(artifact.fsync_operations);
+            let totals = evidence.storage_current.entry(category).or_default();
+            totals.logical_references = totals.logical_references.saturating_add(1);
+            totals.logical_bytes = totals.logical_bytes.saturating_add(artifact.bytes);
+            totals.physical_objects = totals.physical_objects.saturating_add(1);
+            totals.physical_logical_bytes =
+                totals.physical_logical_bytes.saturating_add(artifact.bytes);
+            totals.allocated_bytes = totals
+                .allocated_bytes
+                .saturating_add(artifact.allocated_bytes);
+            evidence
+                .storage_transient_peak_allocated_bytes
+                .entry(category)
+                .and_modify(|peak| *peak = (*peak).max(totals.allocated_bytes))
+                .or_insert(totals.allocated_bytes);
         }
         self.checkpoint.next_sequence = self.checkpoint.next_sequence.saturating_add(1);
         self.checkpoint.saw_edge |= receipt.kind == ConstructionChunkKind::Edge;
@@ -3210,6 +3250,9 @@ fn write_parquet(
     let receipt = ArtifactReceipt {
         name: name.to_owned(),
         bytes: hashing.bytes,
+        allocated_bytes: graphforge_filesystem::file_space_usage(&hashing.inner)
+            .map_err(storage)?
+            .allocated_bytes,
         sha256: hex(&hashing.digest.clone().finalize()),
         identity: identity.into(),
         write_operations: hashing.operations,
@@ -3250,6 +3293,9 @@ fn write_fixed_run<const N: usize>(
     let receipt = ArtifactReceipt {
         name: name.to_owned(),
         bytes: writer.bytes,
+        allocated_bytes: graphforge_filesystem::file_space_usage(&writer.inner)
+            .map_err(storage)?
+            .allocated_bytes,
         sha256: hex(&writer.digest.finalize()),
         identity: identity.into(),
         write_operations: writer.operations,
@@ -3747,6 +3793,9 @@ fn receipt_for_existing_with_work(
         ArtifactReceipt {
             name: name.to_owned(),
             bytes,
+            allocated_bytes: graphforge_filesystem::file_space_usage(&file)
+                .map_err(storage)?
+                .allocated_bytes,
             sha256: hex(&digest.finalize()),
             identity: identity.into(),
             write_operations: 0,
@@ -4451,6 +4500,9 @@ fn merge_row_group(
     let receipt = ArtifactReceipt {
         name: output.to_owned(),
         bytes: hashing.bytes,
+        allocated_bytes: graphforge_filesystem::file_space_usage(&hashing.inner)
+            .map_err(storage)?
+            .allocated_bytes,
         sha256: hex(&hashing.digest.clone().finalize()),
         identity: identity.into(),
         write_operations: hashing.operations,
@@ -7413,6 +7465,20 @@ mod tests {
             assert!(session.evidence().write_operations < session.evidence().input_rows);
             assert!(session.evidence().fsync_operations > 0);
             assert!(session.evidence().peak_accounted_live_bytes > 0);
+            let node_storage =
+                &session.evidence().storage_current[&crate::ArtifactCategory::TopologyNodes];
+            let uuid_storage =
+                &session.evidence().storage_current[&crate::ArtifactCategory::UuidAndSurrogates];
+            assert_eq!(node_storage.logical_references, chunks * 2);
+            assert_eq!(uuid_storage.logical_references, chunks);
+            assert_eq!(node_storage.physical_objects, chunks * 2);
+            assert_eq!(uuid_storage.physical_objects, chunks);
+            assert_eq!(
+                session.evidence().storage_transient_peak_allocated_bytes
+                    [&crate::ArtifactCategory::TopologyNodes],
+                node_storage.allocated_bytes
+            );
+            let persisted_storage = session.evidence().storage_current.clone();
             let checkpoint_bytes = session
                 .root
                 .open_child_file(OsStr::new(CHECKPOINT))
@@ -7421,6 +7487,16 @@ mod tests {
                 .unwrap()
                 .len();
             assert!(checkpoint_bytes < MAX_CONTROL_BYTES);
+            drop(session);
+            let mut session = GraphConstructionSession::resume_with_mode_and_lifecycle(
+                root.path(),
+                Uuid::from_u128(operation),
+                graphforge_core::OntologyMode::Exploratory,
+                GraphConstructionBudgets::default(),
+                crate::filesystem_admission::ProjectLifecycleMode::Durable,
+            )
+            .unwrap();
+            assert_eq!(session.evidence().storage_current, persisted_storage);
             session.seal().unwrap();
             assert_eq!(session.state(), GraphConstructionState::Sealed);
             assert!(session.evidence().authentication_read_bytes > 0);
