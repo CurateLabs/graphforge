@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -61,7 +61,15 @@ struct PlannedFile {
 }
 #[derive(Debug, Clone)]
 enum PlannedSource {
-    File { path: PathBuf, identity: Identity },
+    File {
+        path: PathBuf,
+        identity: Identity,
+    },
+    Cas {
+        lease: crate::graph_object_store::GraphObjectReadLease,
+        digest: String,
+        length: u64,
+    },
     Control(Vec<u8>),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -850,12 +858,35 @@ pub fn plan_selected_portable_v2(
     if selection.include_graph_tree
         && let Some(inv) = g.graph_files_inventory()?
     {
+        let graph_authority = g.declared_graph_files_participant()?;
+        let graph_cas = if matches!(graph_authority, Some(crate::GraphFilesParticipant::V2(_))) {
+            Some(crate::graph_object_store::begin_graph_object_read(
+                g.container_root(),
+            )?)
+        } else {
+            None
+        };
         let id = "graph-tree".to_owned();
         let mut owned = Vec::new();
         for e in inv.files {
-            let source = g.graph_tree_root().join(&e.relative_path);
             let path = format!("data/components/graph-data/{id}/{}", e.relative_path);
-            let f = inspect(&source, &path, limits, &mut total)?;
+            let f = match &graph_authority {
+                Some(crate::GraphFilesParticipant::V1(_)) => inspect(
+                    &g.graph_tree_root().join(&e.relative_path),
+                    &path,
+                    limits,
+                    &mut total,
+                )?,
+                Some(crate::GraphFilesParticipant::V2(_)) => inspect_cas(
+                    graph_cas.as_ref().expect("compact authority has CAS lease"),
+                    &e.content_sha256,
+                    e.byte_length,
+                    &path,
+                    limits,
+                    &mut total,
+                )?,
+                None => return Err(err("GF_SOURCE_CHANGED", "graph authority disappeared")),
+            };
             if f.length != e.byte_length || hex(f.digest) != e.content_sha256 {
                 return Err(err(
                     "GF_SOURCE_CHANGED",
@@ -1480,6 +1511,37 @@ fn inspect(
         digest: digest.finalize().into(),
     })
 }
+fn inspect_cas(
+    lease: &crate::graph_object_store::GraphObjectReadLease,
+    digest: &str,
+    expected_length: u64,
+    path: &str,
+    limits: PortableV2ExportLimits,
+    total: &mut u64,
+) -> Result<PlannedFile, ExportError> {
+    if path.len() > limits.max_path_bytes || expected_length > limits.max_entry_bytes {
+        return Err(limit("CAS entry exceeds configured limit"));
+    }
+    valid_path(path)?;
+    *total = total
+        .checked_add(expected_length)
+        .ok_or_else(|| limit("size overflow"))?;
+    if *total > limits.max_total_bytes {
+        return Err(limit("total too large"));
+    }
+    let _authenticated = lease.open(digest, expected_length)?;
+    let digest_bytes = parse_sha256(digest)?;
+    Ok(PlannedFile {
+        source: PlannedSource::Cas {
+            lease: lease.clone(),
+            digest: digest.to_owned(),
+            length: expected_length,
+        },
+        path: path.into(),
+        length: expected_length,
+        digest: digest_bytes,
+    })
+}
 fn inline_control(
     path: &str,
     bytes: Vec<u8>,
@@ -1523,17 +1585,7 @@ fn copy(
         tick(bytes.len() as u64);
         return Ok(());
     }
-    let PlannedSource::File {
-        path,
-        identity: planned_identity,
-    } = &planned.source
-    else {
-        unreachable!("control source returned above")
-    };
-    let mut input = open_source_no_follow(path)?;
-    if identity(&input.metadata().map_err(storage)?)? != *planned_identity {
-        return Err(err("GF_SOURCE_CHANGED", "source changed"));
-    }
+    let (mut input, planned_identity) = open_planned_source(planned)?;
     let mut buffer = vec![0; size];
     let mut digest = Sha256::new();
     let mut bytes_read = 0;
@@ -1551,9 +1603,11 @@ fn copy(
         tick(count as u64);
     }
     output.sync_all().map_err(storage)?;
-    if bytes_read != planned.length
-        || <[u8; 32]>::from(digest.finalize()) != planned.digest
-        || identity(&input.metadata().map_err(storage)?)? != *planned_identity
+    if bytes_read != planned.length || <[u8; 32]>::from(digest.finalize()) != planned.digest {
+        return Err(err("GF_SOURCE_CHANGED", "source changed during export"));
+    }
+    if let Some(expected) = planned_identity
+        && identity(&input.metadata().map_err(storage)?)? != expected
     {
         return Err(err("GF_SOURCE_CHANGED", "source changed during export"));
     }
@@ -1576,17 +1630,7 @@ fn stream(
         tick(bytes.len() as u64);
         return Ok(());
     }
-    let PlannedSource::File {
-        path,
-        identity: planned_identity,
-    } = &planned.source
-    else {
-        unreachable!("control source returned above")
-    };
-    let mut input = open_source_no_follow(path)?;
-    if identity(&input.metadata().map_err(storage)?)? != *planned_identity {
-        return Err(err("GF_SOURCE_CHANGED", "source changed"));
-    }
+    let (mut input, planned_identity) = open_planned_source(planned)?;
     let mut buffer = vec![0; size];
     let mut digest = Sha256::new();
     let mut bytes_read = 0;
@@ -1604,13 +1648,54 @@ fn stream(
         bytes_read += count as u64;
         tick(count as u64);
     }
-    if bytes_read != planned.length
-        || <[u8; 32]>::from(digest.finalize()) != planned.digest
-        || identity(&input.metadata().map_err(storage)?)? != *planned_identity
+    if bytes_read != planned.length || <[u8; 32]>::from(digest.finalize()) != planned.digest {
+        return Err(err("GF_SOURCE_CHANGED", "source changed during export"));
+    }
+    if let Some(expected) = planned_identity
+        && identity(&input.metadata().map_err(storage)?)? != expected
     {
         return Err(err("GF_SOURCE_CHANGED", "source changed during export"));
     }
     Ok(())
+}
+fn open_planned_source(planned: &PlannedFile) -> Result<(File, Option<Identity>), ExportError> {
+    match &planned.source {
+        PlannedSource::File {
+            path,
+            identity: expected,
+        } => {
+            let input = open_source_no_follow(path)?;
+            if identity(&input.metadata().map_err(storage)?)? != *expected {
+                return Err(err("GF_SOURCE_CHANGED", "source changed"));
+            }
+            Ok((input, Some(*expected)))
+        }
+        PlannedSource::Cas {
+            lease,
+            digest,
+            length,
+        } => {
+            let source = lease
+                .open(digest, *length)
+                .map_err(|_| err("GF_SOURCE_CHANGED", "pinned CAS source changed"))?;
+            let mut file = source.try_clone_file().map_err(storage)?;
+            file.seek(SeekFrom::Start(0)).map_err(storage)?;
+            Ok((file, None))
+        }
+        PlannedSource::Control(_) => unreachable!("control source returned above"),
+    }
+}
+
+fn parse_sha256(value: &str) -> Result<[u8; 32], ExportError> {
+    if value.len() != 64 {
+        return Err(err("GF_INTEGRITY_FAILED", "invalid CAS digest length"));
+    }
+    let mut bytes = [0_u8; 32];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
+            .map_err(|_| err("GF_INTEGRITY_FAILED", "invalid CAS digest"))?;
+    }
+    Ok(bytes)
 }
 fn header(out: &mut File, h: &mut Sha256, path: &str, size: u64) -> Result<(), ExportError> {
     if let Ok((name, prefix)) = split(path) {
@@ -2079,6 +2164,42 @@ fn storage(e: impl std::fmt::Display) -> ExportError {
 mod tests {
     use super::*;
     use crate::open_or_initialize_project;
+
+    fn compact_graph_generation() -> (tempfile::TempDir, ResolvedProjectGeneration) {
+        let project = tempfile::tempdir().unwrap();
+        open_or_initialize_project(project.path()).unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let relative = PathBuf::from("topology/nodes/part-00000.parquet");
+        fs::create_dir_all(workspace.path().join(relative.parent().unwrap())).unwrap();
+        fs::write(workspace.path().join(&relative), b"compact graph payload").unwrap();
+        let lease = crate::begin_graph_object_publication(project.path()).unwrap();
+        let mut state = crate::GraphManifestState::empty();
+        let (root, _) =
+            crate::append_graph_files_v2(&lease, workspace.path(), &mut state, &[relative], &[])
+                .unwrap();
+        let request = crate::ProjectGenerationRequest {
+            transaction_uuid: Uuid::new_v4(),
+            generation_uuid: Uuid::new_v4(),
+            capabilities: vec![crate::ProjectCapability {
+                capability_id: crate::GRAPH_CAPABILITY_ID.into(),
+                capability_version: 1,
+            }],
+            participants: vec![crate::graph_files_root_participant(&root).unwrap()],
+        };
+        let crate::ProjectStageOutcome::Staged(staged) =
+            crate::stage_project_generation(project.path(), &request).unwrap()
+        else {
+            panic!("fresh compact generation replayed");
+        };
+        staged
+            .validate(|_| Ok(()), |_, _| Ok(()))
+            .unwrap()
+            .publish_with_graph_objects(&lease)
+            .unwrap();
+        drop(lease);
+        let generation = crate::resolve_project_generation(project.path()).unwrap();
+        (project, generation)
+    }
 
     fn graph_generation() -> (tempfile::TempDir, ResolvedProjectGeneration) {
         graph_generation_with_composition(false)
@@ -2702,7 +2823,9 @@ mod tests {
             .source
         {
             PlannedSource::Control(bytes) => bytes.clone(),
-            PlannedSource::File { .. } => panic!("projected module must be an inline control"),
+            PlannedSource::File { .. } | PlannedSource::Cas { .. } => {
+                panic!("projected module must be an inline control")
+            }
         };
         let mut module: serde_json::Value = serde_json::from_slice(&module_bytes).unwrap();
         module["ontology_id"] = "https://graphforge.dev/ontology/tampered".into();
@@ -2732,7 +2855,9 @@ mod tests {
             .source
         {
             PlannedSource::Control(bytes) => bytes.clone(),
-            PlannedSource::File { .. } => panic!("composition must be an inline control"),
+            PlannedSource::File { .. } | PlannedSource::Cas { .. } => {
+                panic!("composition must be an inline control")
+            }
         };
         let mut control: serde_json::Value = serde_json::from_slice(&control_bytes).unwrap();
         control["required_features"]
@@ -2782,7 +2907,9 @@ mod tests {
             .source
         {
             PlannedSource::Control(bytes) => bytes.clone(),
-            PlannedSource::File { .. } => panic!("projected bridge must be an inline control"),
+            PlannedSource::File { .. } | PlannedSource::Cas { .. } => {
+                panic!("projected bridge must be an inline control")
+            }
         };
         let mut bridge: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         bridge["authored_version"] = "tampered-v2".into();
@@ -3661,6 +3788,92 @@ mod tests {
     }
 
     #[test]
+    fn compact_plan_is_reusable_across_representations_cancelled_retry_and_cas_tamper() {
+        let (project, generation) = compact_graph_generation();
+        let limits = PortableV2ExportLimits::default();
+        let plan = plan_complete_portable_v2(&generation, limits).unwrap();
+        assert!(
+            plan.files
+                .iter()
+                .any(|file| matches!(file.source, PlannedSource::Cas { .. }))
+        );
+        let out = tempfile::tempdir().unwrap();
+        let expanded = out.path().join("compact.gfproject");
+        let bundle = out.path().join("compact.gfpb");
+        let cancelled_bundle = out.path().join("cancelled.gfpb");
+        let active = AtomicBool::new(false);
+        let expanded_receipt = export_complete_portable_v2(
+            &plan,
+            &expanded,
+            PortableV2Output::Expanded,
+            limits,
+            &active,
+            |_| {},
+        )
+        .unwrap();
+        let cancelled = AtomicBool::new(true);
+        assert_eq!(
+            export_complete_portable_v2(
+                &plan,
+                &cancelled_bundle,
+                PortableV2Output::Bundle,
+                limits,
+                &cancelled,
+                |_| {},
+            )
+            .unwrap_err()
+            .code,
+            PortableV2ErrorCode::Cancelled
+        );
+        assert!(!cancelled_bundle.exists());
+        let bundle_receipt = export_complete_portable_v2(
+            &plan,
+            &bundle,
+            PortableV2Output::Bundle,
+            limits,
+            &active,
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(
+            expanded_receipt.package_digest,
+            bundle_receipt.package_digest
+        );
+        verify_portable_v2(&expanded, PortableV2Mode::Full, limits, Some(&active)).unwrap();
+        verify_portable_v2(&bundle, PortableV2Mode::Full, limits, Some(&active)).unwrap();
+
+        let payload_digest = hex(Sha256::digest(b"compact graph payload").into());
+        let (digest, length) = plan
+            .files
+            .iter()
+            .find_map(|file| match &file.source {
+                PlannedSource::Cas { digest, length, .. } if digest == &payload_digest => {
+                    Some((digest.clone(), *length))
+                }
+                PlannedSource::File { .. } | PlannedSource::Control(_) => None,
+                PlannedSource::Cas { .. } => None,
+            })
+            .unwrap();
+        let object = crate::graph_object_store::graph_object_path(project.path(), &digest).unwrap();
+        let mut permissions = fs::metadata(&object).unwrap().permissions();
+        permissions.set_readonly(false);
+        fs::set_permissions(&object, permissions).unwrap();
+        fs::write(&object, vec![b'x'; usize::try_from(length).unwrap()]).unwrap();
+        let tampered = out.path().join("tampered.gfpb");
+        let error = export_complete_portable_v2(
+            &plan,
+            &tampered,
+            PortableV2Output::Bundle,
+            limits,
+            &active,
+            |_| {},
+        )
+        .unwrap_err();
+        assert_eq!(error.code, PortableV2ErrorCode::ConcurrentMutation);
+        assert!(!tampered.exists());
+    }
+
+    #[test]
     fn destination_replacement_and_source_mutation_fail_closed() {
         let project = tempfile::tempdir().unwrap();
         let generation = open_or_initialize_project(project.path()).unwrap();
@@ -3696,7 +3909,7 @@ mod tests {
             .iter()
             .find_map(|file| match &file.source {
                 PlannedSource::File { path, .. } => Some(path),
-                PlannedSource::Control(_) => None,
+                PlannedSource::Control(_) | PlannedSource::Cas { .. } => None,
             })
             .unwrap();
         let original = fs::read(source).unwrap();

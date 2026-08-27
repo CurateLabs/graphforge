@@ -47,7 +47,8 @@ pub struct FilesystemAdmissionEvidence {
 ///
 /// Ephemeral mode is an explicit escape hatch for in-memory instances whose
 /// temporary workspace is not presented as durable project storage.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ProjectLifecycleMode {
     /// Probe and retain the supported durable-filesystem identity.
     Durable,

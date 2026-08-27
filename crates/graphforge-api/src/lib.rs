@@ -50,6 +50,10 @@ pub use graphforge_ontology::{
 use graphforge_ontology::{OntologyCompiler, OntologyHandle, OntologyLoader};
 use graphforge_storage::GraphCatalog;
 use graphforge_storage::ResolvedProjectGeneration;
+pub use graphforge_storage::{
+    CONSTRUCTION_EDGE_SCHEMA, CONSTRUCTION_NODE_SCHEMA, ConstructionChunkReceipt,
+    GraphConstructionBudgets, GraphConstructionEvidence, GraphConstructionState,
+};
 use sha2::{Digest, Sha256};
 
 #[cfg(test)]
@@ -125,6 +129,7 @@ mod provider_rerank;
 mod provider_session;
 mod repository;
 mod resource_policy;
+mod resumable_construction;
 #[cfg(test)]
 mod same_process_concurrency_tests;
 #[cfg(test)]
@@ -169,6 +174,9 @@ pub use repository::{
     RepositoryInitReceipt, RepositoryRemoveReceipt, RepositorySourceDigest, RepositorySyncRequest,
     RepositorySyncResult, RepositorySyncStatus, SkillBundle, SkillBundleFile, SkillMutationReceipt,
     SkillStatus, SkillStatusReceipt,
+};
+pub use resumable_construction::{
+    GraphConstructionProgress, GraphConstructionPublicationReceipt, GraphConstructionSession,
 };
 
 // Re-export the foundational types callers need alongside the facade, so a

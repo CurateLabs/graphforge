@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use graphforge_core::{GfError, ProjectErrorCode};
+use graphforge_core::{ApiErrorCode, GfError, ProjectErrorCode};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -1354,7 +1354,7 @@ impl ValidatedProjectGeneration {
     /// Returns a stable publication error whose diagnostic states whether the
     /// commit point was crossed.
     pub fn publish(mut self) -> Result<ProjectPublicationReceipt, GfError> {
-        self.publish_with_optional_graph_objects(None)
+        self.publish_with_optional_graph_objects(None, None)
     }
 
     /// Publish a compact graph generation while holding its CAS lease through
@@ -1363,12 +1363,23 @@ impl ValidatedProjectGeneration {
         mut self,
         lease: &crate::GraphObjectPublicationLease,
     ) -> Result<ProjectPublicationReceipt, GfError> {
-        self.publish_with_optional_graph_objects(Some(lease))
+        self.publish_with_optional_graph_objects(Some(lease), None)
+    }
+
+    /// Publish a compact graph while polling cancellation until the atomic
+    /// `CURRENT` replacement commit point.
+    pub(crate) fn publish_with_graph_objects_cancellable(
+        mut self,
+        lease: &crate::GraphObjectPublicationLease,
+        cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<ProjectPublicationReceipt, GfError> {
+        self.publish_with_optional_graph_objects(Some(lease), Some(cancelled))
     }
 
     fn publish_with_optional_graph_objects(
         &mut self,
         graph_object_lease: Option<&crate::GraphObjectPublicationLease>,
+        cancellation: Option<&mut dyn FnMut() -> bool>,
     ) -> Result<ProjectPublicationReceipt, GfError> {
         self.0.admission.revalidate_identity()?;
         let lifecycle_admission = self.0.admission.readmit_for_publish()?;
@@ -1379,9 +1390,13 @@ impl ValidatedProjectGeneration {
             self.0.admission.revalidate_identity()?;
         }
         let result = self
-            .publish_inner(graph_object_lease, lifecycle_admission.as_ref())
+            .publish_inner(
+                graph_object_lease,
+                lifecycle_admission.as_ref(),
+                cancellation,
+            )
             .map_err(|error| {
-                if matches!(error, GfError::Project { .. }) {
+                if matches!(error, GfError::Project { .. } | GfError::Api { .. }) {
                     error
                 } else {
                     publication_error_from_parts(
@@ -1434,6 +1449,7 @@ impl ValidatedProjectGeneration {
         &self,
         graph_object_lease: Option<&crate::GraphObjectPublicationLease>,
         lifecycle_admission: Option<&crate::filesystem_admission::ProjectLifecycleAdmission>,
+        cancellation: Option<&mut dyn FnMut() -> bool>,
     ) -> Result<ProjectPublicationReceipt, GfError> {
         let staged = &self.0;
         let compact_graph = has_compact_graph_participant(staged)?;
@@ -1460,6 +1476,7 @@ impl ValidatedProjectGeneration {
             manifest_sha256,
             graph_object_lease,
             lifecycle_admission,
+            cancellation,
         )?;
         finish_published_generation(staged, manifest_sha256)?;
         Ok(ProjectPublicationReceipt {
@@ -1678,6 +1695,7 @@ fn replace_current(
     manifest_sha256: [u8; 32],
     graph_object_lease: Option<&crate::GraphObjectPublicationLease>,
     lifecycle_admission: Option<&crate::filesystem_admission::ProjectLifecycleAdmission>,
+    mut cancellation: Option<&mut dyn FnMut() -> bool>,
 ) -> Result<(), GfError> {
     let current = CurrentRecord {
         format: "graphforge-project".into(),
@@ -1735,6 +1753,12 @@ fn replace_current(
                     .revalidate_for_root(staged.parent.container_root())
                     .map_err(std::io::Error::other)?;
             }
+            // This is deliberately the final fallible predicate before the
+            // single native replacement commit point. After replacement,
+            // reconciliation owns the result and cancellation cannot undo it.
+            if cancellation.as_mut().is_some_and(|cancelled| cancelled()) {
+                return Err(std::io::Error::other(CancelledBeforeReplace));
+            }
             Ok(())
         },
     );
@@ -1763,6 +1787,19 @@ fn reconcile_current_replacement_error(
     manifest_sha256: [u8; 32],
     error: &AtomicPublishError,
 ) -> Result<(), GfError> {
+    // `CancelledBeforeReplace` is emitted only by the final predicate inside
+    // `before_replace`; the native namespace operation has not started, so
+    // committed=false is proven without consulting recovery-visible journals.
+    if matches!(error, AtomicPublishError::CancelledBeforeReplace) {
+        return Err(GfError::Api {
+            code: ApiErrorCode::Cancelled,
+            message: format!(
+                "transaction_uuid={} generation_uuid={} boundary=project.before_current_replace committed=false",
+                transaction_uuid.hyphenated(),
+                generation_uuid.hyphenated()
+            ),
+        });
+    }
     // The native primitive distinguishes a proved no-op from an outcome whose
     // namespace state requires reconciliation. Re-read CURRENT under the
     // still-held writer lock for every error so callers never receive
@@ -2378,6 +2415,7 @@ pub(crate) fn write_journal(path: &Path, journal: &JournalRecord) -> Result<(), 
 pub(crate) enum AtomicPublishError {
     Io(std::io::Error),
     Replacement(graphforge_filesystem::ReplaceFileError),
+    CancelledBeforeReplace,
 }
 
 impl std::fmt::Display for AtomicPublishError {
@@ -2385,6 +2423,7 @@ impl std::fmt::Display for AtomicPublishError {
         match self {
             Self::Io(error) => error.fmt(formatter),
             Self::Replacement(error) => error.fmt(formatter),
+            Self::CancelledBeforeReplace => formatter.write_str("cancelled before replacement"),
         }
     }
 }
@@ -2393,9 +2432,26 @@ impl std::error::Error for AtomicPublishError {}
 
 impl From<std::io::Error> for AtomicPublishError {
     fn from(error: std::io::Error) -> Self {
-        Self::Io(error)
+        if let Some(source) = error.get_ref()
+            && source.is::<CancelledBeforeReplace>()
+        {
+            Self::CancelledBeforeReplace
+        } else {
+            Self::Io(error)
+        }
     }
 }
+
+#[derive(Debug)]
+struct CancelledBeforeReplace;
+
+impl std::fmt::Display for CancelledBeforeReplace {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("publication cancelled at project.before_current_replace")
+    }
+}
+
+impl std::error::Error for CancelledBeforeReplace {}
 
 pub(crate) fn publish_atomic_bytes(
     path: &Path,
@@ -2960,11 +3016,10 @@ mod tests {
             panic!("new request unexpectedly replayed");
         };
 
-        fs::write(
-            crate::graph_object_path(root.path(), &payload_digest).unwrap(),
+        crate::graph_object_store::corrupt_sealed_graph_object_for_test(
+            &crate::graph_object_path(root.path(), &payload_digest).unwrap(),
             b"corrupt",
-        )
-        .unwrap();
+        );
         let validated = staged
             .validate(|_| Ok(()), |_, _| Ok(()))
             .expect("intermediate validation must not rehash compact payloads");
@@ -4088,6 +4143,32 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.code(), "GF_PROJECT_CORRUPT");
+    }
+
+    #[test]
+    fn generic_eintr_is_reconciled_and_never_masquerades_as_cancellation() {
+        let root = project();
+        let interrupted = AtomicPublishError::from(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "injected unrelated EINTR",
+        ));
+        assert!(matches!(interrupted, AtomicPublishError::Io(_)));
+        let error = reconcile_current_replacement_error(
+            root.path(),
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            [0x42; 32],
+            &interrupted,
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "GF_PUBLICATION_FAILED");
+        assert!(error.to_string().contains("committed=false"));
+
+        let cancellation = AtomicPublishError::from(std::io::Error::other(CancelledBeforeReplace));
+        assert!(matches!(
+            cancellation,
+            AtomicPublishError::CancelledBeforeReplace
+        ));
     }
 
     #[test]

@@ -1,8 +1,8 @@
 {
   "contractVersion": 1,
   "rustManifest": "../../../tests/contracts/non-cypher-rust-surface.json",
-  "releaseSurfaceCount": 247,
-  "releaseSurfaceDigest": "fa31f90944981d9e850cb115e70beb0c987ba36cedd71c681a51b122d59954fb",
+  "releaseSurfaceCount": 257,
+  "releaseSurfaceDigest": "bb7d3f89204eb3115fd425081d45e874251a20de9759355e867d87e005063219",
   "requiredEquivalent": [
     "GraphForge.adopt_ontology",
     "GraphForge.clear_ontology",
@@ -29,6 +29,7 @@
     "compatibility": "arrowIpc",
     "transaction-maintenance": "transactionMaintenance",
     "resumable-import": "importSession",
+    "resumable-construction": "resumableConstruction",
     "semantic-generation-diff": "semanticGenerationDiff",
     "portable-v2-facade": "portableV2"
   },
@@ -292,6 +293,7 @@
     },
     "notExposedDefaults": {
       "CheckpointView": "Node checkpoint views expose the bounded pinned read surface; unsupported Rust checkpoint operations require an explicit parity decision.",
+      "GraphConstructionSession": "Resumable graph construction is not yet shipped through the Node product facade; all session operations remain explicitly Rust-only.",
       "GraphForge": "No shipped Node member exists for this Rust facade entry; adding one requires an explicit parity decision.",
       "OpenRouterProviderSession": "Rust provider sessions are not exported; Node owns a configured native provider adapter instead.",
       "RepositoryContext": "Rust owns repository lifecycle behavior; the Node command wrapper parity is delivered by issue #226."
@@ -454,6 +456,11 @@
     "importSession": {
       "import_session.test.mjs": [
         "import session begin checkpoint resume abort lifecycle"
+      ]
+    },
+    "resumableConstruction": {
+      "non-cypher-release-parity.test.mjs": [
+        "the Node classification is total, frozen, and backed by non-skipped native tests"
       ]
     }
   }

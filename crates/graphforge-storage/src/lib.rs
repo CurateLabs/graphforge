@@ -31,6 +31,16 @@ pub use graph_projection::{
     materialize_graph_projection, materialize_portable_graph_tree_projection,
 };
 
+pub mod graph_construction;
+mod graph_construction_encoding;
+pub use graph_construction::{
+    CONSTRUCTION_EDGE_SCHEMA, CONSTRUCTION_NODE_SCHEMA, ConstructionChunkKind,
+    ConstructionChunkReceipt, ConstructionRetainedArtifact, ConstructionSemanticAuthority,
+    ConstructionShape, GraphConstructionBudgets, GraphConstructionEncoding,
+    GraphConstructionEncodingEvidence, GraphConstructionEvidence, GraphConstructionSession,
+    GraphConstructionState,
+};
+
 pub mod graph_files;
 #[cfg(test)]
 pub(crate) use graph_files::graph_files_root_participant;

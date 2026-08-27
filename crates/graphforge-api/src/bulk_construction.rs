@@ -1765,35 +1765,7 @@ fn validate_property_type(
 }
 
 fn property_data_type_supported(data_type: &DataType) -> bool {
-    (match data_type {
-        DataType::List(field) | DataType::LargeList(field) => {
-            property_data_type_supported(field.data_type())
-        }
-        _ => matches!(
-            data_type,
-            DataType::Boolean
-                | DataType::Int8
-                | DataType::Int16
-                | DataType::Int32
-                | DataType::Int64
-                | DataType::UInt8
-                | DataType::UInt16
-                | DataType::UInt32
-                | DataType::Float32
-                | DataType::Float64
-                | DataType::Utf8
-                | DataType::LargeUtf8
-                | DataType::Time64(arrow::datatypes::TimeUnit::Nanosecond)
-        ),
-    }) || {
-        matches!(data_type, DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, zone) if zone.as_deref() == Some("UTC"))
-            || matches!(data_type, DataType::Struct(fields)
-        if fields == &graphforge_storage::schemas::duration_struct_fields()
-            || fields == &graphforge_storage::schemas::date_struct_fields()
-            || fields == &graphforge_storage::schemas::localdatetime_struct_fields()
-            || fields == &graphforge_storage::schemas::time_struct_fields()
-            || fields == &graphforge_storage::schemas::datetime_struct_fields())
-    }
+    graphforge_storage::schemas::property_data_type_supported(data_type)
 }
 
 fn validate_identifier(
@@ -1816,11 +1788,7 @@ fn validate_identifier(
 }
 
 fn validate_identifier_parts(value: &str) -> bool {
-    let mut characters = value.chars();
-    characters
-        .next()
-        .is_some_and(|first| first == '_' || first.is_alphabetic())
-        && characters.all(|character| character == '_' || character.is_alphanumeric())
+    graphforge_core::identifier::is_graph_identifier(value)
 }
 
 fn uuid_column<'a>(
@@ -3528,6 +3496,24 @@ mod tests {
             assert_eq!(field.reason, BulkValidationReason::InvalidIdentifier);
             assert_eq!(field.field.as_deref(), Some(identifier));
         }
+        let at_limit = format!("A{}", "é".repeat(127));
+        let over_limit = format!("A{}x", "é".repeat(127));
+        assert_eq!(at_limit.len(), 255);
+        assert_eq!(over_limit.len(), 256);
+        assert!(validate_identifier(BulkInputKind::Node, 0, "label", &at_limit).is_ok());
+        assert!(validate_property_name(BulkInputKind::Node, &at_limit).is_ok());
+        assert_eq!(
+            validate_identifier(BulkInputKind::Edge, 7, "rel_type", &over_limit)
+                .unwrap_err()
+                .reason,
+            BulkValidationReason::InvalidIdentifier
+        );
+        assert_eq!(
+            validate_property_name(BulkInputKind::Edge, &over_limit)
+                .unwrap_err()
+                .reason,
+            BulkValidationReason::InvalidIdentifier
+        );
 
         let compatible = [
             (PropertyValueType::Utf8, DataType::LargeUtf8),

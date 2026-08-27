@@ -259,6 +259,37 @@ impl StableDirectory {
         self.open_child_file(target).map(|_| ())
     }
 
+    /// Atomically install a retained temporary child without replacing an
+    /// existing target. This is the creation authority for durable control
+    /// records whose first publication must never overwrite competing state.
+    ///
+    /// # Errors
+    /// Returns an I/O error when either name is invalid, the retained source
+    /// identity changed, the target already exists, or durable installation
+    /// and identity revalidation fail.
+    pub fn install_child(
+        &self,
+        temporary: &OsStr,
+        expected_temporary: FileIdentity,
+        target: &OsStr,
+    ) -> io::Result<()> {
+        validate_child_name(temporary)?;
+        validate_child_name(target)?;
+        self.revalidate_named()?;
+        let temporary_file = self.open_child_file(temporary)?;
+        if file_identity(&temporary_file)? != expected_temporary
+            || file_link_count(&temporary_file)? != 1
+        {
+            return Err(io::Error::other(
+                "atomic temporary child identity or link count changed",
+            ));
+        }
+        drop(temporary_file);
+        install_new_file_platform(&self.file, temporary, target, Some(expected_temporary))?;
+        self.revalidate_named()?;
+        self.open_child_file(target).map(|_| ())
+    }
+
     /// Flush this retained directory capability.
     pub fn sync(&self) -> io::Result<()> {
         self.revalidate_named()?;
@@ -1161,7 +1192,10 @@ mod windows {
     use std::os::windows::io::AsRawHandle as _;
     use std::path::{Path, PathBuf};
 
-    use windows_sys::Win32::Foundation::{GENERIC_WRITE, LocalFree};
+    use windows_sys::Win32::Foundation::{
+        ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED, GENERIC_WRITE,
+        LocalFree,
+    };
     #[cfg(test)]
     use windows_sys::Win32::Security::Authorization::{
         ConvertSecurityDescriptorToStringSecurityDescriptorW, GetNamedSecurityInfoW, SE_FILE_OBJECT,
@@ -1173,13 +1207,14 @@ mod windows {
     use windows_sys::Win32::Security::{DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION};
     use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
     use windows_sys::Win32::Storage::FileSystem::{
-        BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, DELETE, FILE_DISPOSITION_INFO,
+        BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, DELETE, FILE_DISPOSITION_FLAG_DELETE,
+        FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_INFO_EX,
         FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_WRITE_THROUGH,
         FILE_ID_INFO, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO,
-        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileDispositionInfo, FileIdInfo,
-        FileRenameInfo, FileRenameInfoEx, GetDriveTypeW, GetFileInformationByHandle,
-        GetFileInformationByHandleEx, GetFinalPathNameByHandleW, GetVolumeInformationW,
-        GetVolumePathNameW, SetFileInformationByHandle, VOLUME_NAME_DOS,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES,
+        FileDispositionInfoEx, FileIdInfo, FileRenameInfo, FileRenameInfoEx, GetDriveTypeW,
+        GetFileInformationByHandle, GetFileInformationByHandleEx, GetFinalPathNameByHandleW,
+        GetVolumeInformationW, GetVolumePathNameW, SetFileInformationByHandle, VOLUME_NAME_DOS,
     };
 
     #[cfg(test)]
@@ -1357,30 +1392,57 @@ mod windows {
 
     pub(super) fn delete_file_by_handle(path: &Path, expected: FileIdentity) -> io::Result<()> {
         let file = std::fs::OpenOptions::new()
-            .access_mode(DELETE | FILE_READ_ATTRIBUTES)
+            // IGNORE_READONLY_ATTRIBUTE requires FILE_WRITE_ATTRIBUTES even
+            // though the operation does not clear the shared attribute.
+            .access_mode(DELETE | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES)
             .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH)
             .open(path)?;
         if file_identity(&file)? != expected || identity(path)? != expected {
             return Err(io::Error::other("child identity changed before unlink"));
         }
-        let mut disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
+        let mut disposition = FILE_DISPOSITION_INFO_EX {
+            Flags: FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE,
+        };
         // SAFETY: `file` is an exact retained handle opened with DELETE access,
         // and `disposition` is the initialized structure required by
-        // FileDispositionInfo for the duration of the call.
+        // FileDispositionInfoEx for the duration of the call. Ignoring the
+        // readonly attribute removes only this name without mutating attributes
+        // shared by another hard link to the same file.
         let deleted = unsafe {
             SetFileInformationByHandle(
                 file.as_raw_handle(),
-                FileDispositionInfo,
-                (&mut disposition as *mut FILE_DISPOSITION_INFO).cast(),
-                u32::try_from(std::mem::size_of::<FILE_DISPOSITION_INFO>())
-                    .expect("FILE_DISPOSITION_INFO size fits u32"),
+                FileDispositionInfoEx,
+                (&mut disposition as *mut FILE_DISPOSITION_INFO_EX).cast(),
+                u32::try_from(std::mem::size_of::<FILE_DISPOSITION_INFO_EX>())
+                    .expect("FILE_DISPOSITION_INFO_EX size fits u32"),
             )
         };
         if deleted == 0 {
-            Err(io::Error::last_os_error())
+            Err(readonly_safe_delete_error(io::Error::last_os_error()))
         } else {
             Ok(())
+        }
+    }
+
+    fn readonly_safe_delete_error(error: io::Error) -> io::Error {
+        let unsupported = [
+            ERROR_INVALID_FUNCTION as i32,
+            ERROR_NOT_SUPPORTED as i32,
+            ERROR_INVALID_PARAMETER as i32,
+        ];
+        if error
+            .raw_os_error()
+            .is_some_and(|code| unsupported.contains(&code))
+        {
+            io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "readonly-safe child deletion requires Windows 10 version 1709 or Windows Server version 1709 or newer: {error}"
+                ),
+            )
+        } else {
+            error
         }
     }
 
@@ -1808,6 +1870,19 @@ mod windows {
                 ),
                 ReplaceFileError::StateUnknown(_)
             ));
+        }
+
+        #[test]
+        fn readonly_safe_delete_maps_unsupported_platform_errors_actionably() {
+            let unsupported = readonly_safe_delete_error(io::Error::from_raw_os_error(
+                ERROR_NOT_SUPPORTED as i32,
+            ));
+            assert_eq!(unsupported.kind(), io::ErrorKind::Unsupported);
+            assert!(unsupported.to_string().contains("Windows 10 version 1709"));
+
+            let denied = readonly_safe_delete_error(io::Error::from_raw_os_error(5));
+            assert_eq!(denied.kind(), io::ErrorKind::PermissionDenied);
+            assert_eq!(denied.raw_os_error(), Some(5));
         }
 
         #[test]
@@ -2458,6 +2533,45 @@ mod tests {
             std::fs::read(root.path().join("payload")).unwrap(),
             b"replacement"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stable_directory_unlinks_exact_readonly_child_without_unsealing_hard_link() {
+        use std::io::Write as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let stable = StableDirectory::open(root.path()).unwrap();
+        let temporary_path = root.path().join("temporary");
+        let installed_path = root.path().join("installed");
+        let mut temporary = stable.create_child_file(OsStr::new("temporary")).unwrap();
+        temporary.write_all(b"sealed").unwrap();
+        temporary.sync_all().unwrap();
+        let identity = file_identity(&temporary).unwrap();
+        std::fs::hard_link(&temporary_path, &installed_path).unwrap();
+        assert_eq!(path_identity(&installed_path).unwrap(), identity);
+        let mut permissions = temporary.metadata().unwrap().permissions();
+        permissions.set_readonly(true);
+        temporary.set_permissions(permissions).unwrap();
+        assert!(temporary.metadata().unwrap().permissions().readonly());
+        assert!(
+            std::fs::metadata(&installed_path)
+                .unwrap()
+                .permissions()
+                .readonly()
+        );
+        drop(temporary);
+
+        stable
+            .unlink_child_if_identity(OsStr::new("temporary"), identity)
+            .unwrap();
+
+        assert!(!temporary_path.exists());
+        assert_eq!(std::fs::read(&installed_path).unwrap(), b"sealed");
+        assert_eq!(path_identity(&installed_path).unwrap(), identity);
+        let installed = File::open(&installed_path).unwrap();
+        assert!(installed.metadata().unwrap().permissions().readonly());
+        assert_eq!(file_link_count(&installed).unwrap(), 1);
     }
 
     #[test]

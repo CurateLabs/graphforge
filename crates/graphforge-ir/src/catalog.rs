@@ -181,12 +181,32 @@ impl RuntimeCatalog {
         Self::default()
     }
 
+    /// Number of retained catalog entries.
+    #[must_use]
+    pub fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Exact UTF-8 bytes retained by entry names and property owners.
+    #[must_use]
+    pub fn retained_identifier_bytes(&self) -> usize {
+        self.entries.iter().fold(0_usize, |bytes, entry| {
+            bytes
+                .saturating_add(entry.name.len())
+                .saturating_add(entry.owner_label.as_ref().map_or(0, String::len))
+        })
+    }
+
     /// Interns an entity label and returns a stable [`RuntimeTypeId`].
     ///
     /// If `name` has been seen before the observation count is incremented and
     /// the existing ID is returned unchanged.
     pub fn intern_label(&mut self, name: &str) -> RuntimeTypeId {
-        let now = now_micros();
+        self.intern_label_at(name, now_micros())
+    }
+
+    /// Interns an entity label at a caller-authoritative timestamp.
+    pub fn intern_label_at(&mut self, name: &str, now: i64) -> RuntimeTypeId {
         if let Some(&idx) = self.entity_types.get(name) {
             let entry = &mut self.entries[idx];
             entry.observation_count += 1;
@@ -211,7 +231,11 @@ impl RuntimeCatalog {
 
     /// Interns a relation type name and returns a stable [`RuntimeTypeId`].
     pub fn intern_relation_type(&mut self, name: &str) -> RuntimeTypeId {
-        let now = now_micros();
+        self.intern_relation_type_at(name, now_micros())
+    }
+
+    /// Interns a relation type at a caller-authoritative timestamp.
+    pub fn intern_relation_type_at(&mut self, name: &str, now: i64) -> RuntimeTypeId {
         if let Some(&idx) = self.relation_types.get(name) {
             let entry = &mut self.entries[idx];
             entry.observation_count += 1;
@@ -239,7 +263,16 @@ impl RuntimeCatalog {
     /// Properties are keyed by `(name, owner_label)` so the same property name
     /// observed on different labels gets independent IDs.
     pub fn intern_property(&mut self, name: &str, owner_label: Option<&str>) -> RuntimePropId {
-        let now = now_micros();
+        self.intern_property_at(name, owner_label, now_micros())
+    }
+
+    /// Interns a property at a caller-authoritative timestamp.
+    pub fn intern_property_at(
+        &mut self,
+        name: &str,
+        owner_label: Option<&str>,
+        now: i64,
+    ) -> RuntimePropId {
         let key = (name.to_owned(), owner_label.map(str::to_owned));
         if let Some(&idx) = self.properties.get(&key) {
             let entry = &mut self.entries[idx];
@@ -267,6 +300,19 @@ impl RuntimeCatalog {
     #[must_use]
     pub fn contains_entity_type(&self, name: &str) -> bool {
         self.entity_types.contains_key(name)
+    }
+
+    /// Returns `true` if `name` has been interned as a relation type.
+    #[must_use]
+    pub fn contains_relation_type(&self, name: &str) -> bool {
+        self.relation_types.contains_key(name)
+    }
+
+    /// Returns `true` if the owner-scoped property has been interned.
+    #[must_use]
+    pub fn contains_property(&self, name: &str, owner_label: Option<&str>) -> bool {
+        self.properties
+            .contains_key(&(name.to_owned(), owner_label.map(str::to_owned)))
     }
 
     /// Returns all interned entity type names (order unspecified).
@@ -416,104 +462,239 @@ impl RuntimeCatalog {
     /// Returns [`GfError::Storage`] if any column has the wrong type or an
     /// unknown `entry_kind` value is encountered.
     pub fn from_record_batch(batch: &RecordBatch) -> Result<Self, GfError> {
+        Self::from_record_batches(std::iter::once(batch))
+    }
+
+    /// Restores a catalog from a bounded stream of persisted Arrow batches
+    /// without concatenating or retaining those batches.
+    #[allow(clippy::too_many_lines)] // One persisted schema decoder; splitting obscures row authority.
+    pub fn from_record_batches<'a>(
+        batches: impl IntoIterator<Item = &'a RecordBatch>,
+    ) -> Result<Self, GfError> {
+        Self::decode_record_batches_at(batches, 0, 0)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn decode_record_batches_at<'a>(
+        batches: impl IntoIterator<Item = &'a RecordBatch>,
+        initial_type_id: u32,
+        initial_prop_id: u32,
+    ) -> Result<Self, GfError> {
         let storage_err = |msg: &str| GfError::Storage(msg.to_owned());
-
-        let kinds = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or_else(|| storage_err("runtime_catalog col 0 (entry_kind) not Utf8"))?;
-        let names = batch
-            .column(1)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or_else(|| storage_err("runtime_catalog col 1 (name) not Utf8"))?;
-        let ids = batch
-            .column(2)
-            .as_any()
-            .downcast_ref::<UInt32Array>()
-            .ok_or_else(|| storage_err("runtime_catalog col 2 (runtime_id) not UInt32"))?;
-        let counts = batch
-            .column(3)
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .ok_or_else(|| storage_err("runtime_catalog col 3 (observation_count) not UInt64"))?;
-        let first_seens = batch
-            .column(4)
-            .as_any()
-            .downcast_ref::<TimestampMicrosecondArray>()
-            .ok_or_else(|| {
-                storage_err("runtime_catalog col 4 (first_seen) not TimestampMicrosecond")
-            })?;
-        let last_seens = batch
-            .column(5)
-            .as_any()
-            .downcast_ref::<TimestampMicrosecondArray>()
-            .ok_or_else(|| {
-                storage_err("runtime_catalog col 5 (last_seen) not TimestampMicrosecond")
-            })?;
-        let owners = batch
-            .column(6)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or_else(|| storage_err("runtime_catalog col 6 (owner_label) not Utf8"))?;
-
         let mut catalog = Self::new();
-        let mut max_type_id: u32 = 0;
-        let mut max_prop_id: u32 = 0;
+        let mut next_type_id = initial_type_id;
+        let mut next_prop_id = initial_prop_id;
+        for batch in batches {
+            if batch.schema().as_ref() != RUNTIME_CATALOG_SCHEMA.as_ref() {
+                return Err(storage_err("runtime_catalog schema is not canonical"));
+            }
+            let kinds = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or_else(|| storage_err("runtime_catalog col 0 (entry_kind) not Utf8"))?;
+            let names = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or_else(|| storage_err("runtime_catalog col 1 (name) not Utf8"))?;
+            let ids = batch
+                .column(2)
+                .as_any()
+                .downcast_ref::<UInt32Array>()
+                .ok_or_else(|| storage_err("runtime_catalog col 2 (runtime_id) not UInt32"))?;
+            let counts = batch
+                .column(3)
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .ok_or_else(|| {
+                    storage_err("runtime_catalog col 3 (observation_count) not UInt64")
+                })?;
+            let first_seens = batch
+                .column(4)
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondArray>()
+                .ok_or_else(|| {
+                    storage_err("runtime_catalog col 4 (first_seen) not TimestampMicrosecond")
+                })?;
+            let last_seens = batch
+                .column(5)
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondArray>()
+                .ok_or_else(|| {
+                    storage_err("runtime_catalog col 5 (last_seen) not TimestampMicrosecond")
+                })?;
+            let owners = batch
+                .column(6)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or_else(|| storage_err("runtime_catalog col 6 (owner_label) not Utf8"))?;
 
-        for row in 0..batch.num_rows() {
-            let kind = match kinds.value(row) {
-                "entity_type" => EntryKind::EntityType,
-                "relation_type" => EntryKind::RelationType,
-                "property" => EntryKind::Property,
-                other => {
-                    return Err(GfError::Storage(format!(
-                        "runtime_catalog: unknown entry_kind '{other}'"
-                    )));
-                }
-            };
-            let name = names.value(row).to_owned();
-            let runtime_id = ids.value(row);
-            let observation_count = counts.value(row);
-            let first_seen = first_seens.value(row);
-            let last_seen = last_seens.value(row);
-            let owner_label = if owners.is_null(row) {
-                None
-            } else {
-                Some(owners.value(row).to_owned())
-            };
+            if kinds.null_count() != 0
+                || names.null_count() != 0
+                || ids.null_count() != 0
+                || counts.null_count() != 0
+                || first_seens.null_count() != 0
+                || last_seens.null_count() != 0
+            {
+                return Err(storage_err("runtime_catalog required column contains null"));
+            }
 
-            let idx = catalog.entries.len();
-            catalog.entries.push(CatalogEntry {
-                kind,
-                name: name.clone(),
-                runtime_id,
-                observation_count,
-                first_seen,
-                last_seen,
-                owner_label: owner_label.clone(),
-            });
+            for row in 0..batch.num_rows() {
+                let kind = match kinds.value(row) {
+                    "entity_type" => EntryKind::EntityType,
+                    "relation_type" => EntryKind::RelationType,
+                    "property" => EntryKind::Property,
+                    other => {
+                        return Err(GfError::Storage(format!(
+                            "runtime_catalog: unknown entry_kind '{other}'"
+                        )));
+                    }
+                };
+                let name = names.value(row).to_owned();
+                let runtime_id = ids.value(row);
+                let observation_count = counts.value(row);
+                let first_seen = first_seens.value(row);
+                let last_seen = last_seens.value(row);
+                let owner_label = if owners.is_null(row) {
+                    None
+                } else {
+                    Some(owners.value(row).to_owned())
+                };
 
-            match kind {
-                EntryKind::EntityType => {
-                    catalog.entity_types.insert(name, idx);
-                    max_type_id = max_type_id.max(runtime_id + 1);
+                if name.is_empty()
+                    || observation_count == 0
+                    || first_seen > last_seen
+                    || (kind != EntryKind::Property && owner_label.is_some())
+                {
+                    return Err(storage_err("runtime_catalog row is not canonical"));
                 }
-                EntryKind::RelationType => {
-                    catalog.relation_types.insert(name, idx);
-                    max_type_id = max_type_id.max(runtime_id + 1);
+                let expected_id = match kind {
+                    EntryKind::EntityType | EntryKind::RelationType => &mut next_type_id,
+                    EntryKind::Property => &mut next_prop_id,
+                };
+                if runtime_id != *expected_id {
+                    return Err(storage_err(
+                        "runtime_catalog IDs are not unique and contiguous in insertion order",
+                    ));
                 }
-                EntryKind::Property => {
-                    catalog.properties.insert((name, owner_label), idx);
-                    max_prop_id = max_prop_id.max(runtime_id + 1);
+                *expected_id = expected_id.checked_add(1).ok_or_else(|| {
+                    storage_err("runtime_catalog persisted ID exceeds supported range")
+                })?;
+
+                let idx = catalog.entries.len();
+                catalog.entries.push(CatalogEntry {
+                    kind,
+                    name: name.clone(),
+                    runtime_id,
+                    observation_count,
+                    first_seen,
+                    last_seen,
+                    owner_label: owner_label.clone(),
+                });
+
+                match kind {
+                    EntryKind::EntityType => {
+                        if catalog.entity_types.insert(name, idx).is_some() {
+                            return Err(storage_err(
+                                "runtime_catalog contains duplicate entity type",
+                            ));
+                        }
+                    }
+                    EntryKind::RelationType => {
+                        if catalog.relation_types.insert(name, idx).is_some() {
+                            return Err(storage_err(
+                                "runtime_catalog contains duplicate relation type",
+                            ));
+                        }
+                    }
+                    EntryKind::Property => {
+                        if catalog
+                            .properties
+                            .insert((name, owner_label), idx)
+                            .is_some()
+                        {
+                            return Err(storage_err("runtime_catalog contains duplicate property"));
+                        }
+                    }
                 }
             }
         }
 
-        catalog.next_type_id = max_type_id;
-        catalog.next_prop_id = max_prop_id;
+        catalog.next_type_id = next_type_id;
+        catalog.next_prop_id = next_prop_id;
         Ok(catalog)
+    }
+
+    /// Appends one persisted catalog batch while preserving its stable IDs and
+    /// observations. The caller may therefore decode a Parquet catalog in
+    /// bounded windows rather than concatenating it in memory.
+    pub fn extend_from_record_batch(&mut self, batch: &RecordBatch) -> Result<(), GfError> {
+        let incoming = Self::decode_record_batches_at(
+            std::iter::once(batch),
+            self.next_type_id,
+            self.next_prop_id,
+        )?;
+        let mut expected_type_id = self.next_type_id;
+        let mut expected_prop_id = self.next_prop_id;
+        for entry in &incoming.entries {
+            let duplicate = match entry.kind {
+                EntryKind::EntityType => self.entity_types.contains_key(&entry.name),
+                EntryKind::RelationType => self.relation_types.contains_key(&entry.name),
+                EntryKind::Property => self
+                    .properties
+                    .contains_key(&(entry.name.clone(), entry.owner_label.clone())),
+            };
+            if duplicate {
+                return Err(GfError::Storage(
+                    "runtime_catalog contains a duplicate persisted entry".to_owned(),
+                ));
+            }
+            let expected = match entry.kind {
+                EntryKind::EntityType | EntryKind::RelationType => &mut expected_type_id,
+                EntryKind::Property => &mut expected_prop_id,
+            };
+            if entry.runtime_id != *expected {
+                return Err(GfError::Storage(
+                    "runtime_catalog persisted IDs do not continue prior authority".to_owned(),
+                ));
+            }
+            *expected = expected.checked_add(1).ok_or_else(|| {
+                GfError::Storage("runtime_catalog persisted ID overflow".to_owned())
+            })?;
+        }
+        for entry in incoming.entries {
+            let idx = self.entries.len();
+            match entry.kind {
+                EntryKind::EntityType => {
+                    self.entity_types.insert(entry.name.clone(), idx);
+                    self.next_type_id =
+                        self.next_type_id
+                            .max(entry.runtime_id.checked_add(1).ok_or_else(|| {
+                                GfError::Storage("runtime_catalog persisted ID overflow".to_owned())
+                            })?);
+                }
+                EntryKind::RelationType => {
+                    self.relation_types.insert(entry.name.clone(), idx);
+                    self.next_type_id =
+                        self.next_type_id
+                            .max(entry.runtime_id.checked_add(1).ok_or_else(|| {
+                                GfError::Storage("runtime_catalog persisted ID overflow".to_owned())
+                            })?);
+                }
+                EntryKind::Property => {
+                    let key = (entry.name.clone(), entry.owner_label.clone());
+                    self.properties.insert(key, idx);
+                    self.next_prop_id =
+                        self.next_prop_id
+                            .max(entry.runtime_id.checked_add(1).ok_or_else(|| {
+                                GfError::Storage("runtime_catalog persisted ID overflow".to_owned())
+                            })?);
+                }
+            }
+            self.entries.push(entry);
+        }
+        Ok(())
     }
 }
 
@@ -559,6 +740,27 @@ mod tests {
         let id1 = cat.intern_label("Person");
         let id2 = cat.intern_label("Person");
         assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn caller_authoritative_timestamp_is_preserved_for_every_catalog_kind() {
+        let mut catalog = RuntimeCatalog::new();
+        catalog.intern_label_at("Person", 42);
+        catalog.intern_relation_type_at("KNOWS", 42);
+        catalog.intern_property_at("score", Some("Person"), 42);
+        let batch = catalog.to_record_batch();
+        let first = batch
+            .column(4)
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .unwrap();
+        let last = batch
+            .column(5)
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .unwrap();
+        assert_eq!(first.values(), &[42, 42, 42]);
+        assert_eq!(last.values(), &[42, 42, 42]);
     }
 
     #[test]
@@ -713,6 +915,38 @@ mod tests {
     }
 
     #[test]
+    fn roundtrip_preserves_global_unowned_properties() {
+        let mut catalog = RuntimeCatalog::new();
+        let expected = catalog.intern_property("score", None);
+
+        let restored = RuntimeCatalog::from_record_batch(&catalog.to_record_batch()).unwrap();
+        assert!(restored.contains_property("score", None));
+        assert_eq!(restored.property_name(expected), Some("score"));
+        assert_eq!(
+            restored
+                .to_record_batch()
+                .column(6)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .null_count(),
+            1
+        );
+    }
+
+    #[test]
+    fn persisted_catalog_rejects_owner_on_non_property_rows() {
+        let mut catalog = RuntimeCatalog::new();
+        catalog.intern_label("Person");
+        let good = catalog.to_record_batch();
+        let mut columns = good.columns().to_vec();
+        columns[6] = Arc::new(StringArray::from(vec![Some("invalid-owner")]));
+        let malformed = RecordBatch::try_new(RUNTIME_CATALOG_SCHEMA.clone(), columns).unwrap();
+
+        assert!(RuntimeCatalog::from_record_batch(&malformed).is_err());
+    }
+
+    #[test]
     fn roundtrip_empty_catalog() {
         let cat = RuntimeCatalog::new();
         let batch = cat.to_record_batch();
@@ -744,5 +978,29 @@ mod tests {
             matches!(result, Err(GfError::Storage(_))),
             "expected Storage error for unknown entry_kind"
         );
+    }
+
+    #[test]
+    fn persisted_catalog_rejects_noncanonical_schema_without_panicking() {
+        let mut cat = RuntimeCatalog::new();
+        cat.intern_label("X");
+        let good = cat.to_record_batch();
+        let shortened = RecordBatch::try_new(
+            Arc::new(Schema::new(RUNTIME_CATALOG_SCHEMA.fields()[..6].to_vec())),
+            good.columns()[..6].to_vec(),
+        )
+        .unwrap();
+        assert!(RuntimeCatalog::from_record_batch(&shortened).is_err());
+    }
+
+    #[test]
+    fn persisted_catalog_rejects_maximum_id_before_overflow() {
+        let mut cat = RuntimeCatalog::new();
+        cat.intern_label("X");
+        let good = cat.to_record_batch();
+        let mut columns = good.columns().to_vec();
+        columns[2] = Arc::new(UInt32Array::from(vec![u32::MAX]));
+        let malformed = RecordBatch::try_new(RUNTIME_CATALOG_SCHEMA.clone(), columns).unwrap();
+        assert!(RuntimeCatalog::from_record_batch(&malformed).is_err());
     }
 }

@@ -190,12 +190,7 @@ impl GraphForge {
 }
 
 fn validate_identifier(kind: &str, name: &str) -> Result<(), GfError> {
-    let mut characters = name.chars();
-    let valid = characters
-        .next()
-        .is_some_and(|first| first == '_' || first.is_alphabetic())
-        && characters.all(|character| character == '_' || character.is_alphanumeric());
-    if valid {
+    if graphforge_core::identifier::is_graph_identifier(name) {
         Ok(())
     } else {
         Err(validation(format!("invalid node {kind} {name:?}")))

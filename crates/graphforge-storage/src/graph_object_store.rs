@@ -18,6 +18,7 @@ use crate::{
     GraphFilesOpenStrategy, GraphFilesRootV2, GraphManifestNode, GraphManifestNodeKind,
 };
 use graphforge_filesystem::StableDirectory;
+use parquet::file::reader::{ChunkReader, Length};
 
 /// Project-relative root of immutable graph objects.
 pub const GRAPH_OBJECTS_DIR: &str = "graph-objects";
@@ -1310,6 +1311,26 @@ pub fn graph_object_path(root: &Path, digest: &str) -> Result<PathBuf, GfError> 
         .join(&digest[2..]))
 }
 
+#[cfg(test)]
+pub(crate) fn corrupt_sealed_graph_object_for_test(path: &Path, bytes: &[u8]) {
+    let metadata = fs::metadata(path).expect("inspect sealed graph object fixture");
+    assert!(
+        metadata.permissions().readonly(),
+        "graph object fixture must be sealed before hostile corruption"
+    );
+    let mut permissions = metadata.permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        permissions.set_mode(permissions.mode() | 0o200);
+    }
+    #[cfg(not(unix))]
+    permissions.set_readonly(false);
+    fs::set_permissions(path, permissions)
+        .expect("make exact graph object fixture owner-writable for hostile corruption");
+    fs::write(path, bytes).expect("corrupt exact sealed graph object fixture");
+}
+
 /// Install exact in-memory bytes under their SHA-256 identity.
 pub fn install_graph_object_bytes(
     root: &Path,
@@ -1936,6 +1957,160 @@ pub fn read_graph_object_by_digest(
     read_graph_object_by_digest_from_read_only_cas(&cas, digest, max_length)
 }
 
+/// Open and stream-authenticate one immutable CAS object without allocating its payload.
+pub(crate) struct AuthenticatedGraphObject {
+    file: File,
+    authenticated_length: u64,
+    _cas: std::sync::Arc<ReadOnlyCasRoot>,
+}
+
+#[derive(Clone)]
+pub(crate) struct GraphObjectReadLease {
+    cas: std::sync::Arc<ReadOnlyCasRoot>,
+}
+
+impl std::fmt::Debug for GraphObjectReadLease {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GraphObjectReadLease")
+            .finish_non_exhaustive()
+    }
+}
+
+pub(crate) fn begin_graph_object_read(root: &Path) -> Result<GraphObjectReadLease, GfError> {
+    Ok(GraphObjectReadLease {
+        cas: std::sync::Arc::new(ReadOnlyCasRoot::open(root)?),
+    })
+}
+
+impl GraphObjectReadLease {
+    pub(crate) fn open(
+        &self,
+        digest: &str,
+        expected_length: u64,
+    ) -> Result<AuthenticatedGraphObject, GfError> {
+        open_graph_object_with_read_lease(self, digest, expected_length)
+    }
+}
+
+impl std::fmt::Debug for AuthenticatedGraphObject {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AuthenticatedGraphObject")
+            .finish_non_exhaustive()
+    }
+}
+
+impl AuthenticatedGraphObject {
+    pub(crate) fn try_clone_file(&self) -> std::io::Result<File> {
+        self.file.try_clone()
+    }
+
+    pub(crate) fn authenticated_length(&self) -> u64 {
+        self.authenticated_length
+    }
+}
+
+impl AsRef<File> for AuthenticatedGraphObject {
+    fn as_ref(&self) -> &File {
+        &self.file
+    }
+}
+
+impl Read for AuthenticatedGraphObject {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.file.read(buffer)
+    }
+}
+
+impl Seek for AuthenticatedGraphObject {
+    fn seek(&mut self, position: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.file.seek(position)
+    }
+}
+
+impl Length for AuthenticatedGraphObject {
+    fn len(&self) -> u64 {
+        self.authenticated_length
+    }
+}
+
+impl ChunkReader for AuthenticatedGraphObject {
+    type T = std::io::BufReader<File>;
+
+    fn get_read(&self, start: u64) -> parquet::errors::Result<Self::T> {
+        let mut file = self.file.try_clone()?;
+        file.seek(std::io::SeekFrom::Start(start))?;
+        Ok(std::io::BufReader::new(file))
+    }
+
+    fn get_bytes(&self, start: u64, length: usize) -> parquet::errors::Result<bytes::Bytes> {
+        let mut file = self.file.try_clone()?;
+        file.seek(std::io::SeekFrom::Start(start))?;
+        let mut value = vec![0; length];
+        file.read_exact(&mut value)?;
+        Ok(value.into())
+    }
+}
+
+pub(crate) fn open_graph_object_by_digest(
+    root: &Path,
+    digest: &str,
+    expected_length: u64,
+) -> Result<AuthenticatedGraphObject, GfError> {
+    begin_graph_object_read(root)?.open(digest, expected_length)
+}
+
+fn open_graph_object_with_read_lease(
+    lease: &GraphObjectReadLease,
+    digest: &str,
+    expected_length: u64,
+) -> Result<AuthenticatedGraphObject, GfError> {
+    let mut file = lease.cas.open_digest(digest)?;
+    let metadata = file.metadata().map_err(|error| {
+        storage(
+            "inspect stable graph object",
+            &lease.cas.diagnostic_root,
+            error,
+        )
+    })?;
+    // CAS payloads are deliberately hard-linked into private materializations,
+    // so their link count is not an authority signal. The stable no-follow CAS
+    // traversal, exact digest address, exact length, and streamed digest bind
+    // this descriptor without relaxing path-native child-file admission.
+    if !metadata.is_file()
+        || metadata.len() != expected_length
+        || !metadata.permissions().readonly()
+    {
+        return Err(validation("graph object authority changed"));
+    }
+    let mut hasher = Sha256::new();
+    let mut block = vec![0_u8; 1 << 20];
+    loop {
+        let count = file.read(&mut block).map_err(|error| {
+            storage(
+                "authenticate graph object",
+                &lease.cas.diagnostic_root,
+                error,
+            )
+        })?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&block[..count]);
+    }
+    if hex_digest(hasher.finalize().into()) != digest {
+        return Err(validation("graph object digest does not match its address"));
+    }
+    file.rewind()
+        .map_err(|error| storage("rewind graph object", &lease.cas.diagnostic_root, error))?;
+    Ok(AuthenticatedGraphObject {
+        file,
+        authenticated_length: expected_length,
+        _cas: std::sync::Arc::clone(&lease.cas),
+    })
+}
+
 fn read_graph_object_by_digest_from_read_only_cas(
     cas: &ReadOnlyCasRoot,
     digest: &str,
@@ -2007,7 +2182,7 @@ where
     let bucket = cas.digest_bucket(digest, true)?;
     let destination_name = std::ffi::OsStr::new(&digest[2..]);
     if let Ok(file) = bucket.open_child_file(destination_name) {
-        verify_file(file, digest, expected_length, &cas.diagnostic_root)?;
+        verify_and_seal_graph_object(&file, digest, expected_length, &cas.diagnostic_root)?;
         return Ok(GraphObjectInstallEvidence {
             reused_existing: true,
             ..GraphObjectInstallEvidence::default()
@@ -2043,6 +2218,7 @@ where
         expected_length,
         &cas.diagnostic_root,
     )?;
+    seal_graph_object(&temporary, &cas.diagnostic_root)?;
     let installed = if let Ok((_installed, _identity)) = cas.tmp.link_child_into(
         &temporary_name,
         &temporary,
@@ -2059,9 +2235,14 @@ where
                 error,
             )
         })?;
-        verify_file(existing, digest, expected_length, &cas.diagnostic_root)?;
+        verify_and_seal_graph_object(&existing, digest, expected_length, &cas.diagnostic_root)?;
         false
     };
+    // Windows cannot open a deletion handle while the original temporary
+    // handle remains open without delete sharing. Publication and concurrent
+    // winner authentication are complete, so release it before exact-identity
+    // cleanup; the installed hard link remains sealed.
+    drop(temporary);
     cas.tmp
         .unlink_child_if_identity(&temporary_name, temporary_identity)
         .map_err(|error| {
@@ -2114,6 +2295,46 @@ fn verify_file(
         return Err(validation("graph object digest does not match its address"));
     }
     Ok(())
+}
+
+fn verify_and_seal_graph_object(
+    file: &File,
+    digest: &str,
+    expected_length: u64,
+    diagnostic: &Path,
+) -> Result<(), GfError> {
+    // Reuse is safe only after the exact opened inode is no longer writable.
+    // Hashing first would leave a window in which the already-authenticated
+    // bytes could be changed before the subsequent chmod.
+    seal_graph_object(file, diagnostic)?;
+    verify_file(
+        file.try_clone()
+            .map_err(|error| storage("clone graph object for authentication", diagnostic, error))?,
+        digest,
+        expected_length,
+        diagnostic,
+    )?;
+    if !file
+        .metadata()
+        .map_err(|error| storage("reinspect sealed graph object", diagnostic, error))?
+        .permissions()
+        .readonly()
+    {
+        return Err(validation(
+            "graph object became writable during authentication",
+        ));
+    }
+    Ok(())
+}
+
+fn seal_graph_object(file: &File, diagnostic: &Path) -> Result<(), GfError> {
+    let mut permissions = file
+        .metadata()
+        .map_err(|error| storage("inspect graph object permissions", diagnostic, error))?
+        .permissions();
+    permissions.set_readonly(true);
+    file.set_permissions(permissions)
+        .map_err(|error| storage("seal graph object permissions", diagnostic, error))
 }
 
 fn hash_regular_file(path: &Path) -> Result<[u8; 32], GfError> {
@@ -2636,6 +2857,72 @@ mod tests {
         drop(publication);
     }
 
+    #[test]
+    fn authenticated_reader_keeps_cas_sealed_through_descriptor_consumption() {
+        let root = tempfile::tempdir().unwrap();
+        let payload = b"authenticated payload";
+        let (digest, _) = install_graph_object_bytes(root.path(), payload).unwrap();
+        let mut reader =
+            open_graph_object_by_digest(root.path(), &digest, payload.len() as u64).unwrap();
+        assert_eq!(reader.len(), payload.len() as u64);
+        let path = graph_object_path(root.path(), &digest).unwrap();
+
+        let mutation = fs::OpenOptions::new().write(true).open(&path);
+        assert!(
+            mutation.is_err(),
+            "sealed CAS object accepted in-place mutation"
+        );
+
+        let mut decoded = Vec::new();
+        reader.read_to_end(&mut decoded).unwrap();
+        assert_eq!(decoded, payload);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reuse_seals_the_authenticated_descriptor_not_a_replaced_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let payload = b"descriptor-bound payload";
+        let (digest, _) = install_graph_object_bytes(root.path(), payload).unwrap();
+        let path = graph_object_path(root.path(), &digest).unwrap();
+        let displaced = path.with_extension("displaced");
+        let descriptor = File::open(&path).unwrap();
+
+        fs::rename(&path, &displaced).unwrap();
+        fs::set_permissions(&displaced, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::write(&path, b"hostile replacement").unwrap();
+        verify_and_seal_graph_object(&descriptor, &digest, payload.len() as u64, root.path())
+            .unwrap();
+
+        assert!(fs::metadata(&displaced).unwrap().permissions().readonly());
+        assert!(!fs::metadata(&path).unwrap().permissions().readonly());
+        assert!(open_graph_object_by_digest(root.path(), &digest, payload.len() as u64).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reuse_seals_same_inode_before_digest_authentication() {
+        let root = tempfile::tempdir().unwrap();
+        let payload = b"seal-before-authentication";
+        let digest = hex_digest(Sha256::digest(payload).into());
+        let path = root.path().join("candidate");
+        fs::write(&path, payload).unwrap();
+        let descriptor = File::open(&path).unwrap();
+
+        seal_graph_object(&descriptor, root.path()).unwrap();
+        assert!(fs::OpenOptions::new().write(true).open(&path).is_err());
+        verify_file(
+            descriptor.try_clone().unwrap(),
+            &digest,
+            payload.len() as u64,
+            root.path(),
+        )
+        .unwrap();
+        assert!(descriptor.metadata().unwrap().permissions().readonly());
+    }
+
     #[cfg(unix)]
     #[test]
     fn materialization_rejects_target_and_intermediate_symlink_escape() {
@@ -2743,7 +3030,10 @@ mod tests {
             b"payload"
         );
 
-        fs::write(graph_object_path(root.path(), &digest).unwrap(), b"corrupt").unwrap();
+        corrupt_sealed_graph_object_for_test(
+            &graph_object_path(root.path(), &digest).unwrap(),
+            b"corrupt",
+        );
         assert!(install_graph_object_bytes(root.path(), b"payload").is_err());
     }
 
@@ -3122,11 +3412,10 @@ mod tests {
         );
 
         let (another_orphan, _) = install_graph_object_bytes(container.path(), b"another").unwrap();
-        fs::write(
-            graph_object_path(container.path(), &root.root_node_sha256).unwrap(),
+        corrupt_sealed_graph_object_for_test(
+            &graph_object_path(container.path(), &root.root_node_sha256).unwrap(),
             b"tampered",
-        )
-        .unwrap();
+        );
         assert!(
             gc_graph_objects(
                 container.path(),

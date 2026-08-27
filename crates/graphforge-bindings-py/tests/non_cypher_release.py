@@ -23,8 +23,8 @@ ROOT = Path(__file__).resolve().parents[3]
 RUST_MANIFEST = ROOT / "tests/contracts/non-cypher-rust-surface.json"
 RUST_GATE = ROOT / "scripts/ci/non-cypher-surface-gate.py"
 PYO3_SOURCE = ROOT / "crates/graphforge-bindings-py/src/lib.rs"
-EXPECTED_RUST_DIGEST = "2d86746c592716a79fe12cb5471f1c9b90ce8e91bfca772b19110cdfafa468d1"
-EXPECTED_RELEASE_DIGEST = "fa31f90944981d9e850cb115e70beb0c987ba36cedd71c681a51b122d59954fb"
+EXPECTED_RUST_DIGEST = "71c92e47b6e43da553be7288724d522e303da5d4677e60f51e7ea8d9f8a41b99"
+EXPECTED_RELEASE_DIGEST = "bb7d3f89204eb3115fd425081d45e874251a20de9759355e867d87e005063219"
 
 PYTHON_ONLY_METHODS = frozenset(
     {
@@ -140,6 +140,9 @@ EVIDENCE = {
     "resumable-import": {
         "import_session_lifecycle.py": ["check_import_session_lifecycle"],
     },
+    "resumable-construction": {
+        "non_cypher_release.py": ["check_surface_projection"],
+    },
     "semantic-generation-diff": {
         "generation_diff.py": ["check_generation_diff"],
     },
@@ -254,7 +257,7 @@ def _classification_report() -> dict[str, object]:
         for group in manifest["method_evidence_groups"].values()
         for method_id in group["ids"]
     }
-    assert len(release_methods) == 247
+    assert len(release_methods) == 257
     assert _digest(release_methods) == EXPECTED_RELEASE_DIGEST
     assert set(EVIDENCE) == set(manifest["method_evidence_groups"])
 
@@ -326,6 +329,14 @@ def _classification_report() -> dict[str, object]:
             classification = "not-exposed"
             reason = (
                 "the Python historical view exposes a deliberately smaller read-only projection"
+            )
+        elif rust_id.startswith("GraphConstructionSession.") or rust_id in {
+            "GraphForge.begin_graph_construction",
+            "GraphForge.resume_graph_construction",
+        }:
+            classification = "not-exposed"
+            reason = (
+                "resumable graph construction is not yet shipped through the Python product facade"
             )
         else:
             classification = "not-exposed"
