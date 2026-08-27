@@ -1354,7 +1354,7 @@ impl ValidatedProjectGeneration {
     /// Returns a stable publication error whose diagnostic states whether the
     /// commit point was crossed.
     pub fn publish(mut self) -> Result<ProjectPublicationReceipt, GfError> {
-        self.publish_with_optional_graph_objects(None)
+        self.publish_with_optional_graph_objects(None, None)
     }
 
     /// Publish a compact graph generation while holding its CAS lease through
@@ -1363,12 +1363,23 @@ impl ValidatedProjectGeneration {
         mut self,
         lease: &crate::GraphObjectPublicationLease,
     ) -> Result<ProjectPublicationReceipt, GfError> {
-        self.publish_with_optional_graph_objects(Some(lease))
+        self.publish_with_optional_graph_objects(Some(lease), None)
+    }
+
+    /// Publish a compact graph while polling cancellation until the atomic
+    /// `CURRENT` replacement commit point.
+    pub(crate) fn publish_with_graph_objects_cancellable(
+        mut self,
+        lease: &crate::GraphObjectPublicationLease,
+        cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<ProjectPublicationReceipt, GfError> {
+        self.publish_with_optional_graph_objects(Some(lease), Some(cancelled))
     }
 
     fn publish_with_optional_graph_objects(
         &mut self,
         graph_object_lease: Option<&crate::GraphObjectPublicationLease>,
+        cancellation: Option<&mut dyn FnMut() -> bool>,
     ) -> Result<ProjectPublicationReceipt, GfError> {
         self.0.admission.revalidate_identity()?;
         let lifecycle_admission = self.0.admission.readmit_for_publish()?;
@@ -1379,7 +1390,11 @@ impl ValidatedProjectGeneration {
             self.0.admission.revalidate_identity()?;
         }
         let result = self
-            .publish_inner(graph_object_lease, lifecycle_admission.as_ref())
+            .publish_inner(
+                graph_object_lease,
+                lifecycle_admission.as_ref(),
+                cancellation,
+            )
             .map_err(|error| {
                 if matches!(error, GfError::Project { .. }) {
                     error
@@ -1434,6 +1449,7 @@ impl ValidatedProjectGeneration {
         &self,
         graph_object_lease: Option<&crate::GraphObjectPublicationLease>,
         lifecycle_admission: Option<&crate::filesystem_admission::ProjectLifecycleAdmission>,
+        cancellation: Option<&mut dyn FnMut() -> bool>,
     ) -> Result<ProjectPublicationReceipt, GfError> {
         let staged = &self.0;
         let compact_graph = has_compact_graph_participant(staged)?;
@@ -1460,6 +1476,7 @@ impl ValidatedProjectGeneration {
             manifest_sha256,
             graph_object_lease,
             lifecycle_admission,
+            cancellation,
         )?;
         finish_published_generation(staged, manifest_sha256)?;
         Ok(ProjectPublicationReceipt {
@@ -1678,6 +1695,7 @@ fn replace_current(
     manifest_sha256: [u8; 32],
     graph_object_lease: Option<&crate::GraphObjectPublicationLease>,
     lifecycle_admission: Option<&crate::filesystem_admission::ProjectLifecycleAdmission>,
+    mut cancellation: Option<&mut dyn FnMut() -> bool>,
 ) -> Result<(), GfError> {
     let current = CurrentRecord {
         format: "graphforge-project".into(),
@@ -1720,6 +1738,12 @@ fn replace_current(
                 "CURRENT",
                 false,
             )?;
+            if cancellation.as_mut().is_some_and(|cancelled| cancelled()) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "publication cancelled before CURRENT commit point",
+                ));
+            }
             if let Some(admission) = lifecycle_admission {
                 admission
                     .revalidate_identity()

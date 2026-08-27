@@ -246,9 +246,12 @@ impl GraphConstructionSession<'_> {
         }
         let target = derived_uuid(self.session_uuid, b"generation");
         let transaction = derived_uuid(self.session_uuid, b"transaction");
-        let published = self
-            .inner
-            .publish_canonical(&encoding, target, transaction)?;
+        let published = self.inner.publish_canonical_with_cancellation(
+            &encoding,
+            target,
+            transaction,
+            || cancellation.is_some_and(crate::CancellationToken::is_cancelled),
+        )?;
 
         let root = self.graph.resolved_generation.container_root();
         let resolved = graphforge_storage::resolve_project_generation(root)?;
@@ -476,10 +479,19 @@ mod tests {
             .unwrap()
             .generation_uuid();
         let mut session = graph.begin_graph_construction(Default::default()).unwrap();
-        session
-            .append_nodes("nodes", &nodes(&[Uuid::now_v7()]))
-            .unwrap();
+        let first = Uuid::now_v7();
+        let second = Uuid::now_v7();
         let cancellation = crate::CancellationToken::new();
+        session
+            .append_nodes_with_cancellation("nodes", &nodes(&[first, second]), &cancellation)
+            .unwrap();
+        session
+            .append_edges_with_cancellation(
+                "edges",
+                &edges(&[Uuid::now_v7()], &[(first, second)]),
+                &cancellation,
+            )
+            .unwrap();
         cancellation.cancel();
         assert!(
             session

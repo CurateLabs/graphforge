@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "f95b7cb7b6612d357fa4a9e9df165ff684910e93f3a48df46e997bae6a60ba64",
+  "public_method_digest": "71c92e47b6e43da553be7288724d522e303da5d4677e60f51e7ea8d9f8a41b99",
   "method_policy": {
     "receiver_defaults": {
       "GraphForge": "release-tested",
@@ -294,13 +294,20 @@
       "ids": [
         "GraphConstructionSession.abort",
         "GraphConstructionSession.append_edges",
+        "GraphConstructionSession.append_edges_with_cancellation",
         "GraphConstructionSession.append_nodes",
+        "GraphConstructionSession.append_nodes_with_cancellation",
         "GraphConstructionSession.progress",
         "GraphConstructionSession.seal_and_publish",
+        "GraphConstructionSession.seal_and_publish_with_cancellation",
         "GraphForge.begin_graph_construction",
         "GraphForge.resume_graph_construction"
       ],
       "test_refs": [
+        {
+          "path": "crates/graphforge-api/src/resumable_construction.rs",
+          "symbol": "cancelled_public_construction_preserves_current"
+        },
         {
           "path": "crates/graphforge-api/src/resumable_construction.rs",
           "symbol": "graphforge_multi_chunk_construction_publishes_once_and_reopens"

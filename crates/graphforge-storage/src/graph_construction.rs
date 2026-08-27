@@ -919,6 +919,24 @@ impl GraphConstructionSession {
         target_generation_uuid: Uuid,
         transaction_uuid: Uuid,
     ) -> Result<crate::ProjectPublicationReceipt, GfError> {
+        self.publish_canonical_with_cancellation(
+            encoding,
+            target_generation_uuid,
+            transaction_uuid,
+            || false,
+        )
+    }
+
+    /// Publish while polling cancellation through the final pre-`CURRENT` boundary.
+    #[allow(clippy::too_many_lines)]
+    pub fn publish_canonical_with_cancellation(
+        &mut self,
+        encoding: &GraphConstructionEncoding,
+        target_generation_uuid: Uuid,
+        transaction_uuid: Uuid,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<crate::ProjectPublicationReceipt, GfError> {
+        reject_cancelled(&mut cancelled)?;
         if self.checkpoint.publication_state == Some(ConstructionPublicationState::Published) {
             let published =
                 crate::published_project_transaction(&self.project_path, transaction_uuid)?
@@ -1100,7 +1118,7 @@ impl GraphConstructionSession {
             )? {
                 crate::ProjectStageOutcome::Staged(staged) => staged
                     .validate(|_| Ok(()), |_, _| Ok(()))?
-                    .publish_with_graph_objects(&lease)?,
+                    .publish_with_graph_objects_cancellable(&lease, &mut cancelled)?,
                 crate::ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
             };
         construction_failpoint("publication.after_current_before_receipt");
