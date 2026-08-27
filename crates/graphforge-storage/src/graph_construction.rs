@@ -729,7 +729,7 @@ pub struct GraphConstructionSession {
     parent_catalog: RuntimeCatalog,
     compact_parent: Option<crate::GraphFilesInventory>,
     semantic_authority: Option<ConstructionSemanticAuthority>,
-    _session_lock: File,
+    session_lock: File,
     _reservation: ProcessReservation,
 }
 
@@ -738,7 +738,7 @@ impl Drop for GraphConstructionSession {
         // Release the descriptor lock before the process reservation. Relying
         // on platform-specific close semantics leaves a window where an
         // immediate authenticated resume can observe the retired owner.
-        let _ = crate::file_lock::unlock(&self._session_lock);
+        let _ = crate::file_lock::unlock(&self.session_lock);
     }
 }
 
@@ -1628,7 +1628,7 @@ impl GraphConstructionSession {
             parent_catalog,
             compact_parent,
             semantic_authority,
-            _session_lock: session_lock,
+            session_lock,
             _reservation: reservation,
         };
         recover_shape_intent(&session.root, &mut session.checkpoint)?;
