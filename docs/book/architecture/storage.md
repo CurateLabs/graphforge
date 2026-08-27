@@ -66,6 +66,41 @@ The relational lowering layer maps `node_uuid → node_id` once at scan time. Al
 
 **Rule:** UUIDs appear in every public API result schema. Surrogates are execution-internal and must never appear in API outputs.
 
+The v4 reverse authority makes `node_id → node_uuid` a generation-pinned,
+disk-bound read rather than a graph-sized process cache. Its manifest names
+typed immutable artifacts: packed UUID payloads for contiguous ordinal ranges,
+UUID-sorted `(UUID, surrogate)` forward records, plus sorted surrogate
+tombstones. Admission authenticates each retained file
+in one streaming pass that jointly derives its whole-file digest, block fences,
+structural checks, and mapping commitment. Aggregate admission counters report
+the exact artifact bytes, sequential read calls, and peak bounded buffer. A
+lookup accepts only
+a bounded request batch, sorts and deduplicates it, applies newest tombstones,
+and reads authenticated fixed-size ordinal blocks while
+restoring caller order. Storage grows with retained identities rather than the
+largest sparse surrogate, and anonymous buffers do not grow with graph
+cardinality. Version-3 state is an explicit rebuild-required disposition; a v4
+reader never interprets or mixes v3 reverse records.
+
+Admission also streams both forward and ordinal authorities through the same
+domain-separated mapping commitment and count. Strict forward UUID ordering and
+that bounded reconciliation reject duplicate, missing, or cross-generation
+identity mappings without constructing a graph-sized in-memory map.
+
+The retained reader owns a shared capability on `ordinal-v4.lock`; every v4
+publisher must hold that same file exclusively across artifact installation and
+manifest replacement. Each admitted file's stable identity, length, and
+high-resolution modification time are retained as a fast change detector.
+That cooperative ownership is not the cryptographic boundary: every selected
+ordinal or tombstone block is verified against its manifest digest before its
+bytes can produce a result. A non-cooperating mutation therefore fails closed
+even if it preserves the inode and restores the original modification time.
+Adjacent selected ordinal blocks may share one bounded read only when their
+intervening gap and combined span fit the configured cap; every constituent
+slice is still verified against its own digest. Version-3 rebuild recognition
+uses the existing canonical v3 manifest and run-descriptor validator, so a
+minimal version tag or a v3 document mixed with v4 fields fails closed.
+
 ### Objects requiring UUID identity
 
 | Object | UUID column |
