@@ -17,6 +17,15 @@ pub struct FileIdentity {
     pub file_id: [u8; 16],
 }
 
+/// Logical and physically allocated byte counts for one retained file handle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileSpaceUsage {
+    /// Logical end-of-file length visible to readers.
+    pub logical_bytes: u64,
+    /// Physical filesystem allocation charged to the file.
+    pub allocated_bytes: u64,
+}
+
 /// Retained directory capability whose children are opened without following
 /// links or reparse points.
 #[derive(Debug)]
@@ -750,6 +759,15 @@ pub fn file_identity(file: &File) -> io::Result<FileIdentity> {
     file_identity_platform(file)
 }
 
+/// Return logical and physically allocated bytes for a retained regular-file handle.
+///
+/// The descriptor is the sole authority: this function never resolves or reopens a
+/// pathname. Unsupported platforms and native values that cannot be represented
+/// safely fail closed.
+pub fn file_space_usage(file: &File) -> io::Result<FileSpaceUsage> {
+    file_space_usage_platform(file)
+}
+
 /// Return the stable native volume/file identity of a non-followed path.
 pub fn path_identity(path: &Path) -> io::Result<FileIdentity> {
     path_identity_platform(path)
@@ -881,6 +899,15 @@ fn verify_regular_metadata(metadata: &std::fs::Metadata) -> io::Result<()> {
     Ok(())
 }
 
+fn verify_space_usage_metadata(metadata: &std::fs::Metadata) -> io::Result<()> {
+    if is_link_or_reparse(metadata) || !metadata.is_file() {
+        return Err(io::Error::other(
+            "space usage handle is not a regular non-reparse file",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(windows)]
 fn is_link_or_reparse(metadata: &std::fs::Metadata) -> bool {
     use std::os::windows::fs::MetadataExt as _;
@@ -992,6 +1019,22 @@ fn file_identity_platform(file: &File) -> io::Result<FileIdentity> {
 }
 
 #[cfg(unix)]
+fn file_space_usage_platform(file: &File) -> io::Result<FileSpaceUsage> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let metadata = file.metadata()?;
+    verify_space_usage_metadata(&metadata)?;
+    let allocated_bytes = metadata
+        .blocks()
+        .checked_mul(512)
+        .ok_or_else(|| io::Error::other("allocated file byte count overflowed u64"))?;
+    Ok(FileSpaceUsage {
+        logical_bytes: metadata.len(),
+        allocated_bytes,
+    })
+}
+
+#[cfg(unix)]
 fn path_identity_platform(path: &Path) -> io::Result<FileIdentity> {
     use std::os::unix::fs::MetadataExt as _;
     let metadata = std::fs::symlink_metadata(path)?;
@@ -1024,6 +1067,11 @@ fn create_private_directory_platform(path: &Path) -> io::Result<()> {
 #[cfg(windows)]
 fn file_identity_platform(file: &File) -> io::Result<FileIdentity> {
     windows::file_identity(file)
+}
+
+#[cfg(windows)]
+fn file_space_usage_platform(file: &File) -> io::Result<FileSpaceUsage> {
+    windows::file_space_usage(file)
 }
 
 #[cfg(windows)]
@@ -1158,6 +1206,14 @@ fn file_identity_platform(_file: &File) -> io::Result<FileIdentity> {
 }
 
 #[cfg(all(not(unix), not(windows)))]
+fn file_space_usage_platform(_file: &File) -> io::Result<FileSpaceUsage> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "allocated-byte measurement is unsupported on this platform",
+    ))
+}
+
+#[cfg(all(not(unix), not(windows)))]
 fn path_identity_platform(_path: &Path) -> io::Result<FileIdentity> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
@@ -1211,17 +1267,18 @@ mod windows {
         FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_INFO_EX,
         FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_WRITE_THROUGH,
         FILE_ID_INFO, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO,
-        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES,
-        FileDispositionInfoEx, FileIdInfo, FileRenameInfo, FileRenameInfoEx, GetDriveTypeW,
-        GetFileInformationByHandle, GetFileInformationByHandleEx, GetFinalPathNameByHandleW,
-        GetVolumeInformationW, GetVolumePathNameW, SetFileInformationByHandle, VOLUME_NAME_DOS,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO,
+        FILE_WRITE_ATTRIBUTES, FileDispositionInfoEx, FileIdInfo, FileRenameInfo, FileRenameInfoEx,
+        FileStandardInfo, GetDriveTypeW, GetFileInformationByHandle, GetFileInformationByHandleEx,
+        GetFinalPathNameByHandleW, GetVolumeInformationW, GetVolumePathNameW,
+        SetFileInformationByHandle, VOLUME_NAME_DOS,
     };
 
     #[cfg(test)]
     use super::classify_failed_replacement;
     use super::{
-        FileIdentity, ReplaceFileError, WindowsVolumeInformation, is_link_or_reparse,
-        verify_regular_metadata,
+        FileIdentity, FileSpaceUsage, ReplaceFileError, WindowsVolumeInformation,
+        is_link_or_reparse, verify_regular_metadata, verify_space_usage_metadata,
     };
 
     const DRIVE_FIXED: u32 = 3;
@@ -1690,7 +1747,7 @@ mod windows {
     }
 
     fn verify_open_regular(file: &File) -> io::Result<()> {
-        verify_regular_metadata(&file.metadata()?)?;
+        verify_space_usage_metadata(&file.metadata()?)?;
         let information = information(file)?;
         if information.nNumberOfLinks != 1 {
             return Err(io::Error::other("replacement path is hard linked"));
@@ -1729,6 +1786,33 @@ mod windows {
         Ok(FileIdentity {
             volume_serial: information.VolumeSerialNumber,
             file_id: information.FileId.Identifier,
+        })
+    }
+
+    pub(super) fn file_space_usage(file: &File) -> io::Result<FileSpaceUsage> {
+        verify_regular_metadata(&file.metadata()?)?;
+        let mut information = FILE_STANDARD_INFO::default();
+        // SAFETY: the retained handle remains live and the output buffer has
+        // exactly the size required by FileStandardInfo.
+        let succeeded = unsafe {
+            GetFileInformationByHandleEx(
+                file.as_raw_handle(),
+                FileStandardInfo,
+                (&raw mut information).cast(),
+                u32::try_from(std::mem::size_of::<FILE_STANDARD_INFO>())
+                    .expect("FILE_STANDARD_INFO size fits u32"),
+            )
+        };
+        if succeeded == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let logical_bytes = u64::try_from(information.EndOfFile)
+            .map_err(|_| io::Error::other("native logical file length was negative"))?;
+        let allocated_bytes = u64::try_from(information.AllocationSize)
+            .map_err(|_| io::Error::other("native allocated file length was negative"))?;
+        Ok(FileSpaceUsage {
+            logical_bytes,
+            allocated_bytes,
         })
     }
 
@@ -2124,6 +2208,95 @@ mod windows {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[allow(unsafe_code)]
+    fn mark_sparse(file: &File) {
+        use std::os::windows::io::AsRawHandle as _;
+        use windows_sys::Win32::System::IO::DeviceIoControl;
+        use windows_sys::Win32::System::Ioctl::FSCTL_SET_SPARSE;
+
+        let mut returned = 0;
+        // SAFETY: `file` retains a live file handle; this control code has no
+        // input or output buffer, and `returned` remains live for the call.
+        let succeeded = unsafe {
+            DeviceIoControl(
+                file.as_raw_handle(),
+                FSCTL_SET_SPARSE,
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                0,
+                &raw mut returned,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_ne!(succeeded, 0, "{}", io::Error::last_os_error());
+    }
+
+    #[cfg(unix)]
+    fn mark_sparse(_file: &File) {}
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn retained_handle_reports_sparse_logical_and_allocated_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sparse.bin");
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        mark_sparse(&file);
+        file.set_len(64 * 1024 * 1024).unwrap();
+        file.sync_all().unwrap();
+
+        let usage = file_space_usage(&file).unwrap();
+        assert_eq!(usage.logical_bytes, 64 * 1024 * 1024);
+        assert!(
+            usage.allocated_bytes < usage.logical_bytes,
+            "sparse allocation must be physical, not a logical-length proxy: {usage:?}"
+        );
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn retained_hard_link_handles_share_identity_and_space_usage() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_path = directory.path().join("source.bin");
+        let alias_path = directory.path().join("alias.bin");
+        let source = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&source_path)
+            .unwrap();
+        mark_sparse(&source);
+        source.set_len(32 * 1024 * 1024).unwrap();
+        source.sync_all().unwrap();
+        std::fs::hard_link(&source_path, &alias_path).unwrap();
+        let alias = File::open(&alias_path).unwrap();
+
+        assert_eq!(
+            file_identity(&source).unwrap(),
+            file_identity(&alias).unwrap()
+        );
+        assert_eq!(
+            file_space_usage(&source).unwrap(),
+            file_space_usage(&alias).unwrap()
+        );
+
+        std::fs::remove_file(&source_path).unwrap();
+        assert_eq!(
+            file_identity(&source).unwrap(),
+            file_identity(&alias).unwrap()
+        );
+        assert_eq!(
+            file_space_usage(&source).unwrap(),
+            file_space_usage(&alias).unwrap()
+        );
+    }
 
     #[cfg(unix)]
     const FIFO_CHILD_ENV: &str = "GRAPHFORGE_FILESYSTEM_FIFO_CHILD";
