@@ -37,6 +37,7 @@ fn force_stale_generation_fixture(dir: &Path) {
 /// Strict-mode diamond a→b, a→c, b→d, c→d plus a parallel a→b and a self-loop
 /// d→d, all KNOWS — the fixture whose self-loop pins the undirected merge
 /// order. Returns the surrogate node ids.
+#[allow(clippy::many_single_char_names)]
 fn write_diamond(dir: &Path) -> [u64; 4] {
     let mut w = GraphWriter::open_at(dir, OntologyMode::Strict, TS).unwrap();
     let uuids: Vec<Uuid> = (0..4).map(|_| new_v7()).collect();

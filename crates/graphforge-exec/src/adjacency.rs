@@ -9,13 +9,14 @@
 //!
 //! - [`ScanBuildAdjacencyProvider`] — reads the typed edge tables and builds
 //!   the view in memory on every call (the behavior of the retired private
-//!   `build_adjacency`); the universal fallback.
+//!   `build_adjacency`); retained as an explicit oracle/foreign-session provider.
 //! - [`PersistentAdjacencyProvider`] (#761) — serves from the on-disk CSR
 //!   index under `indexes/adjacency/` when it is fresh (manifest
 //!   `topology_generation` matches the project counter), lazily rebuilds a
-//!   stale index, and falls back to scan-build whenever the index cannot
-//!   serve a key. A stale, corrupt, or missing index can only cost speed,
-//!   never correctness. The adjacency-aware lowering rule is #763.
+//!   stale, corrupt, incomplete, or missing index with the bounded external-sort
+//!   builder, and fails closed if that reconstruction fails. The project facade
+//!   never falls back to the O(E)-memory oracle. The adjacency-aware lowering
+//!   rule is #763.
 //!
 //! Surrogate-only (R-ADJ-3): the view holds `node_id` / `edge_id` `u64`
 //! surrogates exclusively; UUIDs are resolved at the API boundary, never here.
@@ -28,8 +29,8 @@ use arrow::record_batch::RecordBatch;
 use graphforge_core::{GfError, OntologyMode};
 use graphforge_ir::Direction;
 use graphforge_storage::adjacency::{
-    self as csr, ALL_RELATIONS_STEM, AdjacencyManifestRow, CsrIndex, CsrRow, ShardedCsrIndex,
-    build_adjacency_index,
+    self as csr, ALL_RELATIONS_STEM, AdjacencyManifestRow, AdjacencySourceIdentity, CsrIndex,
+    CsrRow, ShardedCsrIndex, adjacency_relation_key, is_adjacency_relation_key,
 };
 use graphforge_storage::adjacency_delta::{
     CsrDeltaOverlay, DeltaSegment, overlay_delta_segments, read_delta_chain,
@@ -46,11 +47,11 @@ pub enum AdjacencyStatus {
     Hit,
     /// The index capability is present but could not serve this key fresh:
     /// stale or corrupt manifest/counter, a fresh index with no row for the
-    /// relation, or a missing CSR file. The request scan-builds (and, when
-    /// the whole index was stale, lazily rebuilds it).
+    /// relation, or a missing CSR file. The persistent provider rebuilds it.
     Miss,
-    /// No index capability for this request: `indexes/adjacency/` absent, a
-    /// scan-build-only provider, or the typed-mode `"*"` bypass.
+    /// No index capability currently exists: `indexes/adjacency/` is absent,
+    /// or this is an explicit scan-build-only provider. Persistent execution
+    /// builds the capability on first use.
     Building,
 }
 
@@ -460,16 +461,16 @@ fn merge_undirected_row<'a>(out: &NeighborRow<'a>, inbound: &NeighborRow<'a>) ->
 }
 
 /// Single adjacency abstraction (ADR 0005): implementations decide *how* a
-/// view is produced (scan-build now; disk-loaded CSR with scan fallback in
-/// #761) — consumers only see [`Adjacency`].
+/// view is produced (explicit scan oracle or persistent bounded CSR) —
+/// consumers only see [`Adjacency`].
 pub trait AdjacencyProvider: Send + Sync {
     /// The adjacency view for (`rel_type_name`, `direction`).
     ///
     /// `"*"` means all relation types (#823): the per-row `rel_type_name`
     /// filter is skipped and every relation's edges are unioned — served by the
-    /// `_all` CSR union (a `Hit`) when the index is fresh, otherwise by a union
-    /// scan-build over `read_edges(dir, "*", mode)` (which itself unions every
-    /// `topology/edges/*.parquet` in Strict/Advisory).
+    /// `_all` CSR union when the persistent index is fresh. Persistent execution
+    /// bounded-builds that union when absent; only an explicitly selected scan
+    /// provider uses `read_edges(dir, "*", mode)`.
     ///
     /// # Errors
     /// Returns [`GfError::Execution`] on storage or decode failure.
@@ -606,6 +607,9 @@ enum IndexState {
         /// read — what [`PersistentAdjacencyProvider::revalidate`] compares
         /// against for cheap cross-query freshness (#832).
         generation: u64,
+        /// Authenticated immutable source identity owning this private cache.
+        /// `None` is limited to legacy mutable sessions.
+        source_identity: Option<AdjacencySourceIdentity>,
         /// The manifest rows.
         rows: Vec<AdjacencyManifestRow>,
         /// The delta chain (#765) overlaid on the base CSRs to reach
@@ -617,20 +621,22 @@ enum IndexState {
 
 /// Provider over the on-disk CSR index (#761): serves `Hit`s from
 /// `indexes/adjacency/` when the manifest generation matches the project's
-/// `topology_generation`, lazily rebuilds a stale index, and falls back to
-/// scan-build whenever the index cannot serve a key — a stale, corrupt, or
-/// missing index only ever costs speed, never correctness.
+/// `topology_generation`, and lazily runs the bounded external-sort builder
+/// whenever the index cannot serve a key. The persistent provider never uses
+/// the O(E)-memory scan-build oracle: if bounded index construction cannot
+/// complete, traversal fails with a typed execution error instead of risking
+/// process OOM.
 ///
-/// One instance lives per [`ExecutionSession`](crate::ExecutionSession)
-/// (= per query); loaded views are cached per `(stem, direction)` so a
-/// multi-expand query loads each CSR once. Facade-level cross-query caching
-/// is a planned later lift (the `Arc<Adjacency>` return type already
-/// supports it).
+/// The facade shares one instance across execution sessions. Loaded views are
+/// cached per `(stem, direction)`, and lazy external-sort publication is
+/// single-flight: concurrent waiters re-read and serve the winner's files.
 pub struct PersistentAdjacencyProvider {
     dir: PathBuf,
-    /// Scan-build fallback, fed the ORIGINAL relation name so per-row relation
-    /// filtering still applies (the union read serves the typed `"*"` wildcard).
-    scan: ScanBuildAdjacencyProvider,
+    source_identity: Option<AdjacencySourceIdentity>,
+    cache_dir: PathBuf,
+    artifact_dir: Mutex<PathBuf>,
+    /// Serializes lazy publication. Waiters re-read the published state.
+    rebuild: Mutex<()>,
     /// Lazily-read index state; refreshed after a successful lazy rebuild.
     state: Mutex<Option<IndexState>>,
     /// Loaded views per `(stem, direction)`.
@@ -640,10 +646,62 @@ pub struct PersistentAdjacencyProvider {
 impl PersistentAdjacencyProvider {
     /// A provider over the project at `dir` in ontology `mode`.
     #[must_use]
-    pub fn new(dir: PathBuf, mode: OntologyMode) -> Self {
+    pub fn new(dir: PathBuf, _mode: OntologyMode) -> Self {
+        Self::with_artifact_dir(dir.clone(), dir, None)
+    }
+
+    /// A provider whose lazy derived artifacts live outside the source graph tree.
+    ///
+    /// Each provider receives a private child directory because the bounded
+    /// builder uses fixed staging names. Providers for projected graphs or
+    /// alternate execution modes must therefore never race in a shared cache
+    /// root.
+    #[must_use]
+    pub fn new_with_cache(dir: PathBuf, cache_root: &std::path::Path, _mode: OntologyMode) -> Self {
+        static NEXT_CACHE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = NEXT_CACHE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let artifact_dir = cache_root.join(format!("provider-{id}"));
+        Self::with_artifact_dir(dir, artifact_dir, None)
+    }
+
+    /// A provider for one authenticated immutable project generation.
+    #[must_use]
+    pub fn new_with_authenticated_cache(
+        dir: PathBuf,
+        cache_root: &std::path::Path,
+        _mode: OntologyMode,
+        source_identity: AdjacencySourceIdentity,
+    ) -> Self {
+        static NEXT_CACHE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = NEXT_CACHE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let digest = source_identity
+            .generation_manifest_sha256
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let artifact_dir = cache_root.join(format!(
+            "generation-{}-{digest}-provider-{id}",
+            source_identity.generation_uuid.hyphenated()
+        ));
+        Self::with_artifact_dir(dir, artifact_dir, Some(source_identity))
+    }
+
+    fn with_artifact_dir(
+        dir: PathBuf,
+        artifact_dir: PathBuf,
+        source_identity: Option<AdjacencySourceIdentity>,
+    ) -> Self {
+        let active_artifact = if csr::adjacency_dir(&dir).exists() {
+            dir.clone()
+        } else {
+            artifact_dir.clone()
+        };
         Self {
-            scan: ScanBuildAdjacencyProvider::new(dir.clone(), mode),
             dir,
+            source_identity,
+            cache_dir: artifact_dir,
+            artifact_dir: Mutex::new(active_artifact),
+            rebuild: Mutex::new(()),
             state: Mutex::new(None),
             cache: Mutex::new(HashMap::new()),
         }
@@ -657,26 +715,35 @@ impl PersistentAdjacencyProvider {
         if rel_type_name == "*" {
             ALL_RELATIONS_STEM.to_owned()
         } else {
-            rel_type_name.to_owned()
+            adjacency_relation_key(rel_type_name)
         }
     }
 
     /// The current index state, read once and memoized.
     fn state(&self) -> IndexState {
         let mut guard = self.state.lock().expect("adjacency state lock");
+        let artifact_dir = self
+            .artifact_dir
+            .lock()
+            .expect("adjacency artifact lock")
+            .clone();
         guard
-            .get_or_insert_with(|| Self::read_state(&self.dir))
+            .get_or_insert_with(|| Self::read_state(&self.dir, &artifact_dir, self.source_identity))
             .clone()
     }
 
-    fn read_state(dir: &std::path::Path) -> IndexState {
-        if !csr::adjacency_dir(dir).exists() {
+    fn read_state(
+        source_dir: &std::path::Path,
+        artifact_dir: &std::path::Path,
+        source_identity: Option<AdjacencySourceIdentity>,
+    ) -> IndexState {
+        if !csr::adjacency_dir(artifact_dir).exists() {
             return IndexState::Absent;
         }
-        let Ok(generation) = read_topology_generation(dir) else {
+        let Ok(generation) = read_topology_generation(source_dir) else {
             return IndexState::Unreadable;
         };
-        let Ok(rows) = csr::read_manifest(dir) else {
+        let Ok(rows) = csr::read_manifest(artifact_dir) else {
             return IndexState::Unreadable;
         };
         // The base generation the CSRs were built at — uniform across rows on a
@@ -684,15 +751,27 @@ impl PersistentAdjacencyProvider {
         // stale (rebuild repairs them), never served.
         let base = rows.first().map(|r| r.topology_generation);
         let uniform = base.is_some_and(|b| rows.iter().all(|r| r.topology_generation == b));
+        // Raw-name manifests predate identity-bound keys and cannot distinguish
+        // a literal `_all` relation from the wildcard union. Rebuild them;
+        // never interpret absent encoded coverage as a proven empty relation.
+        let identity_bound = rows.iter().all(|row| match row.relation_name.as_deref() {
+            None => row.relation_type == ALL_RELATIONS_STEM,
+            Some(name) => {
+                is_adjacency_relation_key(&row.relation_type)
+                    && row.relation_type == adjacency_relation_key(name)
+            }
+        });
         let (fresh, deltas) = match base {
             // base == counter: exact match, no overlay (the #761 fast path).
-            Some(b) if uniform && b == generation => (true, Vec::new()),
+            Some(b) if uniform && identity_bound && b == generation => (true, Vec::new()),
             // base < counter: serveable iff an intact, bounded delta chain
             // (#765) covers (base, counter]; otherwise stale ⇒ rebuild.
-            Some(b) if uniform && b < generation => match read_delta_chain(dir, b, generation) {
-                Some(chain) => (true, chain),
-                None => (false, Vec::new()),
-            },
+            Some(b) if uniform && identity_bound && b < generation => {
+                match read_delta_chain(source_dir, b, generation) {
+                    Some(chain) => (true, chain),
+                    None => (false, Vec::new()),
+                }
+            }
             // Empty / torn manifest, or an index newer than the counter
             // (anomalous, e.g. a counter reset): stale.
             _ => (false, Vec::new()),
@@ -700,6 +779,7 @@ impl PersistentAdjacencyProvider {
         IndexState::Ready {
             fresh,
             generation,
+            source_identity,
             rows,
             deltas: Arc::new(deltas),
         }
@@ -718,6 +798,20 @@ impl PersistentAdjacencyProvider {
         }
     }
 
+    fn rows_cover_name(
+        rows: &[AdjacencyManifestRow],
+        stem: &str,
+        rel_type_name: &str,
+        direction: Direction,
+    ) -> bool {
+        let expected = (rel_type_name != "*").then_some(rel_type_name);
+        Self::rows_cover(rows, stem, direction)
+            && rows
+                .iter()
+                .filter(|row| row.relation_type == stem)
+                .all(|row| row.relation_name.as_deref() == expected)
+    }
+
     /// Load the view for (`stem`, `direction`) from the CSR file(s), overlaying
     /// the delta chain (#765) when one is present (`deltas` non-empty).
     ///
@@ -731,8 +825,15 @@ impl PersistentAdjacencyProvider {
         rows: &[AdjacencyManifestRow],
         deltas: &[DeltaSegment],
     ) -> Result<Adjacency, GfError> {
+        // One immutable publication serves both halves of an undirected view.
+        // Capture it once so concurrent invalidation cannot mix roots.
+        let artifact_dir = self
+            .artifact_dir
+            .lock()
+            .expect("adjacency artifact lock")
+            .clone();
         let directed = |d: csr::Direction| -> Result<AdjacencyInner, GfError> {
-            let path = csr::csr_path(&self.dir, stem, d);
+            let path = csr::csr_path(&artifact_dir, stem, d);
             if csr::sharded_csr_exists(&path) {
                 let base = Arc::new(ShardedCsrIndex::open(&path)?);
                 if let Some(row) = rows
@@ -801,47 +902,136 @@ impl PersistentAdjacencyProvider {
     }
 
     /// Lazily rebuild the index, refresh the memoized state, and serve from
-    /// the fresh files; any failure falls back to scan-build (a build problem
-    /// must never fail the query).
+    /// the fresh files. This path deliberately fails closed rather than using
+    /// the O(E)-memory scan-build oracle.
     fn rebuild_and_serve(
         &self,
         rel_type_name: &str,
-        stem: &str,
         direction: Direction,
     ) -> Result<Arc<Adjacency>, GfError> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| i64::try_from(d.as_micros()).unwrap_or(i64::MAX));
-        match build_adjacency_index(&self.dir, now) {
-            Ok(rows) => {
-                let covered = Self::rows_cover(&rows, stem, direction);
-                // Index writes don't bump the topology counter, so re-read it
-                // for the stamp — a missed stamp would make the next
-                // revalidate() spuriously drop this fresh rebuild.
-                let generation = rows.first().map_or_else(
-                    || read_topology_generation(&self.dir).unwrap_or(0),
-                    |r| r.topology_generation,
-                );
-                // A fresh rebuild has no overlay: the new base IS `generation`
-                // and the builder pruned the consumed segments (#765).
-                let view = if covered {
-                    self.load(stem, direction, &rows, &[]).ok()
-                } else {
-                    None
-                };
+        self.rebuild_and_serve_with_checkpoint(rel_type_name, direction, || Ok(()))
+    }
+
+    #[allow(clippy::too_many_lines)] // single-flight recheck, build, generation validation, and publication are one atomic path
+    fn rebuild_and_serve_with_checkpoint(
+        &self,
+        rel_type_name: &str,
+        direction: Direction,
+        mut checkpoint: impl FnMut() -> Result<(), GfError>,
+    ) -> Result<Arc<Adjacency>, GfError> {
+        let stem = Self::stem_for(rel_type_name);
+        let _rebuild = self.rebuild.lock().expect("adjacency rebuild lock");
+
+        // Another query may have completed the bounded build while this caller
+        // waited. Re-read from disk under the single-flight lock and serve its
+        // publication instead of multiplying external-sort memory and racing
+        // the builder's fixed staging paths.
+        if let Some(view) = self
+            .cache
+            .lock()
+            .expect("adjacency cache lock")
+            .get(&(stem.clone(), direction))
+            .cloned()
+        {
+            return Ok(view);
+        }
+        let active_artifact = self
+            .artifact_dir
+            .lock()
+            .expect("adjacency artifact lock")
+            .clone();
+        if let IndexState::Ready {
+            fresh: true,
+            generation,
+            source_identity,
+            rows,
+            deltas,
+        } = Self::read_state(&self.dir, &active_artifact, self.source_identity)
+        {
+            let covered = Self::rows_cover_name(&rows, &stem, rel_type_name, direction);
+            let loaded = if covered {
+                self.load(&stem, direction, &rows, &deltas).map(Some)
+            } else if deltas.is_empty() {
+                Ok(None)
+            } else {
+                Err(GfError::Execution(
+                    "fresh adjacency delta chain lacks requested relation coverage".into(),
+                ))
+            };
+            if let Ok(view) = loaded {
                 *self.state.lock().expect("adjacency state lock") = Some(IndexState::Ready {
                     fresh: true,
                     generation,
+                    source_identity,
                     rows,
-                    deltas: Arc::new(Vec::new()),
+                    deltas,
                 });
-                if let Some(view) = view {
-                    return Ok(self.cache_view(stem, direction, view));
-                }
-                self.scan.adjacency(rel_type_name, direction)
+                return Ok(self.cache_view(&stem, direction, view.unwrap_or_default()));
             }
-            Err(_) => self.scan.adjacency(rel_type_name, direction),
         }
+        self.artifact_dir
+            .lock()
+            .expect("adjacency artifact lock")
+            .clone_from(&self.cache_dir);
+        for attempt in 0..2 {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| i64::try_from(d.as_micros()).unwrap_or(i64::MAX));
+            let rows = graphforge_storage::adjacency::build_adjacency_index_into(
+                &self.dir,
+                &self.cache_dir,
+                now,
+                &mut checkpoint,
+            )
+            .map_err(|error| {
+                GfError::Execution(format!("bounded adjacency index build failed: {error}"))
+            })?;
+            let base_generation = rows.first().map_or_else(
+                || read_topology_generation(&self.dir).unwrap_or(0),
+                |row| row.topology_generation,
+            );
+            let current_generation = read_topology_generation(&self.dir).map_err(|error| {
+                GfError::Execution(format!(
+                    "cannot validate bounded adjacency build generation: {error}"
+                ))
+            })?;
+            let deltas = if current_generation == base_generation {
+                Vec::new()
+            } else if current_generation > base_generation {
+                match read_delta_chain(&self.dir, base_generation, current_generation) {
+                    Some(chain) => chain,
+                    None if attempt == 0 => continue,
+                    None => {
+                        return Err(GfError::Execution(
+                            "topology changed during bounded adjacency build without a complete delta chain"
+                                .into(),
+                        ));
+                    }
+                }
+            } else if attempt == 0 {
+                continue;
+            } else {
+                return Err(GfError::Execution(
+                    "topology generation moved backwards during bounded adjacency build".into(),
+                ));
+            };
+            let covered = Self::rows_cover_name(&rows, &stem, rel_type_name, direction);
+            let view = covered
+                .then(|| self.load(&stem, direction, &rows, &deltas))
+                .transpose()?;
+            *self.state.lock().expect("adjacency state lock") = Some(IndexState::Ready {
+                fresh: true,
+                generation: current_generation,
+                source_identity: self.source_identity,
+                rows,
+                deltas: Arc::new(deltas),
+            });
+            if let Some(view) = view {
+                return Ok(self.cache_view(&stem, direction, view));
+            }
+            return Ok(self.cache_view(&stem, direction, Adjacency::default()));
+        }
+        unreachable!("bounded adjacency rebuild retry loop returns")
     }
 
     /// Drop the memoized index state and every loaded view, forcing the next
@@ -854,6 +1044,12 @@ impl PersistentAdjacencyProvider {
     pub fn invalidate(&self) {
         *self.state.lock().expect("adjacency state lock") = None;
         self.cache.lock().expect("adjacency cache lock").clear();
+        *self.artifact_dir.lock().expect("adjacency artifact lock") =
+            if csr::adjacency_dir(&self.dir).exists() {
+                self.dir.clone()
+            } else {
+                self.cache_dir.clone()
+            };
     }
 
     /// Cheap cross-query freshness check (#832): one `generation.json` read
@@ -873,8 +1069,12 @@ impl PersistentAdjacencyProvider {
             Some(IndexState::Ready {
                 fresh: true,
                 generation,
+                source_identity,
                 ..
-            }) => !read_topology_generation(&self.dir).is_ok_and(|g| g == *generation),
+            }) => source_identity.map_or_else(
+                || !read_topology_generation(&self.dir).is_ok_and(|g| g == *generation),
+                |observed| Some(observed) != self.source_identity,
+            ),
             // Non-serving states — always retry (a cheap manifest re-read, not
             // a rebuild). For a stale `fresh: false` index this matters: it may
             // have been repaired in place at the *same* topology generation (an
@@ -923,7 +1123,7 @@ fn sharded_overlay_rows(
     let mut max_key = base.node_count().saturating_sub(1);
     for segment in chain {
         for edge in &segment.edges {
-            if take_all || edge.rel_type_name == stem {
+            if take_all || adjacency_relation_key(&edge.rel_type_name) == stem {
                 let (key, neighbor) = match direction {
                     csr::Direction::Out => (edge.src_id, edge.dst_id),
                     csr::Direction::In => (edge.dst_id, edge.src_id),
@@ -966,37 +1166,41 @@ impl AdjacencyProvider for PersistentAdjacencyProvider {
             return Ok(Arc::clone(view));
         }
         match self.state() {
-            IndexState::Absent | IndexState::Unreadable => {
-                // A streaming ExpandExec may request the same view once per
-                // input batch. Scan-build exactly once per session/query and
-                // cache it just like a CSR view; writes/revalidation clear the
-                // cache before a changed topology can be observed (#1248).
-                let view = self.scan.adjacency(rel_type_name, direction)?;
-                Ok(self.cache_shared_view(&stem, direction, view))
-            }
+            // The scan fallback materializes every edge twice: first in Arrow
+            // batches and then in a HashMap. That makes the first ordinary
+            // fixed-hop query O(E) anonymous memory. The adjacency builder is
+            // already an external-sort, bounded-memory operation; use it to
+            // publish sharded CSR and serve requested rows from disk. This is
+            // also the repair path for an unreadable index.
             IndexState::Ready {
                 fresh: true,
                 rows,
                 deltas,
                 ..
             } => {
-                if !Self::rows_cover(&rows, &stem, direction) {
-                    // A FRESH index with no row for this relation: a relation
-                    // born only in the delta chain has no base CSR to overlay,
-                    // and rebuilding cannot add an unknown/unusable stem either,
-                    // so scan-build without rebuild (the union `_all` still
-                    // carries those rows for exploratory `*`). Correct, slower.
-                    return self.scan.adjacency(rel_type_name, direction);
+                if !Self::rows_cover_name(&rows, &stem, rel_type_name, direction) {
+                    // With no delta chain, a complete current manifest proves
+                    // that this relation has no source edges. A relation born
+                    // after the base index can exist only when deltas are
+                    // present; rebuild that case so missing coverage never
+                    // diverts into the O(E)-memory scan oracle.
+                    return if deltas.is_empty() {
+                        Ok(self.cache_view(&stem, direction, Adjacency::default()))
+                    } else {
+                        self.rebuild_and_serve(rel_type_name, direction)
+                    };
                 }
                 match self.load(&stem, direction, &rows, &deltas) {
                     Ok(view) => Ok(self.cache_view(&stem, direction, view)),
                     // CSR missing/corrupt, or the torn-read count guard tripped:
                     // one lazy rebuild repairs the index.
-                    Err(_) => self.rebuild_and_serve(rel_type_name, &stem, direction),
+                    Err(_) => self.rebuild_and_serve(rel_type_name, direction),
                 }
             }
-            IndexState::Ready { fresh: false, .. } => {
-                self.rebuild_and_serve(rel_type_name, &stem, direction)
+            IndexState::Absent
+            | IndexState::Unreadable
+            | IndexState::Ready { fresh: false, .. } => {
+                self.rebuild_and_serve(rel_type_name, direction)
             }
         }
     }
@@ -1015,7 +1219,7 @@ impl AdjacencyProvider for PersistentAdjacencyProvider {
                     let path = csr::csr_path(&self.dir, &stem, d);
                     path.exists() || csr::sharded_csr_exists(&path)
                 };
-                let present = Self::rows_cover(&rows, &stem, direction)
+                let present = Self::rows_cover_name(&rows, &stem, rel_type_name, direction)
                     && match direction {
                         Direction::Out => files_exist(csr::Direction::Out),
                         Direction::In => files_exist(csr::Direction::In),
@@ -1065,6 +1269,7 @@ mod tests {
 
     /// Diamond a→b, a→c, b→d, c→d plus a parallel edge a→b and a self-loop
     /// d→d, all `KNOWS`, Strict mode. Returns the surrogate node ids.
+    #[allow(clippy::many_single_char_names)]
     fn write_diamond(dir: &Path) -> [u64; 4] {
         let mut w = GraphWriter::open_at(dir, OntologyMode::Strict, TS).unwrap();
         let uuids: Vec<Uuid> = (0..4).map(|_| new_v7()).collect();
@@ -1156,7 +1361,7 @@ mod tests {
     #[test]
     fn typed_mode_wildcard_unions_all_rel_types() {
         let dir = TempDir::new().unwrap();
-        let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
+        let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
         let (a, b, c) = (new_v7(), new_v7(), new_v7());
         let ids: Vec<u64> = [a, b, c]
             .iter()
@@ -1287,6 +1492,228 @@ mod tests {
         assert_eq!(scanned.backing(), AdjacencyBacking::ScanHashMap);
     }
 
+    /// The first ordinary fixed-hop query on an unindexed project must not
+    /// construct an O(E) anonymous-memory HashMap. It builds the bounded,
+    /// spillable persistent representation and immediately serves sharded CSR.
+    #[test]
+    fn absent_index_builds_and_serves_disk_backed_csr() {
+        let dir = TempDir::new().unwrap();
+        let [a, b, c, _d] = write_diamond(dir.path());
+        let provider =
+            PersistentAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Strict);
+
+        assert_eq!(
+            provider.status("KNOWS", Direction::Out),
+            AdjacencyStatus::Building
+        );
+        let out = provider.adjacency("KNOWS", Direction::Out).unwrap();
+
+        assert_eq!(out.backing(), AdjacencyBacking::CsrNative);
+        assert_eq!(out.base_csr_entries_expanded(), 0);
+        assert_eq!(out.neighbors(a).to_vec(), vec![(1, b), (2, c), (5, b)]);
+        assert!(csr::adjacency_dir(dir.path()).exists());
+        assert_eq!(
+            provider.status("KNOWS", Direction::Out),
+            AdjacencyStatus::Hit
+        );
+    }
+
+    #[test]
+    fn persistent_exact_relation_keys_do_not_collide_with_wildcard_or_paths() {
+        let dir = TempDir::new().unwrap();
+        let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
+        let (a, b, c) = (new_v7(), new_v7(), new_v7());
+        let ids: Vec<u64> = [a, b, c]
+            .iter()
+            .map(|uuid| w.create_node(*uuid, TypeId(0)).unwrap())
+            .collect();
+        w.create_edge(new_v7(), "a/b", &a, &b).unwrap();
+        w.create_edge(new_v7(), "_all", &a, &c).unwrap();
+        w.flush().unwrap();
+
+        let provider =
+            PersistentAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Exploratory);
+        assert_eq!(
+            provider
+                .adjacency("a/b", Direction::Out)
+                .unwrap()
+                .neighbors(ids[0])
+                .to_vec(),
+            vec![(1, ids[1])]
+        );
+        assert_eq!(
+            provider
+                .adjacency("_all", Direction::Out)
+                .unwrap()
+                .neighbors(ids[0])
+                .to_vec(),
+            vec![(2, ids[2])]
+        );
+        assert_eq!(
+            provider
+                .adjacency("*", Direction::Out)
+                .unwrap()
+                .neighbors(ids[0])
+                .to_vec(),
+            vec![(1, ids[1]), (2, ids[2])]
+        );
+    }
+
+    #[test]
+    fn lazy_build_validates_and_overlays_a_concurrent_topology_commit() {
+        let dir = TempDir::new().unwrap();
+        let [a, _b, _c, _d] = write_diamond(dir.path());
+        let provider =
+            PersistentAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Strict);
+        let mut checkpoints = 0;
+        let mut appended = None;
+
+        let view = provider
+            .rebuild_and_serve_with_checkpoint("KNOWS", Direction::Out, || {
+                checkpoints += 1;
+                if checkpoints == 2 {
+                    let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
+                    let src = new_v7();
+                    let dst = new_v7();
+                    let src_id = w.create_node(src, TypeId(0)).unwrap();
+                    let dst_id = w.create_node(dst, TypeId(0)).unwrap();
+                    w.create_edge(new_v7(), "KNOWS", &src, &dst).unwrap();
+                    w.flush().unwrap();
+                    appended = Some((src_id, dst_id));
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        let (src, dst) = appended.expect("checkpoint injected one topology commit");
+        assert_eq!(view.neighbors(src).to_vec(), vec![(7, dst)]);
+        assert_eq!(view.neighbors(a).len(), 3);
+        assert_eq!(
+            provider.status("KNOWS", Direction::Out),
+            AdjacencyStatus::Hit,
+            "the memoized state is stamped only after generation validation"
+        );
+    }
+
+    #[test]
+    fn private_lazy_build_never_mutates_the_authoritative_graph_tree() {
+        let dir = TempDir::new().unwrap();
+        let cache = TempDir::new().unwrap();
+        let [a, ..] = write_diamond(dir.path());
+        assert!(!csr::adjacency_dir(dir.path()).exists());
+
+        let provider = PersistentAdjacencyProvider::new_with_cache(
+            dir.path().to_path_buf(),
+            cache.path(),
+            OntologyMode::Strict,
+        );
+        let view = provider.adjacency("KNOWS", Direction::Out).unwrap();
+
+        assert_eq!(view.neighbors(a).len(), 3);
+        assert!(
+            !csr::adjacency_dir(dir.path()).exists(),
+            "query repair wrote derived files into authoritative graph content"
+        );
+        assert!(
+            std::fs::read_dir(cache.path())
+                .unwrap()
+                .any(|entry| csr::adjacency_dir(&entry.unwrap().path()).exists()),
+            "bounded CSR publication did not use its private cache namespace"
+        );
+    }
+
+    #[test]
+    fn concurrent_lazy_rebuild_is_single_flight_and_waiter_serves_publication() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let dir = TempDir::new().unwrap();
+        write_diamond(dir.path());
+        let provider = Arc::new(PersistentAdjacencyProvider::new(
+            dir.path().to_path_buf(),
+            OntologyMode::Strict,
+        ));
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (waiter_started_tx, waiter_started_rx) = mpsc::channel();
+        let (waiter_tx, waiter_rx) = mpsc::channel();
+
+        std::thread::scope(|scope| {
+            let builder_provider = Arc::clone(&provider);
+            let builder = scope.spawn(move || {
+                let mut first = true;
+                builder_provider.rebuild_and_serve_with_checkpoint("KNOWS", Direction::Out, || {
+                    if first {
+                        first = false;
+                        entered_tx.send(()).unwrap();
+                        release_rx.recv().unwrap();
+                    }
+                    Ok(())
+                })
+            });
+            entered_rx.recv().unwrap();
+
+            let waiter_provider = Arc::clone(&provider);
+            let waiter = scope.spawn(move || {
+                waiter_started_tx.send(()).unwrap();
+                let result = waiter_provider.adjacency("KNOWS", Direction::Out);
+                waiter_tx.send(()).unwrap();
+                result
+            });
+            waiter_started_rx.recv().unwrap();
+            assert!(
+                waiter_rx.recv_timeout(Duration::from_millis(50)).is_err(),
+                "waiter must not enter a second external-sort build"
+            );
+            release_tx.send(()).unwrap();
+
+            let built = builder.join().unwrap().unwrap();
+            let waiter_view = waiter.join().unwrap().unwrap();
+            assert!(Arc::ptr_eq(&built, &waiter_view));
+        });
+    }
+
+    #[test]
+    fn complete_index_missing_relation_returns_empty_without_scan_hash_map() {
+        let dir = TempDir::new().unwrap();
+        write_diamond(dir.path());
+        graphforge_storage::adjacency::build_adjacency_index(dir.path(), TS).unwrap();
+        let provider =
+            PersistentAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Strict);
+
+        let missing = provider.adjacency("MISSING", Direction::Out).unwrap();
+
+        assert!(missing.is_empty());
+        assert_eq!(missing.base_csr_entries_expanded(), 0);
+        assert_eq!(
+            provider.status("MISSING", Direction::Out),
+            AdjacencyStatus::Miss,
+            "the complete current manifest proves bounded empty coverage"
+        );
+    }
+
+    #[test]
+    fn bounded_build_failure_does_not_fall_back_to_full_scan() {
+        let dir = TempDir::new().unwrap();
+        write_diamond(dir.path());
+        let adjacency_path = csr::adjacency_dir(dir.path());
+        std::fs::create_dir_all(adjacency_path.parent().unwrap()).unwrap();
+        std::fs::write(&adjacency_path, b"blocks adjacency directory creation").unwrap();
+        let provider =
+            PersistentAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Strict);
+
+        let error = provider
+            .adjacency("KNOWS", Direction::Out)
+            .expect_err("bounded build failure must fail closed");
+
+        assert!(
+            error
+                .to_string()
+                .contains("bounded adjacency index build failed"),
+            "unexpected error: {error}"
+        );
+    }
+
     #[test]
     fn undirected_csr_merge_preserves_out_before_in_ties() {
         let out = CsrIndex {
@@ -1319,5 +1746,42 @@ mod tests {
         assert_eq!(AdjacencyStatus::Building.as_str(), "building");
         assert_eq!(AdjacencyStatus::Hit.as_str(), "hit");
         assert_eq!(AdjacencyStatus::Miss.as_str(), "miss");
+    }
+
+    #[test]
+    fn authenticated_private_cache_key_binds_generation_and_manifest() {
+        let source = TempDir::new().unwrap();
+        let cache = TempDir::new().unwrap();
+        let first = AdjacencySourceIdentity {
+            generation_uuid: Uuid::from_u128(1),
+            generation_manifest_sha256: [0x11; 32],
+        };
+        let second = AdjacencySourceIdentity {
+            generation_uuid: Uuid::from_u128(1),
+            generation_manifest_sha256: [0x22; 32],
+        };
+        let first_provider = PersistentAdjacencyProvider::new_with_authenticated_cache(
+            source.path().to_path_buf(),
+            cache.path(),
+            OntologyMode::Strict,
+            first,
+        );
+        let second_provider = PersistentAdjacencyProvider::new_with_authenticated_cache(
+            source.path().to_path_buf(),
+            cache.path(),
+            OntologyMode::Strict,
+            second,
+        );
+
+        assert_eq!(first_provider.source_identity, Some(first));
+        assert_eq!(second_provider.source_identity, Some(second));
+        assert_ne!(first_provider.cache_dir, second_provider.cache_dir);
+        let first_name = first_provider
+            .cache_dir
+            .file_name()
+            .unwrap()
+            .to_string_lossy();
+        assert!(first_name.contains(&first.generation_uuid.hyphenated().to_string()));
+        assert!(first_name.contains(&"11".repeat(32)));
     }
 }

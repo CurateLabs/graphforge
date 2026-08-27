@@ -74,9 +74,7 @@ fn manifest_dir() -> std::path::PathBuf {
     if raw.is_absolute() {
         return raw.to_path_buf();
     }
-    std::env::current_dir()
-        .map(|cwd| cwd.join(raw))
-        .unwrap_or_else(|_| raw.to_path_buf())
+    std::env::current_dir().map_or_else(|_| raw.to_path_buf(), |cwd| cwd.join(raw))
 }
 
 fn golden_settings(dir: &Path) -> insta::Settings {
