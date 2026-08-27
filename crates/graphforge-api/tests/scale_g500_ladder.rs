@@ -1177,12 +1177,11 @@ impl<'a, 'graph> EdgeSink<'a, 'graph> {
         session: &'a mut GraphConstructionSession<'graph>,
         cancellation: Option<&'a AtomicBool>,
     ) -> Self {
-        let chunk_index = u128::from(session.progress().accepted_chunks);
         EdgeSink {
             session,
             cancellation,
             buf: Vec::with_capacity(EDGE_PUBLISH_ROWS),
-            chunk_index,
+            chunk_index: 0,
             hasher: Sha256::new(),
         }
     }
@@ -2708,18 +2707,27 @@ fn tiny_construction_ladder_resumes_and_scales_bounded_work_linearly() {
             .resume_graph_construction(session_uuid, GraphConstructionBudgets::default())
             .expect("resume after durable edge chunk");
         let mut sink = EdgeSink::new(&mut resumed, None);
+        // Replay the acknowledged chunk from the deterministic input cursor;
+        // append authenticates it idempotently instead of minting new IDs.
+        sink.push(0, 1);
+        sink.flush();
         for node in 1..u32::try_from(8 * factor - 1).expect("tiny vertex count") {
             sink.push(node, node + 1);
         }
         sink.flush();
         let _ = sink.finish();
+        let receipt = resumed
+            .seal_and_publish()
+            .expect("publish tiny construction");
         let progress = resumed.progress();
         assert_eq!(progress.evidence.input_rows, 16 * factor - 1);
         assert!(progress.evidence.input_batches <= 2 * factor + 1);
         assert!(progress.evidence.parquet_shards <= progress.evidence.input_batches);
-        let receipt = resumed
-            .seal_and_publish()
-            .expect("publish tiny construction");
+        assert!(progress.evidence.peak_batch_rows <= BATCH_ROWS as u64);
+        assert!(progress.evidence.peak_accounted_live_bytes > 0);
+        assert!(progress.evidence.merge_read_records <= 1_024 * factor);
+        assert!(progress.evidence.merge_written_records <= 1_024 * factor);
+        assert!(progress.evidence.parquet_write_operations > 0);
         assert_ne!(receipt.generation_uuid, before);
         assert_eq!(current_generation_uuid(&graph), receipt.generation_uuid);
         drop(resumed);
