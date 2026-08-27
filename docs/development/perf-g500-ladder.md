@@ -18,7 +18,7 @@ edges.
 | Pinned `github.com/graph500/graph500` generator | No — bounded bench-local Kronecker in the test file |
 | Graph500 BFS kernel / harmonic-mean TEPS | Non-goal (`teps` is `null`) |
 | One-billion-live-edge product certification | No — that is #745 |
-| Engineering green (generate → ingest → reopen → GSI → `LIMIT 1000`) | Yes, through one resumable `GraphConstructionSession` + `execute` |
+| Engineering green (generate → ingest → reopen → counts → one/two-hop `LIMIT 1000`) | Yes, through one resumable `GraphConstructionSession` + observed public execution |
 
 ## What is new versus the #710 SCALE-20 client
 
@@ -97,17 +97,33 @@ seconds.
 
 ## First-fail ladder
 
-`run_ladder` walks the provisioned rungs in increasing scale and, after each
-phase (`generate`, `ingest`, `reopen`, `query`), compares peak RSS / disk /
-elapsed time against the envelope. On the **first** violation it records the
-failing phase and `error_class` (`oom` | `disk_exhaustion` | `timeout`) and
-stops — no larger rung is attempted and no SCALE-26 pass is claimed.
+`run_ladder` walks the provisioned rungs in increasing scale and gives every
+potentially large operation its own atomic boundary: `generate`, `ingest`,
+`reopen`, `node_count`, `edge_count`, `one_hop`, and `two_hop`. After each it
+compares RSS, disk, elapsed time, and operator-release evidence with the
+declared envelope. On the **first** violation it records that exact phase and a
+typed error class and stops—no larger rung is attempted and no SCALE-26 pass is
+claimed.
 
 > RSS fidelity: peak RSS is read from `/proc/self/status` `VmHWM` on Linux
 > (a true high-water mark) and falls back to sampled `ps` RSS otherwise (an
 > *instantaneous lower bound*, not a peak). Evidence records `rss_source`
 > (`vmhwm` | `ps_sampled`) so a `ps_sampled` value is read as a floor. Run
 > provisioned certification rungs on **Linux**.
+
+The one-hop and two-hop qualification probes remain the original unrooted,
+ordered `LIMIT 1000` queries. This preserves the historical S20 workload and
+prevents a selective root from silently replacing it. A deterministic rooted
+variant is also measured inside each query boundary to attribute expansion work
+to a bounded neighborhood, but it is labeled `rooted_additional` and is never
+reported as the unrooted result.
+
+Observed execution owns a query-local capture. Evidence records expansion and
+TopK rows/work, per-operator RSS lifetime boundaries, memory-pool reservation
+before and after execution, returned Arrow bytes, and whether operator memory
+quiesced. Process-wide compatibility counters are not accepted as operator
+attribution. A phase cannot pass when its query-local allocation remains live
+after the result boundary.
 
 Provisioned runs must set `GF_G500_LADDER_WORKSPACE` to a stable run directory.
 If omitted, the runner derives `workspace/<rung>` beside
@@ -172,6 +188,10 @@ One object per attempted rung (schema
 - `first_failing_phase`, `error_class`, `pass`, `reconciles`.
 - `input_fingerprint` (deterministic SHA-256 of the sorted live edge set),
   `rss_peak_bytes`, `disk_used_bytes`, `wall_time_s`, per-phase `steps`.
+- Query steps include the unrooted result, separately labeled additional rooted
+  result, query-local expand/TopK work, RSS lifetimes, and allocation-release
+  evidence. `operator_memory_contract` records the configured budget, maximum
+  observed working set, headroom, and lower-rung plateau decision.
 - `machine_envelope` (128 GiB / 1 TiB / 4 h fail-safe), `sut`, `generator`.
 - `track` and `teps` are always `null`.
 

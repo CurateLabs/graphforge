@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "71c92e47b6e43da553be7288724d522e303da5d4677e60f51e7ea8d9f8a41b99",
+  "public_method_digest": "5b940b936d8d142221461b8a91896d04d588e032b510bec42a1c2f9b962c6041",
   "method_policy": {
     "receiver_defaults": {
       "GraphForge": "release-tested",
@@ -806,6 +806,7 @@
       "ids": [
         "GraphForge.clear",
         "GraphForge.execute",
+        "GraphForge.execute_observed",
         "GraphForge.execute_with_composition",
         "GraphForge.execute_stream",
         "GraphForge.execute_stream_owned",
@@ -815,6 +816,7 @@
         "GraphForge.execute_to_parquet_stream_with_params",
         "GraphForge.execute_to_parquet_with_params",
         "GraphForge.execute_with_params",
+        "GraphForge.execute_with_params_observed",
         "GraphForge.explain",
         "GraphForge.register_procedure",
         "GraphForge.runtime_catalog",
@@ -844,6 +846,10 @@
         {
           "path": "crates/graphforge-api/tests/facade_methods.rs",
           "symbol": "explain_is_side_effect_free_on_the_shared_catalog"
+        },
+        {
+          "path": "crates/graphforge-api/tests/fixed_hop_limit.rs",
+          "symbol": "observed_public_surface_is_parameterized_and_query_scoped"
         },
         {
           "path": "crates/graphforge-api/src/lib.rs",

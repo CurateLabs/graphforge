@@ -266,6 +266,7 @@ impl GraphForge {
             graph_open_evidence: self.graph_open_evidence.clone(),
             project_open_recovery: self.project_open_recovery.clone(),
             tempdir: self.tempdir.clone(),
+            adjacency_cache_guard: Arc::clone(&self.adjacency_cache_guard),
             ontology: self.ontology.clone(),
             ontology_document: self.ontology_document.clone(),
             runtime_catalog: Arc::clone(&self.runtime_catalog),
