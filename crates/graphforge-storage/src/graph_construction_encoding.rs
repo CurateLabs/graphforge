@@ -1037,13 +1037,6 @@ fn encode_edges(
                 && ontology_mode == OntologyMode::Exploratory
             {
                 let routes = StringArray::from(vec![route.as_str(); selected.num_rows()]);
-                let mut fields = selected
-                    .schema()
-                    .fields()
-                    .iter()
-                    .map(|field| field.as_ref().clone())
-                    .collect::<Vec<_>>();
-                fields.push(Field::new("rel_type_name", DataType::Utf8, false));
                 let mut columns = selected.columns().to_vec();
                 columns.push(Arc::new(routes));
                 selected =
@@ -1630,7 +1623,7 @@ fn authenticate_file(path: &str, file: &mut File) -> Result<ConstructionEncodedA
 pub(crate) fn read_inventory(
     root: &StableDirectory,
 ) -> Result<Option<GraphConstructionEncoding>, GfError> {
-    let mut file = match root.open_child_file(OsStr::new(INVENTORY)) {
+    let file = match root.open_child_file(OsStr::new(INVENTORY)) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(storage(error)),
@@ -1638,13 +1631,13 @@ pub(crate) fn read_inventory(
     if file.metadata().map_err(storage)?.len() > MAX_INVENTORY_BYTES {
         return Err(storage("canonical inventory exceeds bound"));
     }
-    serde_json::from_reader(&mut file)
+    serde_json::from_reader(BufReader::with_capacity(COPY_BUFFER_BYTES, file))
         .map(Some)
         .map_err(storage)
 }
 
 fn read_encoding_intent(root: &StableDirectory) -> Result<Option<EncodingIntent>, GfError> {
-    let mut file = match root.open_child_file(OsStr::new(ENCODING_INTENT)) {
+    let file = match root.open_child_file(OsStr::new(ENCODING_INTENT)) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(storage(error)),
@@ -1652,7 +1645,7 @@ fn read_encoding_intent(root: &StableDirectory) -> Result<Option<EncodingIntent>
     if file.metadata().map_err(storage)?.len() > MAX_INVENTORY_BYTES {
         return Err(storage("encoding intent exceeds bound"));
     }
-    serde_json::from_reader(&mut file)
+    serde_json::from_reader(BufReader::with_capacity(COPY_BUFFER_BYTES, file))
         .map(Some)
         .map_err(storage)
 }
@@ -1858,8 +1851,10 @@ fn install_json<T: Serialize>(
         identity,
         armed: true,
     };
-    serde_json::to_writer(&mut file, value).map_err(storage)?;
-    file.flush().map_err(storage)?;
+    let mut writer = BufWriter::with_capacity(COPY_BUFFER_BYTES, &mut file);
+    serde_json::to_writer(&mut writer, value).map_err(storage)?;
+    writer.flush().map_err(storage)?;
+    drop(writer);
     file.sync_all().map_err(storage)?;
     crate::graph_construction::construction_failpoint(&format!(
         "encode.control.after_temp_fsync.{name}"
