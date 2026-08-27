@@ -424,6 +424,8 @@ def test_oci_inspection_authenticates_repo_digest_revision_and_runtime(monkeypat
     image = "registry.example/graphforge@sha256:" + "b" * 64
     inspected = [
         {
+            "Os": "linux",
+            "Architecture": "amd64",
             "RepoDigests": [image],
             "Config": {
                 "Labels": {
@@ -459,11 +461,15 @@ def test_oci_inspection_authenticates_repo_digest_revision_and_runtime(monkeypat
     monkeypatch.setattr(controller, "expected_source_snapshot", lambda: "c" * 64)
     assert controller.inspect_image(image, "a" * 40, "sha256:" + "b" * 64) == "c" * 64
     assert [call[1] for call in calls] == ["pull", "image", "create", "cp", "rm"]
+    assert calls[0] == ["docker", "pull", "--platform", "linux/amd64", image]
+    assert calls[2] == ["docker", "create", "--platform", "linux/amd64", image]
 
 
 @pytest.mark.parametrize(
     ("change", "message"),
     [
+        ({"Architecture": "arm64"}, "linux/amd64"),
+        ({"Os": "windows"}, "linux/amd64"),
         ({"RepoDigests": ["registry.example/other@sha256:" + "b" * 64]}, "repo digest"),
         (
             {
@@ -492,6 +498,8 @@ def test_oci_inspection_authenticates_repo_digest_revision_and_runtime(monkeypat
 def test_oci_inspection_rejects_provenance_mismatch(monkeypatch, change, message):
     image = "registry.example/graphforge@sha256:" + "b" * 64
     inspected = {
+        "Os": "linux",
+        "Architecture": "amd64",
         "RepoDigests": [image],
         "Config": {
             "Labels": {

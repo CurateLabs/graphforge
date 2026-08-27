@@ -272,7 +272,11 @@ def expected_source_snapshot() -> str:
 def inspect_image(image: str, expected_sha: str, digest: str) -> str:
     """Pull and authenticate the local OCI config before any provider mutation."""
     subprocess.run(
-        ["docker", "pull", image], check=True, text=True, capture_output=True, timeout=900
+        ["docker", "pull", "--platform", "linux/amd64", image],
+        check=True,
+        text=True,
+        capture_output=True,
+        timeout=900,
     )
     result = subprocess.run(
         ["docker", "image", "inspect", image],
@@ -285,6 +289,8 @@ def inspect_image(image: str, expected_sha: str, digest: str) -> str:
     if not isinstance(inspected, list) or len(inspected) != 1:
         raise ControllerError("OCI inspection did not return exactly one image")
     image_data = inspected[0]
+    if image_data.get("Os") != "linux" or image_data.get("Architecture") != "amd64":
+        raise ControllerError("pulled OCI image is not the required linux/amd64 runtime")
     repo_digests = image_data.get("RepoDigests")
     labels = image_data.get("Config", {}).get("Labels")
     requested_repo = image.rsplit("@", 1)[0]
@@ -298,7 +304,11 @@ def inspect_image(image: str, expected_sha: str, digest: str) -> str:
     if labels.get("dev.graphforge.fly-s20") != "graphforge-fly-s20-runtime/1":
         raise ControllerError("OCI runtime schema label is missing or unsupported")
     created = subprocess.run(
-        ["docker", "create", image], check=True, text=True, capture_output=True, timeout=120
+        ["docker", "create", "--platform", "linux/amd64", image],
+        check=True,
+        text=True,
+        capture_output=True,
+        timeout=120,
     ).stdout.strip()
     try:
         with tempfile.TemporaryDirectory(prefix="graphforge-image-provenance-") as directory:
