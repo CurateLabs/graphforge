@@ -119,7 +119,9 @@ therefore survive process replacement and are reused on re-entry.
 > windows into immutable Parquet shards and retains only bounded merge/probe
 > state; accumulated topology remains disk-owned. While ingest runs, the atomic journal is
 > refreshed every two seconds with the current subphase, edge-chunk index,
-> anonymous/file RSS, disk usage, and aggregate topology rewrite counters. An
+> anonymous/file RSS, and aggregate topology rewrite counters. It deliberately
+> does not recursively walk the active project. Disk attribution comes from
+> storage-owned counters and exact descriptors at completed phase boundaries. An
 > `oom` with `first_failing_phase: "ingest"` therefore remains an upstream
 > construction failure, not a generator-memory regression. Each completed
 > ingest phase records elapsed time, RSS, disk bytes, shard count, input rows,
@@ -176,6 +178,29 @@ One object per attempted rung (schema
 Wall-clock and RSS numbers are hardware-specific observations, never CI
 millisecond gates. For #745, `sut` must name the cloud SKU; laptop SUTs are
 rejected as certification evidence.
+
+### Disk attribution and S26 admission
+
+The versioned `graphforge-g500-ladder-qualification/2` companion document is
+validated by `scripts/ci/validate-g500-ladder-qualification.py`. Every observed
+rung has exactly one deduplicated row for generator spill, canonical generation,
+derived adjacency, portable package, and clean import. Each row separates
+logical file length from allocated blocks and identifies its authority:
+generator/package descriptors or a storage-owned snapshot. Totals and exact
+integer byte/live-edge ratios must reconcile; rounded decimal ratios are not
+accepted.
+
+At least two ordered adjacent rungs are required. The S26 rate must be no lower
+than both the newest observed peak ratio and every positive adjacent-rung slope.
+The validator independently recomputes projected canonical/lifecycle peak,
+volume headroom, and the admit/refuse decision. A single successful rung is not
+a projection, and insufficient reserved headroom always refuses SCALE-26.
+
+Validate a captured companion document with:
+
+```bash
+make g500-ladder-qualification-check EVIDENCE=build/g500-ladder-qualification.json
+```
 
 ## CI placement
 
