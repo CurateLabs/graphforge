@@ -79,8 +79,7 @@ pub(crate) fn read_parquet_or_empty(
     if !path.exists() {
         return Ok(vec![RecordBatch::new_empty(schema)]);
     }
-    let file = File::open(path).map_err(|e| io_err(&e))?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(parquet_err)?;
+    let builder = admitted_parquet(path)?;
     let file_schema = builder.schema().clone();
     let reader = builder.build().map_err(parquet_err)?;
     let batches: Vec<RecordBatch> = reader.collect::<Result<Vec<_>, _>>().map_err(parquet_err)?;
@@ -1591,10 +1590,43 @@ const MAX_ADMITTED_PARQUET_METADATA_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_ADMITTED_ROW_GROUP_BYTES: i64 = 256 * 1024 * 1024;
 const MAX_ADMITTED_COLUMN_BYTES: i64 = 64 * 1024 * 1024;
 
+/// Open one path through the storage-wide fail-closed Parquet admission policy.
+pub(crate) fn admitted_parquet(
+    path: &Path,
+) -> Result<ParquetRecordBatchReaderBuilder<File>, DataFusionError> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
+    }
+    let mut file = options.open(path).map_err(|error| io_err(&error))?;
+    let metadata = file.metadata().map_err(|error| io_err(&error))?;
+    if !metadata.file_type().is_file() {
+        return Err(DataFusionError::Execution(format!(
+            "Parquet source {} is not a regular file",
+            path.display()
+        )));
+    }
+    preflight_parquet_handle(&mut file, metadata.len())?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(parquet_err)?;
+    admit_decoded_parquet(&builder)?;
+    Ok(builder)
+}
+
 fn preflight_parquet_handle(file: &mut File, length: u64) -> Result<(), DataFusionError> {
     if length < 12 {
         return Err(DataFusionError::Execution(
             "Parquet footer is truncated".into(),
+        ));
+    }
+    file.seek(SeekFrom::Start(0)).map_err(|e| io_err(&e))?;
+    let mut leading = [0_u8; 4];
+    file.read_exact(&mut leading).map_err(|e| io_err(&e))?;
+    if &leading != b"PAR1" {
+        return Err(DataFusionError::Execution(
+            "Parquet leading magic is invalid".into(),
         ));
     }
     file.seek(SeekFrom::End(-8)).map_err(|e| io_err(&e))?;
@@ -2956,6 +2988,46 @@ mod tests {
     use parquet::file::properties::WriterProperties;
     use std::collections::{BTreeSet, HashMap};
     use tempfile::TempDir;
+
+    #[test]
+    fn catalog_parquet_admission_rejects_directory_and_bad_leading_magic() {
+        let root = TempDir::new().unwrap();
+        assert!(admitted_parquet(root.path()).is_err());
+        let bad = root.path().join("bad.parquet");
+        std::fs::write(&bad, b"NOPE\0\0\0\0PAR1").unwrap();
+        assert!(
+            admitted_parquet(&bad)
+                .unwrap_err()
+                .to_string()
+                .contains("leading magic")
+        );
+        let bad_footer = root.path().join("bad-footer.parquet");
+        std::fs::write(&bad_footer, b"PAR1\0\0\0\0NOPE").unwrap();
+        assert!(admitted_parquet(&bad_footer).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn catalog_parquet_admission_rejects_symlink_and_fifo_without_blocking() {
+        use std::os::unix::fs::symlink;
+
+        let root = TempDir::new().unwrap();
+        let target = root.path().join("target.parquet");
+        std::fs::write(&target, b"NOPE\0\0\0\0PAR1").unwrap();
+        let link = root.path().join("link.parquet");
+        symlink(&target, &link).unwrap();
+        assert!(admitted_parquet(&link).is_err());
+
+        let fifo = root.path().join("pipe.parquet");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(admitted_parquet(&fifo).is_err());
+    }
 
     #[test]
     fn raw_catalog_shares_one_authenticated_property_inventory() {
