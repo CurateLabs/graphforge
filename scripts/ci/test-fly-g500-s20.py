@@ -346,7 +346,7 @@ def test_contract_fixes_resources_and_rejects_unsafe_local_image(tmp_path):
     assert payload["config"]["env"]["GF_G500_S20_VOLUME_GB"] == "500"
     assert payload["config"]["env"]["GF_G500_S20_EVIDENCE_OUT"] == "/work/s20-evidence.json"
     assert payload["config"]["env"]["GF_G500_S20_RESULT_OUT"] == "/work/container-result.json"
-    assert payload["config"]["env"]["GF_G500_S20_TIMEOUT_SECONDS"] == "14100"
+    assert payload["config"]["env"]["GF_G500_S20_TIMEOUT_SECONDS"] == "13800"
     with pytest.raises(controller.ControllerError, match="safe local"):
         controller.validate_inputs(args(tmp_path, image="registry.example/graphforge bad"))
 
@@ -749,7 +749,7 @@ def test_machine_invariants_use_fresh_get_not_create_echo(monkeypatch, tmp_path)
             return json.dumps(fresh).encode()
 
     class Fly:
-        def auth_token(self):
+        def auth_token(self, **_kwargs):
             return "token"
 
     observed = []
@@ -760,8 +760,55 @@ def test_machine_invariants_use_fresh_get_not_create_echo(monkeypatch, tmp_path)
 
     monkeypatch.setattr(controller.urllib.request, "urlopen", urlopen)
     run = args(tmp_path, app_name="gf-s20-owned")
-    assert controller.get_machine(run, Fly(), machine_id) == fresh
+    assert controller.get_machine(
+        run, Fly(), machine_id, deadline=controller.time.monotonic() + 120
+    ) == fresh
     assert observed == ["https://api.machines.dev/v1/apps/gf-s20-owned/machines/machine-observed"]
+
+
+def test_machine_provisioning_calls_share_remaining_outer_deadline(monkeypatch, tmp_path):
+    timeouts = []
+    auth_deadlines = []
+    machine_id = "machine-observed"
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps({"id": machine_id}).encode()
+
+    class Fly:
+        def auth_token(self, **kwargs):
+            auth_deadlines.append(kwargs["deadline"])
+            return "test-token"
+
+    def urlopen(_request, **kwargs):
+        timeouts.append(kwargs["timeout"])
+        return Response()
+
+    monkeypatch.setattr(controller.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(controller.urllib.request, "urlopen", urlopen)
+    run = args(tmp_path)
+    deadline = 107.5
+    created = controller.create_machine(
+        run,
+        Fly(),
+        "volume",
+        "registry.fly.io/app@sha256:" + "d" * 64,
+        "sha256:" + "d" * 64,
+        "c" * 64,
+        deadline=deadline,
+    )
+    assert created["id"] == machine_id
+    assert controller.get_machine(run, Fly(), machine_id, deadline=deadline)["id"] == machine_id
+    assert auth_deadlines == [deadline, deadline]
+    assert timeouts == [7.5, 7.5]
+    with pytest.raises(controller.ControllerError, match="deadline exhausted"):
+        controller._bounded_timeout(99.0, 120)
 
 
 def test_machine_guest_allows_harmless_provider_additive_fields(tmp_path):
@@ -794,7 +841,78 @@ def test_machine_guest_allows_harmless_provider_additive_fields(tmp_path):
 
 def test_inner_runtime_timeout_leaves_bounded_result_handoff():
     assert controller.RESULT_HANDOFF_SECONDS == 300
-    assert controller.RUN_SECONDS - controller.RESULT_HANDOFF_SECONDS == 14_100
+    assert controller.PROVISIONING_SECONDS == 300
+    assert (
+        controller.RUN_SECONDS
+        - controller.RESULT_HANDOFF_SECONDS
+        - controller.PROVISIONING_SECONDS
+        == 13_800
+    )
+    assert controller.MONITOR_INTERVAL_SECONDS == 30
+    assert controller.MONITOR_TRANSFER_TIMEOUT_SECONDS == 20
+    assert controller.REGISTRY_TRANSFER_TIMEOUT_SECONDS == 1_800
+    assert controller.RUN_SECONDS // controller.MONITOR_INTERVAL_SECONDS == 480
+
+
+def test_runtime_status_envelope_is_closed_and_keeps_last_good_phase(tmp_path):
+    status = tmp_path / "status.json"
+    status.write_text(
+        json.dumps(
+            {
+                "schema": "graphforge-fly-s20-status/1",
+                "status": "running",
+                "phase": "ingest",
+            }
+        )
+    )
+    assert controller.observed_status(status) == {"status": "running", "phase": "ingest"}
+    leaked = json.loads(status.read_text())
+    leaked["machine_id"] = "provider-secret"
+    status.write_text(json.dumps(leaked))
+    with pytest.raises(controller.ControllerError, match="unknown fields"):
+        controller.observed_status(status)
+
+
+def test_monitor_transfer_timeout_is_capped_by_shared_absolute_deadline(monkeypatch, tmp_path):
+    observed = []
+
+    class Fly:
+        def run(self, _command, **kwargs):
+            observed.append(kwargs["timeout"])
+            return argparse.Namespace(returncode=1)
+
+    monkeypatch.setattr(controller.time, "monotonic", lambda: 100.0)
+    controller.fetch(
+        Fly(),
+        args(tmp_path),
+        "machine",
+        controller.ACTIVE_PHASE_PATH,
+        tmp_path / "status.json",
+        deadline=107.5,
+    )
+    assert observed == [7.5]
+
+
+def test_optional_ack_near_deadline_cannot_turn_validated_success_into_failure(
+    monkeypatch, tmp_path
+):
+    class Fly:
+        def run(self, *_args, **_kwargs):
+            raise AssertionError("near-deadline acknowledgement must be skipped")
+
+    monkeypatch.setattr(controller.time, "monotonic", lambda: 100.0)
+    assert controller.acknowledge_result(Fly(), args(tmp_path), "machine", 100.5) is False
+
+
+def test_optional_ack_timeout_is_bounded_and_nonfatal(monkeypatch, tmp_path):
+    class Fly:
+        def run(self, command, **kwargs):
+            assert command[:2] == ["machine", "exec"]
+            assert kwargs["timeout"] == 5.0
+            raise controller.subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    monkeypatch.setattr(controller.time, "monotonic", lambda: 100.0)
+    assert controller.acknowledge_result(Fly(), args(tmp_path), "machine", 105.0) is False
 
 
 def test_private_registry_push_failure_stops_before_manifest_or_inspection(monkeypatch, tmp_path):
@@ -803,7 +921,9 @@ def test_private_registry_push_failure_stops_before_manifest_or_inspection(monke
     def docker(command, **_kwargs):
         docker_calls.append(command)
         if command[1:2] == ["push"]:
-            raise controller.subprocess.CalledProcessError(1, command)
+            raise controller.subprocess.CalledProcessError(
+                1, command, stderr="denied: secret-token gf-s20-unique"
+            )
         return argparse.Namespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(controller.subprocess, "run", docker)
@@ -812,13 +932,96 @@ def test_private_registry_push_failure_stops_before_manifest_or_inspection(monke
         "inspect_image",
         lambda *_args: (_ for _ in ()).throw(AssertionError("must not inspect a failed push")),
     )
-    with pytest.raises(controller.subprocess.CalledProcessError):
-        controller.publish_to_fly_registry(args(tmp_path), "sha256:" + "f" * 64, object())
+    run = args(tmp_path)
+    with pytest.raises(controller.ControllerError, match="registry push failed"):
+        controller.publish_to_fly_registry(run, "sha256:" + "f" * 64, object())
     assert [command[:2] for command in docker_calls] == [
         ["flyctl", "auth"],
         ["docker", "tag"],
         ["docker", "push"],
     ]
+    diagnostic_text = run.diagnostic_out.read_text()
+    diagnostic = json.loads(diagnostic_text)
+    assert diagnostic["code"] == "registry_push_failed"
+    assert diagnostic["command_failure"]["operation"] == "docker_push"
+    assert diagnostic["command_failure"]["outcome"] == "nonzero_exit"
+    assert diagnostic["command_failure"]["exit_code"] == 1
+    assert diagnostic["command_failure"]["elapsed_seconds"] in (0, 1)
+    assert diagnostic["command_failure"]["timeout_seconds"] == 1800
+    assert diagnostic["command_failure"]["stderr_class"] == "permission_rejected"
+    assert diagnostic["command_failure"]["stderr_sha256"].startswith("sha256:")
+    assert "secret-token" not in diagnostic_text
+    assert "gf-s20-unique" not in diagnostic_text
+
+
+def test_slow_registry_push_below_bound_is_not_misclassified_as_timeout(monkeypatch, tmp_path):
+    pushed_digest = "sha256:" + "d" * 64
+    push_timeout = []
+
+    def docker(command, **kwargs):
+        if command[1:2] == ["push"]:
+            push_timeout.append(kwargs["timeout"])
+            return argparse.Namespace(
+                returncode=0, stdout=f"digest: {pushed_digest}\n", stderr=""
+            )
+        return argparse.Namespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(controller.subprocess, "run", docker)
+    monkeypatch.setattr(controller, "inspect_image", lambda *_args: "c" * 64)
+    run = args(tmp_path)
+    assert controller.publish_to_fly_registry(
+        run, "sha256:" + "f" * 64, object()
+    )[1] == pushed_digest
+    assert push_timeout == [1800]
+    assert not run.diagnostic_out.exists()
+
+
+def test_stalled_registry_push_has_distinct_bounded_timeout_diagnostic(monkeypatch, tmp_path):
+    def docker(command, **_kwargs):
+        if command[1:2] == ["push"]:
+            raise controller.subprocess.TimeoutExpired(
+                command, 1800, stderr=b"network timeout secret-token"
+            )
+        return argparse.Namespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(controller.subprocess, "run", docker)
+    run = args(tmp_path)
+    with pytest.raises(controller.ControllerError, match="bounded timeout"):
+        controller.publish_to_fly_registry(run, "sha256:" + "f" * 64, object())
+    diagnostic_text = run.diagnostic_out.read_text()
+    diagnostic = json.loads(diagnostic_text)
+    assert diagnostic["code"] == "registry_push_timeout"
+    assert diagnostic["command_failure"]["outcome"] == "timeout"
+    assert diagnostic["command_failure"]["exit_code"] is None
+    assert diagnostic["command_failure"]["timeout_seconds"] == 1800
+    assert diagnostic["command_failure"]["stderr_class"] == "transport_timeout"
+    assert "secret-token" not in diagnostic_text
+
+
+def test_registry_rejection_in_stdout_is_classified_and_hashed_without_leak(
+    monkeypatch, tmp_path
+):
+    def docker(command, **_kwargs):
+        if command[1:2] == ["push"]:
+            raise controller.subprocess.CalledProcessError(
+                1,
+                command,
+                output="unauthorized private-token gf-s20-private-name",
+                stderr="",
+            )
+        return argparse.Namespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(controller.subprocess, "run", docker)
+    run = args(tmp_path)
+    with pytest.raises(controller.ControllerError, match="registry push failed"):
+        controller.publish_to_fly_registry(run, "sha256:" + "f" * 64, object())
+    text = run.diagnostic_out.read_text()
+    diagnostic = json.loads(text)
+    details = diagnostic["command_failure"]
+    assert details["stderr_class"] == "authentication_rejected"
+    assert details["stdout_sha256"].startswith("sha256:")
+    assert "private-token" not in text
+    assert "gf-s20-private-name" not in text
 
 
 def test_private_registry_digest_mismatch_fails_closed(monkeypatch, tmp_path):
@@ -1179,8 +1382,8 @@ def test_terminal_failure_is_persisted_promptly_and_still_verified_cleaned(tmp_p
             "mounts": [{"path": "/work", "volume": "volume-observed"}],
         },
     }
-    monkeypatch.setattr(controller, "create_machine", lambda *_args: machine)
-    monkeypatch.setattr(controller, "get_machine", lambda *_args: machine)
+    monkeypatch.setattr(controller, "create_machine", lambda *_args, **_kwargs: machine)
+    monkeypatch.setattr(controller, "get_machine", lambda *_args, **_kwargs: machine)
     monkeypatch.setattr(
         controller,
         "publish_to_fly_registry",
@@ -1206,10 +1409,23 @@ def test_terminal_failure_is_persisted_promptly_and_still_verified_cleaned(tmp_p
 
         def run(self, command, check=True, **_kwargs):
             if command[:3] == ["ssh", "sftp", "get"]:
-                assert command[3] == "/work/container-result.json"
-                Path(command[4]).write_text(
-                    json.dumps({"status": "failure", "phase": "ingest", "code": "GF_OOM"})
-                )
+                if command[3] == controller.ACTIVE_PHASE_PATH:
+                    Path(command[4]).write_text(
+                        json.dumps(
+                            {
+                                "schema": "graphforge-fly-s20-status/1",
+                                "status": "failure",
+                                "phase": "ingest",
+                                "code": "GF_OOM",
+                            }
+                        )
+                    )
+                elif command[3] == controller.RESULT_PATH:
+                    Path(command[4]).write_text(
+                        json.dumps(
+                            {"status": "failure", "phase": "ingest", "code": "GF_OOM"}
+                        )
+                    )
                 return argparse.Namespace(returncode=0)
             if command[:2] in (["machine", "status"], ["volumes", "show"]):
                 return argparse.Namespace(returncode=1)

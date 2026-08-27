@@ -31,6 +31,9 @@ export GF_G500_LADDER_WORKSPACE=/work/s20
 export GF_G500_S20_EVIDENCE_OUT=/work/s20-evidence.json
 export GF_G500_LADDER_JOURNAL_OUT=/work/s20-journal.json
 export GF_G500_S20_ACTIVE_PHASE_OUT=/work/s20-active-phase.json
+printf '{"schema":"graphforge-fly-s20-status/1","status":"running","phase":"runner"}\n' \
+  > /work/s20-active-phase.json.tmp
+mv /work/s20-active-phase.json.tmp /work/s20-active-phase.json
 
 started_at="$(date +%s)"
 export GF_G500_S20_MEMORY_BYTES=$((4096 * 1024 * 1024))
@@ -62,6 +65,14 @@ else
     "$phase" "$status" > /work/container-result.json.tmp
 fi
 mv /work/container-result.json.tmp /work/container-result.json
+if [ "$status" -eq 0 ]; then
+  printf '{"schema":"graphforge-fly-s20-status/1","status":"success","phase":"finalize"}\n' \
+    > /work/s20-active-phase.json.tmp
+else
+  printf '{"schema":"graphforge-fly-s20-status/1","status":"failure","phase":"%s","code":"process_exit_%s"}\n' \
+    "$phase" "$status" > /work/s20-active-phase.json.tmp
+fi
+mv /work/s20-active-phase.json.tmp /work/s20-active-phase.json
 
 remaining=300
 while [ ! -f /work/controller-ack ] && [ "$remaining" -gt 0 ]; do

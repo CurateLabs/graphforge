@@ -68,7 +68,14 @@ fn set_s20_active_phase(index: u64) {
         .get(usize::try_from(index).unwrap_or(usize::MAX))
         .copied()
         .unwrap_or("runner");
-    write_json_atomically(&PathBuf::from(path), &json!({ "phase": name }));
+    write_json_atomically(
+        &PathBuf::from(path),
+        &json!({
+            "schema": "graphforge-fly-s20-status/1",
+            "status": "running",
+            "phase": name,
+        }),
+    );
 }
 static INGEST_SUBPHASE: AtomicU64 = AtomicU64::new(0);
 static INGEST_CHUNK_INDEX: AtomicU64 = AtomicU64::new(0);

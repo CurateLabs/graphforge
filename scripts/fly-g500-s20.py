@@ -15,6 +15,7 @@ import hashlib
 from html.parser import HTMLParser
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -42,6 +43,12 @@ VOLUME_USD_PER_GB_MONTH = 0.15
 COMPUTE_PRICE_CEILING_USD_PER_SECOND = 0.00003864
 RUN_SECONDS = 14_400
 RESULT_HANDOFF_SECONDS = 300
+PROVISIONING_SECONDS = 300
+MONITOR_INTERVAL_SECONDS = 30
+MONITOR_TRANSFER_TIMEOUT_SECONDS = 20
+REGISTRY_TRANSFER_TIMEOUT_SECONDS = 1_800
+CONTROL_PLANE_TIMEOUT_SECONDS = 120
+LOCAL_METADATA_TIMEOUT_SECONDS = 120
 CLEANUP_RESERVE_SECONDS = 600
 VOLUME_BILLING_HOURS = 5
 EVIDENCE_PATH = "/work/s20-evidence.json"
@@ -76,9 +83,55 @@ class OwnedAppCreationError(ControllerError):
     """Creation failed ambiguously, but the exact target app is now owned."""
 
 
+def _registry_stderr_class(stderr: str) -> str:
+    lowered = stderr.lower()
+    for patterns, classification in (
+        (("unauthorized", "authentication required"), "authentication_rejected"),
+        (("denied", "forbidden"), "permission_rejected"),
+        (("timeout", "timed out", "deadline exceeded"), "transport_timeout"),
+        (("connection reset", "unexpected eof", "network"), "transport_failure"),
+        (("blob upload", "manifest invalid"), "content_rejected"),
+    ):
+        if any(pattern in lowered for pattern in patterns):
+            return classification
+    return "unclassified_failure"
+
+
+def _registry_failure_details(
+    error: subprocess.CalledProcessError | subprocess.TimeoutExpired,
+    elapsed_seconds: float,
+) -> dict[str, Any]:
+    stderr_value = error.stderr
+    stdout_value = getattr(error, "stdout", None) or getattr(error, "output", None)
+    if isinstance(stderr_value, bytes):
+        stderr_value = stderr_value.decode("utf-8", errors="replace")
+    stderr = stderr_value if isinstance(stderr_value, str) else ""
+    if isinstance(stdout_value, bytes):
+        stdout_value = stdout_value.decode("utf-8", errors="replace")
+    stdout = stdout_value if isinstance(stdout_value, str) else ""
+    captured = "\n".join((stdout[-16_384:], stderr[-16_384:]))
+    timed_out = isinstance(error, subprocess.TimeoutExpired)
+    return {
+        "operation": "docker_push",
+        "outcome": "timeout" if timed_out else "nonzero_exit",
+        "exit_code": None if timed_out else int(error.returncode),
+        "elapsed_seconds": min(
+            REGISTRY_TRANSFER_TIMEOUT_SECONDS, max(0, math.ceil(elapsed_seconds))
+        ),
+        "timeout_seconds": REGISTRY_TRANSFER_TIMEOUT_SECONDS,
+        "stderr_class": _registry_stderr_class(captured),
+        "stdout_sha256": "sha256:" + hashlib.sha256(stdout.encode()).hexdigest(),
+        "stderr_sha256": "sha256:" + hashlib.sha256(stderr.encode()).hexdigest(),
+    }
+
+
 class Flyctl:
     def run(
-        self, args: Sequence[str], *, check: bool = True, timeout: float = 120
+        self,
+        args: Sequence[str],
+        *,
+        check: bool = True,
+        timeout: float = CONTROL_PLANE_TIMEOUT_SECONDS,
     ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["flyctl", *args],
@@ -165,10 +218,15 @@ class Flyctl:
             is None
         )
 
-    def machine_runtime(self, app: str, machine_id: str) -> dict[str, Any]:
+    def machine_runtime(
+        self, app: str, machine_id: str, *, deadline: float | None = None
+    ) -> dict[str, Any]:
         """Read Machine runtime state from the stable authenticated provider API."""
         value = self.api_json(
-            "GET", f"/v1/apps/{app}/machines/{machine_id}", absent_ok=True
+            "GET",
+            f"/v1/apps/{app}/machines/{machine_id}",
+            deadline=deadline,
+            absent_ok=True,
         )
         if value is None:
             return {"state": "destroyed", "oom": False}
@@ -208,6 +266,7 @@ def check_source(expected_sha: str) -> None:
         check=True,
         text=True,
         stdout=subprocess.PIPE,
+        timeout=30,
     ).stdout.strip()
     dirty = subprocess.run(
         ["git", "status", "--porcelain"],
@@ -215,6 +274,7 @@ def check_source(expected_sha: str) -> None:
         check=True,
         text=True,
         stdout=subprocess.PIPE,
+        timeout=30,
     ).stdout
     if head != expected_sha or dirty:
         raise ControllerError("exact expected SHA must be checked out in a clean tree")
@@ -350,7 +410,7 @@ def inspect_image(
             check=True,
             text=True,
             capture_output=True,
-            timeout=900,
+            timeout=REGISTRY_TRANSFER_TIMEOUT_SECONDS,
         )
     result = subprocess.run(
         ["docker", "image", "inspect", image],
@@ -358,7 +418,7 @@ def inspect_image(
         check=True,
         text=True,
         capture_output=True,
-        timeout=120,
+        timeout=LOCAL_METADATA_TIMEOUT_SECONDS,
     )
     inspected = json.loads(result.stdout)
     if not isinstance(inspected, list) or len(inspected) != 1:
@@ -387,7 +447,7 @@ def inspect_image(
         check=True,
         text=True,
         capture_output=True,
-        timeout=120,
+        timeout=LOCAL_METADATA_TIMEOUT_SECONDS,
     ).stdout.strip()
     try:
         with tempfile.TemporaryDirectory(prefix="graphforge-image-provenance-") as directory:
@@ -403,7 +463,7 @@ def inspect_image(
                 check=True,
                 text=True,
                 capture_output=True,
-                timeout=120,
+                timeout=LOCAL_METADATA_TIMEOUT_SECONDS,
             )
             provenance = json.loads(target.read_text(encoding="utf-8"))
     finally:
@@ -413,7 +473,7 @@ def inspect_image(
             check=False,
             text=True,
             capture_output=True,
-            timeout=120,
+            timeout=LOCAL_METADATA_TIMEOUT_SECONDS,
         )
     expected_snapshot = expected_source_snapshot()
     if provenance != {
@@ -432,7 +492,7 @@ def inspect_local_image(image: str, expected_sha: str) -> tuple[str, str]:
         check=True,
         text=True,
         capture_output=True,
-        timeout=120,
+        timeout=LOCAL_METADATA_TIMEOUT_SECONDS,
     )
     inspected = json.loads(result.stdout)
     if not isinstance(inspected, list) or len(inspected) != 1:
@@ -491,7 +551,7 @@ def publish_to_fly_registry(
             check=True,
             text=True,
             capture_output=True,
-            timeout=120,
+            timeout=CONTROL_PLANE_TIMEOUT_SECONDS,
         )
         subprocess.run(
             ["docker", "tag", local_image_id, tag],
@@ -501,14 +561,34 @@ def publish_to_fly_registry(
             capture_output=True,
             timeout=120,
         )
-        pushed = subprocess.run(
-            ["docker", "push", tag],
-            env=environment,
-            check=True,
-            text=True,
-            capture_output=True,
-            timeout=1_800,
-        )
+        push_started = time.monotonic()
+        try:
+            pushed = subprocess.run(
+                ["docker", "push", tag],
+                env=environment,
+                check=True,
+                text=True,
+                capture_output=True,
+                timeout=REGISTRY_TRANSFER_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired as error:
+            persist_controller_failure(
+                args,
+                "registry_push_timeout",
+                command_failure=_registry_failure_details(
+                    error, time.monotonic() - push_started
+                ),
+            )
+            raise ControllerError("Fly registry push exceeded its bounded timeout") from None
+        except subprocess.CalledProcessError as error:
+            persist_controller_failure(
+                args,
+                "registry_push_failed",
+                command_failure=_registry_failure_details(
+                    error, time.monotonic() - push_started
+                ),
+            )
+            raise ControllerError("Fly registry push failed") from None
         matches = set(re.findall(r"digest:\s*(sha256:[0-9a-f]{64})", pushed.stdout + pushed.stderr))
         if len(matches) != 1:
             raise ControllerError("Fly registry push did not return one immutable digest")
@@ -520,7 +600,7 @@ def publish_to_fly_registry(
             check=True,
             text=True,
             capture_output=True,
-            timeout=120,
+            timeout=LOCAL_METADATA_TIMEOUT_SECONDS,
         )
         snapshot = inspect_image(image, args.expected_sha, digest, environment)
         return image, digest, snapshot
@@ -708,7 +788,9 @@ def machine_payload(
                 "GF_G500_S20_VOLUME_GB": str(args.volume_size_gb),
                 "GF_G500_S20_EVIDENCE_OUT": EVIDENCE_PATH,
                 "GF_G500_S20_RESULT_OUT": RESULT_PATH,
-                "GF_G500_S20_TIMEOUT_SECONDS": str(RUN_SECONDS - RESULT_HANDOFF_SECONDS),
+                "GF_G500_S20_TIMEOUT_SECONDS": str(
+                    RUN_SECONDS - RESULT_HANDOFF_SECONDS - PROVISIONING_SECONDS
+                ),
                 "TMPDIR": "/work/tmp",
             },
         },
@@ -786,8 +868,10 @@ def create_machine(
     image: str,
     digest: str,
     source_snapshot: str,
+    *,
+    deadline: float,
 ) -> dict[str, Any]:
-    token = fly.auth_token()
+    token = fly.auth_token(deadline=deadline)
     if not token:
         raise ControllerError("Fly authentication token is unavailable")
     request = urllib.request.Request(
@@ -797,7 +881,9 @@ def create_machine(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=120) as response:
+        with urllib.request.urlopen(
+            request, timeout=_bounded_timeout(deadline, CONTROL_PLANE_TIMEOUT_SECONDS)
+        ) as response:
             return json.load(response)
     except urllib.error.HTTPError as error:
         raise ControllerError(
@@ -807,10 +893,16 @@ def create_machine(
         raise ControllerError("Fly Machines API connection failed") from None
 
 
-def get_machine(args: argparse.Namespace, fly: Flyctl, machine_id: str) -> dict[str, Any]:
+def get_machine(
+    args: argparse.Namespace,
+    fly: Flyctl,
+    machine_id: str,
+    *,
+    deadline: float,
+) -> dict[str, Any]:
     """Fetch fresh provider state; never certify invariants from the POST echo."""
     token = (
-        fly.auth_token()
+        fly.auth_token(deadline=deadline)
         if hasattr(fly, "auth_token")
         else fly.run(["auth", "token"]).stdout.strip()
     )
@@ -821,7 +913,9 @@ def get_machine(args: argparse.Namespace, fly: Flyctl, machine_id: str) -> dict[
         headers={"Authorization": f"Bearer {token}"},
     )
     try:
-        with urllib.request.urlopen(request, timeout=120) as response:
+        with urllib.request.urlopen(
+            request, timeout=_bounded_timeout(deadline, CONTROL_PLANE_TIMEOUT_SECONDS)
+        ) as response:
             value = json.load(response)
     except urllib.error.HTTPError as error:
         raise ControllerError(f"Fly Machine GET returned HTTP {error.code}") from None
@@ -972,6 +1066,13 @@ def _cleanup_timeout(deadline: float) -> float:
     return min(30.0, remaining)
 
 
+def _bounded_timeout(deadline: float, maximum: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise ControllerError("operation deadline exhausted")
+    return min(maximum, remaining)
+
+
 def observed_phase(path: Path) -> str:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -981,6 +1082,31 @@ def observed_phase(path: Path) -> str:
     if isinstance(value, list) and value:
         candidates.append(value[-1].get("phase") if isinstance(value[-1], dict) else None)
     return next((phase for phase in candidates if phase in PHASES), "runner")
+
+
+def observed_status(path: Path) -> dict[str, str]:
+    """Read only the closed durable monitor envelope, retaining no provider data."""
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"status": "running", "phase": "runner"}
+    if not isinstance(value, dict) or set(value) - {"schema", "status", "phase", "code"}:
+        raise ControllerError("runtime status envelope has unknown fields")
+    if value.get("schema") != "graphforge-fly-s20-status/1":
+        raise ControllerError("runtime status envelope has invalid schema")
+    status = value.get("status")
+    phase = value.get("phase")
+    if status not in {"running", "success", "failure"} or phase not in PHASES:
+        raise ControllerError("runtime status envelope has invalid state")
+    result = {"status": status, "phase": phase}
+    if status == "failure":
+        code = value.get("code")
+        if not isinstance(code, str) or not re.fullmatch(r"[a-zA-Z0-9_.-]{1,80}", code):
+            raise ControllerError("runtime status envelope has invalid failure code")
+        result["code"] = code
+    elif "code" in value:
+        raise ControllerError("runtime status envelope has unexpected code")
+    return result
 
 
 def terminal_machine_diagnostic(machine: Any, phase: str) -> dict[str, str] | None:
@@ -1060,8 +1186,20 @@ def validate_container_result(value: Any) -> dict[str, str]:
 
 
 def fetch(
-    fly: Flyctl, args: argparse.Namespace, machine_id: str, remote: str, local: Path
+    fly: Flyctl,
+    args: argparse.Namespace,
+    machine_id: str,
+    remote: str,
+    local: Path,
+    *,
+    deadline: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    timeout = MONITOR_TRANSFER_TIMEOUT_SECONDS
+    if deadline is not None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ControllerError("runtime monitoring deadline exhausted")
+        timeout = min(timeout, remaining)
     return fly.run(
         [
             "ssh",
@@ -1075,6 +1213,7 @@ def fetch(
             machine_id,
         ],
         check=False,
+        timeout=timeout,
     )
 
 
@@ -1083,6 +1222,7 @@ def persist_controller_failure(
     code: str,
     *,
     observed: dict[str, Any] | None = None,
+    command_failure: dict[str, Any] | None = None,
 ) -> None:
     """Persist one sanitized controller-side first failure without overwriting it."""
     if args.diagnostic_out.exists():
@@ -1095,7 +1235,34 @@ def persist_controller_failure(
     }
     if observed is not None:
         diagnostic["observed_machine"] = observed
+    if command_failure is not None:
+        diagnostic["command_failure"] = command_failure
     args.diagnostic_out.write_text(json.dumps(diagnostic, indent=2, sort_keys=True) + "\n")
+
+
+def acknowledge_result(
+    fly: Flyctl, args: argparse.Namespace, machine_id: str, deadline: float
+) -> bool:
+    """Best-effort handoff acknowledgement; validated evidence remains authoritative."""
+    remaining = deadline - time.monotonic()
+    if remaining < 1.0:
+        return False
+    try:
+        result = fly.run(
+            [
+                "machine",
+                "exec",
+                machine_id,
+                "--app",
+                args.app_name,
+                "touch /work/controller-ack",
+            ],
+            check=False,
+            timeout=min(30.0, remaining),
+        )
+        return result.returncode == 0
+    except (ControllerError, subprocess.SubprocessError):
+        return False
 
 
 def execute(
@@ -1146,9 +1313,18 @@ def execute(
             ]
         )
         volume_id = assert_volume(volume, args)
-        created_machine = create_machine(args, fly, volume_id, image, digest, source_snapshot)
+        deadline = time.monotonic() + args.timeout_s
+        created_machine = create_machine(
+            args,
+            fly,
+            volume_id,
+            image,
+            digest,
+            source_snapshot,
+            deadline=deadline,
+        )
         machine_id = created_machine["id"]
-        machine = get_machine(args, fly, machine_id)
+        machine = get_machine(args, fly, machine_id, deadline=deadline)
         checks = machine_response_checks(machine, args, digest, volume_id)
         try:
             assert_machine(machine, args, digest, volume_id)
@@ -1159,36 +1335,65 @@ def execute(
                 observed=checks,
             )
             raise
-        deadline = time.monotonic() + args.timeout_s
         with tempfile.TemporaryDirectory(prefix="graphforge-s20-") as directory:
             local = Path(directory) / "evidence.json"
             result_file = Path(directory) / "container-result.json"
             active_file = Path(directory) / "active-phase.json"
             journal_file = Path(directory) / "journal.json"
+            last_phase = None
             while time.monotonic() < deadline:
-                result = fetch(fly, args, machine_id, RESULT_PATH, result_file)
-                if result.returncode == 0 and result_file.is_file():
-                    diagnostic = validate_container_result(json.loads(result_file.read_text()))
-                    if diagnostic["status"] == "failure":
-                        args.diagnostic_out.write_text(
-                            json.dumps(diagnostic, indent=2, sort_keys=True) + "\n"
+                fetch(
+                    fly,
+                    args,
+                    machine_id,
+                    ACTIVE_PHASE_PATH,
+                    active_file,
+                    deadline=deadline,
+                )
+                status = observed_status(active_file)
+                phase = status["phase"]
+                if phase != last_phase:
+                    fetch(
+                        fly,
+                        args,
+                        machine_id,
+                        JOURNAL_PATH,
+                        journal_file,
+                        deadline=deadline,
+                    )
+                    last_phase = phase
+                if status["status"] != "running":
+                    fetch(
+                        fly,
+                        args,
+                        machine_id,
+                        RESULT_PATH,
+                        result_file,
+                        deadline=deadline,
+                    )
+                    if result_file.is_file():
+                        diagnostic = validate_container_result(json.loads(result_file.read_text()))
+                        if diagnostic["status"] == "failure":
+                            args.diagnostic_out.write_text(
+                                json.dumps(diagnostic, indent=2, sort_keys=True) + "\n"
+                            )
+                            raise ControllerError(
+                                f"container failed in {diagnostic['phase']} with "
+                                f"{diagnostic['code']}"
+                            )
+                    if status["status"] == "success":
+                        evidence_result = fetch(
+                            fly,
+                            args,
+                            machine_id,
+                            EVIDENCE_PATH,
+                            local,
+                            deadline=deadline,
                         )
-                        raise ControllerError(
-                            f"container failed in {diagnostic['phase']} with {diagnostic['code']}"
-                        )
-                    evidence_result = fetch(fly, args, machine_id, EVIDENCE_PATH, local)
-                    if evidence_result.returncode == 0 and local.is_file():
-                        break
-                # The shell result can be absent when the kernel or provider terminated
-                # the process. Retrieve the last durable progress markers before asking
-                # Fly for the terminal state so OOM and abrupt exits surface promptly.
-                fetch(fly, args, machine_id, ACTIVE_PHASE_PATH, active_file)
-                fetch(fly, args, machine_id, JOURNAL_PATH, journal_file)
-                phase = observed_phase(active_file)
-                if phase == "runner":
-                    phase = observed_phase(journal_file)
+                        if evidence_result.returncode == 0 and local.is_file():
+                            break
                 terminal = terminal_machine_diagnostic(
-                    fly.machine_runtime(args.app_name, machine_id), phase
+                    fly.machine_runtime(args.app_name, machine_id, deadline=deadline), phase
                 )
                 if terminal:
                     args.diagnostic_out.write_text(
@@ -1197,7 +1402,9 @@ def execute(
                     raise ControllerError(
                         f"Machine terminated in {terminal['phase']} with {terminal['code']}"
                     )
-                time.sleep(2)
+                time.sleep(
+                    min(MONITOR_INTERVAL_SECONDS, max(0, deadline - time.monotonic()))
+                )
             else:
                 raise ControllerError("timed out retrieving S20 evidence")
             spec = importlib.util.spec_from_file_location("s20_validator", VALIDATOR)
@@ -1214,17 +1421,7 @@ def execute(
                 source_snapshot,
             )
             args.evidence_out.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
-            fly.run(
-                [
-                    "machine",
-                    "exec",
-                    machine_id,
-                    "--app",
-                    args.app_name,
-                    "touch /work/controller-ack",
-                ],
-                check=False,
-            )
+            acknowledge_result(fly, args, machine_id, deadline)
     except Exception as error:
         primary_error = error
         persist_controller_failure(args, f"controller_{type(error).__name__.lower()}")
