@@ -1199,7 +1199,7 @@ fn write_batch_creates(
                             ))
                         })?
                 };
-                writer.register_existing_node(uuid, node_id);
+                writer.register_existing_node(uuid, node_id)?;
                 var_to_uuid.insert(spec.var, uuid);
             } else {
                 let uuid = new_v7();
@@ -1851,7 +1851,7 @@ impl SetAccumulator {
     fn apply(&self, dir: &Path) -> Result<u64, GfError> {
         let mut staged = graphforge_storage::RewriteBatch::new();
         let total = self.stage_into(&mut staged, dir)?;
-        staged.commit()?;
+        staged.commit_at(dir)?;
         Ok(total)
     }
 
@@ -1928,7 +1928,7 @@ impl RemoveAccumulator {
     fn apply(&self, dir: &Path) -> Result<u64, GfError> {
         let mut staged = graphforge_storage::RewriteBatch::new();
         let total = self.stage_into(&mut staged, dir)?;
-        staged.commit()?;
+        staged.commit_at(dir)?;
         Ok(total)
     }
 

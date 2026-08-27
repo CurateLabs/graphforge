@@ -18,6 +18,23 @@ is a **spec + external harness** track — see
 matrix + harness contract) and the [LDBC full suite](../guide/datasets/ldbc.md)
 — not normal GraphForge CI.
 
+Fresh graph construction is append-only at the Parquet-fragment level. Nodes,
+each edge relation, and node/edge property routes retain a legacy-compatible
+first fragment and immutable bounded fragments thereafter. The writer encodes
+each accepted row once; increasing total row count must increase aggregate
+input rows, rows encoded, shard bytes, and shard count linearly while prior
+rows decoded remains zero. Writer reopen uses one persisted surrogate-tail
+record. Edge endpoint resolution retains one authenticated UUID-index snapshot,
+sorts and deduplicates each request, selects bounded blocks from authenticated
+fences, and merge-scans each selected block once. It reports block reads/bytes
+and exactly zero per-record filesystem seeks; neither operation scans retained
+topology. The writer's charged retained state and flush scratch are therefore
+bounded by the configured batch/shard window. Process RSS is separate runtime
+evidence: the public construction/S20 sampler must measure it at each phase and
+show that it plateaus as retained edge count rises. Continued material RSS
+growth proportional to retained edge count is a correctness failure, not a
+reason to raise the M5 memory ceiling.
+
 ## Rust 0.5.0 Fixed-Hop LIMIT Contract
 
 Fixed one- and multi-hop patterns use the adjacency provider in every ontology

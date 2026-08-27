@@ -14,10 +14,12 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tantivy = { workspace = true }
 ureq = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 graphforge-core = { path = "../graphforge-core" }
 graphforge-ir = { path = "../graphforge-ir" }
+parquet = { workspace = true }
 tempfile = "3"
 
 [lints]

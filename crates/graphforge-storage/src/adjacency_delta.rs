@@ -114,7 +114,7 @@ pub fn write_delta_segment(
         Arc::clone(&ADJACENCY_DELTA_SCHEMA),
         &batch,
     )?;
-    staged.commit()
+    staged.commit_at(project_dir)
 }
 
 /// Read one delta segment from disk. A missing file is an error here — callers

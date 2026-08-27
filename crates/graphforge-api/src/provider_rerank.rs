@@ -591,7 +591,7 @@ mod tests {
     use std::time::Duration;
 
     use graphforge_search::{
-        ProviderCapabilities, ProviderCapability, RerankOutput, StandardProviderExecutionRuntime,
+        ProviderCapabilities, ProviderCapability, ProviderCheckpoint, RerankOutput,
     };
     use graphforge_storage::{TokenCountClass, TokenizerIdentity};
 
@@ -609,6 +609,23 @@ mod tests {
         contract: ProviderModelContract,
         mode: Mode,
         calls: usize,
+    }
+
+    #[derive(Default)]
+    struct DeterministicRuntime;
+
+    impl ProviderExecutionRuntime for DeterministicRuntime {
+        fn elapsed(&self) -> Duration {
+            Duration::ZERO
+        }
+
+        fn wait(
+            &mut self,
+            _duration: Duration,
+            checkpoint: &mut ProviderCheckpoint<'_>,
+        ) -> ProviderResult<()> {
+            checkpoint()
+        }
     }
 
     impl CandidateReranker for FakeReranker {
@@ -787,7 +804,7 @@ mod tests {
         count_tokens: &mut ProviderTokenCounter<'_>,
         checkpoint: &mut ProviderArtifactCheckpoint<'_>,
     ) -> Result<ProviderRerankedFindResult, ProviderRerankError> {
-        let mut runtime = StandardProviderExecutionRuntime::new();
+        let mut runtime = DeterministicRuntime;
         let mut estimate_cost = |shape: graphforge_search::RerankWorkShape| {
             Ok(u64::try_from(shape.candidates()).unwrap())
         };
@@ -839,7 +856,7 @@ mod tests {
             mode: Mode::Success,
             calls: 0,
         };
-        let mut runtime = StandardProviderExecutionRuntime::new();
+        let mut runtime = DeterministicRuntime;
         let mut count_tokens = |_: &ProviderModelContract, text: &str| Ok(text.len() as u64);
         let mut estimate_cost =
             |shape: graphforge_search::RerankWorkShape| Ok(shape.candidates() as u64);
@@ -1132,10 +1149,13 @@ mod tests {
             &mut checkpoint,
         )
         .unwrap_err();
-        assert!(matches!(
-            error,
-            ProviderRerankError::Artifact(SearchArtifactError::ConcurrentMutation)
-        ));
+        assert!(
+            matches!(
+                error,
+                ProviderRerankError::Artifact(SearchArtifactError::ConcurrentMutation)
+            ),
+            "unexpected rerank error: {error:?}"
+        );
         assert_eq!(provider.calls, 2);
         assert_eq!(mutations, 2);
     }

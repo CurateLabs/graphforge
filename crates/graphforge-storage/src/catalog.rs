@@ -4,12 +4,12 @@
 //! presents its Parquet files as DataFusion tables under the address
 //! `graph.graph.<table_name>`:
 //!
-//! | Table name | File | Schema |
+//! | Table name | Logical source | Schema |
 //! |---|---|---|
-//! | `topology_nodes` | `topology/nodes.parquet` | `TOPOLOGY_NODES_SCHEMA` |
-//! | `edges_TYPENAME` | `topology/edges/TYPENAME.parquet` | `TYPED_EDGE_SCHEMA` |
-//! | `edges__exploratory` | `topology/edges/_exploratory.parquet` | `EXPLORATORY_EDGE_SCHEMA` |
-//! | `properties_ENTITY` | `properties/ENTITY.parquet` | `property_schema(entity, defs)` |
+//! | `topology_nodes` | legacy `topology/nodes.parquet` plus canonical `topology/nodes/*.parquet` shards | `TOPOLOGY_NODES_SCHEMA` |
+//! | `edges_TYPENAME` | legacy `topology/edges/TYPENAME.parquet` plus canonical `topology/edges/TYPENAME/*.parquet` shards | `TYPED_EDGE_SCHEMA` |
+//! | `edges__exploratory` | legacy and canonical `_exploratory` edge shards | `EXPLORATORY_EDGE_SCHEMA` |
+//! | `properties_ENTITY` | authenticated newest-wins overlay of legacy and canonical property fragments | `property_schema(entity, defs)` |
 //!
 //! # Scan implementation
 //!
@@ -20,11 +20,13 @@
 //! (default filter pushdown is unsupported / non-exact).
 //!
 //! Direct readers (`read_edges`, `read_nodes`, …) used by ExpandExec and writers
-//! still eagerly materialize; they are outside the query-provider scan path.
+//! consume the same canonical shard union; they are outside the query-provider
+//! scan path.
 
 use std::collections::HashMap;
 use std::fmt;
 use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -39,6 +41,7 @@ use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::Expr;
 use datafusion_catalog::Session;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use sha2::{Digest, Sha256};
 
 use graphforge_core::OntologyMode;
 use graphforge_ir::RuntimeCatalog;
@@ -76,8 +79,7 @@ pub(crate) fn read_parquet_or_empty(
     if !path.exists() {
         return Ok(vec![RecordBatch::new_empty(schema)]);
     }
-    let file = File::open(path).map_err(|e| io_err(&e))?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(parquet_err)?;
+    let builder = admitted_parquet(path)?;
     let file_schema = builder.schema().clone();
     let reader = builder.build().map_err(parquet_err)?;
     let batches: Vec<RecordBatch> = reader.collect::<Result<Vec<_>, _>>().map_err(parquet_err)?;
@@ -187,11 +189,15 @@ pub fn read_edges(
         OntologyMode::Exploratory => ("_exploratory", EXPLORATORY_EDGE_SCHEMA.clone()),
         OntologyMode::Advisory | OntologyMode::Strict => (rel_name, TYPED_EDGE_SCHEMA.clone()),
     };
-    let path = dir
-        .join("topology")
-        .join("edges")
-        .join(format!("{stem}.parquet"));
-    let batches = read_parquet_or_empty(&path, schema)?;
+    let mut batches = Vec::new();
+    for (_, path) in crate::mutator::edge_parquet_files(dir, Some(stem))
+        .map_err(|error| DataFusionError::Execution(error.to_string()))?
+    {
+        batches.extend(read_parquet_or_empty(&path, schema.clone())?);
+    }
+    if batches.is_empty() {
+        batches.push(RecordBatch::new_empty(schema));
+    }
     crate::io_stats::record_edge_full_read(total_rows(&batches));
     Ok(batches)
 }
@@ -253,18 +259,23 @@ pub fn read_edges_filtered_observed(
         OntologyMode::Exploratory => ("_exploratory", EXPLORATORY_EDGE_SCHEMA.clone()),
         OntologyMode::Advisory | OntologyMode::Strict => (rel_name, TYPED_EDGE_SCHEMA.clone()),
     };
-    let path = dir
-        .join("topology")
-        .join("edges")
-        .join(format!("{stem}.parquet"));
-    read_parquet_filtered_u64(
-        &path,
-        schema,
-        "edge_id",
-        edge_ids,
-        FilteredReadKind::Edge,
-        observer,
-    )
+    let mut batches = Vec::new();
+    for (_, path) in crate::mutator::edge_parquet_files(dir, Some(stem))
+        .map_err(|error| DataFusionError::Execution(error.to_string()))?
+    {
+        batches.extend(read_parquet_filtered_u64(
+            &path,
+            schema.clone(),
+            "edge_id",
+            edge_ids,
+            FilteredReadKind::Edge,
+            observer,
+        )?);
+    }
+    if batches.is_empty() {
+        batches.push(RecordBatch::new_empty(schema));
+    }
+    Ok(batches)
 }
 
 /// Read the union of every relation's edges (#823): the "all relation types"
@@ -280,16 +291,10 @@ fn read_edges_union(
     edge_ids: Option<&std::collections::HashSet<u64>>,
     observer: Option<&std::sync::Arc<dyn crate::io_stats::FilteredReadObserver>>,
 ) -> Result<Vec<RecordBatch>, DataFusionError> {
-    let mut files = crate::mutator::parquet_files_in(dir, "topology/edges")
-        .map_err(|e| DataFusionError::Execution(e.to_string()))?;
-    files.sort();
     let mut out = Vec::new();
-    for path in files {
-        let stem = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or_default()
-            .to_owned();
+    for (stem, path) in crate::mutator::edge_parquet_files(dir, None)
+        .map_err(|error| DataFusionError::Execution(error.to_string()))?
+    {
         let schema = discover_parquet_schema(&path).unwrap_or_else(|| TYPED_EDGE_SCHEMA.clone());
         let batches = if let Some(ids) = edge_ids {
             read_parquet_filtered_u64(
@@ -407,21 +412,31 @@ impl From<FilteredReadKind> for crate::io_stats::FilteredReadTable {
     }
 }
 
-/// Exact row selection for the canonical dense `node_id == row_ordinal + 1`
-/// layout. The selection is relative to the concatenation of `row_groups`, as
-/// required by Parquet after row-group filtering.
+/// Exact row selection for a canonical dense contiguous `node_id` range. The
+/// selection is relative to the concatenation of `row_groups`, as required by
+/// Parquet after row-group filtering.
 struct DenseNodeSelection {
     row_groups: Vec<usize>,
     selection: parquet::arrow::arrow_reader::RowSelection,
     pages_considered: u64,
     pages_selected: u64,
     exact_rows_selected: u64,
+    first_id: u64,
+    last_id: u64,
 }
 
 struct DenseNodeLayout {
+    first_id: u64,
     group_rows: Vec<usize>,
     group_pages: Vec<Vec<usize>>,
     total_rows: usize,
+    pages_considered: u64,
+}
+
+struct DenseNodeGroups {
+    group_rows: Vec<usize>,
+    group_pages: Vec<Vec<usize>>,
+    rows_seen: usize,
     pages_considered: u64,
 }
 
@@ -430,8 +445,6 @@ fn dense_node_layout(
     metadata: &parquet::file::metadata::ParquetMetaData,
     key_leaf: usize,
 ) -> Option<DenseNodeLayout> {
-    use parquet::basic::BoundaryOrder;
-    use parquet::file::page_index::column_index::ColumnIndexMetaData;
     use parquet::file::statistics::Statistics;
 
     let total_rows = usize::try_from(metadata.file_metadata().num_rows()).ok()?;
@@ -445,6 +458,41 @@ fn dense_node_layout(
         return None;
     }
 
+    let Statistics::Int64(first_stats) = row_groups.first()?.column(key_leaf).statistics()? else {
+        return None;
+    };
+    let first_id = u64::try_from(*first_stats.min_opt()?).ok()?;
+    if first_id == 0 {
+        return None;
+    }
+
+    let groups = dense_node_groups(metadata, key_leaf, first_id)?;
+    if groups.rows_seen != total_rows {
+        return None;
+    }
+
+    Some(DenseNodeLayout {
+        first_id,
+        group_rows: groups.group_rows,
+        group_pages: groups.group_pages,
+        total_rows,
+        pages_considered: groups.pages_considered,
+    })
+}
+
+/// Validate every row group and page against the dense id sequence.
+fn dense_node_groups(
+    metadata: &parquet::file::metadata::ParquetMetaData,
+    key_leaf: usize,
+    first_id: u64,
+) -> Option<DenseNodeGroups> {
+    use parquet::basic::BoundaryOrder;
+    use parquet::file::page_index::column_index::ColumnIndexMetaData;
+    use parquet::file::statistics::Statistics;
+
+    let row_groups = metadata.row_groups();
+    let column_indexes = metadata.column_index()?;
+    let offset_indexes = metadata.offset_index()?;
     let mut group_rows = Vec::with_capacity(row_groups.len());
     let mut group_pages = Vec::with_capacity(row_groups.len());
     let mut file_row_offset = 0usize;
@@ -455,8 +503,12 @@ fn dense_node_layout(
         if rows == 0 {
             return None;
         }
-        let expected_min = i64::try_from(file_row_offset.checked_add(1)?).ok()?;
-        let expected_max = i64::try_from(file_row_offset.checked_add(rows)?).ok()?;
+        let expected_min =
+            i64::try_from(first_id.checked_add(u64::try_from(file_row_offset).ok()?)?).ok()?;
+        let expected_max = i64::try_from(
+            first_id.checked_add(u64::try_from(file_row_offset.checked_add(rows - 1)?).ok()?)?,
+        )
+        .ok()?;
         let Statistics::Int64(group_stats) = row_group.column(key_leaf).statistics()? else {
             return None;
         };
@@ -499,10 +551,21 @@ fn dense_node_layout(
         for (page_idx, &first) in first_rows.iter().enumerate() {
             let end = first_rows.get(page_idx + 1).copied().unwrap_or(rows);
             let page_rows = end.checked_sub(first)?;
-            let page_min =
-                i64::try_from(file_row_offset.checked_add(first)?.checked_add(1)?).ok()?;
-            let page_max =
-                i64::try_from(file_row_offset.checked_add(first)?.checked_add(page_rows)?).ok()?;
+            let page_min = i64::try_from(
+                first_id.checked_add(u64::try_from(file_row_offset.checked_add(first)?).ok()?)?,
+            )
+            .ok()?;
+            let page_max = i64::try_from(
+                first_id.checked_add(
+                    u64::try_from(
+                        file_row_offset
+                            .checked_add(first)?
+                            .checked_add(page_rows - 1)?,
+                    )
+                    .ok()?,
+                )?,
+            )
+            .ok()?;
             if page_stats.min_value(page_idx) != Some(&page_min)
                 || page_stats.max_value(page_idx) != Some(&page_max)
             {
@@ -515,14 +578,10 @@ fn dense_node_layout(
         group_pages.push(first_rows);
         file_row_offset = file_row_offset.checked_add(rows)?;
     }
-    if file_row_offset != total_rows {
-        return None;
-    }
-
-    Some(DenseNodeLayout {
+    Some(DenseNodeGroups {
         group_rows,
         group_pages,
-        total_rows,
+        rows_seen: file_row_offset,
         pages_considered,
     })
 }
@@ -536,18 +595,19 @@ fn dense_node_selection(
     sorted_ids: &[u64],
 ) -> Option<DenseNodeSelection> {
     let DenseNodeLayout {
+        first_id,
         group_rows,
         group_pages,
         total_rows,
         pages_considered,
     } = dense_node_layout(metadata, key_leaf)?;
 
-    let max_id = u64::try_from(total_rows).ok()?;
+    let max_id = first_id.checked_add(u64::try_from(total_rows.checked_sub(1)?).ok()?)?;
     let ordinals: Vec<usize> = sorted_ids
         .iter()
         .copied()
-        .filter(|&id| id != 0 && id <= max_id)
-        .map(|id| usize::try_from(id - 1).ok())
+        .filter(|&id| id >= first_id && id <= max_id)
+        .map(|id| usize::try_from(id.checked_sub(first_id)?).ok())
         .collect::<Option<_>>()?;
     let mut selected_groups = Vec::new();
     let mut ranges = Vec::with_capacity(ordinals.len());
@@ -589,6 +649,8 @@ fn dense_node_selection(
         pages_considered,
         pages_selected: selected_pages,
         exact_rows_selected: u64::try_from(ordinals.len()).ok()?,
+        first_id,
+        last_id: max_id,
     })
 }
 
@@ -750,6 +812,7 @@ fn read_parquet_filtered_u64_attempt(
         .then(|| dense_node_selection(builder.metadata(), key_leaf, &sorted))
         .flatten();
     let metadata_fallbacks = u64::from(dense_requested && dense.is_none());
+    let dense_id_range = dense.as_ref().map(|dense| (dense.first_id, dense.last_id));
 
     // Exact ordinal selection is node-only. Edges and noncanonical node files
     // retain the conservative row-group min/max behavior.
@@ -851,11 +914,12 @@ fn read_parquet_filtered_u64_attempt(
     let returned = total_rows(&batches);
     record_filtered(kind, returned);
     if used_dense_selection {
-        let max_id = u64::try_from(total).unwrap_or(0);
+        let (first_id, max_id) =
+            dense_id_range.expect("dense selection has an authenticated range");
         let expected: std::collections::HashSet<u64> = ids
             .iter()
             .copied()
-            .filter(|&id| id != 0 && id <= max_id)
+            .filter(|&id| id >= first_id && id <= max_id)
             .collect();
         if !filtered_keys_match(&batches, key_column, &expected) {
             pruning.validation_fallbacks = 1;
@@ -918,19 +982,150 @@ fn record_pruning(
     observation.pruning(pruning);
 }
 
-/// Read all node rows from `topology/nodes.parquet` in the project at `dir`.
+/// Enumerate the logical node topology's legacy flat file and canonical shards.
 ///
-/// Returns a single (possibly empty) [`RecordBatch`] with
-/// [`TOPOLOGY_NODES_SCHEMA`]; a missing file yields an empty batch.
+/// Paths are returned in canonical topology order. An absent node topology
+/// yields an empty vector; malformed canonical shard entries fail closed.
 ///
 /// # Errors
 /// Propagates Parquet / Arrow errors encountered while reading.
+pub fn topology_node_files(dir: &Path) -> Result<Vec<PathBuf>, graphforge_core::GfError> {
+    crate::mutator::node_parquet_files(dir)
+}
+
+/// Enumerate every canonical node-property fragment for `stem`.
+///
+/// This is the storage-owned source-of-truth used by consumers that must charge
+/// or fingerprint the exact same legacy and immutable-shard files that
+/// [`read_properties`] consumes.
+pub fn node_property_files(
+    dir: &Path,
+    stem: &str,
+) -> Result<Vec<PathBuf>, graphforge_core::GfError> {
+    crate::mutator::property_parquet_files(dir, "properties", stem)
+}
+
+/// Enumerate all canonical node-property source fragments, failing closed on
+/// malformed route entries instead of silently omitting them.
+pub fn node_property_source_files(dir: &Path) -> Result<Vec<PathBuf>, graphforge_core::GfError> {
+    Ok(node_property_source_fragments(dir)?
+        .into_iter()
+        .map(|(_, path)| path)
+        .collect())
+}
+
+/// Enumerate the route and exact path of every canonical node-property source.
+pub fn node_property_source_fragments(
+    dir: &Path,
+) -> Result<Vec<(String, PathBuf)>, graphforge_core::GfError> {
+    let root = dir.join("properties");
+    let entries = match std::fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(graphforge_core::GfError::Storage(error.to_string())),
+    };
+    let mut paths = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| graphforge_core::GfError::Storage(error.to_string()))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| graphforge_core::GfError::Storage(error.to_string()))?;
+        let path = entry.path();
+        if file_type.is_symlink() {
+            return Err(graphforge_core::GfError::Storage(
+                "property source contains a symbolic link".into(),
+            ));
+        }
+        if file_type.is_file() {
+            if path.extension().and_then(|value| value.to_str()) == Some("parquet") {
+                let stem = path
+                    .file_stem()
+                    .and_then(|value| value.to_str())
+                    .ok_or_else(|| {
+                        graphforge_core::GfError::Storage(
+                            "property source route is not canonical UTF-8".into(),
+                        )
+                    })?;
+                paths.push((stem.to_owned(), path));
+            }
+            continue;
+        }
+        if file_type.is_dir() {
+            let stem = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .ok_or_else(|| {
+                    graphforge_core::GfError::Storage(
+                        "property shard route is not canonical UTF-8".into(),
+                    )
+                })?;
+            if stem.ends_with(".parquet") {
+                return Err(graphforge_core::GfError::Storage(
+                    "property source Parquet path is not a regular file".into(),
+                ));
+            }
+            paths.extend(
+                crate::mutator::property_parquet_files(dir, "properties", stem)?
+                    .into_iter()
+                    .map(|path| (stem.to_owned(), path)),
+            );
+            continue;
+        }
+        return Err(graphforge_core::GfError::Storage(
+            "property source contains a special file".into(),
+        ));
+    }
+    paths.sort_by(|left, right| left.1.cmp(&right.1));
+    paths.dedup_by(|left, right| left.1 == right.1);
+    Ok(paths)
+}
+
+/// Read all node rows from every canonical topology fragment.
 pub fn read_nodes(dir: &Path) -> Result<Vec<RecordBatch>, DataFusionError> {
-    let path = dir.join("topology").join("nodes.parquet");
-    let batches =
-        normalize_topology_nodes(read_parquet_or_empty(&path, TOPOLOGY_NODES_SCHEMA.clone())?)?;
+    let paths = crate::mutator::node_parquet_files(dir)
+        .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+    let mut batches = Vec::new();
+    for path in paths {
+        batches.extend(normalize_topology_nodes(read_parquet_or_empty(
+            &path,
+            TOPOLOGY_NODES_SCHEMA.clone(),
+        )?)?);
+    }
+    if batches.is_empty() {
+        batches.push(RecordBatch::new_empty(TOPOLOGY_NODES_SCHEMA.clone()));
+    }
+    let mut uuids = std::collections::HashSet::new();
+    let mut surrogates = std::collections::HashSet::new();
+    for batch in &batches {
+        let uuid = batch
+            .column_by_name("node_uuid")
+            .and_then(|array| {
+                array
+                    .as_any()
+                    .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
+            })
+            .ok_or_else(|| DataFusionError::Execution("node_uuid is not fixed binary".into()))?;
+        let surrogate = batch
+            .column_by_name("node_id")
+            .and_then(|array| array.as_any().downcast_ref::<arrow::array::UInt64Array>())
+            .ok_or_else(|| DataFusionError::Execution("node_id is not UInt64".into()))?;
+        for row in 0..batch.num_rows() {
+            if !uuids.insert(uuid.value(row).to_vec()) || !surrogates.insert(surrogate.value(row)) {
+                return Err(DataFusionError::Execution(
+                    "canonical node shards contain a duplicate UUID or surrogate".into(),
+                ));
+            }
+        }
+    }
     crate::io_stats::record_node_full_read(total_rows(&batches));
     Ok(batches)
+}
+
+/// Whether at least one canonical legacy or sharded node file exists.
+pub fn node_topology_present(dir: &Path) -> Result<bool, DataFusionError> {
+    Ok(!crate::mutator::node_parquet_files(dir)
+        .map_err(|error| DataFusionError::Execution(error.to_string()))?
+        .is_empty())
 }
 
 /// Like [`read_nodes`] but returns only rows whose `node_id` is in `node_ids` —
@@ -962,15 +1157,23 @@ pub fn read_nodes_filtered_observed(
     node_ids: &std::collections::HashSet<u64>,
     observer: Option<&std::sync::Arc<dyn crate::io_stats::FilteredReadObserver>>,
 ) -> Result<Vec<RecordBatch>, DataFusionError> {
-    let path = dir.join("topology").join("nodes.parquet");
-    normalize_topology_nodes(read_parquet_filtered_u64(
-        &path,
-        TOPOLOGY_NODES_SCHEMA.clone(),
-        "node_id",
-        node_ids,
-        FilteredReadKind::Node,
-        observer,
-    )?)
+    let paths = crate::mutator::node_parquet_files(dir)
+        .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+    let mut batches = Vec::new();
+    for path in paths {
+        batches.extend(normalize_topology_nodes(read_parquet_filtered_u64(
+            &path,
+            TOPOLOGY_NODES_SCHEMA.clone(),
+            "node_id",
+            node_ids,
+            FilteredReadKind::Node,
+            observer,
+        )?)?);
+    }
+    if batches.is_empty() {
+        batches.push(RecordBatch::new_empty(TOPOLOGY_NODES_SCHEMA.clone()));
+    }
+    Ok(batches)
 }
 
 /// Return the largest `edge_id` surrogate across every edge file under
@@ -983,25 +1186,14 @@ pub fn read_nodes_filtered_observed(
 /// # Errors
 /// Propagates Parquet / Arrow errors encountered while reading an edge file.
 pub(crate) fn max_edge_id(dir: &Path) -> Result<u64, DataFusionError> {
-    let edges_dir = dir.join("topology").join("edges");
-    let entries = match std::fs::read_dir(&edges_dir) {
-        Ok(rd) => rd,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-        Err(e) => return Err(io_err(&e)),
-    };
-
     let mut max = 0u64;
-    for entry in entries {
-        let path = entry.map_err(|e| io_err(&e))?.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("parquet") {
-            continue;
-        }
-        // Preserve discovery semantics: unrelated/corrupt edge artifacts are
-        // ignored here and rejected by the normal catalog validation path.
-        // Surrogate recovery must still inspect every readable relation stem.
-        if let Ok(candidate) = max_ordered_u64_tail(&path, "edge_id") {
-            max = max.max(candidate);
-        }
+    for (_, path) in crate::mutator::edge_parquet_files(dir, None)
+        .map_err(|error| DataFusionError::Execution(error.to_string()))?
+    {
+        // Every enumerated Parquet path is canonical topology. Ignoring a
+        // malformed shard here could resume surrogate allocation from an
+        // incomplete maximum and authenticate colliding edge identities.
+        max = max.max(max_ordered_u64_tail(&path, "edge_id")?);
     }
     Ok(max)
 }
@@ -1010,7 +1202,13 @@ pub(crate) fn max_edge_id(dir: &Path) -> Result<u64, DataFusionError> {
 /// node table. Canonical topology keeps surrogate ids strictly increasing, so
 /// only the final bounded Parquet row group is needed.
 pub(crate) fn max_node_id(dir: &Path) -> Result<u64, DataFusionError> {
-    max_ordered_u64_tail(&dir.join("topology/nodes.parquet"), "node_id")
+    let mut max = 0;
+    for path in crate::mutator::node_parquet_files(dir)
+        .map_err(|error| DataFusionError::Execution(error.to_string()))?
+    {
+        max = max.max(max_ordered_u64_tail(&path, "node_id")?);
+    }
+    Ok(max)
 }
 
 fn max_ordered_u64_tail(path: &Path, column: &str) -> Result<u64, DataFusionError> {
@@ -1226,12 +1424,412 @@ where
     visit_property_overlay_batched(dir, stem, false, batch_size, visit)
 }
 
-/// Visit `topology/nodes.parquet` one bounded batch at a time (#706).
+/// Visit the authenticated newest-wins node-property overlay while retaining
+/// exact physical-fragment evidence for source-byte admission and snapshots.
+///
+/// Every physical fragment is admitted and authenticated once by storage, but
+/// `visit` receives only the newest live row for each UUID in a route. This
+/// keeps consumers from mistaking superseded immutable snapshots for duplicate
+/// logical rows.
+pub fn visit_node_property_overlay_admitted<F>(
+    dir: &Path,
+    batch_size: usize,
+    byte_limit: u64,
+    projected_columns: Option<&std::collections::BTreeSet<String>>,
+    evidence: &mut Vec<AdmittedSourceFile>,
+    mut visit: F,
+) -> Result<u64, DataFusionError>
+where
+    F: FnMut(&str, &RecordBatch) -> Result<bool, DataFusionError>,
+{
+    let inventory = crate::property_overlay::authenticated_property_inventory(dir)
+        .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+    let admitted = inventory
+        .admitted_source_files(crate::property_overlay::PropertyRouteKind::Node)
+        .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+    let total = admitted.iter().try_fold(0_u64, |sum, file| {
+        sum.checked_add(file.byte_length).ok_or_else(|| {
+            DataFusionError::ResourcesExhausted("property source bytes overflow".into())
+        })
+    })?;
+    if total > byte_limit {
+        return Err(DataFusionError::ResourcesExhausted(format!(
+            "property source bytes exceed {byte_limit}"
+        )));
+    }
+
+    let routes = inventory
+        .routes(crate::property_overlay::PropertyRouteKind::Node)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let scratch = tempfile::tempdir().map_err(|error| io_err(&error))?;
+    let mut stopped = false;
+    for route in routes {
+        let mut rows = Vec::with_capacity(batch_size.max(1));
+        inventory
+            .visit_route(
+                crate::property_overlay::PropertyRouteKind::Node,
+                &route,
+                scratch.path(),
+                crate::property_overlay::PropertyOverlayLimits::default(),
+                |mut row| {
+                    if stopped {
+                        return Ok(());
+                    }
+                    if let Some(columns) = projected_columns {
+                        row.values.retain(|name, _| columns.contains(name));
+                    }
+                    rows.push(row);
+                    if rows.len() >= batch_size.max(1) {
+                        let batch = crate::writer::property_snapshots_to_batch(
+                            &route,
+                            false,
+                            std::mem::take(&mut rows),
+                        )?
+                        .ok_or_else(|| {
+                            graphforge_core::GfError::Storage("property batch disappeared".into())
+                        })?;
+                        stopped = !visit(&route, &batch).map_err(|error| {
+                            graphforge_core::GfError::Storage(error.to_string())
+                        })?;
+                    }
+                    Ok(())
+                },
+            )
+            .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+        if !stopped && !rows.is_empty() {
+            let batch = crate::writer::property_snapshots_to_batch(&route, false, rows)
+                .map_err(|error| DataFusionError::Execution(error.to_string()))?
+                .ok_or_else(|| DataFusionError::Execution("property batch disappeared".into()))?;
+            stopped = !visit(&route, &batch)?;
+        }
+        if stopped {
+            break;
+        }
+    }
+    evidence.extend(admitted);
+    Ok(total)
+}
+
+/// Visit an already-enumerated property source set through the same stable file
+/// handles used for byte admission. This prevents pathname replacement between
+/// accounting and Parquet decode and bounds each compressed column chunk before
+/// Arrow allocation.
+pub fn visit_property_fragments_admitted<F>(
+    fragments: &[(String, PathBuf)],
+    batch_size: usize,
+    byte_limit: u64,
+    projected_columns: Option<&std::collections::BTreeSet<String>>,
+    evidence: &mut Vec<AdmittedSourceFile>,
+    mut visit: F,
+) -> Result<u64, DataFusionError>
+where
+    F: FnMut(&str, &RecordBatch) -> Result<bool, DataFusionError>,
+{
+    let mut total = 0_u64;
+    for (stem, path) in fragments {
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        }
+        let mut file = options.open(path).map_err(|e| io_err(&e))?;
+        let metadata = file.metadata().map_err(|e| io_err(&e))?;
+        if !metadata.file_type().is_file() {
+            return Err(DataFusionError::Execution(format!(
+                "property source {} is not a regular file",
+                path.display()
+            )));
+        }
+        total = total.checked_add(metadata.len()).ok_or_else(|| {
+            DataFusionError::ResourcesExhausted("property source bytes overflow".into())
+        })?;
+        if total > byte_limit {
+            return Err(DataFusionError::ResourcesExhausted(format!(
+                "property source bytes exceed {byte_limit}"
+            )));
+        }
+        preflight_parquet_handle(&mut file, metadata.len())?;
+        evidence.push(hash_admitted_source(
+            property_relative_name(stem, path)?,
+            &mut file,
+            metadata.len(),
+        )?);
+        let mut builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(parquet_err)?;
+        admit_decoded_parquet(&builder)?;
+        if let Some(columns) = projected_columns {
+            use parquet::arrow::ProjectionMask;
+            let roots = builder
+                .schema()
+                .fields()
+                .iter()
+                .enumerate()
+                .filter_map(|(index, field)| columns.contains(field.name()).then_some(index))
+                .collect::<Vec<_>>();
+            let projection = ProjectionMask::roots(builder.parquet_schema(), roots);
+            builder = builder.with_projection(projection);
+        }
+        let reader = builder
+            .with_batch_size(batch_size.max(1))
+            .build()
+            .map_err(parquet_err)?;
+        for batch in reader {
+            let batch = batch.map_err(parquet_err)?;
+            if !visit(stem, &batch)? {
+                return Ok(total);
+            }
+        }
+    }
+    Ok(total)
+}
+
+const MAX_ADMITTED_PARQUET_COLUMNS: usize = 4_096;
+const MAX_ADMITTED_PARQUET_METADATA_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_ADMITTED_ROW_GROUP_BYTES: i64 = 256 * 1024 * 1024;
+const MAX_ADMITTED_COLUMN_BYTES: i64 = 64 * 1024 * 1024;
+
+/// Open one path through the storage-wide fail-closed Parquet admission policy.
+pub(crate) fn admitted_parquet(
+    path: &Path,
+) -> Result<ParquetRecordBatchReaderBuilder<File>, DataFusionError> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
+    }
+    let mut file = options.open(path).map_err(|error| io_err(&error))?;
+    let metadata = file.metadata().map_err(|error| io_err(&error))?;
+    if !metadata.file_type().is_file() {
+        return Err(DataFusionError::Execution(format!(
+            "Parquet source {} is not a regular file",
+            path.display()
+        )));
+    }
+    preflight_parquet_handle(&mut file, metadata.len())?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(parquet_err)?;
+    admit_decoded_parquet(&builder)?;
+    Ok(builder)
+}
+
+fn preflight_parquet_handle(file: &mut File, length: u64) -> Result<(), DataFusionError> {
+    if length < 12 {
+        return Err(DataFusionError::Execution(
+            "Parquet footer is truncated".into(),
+        ));
+    }
+    file.seek(SeekFrom::Start(0)).map_err(|e| io_err(&e))?;
+    let mut leading = [0_u8; 4];
+    file.read_exact(&mut leading).map_err(|e| io_err(&e))?;
+    if &leading != b"PAR1" {
+        return Err(DataFusionError::Execution(
+            "Parquet leading magic is invalid".into(),
+        ));
+    }
+    file.seek(SeekFrom::End(-8)).map_err(|e| io_err(&e))?;
+    let mut footer = [0_u8; 8];
+    file.read_exact(&mut footer).map_err(|e| io_err(&e))?;
+    let metadata_len = u64::from(u32::from_le_bytes(footer[..4].try_into().unwrap()));
+    if &footer[4..] != b"PAR1"
+        || metadata_len > MAX_ADMITTED_PARQUET_METADATA_BYTES
+        || metadata_len
+            .checked_add(8)
+            .is_none_or(|bytes| bytes > length)
+    {
+        return Err(DataFusionError::ResourcesExhausted(
+            "Parquet metadata exceeds admission limit".into(),
+        ));
+    }
+    file.seek(SeekFrom::Start(0)).map_err(|e| io_err(&e))?;
+    Ok(())
+}
+
+fn admit_decoded_parquet(
+    builder: &ParquetRecordBatchReaderBuilder<File>,
+) -> Result<(), DataFusionError> {
+    if builder.schema().fields().len() > MAX_ADMITTED_PARQUET_COLUMNS {
+        return Err(DataFusionError::ResourcesExhausted(
+            "Parquet schema exceeds column admission limit".into(),
+        ));
+    }
+    for group in builder.metadata().row_groups() {
+        if group.total_byte_size() < 0 || group.total_byte_size() > MAX_ADMITTED_ROW_GROUP_BYTES {
+            return Err(DataFusionError::ResourcesExhausted(
+                "Parquet row group exceeds decoded-byte admission limit".into(),
+            ));
+        }
+        for column in group.columns() {
+            if column.uncompressed_size() < 0
+                || column.uncompressed_size() > MAX_ADMITTED_COLUMN_BYTES
+            {
+                return Err(DataFusionError::ResourcesExhausted(
+                    "Parquet column chunk exceeds decoded-byte admission limit".into(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Visit canonical topology fragments with byte/decode admission and decoding
+/// performed through the same no-follow file handle.
+pub fn visit_node_fragments_admitted<F>(
+    dir: &Path,
+    batch_size: usize,
+    byte_limit: u64,
+    evidence: &mut Vec<AdmittedSourceFile>,
+    mut visit: F,
+) -> Result<u64, DataFusionError>
+where
+    F: FnMut(&RecordBatch) -> Result<bool, DataFusionError>,
+{
+    let paths = crate::mutator::node_parquet_files(dir)
+        .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+    let mut total = 0_u64;
+    for path in paths {
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        }
+        let mut file = options.open(&path).map_err(|e| io_err(&e))?;
+        let metadata = file.metadata().map_err(|e| io_err(&e))?;
+        if !metadata.file_type().is_file() {
+            return Err(DataFusionError::Execution(format!(
+                "topology source {} is not a regular file",
+                path.display()
+            )));
+        }
+        total = total.checked_add(metadata.len()).ok_or_else(|| {
+            DataFusionError::ResourcesExhausted("topology source bytes overflow".into())
+        })?;
+        if total > byte_limit {
+            return Err(DataFusionError::ResourcesExhausted(format!(
+                "topology source bytes exceed {byte_limit}"
+            )));
+        }
+        preflight_parquet_handle(&mut file, metadata.len())?;
+        evidence.push(hash_admitted_source(
+            node_relative_name(&path)?,
+            &mut file,
+            metadata.len(),
+        )?);
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(parquet_err)?;
+        admit_decoded_parquet(&builder)?;
+        for batch in builder
+            .with_batch_size(batch_size.max(1))
+            .build()
+            .map_err(parquet_err)?
+        {
+            let batch = batch.map_err(parquet_err)?;
+            for normalized in normalize_topology_nodes(vec![batch])? {
+                if !visit(&normalized)? {
+                    return Ok(total);
+                }
+            }
+        }
+    }
+    Ok(total)
+}
+
+/// Content identity captured from the same stable handle later decoded by a
+/// bounded graph-source visitor.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AdmittedSourceFile {
+    /// Canonical graph-root-relative source name.
+    pub name: String,
+    /// Exact handle length admitted before hashing and decode.
+    pub byte_length: u64,
+    /// SHA-256 of the complete bytes read from that handle.
+    pub sha256: [u8; 32],
+}
+
+fn property_relative_name(stem: &str, path: &Path) -> Result<String, DataFusionError> {
+    let file = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| DataFusionError::Execution("property source name is not UTF-8".into()))?;
+    Ok(
+        if path
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            == Some(stem)
+        {
+            format!("properties/{stem}/{file}")
+        } else {
+            format!("properties/{file}")
+        },
+    )
+}
+
+fn node_relative_name(path: &Path) -> Result<String, DataFusionError> {
+    let file = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| DataFusionError::Execution("topology source name is not UTF-8".into()))?;
+    Ok(
+        if path
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            == Some("nodes")
+        {
+            format!("topology/nodes/{file}")
+        } else {
+            "topology/nodes.parquet".into()
+        },
+    )
+}
+
+fn hash_admitted_source(
+    name: String,
+    file: &mut File,
+    length: u64,
+) -> Result<AdmittedSourceFile, DataFusionError> {
+    file.seek(SeekFrom::Start(0)).map_err(|e| io_err(&e))?;
+    let mut digest = Sha256::new();
+    let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
+    let mut read = 0_u64;
+    loop {
+        let count = file.read(&mut buffer).map_err(|e| io_err(&e))?;
+        if count == 0 {
+            break;
+        }
+        read = read.checked_add(count as u64).ok_or_else(|| {
+            DataFusionError::ResourcesExhausted("graph source length overflow".into())
+        })?;
+        if read > length {
+            return Err(DataFusionError::Execution(
+                "graph source changed while hashing admitted handle".into(),
+            ));
+        }
+        digest.update(&buffer[..count]);
+    }
+    if read != length {
+        return Err(DataFusionError::Execution(
+            "graph source changed while hashing admitted handle".into(),
+        ));
+    }
+    file.seek(SeekFrom::Start(0)).map_err(|e| io_err(&e))?;
+    Ok(AdmittedSourceFile {
+        name,
+        byte_length: length,
+        sha256: digest.finalize().into(),
+    })
+}
+
+/// Visit the canonical node-topology shard union one bounded batch at a time (#706).
 ///
 /// Applies the same legacy `type_id` → `type_ids` normalization as
 /// [`read_nodes`]. `visit` returns `Ok(true)` to continue or `Ok(false)` to
-/// stop early. A missing file yields a single empty schema-shaped batch (parity
-/// with [`read_nodes`]).
+/// stop early. An absent node topology yields a single empty schema-shaped
+/// batch (parity with [`read_nodes`]).
 ///
 /// # Errors
 /// Propagates Parquet / Arrow / normalization errors, or any error from `visit`.
@@ -1243,24 +1841,28 @@ pub fn visit_nodes_batched<F>(
 where
     F: FnMut(&RecordBatch) -> Result<bool, DataFusionError>,
 {
-    let path = dir.join("topology").join("nodes.parquet");
-    if !path.exists() {
+    let paths = crate::mutator::node_parquet_files(dir)
+        .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+    if paths.is_empty() {
         let empty = RecordBatch::new_empty(TOPOLOGY_NODES_SCHEMA.clone());
         let _ = visit(&empty)?;
         return Ok(());
     }
-    let file = File::open(&path).map_err(|e| io_err(&e))?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(parquet_err)?;
-    let builder = builder.with_batch_size(batch_size.max(1));
-    let reader = builder.build().map_err(parquet_err)?;
     let mut any = false;
-    for batch in reader {
-        any = true;
-        let batch = batch.map_err(parquet_err)?;
-        let normalized = normalize_topology_nodes(vec![batch])?;
-        for b in &normalized {
-            if !visit(b)? {
-                return Ok(());
+    for path in paths {
+        let file = File::open(&path).map_err(|e| io_err(&e))?;
+        let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+            .map_err(parquet_err)?
+            .with_batch_size(batch_size.max(1))
+            .build()
+            .map_err(parquet_err)?;
+        for batch in reader {
+            any = true;
+            let normalized = normalize_topology_nodes(vec![batch.map_err(parquet_err)?])?;
+            for b in &normalized {
+                if !visit(b)? {
+                    return Ok(());
+                }
             }
         }
     }
@@ -1325,17 +1927,25 @@ fn list_parquet_stems(dir: &Path) -> Vec<String> {
 // TopologyNodeTable
 // ---------------------------------------------------------------------------
 
-/// [`TableProvider`] for `topology/nodes.parquet`.
+/// [`TableProvider`] for the logical legacy-plus-canonical node shard union.
 #[derive(Debug, Clone)]
 pub struct TopologyNodeTable {
-    path: PathBuf,
+    paths: Vec<PathBuf>,
 }
 
 impl TopologyNodeTable {
-    /// Create a table backed by the given Parquet file path.
+    /// Create a table backed by one legacy or canonical Parquet fragment.
     #[must_use]
     pub fn new(path: PathBuf) -> Self {
-        Self { path }
+        Self { paths: vec![path] }
+    }
+
+    /// Open every canonical node topology fragment in deterministic order.
+    pub fn open_project(dir: &Path) -> Result<Self, DataFusionError> {
+        Ok(Self {
+            paths: crate::mutator::node_parquet_files(dir)
+                .map_err(|error| DataFusionError::Execution(error.to_string()))?,
+        })
     }
 }
 
@@ -1357,10 +1967,15 @@ impl TableProvider for TopologyNodeTable {
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
         // Existence only — no Parquet decode during planning (#339).
-        let fragment = ParquetFragment::for_path(self.path.clone(), true);
+        let fragments = self
+            .paths
+            .iter()
+            .cloned()
+            .map(|path| ParquetFragment::for_path(path, true))
+            .collect();
         scan_fragments(
             TOPOLOGY_NODES_SCHEMA.clone(),
-            vec![fragment],
+            fragments,
             projection,
             limit,
             state.config().batch_size(),
@@ -1375,7 +1990,8 @@ impl TableProvider for TopologyNodeTable {
 /// [`TableProvider`] for `topology/edges/TYPENAME.parquet`.
 #[derive(Debug, Clone)]
 pub struct TypedEdgeTable {
-    path: PathBuf,
+    dir: PathBuf,
+    rel_type_name: String,
     schema: SchemaRef,
 }
 
@@ -1386,16 +2002,16 @@ impl TypedEdgeTable {
     /// - any other name → [`TYPED_EDGE_SCHEMA`]
     #[must_use]
     pub fn open(dir: &Path, rel_type_name: &str) -> Self {
-        let path = dir
-            .join("topology")
-            .join("edges")
-            .join(format!("{rel_type_name}.parquet"));
         let schema = if rel_type_name == "_exploratory" {
             EXPLORATORY_EDGE_SCHEMA.clone()
         } else {
             TYPED_EDGE_SCHEMA.clone()
         };
-        Self { path, schema }
+        Self {
+            dir: dir.to_path_buf(),
+            rel_type_name: rel_type_name.to_owned(),
+            schema,
+        }
     }
 }
 
@@ -1416,10 +2032,14 @@ impl TableProvider for TypedEdgeTable {
         _filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
-        let fragment = ParquetFragment::for_path(self.path.clone(), false);
+        let fragments = crate::mutator::edge_parquet_files(&self.dir, Some(&self.rel_type_name))
+            .map_err(|error| DataFusionError::Execution(error.to_string()))?
+            .into_iter()
+            .map(|(_, path)| ParquetFragment::for_path(path, false))
+            .collect();
         scan_fragments(
             self.schema.clone(),
-            vec![fragment],
+            fragments,
             projection,
             limit,
             state.config().batch_size(),
@@ -1469,20 +2089,10 @@ impl TableProvider for UnionEdgeTable {
         _filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
-        // Directory listing only — stem order matches `read_edges_union`.
-        let mut files = crate::mutator::parquet_files_in(&self.dir, "topology/edges")
-            .map_err(|e| DataFusionError::Execution(e.to_string()))?;
-        files.sort();
-        let fragments: Vec<ParquetFragment> = files
+        let fragments: Vec<ParquetFragment> = crate::mutator::edge_parquet_files(&self.dir, None)
+            .map_err(|error| DataFusionError::Execution(error.to_string()))?
             .into_iter()
-            .map(|path| {
-                let stem = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or_default()
-                    .to_owned();
-                ParquetFragment::for_union_edge(path, stem)
-            })
+            .map(|(stem, path)| ParquetFragment::for_union_edge(path, stem))
             .collect();
         scan_fragments(
             EXPLORATORY_EDGE_SCHEMA.clone(),
@@ -1920,10 +2530,9 @@ impl GraphCatalog {
         let mut schema = GraphSchema::new();
 
         // ---- topology nodes ----
-        let nodes_path = dir.join("topology").join("nodes.parquet");
         schema.register(
             "topology_nodes",
-            Arc::new(TopologyNodeTable::new(nodes_path)),
+            Arc::new(TopologyNodeTable::open_project(dir)?),
         );
 
         // ---- typed edge tables ----
@@ -2377,8 +2986,48 @@ mod tests {
     use datafusion::prelude::SessionContext;
     use parquet::arrow::ArrowWriter;
     use parquet::file::properties::WriterProperties;
-    use std::collections::HashMap;
+    use std::collections::{BTreeSet, HashMap};
     use tempfile::TempDir;
+
+    #[test]
+    fn catalog_parquet_admission_rejects_directory_and_bad_leading_magic() {
+        let root = TempDir::new().unwrap();
+        assert!(admitted_parquet(root.path()).is_err());
+        let bad = root.path().join("bad.parquet");
+        std::fs::write(&bad, b"NOPE\0\0\0\0PAR1").unwrap();
+        assert!(
+            admitted_parquet(&bad)
+                .unwrap_err()
+                .to_string()
+                .contains("leading magic")
+        );
+        let bad_footer = root.path().join("bad-footer.parquet");
+        std::fs::write(&bad_footer, b"PAR1\0\0\0\0NOPE").unwrap();
+        assert!(admitted_parquet(&bad_footer).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn catalog_parquet_admission_rejects_symlink_and_fifo_without_blocking() {
+        use std::os::unix::fs::symlink;
+
+        let root = TempDir::new().unwrap();
+        let target = root.path().join("target.parquet");
+        std::fs::write(&target, b"NOPE\0\0\0\0PAR1").unwrap();
+        let link = root.path().join("link.parquet");
+        symlink(&target, &link).unwrap();
+        assert!(admitted_parquet(&link).is_err());
+
+        let fifo = root.path().join("pipe.parquet");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(admitted_parquet(&fifo).is_err());
+    }
 
     #[test]
     fn raw_catalog_shares_one_authenticated_property_inventory() {
@@ -2575,7 +3224,12 @@ mod tests {
     }
 
     fn write_nodes_parquet(path: &Path) {
-        let uuid_bytes: Vec<u8> = vec![1u8; 16];
+        write_nodes_parquet_value(path, 1, 1);
+    }
+
+    fn write_nodes_parquet_value(path: &Path, uuid_byte: u8, node_id: u64) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let uuid_bytes: Vec<u8> = vec![uuid_byte; 16];
         let uuid_arr =
             FixedSizeBinaryArray::try_from_iter(std::iter::once(uuid_bytes.clone())).unwrap();
         let ts =
@@ -2591,7 +3245,7 @@ mod tests {
             TOPOLOGY_NODES_SCHEMA.clone(),
             vec![
                 Arc::new(uuid_arr),
-                Arc::new(UInt64Array::from(vec![1u64])),
+                Arc::new(UInt64Array::from(vec![node_id])),
                 Arc::new(UInt32Array::from(vec![0u32])),
                 Arc::new(labels),
                 Arc::new(ts.clone()),
@@ -2609,6 +3263,36 @@ mod tests {
         .unwrap();
         writer.write(&batch).unwrap();
         writer.close().unwrap();
+    }
+
+    #[test]
+    fn ordinary_node_readers_union_legacy_and_canonical_shards() {
+        let dir = TempDir::new().unwrap();
+        write_nodes_parquet_value(&dir.path().join("topology/nodes.parquet"), 1, 1);
+        write_nodes_parquet_value(
+            &dir.path()
+                .join("topology/nodes/00000000000000000002-00000000000000000002.parquet"),
+            2,
+            2,
+        );
+        let batches = read_nodes(dir.path()).unwrap();
+        assert_eq!(total_rows(&batches), 2);
+        assert_eq!(max_node_id(dir.path()).unwrap(), 2);
+        let filtered =
+            read_nodes_filtered(dir.path(), &std::collections::HashSet::from([2])).unwrap();
+        assert_eq!(total_rows(&filtered), 1);
+        let mut visited = 0;
+        visit_nodes_batched(dir.path(), 1, |batch| {
+            visited += batch.num_rows();
+            Ok(true)
+        })
+        .unwrap();
+        assert_eq!(visited, 2);
+
+        std::fs::remove_file(dir.path().join("topology/nodes.parquet")).unwrap();
+        let shard_only = read_nodes(dir.path()).unwrap();
+        assert_eq!(total_rows(&shard_only), 1);
+        assert_eq!(max_node_id(dir.path()).unwrap(), 2);
     }
 
     #[test]
@@ -2701,6 +3385,29 @@ mod tests {
         let batches = df.collect().await.unwrap();
         let total: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total, 1);
+    }
+
+    #[tokio::test]
+    async fn topology_node_table_scan_unions_mixed_layout() {
+        let dir = TempDir::new().unwrap();
+        write_nodes_parquet_value(&dir.path().join("topology/nodes.parquet"), 1, 1);
+        write_nodes_parquet_value(
+            &dir.path()
+                .join("topology/nodes/00000000000000000002-00000000000000000002.parquet"),
+            2,
+            2,
+        );
+        let table = TopologyNodeTable::open_project(dir.path()).unwrap();
+        let ctx = SessionContext::new();
+        ctx.register_table("nodes", Arc::new(table)).unwrap();
+        let batches = ctx
+            .sql("SELECT node_id FROM nodes ORDER BY node_id")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 2);
     }
 
     #[tokio::test]
@@ -3324,12 +4031,156 @@ mod tests {
     }
 
     #[test]
-    fn wave12_max_edge_id_skips_non_parquet_and_corrupt_parquet_entries() {
+    fn wave12_max_edge_id_ignores_non_parquet_but_rejects_corrupt_canonical_shards() {
         let dir = TempDir::new().unwrap();
         let edges = dir.path().join("topology/edges");
         std::fs::create_dir_all(&edges).unwrap();
         std::fs::write(edges.join("note.txt"), b"not parquet").unwrap();
         std::fs::write(edges.join("broken.parquet"), b"not parquet").unwrap();
-        assert_eq!(max_edge_id(dir.path()).unwrap(), 0);
+        assert!(max_edge_id(dir.path()).is_err());
+    }
+
+    #[test]
+    fn admitted_property_projection_retains_one_handle_across_replacement() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("route.parquet");
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+            Field::new("wanted", DataType::Utf8, true),
+            Field::new("ignored", DataType::Utf8, true),
+        ]));
+        let file = File::create(&path).unwrap();
+        let mut writer = ArrowWriter::try_new(
+            file,
+            schema.clone(),
+            Some(
+                WriterProperties::builder()
+                    .set_max_row_group_row_count(Some(1))
+                    .build(),
+            ),
+        )
+        .unwrap();
+        for value in ["one", "two"] {
+            writer
+                .write(
+                    &RecordBatch::try_new(
+                        schema.clone(),
+                        vec![
+                            Arc::new(
+                                FixedSizeBinaryArray::try_from_iter(std::iter::once(vec![1; 16]))
+                                    .unwrap(),
+                            ),
+                            Arc::new(StringArray::from(vec![value])),
+                            Arc::new(StringArray::from(vec!["unused"])),
+                        ],
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        writer.close().unwrap();
+        let fragments = vec![("route".to_owned(), path.clone())];
+        let columns = BTreeSet::from(["node_uuid".to_owned(), "wanted".to_owned()]);
+        let mut rows = 0;
+        let mut evidence = Vec::new();
+        visit_property_fragments_admitted(
+            &fragments,
+            1,
+            u64::MAX,
+            Some(&columns),
+            &mut evidence,
+            |_, batch| {
+                assert_eq!(batch.num_columns(), 2);
+                rows += batch.num_rows();
+                if rows == 1 {
+                    std::fs::rename(&path, path.with_extension("original")).unwrap();
+                    std::fs::write(&path, b"replacement is not parquet").unwrap();
+                } else if rows == 2 {
+                    std::fs::remove_file(&path).unwrap();
+                    std::fs::rename(path.with_extension("original"), &path).unwrap();
+                }
+                Ok(true)
+            },
+        )
+        .unwrap();
+        assert_eq!(rows, 2);
+        assert_eq!(evidence.len(), 1, "one admitted handle emits one identity");
+        let mut reopened = Vec::new();
+        visit_property_fragments_admitted(
+            &fragments,
+            1,
+            u64::MAX,
+            Some(&columns),
+            &mut reopened,
+            |_, _| Ok(true),
+        )
+        .unwrap();
+        assert_eq!(
+            reopened, evidence,
+            "A-B-A cannot redirect the decoded handle"
+        );
+    }
+
+    #[test]
+    fn admitted_property_rejects_wide_schema_before_decode() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("wide.parquet");
+        let fields = (0..=MAX_ADMITTED_PARQUET_COLUMNS)
+            .map(|index| Field::new(format!("c{index}"), DataType::Utf8, true))
+            .collect::<Vec<_>>();
+        let schema = Arc::new(Schema::new(fields));
+        let arrays = (0..schema.fields().len())
+            .map(|_| Arc::new(StringArray::from(Vec::<Option<&str>>::new())) as Arc<dyn Array>)
+            .collect();
+        let batch = RecordBatch::try_new(schema.clone(), arrays).unwrap();
+        let mut writer = ArrowWriter::try_new(File::create(&path).unwrap(), schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        let error = visit_property_fragments_admitted(
+            &[("wide".to_owned(), path)],
+            1,
+            u64::MAX,
+            None,
+            &mut Vec::new(),
+            |_, _| Ok(true),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("column admission limit"));
+    }
+
+    #[test]
+    fn admitted_property_rejects_compressed_decode_expansion() {
+        use parquet::basic::Compression;
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("compressed.parquet");
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "payload",
+            DataType::Utf8,
+            false,
+        )]));
+        let payload = "x".repeat(usize::try_from(MAX_ADMITTED_COLUMN_BYTES).unwrap() + 1);
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(StringArray::from(vec![payload]))],
+        )
+        .unwrap();
+        let properties = WriterProperties::builder()
+            .set_compression(Compression::ZSTD(parquet::basic::ZstdLevel::default()))
+            .build();
+        let mut writer =
+            ArrowWriter::try_new(File::create(&path).unwrap(), schema, Some(properties)).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        let error = visit_property_fragments_admitted(
+            &[("compressed".to_owned(), path)],
+            1,
+            u64::MAX,
+            None,
+            &mut Vec::new(),
+            |_, _| Ok(true),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("decoded-byte admission limit"));
     }
 }

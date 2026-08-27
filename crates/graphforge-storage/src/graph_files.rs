@@ -638,7 +638,8 @@ pub(crate) fn is_graph_operational_file(relative: &Path) -> bool {
         return false;
     };
     match components.as_slice() {
-        [".graphforge-rewrite.lock"]
+        [".graphforge-cache", ..]
+        | [".graphforge-rewrite.lock"]
         | ["embeddings", ".catalog.lock" | ".refresh.lock"]
         | ["graph-objects", "lifecycle.lock"]
         | ["indexes", "search", .., ".writer.lock"] => true,
@@ -932,6 +933,14 @@ mod tests {
         fs::write(source.path().join("topology/nodes.parquet"), b"nodes").unwrap();
         fs::write(source.path().join("topology/edges/knows.parquet"), b"edges").unwrap();
         fs::write(source.path().join(".graphforge-rewrite.lock"), b"ignored").unwrap();
+        fs::create_dir_all(source.path().join(".graphforge-cache/uuid-membership")).unwrap();
+        fs::write(
+            source
+                .path()
+                .join(".graphforge-cache/uuid-membership/manifest.json"),
+            b"derived",
+        )
+        .unwrap();
 
         let (inventory, participant) = capture_graph_files(source.path()).unwrap();
         assert_eq!(inventory.file_count, 2);
@@ -957,6 +966,11 @@ mod tests {
         assert!(inventory.files.iter().any(|entry| {
             entry.relative_path == "topology/edges/KNOWS/.gf-stage-injected.parquet"
         }));
+        assert!(
+            crate::mutator::edge_parquet_files(source.path(), None).is_err(),
+            "non-canonical staged-looking names are authenticated but never topology"
+        );
+
         let generation = tempfile::tempdir().unwrap();
         stage_graph_tree(source.path(), generation.path(), &inventory).unwrap();
         let graph_root = graph_tree_root(generation.path());

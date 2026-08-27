@@ -140,6 +140,61 @@ impl RewriteBatch {
         Self::default()
     }
 
+    /// Stage an authenticated control record in the same rename unit as graph data.
+    pub(crate) fn stage_bytes(&mut self, final_path: &Path, bytes: &[u8]) -> Result<(), GfError> {
+        let parent = final_path
+            .parent()
+            .ok_or_else(|| GfError::Storage("staged control record has no parent".into()))?;
+        std::fs::create_dir_all(parent).map_err(|error| io_err(&error))?;
+        let mut temp = NamedTempFile::new_in(parent).map_err(|error| io_err(&error))?;
+        let uuid_participant = final_path
+            .components()
+            .any(|component| component.as_os_str() == "uuid-membership");
+        if uuid_participant {
+            crate::io_stats::record_uuid_file_open();
+        }
+        std::io::Write::write_all(&mut temp, bytes).map_err(|error| io_err(&error))?;
+        temp.as_file().sync_all().map_err(|error| io_err(&error))?;
+        if uuid_participant {
+            crate::io_stats::record_uuid_file_sync();
+        }
+        self.staged.push((temp, final_path.to_path_buf()));
+        Ok(())
+    }
+
+    /// Stage an existing file into this transaction using bounded block I/O.
+    pub(crate) fn stage_file(&mut self, final_path: &Path, source: &Path) -> Result<(), GfError> {
+        let parent = final_path
+            .parent()
+            .ok_or_else(|| GfError::Storage("staged file has no parent".into()))?;
+        std::fs::create_dir_all(parent).map_err(|error| io_err(&error))?;
+        let mut input = std::fs::File::open(source).map_err(|error| io_err(&error))?;
+        let mut temp = NamedTempFile::new_in(parent).map_err(|error| io_err(&error))?;
+        let uuid_participant = final_path
+            .components()
+            .any(|component| component.as_os_str() == "uuid-membership");
+        if uuid_participant {
+            crate::io_stats::record_uuid_file_open();
+            crate::io_stats::record_uuid_file_open();
+        }
+        let mut block = vec![0_u8; 1024 * 1024];
+        loop {
+            let count =
+                std::io::Read::read(&mut input, &mut block).map_err(|error| io_err(&error))?;
+            if count == 0 {
+                break;
+            }
+            std::io::Write::write_all(&mut temp, &block[..count])
+                .map_err(|error| io_err(&error))?;
+        }
+        temp.as_file().sync_all().map_err(|error| io_err(&error))?;
+        if uuid_participant {
+            crate::io_stats::record_uuid_file_sync();
+        }
+        self.staged.push((temp, final_path.to_path_buf()));
+        Ok(())
+    }
+
     /// Stage `batch` as the replacement content for `final_path`.
     ///
     /// Writes a sibling temp file (creating the parent directory if needed);
@@ -307,16 +362,80 @@ impl RewriteBatch {
     /// Returns [`GfError`] on a rename failure; files renamed before the
     /// failure stay committed (see the module docs for the consistency bound),
     /// and the remaining temps are removed on drop.
+    #[deprecated(note = "use RewriteBatch::commit_at with an admitted project root")]
     pub fn commit(self) -> Result<(), GfError> {
+        Err(GfError::Storage(
+            "raw staged commit requires an explicit admitted project root".into(),
+        ))
+    }
+
+    /// Commit non-authoritative staged files beneath one explicit project root.
+    ///
+    /// Every destination must be an absolute, normalized descendant whose
+    /// parent is retained through no-follow directory capabilities. Canonical
+    /// graph authorities remain reserved for their generation-sealed paths.
+    pub fn commit_at(self, project_root: &Path) -> Result<(), GfError> {
+        let (root_handle, relative_destinations) = admit_commit_root(project_root, &self.staged)?;
         if let Some(root) = self
             .property_windows
             .values()
             .next()
             .map(|window| window.project_root.clone())
         {
+            if root != project_root {
+                return Err(GfError::Storage(
+                    "property authority root differs from admitted commit root".into(),
+                ));
+            }
             crate::generation::commit_topology_aware(self, &root)?;
             return Ok(());
         }
+        if relative_destinations
+            .iter()
+            .any(|relative| is_reserved_authority(relative))
+        {
+            return Err(GfError::Storage(
+                "reserved graph authority must commit through its sealed publication path".into(),
+            ));
+        }
+        self.commit_retained(&root_handle, &relative_destinations)
+    }
+
+    fn commit_retained(
+        self,
+        root: &graphforge_filesystem::StableDirectory,
+        destinations: &[PathBuf],
+    ) -> Result<(), GfError> {
+        let non_empty = !self.staged.is_empty();
+        for ((temporary, destination), relative) in self.staged.into_iter().zip(destinations) {
+            let (parent, target) = retained_parent(root, relative)?;
+            let temporary_path = temporary.path();
+            if temporary_path.parent() != destination.parent() {
+                return Err(GfError::Storage(
+                    "staged temporary and destination parents differ".into(),
+                ));
+            }
+            let temporary_name = temporary_path
+                .file_name()
+                .ok_or_else(|| GfError::Storage("staged temporary has no child name".into()))?;
+            let expected = graphforge_filesystem::file_identity(temporary.as_file())
+                .map_err(|error| GfError::Storage(error.to_string()))?;
+            run_before_retained_install_hook();
+            parent
+                .replace_child(temporary_name, expected, &target)
+                .map_err(|error| GfError::Storage(error.to_string()))?;
+            parent
+                .sync()
+                .map_err(|error| GfError::Storage(error.to_string()))?;
+        }
+        if non_empty {
+            crate::io_stats::record_rewrite_commit();
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn commit_unsealed(self) -> Result<(), GfError> {
         let non_empty = !self.staged.is_empty();
         for (tmp, final_path) in self.staged {
             tmp.persist(&final_path)
@@ -327,6 +446,13 @@ impl RewriteBatch {
             crate::io_stats::record_rewrite_commit();
         }
         Ok(())
+    }
+
+    /// Install deliberately unsealed fixtures that exercise stale/corrupt
+    /// authority handling. Never available to production callers.
+    #[cfg(test)]
+    pub(crate) fn commit_unsealed_for_test(self) -> Result<(), GfError> {
+        self.commit_unsealed()
     }
 
     /// The staged destination paths, in insertion (= commit) order.
@@ -468,6 +594,121 @@ impl RewriteBatch {
             self.staged.push(entry);
         }
     }
+}
+
+fn admit_commit_root(
+    project_root: &Path,
+    staged: &[(NamedTempFile, PathBuf)],
+) -> Result<(graphforge_filesystem::StableDirectory, Vec<PathBuf>), GfError> {
+    if !project_root.is_absolute()
+        || project_root.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir | std::path::Component::CurDir
+            )
+        })
+    {
+        return Err(GfError::Storage(
+            "admitted project root must be absolute and normalized".into(),
+        ));
+    }
+    let root = graphforge_filesystem::StableDirectory::open(project_root).map_err(|error| {
+        GfError::Storage(format!(
+            "cannot authenticate admitted project root: {error}"
+        ))
+    })?;
+    let mut relative_destinations = Vec::with_capacity(staged.len());
+    for (_, destination) in staged {
+        if !destination.is_absolute()
+            || destination.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir | std::path::Component::CurDir
+                )
+            })
+            || destination.strip_prefix(project_root).is_err()
+        {
+            return Err(GfError::Storage(
+                "staged destination is not a normalized descendant of the admitted project root"
+                    .into(),
+            ));
+        }
+        let relative = destination.strip_prefix(project_root).expect("checked");
+        retained_parent(&root, relative)?;
+        relative_destinations.push(relative.to_path_buf());
+    }
+    Ok((root, relative_destinations))
+}
+
+fn retained_parent(
+    root: &graphforge_filesystem::StableDirectory,
+    relative: &Path,
+) -> Result<(graphforge_filesystem::StableDirectory, std::ffi::OsString), GfError> {
+    let mut components = relative.components().peekable();
+    let mut directory = root
+        .try_clone()
+        .map_err(|error| GfError::Storage(error.to_string()))?;
+    while let Some(component) = components.next() {
+        let std::path::Component::Normal(name) = component else {
+            return Err(GfError::Storage(
+                "non-normal root-relative destination".into(),
+            ));
+        };
+        if components.peek().is_none() {
+            return Ok((directory, name.to_os_string()));
+        }
+        directory = directory
+            .open_child_directory(name)
+            .map_err(|error| GfError::Storage(error.to_string()))?;
+    }
+    Err(GfError::Storage("empty root-relative destination".into()))
+}
+
+#[cfg(test)]
+thread_local! {
+    static BEFORE_RETAINED_INSTALL_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+fn set_before_retained_install_hook(hook: impl FnOnce() + 'static) {
+    BEFORE_RETAINED_INSTALL_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+fn run_before_retained_install_hook() {
+    BEFORE_RETAINED_INSTALL_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn run_before_retained_install_hook() {}
+
+fn is_reserved_authority(relative: &Path) -> bool {
+    let components = relative
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(value) => value.to_str(),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    matches!(
+        components.as_slice(),
+        [".graphforge-rewrite-v1.json" | ".graphforge-rewrite.lock"]
+            | [
+                "topology",
+                "generation.json"
+                    | "nodes.parquet"
+                    | "surrogate_tails.parquet"
+                    | "runtime_entity_label_encoding.json",
+            ]
+            | ["topology", "nodes" | "edges" | "uuid-membership", ..]
+    ) || (components.len() == 1
+        && components[0].starts_with("..graphforge-rewrite-v1.json.")
+        && Path::new(components[0]).extension() == Some(std::ffi::OsStr::new("tmp")))
 }
 
 /// Parquet row-group size for all staged files. Smaller than the 1 M-row
@@ -743,7 +984,7 @@ mod tests {
         let (schema, initial) = int_batch(&initial_values);
         let mut first = RewriteBatch::new();
         first.stage(&path, Arc::clone(&schema), &initial).unwrap();
-        first.commit().unwrap();
+        first.commit_unsealed_for_test().unwrap();
 
         crate::io_stats::reset();
         let (_, appended) = int_batch(&[900_001, 900_002, 900_003]);
@@ -751,7 +992,7 @@ mod tests {
         let existing = rewrite
             .restage_append(&path, Arc::clone(&schema), &appended)
             .unwrap();
-        rewrite.commit().unwrap();
+        rewrite.commit_unsealed_for_test().unwrap();
 
         assert_eq!(existing, initial_values.len() as u64);
         let io = crate::io_stats::snapshot();
@@ -762,6 +1003,118 @@ mod tests {
             &values[initial_values.len()..],
             &[900_001, 900_002, 900_003]
         );
+    }
+
+    #[test]
+    fn raw_commit_rejects_canonical_topology_destination() {
+        let dir = TempDir::new().unwrap();
+        for relative in [
+            ".graphforge-rewrite-v1.json",
+            "..graphforge-rewrite-v1.json.0123456789abcdef.tmp",
+            "topology/generation.json",
+            "topology/nodes.parquet",
+            "topology/nodes/0000000000000001-0000000000000001.parquet",
+            "topology/edges/KNOWS/0000000000000001-0000000000000001.parquet",
+        ] {
+            let path = dir.path().join(relative);
+            let (schema, batch) = int_batch(&[1]);
+            let mut staged = RewriteBatch::new();
+            staged.stage(&path, schema, &batch).unwrap();
+            let error = staged.commit_at(dir.path()).unwrap_err();
+            assert!(error.to_string().contains("reserved graph authority"));
+            assert!(!path.exists());
+        }
+    }
+
+    #[test]
+    fn root_bound_commit_allows_projects_beneath_reserved_named_ancestors() {
+        let dir = TempDir::new().unwrap();
+        for relative_root in ["topology/nodes/project", "topology/edges/project"] {
+            let root = dir.path().join(relative_root);
+            std::fs::create_dir_all(&root).unwrap();
+            let path = root.join("data.parquet");
+            let (schema, batch) = int_batch(&[1]);
+            let mut staged = RewriteBatch::new();
+            staged.stage(&path, schema, &batch).unwrap();
+            staged.commit_at(&root).unwrap();
+            assert_eq!(read_values(&path), [1]);
+        }
+    }
+
+    #[test]
+    fn root_bound_commit_rejects_parent_normalization() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("safe")).unwrap();
+        let path = dir.path().join("safe/../escape.parquet");
+        let (schema, batch) = int_batch(&[1]);
+        let mut staged = RewriteBatch::new();
+        staged.stage(&path, schema, &batch).unwrap();
+        let error = staged.commit_at(dir.path()).unwrap_err();
+        assert!(error.to_string().contains("normalized descendant"));
+        assert!(!dir.path().join("escape.parquet").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_bound_commit_rejects_symlink_escape() {
+        let root = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("linked")).unwrap();
+        let path = root.path().join("linked/escape.parquet");
+        let (schema, batch) = int_batch(&[1]);
+        let mut staged = RewriteBatch::new();
+        staged.stage(&path, schema, &batch).unwrap();
+        staged.commit_at(root.path()).unwrap_err();
+        assert!(!outside.path().join("escape.parquet").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_bound_commit_rejects_in_root_directory_alias() {
+        let root = TempDir::new().unwrap();
+        std::fs::create_dir(root.path().join("real")).unwrap();
+        std::os::unix::fs::symlink(root.path().join("real"), root.path().join("alias")).unwrap();
+        let path = root.path().join("alias/data.parquet");
+        let (schema, batch) = int_batch(&[1]);
+        let mut staged = RewriteBatch::new();
+        staged.stage(&path, schema, &batch).unwrap();
+        staged.commit_at(root.path()).unwrap_err();
+        assert!(!root.path().join("real/data.parquet").exists());
+    }
+
+    #[test]
+    fn retained_commit_rejects_concurrent_parent_swap() {
+        let root = TempDir::new().unwrap();
+        let parent = root.path().join("derived");
+        let displaced = root.path().join("displaced");
+        std::fs::create_dir(&parent).unwrap();
+        let path = parent.join("data.parquet");
+        let (schema, batch) = int_batch(&[1]);
+        let mut staged = RewriteBatch::new();
+        staged.stage(&path, schema, &batch).unwrap();
+        let parent_for_hook = parent.clone();
+        let displaced_for_hook = displaced.clone();
+        set_before_retained_install_hook(move || {
+            std::fs::rename(&parent_for_hook, &displaced_for_hook).unwrap();
+            std::fs::create_dir(&parent_for_hook).unwrap();
+        });
+        let error = staged.commit_at(root.path()).unwrap_err();
+        assert!(error.to_string().contains("identity changed"));
+        assert!(!path.exists());
+        assert!(!displaced.join("data.parquet").exists());
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn legacy_rootless_commit_is_fail_closed() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("data.parquet");
+        let (schema, batch) = int_batch(&[1]);
+        let mut staged = RewriteBatch::new();
+        staged.stage(&path, schema, &batch).unwrap();
+        let error = staged.commit().unwrap_err();
+        assert!(error.to_string().contains("explicit admitted project root"));
+        assert!(!path.exists());
     }
 
     #[test]
@@ -800,10 +1153,15 @@ mod tests {
     }
 
     /// Single-file stage + commit, the test fixture writer.
-    fn write_parquet(path: &Path, schema: SchemaRef, batch: &RecordBatch) -> Result<(), GfError> {
+    fn write_parquet(
+        root: &Path,
+        path: &Path,
+        schema: SchemaRef,
+        batch: &RecordBatch,
+    ) -> Result<(), GfError> {
         let mut staged = RewriteBatch::new();
         staged.stage(path, schema, batch)?;
-        staged.commit()
+        staged.commit_at(root)
     }
 
     #[test]
@@ -811,14 +1169,14 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("data.parquet");
         let (schema, before) = int_batch(&[1, 2, 3]);
-        write_parquet(&path, Arc::clone(&schema), &before).unwrap();
+        write_parquet(dir.path(), &path, Arc::clone(&schema), &before).unwrap();
 
         let (schema2, after) = int_batch(&[9]);
         let mut batch = RewriteBatch::new();
         batch.stage(&path, schema2, &after).unwrap();
         assert_eq!(read_values(&path), vec![1, 2, 3], "no change before commit");
 
-        batch.commit().unwrap();
+        batch.commit_at(dir.path()).unwrap();
         assert_eq!(read_values(&path), vec![9], "replacement visible on commit");
     }
 
@@ -837,7 +1195,7 @@ mod tests {
         let order: Vec<_> = batch.staged_paths().collect();
         assert_eq!(order, vec![a.as_path(), b.as_path()]);
 
-        batch.commit().unwrap();
+        batch.commit_at(dir.path()).unwrap();
         assert_eq!(read_values(&a), vec![7]);
         assert_eq!(read_values(&b), vec![7]);
         assert_eq!(tmp_entries(dir.path()), 0, "no temp residue at root");
@@ -849,7 +1207,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("data.parquet");
         let (schema, before) = int_batch(&[4, 5]);
-        write_parquet(&path, Arc::clone(&schema), &before).unwrap();
+        write_parquet(dir.path(), &path, Arc::clone(&schema), &before).unwrap();
 
         {
             let (schema2, after) = int_batch(&[6]);
@@ -867,9 +1225,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("data.parquet");
         let (schema, first) = int_batch(&[1]);
-        write_parquet(&path, schema, &first).unwrap();
+        write_parquet(dir.path(), &path, schema, &first).unwrap();
         let (schema, second) = int_batch(&[2, 3]);
-        write_parquet(&path, schema, &second).unwrap();
+        write_parquet(dir.path(), &path, schema, &second).unwrap();
 
         assert_eq!(read_values(&path), vec![2, 3]);
         assert_eq!(tmp_entries(dir.path()), 0);
@@ -901,7 +1259,7 @@ mod tests {
         assert_eq!(order, vec![a.as_path(), b.as_path()], "position kept");
         assert_eq!(tmp_entries(dir.path()), 2, "replaced temp was removed");
 
-        batch.commit().unwrap();
+        batch.commit_at(dir.path()).unwrap();
         assert_eq!(read_values(&a), vec![5, 6]);
         assert_eq!(read_values(&b), vec![1]);
     }
@@ -914,7 +1272,7 @@ mod tests {
 
         let mut batch = RewriteBatch::new();
         batch.stage(&path, schema, &content).unwrap();
-        batch.commit().unwrap();
+        batch.commit_at(dir.path()).unwrap();
         assert_eq!(read_values(&path), vec![42]);
     }
 }

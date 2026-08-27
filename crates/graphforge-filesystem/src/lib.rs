@@ -27,6 +27,22 @@ pub struct StableDirectory {
 }
 
 impl StableDirectory {
+    /// Duplicate this retained directory capability without resolving its path again.
+    ///
+    /// # Errors
+    /// Returns an error if the retained directory identity changed or the OS
+    /// cannot duplicate its handle.
+    pub fn try_clone(&self) -> io::Result<Self> {
+        self.revalidate_named()?;
+        let clone = Self {
+            path: self.path.clone(),
+            file: self.file.try_clone()?,
+            identity: self.identity,
+        };
+        clone.revalidate_named()?;
+        Ok(clone)
+    }
+
     /// Acquire a cooperative shared lock on this retained Unix directory inode.
     ///
     /// Windows directory handles cannot be byte-range locked; callers use a

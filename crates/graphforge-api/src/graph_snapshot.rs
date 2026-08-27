@@ -42,19 +42,26 @@ static GRAPH_SNAPSHOT_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
 pub(crate) fn capture(root: &Path) -> Result<ProjectParticipant, GfError> {
     let mut paths = Vec::new();
     collect_files(root, &mut paths)?;
-    paths.sort();
     if paths.len() > MAX_SNAPSHOT_FILES {
         return Err(resource_limit("graph snapshot file count exceeds limit"));
     }
 
+    let mut paths = paths
+        .into_iter()
+        .map(|path| {
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|_| validation("graph snapshot path escaped workspace"))?;
+            validate_relative_path(relative)?;
+            Ok((path_text(relative)?, path))
+        })
+        .collect::<Result<Vec<_>, GfError>>()?;
+    paths.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+
     let mut relative_paths = Vec::with_capacity(paths.len());
     let mut contents = Vec::with_capacity(paths.len());
     let mut total = 0_u64;
-    for path in paths {
-        let relative = path
-            .strip_prefix(root)
-            .map_err(|_| validation("graph snapshot path escaped workspace"))?;
-        validate_relative_path(relative)?;
+    for (relative, path) in paths {
         let metadata = fs::symlink_metadata(&path)
             .map_err(|error| storage("inspect graph snapshot file", &path, error))?;
         if !metadata.file_type().is_file() {
@@ -69,7 +76,7 @@ pub(crate) fn capture(root: &Path) -> Result<ProjectParticipant, GfError> {
         if total > MAX_SNAPSHOT_TOTAL_BYTES {
             return Err(resource_limit("graph snapshot total size exceeds limit"));
         }
-        relative_paths.push(path_text(relative)?);
+        relative_paths.push(relative);
         contents.push(
             fs::read(&path).map_err(|error| storage("read graph snapshot file", &path, error))?,
         );
@@ -287,14 +294,25 @@ mod tests {
     fn snapshot_round_trip_is_byte_deterministic_and_path_ordered() {
         let source = tempfile::tempdir().unwrap();
         fs::create_dir_all(source.path().join("topology/edges")).unwrap();
+        fs::create_dir_all(source.path().join("derived/uuid-membership")).unwrap();
         fs::write(source.path().join("topology/nodes.parquet"), b"nodes").unwrap();
         fs::write(source.path().join("topology/edges/knows.parquet"), b"edges").unwrap();
+        fs::write(
+            source.path().join("derived/uuid-membership.json"),
+            b"manifest",
+        )
+        .unwrap();
+        fs::write(
+            source.path().join("derived/uuid-membership/run.uuidx"),
+            b"run",
+        )
+        .unwrap();
         fs::write(source.path().join("writer.lock"), b"ignored").unwrap();
 
         let first = capture(source.path()).unwrap();
         let second = capture(source.path()).unwrap();
         assert_eq!(first.bytes, second.bytes);
-        assert_eq!(first.row_count, 2);
+        assert_eq!(first.row_count, 4);
 
         let target = tempfile::tempdir().unwrap();
         hydrate(&first.bytes, target.path()).unwrap();
@@ -305,6 +323,14 @@ mod tests {
         assert_eq!(
             fs::read(target.path().join("topology/edges/knows.parquet")).unwrap(),
             b"edges"
+        );
+        assert_eq!(
+            fs::read(target.path().join("derived/uuid-membership.json")).unwrap(),
+            b"manifest"
+        );
+        assert_eq!(
+            fs::read(target.path().join("derived/uuid-membership/run.uuidx")).unwrap(),
+            b"run"
         );
         assert!(!target.path().join("writer.lock").exists());
     }

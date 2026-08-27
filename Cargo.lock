@@ -2432,11 +2432,13 @@ dependencies = [
  "graphforge-core",
  "graphforge-ir",
  "graphforge-storage",
+ "parquet",
  "serde",
  "serde_json",
  "tantivy",
  "tempfile",
  "ureq",
+ "uuid",
 ]
 
 [[package]]

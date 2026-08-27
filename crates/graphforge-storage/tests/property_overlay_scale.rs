@@ -211,23 +211,26 @@ fn process_peak_rss_bytes() -> u64 {
 }
 
 fn populate_through_graph_writer(root: &Path, end: usize) {
-    let mut writer = GraphWriter::open_at(root, OntologyMode::Exploratory, TS).unwrap();
-    for index in 0..end {
-        writer
-            .set_properties(
-                &uuid(index),
-                None,
-                HashMap::from([
-                    (
-                        "ordinal".to_owned(),
-                        IrLiteral::Int(i64::try_from(index).unwrap()),
-                    ),
-                    ("payload".to_owned(), IrLiteral::Str("x".repeat(2048))),
-                ]),
-            )
-            .unwrap();
+    const WRITE_WINDOW: usize = 4 * 1024;
+    for start in (0..end).step_by(WRITE_WINDOW) {
+        let mut writer = GraphWriter::open_at(root, OntologyMode::Exploratory, TS).unwrap();
+        for index in start..end.min(start + WRITE_WINDOW) {
+            writer
+                .set_properties(
+                    &uuid(index),
+                    None,
+                    HashMap::from([
+                        (
+                            "ordinal".to_owned(),
+                            IrLiteral::Int(i64::try_from(index).unwrap()),
+                        ),
+                        ("payload".to_owned(), IrLiteral::Str("x".repeat(2048))),
+                    ]),
+                )
+                .unwrap();
+        }
+        writer.flush().unwrap();
     }
-    writer.flush().unwrap();
 }
 
 fn apply_fixed_write_window(root: &Path) {

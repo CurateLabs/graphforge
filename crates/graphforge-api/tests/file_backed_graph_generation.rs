@@ -13,27 +13,493 @@
 #[path = "support/project_fixture.rs"]
 mod project_fixture;
 
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use arrow::array::{FixedSizeBinaryArray, Int64Array};
 use graphforge_api::{
     CheckpointRequest, GraphForge, OperationId, PortableExportRequest, PortableSelection,
+    PortableV2ExportRequest, PortableV2ImportRequest, PortableVerifyRequest, verify_portable_v2,
 };
+use graphforge_core::{OntologyMode, TypeId};
 use graphforge_storage::{
-    GRAPH_CAPABILITY_ID, GRAPH_CAPABILITY_VERSION, GRAPH_FILES_FAMILY, GraphFilesOpenStrategy,
-    ProjectCapability, ProjectGenerationRequest, ProjectStageOutcome, capture_graph_files,
-    empty_workspace_participants, resolve_project_generation,
-    stage_project_generation_with_graph_tree,
+    GRAPH_CAPABILITY_ID, GRAPH_CAPABILITY_VERSION, GRAPH_FILES_FAMILY, GraphFileRole,
+    GraphFilesOpenStrategy, GraphWriter, GraphWriterLimits, PortableV2GraphSelector,
+    PortableV2Limits, PortableV2Mode, PortableV2Output, PortableV2PackageClass,
+    PortableV2PropertyProjection, PortableV2SelectionProfile, PortableV2SubsetClosure,
+    PortableV2SubsetRequest, ProjectCapability, ProjectGenerationRequest, ProjectStageOutcome,
+    UuidIndexKind, UuidMembershipIndex, capture_graph_files, empty_workspace_participants,
+    resolve_project_generation, stage_project_generation_with_graph_tree,
 };
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 /// Legacy graph snapshot envelope total (must remain exceeded by oversize evidence).
 const LEGACY_SNAPSHOT_ENVELOPE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// Deterministic oversize padding used for the manual large-class proof.
 const OVERSIZE_PADDING_BYTES: u64 = LEGACY_SNAPSHOT_ENVELOPE_BYTES + 64 * 1024 * 1024;
+
+fn result_fingerprint(result: &graphforge_api::ExecutionResult) -> String {
+    let mut hasher = Sha256::new();
+    for batch in &result.batches {
+        for row in 0..batch.num_rows() {
+            for column in batch.columns() {
+                let value = arrow::util::display::array_value_to_string(column, row)
+                    .expect("canonical Arrow display value");
+                hasher.update(value.len().to_le_bytes());
+                hasher.update(value.as_bytes());
+            }
+        }
+    }
+    let digest = hasher.finalize();
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    format!("sha256:{encoded}")
+}
+
+fn scalar_i64(result: &graphforge_api::ExecutionResult) -> i64 {
+    result.batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .expect("scalar is Int64")
+        .value(0)
+}
+
+fn scalar_uuid(result: &graphforge_api::ExecutionResult) -> Uuid {
+    let values = result.batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<FixedSizeBinaryArray>()
+        .expect("UUID scalar is FixedSizeBinary(16)");
+    Uuid::from_slice(values.value(0)).expect("valid UUID bytes")
+}
+
+fn inventory_digests(root: &Path) -> BTreeMap<String, String> {
+    resolve_project_generation(root)
+        .unwrap()
+        .graph_files_inventory()
+        .unwrap()
+        .unwrap()
+        .files
+        .into_iter()
+        .map(|entry| (entry.relative_path, entry.content_sha256))
+        .collect()
+}
+
+fn property_digests(root: &Path) -> BTreeMap<String, String> {
+    resolve_project_generation(root)
+        .unwrap()
+        .graph_files_inventory()
+        .unwrap()
+        .unwrap()
+        .files
+        .into_iter()
+        .filter(|entry| entry.role == GraphFileRole::Properties)
+        .map(|entry| (entry.relative_path, entry.content_sha256))
+        .collect()
+}
+
+#[test]
+fn sharded_graph_uses_ordinary_reopen_query_and_portable_round_trip() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    let source_path = source.to_str().unwrap();
+    let graph = GraphForge::new(Some(source_path)).unwrap();
+    graph
+        .execute("CREATE (:Person {name:'Ada'})-[:KNOWS]->(:Person {name:'Bob'})")
+        .unwrap();
+    graph
+        .execute("CREATE (:Person {name:'Cy'})-[:KNOWS]->(:Person {name:'Di'})")
+        .unwrap();
+    drop(graph);
+
+    let generation = resolve_project_generation(&source).unwrap();
+    let inventory = generation.graph_files_inventory().unwrap().unwrap();
+    let node_fragments = inventory
+        .files
+        .iter()
+        .filter(|entry| {
+            entry.relative_path == "topology/nodes.parquet"
+                || entry.relative_path.starts_with("topology/nodes/")
+        })
+        .count();
+    let edge_fragments = inventory
+        .files
+        .iter()
+        .filter(|entry| {
+            entry.relative_path.starts_with("topology/edges/")
+                && entry.relative_path.ends_with(".parquet")
+        })
+        .count();
+    assert_eq!(node_fragments, 2, "both immutable node shards must publish");
+    assert_eq!(edge_fragments, 2, "both immutable edge shards must publish");
+
+    let reopened = GraphForge::new(Some(source_path)).unwrap();
+    assert_eq!(reopened.node_count("Person").unwrap(), 4);
+    let properties_before = property_digests(&source);
+    assert_eq!(
+        properties_before.len(),
+        2,
+        "each append owns a property shard"
+    );
+    reopened
+        .execute("MATCH (p:Person {name:'Ada'}) SET p.name = 'Ada Lovelace'")
+        .unwrap();
+    let properties_after = property_digests(&source);
+    let unchanged_properties = properties_before
+        .iter()
+        .filter(|(path, digest)| properties_after.get(*path) == Some(*digest))
+        .count();
+    assert_eq!(
+        properties_after.len(),
+        properties_before.len() + 1,
+        "the property update appends one authoritative immutable fragment"
+    );
+    assert_eq!(
+        unchanged_properties,
+        properties_before.len(),
+        "property updates must not rewrite any prior immutable fragment"
+    );
+
+    reopened.rebuild_adjacency(None).unwrap();
+    drop(reopened);
+    let reopened = GraphForge::new(Some(source_path)).unwrap();
+    let traversal = "MATCH (a:Person)-[:KNOWS]->(b:Person) \
+                     RETURN a.name AS from, b.name AS to ORDER BY from, to";
+    assert!(
+        reopened
+            .explain(traversal)
+            .unwrap()
+            .contains("adjacency=hit"),
+        "reopened traversal must use the rebuilt adjacency index"
+    );
+    let queried = reopened.execute(traversal).unwrap();
+    assert_eq!(queried.stats.rows_produced, 2);
+    let source_query_fingerprint = result_fingerprint(&queried);
+    let later_edge_uuid = scalar_uuid(
+        &reopened
+            .execute("MATCH (a:Person {name:'Cy'})-[r:KNOWS]->(:Person) RETURN r.edge_uuid")
+            .unwrap(),
+    );
+    let open = reopened.graph_open_evidence();
+    let reopened_inventory = resolve_project_generation(&source)
+        .unwrap()
+        .graph_files_inventory()
+        .unwrap()
+        .unwrap();
+    assert_eq!(open.strategy, GraphFilesOpenStrategy::PrivateMaterialize);
+    assert_eq!(open.files_validated, reopened_inventory.file_count);
+    assert_eq!(open.files_copied, open.files_validated);
+
+    let limits = PortableV2Limits::default();
+    let subset_package = root.path().join("later-edge-subset.gfpb");
+    reopened
+        .export_portable_v2(
+            &PortableV2ExportRequest {
+                selection: PortableSelection::Current,
+                output_path: subset_package.clone(),
+                representation: PortableV2Output::Bundle,
+                profile: PortableV2SelectionProfile::Complete,
+                subset: Some(PortableV2SubsetRequest {
+                    selector: PortableV2GraphSelector {
+                        node_uuids: Vec::new(),
+                        edge_uuids: vec![later_edge_uuid.hyphenated().to_string()],
+                    },
+                    closure: PortableV2SubsetClosure::Referential,
+                    projection: PortableV2PropertyProjection::default(),
+                }),
+                limits,
+            },
+            None,
+            |_| {},
+        )
+        .unwrap();
+    let subset_verified = verify_portable_v2(
+        &PortableVerifyRequest {
+            input: subset_package,
+            mode: PortableV2Mode::Full,
+            limits,
+        },
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        subset_verified.package_class,
+        PortableV2PackageClass::GraphDataSubset
+    );
+
+    let package = root.path().join("sharded.gfpb");
+    let exported = reopened
+        .export_portable_v2(
+            &PortableV2ExportRequest {
+                selection: PortableSelection::Current,
+                output_path: package.clone(),
+                representation: PortableV2Output::Bundle,
+                profile: PortableV2SelectionProfile::Complete,
+                subset: None,
+                limits,
+            },
+            None,
+            |_| {},
+        )
+        .unwrap();
+    drop(reopened);
+    let verified = verify_portable_v2(
+        &PortableVerifyRequest {
+            input: package.clone(),
+            mode: PortableV2Mode::Full,
+            limits,
+        },
+        None,
+    )
+    .unwrap();
+    assert_eq!(verified.package_digest, exported.package_digest);
+
+    let imported_path = root.path().join("clean-import");
+    assert!(!imported_path.exists(), "import target must start clean");
+    GraphForge::import_portable_v2(
+        &imported_path,
+        &PortableV2ImportRequest {
+            input: package,
+            operation_id: OperationId(Uuid::from_u128(931)),
+            limits,
+        },
+        None,
+    )
+    .unwrap();
+    let imported = GraphForge::new(Some(imported_path.to_str().unwrap())).unwrap();
+    assert_eq!(imported.node_count("Person").unwrap(), 4);
+    let imported_edges = imported
+        .execute("MATCH (:Person)-[:KNOWS]->(:Person) RETURN count(*) AS edges")
+        .unwrap();
+    assert_eq!(scalar_i64(&imported_edges), 2);
+    let imported_query = imported.execute(traversal).unwrap();
+    assert_eq!(imported_query.stats.rows_produced, 2);
+    assert_eq!(
+        result_fingerprint(&imported_query),
+        source_query_fingerprint
+    );
+}
+
+#[test]
+fn sharded_append_io_evidence_is_process_isolated() {
+    const CHILD: &str = "GRAPHFORGE_931_SHARDED_APPEND_IO_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let status = Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("sharded_append_io_evidence_is_process_isolated")
+            .arg("--nocapture")
+            .env(CHILD, "1")
+            .status()
+            .unwrap();
+        assert!(status.success(), "isolated sharded append I/O proof failed");
+        return;
+    }
+
+    // These counters are process-global. Run this direct writer proof in a
+    // one-test child process so parallel integration tests cannot contribute
+    // unrelated reads between reset and snapshot.
+    let root = tempfile::tempdir().unwrap();
+    let direct = root.path().join("direct-work-evidence");
+    fs::create_dir(&direct).unwrap();
+    let first_uuid = Uuid::now_v7();
+    let mut first = GraphWriter::open_at(&direct, OntologyMode::Strict, 1).unwrap();
+    first.create_node(first_uuid, TypeId(0)).unwrap();
+    first.flush().unwrap();
+    let writer_limits = GraphWriterLimits {
+        max_buffered_topology_rows: 1,
+        max_buffered_topology_bytes: 16 * 1024,
+        max_flush_scratch_bytes: 16 * 1024,
+    };
+    graphforge_storage::io_stats::reset();
+    let mut second = GraphWriter::open_at(&direct, OntologyMode::Strict, 2)
+        .unwrap()
+        .with_limits(writer_limits);
+    second.create_node(Uuid::now_v7(), TypeId(0)).unwrap();
+    second.flush().unwrap();
+    let work = second.topology_write_work();
+    let io = graphforge_storage::io_stats::snapshot();
+    assert_eq!(work.input_rows, 1);
+    assert_eq!(work.prior_rows_decoded, 0);
+    assert_eq!(work.rows_encoded, 1);
+    assert_eq!(work.shard_count, 1);
+    assert_eq!(work.existing_rows_rewritten, 0);
+    assert_eq!(work.new_rows_written, 1);
+    assert!(work.output_bytes > 0);
+    assert_eq!(work.peak_buffered_rows, 1);
+    assert!(work.peak_buffered_bytes <= writer_limits.max_buffered_topology_bytes as u64);
+    assert!(work.peak_flush_scratch_bytes <= writer_limits.max_flush_scratch_bytes as u64);
+    assert_eq!(
+        io.node_full_reads, 0,
+        "append must not decode prior node shards"
+    );
+    assert_eq!(
+        io.edge_full_reads, 0,
+        "append must not decode prior edge shards"
+    );
+    assert_eq!(io.topology_rewrite_existing_rows, 0);
+    assert_eq!(io.topology_rewrite_new_rows, 1);
+    assert_eq!(io.topology_rewrite_output_rows, 1);
+}
+
+#[test]
+fn public_delete_keeps_multishard_index_readers_and_portability_consistent() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("delete-source");
+    let graph = GraphForge::new(Some(source.to_str().unwrap())).unwrap();
+    graph
+        .execute("CREATE (:Person {name:'Ada'})-[:KNOWS]->(:Person {name:'Bob'})")
+        .unwrap();
+    let first_inventory = inventory_digests(&source);
+    graph
+        .execute("CREATE (:Person {name:'Cy'})-[:KNOWS]->(:Person {name:'Di'})")
+        .unwrap();
+    graph
+        .execute("MATCH (p:Person {name:'Di'}) SET p:Selected")
+        .unwrap();
+    assert_eq!(graph.node_count("Selected").unwrap(), 1);
+    let before_delete = inventory_digests(&source);
+    let earlier_shards = before_delete
+        .iter()
+        .filter(|(path, _)| {
+            first_inventory.contains_key(*path)
+                && (*path == "topology/nodes.parquet"
+                    || path.starts_with("topology/nodes/")
+                    || path.starts_with("topology/edges/"))
+                && path.ends_with(".parquet")
+        })
+        .map(|(path, digest)| (path.clone(), digest.clone()))
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        earlier_shards.len(),
+        2,
+        "the first node and edge fragments remain distinct"
+    );
+
+    let deleted_uuid = scalar_uuid(
+        &graph
+            .execute("MATCH (p:Person {name:'Cy'}) RETURN p.node_uuid")
+            .unwrap(),
+    );
+    let generation = resolve_project_generation(&source).unwrap();
+    let mut index = UuidMembershipIndex::open(&generation.graph_tree_root()).unwrap();
+    let deleted_surrogate = index.lookup_node_surrogates(&[deleted_uuid]).unwrap().0[0]
+        .expect("Cy is indexed before deletion");
+
+    graph
+        .execute("MATCH (p:Person {name:'Cy'}) DETACH DELETE p")
+        .unwrap();
+    let after_delete = inventory_digests(&source);
+    for (path, digest) in &earlier_shards {
+        assert_eq!(
+            after_delete.get(path),
+            Some(digest),
+            "deleting a later-shard entity must not rewrite earlier shard {path}"
+        );
+    }
+    let generation = resolve_project_generation(&source).unwrap();
+    let mut index = UuidMembershipIndex::open(&generation.graph_tree_root()).unwrap();
+    assert_eq!(
+        index.lookup_node_surrogates(&[deleted_uuid]).unwrap().0,
+        [None]
+    );
+    assert_eq!(index.count(UuidIndexKind::Node), 3);
+    assert_eq!(index.count(UuidIndexKind::Edge), 1);
+
+    graph.execute("CREATE (:Person {name:'Eve'})").unwrap();
+    let replacement_uuid = scalar_uuid(
+        &graph
+            .execute("MATCH (p:Person {name:'Eve'}) RETURN p.node_uuid")
+            .unwrap(),
+    );
+    assert_ne!(
+        replacement_uuid, deleted_uuid,
+        "deleted identity is not reused"
+    );
+    let generation = resolve_project_generation(&source).unwrap();
+    let mut index = UuidMembershipIndex::open(&generation.graph_tree_root()).unwrap();
+    let replacement_surrogate = index.lookup_node_surrogates(&[replacement_uuid]).unwrap().0[0]
+        .expect("replacement node is indexed");
+    assert_ne!(
+        replacement_surrogate, deleted_surrogate,
+        "surrogate is not reused"
+    );
+
+    graph.rebuild_adjacency(None).unwrap();
+    drop(graph);
+    let reopened = GraphForge::new(Some(source.to_str().unwrap())).unwrap();
+    assert_eq!(reopened.node_count("Person").unwrap(), 4);
+    assert_eq!(reopened.node_count("Selected").unwrap(), 1);
+    let traversal = "MATCH (a:Person)-[:KNOWS]->(b:Person) \
+                     RETURN a.name AS from, b.name AS to ORDER BY from, to";
+    assert!(
+        reopened
+            .explain(traversal)
+            .unwrap()
+            .contains("adjacency=hit")
+    );
+    let source_result = reopened.execute(traversal).unwrap();
+    assert_eq!(source_result.stats.rows_produced, 1);
+    let source_fingerprint = result_fingerprint(&source_result);
+
+    let limits = PortableV2Limits::default();
+    let package = root.path().join("deleted-sharded.gfpb");
+    let exported = reopened
+        .export_portable_v2(
+            &PortableV2ExportRequest {
+                selection: PortableSelection::Current,
+                output_path: package.clone(),
+                representation: PortableV2Output::Bundle,
+                profile: PortableV2SelectionProfile::Complete,
+                subset: None,
+                limits,
+            },
+            None,
+            |_| {},
+        )
+        .unwrap();
+    drop(reopened);
+    let verified = verify_portable_v2(
+        &PortableVerifyRequest {
+            input: package.clone(),
+            mode: PortableV2Mode::Full,
+            limits,
+        },
+        None,
+    )
+    .unwrap();
+    assert_eq!(verified.package_digest, exported.package_digest);
+
+    let imported_path = root.path().join("deleted-clean-import");
+    GraphForge::import_portable_v2(
+        &imported_path,
+        &PortableV2ImportRequest {
+            input: package,
+            operation_id: OperationId(Uuid::from_u128(931_2)),
+            limits,
+        },
+        None,
+    )
+    .unwrap();
+    let imported = GraphForge::new(Some(imported_path.to_str().unwrap())).unwrap();
+    assert_eq!(imported.node_count("Person").unwrap(), 4);
+    let imported_edges = imported
+        .execute("MATCH ()-[:KNOWS]->() RETURN count(*) AS edges")
+        .unwrap();
+    assert_eq!(scalar_i64(&imported_edges), 1);
+    assert_eq!(
+        result_fingerprint(&imported.execute(traversal).unwrap()),
+        source_fingerprint
+    );
+}
 
 #[test]
 fn file_backed_multi_file_fixture_reopens_without_snapshot_envelope() {

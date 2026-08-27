@@ -2204,7 +2204,7 @@ mod tests {
         let mut writer =
             GraphWriter::open_at(fixture.dir.path(), OntologyMode::Strict, TS + 1).unwrap();
         for (&uuid, &id) in fixture.uuids.iter().zip(&fixture.ids) {
-            writer.register_existing_node(uuid, id);
+            writer.register_existing_node(uuid, id).unwrap();
         }
         writer
             .create_edge(extra, "KNOWS", &fixture.uuids[1], &fixture.uuids[0])

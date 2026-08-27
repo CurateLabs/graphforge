@@ -91,7 +91,7 @@ impl GraphForge {
             stem,
             &updates,
         )?;
-        staged.commit()?;
+        staged.commit_at(&self.dir)?;
         *catalog = next_catalog;
         drop(catalog);
         let mut outputs = updates

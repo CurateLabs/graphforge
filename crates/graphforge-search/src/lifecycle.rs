@@ -1,12 +1,14 @@
 //! Freshness-aware, atomic lifecycle for derived Tantivy text indexes.
 
 use std::cell::{Cell, RefCell};
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 
 use graphforge_storage::{
     PublishedSearchArtifact, SearchArtifactError, SearchArtifactKey, SearchCoordinationLimits,
-    SearchPublicationMode, SearchPublicationOutcome, SearchPublicationPlan, SearchSourcePart,
-    SearchSourceSnapshot, coordinate_search_publication,
+    SearchPublicationMode, SearchPublicationOutcome, SearchPublicationPlan, SearchSourceSnapshot,
+    coordinate_search_publication,
 };
 
 use crate::TextSearchLimits;
@@ -169,45 +171,34 @@ pub fn inspect_text_index_freshness<C>(
 where
     C: FnMut() -> Result<(), SearchArtifactError>,
 {
-    let mut retry = true;
-    loop {
-        let before = capture_text_snapshot(project_dir, limits.text, &mut checkpoint)?;
-        let projection = project_text_source(
-            project_dir,
-            request.label_id,
-            explicit_properties,
-            limits.text,
-            &mut checkpoint,
-        )?;
-        if explicit_properties.is_some() {
-            validate_observed_properties(&projection)?;
-        }
-        let after = capture_text_snapshot(project_dir, limits.text, &mut checkpoint)?;
-        if before != after {
-            if !retry {
-                return Err(SearchArtifactError::ConcurrentMutation);
-            }
-            retry = false;
-            continue;
-        }
-        let properties = explicit_properties
-            .map(<[String]>::to_vec)
-            .unwrap_or(projection.properties);
-        if properties.is_empty() {
-            return Ok(TextIndexFreshnessInspection {
-                properties,
-                source_generation: after.generation,
-                source_fingerprint: after.fingerprint,
-                artifact_generation: None,
-                artifact_source_generation: None,
-                artifact_source_fingerprint: None,
-                state: TextIndexFreshnessState::Missing,
-                reason: Some(TextIndexFreshnessReason::NoTextProperties),
-            });
-        }
-        let key = SearchArtifactKey::text(request.label, &properties)?;
-        return inspect_published_text(project_dir, &key, after);
+    let projection = project_text_source(
+        project_dir,
+        request.label_id,
+        explicit_properties,
+        limits.text,
+        &mut checkpoint,
+    )?;
+    if explicit_properties.is_some() {
+        validate_observed_properties(&projection)?;
     }
+    let after = projection.source_snapshot.clone();
+    let properties = explicit_properties
+        .map(<[String]>::to_vec)
+        .unwrap_or(projection.properties);
+    if properties.is_empty() {
+        return Ok(TextIndexFreshnessInspection {
+            properties,
+            source_generation: after.generation,
+            source_fingerprint: after.fingerprint,
+            artifact_generation: None,
+            artifact_source_generation: None,
+            artifact_source_fingerprint: None,
+            state: TextIndexFreshnessState::Missing,
+            reason: Some(TextIndexFreshnessReason::NoTextProperties),
+        });
+    }
+    let key = SearchArtifactKey::text(request.label, &properties)?;
+    inspect_published_text(project_dir, &key, after)
 }
 
 fn inspect_published_text(
@@ -426,7 +417,6 @@ where
     let retry_budget = Cell::new(true);
 
     loop {
-        let before = capture_text_snapshot(project_dir, limits.text, &mut checkpoint)?;
         let projection = project_text_source(
             project_dir,
             request.label_id,
@@ -437,11 +427,7 @@ where
         if explicit_properties.is_some() {
             validate_observed_properties(&projection)?;
         }
-        let discovered = capture_text_snapshot(project_dir, limits.text, &mut checkpoint)?;
-        if before != discovered {
-            consume_retry(Some(&retry_budget))?;
-            continue;
-        }
+        let discovered = projection.source_snapshot.clone();
         let properties = explicit_properties.clone().unwrap_or(projection.properties);
         if properties.is_empty() {
             return Ok(TextIndexPreparation::NoTextProperties);
@@ -464,7 +450,13 @@ where
             },
         ) {
             Ok(index) => {
-                let after = capture_text_snapshot(project_dir, limits.text, &mut checkpoint)?;
+                let after = generation_checked_snapshot(
+                    project_dir,
+                    &discovered,
+                    request.label_id,
+                    &properties,
+                    limits.text,
+                )?;
                 match index.artifact().manifest.verify_fresh(
                     &key,
                     TEXT_BACKEND_VERSION,
@@ -512,6 +504,16 @@ where
         .to_vec();
     let checkpoint = RefCell::new(checkpoint);
     let build_calls = Cell::new(0_u8);
+    let projection = RefCell::new(None::<TextSourceProjection>);
+    let revalidate = |expected: &SearchSourceSnapshot| {
+        generation_checked_snapshot(
+            project_dir,
+            expected,
+            request.label_id,
+            &properties,
+            limits.text,
+        )
+    };
     let outcome = coordinate_search_publication(
         project_dir,
         SearchPublicationPlan {
@@ -523,17 +525,25 @@ where
         },
         limits.coordination,
         || {
-            let snapshot =
-                capture_text_snapshot(project_dir, limits.text, || checkpoint.borrow_mut()())?;
-            if policy
-                .expected_snapshot
-                .is_some_and(|expected| expected != &snapshot)
-            {
-                return Err(SearchArtifactError::Stale {
-                    reason: "graph changed after text property discovery".to_owned(),
-                });
+            if let Some(expected) = policy.expected_snapshot {
+                return revalidate(expected).map_err(stale_after_property_discovery);
             }
-            Ok(snapshot)
+            if projection.borrow().is_none() {
+                *projection.borrow_mut() = Some(project_text_source(
+                    project_dir,
+                    request.label_id,
+                    Some(&properties),
+                    limits.text,
+                    || checkpoint.borrow_mut()(),
+                )?);
+            }
+            let borrowed = projection.borrow();
+            revalidate(
+                &borrowed
+                    .as_ref()
+                    .expect("projection initialized")
+                    .source_snapshot,
+            )
         },
         |artifact| {
             inspect_text_artifact(artifact, &properties, limits.text, || {
@@ -545,17 +555,29 @@ where
             if build_calls.replace(build_calls.get().saturating_add(1)) > 0 {
                 consume_retry(policy.retry_budget)?;
             }
-            let projection = project_text_source(
-                project_dir,
-                request.label_id,
-                Some(&properties),
-                limits.text,
-                || checkpoint.borrow_mut()(),
-            )?;
-            if policy.require_observed_properties {
-                validate_observed_properties(&projection)?;
+            if projection.borrow().is_none() {
+                *projection.borrow_mut() = Some(project_text_source(
+                    project_dir,
+                    request.label_id,
+                    Some(&properties),
+                    limits.text,
+                    || checkpoint.borrow_mut()(),
+                )?);
             }
-            match build_text_index(build_dir, &projection, limits.text, || {
+            let borrowed = projection.borrow();
+            let projection = borrowed.as_ref().expect("projection initialized");
+            if policy
+                .expected_snapshot
+                .is_some_and(|expected| expected != &projection.source_snapshot)
+            {
+                return Err(SearchArtifactError::Stale {
+                    reason: "graph changed after text property discovery".to_owned(),
+                });
+            }
+            if policy.require_observed_properties {
+                validate_observed_properties(projection)?;
+            }
+            match build_text_index(build_dir, projection, limits.text, || {
                 checkpoint.borrow_mut()()
             })? {
                 TextIndexBuildOutcome::Empty => write_empty_marker(build_dir)?,
@@ -662,7 +684,6 @@ where
     let retry_budget = Cell::new(true);
 
     loop {
-        let before = capture_text_snapshot(project_dir, limits.text, &mut checkpoint)?;
         let projection = project_text_source(
             project_dir,
             request.label_id,
@@ -670,11 +691,7 @@ where
             limits.text,
             &mut checkpoint,
         )?;
-        let after_discovery = capture_text_snapshot(project_dir, limits.text, &mut checkpoint)?;
-        if before != after_discovery {
-            consume_retry(Some(&retry_budget))?;
-            continue;
-        }
+        let after_discovery = projection.source_snapshot.clone();
         if projection.properties.is_empty() {
             return Ok(Vec::new());
         }
@@ -756,7 +773,21 @@ where
             &mut *checkpoint,
         )?,
     };
-    let after = capture_text_snapshot(project_dir, limits.text, &mut *checkpoint)?;
+    let manifest_snapshot = SearchSourceSnapshot {
+        generation: publication.artifact().manifest.source_generation,
+        fingerprint: publication.artifact().manifest.source_fingerprint.clone(),
+    };
+    let after = match generation_checked_snapshot(
+        project_dir,
+        &manifest_snapshot,
+        request.index.label_id,
+        properties,
+        limits.text,
+    ) {
+        Ok(snapshot) => snapshot,
+        Err(SearchArtifactError::ConcurrentMutation) => return Ok(TextSearchAttempt::Retry),
+        Err(error) => return Err(error),
+    };
     if request
         .expected_snapshot
         .is_some_and(|expected| expected != &after)
@@ -901,6 +932,7 @@ where
     Ok(())
 }
 
+#[cfg(test)]
 fn capture_text_snapshot<C>(
     project_dir: &Path,
     limits: TextSearchLimits,
@@ -911,60 +943,54 @@ where
 {
     checkpoint()?;
     let mut paths = Vec::new();
-    let topology = project_dir.join("topology").join("nodes.parquet");
-    match std::fs::symlink_metadata(&topology) {
-        Ok(_) => paths.push(("topology/nodes.parquet".to_owned(), topology)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(source(format!("inspect {}: {error}", topology.display())));
-        }
+    for topology in graphforge_storage::topology_node_files(project_dir)
+        .map_err(|error| source(error.to_string()))?
+    {
+        let relative = topology
+            .strip_prefix(project_dir)
+            .map_err(|_| source("topology source escaped project root"))?
+            .to_str()
+            .ok_or_else(|| source("topology source path is not UTF-8"))?
+            .to_owned();
+        paths.push((relative, topology));
     }
     paths.extend(property_source_paths(project_dir, &mut checkpoint)?);
     paths.sort_unstable_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
 
-    let mut total = 0_u64;
-    let mut owned = Vec::with_capacity(paths.len());
-    for (name, path) in paths {
-        checkpoint()?;
-        let metadata = std::fs::symlink_metadata(&path)
-            .map_err(|error| source(format!("inspect {}: {error}", path.display())))?;
-        if !metadata.file_type().is_file() {
-            return Err(source(format!(
-                "search source {} is not a regular file",
-                path.display()
-            )));
-        }
-        total = total
-            .checked_add(metadata.len())
-            .ok_or_else(|| exhausted_source(limits.source_bytes))?;
-        if total > limits.source_bytes {
-            return Err(exhausted_source(limits.source_bytes));
-        }
-        let bytes = std::fs::read(&path)
-            .map_err(|error| source(format!("read {}: {error}", path.display())))?;
-        let actual =
-            u64::try_from(bytes.len()).map_err(|_| exhausted_source(limits.source_bytes))?;
-        if actual > metadata.len() {
-            total = total
-                .checked_add(actual - metadata.len())
-                .ok_or_else(|| exhausted_source(limits.source_bytes))?;
-            if total > limits.source_bytes {
-                return Err(exhausted_source(limits.source_bytes));
-            }
-        }
-        owned.push((name, bytes));
-    }
     checkpoint()?;
-    let parts = owned
-        .iter()
-        .map(|(name, bytes)| SearchSourcePart {
-            name,
-            bytes: bytes.as_slice(),
-        })
-        .collect::<Vec<_>>();
-    SearchSourceSnapshot::capture(project_dir, &parts)
+    SearchSourceSnapshot::capture_files(
+        project_dir,
+        &paths,
+        limits.source_bytes,
+        "text_source_bytes",
+    )
 }
 
+fn generation_checked_snapshot(
+    project_dir: &Path,
+    expected: &SearchSourceSnapshot,
+    label_id: u32,
+    properties: &[String],
+    limits: TextSearchLimits,
+) -> Result<SearchSourceSnapshot, SearchArtifactError> {
+    let fresh = project_text_source(project_dir, label_id, Some(properties), limits, || Ok(()))?
+        .source_snapshot;
+    if fresh != *expected {
+        return Err(SearchArtifactError::ConcurrentMutation);
+    }
+    Ok(fresh)
+}
+
+fn stale_after_property_discovery(error: SearchArtifactError) -> SearchArtifactError {
+    match error {
+        SearchArtifactError::ConcurrentMutation => SearchArtifactError::Stale {
+            reason: "graph changed after text property discovery".to_owned(),
+        },
+        other => other,
+    }
+}
+
+#[cfg(test)]
 fn property_source_paths<C>(
     project_dir: &Path,
     checkpoint: &mut C,
@@ -972,41 +998,21 @@ fn property_source_paths<C>(
 where
     C: FnMut() -> Result<(), SearchArtifactError>,
 {
-    let directory = project_dir.join("properties");
-    let entries = match std::fs::read_dir(&directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => {
-            return Err(source(format!(
-                "read property source directory {}: {error}",
-                directory.display()
-            )));
-        }
-    };
     let mut paths = Vec::new();
-    for entry in entries {
+    for path in graphforge_storage::node_property_source_files(project_dir)
+        .map_err(|error| source(error.to_string()))?
+    {
         checkpoint()?;
-        let entry =
-            entry.map_err(|error| source(format!("read property source entry: {error}")))?;
-        let path = entry.path();
-        if path.extension().and_then(|value| value.to_str()) != Some("parquet") {
-            continue;
-        }
-        let file_name = path
-            .file_name()
-            .and_then(|value| value.to_str())
-            .ok_or_else(|| source("property source contains a non-UTF-8 Parquet name"))?;
-        paths.push((format!("properties/{file_name}"), path));
+        let relative = path
+            .strip_prefix(project_dir)
+            .map_err(|_| source("property source escaped project root"))?
+            .to_str()
+            .ok_or_else(|| source("property source path is not UTF-8"))?
+            .to_owned();
+        paths.push((relative, path));
     }
     paths.sort_unstable_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
     Ok(paths)
-}
-
-fn exhausted_source(limit: u64) -> SearchArtifactError {
-    SearchArtifactError::ResourceExhausted {
-        resource: "text_source_bytes",
-        limit,
-    }
 }
 
 fn invalid(field: &'static str, reason: impl Into<String>) -> SearchArtifactError {
@@ -1034,6 +1040,7 @@ fn validate_observed_properties(
     Ok(())
 }
 
+#[cfg(test)]
 fn source(reason: impl Into<String>) -> SearchArtifactError {
     SearchArtifactError::SourceSnapshot {
         reason: reason.into(),
@@ -1367,6 +1374,80 @@ mod tests {
             Err(SearchArtifactError::ConcurrentMutation)
         ));
         assert!(calls.get() > 2);
+    }
+
+    #[test]
+    fn snapshot_fingerprint_detects_an_immutable_node_shard_change() {
+        let dir = TempDir::new().unwrap();
+        write_person(dir.path(), "Alice");
+        let mut second = GraphWriter::open_at(dir.path(), OntologyMode::Strict, 2).unwrap();
+        second.create_node(uuid(2), TypeId(LABEL_ID)).unwrap();
+        second.flush().unwrap();
+        let paths = graphforge_storage::topology_node_files(dir.path()).unwrap();
+        assert_eq!(paths.len(), 2);
+        let before =
+            capture_text_snapshot(dir.path(), TextSearchLimits::default(), || Ok(())).unwrap();
+        let selected_before = project_text_source(
+            dir.path(),
+            LABEL_ID,
+            Some(&properties()),
+            TextSearchLimits::default(),
+            || Ok(()),
+        )
+        .unwrap()
+        .source_snapshot;
+        use std::io::Write as _;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&paths[1])
+            .unwrap()
+            .write_all(b"shard changed without a generation bump")
+            .unwrap();
+        let after =
+            capture_text_snapshot(dir.path(), TextSearchLimits::default(), || Ok(())).unwrap();
+        assert_ne!(before.fingerprint, after.fingerprint);
+        assert_eq!(before.generation, after.generation);
+        assert!(
+            generation_checked_snapshot(
+                dir.path(),
+                &selected_before,
+                LABEL_ID,
+                &properties(),
+                TextSearchLimits::default(),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn snapshot_fingerprint_detects_an_immutable_property_shard_change() {
+        let dir = TempDir::new().unwrap();
+        write_person(dir.path(), "Alice");
+        let mut second = GraphWriter::open_at(dir.path(), OntologyMode::Strict, 2).unwrap();
+        second.create_node(uuid(2), TypeId(LABEL_ID)).unwrap();
+        second
+            .set_properties(
+                &uuid(2),
+                Some(LABEL),
+                HashMap::from([("name".to_owned(), IrLiteral::Str("Bob".to_owned()))]),
+            )
+            .unwrap();
+        second.flush().unwrap();
+        let paths = graphforge_storage::node_property_files(dir.path(), LABEL).unwrap();
+        assert_eq!(paths.len(), 2);
+        let before =
+            capture_text_snapshot(dir.path(), TextSearchLimits::default(), || Ok(())).unwrap();
+        use std::io::Write as _;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&paths[1])
+            .unwrap()
+            .write_all(b"property shard changed without a generation bump")
+            .unwrap();
+        let after =
+            capture_text_snapshot(dir.path(), TextSearchLimits::default(), || Ok(())).unwrap();
+        assert_eq!(before.generation, after.generation);
+        assert_ne!(before.fingerprint, after.fingerprint);
     }
 
     #[test]

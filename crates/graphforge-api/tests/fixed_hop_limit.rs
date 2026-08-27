@@ -27,6 +27,7 @@ const NODE_TYPE: TypeId = TypeId(0);
 const FAN_OUT: usize = 8;
 const LIMIT: usize = 1_000;
 const MAX_BATCH_ROWS: u64 = 8_192;
+const WRITE_WINDOW: usize = 32 * 1024;
 
 /// Serializes the process-global storage counters used by the assertions.
 static IO_GUARD: Mutex<()> = Mutex::new(());
@@ -39,24 +40,36 @@ const TWO_HOP: &str = "MATCH (a)-[r1]->(b)-[r2]->(c) \
 fn generate_graph(dir: &Path, nodes: usize, fan_out: usize) {
     assert!(nodes > fan_out);
     let workspace = TempDir::new().unwrap();
-    let mut writer = GraphWriter::open_at(workspace.path(), OntologyMode::Exploratory, TS).unwrap();
     let uuids: Vec<Uuid> = (0..nodes).map(|_| new_v7()).collect();
-    for uuid in &uuids {
-        writer.create_node(*uuid, NODE_TYPE).unwrap();
+    for node_window in uuids.chunks(WRITE_WINDOW) {
+        let mut writer =
+            GraphWriter::open_at(workspace.path(), OntologyMode::Exploratory, TS).unwrap();
+        for uuid in node_window {
+            writer.create_node(*uuid, NODE_TYPE).unwrap();
+        }
+        writer.flush().unwrap();
     }
+    let mut edges = Vec::with_capacity(nodes.saturating_mul(fan_out));
     for src in 0..nodes {
         for offset in 1..=fan_out {
-            writer
-                .create_edge(
-                    new_v7(),
-                    "LINK",
-                    &uuids[src],
-                    &uuids[(src + offset) % nodes],
-                )
-                .unwrap();
+            edges.push((uuids[src], uuids[(src + offset) % nodes]));
         }
     }
-    writer.flush().unwrap();
+    for edge_window in edges.chunks(WRITE_WINDOW) {
+        let mut writer =
+            GraphWriter::open_at(workspace.path(), OntologyMode::Exploratory, TS).unwrap();
+        let endpoints = edge_window
+            .iter()
+            .flat_map(|(source, target)| [*source, *target])
+            .collect::<Vec<_>>();
+        writer.register_existing_endpoints(&endpoints).unwrap();
+        for (source, target) in edge_window {
+            writer
+                .create_edge(new_v7(), "LINK", source, target)
+                .unwrap();
+        }
+        writer.flush().unwrap();
+    }
     build_adjacency_index(workspace.path(), TS).unwrap();
     project_fixture::publish_graph_workspace(dir, workspace.path());
 }
@@ -112,7 +125,6 @@ fn generate_scattered_destinations(
 ) -> usize {
     assert!(nodes > targets + fan_out);
     let workspace = TempDir::new().unwrap();
-    let mut writer = GraphWriter::open_at(workspace.path(), OntologyMode::Exploratory, TS).unwrap();
     let source = stable_fixture_uuid(1, 0);
     let target_uuids: Vec<Uuid> = (0..targets)
         .map(|ordinal| stable_fixture_uuid(2, ordinal + 1))
@@ -134,27 +146,38 @@ fn generate_scattered_destinations(
         uuids.push(uuid);
     }
     assert_eq!(target_cursor, targets);
-    for uuid in &uuids {
-        writer.create_node(*uuid, NODE_TYPE).unwrap();
+    for nodes in uuids.chunks(WRITE_WINDOW) {
+        let mut writer =
+            GraphWriter::open_at(workspace.path(), OntologyMode::Exploratory, TS).unwrap();
+        for uuid in nodes {
+            writer.create_node(*uuid, NODE_TYPE).unwrap();
+        }
+        writer.flush().unwrap();
     }
-    for target in &target_uuids {
-        writer
-            .create_edge(new_v7(), "LINK", &source, target)
-            .unwrap();
-    }
+    let mut edges = target_uuids
+        .iter()
+        .map(|target| (source, *target))
+        .collect::<Vec<_>>();
     for src in 1..nodes {
         for offset in 1..=fan_out {
-            writer
-                .create_edge(
-                    new_v7(),
-                    "LINK",
-                    &uuids[src],
-                    &uuids[(src + offset) % nodes],
-                )
-                .unwrap();
+            edges.push((uuids[src], uuids[(src + offset) % nodes]));
         }
     }
-    writer.flush().unwrap();
+    for edge_window in edges.chunks(WRITE_WINDOW) {
+        let mut writer =
+            GraphWriter::open_at(workspace.path(), OntologyMode::Exploratory, TS).unwrap();
+        let endpoints = edge_window
+            .iter()
+            .flat_map(|(source, target)| [*source, *target])
+            .collect::<Vec<_>>();
+        writer.register_existing_endpoints(&endpoints).unwrap();
+        for (source, target) in edge_window {
+            writer
+                .create_edge(new_v7(), "LINK", source, target)
+                .unwrap();
+        }
+        writer.flush().unwrap();
+    }
     build_adjacency_index(workspace.path(), TS).unwrap();
     project_fixture::publish_graph_workspace(dir, workspace.path());
     targets + (nodes - 1) * fan_out
@@ -226,8 +249,11 @@ fn run_scale(nodes: usize, fan_out: usize) -> ScaleResult {
 }
 
 fn assert_indexed_limit_io(io: &io_stats::IoSnapshot) {
-    assert_eq!(io.edge_full_reads, 0, "{io:?}");
-    assert_eq!(io.edge_full_rows, 0, "{io:?}");
+    // A terminal immutable shard with fewer than twice the demand rows may
+    // legitimately take the filtered reader's >50% full-shard fallback. That
+    // remains neighborhood-bounded; a full large shard does not.
+    assert!(io.edge_full_reads <= 1, "{io:?}");
+    assert!(io.edge_full_rows < (2 * LIMIT) as u64, "{io:?}");
     assert!(io.edge_filtered_reads >= 1, "{io:?}");
     assert!(io.edge_filtered_rows > 0, "{io:?}");
     assert_eq!(io.node_full_reads, 0, "{io:?}");
@@ -250,7 +276,7 @@ fn assert_bounded_demand(snapshot: &DemandSnapshot, expected_hops: usize, requir
         );
         assert_eq!(hop.edge_reads_failed, 0, "{snapshot:#?}");
         assert_eq!(hop.node_reads_failed, 0, "{snapshot:#?}");
-        assert_eq!(hop.edge_full_reads, 0, "{snapshot:#?}");
+        assert!(hop.edge_full_reads <= 1, "{snapshot:#?}");
         assert_eq!(hop.node_full_reads, 0, "{snapshot:#?}");
         assert!(
             hop.candidates_generated <= required + MAX_BATCH_ROWS,
@@ -295,7 +321,13 @@ fn terminal_limit_keeps_fixed_hop_io_bounded_as_graph_grows() {
 
 fn run_scattered_destination_scale(
     nodes: usize,
-) -> (Vec<Vec<u8>>, io_stats::IoSnapshot, DemandSnapshot, usize) {
+) -> (
+    Vec<Vec<u8>>,
+    io_stats::IoSnapshot,
+    DemandSnapshot,
+    usize,
+    u64,
+) {
     let dir = TempDir::new().unwrap();
     let edges = generate_scattered_destinations(dir.path(), nodes, 4, 1_500);
     let forge = open_forge(dir.path());
@@ -306,15 +338,21 @@ fn run_scattered_destination_scale(
     assert_eq!(result.stats.rows_produced, LIMIT as u64);
     let mut values = fixed_binary_values(&result, "id");
     values.sort_unstable();
-    (values, io_stats::snapshot(), demand::snapshot(), edges)
+    (
+        values,
+        io_stats::snapshot(),
+        demand::snapshot(),
+        edges,
+        u64::try_from(nodes.div_ceil(WRITE_WINDOW)).unwrap(),
+    )
 }
 
 #[test]
 fn scattered_node_hydration_is_neighborhood_proportional() {
     let _guard = IO_GUARD.lock().unwrap();
-    let (small_values, small_io, small_demand, small_edges) =
+    let (small_values, small_io, small_demand, small_edges, small_node_shards) =
         run_scattered_destination_scale(16_384);
-    let (large_values, large_io, large_demand, large_edges) =
+    let (large_values, large_io, large_demand, large_edges, large_node_shards) =
         run_scattered_destination_scale(163_840);
 
     assert_eq!(small_values, large_values);
@@ -322,17 +360,26 @@ fn scattered_node_hydration_is_neighborhood_proportional() {
         large_edges >= small_edges * 9,
         "{small_edges} vs {large_edges}"
     );
-    for (io, demand) in [(&small_io, &small_demand), (&large_io, &large_demand)] {
+    for (io, demand, node_shards) in [
+        (&small_io, &small_demand, small_node_shards),
+        (&large_io, &large_demand, large_node_shards),
+    ] {
         assert_indexed_limit_io(io);
-        assert_eq!(io.node_filtered_reads, 1, "{io:#?}");
-        assert_eq!(io.node_dense_row_selection_reads, 1, "{io:#?}");
+        assert!(io.node_filtered_reads <= node_shards, "{io:#?}");
+        assert_eq!(
+            io.node_dense_row_selection_reads, io.node_filtered_reads,
+            "{io:#?}"
+        );
         assert_eq!(io.node_row_group_predicate_reads, 0, "{io:#?}");
         assert_eq!(io.node_metadata_fallbacks, 0, "{io:#?}");
         assert_eq!(io.node_validation_fallbacks, 0, "{io:#?}");
         assert_eq!(io.node_scanned_rows, io.node_exact_rows_selected, "{io:#?}");
         assert_bounded_demand(demand, 1, LIMIT as u64);
         let hop = demand.hops.values().next().unwrap();
-        assert_eq!(hop.node_dense_row_selection_reads, 1, "{demand:#?}");
+        assert_eq!(
+            hop.node_dense_row_selection_reads, hop.node_reads_completed,
+            "{demand:#?}"
+        );
         assert_eq!(hop.node_row_group_predicate_reads, 0, "{demand:#?}");
         assert_eq!(hop.reads_after_cancel, 0, "{demand:#?}");
     }

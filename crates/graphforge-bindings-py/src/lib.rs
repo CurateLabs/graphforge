@@ -1595,19 +1595,24 @@ pub(crate) fn params_from_dict(
 }
 
 /// Transfer an [`ExecutionResult`] to a `pyarrow.Table` via the Arrow C Data
-/// Interface, preserving the schema (and its `graphforge.*` metadata). An empty
-/// result yields a zero-row table with the correct schema.
+/// Interface, preserving the schema (and its `graphforge.*` metadata). Internal
+/// execution/storage batches are coalesced at this non-streaming binding
+/// boundary so Python observes one logical result batch. `execute_stream`
+/// retains the engine's genuine streaming batches. An empty result yields one
+/// typed zero-row batch.
 fn result_to_pyarrow(py: Python<'_>, result: &ExecutionResult) -> PyResult<Py<PyAny>> {
-    let batches = result
-        .batches
-        .iter()
-        .map(|b| b.to_pyarrow(py))
-        .collect::<PyResult<Vec<_>>>()?;
+    let logical = if result.batches.is_empty() {
+        RecordBatch::new_empty(Arc::clone(&result.schema))
+    } else {
+        arrow::compute::concat_batches(&result.schema, &result.batches)
+            .map_err(|error| to_pyerr(py, &GfError::Execution(error.to_string())))?
+    };
+    let batch = logical.to_pyarrow(py)?;
     let schema = result.schema.to_pyarrow(py)?;
     let table = py
         .import("pyarrow")?
         .getattr("Table")?
-        .call_method1("from_batches", (batches, schema))?;
+        .call_method1("from_batches", ([batch], schema))?;
     Ok(table.unbind())
 }
 

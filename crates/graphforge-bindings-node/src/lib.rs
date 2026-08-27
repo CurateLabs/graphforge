@@ -204,19 +204,24 @@ fn bulk_edge_publication_error(error: BulkEdgePublicationError) -> NodeError {
 }
 
 /// Serialize an execution result to an Arrow IPC **stream** Buffer. The stream
-/// preamble carries the schema (incl. the `graphforge.*` metadata); a zero-row
-/// result still emits a valid schema-only stream. JS decodes it with
-/// apache-arrow `tableFromIPC`.
+/// preamble carries the schema (incl. the `graphforge.*` metadata). Internal
+/// execution/storage batches are coalesced at this non-streaming binding
+/// boundary so JavaScript observes one logical result batch; a zero-row result
+/// emits one typed empty batch. JS decodes it with apache-arrow `tableFromIPC`.
 fn result_to_ipc(result: &ExecutionResult) -> std::result::Result<Vec<u8>, GfError> {
+    let logical = if result.batches.is_empty() {
+        arrow::record_batch::RecordBatch::new_empty(Arc::clone(&result.schema))
+    } else {
+        concat_batches(&result.schema, &result.batches)
+            .map_err(|error| GfError::Execution(error.to_string()))?
+    };
     let mut buf: Vec<u8> = Vec::new();
     {
         let mut writer = StreamWriter::try_new(&mut buf, result.schema.as_ref())
             .map_err(|e| GfError::Execution(e.to_string()))?;
-        for batch in &result.batches {
-            writer
-                .write(batch)
-                .map_err(|e| GfError::Execution(e.to_string()))?;
-        }
+        writer
+            .write(&logical)
+            .map_err(|e| GfError::Execution(e.to_string()))?;
         writer
             .finish()
             .map_err(|e| GfError::Execution(e.to_string()))?;

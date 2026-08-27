@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+static PROCESS_REWRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 use crate::filesystem_admission::{ProjectLifecycleMode, ProjectRootRequirement};
 use crate::staging::RewriteBatch;
 
@@ -43,9 +45,35 @@ pub struct AuxiliaryReceipt {
     pub bytes: u64,
 }
 
+/// Authoritative rewrite state exposed to an auxiliary participant while the
+/// admitted project rewrite lock is held.
+pub(crate) struct ParticipantPreparationContext<'a> {
+    /// Exact recovered generation pair preceding this transaction.
+    pub prior: GenerationPair,
+    /// Exact generation pair that this transaction will publish.
+    pub next: GenerationPair,
+    /// Retained, admitted project directory capability.
+    pub project: &'a StableDirectory,
+    /// Canonical admitted project root.
+    pub project_root: &'a Path,
+}
+
+/// One-shot participant preparation executed inside the retained rewrite
+/// critical section.
+pub(crate) type RewriteParticipantPreparer<'a> = Box<
+    dyn FnOnce(
+            ParticipantPreparationContext<'_>,
+            &mut RewriteBatch,
+        ) -> Result<Option<AuxiliaryReceipt>, GfError>
+        + 'a,
+>;
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+/// Topology and search authorities selected for one durable rewrite.
 pub(crate) struct GenerationPair {
+    /// Topology generation published by the transaction.
     pub topology: u64,
+    /// Search generation published by the transaction.
     pub search: u64,
     #[serde(default)]
     pub property: u64,
@@ -99,6 +127,73 @@ struct AuthenticatedFile {
 enum EntryClass {
     Data,
     GenerationAuthority,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AuxiliaryReconcileOutcome {
+    Committed,
+    NotCommitted,
+}
+
+pub(crate) fn reconcile_auxiliary(
+    root: &Path,
+    prior: GenerationPair,
+    next: GenerationPair,
+    receipt: &AuxiliaryReceipt,
+) -> Result<AuxiliaryReconcileOutcome, GfError> {
+    let guard = acquire(root)?;
+    guard.revalidate()?;
+    let raw = crate::generation::read_generation_state_raw(root)?;
+    recover_locked(
+        root,
+        &guard.directory,
+        GenerationPair {
+            topology: raw.topology,
+            search: raw.search,
+            property: raw.property,
+        },
+    )?;
+    let current = crate::generation::read_generation_state_raw(root)?;
+    let relative = Path::new(&receipt.path);
+    canonical_journal_path(&receipt.path)?;
+    let mut directory = graphforge_filesystem::StableDirectory::open(root).map_err(storage)?;
+    let mut components = relative.components().peekable();
+    let mut file = None;
+    while let Some(component) = components.next() {
+        let Component::Normal(name) = component else {
+            return Err(storage("auxiliary receipt path is not canonical"));
+        };
+        if components.peek().is_some() {
+            directory = directory.open_child_directory(name).map_err(storage)?;
+        } else {
+            file = match directory.open_child_file(name) {
+                Ok(file) => Some(file),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(storage(error)),
+            };
+        }
+    }
+    let exact = if let Some(file) = file {
+        let (bytes, digest) = hash_reader(file.try_clone().map_err(storage)?)?;
+        directory.revalidate_named().map_err(storage)?;
+        bytes == receipt.bytes && digest == receipt.digest
+    } else {
+        false
+    };
+    let current = GenerationPair {
+        topology: current.topology,
+        search: current.search,
+        property: current.property,
+    };
+    if current == next && exact {
+        Ok(AuxiliaryReconcileOutcome::Committed)
+    } else if current == prior && !exact {
+        Ok(AuxiliaryReconcileOutcome::NotCommitted)
+    } else {
+        Err(storage(
+            "auxiliary rewrite outcome is ambiguous or substituted",
+        ))
+    }
 }
 
 fn storage(error: impl std::fmt::Display) -> GfError {
@@ -163,6 +258,7 @@ fn authenticated_file(file: &File) -> Result<AuthenticatedFile, GfError> {
 }
 
 struct RewriteGuard {
+    _process: std::sync::MutexGuard<'static, ()>,
     admission: crate::filesystem_admission::ProjectLifecycleAdmission,
     directory: StableDirectory,
     lifecycle: File,
@@ -176,6 +272,11 @@ impl Drop for RewriteGuard {
 }
 
 fn acquire(root: &Path) -> Result<RewriteGuard, GfError> {
+    // This mutex owns ordering only; the durable journal owns recovery state.
+    // A panicking holder must not disable every later rewrite in the process.
+    let process = PROCESS_REWRITE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // The lifecycle guard binds the named project root. Ephemeral mode avoids
     // repeating the expensive filesystem probe; durable projects have already
     // passed it at facade admission.
@@ -199,6 +300,7 @@ fn acquire(root: &Path) -> Result<RewriteGuard, GfError> {
     admission.revalidate_identity()?;
     let lifecycle_identity = graphforge_filesystem::file_identity(&lock).map_err(storage)?;
     Ok(RewriteGuard {
+        _process: process,
         admission,
         directory,
         lifecycle: lock,
@@ -672,15 +774,60 @@ thread_local! {
     static FAIL_AFTER_DURABLE_INTENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// Execute bounded maintenance under the same recovered project rewrite lock.
+pub(crate) fn with_rewrite_lock<T>(
+    root: &Path,
+    operation: impl FnOnce(&StableDirectory) -> Result<T, GfError>,
+) -> Result<T, GfError> {
+    let guard = acquire(root)?;
+    guard.revalidate()?;
+    let current = crate::generation::read_generation_state_raw(root)?;
+    recover_locked(
+        root,
+        &guard.directory,
+        GenerationPair {
+            topology: current.topology,
+            search: current.search,
+            property: current.property,
+        },
+    )?;
+    guard.revalidate()?;
+    let output = operation(&guard.directory)?;
+    guard.revalidate()?;
+    Ok(output)
+}
+
 #[allow(clippy::too_many_lines)]
 pub(crate) fn commit(
-    mut batch: RewriteBatch,
+    batch: RewriteBatch,
     root: &Path,
     bump_topology: bool,
     bump_search: bool,
     bump_property: bool,
     auxiliary: Option<AuxiliaryReceipt>,
 ) -> Result<GenerationPair, GfError> {
+    commit_with_participant(
+        batch,
+        root,
+        bump_topology,
+        bump_search,
+        bump_property,
+        auxiliary,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_lines)] // Linear crash-barrier state machine; splitting obscures order.
+pub(crate) fn commit_with_participant(
+    mut batch: RewriteBatch,
+    root: &Path,
+    bump_topology: bool,
+    bump_search: bool,
+    bump_property: bool,
+    auxiliary: Option<AuxiliaryReceipt>,
+    participant: Option<RewriteParticipantPreparer<'_>>,
+) -> Result<GenerationPair, GfError> {
+    let has_participant = participant.is_some();
     // Serialize the pinned-generation precondition with CURRENT replacement.
     // Project publication takes this same lock before it can replace CURRENT.
     let _project_authority_guard = batch
@@ -702,7 +849,13 @@ pub(crate) fn commit(
         search: recovered.search,
         property: recovered.property,
     };
-    if batch.is_empty() && !bump_topology && !bump_search && !bump_property && auxiliary.is_none() {
+    if batch.is_empty()
+        && !bump_topology
+        && !bump_search
+        && !bump_property
+        && auxiliary.is_none()
+        && !has_participant
+    {
         return Ok(prior);
     }
     let next = GenerationPair {
@@ -734,6 +887,57 @@ pub(crate) fn commit(
     if bump_property {
         crate::writer::seal_property_windows(&mut batch, root, next.property)?;
         batch.move_staged_destination_to_end(&root.join("topology/nodes.parquet"));
+    }
+    let participant_baseline = batch
+        .staged_paths()
+        .map(Path::to_path_buf)
+        .collect::<std::collections::BTreeSet<_>>();
+    let participant_auxiliary = if let Some(prepare) = participant {
+        prepare(
+            ParticipantPreparationContext {
+                prior,
+                next,
+                project: &guard.directory,
+                project_root: root,
+            },
+            &mut batch,
+        )?
+    } else {
+        None
+    };
+    if auxiliary.is_some() && participant_auxiliary.is_some() {
+        return Err(storage("rewrite has multiple auxiliary participants"));
+    }
+    let auxiliary = participant_auxiliary.or(auxiliary);
+    let reserved = root.join("topology/uuid-membership");
+    if has_participant
+        && batch
+            .staged_paths()
+            .filter(|destination| !participant_baseline.contains(*destination))
+            .any(|destination| !destination.starts_with(&reserved))
+    {
+        return Err(storage(
+            "rewrite participant staged a destination outside its reserved namespace",
+        ));
+    }
+    let stages_reserved = batch
+        .staged_paths()
+        .any(|destination| destination.starts_with(&reserved));
+    if stages_reserved && !has_participant {
+        return Err(storage(
+            "uuid-membership namespace requires the sealed rewrite participant",
+        ));
+    }
+    if stages_reserved
+        && auxiliary.as_ref().is_none_or(|receipt| {
+            receipt.kind != "uuid-membership/v3"
+                || receipt.schema_version != 3
+                || receipt.path != "topology/uuid-membership/topology-receipt.json"
+        })
+    {
+        return Err(storage(
+            "UUID rewrite participant must stage its namespace and exact typed receipt",
+        ));
     }
     let generation_bytes =
         crate::generation::encode_generation_state(next.topology, next.search, next.property)?;
@@ -871,6 +1075,21 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn poisoned_process_ordering_lock_does_not_disable_later_rewrites() {
+        std::thread::spawn(|| {
+            let _guard = PROCESS_REWRITE_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            panic!("poison process rewrite ordering lock");
+        })
+        .join()
+        .expect_err("poisoning thread must panic");
+
+        let root = TempDir::new().unwrap();
+        drop(acquire(root.path()).unwrap());
+    }
 
     fn entry(destination: &str, class: EntryClass) -> Entry {
         Entry {

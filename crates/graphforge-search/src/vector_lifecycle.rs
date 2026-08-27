@@ -4,15 +4,13 @@ use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use arrow::array::{Array, FixedSizeBinaryArray, ListArray, UInt32Array};
+use arrow::array::{Array, FixedSizeBinaryArray, ListArray, UInt32Array, UInt64Array};
 use graphforge_storage::{
     PublishedSearchArtifact, SearchArtifactError, SearchArtifactKey, SearchCoordinationLimits,
-    SearchPublicationOutcome, SearchSourcePart, SearchSourceSnapshot, VECTOR_BACKEND_VERSION,
+    SearchPublicationOutcome, SearchSourceSnapshot, VECTOR_BACKEND_VERSION,
     VECTOR_CONTRACT_VERSION, VectorSearchHit, VectorStoreLimits, current_search_artifact,
-    read_nodes, search_published_vectors, upsert_published_vector, validate_vector,
+    search_published_vectors, upsert_published_vector, validate_vector,
 };
-
-const TOPOLOGY_SOURCE: &str = "topology/nodes.parquet";
 
 /// Bounds for graph membership, vector work, and atomic publication.
 #[derive(Clone, Copy, Debug)]
@@ -72,6 +70,7 @@ where
 {
     let key = SearchArtifactKey::vector(request.label, request.space)?;
     let checkpoint = RefCell::new(checkpoint);
+    let projection = RefCell::new(None::<LabelMemberProjection>);
     upsert_published_vector(
         project_dir,
         key.label(),
@@ -81,12 +80,27 @@ where
         updated_at_micros,
         limits.vector,
         limits.coordination,
-        || capture_topology_snapshot(project_dir, limits, || checkpoint.borrow_mut()()),
+        || {
+            if projection.borrow().is_none() {
+                *projection.borrow_mut() = Some(project_label_members_snapshot(
+                    project_dir,
+                    request.label_id,
+                    limits,
+                    || checkpoint.borrow_mut()(),
+                )?);
+            }
+            let borrowed = projection.borrow();
+            let projected = borrowed.as_ref().expect("projection initialized");
+            if SearchSourceSnapshot::generation(project_dir)? != projected.snapshot.generation {
+                return Err(SearchArtifactError::ConcurrentMutation);
+            }
+            Ok(projected.snapshot.clone())
+        },
         |candidate| {
-            project_label_members(project_dir, request.label_id, limits, || {
-                checkpoint.borrow_mut()()
-            })
-            .map(|eligible| eligible.contains(&candidate))
+            Ok(projection
+                .borrow()
+                .as_ref()
+                .is_some_and(|projected| projected.members.contains(&candidate)))
         },
         || checkpoint.borrow_mut()(),
     )
@@ -117,16 +131,9 @@ where
     validate_result_limit(limit, limits.vector)?;
 
     for attempt in 1_u8..=2 {
-        let before = capture_topology_snapshot(project_dir, limits, &mut checkpoint)?;
-        let eligible =
-            project_label_members(project_dir, request.label_id, limits, &mut checkpoint)?;
-        let projected = capture_topology_snapshot(project_dir, limits, &mut checkpoint)?;
-        if before != projected {
-            if attempt == 2 {
-                return Err(SearchArtifactError::ConcurrentMutation);
-            }
-            continue;
-        }
+        let projection =
+            project_label_members_snapshot(project_dir, request.label_id, limits, &mut checkpoint)?;
+        let expected_generation = projection.snapshot.generation;
 
         let hits = match current_search_artifact(project_dir, &key)? {
             Some(artifact) => {
@@ -134,7 +141,7 @@ where
                 search_published_vectors(
                     &artifact,
                     query,
-                    &eligible,
+                    &projection.members,
                     limit,
                     limits.vector,
                     &mut checkpoint,
@@ -142,8 +149,7 @@ where
             }
             None => Vec::new(),
         };
-        let after = capture_topology_snapshot(project_dir, limits, &mut checkpoint)?;
-        if before == after {
+        if SearchSourceSnapshot::generation(project_dir)? == expected_generation {
             return Ok(hits);
         }
         if attempt == 2 {
@@ -165,61 +171,151 @@ pub fn project_label_members<C>(
     project_dir: &Path,
     label_id: u32,
     limits: VectorLifecycleLimits,
-    mut checkpoint: C,
+    checkpoint: C,
 ) -> Result<BTreeSet<[u8; 16]>, SearchArtifactError>
 where
     C: FnMut() -> Result<(), SearchArtifactError>,
 {
-    checkpoint()?;
-    let batches = read_nodes(project_dir).map_err(|error| source(error.to_string()))?;
-    let mut eligible = BTreeSet::new();
-    let mut seen = BTreeSet::new();
-    let mut rows = 0_usize;
-    for batch in batches {
-        checkpoint()?;
-        let uuids = batch
-            .column_by_name("node_uuid")
-            .and_then(|column| column.as_any().downcast_ref::<FixedSizeBinaryArray>())
-            .ok_or_else(|| source("topology node_uuid is not FixedSizeBinary(16)"))?;
-        let labels = batch
-            .column_by_name("type_ids")
-            .and_then(|column| column.as_any().downcast_ref::<ListArray>())
-            .ok_or_else(|| source("topology type_ids is not List<UInt32>"))?;
-        for row in 0..batch.num_rows() {
-            checkpoint()?;
-            rows = rows.saturating_add(1);
-            if rows > limits.topology_rows {
-                return Err(exhausted("vector_topology_rows", limits.topology_rows));
-            }
-            if uuids.is_null(row) || labels.is_null(row) {
-                return Err(source("topology contains null node identity data"));
-            }
-            let node_uuid: [u8; 16] = uuids
-                .value(row)
-                .try_into()
-                .map_err(|_| source("topology node_uuid is not 16 bytes"))?;
-            if !seen.insert(node_uuid) {
-                return Err(source("topology contains duplicate node UUIDs"));
-            }
-            let values = labels.value(row);
-            let values = values
-                .as_any()
-                .downcast_ref::<UInt32Array>()
-                .ok_or_else(|| source("topology type_ids child is not UInt32"))?;
-            if values.null_count() != 0 {
-                return Err(source("topology type_ids contains null labels"));
-            }
-            if values.values().contains(&label_id) {
-                eligible.insert(node_uuid);
-                if eligible.len() > limits.vector.eligible_nodes {
-                    return Err(exhausted("eligible_nodes", limits.vector.eligible_nodes));
-                }
-            }
-        }
-    }
-    Ok(eligible)
+    project_label_members_snapshot(project_dir, label_id, limits, checkpoint)
+        .map(|projection| projection.members)
 }
 
+pub(crate) struct LabelMemberProjection {
+    pub(crate) members: BTreeSet<[u8; 16]>,
+    pub(crate) snapshot: SearchSourceSnapshot,
+}
+
+#[allow(clippy::too_many_lines)] // one streaming callback preserves one admitted handle
+pub(crate) fn project_label_members_snapshot<C>(
+    project_dir: &Path,
+    label_id: u32,
+    limits: VectorLifecycleLimits,
+    mut checkpoint: C,
+) -> Result<LabelMemberProjection, SearchArtifactError>
+where
+    C: FnMut() -> Result<(), SearchArtifactError>,
+{
+    checkpoint()?;
+    let source_generation = SearchSourceSnapshot::generation(project_dir)?;
+    let mut source_evidence = Vec::new();
+    let mut eligible = BTreeSet::new();
+    let mut rows = 0_usize;
+    let mut last_surrogate = None;
+    let mut index = graphforge_storage::uuid_membership_index_present(project_dir)
+        .then(|| graphforge_storage::UuidMembershipIndex::open(project_dir))
+        .transpose()
+        .map_err(|error| source(error.to_string()))?;
+    let mut legacy_seen = index.is_none().then(BTreeSet::new);
+    let mut failure = None;
+    graphforge_storage::visit_node_fragments_admitted(
+        project_dir,
+        8192,
+        limits.source_bytes,
+        &mut source_evidence,
+        |batch| {
+            let result: Result<(), SearchArtifactError> = (|| {
+                checkpoint()?;
+                let uuids = batch
+                    .column_by_name("node_uuid")
+                    .and_then(|column| column.as_any().downcast_ref::<FixedSizeBinaryArray>())
+                    .ok_or_else(|| source("topology node_uuid is not FixedSizeBinary(16)"))?;
+                let labels = batch
+                    .column_by_name("type_ids")
+                    .and_then(|column| column.as_any().downcast_ref::<ListArray>())
+                    .ok_or_else(|| source("topology type_ids is not List<UInt32>"))?;
+                let surrogates = batch
+                    .column_by_name("node_id")
+                    .and_then(|column| column.as_any().downcast_ref::<UInt64Array>())
+                    .ok_or_else(|| source("topology node_id is not UInt64"))?;
+                let mut batch_uuids = Vec::with_capacity(batch.num_rows());
+                for row in 0..batch.num_rows() {
+                    let bytes: [u8; 16] = uuids
+                        .value(row)
+                        .try_into()
+                        .map_err(|_| source("topology node_uuid is not 16 bytes"))?;
+                    batch_uuids.push(uuid::Uuid::from_bytes(bytes));
+                }
+                let indexed = index
+                    .as_mut()
+                    .map(|index| index.lookup_node_surrogates(&batch_uuids))
+                    .transpose()
+                    .map_err(|error| source(error.to_string()))?
+                    .map(|(values, _)| values);
+                for row in 0..batch.num_rows() {
+                    checkpoint()?;
+                    rows = rows.saturating_add(1);
+                    if rows > limits.topology_rows {
+                        return Err(exhausted("vector_topology_rows", limits.topology_rows));
+                    }
+                    if uuids.is_null(row) || labels.is_null(row) || surrogates.is_null(row) {
+                        return Err(source("topology contains null node identity data"));
+                    }
+                    let node_uuid: [u8; 16] = uuids
+                        .value(row)
+                        .try_into()
+                        .map_err(|_| source("topology node_uuid is not 16 bytes"))?;
+                    let surrogate = surrogates.value(row);
+                    if last_surrogate.is_some_and(|prior| surrogate <= prior)
+                        || indexed
+                            .as_ref()
+                            .is_some_and(|values| values[row] != Some(surrogate))
+                        || legacy_seen
+                            .as_mut()
+                            .is_some_and(|seen| !seen.insert(node_uuid))
+                    {
+                        return Err(source(
+                            "topology identity disagrees with authenticated UUID index",
+                        ));
+                    }
+                    last_surrogate = Some(surrogate);
+                    let values = labels.value(row);
+                    let values = values
+                        .as_any()
+                        .downcast_ref::<UInt32Array>()
+                        .ok_or_else(|| source("topology type_ids child is not UInt32"))?;
+                    if values.null_count() != 0 {
+                        return Err(source("topology type_ids contains null labels"));
+                    }
+                    if values.values().contains(&label_id) {
+                        eligible.insert(node_uuid);
+                        if eligible.len() > limits.vector.eligible_nodes {
+                            return Err(exhausted("eligible_nodes", limits.vector.eligible_nodes));
+                        }
+                    }
+                }
+                Ok(())
+            })();
+            if let Err(error) = result {
+                failure = Some(error);
+                return Ok(false);
+            }
+            Ok(true)
+        },
+    )
+    .map_err(|error| source(error.to_string()))?;
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    if index
+        .as_ref()
+        .is_some_and(|index| rows as u64 != index.count(graphforge_storage::UuidIndexKind::Node))
+    {
+        return Err(source(
+            "topology row count disagrees with authenticated UUID index",
+        ));
+    }
+    let snapshot = SearchSourceSnapshot::from_admitted_files(
+        project_dir,
+        source_generation,
+        &source_evidence,
+    )?;
+    Ok(LabelMemberProjection {
+        members: eligible,
+        snapshot,
+    })
+}
+
+#[cfg(test)]
 pub(crate) fn capture_topology_snapshot<C>(
     project_dir: &Path,
     limits: VectorLifecycleLimits,
@@ -229,41 +325,26 @@ where
     C: FnMut() -> Result<(), SearchArtifactError>,
 {
     checkpoint()?;
-    let path = project_dir.join(TOPOLOGY_SOURCE);
-    let bytes = match std::fs::symlink_metadata(&path) {
-        Ok(metadata) => {
-            if !metadata.file_type().is_file() {
-                return Err(source(format!(
-                    "search source {} is not a regular file",
-                    path.display()
-                )));
-            }
-            if metadata.len() > limits.source_bytes {
-                return Err(exhausted_u64("vector_source_bytes", limits.source_bytes));
-            }
-            let bytes = std::fs::read(&path)
-                .map_err(|error| source(format!("read {}: {error}", path.display())))?;
-            if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > limits.source_bytes {
-                return Err(exhausted_u64("vector_source_bytes", limits.source_bytes));
-            }
-            Some(bytes)
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => {
-            return Err(source(format!("inspect {}: {error}", path.display())));
-        }
-    };
-    checkpoint()?;
-    match bytes.as_deref() {
-        Some(bytes) => SearchSourceSnapshot::capture(
-            project_dir,
-            &[SearchSourcePart {
-                name: TOPOLOGY_SOURCE,
-                bytes,
-            }],
-        ),
-        None => SearchSourceSnapshot::capture(project_dir, &[]),
+    let paths = graphforge_storage::topology_node_files(project_dir)
+        .map_err(|error| source(error.to_string()))?;
+    let mut named = Vec::with_capacity(paths.len());
+    for path in paths {
+        checkpoint()?;
+        let relative = path
+            .strip_prefix(project_dir)
+            .map_err(|_| source("topology source escaped project root"))?
+            .to_str()
+            .ok_or_else(|| source("topology source path is not UTF-8"))?
+            .to_owned();
+        named.push((relative, path));
     }
+    checkpoint()?;
+    SearchSourceSnapshot::capture_files(
+        project_dir,
+        &named,
+        limits.source_bytes,
+        "vector_source_bytes",
+    )
 }
 
 fn validate_requested_artifact(
@@ -328,6 +409,7 @@ mod tests {
     use graphforge_storage::{
         GraphWriter, SearchPublicationOutcome, delete_nodes, generation::bump_search_generation,
     };
+    use parquet::arrow::ArrowWriter;
     use tempfile::TempDir;
 
     use super::*;
@@ -378,6 +460,81 @@ mod tests {
                 .unwrap();
         }
         writer.flush().unwrap();
+    }
+
+    fn corrupt_node_surrogate_to_null(root: &Path) {
+        let path = graphforge_storage::topology_node_files(root)
+            .unwrap()
+            .remove(0);
+        let batch = graphforge_storage::read_nodes(root).unwrap().remove(0);
+        let mut fields = batch
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.as_ref().clone())
+            .collect::<Vec<_>>();
+        let index = batch.schema().index_of("node_id").unwrap();
+        fields[index] = fields[index].clone().with_nullable(true);
+        let schema = std::sync::Arc::new(arrow::datatypes::Schema::new(fields));
+        let mut columns = batch.columns().to_vec();
+        columns[index] = std::sync::Arc::new(arrow::array::UInt64Array::from(vec![None]));
+        let corrupted = arrow::array::RecordBatch::try_new(schema.clone(), columns).unwrap();
+        let mut writer =
+            ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
+        writer.write(&corrupted).unwrap();
+        writer.close().unwrap();
+    }
+
+    #[test]
+    fn vector_membership_rejects_null_node_surrogate_explicitly() {
+        let dir = TempDir::new().unwrap();
+        write_members(&dir, &[(1, vec![9])]);
+        corrupt_node_surrogate_to_null(dir.path());
+        std::fs::remove_dir_all(dir.path().join("topology/uuid-membership")).unwrap();
+        assert!(matches!(
+            project_label_members(dir.path(), 9, VectorLifecycleLimits::default(), || Ok(())),
+            Err(SearchArtifactError::SourceSnapshot { .. })
+        ));
+    }
+
+    #[test]
+    fn topology_snapshot_and_byte_limit_cover_every_node_shard() {
+        let dir = TempDir::new().unwrap();
+        for ordinal in 1_u8..=2 {
+            let mut writer =
+                GraphWriter::open_at(dir.path(), OntologyMode::Strict, i64::from(ordinal)).unwrap();
+            writer.create_node(uuid(ordinal), TypeId(9)).unwrap();
+            writer.flush().unwrap();
+        }
+        let paths = graphforge_storage::topology_node_files(dir.path()).unwrap();
+        assert_eq!(paths.len(), 2);
+        let before =
+            capture_topology_snapshot(dir.path(), VectorLifecycleLimits::default(), || Ok(()))
+                .unwrap();
+        use std::io::Write as _;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&paths[1])
+            .unwrap()
+            .write_all(b"changed without generation")
+            .unwrap();
+        let after =
+            capture_topology_snapshot(dir.path(), VectorLifecycleLimits::default(), || Ok(()))
+                .unwrap();
+        assert_eq!(before.generation, after.generation);
+        assert_ne!(before.fingerprint, after.fingerprint);
+
+        let limits = VectorLifecycleLimits {
+            source_bytes: std::fs::metadata(&paths[0]).unwrap().len(),
+            ..VectorLifecycleLimits::default()
+        };
+        assert!(matches!(
+            capture_topology_snapshot(dir.path(), limits, || Ok(())),
+            Err(SearchArtifactError::ResourceExhausted {
+                resource: "vector_source_bytes",
+                ..
+            })
+        ));
     }
 
     #[test]

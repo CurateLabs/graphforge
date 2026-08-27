@@ -365,6 +365,28 @@ struct RouteSchemaBuilder {
 }
 
 impl AuthenticatedPropertyInventory {
+    pub(crate) fn admitted_source_files(
+        &self,
+        kind: PropertyRouteKind,
+    ) -> Result<Vec<crate::catalog::AdmittedSourceFile>, GfError> {
+        let mut files = Vec::new();
+        for ((candidate, _), fragments) in &self.routes {
+            if *candidate != kind {
+                continue;
+            }
+            for fragment in fragments {
+                let digest = decode_sha256(&fragment.entry.content_sha256)?;
+                files.push(crate::catalog::AdmittedSourceFile {
+                    name: fragment.entry.relative_path.clone(),
+                    byte_length: fragment.entry.byte_length,
+                    sha256: digest,
+                });
+            }
+        }
+        files.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+        Ok(files)
+    }
+
     #[cfg(test)]
     fn live_fragment_handles(&self) -> u64 {
         self.handle_counts.live.load(Ordering::SeqCst)
@@ -891,6 +913,31 @@ impl AuthenticatedPropertyInventory {
             .saturating_add(metrics.merge_peak_bytes);
         metrics.peak_buffered_bytes = budget.peak();
         Ok(metrics)
+    }
+}
+
+fn decode_sha256(value: &str) -> Result<[u8; 32], GfError> {
+    if value.len() != 64 {
+        return Err(corrupt(
+            "property inventory digest is not canonical SHA-256",
+        ));
+    }
+    let mut decoded = [0_u8; 32];
+    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        let high = hex_value(pair[0])?;
+        let low = hex_value(pair[1])?;
+        decoded[index] = (high << 4) | low;
+    }
+    Ok(decoded)
+}
+
+fn hex_value(value: u8) -> Result<u8, GfError> {
+    match value {
+        b'0'..=b'9' => Ok(value - b'0'),
+        b'a'..=b'f' => Ok(value - b'a' + 10),
+        _ => Err(corrupt(
+            "property inventory digest is not lowercase hexadecimal",
+        )),
     }
 }
 

@@ -365,8 +365,8 @@ mod tests {
 
         let mut edge_writer =
             GraphWriter::open_at(project.path(), OntologyMode::Exploratory, 11).unwrap();
-        edge_writer.register_existing_node(node_a, 1);
-        edge_writer.register_existing_node(node_b, 2);
+        edge_writer.register_existing_node(node_a, 1).unwrap();
+        edge_writer.register_existing_node(node_b, 2).unwrap();
         edge_writer
             .create_edge(new_v7(), "LINKS", &node_a, &node_b)
             .unwrap();

@@ -1,6 +1,6 @@
 {
   "schema": "graphforge.cargo-feature-fingerprint.v1",
-  "sha256": "e9a7b05aa171a3b8277548a70c8d91df4d67620c525352d752312fc20015cbf3",
+  "sha256": "faf566b1023d302f374da985eedf1d2faa6e580fb9caa5dccc17840db4c50023",
   "entries": [
     {
       "name": "graphforge-api",
@@ -1806,6 +1806,15 @@
           "target": null
         },
         {
+          "name": "parquet",
+          "req": "^58",
+          "features": [],
+          "optional": false,
+          "uses_default_features": true,
+          "kind": "dev",
+          "target": null
+        },
+        {
           "name": "serde",
           "req": "^1",
           "features": [
@@ -1854,6 +1863,19 @@
           ],
           "optional": false,
           "uses_default_features": false,
+          "kind": null,
+          "target": null
+        },
+        {
+          "name": "uuid",
+          "req": "^1",
+          "features": [
+            "serde",
+            "v5",
+            "v7"
+          ],
+          "optional": false,
+          "uses_default_features": true,
           "kind": null,
           "target": null
         }

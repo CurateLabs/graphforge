@@ -30,7 +30,6 @@ use graphforge_ontology::OntologyHandle;
 use serde::{Deserialize, Serialize};
 
 use crate::catalog::{normalize_topology_nodes, read_nodes};
-use crate::generation::commit_topology_aware;
 use crate::schemas::TOPOLOGY_NODES_SCHEMA;
 use crate::staging::RewriteBatch;
 
@@ -424,15 +423,23 @@ fn reconcile_inner(
                      read-only open cannot rewrite topology",
                 ));
             }
-            let (rewritten, remapped) = remap_batches(batches, &remap)?;
-            remapped_label_values = remapped;
+            let mut staged = RewriteBatch::new();
+            for path in crate::mutator::node_parquet_files(dir)? {
+                let source = normalize_topology_nodes(
+                    crate::catalog::read_parquet_or_empty(&path, TOPOLOGY_NODES_SCHEMA.clone())
+                        .map_err(pq_err)?,
+                )
+                .map_err(pq_err)?;
+                let (rewritten, remapped) = remap_batches(source, &remap)?;
+                remapped_label_values = remapped_label_values.saturating_add(remapped);
+                if remapped > 0 {
+                    let merged = arrow::compute::concat_batches(&TOPOLOGY_NODES_SCHEMA, &rewritten)
+                        .map_err(|e| storage_err(e.to_string()))?;
+                    staged.restage(&path, TOPOLOGY_NODES_SCHEMA.clone(), &merged)?;
+                }
+            }
             if remapped_label_values > 0 {
-                let path = dir.join("topology").join("nodes.parquet");
-                let merged = arrow::compute::concat_batches(&TOPOLOGY_NODES_SCHEMA, &rewritten)
-                    .map_err(|e| storage_err(e.to_string()))?;
-                let mut staged = RewriteBatch::new();
-                staged.restage(&path, TOPOLOGY_NODES_SCHEMA.clone(), &merged)?;
-                commit_topology_aware(staged, dir)?;
+                crate::uuid_membership::commit_uuid_neutral_topology_rewrite(dir, staged)?;
             }
         }
     }
@@ -515,7 +522,7 @@ mod tests {
         }
         let uuid_array =
             FixedSizeBinaryArray::try_from_sparse_iter_with_size(uuids.into_iter(), 16).unwrap();
-        let node_ids = UInt64Array::from((0..n as u64).collect::<Vec<_>>());
+        let node_ids = UInt64Array::from((1..=n as u64).collect::<Vec<_>>());
         let primary = UInt32Array::from(
             type_ids
                 .iter()
@@ -584,7 +591,13 @@ migrations: []
     #[test]
     fn exploratory_legacy_ids_migrate_to_tagged_form() {
         let dir = TempDir::new().unwrap();
-        write_nodes(dir.path(), &[&[0], &[1]]);
+        let endpoints = [uuid::Uuid::from_u128(1), uuid::Uuid::from_u128(2)];
+        let mut seed =
+            crate::GraphWriter::open_at(dir.path(), graphforge_core::OntologyMode::Exploratory, 1)
+                .unwrap();
+        seed.create_node(endpoints[0], TypeId(0)).unwrap();
+        seed.create_node(endpoints[1], TypeId(1)).unwrap();
+        seed.flush().unwrap();
         let mut catalog = RuntimeCatalog::new();
         assert_eq!(catalog.intern_label("Ghost").0, 0);
         assert_eq!(catalog.intern_label("Spectre").0, 1);
@@ -594,6 +607,19 @@ migrations: []
         assert_eq!(outcome.remapped_label_values, 4);
         assert!(outcome.encoding_marked);
         assert!(has_runtime_entity_label_encoding_marker(dir.path()));
+        assert!(crate::uuid_membership_index_is_fresh(dir.path()).unwrap());
+
+        // Reopening and probing the generation-carried UUID authority must not
+        // decode the topology that reconciliation just rewrote.
+        crate::io_stats::reset();
+        let mut writer =
+            crate::GraphWriter::open_at(dir.path(), graphforge_core::OntologyMode::Exploratory, 2)
+                .unwrap();
+        let work = writer.register_existing_endpoints(&endpoints).unwrap();
+        assert_eq!(work.found, 2);
+        let io = crate::io_stats::snapshot();
+        assert_eq!(io.node_full_reads, 0);
+        assert_eq!(io.node_filtered_reads, 0);
 
         let batches = read_nodes(dir.path()).unwrap();
         let type_ids = batches[0]
@@ -605,6 +631,64 @@ migrations: []
         let row0 = type_ids.value(0);
         let row0 = row0.as_any().downcast_ref::<UInt32Array>().unwrap();
         assert_eq!(row0.value(0), runtime_entity_type_id(RuntimeTypeId(0)).0);
+    }
+
+    #[test]
+    fn uuid_neutral_label_rewrite_recovers_after_committed_refresh_failure() {
+        let dir = TempDir::new().unwrap();
+        write_nodes(dir.path(), &[&[0], &[1]]);
+        let mut catalog = RuntimeCatalog::new();
+        catalog.intern_label("Ghost");
+        catalog.intern_label("Spectre");
+        reconcile_runtime_entity_label_ids(dir.path(), None, &catalog).unwrap();
+
+        let stage_current = || {
+            let batches = read_nodes(dir.path()).unwrap();
+            let batch = arrow::compute::concat_batches(&TOPOLOGY_NODES_SCHEMA, &batches).unwrap();
+            let mut staged = RewriteBatch::new();
+            staged
+                .restage(
+                    &dir.path().join("topology/nodes.parquet"),
+                    TOPOLOGY_NODES_SCHEMA.clone(),
+                    &batch,
+                )
+                .unwrap();
+            staged
+        };
+
+        let before = crate::read_topology_generation(dir.path()).unwrap();
+        crate::uuid_membership::fail_next_snapshot_refresh_for_test();
+        let error = crate::uuid_membership::commit_uuid_neutral_topology_rewrite(
+            dir.path(),
+            stage_current(),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("committed but UUID index snapshot refresh failed")
+        );
+        assert_eq!(
+            crate::read_topology_generation(dir.path()).unwrap(),
+            before + 1
+        );
+        assert!(crate::uuid_membership_index_is_fresh(dir.path()).unwrap());
+
+        assert_eq!(
+            crate::uuid_membership::commit_uuid_neutral_topology_rewrite(
+                dir.path(),
+                stage_current(),
+            )
+            .unwrap(),
+            Some(before + 2)
+        );
+        assert!(crate::uuid_membership_index_is_fresh(dir.path()).unwrap());
+        assert_eq!(
+            crate::UuidMembershipIndex::open(dir.path())
+                .unwrap()
+                .count(crate::UuidIndexKind::Node),
+            2
+        );
     }
 
     #[test]

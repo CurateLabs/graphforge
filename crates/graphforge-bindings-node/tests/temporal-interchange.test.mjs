@@ -18,16 +18,20 @@ const fixture = JSON.parse(
 
 test("temporal values remain typed Arrow with exact zone and calendar components", () => {
   const forge = new GraphForge();
-  forge.addNode(
-    "Temporal",
-    Object.fromEntries(fixture.cases.map((entry) => [entry.name, entry.value])),
-  );
-  forge.addNode("Temporal", {});
+  forge.addNode("Temporal", {
+    ...Object.fromEntries(
+      fixture.cases.map((entry) => [entry.name, entry.value]),
+    ),
+    fixture_ordinal: 0,
+  });
+  forge.addNode("Temporal", { fixture_ordinal: 1 });
   const projection = fixture.cases
     .map((entry) => `n.${entry.name} AS ${entry.name}`)
     .join(", ");
   const table = tableFromIPC(
-    forge.execute(`MATCH (n:Temporal) RETURN ${projection}`),
+    forge.execute(
+      `MATCH (n:Temporal) RETURN ${projection} ORDER BY n.fixture_ordinal`,
+    ),
   );
   assert.equal(table.numRows, 2);
   for (const entry of fixture.cases) {

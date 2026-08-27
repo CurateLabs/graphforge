@@ -342,9 +342,10 @@ pub use io_stats::{IoSnapshot, snapshot as io_snapshot};
 
 pub mod uuid_membership;
 pub use uuid_membership::{
-    UuidIndexBuildLimits, UuidIndexBuildMetrics, UuidIndexKind, UuidMembershipIndex,
-    UuidProbeMetrics, rebuild_uuid_membership_indexes, uuid_membership_index_is_fresh,
-    uuid_membership_index_present,
+    AuthenticatedUuidIndexSnapshot, UuidIndexAppendMetrics, UuidIndexBuildLimits,
+    UuidIndexBuildMetrics, UuidIndexKind, UuidIndexOrphanGcWork, UuidMembershipIndex,
+    UuidProbeMetrics, maintain_uuid_membership_orphans, rebuild_uuid_membership_indexes,
+    uuid_membership_index_is_fresh, uuid_membership_index_present,
 };
 
 pub mod property_overlay;
@@ -359,11 +360,14 @@ pub use property_overlay::{
 
 pub mod catalog;
 pub use catalog::{
-    EdgePropertyTable, GraphCatalog, PropertyTable, TopologyNodeTable, TypedEdgeTable,
-    UnionEdgeTable, list_edge_property_stems, list_property_stems, read_edge_properties,
-    read_edges, read_edges_filtered, read_edges_filtered_observed, read_nodes, read_nodes_filtered,
-    read_nodes_filtered_observed, read_properties, read_properties_batched, visit_nodes_batched,
-    visit_properties_batched,
+    AdmittedSourceFile, EdgePropertyTable, GraphCatalog, PropertyTable, TopologyNodeTable,
+    TypedEdgeTable, UnionEdgeTable, list_edge_property_stems, list_property_stems,
+    node_property_files, node_property_source_files, node_property_source_fragments,
+    node_topology_present, read_edge_properties, read_edges, read_edges_filtered,
+    read_edges_filtered_observed, read_nodes, read_nodes_filtered, read_nodes_filtered_observed,
+    read_properties, read_properties_batched, topology_node_files, visit_node_fragments_admitted,
+    visit_node_property_overlay_admitted, visit_nodes_batched, visit_properties_batched,
+    visit_property_fragments_admitted,
 };
 
 pub mod runtime_entity_labels;
@@ -387,10 +391,10 @@ pub use schemas::{
 
 pub mod writer;
 pub use writer::{
-    GraphWriter, count_entity_properties, decode_spatial_property_value, read_entity_properties,
-    read_entity_property_keys, read_node_property_rows, remove_edge_properties,
-    remove_node_properties, set_edge_properties_rewrite, set_node_properties,
-    stage_property_tombstones_authenticated, stage_remove_edge_properties,
+    GraphWriter, GraphWriterLimits, count_entity_properties, decode_spatial_property_value,
+    read_entity_properties, read_entity_property_keys, read_node_property_rows,
+    remove_edge_properties, remove_node_properties, set_edge_properties_rewrite,
+    set_node_properties, stage_property_tombstones_authenticated, stage_remove_edge_properties,
     stage_remove_edge_properties_authenticated, stage_remove_node_properties,
     stage_remove_node_properties_authenticated, stage_set_edge_properties,
     stage_set_edge_properties_authenticated, stage_set_node_properties,

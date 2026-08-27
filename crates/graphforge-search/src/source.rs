@@ -3,9 +3,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use arrow::array::{Array, FixedSizeBinaryArray, ListArray, StringArray, UInt32Array};
+use arrow::array::{Array, FixedSizeBinaryArray, ListArray, StringArray, UInt32Array, UInt64Array};
 use arrow::datatypes::DataType;
-use graphforge_storage::{SearchArtifactError, list_property_stems, read_nodes, read_properties};
+use graphforge_storage::{AdmittedSourceFile, SearchArtifactError, SearchSourceSnapshot};
 
 use crate::TextSearchLimits;
 
@@ -30,6 +30,8 @@ pub struct TextSourceProjection {
     pub documents: Vec<TextDocument>,
     /// Physical committed source bytes inspected while projecting.
     pub source_bytes: u64,
+    /// Generation and content identity captured from the exact decoded handles.
+    pub source_snapshot: SearchSourceSnapshot,
 }
 
 /// Project one caller-resolved label from topology and property Parquet files.
@@ -57,6 +59,8 @@ where
     C: FnMut() -> Result<(), SearchArtifactError>,
 {
     checkpoint()?;
+    let source_generation = SearchSourceSnapshot::generation(project_dir)?;
+    let mut source_evidence = Vec::<AdmittedSourceFile>::new();
     let explicit = selected_properties
         .map(|properties| normalize_properties(properties, limits))
         .transpose()?;
@@ -71,15 +75,22 @@ where
         limits,
         &mut checkpoint,
         &mut source_bytes,
+        &mut source_evidence,
     )?;
     if eligible.len() > limits.documents {
         return Err(exhausted("text_documents", limits.documents));
     }
     if eligible.is_empty() {
+        let source_snapshot = SearchSourceSnapshot::from_admitted_files(
+            project_dir,
+            source_generation,
+            &source_evidence,
+        )?;
         return Ok(TextSourceProjection {
             properties: explicit.unwrap_or_default(),
             documents: Vec::new(),
             source_bytes,
+            source_snapshot,
         });
     }
 
@@ -90,13 +101,20 @@ where
         limits,
         &mut checkpoint,
         &mut source_bytes,
+        &mut source_evidence,
     )?;
     let properties = explicit.unwrap_or_else(|| observed_properties.into_iter().collect());
     if properties.is_empty() {
+        let source_snapshot = SearchSourceSnapshot::from_admitted_files(
+            project_dir,
+            source_generation,
+            &source_evidence,
+        )?;
         return Ok(TextSourceProjection {
             properties,
             documents: Vec::new(),
             source_bytes,
+            source_snapshot,
         });
     }
     let property_set = properties.iter().collect::<BTreeSet<_>>();
@@ -112,74 +130,148 @@ where
             TextDocument { node_uuid, fields }
         })
         .collect();
+    let source_snapshot = SearchSourceSnapshot::from_admitted_files(
+        project_dir,
+        source_generation,
+        &source_evidence,
+    )?;
     Ok(TextSourceProjection {
         properties,
         documents,
         source_bytes,
+        source_snapshot,
     })
 }
 
+#[allow(clippy::too_many_lines)] // one streaming callback preserves one admitted handle
 fn select_eligible_nodes<C>(
     project_dir: &Path,
     label_id: u32,
     limits: TextSearchLimits,
     checkpoint: &mut C,
     source_bytes: &mut u64,
+    source_evidence: &mut Vec<AdmittedSourceFile>,
 ) -> Result<BTreeSet<[u8; 16]>, SearchArtifactError>
 where
     C: FnMut() -> Result<(), SearchArtifactError>,
 {
-    add_source_bytes(
-        &project_dir.join("topology").join("nodes.parquet"),
-        source_bytes,
-        limits,
-    )?;
-    let batches = read_nodes(project_dir).map_err(|error| source(error.to_string()))?;
     let mut eligible = BTreeSet::new();
-    let mut seen_topology = BTreeSet::new();
     let mut topology_rows = 0_usize;
-    for batch in batches {
-        checkpoint()?;
-        let uuids = batch
-            .column_by_name("node_uuid")
-            .and_then(|column| column.as_any().downcast_ref::<FixedSizeBinaryArray>())
-            .ok_or_else(|| source("topology node_uuid is not FixedSizeBinary(16)"))?;
-        let labels = batch
-            .column_by_name("type_ids")
-            .and_then(|column| column.as_any().downcast_ref::<ListArray>())
-            .ok_or_else(|| source("topology type_ids is not List<UInt32>"))?;
-        for row in 0..batch.num_rows() {
-            checkpoint()?;
-            topology_rows = topology_rows.saturating_add(1);
-            if topology_rows > limits.topology_rows {
-                return Err(exhausted("text_topology_rows", limits.topology_rows));
+    let mut last_surrogate = None;
+    let mut index = graphforge_storage::uuid_membership_index_present(project_dir)
+        .then(|| graphforge_storage::UuidMembershipIndex::open(project_dir))
+        .transpose()
+        .map_err(|error| source(error.to_string()))?;
+    // Pre-index legacy graphs are bounded by `topology_rows`; current durable
+    // generations authenticate UUID uniqueness through the disk index instead.
+    let mut legacy_seen = index.is_none().then(BTreeSet::new);
+    let mut failure = None;
+    let admitted = graphforge_storage::visit_node_fragments_admitted(
+        project_dir,
+        8192,
+        limits.source_bytes,
+        source_evidence,
+        |batch| {
+            let result: Result<(), SearchArtifactError> = (|| {
+                checkpoint()?;
+                let uuids = batch
+                    .column_by_name("node_uuid")
+                    .and_then(|column| column.as_any().downcast_ref::<FixedSizeBinaryArray>())
+                    .ok_or_else(|| source("topology node_uuid is not FixedSizeBinary(16)"))?;
+                let labels = batch
+                    .column_by_name("type_ids")
+                    .and_then(|column| column.as_any().downcast_ref::<ListArray>())
+                    .ok_or_else(|| source("topology type_ids is not List<UInt32>"))?;
+                let surrogates = batch
+                    .column_by_name("node_id")
+                    .and_then(|column| column.as_any().downcast_ref::<UInt64Array>())
+                    .ok_or_else(|| source("topology node_id is not UInt64"))?;
+                let mut batch_uuids = Vec::with_capacity(batch.num_rows());
+                for row in 0..batch.num_rows() {
+                    let bytes: [u8; 16] = uuids
+                        .value(row)
+                        .try_into()
+                        .map_err(|_| source("topology node_uuid is not 16 bytes"))?;
+                    batch_uuids.push(uuid::Uuid::from_bytes(bytes));
+                }
+                let indexed = index
+                    .as_mut()
+                    .map(|index| index.lookup_node_surrogates(&batch_uuids))
+                    .transpose()
+                    .map_err(|error| source(error.to_string()))?
+                    .map(|(values, _)| values);
+                for row in 0..batch.num_rows() {
+                    checkpoint()?;
+                    topology_rows = topology_rows.saturating_add(1);
+                    if topology_rows > limits.topology_rows {
+                        return Err(exhausted("text_topology_rows", limits.topology_rows));
+                    }
+                    if uuids.is_null(row) || labels.is_null(row) || surrogates.is_null(row) {
+                        return Err(source("topology contains null node identity data"));
+                    }
+                    let node_uuid: [u8; 16] = uuids
+                        .value(row)
+                        .try_into()
+                        .map_err(|_| source("topology node_uuid is not 16 bytes"))?;
+                    let surrogate = surrogates.value(row);
+                    if last_surrogate.is_some_and(|prior| surrogate <= prior)
+                        || indexed
+                            .as_ref()
+                            .is_some_and(|values| values[row] != Some(surrogate))
+                        || legacy_seen
+                            .as_mut()
+                            .is_some_and(|seen| !seen.insert(node_uuid))
+                    {
+                        return Err(source(
+                            "topology identity disagrees with authenticated UUID index",
+                        ));
+                    }
+                    last_surrogate = Some(surrogate);
+                    let label_values = labels.value(row);
+                    let label_values = label_values
+                        .as_any()
+                        .downcast_ref::<UInt32Array>()
+                        .ok_or_else(|| source("topology type_ids child is not UInt32"))?;
+                    if label_values.null_count() != 0 {
+                        return Err(source("topology type_ids contains null labels"));
+                    }
+                    if label_values.values().contains(&label_id) {
+                        eligible.insert(node_uuid);
+                    }
+                }
+                Ok(())
+            })();
+            if let Err(error) = result {
+                failure = Some(error);
+                return Ok(false);
             }
-            if uuids.is_null(row) || labels.is_null(row) {
-                return Err(source("topology contains null node identity data"));
-            }
-            let node_uuid: [u8; 16] = uuids
-                .value(row)
-                .try_into()
-                .map_err(|_| source("topology node_uuid is not 16 bytes"))?;
-            if !seen_topology.insert(node_uuid) {
-                return Err(source("topology contains duplicate node UUIDs"));
-            }
-            let label_values = labels.value(row);
-            let label_values = label_values
-                .as_any()
-                .downcast_ref::<UInt32Array>()
-                .ok_or_else(|| source("topology type_ids child is not UInt32"))?;
-            if label_values.null_count() != 0 {
-                return Err(source("topology type_ids contains null labels"));
-            }
-            if label_values.values().contains(&label_id) {
-                eligible.insert(node_uuid);
-            }
+            Ok(true)
+        },
+    )
+    .map_err(|error| {
+        if error.to_string().contains("source bytes")
+            || error.to_string().contains("admission limit")
+        {
+            exhausted_u64("text_source_bytes", limits.source_bytes)
+        } else {
+            source(error.to_string())
         }
+    })?;
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    *source_bytes = admitted;
+    if index.as_ref().is_some_and(|index| {
+        topology_rows as u64 != index.count(graphforge_storage::UuidIndexKind::Node)
+    }) {
+        return Err(source(
+            "topology row count disagrees with authenticated UUID index",
+        ));
     }
     Ok(eligible)
 }
 
+#[allow(clippy::too_many_lines)]
 fn project_properties<C>(
     project_dir: &Path,
     eligible: &BTreeSet<[u8; 16]>,
@@ -187,93 +279,113 @@ fn project_properties<C>(
     limits: TextSearchLimits,
     checkpoint: &mut C,
     source_bytes: &mut u64,
+    source_evidence: &mut Vec<AdmittedSourceFile>,
 ) -> Result<ProjectedProperties, SearchArtifactError>
 where
     C: FnMut() -> Result<(), SearchArtifactError>,
 {
     let mut property_rows = 0_usize;
-    let mut seen_property_rows = BTreeSet::new();
     let mut observed_properties = BTreeSet::new();
     let mut fields_by_uuid = TextFieldsByUuid::new();
-    for stem in list_property_stems(project_dir) {
-        checkpoint()?;
-        let path = project_dir
-            .join("properties")
-            .join(format!("{stem}.parquet"));
-        add_source_bytes(&path, source_bytes, limits)?;
-        let batches = read_properties(project_dir, &stem)
-            .map_err(|error| source(format!("read {}: {error}", path.display())))?;
-        if batches.is_empty() {
-            return Err(source(format!(
-                "{} is not readable Parquet",
-                path.display()
-            )));
-        }
-        for batch in batches {
-            checkpoint()?;
-            let uuids = batch
-                .column_by_name("node_uuid")
-                .and_then(|column| column.as_any().downcast_ref::<FixedSizeBinaryArray>())
-                .ok_or_else(|| source(format!("{} node_uuid is malformed", path.display())))?;
-            for row in 0..batch.num_rows() {
+    checkpoint()?;
+    let remaining = limits.source_bytes.saturating_sub(*source_bytes);
+    let projected_columns = explicit.map(|selected| {
+        let mut columns = selected.clone();
+        columns.insert("node_uuid".to_owned());
+        columns
+    });
+    let mut failure = None;
+    let admitted = graphforge_storage::visit_node_property_overlay_admitted(
+        project_dir,
+        8192,
+        remaining,
+        projected_columns.as_ref(),
+        source_evidence,
+        |stem, batch| {
+            let result: Result<(), SearchArtifactError> = (|| {
                 checkpoint()?;
-                property_rows = property_rows.saturating_add(1);
-                if property_rows > limits.property_rows {
-                    return Err(exhausted("text_property_rows", limits.property_rows));
-                }
-                if uuids.is_null(row) {
-                    return Err(source(format!(
-                        "{} contains null node_uuid",
-                        path.display()
-                    )));
-                }
-                let node_uuid: [u8; 16] = uuids
-                    .value(row)
-                    .try_into()
-                    .map_err(|_| source(format!("{} node_uuid is not 16 bytes", path.display())))?;
-                if !eligible.contains(&node_uuid) {
-                    continue;
-                }
-                if !seen_property_rows.insert(node_uuid) {
-                    return Err(source(format!(
-                        "eligible UUID {node_uuid:02x?} has duplicate property rows"
-                    )));
-                }
-                for (field, column) in batch.schema().fields().iter().zip(batch.columns()) {
-                    let name = field.name();
-                    if name == "node_uuid"
-                        || explicit.is_some_and(|selected| !selected.contains(name))
-                    {
-                        continue;
+                let uuids = batch
+                    .column_by_name("node_uuid")
+                    .and_then(|column| column.as_any().downcast_ref::<FixedSizeBinaryArray>())
+                    .ok_or_else(|| {
+                        source(format!("property route {stem} node_uuid is malformed"))
+                    })?;
+                for row in 0..batch.num_rows() {
+                    checkpoint()?;
+                    property_rows = property_rows.saturating_add(1);
+                    if property_rows > limits.property_rows {
+                        return Err(exhausted("text_property_rows", limits.property_rows));
                     }
-                    if field.data_type() != &DataType::Utf8 {
-                        continue;
-                    }
-                    let values =
-                        column
-                            .as_any()
-                            .downcast_ref::<StringArray>()
-                            .ok_or_else(|| {
-                                source(format!("{} field {name:?} is malformed", path.display()))
-                            })?;
-                    if values.is_null(row) {
-                        continue;
-                    }
-                    validate_property(name, limits)?;
-                    observed_properties.insert(name.clone());
-                    let replaced = fields_by_uuid
-                        .entry(node_uuid)
-                        .or_default()
-                        .insert(name.clone(), values.value(row).to_owned());
-                    if replaced.is_some() {
+                    if uuids.is_null(row) {
                         return Err(source(format!(
-                            "eligible UUID {node_uuid:02x?} repeats property {name:?}"
+                            "property route {stem} contains null node_uuid"
                         )));
                     }
+                    let node_uuid: [u8; 16] = uuids.value(row).try_into().map_err(|_| {
+                        source(format!("property route {stem} node_uuid is not 16 bytes"))
+                    })?;
+                    if !eligible.contains(&node_uuid) {
+                        continue;
+                    }
+                    for (field, column) in batch.schema().fields().iter().zip(batch.columns()) {
+                        let name = field.name();
+                        if name == "node_uuid"
+                            || explicit.is_some_and(|selected| !selected.contains(name))
+                        {
+                            continue;
+                        }
+                        if field.data_type() != &DataType::Utf8 {
+                            continue;
+                        }
+                        let values =
+                            column
+                                .as_any()
+                                .downcast_ref::<StringArray>()
+                                .ok_or_else(|| {
+                                    source(format!(
+                                        "property route {stem} field {name:?} is malformed"
+                                    ))
+                                })?;
+                        if values.is_null(row) {
+                            continue;
+                        }
+                        validate_property(name, limits)?;
+                        observed_properties.insert(name.clone());
+                        let replaced = fields_by_uuid
+                            .entry(node_uuid)
+                            .or_default()
+                            .insert(name.clone(), values.value(row).to_owned());
+                        if replaced.is_some() {
+                            return Err(source(format!(
+                                "eligible UUID {node_uuid:02x?} repeats property {name:?}"
+                            )));
+                        }
+                    }
                 }
+                Ok(())
+            })();
+            if let Err(error) = result {
+                failure = Some(error);
+                return Ok(false);
             }
-        }
+            Ok(true)
+        },
+    );
+    if let Some(error) = failure {
+        return Err(error);
     }
+    let admitted = admitted.map_err(|error| {
+        if error.to_string().contains("property source bytes")
+            || error.to_string().contains("decoded-byte admission")
+        {
+            exhausted_u64("text_source_bytes", limits.source_bytes)
+        } else {
+            source(format!("read property sources: {error}"))
+        }
+    })?;
+    *source_bytes = source_bytes
+        .checked_add(admitted)
+        .ok_or_else(|| exhausted_u64("text_source_bytes", limits.source_bytes))?;
     Ok((observed_properties, fields_by_uuid))
 }
 
@@ -316,6 +428,7 @@ fn validate_property(property: &str, limits: TextSearchLimits) -> Result<(), Sea
     Ok(())
 }
 
+#[cfg(test)]
 fn add_source_bytes(
     path: &Path,
     total: &mut u64,
@@ -366,9 +479,10 @@ mod tests {
     use std::cell::Cell;
     use std::collections::HashMap;
 
-    use graphforge_core::uuid::Uuid;
+    use graphforge_core::uuid::{Uuid, to_bytes};
     use graphforge_ir::{IrLiteral, OntologyMode, TypeId};
-    use graphforge_storage::GraphWriter;
+    use graphforge_storage::{GraphWriter, set_node_properties};
+    use parquet::arrow::ArrowWriter;
     use tempfile::TempDir;
 
     use super::*;
@@ -377,6 +491,29 @@ mod tests {
         let mut bytes = [0_u8; 16];
         bytes[15] = value;
         Uuid::from_bytes(bytes)
+    }
+
+    fn corrupt_node_surrogate_to_null(root: &Path) {
+        let path = graphforge_storage::topology_node_files(root)
+            .unwrap()
+            .remove(0);
+        let batch = graphforge_storage::read_nodes(root).unwrap().remove(0);
+        let mut fields = batch
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.as_ref().clone())
+            .collect::<Vec<_>>();
+        let node_id = batch.schema().index_of("node_id").unwrap();
+        fields[node_id] = fields[node_id].clone().with_nullable(true);
+        let schema = std::sync::Arc::new(arrow::datatypes::Schema::new(fields));
+        let mut columns = batch.columns().to_vec();
+        columns[node_id] = std::sync::Arc::new(arrow::array::UInt64Array::from(vec![None]));
+        let corrupted = arrow::array::RecordBatch::try_new(schema.clone(), columns).unwrap();
+        let mut writer =
+            ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
+        writer.write(&corrupted).unwrap();
+        writer.close().unwrap();
     }
 
     #[test]
@@ -413,6 +550,151 @@ mod tests {
                 resource: "text_source_bytes",
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn source_byte_limit_counts_every_immutable_node_shard() {
+        let dir = TempDir::new().unwrap();
+        let mut first = GraphWriter::open_at(dir.path(), OntologyMode::Strict, 1).unwrap();
+        first.create_node(uuid(1), TypeId(9)).unwrap();
+        first.flush().unwrap();
+        let mut second = GraphWriter::open_at(dir.path(), OntologyMode::Strict, 2).unwrap();
+        second.create_node(uuid(2), TypeId(9)).unwrap();
+        second.flush().unwrap();
+        let paths = graphforge_storage::topology_node_files(dir.path()).unwrap();
+        assert_eq!(paths.len(), 2);
+        let mut limits = TextSearchLimits::default();
+        limits.source_bytes = std::fs::metadata(&paths[0]).unwrap().len();
+        assert!(matches!(
+            project_text_source(dir.path(), 9, None, limits, || Ok(())),
+            Err(SearchArtifactError::ResourceExhausted {
+                resource: "text_source_bytes",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn source_byte_limit_counts_every_immutable_property_shard() {
+        let dir = TempDir::new().unwrap();
+        for ordinal in 1_u8..=2 {
+            let mut writer =
+                GraphWriter::open_at(dir.path(), OntologyMode::Strict, i64::from(ordinal)).unwrap();
+            let node = uuid(ordinal);
+            writer.create_node(node, TypeId(9)).unwrap();
+            writer
+                .set_properties(
+                    &node,
+                    Some("Person"),
+                    HashMap::from([(
+                        "name".to_owned(),
+                        IrLiteral::Str(format!("person-{ordinal}")),
+                    )]),
+                )
+                .unwrap();
+            writer.flush().unwrap();
+        }
+        let node_bytes = graphforge_storage::topology_node_files(dir.path())
+            .unwrap()
+            .into_iter()
+            .map(|path| std::fs::metadata(path).unwrap().len())
+            .sum::<u64>();
+        let properties = graphforge_storage::node_property_files(dir.path(), "Person").unwrap();
+        assert_eq!(properties.len(), 2);
+        let mut limits = TextSearchLimits::default();
+        limits.source_bytes = node_bytes + std::fs::metadata(&properties[0]).unwrap().len();
+        assert!(matches!(
+            project_text_source(dir.path(), 9, None, limits, || Ok(())),
+            Err(SearchArtifactError::ResourceExhausted {
+                resource: "text_source_bytes",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn projection_reads_newest_overlay_row_and_accounts_for_every_fragment() {
+        let dir = TempDir::new().unwrap();
+        let node = uuid(1);
+        let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, 1).unwrap();
+        writer.create_node(node, TypeId(9)).unwrap();
+        writer
+            .set_properties(
+                &node,
+                Some("Person"),
+                HashMap::from([("name".to_owned(), IrLiteral::Str("Alice".to_owned()))]),
+            )
+            .unwrap();
+        writer.flush().unwrap();
+        let updates = HashMap::from([(
+            to_bytes(&node),
+            HashMap::from([("name".to_owned(), IrLiteral::Str("Bob".to_owned()))]),
+        )]);
+        assert_eq!(
+            set_node_properties(dir.path(), "Person", &updates).unwrap(),
+            1
+        );
+
+        let property_files = graphforge_storage::node_property_files(dir.path(), "Person").unwrap();
+        assert_eq!(property_files.len(), 2);
+        let expected_bytes = graphforge_storage::topology_node_files(dir.path())
+            .unwrap()
+            .into_iter()
+            .chain(property_files)
+            .map(|path| std::fs::metadata(path).unwrap().len())
+            .sum::<u64>();
+        let projection =
+            project_text_source(dir.path(), 9, None, TextSearchLimits::default(), || Ok(()))
+                .unwrap();
+
+        assert_eq!(projection.source_bytes, expected_bytes);
+        assert_eq!(projection.documents.len(), 1);
+        assert_eq!(projection.documents[0].fields["name"], "Bob");
+    }
+
+    #[test]
+    fn projection_merges_disjoint_routes_and_rejects_property_collisions() {
+        let dir = TempDir::new().unwrap();
+        let node = uuid(1);
+        let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, 1).unwrap();
+        writer.create_node(node, TypeId(9)).unwrap();
+        writer
+            .set_properties(
+                &node,
+                Some("Primary"),
+                HashMap::from([("name".to_owned(), IrLiteral::Str("Alice".to_owned()))]),
+            )
+            .unwrap();
+        writer.flush().unwrap();
+        let updates = HashMap::from([(
+            to_bytes(&node),
+            HashMap::from([(
+                "summary".to_owned(),
+                IrLiteral::Str("Graph search".to_owned()),
+            )]),
+        )]);
+        assert_eq!(
+            set_node_properties(dir.path(), "Secondary", &updates).unwrap(),
+            1
+        );
+        let projection =
+            project_text_source(dir.path(), 9, None, TextSearchLimits::default(), || Ok(()))
+                .unwrap();
+        assert_eq!(projection.documents[0].fields.len(), 2);
+
+        let collision = HashMap::from([(
+            to_bytes(&node),
+            HashMap::from([("name".to_owned(), IrLiteral::Str("Other".to_owned()))]),
+        )]);
+        assert_eq!(
+            set_node_properties(dir.path(), "Secondary", &collision).unwrap(),
+            1
+        );
+        assert!(matches!(
+            project_text_source(dir.path(), 9, None, TextSearchLimits::default(), || Ok(())),
+            Err(SearchArtifactError::SourceSnapshot { reason })
+                if reason.contains("repeats property")
         ));
     }
 
@@ -514,6 +796,19 @@ mod tests {
                 SearchArtifactError::Cancelled
             )),
             Err(SearchArtifactError::Cancelled)
+        ));
+    }
+
+    #[test]
+    fn projection_rejects_null_node_surrogate_explicitly() {
+        let dir = TempDir::new().unwrap();
+        let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, 1).unwrap();
+        writer.create_node(uuid(1), TypeId(1)).unwrap();
+        writer.flush().unwrap();
+        corrupt_node_surrogate_to_null(dir.path());
+        assert!(matches!(
+            project_text_source(dir.path(), 1, None, TextSearchLimits::default(), || Ok(())),
+            Err(SearchArtifactError::SourceSnapshot { .. })
         ));
     }
 

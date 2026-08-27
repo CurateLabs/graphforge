@@ -4,9 +4,13 @@
 //! Raw selectors never become path components: normalized UTF-8 bytes are
 //! length-framed, hexadecimal encoded, and split into bounded safe segments.
 
+use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 
 use graphforge_core::GfError;
+use sha2::{Digest as _, Sha256};
+
+use crate::catalog::AdmittedSourceFile;
 
 /// Search manifest format implemented by this release.
 pub const SEARCH_MANIFEST_VERSION: u32 = 1;
@@ -307,6 +311,52 @@ pub struct SearchSourceSnapshot {
 }
 
 impl SearchSourceSnapshot {
+    /// Read the lightweight committed search-generation authority without
+    /// reopening graph payloads.
+    pub fn generation(project_dir: &Path) -> Result<u64, SearchArtifactError> {
+        crate::generation::read_search_generation(project_dir).map_err(|error| {
+            SearchArtifactError::SourceSnapshot {
+                reason: error.to_string(),
+            }
+        })
+    }
+
+    /// Bind evidence captured from the exact handles used for decode to one
+    /// unchanged committed search generation.
+    pub fn from_admitted_files(
+        project_dir: &Path,
+        expected_generation: u64,
+        files: &[AdmittedSourceFile],
+    ) -> Result<Self, SearchArtifactError> {
+        let generation = Self::generation(project_dir)?;
+        if generation != expected_generation {
+            return Err(SearchArtifactError::ConcurrentMutation);
+        }
+        let mut ordered = files.to_vec();
+        ordered.sort_unstable_by(|left, right| left.name.as_bytes().cmp(right.name.as_bytes()));
+        for pair in ordered.windows(2) {
+            if pair[0].name == pair[1].name {
+                return Err(invalid(
+                    "source fingerprint",
+                    format!("duplicate source part {:?}", pair[0].name),
+                ));
+            }
+        }
+        let mut digest = Sha256::new();
+        digest.update(b"graphforge-admitted-source-v1\0");
+        for file in ordered {
+            let name = normalize_source_name(&file.name)?;
+            digest.update((name.len() as u64).to_le_bytes());
+            digest.update(name.as_bytes());
+            digest.update(file.byte_length.to_le_bytes());
+            digest.update(file.sha256);
+        }
+        Ok(Self {
+            generation,
+            fingerprint: format!("gf-sha256-files-v1:{}", hex(&digest.finalize())),
+        })
+    }
+
     /// Capture the current search generation and fingerprint the supplied
     /// logical source parts.
     ///
@@ -324,6 +374,29 @@ impl SearchSourceSnapshot {
                 }
             })?;
         let fingerprint = canonical_source_fingerprint(parts)?;
+        Ok(Self {
+            generation,
+            fingerprint,
+        })
+    }
+
+    /// Capture a canonical source snapshot by streaming regular files through
+    /// one fixed-size buffer. Each pathname is opened once and the resulting
+    /// handle is used for both admission and hashing, so replacement after open
+    /// cannot redirect the read to a different object.
+    pub fn capture_files(
+        project_dir: &Path,
+        files: &[(String, PathBuf)],
+        byte_limit: u64,
+        resource: &'static str,
+    ) -> Result<Self, SearchArtifactError> {
+        let generation =
+            crate::generation::read_search_generation(project_dir).map_err(|error| {
+                SearchArtifactError::SourceSnapshot {
+                    reason: error.to_string(),
+                }
+            })?;
+        let fingerprint = canonical_file_source_fingerprint(files, byte_limit, resource)?;
         Ok(Self {
             generation,
             fingerprint,
@@ -380,6 +453,116 @@ pub fn canonical_source_fingerprint(
     ))
 }
 
+/// Stream canonical named files into the same fingerprint format as
+/// [`canonical_source_fingerprint`] without retaining their contents.
+pub fn canonical_file_source_fingerprint(
+    files: &[(String, PathBuf)],
+    byte_limit: u64,
+    resource: &'static str,
+) -> Result<String, SearchArtifactError> {
+    let mut ordered = files.to_vec();
+    ordered.sort_unstable_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
+    for pair in ordered.windows(2) {
+        if pair[0].0 == pair[1].0 {
+            return Err(invalid(
+                "source fingerprint",
+                format!("duplicate source part {:?}", pair[0].0),
+            ));
+        }
+    }
+    let mut states = [
+        0xcbf2_9ce4_8422_2325_u64,
+        0x8422_2325_cbf2_9ce4_u64,
+        0x9e37_79b9_7f4a_7c15_u64,
+        0xd6e8_feb8_6659_fd93_u64,
+    ];
+    let mut total = 0_u64;
+    let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
+    for (name, path) in ordered {
+        let name = normalize_source_name(&name)?;
+        let mut file = open_source_nofollow(&path)?;
+        let metadata = file.metadata().map_err(|source| SearchArtifactError::Io {
+            operation: "inspect search source",
+            path: path.clone(),
+            source,
+        })?;
+        if !metadata.file_type().is_file() {
+            return Err(SearchArtifactError::SourceSnapshot {
+                reason: format!("search source {} is not a regular file", path.display()),
+            });
+        }
+        total =
+            total
+                .checked_add(metadata.len())
+                .ok_or(SearchArtifactError::ResourceExhausted {
+                    resource,
+                    limit: byte_limit,
+                })?;
+        if total > byte_limit {
+            return Err(SearchArtifactError::ResourceExhausted {
+                resource,
+                limit: byte_limit,
+            });
+        }
+        hash_frame_prefix(&mut states, name.len() as u64);
+        hash_bytes(&mut states, name.as_bytes());
+        hash_frame_finish(&mut states);
+        hash_frame_prefix(&mut states, metadata.len());
+        let mut read = 0_u64;
+        loop {
+            let count = file
+                .read(&mut buffer)
+                .map_err(|source| SearchArtifactError::Io {
+                    operation: "read search source",
+                    path: path.clone(),
+                    source,
+                })?;
+            if count == 0 {
+                break;
+            }
+            read =
+                read.checked_add(count as u64)
+                    .ok_or(SearchArtifactError::ResourceExhausted {
+                        resource,
+                        limit: byte_limit,
+                    })?;
+            if read > metadata.len() {
+                return Err(SearchArtifactError::SourceSnapshot {
+                    reason: format!("search source {} changed while hashing", path.display()),
+                });
+            }
+            hash_bytes(&mut states, &buffer[..count]);
+        }
+        if read != metadata.len() || file.stream_position().ok() != Some(metadata.len()) {
+            return Err(SearchArtifactError::SourceSnapshot {
+                reason: format!("search source {} changed while hashing", path.display()),
+            });
+        }
+        hash_frame_finish(&mut states);
+    }
+    Ok(format!(
+        "gf-fnv1a256:{:016x}{:016x}{:016x}{:016x}",
+        states[0], states[1], states[2], states[3]
+    ))
+}
+
+fn open_source_nofollow(path: &Path) -> Result<std::fs::File, SearchArtifactError> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    options
+        .open(path)
+        .map_err(|source| SearchArtifactError::Io {
+            operation: "open search source",
+            path: path.to_path_buf(),
+            source,
+        })
+}
+
 /// Versioned JSON metadata for one complete search artifact.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SearchManifest {
@@ -425,7 +608,7 @@ impl SearchManifest {
         if !canonical_fingerprint(&source.fingerprint) {
             return Err(invalid(
                 "source_fingerprint",
-                "must be gf-fnv1a256 followed by 64 lowercase hexadecimal digits",
+                "must use a supported 256-bit lowercase source-fingerprint encoding",
             ));
         }
         match (key.kind, dimension) {
@@ -702,12 +885,15 @@ fn normalize_version(field: &'static str, value: &str) -> Result<String, SearchA
 }
 
 fn canonical_fingerprint(value: &str) -> bool {
-    value.strip_prefix("gf-fnv1a256:").is_some_and(|digest| {
-        digest.len() == 64
-            && digest
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    })
+    value
+        .strip_prefix("gf-fnv1a256:")
+        .or_else(|| value.strip_prefix("gf-sha256-files-v1:"))
+        .is_some_and(|digest| {
+            digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
 }
 
 fn encode_sequence(values: &[String]) -> Vec<u8> {
@@ -744,12 +930,30 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 fn hash_frame(states: &mut [u64; 4], bytes: &[u8]) {
+    hash_frame_prefix(states, bytes.len() as u64);
+    hash_bytes(states, bytes);
+    hash_frame_finish(states);
+}
+
+fn hash_frame_prefix(states: &mut [u64; 4], length: u64) {
     for state in &mut *states {
-        for byte in (bytes.len() as u64).to_be_bytes().iter().chain(bytes) {
+        for byte in length.to_be_bytes() {
+            *state ^= u64::from(byte);
+            *state = state.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+}
+
+fn hash_bytes(states: &mut [u64; 4], bytes: &[u8]) {
+    for state in &mut *states {
+        for byte in bytes {
             *state ^= u64::from(*byte);
             *state = state.wrapping_mul(0x0000_0100_0000_01b3);
         }
     }
+}
+
+fn hash_frame_finish(states: &mut [u64; 4]) {
     for (index, state) in states.iter_mut().enumerate() {
         *state ^= (index as u64 + 1) * 0x9e37_79b9;
     }
@@ -923,6 +1127,24 @@ mod tests {
             .unwrap()
         );
         assert!(canonical_source_fingerprint(&[a, a]).is_err());
+
+        let dir = tempfile::tempdir().unwrap();
+        let a_path = dir.path().join("a");
+        let b_path = dir.path().join("b");
+        std::fs::write(&a_path, a.bytes).unwrap();
+        std::fs::write(&b_path, b.bytes).unwrap();
+        let files = vec![(a.name.to_owned(), a_path), (b.name.to_owned(), b_path)];
+        assert_eq!(
+            canonical_file_source_fingerprint(&files, 1024, "test_source_bytes").unwrap(),
+            canonical_source_fingerprint(&[a, b]).unwrap()
+        );
+        assert!(matches!(
+            canonical_file_source_fingerprint(&files, 3, "test_source_bytes"),
+            Err(SearchArtifactError::ResourceExhausted {
+                resource: "test_source_bytes",
+                limit: 3
+            })
+        ));
     }
 
     #[test]

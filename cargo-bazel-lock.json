@@ -1,5 +1,5 @@
 {
-  "checksum": "65c259591c3e2c48717bed123a8a3fb9d64d0c8d983c23396d68d64408fdad2c",
+  "checksum": "037b1a5c1dc3799576a30eb1ae9e1e4892f4c81b0c5de82a3929bd4d7ebaebb1",
   "crates": {
     "adler2 2.0.1": {
       "name": "adler2",
@@ -13863,12 +13863,20 @@
             {
               "id": "ureq 3.4.0",
               "target": "ureq"
+            },
+            {
+              "id": "uuid 1.24.1",
+              "target": "uuid"
             }
           ],
           "selects": {}
         },
         "deps_dev": {
           "common": [
+            {
+              "id": "parquet 58.3.0",
+              "target": "parquet"
+            },
             {
               "id": "tempfile 3.27.0",
               "target": "tempfile"

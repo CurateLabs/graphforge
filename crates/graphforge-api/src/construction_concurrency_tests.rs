@@ -306,7 +306,11 @@ fn cross_process_writer_busy_rejects_add_edge() {
     let error = graph
         .add_edge(&src, "KNOWS", &dst, &empty_props())
         .expect_err("add_edge must observe writer busy");
-    assert_eq!(error.code(), "GF_WRITER_BUSY");
+    assert_eq!(
+        error.code(),
+        "GF_WRITER_BUSY",
+        "unexpected error: {error:?}"
+    );
     drop(held);
     assert_eq!(generation(&graph), prior);
     assert_eq!(durable_generation(project.path()), prior);

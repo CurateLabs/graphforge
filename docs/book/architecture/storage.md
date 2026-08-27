@@ -568,18 +568,94 @@ project-format compatibility path.
 | `dst_id` | `UInt64` | Local surrogate — DataFusion join key |
 | `created_at` | `Timestamp(Microseconds, UTC)` | |
 
-Typed edge tables (one Parquet file per relation type) replace the unified `edge_facts` table. This enables direct scans on a single relation type without filtering, yielding significant I/O savings at 100M+ edges. See [refactor-v0.5.md §7](refactor-v0.5.md) for performance analysis.
+Typed edge tables replace the unified `edge_facts` table. A relation is a
+logical union of its legacy flat fragment and ordered immutable range
+fragments. Each construction flush encodes only accepted rows; it never
+decodes and rewrites prior edge topology. Ordinary catalog, traversal,
+adjacency, UUID-index, mutation, projection, and delta-replay paths enumerate
+the same fragments. This keeps aggregate fresh-import edge encoding O(N) and
+resident topology bounded by the configured construction window while
+preserving direct single-relation scans. See [refactor-v0.5.md §7](refactor-v0.5.md)
+for performance analysis.
+
+Node topology follows the same immutable layout: the first compatible write
+may retain `topology/nodes.parquet`, while later appends create ordered
+`topology/nodes/<first>-<last>.parquet` fragments. Counts, filtered reads,
+surrogate recovery, UUID membership, semantic validation, projection, export,
+label mutation, and deletion operate over the logical union. A localized
+rewrite replaces only the fragment containing a changed row; untouched node
+fragments retain their filesystem identity.
+
+`topology/surrogate_tails.parquet` is a one-row control record containing the
+monotonic maximum node and edge surrogates. It is staged in
+the same commit as every topology append. Writer reopen reads this bounded
+record rather than enumerating or decoding the accumulated topology fragments;
+legacy projects without it use the bounded tail migration path once.
+
+Bulk endpoint resolution uses the persistent authenticated
+`topology/uuid-membership/` snapshot published with each immutable graph
+generation. Its manifest authenticates the
+topology generation, record counts, lengths, and SHA-256 digests. Nodes have a
+sorted fixed-width `UUID -> node_id` file; edges have a sorted UUID membership
+file. Builds use bounded external sort runs and bounded-fan-in merges. Probes
+sort and deduplicate the caller batch, use authenticated block fences to select
+only candidate blocks, and merge-scan every selected block once. Newest runs
+own tombstone and cross-kind shadowing; node results are batch-validated against
+the surrogate-sorted reverse file before caller order is restored. Production
+work evidence reports identity/surrogate block reads and bytes, runs considered,
+and exactly zero per-record filesystem seeks while decoding zero topology rows.
+Duplicate node or edge UUIDs, reuse of one UUID across the node and edge
+domains, stale manifests, and missing, truncated, checksum-mismatched, or
+identity/reverse-inconsistent index files fail closed.
+
+New publications use a compact version-2 `graph/files` root. Payloads and
+fixed-depth radix nodes live once in the project content-addressed object
+store; a generation stores only its root reference and logical totals. Updates
+copy at most one bounded SHA-256 nibble path and retain exact-path collision
+leaves, so publication never scans or recopies prior file metadata. The private
+workspace commit boundary records revision-identified sealed and tombstone
+descriptors before mutations become visible; they are acknowledged only after
+CURRENT advances. Reopen traverses the authenticated radix and hashes every
+selected payload object. Post-CURRENT GC traces every remaining generation
+root and defers while an optimistic attempt or CAS publication lease is live.
+Version-1 expanded inventories remain readable and are migrated under the same
+CAS publication lease before a writable facade publishes version 2.
+
+The authoritative write census is executable: topology node and edge shards,
+node and edge properties, graph deltas, catalog records, extension-owned graph
+records, and the generation/runtime-catalog/runtime-label control files must
+all appear in the revision descriptor journal and resolve to the same v2
+logical inventory. Rebuildable adjacency and UUID-membership artifacts live
+under `.graphforge-cache/` and are rejected as graph authority. Parquet write
+sites share `RewriteBatch` plus `commit_topology_aware`; the three control-file
+writers record their descriptor before making replacement bytes visible.
+
+Terminal leaves retain a sorted exact-path bucket for the theoretical case in
+which distinct path bytes have the same SHA-256 digest. Producing a real
+SHA-256 collision is cryptographically infeasible and is not a test fixture.
+Tests instead cover exact-path replacement/deletion and reject malformed leaf
+digests, ordering, duplicate references, wrong depth, and corrupt objects.
 
 ### Properties layer (warm path)
 
-**`properties/ENTITY_TYPE.parquet`** (one file per entity type, columns per ontology)
+**`properties/ENTITY_TYPE.parquet`** (legacy first fragment) and
+**`properties/ENTITY_TYPE/<generation>-<ordinal>.parquet`** (immutable construction fragments)
 
 | Column | Arrow type | Notes |
 |---|---|---|
 | `node_uuid` | `FixedSizeBinary(16)` | Join key back to `topology/nodes.parquet` |
 | *(property columns)* | *(per ontology)* | e.g. `name Utf8`, `age Int64`, `email Utf8` |
 
-Property access is a join: `topology/nodes JOIN properties/PERSON ON node_uuid`. DataFusion handles this as a hash join. The separation allows graph traversal to skip property I/O entirely.
+Property access joins the logical node-topology shard union to the logical
+property overlay on `node_uuid`. Catalog, direct, SQL, export, verification,
+and import readers authenticate the legacy flat fragment and every canonical
+immutable fragment, then expose one newest-authority complete snapshot per
+UUID; they do not concatenate physical rows. A newest tombstone suppresses the
+UUID, and the newest live-schema summary determines which property keys remain
+logically present. Edge properties use the identical authority model under
+`edge_properties/`. Construction and ordinary SET/REMOVE mutations append only
+the changed bounded window without rewriting prior fragments. The separation
+still lets topology-only traversal skip property I/O entirely.
 
 ### Provenance and knowledge participants
 

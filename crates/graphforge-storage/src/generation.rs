@@ -160,13 +160,31 @@ fn read_generation_state(project_dir: &Path) -> Result<GenerationState, GfError>
     read_generation_state_raw(project_dir)
 }
 
-/// Atomically persist `current + 1` (sibling temp + rename) and return the
-/// new value. Creates `topology/` if needed.
+/// Legacy generation-only bump retained for source compatibility.
+///
+/// Topology authority now includes the authenticated UUID membership
+/// participant, so advancing only the counter is never a valid production
+/// mutation.
+///
+/// # Errors
+/// Always returns [`GfError::Storage`] without changing project state.
+#[deprecated(
+    note = "topology generation cannot advance without the authenticated UUID membership participant"
+)]
+pub fn bump_topology_generation(_project_dir: &Path) -> Result<u64, GfError> {
+    Err(GfError::Storage(
+        "topology generation cannot advance without the authenticated UUID membership participant"
+            .into(),
+    ))
+}
+
+/// Test-only escape hatch for deliberately constructing stale derived state.
 ///
 /// # Errors
 /// Returns [`GfError::Storage`] if the current value cannot be read (corrupt
 /// file) or on I/O failure; on failure the prior file is untouched.
-pub fn bump_topology_generation(project_dir: &Path) -> Result<u64, GfError> {
+#[cfg(test)]
+pub(crate) fn force_bump_topology_generation_for_test(project_dir: &Path) -> Result<u64, GfError> {
     Ok(
         crate::durable_rewrite::commit(RewriteBatch::new(), project_dir, true, false, false, None)?
             .topology,
@@ -186,31 +204,34 @@ pub fn bump_search_generation(project_dir: &Path) -> Result<u64, GfError> {
 }
 
 /// Whether any staged destination in `staged` rewrites topology:
-/// `topology/nodes.parquet` or any file under `topology/edges/` (including
+/// `topology/nodes.parquet`, any immutable node shard under `topology/nodes/`,
+/// or any file under `topology/edges/` (including
 /// `_exploratory.parquet`). Paths elsewhere (`properties/`,
 /// `edge_properties/`, `provenance/`, …) do not count.
 #[must_use]
 pub fn touches_topology(staged: &RewriteBatch, project_dir: &Path) -> bool {
     let topology = project_dir.join("topology");
     let nodes = topology.join("nodes.parquet");
+    let node_shards = topology.join("nodes");
     let edges = topology.join("edges");
     staged
         .staged_paths()
-        .any(|path| path == nodes || path.starts_with(&edges))
+        .any(|path| path == nodes || path.starts_with(&node_shards) || path.starts_with(&edges))
 }
 
 /// Whether a staged batch changes graph-native search inputs: node identity or
-/// label membership (`topology/nodes.parquet`) or node properties
+/// label membership (`topology/nodes.parquet` or an immutable node shard) or node properties
 /// (`properties/`). Edge-only and knowledge-layer writes are intentionally
 /// excluded.
 #[must_use]
 pub fn touches_search_source(staged: &RewriteBatch, project_dir: &Path) -> bool {
     let nodes = project_dir.join("topology").join("nodes.parquet");
+    let node_shards = project_dir.join("topology").join("nodes");
     let properties = project_dir.join("properties");
     staged.has_node_property_windows()
-        || staged
-            .staged_paths()
-            .any(|path| path == nodes || path.starts_with(&properties))
+        || staged.staged_paths().any(|path| {
+            path == nodes || path.starts_with(&node_shards) || path.starts_with(&properties)
+        })
 }
 
 /// Durably commit `staged`, publishing each affected generation **last** (see
@@ -240,11 +261,50 @@ pub fn commit_topology_aware_with_auxiliary(
     project_dir: &Path,
     auxiliary: Option<crate::AuxiliaryReceipt>,
 ) -> Result<Option<u64>, GfError> {
+    if touches_topology(&staged, project_dir) {
+        return Err(GfError::Storage(
+            "topology rewrites must commit through the authenticated UUID membership participant"
+                .into(),
+        ));
+    }
+    commit_topology_aware_unchecked(staged, project_dir, auxiliary)
+}
+
+/// Generation-mechanics primitive for tests and non-public participant plumbing.
+/// Production topology writers must use `commit_topology_aware_with_participant`.
+fn commit_topology_aware_unchecked(
+    staged: RewriteBatch,
+    project_dir: &Path,
+    auxiliary: Option<crate::AuxiliaryReceipt>,
+) -> Result<Option<u64>, GfError> {
     let topology = touches_topology(&staged, project_dir);
     let search = touches_search_source(&staged, project_dir);
     let property = staged.has_property_windows();
     let generations =
         crate::durable_rewrite::commit(staged, project_dir, topology, search, property, auxiliary)?;
+    Ok(topology.then_some(generations.topology))
+}
+
+/// Commit a rewrite whose auxiliary participant is prepared only after
+/// recovery and authoritative next-generation derivation, while the retained
+/// project rewrite lock remains held.
+pub(crate) fn commit_topology_aware_with_participant(
+    staged: RewriteBatch,
+    project_dir: &Path,
+    participant: crate::durable_rewrite::RewriteParticipantPreparer<'_>,
+) -> Result<Option<u64>, GfError> {
+    let topology = touches_topology(&staged, project_dir);
+    let search = touches_search_source(&staged, project_dir);
+    let property = staged.has_property_windows();
+    let generations = crate::durable_rewrite::commit_with_participant(
+        staged,
+        project_dir,
+        topology,
+        search,
+        property,
+        None,
+        Some(participant),
+    )?;
     Ok(topology.then_some(generations.topology))
 }
 
@@ -299,9 +359,18 @@ mod tests {
     #[test]
     fn bump_increments_and_persists() {
         let dir = TempDir::new().unwrap();
-        assert_eq!(bump_topology_generation(dir.path()).unwrap(), 1);
-        assert_eq!(bump_topology_generation(dir.path()).unwrap(), 2);
-        assert_eq!(bump_topology_generation(dir.path()).unwrap(), 3);
+        assert_eq!(
+            force_bump_topology_generation_for_test(dir.path()).unwrap(),
+            1
+        );
+        assert_eq!(
+            force_bump_topology_generation_for_test(dir.path()).unwrap(),
+            2
+        );
+        assert_eq!(
+            force_bump_topology_generation_for_test(dir.path()).unwrap(),
+            3
+        );
         assert_eq!(read_topology_generation(dir.path()).unwrap(), 3);
         assert_eq!(read_search_generation(dir.path()).unwrap(), 0);
         // No temp residue next to the counter.
@@ -311,6 +380,20 @@ mod tests {
             .filter(|e| e.path().extension().is_some_and(|x| x == "tmp"))
             .count();
         assert_eq!(temps, 0);
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn legacy_public_bump_is_fail_closed() {
+        let dir = TempDir::new().unwrap();
+        let error = bump_topology_generation(dir.path()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("authenticated UUID membership participant")
+        );
+        assert_eq!(read_topology_generation(dir.path()).unwrap(), 0);
+        assert!(!dir.path().join("topology/generation.json").exists());
     }
 
     #[test]
@@ -330,7 +413,7 @@ mod tests {
             );
             // A corrupt counter must also fail the bump, not silently reset.
             assert!(matches!(
-                bump_topology_generation(dir.path()),
+                force_bump_topology_generation_for_test(dir.path()),
                 Err(GfError::Storage(_))
             ));
         }
@@ -339,7 +422,10 @@ mod tests {
     #[test]
     fn corrupt_rewrite_journal_fails_closed_without_changing_authority() {
         let dir = TempDir::new().unwrap();
-        assert_eq!(bump_topology_generation(dir.path()).unwrap(), 1);
+        assert_eq!(
+            force_bump_topology_generation_for_test(dir.path()).unwrap(),
+            1
+        );
         std::fs::write(
             dir.path().join(".graphforge-rewrite-v1.json"),
             br#"{"version":1,"checksum":"forged"}"#,
@@ -355,6 +441,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         for (rel, topology, search) in [
             ("topology/nodes.parquet", true, true),
+            ("topology/nodes/0001-0002.parquet", true, true),
+            ("topology/nodes2/0001-0002.parquet", false, false),
             ("topology/edges/KNOWS.parquet", true, false),
             ("topology/edges/_exploratory.parquet", true, false),
             ("topology/runtime_catalog.parquet", false, false),
@@ -397,16 +485,30 @@ mod tests {
             dir.path(),
             &["topology/nodes.parquet", "properties/Person.parquet"],
         );
-        commit_topology_aware(staged, dir.path()).unwrap();
+        commit_topology_aware_unchecked(staged, dir.path(), None).unwrap();
         assert_eq!(read_topology_generation(dir.path()).unwrap(), 1);
         assert_eq!(read_search_generation(dir.path()).unwrap(), 2);
         assert!(dir.path().join("topology/nodes.parquet").exists());
 
         // Edge-only topology advances adjacency without invalidating search.
         let staged = staged_for(dir.path(), &["topology/edges/KNOWS.parquet"]);
-        commit_topology_aware(staged, dir.path()).unwrap();
+        commit_topology_aware_unchecked(staged, dir.path(), None).unwrap();
         assert_eq!(read_topology_generation(dir.path()).unwrap(), 2);
         assert_eq!(read_search_generation(dir.path()).unwrap(), 2);
+    }
+
+    #[test]
+    fn plain_commit_rejects_topology_without_uuid_participant() {
+        let dir = TempDir::new().unwrap();
+        let staged = staged_for(dir.path(), &["topology/nodes.parquet"]);
+        let error = commit_topology_aware(staged, dir.path()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("authenticated UUID membership participant")
+        );
+        assert_eq!(read_topology_generation(dir.path()).unwrap(), 0);
+        assert!(!dir.path().join("topology/nodes.parquet").exists());
     }
 
     #[test]
@@ -430,7 +532,7 @@ mod tests {
         std::fs::write(&path, r#"{"topology_generation":7,"search_generation":11}"#).unwrap();
 
         assert_eq!(read_property_generation(dir.path()).unwrap(), 11);
-        bump_topology_generation(dir.path()).unwrap();
+        force_bump_topology_generation_for_test(dir.path()).unwrap();
         let state = read_generation_state_raw(dir.path()).unwrap();
         assert_eq!(state.property, 11);
         let persisted: serde_json::Value =

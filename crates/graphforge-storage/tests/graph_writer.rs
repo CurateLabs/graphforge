@@ -515,8 +515,7 @@ async fn append_edge_stems_are_isolated() {
 
     // Second session writes only LIKES — KNOWS.parquet must be left intact.
     let mut w2 = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
-    w2.create_node(a, TypeId(0)).unwrap();
-    w2.create_node(b, TypeId(0)).unwrap();
+    w2.register_existing_endpoints(&[a, b]).unwrap();
     w2.create_edge(new_v7(), "LIKES", &a, &b).unwrap();
     w2.flush().unwrap();
 

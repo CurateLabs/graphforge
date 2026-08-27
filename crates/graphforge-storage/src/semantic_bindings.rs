@@ -2,7 +2,6 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use graphforge_core::{GfError, ProjectErrorCode};
@@ -24,7 +23,6 @@ pub const MAX_SEMANTIC_BINDINGS: usize = 1_000_000;
 /// Maximum canonical participant bytes.
 pub const MAX_SEMANTIC_BINDING_BYTES: usize = 64 * 1024 * 1024;
 const MAX_SEMANTIC_PARQUET_COLUMNS: usize = 4_096;
-const MAX_SEMANTIC_PARQUET_METADATA_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_SEMANTIC_STRING_BYTES: usize = 4_096;
 /// Parquet schema metadata key authenticating the opaque route.
 pub const SEMANTIC_ROUTE_METADATA_KEY: &str = "graphforge.semantic_route";
@@ -614,21 +612,15 @@ impl SemanticStorageBindings {
             .filter(|binding| binding.route_kind == SemanticRouteKind::Entity)
             .map(|binding| binding.storage_id)
             .collect::<BTreeSet<_>>();
-        let topology_path = graph_root.join("topology/nodes.parquet");
         let mut topology_rows_scanned = 0_u64;
         let mut max_topology_batch_rows = 0_usize;
-        if topology_path.exists() {
+        for topology_path in crate::mutator::node_parquet_files(graph_root)? {
             use arrow::array::{Array, ListArray, UInt32Array};
             use arrow::datatypes::DataType;
-            preflight_parquet_footer(&topology_path)?;
-            let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
-                File::open(&topology_path)
-                    .map_err(|_| legacy_ambiguous("legacy topology cannot be opened"))?,
-            )
-            .map_err(|_| legacy_ambiguous("legacy topology metadata is invalid"))?
-            .with_batch_size(8192)
-            .build()
-            .map_err(|_| legacy_ambiguous("legacy topology reader cannot be built"))?;
+            let reader = admitted_semantic_parquet(&topology_path)?
+                .with_batch_size(8192)
+                .build()
+                .map_err(|_| legacy_ambiguous("legacy topology reader cannot be built"))?;
             for batch in reader {
                 let batch =
                     batch.map_err(|_| legacy_ambiguous("legacy topology batch is invalid"))?;
@@ -1027,55 +1019,59 @@ impl SemanticStorageBindings {
     fn validate_topology_ids(&self, graph_root: &Path) -> Result<(), GfError> {
         use arrow::array::{Array, ListArray, UInt32Array};
 
-        let path = graph_root.join("topology/nodes.parquet");
-        if !path.exists() {
-            return Ok(());
-        }
         let entity_ids = self
             .bindings
             .iter()
             .filter(|binding| binding.route_kind == SemanticRouteKind::Entity)
             .map(|binding| binding.storage_id)
             .collect::<BTreeSet<_>>();
-        preflight_parquet_footer(&path)?;
-        let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
-            File::open(path).map_err(|_| corrupt("semantic topology cannot be opened"))?,
-        )
-        .map_err(|_| corrupt("semantic topology metadata is invalid"))?
-        .with_batch_size(8192)
-        .build()
-        .map_err(|_| corrupt("semantic topology reader cannot be built"))?;
-        for batch in reader {
-            let batch = batch.map_err(|_| corrupt("semantic topology batch is invalid"))?;
-            let primary = batch
-                .column_by_name("type_id")
-                .and_then(|array| array.as_any().downcast_ref::<UInt32Array>())
-                .ok_or_else(|| corrupt("semantic topology type_id is missing or malformed"))?;
-            let type_ids = batch
-                .column_by_name("type_ids")
-                .and_then(|array| array.as_any().downcast_ref::<ListArray>())
-                .ok_or_else(|| corrupt("semantic topology type_ids is missing or malformed"))?;
-            for row in 0..type_ids.len() {
-                if type_ids.is_null(row) {
-                    return Err(corrupt("semantic topology type_ids is null"));
-                }
-                let values = type_ids.value(row);
-                let values = values
-                    .as_any()
-                    .downcast_ref::<UInt32Array>()
-                    .ok_or_else(|| corrupt("semantic topology type_ids has wrong element type"))?;
-                let primary_id = primary.value(row);
-                if !values.values().contains(&primary_id) {
-                    return Err(corrupt(
-                        "semantic topology scalar type_id is absent from normalized type_ids",
-                    ));
-                }
-                for id in values.values() {
-                    let runtime = id & ((1 << 30) | (1 << 31)) != 0;
-                    if !runtime && !entity_ids.contains(id) {
+        for path in crate::mutator::node_parquet_files(graph_root)? {
+            let reader = admitted_semantic_parquet(&path)?
+                .with_batch_size(8192)
+                .build()
+                .map_err(|_| corrupt("semantic topology reader cannot be built"))?;
+            for batch in reader {
+                let batch = batch.map_err(|_| corrupt("semantic topology batch is invalid"))?;
+                let batch = crate::catalog::normalize_topology_nodes(vec![batch])
+                    .map_err(|error| {
+                        corrupt(&format!("semantic topology normalization failed: {error}"))
+                    })?
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| corrupt("semantic topology normalization disappeared"))?;
+                let primary = batch
+                    .column_by_name("type_id")
+                    .and_then(|array| array.as_any().downcast_ref::<UInt32Array>())
+                    .ok_or_else(|| corrupt("semantic topology type_id is missing or malformed"))?;
+                let type_ids = batch
+                    .column_by_name("type_ids")
+                    .and_then(|array| array.as_any().downcast_ref::<ListArray>())
+                    .ok_or_else(|| corrupt("semantic topology type_ids is missing or malformed"))?;
+                for row in 0..type_ids.len() {
+                    if type_ids.is_null(row) {
+                        return Err(corrupt("semantic topology type_ids is null"));
+                    }
+                    let values = type_ids.value(row);
+                    let values =
+                        values
+                            .as_any()
+                            .downcast_ref::<UInt32Array>()
+                            .ok_or_else(|| {
+                                corrupt("semantic topology type_ids has wrong element type")
+                            })?;
+                    let primary_id = primary.value(row);
+                    if !values.values().contains(&primary_id) {
                         return Err(corrupt(
-                            "semantic topology contains an unbound ontology entity id",
+                            "semantic topology scalar type_id is absent from normalized type_ids",
                         ));
+                    }
+                    for id in values.values() {
+                        let runtime = id & ((1 << 30) | (1 << 31)) != 0;
+                        if !runtime && !entity_ids.contains(id) {
+                            return Err(corrupt(
+                                "semantic topology contains an unbound ontology entity id",
+                            ));
+                        }
                     }
                 }
             }
@@ -1100,23 +1096,14 @@ impl SemanticStorageBindings {
         graph_root: &Path,
         inventory: Option<&crate::GraphFilesInventory>,
     ) -> Result<(), GfError> {
-        let mut expected = self
+        let expected = self
             .bindings
             .iter()
-            .filter_map(|binding| binding.physical_path(graph_root))
+            .map(|binding| semantic_route_fragments(binding, graph_root))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
             .collect::<BTreeSet<_>>();
-        expected.extend(
-            self.bindings
-                .iter()
-                .filter(|binding| {
-                    matches!(
-                        binding.route_kind,
-                        SemanticRouteKind::NodeProperty | SemanticRouteKind::EdgeProperty
-                    )
-                })
-                .filter_map(|binding| binding.physical_path(graph_root))
-                .map(|path| path.with_extension("")),
-        );
         let inventory_paths = inventory.map(|inventory| {
             inventory
                 .files
@@ -1124,84 +1111,16 @@ impl SemanticStorageBindings {
                 .map(|entry| entry.relative_path.as_str())
                 .collect::<BTreeSet<_>>()
         });
-        for subdir in ["topology/edges", "properties", "edge_properties"] {
-            let directory = graph_root.join(subdir);
-            let Ok(entries) = std::fs::read_dir(&directory) else {
-                continue;
-            };
-            for entry in entries {
-                let path = entry
-                    .map_err(|_| corrupt("semantic route inventory cannot be read"))?
-                    .path();
-                if path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| {
-                        name.starts_with("s-") && (name.ends_with(".parquet") || path.is_dir())
-                    })
-                    && !expected.contains(&path)
-                {
-                    return Err(corrupt("unlisted opaque semantic route file is present"));
-                }
-            }
-        }
+        validate_no_unlisted_semantic_routes(graph_root, &expected)?;
         for binding in &self.bindings {
-            let Some(path) = binding.physical_path(graph_root) else {
-                continue;
-            };
-            let route_files = semantic_route_files(&path)?;
-            if route_files.is_empty() {
-                continue;
-            }
-            for path in route_files {
-                let relative = path
-                    .strip_prefix(graph_root)
-                    .map_err(|_| corrupt("semantic route escapes graph inventory"))?
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                if inventory_paths
-                    .as_ref()
-                    .is_some_and(|paths| !paths.contains(relative.as_str()))
-                {
-                    return Err(corrupt(
-                        "semantic route is absent from authenticated graph inventory",
-                    ));
-                }
-                preflight_parquet_footer(&path)?;
-                let file =
-                    File::open(&path).map_err(|_| corrupt("semantic route file is missing"))?;
-                let builder =
-                    parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)
-                        .map_err(|_| corrupt("semantic route Parquet metadata is invalid"))?;
-                let schema = builder.schema();
-                if schema.fields().len() > MAX_SEMANTIC_PARQUET_COLUMNS {
-                    return Err(corrupt("semantic route column count exceeds limit"));
-                }
-                if schema.metadata().get(SEMANTIC_ROUTE_METADATA_KEY) != Some(&binding.route)
-                    || schema.metadata().get(SEMANTIC_COMPOSITION_METADATA_KEY)
-                        != Some(&self.composition_fingerprint)
-                {
-                    return Err(corrupt(&format!(
-                        "semantic route metadata does not match binding for {relative}: expected route {} and composition {}, found route {:?} and composition {:?}",
-                        binding.route,
-                        self.composition_fingerprint,
-                        schema.metadata().get(SEMANTIC_ROUTE_METADATA_KEY),
-                        schema.metadata().get(SEMANTIC_COMPOSITION_METADATA_KEY),
-                    )));
-                }
-                let join_key = match binding.route_kind {
-                    SemanticRouteKind::NodeProperty => "node_uuid",
-                    SemanticRouteKind::Relation | SemanticRouteKind::EdgeProperty => "edge_uuid",
-                    SemanticRouteKind::Entity => unreachable!(),
-                };
-                let join_field = schema
-                    .field_with_name(join_key)
-                    .map_err(|_| corrupt("semantic route join key is missing"))?;
-                if join_field.is_nullable()
-                    || join_field.data_type() != &arrow::datatypes::DataType::FixedSizeBinary(16)
-                {
-                    return Err(corrupt("semantic route join key is missing"));
-                }
+            for path in semantic_route_fragments(binding, graph_root)? {
+                validate_semantic_route_fragment(
+                    binding,
+                    &path,
+                    graph_root,
+                    inventory_paths.as_ref(),
+                    &self.composition_fingerprint,
+                )?;
             }
         }
         self.validate_topology_ids(graph_root)?;
@@ -1318,6 +1237,138 @@ impl SemanticStorageBindings {
     }
 }
 
+fn semantic_route_fragments(
+    binding: &SemanticStorageBinding,
+    root: &Path,
+) -> Result<Vec<PathBuf>, GfError> {
+    match binding.route_kind {
+        SemanticRouteKind::Entity => Ok(Vec::new()),
+        SemanticRouteKind::Relation => Ok(crate::mutator::edge_parquet_files(
+            root,
+            Some(&binding.route),
+        )?
+        .into_iter()
+        .map(|(_, path)| path)
+        .collect()),
+        SemanticRouteKind::NodeProperty => {
+            crate::mutator::property_parquet_files(root, "properties", &binding.route)
+        }
+        SemanticRouteKind::EdgeProperty => {
+            crate::mutator::property_parquet_files(root, "edge_properties", &binding.route)
+        }
+    }
+}
+
+fn validate_no_unlisted_semantic_routes(
+    graph_root: &Path,
+    expected: &BTreeSet<PathBuf>,
+) -> Result<(), GfError> {
+    for subdir in ["topology/edges", "properties", "edge_properties"] {
+        let entries = match std::fs::read_dir(graph_root.join(subdir)) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return Err(corrupt("semantic route inventory cannot be read")),
+        };
+        for entry in entries {
+            let entry = entry.map_err(|_| corrupt("semantic route inventory cannot be read"))?;
+            let path = entry.path();
+            let opaque = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("s-"));
+            let file_type = entry
+                .file_type()
+                .map_err(|_| corrupt("semantic route inventory cannot be inspected"))?;
+            if !opaque {
+                continue;
+            }
+            if file_type.is_symlink() || (!file_type.is_file() && !file_type.is_dir()) {
+                return Err(corrupt(
+                    "opaque semantic route has a noncanonical file type",
+                ));
+            }
+            if file_type.is_file() {
+                if path.extension().and_then(|value| value.to_str()) != Some("parquet")
+                    || !expected.contains(&path)
+                {
+                    return Err(corrupt("unlisted opaque semantic route file is present"));
+                }
+                continue;
+            }
+            for fragment in std::fs::read_dir(&path)
+                .map_err(|_| corrupt("semantic shard route cannot be read"))?
+            {
+                let fragment =
+                    fragment.map_err(|_| corrupt("semantic shard fragment cannot be read"))?;
+                let fragment_path = fragment.path();
+                let fragment_type = fragment
+                    .file_type()
+                    .map_err(|_| corrupt("semantic shard fragment cannot be inspected"))?;
+                if !fragment_type.is_file()
+                    || fragment_path.extension().and_then(|value| value.to_str()) != Some("parquet")
+                    || !expected.contains(&fragment_path)
+                {
+                    return Err(corrupt("unlisted opaque semantic route shard is present"));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_semantic_route_fragment(
+    binding: &SemanticStorageBinding,
+    path: &Path,
+    graph_root: &Path,
+    inventory_paths: Option<&BTreeSet<&str>>,
+    composition_fingerprint: &str,
+) -> Result<(), GfError> {
+    let relative = path
+        .strip_prefix(graph_root)
+        .map_err(|_| corrupt("semantic route escapes graph inventory"))?
+        .to_string_lossy()
+        .replace('\\', "/");
+    if inventory_paths.is_some_and(|paths| !paths.contains(relative.as_str())) {
+        return Err(corrupt(
+            "semantic route is absent from authenticated graph inventory",
+        ));
+    }
+    let builder = admitted_semantic_parquet(path)?;
+    let schema = builder.schema();
+    if schema.fields().len() > MAX_SEMANTIC_PARQUET_COLUMNS {
+        return Err(corrupt("semantic route column count exceeds limit"));
+    }
+    if schema
+        .metadata()
+        .get(SEMANTIC_ROUTE_METADATA_KEY)
+        .map(String::as_str)
+        != Some(binding.route.as_str())
+        || schema
+            .metadata()
+            .get(SEMANTIC_COMPOSITION_METADATA_KEY)
+            .map(String::as_str)
+            != Some(composition_fingerprint)
+    {
+        return Err(corrupt(&format!(
+            "semantic route metadata does not match binding for {relative}"
+        )));
+    }
+    let join_key = match binding.route_kind {
+        SemanticRouteKind::NodeProperty => "node_uuid",
+        SemanticRouteKind::Relation | SemanticRouteKind::EdgeProperty => "edge_uuid",
+        SemanticRouteKind::Entity => unreachable!(),
+    };
+    let join_field = schema
+        .field_with_name(join_key)
+        .map_err(|_| corrupt("semantic route join key is missing"))?;
+    if join_field.is_nullable()
+        || join_field.data_type() != &arrow::datatypes::DataType::FixedSizeBinary(16)
+    {
+        return Err(corrupt("semantic route join key is missing"));
+    }
+    Ok(())
+}
+
 impl SemanticStorageBinding {
     /// Exact physical path for routed data, or none for numeric entity bindings.
     #[must_use]
@@ -1417,15 +1468,10 @@ pub fn require_atomic_legacy_migration(graph_root: &Path) -> Result<(), GfError>
             if path.extension().and_then(|value| value.to_str()) != Some("parquet") {
                 continue;
             }
-            preflight_parquet_footer(&path)?;
-            let metadata = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
-                File::open(&path)
-                    .map_err(|_| corrupt("legacy migration Parquet cannot be opened"))?,
-            )
-            .map_err(|_| corrupt("legacy migration Parquet metadata is invalid"))?
-            .metadata()
-            .file_metadata()
-            .num_rows();
+            let metadata = admitted_semantic_parquet(&path)?
+                .metadata()
+                .file_metadata()
+                .num_rows();
             if metadata > 0 {
                 return Err(GfError::Validation(
                     "GF_SEMANTIC_LEGACY_MIGRATION_REQUIRED: data-bearing legacy routes must be rewritten and published with semantic bindings as one staged generation".into(),
@@ -1502,11 +1548,7 @@ pub fn apply_legacy_route_moves(
             return Err(corrupt(&format!("legacy migration rename failed: {error}")));
         }
         let rewrite = (|| {
-            preflight_parquet_footer(&backup)?;
-            let builder = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
-                File::open(&backup).map_err(|_| corrupt("legacy migration source cannot open"))?,
-            )
-            .map_err(|_| corrupt("legacy migration source metadata is invalid"))?;
+            let builder = admitted_semantic_parquet(&backup)?;
             if builder.schema().fields().len() > MAX_SEMANTIC_PARQUET_COLUMNS {
                 return Err(corrupt("legacy migration column count exceeds limit"));
             }
@@ -1680,46 +1722,8 @@ pub fn materialize_semantic_migration(
             checkpoint()?;
             let source = source_graph_root.join(&entry.relative_path);
             let relative = PathBuf::from(&entry.relative_path);
-            let old_route =
-                semantic_route_from_relative(&relative).filter(|route| route.starts_with("s-"));
-            let target_relative = if let Some(old_route) = old_route {
-                if let Some(new_route) = route_moves.get(old_route) {
-                    let old_component = relative
-                        .components()
-                        .position(|component| component.as_os_str() == old_route)
-                        .or_else(|| {
-                            relative.components().position(|component| {
-                                component.as_os_str().to_str()
-                                    == Some(format!("{old_route}.parquet").as_str())
-                            })
-                        });
-                    if let Some(index) = old_component {
-                        let mut rebuilt = PathBuf::new();
-                        for (position, component) in relative.components().enumerate() {
-                            if position == index {
-                                let is_file = component
-                                    .as_os_str()
-                                    .to_str()
-                                    .is_some_and(|value| value.ends_with(".parquet"));
-                                rebuilt.push(if is_file {
-                                    format!("{new_route}.parquet")
-                                } else {
-                                    new_route.clone()
-                                });
-                            } else {
-                                rebuilt.push(component.as_os_str());
-                            }
-                        }
-                        rebuilt
-                    } else {
-                        return Err(corrupt("migration semantic route path is malformed"));
-                    }
-                } else {
-                    relative.clone()
-                }
-            } else {
-                relative.clone()
-            };
+            let old_route = semantic_route_from_relative(&relative);
+            let target_relative = migrated_semantic_relative(&relative, &route_moves);
             let target = staging_graph_root.join(target_relative);
             std::fs::create_dir_all(
                 target
@@ -1733,11 +1737,7 @@ pub fn materialize_semantic_migration(
                 files_materialized += 1;
                 continue;
             }
-            preflight_parquet_footer(&source)?;
-            let builder = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
-                File::open(&source).map_err(|_| corrupt("migration Parquet cannot be opened"))?,
-            )
-            .map_err(|_| corrupt("migration Parquet metadata is invalid"))?;
+            let builder = admitted_semantic_parquet(&source)?;
             if builder.schema().fields().len() > MAX_SEMANTIC_PARQUET_COLUMNS {
                 return Err(corrupt("migration Parquet column count exceeds limit"));
             }
@@ -1848,30 +1848,30 @@ pub fn materialize_semantic_migration(
                 .iter()
                 .find(|binding| binding.symbol == property.symbol)
                 .ok_or_else(|| corrupt("migration target property binding is absent"))?;
-            let path = binding
-                .physical_path(&staging_graph_root)
-                .ok_or_else(|| corrupt("migration target property route is absent"))?;
-            if !path.exists() {
-                continue;
-            }
-            let builder = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
-                File::open(path)
-                    .map_err(|_| corrupt("migration target property table cannot be opened"))?,
-            )
-            .map_err(|_| corrupt("migration target property schema is invalid"))?;
             let property_name = property
                 .symbol
                 .local_id
                 .split_once(':')
                 .map(|(_, name)| name)
                 .ok_or_else(|| corrupt("migration target property identity is malformed"))?;
-            if let Ok(field) = builder.schema().field_with_name(property_name)
-                && (format!("{:?}", field.data_type()) != property.arrow_data_type
-                    || field.is_nullable() != property.nullable)
-            {
-                return Err(corrupt(
-                    "migration target property column type or nullability disagrees",
-                ));
+            for path in semantic_route_fragments(binding, &staging_graph_root)? {
+                let builder = admitted_semantic_parquet(&path)?;
+                match builder.schema().field_with_name(property_name) {
+                    Ok(field)
+                        if format!("{:?}", field.data_type()) != property.arrow_data_type
+                            || field.is_nullable() != property.nullable =>
+                    {
+                        return Err(corrupt(
+                            "migration target property column type or nullability disagrees",
+                        ));
+                    }
+                    Err(_) if !property.nullable => {
+                        return Err(corrupt(
+                            "migration target required property column is missing",
+                        ));
+                    }
+                    Ok(_) | Err(_) => {}
+                }
             }
         }
         let (candidate, _) = crate::capture_graph_files(&staging_graph_root)?;
@@ -1908,6 +1908,56 @@ pub fn materialize_semantic_migration(
     Ok(evidence)
 }
 
+fn semantic_route_from_relative(relative: &Path) -> Option<&str> {
+    let parts = relative
+        .components()
+        .map(std::path::Component::as_os_str)
+        .collect::<Vec<_>>();
+    let route_index = match parts.as_slice() {
+        [topology, edges, ..]
+            if *topology == std::ffi::OsStr::new("topology")
+                && *edges == std::ffi::OsStr::new("edges") =>
+        {
+            2
+        }
+        [properties, ..] if *properties == std::ffi::OsStr::new("properties") => 1,
+        [properties, ..] if *properties == std::ffi::OsStr::new("edge_properties") => 1,
+        _ => return None,
+    };
+    let route = parts.get(route_index)?.to_str()?;
+    route
+        .strip_suffix(".parquet")
+        .or(Some(route))
+        .filter(|route| route.starts_with("s-"))
+}
+
+fn migrated_semantic_relative(relative: &Path, route_moves: &BTreeMap<String, String>) -> PathBuf {
+    let Some(old_route) = semantic_route_from_relative(relative) else {
+        return relative.to_path_buf();
+    };
+    let Some(new_route) = route_moves.get(old_route) else {
+        return relative.to_path_buf();
+    };
+    let mut parts = relative
+        .components()
+        .map(|part| part.as_os_str().to_owned())
+        .collect::<Vec<_>>();
+    let route_index = if parts.first().is_some_and(|part| part == "topology") {
+        2
+    } else {
+        1
+    };
+    let flat = parts[route_index]
+        .to_str()
+        .is_some_and(|part| part.ends_with(".parquet"));
+    parts[route_index] = if flat {
+        format!("{new_route}.parquet").into()
+    } else {
+        new_route.into()
+    };
+    parts.into_iter().collect()
+}
+
 fn scan_retained_migration_rows(graph_root: &Path) -> Result<u64, GfError> {
     let (inventory, _) = crate::capture_graph_files(graph_root)?;
     let mut rows = 0_u64;
@@ -1920,14 +1970,10 @@ fn scan_retained_migration_rows(graph_root: &Path) -> Result<u64, GfError> {
             continue;
         }
         let path = graph_root.join(entry.relative_path);
-        preflight_parquet_footer(&path)?;
-        let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
-            File::open(path).map_err(|_| corrupt("migration impact Parquet cannot be opened"))?,
-        )
-        .map_err(|_| corrupt("migration impact Parquet metadata is invalid"))?
-        .with_batch_size(8_192)
-        .build()
-        .map_err(|_| corrupt("migration impact reader cannot be built"))?;
+        let reader = admitted_semantic_parquet(&path)?
+            .with_batch_size(8_192)
+            .build()
+            .map_err(|_| corrupt("migration impact reader cannot be built"))?;
         for batch in reader {
             let batch = batch.map_err(|_| corrupt("migration impact batch is invalid"))?;
             rows = rows
@@ -1945,77 +1991,11 @@ fn corrupt(message: &str) -> GfError {
     }
 }
 
-fn preflight_parquet_footer(path: &Path) -> Result<(), GfError> {
-    let mut file = File::open(path).map_err(|_| corrupt("semantic Parquet cannot be opened"))?;
-    let length = file
-        .metadata()
-        .map_err(|_| corrupt("semantic Parquet metadata cannot be read"))?
-        .len();
-    if length < 12 {
-        return Err(corrupt("semantic Parquet footer is truncated"));
-    }
-    file.seek(SeekFrom::End(-8))
-        .map_err(|_| corrupt("semantic Parquet footer cannot be read"))?;
-    let mut footer = [0_u8; 8];
-    file.read_exact(&mut footer)
-        .map_err(|_| corrupt("semantic Parquet footer cannot be read"))?;
-    if &footer[4..] != b"PAR1" {
-        return Err(corrupt("semantic Parquet footer magic is invalid"));
-    }
-    let metadata_len = u64::from(u32::from_le_bytes(footer[..4].try_into().unwrap()));
-    if metadata_len > MAX_SEMANTIC_PARQUET_METADATA_BYTES
-        || metadata_len
-            .checked_add(8)
-            .is_none_or(|total| total > length)
-    {
-        return Err(corrupt("semantic Parquet metadata exceeds admission limit"));
-    }
-    Ok(())
-}
-
-fn semantic_route_files(path: &Path) -> Result<Vec<PathBuf>, GfError> {
-    if path.is_file() {
-        return Ok(vec![path.to_path_buf()]);
-    }
-    let directory = if path.exists() {
-        path.to_path_buf()
-    } else {
-        path.with_extension("")
-    };
-    if !directory.is_dir() {
-        return Ok(Vec::new());
-    }
-    let mut files = std::fs::read_dir(directory)
-        .map_err(|_| corrupt("semantic route directory cannot be read"))?
-        .map(|entry| {
-            entry
-                .map_err(|_| corrupt("semantic route directory entry cannot be read"))
-                .map(|entry| entry.path())
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    files.retain(|file| file.extension().and_then(|value| value.to_str()) == Some("parquet"));
-    files.sort();
-    Ok(files)
-}
-
-fn semantic_route_from_relative(relative: &Path) -> Option<&str> {
-    let mut components = relative.components();
-    let family = components.next()?.as_os_str().to_str()?;
-    if !matches!(family, "properties" | "edge_properties" | "topology") {
-        return None;
-    }
-    let second = components.next()?.as_os_str().to_str()?;
-    if family == "topology" && second == "edges" {
-        return components
-            .next()?
-            .as_os_str()
-            .to_str()?
-            .strip_suffix(".parquet");
-    }
-    if matches!(family, "properties" | "edge_properties") {
-        return second.strip_suffix(".parquet").or(Some(second));
-    }
-    None
+fn admitted_semantic_parquet(
+    path: &Path,
+) -> Result<parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder<File>, GfError> {
+    crate::catalog::admitted_parquet(path)
+        .map_err(|error| corrupt(&format!("semantic Parquet admission failed: {error}")))
 }
 
 fn legacy_ambiguous(message: &str) -> GfError {
@@ -2057,45 +2037,41 @@ fn binding_has_retained_data(
 ) -> Result<bool, GfError> {
     if binding.route_kind == SemanticRouteKind::Entity {
         use arrow::array::{Array, ListArray, UInt32Array};
-        let path = graph_root.join("topology/nodes.parquet");
-        if !path.exists() {
-            return Ok(false);
-        }
-        preflight_parquet_footer(&path)?;
-        let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
-            File::open(path).map_err(|_| corrupt("removal topology cannot be opened"))?,
-        )
-        .map_err(|_| corrupt("removal topology metadata is invalid"))?
-        .with_batch_size(8192)
-        .build()
-        .map_err(|_| corrupt("removal topology reader cannot be built"))?;
-        for batch in reader {
-            let batch = batch.map_err(|_| corrupt("removal topology batch is invalid"))?;
-            let values = batch
-                .column_by_name("type_ids")
-                .and_then(|array| array.as_any().downcast_ref::<ListArray>())
-                .ok_or_else(|| corrupt("removal topology type_ids is malformed"))?;
-            for row in 0..values.len() {
-                if values.is_null(row) {
-                    return Err(corrupt("removal topology type_ids is null"));
-                }
-                let ids = values.value(row);
-                let ids = ids
-                    .as_any()
-                    .downcast_ref::<UInt32Array>()
-                    .ok_or_else(|| corrupt("removal topology type_ids has wrong type"))?;
-                if ids.values().contains(&binding.storage_id) {
-                    return Ok(true);
+        for path in crate::catalog::topology_node_files(graph_root)? {
+            let reader = admitted_semantic_parquet(&path)?
+                .with_batch_size(8192)
+                .build()
+                .map_err(|_| corrupt("removal topology reader cannot be built"))?;
+            for batch in reader {
+                let batch = batch.map_err(|_| corrupt("removal topology cannot be read"))?;
+                if let Some(values) = batch
+                    .column_by_name("type_ids")
+                    .and_then(|array| array.as_any().downcast_ref::<ListArray>())
+                {
+                    for row in 0..values.len() {
+                        if values.is_null(row) {
+                            return Err(corrupt("removal topology type_ids is null"));
+                        }
+                        let ids = values.value(row);
+                        let ids = ids
+                            .as_any()
+                            .downcast_ref::<UInt32Array>()
+                            .ok_or_else(|| corrupt("removal topology type_ids has wrong type"))?;
+                        if ids.values().contains(&binding.storage_id) {
+                            return Ok(true);
+                        }
+                    }
+                } else {
+                    let primary = batch
+                        .column_by_name("type_id")
+                        .and_then(|array| array.as_any().downcast_ref::<UInt32Array>())
+                        .ok_or_else(|| corrupt("removal topology labels are malformed"))?;
+                    if primary.values().contains(&binding.storage_id) {
+                        return Ok(true);
+                    }
                 }
             }
         }
-        return Ok(false);
-    }
-    let Some(path) = binding.physical_path(graph_root) else {
-        return Ok(false);
-    };
-    let route_files = semantic_route_files(&path)?;
-    if route_files.is_empty() {
         return Ok(false);
     }
     if matches!(
@@ -2124,12 +2100,19 @@ fn binding_has_retained_data(
         }
         return Ok(false);
     }
-    for path in route_files {
-        preflight_parquet_footer(&path)?;
-        let builder = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
-            File::open(path).map_err(|_| corrupt("removal route cannot be opened"))?,
-        )
-        .map_err(|_| corrupt("removal route metadata is invalid"))?;
+    let paths = match binding.route_kind {
+        SemanticRouteKind::Relation => {
+            crate::mutator::edge_parquet_files(graph_root, Some(&binding.route))?
+                .into_iter()
+                .map(|(_, path)| path)
+                .collect::<Vec<_>>()
+        }
+        SemanticRouteKind::Entity
+        | SemanticRouteKind::NodeProperty
+        | SemanticRouteKind::EdgeProperty => unreachable!("handled above"),
+    };
+    for path in paths {
+        let builder = admitted_semantic_parquet(&path)?;
         if builder.metadata().file_metadata().num_rows() > 0 {
             return Ok(true);
         }
@@ -2209,6 +2192,46 @@ mod tests {
         MigrationDef, OntologyDoc, OntologyModuleId, PropertyDef, PropertyValueType,
         RelationTypeDef, SemanticFlags, compile_inventory, module_document_digest,
     };
+
+    #[test]
+    fn semantic_parquet_admission_rejects_directory_and_bad_leading_magic() {
+        let root = tempfile::TempDir::new().unwrap();
+        assert!(admitted_semantic_parquet(root.path()).is_err());
+        let bad = root.path().join("bad.parquet");
+        std::fs::write(&bad, b"NOPE\0\0\0\0PAR1").unwrap();
+        assert!(
+            admitted_semantic_parquet(&bad)
+                .unwrap_err()
+                .to_string()
+                .contains("leading magic")
+        );
+        let bad_footer = root.path().join("bad-footer.parquet");
+        std::fs::write(&bad_footer, b"PAR1\0\0\0\0NOPE").unwrap();
+        assert!(admitted_semantic_parquet(&bad_footer).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn semantic_parquet_admission_rejects_symlink_and_fifo_without_blocking() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::TempDir::new().unwrap();
+        let target = root.path().join("target.parquet");
+        std::fs::write(&target, b"NOPE\0\0\0\0PAR1").unwrap();
+        let link = root.path().join("link.parquet");
+        symlink(&target, &link).unwrap();
+        assert!(admitted_semantic_parquet(&link).is_err());
+
+        let fifo = root.path().join("pipe.parquet");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(admitted_semantic_parquet(&fifo).is_err());
+    }
     fn module(name: &str) -> OntologyModuleId {
         OntologyModuleId {
             ontology_id: name.into(),
@@ -2779,6 +2802,78 @@ mod tests {
     }
 
     #[test]
+    fn retained_entity_scan_includes_immutable_node_shards() {
+        let composition = compiled("1");
+        let bindings = SemanticStorageBindings::project(&composition, None).unwrap();
+        let entity = bindings
+            .bindings
+            .iter()
+            .find(|binding| binding.route_kind == SemanticRouteKind::Entity)
+            .unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        for generation in 1_i64..=16 {
+            let mut writer = crate::GraphWriter::open_at(
+                dir.path(),
+                graphforge_core::OntologyMode::Strict,
+                generation,
+            )
+            .unwrap();
+            writer
+                .create_node(
+                    graphforge_core::uuid::new_v7(),
+                    graphforge_core::TypeId(if generation == 16 {
+                        entity.storage_id
+                    } else {
+                        999
+                    }),
+                )
+                .unwrap();
+            writer.flush().unwrap();
+        }
+        assert_eq!(
+            crate::catalog::topology_node_files(dir.path())
+                .unwrap()
+                .len(),
+            16
+        );
+
+        assert!(
+            SemanticStorageBindings::binding_has_retained_data(entity, dir.path()).unwrap(),
+            "a binding used only by an immutable node shard must remain protected"
+        );
+    }
+
+    #[test]
+    fn retained_entity_scan_preflights_every_shard_before_decoding() {
+        use std::io::Write as _;
+
+        let composition = compiled("1");
+        let bindings = SemanticStorageBindings::project(&composition, None).unwrap();
+        let entity = bindings
+            .bindings
+            .iter()
+            .find(|binding| binding.route_kind == SemanticRouteKind::Entity)
+            .unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let shard = dir
+            .path()
+            .join("topology/nodes/00000000000000000001-00000000000000000001.parquet");
+        std::fs::create_dir_all(shard.parent().unwrap()).unwrap();
+        let mut file = File::create(&shard).unwrap();
+        file.write_all(b"PAR1").unwrap();
+        file.write_all(&(u32::MAX).to_le_bytes()).unwrap();
+        file.write_all(b"PAR1").unwrap();
+        drop(file);
+        let error =
+            SemanticStorageBindings::binding_has_retained_data(entity, dir.path()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("metadata exceeds admission limit")
+        );
+    }
+
+    #[test]
     fn legacy_scanner_resource_ladder_is_independent_of_total_rows() {
         let composition = compiled("1");
         for rows in [1_usize, 8_193] {
@@ -2821,7 +2916,7 @@ mod tests {
         file.write_all(&(u32::MAX).to_le_bytes()).unwrap();
         file.write_all(b"PAR1").unwrap();
         drop(file);
-        let error = preflight_parquet_footer(&path).unwrap_err();
+        let error = admitted_semantic_parquet(&path).unwrap_err();
         assert!(
             error
                 .to_string()
@@ -2852,6 +2947,33 @@ mod tests {
                 .contains("metadata exceeds admission limit"),
             "{error:?}"
         );
+    }
+
+    #[test]
+    fn semantic_admission_and_decode_share_one_stable_file_handle() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut writer =
+            crate::GraphWriter::open_at(dir.path(), graphforge_core::OntologyMode::Strict, 1)
+                .unwrap();
+        writer
+            .create_node(graphforge_core::uuid::new_v7(), graphforge_core::TypeId(1))
+            .unwrap();
+        writer.flush().unwrap();
+        let path = crate::catalog::topology_node_files(dir.path())
+            .unwrap()
+            .remove(0);
+        let builder = admitted_semantic_parquet(&path).unwrap();
+        let original = path.with_extension("admitted-original");
+        std::fs::rename(&path, &original).unwrap();
+        std::fs::write(&path, b"replacement is not parquet").unwrap();
+        let rows = builder
+            .with_batch_size(1)
+            .build()
+            .unwrap()
+            .map(|batch| batch.unwrap().num_rows())
+            .sum::<usize>();
+        assert_eq!(rows, 1);
+        assert!(admitted_semantic_parquet(&path).is_err());
     }
 
     #[test]
@@ -2969,5 +3091,196 @@ mod tests {
         let injected = dir.path().join("properties/s-deadbeef.parquet");
         std::fs::write(injected, b"unlisted route must be rejected before decode").unwrap();
         assert!(bindings.validate_physical_routes(dir.path()).is_err());
+    }
+
+    #[test]
+    fn topology_validation_accepts_mixed_legacy_and_normalized_fragments() {
+        let composition = compiled("1");
+        let bindings = SemanticStorageBindings::project(&composition, None).unwrap();
+        let entity = bindings
+            .bindings
+            .iter()
+            .find(|binding| binding.route_kind == SemanticRouteKind::Entity)
+            .unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut writer =
+            crate::GraphWriter::open_at(dir.path(), graphforge_core::OntologyMode::Strict, 1)
+                .unwrap()
+                .with_semantic_composition_fingerprint(Some(composition.fingerprint.clone()));
+        writer
+            .create_node(
+                graphforge_core::uuid::new_v7(),
+                graphforge_core::TypeId(entity.storage_id),
+            )
+            .unwrap();
+        writer.flush().unwrap();
+
+        let current_path = crate::catalog::topology_node_files(dir.path())
+            .unwrap()
+            .remove(0);
+        let current_batch = admitted_semantic_parquet(&current_path)
+            .unwrap()
+            .build()
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+        let legacy_fields = current_batch
+            .schema()
+            .fields()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, field)| (index != 3).then_some(field.as_ref().clone()))
+            .collect::<Vec<_>>();
+        let legacy_columns = current_batch
+            .columns()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, column)| (index != 3).then_some(std::sync::Arc::clone(column)))
+            .collect::<Vec<_>>();
+        let legacy = arrow::record_batch::RecordBatch::try_new(
+            std::sync::Arc::new(arrow::datatypes::Schema::new(legacy_fields)),
+            legacy_columns,
+        )
+        .unwrap();
+        let canonical_dir = dir.path().join("topology/nodes");
+        std::fs::create_dir_all(&canonical_dir).unwrap();
+        let retained_current =
+            canonical_dir.join("00000000000000000001-00000000000000000001.parquet");
+        if current_path != retained_current {
+            std::fs::rename(&current_path, &retained_current).unwrap();
+        }
+        let legacy_path = dir.path().join("topology/nodes.parquet");
+        let mut legacy_writer = parquet::arrow::ArrowWriter::try_new(
+            File::create(legacy_path).unwrap(),
+            legacy.schema(),
+            None,
+        )
+        .unwrap();
+        legacy_writer.write(&legacy).unwrap();
+        legacy_writer.close().unwrap();
+
+        bindings.validate_physical_routes(dir.path()).unwrap();
+    }
+
+    #[test]
+    fn semantic_validation_covers_every_immutable_property_fragment() {
+        use std::collections::HashMap;
+
+        let composition = compiled("1");
+        let bindings = SemanticStorageBindings::project(&composition, None).unwrap();
+        let entity = bindings
+            .bindings
+            .iter()
+            .find(|binding| binding.route_kind == SemanticRouteKind::Entity)
+            .unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut writer =
+            crate::GraphWriter::open_at(dir.path(), graphforge_core::OntologyMode::Strict, 1)
+                .unwrap()
+                .with_semantic_composition_fingerprint(Some(composition.fingerprint.clone()));
+        let node = graphforge_core::uuid::new_v7();
+        writer
+            .create_node(node, graphforge_core::TypeId(entity.storage_id))
+            .unwrap();
+        writer
+            .set_properties(
+                &node,
+                Some(&entity.route),
+                HashMap::from([("name".into(), graphforge_ir::IrLiteral::Str("Ada".into()))]),
+            )
+            .unwrap();
+        writer.flush().unwrap();
+        let mut second =
+            crate::GraphWriter::open_at(dir.path(), graphforge_core::OntologyMode::Strict, 2)
+                .unwrap()
+                .with_semantic_composition_fingerprint(Some(composition.fingerprint.clone()));
+        second
+            .set_properties(
+                &node,
+                Some(&entity.route),
+                HashMap::from([("name".into(), graphforge_ir::IrLiteral::Str("Grace".into()))]),
+            )
+            .unwrap();
+        second.flush().unwrap();
+
+        let fragments = crate::property_overlay::enumerate_property_fragments(
+            dir.path(),
+            crate::PropertyRouteKind::Node,
+            &entity.route,
+        )
+        .unwrap();
+        assert_eq!(fragments.len(), 2);
+        let rows = crate::catalog::read_properties(dir.path(), &entity.route).unwrap();
+        let names = rows[0]
+            .column_by_name("name")
+            .and_then(|column| column.as_any().downcast_ref::<arrow::array::StringArray>())
+            .unwrap();
+        assert_eq!(names.value(0), "Grace");
+
+        bindings.validate_physical_routes(dir.path()).unwrap();
+        let (inventory, _) = crate::capture_graph_files(dir.path()).unwrap();
+        bindings
+            .validate_physical_routes_with_inventory(dir.path(), Some(&inventory))
+            .unwrap();
+        for fragment in fragments {
+            let relative = fragment
+                .path
+                .strip_prefix(dir.path())
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_owned();
+            let mut omitted = inventory.clone();
+            omitted
+                .files
+                .retain(|entry| entry.relative_path != relative);
+            omitted.file_count = omitted.files.len() as u64;
+            assert!(
+                bindings
+                    .validate_physical_routes_with_inventory(dir.path(), Some(&omitted))
+                    .is_err(),
+                "omitting authenticated property fragment {relative} must fail closed"
+            );
+        }
+    }
+
+    #[test]
+    fn semantic_route_moves_preserve_every_shard_basename() {
+        let moves = BTreeMap::from([("s-old".to_owned(), "s-new".to_owned())]);
+        for (source, target) in [
+            (
+                "properties/s-old/00000000000000000001.parquet",
+                "properties/s-new/00000000000000000001.parquet",
+            ),
+            (
+                "edge_properties/s-old/00000000000000000002.parquet",
+                "edge_properties/s-new/00000000000000000002.parquet",
+            ),
+            (
+                "topology/edges/s-old/00000000000000000003.parquet",
+                "topology/edges/s-new/00000000000000000003.parquet",
+            ),
+            ("properties/s-old.parquet", "properties/s-new.parquet"),
+        ] {
+            assert_eq!(
+                migrated_semantic_relative(Path::new(source), &moves),
+                PathBuf::from(target)
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn semantic_route_inventory_rejects_opaque_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().join("properties");
+        std::fs::create_dir_all(&root).unwrap();
+        let target = dir.path().join("target");
+        std::fs::write(&target, b"not parquet").unwrap();
+        symlink(&target, root.join("s-deadbeef.parquet")).unwrap();
+        assert!(validate_no_unlisted_semantic_routes(dir.path(), &BTreeSet::new()).is_err());
     }
 }
