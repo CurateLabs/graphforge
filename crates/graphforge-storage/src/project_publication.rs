@@ -3016,11 +3016,10 @@ mod tests {
             panic!("new request unexpectedly replayed");
         };
 
-        fs::write(
-            crate::graph_object_path(root.path(), &payload_digest).unwrap(),
+        crate::graph_object_store::corrupt_sealed_graph_object_for_test(
+            &crate::graph_object_path(root.path(), &payload_digest).unwrap(),
             b"corrupt",
-        )
-        .unwrap();
+        );
         let validated = staged
             .validate(|_| Ok(()), |_, _| Ok(()))
             .expect("intermediate validation must not rehash compact payloads");

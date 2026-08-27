@@ -1311,6 +1311,26 @@ pub fn graph_object_path(root: &Path, digest: &str) -> Result<PathBuf, GfError> 
         .join(&digest[2..]))
 }
 
+#[cfg(test)]
+pub(crate) fn corrupt_sealed_graph_object_for_test(path: &Path, bytes: &[u8]) {
+    let metadata = fs::metadata(path).expect("inspect sealed graph object fixture");
+    assert!(
+        metadata.permissions().readonly(),
+        "graph object fixture must be sealed before hostile corruption"
+    );
+    let mut permissions = metadata.permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        permissions.set_mode(permissions.mode() | 0o200);
+    }
+    #[cfg(not(unix))]
+    permissions.set_readonly(false);
+    fs::set_permissions(path, permissions)
+        .expect("make exact graph object fixture owner-writable for hostile corruption");
+    fs::write(path, bytes).expect("corrupt exact sealed graph object fixture");
+}
+
 /// Install exact in-memory bytes under their SHA-256 identity.
 pub fn install_graph_object_bytes(
     root: &Path,
@@ -2998,7 +3018,10 @@ mod tests {
             b"payload"
         );
 
-        fs::write(graph_object_path(root.path(), &digest).unwrap(), b"corrupt").unwrap();
+        corrupt_sealed_graph_object_for_test(
+            &graph_object_path(root.path(), &digest).unwrap(),
+            b"corrupt",
+        );
         assert!(install_graph_object_bytes(root.path(), b"payload").is_err());
     }
 
@@ -3377,11 +3400,10 @@ mod tests {
         );
 
         let (another_orphan, _) = install_graph_object_bytes(container.path(), b"another").unwrap();
-        fs::write(
-            graph_object_path(container.path(), &root.root_node_sha256).unwrap(),
+        corrupt_sealed_graph_object_for_test(
+            &graph_object_path(container.path(), &root.root_node_sha256).unwrap(),
             b"tampered",
-        )
-        .unwrap();
+        );
         assert!(
             gc_graph_objects(
                 container.path(),
