@@ -19,6 +19,12 @@ pub mod filesystem_admission;
 pub mod adjacency;
 pub mod adjacency_delta;
 
+pub mod storage_attribution;
+pub use storage_attribution::{
+    ArtifactCategory, ArtifactStorageTotals, StorageAttributionSnapshot,
+    capture_storage_attribution, classify_graph_artifact,
+};
+
 pub mod generation;
 pub use generation::{
     commit_topology_aware, commit_topology_aware_with_auxiliary, read_search_generation,
