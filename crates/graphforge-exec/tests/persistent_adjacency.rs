@@ -155,7 +155,7 @@ fn absent_capability_dir_is_building_and_scan_builds() {
 }
 
 #[test]
-fn absent_index_scan_build_is_cached_across_stream_batches() {
+fn absent_index_bounded_build_is_cached_across_queries() {
     let dir = TempDir::new().unwrap();
     write_diamond(dir.path());
     let provider = persistent(dir.path(), OntologyMode::Strict);
@@ -164,13 +164,13 @@ fn absent_index_scan_build_is_cached_across_stream_batches() {
     let second = provider.adjacency("KNOWS", Direction::Out).unwrap();
     assert!(
         Arc::ptr_eq(&first, &second),
-        "scan-build must be reused instead of rescanning per input batch"
+        "bounded derived CSR must be reused instead of rebuilding per input batch"
     );
     provider.revalidate();
     let next_query = provider.adjacency("KNOWS", Direction::Out).unwrap();
     assert!(
-        !Arc::ptr_eq(&first, &next_query),
-        "an absent-index cache must not survive the next query"
+        Arc::ptr_eq(&first, &next_query),
+        "the authenticated unchanged source must retain its bounded derived CSR"
     );
 }
 
@@ -220,11 +220,11 @@ fn fresh_index_with_unknown_rel_scan_builds_without_rebuild() {
 }
 
 // ---------------------------------------------------------------------------
-// Corrupt artifacts degrade, never fail
+// Corrupt artifacts repair when authority is readable and fail closed when it is not
 // ---------------------------------------------------------------------------
 
 #[test]
-fn corrupt_generation_counter_is_miss_without_rebuild() {
+fn corrupt_generation_counter_refuses_unbounded_scan_fallback() {
     let dir = TempDir::new().unwrap();
     write_diamond(dir.path());
     build_adjacency_index(dir.path(), TS).unwrap();
@@ -239,13 +239,15 @@ fn corrupt_generation_counter_is_miss_without_rebuild() {
         provider.status("KNOWS", Direction::Out),
         AdjacencyStatus::Miss
     );
-    // Scan-build fallback still serves correct results; no rebuild was
-    // attempted (stamping a manifest requires a readable counter).
-    assert_eq!(
-        provider.adjacency("KNOWS", Direction::Out).unwrap(),
-        scan(dir.path(), OntologyMode::Strict)
-            .adjacency("KNOWS", Direction::Out)
-            .unwrap()
+    let error = provider
+        .adjacency("KNOWS", Direction::Out)
+        .expect_err("unreadable authority must never select the O(E)-memory scan oracle");
+    assert!(
+        error
+            .to_string()
+            .contains("bounded adjacency index build failed")
+            && error.to_string().contains("corrupt"),
+        "{error}"
     );
 }
 
