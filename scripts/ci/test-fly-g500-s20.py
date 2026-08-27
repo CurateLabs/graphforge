@@ -689,6 +689,36 @@ def test_current_official_pricing_selects_fixed_region_and_derives_ledger():
     assert reservation["reserved_usd"] == 0.90
 
 
+def test_main_prints_and_executes_one_authoritative_reservation(monkeypatch, tmp_path, capsys):
+    run = args(tmp_path, execute=True, confirm_disposable=True)
+    monkeypatch.setattr(
+        controller,
+        "parser",
+        lambda: argparse.Namespace(parse_args=lambda: run),
+    )
+    monkeypatch.setattr(controller, "validate_inputs", lambda _args: None)
+    monkeypatch.setattr(controller, "check_source", lambda _sha: None)
+    monkeypatch.setattr(
+        controller,
+        "inspect_local_image",
+        lambda *_args: ("sha256:" + "f" * 64, "c" * 64),
+    )
+    monkeypatch.setattr(
+        controller,
+        "fetch_current_pricing",
+        lambda _region: (Decimal("0.00002484"), Decimal("0.15")),
+    )
+    captured = []
+    monkeypatch.setattr(
+        controller,
+        "execute",
+        lambda _args, _fly, _image, _snapshot, reservation: captured.append(reservation),
+    )
+    assert controller.main() == 0
+    printed = json.loads(capsys.readouterr().out)
+    assert captured == [printed["reservation"]]
+
+
 @pytest.mark.parametrize(
     ("html", "region", "message"),
     [
@@ -925,6 +955,53 @@ def test_reconciled_owned_app_is_cleaned_before_error_escapes(monkeypatch, tmp_p
     with pytest.raises(controller.OwnedAppCreationError):
         controller.execute(run, fly, "sha256:" + "f" * 64, "c" * 64)
     assert observed == [(run.app_name, None, None, True)]
+
+
+def test_keyboard_interrupt_still_cleans_owned_resources_and_revokes_token(monkeypatch, tmp_path):
+    class Fly:
+        def json(self, command, **_kwargs):
+            assert command == ["apps", "list"]
+            return []
+
+    observed = []
+    revoked = []
+    monkeypatch.setattr(controller, "reserve_budget", lambda *_args: None)
+    monkeypatch.setattr(
+        controller,
+        "create_owned_app",
+        lambda *_args: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
+    monkeypatch.setattr(
+        controller,
+        "cleanup_owned",
+        lambda _fly, app, machine, volume, owned: observed.append((app, machine, volume, owned)),
+    )
+    fly = Fly()
+    credential = controller.RunCredential(
+        "token-test-id",
+        "gf-s20-test",
+        "test-secret-value-long-enough",
+        controller.time.monotonic() + controller.RUN_TOKEN_LIFETIME_SECONDS,
+    )
+    monkeypatch.setattr(controller, "mint_run_credential", lambda *_args: credential)
+    monkeypatch.setattr(controller, "run_scoped_flyctl", lambda _credential: fly)
+    monkeypatch.setattr(
+        controller,
+        "revoke_run_credential",
+        lambda _bootstrap, value, org: revoked.append((value.token_id, org)),
+    )
+    run = args(tmp_path, execute=True, confirm_disposable=True)
+    with pytest.raises(KeyboardInterrupt):
+        controller.execute(
+            run,
+            fly,
+            "sha256:" + "f" * 64,
+            "c" * 64,
+            controller.price_reservation(500, Decimal("0"), Decimal("0")),
+        )
+    assert observed == [(run.app_name, None, None, False)]
+    assert revoked == [(credential.token_id, run.org)]
+    assert json.loads(run.diagnostic_out.read_text())["code"] == ("controller_keyboardinterrupt")
 
 
 def test_primary_failure_and_typed_diagnostic_survive_cleanup_failure(monkeypatch, tmp_path):

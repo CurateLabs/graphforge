@@ -22,6 +22,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
 import time
 from typing import Any
@@ -1742,13 +1743,14 @@ def execute(
     fly: Flyctl,
     local_image_id: str | None = None,
     local_snapshot: str | None = None,
+    reservation: dict[str, Any] | None = None,
 ) -> None:
     bootstrap = fly
     run_fly: Flyctl | None = None
     credential: RunCredential | None = None
     app_created = False
     machine_id = volume_id = None
-    primary_error: Exception | None = None
+    primary_error: BaseException | None = None
     try:
         if local_image_id is None or local_snapshot is None:
             local_image_id, local_snapshot = inspect_local_image(args.image, args.expected_sha)
@@ -1757,11 +1759,13 @@ def execute(
             item.get("Name") == args.app_name or item.get("name") == args.app_name for item in apps
         ):
             raise ControllerError("refusing to reuse an existing app")
-        compute_rate, volume_rate = fetch_current_pricing(args.region)
+        if reservation is None:
+            compute_rate, volume_rate = fetch_current_pricing(args.region)
+            reservation = price_reservation(args.volume_size_gb, compute_rate, volume_rate)
         reserve_budget(
             args.ledger,
             args.app_name,
-            price_reservation(args.volume_size_gb, compute_rate, volume_rate),
+            reservation,
         )
         credential = mint_run_credential(args, bootstrap)
         admit_run_credential(credential, args.timeout_s)
@@ -1885,7 +1889,7 @@ def execute(
             )
             args.evidence_out.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
             acknowledge_result(run_fly, args, machine_id, deadline)
-    except Exception as error:
+    except BaseException as error:
         primary_error = error
         if isinstance(error, ProviderRequestError):
             persist_controller_failure(args, error.code, provider_request=error.details)
@@ -1956,6 +1960,8 @@ def main() -> int:
         validate_inputs(args)
         check_source(args.expected_sha)
         local_image_id, source_snapshot = inspect_local_image(args.image, args.expected_sha)
+        compute_rate, volume_rate = fetch_current_pricing(args.region)
+        reservation = price_reservation(args.volume_size_gb, compute_rate, volume_rate)
         plan = {
             "scale": 20,
             "source_sha": args.expected_sha,
@@ -1965,18 +1971,27 @@ def main() -> int:
             "region": args.region,
             "local_image_id": local_image_id,
             "maximum_total_cost_usd": MAX_COST_USD,
-            "reservation": price_reservation(args.volume_size_gb),
+            "reservation": reservation,
         }
         print(json.dumps(plan, sort_keys=True))
         if args.execute:
-            execute(args, Flyctl(), local_image_id, source_snapshot)
+            execute(
+                args,
+                Flyctl(),
+                local_image_id,
+                source_snapshot,
+                reservation,
+            )
         return 0
+    except KeyboardInterrupt as error:
+        print("error: interrupted after cleanup", file=sys.stderr)
+        for note in getattr(error, "__notes__", ()):
+            print(f"error: {note}", file=sys.stderr)
+        return 130
     except (ControllerError, subprocess.SubprocessError, json.JSONDecodeError, KeyError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
 
 
 if __name__ == "__main__":
-    import sys
-
     raise SystemExit(main())
