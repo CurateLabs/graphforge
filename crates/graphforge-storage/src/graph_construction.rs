@@ -8809,11 +8809,11 @@ mod tests {
         let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
         let encoding = session.encode_canonical(&shape, 1).unwrap();
 
-        let receipt = session
-            .publish_canonical(&encoding, target, transaction)
-            .unwrap();
-        assert_eq!(receipt.generation_uuid, target);
-        assert!(!receipt.idempotent_replay);
+        assert_eq!(
+            session.checkpoint.publication_state,
+            Some(ConstructionPublicationState::Publishing),
+            "the durable intent remains recoverable without claiming commit"
+        );
         let current = crate::resolve_project_generation(root.path()).unwrap();
         assert_eq!(current.generation_uuid(), target);
         let inventory = current.graph_files_inventory().unwrap().unwrap();
@@ -8926,6 +8926,52 @@ mod tests {
         assert_eq!(
             session.checkpoint.publication_state,
             Some(ConstructionPublicationState::Sealed)
+        );
+    }
+
+    #[test]
+    fn canonical_publication_cancels_at_named_immediate_pre_current_boundary() {
+        let root = TempDir::new().unwrap();
+        let parent = crate::open_or_initialize_project(root.path()).unwrap();
+        let prior = parent.generation_uuid();
+        drop(parent);
+        let prior_current = std::fs::read(root.path().join("CURRENT")).unwrap();
+        let mut session = GraphConstructionSession::open(
+            root.path(),
+            Uuid::from_u128(9_465),
+            0,
+            GraphConstructionBudgets::default(),
+        )
+        .unwrap();
+        session
+            .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 2))
+            .unwrap();
+        session.seal().unwrap();
+        let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
+        let encoding = session.encode_canonical(&shape, 1).unwrap();
+        let target = Uuid::from_u128(9_466);
+        let transaction = Uuid::from_u128(9_467);
+        let mut checkpoints = 0_u8;
+        let error = session
+            .publish_canonical_with_cancellation(&encoding, target, transaction, || {
+                checkpoints += 1;
+                checkpoints == 2
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("before_current_replace"));
+        assert_eq!(
+            checkpoints, 2,
+            "entry and immediate pre-CURRENT checkpoints"
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("CURRENT")).unwrap(),
+            prior_current
+        );
+        assert_ne!(target, prior);
+        assert_eq!(
+            session.checkpoint.publication_state,
+            Some(ConstructionPublicationState::Publishing),
+            "the durable intent remains recoverable without claiming commit"
         );
     }
 

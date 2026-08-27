@@ -1675,7 +1675,9 @@ fn open_planned_source(planned: &PlannedFile) -> Result<(File, Option<Identity>)
             digest,
             length,
         } => {
-            let source = lease.open(digest, *length)?;
+            let source = lease
+                .open(digest, *length)
+                .map_err(|_| err("GF_SOURCE_CHANGED", "pinned CAS source changed"))?;
             let mut file = source.try_clone_file().map_err(storage)?;
             file.seek(SeekFrom::Start(0)).map_err(storage)?;
             Ok((file, None))
@@ -2162,6 +2164,42 @@ fn storage(e: impl std::fmt::Display) -> ExportError {
 mod tests {
     use super::*;
     use crate::open_or_initialize_project;
+
+    fn compact_graph_generation() -> (tempfile::TempDir, ResolvedProjectGeneration) {
+        let project = tempfile::tempdir().unwrap();
+        open_or_initialize_project(project.path()).unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let relative = PathBuf::from("topology/nodes/part-00000.parquet");
+        fs::create_dir_all(workspace.path().join(relative.parent().unwrap())).unwrap();
+        fs::write(workspace.path().join(&relative), b"compact graph payload").unwrap();
+        let lease = crate::begin_graph_object_publication(project.path()).unwrap();
+        let mut state = crate::GraphManifestState::empty();
+        let (root, _) =
+            crate::append_graph_files_v2(&lease, workspace.path(), &mut state, &[relative], &[])
+                .unwrap();
+        let request = crate::ProjectGenerationRequest {
+            transaction_uuid: Uuid::new_v4(),
+            generation_uuid: Uuid::new_v4(),
+            capabilities: vec![crate::ProjectCapability {
+                capability_id: crate::GRAPH_CAPABILITY_ID.into(),
+                capability_version: 1,
+            }],
+            participants: vec![crate::graph_files_root_participant(&root).unwrap()],
+        };
+        let crate::ProjectStageOutcome::Staged(staged) =
+            crate::stage_project_generation(project.path(), &request).unwrap()
+        else {
+            panic!("fresh compact generation replayed");
+        };
+        staged
+            .validate(|_| Ok(()), |_, _| Ok(()))
+            .unwrap()
+            .publish_with_graph_objects(&lease)
+            .unwrap();
+        drop(lease);
+        let generation = crate::resolve_project_generation(project.path()).unwrap();
+        (project, generation)
+    }
 
     fn graph_generation() -> (tempfile::TempDir, ResolvedProjectGeneration) {
         graph_generation_with_composition(false)
@@ -3747,6 +3785,92 @@ mod tests {
         };
         let error = plan_complete_portable_v2(&generation, limited).unwrap_err();
         assert_eq!(error.code, PortableV2ErrorCode::LimitExceeded);
+    }
+
+    #[test]
+    fn compact_plan_is_reusable_across_representations_cancelled_retry_and_cas_tamper() {
+        let (project, generation) = compact_graph_generation();
+        let limits = PortableV2ExportLimits::default();
+        let plan = plan_complete_portable_v2(&generation, limits).unwrap();
+        assert!(
+            plan.files
+                .iter()
+                .any(|file| matches!(file.source, PlannedSource::Cas { .. }))
+        );
+        let out = tempfile::tempdir().unwrap();
+        let expanded = out.path().join("compact.gfproject");
+        let bundle = out.path().join("compact.gfpb");
+        let cancelled_bundle = out.path().join("cancelled.gfpb");
+        let active = AtomicBool::new(false);
+        let expanded_receipt = export_complete_portable_v2(
+            &plan,
+            &expanded,
+            PortableV2Output::Expanded,
+            limits,
+            &active,
+            |_| {},
+        )
+        .unwrap();
+        let cancelled = AtomicBool::new(true);
+        assert_eq!(
+            export_complete_portable_v2(
+                &plan,
+                &cancelled_bundle,
+                PortableV2Output::Bundle,
+                limits,
+                &cancelled,
+                |_| {},
+            )
+            .unwrap_err()
+            .code,
+            PortableV2ErrorCode::Cancelled
+        );
+        assert!(!cancelled_bundle.exists());
+        let bundle_receipt = export_complete_portable_v2(
+            &plan,
+            &bundle,
+            PortableV2Output::Bundle,
+            limits,
+            &active,
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(
+            expanded_receipt.package_digest,
+            bundle_receipt.package_digest
+        );
+        verify_portable_v2(&expanded, PortableV2Mode::Full, limits, Some(&active)).unwrap();
+        verify_portable_v2(&bundle, PortableV2Mode::Full, limits, Some(&active)).unwrap();
+
+        let payload_digest = hex(Sha256::digest(b"compact graph payload").into());
+        let (digest, length) = plan
+            .files
+            .iter()
+            .find_map(|file| match &file.source {
+                PlannedSource::Cas { digest, length, .. } if digest == &payload_digest => {
+                    Some((digest.clone(), *length))
+                }
+                PlannedSource::File { .. } | PlannedSource::Control(_) => None,
+                PlannedSource::Cas { .. } => None,
+            })
+            .unwrap();
+        let object = crate::graph_object_store::graph_object_path(project.path(), &digest).unwrap();
+        let mut permissions = fs::metadata(&object).unwrap().permissions();
+        permissions.set_readonly(false);
+        fs::set_permissions(&object, permissions).unwrap();
+        fs::write(&object, vec![b'x'; usize::try_from(length).unwrap()]).unwrap();
+        let tampered = out.path().join("tampered.gfpb");
+        let error = export_complete_portable_v2(
+            &plan,
+            &tampered,
+            PortableV2Output::Bundle,
+            limits,
+            &active,
+            |_| {},
+        )
+        .unwrap_err();
+        assert_eq!(error.code, PortableV2ErrorCode::ConcurrentMutation);
+        assert!(!tampered.exists());
     }
 
     #[test]

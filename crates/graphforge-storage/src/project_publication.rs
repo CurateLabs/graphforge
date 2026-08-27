@@ -1738,12 +1738,6 @@ fn replace_current(
                 "CURRENT",
                 false,
             )?;
-            if cancellation.as_mut().is_some_and(|cancelled| cancelled()) {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Interrupted,
-                    "publication cancelled before CURRENT commit point",
-                ));
-            }
             if let Some(admission) = lifecycle_admission {
                 admission
                     .revalidate_identity()
@@ -1758,6 +1752,15 @@ fn replace_current(
                 lease
                     .revalidate_for_root(staged.parent.container_root())
                     .map_err(std::io::Error::other)?;
+            }
+            // This is deliberately the final fallible predicate before the
+            // single native replacement commit point. After replacement,
+            // reconciliation owns the result and cancellation cannot undo it.
+            if cancellation.as_mut().is_some_and(|cancelled| cancelled()) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "publication cancelled at project.before_current_replace",
+                ));
             }
             Ok(())
         },
