@@ -2217,6 +2217,49 @@ fn create_bounded_drill_package(root: &Path, limits: PortableV2Limits) -> (PathB
     drop(construction);
     drop(graph);
     let graph = GraphForge::new(project.to_str()).expect("reopen bounded drill project");
+    let expanded = root.join("drill-expanded");
+    graph
+        .export_portable_v2(
+            &PortableV2ExportRequest {
+                selection: PortableSelection::Current,
+                output_path: expanded.clone(),
+                representation: PortableV2Output::Expanded,
+                profile: PortableV2SelectionProfile::Complete,
+                subset: None,
+                limits,
+            },
+            None,
+            |_| {},
+        )
+        .expect("export compact drill expanded package");
+    verify_portable_v2(
+        &PortableVerifyRequest {
+            input: expanded,
+            mode: PortableV2Mode::Full,
+            limits,
+        },
+        None,
+    )
+    .expect("verify compact drill expanded package");
+    let cancelled = AtomicBool::new(true);
+    let cancelled_path = root.join("drill-cancelled.gfpb");
+    assert!(
+        graph
+            .export_portable_v2(
+                &PortableV2ExportRequest {
+                    selection: PortableSelection::Current,
+                    output_path: cancelled_path.clone(),
+                    representation: PortableV2Output::Bundle,
+                    profile: PortableV2SelectionProfile::Complete,
+                    subset: None,
+                    limits,
+                },
+                Some(&cancelled),
+                |_| {},
+            )
+            .is_err()
+    );
+    assert!(!cancelled_path.exists());
     let receipt = graph
         .export_portable_v2(
             &PortableV2ExportRequest {
@@ -2734,7 +2777,13 @@ fn tiny_construction_ladder_resumes_and_scales_bounded_work_linearly() {
         assert!(progress.evidence.input_batches <= 2 * factor + 1);
         assert!(progress.evidence.parquet_shards <= progress.evidence.input_batches);
         assert!(progress.evidence.peak_batch_rows <= BATCH_ROWS as u64);
-        assert!(progress.evidence.peak_accounted_live_bytes > 0);
+        assert!(progress.evidence.peak_accounted_live_bytes <= 64 * 1024 * 1024);
+        assert!(progress.evidence.peak_run_records <= BATCH_ROWS as u64);
+        assert!(progress.evidence.peak_merge_inputs <= 64);
+        assert!(progress.evidence.peak_merge_name_slots <= 64);
+        assert!(progress.evidence.peak_resolved_endpoint_name_slots <= 64);
+        assert!(progress.evidence.peak_catalog_entries <= 64);
+        assert!(progress.evidence.peak_catalog_identifier_bytes <= 64 * 1024);
         assert!(progress.evidence.merge_read_records <= 1_024 * factor);
         assert!(progress.evidence.merge_written_records <= 1_024 * factor);
         assert!(progress.evidence.parquet_write_operations > 0);
