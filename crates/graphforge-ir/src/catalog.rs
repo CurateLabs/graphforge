@@ -565,7 +565,7 @@ impl RuntimeCatalog {
                 if name.is_empty()
                     || observation_count == 0
                     || first_seen > last_seen
-                    || (kind == EntryKind::Property) != owner_label.is_some()
+                    || (kind != EntryKind::Property && owner_label.is_some())
                 {
                     return Err(storage_err("runtime_catalog row is not canonical"));
                 }
@@ -912,6 +912,38 @@ mod tests {
             .find(|&r| kinds.value(r) == "entity_type")
             .unwrap();
         assert_eq!(counts.value(person_row), 3);
+    }
+
+    #[test]
+    fn roundtrip_preserves_global_unowned_properties() {
+        let mut catalog = RuntimeCatalog::new();
+        let expected = catalog.intern_property("score", None);
+
+        let restored = RuntimeCatalog::from_record_batch(&catalog.to_record_batch()).unwrap();
+        assert!(restored.contains_property("score", None));
+        assert_eq!(restored.property_name(expected), Some("score"));
+        assert_eq!(
+            restored
+                .to_record_batch()
+                .column(6)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .null_count(),
+            1
+        );
+    }
+
+    #[test]
+    fn persisted_catalog_rejects_owner_on_non_property_rows() {
+        let mut catalog = RuntimeCatalog::new();
+        catalog.intern_label("Person");
+        let good = catalog.to_record_batch();
+        let mut columns = good.columns().to_vec();
+        columns[6] = Arc::new(StringArray::from(vec![Some("invalid-owner")]));
+        let malformed = RecordBatch::try_new(RUNTIME_CATALOG_SCHEMA.clone(), columns).unwrap();
+
+        assert!(RuntimeCatalog::from_record_batch(&malformed).is_err());
     }
 
     #[test]
