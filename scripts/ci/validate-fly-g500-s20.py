@@ -21,7 +21,9 @@ class EvidenceError(RuntimeError):
     pass
 
 
-def validate(value: Any, sha: str, digest: str, region: str) -> None:
+def validate(
+    value: Any, sha: str, digest: str, region: str, source_snapshot: str | None = None
+) -> None:
     try:
         jsonschema.validate(
             value, json.loads(SCHEMA.read_text()), format_checker=jsonschema.FormatChecker()
@@ -30,7 +32,16 @@ def validate(value: Any, sha: str, digest: str, region: str) -> None:
         raise EvidenceError(f"schema violation: {error.message}") from None
     if value["git_sha"] != sha or value["image_digest"] != digest or value["region"] != region:
         raise EvidenceError("evidence identity differs from the pinned run")
+    provenance = value["build_provenance"]
+    if provenance["source_sha"] != sha or (
+        source_snapshot is not None and provenance["source_snapshot_sha256"] != source_snapshot
+    ):
+        raise EvidenceError("evidence build provenance differs from the pinned image")
     counts = value["counts"]
+    expected_nodes = 1 << 20
+    expected_attempts = expected_nodes * 16
+    if counts["raw_attempts"] != expected_attempts:
+        raise EvidenceError("S20 ef=16 requires exactly 2^20 * 16 raw attempts")
     if (
         value["result"] == "passed"
         and len({counts["generated_edges"], counts["source_edges"], counts["imported_edges"]}) != 1
@@ -43,6 +54,13 @@ def validate(value: Any, sha: str, digest: str, region: str) -> None:
     ):
         raise EvidenceError("generator attempt accounting does not reconcile")
     lifecycle = value["lifecycle"]
+    if lifecycle["source_nodes"] != expected_nodes or lifecycle["imported_nodes"] != expected_nodes:
+        raise EvidenceError("S20 lifecycle requires exactly 2^20 source/imported nodes")
+    if (
+        lifecycle["source_edges"] != counts["source_edges"]
+        or lifecycle["imported_edges"] != counts["imported_edges"]
+    ):
+        raise EvidenceError("lifecycle edge counts are not bound to top-level counts")
     if lifecycle["source_nodes"] != lifecycle["imported_nodes"]:
         raise EvidenceError("source/import node counts differ")
     for suffix in ("one_hop", "two_hop"):
@@ -68,13 +86,41 @@ def validate(value: Any, sha: str, digest: str, region: str) -> None:
                 raise EvidenceError(f"{name} category {field} does not reconcile")
         if any(attribution["categories"]["other"][field] for field in fields):
             raise EvidenceError(f"{name} contains unclassified artifacts")
+    storage = value["storage"]
+    expected_logical = (
+        lifecycle["source_storage"]["logical_bytes"]
+        + lifecycle["imported_storage"]["logical_bytes"]
+        + lifecycle["package_storage"]["logical_bytes"]
+        + storage["generator_logical_bytes"]
+    )
+    expected_allocated = (
+        lifecycle["source_storage"]["allocated_bytes"]
+        + lifecycle["imported_storage"]["allocated_bytes"]
+        + lifecycle["package_storage"]["allocated_bytes"]
+        + storage["generator_allocated_bytes"]
+    )
+    if (
+        storage["logical_bytes"] != expected_logical
+        or storage["allocated_bytes"] != expected_allocated
+    ):
+        raise EvidenceError("top-level storage totals do not reconcile with attributed artifacts")
+    if storage["peak_allocated_bytes"] < storage["allocated_bytes"]:
+        raise EvidenceError("storage peak understates retained allocated bytes")
+    capacity_limit = value["volume_gb"] * 1024**3
+    if not capacity_limit * 9 // 10 <= storage["capacity_bytes"] <= capacity_limit:
+        raise EvidenceError("observed capacity is not bound to the declared Fly volume")
     if value["storage"]["peak_allocated_bytes"] > value["storage"]["capacity_bytes"]:
         raise EvidenceError("allocated storage exceeds volume capacity")
     for phase, memory in value["phase_memory"].items():
-        if memory["rss_peak_bytes"] == 0 or memory["hwm_bytes"] < memory["rss_peak_bytes"]:
+        if (
+            memory["rss_peak_bytes"] == 0
+            or memory["process_global_hwm_bytes"] < memory["rss_peak_bytes"]
+        ):
             raise EvidenceError(f"phase {phase} lacks truthful RSS/HWM sampling")
         if memory["anonymous_peak_bytes"] + memory["file_peak_bytes"] < memory["rss_peak_bytes"]:
             raise EvidenceError(f"phase {phase} memory categories understate RSS")
+        if memory["rss_peak_bytes"] > 4096 * 1024 * 1024:
+            raise EvidenceError(f"phase {phase} exceeds the 4096 MiB S20 memory envelope")
 
     def reject_sensitive(item: Any) -> None:
         if isinstance(item, dict):

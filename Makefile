@@ -333,6 +333,10 @@ g500-ladder-qualification-check:  ## Validate #951 disk attribution and conserva
 	@test -n "$$EVIDENCE" || (echo "EVIDENCE is required" && exit 2)
 	uv run --frozen --with jsonschema python scripts/ci/validate-g500-ladder-qualification.py "$$EVIDENCE"
 
+.PHONY: fly-g500-s20-check
+fly-g500-s20-check:  ## Deterministic no-spend Fly S20 controller/evidence contract tests
+	uv run --frozen --with jsonschema --with pytest pytest -q scripts/ci/test-fly-g500-s20.py
+
 bench-adjacency-200m:  ## >200M-edge public adjacency build evidence (#336; ignored, scale-host)
 	GF_ADJACENCY_SCALE_EVIDENCE_OUT="$(CURDIR)/docs/development/adjacency-200m-evidence.json" \
 	GF_ADJACENCY_SCALE_WORK="$(CURDIR)/build/adjacency-200m-work" \

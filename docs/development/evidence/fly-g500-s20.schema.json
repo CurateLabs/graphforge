@@ -5,12 +5,13 @@
   "$defs": {
     "phase_memory": {
       "type": "object", "additionalProperties": false,
-      "required": ["rss_peak_bytes", "hwm_bytes", "anonymous_peak_bytes", "file_peak_bytes", "sample_interval_ms"],
+      "required": ["rss_peak_bytes", "process_global_hwm_bytes", "anonymous_peak_bytes", "file_peak_bytes", "volume_used_delta_peak_bytes", "sample_interval_ms"],
       "properties": {
         "rss_peak_bytes": {"type": "integer", "minimum": 0},
-        "hwm_bytes": {"type": "integer", "minimum": 0},
+        "process_global_hwm_bytes": {"type": "integer", "minimum": 0},
         "anonymous_peak_bytes": {"type": "integer", "minimum": 0},
         "file_peak_bytes": {"type": "integer", "minimum": 0},
+        "volume_used_delta_peak_bytes": {"type": "integer", "minimum": 0},
         "sample_interval_ms": {"const": 250}
       }
     },
@@ -74,10 +75,19 @@
       "properties": {"category": {"const": "portable_bundle"}, "logical_bytes": {"type": "integer", "minimum": 1}, "allocated_bytes": {"type": "integer", "minimum": 1}, "logical_references": {"const": 1}, "physical_objects": {"const": 1}, "source": {"const": "portable_bundle_exact_descriptor"}}
     }
   },
-  "required": ["schema", "git_sha", "image_digest", "provider", "region", "scale", "machine", "volume_gb", "result", "counts", "phase_memory", "storage", "run", "rung", "lifecycle", "memory", "wall_time_s", "first_failure"],
+  "required": ["schema", "git_sha", "build_provenance", "image_digest", "provider", "region", "scale", "machine", "volume_gb", "result", "counts", "phase_memory", "storage", "run", "rung", "lifecycle", "memory", "wall_time_s", "first_failure"],
   "properties": {
     "schema": {"const": "graphforge-fly-g500-s20/1"},
     "git_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "build_provenance": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "source_sha", "source_snapshot_sha256"],
+      "properties": {
+        "schema": {"const": "graphforge-fly-s20-build-provenance/1"},
+        "source_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "source_snapshot_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      }
+    },
     "image_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
     "provider": {"const": "fly.io"},
     "region": {"type": "string", "pattern": "^[a-z0-9-]{2,20}$"},
@@ -122,11 +132,12 @@
     },
     "storage": {
       "type": "object", "additionalProperties": false,
-      "required": ["logical_bytes", "allocated_bytes", "peak_allocated_bytes", "generator_allocated_bytes", "construction_transient_peak_allocated_bytes", "capacity_bytes"],
+      "required": ["logical_bytes", "allocated_bytes", "peak_allocated_bytes", "generator_logical_bytes", "generator_allocated_bytes", "construction_transient_peak_allocated_bytes", "capacity_bytes"],
       "properties": {
         "logical_bytes": {"type": "integer", "minimum": 0},
         "allocated_bytes": {"type": "integer", "minimum": 0},
         "peak_allocated_bytes": {"type": "integer", "minimum": 0},
+        "generator_logical_bytes": {"type": "integer", "minimum": 1},
         "generator_allocated_bytes": {"type": "integer", "minimum": 1},
         "construction_transient_peak_allocated_bytes": {"type": "integer", "minimum": 1},
         "capacity_bytes": {"type": "integer", "minimum": 1}

@@ -5,6 +5,12 @@ set -eu
 : "${GF_G500_S20_IMAGE_DIGEST:?immutable image digest is required}"
 : "${GF_G500_S20_REGION:?fixed Fly region is required}"
 : "${GF_G500_S20_VOLUME_GB:?volume size is required}"
+: "${GF_G500_S20_SOURCE_SNAPSHOT_SHA256:?source snapshot identity is required}"
+
+attestation=/usr/local/share/graphforge/build-provenance.json
+grep -Fq '"source_sha":"'"$GF_G500_S20_EXPECTED_SHA"'"' "$attestation" || exit 4
+grep -Fq '"source_snapshot_sha256":"'"$GF_G500_S20_SOURCE_SNAPSHOT_SHA256"'"' "$attestation" || exit 4
+export GF_G500_S20_BUILD_PROVENANCE="$GF_G500_S20_SOURCE_SNAPSHOT_SHA256"
 
 test "$(stat -c %d /work)" != "$(stat -c %d /)" || {
   echo "typed_failure=work_volume_missing" >&2

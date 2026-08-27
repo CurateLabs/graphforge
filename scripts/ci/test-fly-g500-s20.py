@@ -136,6 +136,11 @@ def evidence(**changes):
     value = {
         "schema": "graphforge-fly-g500-s20/1",
         "git_sha": "a" * 40,
+        "build_provenance": {
+            "schema": "graphforge-fly-s20-build-provenance/1",
+            "source_sha": "a" * 40,
+            "source_snapshot_sha256": "sha256:" + "c" * 64,
+        },
         "image_digest": "sha256:" + "b" * 64,
         "provider": "fly.io",
         "region": "den",
@@ -144,19 +149,20 @@ def evidence(**changes):
         "volume_gb": 500,
         "result": "passed",
         "counts": {
-            "generated_edges": 16_777_216,
-            "source_edges": 16_777_216,
-            "imported_edges": 16_777_216,
-            "raw_attempts": 17_000_000,
+            "generated_edges": 16_000_000,
+            "source_edges": 16_000_000,
+            "imported_edges": 16_000_000,
+            "raw_attempts": 16_777_216,
             "self_loops_rejected": 100_000,
-            "duplicates_rejected": 122_784,
+            "duplicates_rejected": 677_216,
         },
         "phase_memory": {
             phase: {
                 "rss_peak_bytes": 500_000_000,
-                "hwm_bytes": 600_000_000,
+                "process_global_hwm_bytes": 600_000_000,
                 "anonymous_peak_bytes": 300_000_000,
                 "file_peak_bytes": 200_000_000,
+                "volume_used_delta_peak_bytes": 16_384,
                 "sample_interval_ms": 250,
             }
             for phase in (
@@ -173,9 +179,10 @@ def evidence(**changes):
             )
         },
         "storage": {
-            "logical_bytes": 10_000,
-            "allocated_bytes": 12_288,
+            "logical_bytes": 1_003,
+            "allocated_bytes": 16_384,
             "peak_allocated_bytes": 16_384,
+            "generator_logical_bytes": 1_000,
             "generator_allocated_bytes": 4_096,
             "construction_transient_peak_allocated_bytes": 4_096,
             "capacity_bytes": 500_000_000_000,
@@ -184,9 +191,9 @@ def evidence(**changes):
         "rung": {"pass": True, "reconciles": True, "construction": construction()},
         "lifecycle": {
             "source_nodes": 1_048_576,
-            "source_edges": 16_777_216,
+            "source_edges": 16_000_000,
             "imported_nodes": 1_048_576,
-            "imported_edges": 16_777_216,
+            "imported_edges": 16_000_000,
             "source_generation": "00000000-0000-4000-8000-000000000001",
             "imported_generation": "00000000-0000-4000-8000-000000000002",
             "package_digest": "sha256:" + "d" * 64,
@@ -232,7 +239,7 @@ def pricing_html(*, region="den", rate="0.00002484", duplicate=False, volume="0.
 
 def test_contract_fixes_resources_and_rejects_mutable_image(tmp_path):
     digest = controller.validate_inputs(args(tmp_path))
-    payload = controller.machine_payload(args(tmp_path), "vol-id", digest)
+    payload = controller.machine_payload(args(tmp_path), "vol-id", digest, "c" * 64)
     assert payload["config"]["guest"] == {"cpu_kind": "performance", "cpus": 2, "memory_mb": 4096}
     assert payload["config"]["services"] == []
     assert payload["config"]["restart"] == {"policy": "no"}
@@ -270,11 +277,45 @@ def test_durable_budget_reservations_survive_and_accumulate(tmp_path):
     state = json.loads(ledger.read_text())
     assert sum(run["reserved_usd"] for run in state["runs"]) == 2.22
     assert state["runs"][0]["pricing_source"] == "https://fly.io/docs/about/pricing/"
-    oversized = {**first, "reserved_usd": 8.0}
+    oversized = controller.price_reservation(500, Decimal("0.0006"), Decimal("0.15"))
     with pytest.raises(controller.ControllerError, match="exceed"):
         controller.reserve_budget(ledger, "run-three", oversized)
     with pytest.raises(controller.ControllerError, match="already reserved"):
         controller.reserve_budget(ledger, "run-one", first)
+
+
+@pytest.mark.parametrize("bad", ["NaN", "Infinity", -0.01, "garbage", None])
+def test_budget_ledger_rejects_nonfinite_negative_and_malformed_existing_amounts(tmp_path, bad):
+    ledger = tmp_path / "ledger.json"
+    reservation = controller.price_reservation(500)
+    ledger.write_text(
+        json.dumps(
+            {
+                "schema": "graphforge-fly-cost-ledger/1",
+                "limit_usd": 10.0,
+                "runs": [{"run_id": "old", **reservation, "reserved_usd": bad}],
+            }
+        )
+    )
+    with pytest.raises(controller.ControllerError, match="cost ledger"):
+        controller.reserve_budget(ledger, "new", reservation)
+
+
+def test_budget_ledger_recomputes_existing_reservations_in_decimal_cents(tmp_path):
+    ledger = tmp_path / "ledger.json"
+    reservation = controller.price_reservation(500)
+    forged = {**reservation, "reserved_usd": reservation["reserved_usd"] - 0.01}
+    ledger.write_text(
+        json.dumps(
+            {
+                "schema": "graphforge-fly-cost-ledger/1",
+                "limit_usd": 10.0,
+                "runs": [{"run_id": "old", **forged}],
+            }
+        )
+    )
+    with pytest.raises(controller.ControllerError, match="recomputed cents"):
+        controller.reserve_budget(ledger, "new", reservation)
 
 
 def test_current_official_pricing_selects_fixed_region_and_derives_ledger():
@@ -322,12 +363,28 @@ def test_oci_inspection_authenticates_repo_digest_revision_and_runtime(monkeypat
 
     def run(command, **_kwargs):
         calls.append(command)
-        stdout = json.dumps(inspected) if command[1:3] == ["image", "inspect"] else ""
+        if command[1:3] == ["image", "inspect"]:
+            stdout = json.dumps(inspected)
+        elif command[1:2] == ["create"]:
+            stdout = "container-id\n"
+        else:
+            stdout = ""
+        if command[1:2] == ["cp"]:
+            Path(command[-1]).write_text(
+                json.dumps(
+                    {
+                        "schema": "graphforge-fly-s20-build-provenance/1",
+                        "source_sha": "a" * 40,
+                        "source_snapshot_sha256": "c" * 64,
+                    }
+                )
+            )
         return argparse.Namespace(stdout=stdout)
 
     monkeypatch.setattr(controller.subprocess, "run", run)
-    controller.inspect_image(image, "a" * 40, "sha256:" + "b" * 64)
-    assert calls == [["docker", "pull", image], ["docker", "image", "inspect", image]]
+    monkeypatch.setattr(controller, "expected_source_snapshot", lambda: "c" * 64)
+    assert controller.inspect_image(image, "a" * 40, "sha256:" + "b" * 64) == "c" * 64
+    assert [call[1] for call in calls] == ["pull", "image", "create", "cp", "rm"]
 
 
 @pytest.mark.parametrize(
@@ -402,15 +459,60 @@ def test_cleanup_only_uses_observed_owned_identifiers():
     class Fly:
         def run(self, command, check=True):
             calls.append((command, check))
+            return argparse.Namespace(returncode=1 if command[1] in {"status", "show"} else 0)
+
+        def json(self, command):
+            calls.append((command, True))
+            return []
 
     controller.cleanup_owned(Fly(), "gf-s20-unique", None, None, False)
     assert calls == []
     controller.cleanup_owned(Fly(), "gf-s20-unique", "machine-observed", "volume-observed", True)
     assert [call[0][0:2] for call in calls] == [
         ["machine", "destroy"],
+        ["machine", "status"],
         ["volumes", "destroy"],
+        ["volumes", "show"],
         ["apps", "destroy"],
+        ["apps", "list"],
     ]
+
+
+def test_cleanup_converges_child_first_across_async_deletion(monkeypatch):
+    monkeypatch.setattr(controller.time, "sleep", lambda _seconds: None)
+    calls = []
+    probes = {"machine": 0, "volumes": 0}
+
+    class Fly:
+        def run(self, command, check=True):
+            calls.append(command[:2])
+            if command[1] in {"status", "show"}:
+                probes[command[0]] += 1
+                return argparse.Namespace(returncode=0 if probes[command[0]] == 1 else 1)
+            return argparse.Namespace(returncode=0)
+
+        def json(self, command):
+            calls.append(command[:2])
+            return []
+
+    controller.cleanup_owned(Fly(), "gf-s20-unique", "machine", "volume", True)
+    assert calls.index(["volumes", "destroy"]) > max(
+        index for index, call in enumerate(calls) if call[0] == "machine"
+    )
+    assert calls.index(["apps", "destroy"]) > max(
+        index for index, call in enumerate(calls) if call[0] == "volumes"
+    )
+
+
+def test_cleanup_survivor_fails_after_bounded_retries(monkeypatch):
+    monkeypatch.setattr(controller.time, "sleep", lambda _seconds: None)
+
+    class Fly:
+        def run(self, command, check=True):
+            return argparse.Namespace(returncode=0)
+
+    with pytest.raises(controller.ControllerError, match="bounded cleanup"):
+        controller.cleanup_owned(Fly(), "gf-s20-unique", "machine", None, False)
 
 
 def test_post_cleanup_absence_is_verified_child_to_parent():
@@ -503,7 +605,7 @@ def test_terminal_failure_is_persisted_promptly_and_still_verified_cleaned(tmp_p
             "auto_destroy": True,
             "restart": {"policy": "no"},
             "services": [],
-            "mounts": [{"path": "/work"}],
+            "mounts": [{"path": "/work", "volume": "volume-observed"}],
         },
     }
     monkeypatch.setattr(controller, "create_machine", lambda *_args: machine)
@@ -523,7 +625,7 @@ def test_terminal_failure_is_persisted_promptly_and_still_verified_cleaned(tmp_p
                 self.app_lists += 1
                 return []
             if command[:2] == ["volumes", "create"]:
-                return {"id": "volume-observed"}
+                return {"id": "volume-observed", "region": "den", "size_gb": 500}
             raise AssertionError(command)
 
         def run(self, command, check=True):
@@ -533,7 +635,9 @@ def test_terminal_failure_is_persisted_promptly_and_still_verified_cleaned(tmp_p
                     json.dumps({"status": "failure", "phase": "ingest", "code": "GF_OOM"})
                 )
                 return argparse.Namespace(returncode=0)
-            return argparse.Namespace(returncode=1)
+            if command[:2] in (["machine", "status"], ["volumes", "show"]):
+                return argparse.Namespace(returncode=1)
+            return argparse.Namespace(returncode=0)
 
     run = args(tmp_path, execute=True, confirm_disposable=True)
     fly = Fly()
@@ -558,13 +662,37 @@ def test_observed_machine_must_match_private_fixed_plan(tmp_path):
             "auto_destroy": True,
             "restart": {"policy": "no"},
             "services": [],
-            "mounts": [{"path": "/work"}],
+            "mounts": [{"path": "/work", "volume": "volume-observed"}],
         },
     }
-    controller.assert_machine(machine, args(tmp_path), digest)
+    controller.assert_machine(machine, args(tmp_path), digest, "volume-observed")
     machine["config"]["services"] = [{"ports": [443]}]
     with pytest.raises(controller.ControllerError, match="service"):
-        controller.assert_machine(machine, args(tmp_path), digest)
+        controller.assert_machine(machine, args(tmp_path), digest, "volume-observed")
+
+
+def test_observed_volume_and_machine_mount_are_exact(tmp_path):
+    run = args(tmp_path)
+    assert (
+        controller.assert_volume({"id": "volume-observed", "region": "den", "size_gb": 500}, run)
+        == "volume-observed"
+    )
+    with pytest.raises(controller.ControllerError, match="region/size"):
+        controller.assert_volume({"id": "volume-observed", "region": "ord", "size_gb": 500}, run)
+
+
+def test_terminal_machine_oom_uses_last_allowlisted_phase(tmp_path):
+    active = tmp_path / "active.json"
+    active.write_text(json.dumps({"phase": "ingest", "private": "/secret"}))
+    assert controller.observed_phase(active) == "ingest"
+    assert controller.terminal_machine_diagnostic(
+        {"state": "stopped", "events": [{"type": "oom", "secret": "hidden"}]}, "ingest"
+    ) == {
+        "schema": "graphforge-fly-g500-s20-diagnostic/1",
+        "status": "failure",
+        "phase": "ingest",
+        "code": "machine_oom",
+    }
 
 
 def test_closed_evidence_accepts_only_pinned_sanitized_s20():
@@ -600,6 +728,35 @@ def test_closed_evidence_rejects_deleted_falsified_and_nested_unknown_proof():
     }
     with pytest.raises(validator.EvidenceError, match=r"does not reconcile|unclassified"):
         validator.validate(unclassified, "a" * 40, "sha256:" + "b" * 64, "den")
+
+
+def test_evidence_rejects_tiny_relabel_cross_count_and_memory_overage():
+    tiny = evidence()
+    tiny["counts"].update(
+        {
+            "raw_attempts": 16,
+            "generated_edges": 15,
+            "source_edges": 15,
+            "imported_edges": 15,
+            "self_loops_rejected": 1,
+            "duplicates_rejected": 0,
+        }
+    )
+    tiny["lifecycle"].update(
+        {"source_nodes": 1, "imported_nodes": 1, "source_edges": 15, "imported_edges": 15}
+    )
+    with pytest.raises(validator.EvidenceError, match=r"2\^20"):
+        validator.validate(tiny, "a" * 40, "sha256:" + "b" * 64, "den")
+    cross_count = evidence()
+    cross_count["lifecycle"]["source_edges"] -= 1
+    with pytest.raises(validator.EvidenceError, match="not bound"):
+        validator.validate(cross_count, "a" * 40, "sha256:" + "b" * 64, "den")
+    over_memory = evidence()
+    over_memory["phase_memory"]["ingest"]["rss_peak_bytes"] = 5 * 1024**3
+    over_memory["phase_memory"]["ingest"]["process_global_hwm_bytes"] = 5 * 1024**3
+    over_memory["phase_memory"]["ingest"]["anonymous_peak_bytes"] = 5 * 1024**3
+    with pytest.raises(validator.EvidenceError, match="4096 MiB"):
+        validator.validate(over_memory, "a" * 40, "sha256:" + "b" * 64, "den")
 
 
 def test_no_lower_rung_or_dynamic_sizing_contract_exists():

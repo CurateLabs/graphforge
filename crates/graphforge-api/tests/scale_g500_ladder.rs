@@ -3132,6 +3132,22 @@ fn observed_filesystem_capacity_bytes(path: &Path) -> u64 {
     .saturating_mul(1024)
 }
 
+fn observed_filesystem_used_bytes(path: &Path) -> u64 {
+    command_text(
+        "df",
+        &[
+            "-k",
+            "--output=used",
+            path.to_str().expect("UTF-8 work path"),
+        ],
+    )
+    .lines()
+    .last()
+    .and_then(|value| value.trim().parse::<u64>().ok())
+    .expect("observe work-volume used bytes")
+    .saturating_mul(1024)
+}
+
 fn s20_memory_snapshot() -> Value {
     let status = fs::read_to_string("/proc/self/status").unwrap_or_default();
     let kib = |name: &str| {
@@ -3169,6 +3185,7 @@ struct PhaseMemoryPeak {
     hwm_bytes: u64,
     anonymous_bytes: u64,
     file_bytes: u64,
+    volume_used_delta_bytes: u64,
 }
 
 struct S20PhaseSampler {
@@ -3191,12 +3208,15 @@ impl S20PhaseSampler {
         "finalize",
     ];
 
-    fn start() -> Self {
+    fn start(work_root: &Path) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let peaks = Arc::new(std::sync::Mutex::new([PhaseMemoryPeak::default(); 10]));
         let worker_stop = Arc::clone(&stop);
         let worker_peaks = Arc::clone(&peaks);
+        let volume_root = work_root.to_path_buf();
+        let baseline_used = observed_filesystem_used_bytes(work_root);
         let worker = thread::spawn(move || {
+            let mut sample_index = 0_u8;
             while !worker_stop.load(Ordering::Relaxed) {
                 let index = S20_ACTIVE_PHASE.load(Ordering::Relaxed);
                 if let Ok(index) = usize::try_from(index)
@@ -3217,7 +3237,14 @@ impl S20PhaseSampler {
                     peak.file_bytes = peak
                         .file_bytes
                         .max(sample["file_bytes"].as_u64().unwrap_or(0));
+                    if sample_index == 0 {
+                        peak.volume_used_delta_bytes = peak.volume_used_delta_bytes.max(
+                            observed_filesystem_used_bytes(&volume_root)
+                                .saturating_sub(baseline_used),
+                        );
+                    }
                 }
+                sample_index = (sample_index + 1) % 8;
                 thread::sleep(Duration::from_millis(250));
             }
         });
@@ -3247,9 +3274,10 @@ impl S20PhaseSampler {
                         (*name).to_owned(),
                         json!({
                             "rss_peak_bytes": peak.rss_bytes,
-                            "hwm_bytes": peak.hwm_bytes,
+                            "process_global_hwm_bytes": peak.hwm_bytes,
                             "anonymous_peak_bytes": peak.anonymous_bytes,
                             "file_peak_bytes": peak.file_bytes,
+                            "volume_used_delta_peak_bytes": peak.volume_used_delta_bytes,
                             "sample_interval_ms": 250,
                         }),
                     )
@@ -3306,7 +3334,7 @@ fn fly_s20_full_lifecycle_evidence() {
     assert!(!work_root.exists(), "S20 work root must be fresh");
     fs::create_dir_all(&work_root).expect("create S20 work root");
     let started = Instant::now();
-    let phase_sampler = S20PhaseSampler::start();
+    let phase_sampler = S20PhaseSampler::start(&work_root);
     let envelope = RunEnvelope {
         rss_bytes: required_env_u64("GF_G500_S20_MEMORY_BYTES"),
         disk_bytes: required_env_u64("GF_G500_S20_DISK_BYTES"),
@@ -3430,6 +3458,11 @@ fn fly_s20_full_lifecycle_evidence() {
         .and_then(|steps| steps.iter().find(|step| step["id"] == "generate"))
         .and_then(|step| step["detail"]["storage"]["allocated_bytes"].as_u64())
         .expect("generator allocated bytes");
+    let generator_logical = rung_outcome.evidence["steps"]
+        .as_array()
+        .and_then(|steps| steps.iter().find(|step| step["id"] == "generate"))
+        .and_then(|step| step["detail"]["storage"]["logical_bytes"].as_u64())
+        .expect("generator logical bytes");
     let construction_transient_peak = rung_outcome.evidence["steps"]
         .as_array()
         .and_then(|steps| steps.iter().find(|step| step["id"] == "ingest"))
@@ -3454,10 +3487,22 @@ fn fly_s20_full_lifecycle_evidence() {
         "observed volume is larger than the authorized disk envelope"
     );
     let phase_memory = phase_sampler.finish();
+    let observed_volume_peak = phase_memory
+        .as_object()
+        .expect("phase memory object")
+        .values()
+        .filter_map(|phase| phase["volume_used_delta_peak_bytes"].as_u64())
+        .max()
+        .unwrap_or(0);
 
     let evidence = json!({
         "schema": "graphforge-fly-g500-s20/1",
         "git_sha": std::env::var("GF_G500_S20_EXPECTED_SHA").expect("exact SHA"),
+        "build_provenance": {
+            "schema": "graphforge-fly-s20-build-provenance/1",
+            "source_sha": std::env::var("GF_G500_S20_EXPECTED_SHA").expect("exact SHA"),
+            "source_snapshot_sha256": std::env::var("GF_G500_S20_BUILD_PROVENANCE").expect("embedded source snapshot identity"),
+        },
         "image_digest": std::env::var("GF_G500_S20_IMAGE_DIGEST").expect("image digest"),
         "provider": "fly.io",
         "region": std::env::var("GF_G500_S20_REGION").expect("fixed region"),
@@ -3476,10 +3521,12 @@ fn fly_s20_full_lifecycle_evidence() {
         "storage": {
             "logical_bytes": source_storage["logical_bytes"].as_u64().unwrap_or(0)
                 .saturating_add(imported_storage["logical_bytes"].as_u64().unwrap_or(0))
-                .saturating_add(package_storage["logical_bytes"].as_u64().unwrap_or(0)),
+                .saturating_add(package_storage["logical_bytes"].as_u64().unwrap_or(0))
+                .saturating_add(generator_logical),
             "allocated_bytes": retained_allocated_total,
-            "peak_allocated_bytes": allocated_peak,
+            "peak_allocated_bytes": allocated_peak.max(observed_volume_peak),
             "generator_allocated_bytes": generator_allocated,
+            "generator_logical_bytes": generator_logical,
             "construction_transient_peak_allocated_bytes": construction_transient_peak,
             "capacity_bytes": observed_capacity,
         },
