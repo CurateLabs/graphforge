@@ -86,6 +86,7 @@ fn run_source_spool_hook(_phase: &str) {}
 struct CountingWriter {
     inner: File,
     counter: IoCounter,
+    digest: Sha256,
 }
 
 struct CountingInput<R> {
@@ -195,6 +196,7 @@ impl Write for CountingWriter {
     fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
         let written = self.inner.write(buffer)?;
         self.counter.account(written);
+        self.digest.update(&buffer[..written]);
         Ok(written)
     }
 
@@ -1457,21 +1459,24 @@ fn write_parquet(
         CountingWriter {
             inner: file,
             counter: counter.clone(),
+            digest: Sha256::new(),
         },
         batch.schema(),
         None,
     )
     .map_err(storage)?;
     writer.write(batch).map_err(storage)?;
-    writer.close().map_err(storage)?;
-    let mut file = directory
-        .open_child_file(OsStr::new(&temporary))
-        .map_err(storage)?;
-    file.sync_all().map_err(storage)?;
+    let writer = writer.into_inner().map_err(storage)?;
+    writer.inner.sync_all().map_err(storage)?;
     crate::graph_construction::construction_failpoint(&format!(
         "encode.parquet.after_temp_fsync.{relative}"
     ));
-    let artifact = authenticate_file(relative, &mut file)?;
+    let (written, operations) = counter.values();
+    let artifact = ConstructionEncodedArtifact {
+        path: relative.to_owned(),
+        bytes: written,
+        sha256: hex(&writer.digest.finalize()),
+    };
     directory
         .replace_child(OsStr::new(&temporary), identity, OsStr::new(&name))
         .map_err(storage)?;
@@ -1480,7 +1485,6 @@ fn write_parquet(
     crate::graph_construction::construction_failpoint(&format!(
         "encode.parquet.after_install.{relative}"
     ));
-    let (written, operations) = counter.values();
     evidence.output_write_bytes = evidence.output_write_bytes.saturating_add(written);
     evidence.output_write_operations = evidence.output_write_operations.saturating_add(operations);
     evidence.fsync_operations = evidence.fsync_operations.saturating_add(2);
@@ -1521,6 +1525,7 @@ fn copy_artifact<R: Read + Seek>(
         CountingWriter {
             inner: file,
             counter: write_counter.clone(),
+            digest: Sha256::new(),
         },
     );
     let bytes = std::io::copy(&mut input, &mut writer).map_err(storage)?;
@@ -1529,11 +1534,13 @@ fn copy_artifact<R: Read + Seek>(
     crate::graph_construction::construction_failpoint(&format!(
         "encode.copy.after_temp_fsync.{relative}"
     ));
-    drop(writer);
-    let mut file = directory
-        .open_child_file(OsStr::new(&temporary))
-        .map_err(storage)?;
-    let artifact = authenticate_file(relative, &mut file)?;
+    let writer = writer.into_inner().map_err(storage)?;
+    let (write_bytes, write_operations) = write_counter.values();
+    let artifact = ConstructionEncodedArtifact {
+        path: relative.to_owned(),
+        bytes: write_bytes,
+        sha256: hex(&writer.digest.finalize()),
+    };
     if artifact.bytes != bytes {
         return Err(storage("copied canonical artifact length changed"));
     }
@@ -1558,7 +1565,6 @@ fn copy_artifact<R: Read + Seek>(
         .source_spool_read_operations
         .saturating_add(read_operations);
     evidence.output_write_bytes = evidence.output_write_bytes.saturating_add(bytes);
-    let (write_bytes, write_operations) = write_counter.values();
     if write_bytes != bytes {
         return Err(storage(
             "copied canonical artifact write accounting differs",
@@ -1809,10 +1815,12 @@ fn authenticate_inventory(
     Ok(())
 }
 
-pub(crate) fn authenticate_for_publication(
+/// Bind publication to the durable encoding control record without rereading
+/// payload bytes. Payloads are authenticated by the subsequent CAS install.
+pub(crate) fn authenticate_inventory_control_for_publication(
     source: &StableDirectory,
     inventory: &GraphConstructionEncoding,
-) -> Result<(), GfError> {
+) -> Result<u64, GfError> {
     let encoded = source
         .open_child_directory(OsStr::new(ENCODED_ROOT))
         .map_err(storage)?;
@@ -1823,16 +1831,12 @@ pub(crate) fn authenticate_for_publication(
             "publication inventory differs from durable encoding",
         ));
     }
-    for expected in &inventory.artifacts {
-        let (directory, name) = directory_for(&encoded, &expected.path)?;
-        let mut file = directory
-            .open_child_file(OsStr::new(&name))
-            .map_err(storage)?;
-        if authenticate_file(&expected.path, &mut file)? != *expected {
-            return Err(storage("canonical artifact differs from durable inventory"));
-        }
-    }
-    Ok(())
+    encoded
+        .open_child_file(OsStr::new(INVENTORY))
+        .map_err(storage)?
+        .metadata()
+        .map(|metadata| metadata.len())
+        .map_err(storage)
 }
 
 fn install_json<T: Serialize>(
