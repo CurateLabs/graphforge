@@ -8,11 +8,12 @@
 //! counts, and SHA-256 before serving bounded binary-search probes.
 
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, VecDeque};
 use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use arrow::array::{Array, FixedSizeBinaryArray, UInt64Array};
 use graphforge_core::GfError;
@@ -27,6 +28,7 @@ const IDENTITY_RECORD_BYTES: u64 = 32;
 const NODE_LOOKUP_RECORD_WIDTH: usize = 24;
 const IDENTITY_RECORD_WIDTH: usize = 32;
 const BULK_IO_BYTES: usize = 1 << 20;
+const PROBE_CACHE_BYTES: usize = 64 * 1024 * 1024;
 // Persistent authenticated authority for UUID-to-surrogate resolution. Keeping
 // it in the immutable topology generation is what lets writer reopen avoid
 // decoding historical topology shards; `.graphforge-cache` is only for data
@@ -208,6 +210,10 @@ pub struct UuidProbeMetrics {
     pub runs_considered: u64,
     /// Per-record filesystem seeks. Batched lookup must keep this exactly zero.
     pub per_record_seeks: u64,
+    /// Bytes resident in the authenticated probe-block LRU after this lookup.
+    pub cache_resident_bytes: u64,
+    /// Hard byte ceiling for the authenticated probe-block LRU.
+    pub cache_limit_bytes: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -569,6 +575,22 @@ fn reject_retained_surrogate_collisions(
 pub struct UuidMembershipIndex {
     runs: Vec<OpenRun>,
     manifest: Manifest,
+    probe_cache: BTreeMap<ProbeCacheKey, Arc<[u8]>>,
+    probe_cache_order: VecDeque<ProbeCacheKey>,
+    probe_cache_bytes: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum ProbeCacheKind {
+    Identity,
+    Surrogate,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ProbeCacheKey {
+    run: usize,
+    block: usize,
+    kind: ProbeCacheKind,
 }
 
 /// Long-lived authenticated UUID-index snapshot retained by construction writers.
@@ -2734,7 +2756,13 @@ impl UuidMembershipIndex {
                 descriptor: descriptor.clone(),
             });
         }
-        Ok(Self { runs, manifest })
+        Ok(Self {
+            runs,
+            manifest,
+            probe_cache: BTreeMap::new(),
+            probe_cache_order: VecDeque::new(),
+            probe_cache_bytes: 0,
+        })
     }
 
     /// Topology generation authenticated by this open handle.
@@ -2750,6 +2778,181 @@ impl UuidMembershipIndex {
             UuidIndexKind::Node => self.manifest.live_node_count,
             UuidIndexKind::Edge => self.manifest.live_edge_count,
         }
+    }
+
+    fn cached_probe_block(
+        &mut self,
+        key: ProbeCacheKey,
+        metrics: &mut UuidProbeMetrics,
+    ) -> Result<Arc<[u8]>, GfError> {
+        if let Some(bytes) = self.probe_cache.get(&key).cloned() {
+            if let Some(position) = self
+                .probe_cache_order
+                .iter()
+                .position(|cached| *cached == key)
+            {
+                self.probe_cache_order.remove(position);
+            }
+            self.probe_cache_order.push_back(key);
+            return Ok(bytes);
+        }
+        let (descriptor, width, probe_kind) = match key.kind {
+            ProbeCacheKind::Identity => (
+                self.runs[key.run].descriptor.identities.blocks[key.block].clone(),
+                IDENTITY_RECORD_WIDTH,
+                ProbeFileKind::Identity,
+            ),
+            ProbeCacheKind::Surrogate => (
+                self.runs[key.run].descriptor.node_surrogates.blocks[key.block].clone(),
+                NODE_LOOKUP_RECORD_WIDTH,
+                ProbeFileKind::Surrogate,
+            ),
+        };
+        let bytes = match key.kind {
+            ProbeCacheKind::Identity => authenticated_probe_block(
+                &mut self.runs[key.run].identities,
+                &descriptor,
+                width,
+                probe_kind,
+                metrics,
+            )?,
+            ProbeCacheKind::Surrogate => authenticated_probe_block(
+                &mut self.runs[key.run].node_surrogates,
+                &descriptor,
+                width,
+                probe_kind,
+                metrics,
+            )?,
+        };
+        let bytes: Arc<[u8]> = bytes.into();
+        while self.probe_cache_bytes.saturating_add(bytes.len()) > PROBE_CACHE_BYTES {
+            let Some(oldest) = self.probe_cache_order.pop_front() else {
+                break;
+            };
+            if let Some(evicted) = self.probe_cache.remove(&oldest) {
+                self.probe_cache_bytes = self.probe_cache_bytes.saturating_sub(evicted.len());
+            }
+        }
+        if bytes.len() <= PROBE_CACHE_BYTES {
+            self.probe_cache_bytes = self.probe_cache_bytes.saturating_add(bytes.len());
+            self.probe_cache_order.push_back(key);
+            self.probe_cache.insert(key, Arc::clone(&bytes));
+        }
+        Ok(bytes)
+    }
+
+    /// Resolve canonical node surrogates to UUIDs through authenticated,
+    /// fixed-size block reads retained in a fixed-budget LRU. Results preserve
+    /// caller order; deleted, missing, or mismatched identities return `None`.
+    pub fn lookup_node_uuids(
+        &mut self,
+        requested: &[u64],
+    ) -> Result<(Vec<Option<Uuid>>, UuidProbeMetrics), GfError> {
+        let unique = requested.iter().copied().collect::<BTreeSet<_>>();
+        let mut unresolved = unique.clone();
+        let mut candidates = BTreeMap::<u64, Uuid>::new();
+        let mut metrics = UuidProbeMetrics {
+            requested: requested.len() as u64,
+            unique_requested: unique.len() as u64,
+            ..Default::default()
+        };
+        for run in (0..self.runs.len()).rev() {
+            if unresolved.is_empty() {
+                break;
+            }
+            metrics.runs_considered = metrics.runs_considered.saturating_add(1);
+            let descriptor = self.runs[run].descriptor.node_surrogates.clone();
+            let mut groups = BTreeMap::<usize, Vec<u64>>::new();
+            for &surrogate in &unresolved {
+                if let Some(block) =
+                    candidate_block(&descriptor, &hex_sha256_key(&surrogate.to_be_bytes()))
+                {
+                    groups.entry(block).or_default().push(surrogate);
+                }
+            }
+            for (block, surrogates) in groups {
+                let bytes = self.cached_probe_block(
+                    ProbeCacheKey {
+                        run,
+                        block,
+                        kind: ProbeCacheKind::Surrogate,
+                    },
+                    &mut metrics,
+                )?;
+                for surrogate in surrogates {
+                    let key = surrogate.to_be_bytes();
+                    if let Some(at) = block_record_index(&bytes, NODE_LOOKUP_RECORD_WIDTH, &key) {
+                        let start = at * NODE_LOOKUP_RECORD_WIDTH;
+                        candidates.insert(
+                            surrogate,
+                            Uuid::from_bytes(
+                                bytes[start + 8..start + 24].try_into().expect("fixed"),
+                            ),
+                        );
+                        unresolved.remove(&surrogate);
+                    }
+                }
+            }
+        }
+
+        let mut unresolved_uuids = candidates.values().copied().collect::<BTreeSet<_>>();
+        let mut live = BTreeMap::<Uuid, u64>::new();
+        for run in (0..self.runs.len()).rev() {
+            if unresolved_uuids.is_empty() {
+                break;
+            }
+            let descriptor = self.runs[run].descriptor.identities.clone();
+            let mut groups = BTreeMap::<usize, Vec<Uuid>>::new();
+            for uuid in &unresolved_uuids {
+                if let Some(block) = candidate_block(&descriptor, &hex_sha256_key(uuid.as_bytes()))
+                {
+                    groups.entry(block).or_default().push(*uuid);
+                }
+            }
+            for (block, uuids) in groups {
+                let bytes = self.cached_probe_block(
+                    ProbeCacheKey {
+                        run,
+                        block,
+                        kind: ProbeCacheKind::Identity,
+                    },
+                    &mut metrics,
+                )?;
+                for uuid in uuids {
+                    if let Some(at) =
+                        block_record_index(&bytes, IDENTITY_RECORD_WIDTH, uuid.as_bytes())
+                    {
+                        let start = at * IDENTITY_RECORD_WIDTH;
+                        let record = &bytes[start..start + IDENTITY_RECORD_WIDTH];
+                        if record[16] == 0 {
+                            live.insert(
+                                uuid,
+                                u64::from_be_bytes(record[24..32].try_into().expect("fixed")),
+                            );
+                        }
+                        unresolved_uuids.remove(&uuid);
+                    }
+                }
+            }
+        }
+        metrics.found = candidates
+            .iter()
+            .filter(|(surrogate, uuid)| live.get(uuid) == Some(surrogate))
+            .count() as u64;
+        metrics.cache_resident_bytes = self.probe_cache_bytes as u64;
+        metrics.cache_limit_bytes = PROBE_CACHE_BYTES as u64;
+        Ok((
+            requested
+                .iter()
+                .map(|surrogate| {
+                    candidates
+                        .get(surrogate)
+                        .copied()
+                        .filter(|uuid| live.get(uuid) == Some(surrogate))
+                })
+                .collect(),
+            metrics,
+        ))
     }
 
     /// Probe a batch in caller order. Memory is O(unique requested UUIDs).
@@ -6055,6 +6258,55 @@ mod tests {
         assert!(metrics.identity_blocks_read <= 3);
         assert_eq!(metrics.surrogate_blocks_read, 1);
         assert_eq!(metrics.file_seeks, metrics.identity_blocks_read + 1);
+    }
+
+    #[test]
+    fn reverse_lookup_is_authenticated_ordered_and_block_cached() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::generation::force_bump_topology_generation_for_test(dir.path()).unwrap();
+        let retained = (1_u64..=40_000)
+            .map(|value| (Uuid::from_u128(u128::from(value)), value))
+            .collect::<Vec<_>>();
+        append_uuid_membership_delta(dir.path(), 1, &retained, &[]).unwrap();
+        crate::generation::force_bump_topology_generation_for_test(dir.path()).unwrap();
+        append_uuid_membership_delta_with_tombstones(
+            dir.path(),
+            2,
+            &[],
+            &[],
+            &[(retained[19_999].0, retained[19_999].1)],
+            &[],
+        )
+        .unwrap();
+
+        let requested = [40_000, 20_000, 40_000, 50_000, 1];
+        let mut index = UuidMembershipIndex::open(dir.path()).unwrap();
+        let (resolved, cold) = index.lookup_node_uuids(&requested).unwrap();
+        assert_eq!(
+            resolved,
+            [
+                Some(retained[39_999].0),
+                None,
+                Some(retained[39_999].0),
+                None,
+                Some(retained[0].0),
+            ]
+        );
+        assert_eq!(
+            (cold.requested, cold.unique_requested, cold.found),
+            (5, 4, 2)
+        );
+        assert!(cold.identity_blocks_read > 0, "{cold:#?}");
+        assert!(cold.surrogate_blocks_read > 0, "{cold:#?}");
+        assert!(index.probe_cache_bytes <= PROBE_CACHE_BYTES);
+
+        let (again, warm) = index.lookup_node_uuids(&requested).unwrap();
+        assert_eq!(again, resolved);
+        assert_eq!(warm.identity_blocks_read, 0, "{warm:#?}");
+        assert_eq!(warm.surrogate_blocks_read, 0, "{warm:#?}");
+        assert_eq!(warm.identity_bytes_read, 0, "{warm:#?}");
+        assert_eq!(warm.surrogate_bytes_read, 0, "{warm:#?}");
+        assert!(index.probe_cache_bytes <= PROBE_CACHE_BYTES);
     }
 
     #[test]

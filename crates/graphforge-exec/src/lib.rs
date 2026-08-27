@@ -226,10 +226,11 @@ mod write_driver;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use arrow::array::{
-    Array, ArrayRef, FixedSizeBinaryArray, Int8Array, RecordBatch, StructArray, UInt64Array,
+    Array, ArrayRef, FixedSizeBinaryArray, FixedSizeBinaryBuilder, Int8Array, RecordBatch,
+    StructArray, UInt64Array, new_null_array,
 };
 use arrow::datatypes::{DataType, SchemaRef};
 use async_trait::async_trait;
@@ -3132,6 +3133,60 @@ impl ValueAt for arrow::array::UInt64Array {
 /// wraps the node in `DISTINCT` (mirroring the join path's union+distinct),
 /// so this node emits the provider's merged view raw — including a
 /// self-loop's two entries, which the `DISTINCT` collapses.
+#[derive(Debug, Default)]
+struct NodeIdentityCache {
+    index: OnceLock<Result<Mutex<graphforge_storage::UuidMembershipIndex>, String>>,
+}
+
+impl NodeIdentityCache {
+    fn resolve(
+        &self,
+        dir: &Path,
+        node_ids: &HashSet<u64>,
+        edge_var: u32,
+    ) -> Result<HashMap<u64, [u8; 16]>, GfError> {
+        let index = self.index.get_or_init(|| {
+            graphforge_storage::UuidMembershipIndex::open(dir)
+                .map(Mutex::new)
+                .map_err(|error| error.to_string())
+        });
+        let index = index
+            .as_ref()
+            .map_err(|error| GfError::Execution(error.clone()))?;
+        let requested = node_ids.iter().copied().collect::<Vec<_>>();
+        let (uuids, metrics) = index
+            .lock()
+            .map_err(|_| GfError::Execution("node identity cache lock poisoned".into()))?
+            .lookup_node_uuids(&requested)?;
+        demand::record_identity_snapshot(
+            edge_var,
+            metrics
+                .surrogate_blocks_read
+                .saturating_add(metrics.identity_blocks_read),
+            metrics
+                .surrogate_bytes_read
+                .saturating_add(metrics.identity_bytes_read),
+            metrics.cache_resident_bytes,
+            metrics.cache_limit_bytes,
+        );
+        let mut resolved = HashMap::with_capacity(node_ids.len());
+        for (id, uuid) in requested.into_iter().zip(uuids) {
+            let Some(uuid) = uuid else {
+                return Err(GfError::Execution(format!(
+                    "Expand reached unknown destination node_id {id}"
+                )));
+            };
+            resolved.insert(id, *uuid.as_bytes());
+        }
+        Ok(resolved)
+    }
+}
+
+/// Physical fixed-hop expansion over authenticated adjacency shards.
+///
+/// Exact downstream column demand selects between full record hydration and a
+/// bounded destination-identity projection that never allocates with graph
+/// cardinality.
 pub struct ExpandExec {
     input: Arc<dyn ExecutionPlan>,
     rel_type_name: String,
@@ -3156,6 +3211,12 @@ pub struct ExpandExec {
     demand_batch: Option<usize>,
     /// Query-scoped terminal cancellation shared by the bounded hop chain.
     demand: Option<Arc<demand::QueryDemand>>,
+    /// Exact output columns consumed above this operator. Unset means the
+    /// standalone/full-schema contract and retains the reference path.
+    required_output: Option<Arc<[bool]>>,
+    /// Query-plan-local authenticated destination identity cache. The cache is
+    /// fixed-budget and shared by every output chunk of this hop.
+    node_identities: Arc<NodeIdentityCache>,
 }
 
 impl ExpandExec {
@@ -3196,6 +3257,8 @@ impl ExpandExec {
             edge_var: node.edge_var,
             demand_batch: None,
             demand: None,
+            required_output: None,
+            node_identities: Arc::new(NodeIdentityCache::default()),
         }
     }
 
@@ -3220,6 +3283,30 @@ impl ExpandExec {
             edge_var: self.edge_var,
             demand_batch: Some(batch_goal),
             demand: Some(demand),
+            required_output: self.required_output.clone(),
+            node_identities: Arc::clone(&self.node_identities),
+        })
+    }
+
+    pub(crate) fn with_required_output(&self, required: Vec<bool>) -> Arc<dyn ExecutionPlan> {
+        Arc::new(Self {
+            input: Arc::clone(&self.input),
+            rel_type_name: self.rel_type_name.clone(),
+            direction: self.direction,
+            dir: self.dir.clone(),
+            mode: self.mode,
+            src_col_idx: self.src_col_idx,
+            edge_prop_count: self.edge_prop_count,
+            input_width: self.input_width,
+            schema: Arc::clone(&self.schema),
+            props: Arc::clone(&self.props),
+            provider: Arc::clone(&self.provider),
+            fetch: self.fetch,
+            edge_var: self.edge_var,
+            demand_batch: self.demand_batch,
+            demand: self.demand.clone(),
+            required_output: Some(required.into()),
+            node_identities: Arc::clone(&self.node_identities),
         })
     }
 }
@@ -3298,6 +3385,8 @@ impl ExecutionPlan for ExpandExec {
             edge_var: self.edge_var,
             demand_batch: self.demand_batch,
             demand: self.demand.clone(),
+            required_output: self.required_output.clone(),
+            node_identities: Arc::clone(&self.node_identities),
         }))
     }
 
@@ -3318,6 +3407,8 @@ impl ExecutionPlan for ExpandExec {
             edge_var: self.edge_var,
             demand_batch: self.demand_batch,
             demand: self.demand.clone(),
+            required_output: self.required_output.clone(),
+            node_identities: Arc::clone(&self.node_identities),
         }))
     }
 
@@ -3355,6 +3446,8 @@ impl ExecutionPlan for ExpandExec {
             provider: self.provider.clone(),
             edge_var: self.edge_var,
             demand: self.demand.clone(),
+            required_output: self.required_output.clone(),
+            node_identities: Arc::clone(&self.node_identities),
         };
         let schema = self.schema.clone();
         let batch_size = context.session_config().batch_size();
@@ -3446,6 +3539,8 @@ struct SingleHopConfig {
     provider: Arc<dyn AdjacencyProvider>,
     edge_var: u32,
     demand: Option<Arc<demand::QueryDemand>>,
+    required_output: Option<Arc<[bool]>>,
+    node_identities: Arc<NodeIdentityCache>,
 }
 
 /// Resumable position within one input batch. Keeping the raw adjacency offset
@@ -3533,6 +3628,85 @@ fn expand_single_hop_chunk(
         return Ok(RecordBatch::new_empty(cfg.out_schema.clone()));
     }
     demand::record_candidates(cfg.edge_var, triples.len());
+
+    let dst_width = graphforge_storage::TOPOLOGY_NODES_SCHEMA.fields().len();
+    let edge_end = cfg.out_schema.fields().len().saturating_sub(dst_width);
+    let required = cfg.required_output.as_deref();
+    let edge_unused = required.is_some_and(|required| {
+        required
+            .get(cfg.input_width..edge_end)
+            .is_some_and(|fields| fields.iter().all(|needed| !needed))
+    });
+    let dst_identity_only = required.is_some_and(|required| {
+        cfg.out_schema
+            .fields()
+            .iter()
+            .enumerate()
+            .skip(edge_end)
+            .all(|(index, field)| {
+                !required[index] || matches!(field.name().as_str(), "node_uuid" | "node_id")
+            })
+    });
+    if edge_unused && dst_identity_only {
+        let node_uuids = cfg
+            .node_identities
+            .resolve(&cfg.dir, &reached, cfg.edge_var)?;
+        demand::record_projected_chunk(cfg.edge_var, triples.len());
+        let src_take = arrow::array::UInt32Array::from(
+            triples
+                .iter()
+                .map(|(row, _, _)| {
+                    u32::try_from(*row).map_err(|_| exec_err("row index exceeds u32".into()))
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+        let mut columns = Vec::with_capacity(cfg.out_schema.fields().len());
+        for (index, col) in input.columns().iter().enumerate() {
+            if required.is_some_and(|required| required[index]) {
+                columns.push(take(col, &src_take, None).map_err(|e| exec_err(e.to_string()))?);
+            } else {
+                columns.push(new_null_array(col.data_type(), triples.len()));
+            }
+        }
+        for field in cfg
+            .out_schema
+            .fields()
+            .iter()
+            .skip(cfg.input_width)
+            .take(edge_end - cfg.input_width)
+        {
+            columns.push(new_null_array(field.data_type(), triples.len()));
+        }
+        for (offset, field) in cfg.out_schema.fields().iter().skip(edge_end).enumerate() {
+            let index = edge_end + offset;
+            let column: ArrayRef =
+                if required.is_some_and(|required| required[index]) && field.name() == "node_id" {
+                    Arc::new(UInt64Array::from(
+                        triples
+                            .iter()
+                            .map(|(_, _, neighbor)| *neighbor)
+                            .collect::<Vec<_>>(),
+                    ))
+                } else if required.is_some_and(|required| required[index])
+                    && field.name() == "node_uuid"
+                {
+                    let mut builder = FixedSizeBinaryBuilder::with_capacity(triples.len(), 16);
+                    for (_, _, neighbor) in &triples {
+                        builder
+                            .append_value(node_uuids[neighbor])
+                            .map_err(|error| exec_err(error.to_string()))?;
+                    }
+                    Arc::new(builder.finish())
+                } else {
+                    new_null_array(field.data_type(), triples.len())
+                };
+            columns.push(column);
+        }
+        let output = RecordBatch::try_new(cfg.out_schema.clone(), columns)
+            .map_err(|error| exec_err(error.to_string()))?;
+        demand::record_emitted(cfg.edge_var, output.num_rows());
+        return Ok(output);
+    }
 
     // Edge rows keyed by edge_id, for the edge topology columns — read
     // lazily for the traversed ids only.

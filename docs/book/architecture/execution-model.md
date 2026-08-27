@@ -113,6 +113,16 @@ execution paths consume it through a single `AdjacencyProvider` abstraction:
 | `VarLenExpandExec` | Iterative BFS over the `AdjacencyProvider` for `*min..max` patterns (replaces the per-query in-memory adjacency build) |
 | `ExpandExec` | Adjacency-backed single-hop expansion: chosen at lowering time when the provider reports a `hit` for a typed relation (any direction; undirected wraps in `DISTINCT`, mirroring the join path's union+distinct). Exploratory single-hop and uncovered patterns keep the DataFusion join chain. |
 
+`ExpandExec` also receives exact physical column demand. When a hop only feeds
+the destination `node_id`/`node_uuid` projection, it does not open edge records
+or full node rows. Destination UUIDs come from the authenticated immutable
+surrogate index through a query-plan-local 64 MiB block LRU. The LRU is a hard
+memory bound independent of graph cardinality; eviction returns to
+authenticated block reads, never to graph-sized identity materialization or
+per-chunk Parquet hydration. Relationship values, relationship predicates,
+path-uniqueness checks, and other node properties retain the full reference
+materialization path.
+
 **Selection is a planner choice, not an IR change.** The Graph IR is unchanged: variable-length
 traversal is still encoded on `Expand { …, min_hops, max_hops }`. A lowering rule selects an
 adjacency-backed physical node when the provider covers the relation type + direction, and falls

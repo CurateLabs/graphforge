@@ -17,13 +17,16 @@ use arrow::datatypes::SchemaRef;
 use datafusion::common::config::ConfigOptions;
 use datafusion::common::{DataFusionError, Result};
 use datafusion::execution::TaskContext;
+use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_expr::ScalarFunctionExpr;
+use datafusion::physical_expr::utils::collect_columns;
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::filter::FilterExec;
 use datafusion::physical_plan::limit::{GlobalLimitExec, LocalLimitExec};
 use datafusion::physical_plan::projection::ProjectionExec;
 use datafusion::physical_plan::repartition::RepartitionExec;
+use datafusion::physical_plan::sorts::sort::SortExec;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties, RecordBatchStream,
     SendableRecordBatchStream,
@@ -88,6 +91,18 @@ pub struct HopSnapshot {
     pub node_validation_fallbacks: u64,
     /// Read attempts rejected after terminal cancellation.
     pub reads_after_cancel: u64,
+    /// Output chunks served by the destination-identity-only path.
+    pub projected_chunks: u64,
+    /// Candidate rows served without edge-record materialization.
+    pub projected_rows: u64,
+    /// Authenticated reverse-identity blocks read once for this query plan.
+    pub identity_blocks_read: u64,
+    /// Authenticated reverse-identity bytes read once for this query plan.
+    pub identity_bytes_read: u64,
+    /// Peak authenticated identity-block cache residency.
+    pub identity_cache_peak_bytes: u64,
+    /// Fixed authenticated identity-block cache ceiling.
+    pub identity_cache_limit_bytes: u64,
 }
 
 /// Rows observed at one selective physical filter.
@@ -138,6 +153,36 @@ pub fn disable() {
 #[doc(hidden)]
 pub fn snapshot() -> DemandSnapshot {
     CAPTURE.lock().expect("demand stats lock").clone()
+}
+
+pub(crate) fn record_projected_chunk(edge_var: u32, rows: usize) {
+    if !CAPTURE_ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
+    let mut snapshot = CAPTURE.lock().expect("demand stats lock");
+    let hop = snapshot.hops.entry(edge_var).or_default();
+    hop.projected_chunks = hop.projected_chunks.saturating_add(1);
+    hop.projected_rows = hop
+        .projected_rows
+        .saturating_add(u64::try_from(rows).unwrap_or(u64::MAX));
+}
+
+pub(crate) fn record_identity_snapshot(
+    edge_var: u32,
+    blocks: u64,
+    bytes: u64,
+    cache_resident_bytes: u64,
+    cache_limit_bytes: u64,
+) {
+    if !CAPTURE_ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
+    let mut snapshot = CAPTURE.lock().expect("demand stats lock");
+    let hop = snapshot.hops.entry(edge_var).or_default();
+    hop.identity_blocks_read = hop.identity_blocks_read.saturating_add(blocks);
+    hop.identity_bytes_read = hop.identity_bytes_read.saturating_add(bytes);
+    hop.identity_cache_peak_bytes = hop.identity_cache_peak_bytes.max(cache_resident_bytes);
+    hop.identity_cache_limit_bytes = cache_limit_bytes;
 }
 
 pub(crate) fn capture_enabled() -> bool {
@@ -368,6 +413,8 @@ impl PhysicalOptimizerRule for FixedHopDemandRule {
         plan: Arc<dyn ExecutionPlan>,
         config: &ConfigOptions,
     ) -> Result<Arc<dyn ExecutionPlan>> {
+        let required = (0..plan.schema().fields().len()).collect();
+        let plan = rewrite_materialization(plan, &required)?;
         let Some(terminal) = find_terminal_demand(&plan) else {
             return Ok(plan);
         };
@@ -400,6 +447,94 @@ impl PhysicalOptimizerRule for FixedHopDemandRule {
     fn schema_check(&self) -> bool {
         true
     }
+}
+
+fn collect_expr_columns(
+    expr: &Arc<dyn PhysicalExpr>,
+    required: &mut std::collections::BTreeSet<usize>,
+) {
+    for column in collect_columns(expr) {
+        required.insert(column.index());
+    }
+}
+
+/// Push exact physical output demand into ExpandExec while retaining its full
+/// schema contract. Columns proven unreachable above the operator may be
+/// represented without opening their backing records; standalone/full-schema
+/// execution remains on the reference path.
+fn rewrite_materialization(
+    plan: Arc<dyn ExecutionPlan>,
+    required: &std::collections::BTreeSet<usize>,
+) -> Result<Arc<dyn ExecutionPlan>> {
+    if let Some(projection) = plan.downcast_ref::<ProjectionExec>() {
+        let mut child_required = std::collections::BTreeSet::new();
+        for &output in required {
+            if let Some(expr) = projection.expr().get(output) {
+                collect_expr_columns(&expr.expr, &mut child_required);
+            }
+        }
+        let child = rewrite_materialization(Arc::clone(projection.input()), &child_required)?;
+        return plan.with_new_children(vec![child]);
+    }
+
+    let mut child_required = required.clone();
+    if let Some(filter) = plan.downcast_ref::<FilterExec>() {
+        collect_expr_columns(filter.predicate(), &mut child_required);
+    }
+    if let Some(sort) = plan.downcast_ref::<SortExec>() {
+        for expr in sort.expr() {
+            collect_expr_columns(&expr.expr, &mut child_required);
+        }
+    }
+
+    if let Some(expand) = plan.downcast_ref::<ExpandExec>() {
+        let mut input_required = required
+            .iter()
+            .copied()
+            .filter(|index| *index < expand.input_width)
+            .collect::<std::collections::BTreeSet<_>>();
+        input_required.insert(expand.src_col_idx);
+        let child = rewrite_materialization(Arc::clone(&expand.input), &input_required)?;
+        let rebuilt = plan.with_new_children(vec![child])?;
+        let expand = rebuilt
+            .downcast_ref::<ExpandExec>()
+            .ok_or_else(|| DataFusionError::Internal("ExpandExec rewrite changed type".into()))?;
+        let mask = (0..expand.schema().fields().len())
+            .map(|index| required.contains(&index))
+            .collect();
+        return Ok(expand.with_required_output(mask));
+    }
+
+    let children = plan.children();
+    if children.len() != 1 {
+        let mut rewritten = Vec::with_capacity(children.len());
+        for child in children {
+            let all = (0..child.schema().fields().len()).collect();
+            rewritten.push(rewrite_materialization(Arc::clone(child), &all)?);
+        }
+        return if rewritten.is_empty() {
+            Ok(plan)
+        } else {
+            plan.with_new_children(rewritten)
+        };
+    }
+    let child = children[0];
+    let next = if materialization_demand_transparent(plan.as_ref()) {
+        child_required
+    } else {
+        (0..child.schema().fields().len()).collect()
+    };
+    let child = rewrite_materialization(Arc::clone(child), &next)?;
+    plan.with_new_children(vec![child])
+}
+
+fn materialization_demand_transparent(plan: &dyn ExecutionPlan) -> bool {
+    plan.downcast_ref::<FilterExec>().is_some()
+        || plan.downcast_ref::<SortExec>().is_some()
+        || plan.downcast_ref::<GlobalLimitExec>().is_some()
+        || plan.downcast_ref::<LocalLimitExec>().is_some()
+        || plan.downcast_ref::<CoalescePartitionsExec>().is_some()
+        || plan.downcast_ref::<RepartitionExec>().is_some()
 }
 
 fn find_terminal_demand(plan: &Arc<dyn ExecutionPlan>) -> Option<TerminalDemand> {

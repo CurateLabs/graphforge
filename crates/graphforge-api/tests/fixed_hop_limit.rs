@@ -35,6 +35,7 @@ static IO_GUARD: Mutex<()> = Mutex::new(());
 const ONE_HOP: &str = "MATCH (a)-[r]->(b) RETURN b.node_uuid AS id LIMIT 1000";
 const TWO_HOP: &str = "MATCH (a)-[r1]->(b)-[r2]->(c) \
                        RETURN c.node_uuid AS id LIMIT 1000";
+const ORDERED_ONE_HOP: &str = "MATCH (a)-[r]->(b) RETURN b.node_uuid AS id ORDER BY id LIMIT 1000";
 
 /// Deterministic ring: each node points to its next `fan_out` successors.
 fn generate_graph(dir: &Path, nodes: usize, fan_out: usize) {
@@ -388,6 +389,43 @@ fn scattered_node_hydration_is_neighborhood_proportional() {
         "scattered node work must stay bounded across 10x graph growth: \
          small={small_io:#?}, large={large_io:#?}"
     );
+}
+
+#[test]
+fn ordered_uuid_projection_never_falls_back_to_full_record_hydration() {
+    let _guard = IO_GUARD.lock().unwrap();
+    let dir = TempDir::new().unwrap();
+    generate_graph(dir.path(), 4_096, FAN_OUT);
+    let forge = open_forge(dir.path());
+
+    let plan = forge.explain(ORDERED_ONE_HOP).unwrap();
+    assert!(plan.contains("SortExec"), "{plan}");
+    io_stats::reset();
+    demand::reset();
+    let result = forge.execute(ORDERED_ONE_HOP).unwrap();
+    demand::disable();
+    assert_eq!(result.stats.rows_produced, LIMIT as u64);
+
+    let io = io_stats::snapshot();
+    assert_eq!(io.edge_full_reads + io.edge_filtered_reads, 0, "{io:#?}");
+    assert_eq!(io.node_full_reads + io.node_filtered_reads, 0, "{io:#?}");
+    let snapshot = demand::snapshot();
+    assert_eq!(snapshot.hops.len(), 1, "{snapshot:#?}");
+    let hop = snapshot.hops.values().next().unwrap();
+    assert!(hop.projected_chunks >= 4, "{snapshot:#?}");
+    assert_eq!(
+        hop.projected_rows,
+        (4_096 * FAN_OUT) as u64,
+        "{snapshot:#?}"
+    );
+    assert!(hop.identity_blocks_read > 0, "{snapshot:#?}");
+    assert_eq!(hop.identity_cache_limit_bytes, 64 * 1024 * 1024);
+    assert!(
+        hop.identity_cache_peak_bytes <= hop.identity_cache_limit_bytes,
+        "{snapshot:#?}"
+    );
+    assert_eq!(hop.edge_reads_started, 0, "{snapshot:#?}");
+    assert_eq!(hop.node_reads_started, 0, "{snapshot:#?}");
 }
 
 #[test]
