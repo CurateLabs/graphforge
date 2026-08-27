@@ -39,6 +39,7 @@ use crate::uuid_membership::{AuthenticatedUuidIndexSnapshot, UuidConstructionSna
 
 const FORMAT_VERSION: u32 = 5;
 const PRIVATE_ROOT: &str = ".graphforge-construction";
+const SESSION_LOCK: &str = "session.lock";
 const CHECKPOINT: &str = "checkpoint.json";
 const INTENT: &str = "intent.json";
 const SHAPE_INTENT: &str = "shape-intent.json";
@@ -728,6 +729,7 @@ pub struct GraphConstructionSession {
     parent_catalog: RuntimeCatalog,
     compact_parent: Option<crate::GraphFilesInventory>,
     semantic_authority: Option<ConstructionSemanticAuthority>,
+    _session_lock: File,
     _reservation: ProcessReservation,
 }
 
@@ -1395,7 +1397,16 @@ impl GraphConstructionSession {
         let root = private
             .create_child_directory(OsStr::new(&operation_name))
             .map_err(storage)?;
-        if !root.try_lock_exclusive().map_err(storage)? {
+        // Directory handles cannot be locked on Windows. Retain an authenticated
+        // regular child for the lifetime of the session and use the storage
+        // layer's cross-platform lock abstraction on that exact descriptor.
+        let session_lock = root
+            .open_or_create_child_file(OsStr::new(SESSION_LOCK))
+            .map_err(storage)?;
+        if file_link_count(&session_lock).map_err(storage)? != 1 {
+            return Err(storage("construction session lock has unexpected links"));
+        }
+        if !crate::file_lock::try_lock_exclusive(&session_lock).map_err(storage)? {
             return Err(storage(
                 "construction operation is locked by another process",
             ));
@@ -1608,6 +1619,7 @@ impl GraphConstructionSession {
             parent_catalog,
             compact_parent,
             semantic_authority,
+            _session_lock: session_lock,
             _reservation: reservation,
         };
         recover_shape_intent(&session.root, &mut session.checkpoint)?;
@@ -7510,6 +7522,21 @@ mod tests {
                 .append(ConstructionChunkKind::Node, "late-node", &node_batch(1, 1))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn session_coordination_file_is_exclusively_locked() {
+        let root = TempDir::new().unwrap();
+        let stable = StableDirectory::open(root.path()).unwrap();
+        let owner = stable
+            .open_or_create_child_file(OsStr::new(SESSION_LOCK))
+            .unwrap();
+        assert!(crate::file_lock::try_lock_exclusive(&owner).unwrap());
+
+        let contender = stable.open_child_file(OsStr::new(SESSION_LOCK)).unwrap();
+        assert!(!crate::file_lock::try_lock_exclusive(&contender).unwrap());
+        crate::file_lock::unlock(&owner).unwrap();
+        assert!(crate::file_lock::try_lock_exclusive(&contender).unwrap());
     }
 
     #[cfg(unix)]
