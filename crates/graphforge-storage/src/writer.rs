@@ -102,7 +102,10 @@ pub(crate) fn read_surrogate_tails(dir: &Path) -> Result<Option<(u64, u64)>, GfE
     read_surrogate_tails_file(input).map(Some)
 }
 
-pub(crate) fn read_surrogate_tails_file(input: fs::File) -> Result<(u64, u64), GfError> {
+pub(crate) fn read_surrogate_tails_file<R>(input: R) -> Result<(u64, u64), GfError>
+where
+    R: parquet::file::reader::ChunkReader + 'static,
+{
     use arrow::array::Array;
 
     let mut reader = ParquetRecordBatchReaderBuilder::try_new(input)

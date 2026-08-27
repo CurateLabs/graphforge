@@ -149,11 +149,10 @@ fn compact_parent_inventory(
     crate::graph_files::inventory_from_entries(entries).map(Some)
 }
 
-fn compact_parent_surrogate_tails(project_dir: &Path) -> Result<Option<(u64, u64)>, GfError> {
-    let parent = crate::resolve_project_generation(project_dir)?;
-    let Some(inventory) = compact_parent_inventory(&parent)? else {
-        return Ok(None);
-    };
+fn compact_parent_surrogate_tails(
+    project_dir: &Path,
+    inventory: &crate::GraphFilesInventory,
+) -> Result<Option<(u64, u64)>, GfError> {
     let Some(entry) = inventory
         .files
         .iter()
@@ -727,7 +726,7 @@ pub struct GraphConstructionSession {
     checkpoint: Checkpoint,
     base_snapshot: Option<AuthenticatedUuidIndexSnapshot>,
     parent_catalog: RuntimeCatalog,
-    compact_parent: bool,
+    compact_parent: Option<crate::GraphFilesInventory>,
     semantic_authority: Option<ConstructionSemanticAuthority>,
     _reservation: ProcessReservation,
 }
@@ -1581,7 +1580,7 @@ impl GraphConstructionSession {
             parent_generation_uuid,
             &parent_generation_manifest_sha256,
         )?;
-        let compact_parent = compact_inventory.is_some();
+        let compact_parent = compact_inventory;
         let mut session = Self {
             project_path: project_dir.to_path_buf(),
             project,
@@ -2105,8 +2104,8 @@ impl GraphConstructionSession {
         )?;
         let (base_max_node, base_max_edge) = match self.checkpoint.parent_topology_generation {
             0 => (0, 0),
-            _ => (if self.compact_parent {
-                compact_parent_surrogate_tails(&self.project_path)?
+            _ => (if let Some(inventory) = &self.compact_parent {
+                compact_parent_surrogate_tails(&self.project_path, inventory)?
             } else {
                 None
             })
@@ -2885,24 +2884,43 @@ impl<R: Read> Read for CountingRead<R> {
     }
 }
 
-pub(crate) struct CountingChunkReader {
-    pub(crate) file: File,
+pub(crate) struct CountingChunkReader<R = File> {
+    pub(crate) file: R,
     pub(crate) counter: IoCounter,
 }
 
-impl Length for CountingChunkReader {
-    fn len(&self) -> u64 {
-        self.file.metadata().map_or(0, |metadata| metadata.len())
+pub(crate) trait ConstructionFileHandle: Send + Sync {
+    fn descriptor(&self) -> &File;
+}
+
+impl ConstructionFileHandle for File {
+    fn descriptor(&self) -> &File {
+        self
     }
 }
 
-impl ChunkReader for CountingChunkReader {
+impl ConstructionFileHandle for crate::graph_object_store::AuthenticatedGraphObject {
+    fn descriptor(&self) -> &File {
+        self.as_ref()
+    }
+}
+
+impl<R: ConstructionFileHandle> Length for CountingChunkReader<R> {
+    fn len(&self) -> u64 {
+        self.file
+            .descriptor()
+            .metadata()
+            .map_or(0, |metadata| metadata.len())
+    }
+}
+
+impl<R: ConstructionFileHandle> ChunkReader for CountingChunkReader<R> {
     type T = CountingRead<BufReader<File>>;
 
     fn get_read(&self, start: u64) -> parquet::errors::Result<Self::T> {
         use std::io::{Seek, SeekFrom};
 
-        let mut file = self.file.try_clone()?;
+        let mut file = self.file.descriptor().try_clone()?;
         file.seek(SeekFrom::Start(start))?;
         Ok(CountingRead {
             inner: BufReader::with_capacity(BLOCK_BYTES, file),
@@ -2913,7 +2931,7 @@ impl ChunkReader for CountingChunkReader {
     fn get_bytes(&self, start: u64, length: usize) -> parquet::errors::Result<bytes::Bytes> {
         use std::io::{Seek, SeekFrom};
 
-        let mut file = self.file.try_clone()?;
+        let mut file = self.file.descriptor().try_clone()?;
         file.seek(SeekFrom::Start(start))?;
         let mut value = vec![0_u8; length];
         file.read_exact(&mut value)?;
@@ -4495,11 +4513,14 @@ fn load_parent_runtime_catalog_from_compact(
     decode_parent_runtime_catalog_file(file, &entry.content_sha256, budgets)
 }
 
-fn decode_parent_runtime_catalog_file(
-    file: File,
+fn decode_parent_runtime_catalog_file<R>(
+    file: R,
     digest: &str,
     budgets: GraphConstructionBudgets,
-) -> Result<(RuntimeCatalog, Option<String>, ReadWork), GfError> {
+) -> Result<(RuntimeCatalog, Option<String>, ReadWork), GfError>
+where
+    R: ConstructionFileHandle + 'static,
+{
     let counter = IoCounter::default();
     let reader = ParquetRecordBatchReaderBuilder::try_new(CountingChunkReader {
         file,

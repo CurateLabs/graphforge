@@ -18,6 +18,7 @@ use crate::{
     GraphFilesOpenStrategy, GraphFilesRootV2, GraphManifestNode, GraphManifestNodeKind,
 };
 use graphforge_filesystem::StableDirectory;
+use parquet::file::reader::{ChunkReader, Length};
 
 /// Project-relative root of immutable graph objects.
 pub const GRAPH_OBJECTS_DIR: &str = "graph-objects";
@@ -1937,11 +1938,72 @@ pub fn read_graph_object_by_digest(
 }
 
 /// Open and stream-authenticate one immutable CAS object without allocating its payload.
+pub(crate) struct AuthenticatedGraphObject {
+    file: File,
+    _cas: ReadOnlyCasRoot,
+}
+
+impl std::fmt::Debug for AuthenticatedGraphObject {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AuthenticatedGraphObject")
+            .finish_non_exhaustive()
+    }
+}
+
+impl AuthenticatedGraphObject {
+    pub(crate) fn try_clone_file(&self) -> std::io::Result<File> {
+        self.file.try_clone()
+    }
+}
+
+impl AsRef<File> for AuthenticatedGraphObject {
+    fn as_ref(&self) -> &File {
+        &self.file
+    }
+}
+
+impl Read for AuthenticatedGraphObject {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.file.read(buffer)
+    }
+}
+
+impl Seek for AuthenticatedGraphObject {
+    fn seek(&mut self, position: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.file.seek(position)
+    }
+}
+
+impl Length for AuthenticatedGraphObject {
+    fn len(&self) -> u64 {
+        self.file.metadata().map_or(0, |metadata| metadata.len())
+    }
+}
+
+impl ChunkReader for AuthenticatedGraphObject {
+    type T = std::io::BufReader<File>;
+
+    fn get_read(&self, start: u64) -> parquet::errors::Result<Self::T> {
+        let mut file = self.file.try_clone()?;
+        file.seek(std::io::SeekFrom::Start(start))?;
+        Ok(std::io::BufReader::new(file))
+    }
+
+    fn get_bytes(&self, start: u64, length: usize) -> parquet::errors::Result<bytes::Bytes> {
+        let mut file = self.file.try_clone()?;
+        file.seek(std::io::SeekFrom::Start(start))?;
+        let mut value = vec![0; length];
+        file.read_exact(&mut value)?;
+        Ok(value.into())
+    }
+}
+
 pub(crate) fn open_graph_object_by_digest(
     root: &Path,
     digest: &str,
     expected_length: u64,
-) -> Result<File, GfError> {
+) -> Result<AuthenticatedGraphObject, GfError> {
     let cas = ReadOnlyCasRoot::open(root)?;
     let mut file = cas.open_digest(digest)?;
     let metadata = file
@@ -1951,7 +2013,10 @@ pub(crate) fn open_graph_object_by_digest(
     // so their link count is not an authority signal. The stable no-follow CAS
     // traversal, exact digest address, exact length, and streamed digest bind
     // this descriptor without relaxing path-native child-file admission.
-    if !metadata.is_file() || metadata.len() != expected_length {
+    if !metadata.is_file()
+        || metadata.len() != expected_length
+        || !metadata.permissions().readonly()
+    {
         return Err(validation("graph object authority changed"));
     }
     let mut hasher = Sha256::new();
@@ -1970,7 +2035,7 @@ pub(crate) fn open_graph_object_by_digest(
     }
     file.rewind()
         .map_err(|error| storage("rewind graph object", root, error))?;
-    Ok(file)
+    Ok(AuthenticatedGraphObject { file, _cas: cas })
 }
 
 fn read_graph_object_by_digest_from_read_only_cas(
@@ -2045,6 +2110,14 @@ where
     let destination_name = std::ffi::OsStr::new(&digest[2..]);
     if let Ok(file) = bucket.open_child_file(destination_name) {
         verify_file(file, digest, expected_length, &cas.diagnostic_root)?;
+        let file = bucket.open_child_file(destination_name).map_err(|error| {
+            storage(
+                "reopen graph object for sealing",
+                &cas.diagnostic_root,
+                error,
+            )
+        })?;
+        seal_graph_object(&file, &cas.diagnostic_root)?;
         return Ok(GraphObjectInstallEvidence {
             reused_existing: true,
             ..GraphObjectInstallEvidence::default()
@@ -2080,6 +2153,7 @@ where
         expected_length,
         &cas.diagnostic_root,
     )?;
+    seal_graph_object(&temporary, &cas.diagnostic_root)?;
     let installed = if let Ok((_installed, _identity)) = cas.tmp.link_child_into(
         &temporary_name,
         &temporary,
@@ -2151,6 +2225,16 @@ fn verify_file(
         return Err(validation("graph object digest does not match its address"));
     }
     Ok(())
+}
+
+fn seal_graph_object(file: &File, diagnostic: &Path) -> Result<(), GfError> {
+    let mut permissions = file
+        .metadata()
+        .map_err(|error| storage("inspect graph object permissions", diagnostic, error))?
+        .permissions();
+    permissions.set_readonly(true);
+    file.set_permissions(permissions)
+        .map_err(|error| storage("seal graph object permissions", diagnostic, error))
 }
 
 fn hash_regular_file(path: &Path) -> Result<[u8; 32], GfError> {
@@ -2671,6 +2755,26 @@ mod tests {
         let publication = publish_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         publish_thread.join().unwrap();
         drop(publication);
+    }
+
+    #[test]
+    fn authenticated_reader_keeps_cas_sealed_through_descriptor_consumption() {
+        let root = tempfile::tempdir().unwrap();
+        let payload = b"authenticated payload";
+        let (digest, _) = install_graph_object_bytes(root.path(), payload).unwrap();
+        let mut reader =
+            open_graph_object_by_digest(root.path(), &digest, payload.len() as u64).unwrap();
+        let path = graph_object_path(root.path(), &digest).unwrap();
+
+        let mutation = fs::OpenOptions::new().write(true).open(&path);
+        assert!(
+            mutation.is_err(),
+            "sealed CAS object accepted in-place mutation"
+        );
+
+        let mut decoded = Vec::new();
+        reader.read_to_end(&mut decoded).unwrap();
+        assert_eq!(decoded, payload);
     }
 
     #[cfg(unix)]
