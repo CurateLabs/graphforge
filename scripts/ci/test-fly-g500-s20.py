@@ -275,8 +275,11 @@ def test_durable_budget_reservations_survive_and_accumulate(tmp_path):
     controller.reserve_budget(ledger, "run-one", first)
     controller.reserve_budget(ledger, "run-two", first)
     state = json.loads(ledger.read_text())
-    assert sum(run["reserved_usd"] for run in state["runs"]) == 2.22
-    assert state["runs"][0]["pricing_source"] == "https://fly.io/docs/about/pricing/"
+    assert sum(run["reservation"]["reserved_usd"] for run in state["runs"]) == 2.22
+    assert state["runs"][0]["reservation"]["pricing_source"] == "https://fly.io/docs/about/pricing/"
+    anchor = json.loads(ledger.with_suffix(".json.anchor").read_text())
+    assert anchor["records"] == 2
+    assert anchor["reserved_cents"] == 222
     oversized = controller.price_reservation(500, Decimal("0.0006"), Decimal("0.15"))
     with pytest.raises(controller.ControllerError, match="exceed"):
         controller.reserve_budget(ledger, "run-three", oversized)
@@ -304,18 +307,33 @@ def test_budget_ledger_rejects_nonfinite_negative_and_malformed_existing_amounts
 def test_budget_ledger_recomputes_existing_reservations_in_decimal_cents(tmp_path):
     ledger = tmp_path / "ledger.json"
     reservation = controller.price_reservation(500)
-    forged = {**reservation, "reserved_usd": reservation["reserved_usd"] - 0.01}
-    ledger.write_text(
-        json.dumps(
-            {
-                "schema": "graphforge-fly-cost-ledger/1",
-                "limit_usd": 10.0,
-                "runs": [{"run_id": "old", **forged}],
-            }
-        )
-    )
-    with pytest.raises(controller.ControllerError, match="recomputed cents"):
+    controller.reserve_budget(ledger, "old", reservation)
+    state = json.loads(ledger.read_text())
+    state["runs"][0]["reservation"]["reserved_usd"] -= 0.01
+    ledger.write_text(json.dumps(state))
+    with pytest.raises(controller.ControllerError, match="authentication"):
         controller.reserve_budget(ledger, "new", reservation)
+
+
+@pytest.mark.parametrize("missing", ["ledger", "anchor"])
+def test_budget_ledger_rejects_deleted_history_or_anchor(tmp_path, missing):
+    ledger = tmp_path / "ledger.json"
+    controller.reserve_budget(ledger, "old", controller.price_reservation(500))
+    target = ledger if missing == "ledger" else ledger.with_suffix(".json.anchor")
+    target.unlink()
+    with pytest.raises(controller.ControllerError, match="ledger or durable anchor is missing"):
+        controller.reserve_budget(ledger, "new", controller.price_reservation(500))
+
+
+def test_budget_ledger_rejects_valid_prefix_truncation(tmp_path):
+    ledger = tmp_path / "ledger.json"
+    reservation = controller.price_reservation(500)
+    controller.reserve_budget(ledger, "one", reservation)
+    prefix = ledger.read_text()
+    controller.reserve_budget(ledger, "two", reservation)
+    ledger.write_text(prefix)
+    with pytest.raises(controller.ControllerError, match="history regressed"):
+        controller.reserve_budget(ledger, "three", reservation)
 
 
 def test_current_official_pricing_selects_fixed_region_and_derives_ledger():
@@ -468,12 +486,17 @@ def test_cleanup_only_uses_observed_owned_identifiers():
     controller.cleanup_owned(Fly(), "gf-s20-unique", None, None, False)
     assert calls == []
     controller.cleanup_owned(Fly(), "gf-s20-unique", "machine-observed", "volume-observed", True)
-    assert [call[0][0:2] for call in calls] == [
+    assert [call[0][0:2] for call in calls[:6]] == [
         ["machine", "destroy"],
         ["machine", "status"],
         ["volumes", "destroy"],
         ["volumes", "show"],
         ["apps", "destroy"],
+        ["apps", "list"],
+    ]
+    assert [call[0][0:2] for call in calls[6:]] == [
+        ["machine", "status"],
+        ["volumes", "show"],
         ["apps", "list"],
     ]
 
@@ -496,15 +519,19 @@ def test_cleanup_converges_child_first_across_async_deletion(monkeypatch):
             return []
 
     controller.cleanup_owned(Fly(), "gf-s20-unique", "machine", "volume", True)
-    assert calls.index(["volumes", "destroy"]) > max(
-        index for index, call in enumerate(calls) if call[0] == "machine"
-    )
-    assert calls.index(["apps", "destroy"]) > max(
-        index for index, call in enumerate(calls) if call[0] == "volumes"
-    )
+    volume_destroy = calls.index(["volumes", "destroy"])
+    app_destroy = calls.index(["apps", "destroy"])
+    assert volume_destroy > calls.index(["machine", "destroy"])
+    assert app_destroy > volume_destroy
+    assert calls[-3:] == [
+        ["machine", "status"],
+        ["volumes", "show"],
+        ["apps", "list"],
+    ]
 
 
 def test_cleanup_survivor_fails_after_bounded_retries(monkeypatch):
+    monkeypatch.setattr(controller, "CLEANUP_ATTEMPTS", 2)
     monkeypatch.setattr(controller.time, "sleep", lambda _seconds: None)
 
     class Fly:
@@ -513,6 +540,27 @@ def test_cleanup_survivor_fails_after_bounded_retries(monkeypatch):
 
     with pytest.raises(controller.ControllerError, match="bounded cleanup"):
         controller.cleanup_owned(Fly(), "gf-s20-unique", "machine", None, False)
+
+
+def test_cleanup_attempts_all_resources_and_aggregates_survivors(monkeypatch):
+    monkeypatch.setattr(controller, "CLEANUP_ATTEMPTS", 2)
+    monkeypatch.setattr(controller.time, "sleep", lambda _seconds: None)
+    calls = []
+
+    class Fly:
+        def run(self, command, check=True):
+            calls.append(command[:2])
+            return argparse.Namespace(returncode=0)
+
+        def json(self, command):
+            calls.append(command[:2])
+            return [{"name": "gf-s20-unique"}]
+
+    with pytest.raises(controller.ControllerError, match=r"Machine.*volume.*app"):
+        controller.cleanup_owned(Fly(), "gf-s20-unique", "machine", "volume", True)
+    assert ["machine", "destroy"] in calls
+    assert ["volumes", "destroy"] in calls
+    assert ["apps", "destroy"] in calls
 
 
 def test_post_cleanup_absence_is_verified_child_to_parent():
@@ -649,7 +697,7 @@ def test_terminal_failure_is_persisted_promptly_and_still_verified_cleaned(tmp_p
         "phase": "ingest",
         "code": "GF_OOM",
     }
-    assert fly.app_lists == 2
+    assert fly.app_lists == 3
 
 
 def test_observed_machine_must_match_private_fixed_plan(tmp_path):

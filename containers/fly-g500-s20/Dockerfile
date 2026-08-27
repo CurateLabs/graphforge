@@ -3,6 +3,7 @@ WORKDIR /source
 COPY . .
 ARG GRAPHFORGE_GIT_SHA
 RUN test -n "$GRAPHFORGE_GIT_SHA" \
+    && mkdir -p /out \
     && snapshot="$(python3 scripts/ci/fly-s20-source-attestation.py /source)" \
     && printf '{"schema":"graphforge-fly-s20-build-provenance/1","source_sha":"%s","source_snapshot_sha256":"%s"}\n' "$GRAPHFORGE_GIT_SHA" "$snapshot" > /out/build-provenance.json \
     && cargo test --locked --release -p graphforge-api --test scale_g500_ladder --no-run \

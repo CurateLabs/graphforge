@@ -11,6 +11,7 @@ import argparse
 from collections.abc import Sequence
 from decimal import ROUND_CEILING, Decimal, InvalidOperation
 import fcntl
+import hashlib
 from html.parser import HTMLParser
 import importlib.util
 import json
@@ -46,8 +47,8 @@ EVIDENCE_PATH = "/work/s20-evidence.json"
 RESULT_PATH = "/work/container-result.json"
 JOURNAL_PATH = "/work/s20-journal.json"
 ACTIVE_PHASE_PATH = "/work/s20-active-phase.json"
-CLEANUP_ATTEMPTS = 5
-CLEANUP_POLL_SECONDS = 0.5
+CLEANUP_ATTEMPTS = 60
+CLEANUP_POLL_SECONDS = 2.0
 PHASES = {
     "generate",
     "ingest",
@@ -307,42 +308,105 @@ def inspect_image(image: str, expected_sha: str, digest: str) -> str:
 
 
 def reserve_budget(path: Path, run_id: str, reservation: dict[str, Any]) -> None:
-    """Durably reserve before creation; reservations survive failed attempts."""
+    """Append one hash-chained reservation with a separately durable anchor."""
     lock_path = path.with_suffix(path.suffix + ".lock")
+    anchor_path = path.with_suffix(path.suffix + ".anchor")
     with lock_path.open("a+b") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        state = {"schema": "graphforge-fly-cost-ledger/1", "limit_usd": MAX_COST_USD, "runs": []}
+        if path.exists() != anchor_path.exists():
+            raise ControllerError("cost ledger or durable anchor is missing")
+        state = {"schema": "graphforge-fly-cost-ledger/2", "limit_usd": MAX_COST_USD, "runs": []}
+        anchor = {
+            "schema": "graphforge-fly-cost-ledger-anchor/1",
+            "head_sha256": "sha256:" + "0" * 64,
+            "records": 0,
+            "reserved_cents": 0,
+        }
         if path.exists():
-            state = json.loads(path.read_text(encoding="utf-8"))
+            try:
+                state = json.loads(path.read_text(encoding="utf-8"))
+                anchor = json.loads(anchor_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                raise ControllerError("cost ledger history is unreadable") from None
         if (
-            state.get("schema") != "graphforge-fly-cost-ledger/1"
+            state.get("schema") != "graphforge-fly-cost-ledger/2"
             or state.get("limit_usd") != MAX_COST_USD
         ):
             raise ControllerError("invalid cost ledger")
         runs = state.get("runs")
         if not isinstance(runs, list):
             raise ControllerError("invalid cost ledger runs")
+        head = "sha256:" + "0" * 64
+        used_cents = 0
+        for record in runs:
+            if not isinstance(record, dict) or set(record) != {
+                "run_id",
+                "previous_sha256",
+                "record_sha256",
+                "reservation",
+            }:
+                raise ControllerError("cost ledger has malformed chained record")
+            if record["previous_sha256"] != head or not SAFE_NAME.fullmatch(record["run_id"]):
+                raise ControllerError("cost ledger chain is invalid")
+            canonical = json.dumps(
+                {
+                    "run_id": record["run_id"],
+                    "previous_sha256": record["previous_sha256"],
+                    "reservation": record["reservation"],
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+            computed = "sha256:" + hashlib.sha256(canonical).hexdigest()
+            if record["record_sha256"] != computed:
+                raise ControllerError("cost ledger record authentication failed")
+            head = computed
+            used_cents += int(_validated_reservation(record["reservation"]) * 100)
+        expected_anchor = {
+            "schema": "graphforge-fly-cost-ledger-anchor/1",
+            "head_sha256": head,
+            "records": len(runs),
+            "reserved_cents": used_cents,
+        }
+        if anchor != expected_anchor:
+            raise ControllerError(
+                "cost ledger history regressed or differs from its durable anchor"
+            )
         if any(run.get("run_id") == run_id for run in runs):
             raise ControllerError("run id is already reserved")
-        used = sum((_validated_reservation(run) for run in runs), Decimal(0))
         amount = _validated_reservation(reservation)
-        if used + amount > Decimal(str(MAX_COST_USD)):
+        amount_cents = int(amount * 100)
+        if used_cents + amount_cents > int(MAX_COST_USD * 100):
             raise ControllerError("durable cost reservations would exceed $10")
-        runs.append({"run_id": run_id, **reservation})
-        with tempfile.NamedTemporaryFile(
-            "w", dir=path.parent, delete=False, encoding="utf-8"
-        ) as handle:
-            json.dump(state, handle, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-            temporary = Path(handle.name)
-        temporary.replace(path)
-        directory = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        payload = {"run_id": run_id, "previous_sha256": head, "reservation": reservation}
+        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        new_head = "sha256:" + hashlib.sha256(canonical).hexdigest()
+        runs.append({**payload, "record_sha256": new_head})
+        new_anchor = {
+            "schema": "graphforge-fly-cost-ledger-anchor/1",
+            "head_sha256": new_head,
+            "records": len(runs),
+            "reserved_cents": used_cents + amount_cents,
+        }
+        _atomic_durable_json(path, state)
+        _atomic_durable_json(anchor_path, new_anchor)
+
+
+def _atomic_durable_json(path: Path, value: Any) -> None:
+    with tempfile.NamedTemporaryFile(
+        "w", dir=path.parent, delete=False, encoding="utf-8"
+    ) as handle:
+        json.dump(value, handle, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+        temporary = Path(handle.name)
+    temporary.replace(path)
+    directory = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
 
 
 def _decimal(value: Any, label: str) -> Decimal:
@@ -505,6 +569,7 @@ def cleanup_owned(
         )
     if app_created:
         resources.append(("app", ["apps", "destroy", app, "--yes"], None))
+    failures = []
     for label, destroy, probe in resources:
         errors = []
         for attempt in range(CLEANUP_ATTEMPTS):
@@ -531,26 +596,43 @@ def cleanup_owned(
                 time.sleep(CLEANUP_POLL_SECONDS)
         else:
             detail = f" ({'; '.join(errors)})" if errors else ""
-            raise ControllerError(f"owned {label} remains after bounded cleanup{detail}")
+            failures.append(f"owned {label} remains after bounded cleanup{detail}")
+    try:
+        verify_absent(fly, app, machine_id, volume_id, app_created)
+    except (ControllerError, subprocess.SubprocessError, json.JSONDecodeError) as error:
+        failures.append(str(error))
+    if failures:
+        raise ControllerError("; ".join(failures))
 
 
 def verify_absent(
     fly: Flyctl, app: str, machine_id: str | None, volume_id: str | None, app_created: bool
 ) -> None:
-    if (
-        machine_id
-        and fly.run(["machine", "status", machine_id, "--app", app], check=False).returncode == 0
-    ):
-        raise ControllerError("owned Machine remains after cleanup")
-    if (
-        volume_id
-        and fly.run(["volumes", "show", volume_id, "--app", app], check=False).returncode == 0
-    ):
-        raise ControllerError("owned volume remains after cleanup")
+    failures = []
+    if machine_id:
+        try:
+            if (
+                fly.run(["machine", "status", machine_id, "--app", app], check=False).returncode
+                == 0
+            ):
+                failures.append("owned Machine remains after cleanup")
+        except subprocess.SubprocessError as error:
+            failures.append(f"Machine absence probe failed: {type(error).__name__}")
+    if volume_id:
+        try:
+            if fly.run(["volumes", "show", volume_id, "--app", app], check=False).returncode == 0:
+                failures.append("owned volume remains after cleanup")
+        except subprocess.SubprocessError as error:
+            failures.append(f"volume absence probe failed: {type(error).__name__}")
     if app_created:
-        apps = fly.json(["apps", "list"])
-        if any(item.get("Name") == app or item.get("name") == app for item in apps):
-            raise ControllerError("owned app remains after cleanup")
+        try:
+            apps = fly.json(["apps", "list"])
+            if any(item.get("Name") == app or item.get("name") == app for item in apps):
+                failures.append("owned app remains after cleanup")
+        except (subprocess.SubprocessError, json.JSONDecodeError) as error:
+            failures.append(f"app absence probe failed: {type(error).__name__}")
+    if failures:
+        raise ControllerError("; ".join(failures))
 
 
 def observed_phase(path: Path) -> str:
