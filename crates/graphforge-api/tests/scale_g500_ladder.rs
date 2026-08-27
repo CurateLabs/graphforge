@@ -17,7 +17,7 @@
 //! large rungs are opt-in via `make bench-g500-ladder`.
 
 use std::cmp::Reverse;
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashMap};
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
@@ -31,11 +31,13 @@ use arrow::array::{Array, FixedSizeBinaryArray, Int64Array, StringArray, UInt64A
 use arrow::record_batch::RecordBatch;
 use graphforge_api::{
     CONSTRUCTION_EDGE_SCHEMA, CONSTRUCTION_NODE_SCHEMA, CancellationToken,
-    GraphConstructionBudgets, GraphConstructionSession, GraphForge, OperationId, PortableSelection,
-    PortableV2ExportRequest, PortableV2ImportRequest, PortableV2Limits, PortableV2Mode,
-    PortableV2Output, PortableV2SelectionProfile, PortableVerifyRequest, verify_portable_v2,
+    GraphConstructionBudgets, GraphConstructionSession, GraphForge, IrLiteral, ObservedExecution,
+    OperationId, PortableSelection, PortableV2ExportRequest, PortableV2ImportRequest,
+    PortableV2Limits, PortableV2Mode, PortableV2Output, PortableV2SelectionProfile,
+    PortableVerifyRequest, verify_portable_v2,
 };
 use graphforge_core::uuid::Uuid;
+use graphforge_exec::demand;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -55,10 +57,107 @@ const EDGE_PUBLISH_ROWS: usize = 1_048_576;
 const ONE_HOP: &str = "MATCH (a)-[r]->(b) RETURN b.node_uuid AS id ORDER BY id LIMIT 1000";
 const TWO_HOP: &str =
     "MATCH (a)-[r1]->(b)-[r2]->(c) RETURN c.node_uuid AS id ORDER BY id LIMIT 1000";
+const ROOTED_ONE_HOP: &str =
+    "MATCH (a)-[r]->(b) WHERE a.node_uuid = $root RETURN b.node_uuid AS id ORDER BY id LIMIT 1000";
+const ROOTED_TWO_HOP: &str = "MATCH (a)-[r1]->(b)-[r2]->(c) WHERE a.node_uuid = $root RETURN c.node_uuid AS id ORDER BY id LIMIT 1000";
 const COUNT_EDGES: &str = "MATCH ()-[r:LINK]->() RETURN count(r) AS total";
 static JOURNAL_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static INGEST_SUBPHASE: AtomicU64 = AtomicU64::new(0);
 static INGEST_CHUNK_INDEX: AtomicU64 = AtomicU64::new(0);
+
+fn execute_rooted_observed(graph: &GraphForge, query: &str) -> ObservedExecution {
+    let params = HashMap::from([("root".to_owned(), IrLiteral::Uuid(*uuidv7(16).as_bytes()))]);
+    graph.execute_with_params_observed(query, &params)
+}
+
+fn query_operator_evidence(snapshot: &demand::DemandSnapshot, memory_budget_bytes: u64) -> Value {
+    let lifetime = |rss: &demand::RssLifetimeSnapshot| {
+        let working_set_bytes = rss.peak_bytes.saturating_sub(rss.before_bytes);
+        json!({
+            "before_bytes": rss.before_bytes,
+            "peak_bytes": rss.peak_bytes,
+            "current_bytes": rss.current_bytes,
+            "after_bytes": rss.after_bytes,
+            "working_set_bytes": working_set_bytes,
+            "budget_bytes": memory_budget_bytes,
+            "headroom_bytes": memory_budget_bytes.saturating_sub(working_set_bytes),
+            "within_budget": working_set_bytes <= memory_budget_bytes,
+        })
+    };
+    json!({
+        "expands": snapshot.hops.iter().map(|(edge_var, hop)| json!({
+            "edge_var": edge_var,
+            "input_batches": hop.input_batches,
+            "input_rows": hop.input_rows,
+            "candidates_generated": hop.candidates_generated,
+            "rows_emitted": hop.rows_emitted,
+            "edge_rows_scanned": hop.edge_rows_scanned,
+            "node_rows_scanned": hop.node_rows_scanned,
+        })).collect::<Vec<_>>(),
+        "sorts": snapshot.sorts.iter().map(|sort| json!({
+            "ordinal": sort.ordinal,
+            "top_k_rows": sort.fetch,
+            "output_rows": sort.output_rows,
+            "output_batches": sort.output_batches,
+            "spill_count": sort.spill_count,
+            "spilled_bytes": sort.spilled_bytes,
+            "memory_used_after": sort.memory_used_after,
+        })).collect::<Vec<_>>(),
+        "memory_reserved_before": snapshot.memory_reserved_before,
+        "memory_reserved_after": snapshot.memory_reserved_after,
+        "returned_batch_bytes": snapshot.returned_batch_bytes,
+        "operator_memory_quiescent": snapshot.memory_reserved_after
+            .saturating_sub(snapshot.memory_reserved_before) <= snapshot.returned_batch_bytes,
+        "operator_rss": {
+            "expand_by_hop": snapshot.operator_rss.expand_by_hop.iter().map(|(edge_var, rss)| {
+                let mut value = lifetime(rss);
+                value["edge_var"] = json!(edge_var);
+                value
+            }).collect::<Vec<_>>(),
+            "sort_exclusive": lifetime(&snapshot.operator_rss.sort_exclusive),
+        },
+    })
+}
+
+fn operator_evidence_passes(
+    snapshot: &demand::DemandSnapshot,
+    expected_hops: usize,
+    memory_budget_bytes: u64,
+    process_budget_bytes: u64,
+) -> bool {
+    snapshot.operator_rss.expand_by_hop.len() == expected_hops
+        && snapshot
+            .operator_rss
+            .expand_by_hop
+            .values()
+            .chain(std::iter::once(&snapshot.operator_rss.sort_exclusive))
+            .all(|rss| {
+                rss.peak_bytes <= process_budget_bytes
+                    && rss.peak_bytes.saturating_sub(rss.before_bytes) <= memory_budget_bytes
+                    && (rss.before_bytes > 0 || !cfg!(target_os = "linux"))
+                    && (rss.after_bytes > 0 || !cfg!(target_os = "linux"))
+            })
+        && snapshot
+            .memory_reserved_after
+            .saturating_sub(snapshot.memory_reserved_before)
+            <= snapshot.returned_batch_bytes
+}
+
+fn max_operator_working_set(steps: &[Value]) -> u64 {
+    steps
+        .iter()
+        .filter_map(|step| step["detail"]["operators"]["operator_rss"].as_object())
+        .flat_map(|rss| {
+            rss["expand_by_hop"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .chain(std::iter::once(&rss["sort_exclusive"]))
+        })
+        .filter_map(|lifetime| lifetime["working_set_bytes"].as_u64())
+        .max()
+        .unwrap_or(0)
+}
 
 // ---------------------------------------------------------------------------
 // Versioned profile (single source of truth for the ladder).
@@ -571,6 +670,11 @@ fn phase_journal_value(
         "active_steps": steps,
         "first_failing_phase": failure.map(|(phase, _)| phase),
         "error_class": failure.map(|(_, class)| class),
+        "interruption_semantics": {
+            "last_atomic_boundary": format!("{phase}:{state}"),
+            "typed_failure_recorded": failure.is_some(),
+            "running_without_typed_failure": state == "running" && failure.is_none(),
+        },
     })
 }
 
@@ -963,10 +1067,11 @@ fn run_rung(
         );
     }
 
-    // ---- reopen + recount ----
+    // ---- reopen + independently journaled count/query boundaries ----
     let mut node_count = 0u64;
     let mut edge_count = 0u64;
     let mut gsi = String::new();
+    let mut query_memory_budget_bytes = 0u64;
     if first_failing_phase.is_none() {
         persist_phase_journal(
             profile,
@@ -980,10 +1085,7 @@ fn run_rung(
         let reopen_started = Instant::now();
         let graph = GraphForge::new(Some(project.to_str().expect("utf8 project")))
             .expect("reopen GraphForge");
-        node_count = graph.node_count(NODE_LABEL).expect("node_count");
-        edge_count = scalar_count(&graph.execute(COUNT_EDGES).expect("edge count"));
         let reopen_s = reopen_started.elapsed().as_secs_f64();
-        gsi = gsi_undirected(node_count, edge_count);
         let reopen_violation = envelope_violation(&env, ladder_started, &project, &spill_dir);
         if let Some(class) = reopen_violation {
             first_failing_phase = Some("reopen");
@@ -994,7 +1096,8 @@ fn run_rung(
             "pass": reopen_violation.is_none(),
             "wall_time_s": reopen_s,
             "rss_peak_bytes": rss_value(),
-            "detail": { "node_count": node_count, "edge_count": edge_count, "gsi": gsi }
+            "process_memory": linux_process_memory(),
+            "detail": { "rss_after_bytes": linux_memory_bytes() }
         }));
         persist_phase_journal(
             profile,
@@ -1010,47 +1113,165 @@ fn run_rung(
             first_failing_phase.zip(error_class),
         );
 
-        // ---- deterministic LIMIT queries ----
+        // Every potentially large operation gets a durable boundary. The
+        // original unrooted ordered LIMIT probes remain the S20 contract;
+        // rooted probes are additional attribution evidence only.
         if first_failing_phase.is_none() {
-            let hop1_started = Instant::now();
             persist_phase_journal(
                 profile,
                 rung,
                 completed_rungs,
-                "query",
+                "node_count",
                 "running",
                 &steps,
                 None,
             );
-            let hop1 = graph.execute(ONE_HOP).expect("one-hop LIMIT");
-            let hop1_rows = row_count(&hop1);
-            steps.push(json!({
-                "id": "cypher_limit_1hop",
-                "pass": hop1_rows <= 1_000,
-                "wall_time_s": hop1_started.elapsed().as_secs_f64(),
-                "detail": { "rows": hop1_rows }
-            }));
-
-            let hop2_started = Instant::now();
-            let hop2 = graph.execute(TWO_HOP).expect("two-hop LIMIT");
-            let hop2_rows = row_count(&hop2);
-            steps.push(json!({
-                "id": "cypher_limit_2hop",
-                "pass": hop2_rows <= 1_000,
-                "wall_time_s": hop2_started.elapsed().as_secs_f64(),
-                "detail": { "rows": hop2_rows }
-            }));
-            let query_violation = envelope_violation(&env, ladder_started, &project, &spill_dir);
-            if let Some(class) = query_violation {
-                first_failing_phase = Some("query");
+            let started = Instant::now();
+            node_count = graph.node_count(NODE_LABEL).expect("node_count");
+            let expected = 1u64 << rung.scale;
+            let mut violation = envelope_violation(&env, ladder_started, &project, &spill_dir);
+            if node_count != expected {
+                violation = Some("result_mismatch");
+            }
+            if let Some(class) = violation {
+                first_failing_phase = Some("node_count");
                 error_class = Some(class);
+            }
+            steps.push(json!({
+                "id": "node_count", "pass": violation.is_none(),
+                "wall_time_s": started.elapsed().as_secs_f64(), "rss_peak_bytes": rss_value(),
+                "process_memory": linux_process_memory(),
+                "detail": { "node_count": node_count, "expected": expected }
+            }));
+            persist_phase_journal(
+                profile,
+                rung,
+                completed_rungs,
+                "node_count",
+                if violation.is_some() {
+                    "phase_failed"
+                } else {
+                    "phase_completed"
+                },
+                &steps,
+                first_failing_phase.zip(error_class),
+            );
+        }
+
+        if first_failing_phase.is_none() {
+            persist_phase_journal(
+                profile,
+                rung,
+                completed_rungs,
+                "edge_count",
+                "running",
+                &steps,
+                None,
+            );
+            let started = Instant::now();
+            let observed = graph.execute_observed(COUNT_EDGES);
+            edge_count = scalar_count(observed.result.as_ref().expect("edge count"));
+            gsi = gsi_undirected(node_count, edge_count);
+            let mut violation = envelope_violation(&env, ladder_started, &project, &spill_dir);
+            if edge_count != live_unique_edges {
+                violation = Some("result_mismatch");
+            }
+            if observed
+                .evidence
+                .memory_reserved_after
+                .saturating_sub(observed.evidence.memory_reserved_before)
+                > observed.evidence.returned_batch_bytes
+            {
+                violation = Some("memory_limit");
+            }
+            if let Some(class) = violation {
+                first_failing_phase = Some("edge_count");
+                error_class = Some(class);
+            }
+            steps.push(json!({
+                "id": "edge_count", "pass": violation.is_none(),
+                "wall_time_s": started.elapsed().as_secs_f64(), "rss_peak_bytes": rss_value(),
+                "process_memory": linux_process_memory(),
+                "detail": { "edge_count": edge_count, "expected": live_unique_edges, "gsi": gsi,
+                    "operators": query_operator_evidence(&observed.evidence, graph.resource_policy().memory_budget_bytes) }
+            }));
+            persist_phase_journal(
+                profile,
+                rung,
+                completed_rungs,
+                "edge_count",
+                if violation.is_some() {
+                    "phase_failed"
+                } else {
+                    "phase_completed"
+                },
+                &steps,
+                first_failing_phase.zip(error_class),
+            );
+        }
+
+        for (phase, query, rooted_query, expected_hops) in [
+            ("one_hop", ONE_HOP, ROOTED_ONE_HOP, 1usize),
+            ("two_hop", TWO_HOP, ROOTED_TWO_HOP, 2usize),
+        ] {
+            if first_failing_phase.is_some() {
+                break;
             }
             persist_phase_journal(
                 profile,
                 rung,
                 completed_rungs,
-                "query",
-                if query_violation.is_some() {
+                phase,
+                "running",
+                &steps,
+                None,
+            );
+            let started = Instant::now();
+            let observed = graph.execute_observed(query);
+            let rooted = execute_rooted_observed(&graph, rooted_query);
+            let memory_budget = graph.resource_policy().memory_budget_bytes;
+            query_memory_budget_bytes = memory_budget;
+            let failure = observed.result.as_ref().err().map(ToString::to_string);
+            let rooted_failure = rooted.result.as_ref().err().map(ToString::to_string);
+            let rows = observed.result.as_ref().map_or(0, row_count);
+            let rooted_rows = rooted.result.as_ref().map_or(0, row_count);
+            let mut violation = envelope_violation(&env, ladder_started, &project, &spill_dir);
+            if failure.is_some() || rooted_failure.is_some() {
+                violation = Some("execution_failure");
+            } else if rows > 1_000 || rooted_rows > 1_000 {
+                violation = Some("result_mismatch");
+            } else if !operator_evidence_passes(
+                &observed.evidence,
+                expected_hops,
+                memory_budget,
+                env.rss_bytes,
+            ) || !operator_evidence_passes(
+                &rooted.evidence,
+                expected_hops,
+                memory_budget,
+                env.rss_bytes,
+            ) {
+                violation = Some("memory_limit");
+            }
+            if let Some(class) = violation {
+                first_failing_phase = Some(phase);
+                error_class = Some(class);
+            }
+            steps.push(json!({
+                "id": phase, "pass": violation.is_none(),
+                "wall_time_s": started.elapsed().as_secs_f64(), "rss_peak_bytes": rss_value(),
+                "process_memory": linux_process_memory(),
+                "detail": { "probe": "unrooted_ordered_limit", "rows": rows,
+                    "execution_failure": failure, "operators": query_operator_evidence(&observed.evidence, memory_budget),
+                    "rooted_additional": { "rows": rooted_rows, "execution_failure": rooted_failure,
+                        "operators": query_operator_evidence(&rooted.evidence, memory_budget) } }
+            }));
+            persist_phase_journal(
+                profile,
+                rung,
+                completed_rungs,
+                phase,
+                if violation.is_some() {
                     "phase_failed"
                 } else {
                     "phase_completed"
@@ -1078,6 +1299,12 @@ fn run_rung(
         Some((bytes, source)) => (json!(bytes), json!(source)),
         None => (Value::Null, Value::Null),
     };
+    let max_operator_working_set_bytes = max_operator_working_set(&steps);
+    let lower_rungs_within_same_budget = completed_rungs.iter().all(|completed| {
+        completed["operator_memory_contract"]["max_working_set_bytes"]
+            .as_u64()
+            .is_none_or(|bytes| bytes <= query_memory_budget_bytes)
+    });
 
     let evidence = json!({
         "schema": EVIDENCE_SCHEMA,
@@ -1126,6 +1353,17 @@ fn run_rung(
         "teps": null,
         "notes": "Bounded-memory engineering green. NOT Official-track, NOT TEPS. Certification of one billion live edges is #745, not this profile.",
         "steps": steps,
+        "operator_memory_contract": {
+            "classification": "bounded_plateau",
+            "budget_source": "GraphForge.resource_policy.memory_budget_bytes",
+            "budget_bytes": query_memory_budget_bytes,
+            "max_working_set_bytes": max_operator_working_set_bytes,
+            "headroom_bytes": query_memory_budget_bytes.saturating_sub(max_operator_working_set_bytes),
+            "lower_rungs_within_same_budget": lower_rungs_within_same_budget,
+            "pass": query_memory_budget_bytes > 0
+                && max_operator_working_set_bytes <= query_memory_budget_bytes
+                && lower_rungs_within_same_budget,
+        },
     });
 
     RungOutcome { passed, evidence }
@@ -1758,6 +1996,35 @@ fn ci_rung_public_facade_engineering_green() {
         1u64 << ci_rung.scale
     );
     assert!(live > 0, "CI rung must persist a non-empty graph");
+    let steps = ev["steps"].as_array().expect("rung steps");
+    assert_eq!(
+        steps
+            .iter()
+            .map(|step| step["id"].as_str().expect("step id"))
+            .collect::<Vec<_>>(),
+        [
+            "generate",
+            "ingest",
+            "reopen",
+            "node_count",
+            "edge_count",
+            "one_hop",
+            "two_hop",
+        ]
+    );
+    for phase in ["one_hop", "two_hop"] {
+        let step = steps
+            .iter()
+            .find(|step| step["id"] == phase)
+            .expect("query phase");
+        assert_eq!(step["detail"]["probe"], "unrooted_ordered_limit");
+        assert!(step["detail"]["rooted_additional"].is_object());
+        assert_eq!(
+            step["detail"]["operators"]["operator_memory_quiescent"],
+            true
+        );
+    }
+    assert_eq!(ev["operator_memory_contract"]["pass"], true);
 }
 
 /// Provisioned full ladder (SCALE-20 → SCALE-26). Opt-in via
@@ -1851,6 +2118,10 @@ fn phase_journal_atomically_preserves_completed_rungs_and_active_state() {
     assert_eq!(journal["run_state"], "phase_failed");
     assert_eq!(journal["first_failing_phase"], "ingest");
     assert_eq!(journal["error_class"], "disk_limit");
+    assert_eq!(
+        journal["interruption_semantics"]["last_atomic_boundary"],
+        "ingest:phase_failed"
+    );
 
     let directory = TempDir::new().expect("journal directory");
     let path = directory.path().join("journal.json");
