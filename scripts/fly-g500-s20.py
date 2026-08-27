@@ -91,13 +91,22 @@ class Flyctl:
     def json(self, args: Sequence[str], *, timeout: float = 120) -> Any:
         return json.loads(self.run([*args, "--json"], timeout=timeout).stdout)
 
+    def auth_token(self, *, deadline: float | None = None) -> str:
+        cached = getattr(self, "_cached_auth_token", None)
+        if isinstance(cached, str) and cached:
+            return cached
+        timeout = _cleanup_timeout(deadline) if deadline is not None else 120
+        token = self.run(["auth", "token"], timeout=timeout).stdout.strip()
+        if not token:
+            raise ControllerError("Fly authentication token is unavailable")
+        self._cached_auth_token = token
+        return token
+
     def resource_absent(self, kind: str, app: str, resource_id: str, *, deadline: float) -> bool:
         """Return true only for an authenticated provider 404."""
         if kind not in {"machines", "volumes"}:
             raise ControllerError("unsupported provider absence probe")
-        token = self.run(["auth", "token"], timeout=_cleanup_timeout(deadline)).stdout.strip()
-        if not token:
-            raise ControllerError("Fly authentication token is unavailable during cleanup")
+        token = self.auth_token(deadline=deadline)
         request = urllib.request.Request(
             f"https://api.machines.dev/v1/apps/{app}/{kind}/{resource_id}",
             headers={"Authorization": f"Bearer {token}"},
@@ -665,25 +674,56 @@ def assert_volume(volume: Any, args: argparse.Namespace) -> str:
 def assert_machine(
     machine: dict[str, Any], args: argparse.Namespace, digest: str, volume_id: str
 ) -> None:
+    checks = machine_response_checks(machine, args, digest, volume_id)
+    if not checks["identity_match"]:
+        raise ControllerError("observed Machine region/image differs from the pinned plan")
+    if not checks["guest_match"]:
+        raise ControllerError("observed Machine resources differ from 2 CPU/4096 MB")
+    if not checks["disposable_match"]:
+        raise ControllerError("observed Machine is not disposable")
+    if not checks["private_match"]:
+        raise ControllerError("observed Machine exposes a service")
+    if not checks["mount_match"]:
+        raise ControllerError("observed Machine does not have the one /work volume")
+
+
+def machine_response_checks(
+    machine: dict[str, Any], args: argparse.Namespace, digest: str, volume_id: str
+) -> dict[str, bool]:
+    """Project the create response into a closed, identifier-free assertion record."""
     config = machine.get("config", {})
     guest = config.get("guest", {})
     image_ref = machine.get("image_ref", {})
-    if (
-        machine.get("region") != args.region
-        or image_ref.get("registry") != "registry.fly.io"
-        or image_ref.get("repository") != args.app_name
-        or image_ref.get("digest") != digest
-    ):
-        raise ControllerError("observed Machine region/image differs from the pinned plan")
-    if guest != {"cpu_kind": "performance", "cpus": CPUS, "memory_mb": MEMORY_MB}:
-        raise ControllerError("observed Machine resources differ from 2 CPU/4096 MB")
-    if config.get("auto_destroy") is not True or config.get("restart", {}).get("policy") != "no":
-        raise ControllerError("observed Machine is not disposable")
-    if config.get("services") not in (None, []):
-        raise ControllerError("observed Machine exposes a service")
     mounts = config.get("mounts", [])
-    if len(mounts) != 1 or mounts[0].get("path") != "/work" or mounts[0].get("volume") != volume_id:
-        raise ControllerError("observed Machine does not have the one /work volume")
+    return {
+        "identity_match": machine.get("region") == args.region
+        and image_ref.get("registry") == "registry.fly.io"
+        and image_ref.get("repository") == args.app_name
+        and image_ref.get("digest") == digest,
+        "guest_match": isinstance(guest, dict)
+        and guest.get("cpu_kind") == "performance"
+        and guest.get("cpus") == CPUS
+        and guest.get("memory_mb") == MEMORY_MB,
+        "disposable_match": config.get("auto_destroy") is True
+        and config.get("restart", {}).get("policy") == "no",
+        "private_match": config.get("services") in (None, []),
+        "mount_match": len(mounts) == 1
+        and mounts[0].get("path") == "/work"
+        and mounts[0].get("volume") == volume_id,
+    }
+
+
+def machine_assertion_code(checks: dict[str, bool]) -> str:
+    for key, code in (
+        ("identity_match", "machine_image_identity_mismatch"),
+        ("guest_match", "machine_resource_mismatch"),
+        ("disposable_match", "machine_disposable_policy_mismatch"),
+        ("private_match", "machine_public_service_mismatch"),
+        ("mount_match", "machine_volume_mount_mismatch"),
+    ):
+        if not checks[key]:
+            return code
+    return "machine_post_create_assertion_failed"
 
 
 def create_machine(
@@ -714,6 +754,31 @@ def create_machine(
         raise ControllerError("Fly Machines API connection failed") from None
 
 
+def get_machine(args: argparse.Namespace, fly: Flyctl, machine_id: str) -> dict[str, Any]:
+    """Fetch fresh provider state; never certify invariants from the POST echo."""
+    token = (
+        fly.auth_token()
+        if hasattr(fly, "auth_token")
+        else fly.run(["auth", "token"]).stdout.strip()
+    )
+    if not token:
+        raise ControllerError("Fly authentication token is unavailable")
+    request = urllib.request.Request(
+        f"https://api.machines.dev/v1/apps/{args.app_name}/machines/{machine_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            value = json.load(response)
+    except urllib.error.HTTPError as error:
+        raise ControllerError(f"Fly Machine GET returned HTTP {error.code}") from None
+    except urllib.error.URLError:
+        raise ControllerError("Fly Machine GET connection failed") from None
+    if not isinstance(value, dict) or value.get("id") != machine_id:
+        raise ControllerError("Fly Machine GET did not return the observed Machine")
+    return value
+
+
 def cleanup_owned(
     fly: Flyctl, app: str, machine_id: str | None, volume_id: str | None, app_created: bool
 ) -> None:
@@ -738,7 +803,7 @@ def cleanup_owned(
         )
     if app_created:
         resources.append(("app", ["apps", "destroy", app, "--yes"], None))
-    failures = []
+    attempt_failures = []
     for resource_index, (label, destroy, probe) in enumerate(resources):
         errors = []
         # Divide the remaining teardown window so one stuck child cannot starve
@@ -749,12 +814,17 @@ def cleanup_owned(
             0, (teardown_end - time.monotonic()) / remaining_resources
         )
         for attempt in range(CLEANUP_ATTEMPTS):
-            try:
-                result = fly.run(destroy, check=False, timeout=_cleanup_timeout(slice_end))
-                if result.returncode not in (0, 1):
-                    errors.append(f"destroy rc={result.returncode}")
-            except (subprocess.SubprocessError, ControllerError) as error:
-                errors.append(type(error).__name__)
+            if attempt == 0:
+                try:
+                    result = fly.run(
+                        destroy,
+                        check=False,
+                        timeout=min(5.0, _cleanup_timeout(slice_end)),
+                    )
+                    if result.returncode not in (0, 1):
+                        errors.append(f"destroy rc={result.returncode}")
+                except (subprocess.SubprocessError, ControllerError) as error:
+                    errors.append(type(error).__name__)
             absent = False
             try:
                 if probe is not None:
@@ -772,21 +842,33 @@ def cleanup_owned(
                 errors.append(type(error).__name__)
             if absent:
                 break
+            if attempt > 0:
+                try:
+                    result = fly.run(
+                        destroy,
+                        check=False,
+                        timeout=min(5.0, _cleanup_timeout(slice_end)),
+                    )
+                    if result.returncode not in (0, 1):
+                        errors.append(f"destroy rc={result.returncode}")
+                except (subprocess.SubprocessError, ControllerError) as error:
+                    errors.append(type(error).__name__)
             if attempt + 1 < CLEANUP_ATTEMPTS and time.monotonic() < slice_end:
                 time.sleep(min(CLEANUP_POLL_SECONDS, max(0, slice_end - time.monotonic())))
             else:
                 detail = f" ({'; '.join(errors)})" if errors else ""
-                failures.append(f"owned {label} remains after bounded cleanup{detail}")
+                attempt_failures.append(
+                    f"owned {label} was not absent after bounded cleanup{detail}"
+                )
                 break
         else:
             detail = f" ({'; '.join(errors)})" if errors else ""
-            failures.append(f"owned {label} remains after bounded cleanup{detail}")
+            attempt_failures.append(f"owned {label} was not absent after bounded cleanup{detail}")
     try:
         verify_absent(fly, app, machine_id, volume_id, app_created, deadline=deadline)
     except (ControllerError, subprocess.SubprocessError, json.JSONDecodeError) as error:
-        failures.append(str(error))
-    if failures:
-        raise ControllerError("; ".join(failures))
+        detail = "; ".join([*attempt_failures, str(error)])
+        raise ControllerError(detail) from error
 
 
 def verify_absent(
@@ -892,6 +974,26 @@ def fetch(
     )
 
 
+def persist_controller_failure(
+    args: argparse.Namespace,
+    code: str,
+    *,
+    observed: dict[str, Any] | None = None,
+) -> None:
+    """Persist one sanitized controller-side first failure without overwriting it."""
+    if args.diagnostic_out.exists():
+        return
+    diagnostic: dict[str, Any] = {
+        "schema": "graphforge-fly-g500-s20-diagnostic/1",
+        "status": "failure",
+        "phase": "runner",
+        "code": code,
+    }
+    if observed is not None:
+        diagnostic["observed_machine"] = observed
+    args.diagnostic_out.write_text(json.dumps(diagnostic, indent=2, sort_keys=True) + "\n")
+
+
 def execute(
     args: argparse.Namespace,
     fly: Flyctl,
@@ -900,6 +1002,7 @@ def execute(
 ) -> None:
     app_created = False
     machine_id = volume_id = None
+    primary_error: Exception | None = None
     try:
         if local_image_id is None or local_snapshot is None:
             local_image_id, local_snapshot = inspect_local_image(args.image, args.expected_sha)
@@ -939,9 +1042,19 @@ def execute(
             ]
         )
         volume_id = assert_volume(volume, args)
-        machine = create_machine(args, fly, volume_id, image, digest, source_snapshot)
-        machine_id = machine["id"]
-        assert_machine(machine, args, digest, volume_id)
+        created_machine = create_machine(args, fly, volume_id, image, digest, source_snapshot)
+        machine_id = created_machine["id"]
+        machine = get_machine(args, fly, machine_id)
+        checks = machine_response_checks(machine, args, digest, volume_id)
+        try:
+            assert_machine(machine, args, digest, volume_id)
+        except ControllerError:
+            persist_controller_failure(
+                args,
+                machine_assertion_code(checks),
+                observed=checks,
+            )
+            raise
         deadline = time.monotonic() + args.timeout_s
         with tempfile.TemporaryDirectory(prefix="graphforge-s20-") as directory:
             local = Path(directory) / "evidence.json"
@@ -1008,8 +1121,20 @@ def execute(
                 ],
                 check=False,
             )
-    finally:
+    except Exception as error:
+        primary_error = error
+        persist_controller_failure(args, f"controller_{type(error).__name__.lower()}")
+    cleanup_error: Exception | None = None
+    try:
         cleanup_owned(fly, args.app_name, machine_id, volume_id, app_created)
+    except Exception as error:
+        cleanup_error = error
+    if primary_error is not None:
+        if cleanup_error is not None:
+            primary_error.add_note(f"cleanup also failed: {cleanup_error}")
+        raise primary_error
+    if cleanup_error is not None:
+        raise cleanup_error
 
 
 def parser() -> argparse.ArgumentParser:

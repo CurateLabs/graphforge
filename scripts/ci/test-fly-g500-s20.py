@@ -675,6 +675,121 @@ def test_reconciled_owned_app_is_cleaned_before_error_escapes(monkeypatch, tmp_p
     assert observed == [(run.app_name, None, None, True)]
 
 
+def test_primary_failure_and_typed_diagnostic_survive_cleanup_failure(monkeypatch, tmp_path):
+    class Fly:
+        def json(self, command, **_kwargs):
+            assert command == ["apps", "list"]
+            return []
+
+    monkeypatch.setattr(
+        controller, "fetch_current_pricing", lambda _region: (Decimal("0"), Decimal("0"))
+    )
+    monkeypatch.setattr(controller, "reserve_budget", lambda *_args: None)
+    monkeypatch.setattr(
+        controller,
+        "create_owned_app",
+        lambda *_args: (_ for _ in ()).throw(controller.ControllerError("primary create failure")),
+    )
+    monkeypatch.setattr(
+        controller,
+        "cleanup_owned",
+        lambda *_args: (_ for _ in ()).throw(controller.ControllerError("cleanup failure")),
+    )
+    run = args(tmp_path, execute=True, confirm_disposable=True)
+    with pytest.raises(controller.ControllerError, match="primary create failure") as captured:
+        controller.execute(run, Fly(), "sha256:" + "f" * 64, "c" * 64)
+    assert any("cleanup also failed" in note for note in captured.value.__notes__)
+    assert json.loads(run.diagnostic_out.read_text()) == {
+        "schema": "graphforge-fly-g500-s20-diagnostic/1",
+        "status": "failure",
+        "phase": "runner",
+        "code": "controller_controllererror",
+    }
+
+
+def test_machine_mismatch_diagnostic_is_closed_boolean_bitmap(tmp_path):
+    run = args(tmp_path)
+    digest = "sha256:" + "d" * 64
+    machine = {
+        "region": "wrong",
+        "image_ref": {"registry": "raw-provider-string", "repository": "wrong", "digest": "wrong"},
+        "config": {},
+    }
+    checks = controller.machine_response_checks(machine, run, digest, "volume")
+    controller.persist_controller_failure(
+        run, controller.machine_assertion_code(checks), observed=checks
+    )
+    diagnostic = json.loads(run.diagnostic_out.read_text())
+    assert diagnostic["code"] == "machine_image_identity_mismatch"
+    assert set(diagnostic["observed_machine"]) == {
+        "identity_match",
+        "guest_match",
+        "disposable_match",
+        "private_match",
+        "mount_match",
+    }
+    assert set(diagnostic["observed_machine"].values()) <= {True, False}
+    assert "raw-provider-string" not in run.diagnostic_out.read_text()
+
+
+def test_machine_invariants_use_fresh_get_not_create_echo(monkeypatch, tmp_path):
+    machine_id = "machine-observed"
+    fresh = {"id": machine_id, "region": "ord"}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(fresh).encode()
+
+    class Fly:
+        def auth_token(self):
+            return "token"
+
+    observed = []
+
+    def urlopen(request, **_kwargs):
+        observed.append(request.full_url)
+        return Response()
+
+    monkeypatch.setattr(controller.urllib.request, "urlopen", urlopen)
+    run = args(tmp_path, app_name="gf-s20-owned")
+    assert controller.get_machine(run, Fly(), machine_id) == fresh
+    assert observed == ["https://api.machines.dev/v1/apps/gf-s20-owned/machines/machine-observed"]
+
+
+def test_machine_guest_allows_harmless_provider_additive_fields(tmp_path):
+    run = args(tmp_path)
+    digest = "sha256:" + "d" * 64
+    machine = {
+        "region": run.region,
+        "image_ref": {
+            "registry": "registry.fly.io",
+            "repository": run.app_name,
+            "digest": digest,
+        },
+        "config": {
+            "guest": {
+                "cpu_kind": "performance",
+                "cpus": 2,
+                "memory_mb": 4096,
+                "provider_added_metadata": "ignored",
+            },
+            "auto_destroy": True,
+            "restart": {"policy": "no", "provider_added_metadata": True},
+            "services": [],
+            "mounts": [{"path": "/work", "volume": "volume", "name": "provider-added"}],
+        },
+    }
+    checks = controller.machine_response_checks(machine, run, digest, "volume")
+    assert all(checks.values())
+    controller.assert_machine(machine, run, digest, "volume")
+
+
 def test_inner_runtime_timeout_leaves_bounded_result_handoff():
     assert controller.RESULT_HANDOFF_SECONDS == 300
     assert controller.RUN_SECONDS - controller.RESULT_HANDOFF_SECONDS == 14_100
@@ -1063,6 +1178,7 @@ def test_terminal_failure_is_persisted_promptly_and_still_verified_cleaned(tmp_p
         },
     }
     monkeypatch.setattr(controller, "create_machine", lambda *_args: machine)
+    monkeypatch.setattr(controller, "get_machine", lambda *_args: machine)
     monkeypatch.setattr(
         controller,
         "publish_to_fly_registry",
