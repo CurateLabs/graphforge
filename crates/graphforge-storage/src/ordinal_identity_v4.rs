@@ -356,12 +356,6 @@ impl V4OrdinalIdentityHandle {
     ) -> Result<V4OrdinalIdentityOpen, V4OrdinalIdentityError> {
         validate_limits(limits)?;
         let root = StableDirectory::open(&project_dir.join(INDEX_DIR)).map_err(io_error)?;
-        let coordination_file = root.open_child_file(LOCK_NAME.as_ref()).map_err(io_error)?;
-        if file_link_count(&coordination_file).map_err(io_error)? != 1 {
-            return Err(V4OrdinalIdentityError::Authentication);
-        }
-        <File as fs4::FileExt>::lock_shared(&coordination_file).map_err(io_error)?;
-        let coordination_identity = file_identity(&coordination_file).map_err(io_error)?;
         let mut manifest_file = root
             .open_child_file(MANIFEST_NAME.as_ref())
             .map_err(io_error)?;
@@ -374,6 +368,12 @@ impl V4OrdinalIdentityHandle {
         let Some(manifest) = parse_manifest(&body, authority.topology_generation)? else {
             return Ok(V4OrdinalIdentityOpen::RebuildRequired { found_version: 3 });
         };
+        let coordination_file = root.open_child_file(LOCK_NAME.as_ref()).map_err(io_error)?;
+        if file_link_count(&coordination_file).map_err(io_error)? != 1 {
+            return Err(V4OrdinalIdentityError::Authentication);
+        }
+        <File as fs4::FileExt>::lock_shared(&coordination_file).map_err(io_error)?;
+        let coordination_identity = file_identity(&coordination_file).map_err(io_error)?;
         validate_manifest(&manifest, authority.topology_generation)?;
 
         let mut admission =
@@ -838,11 +838,10 @@ fn admit_ordinal_artifact(
     let mut offset = 0_u64;
     let mut ordinal = 0_u64;
     loop {
-        let read = artifact.file.read(&mut buffer).map_err(io_error)?;
+        let read = read_fill_or_eof(&mut artifact.file, &mut buffer, metrics)?;
         if read == 0 {
             break;
         }
-        record_admission_read(metrics, read, buffer.len());
         whole.update(&buffer[..read]);
         if !read.is_multiple_of(UUID_WIDTH_USIZE) {
             return Err(V4OrdinalIdentityError::Authentication);
@@ -948,11 +947,10 @@ fn admit_tombstone_artifact(
     let mut offset = 0_u64;
     let mut declared = run.blocks.iter();
     loop {
-        let read = artifact.file.read(&mut buffer).map_err(io_error)?;
+        let read = read_fill_or_eof(&mut artifact.file, &mut buffer, metrics)?;
         if read == 0 {
             break;
         }
-        record_admission_read(metrics, read, buffer.len());
         whole.update(&buffer[..read]);
         if !read.is_multiple_of(TOMBSTONE_WIDTH_USIZE) {
             return Err(V4OrdinalIdentityError::Authentication);
@@ -1115,6 +1113,23 @@ fn record_admission_read(metrics: &mut V4OrdinalAdmissionMetrics, read: usize, c
     );
 }
 
+fn read_fill_or_eof<R: Read>(
+    reader: &mut R,
+    buffer: &mut [u8],
+    metrics: &mut V4OrdinalAdmissionMetrics,
+) -> Result<usize, V4OrdinalIdentityError> {
+    let mut filled = 0;
+    while filled < buffer.len() {
+        let read = reader.read(&mut buffer[filled..]).map_err(io_error)?;
+        if read == 0 {
+            break;
+        }
+        filled += read;
+        record_admission_read(metrics, read, buffer.len());
+    }
+    Ok(filled)
+}
+
 fn finish_admission(
     artifact: &mut OpenArtifact,
     digest: Sha256,
@@ -1274,9 +1289,45 @@ fn io_error(error: impl std::fmt::Display) -> V4OrdinalIdentityError {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::io::Cursor;
     use std::process::Command;
 
     use super::*;
+
+    struct ShortReader {
+        inner: Cursor<Vec<u8>>,
+        maximum: usize,
+    }
+
+    impl Read for ShortReader {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let available = buffer.len().min(self.maximum);
+            self.inner.read(&mut buffer[..available])
+        }
+    }
+
+    #[test]
+    fn block_fill_preserves_ordinal_and_tombstone_bytes_across_short_reads() {
+        for (width, records) in [(UUID_WIDTH_USIZE, 7_usize), (TOMBSTONE_WIDTH_USIZE, 11)] {
+            let expected = (0..width * records)
+                .map(|value| u8::try_from(value % 251).unwrap())
+                .collect::<Vec<_>>();
+            let mut reader = ShortReader {
+                inner: Cursor::new(expected.clone()),
+                maximum: 3,
+            };
+            let mut actual = vec![0_u8; expected.len()];
+            let mut metrics = V4OrdinalAdmissionMetrics::default();
+            assert_eq!(
+                read_fill_or_eof(&mut reader, &mut actual, &mut metrics).unwrap(),
+                expected.len()
+            );
+            assert_eq!(actual, expected);
+            assert_eq!(Sha256::digest(&actual), Sha256::digest(&expected));
+            assert!(metrics.sequential_read_calls > 1);
+            assert_eq!(metrics.authenticated_bytes, expected.len() as u64);
+        }
+    }
 
     struct Fixture {
         root: tempfile::TempDir,
@@ -1509,6 +1560,7 @@ mod tests {
             }]
         });
         fs::write(&manifest_path, serde_json::to_vec(&v3).unwrap()).unwrap();
+        fs::remove_file(fixture.root.path().join(INDEX_DIR).join(LOCK_NAME)).unwrap();
         assert!(matches!(
             V4OrdinalIdentityHandle::open(
                 fixture.root.path(),
@@ -1518,6 +1570,7 @@ mod tests {
             .unwrap(),
             V4OrdinalIdentityOpen::RebuildRequired { found_version: 3 }
         ));
+        fs::write(fixture.root.path().join(INDEX_DIR).join(LOCK_NAME), []).unwrap();
 
         let mut mixed_v3 = v3.clone();
         mixed_v3["ordinal_ranges"] = serde_json::json!([]);
