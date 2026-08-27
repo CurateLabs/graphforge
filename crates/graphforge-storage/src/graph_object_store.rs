@@ -130,6 +130,12 @@ struct CasRoot {
     lifecycle_identity: graphforge_filesystem::FileIdentity,
 }
 
+struct TemporaryObject {
+    name: std::ffi::OsString,
+    file: File,
+    identity: graphforge_filesystem::FileIdentity,
+}
+
 struct ReadOnlyCasRoot {
     diagnostic_root: PathBuf,
     project: StableDirectory,
@@ -534,12 +540,12 @@ pub fn graph_object_publication_is_live(root: &Path) -> Result<bool, GfError> {
     Ok(live)
 }
 
-/// Exact physical work for one object installation.
+/// Exact application-observed work for one object installation.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GraphObjectInstallEvidence {
     /// Source payload bytes read and hashed.
     pub bytes_hashed: u64,
-    /// New physical bytes installed into the object store.
+    /// Logical payload bytes newly installed into the object store.
     pub bytes_installed: u64,
     /// Whether an already installed exact object satisfied the request.
     pub reused_existing: bool,
@@ -552,7 +558,7 @@ pub struct GraphFilesMigrationEvidence {
     pub payload_objects: u64,
     /// Source payload bytes hashed.
     pub payload_bytes_hashed: u64,
-    /// New physical payload and segment bytes installed.
+    /// Logical payload and segment bytes newly installed.
     pub bytes_installed: u64,
 }
 
@@ -565,8 +571,18 @@ pub struct GraphFilesAppendEvidence {
     pub prior_entries_examined: u64,
     /// New/replaced payload bytes hashed, including verification passes.
     pub payload_bytes_hashed: u64,
-    /// New physical object bytes installed.
+    /// Logical object bytes newly installed.
     pub bytes_installed: u64,
+}
+
+/// A graph file whose content identity was established by an upstream durable
+/// writer. Publication still authenticates these bytes while installing them;
+/// this capability only removes a redundant standalone pre-hash pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AuthenticatedGraphFile {
+    pub(crate) relative_path: PathBuf,
+    pub(crate) byte_length: u64,
+    pub(crate) content_sha256: String,
 }
 
 /// Storage-owned, root-bound state for a sequence of path-copy publications.
@@ -869,6 +885,41 @@ pub fn append_graph_files_v2(
     sealed_paths: &[PathBuf],
     tombstones: &[String],
 ) -> Result<(GraphFilesRootV2, GraphFilesAppendEvidence), GfError> {
+    append_graph_files_v2_inner(lease, workspace, state, sealed_paths, None, tombstones)
+}
+
+/// Publish writer-authenticated files with one copy-and-hash authentication
+/// pass. The expected digest is never trusted without that install-time pass.
+pub(crate) fn append_authenticated_graph_files_v2(
+    lease: &GraphObjectPublicationLease,
+    workspace: &Path,
+    state: &mut GraphManifestState,
+    sealed_files: &[AuthenticatedGraphFile],
+    tombstones: &[String],
+) -> Result<(GraphFilesRootV2, GraphFilesAppendEvidence), GfError> {
+    let paths = sealed_files
+        .iter()
+        .map(|file| file.relative_path.clone())
+        .collect::<Vec<_>>();
+    append_graph_files_v2_inner(
+        lease,
+        workspace,
+        state,
+        &paths,
+        Some(sealed_files),
+        tombstones,
+    )
+}
+
+#[allow(clippy::too_many_lines)]
+fn append_graph_files_v2_inner(
+    lease: &GraphObjectPublicationLease,
+    workspace: &Path,
+    state: &mut GraphManifestState,
+    sealed_paths: &[PathBuf],
+    authenticated: Option<&[AuthenticatedGraphFile]>,
+    tombstones: &[String],
+) -> Result<(GraphFilesRootV2, GraphFilesAppendEvidence), GfError> {
     validate_publication_identity(lease)?;
     if state
         .project_identity
@@ -904,20 +955,34 @@ pub fn append_graph_files_v2(
         .root
         .as_ref()
         .map_or(0, |root| root.logical_byte_length);
-    for relative in sealed_paths {
+    for (index, relative) in sealed_paths.iter().enumerate() {
         let source = workspace.join(relative);
-        let metadata = fs::symlink_metadata(&source)
-            .map_err(|error| storage("inspect sealed graph file", &source, error))?;
-        if !metadata.is_file() || metadata.file_type().is_symlink() {
-            return Err(validation("sealed graph path is not a regular file"));
-        }
-        let digest = hash_regular_file(&source)?;
-        let digest = hex_digest(digest);
+        let (digest, expected_length, prehashed_bytes) = if let Some(files) = authenticated {
+            let expected = files
+                .get(index)
+                .ok_or_else(|| validation("authenticated graph inventory is incomplete"))?;
+            if expected.relative_path != *relative {
+                return Err(validation("authenticated graph file metadata changed"));
+            }
+            validate_digest(&expected.content_sha256)?;
+            (expected.content_sha256.clone(), expected.byte_length, 0)
+        } else {
+            let metadata = fs::symlink_metadata(&source)
+                .map_err(|error| storage("inspect sealed graph file", &source, error))?;
+            if !metadata.is_file() || metadata.file_type().is_symlink() {
+                return Err(validation("sealed graph path is not a regular file"));
+            }
+            (
+                hex_digest(hash_regular_file(&source)?),
+                metadata.len(),
+                metadata.len(),
+            )
+        };
         let installed =
-            install_graph_object_file_with_lease(lease, &source, &digest, metadata.len())?;
+            install_graph_object_file_with_lease(lease, &source, &digest, expected_length)?;
         evidence.payload_bytes_hashed = evidence
             .payload_bytes_hashed
-            .saturating_add(metadata.len())
+            .saturating_add(prehashed_bytes)
             .saturating_add(installed.bytes_hashed);
         evidence.bytes_installed = evidence
             .bytes_installed
@@ -928,7 +993,7 @@ pub fn append_graph_files_v2(
             .to_owned();
         let entry = crate::GraphFileEntry {
             relative_path: relative_path.clone(),
-            byte_length: metadata.len(),
+            byte_length: expected_length,
             content_sha256: digest,
             role: crate::graph_files::infer_role(relative),
         };
@@ -948,6 +1013,10 @@ pub fn append_graph_files_v2(
             logical_byte_length = logical_byte_length.saturating_sub(previous.byte_length);
         }
     }
+    // All payload objects are authenticated before any manifest node can
+    // reference them. A returned error here therefore leaves only unreferenced,
+    // retry-safe CAS state.
+    returned_error_boundary("append:before-manifest-reference")?;
     evidence.changed_entries_examined =
         u64::try_from(additions.len().saturating_add(tombstones.len())).unwrap_or(u64::MAX);
     let mut root_digest = match state.root.as_ref() {
@@ -1346,7 +1415,7 @@ fn install_graph_object_bytes_with_lease(
 ) -> Result<(String, GraphObjectInstallEvidence), GfError> {
     let digest = hex_digest(Sha256::digest(bytes).into());
     let expected_length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-    install_object(&lease.cas, &digest, expected_length, |file| {
+    install_object(&lease.cas, &digest, expected_length, false, |file| {
         file.write_all(bytes).map_err(|error| {
             storage(
                 "write temporary graph object",
@@ -1361,7 +1430,9 @@ fn install_graph_object_bytes_with_lease(
                 error,
             )
         })?;
-        Ok(expected_length)
+        // The source is already resident memory; only the mandatory temporary
+        // file verification below is an application-observed payload read.
+        Ok(0)
     })
     .map(|evidence| (digest, evidence))
 }
@@ -1392,43 +1463,49 @@ fn install_graph_object_file_with_lease(
             "graph object source is not the declared regular file",
         ));
     }
-    install_object(&lease.cas, expected_digest, expected_length, |output| {
-        let mut input = File::open(source)
-            .map_err(|error| storage("open graph object source", source, error))?;
-        let mut hasher = Sha256::new();
-        let mut total = 0_u64;
-        let mut buffer = vec![0_u8; BUFFER_BYTES];
-        loop {
-            let read = input
-                .read(&mut buffer)
-                .map_err(|error| storage("read graph object source", source, error))?;
-            if read == 0 {
-                break;
+    install_object(
+        &lease.cas,
+        expected_digest,
+        expected_length,
+        true,
+        |output| {
+            let mut input = File::open(source)
+                .map_err(|error| storage("open graph object source", source, error))?;
+            let mut hasher = Sha256::new();
+            let mut total = 0_u64;
+            let mut buffer = vec![0_u8; BUFFER_BYTES];
+            loop {
+                let read = input
+                    .read(&mut buffer)
+                    .map_err(|error| storage("read graph object source", source, error))?;
+                if read == 0 {
+                    break;
+                }
+                output.write_all(&buffer[..read]).map_err(|error| {
+                    storage(
+                        "write temporary graph object",
+                        &lease.cas.diagnostic_root,
+                        error,
+                    )
+                })?;
+                hasher.update(&buffer[..read]);
+                total = total.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
             }
-            output.write_all(&buffer[..read]).map_err(|error| {
+            if total != expected_length || hex_digest(hasher.finalize().into()) != expected_digest {
+                return Err(validation(
+                    "graph object source digest or length changed during install",
+                ));
+            }
+            output.sync_all().map_err(|error| {
                 storage(
-                    "write temporary graph object",
+                    "fsync temporary graph object",
                     &lease.cas.diagnostic_root,
                     error,
                 )
             })?;
-            hasher.update(&buffer[..read]);
-            total = total.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
-        }
-        if total != expected_length || hex_digest(hasher.finalize().into()) != expected_digest {
-            return Err(validation(
-                "graph object source digest or length changed during install",
-            ));
-        }
-        output.sync_all().map_err(|error| {
-            storage(
-                "fsync temporary graph object",
-                &lease.cas.diagnostic_root,
-                error,
-            )
-        })?;
-        Ok(total)
-    })
+            Ok(total)
+        },
+    )
 }
 
 /// Read and cryptographically verify an immutable object.
@@ -1503,14 +1580,6 @@ fn materialize_from_cas(
     let source = bucket
         .open_child_file(source_name)
         .map_err(|error| storage("open materialization source", &cas.diagnostic_root, error))?;
-    verify_file(
-        source.try_clone().map_err(|error| {
-            storage("clone materialization source", &cas.diagnostic_root, error)
-        })?,
-        &entry.content_sha256,
-        entry.byte_length,
-        &cas.diagnostic_root,
-    )?;
     let source_identity = graphforge_filesystem::file_identity(&source).map_err(|error| {
         storage(
             "identify materialization source",
@@ -2173,6 +2242,7 @@ fn install_object<F>(
     cas: &CasRoot,
     digest: &str,
     expected_length: u64,
+    writer_authenticated: bool,
     write_temporary: F,
 ) -> Result<GraphObjectInstallEvidence, GfError>
 where
@@ -2184,6 +2254,7 @@ where
     if let Ok(file) = bucket.open_child_file(destination_name) {
         verify_and_seal_graph_object(&file, digest, expected_length, &cas.diagnostic_root)?;
         return Ok(GraphObjectInstallEvidence {
+            bytes_hashed: expected_length,
             reused_existing: true,
             ..GraphObjectInstallEvidence::default()
         });
@@ -2207,23 +2278,71 @@ where
         )
     })?;
     let bytes_hashed = write_temporary(&mut temporary)?;
-    temporary
-        .rewind()
-        .map_err(|error| storage("rewind temporary graph object", &cas.diagnostic_root, error))?;
-    verify_file(
-        temporary.try_clone().map_err(|error| {
-            storage("clone temporary graph object", &cas.diagnostic_root, error)
-        })?,
+    if !writer_authenticated {
+        temporary.rewind().map_err(|error| {
+            storage("rewind temporary graph object", &cas.diagnostic_root, error)
+        })?;
+        verify_file(
+            temporary.try_clone().map_err(|error| {
+                storage("clone temporary graph object", &cas.diagnostic_root, error)
+            })?,
+            digest,
+            expected_length,
+            &cas.diagnostic_root,
+        )?;
+    }
+    let installed = finalize_temporary_object(
+        cas,
+        &bucket,
+        TemporaryObject {
+            name: temporary_name,
+            file: temporary,
+            identity: temporary_identity,
+        },
         digest,
         expected_length,
-        &cas.diagnostic_root,
     )?;
-    seal_graph_object(&temporary, &cas.diagnostic_root)?;
+    Ok(GraphObjectInstallEvidence {
+        bytes_hashed: bytes_hashed
+            .saturating_add(if writer_authenticated {
+                0
+            } else {
+                expected_length
+            })
+            .saturating_add(if installed { 0 } else { expected_length }),
+        bytes_installed: if installed { expected_length } else { 0 },
+        reused_existing: !installed,
+    })
+}
+
+fn finalize_temporary_object(
+    cas: &CasRoot,
+    bucket: &StableDirectory,
+    temporary: TemporaryObject,
+    digest: &str,
+    expected_length: u64,
+) -> Result<bool, GfError> {
+    let destination_name = std::ffi::OsStr::new(&digest[2..]);
+    seal_graph_object(&temporary.file, &cas.diagnostic_root)?;
+    let sealed_metadata = temporary
+        .file
+        .metadata()
+        .map_err(|error| storage("reinspect fresh graph object", &cas.diagnostic_root, error))?;
+    if graphforge_filesystem::file_identity(&temporary.file)
+        .map_err(|error| storage("reidentify fresh graph object", &cas.diagnostic_root, error))?
+        != temporary.identity
+        || !sealed_metadata.is_file()
+        || sealed_metadata.len() != expected_length
+        || !sealed_metadata.permissions().readonly()
+    {
+        return Err(validation("fresh graph object post-hash authority changed"));
+    }
+    returned_error_boundary("install:temp-sealed")?;
     let installed = if let Ok((_installed, _identity)) = cas.tmp.link_child_into(
-        &temporary_name,
-        &temporary,
-        temporary_identity,
-        &bucket,
+        &temporary.name,
+        &temporary.file,
+        temporary.identity,
+        bucket,
         destination_name,
     ) {
         true
@@ -2238,20 +2357,10 @@ where
         verify_and_seal_graph_object(&existing, digest, expected_length, &cas.diagnostic_root)?;
         false
     };
-    // Windows cannot open a deletion handle while the original temporary
-    // handle remains open without delete sharing. Publication and concurrent
-    // winner authentication are complete, so release it before exact-identity
-    // cleanup; the installed hard link remains sealed.
-    drop(temporary);
-    cas.tmp
-        .unlink_child_if_identity(&temporary_name, temporary_identity)
-        .map_err(|error| {
-            storage(
-                "remove stable temporary graph object",
-                &cas.diagnostic_root,
-                error,
-            )
-        })?;
+    returned_error_boundary("install:final-linked")?;
+    // The destination namespace must be durable before its temporary alias is
+    // removed; after a crash, retry can therefore authenticate the final CAS
+    // name without depending on the temporary namespace.
     bucket.sync().map_err(|error| {
         storage(
             "sync stable graph object bucket",
@@ -2259,11 +2368,30 @@ where
             error,
         )
     })?;
-    Ok(GraphObjectInstallEvidence {
-        bytes_hashed,
-        bytes_installed: if installed { expected_length } else { 0 },
-        reused_existing: !installed,
-    })
+    returned_error_boundary("install:bucket-synced")?;
+    // Windows cannot open a deletion handle while the original temporary
+    // handle remains open without delete sharing. Publication and concurrent
+    // winner authentication are complete, so release it before exact-identity
+    // cleanup; the fresh CAS-owned inode remains sealed at its final name.
+    drop(temporary.file);
+    cas.tmp
+        .unlink_child_if_identity(&temporary.name, temporary.identity)
+        .map_err(|error| {
+            storage(
+                "remove stable temporary graph object",
+                &cas.diagnostic_root,
+                error,
+            )
+        })?;
+    returned_error_boundary("install:temp-unlinked")?;
+    cas.tmp.sync().map_err(|error| {
+        storage(
+            "sync stable graph object temporary directory",
+            &cas.diagnostic_root,
+            error,
+        )
+    })?;
+    Ok(installed)
 }
 
 fn verify_file(
@@ -2422,6 +2550,79 @@ mod tests {
             ),
             other => panic!("unexpected injected error: {other}"),
         }
+    }
+
+    #[test]
+    fn install_crash_boundaries_leave_only_valid_or_recoverable_unreferenced_state() {
+        let boundaries = [
+            "install:temp-sealed",
+            "install:final-linked",
+            "install:bucket-synced",
+            "install:temp-unlinked",
+            "append:before-manifest-reference",
+        ];
+        for boundary in boundaries {
+            let container = tempfile::tempdir().unwrap();
+            let workspace = tempfile::tempdir().unwrap();
+            let relative_path = PathBuf::from("boundary.parquet");
+            let payload = vec![0x5a_u8; 4096];
+            fs::write(workspace.path().join(&relative_path), &payload).unwrap();
+            let digest = hex_digest(Sha256::digest(&payload).into());
+            let sealed = [AuthenticatedGraphFile {
+                relative_path,
+                byte_length: payload.len() as u64,
+                content_sha256: digest.clone(),
+            }];
+            let lease = begin_graph_object_publication(container.path()).unwrap();
+            let mut failed_state = GraphManifestState::empty();
+
+            inject_returned_error(Some(boundary));
+            let error = append_authenticated_graph_files_v2(
+                &lease,
+                workspace.path(),
+                &mut failed_state,
+                &sealed,
+                &[],
+            )
+            .unwrap_err();
+            inject_returned_error(None);
+            assert_injected_error(error, boundary);
+            assert!(
+                failed_state.root().is_none(),
+                "{boundary} exposed a manifest reference"
+            );
+
+            let object = graph_object_path(container.path(), &digest).unwrap();
+            let recoverable_temporary_exists = container
+                .path()
+                .join(GRAPH_OBJECTS_DIR)
+                .join(TEMP_DIR)
+                .read_dir()
+                .unwrap()
+                .next()
+                .is_some();
+            if object.exists() {
+                verify_graph_object(container.path(), &digest, payload.len() as u64).unwrap();
+            } else {
+                assert!(
+                    recoverable_temporary_exists,
+                    "{boundary} lost both the valid object and recoverable temporary"
+                );
+            }
+
+            let mut retry_state = GraphManifestState::empty();
+            append_authenticated_graph_files_v2(
+                &lease,
+                workspace.path(),
+                &mut retry_state,
+                &sealed,
+                &[],
+            )
+            .unwrap();
+            assert!(retry_state.root().is_some());
+            verify_graph_object(container.path(), &digest, payload.len() as u64).unwrap();
+        }
+        inject_returned_error(None);
     }
 
     #[test]
@@ -3348,6 +3549,120 @@ mod tests {
         assert_eq!(resolved.len(), FILES);
         assert!(evidence.segments_examined <= (2 * FILES - 1) as u64);
         assert!(evidence.work_units <= (4 * FILES - 2) as u64);
+    }
+
+    #[test]
+    fn authenticated_publication_hashes_each_payload_once_with_constant_factor() {
+        for files in [1_usize, 2, 4] {
+            let container = tempfile::tempdir().unwrap();
+            let workspace = tempfile::tempdir().unwrap();
+            let sealed = (0..files)
+                .map(|ordinal| {
+                    let payload = vec![u8::try_from(ordinal + 1).unwrap(); 4096];
+                    let relative_path = PathBuf::from(format!("shards/{ordinal}.parquet"));
+                    let source = workspace.path().join(&relative_path);
+                    fs::create_dir_all(source.parent().unwrap()).unwrap();
+                    fs::write(source, &payload).unwrap();
+                    AuthenticatedGraphFile {
+                        relative_path,
+                        byte_length: payload.len() as u64,
+                        content_sha256: hex_digest(Sha256::digest(&payload).into()),
+                    }
+                })
+                .collect::<Vec<_>>();
+            let lease = begin_graph_object_publication(container.path()).unwrap();
+            let mut state = GraphManifestState::empty();
+            let (_, evidence) = append_authenticated_graph_files_v2(
+                &lease,
+                workspace.path(),
+                &mut state,
+                &sealed,
+                &[],
+            )
+            .unwrap();
+            assert_eq!(
+                evidence.payload_bytes_hashed,
+                u64::try_from(files * 4096).unwrap()
+            );
+            let mut replay_state = GraphManifestState::empty();
+            let (_, replay_evidence) = append_authenticated_graph_files_v2(
+                &lease,
+                workspace.path(),
+                &mut replay_state,
+                &sealed,
+                &[],
+            )
+            .unwrap();
+            assert_eq!(
+                replay_evidence.payload_bytes_hashed,
+                u64::try_from(files * 4096).unwrap(),
+                "CAS reuse must report its one mandatory physical authentication read"
+            );
+            drop(lease);
+            let reclaimed =
+                gc_graph_objects(container.path(), &[], crate::GraphManifestLimits::default())
+                    .unwrap();
+            assert!(reclaimed.objects_removed >= files as u64);
+        }
+    }
+
+    #[test]
+    fn authenticated_publication_still_rejects_corrupt_writer_output() {
+        let container = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let relative_path = PathBuf::from("corrupt.parquet");
+        fs::write(workspace.path().join(&relative_path), b"mutated!").unwrap();
+        let sealed = [AuthenticatedGraphFile {
+            relative_path,
+            byte_length: 8,
+            content_sha256: hex_digest(Sha256::digest(b"original").into()),
+        }];
+        let lease = begin_graph_object_publication(container.path()).unwrap();
+        let mut state = GraphManifestState::empty();
+        assert!(
+            append_authenticated_graph_files_v2(
+                &lease,
+                workspace.path(),
+                &mut state,
+                &sealed,
+                &[],
+            )
+            .is_err()
+        );
+        assert!(state.root().is_none());
+    }
+
+    #[test]
+    fn cas_copy_isolated_from_preexisting_writable_source_descriptor() {
+        let container = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let relative_path = PathBuf::from("owned.parquet");
+        let payload = vec![9_u8; 4096];
+        let workspace_path = workspace.path().join(&relative_path);
+        fs::write(&workspace_path, &payload).unwrap();
+        let mut hostile = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&workspace_path)
+            .unwrap();
+        let sealed = [AuthenticatedGraphFile {
+            relative_path,
+            byte_length: payload.len() as u64,
+            content_sha256: hex_digest(Sha256::digest(&payload).into()),
+        }];
+        let lease = begin_graph_object_publication(container.path()).unwrap();
+        let mut state = GraphManifestState::empty();
+        append_authenticated_graph_files_v2(&lease, workspace.path(), &mut state, &sealed, &[])
+            .unwrap();
+        assert!(workspace_path.exists());
+        hostile.rewind().unwrap();
+        hostile.write_all(&vec![0x44; payload.len()]).unwrap();
+        hostile.sync_all().unwrap();
+        verify_graph_object(
+            container.path(),
+            &sealed[0].content_sha256,
+            payload.len() as u64,
+        )
+        .unwrap();
     }
 
     #[test]

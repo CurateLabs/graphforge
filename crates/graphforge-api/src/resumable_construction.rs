@@ -235,15 +235,19 @@ impl GraphConstructionSession<'_> {
             token.checkpoint()?;
         }
         let _visibility = self.graph.graph_visibility.lock()?;
-        if self.inner.state() == GraphConstructionState::Staging {
-            self.inner.seal()?;
-        }
         let topology_generation = self.inner.parent_topology_generation().saturating_add(1);
-        let encoding = self
-            .inner
-            .prepare_canonical_encoding_with_cancellation(topology_generation, || {
-                cancellation.is_some_and(crate::CancellationToken::is_cancelled)
-            })?;
+        let encoding = if self.inner.state() == GraphConstructionState::Staging {
+            self.inner
+                .seal_and_prepare_canonical_encoding_with_cancellation(
+                    topology_generation,
+                    || cancellation.is_some_and(crate::CancellationToken::is_cancelled),
+                )?
+        } else {
+            self.inner
+                .prepare_canonical_encoding_with_cancellation(topology_generation, || {
+                    cancellation.is_some_and(crate::CancellationToken::is_cancelled)
+                })?
+        };
         if let Some(token) = cancellation {
             token.checkpoint()?;
         }
@@ -264,8 +268,13 @@ impl GraphConstructionSession<'_> {
                     "construction publication did not resolve its exact generation".into(),
                 ));
             }
-            let (prepared_dir, prepared_guard, _) =
+            let (prepared_dir, prepared_guard, hydration_evidence) =
                 super::hydrate_graph_workspace(&resolved, false)?;
+            self.inner.record_hydration_application_read_bytes(
+                hydration_evidence
+                    .bytes_validated
+                    .saturating_add(hydration_evidence.bytes_copied),
+            )?;
             let runtime_catalog = super::load_runtime_catalog(&prepared_dir)?;
             let property_inventory = std::sync::Arc::new(
                 graphforge_storage::AuthenticatedPropertyInventory::from_resolved_generation(
@@ -706,5 +715,85 @@ mod tests {
                 .generation_uuid(),
             child_receipt.generation_uuid
         );
+    }
+
+    #[test]
+    fn construction_application_reads_reconcile_and_scale_at_one_two_four() {
+        let mut observations = Vec::new();
+        for scale in [1_024_usize, 2_048, 4_096] {
+            let graph = GraphForge::new(None).unwrap();
+            let mut session = graph.begin_graph_construction(Default::default()).unwrap();
+            let ids = (0..scale).map(|_| Uuid::now_v7()).collect::<Vec<_>>();
+            session.append_nodes("nodes", &nodes(&ids)).unwrap();
+            session.seal_and_publish().unwrap();
+            let evidence = &session.progress().evidence;
+            assert_eq!(evidence.seal_application_read_bytes, 0);
+            assert!(evidence.shape_application_read_bytes > 0);
+            assert!(evidence.encode_application_read_bytes > 0);
+            assert!(evidence.publication_application_read_bytes > 0);
+            assert!(evidence.cas_application_read_bytes > 0);
+            assert!(evidence.hydration_application_read_bytes > 0);
+            let reconciled = evidence
+                .seal_application_read_bytes
+                .saturating_add(evidence.shape_application_read_bytes)
+                .saturating_add(evidence.encode_application_read_bytes)
+                .saturating_add(evidence.publication_application_read_bytes)
+                .saturating_add(evidence.cas_application_read_bytes)
+                .saturating_add(evidence.hydration_application_read_bytes);
+            assert_eq!(evidence.total_application_read_bytes(), reconciled);
+            let payload = evidence.write_bytes;
+            assert!(
+                payload > 100_000,
+                "fixture must dominate fixed control overhead"
+            );
+            for (phase, ceiling) in [
+                (evidence.shape_application_read_bytes, 24_u64),
+                (evidence.encode_application_read_bytes, 24),
+                (evidence.publication_application_read_bytes, 2),
+                (evidence.cas_application_read_bytes, 24),
+                (evidence.hydration_application_read_bytes, 24),
+                (reconciled, 80),
+            ] {
+                assert!(
+                    phase <= payload.saturating_mul(ceiling),
+                    "phase exceeded its fixed application bytes-per-staged-payload ceiling"
+                );
+            }
+            assert_eq!(
+                evidence.cas_application_read_bytes,
+                evidence.canonical_output_bytes
+            );
+            assert!(evidence.staged_and_retained_disk_bytes >= payload);
+            observations.push((
+                payload,
+                [
+                    evidence.shape_application_read_bytes,
+                    evidence.encode_application_read_bytes,
+                    evidence.cas_application_read_bytes,
+                    evidence.hydration_application_read_bytes,
+                    reconciled,
+                ],
+            ));
+        }
+        for adjacent in observations.windows(2) {
+            let (prior_payload, prior_phases) = adjacent[0];
+            let (next_payload, next_phases) = adjacent[1];
+            assert!(next_payload * 10 >= prior_payload * 17);
+            assert!(next_payload * 10 <= prior_payload * 23);
+            for (prior, next) in prior_phases.into_iter().zip(next_phases) {
+                assert!(
+                    next * 10 >= prior * 15,
+                    "payload-owned phase grew below 1.5x"
+                );
+                assert!(
+                    next * 10 <= prior * 25,
+                    "payload-owned phase grew above 2.5x"
+                );
+                let prior_normalized = prior.saturating_mul(1_000_000) / prior_payload;
+                let next_normalized = next.saturating_mul(1_000_000) / next_payload;
+                assert!(next_normalized * 2 >= prior_normalized);
+                assert!(next_normalized <= prior_normalized.saturating_mul(2));
+            }
+        }
     }
 }

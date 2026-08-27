@@ -197,6 +197,46 @@ heap vectors for every graph edge.
 | Bounded delta overlay without full base copy | Covered by storage overlay parity tests |
 | Selected-subgraph projection bounded by selection | Covered by export path iterating selected node ids |
 | Peak RSS / cold-warm first-use on #334 fixtures | Hardware-specific observation only; recorded in [`m4-exit-evidence.json`](../development/m4-exit-evidence.json). Never a CI pass/fail gate. |
+## Construction integrity I/O
+
+The facade's immediate seal-and-publish path commits the receipt journal, then
+authenticates fixed-width staged artifacts while canonical shaping consumes
+them. Parquet keeps one whole-file digest pass because its bounded range
+decoder does not necessarily visit every file byte in digest order; metadata
+and row decoding are separately counted rather than mislabeled as
+authentication. Final shaped writers durably record their exact digest, length,
+and inode identity; inventory construction reads those small capabilities
+instead of reopening payloads. Incomplete/crash-resumed writers do not receive
+that authority and must regenerate or reauthenticate. A
+crash after that checkpoint does not trust unfinished work: resume performs the
+same full authentication before consumption. Ordinary standalone `seal` keeps
+its independent authentication contract.
+
+Encoding computes output digests over the bytes accepted by its writers and
+retains file and directory durability barriers. Construction publication binds
+the in-memory encoding to the durable inventory control record, then carries
+that authenticated inventory into the graph object store. The object store does
+not trust the recorded digest as a substitute for reading bytes. It creates a
+fresh CAS-owned inode and copies and hashes the source into that inode in one
+pass. It then fsyncs and seals the inode, checks its identity, length, and
+readonly state, links its final digest name, and durably syncs that destination
+directory before removing and syncing the temporary name. A pre-existing
+writable source descriptor therefore has no authority over the CAS inode.
+Reopening a compact workspace links the stable named CAS descriptor and
+performs one full verification on the installed hard link.
+These constant-factor bounds preserve corruption detection while keeping
+seal/publication I/O proportional to canonical output.
+
+`GraphConstructionEvidence` reconciles application-observed bytes read by
+owner: seal, shape, encode, publication control, CAS install/reuse, and
+hydration. The reported total is exactly the saturating sum of those six
+fields. These counters are logical application I/O, not filesystem-device
+physical reads or allocated/peak disk measurements. CAS evidence includes
+source-copy reads and mandatory authentication of reused or concurrently
+installed objects; it never reports a cache hit as zero application work.
+Actual allocated/peak disk and S20/S22 evidence remain harness-owned work in
+#951; #901 remains open until those measurements confirm the repaired path.
+
 ---
 
 ## Why Edge Count, Not Node Count

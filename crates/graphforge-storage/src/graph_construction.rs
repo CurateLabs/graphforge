@@ -303,6 +303,31 @@ enum ConstructionPublicationState {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 /// Measured application I/O and bounded retained-window evidence.
 pub struct GraphConstructionEvidence {
+    /// All application-observed payload bytes read by the seal phase.
+    #[serde(default)]
+    pub seal_application_read_bytes: u64,
+    /// All application-observed payload bytes read by canonical shaping, including
+    /// authentication and merge consumption.
+    #[serde(default)]
+    pub shape_application_read_bytes: u64,
+    /// All application-observed shaped payload bytes read by canonical encoding.
+    #[serde(default)]
+    pub encode_application_read_bytes: u64,
+    /// Application-observed durable control bytes read immediately before publication.
+    #[serde(default)]
+    pub publication_application_read_bytes: u64,
+    /// Application-observed source or reused-object payload bytes read by CAS adoption.
+    #[serde(default)]
+    pub cas_application_read_bytes: u64,
+    /// Application-observed published payload bytes read while hydrating the workspace.
+    #[serde(default)]
+    pub hydration_application_read_bytes: u64,
+    /// New canonical graph payload bytes emitted by encoding.
+    #[serde(default)]
+    pub canonical_output_bytes: u64,
+    /// Staged artifact bytes plus structurally retained parent payload bytes.
+    #[serde(default)]
+    pub staged_and_retained_disk_bytes: u64,
     /// Rows accepted.
     pub input_rows: u64,
     /// Non-replay chunks accepted.
@@ -401,6 +426,19 @@ pub struct GraphConstructionEvidence {
     pub parquet_write_bytes: u64,
     /// Instrumented Parquet writer submissions in shaping.
     pub parquet_write_operations: u64,
+}
+
+impl GraphConstructionEvidence {
+    /// Reconciled application-observed payload/control bytes read across construction.
+    #[must_use]
+    pub const fn total_application_read_bytes(&self) -> u64 {
+        self.seal_application_read_bytes
+            .saturating_add(self.shape_application_read_bytes)
+            .saturating_add(self.encode_application_read_bytes)
+            .saturating_add(self.publication_application_read_bytes)
+            .saturating_add(self.cas_application_read_bytes)
+            .saturating_add(self.hydration_application_read_bytes)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -871,7 +909,7 @@ impl GraphConstructionSession {
         {
             return Err(storage("only a sealed session can be encoded"));
         }
-        let completed = read_completed_shape(&self.root, &self.checkpoint)?
+        let completed = read_completed_shape(&self.root, &self.checkpoint, false)?
             .ok_or_else(|| storage("canonical shape is not complete"))?;
         if &completed != shape {
             return Err(storage("encoder input differs from completed shape"));
@@ -894,6 +932,25 @@ impl GraphConstructionSession {
             self.checkpoint.budgets,
             &mut cancelled,
         )?;
+        self.checkpoint.evidence.encode_application_read_bytes = self
+            .checkpoint
+            .evidence
+            .encode_application_read_bytes
+            .saturating_add(encoded.evidence.input_read_bytes)
+            .saturating_add(encoded.evidence.membership_read_bytes);
+        self.checkpoint.evidence.canonical_output_bytes = encoded
+            .artifacts
+            .iter()
+            .map(|artifact| artifact.bytes)
+            .sum();
+        self.checkpoint.evidence.staged_and_retained_disk_bytes =
+            self.checkpoint.evidence.write_bytes.saturating_add(
+                encoded
+                    .retained_artifacts
+                    .iter()
+                    .map(|artifact| artifact.bytes)
+                    .sum(),
+            );
         let inventory_authority =
             crate::graph_construction_encoding::inventory_authority_sha256(&encoded)?;
         match self.checkpoint.encoding_inventory_sha256.as_deref() {
@@ -980,9 +1037,15 @@ impl GraphConstructionSession {
         if encoding.generation != self.checkpoint.parent_topology_generation.saturating_add(1) {
             return Err(storage("publication topology generation changed"));
         }
-        crate::graph_construction_encoding::authenticate_for_publication(&self.root, encoding)?;
-        self.begin_publication(target_generation_uuid, transaction_uuid)?;
-
+        let inventory_control_bytes =
+            crate::graph_construction_encoding::authenticate_inventory_control_for_publication(
+                &self.root, encoding,
+            )?;
+        self.checkpoint.evidence.publication_application_read_bytes = self
+            .checkpoint
+            .evidence
+            .publication_application_read_bytes
+            .saturating_add(inventory_control_bytes);
         let admission = crate::filesystem_admission::admit_project_lifecycle(
             &self.project_path,
             self.checkpoint.lifecycle_mode,
@@ -997,25 +1060,31 @@ impl GraphConstructionSession {
         }
 
         let lease = crate::begin_graph_object_publication(admission.root())?;
-        let mut manifest_state = match parent.declared_graph_files_participant()? {
-            Some(crate::GraphFilesParticipant::V2(root)) => {
-                crate::graph_object_store::GraphManifestState::open(
-                    &lease,
-                    root,
-                    crate::GraphManifestLimits::default(),
-                )?
-                .0
-            }
-            Some(crate::GraphFilesParticipant::V1(inventory)) if inventory.file_count == 0 => {
-                crate::graph_object_store::GraphManifestState::empty()
-            }
-            Some(crate::GraphFilesParticipant::V1(_)) => {
-                return Err(storage(
-                    "nonempty construction parent requires compact graph root",
-                ));
-            }
-            None => crate::graph_object_store::GraphManifestState::empty(),
-        };
+        let (mut manifest_state, manifest_read_bytes) =
+            match parent.declared_graph_files_participant()? {
+                Some(crate::GraphFilesParticipant::V2(root)) => {
+                    let (state, evidence) = crate::graph_object_store::GraphManifestState::open(
+                        &lease,
+                        root,
+                        crate::GraphManifestLimits::default(),
+                    )?;
+                    (state, evidence.decoded_bytes)
+                }
+                Some(crate::GraphFilesParticipant::V1(inventory)) if inventory.file_count == 0 => {
+                    (crate::graph_object_store::GraphManifestState::empty(), 0)
+                }
+                Some(crate::GraphFilesParticipant::V1(_)) => {
+                    return Err(storage(
+                        "nonempty construction parent requires compact graph root",
+                    ));
+                }
+                None => (crate::graph_object_store::GraphManifestState::empty(), 0),
+            };
+        self.checkpoint.evidence.publication_application_read_bytes = self
+            .checkpoint
+            .evidence
+            .publication_application_read_bytes
+            .saturating_add(manifest_read_bytes);
         for retained in &encoding.retained_artifacts {
             let entry = manifest_state
                 .entries()
@@ -1043,18 +1112,30 @@ impl GraphConstructionSession {
         if workspace_identity != encoded_directory.identity() {
             return Err(storage("encoded workspace path identity changed"));
         }
-        let sealed_paths = encoding
+        let sealed_files = encoding
             .artifacts
             .iter()
-            .map(|artifact| PathBuf::from(&artifact.path))
+            .map(
+                |artifact| crate::graph_object_store::AuthenticatedGraphFile {
+                    relative_path: PathBuf::from(&artifact.path),
+                    byte_length: artifact.bytes,
+                    content_sha256: artifact.sha256.clone(),
+                },
+            )
             .collect::<Vec<_>>();
-        let (graph_root, _) = crate::graph_object_store::append_graph_files_v2(
-            &lease,
-            &workspace,
-            &mut manifest_state,
-            &sealed_paths,
-            &[],
-        )?;
+        let (graph_root, cas_evidence) =
+            crate::graph_object_store::append_authenticated_graph_files_v2(
+                &lease,
+                &workspace,
+                &mut manifest_state,
+                &sealed_files,
+                &[],
+            )?;
+        self.checkpoint.evidence.cas_application_read_bytes = self
+            .checkpoint
+            .evidence
+            .cas_application_read_bytes
+            .saturating_add(cas_evidence.payload_bytes_hashed);
         if graphforge_filesystem::path_identity(&workspace).map_err(storage)?
             != encoded_directory.identity()
         {
@@ -1071,6 +1152,11 @@ impl GraphConstructionSession {
                 return Err(storage("installed construction artifact authority changed"));
             }
         }
+
+        // CAS installation is private and unreachable until the publication
+        // intent and generation are committed. Authenticate all source bytes
+        // first so corruption leaves the session sealed and retryable.
+        self.begin_publication(target_generation_uuid, transaction_uuid)?;
 
         let graph_participant = crate::graph_files::graph_files_root_participant(&graph_root)?;
         let capabilities = parent
@@ -1659,7 +1745,21 @@ impl GraphConstructionSession {
             }
             return Ok(inventory);
         }
-        let shape = self.shape_canonical_with_cancellation(&mut cancelled)?;
+        let shape = self.shape_canonical_inner(&mut cancelled, false)?;
+        self.encode_canonical_with_cancellation(&shape, generation, cancelled)
+    }
+
+    /// Seal receipt authority and immediately prepare canonical encoding with
+    /// one input-authentication pass. If the process stops after the sealed
+    /// checkpoint, resume performs that authentication before consuming data.
+    #[doc(hidden)]
+    pub fn seal_and_prepare_canonical_encoding_with_cancellation(
+        &mut self,
+        generation: u64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<GraphConstructionEncoding, GfError> {
+        self.seal_inner(false)?;
+        let shape = self.shape_canonical_inner(&mut cancelled, false)?;
         self.encode_canonical_with_cancellation(&shape, generation, cancelled)
     }
 
@@ -1708,6 +1808,18 @@ impl GraphConstructionSession {
     #[must_use]
     pub const fn evidence(&self) -> &GraphConstructionEvidence {
         &self.checkpoint.evidence
+    }
+
+    /// Record application-observed reads performed by the facade's post-publication
+    /// hydration before the refreshed workspace becomes visible.
+    #[doc(hidden)]
+    pub fn record_hydration_application_read_bytes(&mut self, bytes: u64) -> Result<(), GfError> {
+        self.checkpoint.evidence.hydration_application_read_bytes = self
+            .checkpoint
+            .evidence
+            .hydration_application_read_bytes
+            .saturating_add(bytes);
+        replace_control(&self.root, CHECKPOINT, &self.checkpoint)
     }
 
     /// Number of durably accepted chunks.
@@ -1929,6 +2041,10 @@ impl GraphConstructionSession {
     /// Independently reopen and authenticate every sealed artifact once, then
     /// freeze the private inventory. No generation authority changes here.
     pub fn seal(&mut self) -> Result<(), GfError> {
+        self.seal_inner(true)
+    }
+
+    fn seal_inner(&mut self, authenticate_artifacts: bool) -> Result<(), GfError> {
         self.revalidate_authority()?;
         self.recover_intent()?;
         if self.checkpoint.state != GraphConstructionState::Staging {
@@ -1948,9 +2064,11 @@ impl GraphConstructionSession {
             if receipt.prior_receipt_sha256 != prior_digest {
                 return Err(storage("receipt journal chain is discontinuous"));
             }
-            let work = validate_receipt_artifacts(&self.root, &receipt)?;
-            read_bytes = read_bytes.saturating_add(work.bytes);
-            read_operations = read_operations.saturating_add(work.operations);
+            if authenticate_artifacts {
+                let work = validate_receipt_artifacts(&self.root, &receipt)?;
+                read_bytes = read_bytes.saturating_add(work.bytes);
+                read_operations = read_operations.saturating_add(work.operations);
+            }
             let body = serde_json::to_vec(&receipt).map_err(storage)?;
             prior_digest = Some(sha256(&body));
         }
@@ -1970,6 +2088,11 @@ impl GraphConstructionSession {
             .evidence
             .authentication_read_operations
             .saturating_add(read_operations);
+        self.checkpoint.evidence.seal_application_read_bytes = self
+            .checkpoint
+            .evidence
+            .seal_application_read_bytes
+            .saturating_add(read_bytes);
         self.checkpoint.state = GraphConstructionState::Sealed;
         self.checkpoint.publication_state = Some(ConstructionPublicationState::Sealed);
         replace_control(&self.root, CHECKPOINT, &self.checkpoint)
@@ -1981,7 +2104,16 @@ impl GraphConstructionSession {
     #[allow(clippy::too_many_lines)] // One authenticated external-shape lifecycle; ordering is the invariant.
     pub fn shape_canonical_with_cancellation(
         &mut self,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ConstructionShape, GfError> {
+        self.shape_canonical_inner(cancelled, true)
+    }
+
+    #[allow(clippy::too_many_lines)] // One authenticated external-shape lifecycle; ordering is the invariant.
+    fn shape_canonical_inner(
+        &mut self,
         mut cancelled: impl FnMut() -> bool,
+        authenticate_completed_outputs: bool,
     ) -> Result<ConstructionShape, GfError> {
         self.revalidate_authority()?;
         if self.checkpoint.state != GraphConstructionState::Sealed
@@ -1990,7 +2122,9 @@ impl GraphConstructionSession {
             return Err(storage("only a sealed session can be shaped"));
         }
         reject_cancelled(&mut cancelled)?;
-        if let Some(shape) = read_completed_shape(&self.root, &self.checkpoint)? {
+        if let Some(shape) =
+            read_completed_shape(&self.root, &self.checkpoint, authenticate_completed_outputs)?
+        {
             return Ok(shape);
         }
         reject_existing_merge_artifacts(&self.root)?;
@@ -2023,7 +2157,14 @@ impl GraphConstructionSession {
         for sequence in 0..self.checkpoint.next_sequence {
             reject_cancelled(&mut cancelled)?;
             let receipt = self.read_receipt(sequence)?;
-            let work = validate_receipt_artifacts(&self.root, &receipt)?;
+            // Fixed-width inputs authenticate their exact inode, length and
+            // digest in the merge consumers below. Parquet's range-oriented
+            // decoder cannot establish a whole-file digest, so retain exactly
+            // one explicit whole-file authentication pass for that artifact.
+            let mut work = authenticate_artifact(&self.root, &receipt.parquet)?;
+            let metadata_work = validate_parquet_metadata(&self.root, &receipt)?;
+            work.bytes = work.bytes.saturating_add(metadata_work.bytes);
+            work.operations = work.operations.saturating_add(metadata_work.operations);
             self.checkpoint.evidence.shape_input_validation_read_bytes = self
                 .checkpoint
                 .evidence
@@ -2302,6 +2443,15 @@ impl GraphConstructionSession {
             .evidence
             .shaped_output_authentication_operations
             .saturating_add(inventory_work.operations);
+        self.checkpoint.evidence.shape_application_read_bytes = self
+            .checkpoint
+            .evidence
+            .shape_input_validation_read_bytes
+            .saturating_add(self.checkpoint.evidence.merge_read_bytes)
+            .saturating_add(self.checkpoint.evidence.parquet_read_bytes)
+            .saturating_add(self.checkpoint.evidence.shaped_output_authentication_bytes)
+            .saturating_add(self.checkpoint.evidence.parent_catalog_read_bytes)
+            .saturating_add(self.checkpoint.evidence.retained_probe_read_bytes);
         let shape_authority_sha256 = shape_authority_sha256(&shape, &outputs)?;
         self.checkpoint.shape_authority_sha256 = Some(shape_authority_sha256.clone());
         replace_control(
@@ -3049,6 +3199,7 @@ fn write_parquet(
         .map_err(storage)?;
     root.sync().map_err(storage)?;
     construction_failpoint(&format!("artifact.after_install.{name}"));
+    persist_shape_receipt(root, &receipt)?;
     Ok(receipt)
 }
 
@@ -3088,6 +3239,7 @@ fn write_fixed_run<const N: usize>(
         .map_err(storage)?;
     root.sync().map_err(storage)?;
     construction_failpoint(&format!("artifact.after_install.{name}"));
+    persist_shape_receipt(root, &receipt)?;
     Ok(receipt)
 }
 
@@ -3151,9 +3303,24 @@ fn recover_shape_intent(
             checkpoint.evidence = final_evidence.clone();
             checkpoint.shape_authority_sha256 = Some(expected_shape_authority);
             replace_control(root, CHECKPOINT, checkpoint)?;
-        } else if checkpoint.evidence != *final_evidence
-            || checkpoint.shape_authority_sha256.as_deref() != Some(&expected_shape_authority)
-        {
+        } else {
+            let mut shape_owned_evidence = checkpoint.evidence.clone();
+            shape_owned_evidence.encode_application_read_bytes =
+                final_evidence.encode_application_read_bytes;
+            shape_owned_evidence.publication_application_read_bytes =
+                final_evidence.publication_application_read_bytes;
+            shape_owned_evidence.cas_application_read_bytes =
+                final_evidence.cas_application_read_bytes;
+            shape_owned_evidence.hydration_application_read_bytes =
+                final_evidence.hydration_application_read_bytes;
+            shape_owned_evidence.canonical_output_bytes = final_evidence.canonical_output_bytes;
+            shape_owned_evidence.staged_and_retained_disk_bytes =
+                final_evidence.staged_and_retained_disk_bytes;
+            if shape_owned_evidence == *final_evidence
+                && checkpoint.shape_authority_sha256.as_deref() == Some(&expected_shape_authority)
+            {
+                return Ok(());
+            }
             return Err(storage("shape evidence authority differs from inventory"));
         }
         return Ok(());
@@ -3380,6 +3547,7 @@ fn recover_publication(
 fn read_completed_shape(
     root: &StableDirectory,
     checkpoint: &Checkpoint,
+    authenticate_outputs: bool,
 ) -> Result<Option<ConstructionShape>, GfError> {
     let mut file = match root.open_child_file(OsStr::new(SHAPE_INTENT)) {
         Ok(file) => file,
@@ -3391,8 +3559,10 @@ fn read_completed_shape(
     if !manifest.complete {
         return Err(storage("incomplete construction shape was not recovered"));
     }
-    for output in &manifest.outputs {
-        authenticate_shaped_output(root, output)?;
+    if authenticate_outputs {
+        for output in &manifest.outputs {
+            authenticate_shaped_output(root, output)?;
+        }
     }
     let shape = manifest
         .shape
@@ -3472,6 +3642,30 @@ fn receipt_for_existing_with_work(
     root: &StableDirectory,
     name: &str,
 ) -> Result<(ArtifactReceipt, ReadWork), GfError> {
+    let capability_name = shape_receipt_name(name);
+    if let Ok(mut capability_file) = root.open_child_file(OsStr::new(&capability_name)) {
+        let control_bytes = capability_file.metadata().map_err(storage)?.len();
+        let receipt: ArtifactReceipt = decode_bounded(&mut capability_file)?;
+        if receipt.name != name {
+            return Err(storage("shaped writer capability names another artifact"));
+        }
+        let file = root.open_child_file(OsStr::new(name)).map_err(storage)?;
+        if file_link_count(&file).map_err(storage)? != 1
+            || !receipt
+                .identity
+                .matches(file_identity(&file).map_err(storage)?)
+            || file.metadata().map_err(storage)?.len() != receipt.bytes
+        {
+            return Err(storage("shaped writer capability identity changed"));
+        }
+        return Ok((
+            receipt,
+            ReadWork {
+                bytes: control_bytes,
+                operations: 1,
+            },
+        ));
+    }
     let mut file = root.open_child_file(OsStr::new(name)).map_err(storage)?;
     if file_link_count(&file).map_err(storage)? != 1 {
         return Err(storage("shaped output has extra links"));
@@ -3501,6 +3695,17 @@ fn receipt_for_existing_with_work(
         },
         ReadWork { bytes, operations },
     ))
+}
+
+fn shape_receipt_name(name: &str) -> String {
+    format!("shape-receipt-{}.json", &sha256(name.as_bytes())[..32])
+}
+
+fn persist_shape_receipt(root: &StableDirectory, receipt: &ArtifactReceipt) -> Result<(), GfError> {
+    if is_shape_artifact_name(&receipt.name) || canonical_artifact_target(&receipt.name) {
+        install_control(root, &shape_receipt_name(&receipt.name), receipt)?;
+    }
+    Ok(())
 }
 
 fn authenticate_shaped_output(
@@ -3655,7 +3860,8 @@ fn convert_identity_run(
         .map_err(storage)?;
     let identity = file_identity(&file).map_err(storage)?;
     let mut reader = BufReader::with_capacity(BLOCK_BYTES, input);
-    let mut writer = BufWriter::with_capacity(BLOCK_BYTES, file);
+    let hashing = HashingWriter::new(file);
+    let mut writer = BufWriter::with_capacity(BLOCK_BYTES, hashing);
     let mut digest = Sha256::new();
     let mut bytes = 0_u64;
     while let Some(uuid) = read_fixed::<IDENTITY_WIDTH>(&mut reader)? {
@@ -3672,7 +3878,7 @@ fn convert_identity_run(
         return Err(storage("identity source content changed before merge"));
     }
     writer.flush().map_err(storage)?;
-    writer.get_ref().sync_all().map_err(storage)?;
+    writer.get_ref().inner.sync_all().map_err(storage)?;
     account_sequential_write(bytes.saturating_mul(2), evidence);
     drop(writer);
     root.install_child(OsStr::new(&temporary), identity, OsStr::new(output))
@@ -3706,7 +3912,8 @@ fn copy_authenticated_run<const N: usize>(
         .map_err(storage)?;
     let identity = file_identity(&file).map_err(storage)?;
     let mut reader = BufReader::with_capacity(BLOCK_BYTES, input);
-    let mut writer = BufWriter::with_capacity(BLOCK_BYTES, file);
+    let hashing = HashingWriter::new(file);
+    let mut writer = BufWriter::with_capacity(BLOCK_BYTES, hashing);
     let mut digest = Sha256::new();
     let mut bytes = 0_u64;
     while let Some(record) = read_fixed::<N>(&mut reader)? {
@@ -3720,12 +3927,21 @@ fn copy_authenticated_run<const N: usize>(
         return Err(storage("construction merge source content changed"));
     }
     writer.flush().map_err(storage)?;
-    writer.get_ref().sync_all().map_err(storage)?;
+    writer.get_ref().inner.sync_all().map_err(storage)?;
     account_sequential_write(bytes, evidence);
     drop(writer);
     root.install_child(OsStr::new(&temporary), identity, OsStr::new(output))
         .map_err(storage)?;
     root.sync().map_err(storage)?;
+    let output_receipt = ArtifactReceipt {
+        name: output.to_owned(),
+        bytes,
+        sha256: receipt.sha256.clone(),
+        identity: identity.into(),
+        write_operations: bytes.div_ceil(BLOCK_BYTES as u64),
+        fsync_operations: 2,
+    };
+    install_control(root, &shape_receipt_name(output), &output_receipt)?;
     evidence.merge_fsync_operations = evidence.merge_fsync_operations.saturating_add(2);
     Ok(())
 }
@@ -3882,7 +4098,7 @@ fn merge_fixed_group<const N: usize>(
     reject_duplicates: bool,
     cancelled: &mut impl FnMut() -> bool,
     evidence: &mut GraphConstructionEvidence,
-) -> Result<(), GfError> {
+) -> Result<ArtifactReceipt, GfError> {
     let mut readers = inputs
         .iter()
         .map(|name| {
@@ -3902,7 +4118,8 @@ fn merge_fixed_group<const N: usize>(
         .create_replaceable_child_file(OsStr::new(&temporary))
         .map_err(storage)?;
     let identity = file_identity(&file).map_err(storage)?;
-    let mut writer = BufWriter::with_capacity(BLOCK_BYTES, file);
+    let hashing = HashingWriter::new(file);
+    let mut writer = BufWriter::with_capacity(BLOCK_BYTES, hashing);
     let mut heap = BinaryHeap::new();
     for (index, reader) in readers.iter_mut().enumerate() {
         if let Some(record) = read_fixed::<N>(reader)? {
@@ -3931,22 +4148,28 @@ fn merge_fixed_group<const N: usize>(
         }
     }
     writer.flush().map_err(storage)?;
-    writer.get_ref().sync_all().map_err(storage)?;
-    account_sequential_write(
-        writer.get_ref().metadata().map_err(storage)?.len(),
-        evidence,
-    );
+    writer.get_ref().inner.sync_all().map_err(storage)?;
+    account_sequential_write(writer.get_ref().bytes, evidence);
+    let receipt = ArtifactReceipt {
+        name: output.to_owned(),
+        bytes: writer.get_ref().bytes,
+        sha256: hex(&writer.get_ref().digest.clone().finalize()),
+        identity: identity.into(),
+        write_operations: writer.get_ref().operations,
+        fsync_operations: 2,
+    };
     drop(writer);
     root.install_child(OsStr::new(&temporary), identity, OsStr::new(output))
         .map_err(storage)?;
     root.sync().map_err(storage)?;
     construction_failpoint("shape.fixed_merge.after_install");
+    persist_shape_receipt(root, &receipt)?;
     evidence.merge_fsync_operations = evidence.merge_fsync_operations.saturating_add(2);
     evidence.merge_groups = evidence.merge_groups.saturating_add(1);
     evidence.peak_merge_temporary_bytes = evidence
         .peak_merge_temporary_bytes
         .max(measured_shape_bytes(root)?);
-    Ok(())
+    Ok(receipt)
 }
 
 struct RowCursor {
@@ -4135,6 +4358,7 @@ fn merge_row_group(
         .map_err(storage)?;
     root.sync().map_err(storage)?;
     construction_failpoint("shape.row_merge.after_install");
+    persist_shape_receipt(root, &receipt)?;
     evidence.merge_fsync_operations = evidence.merge_fsync_operations.saturating_add(4);
     evidence.merge_groups = evidence.merge_groups.saturating_add(1);
     evidence.merge_written_bytes = evidence.merge_written_bytes.saturating_add(receipt.bytes);
@@ -5003,7 +5227,8 @@ fn assign_surrogates(
         reader.get_ref().metadata().map_err(storage)?.len(),
         evidence,
     );
-    let mut writer = BufWriter::with_capacity(BLOCK_BYTES, file);
+    let hashing = HashingWriter::new(file);
+    let mut writer = BufWriter::with_capacity(BLOCK_BYTES, hashing);
     let mut count = 0_u64;
     while let Some(mut record) = read_fixed::<BASE_IDENTITY_WIDTH>(&mut reader)? {
         if record[17] == 0 {
@@ -5035,15 +5260,21 @@ fn assign_surrogates(
         }
     }
     writer.flush().map_err(storage)?;
-    writer.get_ref().sync_all().map_err(storage)?;
-    account_sequential_write(
-        writer.get_ref().metadata().map_err(storage)?.len(),
-        evidence,
-    );
+    writer.get_ref().inner.sync_all().map_err(storage)?;
+    account_sequential_write(writer.get_ref().bytes, evidence);
+    let output_receipt = ArtifactReceipt {
+        name: output.to_owned(),
+        bytes: writer.get_ref().bytes,
+        sha256: hex(&writer.get_ref().digest.clone().finalize()),
+        identity: identity.into(),
+        write_operations: writer.get_ref().operations,
+        fsync_operations: 2,
+    };
     drop(writer);
     root.install_child(OsStr::new(&temporary), identity, OsStr::new(output))
         .map_err(storage)?;
     root.sync().map_err(storage)?;
+    persist_shape_receipt(root, &output_receipt)?;
     evidence.merge_fsync_operations = evidence.merge_fsync_operations.saturating_add(2);
     Ok(output.to_owned())
 }
@@ -5501,6 +5732,45 @@ fn validate_parquet_shape(
             }
             previous = Some(value);
         }
+    }
+    Ok(ReadWork {
+        bytes: counter.bytes.load(Ordering::Relaxed),
+        operations: counter.operations.load(Ordering::Relaxed),
+    })
+}
+
+fn validate_parquet_metadata(
+    root: &StableDirectory,
+    receipt: &ConstructionChunkReceipt,
+) -> Result<ReadWork, GfError> {
+    let file = root
+        .open_child_file(OsStr::new(&receipt.parquet.name))
+        .map_err(storage)?;
+    if !receipt
+        .parquet
+        .identity
+        .matches(file_identity(&file).map_err(storage)?)
+    {
+        return Err(storage("Parquet identity changed during metadata reopen"));
+    }
+    let counter = IoCounter::default();
+    let builder = ParquetRecordBatchReaderBuilder::try_new(CountingChunkReader {
+        file,
+        counter: counter.clone(),
+    })
+    .map_err(storage)?;
+    let expected_prefix = match receipt.kind {
+        ConstructionChunkKind::Node => &*CONSTRUCTION_NODE_SCHEMA,
+        ConstructionChunkKind::Edge => &*CONSTRUCTION_EDGE_SCHEMA,
+    };
+    let schema = builder.schema();
+    if schema.fields().len() < expected_prefix.fields().len()
+        || schema.fields()[..expected_prefix.fields().len()] != expected_prefix.fields()[..]
+        || normalized_schema_digest(schema.as_ref()) != receipt.schema_sha256
+        || builder.metadata().file_metadata().num_rows()
+            != i64::try_from(receipt.rows).map_err(|_| storage("receipt row count exceeds i64"))?
+    {
+        return Err(storage("Parquet schema or row count differs from receipt"));
     }
     Ok(ReadWork {
         bytes: counter.bytes.load(Ordering::Relaxed),
@@ -7078,6 +7348,90 @@ mod tests {
         assert_eq!(one_rows.sha256, two_rows.sha256);
         assert_eq!((one_shape.node_count, one_shape.edge_count), (8, 0));
         assert_eq!((two_shape.node_count, two_shape.edge_count), (8, 0));
+    }
+
+    #[test]
+    fn immediate_seal_prepare_authenticates_staged_bytes_once_with_constant_factor() {
+        let mut observations = Vec::new();
+        for rows in [64_usize, 128, 256] {
+            let root = TempDir::new().unwrap();
+            crate::open_or_initialize_project(root.path()).unwrap();
+            let mut session = GraphConstructionSession::open(
+                root.path(),
+                Uuid::now_v7(),
+                0,
+                GraphConstructionBudgets::default(),
+            )
+            .unwrap();
+            session
+                .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, rows))
+                .unwrap();
+            session
+                .seal_and_prepare_canonical_encoding_with_cancellation(1, || false)
+                .unwrap();
+            let evidence = session.evidence();
+            assert_eq!(evidence.authentication_read_bytes, 0);
+            assert!(evidence.shape_input_validation_read_bytes > 0);
+            assert!(
+                evidence.shaped_output_authentication_bytes < evidence.canonical_output_bytes / 4,
+                "writer-completed shaped outputs were reopened: auth={} canonical={}",
+                evidence.shaped_output_authentication_bytes,
+                evidence.canonical_output_bytes
+            );
+            assert!(
+                evidence.shape_input_validation_read_bytes
+                    <= evidence.write_bytes.saturating_mul(3),
+                "shape authentication exceeded three staged-byte passes"
+            );
+            observations.push((rows, evidence.shape_input_validation_read_bytes));
+        }
+        for pair in observations.windows(2) {
+            let (smaller_rows, smaller_bytes) = pair[0];
+            let (larger_rows, larger_bytes) = pair[1];
+            assert_eq!(larger_rows, smaller_rows * 2);
+            assert!(larger_bytes >= smaller_bytes);
+            assert!(
+                larger_bytes <= smaller_bytes.saturating_mul(3),
+                "doubling rows exceeded the bounded linear byte envelope"
+            );
+        }
+    }
+
+    #[test]
+    fn interrupted_immediate_seal_reauthenticates_before_resume_consumption() {
+        let root = TempDir::new().unwrap();
+        crate::open_or_initialize_project(root.path()).unwrap();
+        let operation = Uuid::now_v7();
+        let mut session = GraphConstructionSession::open(
+            root.path(),
+            operation,
+            0,
+            GraphConstructionBudgets::default(),
+        )
+        .unwrap();
+        session
+            .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 64))
+            .unwrap();
+        assert!(
+            session
+                .seal_and_prepare_canonical_encoding_with_cancellation(1, || true)
+                .is_err()
+        );
+        assert_eq!(session.state(), GraphConstructionState::Sealed);
+        assert_eq!(session.evidence().authentication_read_bytes, 0);
+        drop(session);
+
+        let mut resumed = GraphConstructionSession::open(
+            root.path(),
+            operation,
+            0,
+            GraphConstructionBudgets::default(),
+        )
+        .unwrap();
+        resumed
+            .prepare_canonical_encoding_with_cancellation(1, || false)
+            .unwrap();
+        assert!(resumed.evidence().shape_input_validation_read_bytes > 0);
     }
 
     #[test]
@@ -8961,13 +9315,61 @@ mod tests {
             .join(&encoding.artifacts[0].path);
         std::fs::write(victim, b"tampered").unwrap();
 
+        let error = session
+            .publish_canonical(&encoding, Uuid::from_u128(9_461), Uuid::from_u128(9_462))
+            .unwrap_err()
+            .to_string();
         assert!(
-            session
-                .publish_canonical(&encoding, Uuid::from_u128(9_461), Uuid::from_u128(9_462),)
-                .unwrap_err()
-                .to_string()
-                .contains("artifact differs")
+            error.contains("authenticated graph file metadata changed")
+                || error.contains("digest or length changed"),
+            "unexpected corruption error: {error}"
         );
+        assert_eq!(
+            crate::resolve_project_generation(root.path())
+                .unwrap()
+                .generation_uuid(),
+            prior
+        );
+        assert_eq!(
+            session.checkpoint.publication_state,
+            Some(ConstructionPublicationState::Sealed)
+        );
+    }
+
+    #[test]
+    fn canonical_publication_rejects_replaced_durable_inventory_without_payload_reads() {
+        let root = TempDir::new().unwrap();
+        let parent = crate::open_or_initialize_project(root.path()).unwrap();
+        let prior = parent.generation_uuid();
+        drop(parent);
+        let operation = Uuid::from_u128(9_468);
+        let mut session = GraphConstructionSession::open(
+            root.path(),
+            operation,
+            0,
+            GraphConstructionBudgets::default(),
+        )
+        .unwrap();
+        session
+            .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 1))
+            .unwrap();
+        session.seal().unwrap();
+        let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
+        let encoding = session.encode_canonical(&shape, 1).unwrap();
+        let inventory_path = root
+            .path()
+            .join(PRIVATE_ROOT)
+            .join(operation.simple().to_string())
+            .join("encoded-v1/inventory.json");
+        let mut replaced: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&inventory_path).unwrap()).unwrap();
+        replaced["generation"] = serde_json::json!(2);
+        std::fs::write(&inventory_path, serde_json::to_vec(&replaced).unwrap()).unwrap();
+
+        let error = session
+            .publish_canonical(&encoding, Uuid::from_u128(9_469), Uuid::from_u128(9_470))
+            .unwrap_err();
+        assert!(error.to_string().contains("durable encoding"));
         assert_eq!(
             crate::resolve_project_generation(root.path())
                 .unwrap()
