@@ -22,6 +22,7 @@
 //! surrogates exclusively; UUIDs are resolved at the API boundary, never here.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -674,11 +675,13 @@ impl PersistentAdjacencyProvider {
     ) -> Self {
         static NEXT_CACHE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let id = NEXT_CACHE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let digest = source_identity
-            .generation_manifest_sha256
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
+        let digest = source_identity.generation_manifest_sha256.iter().fold(
+            String::with_capacity(64),
+            |mut digest, byte| {
+                write!(&mut digest, "{byte:02x}").expect("writing to a String cannot fail");
+                digest
+            },
+        );
         let artifact_dir = cache_root.join(format!(
             "generation-{}-{digest}-provider-{id}",
             source_identity.generation_uuid.hyphenated()
@@ -1749,9 +1752,11 @@ mod tests {
     }
 
     #[test]
-    fn authenticated_private_cache_key_binds_generation_and_manifest() {
+    fn same_numeric_generation_and_source_metadata_cannot_alias_authenticated_cache() {
         let source = TempDir::new().unwrap();
         let cache = TempDir::new().unwrap();
+        write_diamond(source.path());
+        let numeric_generation = read_topology_generation(source.path()).unwrap();
         let first = AdjacencySourceIdentity {
             generation_uuid: Uuid::from_u128(1),
             generation_manifest_sha256: [0x11; 32],
@@ -1775,6 +1780,10 @@ mod tests {
 
         assert_eq!(first_provider.source_identity, Some(first));
         assert_eq!(second_provider.source_identity, Some(second));
+        assert_eq!(
+            read_topology_generation(source.path()).unwrap(),
+            numeric_generation
+        );
         assert_ne!(first_provider.cache_dir, second_provider.cache_dir);
         let first_name = first_provider
             .cache_dir
@@ -1783,5 +1792,13 @@ mod tests {
             .to_string_lossy();
         assert!(first_name.contains(&first.generation_uuid.hyphenated().to_string()));
         assert!(first_name.contains(&"11".repeat(32)));
+
+        // Both providers see the exact same source pathname, numeric topology
+        // generation, lengths, and timestamps. A derived publication selected
+        // under the first authenticated manifest still cannot become visible
+        // through the second identity's private key.
+        std::fs::create_dir_all(&first_provider.cache_dir).unwrap();
+        std::fs::write(first_provider.cache_dir.join("published"), b"same-metadata").unwrap();
+        assert!(!second_provider.cache_dir.join("published").exists());
     }
 }

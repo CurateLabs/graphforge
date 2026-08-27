@@ -505,11 +505,6 @@ pub(crate) fn record_plan_after(
     });
 }
 
-#[cfg(test)]
-fn with_hop(edge_var: u32, update: impl FnOnce(&mut HopSnapshot)) {
-    with_hop_handle(None, edge_var, update);
-}
-
 fn with_hop_handle(
     handle: Option<&CaptureHandle>,
     edge_var: u32,
