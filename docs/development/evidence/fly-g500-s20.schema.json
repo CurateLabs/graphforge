@@ -2,7 +2,20 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "git_sha", "image_digest", "provider", "region", "scale", "result", "counts", "phase_peak_rss_bytes", "storage"],
+  "$defs": {
+    "phase_memory": {
+      "type": "object", "additionalProperties": false,
+      "required": ["rss_peak_bytes", "hwm_bytes", "anonymous_peak_bytes", "file_peak_bytes", "sample_interval_ms"],
+      "properties": {
+        "rss_peak_bytes": {"type": "integer", "minimum": 0},
+        "hwm_bytes": {"type": "integer", "minimum": 0},
+        "anonymous_peak_bytes": {"type": "integer", "minimum": 0},
+        "file_peak_bytes": {"type": "integer", "minimum": 0},
+        "sample_interval_ms": {"const": 250}
+      }
+    }
+  },
+  "required": ["schema", "git_sha", "image_digest", "provider", "region", "scale", "machine", "volume_gb", "result", "counts", "phase_memory", "storage", "run", "rung", "lifecycle", "memory", "wall_time_s", "first_failure"],
   "properties": {
     "schema": {"const": "graphforge-fly-g500-s20/1"},
     "git_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
@@ -10,6 +23,15 @@
     "provider": {"const": "fly.io"},
     "region": {"type": "string", "pattern": "^[a-z0-9-]{2,20}$"},
     "scale": {"const": 20},
+    "machine": {
+      "type": "object", "additionalProperties": false,
+      "required": ["class", "cpus", "memory_mb"],
+      "properties": {
+        "class": {"const": "performance"}, "cpus": {"const": 2},
+        "memory_mb": {"const": 4096}
+      }
+    },
+    "volume_gb": {"type": "integer", "minimum": 1, "maximum": 500},
     "result": {"enum": ["passed", "failed"]},
     "counts": {
       "type": "object", "additionalProperties": false,
@@ -20,29 +42,39 @@
         "imported_edges": {"type": "integer", "minimum": 0}
       }
     },
-    "phase_peak_rss_bytes": {
+    "phase_memory": {
       "type": "object", "additionalProperties": false,
-      "required": ["generate", "ingest", "source_reopen", "one_hop", "two_hop", "export", "verify", "import", "import_reopen"],
+      "required": ["generate", "ingest", "source_reopen", "source_query", "export", "verify", "import", "import_reopen", "import_query", "finalize"],
       "properties": {
-        "generate": {"type": "integer", "minimum": 0},
-        "ingest": {"type": "integer", "minimum": 0},
-        "source_reopen": {"type": "integer", "minimum": 0},
-        "one_hop": {"type": "integer", "minimum": 0},
-        "two_hop": {"type": "integer", "minimum": 0},
-        "export": {"type": "integer", "minimum": 0},
-        "verify": {"type": "integer", "minimum": 0},
-        "import": {"type": "integer", "minimum": 0},
-        "import_reopen": {"type": "integer", "minimum": 0}
+        "generate": {"$ref": "#/$defs/phase_memory"},
+        "ingest": {"$ref": "#/$defs/phase_memory"},
+        "source_reopen": {"$ref": "#/$defs/phase_memory"},
+        "source_query": {"$ref": "#/$defs/phase_memory"},
+        "export": {"$ref": "#/$defs/phase_memory"},
+        "verify": {"$ref": "#/$defs/phase_memory"},
+        "import": {"$ref": "#/$defs/phase_memory"},
+        "import_reopen": {"$ref": "#/$defs/phase_memory"},
+        "import_query": {"$ref": "#/$defs/phase_memory"},
+        "finalize": {"$ref": "#/$defs/phase_memory"}
       }
     },
     "storage": {
       "type": "object", "additionalProperties": false,
-      "required": ["logical_bytes", "allocated_bytes", "capacity_bytes"],
+      "required": ["logical_bytes", "allocated_bytes", "peak_allocated_bytes", "generator_allocated_bytes", "construction_transient_peak_allocated_bytes", "capacity_bytes"],
       "properties": {
         "logical_bytes": {"type": "integer", "minimum": 0},
         "allocated_bytes": {"type": "integer", "minimum": 0},
+        "peak_allocated_bytes": {"type": "integer", "minimum": 0},
+        "generator_allocated_bytes": {"type": "integer", "minimum": 1},
+        "construction_transient_peak_allocated_bytes": {"type": "integer", "minimum": 1},
         "capacity_bytes": {"type": "integer", "minimum": 1}
       }
-    }
+    },
+    "run": {"type": "object"},
+    "rung": {"type": "object"},
+    "lifecycle": {"type": "object"},
+    "memory": {"type": "object"},
+    "wall_time_s": {"type": "number", "minimum": 0, "maximum": 14400},
+    "first_failure": {"type": ["object", "null"]}
   }
 }

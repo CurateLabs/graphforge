@@ -35,8 +35,13 @@ def validate(value: Any, sha: str, digest: str, region: str) -> None:
         raise EvidenceError(
             "passing evidence must reconcile generated, source, and imported counts"
         )
-    if value["storage"]["allocated_bytes"] > value["storage"]["capacity_bytes"]:
+    if value["storage"]["peak_allocated_bytes"] > value["storage"]["capacity_bytes"]:
         raise EvidenceError("allocated storage exceeds volume capacity")
+    for phase, memory in value["phase_memory"].items():
+        if memory["rss_peak_bytes"] == 0 or memory["hwm_bytes"] < memory["rss_peak_bytes"]:
+            raise EvidenceError(f"phase {phase} lacks truthful RSS/HWM sampling")
+        if memory["anonymous_peak_bytes"] + memory["file_peak_bytes"] < memory["rss_peak_bytes"]:
+            raise EvidenceError(f"phase {phase} memory categories understate RSS")
 
     def reject_sensitive(item: Any) -> None:
         if isinstance(item, dict):

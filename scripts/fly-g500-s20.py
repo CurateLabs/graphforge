@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Sequence
+import fcntl
 import importlib.util
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -123,33 +125,67 @@ def price_reservation(volume_size_gb: int) -> dict[str, Any]:
     }
 
 
+def verify_current_pricing(html: str) -> None:
+    """Fail closed if Fly no longer publishes the rates used by the ledger."""
+    compact = re.sub(r"\s+", "", html)
+    compute = f"{COMPUTE_USD_PER_SECOND:.8f}".rstrip("0")
+    volume = f"{VOLUME_USD_PER_GB_MONTH:.2f}".rstrip("0").rstrip(".")
+    if compute not in compact or f"${volume}/GBpermonth" not in compact:
+        raise ControllerError(
+            "official Fly pricing no longer matches the committed worst-case rates"
+        )
+
+
+def fetch_current_pricing() -> None:
+    request = urllib.request.Request(
+        PRICING_SOURCE, headers={"User-Agent": "graphforge-fly-s20-controller/1"}
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            if response.geturl() != PRICING_SOURCE:
+                raise ControllerError("official Fly pricing request redirected")
+            verify_current_pricing(response.read().decode("utf-8"))
+    except urllib.error.URLError:
+        raise ControllerError("official Fly pricing is unavailable") from None
+
+
 def reserve_budget(path: Path, run_id: str, reservation: dict[str, Any]) -> None:
     """Durably reserve before creation; reservations survive failed attempts."""
-    state = {"schema": "graphforge-fly-cost-ledger/1", "limit_usd": MAX_COST_USD, "runs": []}
-    if path.exists():
-        state = json.loads(path.read_text(encoding="utf-8"))
-    if (
-        state.get("schema") != "graphforge-fly-cost-ledger/1"
-        or state.get("limit_usd") != MAX_COST_USD
-    ):
-        raise ControllerError("invalid cost ledger")
-    runs = state.get("runs")
-    if not isinstance(runs, list):
-        raise ControllerError("invalid cost ledger runs")
-    if any(run.get("run_id") == run_id for run in runs):
-        raise ControllerError("run id is already reserved")
-    used = sum(float(run.get("reserved_usd", MAX_COST_USD + 1)) for run in runs)
-    amount = float(reservation["reserved_usd"])
-    if used + amount > MAX_COST_USD:
-        raise ControllerError("durable cost reservations would exceed $10")
-    runs.append({"run_id": run_id, **reservation})
-    with tempfile.NamedTemporaryFile(
-        "w", dir=path.parent, delete=False, encoding="utf-8"
-    ) as handle:
-        json.dump(state, handle, sort_keys=True)
-        handle.write("\n")
-        temporary = Path(handle.name)
-    temporary.replace(path)
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    with lock_path.open("a+b") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        state = {"schema": "graphforge-fly-cost-ledger/1", "limit_usd": MAX_COST_USD, "runs": []}
+        if path.exists():
+            state = json.loads(path.read_text(encoding="utf-8"))
+        if (
+            state.get("schema") != "graphforge-fly-cost-ledger/1"
+            or state.get("limit_usd") != MAX_COST_USD
+        ):
+            raise ControllerError("invalid cost ledger")
+        runs = state.get("runs")
+        if not isinstance(runs, list):
+            raise ControllerError("invalid cost ledger runs")
+        if any(run.get("run_id") == run_id for run in runs):
+            raise ControllerError("run id is already reserved")
+        used = sum(float(run.get("reserved_usd", MAX_COST_USD + 1)) for run in runs)
+        amount = float(reservation["reserved_usd"])
+        if used + amount > MAX_COST_USD:
+            raise ControllerError("durable cost reservations would exceed $10")
+        runs.append({"run_id": run_id, **reservation})
+        with tempfile.NamedTemporaryFile(
+            "w", dir=path.parent, delete=False, encoding="utf-8"
+        ) as handle:
+            json.dump(state, handle, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+            temporary = Path(handle.name)
+        temporary.replace(path)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
 
 
 def machine_payload(args: argparse.Namespace, volume_id: str, digest: str) -> dict[str, Any]:
@@ -299,6 +335,7 @@ def execute(args: argparse.Namespace, fly: Flyctl, digest: str) -> None:
             item.get("Name") == args.app_name or item.get("name") == args.app_name for item in apps
         ):
             raise ControllerError("refusing to reuse an existing app")
+        fetch_current_pricing()
         reserve_budget(args.ledger, args.app_name, price_reservation(args.volume_size_gb))
         fly.run(["apps", "create", args.app_name, "--org", args.org])
         app_created = True

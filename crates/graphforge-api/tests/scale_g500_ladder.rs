@@ -57,6 +57,7 @@ const TWO_HOP: &str =
     "MATCH (a)-[r1]->(b)-[r2]->(c) RETURN c.node_uuid AS id ORDER BY id LIMIT 1000";
 const COUNT_EDGES: &str = "MATCH ()-[r:LINK]->() RETURN count(r) AS total";
 static JOURNAL_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static S20_ACTIVE_PHASE: AtomicU64 = AtomicU64::new(u64::MAX);
 static INGEST_SUBPHASE: AtomicU64 = AtomicU64::new(0);
 static INGEST_CHUNK_INDEX: AtomicU64 = AtomicU64::new(0);
 
@@ -676,6 +677,16 @@ fn persist_phase_journal(
     steps: &[Value],
     failure: Option<(&str, &str)>,
 ) {
+    let phase_index = match phase {
+        "generate" => Some(0),
+        "ingest" => Some(1),
+        "reopen" | "node_count" => Some(2),
+        "query" => Some(3),
+        _ => None,
+    };
+    if let Some(index) = phase_index {
+        S20_ACTIVE_PHASE.store(index, Ordering::Relaxed);
+    }
     let Ok(path) = std::env::var("GF_G500_LADDER_JOURNAL_OUT") else {
         return;
     };
@@ -3091,6 +3102,22 @@ fn required_env_u64(name: &str) -> u64 {
         .unwrap_or_else(|_| panic!("{name} must be an unsigned integer"))
 }
 
+fn observed_filesystem_capacity_bytes(path: &Path) -> u64 {
+    command_text(
+        "df",
+        &[
+            "-k",
+            "--output=size",
+            path.to_str().expect("UTF-8 work path"),
+        ],
+    )
+    .lines()
+    .last()
+    .and_then(|value| value.trim().parse::<u64>().ok())
+    .expect("observe work-volume capacity")
+    .saturating_mul(1024)
+}
+
 fn s20_memory_snapshot() -> Value {
     let status = fs::read_to_string("/proc/self/status").unwrap_or_default();
     let kib = |name: &str| {
@@ -3120,6 +3147,102 @@ fn s20_memory_snapshot() -> Value {
         "anonymous_bytes": anonymous,
         "file_bytes": rss.saturating_sub(anonymous),
     })
+}
+
+#[derive(Clone, Copy, Default)]
+struct PhaseMemoryPeak {
+    rss_bytes: u64,
+    hwm_bytes: u64,
+    anonymous_bytes: u64,
+    file_bytes: u64,
+}
+
+struct S20PhaseSampler {
+    stop: Arc<AtomicBool>,
+    peaks: Arc<std::sync::Mutex<[PhaseMemoryPeak; 10]>>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl S20PhaseSampler {
+    const NAMES: [&'static str; 10] = [
+        "generate",
+        "ingest",
+        "source_reopen",
+        "source_query",
+        "export",
+        "verify",
+        "import",
+        "import_reopen",
+        "import_query",
+        "finalize",
+    ];
+
+    fn start() -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let peaks = Arc::new(std::sync::Mutex::new([PhaseMemoryPeak::default(); 10]));
+        let worker_stop = Arc::clone(&stop);
+        let worker_peaks = Arc::clone(&peaks);
+        let worker = thread::spawn(move || {
+            while !worker_stop.load(Ordering::Relaxed) {
+                let index = S20_ACTIVE_PHASE.load(Ordering::Relaxed);
+                if let Ok(index) = usize::try_from(index)
+                    && index < Self::NAMES.len()
+                {
+                    let sample = s20_memory_snapshot();
+                    let mut values = worker_peaks.lock().expect("phase memory peaks");
+                    let peak = &mut values[index];
+                    peak.rss_bytes = peak
+                        .rss_bytes
+                        .max(sample["rss_bytes"].as_u64().unwrap_or(0));
+                    peak.hwm_bytes = peak
+                        .hwm_bytes
+                        .max(sample["hwm_bytes"].as_u64().unwrap_or(0));
+                    peak.anonymous_bytes = peak
+                        .anonymous_bytes
+                        .max(sample["anonymous_bytes"].as_u64().unwrap_or(0));
+                    peak.file_bytes = peak
+                        .file_bytes
+                        .max(sample["file_bytes"].as_u64().unwrap_or(0));
+                }
+                thread::sleep(Duration::from_millis(250));
+            }
+        });
+        Self {
+            stop,
+            peaks,
+            worker: Some(worker),
+        }
+    }
+
+    fn enter(index: u64) {
+        S20_ACTIVE_PHASE.store(index, Ordering::SeqCst);
+    }
+
+    fn finish(mut self) -> Value {
+        Self::enter(9);
+        thread::sleep(Duration::from_millis(300));
+        self.stop.store(true, Ordering::SeqCst);
+        self.worker.take().unwrap().join().expect("phase sampler");
+        let peaks = *self.peaks.lock().expect("phase memory peaks");
+        Value::Object(
+            Self::NAMES
+                .iter()
+                .zip(peaks)
+                .map(|(name, peak)| {
+                    (
+                        (*name).to_owned(),
+                        json!({
+                            "rss_peak_bytes": peak.rss_bytes,
+                            "hwm_bytes": peak.hwm_bytes,
+                            "anonymous_peak_bytes": peak.anonymous_bytes,
+                            "file_peak_bytes": peak.file_bytes,
+                            "sample_interval_ms": 250,
+                        }),
+                    )
+                })
+                .collect(),
+        )
+    }
 }
 
 fn query_evidence_value(value: &graphforge_exec::demand::DemandSnapshot) -> Value {
@@ -3169,6 +3292,7 @@ fn fly_s20_full_lifecycle_evidence() {
     assert!(!work_root.exists(), "S20 work root must be fresh");
     fs::create_dir_all(&work_root).expect("create S20 work root");
     let started = Instant::now();
+    let phase_sampler = S20PhaseSampler::start();
     let envelope = RunEnvelope {
         rss_bytes: required_env_u64("GF_G500_S20_MEMORY_BYTES"),
         disk_bytes: required_env_u64("GF_G500_S20_DISK_BYTES"),
@@ -3204,6 +3328,7 @@ fn fly_s20_full_lifecycle_evidence() {
     let source_storage = storage_attribution_value(&source);
     let source_generation = current_generation_uuid(&source_graph);
     let limits = PortableV2Limits::default();
+    S20PhaseSampler::enter(4);
     let exported = source_graph
         .export_portable_v2(
             &PortableV2ExportRequest {
@@ -3220,6 +3345,7 @@ fn fly_s20_full_lifecycle_evidence() {
         .expect("export S20 project");
     assert_eq!(exported.generation_uuid, source_generation);
     drop(source_graph);
+    S20PhaseSampler::enter(5);
     let verified = verify_portable_v2(
         &PortableVerifyRequest {
             input: package.clone(),
@@ -3230,6 +3356,7 @@ fn fly_s20_full_lifecycle_evidence() {
     )
     .expect("verify S20 package");
     assert_eq!(verified.package_digest, exported.package_digest);
+    S20PhaseSampler::enter(6);
     let imported_receipt = GraphForge::import_portable_v2(
         &imported,
         &PortableV2ImportRequest {
@@ -3240,6 +3367,7 @@ fn fly_s20_full_lifecycle_evidence() {
         None,
     )
     .expect("clean S20 import");
+    S20PhaseSampler::enter(7);
     let imported_graph =
         GraphForge::new(Some(imported.to_str().expect("UTF-8 import"))).expect("reopen S20 import");
     let imported_nodes = imported_graph
@@ -3250,6 +3378,7 @@ fn fly_s20_full_lifecycle_evidence() {
             .execute(COUNT_EDGES)
             .expect("imported edge count"),
     );
+    S20PhaseSampler::enter(8);
     let imported_one = imported_graph.execute_observed(ONE_HOP);
     let imported_one_result = imported_one.result.expect("imported one-hop query");
     let imported_one_fingerprint = result_fingerprint(&imported_one_result);
@@ -3266,13 +3395,67 @@ fn fly_s20_full_lifecycle_evidence() {
     assert_eq!(source_two_fingerprint, imported_two_fingerprint);
     assert_eq!(source_authority, imported_authority);
 
+    let generated_edges = rung_outcome.evidence["counts"]["live_unique_edges"]
+        .as_u64()
+        .expect("generated live edge count");
+    let source_allocated = source_storage["allocated_bytes"].as_u64().unwrap_or(0);
+    let imported_allocated = imported_storage["allocated_bytes"].as_u64().unwrap_or(0);
+    let package_storage = exact_descriptor_allocation(std::slice::from_ref(&package));
+    let package_allocated = package_storage["allocated_bytes"].as_u64().unwrap_or(0);
+    let generator_allocated = rung_outcome.evidence["steps"]
+        .as_array()
+        .and_then(|steps| steps.iter().find(|step| step["id"] == "generate"))
+        .and_then(|step| step["detail"]["storage"]["allocated_bytes"].as_u64())
+        .expect("generator allocated bytes");
+    let construction_transient_peak = rung_outcome.evidence["steps"]
+        .as_array()
+        .and_then(|steps| steps.iter().find(|step| step["id"] == "ingest"))
+        .and_then(|step| {
+            step["detail"]["construction"]["storage_transient_peak_allocated_bytes"].as_u64()
+        })
+        .expect("construction transient allocation peak");
+    let retained_allocated_total = source_allocated
+        .saturating_add(imported_allocated)
+        .saturating_add(package_allocated)
+        .saturating_add(generator_allocated);
+    let allocated_peak = retained_allocated_total.max(
+        imported_allocated
+            .saturating_add(package_allocated)
+            .saturating_add(generator_allocated)
+            .saturating_add(construction_transient_peak),
+    );
+    let observed_capacity = observed_filesystem_capacity_bytes(&work_root);
+    assert!(
+        observed_capacity <= required_env_u64("GF_G500_S20_DISK_BYTES"),
+        "observed volume is larger than the authorized disk envelope"
+    );
+    let phase_memory = phase_sampler.finish();
+
     let evidence = json!({
-        "schema": "graphforge-fly-s20-evidence/1",
+        "schema": "graphforge-fly-g500-s20/1",
         "git_sha": std::env::var("GF_G500_S20_EXPECTED_SHA").expect("exact SHA"),
         "image_digest": std::env::var("GF_G500_S20_IMAGE_DIGEST").expect("image digest"),
+        "provider": "fly.io",
         "region": std::env::var("GF_G500_S20_REGION").expect("fixed region"),
+        "scale": 20,
         "machine": { "class": "performance", "cpus": 2, "memory_mb": 4096 },
         "volume_gb": required_env_u64("GF_G500_S20_VOLUME_GB"),
+        "counts": {
+            "generated_edges": generated_edges,
+            "source_edges": source_edges,
+            "imported_edges": imported_edges,
+        },
+        "phase_memory": phase_memory,
+        "storage": {
+            "logical_bytes": source_storage["logical_bytes"].as_u64().unwrap_or(0)
+                .saturating_add(imported_storage["logical_bytes"].as_u64().unwrap_or(0))
+                .saturating_add(package_storage["logical_bytes"].as_u64().unwrap_or(0)),
+            "allocated_bytes": retained_allocated_total,
+            "peak_allocated_bytes": allocated_peak,
+            "generator_allocated_bytes": generator_allocated,
+            "construction_transient_peak_allocated_bytes": construction_transient_peak,
+            "capacity_bytes": observed_capacity,
+        },
         "run": { "scale": 20, "edgefactor": profile.edgefactor, "seed": profile.seed },
         "rung": rung_outcome.evidence,
         "lifecycle": {
@@ -3290,11 +3473,11 @@ fn fly_s20_full_lifecycle_evidence() {
             "imported_authority_fingerprint": imported_authority,
             "source_storage": source_storage,
             "imported_storage": imported_storage,
-            "package_storage": exact_descriptor_allocation(std::slice::from_ref(&package)),
+            "package_storage": package_storage,
         },
         "memory": s20_memory_snapshot(),
         "wall_time_s": started.elapsed().as_secs_f64(),
-        "result": "pass",
+        "result": "passed",
         "first_failure": null,
     });
     let evidence_out = PathBuf::from(

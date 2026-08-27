@@ -147,6 +147,16 @@ def test_durable_budget_reservations_survive_and_accumulate(tmp_path):
         controller.reserve_budget(ledger, "run-one", first)
 
 
+def test_current_official_pricing_must_match_committed_worst_case():
+    controller.verify_current_pricing(
+        "performance-2x $0.00003864 per second; volumes $0.15/GB per month"
+    )
+    with pytest.raises(controller.ControllerError, match="no longer matches"):
+        controller.verify_current_pricing(
+            "performance-2x $0.00009999 per second; volumes $0.15/GB per month"
+        )
+
+
 def test_existing_app_is_refused_before_budget_or_creation(tmp_path):
     class ExistingFly:
         def json(self, command):

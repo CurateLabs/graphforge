@@ -16,6 +16,7 @@ rm -f /work/s20-evidence.json /work/s20-journal.json /work/controller-ack
 mkdir -p /work/tmp
 export TMPDIR=/work/tmp
 export GF_G500_S20_WORK_ROOT=/work/s20
+export GF_G500_LADDER_WORKSPACE=/work/s20
 export GF_G500_S20_EVIDENCE_OUT=/work/s20-evidence.json
 export GF_G500_LADDER_JOURNAL_OUT=/work/s20-journal.json
 
@@ -33,9 +34,12 @@ timeout --signal=TERM --kill-after=30s 14400s \
 status=$?
 set -e
 
-elapsed=$(( $(date +%s) - started_at ))
-printf '{"schema":"graphforge-fly-s20-container-result/1","exit_code":%s,"elapsed_s":%s}\n' \
-  "$status" "$elapsed" > /work/container-result.json.tmp
+if [ "$status" -eq 0 ]; then
+  printf '{"status":"success"}\n' > /work/container-result.json.tmp
+else
+  printf '{"status":"failure","phase":"runner","code":"process_exit_%s"}\n' \
+    "$status" > /work/container-result.json.tmp
+fi
 mv /work/container-result.json.tmp /work/container-result.json
 
 remaining=300
