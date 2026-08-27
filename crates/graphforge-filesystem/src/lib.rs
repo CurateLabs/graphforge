@@ -1211,10 +1211,10 @@ mod windows {
         FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_INFO_EX,
         FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_WRITE_THROUGH,
         FILE_ID_INFO, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO,
-        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileDispositionInfoEx, FileIdInfo,
-        FileRenameInfo, FileRenameInfoEx, GetDriveTypeW, GetFileInformationByHandle,
-        GetFileInformationByHandleEx, GetFinalPathNameByHandleW, GetVolumeInformationW,
-        GetVolumePathNameW, SetFileInformationByHandle, VOLUME_NAME_DOS,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES,
+        FileDispositionInfoEx, FileIdInfo, FileRenameInfo, FileRenameInfoEx, GetDriveTypeW,
+        GetFileInformationByHandle, GetFileInformationByHandleEx, GetFinalPathNameByHandleW,
+        GetVolumeInformationW, GetVolumePathNameW, SetFileInformationByHandle, VOLUME_NAME_DOS,
     };
 
     #[cfg(test)]
@@ -1392,7 +1392,9 @@ mod windows {
 
     pub(super) fn delete_file_by_handle(path: &Path, expected: FileIdentity) -> io::Result<()> {
         let file = std::fs::OpenOptions::new()
-            .access_mode(DELETE | FILE_READ_ATTRIBUTES)
+            // IGNORE_READONLY_ATTRIBUTE requires FILE_WRITE_ATTRIBUTES even
+            // though the operation does not clear the shared attribute.
+            .access_mode(DELETE | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES)
             .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH)
             .open(path)?;
