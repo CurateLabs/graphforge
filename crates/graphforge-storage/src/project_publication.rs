@@ -1787,7 +1787,7 @@ fn reconcile_current_replacement_error(
     manifest_sha256: [u8; 32],
     error: &AtomicPublishError,
 ) -> Result<(), GfError> {
-    // `Interrupted` is emitted only by the final predicate inside
+    // `CancelledBeforeReplace` is emitted only by the final predicate inside
     // `before_replace`; the native namespace operation has not started, so
     // committed=false is proven without consulting recovery-visible journals.
     if matches!(error, AtomicPublishError::CancelledBeforeReplace) {

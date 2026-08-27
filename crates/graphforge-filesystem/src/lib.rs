@@ -1204,10 +1204,11 @@ mod windows {
     use windows_sys::Win32::Security::{DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION};
     use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
     use windows_sys::Win32::Storage::FileSystem::{
-        BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, DELETE, FILE_DISPOSITION_INFO,
+        BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, DELETE, FILE_DISPOSITION_FLAG_DELETE,
+        FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_INFO_EX,
         FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_WRITE_THROUGH,
         FILE_ID_INFO, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO,
-        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileDispositionInfo, FileIdInfo,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileDispositionInfoEx, FileIdInfo,
         FileRenameInfo, FileRenameInfoEx, GetDriveTypeW, GetFileInformationByHandle,
         GetFileInformationByHandleEx, GetFinalPathNameByHandleW, GetVolumeInformationW,
         GetVolumePathNameW, SetFileInformationByHandle, VOLUME_NAME_DOS,
@@ -1395,17 +1396,21 @@ mod windows {
         if file_identity(&file)? != expected || identity(path)? != expected {
             return Err(io::Error::other("child identity changed before unlink"));
         }
-        let mut disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
+        let mut disposition = FILE_DISPOSITION_INFO_EX {
+            Flags: FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE,
+        };
         // SAFETY: `file` is an exact retained handle opened with DELETE access,
         // and `disposition` is the initialized structure required by
-        // FileDispositionInfo for the duration of the call.
+        // FileDispositionInfoEx for the duration of the call. Ignoring the
+        // readonly attribute removes only this name without mutating attributes
+        // shared by another hard link to the same file.
         let deleted = unsafe {
             SetFileInformationByHandle(
                 file.as_raw_handle(),
-                FileDispositionInfo,
-                (&mut disposition as *mut FILE_DISPOSITION_INFO).cast(),
-                u32::try_from(std::mem::size_of::<FILE_DISPOSITION_INFO>())
-                    .expect("FILE_DISPOSITION_INFO size fits u32"),
+                FileDispositionInfoEx,
+                (&mut disposition as *mut FILE_DISPOSITION_INFO_EX).cast(),
+                u32::try_from(std::mem::size_of::<FILE_DISPOSITION_INFO_EX>())
+                    .expect("FILE_DISPOSITION_INFO_EX size fits u32"),
             )
         };
         if deleted == 0 {
@@ -2489,6 +2494,26 @@ mod tests {
             std::fs::read(root.path().join("payload")).unwrap(),
             b"replacement"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stable_directory_unlinks_exact_readonly_child_without_clearing_attributes() {
+        let root = tempfile::tempdir().unwrap();
+        let stable = StableDirectory::open(root.path()).unwrap();
+        let path = root.path().join("readonly");
+        std::fs::write(&path, b"sealed").unwrap();
+        let identity = path_identity(&path).unwrap();
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        assert!(std::fs::metadata(&path).unwrap().permissions().readonly());
+
+        stable
+            .unlink_child_if_identity(OsStr::new("readonly"), identity)
+            .unwrap();
+
+        assert!(!path.exists());
     }
 
     #[test]
