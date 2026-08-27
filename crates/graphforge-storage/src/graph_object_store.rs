@@ -2162,7 +2162,7 @@ where
                 error,
             )
         })?;
-        verify_file(existing, digest, expected_length, &cas.diagnostic_root)?;
+        verify_and_seal_graph_object(&existing, digest, expected_length, &cas.diagnostic_root)?;
         false
     };
     cas.tmp
@@ -2225,6 +2225,10 @@ fn verify_and_seal_graph_object(
     expected_length: u64,
     diagnostic: &Path,
 ) -> Result<(), GfError> {
+    // Reuse is safe only after the exact opened inode is no longer writable.
+    // Hashing first would leave a window in which the already-authenticated
+    // bytes could be changed before the subsequent chmod.
+    seal_graph_object(file, diagnostic)?;
     verify_file(
         file.try_clone()
             .map_err(|error| storage("clone graph object for authentication", diagnostic, error))?,
@@ -2232,7 +2236,17 @@ fn verify_and_seal_graph_object(
         expected_length,
         diagnostic,
     )?;
-    seal_graph_object(file, diagnostic)
+    if !file
+        .metadata()
+        .map_err(|error| storage("reinspect sealed graph object", diagnostic, error))?
+        .permissions()
+        .readonly()
+    {
+        return Err(validation(
+            "graph object became writable during authentication",
+        ));
+    }
+    Ok(())
 }
 
 fn seal_graph_object(file: &File, diagnostic: &Path) -> Result<(), GfError> {
@@ -2806,6 +2820,28 @@ mod tests {
         assert!(fs::metadata(&displaced).unwrap().permissions().readonly());
         assert!(!fs::metadata(&path).unwrap().permissions().readonly());
         assert!(open_graph_object_by_digest(root.path(), &digest, payload.len() as u64).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reuse_seals_same_inode_before_digest_authentication() {
+        let root = tempfile::tempdir().unwrap();
+        let payload = b"seal-before-authentication";
+        let digest = hex_digest(Sha256::digest(payload).into());
+        let path = root.path().join("candidate");
+        fs::write(&path, payload).unwrap();
+        let descriptor = File::open(&path).unwrap();
+
+        seal_graph_object(&descriptor, root.path()).unwrap();
+        assert!(fs::OpenOptions::new().write(true).open(&path).is_err());
+        verify_file(
+            descriptor.try_clone().unwrap(),
+            &digest,
+            payload.len() as u64,
+            root.path(),
+        )
+        .unwrap();
+        assert!(descriptor.metadata().unwrap().permissions().readonly());
     }
 
     #[cfg(unix)]

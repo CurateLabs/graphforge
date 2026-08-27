@@ -30,10 +30,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use arrow::array::{Array, FixedSizeBinaryArray, Int64Array, StringArray, UInt64Array};
 use arrow::record_batch::RecordBatch;
 use graphforge_api::{
-    CancellationToken, GraphForge, OperationId, PortableSelection, PortableV2ExportRequest,
-    PortableV2ImportRequest, PortableV2Limits, PortableV2Mode, PortableV2Output,
-    PortableV2SelectionProfile, PortableVerifyRequest, bulk_edge_input_schema,
-    bulk_node_input_schema, verify_portable_v2,
+    CONSTRUCTION_EDGE_SCHEMA, CONSTRUCTION_NODE_SCHEMA, CancellationToken,
+    GraphConstructionBudgets, GraphConstructionSession, GraphForge, OperationId, PortableSelection,
+    PortableV2ExportRequest, PortableV2ImportRequest, PortableV2Limits, PortableV2Mode,
+    PortableV2Output, PortableV2SelectionProfile, PortableVerifyRequest, verify_portable_v2,
 };
 use graphforge_core::uuid::Uuid;
 use serde::Deserialize;
@@ -597,6 +597,36 @@ fn write_json_atomically(path: &Path, value: &Value) {
         .expect("sync journal parent");
 }
 
+fn open_persisted_construction<'a>(
+    graph: &'a GraphForge,
+    path: &Path,
+) -> GraphConstructionSession<'a> {
+    if path.exists() {
+        let opaque = fs::read_to_string(path).expect("read construction session identifier");
+        let session_uuid =
+            Uuid::parse_str(opaque.trim()).expect("parse construction session identifier");
+        return graph
+            .resume_graph_construction(session_uuid, GraphConstructionBudgets::default())
+            .expect("resume persisted construction session");
+    }
+    let session = graph
+        .begin_graph_construction(GraphConstructionBudgets::default())
+        .expect("begin persisted construction session");
+    let parent = path.parent().expect("construction session parent");
+    fs::create_dir_all(parent).expect("construction session parent");
+    let temporary = parent.join(".construction-session.uuid.tmp");
+    let mut file = File::create(&temporary).expect("create construction session identifier");
+    writeln!(file, "{}", session.session_uuid().hyphenated())
+        .expect("write construction session identifier");
+    file.sync_all()
+        .expect("sync construction session identifier");
+    fs::rename(&temporary, path).expect("publish construction session identifier");
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .expect("sync construction session parent");
+    session
+}
+
 fn persist_phase_journal(
     profile: &ScaleProfile,
     rung: &Rung,
@@ -822,15 +852,21 @@ fn run_rung(
         INGEST_SUBPHASE.store(1, Ordering::Relaxed);
         let heartbeat =
             IngestHeartbeat::start(profile, rung, completed_rungs, &steps, &project, &spill_dir);
-        publish_nodes(&graph, 1u64 << rung.scale, None);
+        let mut construction =
+            open_persisted_construction(&graph, &spill_dir.join("construction-session.uuid"));
+        publish_nodes(&mut construction, 1u64 << rung.scale, None);
         INGEST_SUBPHASE.store(2, Ordering::Relaxed);
-        let mut sink = EdgeSink::new(&graph, None);
+        let mut sink = EdgeSink::new(&mut construction, None);
         let merge =
             merge_runs(&spill.runs, None, |src, dst| sink.push(src, dst)).expect("rung merge");
         sink.flush();
         live_unique_edges = merge.live_unique_edges;
         duplicates_rejected = merge.duplicates_rejected;
         input_fingerprint = format!("sha256:{}", hex_encode(sink.finish()));
+        let construction_evidence = construction.progress().evidence;
+        construction
+            .seal_and_publish()
+            .expect("publish rung construction");
         INGEST_SUBPHASE.store(0, Ordering::Relaxed);
         heartbeat.stop();
         drop(graph);
@@ -845,14 +881,22 @@ fn run_rung(
             "id": "ingest",
             "pass": ingest_violation.is_none(),
             "wall_time_s": ingest_s,
-            // NOTE: ingest RSS includes the upstream bulk-publication identity
-            // set (see runbook), so an ingest-phase `oom` is not a generator
-            // bottleneck. Recorded here so consumers can attribute it.
             "rss_peak_bytes": rss_value(),
+            "disk_used_bytes": directory_bytes(&project).unwrap_or(0)
+                .saturating_add(directory_bytes(&spill_dir).unwrap_or(0)),
             "detail": {
                 "live_unique_edges": live_unique_edges,
                 "duplicates_rejected": duplicates_rejected,
                 "input_fingerprint": input_fingerprint,
+                "construction": {
+                    "input_rows": construction_evidence.input_rows,
+                    "input_batches": construction_evidence.input_batches,
+                    "parquet_shards": construction_evidence.parquet_shards,
+                    "write_bytes": construction_evidence.write_bytes,
+                    "write_operations": construction_evidence.write_operations,
+                    "authentication_read_bytes": construction_evidence.authentication_read_bytes,
+                    "authentication_read_operations": construction_evidence.authentication_read_operations,
+                },
             }
         }));
         persist_phase_journal(
@@ -1097,18 +1141,21 @@ fn provisioned_rungs_through(profile: &ScaleProfile, max_scale: u32) -> Result<V
 // Streaming edge publisher (bounded by EDGE_PUBLISH_ROWS).
 // ---------------------------------------------------------------------------
 
-struct EdgeSink<'a> {
-    graph: &'a GraphForge,
+struct EdgeSink<'a, 'graph> {
+    session: &'a mut GraphConstructionSession<'graph>,
     cancellation: Option<&'a AtomicBool>,
     buf: Vec<(u32, u32)>,
     chunk_index: u128,
     hasher: Sha256,
 }
 
-impl<'a> EdgeSink<'a> {
-    fn new(graph: &'a GraphForge, cancellation: Option<&'a AtomicBool>) -> Self {
+impl<'a, 'graph> EdgeSink<'a, 'graph> {
+    fn new(
+        session: &'a mut GraphConstructionSession<'graph>,
+        cancellation: Option<&'a AtomicBool>,
+    ) -> Self {
         EdgeSink {
-            graph,
+            session,
             cancellation,
             buf: Vec::with_capacity(EDGE_PUBLISH_ROWS),
             chunk_index: 0,
@@ -1131,8 +1178,6 @@ impl<'a> EdgeSink<'a> {
         if self.buf.is_empty() {
             return;
         }
-        let schema = bulk_edge_input_schema(Vec::new()).expect("edge schema");
-        let mut batches = Vec::new();
         let mut offset = 0usize;
         while offset < self.buf.len() {
             self.check_cancellation();
@@ -1151,7 +1196,7 @@ impl<'a> EdgeSink<'a> {
                 targets.push(uuidv7(u128::from(dst) + 1));
             }
             let batch = RecordBatch::try_new(
-                schema.clone(),
+                CONSTRUCTION_EDGE_SCHEMA.clone(),
                 vec![
                     Arc::new(
                         FixedSizeBinaryArray::try_from_iter(edge_ids.iter().map(Uuid::as_bytes))
@@ -1169,7 +1214,12 @@ impl<'a> EdgeSink<'a> {
                 ],
             )
             .expect("edge batch");
-            batches.push(batch);
+            self.session
+                .append_edges(
+                    &format!("edges-{:016x}-{:08x}", self.chunk_index, offset),
+                    &batch,
+                )
+                .expect("append construction edge chunk");
             offset = end;
         }
         INGEST_CHUNK_INDEX.store(
@@ -1177,9 +1227,6 @@ impl<'a> EdgeSink<'a> {
             Ordering::Relaxed,
         );
         INGEST_SUBPHASE.store(3, Ordering::Relaxed);
-        self.graph
-            .publish_bulk_edges(OperationId(uuidv7(0xB100 + self.chunk_index)), &batches)
-            .expect("publish_bulk_edges");
         INGEST_SUBPHASE.store(4, Ordering::Relaxed);
         self.chunk_index += 1;
         self.buf.clear();
@@ -1201,9 +1248,12 @@ impl<'a> EdgeSink<'a> {
     }
 }
 
-fn publish_nodes(graph: &GraphForge, vertex_count: u64, cancellation: Option<&AtomicBool>) {
+fn publish_nodes(
+    session: &mut GraphConstructionSession<'_>,
+    vertex_count: u64,
+    cancellation: Option<&AtomicBool>,
+) {
     let total = usize::try_from(vertex_count).expect("vertex count fits usize");
-    let schema = bulk_node_input_schema(Vec::new()).expect("node schema");
     let mut offset = 0usize;
     while offset < total {
         assert!(
@@ -1211,7 +1261,6 @@ fn publish_nodes(graph: &GraphForge, vertex_count: u64, cancellation: Option<&At
             "node publication cancelled"
         );
         let chunk_end = (offset + EDGE_PUBLISH_ROWS).min(total);
-        let mut batches = Vec::new();
         let mut inner = offset;
         while inner < chunk_end {
             assert!(
@@ -1224,7 +1273,7 @@ fn publish_nodes(graph: &GraphForge, vertex_count: u64, cancellation: Option<&At
                 .map(|index| uuidv7(u128::try_from(index + 1).expect("node seed")))
                 .collect::<Vec<_>>();
             let batch = RecordBatch::try_new(
-                schema.clone(),
+                CONSTRUCTION_NODE_SCHEMA.clone(),
                 vec![
                     Arc::new(
                         FixedSizeBinaryArray::try_from_iter(ids.iter().map(Uuid::as_bytes))
@@ -1234,12 +1283,11 @@ fn publish_nodes(graph: &GraphForge, vertex_count: u64, cancellation: Option<&At
                 ],
             )
             .expect("node batch");
-            batches.push(batch);
+            session
+                .append_nodes(&format!("nodes-{inner:016x}"), &batch)
+                .expect("append construction node chunk");
             inner = end;
         }
-        graph
-            .publish_bulk_nodes(OperationId(uuidv7(0xB001_0000 + offset as u128)), &batches)
-            .expect("publish_bulk_nodes");
         offset = chunk_end;
     }
 }
@@ -2120,13 +2168,22 @@ fn create_bounded_drill_package(root: &Path, limits: PortableV2Limits) -> (PathB
     let package = root.join("drill.gfpb");
     fs::create_dir_all(&project).expect("bounded drill project");
     let graph = GraphForge::new(project.to_str()).expect("open bounded drill project");
-    publish_nodes(&graph, 8, None);
-    let mut sink = EdgeSink::new(&graph, None);
+    let mut construction = graph
+        .begin_graph_construction(Default::default())
+        .expect("begin bounded drill construction");
+    publish_nodes(&mut construction, 8, None);
+    let mut sink = EdgeSink::new(&mut construction, None);
     for edge in [(0, 1), (1, 2), (2, 3), (3, 4)] {
         sink.push(edge.0, edge.1);
     }
     sink.flush();
     let _ = sink.finish();
+    construction
+        .seal_and_publish()
+        .expect("publish bounded drill construction");
+    drop(construction);
+    drop(graph);
+    let graph = GraphForge::new(project.to_str()).expect("reopen bounded drill project");
     let receipt = graph
         .export_portable_v2(
             &PortableV2ExportRequest {
@@ -2224,8 +2281,15 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
 
     let phase = Instant::now();
     let graph = GraphForge::new(source.to_str()).expect("open certification source");
-    publish_nodes(&graph, 1u64 << scale, Some(journal.cancellation()));
-    let mut sink = EdgeSink::new(&graph, Some(journal.cancellation()));
+    let mut construction = graph
+        .begin_graph_construction(Default::default())
+        .expect("begin certification construction");
+    publish_nodes(
+        &mut construction,
+        1u64 << scale,
+        Some(journal.cancellation()),
+    );
+    let mut sink = EdgeSink::new(&mut construction, Some(journal.cancellation()));
     if let Some(edges) = edges {
         for (src, dst) in edges {
             sink.push(src, dst);
@@ -2241,6 +2305,9 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
     sink.flush();
     let input_fingerprint = format!("sha256:{}", sink.finish());
     assert_eq!(input_fingerprint, generation_fingerprint);
+    construction
+        .seal_and_publish()
+        .expect("publish certification construction");
     journal.pass("ingest", phase, Some(input_fingerprint));
 
     let phase = Instant::now();
@@ -2571,8 +2638,11 @@ fn cancellation_stops_merge_and_publication_before_more_work_is_committed() {
     let project = TempDir::new().expect("cancelled publication project");
     let graph = GraphForge::new(project.path().to_str()).expect("open publication project");
     let before = current_generation_uuid(&graph);
+    let mut construction = graph
+        .begin_graph_construction(Default::default())
+        .expect("begin cancelled construction");
     let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        publish_nodes(&graph, 8, Some(&cancelled));
+        publish_nodes(&mut construction, 8, Some(&cancelled));
     }));
     assert!(stopped.is_err());
     assert_eq!(current_generation_uuid(&graph), before);
@@ -2582,6 +2652,54 @@ fn cancellation_stops_merge_and_publication_before_more_work_is_committed() {
             .expect("node count after cancellation"),
         0
     );
+}
+
+#[test]
+fn graph500_driver_has_no_bulk_publication_escape_hatch() {
+    let forbidden = ["publish", "bulk"].join("_");
+    assert!(!include_str!("scale_g500_ladder.rs").contains(&forbidden));
+}
+
+#[test]
+fn tiny_construction_ladder_resumes_and_scales_bounded_work_linearly() {
+    for factor in [1_u64, 2, 4] {
+        let project = TempDir::new().expect("tiny construction project");
+        let graph = GraphForge::new(project.path().to_str()).expect("open tiny project");
+        let before = current_generation_uuid(&graph);
+        let session_file = project.path().join("session.uuid");
+        let session_uuid = {
+            let mut session = open_persisted_construction(&graph, &session_file);
+            publish_nodes(&mut session, 8 * factor, None);
+            session.session_uuid()
+        };
+        let mut resumed = graph
+            .resume_graph_construction(session_uuid, GraphConstructionBudgets::default())
+            .expect("resume tiny construction");
+        let mut sink = EdgeSink::new(&mut resumed, None);
+        for node in 0..u32::try_from(8 * factor - 1).expect("tiny vertex count") {
+            sink.push(node, node + 1);
+        }
+        sink.flush();
+        let _ = sink.finish();
+        let progress = resumed.progress();
+        assert_eq!(progress.evidence.input_rows, 16 * factor - 1);
+        assert!(progress.evidence.input_batches <= 2 * factor + 1);
+        assert!(progress.evidence.parquet_shards <= progress.evidence.input_batches);
+        let receipt = resumed
+            .seal_and_publish()
+            .expect("publish tiny construction");
+        assert_ne!(receipt.generation_uuid, before);
+        assert_eq!(current_generation_uuid(&graph), receipt.generation_uuid);
+        drop(resumed);
+        let replay = graph
+            .resume_graph_construction(session_uuid, GraphConstructionBudgets::default())
+            .expect("resume published tiny construction")
+            .seal_and_publish()
+            .expect("replay tiny publication");
+        assert!(replay.idempotent_replay);
+        assert_eq!(replay.generation_uuid, receipt.generation_uuid);
+        assert_eq!(current_generation_uuid(&graph), receipt.generation_uuid);
+    }
 }
 
 #[test]

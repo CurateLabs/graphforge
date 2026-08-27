@@ -93,6 +93,14 @@ finalization recovers only the last acknowledged durable generation. No partial
 candidate may be addressable, and the last complete atomic journal entry remains
 valid.
 
+Bounded ingest uses one public `GraphConstructionSession`: its opaque session
+UUID is durably recorded before the first node chunk, recovery resumes that
+exact session, nodes precede edges, and `seal_and_publish` is invoked once after
+all chunks. Phase evidence records RSS, elapsed time, disk bytes, immutable
+shards, accepted rows/batches, writes, and authentication reads. Adjacent
+1x/2x/4x observations must show bounded resident windows and topology work that
+scales with rows; continued material RSS growth with edge count is a failure.
+
 Fingerprint reconciliation is explicit: source and imported durable generation
 IDs are distinct; semantic package and transport digests are distinct;
 ontology/capability authority fingerprints match; canonical source/imported

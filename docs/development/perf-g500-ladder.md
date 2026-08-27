@@ -18,7 +18,7 @@ edges.
 | Pinned `github.com/graph500/graph500` generator | No — bounded bench-local Kronecker in the test file |
 | Graph500 BFS kernel / harmonic-mean TEPS | Non-goal (`teps` is `null`) |
 | One-billion-live-edge product certification | No — that is #745 |
-| Engineering green (generate → ingest → reopen → GSI → `LIMIT 1000`) | Yes, on `GraphForge::publish_bulk_*` + `execute` |
+| Engineering green (generate → ingest → reopen → GSI → `LIMIT 1000`) | Yes, through one resumable `GraphConstructionSession` + `execute` |
 
 ## What is new versus the #710 SCALE-20 client
 
@@ -34,8 +34,10 @@ This ladder replaces that with **external sort + spill + k-way merge**:
 3. K-way merge the sorted runs, emitting each unique undirected pair once.
 
 Peak resident edges never exceed `buffer_edges`, **independent of total edge
-count**. Live edges stream straight into `publish_bulk_edges` during the merge,
-so ingest is bounded too.
+count**. Nodes and merged live edges are appended as bounded Arrow chunks to
+one disk-owned construction session. Its opaque UUID is fsynced before append,
+so an interrupted rung resumes the same session; publication performs exactly
+one `CURRENT` transition after all chunks are sealed.
 
 ## Counts always reconcile
 
@@ -107,17 +109,16 @@ stops — no larger rung is attempted and no SCALE-26 pass is claimed.
 > (`vmhwm` | `ps_sampled`) so a `ps_sampled` value is read as a floor. Run
 > provisioned certification rungs on **Linux**.
 
-> Ingest-phase attribution: `publish_bulk_nodes` / `publish_bulk_edges` retain
-> request-sized normalization, identity, endpoint, writer, delta, and receipt
-> state. Existing fixed-schema Parquet is copied through bounded 64K-row batches,
-> and writer reopen reads only final row-group surrogate tails; neither operation
-> materializes accumulated topology. While ingest runs, the atomic journal is
+> Ingest-phase attribution: construction writes bounded node and edge Arrow
+> windows into immutable Parquet shards and retains only bounded merge/probe
+> state; accumulated topology remains disk-owned. While ingest runs, the atomic journal is
 > refreshed every two seconds with the current subphase, edge-chunk index,
 > anonymous/file RSS, disk usage, and aggregate topology rewrite counters. An
 > `oom` with `first_failing_phase: "ingest"` therefore remains an upstream
-> publication failure, not a generator-memory regression. Append-only linear-I/O
-> construction is tracked separately by #901 and remains required before the
-> billion-edge close gate.
+> construction failure, not a generator-memory regression. Each completed
+> ingest phase records elapsed time, RSS, disk bytes, shard count, input rows,
+> batches, writes, and authentication reads so 1x/2x/4x observations can test
+> bounded memory and linear topology work directly.
 
 ## Commands
 
