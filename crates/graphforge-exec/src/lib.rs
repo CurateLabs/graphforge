@@ -419,6 +419,15 @@ pub struct ExecutionResult {
     pub mutation_receipt: Option<MutationReceipt>,
 }
 
+/// One query outcome together with evidence isolated to that query.
+#[derive(Debug)]
+pub struct ObservedExecution {
+    /// Typed execution outcome; failures do not discard the evidence.
+    pub result: Result<ExecutionResult, GfError>,
+    /// Demand, operator, memory-pool, and process-RSS evidence for this query.
+    pub evidence: demand::DemandSnapshot,
+}
+
 impl SideEffects {
     /// Read a single-write summary batch (`GraphCreateExec` / `GraphDeleteExec`
     /// / `GraphSetExec` / `GraphRemoveExec`) into a ledger by column name, so one
@@ -3156,6 +3165,7 @@ pub struct ExpandExec {
     demand_batch: Option<usize>,
     /// Query-scoped terminal cancellation shared by the bounded hop chain.
     demand: Option<Arc<demand::QueryDemand>>,
+    capture: Option<demand::CaptureHandle>,
 }
 
 impl ExpandExec {
@@ -3196,6 +3206,7 @@ impl ExpandExec {
             edge_var: node.edge_var,
             demand_batch: None,
             demand: None,
+            capture: demand::capture_handle(),
         }
     }
 
@@ -3220,6 +3231,7 @@ impl ExpandExec {
             edge_var: self.edge_var,
             demand_batch: Some(batch_goal),
             demand: Some(demand),
+            capture: self.capture.clone(),
         })
     }
 }
@@ -3298,6 +3310,7 @@ impl ExecutionPlan for ExpandExec {
             edge_var: self.edge_var,
             demand_batch: self.demand_batch,
             demand: self.demand.clone(),
+            capture: self.capture.clone(),
         }))
     }
 
@@ -3318,6 +3331,7 @@ impl ExecutionPlan for ExpandExec {
             edge_var: self.edge_var,
             demand_batch: self.demand_batch,
             demand: self.demand.clone(),
+            capture: self.capture.clone(),
         }))
     }
 
@@ -3355,6 +3369,7 @@ impl ExecutionPlan for ExpandExec {
             provider: self.provider.clone(),
             edge_var: self.edge_var,
             demand: self.demand.clone(),
+            capture: self.capture.clone(),
         };
         let schema = self.schema.clone();
         let batch_size = context.session_config().batch_size();
@@ -3371,6 +3386,7 @@ impl ExecutionPlan for ExpandExec {
                 None,
                 batch_size,
                 initial_batch_goal,
+                demand::OperatorActivity::expand_with_capture(self.edge_var, self.capture.clone()),
             ),
             |(
                 mut input_stream,
@@ -3379,6 +3395,7 @@ impl ExecutionPlan for ExpandExec {
                 mut pending,
                 batch_size,
                 mut next_batch_goal,
+                activity,
             )| async move {
                 loop {
                     if remaining == Some(0)
@@ -3416,6 +3433,7 @@ impl ExecutionPlan for ExpandExec {
                                 pending,
                                 batch_size,
                                 next_batch_goal,
+                                activity,
                             ),
                         )));
                     }
@@ -3423,7 +3441,11 @@ impl ExecutionPlan for ExpandExec {
                         return Ok(None);
                     };
                     let input_batch = input_batch?;
-                    demand::record_input(cfg.edge_var, input_batch.num_rows());
+                    demand::record_input_with_capture(
+                        cfg.capture.as_ref(),
+                        cfg.edge_var,
+                        input_batch.num_rows(),
+                    );
                     pending = Some((input_batch, SingleHopPosition::default()));
                 }
             },
@@ -3446,6 +3468,7 @@ struct SingleHopConfig {
     provider: Arc<dyn AdjacencyProvider>,
     edge_var: u32,
     demand: Option<Arc<demand::QueryDemand>>,
+    capture: Option<demand::CaptureHandle>,
 }
 
 /// Resumable position within one input batch. Keeping the raw adjacency offset
@@ -3532,7 +3555,7 @@ fn expand_single_hop_chunk(
     if triples.is_empty() {
         return Ok(RecordBatch::new_empty(cfg.out_schema.clone()));
     }
-    demand::record_candidates(cfg.edge_var, triples.len());
+    demand::record_candidates_with_capture(cfg.capture.as_ref(), cfg.edge_var, triples.len());
 
     // Edge rows keyed by edge_id, for the edge topology columns — read
     // lazily for the traversed ids only.
@@ -3543,9 +3566,11 @@ fn expand_single_hop_chunk(
     if cfg.demand.is_some() && edge_permit.is_none() {
         return Ok(RecordBatch::new_empty(cfg.out_schema.clone()));
     }
-    let edge_observer = demand::capture_enabled().then(|| {
-        Arc::new(demand::HopReadObserver::new(cfg.edge_var))
-            as Arc<dyn graphforge_storage::io_stats::FilteredReadObserver>
+    let edge_observer = (cfg.capture.is_some() || demand::capture_enabled()).then(|| {
+        Arc::new(demand::HopReadObserver::with_capture(
+            cfg.edge_var,
+            cfg.capture.clone(),
+        )) as Arc<dyn graphforge_storage::io_stats::FilteredReadObserver>
     });
     let edge_batches = graphforge_storage::read_edges_filtered_observed(
         &cfg.dir,
@@ -3582,9 +3607,11 @@ fn expand_single_hop_chunk(
     if cfg.demand.is_some() && node_permit.is_none() {
         return Ok(RecordBatch::new_empty(cfg.out_schema.clone()));
     }
-    let node_observer = demand::capture_enabled().then(|| {
-        Arc::new(demand::HopReadObserver::new(cfg.edge_var))
-            as Arc<dyn graphforge_storage::io_stats::FilteredReadObserver>
+    let node_observer = (cfg.capture.is_some() || demand::capture_enabled()).then(|| {
+        Arc::new(demand::HopReadObserver::with_capture(
+            cfg.edge_var,
+            cfg.capture.clone(),
+        )) as Arc<dyn graphforge_storage::io_stats::FilteredReadObserver>
     });
     let node_batches = graphforge_storage::read_nodes_filtered_observed(
         &cfg.dir,
@@ -3670,7 +3697,7 @@ fn expand_single_hop_chunk(
     }
     let output = RecordBatch::try_new(cfg.out_schema.clone(), columns)
         .map_err(|e| exec_err(e.to_string()))?;
-    demand::record_emitted(cfg.edge_var, output.num_rows());
+    demand::record_emitted_with_capture(cfg.capture.as_ref(), cfg.edge_var, output.num_rows());
     Ok(output)
 }
 
@@ -5044,6 +5071,22 @@ impl ExecutionSession {
         self.execute_plan_with_params(plan, &HashMap::new()).await
     }
 
+    /// Execute a read plan with evidence scoped to this query and returned on failure.
+    pub async fn execute_plan_observed(&self, plan: &GraphPlan) -> ObservedExecution {
+        self.execute_plan_with_params_observed(plan, &HashMap::new())
+            .await
+    }
+
+    /// Execute a parameterized read plan with query-scoped evidence.
+    pub async fn execute_plan_with_params_observed(
+        &self,
+        plan: &GraphPlan,
+        params: &HashMap<String, graphforge_ir::IrLiteral>,
+    ) -> ObservedExecution {
+        let (result, evidence) = demand::observe(self.execute_plan_with_params(plan, params)).await;
+        ObservedExecution { result, evidence }
+    }
+
     /// Execute a read [`GraphPlan`], substituting `$name` placeholders with the
     /// supplied parameter values, and return the result.
     ///
@@ -5065,9 +5108,19 @@ impl ExecutionSession {
         let resolved_plan = self.resolve_row_count_expressions(plan, params).await?;
         let (physical, fallback_schema) = self.plan_physical(&resolved_plan, params).await?;
 
-        let mut batches = collect(Arc::clone(&physical), self.ctx.task_ctx())
-            .await
-            .map_err(|e| GfError::Execution(e.to_string()))?;
+        demand::record_memory_before(self.ctx.runtime_env().memory_pool.reserved());
+
+        let _sort_activity = demand::sort_activity(&physical);
+        let collected = collect(Arc::clone(&physical), self.ctx.task_ctx()).await;
+        let returned_batch_bytes = collected.as_ref().map_or(0, |batches| {
+            batches.iter().map(RecordBatch::get_array_memory_size).sum()
+        });
+        demand::record_plan_after(
+            &physical,
+            self.ctx.runtime_env().memory_pool.reserved(),
+            returned_batch_bytes,
+        );
+        let mut batches = collected.map_err(|e| GfError::Execution(e.to_string()))?;
 
         // DataFusion's collect may return zero batches for an empty stream.
         // Public callers (and DF54-era optimistic publish tests) index

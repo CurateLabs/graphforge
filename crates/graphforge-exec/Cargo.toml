@@ -23,12 +23,12 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 sha2 = { workspace = true }
 rayon = "1.10"
+tokio = { workspace = true }
 
 [dev-dependencies]
 graphforge-cypher = { path = "../graphforge-cypher" }
 insta = { workspace = true, features = ["filters"] }
 tempfile = "3"
-tokio = { workspace = true }
 parquet = { workspace = true }
 
 [lints]
