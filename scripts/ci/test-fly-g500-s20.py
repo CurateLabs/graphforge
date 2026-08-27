@@ -458,7 +458,7 @@ def test_oci_inspection_rejects_provenance_mismatch(monkeypatch, change, message
 
 def test_existing_app_is_refused_before_budget_or_creation(tmp_path):
     class ExistingFly:
-        def json(self, command):
+        def json(self, command, **_kwargs):
             assert command == ["apps", "list"]
             return [{"name": "gf-s20-unique"}]
 
@@ -475,28 +475,32 @@ def test_cleanup_only_uses_observed_owned_identifiers():
     calls = []
 
     class Fly:
-        def run(self, command, check=True):
+        def run(self, command, check=True, **_kwargs):
             calls.append((command, check))
             return argparse.Namespace(returncode=1 if command[1] in {"status", "show"} else 0)
 
-        def json(self, command):
+        def json(self, command, **_kwargs):
             calls.append((command, True))
             return []
+
+        def resource_absent(self, kind, app, resource_id, **_kwargs):
+            calls.append((["provider", kind, resource_id, app], True))
+            return True
 
     controller.cleanup_owned(Fly(), "gf-s20-unique", None, None, False)
     assert calls == []
     controller.cleanup_owned(Fly(), "gf-s20-unique", "machine-observed", "volume-observed", True)
     assert [call[0][0:2] for call in calls[:6]] == [
         ["machine", "destroy"],
-        ["machine", "status"],
+        ["provider", "machines"],
         ["volumes", "destroy"],
-        ["volumes", "show"],
+        ["provider", "volumes"],
         ["apps", "destroy"],
         ["apps", "list"],
     ]
     assert [call[0][0:2] for call in calls[6:]] == [
-        ["machine", "status"],
-        ["volumes", "show"],
+        ["provider", "machines"],
+        ["provider", "volumes"],
         ["apps", "list"],
     ]
 
@@ -504,19 +508,24 @@ def test_cleanup_only_uses_observed_owned_identifiers():
 def test_cleanup_converges_child_first_across_async_deletion(monkeypatch):
     monkeypatch.setattr(controller.time, "sleep", lambda _seconds: None)
     calls = []
-    probes = {"machine": 0, "volumes": 0}
+    probes = {"machines": 0, "volumes": 0}
 
     class Fly:
-        def run(self, command, check=True):
+        def run(self, command, check=True, **_kwargs):
             calls.append(command[:2])
             if command[1] in {"status", "show"}:
                 probes[command[0]] += 1
                 return argparse.Namespace(returncode=0 if probes[command[0]] == 1 else 1)
             return argparse.Namespace(returncode=0)
 
-        def json(self, command):
+        def json(self, command, **_kwargs):
             calls.append(command[:2])
             return []
+
+        def resource_absent(self, kind, _app, _resource_id, **_kwargs):
+            calls.append(["provider", kind])
+            probes[kind] += 1
+            return probes[kind] > 1
 
     controller.cleanup_owned(Fly(), "gf-s20-unique", "machine", "volume", True)
     volume_destroy = calls.index(["volumes", "destroy"])
@@ -524,8 +533,8 @@ def test_cleanup_converges_child_first_across_async_deletion(monkeypatch):
     assert volume_destroy > calls.index(["machine", "destroy"])
     assert app_destroy > volume_destroy
     assert calls[-3:] == [
-        ["machine", "status"],
-        ["volumes", "show"],
+        ["provider", "machines"],
+        ["provider", "volumes"],
         ["apps", "list"],
     ]
 
@@ -535,8 +544,11 @@ def test_cleanup_survivor_fails_after_bounded_retries(monkeypatch):
     monkeypatch.setattr(controller.time, "sleep", lambda _seconds: None)
 
     class Fly:
-        def run(self, command, check=True):
+        def run(self, command, check=True, **_kwargs):
             return argparse.Namespace(returncode=0)
+
+        def resource_absent(self, *_args, **_kwargs):
+            return False
 
     with pytest.raises(controller.ControllerError, match="bounded cleanup"):
         controller.cleanup_owned(Fly(), "gf-s20-unique", "machine", None, False)
@@ -548,13 +560,17 @@ def test_cleanup_attempts_all_resources_and_aggregates_survivors(monkeypatch):
     calls = []
 
     class Fly:
-        def run(self, command, check=True):
+        def run(self, command, check=True, **_kwargs):
             calls.append(command[:2])
             return argparse.Namespace(returncode=0)
 
-        def json(self, command):
+        def json(self, command, **_kwargs):
             calls.append(command[:2])
             return [{"name": "gf-s20-unique"}]
+
+        def resource_absent(self, kind, _app, _resource_id, **_kwargs):
+            calls.append(["provider", kind])
+            return False
 
     with pytest.raises(controller.ControllerError, match=r"Machine.*volume.*app"):
         controller.cleanup_owned(Fly(), "gf-s20-unique", "machine", "volume", True)
@@ -563,22 +579,67 @@ def test_cleanup_attempts_all_resources_and_aggregates_survivors(monkeypatch):
     assert ["apps", "destroy"] in calls
 
 
+def test_provider_absence_requires_authenticated_http_404(monkeypatch):
+    fly = controller.Flyctl()
+    monkeypatch.setattr(
+        fly,
+        "run",
+        lambda *_args, **_kwargs: argparse.Namespace(stdout="token\n"),
+    )
+
+    def http_error(code):
+        def raise_error(*_args, **_kwargs):
+            raise controller.urllib.error.HTTPError("url", code, "failure", None, None)
+
+        return raise_error
+
+    monkeypatch.setattr(controller.urllib.request, "urlopen", http_error(404))
+    assert fly.resource_absent("machines", "app", "machine", timeout=3)
+    monkeypatch.setattr(controller.urllib.request, "urlopen", http_error(401))
+    with pytest.raises(controller.ControllerError, match="HTTP 401"):
+        fly.resource_absent("machines", "app", "machine", timeout=3)
+
+
+def test_cleanup_caps_every_call_inside_one_reservation_deadline(monkeypatch):
+    monkeypatch.setattr(controller, "CLEANUP_RESERVE_SECONDS", 1)
+    monkeypatch.setattr(controller, "CLEANUP_ATTEMPTS", 1)
+    timeouts = []
+
+    class Fly:
+        def run(self, _command, **kwargs):
+            timeouts.append(kwargs["timeout"])
+            return argparse.Namespace(returncode=0)
+
+        def json(self, _command, **kwargs):
+            timeouts.append(kwargs["timeout"])
+            return [{"name": "gf-s20-unique"}]
+
+        def resource_absent(self, *_args, **kwargs):
+            timeouts.append(kwargs["timeout"])
+            return False
+
+    with pytest.raises(controller.ControllerError):
+        controller.cleanup_owned(Fly(), "gf-s20-unique", "machine", "volume", True)
+    assert timeouts
+    assert all(0 < timeout <= 1 for timeout in timeouts)
+
+
 def test_post_cleanup_absence_is_verified_child_to_parent():
     calls = []
 
     class Fly:
-        def run(self, command, check=True):
-            calls.append(command)
-            return argparse.Namespace(returncode=1)
-
-        def json(self, command):
+        def json(self, command, **_kwargs):
             calls.append(command)
             return []
 
+        def resource_absent(self, kind, app, resource_id, **_kwargs):
+            calls.append(["provider", kind, resource_id, app])
+            return True
+
     controller.verify_absent(Fly(), "gf-s20-unique", "machine-observed", "volume-observed", True)
     assert calls == [
-        ["machine", "status", "machine-observed", "--app", "gf-s20-unique"],
-        ["volumes", "show", "volume-observed", "--app", "gf-s20-unique"],
+        ["provider", "machines", "machine-observed", "gf-s20-unique"],
+        ["provider", "volumes", "volume-observed", "gf-s20-unique"],
         ["apps", "list"],
     ]
 
@@ -588,13 +649,13 @@ def test_post_cleanup_detects_each_surviving_owned_resource():
         def __init__(self, survivor):
             self.survivor = survivor
 
-        def run(self, command, check=True):
-            return argparse.Namespace(returncode=0 if command[0] == self.survivor else 1)
+        def resource_absent(self, kind, _app, _resource_id, **_kwargs):
+            return kind != self.survivor
 
-        def json(self, _command):
+        def json(self, _command, **_kwargs):
             return [{"name": "gf-s20-unique"}] if self.survivor == "app" else []
 
-    for survivor, message in (("machine", "Machine"), ("volumes", "volume"), ("app", "app")):
+    for survivor, message in (("machines", "Machine"), ("volumes", "volume"), ("app", "app")):
         with pytest.raises(controller.ControllerError, match=message):
             controller.verify_absent(
                 Fly(survivor), "gf-s20-unique", "machine-observed", "volume-observed", True
@@ -624,7 +685,7 @@ def test_fetch_binds_only_declared_runtime_paths(tmp_path):
     calls = []
 
     class Fly:
-        def run(self, command, check=True):
+        def run(self, command, check=True, **_kwargs):
             calls.append(command)
             return argparse.Namespace(returncode=1)
 
@@ -668,7 +729,7 @@ def test_terminal_failure_is_persisted_promptly_and_still_verified_cleaned(tmp_p
         def __init__(self):
             self.app_lists = 0
 
-        def json(self, command):
+        def json(self, command, **_kwargs):
             if command[:2] == ["apps", "list"]:
                 self.app_lists += 1
                 return []
@@ -676,7 +737,7 @@ def test_terminal_failure_is_persisted_promptly_and_still_verified_cleaned(tmp_p
                 return {"id": "volume-observed", "region": "den", "size_gb": 500}
             raise AssertionError(command)
 
-        def run(self, command, check=True):
+        def run(self, command, check=True, **_kwargs):
             if command[:3] == ["ssh", "sftp", "get"]:
                 assert command[3] == "/work/container-result.json"
                 Path(command[4]).write_text(
@@ -686,6 +747,9 @@ def test_terminal_failure_is_persisted_promptly_and_still_verified_cleaned(tmp_p
             if command[:2] in (["machine", "status"], ["volumes", "show"]):
                 return argparse.Namespace(returncode=1)
             return argparse.Namespace(returncode=0)
+
+        def resource_absent(self, *_args, **_kwargs):
+            return True
 
     run = args(tmp_path, execute=True, confirm_disposable=True)
     fly = Fly()

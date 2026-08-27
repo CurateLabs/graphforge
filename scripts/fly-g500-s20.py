@@ -69,18 +69,41 @@ class ControllerError(RuntimeError):
 
 
 class Flyctl:
-    def run(self, args: Sequence[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
+    def run(
+        self, args: Sequence[str], *, check: bool = True, timeout: float = 120
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["flyctl", *args],
             cwd=ROOT,
             check=check,
             text=True,
             capture_output=True,
-            timeout=120,
+            timeout=timeout,
         )
 
-    def json(self, args: Sequence[str]) -> Any:
-        return json.loads(self.run([*args, "--json"]).stdout)
+    def json(self, args: Sequence[str], *, timeout: float = 120) -> Any:
+        return json.loads(self.run([*args, "--json"], timeout=timeout).stdout)
+
+    def resource_absent(self, kind: str, app: str, resource_id: str, *, timeout: float) -> bool:
+        """Return true only for an authenticated provider 404."""
+        if kind not in {"machines", "volumes"}:
+            raise ControllerError("unsupported provider absence probe")
+        token = self.run(["auth", "token"], timeout=timeout).stdout.strip()
+        if not token:
+            raise ControllerError("Fly authentication token is unavailable during cleanup")
+        request = urllib.request.Request(
+            f"https://api.machines.dev/v1/apps/{app}/{kind}/{resource_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout):
+                return False
+        except urllib.error.HTTPError as error:
+            if error.code == 404:
+                return True
+            raise ControllerError(f"Fly {kind} absence probe returned HTTP {error.code}") from None
+        except urllib.error.URLError:
+            raise ControllerError(f"Fly {kind} absence probe failed") from None
 
 
 def validate_inputs(args: argparse.Namespace) -> str:
@@ -550,13 +573,14 @@ def cleanup_owned(
     fly: Flyctl, app: str, machine_id: str | None, volume_id: str | None, app_created: bool
 ) -> None:
     """Destroy only identifiers observed from resources created in this invocation."""
+    deadline = time.monotonic() + CLEANUP_RESERVE_SECONDS
     resources = []
     if machine_id:
         resources.append(
             (
                 "Machine",
                 ["machine", "destroy", machine_id, "--app", app, "--force"],
-                ["machine", "status", machine_id, "--app", app],
+                ("machines", machine_id),
             )
         )
     if volume_id:
@@ -564,41 +588,58 @@ def cleanup_owned(
             (
                 "volume",
                 ["volumes", "destroy", volume_id, "--app", app, "--yes"],
-                ["volumes", "show", volume_id, "--app", app],
+                ("volumes", volume_id),
             )
         )
     if app_created:
         resources.append(("app", ["apps", "destroy", app, "--yes"], None))
     failures = []
-    for label, destroy, probe in resources:
+    for resource_index, (label, destroy, probe) in enumerate(resources):
         errors = []
+        # Divide the remaining teardown window so one stuck child cannot starve
+        # later resources; keep the last minute for the aggregate final proof.
+        teardown_end = deadline - 60
+        remaining_resources = len(resources) - resource_index
+        slice_end = time.monotonic() + max(
+            0, (teardown_end - time.monotonic()) / remaining_resources
+        )
         for attempt in range(CLEANUP_ATTEMPTS):
+            remaining = max(0.1, slice_end - time.monotonic())
+            timeout = min(30.0, remaining)
             try:
-                result = fly.run(destroy, check=False)
+                result = fly.run(destroy, check=False, timeout=timeout)
                 if result.returncode not in (0, 1):
                     errors.append(f"destroy rc={result.returncode}")
-            except subprocess.SubprocessError as error:
+            except (subprocess.SubprocessError, ControllerError) as error:
                 errors.append(type(error).__name__)
             absent = False
             try:
                 if probe is not None:
-                    absent = fly.run(probe, check=False).returncode != 0
+                    absent = fly.resource_absent(probe[0], app, probe[1], timeout=timeout)
                 else:
-                    apps = fly.json(["apps", "list"])
+                    apps = fly.json(["apps", "list"], timeout=timeout)
                     absent = not any(
                         item.get("Name") == app or item.get("name") == app for item in apps
                     )
-            except (subprocess.SubprocessError, json.JSONDecodeError) as error:
+            except (
+                subprocess.SubprocessError,
+                json.JSONDecodeError,
+                ControllerError,
+            ) as error:
                 errors.append(type(error).__name__)
             if absent:
                 break
-            if attempt + 1 < CLEANUP_ATTEMPTS:
-                time.sleep(CLEANUP_POLL_SECONDS)
+            if attempt + 1 < CLEANUP_ATTEMPTS and time.monotonic() < slice_end:
+                time.sleep(min(CLEANUP_POLL_SECONDS, max(0, slice_end - time.monotonic())))
+            else:
+                detail = f" ({'; '.join(errors)})" if errors else ""
+                failures.append(f"owned {label} remains after bounded cleanup{detail}")
+                break
         else:
             detail = f" ({'; '.join(errors)})" if errors else ""
             failures.append(f"owned {label} remains after bounded cleanup{detail}")
     try:
-        verify_absent(fly, app, machine_id, volume_id, app_created)
+        verify_absent(fly, app, machine_id, volume_id, app_created, deadline=deadline)
     except (ControllerError, subprocess.SubprocessError, json.JSONDecodeError) as error:
         failures.append(str(error))
     if failures:
@@ -606,33 +647,48 @@ def cleanup_owned(
 
 
 def verify_absent(
-    fly: Flyctl, app: str, machine_id: str | None, volume_id: str | None, app_created: bool
+    fly: Flyctl,
+    app: str,
+    machine_id: str | None,
+    volume_id: str | None,
+    app_created: bool,
+    *,
+    deadline: float | None = None,
 ) -> None:
+    deadline = deadline if deadline is not None else time.monotonic() + 60
     failures = []
     if machine_id:
         try:
-            if (
-                fly.run(["machine", "status", machine_id, "--app", app], check=False).returncode
-                == 0
+            if not fly.resource_absent(
+                "machines", app, machine_id, timeout=_cleanup_timeout(deadline)
             ):
                 failures.append("owned Machine remains after cleanup")
-        except subprocess.SubprocessError as error:
+        except (subprocess.SubprocessError, ControllerError) as error:
             failures.append(f"Machine absence probe failed: {type(error).__name__}")
     if volume_id:
         try:
-            if fly.run(["volumes", "show", volume_id, "--app", app], check=False).returncode == 0:
+            if not fly.resource_absent(
+                "volumes", app, volume_id, timeout=_cleanup_timeout(deadline)
+            ):
                 failures.append("owned volume remains after cleanup")
-        except subprocess.SubprocessError as error:
+        except (subprocess.SubprocessError, ControllerError) as error:
             failures.append(f"volume absence probe failed: {type(error).__name__}")
     if app_created:
         try:
-            apps = fly.json(["apps", "list"])
+            apps = fly.json(["apps", "list"], timeout=_cleanup_timeout(deadline))
             if any(item.get("Name") == app or item.get("name") == app for item in apps):
                 failures.append("owned app remains after cleanup")
         except (subprocess.SubprocessError, json.JSONDecodeError) as error:
             failures.append(f"app absence probe failed: {type(error).__name__}")
     if failures:
         raise ControllerError("; ".join(failures))
+
+
+def _cleanup_timeout(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise ControllerError("cleanup deadline exhausted")
+    return min(30.0, remaining)
 
 
 def observed_phase(path: Path) -> str:
