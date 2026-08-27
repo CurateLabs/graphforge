@@ -72,6 +72,7 @@ fn set_s20_active_phase(index: u64) {
 }
 static INGEST_SUBPHASE: AtomicU64 = AtomicU64::new(0);
 static INGEST_CHUNK_INDEX: AtomicU64 = AtomicU64::new(0);
+static S20_INGEST_COMMIT_RSS: std::sync::Mutex<Vec<(u64, u64)>> = std::sync::Mutex::new(Vec::new());
 
 // ---------------------------------------------------------------------------
 // Versioned profile (single source of truth for the ladder).
@@ -718,6 +719,7 @@ fn ingest_subphase() -> &'static str {
         2 => "merge_edges",
         3 => "publish_edge_chunk",
         4 => "edge_chunk_committed",
+        5 => "seal_and_recover",
         _ => "idle",
     }
 }
@@ -933,6 +935,10 @@ fn run_rung(
             .expect("open GraphForge for ingest");
         graphforge_storage::io_stats::reset();
         INGEST_CHUNK_INDEX.store(0, Ordering::Relaxed);
+        S20_INGEST_COMMIT_RSS
+            .lock()
+            .expect("reset committed-chunk RSS samples")
+            .clear();
         INGEST_SUBPHASE.store(1, Ordering::Relaxed);
         let heartbeat = IngestHeartbeat::start(profile, rung, completed_rungs, &steps);
         let mut construction = open_persisted_construction(
@@ -962,6 +968,7 @@ fn run_rung(
             duplicates_rejected = merge.duplicates_rejected;
             input_fingerprint = format!("sha256:{}", hex_encode(sink.finish()));
         }
+        INGEST_SUBPHASE.store(5, Ordering::SeqCst);
         let publication_receipt = construction
             .seal_and_publish()
             .expect("publish rung construction");
@@ -983,6 +990,14 @@ fn run_rung(
         assert!(
             recovery_receipt.idempotent_replay,
             "publication recovery must replay the committed receipt"
+        );
+        let publication_commits = measured_publication_commits(&[
+            publication_receipt.idempotent_replay,
+            recovery_receipt.idempotent_replay,
+        ]);
+        assert_eq!(
+            publication_commits, 1,
+            "exactly one receipt must perform the generation commit"
         );
         let recovered_generation_sha256 =
             generation_identity_sha256(recovery_receipt.generation_uuid);
@@ -1038,7 +1053,7 @@ fn run_rung(
                     "retained_probe_read_bytes": construction_evidence.retained_probe_read_bytes,
                     "retained_probe_block_loads": construction_evidence.retained_probe_block_loads,
                     "storage_transient_peak_allocated_bytes": construction_evidence.storage_transient_peak_allocated_bytes,
-                    "publication_commits": 1,
+                    "publication_commits": publication_commits,
                     "recovery_replay": recovery_receipt.idempotent_replay,
                     "published_generation_sha256": published_generation_sha256,
                     "recovered_generation_sha256": recovered_generation_sha256,
@@ -1376,10 +1391,18 @@ impl<'a, 'graph> EdgeSink<'a, 'graph> {
                 .expect("append construction edge chunk");
             offset = end;
         }
-        INGEST_CHUNK_INDEX.store(
-            u64::try_from(self.chunk_index).unwrap_or(u64::MAX),
-            Ordering::Relaxed,
-        );
+        let committed_chunks =
+            u64::try_from(self.chunk_index.saturating_add(1)).unwrap_or(u64::MAX);
+        INGEST_CHUNK_INDEX.store(committed_chunks, Ordering::SeqCst);
+        if std::env::var_os("GF_G500_S20_WORK_ROOT").is_some() {
+            S20_INGEST_COMMIT_RSS
+                .lock()
+                .expect("record committed-chunk RSS")
+                .push((
+                    committed_chunks,
+                    current_rss_bytes().expect("committed-chunk RSS probe"),
+                ));
+        }
         INGEST_SUBPHASE.store(3, Ordering::Relaxed);
         INGEST_SUBPHASE.store(4, Ordering::Relaxed);
         self.chunk_index += 1;
@@ -2302,6 +2325,15 @@ fn generation_identity_sha256(generation: Uuid) -> String {
         "sha256:{}",
         hex_encode(Sha256::digest(generation.as_bytes()))
     )
+}
+
+fn measured_publication_commits(receipt_replays: &[bool]) -> u64 {
+    receipt_replays
+        .iter()
+        .filter(|idempotent_replay| !**idempotent_replay)
+        .count()
+        .try_into()
+        .unwrap_or(u64::MAX)
 }
 
 fn create_bounded_drill_package(root: &Path, limits: PortableV2Limits) -> (PathBuf, String) {
@@ -3230,26 +3262,56 @@ struct PhaseMemoryPeak {
 struct S20PhaseSampler {
     stop: Arc<AtomicBool>,
     peaks: Arc<std::sync::Mutex<[PhaseMemoryPeak; 12]>>,
-    ingest_rss_samples: Arc<std::sync::Mutex<Vec<u64>>>,
     worker: Option<JoinHandle<()>>,
 }
 
-fn ingest_memory_windows(samples: &[u64], envelope_bytes: u64) -> Value {
-    assert!(
-        samples.len() >= 3,
-        "ingest must have early/middle/late RSS samples"
+fn ingest_memory_windows(
+    samples: &[(u64, u64)],
+    final_committed_chunks: u64,
+    envelope_bytes: u64,
+    bounded_working_set_bytes: u64,
+) -> Value {
+    const MIN_SAMPLES_PER_BAND: usize = 3;
+    const SAMPLING_TOLERANCE_BYTES: u64 = 64 * 1024 * 1024;
+    let max_progress = samples
+        .iter()
+        .map(|(progress, _)| *progress)
+        .max()
+        .expect("ingest must expose committed edge-chunk progress");
+    assert_eq!(
+        max_progress, final_committed_chunks,
+        "RSS sampling must cover the final committed edge chunk"
     );
-    let first_end = samples.len().div_ceil(3);
-    let second_end = (samples.len() * 2).div_ceil(3);
-    let window_peak = |values: &[u64]| values.iter().copied().max().unwrap_or(0);
-    let early = window_peak(&samples[..first_end]);
-    let middle = window_peak(&samples[first_end..second_end]);
-    let late = window_peak(&samples[second_end..]);
-    // A saturated streaming phase may move by at most one eighth of the
-    // actual machine envelope between temporal thirds. Check both adjacent
-    // transitions and the cumulative early-to-late delta so monotonic growth
-    // cannot hide behind an earlier transient peak.
-    let allowed_growth = envelope_bytes / 8;
+    assert!(
+        max_progress >= 3,
+        "ingest needs at least three committed chunks"
+    );
+    let early_end = max_progress.div_ceil(3);
+    let middle_end = (max_progress * 2).div_ceil(3);
+    let bands = [
+        (1, early_end),
+        (early_end + 1, middle_end),
+        (middle_end + 1, max_progress),
+    ];
+    let summarize = |(start, end): (u64, u64)| {
+        let values = samples
+            .iter()
+            .filter(|(progress, _)| (start..=end).contains(progress))
+            .map(|(_, rss)| *rss)
+            .collect::<Vec<_>>();
+        assert!(
+            values.len() >= MIN_SAMPLES_PER_BAND,
+            "each ingest progress band needs at least {MIN_SAMPLES_PER_BAND} RSS samples"
+        );
+        (values.iter().copied().max().unwrap_or(0), values.len())
+    };
+    let (early, early_samples) = summarize(bands[0]);
+    let (middle, middle_samples) = summarize(bands[1]);
+    let (late, late_samples) = summarize(bands[2]);
+    // The only tolerated positive RSS movement is the engine's own measured
+    // bounded live construction working set plus one fixed sampler/noise
+    // allowance. It is intentionally independent of machine size and E.
+    let allowed_growth = bounded_working_set_bytes.saturating_add(SAMPLING_TOLERANCE_BYTES);
     let observed_growth = middle
         .saturating_sub(early)
         .max(late.saturating_sub(middle))
@@ -3259,12 +3321,24 @@ fn ingest_memory_windows(samples: &[u64], envelope_bytes: u64) -> Value {
         "early_rss_peak_bytes": early,
         "middle_rss_peak_bytes": middle,
         "late_rss_peak_bytes": late,
+        "early_sample_count": early_samples,
+        "middle_sample_count": middle_samples,
+        "late_sample_count": late_samples,
+        "early_progress_start": bands[0].0,
+        "early_progress_end": bands[0].1,
+        "middle_progress_start": bands[1].0,
+        "middle_progress_end": bands[1].1,
+        "late_progress_start": bands[2].0,
+        "late_progress_end": bands[2].1,
+        "final_committed_chunks": final_committed_chunks,
+        "bounded_working_set_bytes": bounded_working_set_bytes,
+        "sampling_tolerance_bytes": SAMPLING_TOLERANCE_BYTES,
         "allowed_growth_bytes": allowed_growth,
         "observed_growth_bytes": observed_growth,
         "plateau_pass": observed_growth <= allowed_growth,
         "envelope_bytes": envelope_bytes,
         "headroom_bytes": envelope_bytes.saturating_sub(peak),
-        "sample_interval_ms": 250,
+        "sampling_source": "authenticated_edge_chunk_commit",
     })
 }
 
@@ -3287,10 +3361,8 @@ impl S20PhaseSampler {
     fn start(work_root: &Path) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let peaks = Arc::new(std::sync::Mutex::new([PhaseMemoryPeak::default(); 12]));
-        let ingest_rss_samples = Arc::new(std::sync::Mutex::new(Vec::new()));
         let worker_stop = Arc::clone(&stop);
         let worker_peaks = Arc::clone(&peaks);
-        let worker_ingest_samples = Arc::clone(&ingest_rss_samples);
         let volume_root = work_root.to_path_buf();
         let baseline_used = observed_filesystem_used_bytes(work_root);
         let worker = thread::spawn(move || {
@@ -3302,12 +3374,6 @@ impl S20PhaseSampler {
                 {
                     let sample = s20_memory_snapshot();
                     let rss = sample["rss_bytes"].as_u64().unwrap_or(0);
-                    if index == 1 {
-                        worker_ingest_samples
-                            .lock()
-                            .expect("ingest RSS samples")
-                            .push(rss);
-                    }
                     let mut values = worker_peaks.lock().expect("phase memory peaks");
                     let peak = &mut values[index];
                     peak.rss_bytes = peak.rss_bytes.max(rss);
@@ -3334,7 +3400,6 @@ impl S20PhaseSampler {
         Self {
             stop,
             peaks,
-            ingest_rss_samples,
             worker: Some(worker),
         }
     }
@@ -3343,7 +3408,7 @@ impl S20PhaseSampler {
         set_s20_active_phase(index);
     }
 
-    fn finish(mut self, envelope_bytes: u64) -> (Value, Value) {
+    fn finish(mut self, envelope_bytes: u64, bounded_working_set_bytes: u64) -> (Value, Value) {
         Self::enter(11);
         thread::sleep(Duration::from_millis(300));
         self.stop.store(true, Ordering::SeqCst);
@@ -3368,8 +3433,15 @@ impl S20PhaseSampler {
                 })
                 .collect(),
         );
-        let samples = self.ingest_rss_samples.lock().expect("ingest RSS samples");
-        let windows = ingest_memory_windows(&samples, envelope_bytes);
+        let samples = S20_INGEST_COMMIT_RSS
+            .lock()
+            .expect("committed-chunk RSS samples");
+        let windows = ingest_memory_windows(
+            &samples,
+            INGEST_CHUNK_INDEX.load(Ordering::SeqCst),
+            envelope_bytes,
+            bounded_working_set_bytes,
+        );
         (phase_memory, windows)
     }
 }
@@ -3611,7 +3683,11 @@ fn fly_s20_full_lifecycle_evidence() {
         observed_capacity <= required_env_u64("GF_G500_S20_DISK_BYTES"),
         "observed volume is larger than the authorized disk envelope"
     );
-    let (phase_memory, ingest_memory_windows) = phase_sampler.finish(envelope.rss_bytes);
+    let bounded_working_set_bytes = construction["peak_accounted_live_bytes"]
+        .as_u64()
+        .expect("bounded construction working set");
+    let (phase_memory, ingest_memory_windows) =
+        phase_sampler.finish(envelope.rss_bytes, bounded_working_set_bytes);
     let observed_volume_peak = phase_memory
         .as_object()
         .expect("phase memory object")
@@ -3704,18 +3780,51 @@ fn fly_s20_full_lifecycle_evidence() {
 fn ingest_memory_windows_detect_monotonic_and_regrowth_pressure() {
     let gib = 1024 * 1024 * 1024_u64;
     let envelope = 4 * gib;
-    let plateau = ingest_memory_windows(&[gib, gib, gib], envelope);
-    assert_eq!(plateau["allowed_growth_bytes"], envelope / 8);
+    let samples = |rss: [u64; 3]| {
+        (1..=9)
+            .map(|progress| (progress, rss[((progress - 1) / 3) as usize]))
+            .collect::<Vec<_>>()
+    };
+    let working_set = 64 * 1024 * 1024;
+    let plateau = ingest_memory_windows(&samples([gib, gib, gib]), 9, envelope, working_set);
+    assert_eq!(
+        plateau["allowed_growth_bytes"],
+        working_set + 64 * 1024 * 1024
+    );
     assert_eq!(plateau["observed_growth_bytes"], 0);
     assert_eq!(plateau["plateau_pass"], true);
 
-    let monotonic = ingest_memory_windows(&[gib, gib + 300_000_000, gib + 600_000_000], envelope);
+    let monotonic = ingest_memory_windows(
+        &samples([gib, gib + 300_000_000, gib + 600_000_000]),
+        9,
+        envelope,
+        working_set,
+    );
     assert_eq!(monotonic["observed_growth_bytes"], 600_000_000_u64);
     assert_eq!(monotonic["plateau_pass"], false);
 
-    let regrowth = ingest_memory_windows(&[2 * gib, gib, 2 * gib], envelope);
+    let regrowth =
+        ingest_memory_windows(&samples([2 * gib, gib, 2 * gib]), 9, envelope, working_set);
     assert_eq!(regrowth["observed_growth_bytes"], gib);
     assert_eq!(regrowth["plateau_pass"], false);
+}
+
+#[test]
+#[should_panic(expected = "each ingest progress band needs at least 3 RSS samples")]
+fn ingest_memory_windows_reject_sparse_progress_bands() {
+    let _ = ingest_memory_windows(
+        &[(1, 10), (2, 10), (3, 10)],
+        3,
+        4 * 1024 * 1024 * 1024,
+        64 * 1024 * 1024,
+    );
+}
+
+#[test]
+fn publication_commit_count_is_measured_from_receipts() {
+    assert_eq!(measured_publication_commits(&[false, true]), 1);
+    assert_eq!(measured_publication_commits(&[true, true]), 0);
+    assert_eq!(measured_publication_commits(&[false, false]), 2);
 }
 
 fn normalized_filesystem(path: &Path) -> String {
