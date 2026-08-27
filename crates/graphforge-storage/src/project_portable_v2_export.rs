@@ -52,16 +52,17 @@ pub struct PortableV2ExportProgress {
     /// Planned source payload bytes.
     pub bytes_total: u64,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct PlannedFile {
     source: PlannedSource,
     path: String,
     length: u64,
     digest: [u8; 32],
 }
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum PlannedSource {
     File { path: PathBuf, identity: Identity },
+    Cas(crate::graph_object_store::AuthenticatedGraphObject),
     Control(Vec<u8>),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,7 +74,6 @@ struct Identity {
     len: u64,
     modified: Option<std::time::SystemTime>,
 }
-#[derive(Clone)]
 /// Immutable pinned-generation metadata plan; contains no payload buffers.
 pub struct PortableV2ExportPlan {
     generation_uuid: Uuid,
@@ -853,9 +853,24 @@ pub fn plan_selected_portable_v2(
         let id = "graph-tree".to_owned();
         let mut owned = Vec::new();
         for e in inv.files {
-            let source = g.graph_tree_root().join(&e.relative_path);
             let path = format!("data/components/graph-data/{id}/{}", e.relative_path);
-            let f = inspect(&source, &path, limits, &mut total)?;
+            let f = match g.declared_graph_files_participant()? {
+                Some(crate::GraphFilesParticipant::V1(_)) => inspect(
+                    &g.graph_tree_root().join(&e.relative_path),
+                    &path,
+                    limits,
+                    &mut total,
+                )?,
+                Some(crate::GraphFilesParticipant::V2(_)) => inspect_cas(
+                    g.container_root(),
+                    &e.content_sha256,
+                    e.byte_length,
+                    &path,
+                    limits,
+                    &mut total,
+                )?,
+                None => return Err(err("GF_SOURCE_CHANGED", "graph authority disappeared")),
+            };
             if f.length != e.byte_length || hex(f.digest) != e.content_sha256 {
                 return Err(err(
                     "GF_SOURCE_CHANGED",
@@ -1480,6 +1495,34 @@ fn inspect(
         digest: digest.finalize().into(),
     })
 }
+fn inspect_cas(
+    root: &Path,
+    digest: &str,
+    expected_length: u64,
+    path: &str,
+    limits: PortableV2ExportLimits,
+    total: &mut u64,
+) -> Result<PlannedFile, ExportError> {
+    if path.len() > limits.max_path_bytes || expected_length > limits.max_entry_bytes {
+        return Err(limit("CAS entry exceeds configured limit"));
+    }
+    valid_path(path)?;
+    *total = total
+        .checked_add(expected_length)
+        .ok_or_else(|| limit("size overflow"))?;
+    if *total > limits.max_total_bytes {
+        return Err(limit("total too large"));
+    }
+    let source =
+        crate::graph_object_store::open_graph_object_by_digest(root, digest, expected_length)?;
+    let digest = parse_sha256(digest)?;
+    Ok(PlannedFile {
+        source: PlannedSource::Cas(source),
+        path: path.into(),
+        length: expected_length,
+        digest,
+    })
+}
 fn inline_control(
     path: &str,
     bytes: Vec<u8>,
@@ -1523,17 +1566,7 @@ fn copy(
         tick(bytes.len() as u64);
         return Ok(());
     }
-    let PlannedSource::File {
-        path,
-        identity: planned_identity,
-    } = &planned.source
-    else {
-        unreachable!("control source returned above")
-    };
-    let mut input = open_source_no_follow(path)?;
-    if identity(&input.metadata().map_err(storage)?)? != *planned_identity {
-        return Err(err("GF_SOURCE_CHANGED", "source changed"));
-    }
+    let (mut input, planned_identity) = open_planned_source(planned)?;
     let mut buffer = vec![0; size];
     let mut digest = Sha256::new();
     let mut bytes_read = 0;
@@ -1551,9 +1584,11 @@ fn copy(
         tick(count as u64);
     }
     output.sync_all().map_err(storage)?;
-    if bytes_read != planned.length
-        || <[u8; 32]>::from(digest.finalize()) != planned.digest
-        || identity(&input.metadata().map_err(storage)?)? != *planned_identity
+    if bytes_read != planned.length || <[u8; 32]>::from(digest.finalize()) != planned.digest {
+        return Err(err("GF_SOURCE_CHANGED", "source changed during export"));
+    }
+    if let Some(expected) = planned_identity
+        && identity(&input.metadata().map_err(storage)?)? != expected
     {
         return Err(err("GF_SOURCE_CHANGED", "source changed during export"));
     }
@@ -1576,17 +1611,7 @@ fn stream(
         tick(bytes.len() as u64);
         return Ok(());
     }
-    let PlannedSource::File {
-        path,
-        identity: planned_identity,
-    } = &planned.source
-    else {
-        unreachable!("control source returned above")
-    };
-    let mut input = open_source_no_follow(path)?;
-    if identity(&input.metadata().map_err(storage)?)? != *planned_identity {
-        return Err(err("GF_SOURCE_CHANGED", "source changed"));
-    }
+    let (mut input, planned_identity) = open_planned_source(planned)?;
     let mut buffer = vec![0; size];
     let mut digest = Sha256::new();
     let mut bytes_read = 0;
@@ -1604,13 +1629,43 @@ fn stream(
         bytes_read += count as u64;
         tick(count as u64);
     }
-    if bytes_read != planned.length
-        || <[u8; 32]>::from(digest.finalize()) != planned.digest
-        || identity(&input.metadata().map_err(storage)?)? != *planned_identity
+    if bytes_read != planned.length || <[u8; 32]>::from(digest.finalize()) != planned.digest {
+        return Err(err("GF_SOURCE_CHANGED", "source changed during export"));
+    }
+    if let Some(expected) = planned_identity
+        && identity(&input.metadata().map_err(storage)?)? != expected
     {
         return Err(err("GF_SOURCE_CHANGED", "source changed during export"));
     }
     Ok(())
+}
+fn open_planned_source(planned: &PlannedFile) -> Result<(File, Option<Identity>), ExportError> {
+    match &planned.source {
+        PlannedSource::File {
+            path,
+            identity: expected,
+        } => {
+            let input = open_source_no_follow(path)?;
+            if identity(&input.metadata().map_err(storage)?)? != *expected {
+                return Err(err("GF_SOURCE_CHANGED", "source changed"));
+            }
+            Ok((input, Some(*expected)))
+        }
+        PlannedSource::Cas(source) => Ok((source.try_clone_file().map_err(storage)?, None)),
+        PlannedSource::Control(_) => unreachable!("control source returned above"),
+    }
+}
+
+fn parse_sha256(value: &str) -> Result<[u8; 32], ExportError> {
+    if value.len() != 64 {
+        return Err(err("GF_INTEGRITY_FAILED", "invalid CAS digest length"));
+    }
+    let mut bytes = [0_u8; 32];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
+            .map_err(|_| err("GF_INTEGRITY_FAILED", "invalid CAS digest"))?;
+    }
+    Ok(bytes)
 }
 fn header(out: &mut File, h: &mut Sha256, path: &str, size: u64) -> Result<(), ExportError> {
     if let Ok((name, prefix)) = split(path) {
