@@ -6,6 +6,10 @@ set -eu
 : "${GF_G500_S20_REGION:?fixed Fly region is required}"
 : "${GF_G500_S20_VOLUME_GB:?volume size is required}"
 : "${GF_G500_S20_SOURCE_SNAPSHOT_SHA256:?source snapshot identity is required}"
+: "${GF_G500_S20_TIMEOUT_SECONDS:?bounded product timeout is required}"
+case "$GF_G500_S20_TIMEOUT_SECONDS" in *[!0-9]*|'') exit 4 ;; esac
+[ "$GF_G500_S20_TIMEOUT_SECONDS" -ge 60 ] && \
+  [ "$GF_G500_S20_TIMEOUT_SECONDS" -le 14100 ] || exit 4
 
 attestation=/usr/local/share/graphforge/build-provenance.json
 grep -Fq '"source_sha":"'"$GF_G500_S20_EXPECTED_SHA"'"' "$attestation" || exit 4
@@ -35,7 +39,7 @@ export GF_G500_S20_DISK_BYTES=$((GF_G500_S20_VOLUME_GB * 1024 * 1024 * 1024))
 # One real S20 run owns the four-hour product clock. There is no synthetic
 # lower-rung admission ladder and no compilation on the Fly Machine.
 set +e
-timeout --signal=TERM --kill-after=30s 14400s \
+timeout --signal=TERM --kill-after=30s "${GF_G500_S20_TIMEOUT_SECONDS}s" \
   /usr/local/bin/scale-g500-ladder \
   fly_s20_full_lifecycle_evidence \
   --ignored --exact --nocapture --test-threads=1
@@ -49,7 +53,7 @@ else
   if [ -f /work/s20-active-phase.json ]; then
     observed="$(sed -n 's/.*"phase"[[:space:]]*:[[:space:]]*"\([a-z_]*\)".*/\1/p' /work/s20-active-phase.json)"
     case "$observed" in
-      generate|ingest|source_reopen|source_query|export|verify|import|import_reopen|import_query|finalize)
+      generate|ingest|source_reopen|source_query_1hop|source_query_2hop|export|verify|import|imported_reopen|imported_query_1hop|imported_query_2hop|finalize)
         phase="$observed"
         ;;
     esac

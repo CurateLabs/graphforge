@@ -7,6 +7,7 @@ from decimal import Decimal
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -23,11 +24,13 @@ def load(path: Path, name: str):
 
 controller = load(ROOT / "scripts/fly-g500-s20.py", "fly_s20_controller")
 validator = load(ROOT / "scripts/ci/validate-fly-g500-s20.py", "fly_s20_validator")
+attestation = load(ROOT / "scripts/ci/fly-s20-source-attestation.py", "fly_s20_source_attestation")
 
 
 def args(tmp_path: Path, **changes):
     values = {
         "expected_sha": "a" * 40,
+        "image_source_sha": "a" * 40,
         "image": "registry.example/graphforge@sha256:" + "b" * 64,
         "region": "den",
         "org": "curatelabs",
@@ -44,6 +47,39 @@ def args(tmp_path: Path, **changes):
     }
     values.update(changes)
     return argparse.Namespace(**values)
+
+
+def test_source_attestation_ignores_untracked_caches_but_binds_tracked_bytes_and_mode(
+    tmp_path,
+):
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / ".gitignore").write_text(".pytest_cache/\n__pycache__/\n")
+    tracked = tmp_path / "tracked.sh"
+    tracked.write_text("one\n")
+    subprocess.run(["git", "add", ".gitignore", "tracked.sh"], cwd=tmp_path, check=True)
+    initial = attestation.snapshot_sha256(tmp_path)
+    (tmp_path / ".pytest_cache").mkdir()
+    (tmp_path / ".pytest_cache" / "state").write_text("noise")
+    (tmp_path / "__pycache__").mkdir()
+    (tmp_path / "__pycache__" / "module.pyc").write_bytes(b"noise")
+    assert attestation.snapshot_sha256(tmp_path) == initial
+    tracked.write_text("two\n")
+    changed_bytes = attestation.snapshot_sha256(tmp_path)
+    assert changed_bytes != initial
+    tracked.chmod(0o755)
+    assert attestation.snapshot_sha256(tmp_path) != changed_bytes
+
+
+def test_source_attestation_binds_tracked_symlink_target(tmp_path):
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "one").write_text("one")
+    (tmp_path / "two").write_text("two")
+    (tmp_path / "link").symlink_to("one")
+    subprocess.run(["git", "add", "one", "two", "link"], cwd=tmp_path, check=True)
+    initial = attestation.snapshot_sha256(tmp_path)
+    (tmp_path / "link").unlink()
+    (tmp_path / "link").symlink_to("two")
+    assert attestation.snapshot_sha256(tmp_path) != initial
 
 
 def construction():
@@ -293,9 +329,12 @@ def pricing_html(*, region="den", rate="0.00002484", duplicate=False, volume="0.
     """
 
 
-def test_contract_fixes_resources_and_rejects_mutable_image(tmp_path):
-    digest = controller.validate_inputs(args(tmp_path))
-    payload = controller.machine_payload(args(tmp_path), "vol-id", digest, "c" * 64)
+def test_contract_fixes_resources_and_rejects_unsafe_local_image(tmp_path):
+    controller.validate_inputs(args(tmp_path))
+    digest = "sha256:" + "b" * 64
+    private_image = "registry.fly.io/gf-s20-unique@" + digest
+    payload = controller.machine_payload(args(tmp_path), "vol-id", private_image, digest, "c" * 64)
+    assert payload["config"]["image"] == private_image
     assert payload["config"]["guest"] == {"cpu_kind": "performance", "cpus": 2, "memory_mb": 4096}
     assert payload["config"]["services"] == []
     assert payload["config"]["restart"] == {"policy": "no"}
@@ -305,9 +344,9 @@ def test_contract_fixes_resources_and_rejects_mutable_image(tmp_path):
     assert payload["config"]["env"]["GF_G500_S20_VOLUME_GB"] == "500"
     assert payload["config"]["env"]["GF_G500_S20_EVIDENCE_OUT"] == "/work/s20-evidence.json"
     assert payload["config"]["env"]["GF_G500_S20_RESULT_OUT"] == "/work/container-result.json"
-    assert payload["config"]["env"]["GF_G500_S20_TIMEOUT_SECONDS"] == "14400"
-    with pytest.raises(controller.ControllerError, match="immutable"):
-        controller.validate_inputs(args(tmp_path, image="registry.example/graphforge:latest"))
+    assert payload["config"]["env"]["GF_G500_S20_TIMEOUT_SECONDS"] == "14100"
+    with pytest.raises(controller.ControllerError, match="safe local"):
+        controller.validate_inputs(args(tmp_path, image="registry.example/graphforge bad"))
 
 
 @pytest.mark.parametrize("size", [0, 501])
@@ -520,6 +559,207 @@ def test_oci_inspection_rejects_provenance_mismatch(monkeypatch, change, message
         controller.inspect_image(image, "a" * 40, "sha256:" + "b" * 64)
 
 
+def test_private_registry_publication_targets_only_the_owned_app(monkeypatch, tmp_path):
+    run = args(tmp_path)
+    local_image_id = "sha256:" + "f" * 64
+    pushed_digest = "sha256:" + "d" * 64
+    docker_calls = []
+
+    def docker(command, **_kwargs):
+        docker_calls.append(command)
+        output = f"digest: {pushed_digest}\n" if command[1:2] == ["push"] else ""
+        return argparse.Namespace(returncode=0, stdout=output, stderr="")
+
+    inspected = []
+
+    def inspect(image, expected_sha, digest, environment):
+        assert environment["DOCKER_CONFIG"]
+        inspected.append((image, expected_sha, digest))
+        return "c" * 64
+
+    monkeypatch.setattr(controller.subprocess, "run", docker)
+    monkeypatch.setattr(controller, "inspect_image", inspect)
+    image, digest, snapshot = controller.publish_to_fly_registry(run, local_image_id, object())
+
+    repository = "registry.fly.io/gf-s20-unique"
+    tag = f"{repository}:{'a' * 40}"
+    immutable = f"{repository}@{pushed_digest}"
+    assert (image, digest, snapshot) == (immutable, pushed_digest, "c" * 64)
+    assert docker_calls == [
+        ["flyctl", "auth", "docker"],
+        ["docker", "tag", local_image_id, tag],
+        ["docker", "push", tag],
+        ["docker", "manifest", "inspect", immutable],
+    ]
+    assert inspected == [(immutable, "a" * 40, pushed_digest)]
+
+
+def test_private_registry_auth_failure_prevents_any_push(monkeypatch, tmp_path):
+    docker_calls = []
+
+    def docker(command, **_kwargs):
+        docker_calls.append(command)
+        raise controller.subprocess.CalledProcessError(1, command)
+
+    monkeypatch.setattr(controller.subprocess, "run", docker)
+    with pytest.raises(controller.subprocess.CalledProcessError):
+        controller.publish_to_fly_registry(args(tmp_path), "sha256:" + "f" * 64, object())
+    assert docker_calls == [["flyctl", "auth", "docker"]]
+
+
+def test_local_preflight_resolves_tag_to_immutable_id_before_publication(monkeypatch):
+    image_id = "sha256:" + "f" * 64
+    calls = []
+
+    def run(command, **_kwargs):
+        calls.append(command)
+        return argparse.Namespace(stdout=json.dumps([{"Id": image_id}]))
+
+    monkeypatch.setattr(controller.subprocess, "run", run)
+    monkeypatch.setattr(controller, "inspect_image", lambda image, sha: (image, sha)[0])
+    assert controller.inspect_local_image("graphforge-fly-s20:exact", "a" * 40) == (
+        image_id,
+        image_id,
+    )
+    assert calls == [["docker", "image", "inspect", "graphforge-fly-s20:exact"]]
+
+
+def test_ambiguous_app_create_claims_only_exact_target_org(tmp_path):
+    class Fly:
+        def run(self, *_args, **_kwargs):
+            raise controller.subprocess.TimeoutExpired("flyctl", 120)
+
+        def json(self, _command):
+            return [{"name": "gf-s20-unique", "organization": {"slug": "other"}}]
+
+    with pytest.raises(controller.ControllerError, match="target org"):
+        controller.create_owned_app(args(tmp_path), Fly())
+
+
+def test_post_create_cli_failure_is_marked_owned_for_cleanup(tmp_path):
+    class Fly:
+        def run(self, *_args, **_kwargs):
+            raise controller.subprocess.CalledProcessError(1, "flyctl")
+
+        def json(self, _command):
+            return [{"name": "gf-s20-unique", "organization": {"slug": "curatelabs"}}]
+
+    with pytest.raises(controller.OwnedAppCreationError, match="became observable"):
+        controller.create_owned_app(args(tmp_path), Fly())
+
+
+def test_reconciled_owned_app_is_cleaned_before_error_escapes(monkeypatch, tmp_path):
+    class Fly:
+        def json(self, command, **_kwargs):
+            assert command == ["apps", "list"]
+            return []
+
+    observed = []
+    monkeypatch.setattr(
+        controller, "fetch_current_pricing", lambda _region: (Decimal("0"), Decimal("0"))
+    )
+    monkeypatch.setattr(controller, "reserve_budget", lambda *_args: None)
+    monkeypatch.setattr(
+        controller,
+        "create_owned_app",
+        lambda *_args: (_ for _ in ()).throw(controller.OwnedAppCreationError("ambiguous")),
+    )
+    monkeypatch.setattr(
+        controller,
+        "cleanup_owned",
+        lambda _fly, app, machine, volume, owned: observed.append((app, machine, volume, owned)),
+    )
+    run = args(tmp_path, execute=True, confirm_disposable=True)
+    with pytest.raises(controller.OwnedAppCreationError):
+        controller.execute(run, Fly(), "sha256:" + "f" * 64, "c" * 64)
+    assert observed == [(run.app_name, None, None, True)]
+
+
+def test_inner_runtime_timeout_leaves_bounded_result_handoff():
+    assert controller.RESULT_HANDOFF_SECONDS == 300
+    assert controller.RUN_SECONDS - controller.RESULT_HANDOFF_SECONDS == 14_100
+
+
+def test_private_registry_push_failure_stops_before_manifest_or_inspection(monkeypatch, tmp_path):
+    docker_calls = []
+
+    def docker(command, **_kwargs):
+        docker_calls.append(command)
+        if command[1:2] == ["push"]:
+            raise controller.subprocess.CalledProcessError(1, command)
+        return argparse.Namespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(controller.subprocess, "run", docker)
+    monkeypatch.setattr(
+        controller,
+        "inspect_image",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("must not inspect a failed push")),
+    )
+    with pytest.raises(controller.subprocess.CalledProcessError):
+        controller.publish_to_fly_registry(args(tmp_path), "sha256:" + "f" * 64, object())
+    assert [command[:2] for command in docker_calls] == [
+        ["flyctl", "auth"],
+        ["docker", "tag"],
+        ["docker", "push"],
+    ]
+
+
+def test_private_registry_digest_mismatch_fails_closed(monkeypatch, tmp_path):
+    pushed_digest = "sha256:" + "d" * 64
+
+    def docker(command, **_kwargs):
+        output = f"digest: {pushed_digest}\n" if command[1:2] == ["push"] else ""
+        return argparse.Namespace(returncode=0, stdout=output, stderr="")
+
+    monkeypatch.setattr(controller.subprocess, "run", docker)
+    monkeypatch.setattr(
+        controller,
+        "inspect_image",
+        lambda *_args: (_ for _ in ()).throw(
+            controller.ControllerError(
+                "pulled OCI image does not authenticate the requested repo digest"
+            )
+        ),
+    )
+    with pytest.raises(controller.ControllerError, match="repo digest"):
+        controller.publish_to_fly_registry(args(tmp_path), "sha256:" + "f" * 64, object())
+
+
+def test_failed_private_image_publication_cleans_app_before_volume_or_machine(
+    monkeypatch, tmp_path
+):
+    calls = []
+
+    class Fly:
+        def json(self, command, **_kwargs):
+            calls.append(command)
+            if command == ["apps", "list"]:
+                return []
+            raise AssertionError(f"unexpected provider read: {command}")
+
+        def run(self, command, check=True, **_kwargs):
+            calls.append(command)
+            return argparse.Namespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(
+        controller, "fetch_current_pricing", lambda _region: (Decimal("0"), Decimal("0"))
+    )
+    monkeypatch.setattr(controller, "reserve_budget", lambda *_args: None)
+    monkeypatch.setattr(
+        controller,
+        "publish_to_fly_registry",
+        lambda *_args: (_ for _ in ()).throw(controller.ControllerError("registry push failed")),
+    )
+    run = args(tmp_path, execute=True, confirm_disposable=True)
+    with pytest.raises(controller.ControllerError, match="registry push failed"):
+        controller.execute(run, Fly(), "sha256:" + "b" * 64, "c" * 64)
+
+    assert ["apps", "create", run.app_name, "--org", run.org] in calls
+    assert ["apps", "destroy", run.app_name, "--yes"] in calls
+    assert not any(command[:2] == ["volumes", "create"] for command in calls)
+    assert not any(command[:2] == ["machine", "create"] for command in calls)
+
+
 def test_existing_app_is_refused_before_budget_or_creation(tmp_path):
     class ExistingFly:
         def json(self, command, **_kwargs):
@@ -531,7 +771,7 @@ def test_existing_app_is_refused_before_budget_or_creation(tmp_path):
 
     run = args(tmp_path, execute=True, confirm_disposable=True)
     with pytest.raises(controller.ControllerError, match="existing app"):
-        controller.execute(run, ExistingFly(), "sha256:" + "b" * 64)
+        controller.execute(run, ExistingFly(), "sha256:" + "b" * 64, "c" * 64)
     assert not run.ledger.exists()
 
 
@@ -797,8 +1037,10 @@ def test_fetch_binds_only_declared_runtime_paths(tmp_path):
 def test_runtime_preserves_allowlisted_internal_failure_phase():
     entrypoint = (ROOT / "containers/fly-g500-s20/run-s20.sh").read_text()
     assert "GF_G500_S20_ACTIVE_PHASE_OUT=/work/s20-active-phase.json" in entrypoint
-    phases = "source_reopen|source_query|export|verify|import|import_reopen|import_query"
-    assert phases in entrypoint
+    for phase in controller.PHASES - {"runner"}:
+        assert phase in entrypoint
+    assert "${GF_G500_S20_TIMEOUT_SECONDS}s" in entrypoint
+    assert "14400s" not in entrypoint
     assert '"phase":"%s","code":"process_exit_%s"' in entrypoint
 
 
@@ -807,7 +1049,11 @@ def test_terminal_failure_is_persisted_promptly_and_still_verified_cleaned(tmp_p
     machine = {
         "id": "machine-observed",
         "region": "den",
-        "image_ref": {"digest": digest},
+        "image_ref": {
+            "registry": "registry.fly.io",
+            "repository": "gf-s20-unique",
+            "digest": digest,
+        },
         "config": {
             "guest": {"cpu_kind": "performance", "cpus": 2, "memory_mb": 4096},
             "auto_destroy": True,
@@ -817,7 +1063,11 @@ def test_terminal_failure_is_persisted_promptly_and_still_verified_cleaned(tmp_p
         },
     }
     monkeypatch.setattr(controller, "create_machine", lambda *_args: machine)
-    monkeypatch.setattr(controller, "inspect_image", lambda *_args: None)
+    monkeypatch.setattr(
+        controller,
+        "publish_to_fly_registry",
+        lambda *_args: ("registry.fly.io/gf-s20-unique@" + digest, digest, "c" * 64),
+    )
     monkeypatch.setattr(
         controller,
         "fetch_current_pricing",
@@ -853,7 +1103,7 @@ def test_terminal_failure_is_persisted_promptly_and_still_verified_cleaned(tmp_p
     run = args(tmp_path, execute=True, confirm_disposable=True)
     fly = Fly()
     with pytest.raises(controller.ControllerError, match="GF_OOM"):
-        controller.execute(run, fly, digest)
+        controller.execute(run, fly, digest, "c" * 64)
     assert json.loads(run.diagnostic_out.read_text()) == {
         "schema": "graphforge-fly-g500-s20-diagnostic/1",
         "status": "failure",
@@ -867,7 +1117,11 @@ def test_observed_machine_must_match_private_fixed_plan(tmp_path):
     digest = "sha256:" + "b" * 64
     machine = {
         "region": "den",
-        "image_ref": {"digest": digest},
+        "image_ref": {
+            "registry": "registry.fly.io",
+            "repository": "gf-s20-unique",
+            "digest": digest,
+        },
         "config": {
             "guest": {"cpu_kind": "performance", "cpus": 2, "memory_mb": 4096},
             "auto_destroy": True,
@@ -1064,9 +1318,7 @@ def test_ingest_progress_bands_reject_gaps_and_missing_final_coverage():
     duplicate_or_missing_sample = evidence()
     duplicate_or_missing_sample["ingest_memory_windows"]["middle_sample_count"] -= 1
     with pytest.raises(validator.EvidenceError, match="distinct committed chunk coverage"):
-        validator.validate(
-            duplicate_or_missing_sample, "a" * 40, "sha256:" + "b" * 64, "den"
-        )
+        validator.validate(duplicate_or_missing_sample, "a" * 40, "sha256:" + "b" * 64, "den")
 
     wrong_source = evidence()
     wrong_source["ingest_memory_windows"]["sampling_source"] = "timer_poll"
@@ -1124,9 +1376,7 @@ def test_ingest_plateau_rejects_regrowth_and_cumulative_growth(early, middle, la
             "early_rss_peak_bytes": early,
             "middle_rss_peak_bytes": middle,
             "late_rss_peak_bytes": late,
-            "observed_growth_bytes": max(
-                0, middle - early, late - middle, late - early
-            ),
+            "observed_growth_bytes": max(0, middle - early, late - middle, late - early),
             "headroom_bytes": windows["envelope_bytes"] - max(early, middle, late),
         }
     )

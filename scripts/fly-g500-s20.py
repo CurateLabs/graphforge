@@ -29,7 +29,7 @@ ROOT = Path(__file__).resolve().parents[1]
 VALIDATOR = ROOT / "scripts/ci/validate-fly-g500-s20.py"
 ATTESTATION_TOOL = ROOT / "scripts/ci/fly-s20-source-attestation.py"
 SHA = re.compile(r"^[0-9a-f]{40}$")
-DIGEST = re.compile(r"^[^\s@]+@(?P<digest>sha256:[0-9a-f]{64})$")
+LOCAL_IMAGE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/:@-]{0,255}$")
 SAFE_NAME = re.compile(r"^[a-z][a-z0-9-]{2,62}$")
 SAFE_VOLUME = re.compile(r"^[a-z][a-z0-9_]{0,29}$")
 SAFE_REGION = re.compile(r"^[a-z0-9-]{2,20}$")
@@ -41,6 +41,7 @@ PRICING_SOURCE = "https://fly.io/docs/about/pricing/"
 VOLUME_USD_PER_GB_MONTH = 0.15
 COMPUTE_PRICE_CEILING_USD_PER_SECOND = 0.00003864
 RUN_SECONDS = 14_400
+RESULT_HANDOFF_SECONDS = 300
 CLEANUP_RESERVE_SECONDS = 600
 VOLUME_BILLING_HOURS = 5
 EVIDENCE_PATH = "/work/s20-evidence.json"
@@ -53,12 +54,14 @@ PHASES = {
     "generate",
     "ingest",
     "source_reopen",
-    "source_query",
+    "source_query_1hop",
+    "source_query_2hop",
     "export",
     "verify",
     "import",
-    "import_reopen",
-    "import_query",
+    "imported_reopen",
+    "imported_query_1hop",
+    "imported_query_2hop",
     "finalize",
     "runner",
 }
@@ -66,6 +69,10 @@ PHASES = {
 
 class ControllerError(RuntimeError):
     pass
+
+
+class OwnedAppCreationError(ControllerError):
+    """Creation failed ambiguously, but the exact target app is now owned."""
 
 
 class Flyctl:
@@ -106,10 +113,9 @@ class Flyctl:
             raise ControllerError(f"Fly {kind} absence probe failed") from None
 
 
-def validate_inputs(args: argparse.Namespace) -> str:
-    image = DIGEST.fullmatch(args.image)
-    if not image:
-        raise ControllerError("--image must be an immutable OCI @sha256 digest reference")
+def validate_inputs(args: argparse.Namespace) -> None:
+    if not LOCAL_IMAGE.fullmatch(args.image):
+        raise ControllerError("--image must be one safe local OCI image reference")
     if not SHA.fullmatch(args.expected_sha):
         raise ControllerError("--expected-sha must be exact lowercase 40-hex")
     if not SAFE_REGION.fullmatch(args.region):
@@ -131,7 +137,6 @@ def validate_inputs(args: argparse.Namespace) -> str:
             raise ControllerError(f"{label} output parent directory does not exist")
     if args.execute and not args.confirm_disposable:
         raise ControllerError("--execute requires --confirm-disposable")
-    return image.group("digest")
 
 
 def check_source(expected_sha: str) -> None:
@@ -269,17 +274,25 @@ def expected_source_snapshot() -> str:
     return module.snapshot_sha256(ROOT)
 
 
-def inspect_image(image: str, expected_sha: str, digest: str) -> str:
-    """Pull and authenticate the local OCI config before any provider mutation."""
-    subprocess.run(
-        ["docker", "pull", "--platform", "linux/amd64", image],
-        check=True,
-        text=True,
-        capture_output=True,
-        timeout=900,
-    )
+def inspect_image(
+    image: str,
+    expected_sha: str,
+    digest: str | None = None,
+    environment: dict[str, str] | None = None,
+) -> str:
+    """Authenticate a local image, optionally pulling an immutable registry digest."""
+    if digest is not None:
+        subprocess.run(
+            ["docker", "pull", "--platform", "linux/amd64", image],
+            env=environment,
+            check=True,
+            text=True,
+            capture_output=True,
+            timeout=900,
+        )
     result = subprocess.run(
         ["docker", "image", "inspect", image],
+        env=environment,
         check=True,
         text=True,
         capture_output=True,
@@ -293,9 +306,12 @@ def inspect_image(image: str, expected_sha: str, digest: str) -> str:
         raise ControllerError("pulled OCI image is not the required linux/amd64 runtime")
     repo_digests = image_data.get("RepoDigests")
     labels = image_data.get("Config", {}).get("Labels")
-    requested_repo = image.rsplit("@", 1)[0]
-    if not isinstance(repo_digests, list) or f"{requested_repo}@{digest}" not in repo_digests:
-        raise ControllerError("pulled OCI image does not authenticate the requested repo digest")
+    if digest is not None:
+        requested_repo = image.rsplit("@", 1)[0]
+        if not isinstance(repo_digests, list) or f"{requested_repo}@{digest}" not in repo_digests:
+            raise ControllerError(
+                "pulled OCI image does not authenticate the requested repo digest"
+            )
     if (
         not isinstance(labels, dict)
         or labels.get("org.opencontainers.image.revision") != expected_sha
@@ -305,6 +321,7 @@ def inspect_image(image: str, expected_sha: str, digest: str) -> str:
         raise ControllerError("OCI runtime schema label is missing or unsupported")
     created = subprocess.run(
         ["docker", "create", "--platform", "linux/amd64", image],
+        env=environment,
         check=True,
         text=True,
         capture_output=True,
@@ -320,6 +337,7 @@ def inspect_image(image: str, expected_sha: str, digest: str) -> str:
                     f"{created}:/usr/local/share/graphforge/build-provenance.json",
                     str(target),
                 ],
+                env=environment,
                 check=True,
                 text=True,
                 capture_output=True,
@@ -328,7 +346,12 @@ def inspect_image(image: str, expected_sha: str, digest: str) -> str:
             provenance = json.loads(target.read_text(encoding="utf-8"))
     finally:
         subprocess.run(
-            ["docker", "rm", created], check=False, text=True, capture_output=True, timeout=120
+            ["docker", "rm", created],
+            env=environment,
+            check=False,
+            text=True,
+            capture_output=True,
+            timeout=120,
         )
     expected_snapshot = expected_source_snapshot()
     if provenance != {
@@ -338,6 +361,107 @@ def inspect_image(image: str, expected_sha: str, digest: str) -> str:
     }:
         raise ControllerError("embedded build provenance differs from the exact source snapshot")
     return expected_snapshot
+
+
+def inspect_local_image(image: str, expected_sha: str) -> tuple[str, str]:
+    """Resolve a mutable caller reference once, then authenticate its immutable image ID."""
+    result = subprocess.run(
+        ["docker", "image", "inspect", image],
+        check=True,
+        text=True,
+        capture_output=True,
+        timeout=120,
+    )
+    inspected = json.loads(result.stdout)
+    if not isinstance(inspected, list) or len(inspected) != 1:
+        raise ControllerError("local OCI inspection did not return exactly one image")
+    image_id = inspected[0].get("Id")
+    if not isinstance(image_id, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
+        raise ControllerError("local OCI image has no immutable image ID")
+    return image_id, inspect_image(image_id, expected_sha)
+
+
+def create_owned_app(args: argparse.Namespace, fly: Flyctl) -> None:
+    """Create the pre-absent app or reconcile an ambiguous create result."""
+    try:
+        fly.run(["apps", "create", args.app_name, "--org", args.org])
+        return
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        apps = fly.json(["apps", "list"])
+        matches = [
+            item
+            for item in apps
+            if item.get("Name") == args.app_name or item.get("name") == args.app_name
+        ]
+        if len(matches) != 1:
+            raise ControllerError(
+                "app creation failed without one reconcilable owned app"
+            ) from None
+        item = matches[0]
+        organization = item.get("Organization", item.get("organization", {}))
+        slug = (
+            organization.get("Slug", organization.get("slug"))
+            if isinstance(organization, dict)
+            else None
+        )
+        slug = slug or item.get("organization_slug") or item.get("org_slug")
+        if slug != args.org:
+            raise ControllerError(
+                "ambiguous app creation did not reconcile to the target org"
+            ) from None
+        raise OwnedAppCreationError(
+            "app creation failed after the exact owned app became observable"
+        ) from error
+
+
+def publish_to_fly_registry(
+    args: argparse.Namespace, local_image_id: str, _fly: Flyctl
+) -> tuple[str, str, str]:
+    """Publish the authenticated local image into the owned app registry."""
+    repository = f"registry.fly.io/{args.app_name}"
+    tag = f"{repository}:{args.expected_sha}"
+    with tempfile.TemporaryDirectory(prefix="graphforge-fly-docker-config-") as config:
+        environment = {**os.environ, "DOCKER_CONFIG": config}
+        subprocess.run(
+            ["flyctl", "auth", "docker"],
+            cwd=ROOT,
+            env=environment,
+            check=True,
+            text=True,
+            capture_output=True,
+            timeout=120,
+        )
+        subprocess.run(
+            ["docker", "tag", local_image_id, tag],
+            env=environment,
+            check=True,
+            text=True,
+            capture_output=True,
+            timeout=120,
+        )
+        pushed = subprocess.run(
+            ["docker", "push", tag],
+            env=environment,
+            check=True,
+            text=True,
+            capture_output=True,
+            timeout=1_800,
+        )
+        matches = set(re.findall(r"digest:\s*(sha256:[0-9a-f]{64})", pushed.stdout + pushed.stderr))
+        if len(matches) != 1:
+            raise ControllerError("Fly registry push did not return one immutable digest")
+        digest = next(iter(matches))
+        image = f"{repository}@{digest}"
+        subprocess.run(
+            ["docker", "manifest", "inspect", image],
+            env=environment,
+            check=True,
+            text=True,
+            capture_output=True,
+            timeout=120,
+        )
+        snapshot = inspect_image(image, args.expected_sha, digest, environment)
+        return image, digest, snapshot
 
 
 def reserve_budget(path: Path, run_id: str, reservation: dict[str, Any]) -> None:
@@ -495,7 +619,11 @@ def _validated_reservation(value: Any) -> Decimal:
 
 
 def machine_payload(
-    args: argparse.Namespace, volume_id: str, digest: str, source_snapshot: str
+    args: argparse.Namespace,
+    volume_id: str,
+    image: str,
+    digest: str,
+    source_snapshot: str,
 ) -> dict[str, Any]:
     return {
         "name": args.machine_name,
@@ -503,7 +631,7 @@ def machine_payload(
         "skip_launch": False,
         "skip_service_registration": True,
         "config": {
-            "image": args.image,
+            "image": image,
             "auto_destroy": True,
             "restart": {"policy": "no"},
             "guest": {"cpu_kind": "performance", "cpus": CPUS, "memory_mb": MEMORY_MB},
@@ -518,7 +646,7 @@ def machine_payload(
                 "GF_G500_S20_VOLUME_GB": str(args.volume_size_gb),
                 "GF_G500_S20_EVIDENCE_OUT": EVIDENCE_PATH,
                 "GF_G500_S20_RESULT_OUT": RESULT_PATH,
-                "GF_G500_S20_TIMEOUT_SECONDS": str(RUN_SECONDS),
+                "GF_G500_S20_TIMEOUT_SECONDS": str(RUN_SECONDS - RESULT_HANDOFF_SECONDS),
                 "TMPDIR": "/work/tmp",
             },
         },
@@ -539,7 +667,13 @@ def assert_machine(
 ) -> None:
     config = machine.get("config", {})
     guest = config.get("guest", {})
-    if machine.get("region") != args.region or machine.get("image_ref", {}).get("digest") != digest:
+    image_ref = machine.get("image_ref", {})
+    if (
+        machine.get("region") != args.region
+        or image_ref.get("registry") != "registry.fly.io"
+        or image_ref.get("repository") != args.app_name
+        or image_ref.get("digest") != digest
+    ):
         raise ControllerError("observed Machine region/image differs from the pinned plan")
     if guest != {"cpu_kind": "performance", "cpus": CPUS, "memory_mb": MEMORY_MB}:
         raise ControllerError("observed Machine resources differ from 2 CPU/4096 MB")
@@ -556,6 +690,7 @@ def create_machine(
     args: argparse.Namespace,
     fly: Flyctl,
     volume_id: str,
+    image: str,
     digest: str,
     source_snapshot: str,
 ) -> dict[str, Any]:
@@ -564,7 +699,7 @@ def create_machine(
         raise ControllerError("Fly authentication token is unavailable")
     request = urllib.request.Request(
         f"https://api.machines.dev/v1/apps/{args.app_name}/machines",
-        data=json.dumps(machine_payload(args, volume_id, digest, source_snapshot)).encode(),
+        data=json.dumps(machine_payload(args, volume_id, image, digest, source_snapshot)).encode(),
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
         method="POST",
     )
@@ -757,24 +892,37 @@ def fetch(
     )
 
 
-def execute(args: argparse.Namespace, fly: Flyctl, digest: str) -> None:
+def execute(
+    args: argparse.Namespace,
+    fly: Flyctl,
+    local_image_id: str | None = None,
+    local_snapshot: str | None = None,
+) -> None:
     app_created = False
     machine_id = volume_id = None
     try:
+        if local_image_id is None or local_snapshot is None:
+            local_image_id, local_snapshot = inspect_local_image(args.image, args.expected_sha)
         apps = fly.json(["apps", "list"])
         if any(
             item.get("Name") == args.app_name or item.get("name") == args.app_name for item in apps
         ):
             raise ControllerError("refusing to reuse an existing app")
-        source_snapshot = inspect_image(args.image, args.expected_sha, digest)
         compute_rate, volume_rate = fetch_current_pricing(args.region)
         reserve_budget(
             args.ledger,
             args.app_name,
             price_reservation(args.volume_size_gb, compute_rate, volume_rate),
         )
-        fly.run(["apps", "create", args.app_name, "--org", args.org])
-        app_created = True
+        try:
+            create_owned_app(args, fly)
+            app_created = True
+        except OwnedAppCreationError:
+            app_created = True
+            raise
+        image, digest, source_snapshot = publish_to_fly_registry(args, local_image_id, fly)
+        if source_snapshot != local_snapshot:
+            raise ControllerError("Fly registry image source snapshot changed after publication")
         volume = fly.json(
             [
                 "volumes",
@@ -791,7 +939,7 @@ def execute(args: argparse.Namespace, fly: Flyctl, digest: str) -> None:
             ]
         )
         volume_id = assert_volume(volume, args)
-        machine = create_machine(args, fly, volume_id, digest, source_snapshot)
+        machine = create_machine(args, fly, volume_id, image, digest, source_snapshot)
         machine_id = machine["id"]
         assert_machine(machine, args, digest, volume_id)
         deadline = time.monotonic() + args.timeout_s
@@ -841,7 +989,13 @@ def execute(args: argparse.Namespace, fly: Flyctl, digest: str) -> None:
             validator = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(validator)
             evidence = json.loads(local.read_text(encoding="utf-8"))
-            validator.validate(evidence, args.expected_sha, digest, args.region, source_snapshot)
+            validator.validate(
+                evidence,
+                args.expected_sha,
+                digest,
+                args.region,
+                source_snapshot,
+            )
             args.evidence_out.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
             fly.run(
                 [
@@ -880,21 +1034,23 @@ def parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = parser().parse_args()
     try:
-        digest = validate_inputs(args)
+        validate_inputs(args)
         check_source(args.expected_sha)
+        local_image_id, source_snapshot = inspect_local_image(args.image, args.expected_sha)
         plan = {
             "scale": 20,
+            "source_sha": args.expected_sha,
             "cpus": CPUS,
             "memory_mb": MEMORY_MB,
             "volume_size_gb": args.volume_size_gb,
             "region": args.region,
-            "image_digest": digest,
+            "local_image_id": local_image_id,
             "maximum_total_cost_usd": MAX_COST_USD,
             "reservation": price_reservation(args.volume_size_gb),
         }
         print(json.dumps(plan, sort_keys=True))
         if args.execute:
-            execute(args, Flyctl(), digest)
+            execute(args, Flyctl(), local_image_id, source_snapshot)
         return 0
     except (ControllerError, subprocess.SubprocessError, json.JSONDecodeError, KeyError) as error:
         print(f"error: {error}", file=sys.stderr)
