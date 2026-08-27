@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Sequence
-from decimal import ROUND_CEILING, Decimal
+from decimal import ROUND_CEILING, Decimal, InvalidOperation
 import fcntl
 from html.parser import HTMLParser
 import importlib.util
@@ -26,6 +26,7 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 VALIDATOR = ROOT / "scripts/ci/validate-fly-g500-s20.py"
+ATTESTATION_TOOL = ROOT / "scripts/ci/fly-s20-source-attestation.py"
 SHA = re.compile(r"^[0-9a-f]{40}$")
 DIGEST = re.compile(r"^[^\s@]+@(?P<digest>sha256:[0-9a-f]{64})$")
 SAFE_NAME = re.compile(r"^[a-z][a-z0-9-]{2,62}$")
@@ -43,6 +44,23 @@ CLEANUP_RESERVE_SECONDS = 600
 VOLUME_BILLING_HOURS = 5
 EVIDENCE_PATH = "/work/s20-evidence.json"
 RESULT_PATH = "/work/container-result.json"
+JOURNAL_PATH = "/work/s20-journal.json"
+ACTIVE_PHASE_PATH = "/work/s20-active-phase.json"
+CLEANUP_ATTEMPTS = 5
+CLEANUP_POLL_SECONDS = 0.5
+PHASES = {
+    "generate",
+    "ingest",
+    "source_reopen",
+    "source_query",
+    "export",
+    "verify",
+    "import",
+    "import_reopen",
+    "import_query",
+    "finalize",
+    "runner",
+}
 
 
 class ControllerError(RuntimeError):
@@ -141,8 +159,10 @@ class _PricingTables(HTMLParser):
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         attributes = dict(attrs)
-        if tag == "div" and (identifier := attributes.get("id")) and identifier.startswith(
-            "started-machines-pricing-matrix-"
+        if (
+            tag == "div"
+            and (identifier := attributes.get("id"))
+            and identifier.startswith("started-machines-pricing-matrix-")
         ):
             self.table_id = identifier
             self.rows.setdefault(identifier, [])
@@ -181,8 +201,7 @@ def parse_current_pricing(html: str, region: str) -> tuple[Decimal, Decimal]:
         if preset != "performance-2x" or "4GB" not in cells or "2 performance" not in cells:
             continue
         prices = [
-            Decimal(value)
-            for value in re.findall(r"\$([0-9]+(?:\.[0-9]+)?)", " ".join(cells))
+            Decimal(value) for value in re.findall(r"\$([0-9]+(?:\.[0-9]+)?)", " ".join(cells))
         ]
         if len(prices) != 3:
             raise ControllerError("official Fly pricing row has ambiguous price columns")
@@ -217,7 +236,16 @@ def fetch_current_pricing(region: str) -> tuple[Decimal, Decimal]:
         raise ControllerError("official Fly pricing is unavailable") from None
 
 
-def inspect_image(image: str, expected_sha: str, digest: str) -> None:
+def expected_source_snapshot() -> str:
+    spec = importlib.util.spec_from_file_location("source_attestation", ATTESTATION_TOOL)
+    if not spec or not spec.loader:
+        raise ControllerError("cannot load source attestation tool")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.snapshot_sha256(ROOT)
+
+
+def inspect_image(image: str, expected_sha: str, digest: str) -> str:
     """Pull and authenticate the local OCI config before any provider mutation."""
     subprocess.run(
         ["docker", "pull", image], check=True, text=True, capture_output=True, timeout=900
@@ -245,6 +273,37 @@ def inspect_image(image: str, expected_sha: str, digest: str) -> None:
         raise ControllerError("OCI revision label does not equal the exact expected SHA")
     if labels.get("dev.graphforge.fly-s20") != "graphforge-fly-s20-runtime/1":
         raise ControllerError("OCI runtime schema label is missing or unsupported")
+    created = subprocess.run(
+        ["docker", "create", image], check=True, text=True, capture_output=True, timeout=120
+    ).stdout.strip()
+    try:
+        with tempfile.TemporaryDirectory(prefix="graphforge-image-provenance-") as directory:
+            target = Path(directory) / "build-provenance.json"
+            subprocess.run(
+                [
+                    "docker",
+                    "cp",
+                    f"{created}:/usr/local/share/graphforge/build-provenance.json",
+                    str(target),
+                ],
+                check=True,
+                text=True,
+                capture_output=True,
+                timeout=120,
+            )
+            provenance = json.loads(target.read_text(encoding="utf-8"))
+    finally:
+        subprocess.run(
+            ["docker", "rm", created], check=False, text=True, capture_output=True, timeout=120
+        )
+    expected_snapshot = expected_source_snapshot()
+    if provenance != {
+        "schema": "graphforge-fly-s20-build-provenance/1",
+        "source_sha": expected_sha,
+        "source_snapshot_sha256": expected_snapshot,
+    }:
+        raise ControllerError("embedded build provenance differs from the exact source snapshot")
+    return expected_snapshot
 
 
 def reserve_budget(path: Path, run_id: str, reservation: dict[str, Any]) -> None:
@@ -265,9 +324,9 @@ def reserve_budget(path: Path, run_id: str, reservation: dict[str, Any]) -> None
             raise ControllerError("invalid cost ledger runs")
         if any(run.get("run_id") == run_id for run in runs):
             raise ControllerError("run id is already reserved")
-        used = sum(float(run.get("reserved_usd", MAX_COST_USD + 1)) for run in runs)
-        amount = float(reservation["reserved_usd"])
-        if used + amount > MAX_COST_USD:
+        used = sum((_validated_reservation(run) for run in runs), Decimal(0))
+        amount = _validated_reservation(reservation)
+        if used + amount > Decimal(str(MAX_COST_USD)):
             raise ControllerError("durable cost reservations would exceed $10")
         runs.append({"run_id": run_id, **reservation})
         with tempfile.NamedTemporaryFile(
@@ -286,7 +345,61 @@ def reserve_budget(path: Path, run_id: str, reservation: dict[str, Any]) -> None
             os.close(directory)
 
 
-def machine_payload(args: argparse.Namespace, volume_id: str, digest: str) -> dict[str, Any]:
+def _decimal(value: Any, label: str) -> Decimal:
+    if isinstance(value, bool) or not isinstance(value, (int, float, str, Decimal)):
+        raise ControllerError(f"cost ledger has malformed {label}")
+    try:
+        result = Decimal(str(value))
+    except InvalidOperation:
+        raise ControllerError(f"cost ledger has malformed {label}") from None
+    if not result.is_finite() or result < 0:
+        raise ControllerError(f"cost ledger has invalid {label}")
+    return result
+
+
+def _validated_reservation(value: Any) -> Decimal:
+    """Validate a closed reservation and recompute its authoritative cents."""
+    fields = {
+        "pricing_source",
+        "compute_rate_usd_per_second",
+        "volume_rate_usd_per_gb_month",
+        "runtime_seconds",
+        "cleanup_reserve_seconds",
+        "volume_billing_hours",
+        "volume_size_gb",
+        "reserved_usd",
+    }
+    if (
+        not isinstance(value, dict)
+        or set(value) - (fields | {"run_id"})
+        or not fields <= set(value)
+    ):
+        raise ControllerError("cost ledger has malformed reservation")
+    if value["pricing_source"] != PRICING_SOURCE:
+        raise ControllerError("cost ledger has invalid pricing source")
+    if (
+        value["runtime_seconds"] != RUN_SECONDS
+        or value["cleanup_reserve_seconds"] != CLEANUP_RESERVE_SECONDS
+        or value["volume_billing_hours"] != VOLUME_BILLING_HOURS
+        or isinstance(value["volume_size_gb"], bool)
+        or not isinstance(value["volume_size_gb"], int)
+        or not 1 <= value["volume_size_gb"] <= 500
+    ):
+        raise ControllerError("cost ledger has invalid reservation envelope")
+    compute = _decimal(value["compute_rate_usd_per_second"], "compute rate")
+    volume = _decimal(value["volume_rate_usd_per_gb_month"], "volume rate")
+    observed = _decimal(value["reserved_usd"], "reserved amount")
+    expected = Decimal(
+        str(price_reservation(value["volume_size_gb"], compute, volume)["reserved_usd"])
+    )
+    if observed != expected:
+        raise ControllerError("cost ledger reserved amount does not match recomputed cents")
+    return expected
+
+
+def machine_payload(
+    args: argparse.Namespace, volume_id: str, digest: str, source_snapshot: str
+) -> dict[str, Any]:
     return {
         "name": args.machine_name,
         "region": args.region,
@@ -303,6 +416,7 @@ def machine_payload(args: argparse.Namespace, volume_id: str, digest: str) -> di
                 "GF_G500_CERTIFICATION_SCALE": "20",
                 "GF_G500_S20_EXPECTED_SHA": args.expected_sha,
                 "GF_G500_S20_IMAGE_DIGEST": digest,
+                "GF_G500_S20_SOURCE_SNAPSHOT_SHA256": source_snapshot,
                 "GF_G500_S20_REGION": args.region,
                 "GF_G500_S20_VOLUME_GB": str(args.volume_size_gb),
                 "GF_G500_S20_EVIDENCE_OUT": EVIDENCE_PATH,
@@ -314,7 +428,18 @@ def machine_payload(args: argparse.Namespace, volume_id: str, digest: str) -> di
     }
 
 
-def assert_machine(machine: dict[str, Any], args: argparse.Namespace, digest: str) -> None:
+def assert_volume(volume: Any, args: argparse.Namespace) -> str:
+    if not isinstance(volume, dict) or not isinstance(volume.get("id"), str):
+        raise ControllerError("Fly did not return an observed volume identity")
+    size = volume.get("size_gb", volume.get("size"))
+    if volume.get("region") != args.region or size != args.volume_size_gb:
+        raise ControllerError("observed volume region/size differs from the pinned plan")
+    return volume["id"]
+
+
+def assert_machine(
+    machine: dict[str, Any], args: argparse.Namespace, digest: str, volume_id: str
+) -> None:
     config = machine.get("config", {})
     guest = config.get("guest", {})
     if machine.get("region") != args.region or machine.get("image_ref", {}).get("digest") != digest:
@@ -326,19 +451,23 @@ def assert_machine(machine: dict[str, Any], args: argparse.Namespace, digest: st
     if config.get("services") not in (None, []):
         raise ControllerError("observed Machine exposes a service")
     mounts = config.get("mounts", [])
-    if len(mounts) != 1 or mounts[0].get("path") != "/work":
+    if len(mounts) != 1 or mounts[0].get("path") != "/work" or mounts[0].get("volume") != volume_id:
         raise ControllerError("observed Machine does not have the one /work volume")
 
 
 def create_machine(
-    args: argparse.Namespace, fly: Flyctl, volume_id: str, digest: str
+    args: argparse.Namespace,
+    fly: Flyctl,
+    volume_id: str,
+    digest: str,
+    source_snapshot: str,
 ) -> dict[str, Any]:
     token = fly.run(["auth", "token"]).stdout.strip()
     if not token:
         raise ControllerError("Fly authentication token is unavailable")
     request = urllib.request.Request(
         f"https://api.machines.dev/v1/apps/{args.app_name}/machines",
-        data=json.dumps(machine_payload(args, volume_id, digest)).encode(),
+        data=json.dumps(machine_payload(args, volume_id, digest, source_snapshot)).encode(),
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
         method="POST",
     )
@@ -357,18 +486,52 @@ def cleanup_owned(
     fly: Flyctl, app: str, machine_id: str | None, volume_id: str | None, app_created: bool
 ) -> None:
     """Destroy only identifiers observed from resources created in this invocation."""
-    operations = []
+    resources = []
     if machine_id:
-        operations.append(["machine", "destroy", machine_id, "--app", app, "--force"])
+        resources.append(
+            (
+                "Machine",
+                ["machine", "destroy", machine_id, "--app", app, "--force"],
+                ["machine", "status", machine_id, "--app", app],
+            )
+        )
     if volume_id:
-        operations.append(["volumes", "destroy", volume_id, "--app", app, "--yes"])
+        resources.append(
+            (
+                "volume",
+                ["volumes", "destroy", volume_id, "--app", app, "--yes"],
+                ["volumes", "show", volume_id, "--app", app],
+            )
+        )
     if app_created:
-        operations.append(["apps", "destroy", app, "--yes"])
-    for operation in operations:
-        try:
-            fly.run(operation, check=False)
-        except subprocess.SubprocessError:  # noqa: PERF203 - attempt every cleanup operation
-            continue
+        resources.append(("app", ["apps", "destroy", app, "--yes"], None))
+    for label, destroy, probe in resources:
+        errors = []
+        for attempt in range(CLEANUP_ATTEMPTS):
+            try:
+                result = fly.run(destroy, check=False)
+                if result.returncode not in (0, 1):
+                    errors.append(f"destroy rc={result.returncode}")
+            except subprocess.SubprocessError as error:
+                errors.append(type(error).__name__)
+            absent = False
+            try:
+                if probe is not None:
+                    absent = fly.run(probe, check=False).returncode != 0
+                else:
+                    apps = fly.json(["apps", "list"])
+                    absent = not any(
+                        item.get("Name") == app or item.get("name") == app for item in apps
+                    )
+            except (subprocess.SubprocessError, json.JSONDecodeError) as error:
+                errors.append(type(error).__name__)
+            if absent:
+                break
+            if attempt + 1 < CLEANUP_ATTEMPTS:
+                time.sleep(CLEANUP_POLL_SECONDS)
+        else:
+            detail = f" ({'; '.join(errors)})" if errors else ""
+            raise ControllerError(f"owned {label} remains after bounded cleanup{detail}")
 
 
 def verify_absent(
@@ -388,6 +551,34 @@ def verify_absent(
         apps = fly.json(["apps", "list"])
         if any(item.get("Name") == app or item.get("name") == app for item in apps):
             raise ControllerError("owned app remains after cleanup")
+
+
+def observed_phase(path: Path) -> str:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return "runner"
+    candidates = [value.get("phase")] if isinstance(value, dict) else []
+    if isinstance(value, list) and value:
+        candidates.append(value[-1].get("phase") if isinstance(value[-1], dict) else None)
+    return next((phase for phase in candidates if phase in PHASES), "runner")
+
+
+def terminal_machine_diagnostic(machine: Any, phase: str) -> dict[str, str] | None:
+    if not isinstance(machine, dict):
+        raise ControllerError("Machine status response is malformed")
+    state = machine.get("state")
+    if state not in {"stopped", "destroyed"}:
+        return None
+    events = machine.get("events", [])
+    encoded = json.dumps(events, sort_keys=True).lower() if isinstance(events, list) else ""
+    code = "machine_oom" if "oom" in encoded or "out of memory" in encoded else "machine_exit"
+    return {
+        "schema": "graphforge-fly-g500-s20-diagnostic/1",
+        "status": "failure",
+        "phase": phase,
+        "code": code,
+    }
 
 
 def validate_container_result(value: Any) -> dict[str, str]:
@@ -433,7 +624,7 @@ def execute(args: argparse.Namespace, fly: Flyctl, digest: str) -> None:
             item.get("Name") == args.app_name or item.get("name") == args.app_name for item in apps
         ):
             raise ControllerError("refusing to reuse an existing app")
-        inspect_image(args.image, args.expected_sha, digest)
+        source_snapshot = inspect_image(args.image, args.expected_sha, digest)
         compute_rate, volume_rate = fetch_current_pricing(args.region)
         reserve_budget(
             args.ledger,
@@ -457,14 +648,16 @@ def execute(args: argparse.Namespace, fly: Flyctl, digest: str) -> None:
                 "--yes",
             ]
         )
-        volume_id = volume["id"]
-        machine = create_machine(args, fly, volume_id, digest)
+        volume_id = assert_volume(volume, args)
+        machine = create_machine(args, fly, volume_id, digest, source_snapshot)
         machine_id = machine["id"]
-        assert_machine(machine, args, digest)
+        assert_machine(machine, args, digest, volume_id)
         deadline = time.monotonic() + args.timeout_s
         with tempfile.TemporaryDirectory(prefix="graphforge-s20-") as directory:
             local = Path(directory) / "evidence.json"
             result_file = Path(directory) / "container-result.json"
+            active_file = Path(directory) / "active-phase.json"
+            journal_file = Path(directory) / "journal.json"
             while time.monotonic() < deadline:
                 result = fetch(fly, args, machine_id, RESULT_PATH, result_file)
                 if result.returncode == 0 and result_file.is_file():
@@ -479,6 +672,24 @@ def execute(args: argparse.Namespace, fly: Flyctl, digest: str) -> None:
                     evidence_result = fetch(fly, args, machine_id, EVIDENCE_PATH, local)
                     if evidence_result.returncode == 0 and local.is_file():
                         break
+                # The shell result can be absent when the kernel or provider terminated
+                # the process. Retrieve the last durable progress markers before asking
+                # Fly for the terminal state so OOM and abrupt exits surface promptly.
+                fetch(fly, args, machine_id, ACTIVE_PHASE_PATH, active_file)
+                fetch(fly, args, machine_id, JOURNAL_PATH, journal_file)
+                phase = observed_phase(active_file)
+                if phase == "runner":
+                    phase = observed_phase(journal_file)
+                terminal = terminal_machine_diagnostic(
+                    fly.json(["machine", "status", machine_id, "--app", args.app_name]), phase
+                )
+                if terminal:
+                    args.diagnostic_out.write_text(
+                        json.dumps(terminal, indent=2, sort_keys=True) + "\n"
+                    )
+                    raise ControllerError(
+                        f"Machine terminated in {terminal['phase']} with {terminal['code']}"
+                    )
                 time.sleep(2)
             else:
                 raise ControllerError("timed out retrieving S20 evidence")
@@ -488,7 +699,7 @@ def execute(args: argparse.Namespace, fly: Flyctl, digest: str) -> None:
             validator = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(validator)
             evidence = json.loads(local.read_text(encoding="utf-8"))
-            validator.validate(evidence, args.expected_sha, digest, args.region)
+            validator.validate(evidence, args.expected_sha, digest, args.region, source_snapshot)
             args.evidence_out.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
             fly.run(
                 [
@@ -503,7 +714,6 @@ def execute(args: argparse.Namespace, fly: Flyctl, digest: str) -> None:
             )
     finally:
         cleanup_owned(fly, args.app_name, machine_id, volume_id, app_created)
-        verify_absent(fly, args.app_name, machine_id, volume_id, app_created)
 
 
 def parser() -> argparse.ArgumentParser:
