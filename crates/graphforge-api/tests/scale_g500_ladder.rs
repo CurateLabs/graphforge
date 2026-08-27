@@ -2748,8 +2748,13 @@ fn cancellation_stops_merge_and_publication_before_more_work_is_committed() {
 
 #[test]
 fn graph500_driver_has_no_bulk_publication_escape_hatch() {
-    let forbidden = ["publish", "bulk"].join("_");
-    assert!(!include_str!("scale_g500_ladder.rs").contains(&forbidden));
+    let source = include_str!("scale_g500_ladder.rs");
+    for forbidden in [["publish", "bulk"].join("_"), ["bulk", "publish"].join("_")] {
+        assert!(
+            !source.contains(&forbidden),
+            "bulk publication escape hatch reintroduced: {forbidden}"
+        );
+    }
 }
 
 #[test]

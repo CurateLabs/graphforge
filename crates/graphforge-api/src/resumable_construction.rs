@@ -256,21 +256,37 @@ impl GraphConstructionSession<'_> {
             || cancellation.is_some_and(crate::CancellationToken::is_cancelled),
         )?;
 
-        let root = self.graph.resolved_generation.container_root();
-        let resolved = graphforge_storage::resolve_project_generation(root)?;
-        if resolved.generation_uuid() != published.generation_uuid {
-            return Err(GfError::Storage(
-                "construction publication did not resolve its exact generation".into(),
-            ));
-        }
-        let (prepared_dir, prepared_guard, _) = super::hydrate_graph_workspace(&resolved, false)?;
-        let runtime_catalog = super::load_runtime_catalog(&prepared_dir)?;
-        let property_inventory = std::sync::Arc::new(
-            graphforge_storage::AuthenticatedPropertyInventory::from_resolved_generation(
-                &resolved,
-            )?,
-        );
-        replace_workspace(&prepared_dir, &self.graph.dir)?;
+        let refresh = (|| {
+            let root = self.graph.resolved_generation.container_root();
+            let resolved = graphforge_storage::resolve_project_generation(root)?;
+            if resolved.generation_uuid() != published.generation_uuid {
+                return Err(GfError::Storage(
+                    "construction publication did not resolve its exact generation".into(),
+                ));
+            }
+            let (prepared_dir, prepared_guard, _) =
+                super::hydrate_graph_workspace(&resolved, false)?;
+            let runtime_catalog = super::load_runtime_catalog(&prepared_dir)?;
+            let property_inventory = std::sync::Arc::new(
+                graphforge_storage::AuthenticatedPropertyInventory::from_resolved_generation(
+                    &resolved,
+                )?,
+            );
+            replace_workspace(&prepared_dir, &self.graph.dir)?;
+            Ok((
+                resolved,
+                prepared_guard,
+                runtime_catalog,
+                property_inventory,
+            ))
+        })();
+        let (resolved, prepared_guard, runtime_catalog, property_inventory) =
+            refresh.map_err(|error: GfError| {
+                GfError::Storage(format!(
+                    "phase=POST_PUBLICATION_REFRESH committed=true generation_uuid={} recovery=reopen_or_resume cause={error}",
+                    published.generation_uuid
+                ))
+            })?;
         drop(prepared_guard);
         *self
             .graph
@@ -506,6 +522,31 @@ mod tests {
                 .generation_uuid(),
             parent
         );
+    }
+
+    #[test]
+    fn post_publication_refresh_failure_reports_committed_authority() {
+        let graph = GraphForge::new(None).unwrap();
+        let root = graph.resolved_generation.container_root().to_path_buf();
+        let mut session = graph.begin_graph_construction(Default::default()).unwrap();
+        session
+            .append_nodes("nodes", &nodes(&[Uuid::now_v7()]))
+            .unwrap();
+
+        REFRESH_FAILURE.with(|failure| failure.set(Some(RefreshBoundary::BeforeMove)));
+        let error = session.seal_and_publish().unwrap_err();
+        REFRESH_FAILURE.with(|failure| failure.set(None));
+
+        let progress = session.progress();
+        assert!(progress.publication_committed);
+        let committed = graphforge_storage::resolve_project_generation(&root)
+            .unwrap()
+            .generation_uuid();
+        let message = error.to_string();
+        assert!(message.contains("phase=POST_PUBLICATION_REFRESH"));
+        assert!(message.contains("committed=true"));
+        assert!(message.contains(&format!("generation_uuid={committed}")));
+        assert!(message.contains("recovery=reopen_or_resume"));
     }
 
     #[test]

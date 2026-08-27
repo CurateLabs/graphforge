@@ -1960,6 +1960,7 @@ pub fn read_graph_object_by_digest(
 /// Open and stream-authenticate one immutable CAS object without allocating its payload.
 pub(crate) struct AuthenticatedGraphObject {
     file: File,
+    authenticated_length: u64,
     _cas: std::sync::Arc<ReadOnlyCasRoot>,
 }
 
@@ -2004,6 +2005,10 @@ impl AuthenticatedGraphObject {
     pub(crate) fn try_clone_file(&self) -> std::io::Result<File> {
         self.file.try_clone()
     }
+
+    pub(crate) fn authenticated_length(&self) -> u64 {
+        self.authenticated_length
+    }
 }
 
 impl AsRef<File> for AuthenticatedGraphObject {
@@ -2026,7 +2031,7 @@ impl Seek for AuthenticatedGraphObject {
 
 impl Length for AuthenticatedGraphObject {
     fn len(&self) -> u64 {
-        self.file.metadata().map_or(0, |metadata| metadata.len())
+        self.authenticated_length
     }
 }
 
@@ -2101,6 +2106,7 @@ fn open_graph_object_with_read_lease(
         .map_err(|error| storage("rewind graph object", &lease.cas.diagnostic_root, error))?;
     Ok(AuthenticatedGraphObject {
         file,
+        authenticated_length: expected_length,
         _cas: std::sync::Arc::clone(&lease.cas),
     })
 }
@@ -2853,6 +2859,7 @@ mod tests {
         let (digest, _) = install_graph_object_bytes(root.path(), payload).unwrap();
         let mut reader =
             open_graph_object_by_digest(root.path(), &digest, payload.len() as u64).unwrap();
+        assert_eq!(reader.len(), payload.len() as u64);
         let path = graph_object_path(root.path(), &digest).unwrap();
 
         let mutation = fs::OpenOptions::new().write(true).open(&path);

@@ -2937,11 +2937,16 @@ pub(crate) struct CountingChunkReader<R = File> {
 
 pub(crate) trait ConstructionFileHandle: Send + Sync {
     fn descriptor(&self) -> &File;
+    fn length(&self) -> u64;
 }
 
 impl ConstructionFileHandle for File {
     fn descriptor(&self) -> &File {
         self
+    }
+
+    fn length(&self) -> u64 {
+        self.metadata().map_or(0, |metadata| metadata.len())
     }
 }
 
@@ -2949,14 +2954,15 @@ impl ConstructionFileHandle for crate::graph_object_store::AuthenticatedGraphObj
     fn descriptor(&self) -> &File {
         self.as_ref()
     }
+
+    fn length(&self) -> u64 {
+        self.authenticated_length()
+    }
 }
 
 impl<R: ConstructionFileHandle> Length for CountingChunkReader<R> {
     fn len(&self) -> u64 {
-        self.file
-            .descriptor()
-            .metadata()
-            .map_or(0, |metadata| metadata.len())
+        self.file.length()
     }
 }
 
@@ -7537,6 +7543,24 @@ mod tests {
         assert!(!crate::file_lock::try_lock_exclusive(&contender).unwrap());
         crate::file_lock::unlock(&owner).unwrap();
         assert!(crate::file_lock::try_lock_exclusive(&contender).unwrap());
+    }
+
+    #[test]
+    fn counting_reader_uses_authenticated_cas_length() {
+        let root = TempDir::new().unwrap();
+        let payload = b"authenticated parquet-sized payload";
+        let (digest, _) = crate::install_graph_object_bytes(root.path(), payload).unwrap();
+        let file = crate::graph_object_store::open_graph_object_by_digest(
+            root.path(),
+            &digest,
+            payload.len() as u64,
+        )
+        .unwrap();
+        let reader = CountingChunkReader {
+            file,
+            counter: IoCounter::default(),
+        };
+        assert_eq!(Length::len(&reader), payload.len() as u64);
     }
 
     #[cfg(unix)]
