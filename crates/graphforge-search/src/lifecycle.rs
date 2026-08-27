@@ -450,7 +450,13 @@ where
             },
         ) {
             Ok(index) => {
-                let after = generation_checked_snapshot(project_dir, &discovered)?;
+                let after = generation_checked_snapshot(
+                    project_dir,
+                    &discovered,
+                    request.label_id,
+                    &properties,
+                    limits.text,
+                )?;
                 match index.artifact().manifest.verify_fresh(
                     &key,
                     TEXT_BACKEND_VERSION,
@@ -499,6 +505,15 @@ where
     let checkpoint = RefCell::new(checkpoint);
     let build_calls = Cell::new(0_u8);
     let projection = RefCell::new(None::<TextSourceProjection>);
+    let revalidate = |expected: &SearchSourceSnapshot| {
+        generation_checked_snapshot(
+            project_dir,
+            expected,
+            request.label_id,
+            &properties,
+            limits.text,
+        )
+    };
     let outcome = coordinate_search_publication(
         project_dir,
         SearchPublicationPlan {
@@ -511,14 +526,7 @@ where
         limits.coordination,
         || {
             if let Some(expected) = policy.expected_snapshot {
-                return generation_checked_snapshot(project_dir, expected).map_err(|error| {
-                    match error {
-                        SearchArtifactError::ConcurrentMutation => SearchArtifactError::Stale {
-                            reason: "graph changed after text property discovery".to_owned(),
-                        },
-                        other => other,
-                    }
-                });
+                return revalidate(expected).map_err(stale_after_property_discovery);
             }
             if projection.borrow().is_none() {
                 *projection.borrow_mut() = Some(project_text_source(
@@ -530,8 +538,7 @@ where
                 )?);
             }
             let borrowed = projection.borrow();
-            generation_checked_snapshot(
-                project_dir,
+            revalidate(
                 &borrowed
                     .as_ref()
                     .expect("projection initialized")
@@ -770,7 +777,13 @@ where
         generation: publication.artifact().manifest.source_generation,
         fingerprint: publication.artifact().manifest.source_fingerprint.clone(),
     };
-    let after = match generation_checked_snapshot(project_dir, &manifest_snapshot) {
+    let after = match generation_checked_snapshot(
+        project_dir,
+        &manifest_snapshot,
+        request.index.label_id,
+        properties,
+        limits.text,
+    ) {
         Ok(snapshot) => snapshot,
         Err(SearchArtifactError::ConcurrentMutation) => return Ok(TextSearchAttempt::Retry),
         Err(error) => return Err(error),
@@ -956,11 +969,25 @@ where
 fn generation_checked_snapshot(
     project_dir: &Path,
     expected: &SearchSourceSnapshot,
+    label_id: u32,
+    properties: &[String],
+    limits: TextSearchLimits,
 ) -> Result<SearchSourceSnapshot, SearchArtifactError> {
-    if SearchSourceSnapshot::generation(project_dir)? != expected.generation {
+    let fresh = project_text_source(project_dir, label_id, Some(properties), limits, || Ok(()))?
+        .source_snapshot;
+    if fresh != *expected {
         return Err(SearchArtifactError::ConcurrentMutation);
     }
-    Ok(expected.clone())
+    Ok(fresh)
+}
+
+fn stale_after_property_discovery(error: SearchArtifactError) -> SearchArtifactError {
+    match error {
+        SearchArtifactError::ConcurrentMutation => SearchArtifactError::Stale {
+            reason: "graph changed after text property discovery".to_owned(),
+        },
+        other => other,
+    }
 }
 
 #[cfg(test)]
@@ -1360,6 +1387,15 @@ mod tests {
         assert_eq!(paths.len(), 2);
         let before =
             capture_text_snapshot(dir.path(), TextSearchLimits::default(), || Ok(())).unwrap();
+        let selected_before = project_text_source(
+            dir.path(),
+            LABEL_ID,
+            Some(&properties()),
+            TextSearchLimits::default(),
+            || Ok(()),
+        )
+        .unwrap()
+        .source_snapshot;
         use std::io::Write as _;
         std::fs::OpenOptions::new()
             .append(true)
@@ -1371,6 +1407,16 @@ mod tests {
             capture_text_snapshot(dir.path(), TextSearchLimits::default(), || Ok(())).unwrap();
         assert_ne!(before.fingerprint, after.fingerprint);
         assert_eq!(before.generation, after.generation);
+        assert!(
+            generation_checked_snapshot(
+                dir.path(),
+                &selected_before,
+                LABEL_ID,
+                &properties(),
+                TextSearchLimits::default(),
+            )
+            .is_err()
+        );
     }
 
     #[test]

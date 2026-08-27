@@ -624,7 +624,9 @@ pub(crate) fn portable_graph_data_fingerprint(root: &Path) -> Result<[u8; 32], G
     if !node_paths.is_empty() {
         let mut batches = Vec::new();
         for path in node_paths {
-            batches.extend(read_parquet(&path)?);
+            batches.extend(
+                crate::catalog::normalize_topology_nodes(read_parquet(&path)?).map_err(storage)?,
+            );
         }
         let schema = batches
             .first()
@@ -740,7 +742,13 @@ fn fingerprint_graph_paths_with_runtime_names(
         writer.text(&relative).map_err(canonical_error)?;
         let mut batches = Vec::new();
         for path in table_paths {
-            batches.extend(read_parquet(&path)?);
+            let fragments = read_parquet(&path)?;
+            if relative == "topology/nodes.parquet" {
+                batches
+                    .extend(crate::catalog::normalize_topology_nodes(fragments).map_err(storage)?);
+            } else {
+                batches.extend(fragments);
+            }
         }
         let schema = batches
             .first()
@@ -1400,7 +1408,7 @@ fn validate_empty_topology(directory: &Path) -> Result<(), GfError> {
             .to_str()
             .ok_or_else(|| validation("topology target name is not UTF-8"))?;
         match name {
-            "edges" => validate_empty_parquet_directory(&entry.path())?,
+            "edges" | "nodes" => validate_empty_parquet_directory(&entry.path())?,
             "nodes.parquet" => require_empty_parquet(&entry.path())?,
             "runtime_catalog.parquet" | "generation.json" => {
                 if !entry.file_type().map_err(storage)?.is_file() {
@@ -1993,6 +2001,13 @@ mod tests {
         let target = TempDir::new().unwrap();
         write_parquet(
             &target.path().join("topology/nodes.parquet"),
+            &RecordBatch::new_empty(Arc::clone(&crate::TOPOLOGY_NODES_SCHEMA)),
+        )
+        .unwrap();
+        write_parquet(
+            &target
+                .path()
+                .join("topology/nodes/00000000000000000000-00000000000000000000.parquet"),
             &RecordBatch::new_empty(Arc::clone(&crate::TOPOLOGY_NODES_SCHEMA)),
         )
         .unwrap();
@@ -2716,19 +2731,28 @@ mod tests {
                 let legacy = root.path().join("topology/nodes.parquet");
                 let batches = read_parquet(&legacy).unwrap();
                 let batch = concat_batches(&batches[0].schema(), &batches).unwrap();
-                let shards = root.path().join("topology/nodes");
-                fs::create_dir_all(&shards).unwrap();
-                write_parquet(
-                    &shards.join("00000000000000000001-00000000000000000001.parquet"),
-                    &batch.slice(0, 1),
+                let legacy_schema = Arc::new(arrow::datatypes::Schema::new(
+                    [0, 1, 2, 4, 5]
+                        .into_iter()
+                        .map(|index| batch.schema().field(index).clone())
+                        .collect::<Vec<_>>(),
+                ));
+                let legacy_batch = RecordBatch::try_new(
+                    legacy_schema,
+                    [0, 1, 2, 4, 5]
+                        .into_iter()
+                        .map(|index| Arc::clone(batch.column(index)))
+                        .collect(),
                 )
                 .unwrap();
+                write_parquet(&legacy, &legacy_batch.slice(0, 1)).unwrap();
+                let shards = root.path().join("topology/nodes");
+                fs::create_dir_all(&shards).unwrap();
                 write_parquet(
                     &shards.join("00000000000000000002-00000000000000000002.parquet"),
                     &batch.slice(1, 1),
                 )
                 .unwrap();
-                fs::remove_file(legacy).unwrap();
             }
             root
         }
