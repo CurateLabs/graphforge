@@ -1603,6 +1603,16 @@ impl GraphConstructionSession {
         &mut self,
         generation: u64,
     ) -> Result<GraphConstructionEncoding, GfError> {
+        self.prepare_canonical_encoding_with_cancellation(generation, || false)
+    }
+
+    /// Reopen or create canonical encoding while polling cooperative cancellation.
+    pub fn prepare_canonical_encoding_with_cancellation(
+        &mut self,
+        generation: u64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<GraphConstructionEncoding, GfError> {
+        reject_cancelled(&mut cancelled)?;
         self.revalidate_authority()?;
         if self.checkpoint.state != GraphConstructionState::Sealed {
             return Err(storage("only a sealed session can be prepared"));
@@ -1619,8 +1629,8 @@ impl GraphConstructionSession {
             }
             return Ok(inventory);
         }
-        let shape = self.shape_canonical_with_cancellation(|| false)?;
-        self.encode_canonical(&shape, generation)
+        let shape = self.shape_canonical_with_cancellation(&mut cancelled)?;
+        self.encode_canonical_with_cancellation(&shape, generation, cancelled)
     }
 
     #[cfg(test)]

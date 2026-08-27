@@ -156,6 +156,21 @@ impl GraphConstructionSession<'_> {
         )
     }
 
+    /// Append one node chunk while polling cooperative cancellation.
+    pub fn append_nodes_with_cancellation(
+        &mut self,
+        chunk_id: &str,
+        batch: &RecordBatch,
+        cancellation: &crate::CancellationToken,
+    ) -> Result<ConstructionChunkReceipt, GfError> {
+        self.inner.append_with_cancellation(
+            graphforge_storage::ConstructionChunkKind::Node,
+            chunk_id,
+            batch,
+            || cancellation.is_cancelled(),
+        )
+    }
+
     /// Append one canonical edge Arrow chunk after all node chunks.
     pub fn append_edges(
         &mut self,
@@ -166,6 +181,21 @@ impl GraphConstructionSession<'_> {
             graphforge_storage::ConstructionChunkKind::Edge,
             chunk_id,
             batch,
+        )
+    }
+
+    /// Append one edge chunk while polling cooperative cancellation.
+    pub fn append_edges_with_cancellation(
+        &mut self,
+        chunk_id: &str,
+        batch: &RecordBatch,
+        cancellation: &crate::CancellationToken,
+    ) -> Result<ConstructionChunkReceipt, GfError> {
+        self.inner.append_with_cancellation(
+            graphforge_storage::ConstructionChunkKind::Edge,
+            chunk_id,
+            batch,
+            || cancellation.is_cancelled(),
         )
     }
 
@@ -183,12 +213,37 @@ impl GraphConstructionSession<'_> {
 
     /// Seal, shape, encode, and atomically publish exactly one generation.
     pub fn seal_and_publish(&mut self) -> Result<GraphConstructionPublicationReceipt, GfError> {
+        self.seal_and_publish_inner(None)
+    }
+
+    /// Seal and publish while polling cooperative cancellation before `CURRENT`.
+    pub fn seal_and_publish_with_cancellation(
+        &mut self,
+        cancellation: &crate::CancellationToken,
+    ) -> Result<GraphConstructionPublicationReceipt, GfError> {
+        self.seal_and_publish_inner(Some(cancellation))
+    }
+
+    fn seal_and_publish_inner(
+        &mut self,
+        cancellation: Option<&crate::CancellationToken>,
+    ) -> Result<GraphConstructionPublicationReceipt, GfError> {
+        if let Some(token) = cancellation {
+            token.checkpoint()?;
+        }
         let _visibility = self.graph.graph_visibility.lock()?;
         if self.inner.state() == GraphConstructionState::Staging {
             self.inner.seal()?;
         }
         let topology_generation = self.inner.parent_topology_generation().saturating_add(1);
-        let encoding = self.inner.prepare_canonical_encoding(topology_generation)?;
+        let encoding = self
+            .inner
+            .prepare_canonical_encoding_with_cancellation(topology_generation, || {
+                cancellation.is_some_and(crate::CancellationToken::is_cancelled)
+            })?;
+        if let Some(token) = cancellation {
+            token.checkpoint()?;
+        }
         let target = derived_uuid(self.session_uuid, b"generation");
         let transaction = derived_uuid(self.session_uuid, b"transaction");
         let published = self
@@ -411,6 +466,32 @@ mod tests {
             ],
         )
         .unwrap()
+    }
+
+    #[test]
+    fn cancelled_public_construction_preserves_current() {
+        let graph = GraphForge::new(None).unwrap();
+        let root = graph.resolved_generation.container_root().to_path_buf();
+        let parent = graphforge_storage::resolve_project_generation(&root)
+            .unwrap()
+            .generation_uuid();
+        let mut session = graph.begin_graph_construction(Default::default()).unwrap();
+        session
+            .append_nodes("nodes", &nodes(&[Uuid::now_v7()]))
+            .unwrap();
+        let cancellation = crate::CancellationToken::new();
+        cancellation.cancel();
+        assert!(
+            session
+                .seal_and_publish_with_cancellation(&cancellation)
+                .is_err()
+        );
+        assert_eq!(
+            graphforge_storage::resolve_project_generation(&root)
+                .unwrap()
+                .generation_uuid(),
+            parent
+        );
     }
 
     #[test]
