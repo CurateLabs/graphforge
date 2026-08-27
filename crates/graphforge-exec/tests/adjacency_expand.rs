@@ -121,6 +121,14 @@ use arrow::array::Array;
 async fn explain_shows_stable_expand_exec_across_index_states() {
     let dir = TempDir::new().unwrap();
     let rc = seed(dir.path()).await;
+    // Seeding executes MATCH-backed writes, which may legitimately build the
+    // derived adjacency capability. Remove it so this assertion actually
+    // exercises the missing-index lowering state.
+    match std::fs::remove_dir_all(dir.path().join("indexes")) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => panic!("remove seeded adjacency capability: {error}"),
+    }
     let plan = bind(
         "MATCH (a:Person)-[r:KNOWS]->(b:Person) RETURN b.name AS bn",
         &rc,
