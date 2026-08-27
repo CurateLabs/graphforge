@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import importlib.util
 import json
@@ -49,6 +50,253 @@ def args(tmp_path: Path, **changes):
     }
     values.update(changes)
     return argparse.Namespace(**values)
+
+
+def stub_run_credential(monkeypatch, fly):
+    credential = controller.RunCredential(
+        "token-test-id",
+        "gf-s20-test",
+        "test-secret-value-long-enough",
+        controller.time.monotonic() + controller.RUN_TOKEN_LIFETIME_SECONDS,
+    )
+    monkeypatch.setattr(controller, "mint_run_credential", lambda *_args: credential)
+    monkeypatch.setattr(controller, "revoke_run_credential", lambda *_args: None)
+    monkeypatch.setattr(controller, "run_scoped_flyctl", lambda _credential: fly)
+    if not hasattr(fly, "auth_token"):
+        fly.auth_token = lambda **_kwargs: "test-secret-value-long-enough"
+
+
+def token_table(rows):
+    header = " ID │ NAME │ CREATED BY │ EXPIRES AT │ REVOKED AT "
+    return (
+        'Tokens for organization "personal":\n'
+        + header
+        + "\n"
+        + "\n".join(" │ ".join(row) for row in rows)
+        + "\n"
+    )
+
+
+def test_org_token_table_parses_active_and_revoked_go_times():
+    output = token_table(
+        [
+            ("id-active", "gf-s20-a", "owner", "2026-08-28 01:02:03.123 +0000 UTC", "-"),
+            (
+                "id-old",
+                "gf-s20-old",
+                "owner",
+                "2026-08-28 01:02:03 +0000 UTC",
+                "2026-08-27 20:00:00 +0000 UTC",
+            ),
+        ]
+    )
+    rows = controller.parse_org_token_list(output)
+    assert controller.token_is_active(rows["id-active"])
+    assert not controller.token_is_active(rows["id-old"])
+    with pytest.raises(controller.ControllerError, match="unsafe formatting"):
+        controller.parse_org_token_list("\x1b[31m" + output)
+
+
+def test_org_token_parser_accepts_exact_flyctl_v0487_empty_output():
+    observed = (
+        'Tokens for organization "personal":\n'
+        " ID │ NAME │ CREATED BY │ EXPIRES AT │ REVOKED AT \n\n"
+    )
+    assert controller.parse_org_token_list(observed) == {}
+
+
+def test_mint_resolves_exact_new_org_token_and_binds_provider_expiry(monkeypatch, tmp_path):
+    now = datetime.now(timezone.utc)
+    expiry = now + timedelta(hours=6)
+    expiry_text = expiry.strftime("%Y-%m-%d %H:%M:%S +0000 UTC")
+    before = token_table([])
+    after = token_table(
+        [
+            ("token-new-id", "gf-s20-gf-s20-unique", "owner", expiry_text, "-"),
+        ]
+    )
+    outputs = iter((before, json.dumps({"token": "secret-value-that-is-never-logged"}), after))
+
+    class Bootstrap:
+        def run(self, command, **_kwargs):
+            return argparse.Namespace(returncode=0, stdout=next(outputs), stderr="")
+
+    monkeypatch.setattr(controller.time, "time", now.timestamp)
+    monkeypatch.setattr(controller.time, "monotonic", lambda: 100.0)
+    credential = controller.mint_run_credential(args(tmp_path, org="personal"), Bootstrap())
+    assert credential.token_id == "token-new-id"
+    assert credential.secret == "secret-value-that-is-never-logged"
+    assert credential.expires_at_monotonic > 100 + 5 * 60 * 60
+
+
+def test_run_token_403_is_typed_closed_and_never_leaks_body_or_token(monkeypatch):
+    raw_body = b"sensitive provider body"
+    calls = []
+
+    def urlopen(_request, **_kwargs):
+        calls.append(1)
+        raise urllib.error.HTTPError(
+            "url",
+            403,
+            "forbidden",
+            {"Fly-Request-Id": "private-request-id"},
+            __import__("io").BytesIO(raw_body),
+        )
+
+    credential = controller.RunCredential(
+        "id",
+        "name",
+        "very-secret-run-token-value",
+        controller.time.monotonic() + 999,
+    )
+    fly = controller.Flyctl(credential)
+    monkeypatch.setattr(controller.urllib.request, "urlopen", urlopen)
+    with pytest.raises(controller.ProviderRequestError) as captured:
+        fly.api_json("GET", "/v1/apps/app/machines/id", operation="machine_runtime_get")
+    assert len(calls) == 2
+    assert captured.value.details["http_class"] == "permission_denied"
+    assert captured.value.details["request_attempts"] == 2
+    assert captured.value.details["read_reloaded_once"] is True
+    serialized = json.dumps(captured.value.details)
+    assert raw_body.decode() not in serialized
+    assert credential.secret not in serialized
+
+
+def test_machine_post_malformed_success_is_typed_without_replay(monkeypatch):
+    calls = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b'{"truncated":'
+
+    def urlopen(_request, **_kwargs):
+        calls.append(1)
+        return Response()
+
+    fly = controller.Flyctl(
+        controller.RunCredential(
+            "token-id",
+            "name",
+            "very-secret-run-token-value",
+            controller.time.monotonic() + 999,
+        )
+    )
+    monkeypatch.setattr(controller.urllib.request, "urlopen", urlopen)
+    with pytest.raises(controller.ProviderRequestError) as captured:
+        fly.api_json("POST", "/v1/apps/app/machines", data={}, operation="machine_create")
+    assert len(calls) == 1
+    assert captured.value.details["http_class"] == "malformed_response"
+
+
+def test_provider_diagnostic_rejects_boolean_attempts_and_invalid_status():
+    valid = {
+        "operation": "machine_runtime_get",
+        "outcome": "http_error",
+        "http_class": "permission_denied",
+        "http_status": 403,
+        "elapsed_seconds": 1,
+        "body_prefix_sha256": "sha256:" + "a" * 64,
+        "body_truncated": False,
+        "request_id_sha256": None,
+        "request_attempts": 2,
+        "read_reloaded_once": True,
+    }
+    controller.validate_provider_request_diagnostic(valid)
+    for key, bad in (("request_attempts", True), ("elapsed_seconds", -1), ("http_status", "403")):
+        mutated = dict(valid)
+        mutated[key] = bad
+        with pytest.raises(controller.ControllerError):
+            controller.validate_provider_request_diagnostic(mutated)
+
+
+def test_revoke_uses_post_state_even_when_cli_reports_failure():
+    revoked = token_table(
+        [
+            (
+                "token-id",
+                "gf-s20-run",
+                "owner",
+                "2026-08-28 01:00:00 +0000 UTC",
+                "2026-08-27 20:00:00 +0000 UTC",
+            ),
+        ]
+    )
+
+    class Bootstrap:
+        def run(self, command, **_kwargs):
+            if command[:2] == ["tokens", "revoke"]:
+                return argparse.Namespace(returncode=1, stdout="", stderr="rejected")
+            return argparse.Namespace(returncode=0, stdout=revoked, stderr="")
+
+    controller.revoke_token_id(Bootstrap(), "token-id", "personal")
+
+
+def test_revoke_timeout_still_uses_authoritative_post_state():
+    revoked = token_table(
+        [
+            (
+                "token-id",
+                "gf-s20-run",
+                "owner",
+                "2026-08-28 01:00:00 +0000 UTC",
+                "2026-08-27 20:00:00 +0000 UTC",
+            ),
+        ]
+    )
+
+    class Bootstrap:
+        def run(self, command, **_kwargs):
+            if command[:2] == ["tokens", "revoke"]:
+                raise subprocess.TimeoutExpired(command, 1)
+            return argparse.Namespace(returncode=0, stdout=revoked, stderr="")
+
+    controller.revoke_token_id(Bootstrap(), "token-id", "personal")
+    with pytest.raises(controller.ControllerError, match="ID is unsafe"):
+        controller.revoke_token_id(Bootstrap(), "--token", "personal")
+
+
+def test_machine_post_network_failure_reconciles_exact_unique_name(tmp_path):
+    calls = []
+    machine = {"id": "machine-id", "name": "gf-s20-machine"}
+
+    class Fly:
+        def api_json(self, method, _path, **kwargs):
+            calls.append((method, kwargs["operation"]))
+            if method == "POST":
+                raise controller.ProviderRequestError("network", {"http_class": "network_error"})
+            return [machine]
+
+    result = controller.create_machine(
+        args(tmp_path),
+        Fly(),
+        "volume-id",
+        "registry.fly.io/app@sha256:" + "d" * 64,
+        "sha256:" + "d" * 64,
+        "c" * 64,
+        deadline=controller.time.monotonic() + 60,
+    )
+    assert result == machine
+    assert calls == [("POST", "machine_create"), ("GET", "machine_create_reconcile")]
+
+
+def test_credential_admission_includes_setup_runtime_and_cleanup(monkeypatch):
+    monkeypatch.setattr(controller.time, "monotonic", lambda: 100.0)
+    required = controller.TOKEN_SETUP_RESERVE_SECONDS + 14_400 + controller.CLEANUP_RESERVE_SECONDS
+    controller.admit_run_credential(
+        controller.RunCredential("token-id", "name", "secret", 100 + required + 1),
+        14_400,
+    )
+    with pytest.raises(controller.ControllerError, match="expires before"):
+        controller.admit_run_credential(
+            controller.RunCredential("token-id", "name", "secret", 100 + required),
+            14_400,
+        )
 
 
 def test_source_attestation_ignores_untracked_caches_but_binds_tracked_bytes_and_mode(
@@ -671,9 +919,11 @@ def test_reconciled_owned_app_is_cleaned_before_error_escapes(monkeypatch, tmp_p
         "cleanup_owned",
         lambda _fly, app, machine, volume, owned: observed.append((app, machine, volume, owned)),
     )
+    fly = Fly()
+    stub_run_credential(monkeypatch, fly)
     run = args(tmp_path, execute=True, confirm_disposable=True)
     with pytest.raises(controller.OwnedAppCreationError):
-        controller.execute(run, Fly(), "sha256:" + "f" * 64, "c" * 64)
+        controller.execute(run, fly, "sha256:" + "f" * 64, "c" * 64)
     assert observed == [(run.app_name, None, None, True)]
 
 
@@ -697,9 +947,11 @@ def test_primary_failure_and_typed_diagnostic_survive_cleanup_failure(monkeypatc
         "cleanup_owned",
         lambda *_args: (_ for _ in ()).throw(controller.ControllerError("cleanup failure")),
     )
+    fly = Fly()
+    stub_run_credential(monkeypatch, fly)
     run = args(tmp_path, execute=True, confirm_disposable=True)
     with pytest.raises(controller.ControllerError, match="primary create failure") as captured:
-        controller.execute(run, Fly(), "sha256:" + "f" * 64, "c" * 64)
+        controller.execute(run, fly, "sha256:" + "f" * 64, "c" * 64)
     assert any("cleanup also failed" in note for note in captured.value.__notes__)
     assert json.loads(run.diagnostic_out.read_text()) == {
         "schema": "graphforge-fly-g500-s20-diagnostic/1",
@@ -760,9 +1012,10 @@ def test_machine_invariants_use_fresh_get_not_create_echo(monkeypatch, tmp_path)
 
     monkeypatch.setattr(controller.urllib.request, "urlopen", urlopen)
     run = args(tmp_path, app_name="gf-s20-owned")
-    assert controller.get_machine(
-        run, Fly(), machine_id, deadline=controller.time.monotonic() + 120
-    ) == fresh
+    assert (
+        controller.get_machine(run, Fly(), machine_id, deadline=controller.time.monotonic() + 120)
+        == fresh
+    )
     assert observed == ["https://api.machines.dev/v1/apps/gf-s20-owned/machines/machine-observed"]
 
 
@@ -843,9 +1096,7 @@ def test_inner_runtime_timeout_leaves_bounded_result_handoff():
     assert controller.RESULT_HANDOFF_SECONDS == 300
     assert controller.PROVISIONING_SECONDS == 300
     assert (
-        controller.RUN_SECONDS
-        - controller.RESULT_HANDOFF_SECONDS
-        - controller.PROVISIONING_SECONDS
+        controller.RUN_SECONDS - controller.RESULT_HANDOFF_SECONDS - controller.PROVISIONING_SECONDS
         == 13_800
     )
     assert controller.MONITOR_INTERVAL_SECONDS == 30
@@ -961,17 +1212,15 @@ def test_slow_registry_push_below_bound_is_not_misclassified_as_timeout(monkeypa
     def docker(command, **kwargs):
         if command[1:2] == ["push"]:
             push_timeout.append(kwargs["timeout"])
-            return argparse.Namespace(
-                returncode=0, stdout=f"digest: {pushed_digest}\n", stderr=""
-            )
+            return argparse.Namespace(returncode=0, stdout=f"digest: {pushed_digest}\n", stderr="")
         return argparse.Namespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(controller.subprocess, "run", docker)
     monkeypatch.setattr(controller, "inspect_image", lambda *_args: "c" * 64)
     run = args(tmp_path)
-    assert controller.publish_to_fly_registry(
-        run, "sha256:" + "f" * 64, object()
-    )[1] == pushed_digest
+    assert (
+        controller.publish_to_fly_registry(run, "sha256:" + "f" * 64, object())[1] == pushed_digest
+    )
     assert push_timeout == [1800]
     assert not run.diagnostic_out.exists()
 
@@ -998,9 +1247,7 @@ def test_stalled_registry_push_has_distinct_bounded_timeout_diagnostic(monkeypat
     assert "secret-token" not in diagnostic_text
 
 
-def test_registry_rejection_in_stdout_is_classified_and_hashed_without_leak(
-    monkeypatch, tmp_path
-):
+def test_registry_rejection_in_stdout_is_classified_and_hashed_without_leak(monkeypatch, tmp_path):
     def docker(command, **_kwargs):
         if command[1:2] == ["push"]:
             raise controller.subprocess.CalledProcessError(
@@ -1070,9 +1317,11 @@ def test_failed_private_image_publication_cleans_app_before_volume_or_machine(
         "publish_to_fly_registry",
         lambda *_args: (_ for _ in ()).throw(controller.ControllerError("registry push failed")),
     )
+    fly = Fly()
+    stub_run_credential(monkeypatch, fly)
     run = args(tmp_path, execute=True, confirm_disposable=True)
     with pytest.raises(controller.ControllerError, match="registry push failed"):
-        controller.execute(run, Fly(), "sha256:" + "b" * 64, "c" * 64)
+        controller.execute(run, fly, "sha256:" + "b" * 64, "c" * 64)
 
     assert ["apps", "create", run.app_name, "--org", run.org] in calls
     assert ["apps", "destroy", run.app_name, "--yes"] in calls
@@ -1222,7 +1471,7 @@ def test_provider_absence_requires_authenticated_http_404(monkeypatch):
         "machines", "app", "machine", deadline=controller.time.monotonic() + 3
     )
     monkeypatch.setattr(controller.urllib.request, "urlopen", http_error(401))
-    with pytest.raises(controller.ControllerError, match="HTTP 401"):
+    with pytest.raises(controller.ProviderRequestError, match="authentication_invalid"):
         fly.resource_absent("machines", "app", "machine", deadline=controller.time.monotonic() + 3)
 
 
@@ -1422,9 +1671,7 @@ def test_terminal_failure_is_persisted_promptly_and_still_verified_cleaned(tmp_p
                     )
                 elif command[3] == controller.RESULT_PATH:
                     Path(command[4]).write_text(
-                        json.dumps(
-                            {"status": "failure", "phase": "ingest", "code": "GF_OOM"}
-                        )
+                        json.dumps({"status": "failure", "phase": "ingest", "code": "GF_OOM"})
                     )
                 return argparse.Namespace(returncode=0)
             if command[:2] in (["machine", "status"], ["volumes", "show"]):
@@ -1436,6 +1683,7 @@ def test_terminal_failure_is_persisted_promptly_and_still_verified_cleaned(tmp_p
 
     run = args(tmp_path, execute=True, confirm_disposable=True)
     fly = Fly()
+    stub_run_credential(monkeypatch, fly)
     with pytest.raises(controller.ControllerError, match="GF_OOM"):
         controller.execute(run, fly, digest, "c" * 64)
     assert json.loads(run.diagnostic_out.read_text()) == {
@@ -1519,9 +1767,7 @@ def test_machine_runtime_uses_authenticated_api_and_closed_projection(monkeypatc
                     "events": [
                         {
                             "type": "exit",
-                            "request": {
-                                "exit_event": {"oom_killed": True}
-                            },
+                            "request": {"exit_event": {"oom_killed": True}},
                         }
                     ],
                 }
@@ -1545,30 +1791,37 @@ def test_machine_runtime_uses_authenticated_api_and_closed_projection(monkeypatc
 
 
 def test_machine_runtime_oom_uses_only_official_boolean_fields():
-    assert controller.normalize_machine_runtime(
-        {
-            "state": "stopped",
-            "events": [
-                {"request": {"MonitorEvent": {"exit_event": {"oom_killed": True}}}}
-            ],
-        }
-    )["oom"] is True
-    assert controller.normalize_machine_runtime(
-        {
-            "state": "stopped",
-            "events": [
-                {
-                    "type": "exit",
-                    "secret": "out of memory",
-                    "request": {"exit_event": {"oom_killed": False}},
-                }
-            ],
-        }
-    )["oom"] is False
+    assert (
+        controller.normalize_machine_runtime(
+            {
+                "state": "stopped",
+                "events": [{"request": {"MonitorEvent": {"exit_event": {"oom_killed": True}}}}],
+            }
+        )["oom"]
+        is True
+    )
+    assert (
+        controller.normalize_machine_runtime(
+            {
+                "state": "stopped",
+                "events": [
+                    {
+                        "type": "exit",
+                        "secret": "out of memory",
+                        "request": {"exit_event": {"oom_killed": False}},
+                    }
+                ],
+            }
+        )["oom"]
+        is False
+    )
     for unsupported in ("oom", "out_of_memory"):
-        assert controller.normalize_machine_runtime(
-            {"state": "stopped", "events": [{"type": unsupported}]}
-        )["oom"] is False
+        assert (
+            controller.normalize_machine_runtime(
+                {"state": "stopped", "events": [{"type": unsupported}]}
+            )["oom"]
+            is False
+        )
 
 
 def test_machine_runtime_normalizes_provider_404_to_destroyed(monkeypatch):
@@ -1585,7 +1838,7 @@ def test_machine_runtime_normalizes_provider_404_to_destroyed(monkeypatch):
     }
 
 
-def test_api_refreshes_expired_token_once_on_401_without_leaking_it(monkeypatch):
+def test_bootstrap_api_refreshes_expired_token_once_on_safe_get(monkeypatch):
     tokens = []
     responses = [401, {"state": "started"}]
 
@@ -1617,7 +1870,9 @@ def test_api_refreshes_expired_token_once_on_401_without_leaking_it(monkeypatch)
         lambda **_kwargs: next(issued),
     )
     monkeypatch.setattr(controller.urllib.request, "urlopen", urlopen)
-    assert fly.api_json("GET", "/v1/apps/app/machines/id") == {"state": "started"}
+    assert fly.api_json("GET", "/v1/apps/app/machines/id", operation="machine_runtime_get") == {
+        "state": "started"
+    }
     assert tokens == ["Bearer expired-test-token", "Bearer fresh-test-token"]
 
 
@@ -1654,9 +1909,7 @@ def test_failed_teardown_token_refresh_does_not_skip_any_destroy(monkeypatch):
 
     monkeypatch.setattr(controller, "CLEANUP_ATTEMPTS", 1)
     with pytest.raises(controller.ControllerError, match="credential refresh"):
-        controller.cleanup_owned(
-            Fly(), "gf-s20-owned", "machine-observed", "volume-observed", True
-        )
+        controller.cleanup_owned(Fly(), "gf-s20-owned", "machine-observed", "volume-observed", True)
     assert [command[:2] for command in calls if command[1] == "destroy"] == [
         ["machine", "destroy"],
         ["volumes", "destroy"],

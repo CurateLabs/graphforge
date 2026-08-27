@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Sequence
+from contextlib import suppress
+from datetime import datetime, timezone
 from decimal import ROUND_CEILING, Decimal, InvalidOperation
 import fcntl
 import hashlib
@@ -58,6 +60,8 @@ ACTIVE_PHASE_PATH = "/work/s20-active-phase.json"
 CLEANUP_ATTEMPTS = 60
 CLEANUP_POLL_SECONDS = 2.0
 AUTH_TOKEN_TTL_SECONDS = 300.0
+RUN_TOKEN_LIFETIME_SECONDS = 6 * 60 * 60
+TOKEN_SETUP_RESERVE_SECONDS = 60 * 60
 PHASES = {
     "generate",
     "ingest",
@@ -81,6 +85,171 @@ class ControllerError(RuntimeError):
 
 class OwnedAppCreationError(ControllerError):
     """Creation failed ambiguously, but the exact target app is now owned."""
+
+
+class ProviderRequestError(ControllerError):
+    def __init__(self, code: str, details: dict[str, Any]):
+        super().__init__(code)
+        self.code = code
+        self.details = details
+
+
+def validate_provider_request_diagnostic(value: dict[str, Any]) -> None:
+    required = {
+        "operation",
+        "outcome",
+        "http_class",
+        "http_status",
+        "elapsed_seconds",
+        "body_prefix_sha256",
+        "body_truncated",
+        "request_id_sha256",
+        "request_attempts",
+        "read_reloaded_once",
+    }
+    if set(value) != required:
+        raise ControllerError("provider request diagnostic is not closed")
+    if value["operation"] not in {
+        "machine_create",
+        "machine_create_reconcile",
+        "machine_fresh_get",
+        "machine_runtime_get",
+        "machine_absence_get",
+        "volume_absence_get",
+    }:
+        raise ControllerError("provider request diagnostic operation is invalid")
+    if value["outcome"] not in {"http_error", "network_error"}:
+        raise ControllerError("provider request diagnostic outcome is invalid")
+    if value["http_class"] not in {
+        "authentication_invalid",
+        "permission_denied",
+        "not_found",
+        "request_timeout",
+        "conflict",
+        "rate_limited",
+        "transient_server",
+        "provider_rejected",
+        "network_error",
+        "malformed_response",
+    }:
+        raise ControllerError("provider request diagnostic class is invalid")
+    for key in ("body_prefix_sha256", "request_id_sha256"):
+        if value[key] is not None and not re.fullmatch(r"sha256:[0-9a-f]{64}", value[key]):
+            raise ControllerError("provider request diagnostic hash is invalid")
+    if not isinstance(value["body_truncated"], bool) or not isinstance(
+        value["read_reloaded_once"], bool
+    ):
+        raise ControllerError("provider request diagnostic boolean is invalid")
+    if value["request_attempts"] not in {1, 2}:
+        raise ControllerError("provider request diagnostic attempts are invalid")
+    if type(value["request_attempts"]) is not int:
+        raise ControllerError("provider request diagnostic attempts type is invalid")
+    if type(value["elapsed_seconds"]) is not int or value["elapsed_seconds"] < 0:
+        raise ControllerError("provider request diagnostic elapsed time is invalid")
+    status = value["http_status"]
+    if status is not None and (type(status) is not int or not 100 <= status <= 599):
+        raise ControllerError("provider request diagnostic HTTP status is invalid")
+    network = value["outcome"] == "network_error"
+    if network != (value["http_class"] == "network_error" and status is None):
+        raise ControllerError("provider request diagnostic network fields disagree")
+    safe_read = value["operation"] != "machine_create"
+    expected_reload = safe_read and value["request_attempts"] == 2
+    if value["read_reloaded_once"] is not expected_reload:
+        raise ControllerError("provider request diagnostic retry fields disagree")
+
+
+class RunCredential:
+    def __init__(self, token_id: str, name: str, secret: str, expires_at_monotonic: float):
+        self.token_id = token_id
+        self.name = name
+        self.secret = secret
+        self.expires_at_monotonic = expires_at_monotonic
+
+
+def parse_org_token_list(output: str) -> dict[str, dict[str, str]]:
+    """Parse flyctl's bounded human table, rejecting duplicate identities."""
+    if "\x1b" in output or len(output) > 1_000_000:
+        raise ControllerError("Fly org token list has unsafe formatting")
+    lines = output.splitlines()
+    header_index = next(
+        (index for index, line in enumerate(lines) if "ID" in line and "EXPIRES AT" in line),
+        None,
+    )
+    if header_index is None:
+        raise ControllerError("Fly org token list has no recognized header")
+    header = lines[header_index]
+    rows: dict[str, dict[str, str]] = {}
+    unicode_table = "│" in header
+    columns = [
+        header.index(label) for label in ("ID", "NAME", "CREATED BY", "EXPIRES AT", "REVOKED AT")
+    ]
+    if columns != sorted(columns) or len(set(columns)) != 5:
+        raise ControllerError("Fly org token list header is ambiguous")
+    for line in lines[header_index + 1 :]:
+        if not line.strip():
+            continue
+        if unicode_table:
+            fields = [field.strip() for field in line.split("│")]
+        else:
+            padded = line + " " * max(0, len(header) - len(line))
+            fields = [padded[columns[index] : columns[index + 1]].strip() for index in range(4)] + [
+                padded[columns[4] :].strip()
+            ]
+        if len(fields) != 5:
+            raise ControllerError("Fly org token list row is malformed")
+        token_id, name, created_by, expires_at, revoked_at = fields
+        if not token_id or not name or token_id in rows:
+            raise ControllerError("Fly org token list is ambiguous")
+        rows[token_id] = {
+            "name": name,
+            "created_by": created_by,
+            "expires_at": expires_at,
+            "revoked_at": revoked_at,
+        }
+    return rows
+
+
+def list_org_tokens(bootstrap: Flyctl, org: str) -> dict[str, dict[str, str]]:
+    result = bootstrap.run(["tokens", "list", "--scope", "org", "--org", org])
+    return parse_org_token_list(result.stdout)
+
+
+def list_org_tokens_bounded(
+    bootstrap: Flyctl, org: str, attempts: int = 3
+) -> dict[str, dict[str, str]]:
+    last_error: Exception | None = None
+    for _ in range(attempts):
+        try:
+            return list_org_tokens(bootstrap, org)
+        except (ControllerError, subprocess.SubprocessError) as error:  # noqa: PERF203
+            last_error = error
+    raise ControllerError("Fly org token inventory is unavailable") from last_error
+
+
+def token_is_active(row: dict[str, str]) -> bool:
+    marker = row["revoked_at"].strip()
+    if marker in {"", "-"}:
+        return True
+    parse_token_expiry(marker)
+    return False
+
+
+def parse_token_expiry(value: str) -> float:
+    normalized = value.strip().replace("Z", "+00:00")
+    go_time = re.fullmatch(
+        r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(?:\.(\d+))? \+0000 UTC",
+        normalized,
+    )
+    if go_time:
+        fraction = (go_time.group(2) or "")[:6]
+        normalized = go_time.group(1) + (f".{fraction}" if fraction else "") + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        raise ControllerError("Fly org token expiry is not machine-verifiable") from None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
 
 
 def _registry_stderr_class(stderr: str) -> str:
@@ -126,6 +295,9 @@ def _registry_failure_details(
 
 
 class Flyctl:
+    def __init__(self, credential: RunCredential | None = None):
+        self.credential = credential
+
     def run(
         self,
         args: Sequence[str],
@@ -133,9 +305,13 @@ class Flyctl:
         check: bool = True,
         timeout: float = CONTROL_PLANE_TIMEOUT_SECONDS,
     ) -> subprocess.CompletedProcess[str]:
+        environment = None
+        if self.credential is not None:
+            environment = {**os.environ, "FLY_API_TOKEN": self.auth_token()}
         return subprocess.run(
             ["flyctl", *args],
             cwd=ROOT,
+            env=environment,
             check=check,
             text=True,
             capture_output=True,
@@ -145,9 +321,11 @@ class Flyctl:
     def json(self, args: Sequence[str], *, timeout: float = 120) -> Any:
         return json.loads(self.run([*args, "--json"], timeout=timeout).stdout)
 
-    def auth_token(
-        self, *, deadline: float | None = None, force_refresh: bool = False
-    ) -> str:
+    def auth_token(self, *, deadline: float | None = None, force_refresh: bool = False) -> str:
+        if self.credential is not None:
+            if time.monotonic() >= self.credential.expires_at_monotonic:
+                raise ControllerError("run-scoped Fly credential expired")
+            return self.credential.secret
         cached = getattr(self, "_cached_auth_token", None)
         fetched_at = getattr(self, "_cached_auth_token_at", 0.0)
         if (
@@ -165,6 +343,11 @@ class Flyctl:
         self._cached_auth_token_at = time.monotonic()
         return token
 
+    def subprocess_environment(self, base: dict[str, str]) -> dict[str, str]:
+        if self.credential is None:
+            return base
+        return {**base, "FLY_API_TOKEN": self.auth_token()}
+
     def api_json(
         self,
         method: str,
@@ -174,10 +357,26 @@ class Flyctl:
         timeout: float = 30,
         deadline: float | None = None,
         absent_ok: bool = False,
+        operation: str,
     ) -> Any:
-        """Call the Machines API, refreshing once on authentication expiry."""
-        for attempt in range(2):
-            token = self.auth_token(deadline=deadline, force_refresh=attempt == 1)
+        """Call the Machines API with method-safe, closed failure handling."""
+        if operation not in {
+            "machine_create",
+            "machine_create_reconcile",
+            "machine_fresh_get",
+            "machine_runtime_get",
+            "machine_absence_get",
+            "volume_absence_get",
+        }:
+            raise ControllerError("unsupported Fly API operation")
+        started = time.monotonic()
+        safe_read = method == "GET"
+        max_attempts = 2 if safe_read else 1
+        for attempt in range(max_attempts):
+            token = self.auth_token(
+                deadline=deadline,
+                force_refresh=attempt == 1 and self.credential is None,
+            )
             headers = {"Authorization": f"Bearer {token}"}
             encoded = None
             if data is not None:
@@ -193,16 +392,99 @@ class Flyctl:
             try:
                 with urllib.request.urlopen(request, timeout=request_timeout) as response:
                     body = response.read()
-                    return json.loads(body) if body else None
+                    if not body:
+                        return None
+                    try:
+                        return json.loads(body)
+                    except json.JSONDecodeError:
+                        if safe_read and attempt == 0:
+                            continue
+                        prefix = body[:16_384]
+                        raise ProviderRequestError(
+                            f"fly_api_{operation}_malformed_response",
+                            {
+                                "operation": operation,
+                                "outcome": "http_error",
+                                "http_class": "malformed_response",
+                                "http_status": 200,
+                                "elapsed_seconds": max(0, math.ceil(time.monotonic() - started)),
+                                "body_prefix_sha256": "sha256:"
+                                + hashlib.sha256(prefix).hexdigest(),
+                                "body_truncated": len(body) > len(prefix),
+                                "request_id_sha256": None,
+                                "request_attempts": attempt + 1,
+                                "read_reloaded_once": bool(safe_read and attempt == 1),
+                            },
+                        ) from None
             except urllib.error.HTTPError as error:
-                if error.code == 401 and attempt == 0:
+                if error.code == 401 and safe_read and self.credential is None and attempt == 0:
                     continue
                 if error.code == 404 and absent_ok:
                     return None
-                raise ControllerError(f"Fly API returned HTTP {error.code}") from None
-            except (urllib.error.URLError, TimeoutError):
-                raise ControllerError("Fly API connection failed") from None
-        raise ControllerError("Fly API authentication refresh failed")
+                body = error.read(16_385)
+                prefix = body[:16_384]
+                retryable = error.code in {408, 429} or 500 <= error.code <= 599
+                # A safe read may be repeated once. Mutations are never replayed:
+                # their caller must reconcile the exact resource identity.
+                if safe_read and attempt == 0 and (error.code == 403 or retryable):
+                    continue
+                http_class = {
+                    401: "authentication_invalid",
+                    403: "permission_denied",
+                    404: "not_found",
+                    408: "request_timeout",
+                    409: "conflict",
+                    429: "rate_limited",
+                }.get(
+                    error.code,
+                    "transient_server" if 500 <= error.code <= 599 else "provider_rejected",
+                )
+                header_value = ""
+                for header in ("Fly-Request-Id", "X-Request-Id", "Request-Id"):
+                    candidate = error.headers.get(header) if error.headers else None
+                    if candidate:
+                        header_value = candidate[:1_024]
+                        break
+                raise ProviderRequestError(
+                    f"fly_api_{operation}_{http_class}",
+                    {
+                        "operation": operation,
+                        "outcome": "http_error",
+                        "http_class": http_class,
+                        "http_status": error.code,
+                        "elapsed_seconds": max(0, math.ceil(time.monotonic() - started)),
+                        "body_prefix_sha256": "sha256:" + hashlib.sha256(prefix).hexdigest(),
+                        "body_truncated": len(body) > len(prefix),
+                        "request_id_sha256": (
+                            "sha256:" + hashlib.sha256(header_value.encode()).hexdigest()
+                            if header_value
+                            else None
+                        ),
+                        "request_attempts": attempt + 1,
+                        "read_reloaded_once": bool(safe_read and attempt == 1),
+                    },
+                ) from None
+            except (urllib.error.URLError, TimeoutError, OSError) as error:
+                if safe_read and attempt == 0:
+                    continue
+                reason = type(error).__name__
+                raise ProviderRequestError(
+                    f"fly_api_{operation}_network_error",
+                    {
+                        "operation": operation,
+                        "outcome": "network_error",
+                        "http_class": "network_error",
+                        "http_status": None,
+                        "elapsed_seconds": max(0, math.ceil(time.monotonic() - started)),
+                        "body_prefix_sha256": "sha256:"
+                        + hashlib.sha256(reason.encode()).hexdigest(),
+                        "body_truncated": False,
+                        "request_id_sha256": None,
+                        "request_attempts": attempt + 1,
+                        "read_reloaded_once": bool(safe_read and attempt == 1),
+                    },
+                ) from None
+        raise ControllerError("Fly API request exhausted")
 
     def resource_absent(self, kind: str, app: str, resource_id: str, *, deadline: float) -> bool:
         """Return true only for an authenticated provider 404."""
@@ -214,6 +496,7 @@ class Flyctl:
                 f"/v1/apps/{app}/{kind}/{resource_id}",
                 deadline=deadline,
                 absent_ok=True,
+                operation=f"{kind[:-1]}_absence_get",
             )
             is None
         )
@@ -227,10 +510,15 @@ class Flyctl:
             f"/v1/apps/{app}/machines/{machine_id}",
             deadline=deadline,
             absent_ok=True,
+            operation="machine_runtime_get",
         )
         if value is None:
             return {"state": "destroyed", "oom": False}
         return normalize_machine_runtime(value)
+
+
+def run_scoped_flyctl(credential: RunCredential) -> Flyctl:
+    return Flyctl(credential)
 
 
 def validate_inputs(args: argparse.Namespace) -> None:
@@ -536,14 +824,182 @@ def create_owned_app(args: argparse.Namespace, fly: Flyctl) -> None:
         ) from error
 
 
+def create_owned_volume(args: argparse.Namespace, fly: Flyctl) -> dict[str, Any]:
+    command = [
+        "volumes",
+        "create",
+        args.volume_name,
+        "--app",
+        args.app_name,
+        "--region",
+        args.region,
+        "--size",
+        str(args.volume_size_gb),
+        "--scheduled-snapshots=false",
+        "--yes",
+    ]
+    try:
+        value = fly.json(command)
+    except (
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+        json.JSONDecodeError,
+    ) as error:
+        listed = fly.json(["volumes", "list", "--app", args.app_name])
+        matches = (
+            [
+                item
+                for item in listed
+                if isinstance(item, dict)
+                and item.get("name", item.get("Name")) == args.volume_name
+                and item.get("region", item.get("Region")) == args.region
+                and int(item.get("size_gb", item.get("SizeGB", -1))) == args.volume_size_gb
+            ]
+            if isinstance(listed, list)
+            else []
+        )
+        if len(matches) != 1:
+            raise ControllerError(
+                "ambiguous volume creation did not reconcile to one exact identity"
+            ) from error
+        value = matches[0]
+    if not isinstance(value, dict):
+        raise ControllerError("Fly volume create response is malformed")
+    return value
+
+
+def mint_run_credential(args: argparse.Namespace, bootstrap: Flyctl) -> RunCredential:
+    """Mint and uniquely resolve one six-hour org token without persisting its secret."""
+    name = f"gf-s20-{args.app_name[-16:]}"
+    before = list_org_tokens_bounded(bootstrap, args.org)
+    minted_at = time.time()
+    result: subprocess.CompletedProcess[str] | None = None
+    creation_error: Exception | None = None
+    try:
+        result = bootstrap.run(
+            [
+                "tokens",
+                "create",
+                "org",
+                "--org",
+                args.org,
+                "--expiry",
+                "6h",
+                "--name",
+                name,
+                "--json",
+            ]
+        )
+    except (subprocess.SubprocessError, ControllerError) as error:
+        creation_error = error
+    try:
+        after = list_org_tokens_bounded(bootstrap, args.org)
+    except ControllerError:
+        raise ControllerError(
+            "Fly run credential cleanup is unproven; provider expiry remains the safety bound"
+        ) from None
+    discovered = [
+        (token_id, row)
+        for token_id, row in after.items()
+        if token_id not in before and row["name"] == name and token_is_active(row)
+    ]
+    candidates = []
+    expiry_error: Exception | None = None
+    for token_id, row in discovered:
+        try:
+            expiry = parse_token_expiry(row["expires_at"])
+        except ControllerError as error:
+            expiry_error = error
+            continue
+        if (
+            minted_at + RUN_TOKEN_LIFETIME_SECONDS - 300
+            <= expiry
+            <= minted_at + RUN_TOKEN_LIFETIME_SECONDS + 300
+        ):
+            candidates.append((token_id, expiry))
+    try:
+        if creation_error is not None:
+            raise ControllerError("Fly run credential creation failed") from creation_error
+        if expiry_error is not None:
+            raise expiry_error
+        if result is None:
+            raise ControllerError("Fly run credential response is unavailable")
+        value = json.loads(result.stdout)
+        if isinstance(value, str):
+            secret = value
+        elif isinstance(value, dict) and not set(value) - {"token"}:
+            secret = value.get("token")
+        else:
+            raise ControllerError("Fly run credential response has unknown fields")
+        if (
+            not isinstance(secret, str)
+            or not 20 <= len(secret) <= 4_096
+            or "\n" in secret
+            or "\r" in secret
+        ):
+            raise ControllerError("Fly run credential secret is malformed")
+        if len(candidates) != 1:
+            raise ControllerError("Fly run credential identity could not be uniquely resolved")
+    except Exception:
+        cleanup_failures = []
+        for token_id, _row in discovered:
+            try:
+                revoke_token_id(bootstrap, token_id, args.org)
+            except Exception as cleanup_error:  # noqa: PERF203
+                cleanup_failures.append(str(cleanup_error))
+        if cleanup_failures:
+            raise ControllerError(
+                "Fly run credential mint failed and token cleanup was unproven"
+            ) from None
+        raise
+    token_id, provider_expiry = candidates[0]
+    remaining = max(0.0, provider_expiry - time.time() - 60.0)
+    return RunCredential(
+        token_id=token_id,
+        name=name,
+        secret=secret,
+        expires_at_monotonic=time.monotonic() + remaining,
+    )
+
+
+def revoke_token_id(bootstrap: Flyctl, token_id: str, org: str) -> None:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{7,159}", token_id):
+        raise ControllerError("Fly run credential ID is unsafe")
+    with suppress(ControllerError, subprocess.SubprocessError):
+        bootstrap.run(["tokens", "revoke", token_id], check=False)
+    deadline = time.monotonic() + 30.0
+    while True:
+        row = list_org_tokens_bounded(bootstrap, org).get(token_id)
+        if row is None or not token_is_active(row):
+            return
+        if time.monotonic() >= deadline:
+            raise ControllerError("Fly run credential revocation absence was not proven")
+        time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
+
+
+def revoke_run_credential(bootstrap: Flyctl, credential: RunCredential, org: str) -> None:
+    revoke_token_id(bootstrap, credential.token_id, org)
+
+
+def admit_run_credential(credential: RunCredential, timeout_seconds: int) -> None:
+    required = TOKEN_SETUP_RESERVE_SECONDS + timeout_seconds + CLEANUP_RESERVE_SECONDS
+    if credential.expires_at_monotonic <= time.monotonic() + required:
+        raise ControllerError("Fly run credential expires before teardown deadline")
+
+
 def publish_to_fly_registry(
-    args: argparse.Namespace, local_image_id: str, _fly: Flyctl
+    args: argparse.Namespace, local_image_id: str, fly: Flyctl
 ) -> tuple[str, str, str]:
     """Publish the authenticated local image into the owned app registry."""
     repository = f"registry.fly.io/{args.app_name}"
     tag = f"{repository}:{args.expected_sha}"
     with tempfile.TemporaryDirectory(prefix="graphforge-fly-docker-config-") as config:
-        environment = {**os.environ, "DOCKER_CONFIG": config}
+        base_environment = {**os.environ, "DOCKER_CONFIG": config}
+        environment = (
+            fly.subprocess_environment(base_environment)
+            if hasattr(fly, "subprocess_environment")
+            else base_environment
+        )
         subprocess.run(
             ["flyctl", "auth", "docker"],
             cwd=ROOT,
@@ -575,18 +1031,14 @@ def publish_to_fly_registry(
             persist_controller_failure(
                 args,
                 "registry_push_timeout",
-                command_failure=_registry_failure_details(
-                    error, time.monotonic() - push_started
-                ),
+                command_failure=_registry_failure_details(error, time.monotonic() - push_started),
             )
             raise ControllerError("Fly registry push exceeded its bounded timeout") from None
         except subprocess.CalledProcessError as error:
             persist_controller_failure(
                 args,
                 "registry_push_failed",
-                command_failure=_registry_failure_details(
-                    error, time.monotonic() - push_started
-                ),
+                command_failure=_registry_failure_details(error, time.monotonic() - push_started),
             )
             raise ControllerError("Fly registry push failed") from None
         matches = set(re.findall(r"digest:\s*(sha256:[0-9a-f]{64})", pushed.stdout + pushed.stderr))
@@ -871,26 +1323,53 @@ def create_machine(
     *,
     deadline: float,
 ) -> dict[str, Any]:
-    token = fly.auth_token(deadline=deadline)
-    if not token:
-        raise ControllerError("Fly authentication token is unavailable")
-    request = urllib.request.Request(
-        f"https://api.machines.dev/v1/apps/{args.app_name}/machines",
-        data=json.dumps(machine_payload(args, volume_id, image, digest, source_snapshot)).encode(),
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        method="POST",
+    api = (
+        fly.api_json
+        if hasattr(fly, "api_json")
+        else lambda *a, **kw: Flyctl.api_json(fly, *a, **kw)
     )
     try:
-        with urllib.request.urlopen(
-            request, timeout=_bounded_timeout(deadline, CONTROL_PLANE_TIMEOUT_SECONDS)
-        ) as response:
-            return json.load(response)
-    except urllib.error.HTTPError as error:
-        raise ControllerError(
-            f"Fly Machines API rejected creation with HTTP {error.code}"
-        ) from None
-    except urllib.error.URLError:
-        raise ControllerError("Fly Machines API connection failed") from None
+        value = api(
+            "POST",
+            f"/v1/apps/{args.app_name}/machines",
+            data=machine_payload(args, volume_id, image, digest, source_snapshot),
+            deadline=deadline,
+            operation="machine_create",
+        )
+    except ProviderRequestError as error:
+        if error.details.get("http_class") not in {
+            "request_timeout",
+            "transient_server",
+            "network_error",
+            "rate_limited",
+            "conflict",
+            "malformed_response",
+        }:
+            raise
+        try:
+            observed = api(
+                "GET",
+                f"/v1/apps/{args.app_name}/machines",
+                deadline=deadline,
+                operation="machine_create_reconcile",
+            )
+        except Exception:
+            raise error from None
+        matches = (
+            [
+                machine
+                for machine in observed
+                if isinstance(machine, dict) and machine.get("name") == args.machine_name
+            ]
+            if isinstance(observed, list)
+            else []
+        )
+        if len(matches) != 1:
+            raise error
+        value = matches[0]
+    if not isinstance(value, dict):
+        raise ControllerError("Fly Machine create response is malformed")
+    return value
 
 
 def get_machine(
@@ -901,26 +1380,17 @@ def get_machine(
     deadline: float,
 ) -> dict[str, Any]:
     """Fetch fresh provider state; never certify invariants from the POST echo."""
-    token = (
-        fly.auth_token(deadline=deadline)
-        if hasattr(fly, "auth_token")
-        else fly.run(["auth", "token"]).stdout.strip()
+    api = (
+        fly.api_json
+        if hasattr(fly, "api_json")
+        else lambda *a, **kw: Flyctl.api_json(fly, *a, **kw)
     )
-    if not token:
-        raise ControllerError("Fly authentication token is unavailable")
-    request = urllib.request.Request(
-        f"https://api.machines.dev/v1/apps/{args.app_name}/machines/{machine_id}",
-        headers={"Authorization": f"Bearer {token}"},
+    value = api(
+        "GET",
+        f"/v1/apps/{args.app_name}/machines/{machine_id}",
+        deadline=deadline,
+        operation="machine_fresh_get",
     )
-    try:
-        with urllib.request.urlopen(
-            request, timeout=_bounded_timeout(deadline, CONTROL_PLANE_TIMEOUT_SECONDS)
-        ) as response:
-            value = json.load(response)
-    except urllib.error.HTTPError as error:
-        raise ControllerError(f"Fly Machine GET returned HTTP {error.code}") from None
-    except urllib.error.URLError:
-        raise ControllerError("Fly Machine GET connection failed") from None
     if not isinstance(value, dict) or value.get("id") != machine_id:
         raise ControllerError("Fly Machine GET did not return the observed Machine")
     return value
@@ -1161,9 +1631,7 @@ def normalize_machine_runtime(machine: Any) -> dict[str, Any]:
             monitor_exit = (
                 monitor_event.get("exit_event") if isinstance(monitor_event, dict) else None
             )
-            if (
-                isinstance(exit_event, dict) and exit_event.get("oom_killed") is True
-            ) or (
+            if (isinstance(exit_event, dict) and exit_event.get("oom_killed") is True) or (
                 isinstance(monitor_exit, dict) and monitor_exit.get("oom_killed") is True
             ):
                 oom = True
@@ -1223,6 +1691,7 @@ def persist_controller_failure(
     *,
     observed: dict[str, Any] | None = None,
     command_failure: dict[str, Any] | None = None,
+    provider_request: dict[str, Any] | None = None,
 ) -> None:
     """Persist one sanitized controller-side first failure without overwriting it."""
     if args.diagnostic_out.exists():
@@ -1237,6 +1706,9 @@ def persist_controller_failure(
         diagnostic["observed_machine"] = observed
     if command_failure is not None:
         diagnostic["command_failure"] = command_failure
+    if provider_request is not None:
+        validate_provider_request_diagnostic(provider_request)
+        diagnostic["provider_request"] = provider_request
     args.diagnostic_out.write_text(json.dumps(diagnostic, indent=2, sort_keys=True) + "\n")
 
 
@@ -1271,13 +1743,16 @@ def execute(
     local_image_id: str | None = None,
     local_snapshot: str | None = None,
 ) -> None:
+    bootstrap = fly
+    run_fly: Flyctl | None = None
+    credential: RunCredential | None = None
     app_created = False
     machine_id = volume_id = None
     primary_error: Exception | None = None
     try:
         if local_image_id is None or local_snapshot is None:
             local_image_id, local_snapshot = inspect_local_image(args.image, args.expected_sha)
-        apps = fly.json(["apps", "list"])
+        apps = bootstrap.json(["apps", "list"])
         if any(
             item.get("Name") == args.app_name or item.get("name") == args.app_name for item in apps
         ):
@@ -1288,35 +1763,24 @@ def execute(
             args.app_name,
             price_reservation(args.volume_size_gb, compute_rate, volume_rate),
         )
+        credential = mint_run_credential(args, bootstrap)
+        admit_run_credential(credential, args.timeout_s)
+        run_fly = run_scoped_flyctl(credential)
         try:
-            create_owned_app(args, fly)
+            create_owned_app(args, run_fly)
             app_created = True
         except OwnedAppCreationError:
             app_created = True
             raise
-        image, digest, source_snapshot = publish_to_fly_registry(args, local_image_id, fly)
+        image, digest, source_snapshot = publish_to_fly_registry(args, local_image_id, run_fly)
         if source_snapshot != local_snapshot:
             raise ControllerError("Fly registry image source snapshot changed after publication")
-        volume = fly.json(
-            [
-                "volumes",
-                "create",
-                args.volume_name,
-                "--app",
-                args.app_name,
-                "--region",
-                args.region,
-                "--size",
-                str(args.volume_size_gb),
-                "--scheduled-snapshots=false",
-                "--yes",
-            ]
-        )
+        volume = create_owned_volume(args, run_fly)
         volume_id = assert_volume(volume, args)
         deadline = time.monotonic() + args.timeout_s
         created_machine = create_machine(
             args,
-            fly,
+            run_fly,
             volume_id,
             image,
             digest,
@@ -1324,7 +1788,7 @@ def execute(
             deadline=deadline,
         )
         machine_id = created_machine["id"]
-        machine = get_machine(args, fly, machine_id, deadline=deadline)
+        machine = get_machine(args, run_fly, machine_id, deadline=deadline)
         checks = machine_response_checks(machine, args, digest, volume_id)
         try:
             assert_machine(machine, args, digest, volume_id)
@@ -1343,7 +1807,7 @@ def execute(
             last_phase = None
             while time.monotonic() < deadline:
                 fetch(
-                    fly,
+                    run_fly,
                     args,
                     machine_id,
                     ACTIVE_PHASE_PATH,
@@ -1354,7 +1818,7 @@ def execute(
                 phase = status["phase"]
                 if phase != last_phase:
                     fetch(
-                        fly,
+                        run_fly,
                         args,
                         machine_id,
                         JOURNAL_PATH,
@@ -1364,7 +1828,7 @@ def execute(
                     last_phase = phase
                 if status["status"] != "running":
                     fetch(
-                        fly,
+                        run_fly,
                         args,
                         machine_id,
                         RESULT_PATH,
@@ -1383,7 +1847,7 @@ def execute(
                             )
                     if status["status"] == "success":
                         evidence_result = fetch(
-                            fly,
+                            run_fly,
                             args,
                             machine_id,
                             EVIDENCE_PATH,
@@ -1393,7 +1857,8 @@ def execute(
                         if evidence_result.returncode == 0 and local.is_file():
                             break
                 terminal = terminal_machine_diagnostic(
-                    fly.machine_runtime(args.app_name, machine_id, deadline=deadline), phase
+                    run_fly.machine_runtime(args.app_name, machine_id, deadline=deadline),
+                    phase,
                 )
                 if terminal:
                     args.diagnostic_out.write_text(
@@ -1402,9 +1867,7 @@ def execute(
                     raise ControllerError(
                         f"Machine terminated in {terminal['phase']} with {terminal['code']}"
                     )
-                time.sleep(
-                    min(MONITOR_INTERVAL_SECONDS, max(0, deadline - time.monotonic()))
-                )
+                time.sleep(min(MONITOR_INTERVAL_SECONDS, max(0, deadline - time.monotonic())))
             else:
                 raise ControllerError("timed out retrieving S20 evidence")
             spec = importlib.util.spec_from_file_location("s20_validator", VALIDATOR)
@@ -1421,21 +1884,51 @@ def execute(
                 source_snapshot,
             )
             args.evidence_out.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
-            acknowledge_result(fly, args, machine_id, deadline)
+            acknowledge_result(run_fly, args, machine_id, deadline)
     except Exception as error:
         primary_error = error
-        persist_controller_failure(args, f"controller_{type(error).__name__.lower()}")
-    cleanup_error: Exception | None = None
+        if isinstance(error, ProviderRequestError):
+            persist_controller_failure(args, error.code, provider_request=error.details)
+        else:
+            persist_controller_failure(args, f"controller_{type(error).__name__.lower()}")
+    cleanup_errors: list[Exception] = []
     try:
-        cleanup_owned(fly, args.app_name, machine_id, volume_id, app_created)
+        cleanup_owned(
+            run_fly or bootstrap,
+            args.app_name,
+            machine_id,
+            volume_id,
+            app_created,
+        )
     except Exception as error:
-        cleanup_error = error
+        cleanup_errors.append(error)
+        if run_fly is not None:
+            try:
+                cleanup_owned(
+                    bootstrap,
+                    args.app_name,
+                    machine_id,
+                    volume_id,
+                    app_created,
+                )
+            except Exception as bootstrap_cleanup_error:
+                cleanup_errors.append(bootstrap_cleanup_error)
+    if credential is not None:
+        try:
+            revoke_run_credential(bootstrap, credential, args.org)
+        except Exception as error:
+            cleanup_errors.append(error)
+        finally:
+            run_fly = None
+            credential = None
     if primary_error is not None:
-        if cleanup_error is not None:
+        for cleanup_error in cleanup_errors:
             primary_error.add_note(f"cleanup also failed: {cleanup_error}")
         raise primary_error
-    if cleanup_error is not None:
-        raise cleanup_error
+    if cleanup_errors:
+        raise ControllerError(
+            "cleanup failed: " + "; ".join(str(error) for error in cleanup_errors)
+        )
 
 
 def parser() -> argparse.ArgumentParser:
