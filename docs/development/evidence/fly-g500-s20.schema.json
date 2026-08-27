@@ -13,6 +13,65 @@
         "file_peak_bytes": {"type": "integer", "minimum": 0},
         "sample_interval_ms": {"const": 250}
       }
+    },
+    "construction": {
+      "type": "object", "additionalProperties": false,
+      "required": ["input_rows", "input_batches", "parquet_shards", "write_bytes", "write_operations", "authentication_read_bytes", "authentication_read_operations", "peak_batch_rows", "peak_batch_bytes", "peak_accounted_live_bytes", "peak_run_records", "merge_read_records", "merge_written_records", "merge_groups", "peak_merge_inputs", "merge_read_bytes", "merge_written_bytes", "merge_fsync_operations", "parquet_read_bytes", "parquet_read_operations", "parquet_write_bytes", "parquet_write_operations", "retained_probe_read_bytes", "retained_probe_block_loads", "storage_transient_peak_allocated_bytes"],
+      "properties": {
+        "input_rows": {"type": "integer", "minimum": 1}, "input_batches": {"type": "integer", "minimum": 1},
+        "parquet_shards": {"type": "integer", "minimum": 1}, "write_bytes": {"type": "integer", "minimum": 1},
+        "write_operations": {"type": "integer", "minimum": 1}, "authentication_read_bytes": {"type": "integer", "minimum": 0},
+        "authentication_read_operations": {"type": "integer", "minimum": 0}, "peak_batch_rows": {"type": "integer", "minimum": 1},
+        "peak_batch_bytes": {"type": "integer", "minimum": 1}, "peak_accounted_live_bytes": {"type": "integer", "minimum": 1},
+        "peak_run_records": {"type": "integer", "minimum": 0}, "merge_read_records": {"type": "integer", "minimum": 0},
+        "merge_written_records": {"type": "integer", "minimum": 0}, "merge_groups": {"type": "integer", "minimum": 0},
+        "peak_merge_inputs": {"type": "integer", "minimum": 0}, "merge_read_bytes": {"type": "integer", "minimum": 0},
+        "merge_written_bytes": {"type": "integer", "minimum": 0}, "merge_fsync_operations": {"type": "integer", "minimum": 0},
+        "parquet_read_bytes": {"type": "integer", "minimum": 0}, "parquet_read_operations": {"type": "integer", "minimum": 0},
+        "parquet_write_bytes": {"type": "integer", "minimum": 1}, "parquet_write_operations": {"type": "integer", "minimum": 1},
+        "retained_probe_read_bytes": {"type": "integer", "minimum": 0}, "retained_probe_block_loads": {"type": "integer", "minimum": 0},
+        "storage_transient_peak_allocated_bytes": {"type": "integer", "minimum": 1}
+      }
+    },
+    "query": {
+      "type": "object", "additionalProperties": false,
+      "required": ["fingerprint", "evidence"],
+      "properties": {
+        "fingerprint": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "evidence": {
+          "type": "object", "additionalProperties": false,
+          "required": ["hops", "sorts", "memory_reserved_before", "memory_reserved_after", "returned_batch_bytes", "operator_rss"],
+          "properties": {
+            "hops": {"type": "array", "minItems": 1, "items": {"type": "object", "additionalProperties": false, "required": ["id", "input_rows", "candidates_generated", "rows_emitted", "edge_rows_scanned", "edge_full_reads", "node_rows_scanned", "node_full_reads"], "properties": {"id": {"type": "integer", "minimum": 0}, "input_rows": {"type": "integer", "minimum": 0}, "candidates_generated": {"type": "integer", "minimum": 0}, "rows_emitted": {"type": "integer", "minimum": 0}, "edge_rows_scanned": {"type": "integer", "minimum": 0}, "edge_full_reads": {"const": 0}, "node_rows_scanned": {"type": "integer", "minimum": 0}, "node_full_reads": {"const": 0}}}},
+            "sorts": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["ordinal", "fetch", "output_rows", "spill_count", "spilled_bytes", "memory_used_after"], "properties": {"ordinal": {"type": "integer", "minimum": 0}, "fetch": {"type": ["integer", "null"], "minimum": 1}, "output_rows": {"type": "integer", "minimum": 0}, "spill_count": {"type": "integer", "minimum": 0}, "spilled_bytes": {"type": "integer", "minimum": 0}, "memory_used_after": {"const": 0}}}},
+            "memory_reserved_before": {"type": "integer", "minimum": 0}, "memory_reserved_after": {"const": 0},
+            "returned_batch_bytes": {"type": "integer", "minimum": 0},
+            "operator_rss": {"type": "object", "additionalProperties": false, "required": ["expand_peak_bytes", "sort_peak_bytes"], "properties": {"expand_peak_bytes": {"type": "integer", "minimum": 0}, "sort_peak_bytes": {"type": "integer", "minimum": 0}}}
+          }
+        }
+      }
+    },
+    "artifact_totals": {
+      "type": "object", "additionalProperties": false,
+      "required": ["logical_references", "logical_bytes", "physical_objects", "physical_logical_bytes", "allocated_bytes"],
+      "properties": {"logical_references": {"type": "integer", "minimum": 0}, "logical_bytes": {"type": "integer", "minimum": 0}, "physical_objects": {"type": "integer", "minimum": 0}, "physical_logical_bytes": {"type": "integer", "minimum": 0}, "allocated_bytes": {"type": "integer", "minimum": 0}}
+    },
+    "attribution": {
+      "type": "object", "additionalProperties": false,
+      "required": ["generation_uuid", "generation_manifest_sha256", "categories", "logical_references", "logical_bytes", "physical_objects", "physical_logical_bytes", "allocated_bytes"],
+      "properties": {
+        "generation_uuid": {"type": "string", "format": "uuid"},
+        "generation_manifest_sha256": {"type": "array", "minItems": 32, "maxItems": 32, "items": {"type": "integer", "minimum": 0, "maximum": 255}},
+        "categories": {"type": "object", "additionalProperties": false, "required": ["topology_nodes", "topology_edges", "properties", "uuid_and_surrogates", "adjacency", "catalog_and_manifests", "other"], "properties": {"topology_nodes": {"$ref": "#/$defs/artifact_totals"}, "topology_edges": {"$ref": "#/$defs/artifact_totals"}, "properties": {"$ref": "#/$defs/artifact_totals"}, "uuid_and_surrogates": {"$ref": "#/$defs/artifact_totals"}, "adjacency": {"$ref": "#/$defs/artifact_totals"}, "catalog_and_manifests": {"$ref": "#/$defs/artifact_totals"}, "other": {"$ref": "#/$defs/artifact_totals"}}},
+        "logical_references": {"type": "integer", "minimum": 1}, "logical_bytes": {"type": "integer", "minimum": 1},
+        "physical_objects": {"type": "integer", "minimum": 1}, "physical_logical_bytes": {"type": "integer", "minimum": 1},
+        "allocated_bytes": {"type": "integer", "minimum": 1}
+      }
+    },
+    "package_storage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["category", "logical_bytes", "allocated_bytes", "logical_references", "physical_objects", "source"],
+      "properties": {"category": {"const": "portable_bundle"}, "logical_bytes": {"type": "integer", "minimum": 1}, "allocated_bytes": {"type": "integer", "minimum": 1}, "logical_references": {"const": 1}, "physical_objects": {"const": 1}, "source": {"const": "portable_bundle_exact_descriptor"}}
     }
   },
   "required": ["schema", "git_sha", "image_digest", "provider", "region", "scale", "machine", "volume_gb", "result", "counts", "phase_memory", "storage", "run", "rung", "lifecycle", "memory", "wall_time_s", "first_failure"],
@@ -32,14 +91,17 @@
       }
     },
     "volume_gb": {"type": "integer", "minimum": 1, "maximum": 500},
-    "result": {"enum": ["passed", "failed"]},
+    "result": {"const": "passed"},
     "counts": {
       "type": "object", "additionalProperties": false,
-      "required": ["generated_edges", "source_edges", "imported_edges"],
+      "required": ["generated_edges", "source_edges", "imported_edges", "raw_attempts", "self_loops_rejected", "duplicates_rejected"],
       "properties": {
         "generated_edges": {"type": "integer", "minimum": 1},
         "source_edges": {"type": "integer", "minimum": 0},
-        "imported_edges": {"type": "integer", "minimum": 0}
+        "imported_edges": {"type": "integer", "minimum": 0},
+        "raw_attempts": {"type": "integer", "minimum": 1},
+        "self_loops_rejected": {"type": "integer", "minimum": 0},
+        "duplicates_rejected": {"type": "integer", "minimum": 0}
       }
     },
     "phase_memory": {
@@ -70,11 +132,25 @@
         "capacity_bytes": {"type": "integer", "minimum": 1}
       }
     },
-    "run": {"type": "object"},
-    "rung": {"type": "object"},
-    "lifecycle": {"type": "object"},
-    "memory": {"type": "object"},
+    "run": {"type": "object", "additionalProperties": false, "required": ["scale", "edgefactor", "seed"], "properties": {"scale": {"const": 20}, "edgefactor": {"const": 16}, "seed": {"type": "integer", "minimum": 0}}},
+    "rung": {"type": "object", "additionalProperties": false, "required": ["pass", "reconciles", "construction"], "properties": {"pass": {"const": true}, "reconciles": {"const": true}, "construction": {"$ref": "#/$defs/construction"}}},
+    "lifecycle": {
+      "type": "object", "additionalProperties": false,
+      "required": ["source_nodes", "source_edges", "imported_nodes", "imported_edges", "source_generation", "imported_generation", "package_digest", "portable_contract", "source_one_hop", "source_two_hop", "imported_one_hop", "imported_two_hop", "source_authority_fingerprint", "imported_authority_fingerprint", "source_storage", "imported_storage", "package_storage"],
+      "properties": {
+        "source_nodes": {"type": "integer", "minimum": 1}, "source_edges": {"type": "integer", "minimum": 1},
+        "imported_nodes": {"type": "integer", "minimum": 1}, "imported_edges": {"type": "integer", "minimum": 1},
+        "source_generation": {"type": "string", "format": "uuid"}, "imported_generation": {"type": "string", "format": "uuid"},
+        "package_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}, "portable_contract": {"const": "graphforge-portable-verify/2"},
+        "source_one_hop": {"$ref": "#/$defs/query"}, "source_two_hop": {"$ref": "#/$defs/query"},
+        "imported_one_hop": {"$ref": "#/$defs/query"}, "imported_two_hop": {"$ref": "#/$defs/query"},
+        "source_authority_fingerprint": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "imported_authority_fingerprint": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "source_storage": {"$ref": "#/$defs/attribution"}, "imported_storage": {"$ref": "#/$defs/attribution"}, "package_storage": {"$ref": "#/$defs/package_storage"}
+      }
+    },
+    "memory": {"type": "object", "additionalProperties": false, "required": ["rss_bytes", "hwm_bytes", "anonymous_bytes", "file_bytes"], "properties": {"rss_bytes": {"type": "integer", "minimum": 0}, "hwm_bytes": {"type": "integer", "minimum": 0}, "anonymous_bytes": {"type": "integer", "minimum": 0}, "file_bytes": {"type": "integer", "minimum": 0}}},
     "wall_time_s": {"type": "number", "minimum": 0, "maximum": 14400},
-    "first_failure": {"type": ["object", "null"]}
+    "first_failure": {"const": null}
   }
 }

@@ -58,6 +58,18 @@ const TWO_HOP: &str =
 const COUNT_EDGES: &str = "MATCH ()-[r:LINK]->() RETURN count(r) AS total";
 static JOURNAL_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static S20_ACTIVE_PHASE: AtomicU64 = AtomicU64::new(u64::MAX);
+
+fn set_s20_active_phase(index: u64) {
+    S20_ACTIVE_PHASE.store(index, Ordering::SeqCst);
+    let Ok(path) = std::env::var("GF_G500_S20_ACTIVE_PHASE_OUT") else {
+        return;
+    };
+    let name = S20PhaseSampler::NAMES
+        .get(usize::try_from(index).unwrap_or(usize::MAX))
+        .copied()
+        .unwrap_or("runner");
+    write_json_atomically(&PathBuf::from(path), &json!({ "phase": name }));
+}
 static INGEST_SUBPHASE: AtomicU64 = AtomicU64::new(0);
 static INGEST_CHUNK_INDEX: AtomicU64 = AtomicU64::new(0);
 
@@ -685,7 +697,7 @@ fn persist_phase_journal(
         _ => None,
     };
     if let Some(index) = phase_index {
-        S20_ACTIVE_PHASE.store(index, Ordering::Relaxed);
+        set_s20_active_phase(index);
     }
     let Ok(path) = std::env::var("GF_G500_LADDER_JOURNAL_OUT") else {
         return;
@@ -2555,7 +2567,9 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
     journal.pass("imported_query_2hop", phase, Some(imported_2hop.clone()));
     let source_storage = storage_attribution_value(&source);
     let imported_storage = storage_attribution_value(&imported);
-    let package_storage = exact_descriptor_allocation(std::slice::from_ref(&package));
+    let mut package_storage = exact_descriptor_allocation(std::slice::from_ref(&package));
+    package_storage["category"] = json!("portable_bundle");
+    package_storage["source"] = json!("portable_bundle_exact_descriptor");
 
     // Representative drills use the same verifier/import boundaries but never
     // repeat the billion-edge payload.
@@ -3215,7 +3229,7 @@ impl S20PhaseSampler {
     }
 
     fn enter(index: u64) {
-        S20_ACTIVE_PHASE.store(index, Ordering::SeqCst);
+        set_s20_active_phase(index);
     }
 
     fn finish(mut self) -> Value {
@@ -3398,6 +3412,15 @@ fn fly_s20_full_lifecycle_evidence() {
     let generated_edges = rung_outcome.evidence["counts"]["live_unique_edges"]
         .as_u64()
         .expect("generated live edge count");
+    let raw_attempts = rung_outcome.evidence["counts"]["raw_attempts"]
+        .as_u64()
+        .expect("raw attempt count");
+    let self_loops_rejected = rung_outcome.evidence["counts"]["self_loops_rejected"]
+        .as_u64()
+        .expect("self-loop count");
+    let duplicates_rejected = rung_outcome.evidence["counts"]["duplicates_rejected"]
+        .as_u64()
+        .expect("duplicate count");
     let source_allocated = source_storage["allocated_bytes"].as_u64().unwrap_or(0);
     let imported_allocated = imported_storage["allocated_bytes"].as_u64().unwrap_or(0);
     let package_storage = exact_descriptor_allocation(std::slice::from_ref(&package));
@@ -3414,16 +3437,17 @@ fn fly_s20_full_lifecycle_evidence() {
             step["detail"]["construction"]["storage_transient_peak_allocated_bytes"].as_u64()
         })
         .expect("construction transient allocation peak");
+    let construction = rung_outcome.evidence["steps"]
+        .as_array()
+        .and_then(|steps| steps.iter().find(|step| step["id"] == "ingest"))
+        .map(|step| step["detail"]["construction"].clone())
+        .expect("construction evidence");
     let retained_allocated_total = source_allocated
         .saturating_add(imported_allocated)
         .saturating_add(package_allocated)
         .saturating_add(generator_allocated);
-    let allocated_peak = retained_allocated_total.max(
-        imported_allocated
-            .saturating_add(package_allocated)
-            .saturating_add(generator_allocated)
-            .saturating_add(construction_transient_peak),
-    );
+    let allocated_peak = retained_allocated_total
+        .max(generator_allocated.saturating_add(construction_transient_peak));
     let observed_capacity = observed_filesystem_capacity_bytes(&work_root);
     assert!(
         observed_capacity <= required_env_u64("GF_G500_S20_DISK_BYTES"),
@@ -3444,6 +3468,9 @@ fn fly_s20_full_lifecycle_evidence() {
             "generated_edges": generated_edges,
             "source_edges": source_edges,
             "imported_edges": imported_edges,
+            "raw_attempts": raw_attempts,
+            "self_loops_rejected": self_loops_rejected,
+            "duplicates_rejected": duplicates_rejected,
         },
         "phase_memory": phase_memory,
         "storage": {
@@ -3457,7 +3484,13 @@ fn fly_s20_full_lifecycle_evidence() {
             "capacity_bytes": observed_capacity,
         },
         "run": { "scale": 20, "edgefactor": profile.edgefactor, "seed": profile.seed },
-        "rung": rung_outcome.evidence,
+        "rung": {
+            "pass": rung_outcome.passed,
+            "reconciles": raw_attempts == generated_edges
+                .saturating_add(self_loops_rejected)
+                .saturating_add(duplicates_rejected),
+            "construction": construction,
+        },
         "lifecycle": {
             "source_nodes": source_nodes, "source_edges": source_edges,
             "imported_nodes": imported_nodes, "imported_edges": imported_edges,

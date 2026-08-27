@@ -13,12 +13,14 @@ test "$(stat -c %d /work)" != "$(stat -c %d /)" || {
 
 rm -rf /work/s20 /work/tmp
 rm -f /work/s20-evidence.json /work/s20-journal.json /work/controller-ack
+rm -f /work/s20-active-phase.json
 mkdir -p /work/tmp
 export TMPDIR=/work/tmp
 export GF_G500_S20_WORK_ROOT=/work/s20
 export GF_G500_LADDER_WORKSPACE=/work/s20
 export GF_G500_S20_EVIDENCE_OUT=/work/s20-evidence.json
 export GF_G500_LADDER_JOURNAL_OUT=/work/s20-journal.json
+export GF_G500_S20_ACTIVE_PHASE_OUT=/work/s20-active-phase.json
 
 started_at="$(date +%s)"
 export GF_G500_S20_MEMORY_BYTES=$((4096 * 1024 * 1024))
@@ -37,8 +39,17 @@ set -e
 if [ "$status" -eq 0 ]; then
   printf '{"status":"success"}\n' > /work/container-result.json.tmp
 else
-  printf '{"status":"failure","phase":"runner","code":"process_exit_%s"}\n' \
-    "$status" > /work/container-result.json.tmp
+  phase=runner
+  if [ -f /work/s20-active-phase.json ]; then
+    observed="$(sed -n 's/.*"phase"[[:space:]]*:[[:space:]]*"\([a-z_]*\)".*/\1/p' /work/s20-active-phase.json)"
+    case "$observed" in
+      generate|ingest|source_reopen|source_query|export|verify|import|import_reopen|import_query|finalize)
+        phase="$observed"
+        ;;
+    esac
+  fi
+  printf '{"status":"failure","phase":"%s","code":"process_exit_%s"}\n' \
+    "$phase" "$status" > /work/container-result.json.tmp
 fi
 mv /work/container-result.json.tmp /work/container-result.json
 

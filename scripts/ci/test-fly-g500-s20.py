@@ -46,6 +46,92 @@ def args(tmp_path: Path, **changes):
     return argparse.Namespace(**values)
 
 
+def construction():
+    keys = {
+        "input_rows",
+        "input_batches",
+        "parquet_shards",
+        "write_bytes",
+        "write_operations",
+        "authentication_read_bytes",
+        "authentication_read_operations",
+        "peak_batch_rows",
+        "peak_batch_bytes",
+        "peak_accounted_live_bytes",
+        "peak_run_records",
+        "merge_read_records",
+        "merge_written_records",
+        "merge_groups",
+        "peak_merge_inputs",
+        "merge_read_bytes",
+        "merge_written_bytes",
+        "merge_fsync_operations",
+        "parquet_read_bytes",
+        "parquet_read_operations",
+        "parquet_write_bytes",
+        "parquet_write_operations",
+        "retained_probe_read_bytes",
+        "retained_probe_block_loads",
+        "storage_transient_peak_allocated_bytes",
+    }
+    return dict.fromkeys(keys, 1)
+
+
+def query_proof():
+    return {
+        "fingerprint": "sha256:" + "c" * 64,
+        "evidence": {
+            "hops": [
+                {
+                    "id": 1,
+                    "input_rows": 1,
+                    "candidates_generated": 1,
+                    "rows_emitted": 1,
+                    "edge_rows_scanned": 1,
+                    "edge_full_reads": 0,
+                    "node_rows_scanned": 1,
+                    "node_full_reads": 0,
+                }
+            ],
+            "sorts": [],
+            "memory_reserved_before": 0,
+            "memory_reserved_after": 0,
+            "returned_batch_bytes": 1,
+            "operator_rss": {"expand_peak_bytes": 1, "sort_peak_bytes": 0},
+        },
+    }
+
+
+def attribution():
+    totals = {
+        "logical_references": 1,
+        "logical_bytes": 1,
+        "physical_objects": 1,
+        "physical_logical_bytes": 1,
+        "allocated_bytes": 4096,
+    }
+    zero = dict.fromkeys(totals, 0)
+    categories = {
+        name: dict(zero)
+        for name in (
+            "topology_nodes",
+            "topology_edges",
+            "properties",
+            "uuid_and_surrogates",
+            "adjacency",
+            "catalog_and_manifests",
+            "other",
+        )
+    }
+    categories["topology_nodes"] = dict(totals)
+    return {
+        "generation_uuid": "00000000-0000-4000-8000-000000000001",
+        "generation_manifest_sha256": [1] * 32,
+        "categories": categories,
+        **totals,
+    }
+
+
 def evidence(**changes):
     value = {
         "schema": "graphforge-fly-g500-s20/1",
@@ -61,6 +147,9 @@ def evidence(**changes):
             "generated_edges": 16_777_216,
             "source_edges": 16_777_216,
             "imported_edges": 16_777_216,
+            "raw_attempts": 17_000_000,
+            "self_loops_rejected": 100_000,
+            "duplicates_rejected": 122_784,
         },
         "phase_memory": {
             phase: {
@@ -92,9 +181,34 @@ def evidence(**changes):
             "capacity_bytes": 500_000_000_000,
         },
         "run": {"scale": 20, "edgefactor": 16, "seed": 1},
-        "rung": {"pass": True},
-        "lifecycle": {"source_edges": 16_777_216, "imported_edges": 16_777_216},
-        "memory": {"rss_bytes": 1},
+        "rung": {"pass": True, "reconciles": True, "construction": construction()},
+        "lifecycle": {
+            "source_nodes": 1_048_576,
+            "source_edges": 16_777_216,
+            "imported_nodes": 1_048_576,
+            "imported_edges": 16_777_216,
+            "source_generation": "00000000-0000-4000-8000-000000000001",
+            "imported_generation": "00000000-0000-4000-8000-000000000002",
+            "package_digest": "sha256:" + "d" * 64,
+            "portable_contract": "graphforge-portable-verify/2",
+            "source_one_hop": query_proof(),
+            "source_two_hop": query_proof(),
+            "imported_one_hop": query_proof(),
+            "imported_two_hop": query_proof(),
+            "source_authority_fingerprint": "sha256:" + "e" * 64,
+            "imported_authority_fingerprint": "sha256:" + "e" * 64,
+            "source_storage": attribution(),
+            "imported_storage": attribution(),
+            "package_storage": {
+                "category": "portable_bundle",
+                "logical_bytes": 1,
+                "allocated_bytes": 4096,
+                "logical_references": 1,
+                "physical_objects": 1,
+                "source": "portable_bundle_exact_descriptor",
+            },
+        },
+        "memory": {"rss_bytes": 1, "hwm_bytes": 1, "anonymous_bytes": 1, "file_bytes": 0},
         "wall_time_s": 1.0,
         "first_failure": None,
     }
@@ -109,7 +223,7 @@ def pricing_html(*, region="den", rate="0.00002484", duplicate=False, volume="0.
     """
     return f"""
       <div id="started-machines-pricing-matrix-{region}">
-        <table>{row}{row if duplicate else ''}</table>
+        <table>{row}{row if duplicate else ""}</table>
       </div>
       <p>Fly Volumes are local persistent storage for Machines.</p>
       <p>${volume}/GB per month</p><p>Volume billing is pro-rated to the hour.</p>
@@ -178,8 +292,7 @@ def test_current_official_pricing_selects_fixed_region_and_derives_ledger():
         (pricing_html(duplicate=True), "den", "one applicable"),
         (pricing_html(rate="0.00009999"), "den", "exceeds"),
         (
-            pricing_html()
-            + "<p>Fly Volumes $0.20/GB per month Volume billing is pro-rated</p>",
+            pricing_html() + "<p>Fly Volumes $0.20/GB per month Volume billing is pro-rated</p>",
             "den",
             "ambiguous volume",
         ),
@@ -194,13 +307,17 @@ def test_current_official_pricing_fails_closed_on_wrong_ambiguous_or_higher_rows
 
 def test_oci_inspection_authenticates_repo_digest_revision_and_runtime(monkeypatch):
     image = "registry.example/graphforge@sha256:" + "b" * 64
-    inspected = [{
-        "RepoDigests": [image],
-        "Config": {"Labels": {
-            "org.opencontainers.image.revision": "a" * 40,
-            "dev.graphforge.fly-s20": "graphforge-fly-s20-runtime/1",
-        }},
-    }]
+    inspected = [
+        {
+            "RepoDigests": [image],
+            "Config": {
+                "Labels": {
+                    "org.opencontainers.image.revision": "a" * 40,
+                    "dev.graphforge.fly-s20": "graphforge-fly-s20-runtime/1",
+                }
+            },
+        }
+    ]
     calls = []
 
     def run(command, **_kwargs):
@@ -218,27 +335,40 @@ def test_oci_inspection_authenticates_repo_digest_revision_and_runtime(monkeypat
     [
         ({"RepoDigests": ["registry.example/other@sha256:" + "b" * 64]}, "repo digest"),
         (
-            {"Config": {"Labels": {
-                "org.opencontainers.image.revision": "c" * 40,
-                "dev.graphforge.fly-s20": "graphforge-fly-s20-runtime/1",
-            }}},
+            {
+                "Config": {
+                    "Labels": {
+                        "org.opencontainers.image.revision": "c" * 40,
+                        "dev.graphforge.fly-s20": "graphforge-fly-s20-runtime/1",
+                    }
+                }
+            },
             "revision",
         ),
         (
-            {"Config": {"Labels": {
-                "org.opencontainers.image.revision": "a" * 40,
-                "dev.graphforge.fly-s20": "unknown",
-            }}},
+            {
+                "Config": {
+                    "Labels": {
+                        "org.opencontainers.image.revision": "a" * 40,
+                        "dev.graphforge.fly-s20": "unknown",
+                    }
+                }
+            },
             "runtime schema",
         ),
     ],
 )
 def test_oci_inspection_rejects_provenance_mismatch(monkeypatch, change, message):
     image = "registry.example/graphforge@sha256:" + "b" * 64
-    inspected = {"RepoDigests": [image], "Config": {"Labels": {
-        "org.opencontainers.image.revision": "a" * 40,
-        "dev.graphforge.fly-s20": "graphforge-fly-s20-runtime/1",
-    }}}
+    inspected = {
+        "RepoDigests": [image],
+        "Config": {
+            "Labels": {
+                "org.opencontainers.image.revision": "a" * 40,
+                "dev.graphforge.fly-s20": "graphforge-fly-s20-runtime/1",
+            }
+        },
+    }
     inspected.update(change)
     monkeypatch.setattr(
         controller.subprocess,
@@ -354,6 +484,14 @@ def test_fetch_binds_only_declared_runtime_paths(tmp_path):
     assert [call[3] for call in calls] == ["/work/container-result.json", "/work/s20-evidence.json"]
 
 
+def test_runtime_preserves_allowlisted_internal_failure_phase():
+    entrypoint = (ROOT / "containers/fly-g500-s20/run-s20.sh").read_text()
+    assert "GF_G500_S20_ACTIVE_PHASE_OUT=/work/s20-active-phase.json" in entrypoint
+    phases = "source_reopen|source_query|export|verify|import|import_reopen|import_query"
+    assert phases in entrypoint
+    assert '"phase":"%s","code":"process_exit_%s"' in entrypoint
+
+
 def test_terminal_failure_is_persisted_promptly_and_still_verified_cleaned(tmp_path, monkeypatch):
     digest = "sha256:" + "b" * 64
     machine = {
@@ -437,6 +575,31 @@ def test_closed_evidence_accepts_only_pinned_sanitized_s20():
         )
     with pytest.raises(validator.EvidenceError, match="identity"):
         validator.validate(evidence(region="ord"), "a" * 40, "sha256:" + "b" * 64, "den")
+
+
+def test_closed_evidence_rejects_deleted_falsified_and_nested_unknown_proof():
+    missing = evidence()
+    del missing["lifecycle"]["package_digest"]
+    with pytest.raises(validator.EvidenceError, match="schema violation"):
+        validator.validate(missing, "a" * 40, "sha256:" + "b" * 64, "den")
+    falsified = evidence()
+    falsified["lifecycle"]["imported_one_hop"]["fingerprint"] = "sha256:" + "f" * 64
+    with pytest.raises(validator.EvidenceError, match="one_hop fingerprints"):
+        validator.validate(falsified, "a" * 40, "sha256:" + "b" * 64, "den")
+    leaked = copy.deepcopy(evidence())
+    leaked["lifecycle"]["source_one_hop"]["evidence"]["provider_reference"] = "opaque"
+    with pytest.raises(validator.EvidenceError, match="schema violation"):
+        validator.validate(leaked, "a" * 40, "sha256:" + "b" * 64, "den")
+    unclassified = evidence()
+    unclassified["lifecycle"]["source_storage"]["categories"]["other"] = {
+        "logical_references": 1,
+        "logical_bytes": 1,
+        "physical_objects": 1,
+        "physical_logical_bytes": 1,
+        "allocated_bytes": 4096,
+    }
+    with pytest.raises(validator.EvidenceError, match=r"does not reconcile|unclassified"):
+        validator.validate(unclassified, "a" * 40, "sha256:" + "b" * 64, "den")
 
 
 def test_no_lower_rung_or_dynamic_sizing_contract_exists():

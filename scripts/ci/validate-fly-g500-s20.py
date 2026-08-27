@@ -31,10 +31,43 @@ def validate(value: Any, sha: str, digest: str, region: str) -> None:
     if value["git_sha"] != sha or value["image_digest"] != digest or value["region"] != region:
         raise EvidenceError("evidence identity differs from the pinned run")
     counts = value["counts"]
-    if value["result"] == "passed" and len(set(counts.values())) != 1:
+    if (
+        value["result"] == "passed"
+        and len({counts["generated_edges"], counts["source_edges"], counts["imported_edges"]}) != 1
+    ):
         raise EvidenceError(
             "passing evidence must reconcile generated, source, and imported counts"
         )
+    if counts["raw_attempts"] != (
+        counts["generated_edges"] + counts["self_loops_rejected"] + counts["duplicates_rejected"]
+    ):
+        raise EvidenceError("generator attempt accounting does not reconcile")
+    lifecycle = value["lifecycle"]
+    if lifecycle["source_nodes"] != lifecycle["imported_nodes"]:
+        raise EvidenceError("source/import node counts differ")
+    for suffix in ("one_hop", "two_hop"):
+        if (
+            lifecycle[f"source_{suffix}"]["fingerprint"]
+            != lifecycle[f"imported_{suffix}"]["fingerprint"]
+        ):
+            raise EvidenceError(f"source/import {suffix} fingerprints differ")
+    if lifecycle["source_authority_fingerprint"] != lifecycle["imported_authority_fingerprint"]:
+        raise EvidenceError("source/import authority fingerprints differ")
+    for name in ("source_storage", "imported_storage"):
+        attribution = lifecycle[name]
+        fields = (
+            "logical_references",
+            "logical_bytes",
+            "physical_objects",
+            "physical_logical_bytes",
+            "allocated_bytes",
+        )
+        for field in fields:
+            observed = sum(category[field] for category in attribution["categories"].values())
+            if observed != attribution[field]:
+                raise EvidenceError(f"{name} category {field} does not reconcile")
+        if any(attribution["categories"]["other"][field] for field in fields):
+            raise EvidenceError(f"{name} contains unclassified artifacts")
     if value["storage"]["peak_allocated_bytes"] > value["storage"]["capacity_bytes"]:
         raise EvidenceError("allocated storage exceeds volume capacity")
     for phase, memory in value["phase_memory"].items():
