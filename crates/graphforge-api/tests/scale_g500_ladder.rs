@@ -2750,6 +2750,7 @@ fn graph500_driver_has_no_bulk_publication_escape_hatch() {
 
 #[test]
 fn tiny_construction_ladder_resumes_and_scales_bounded_work_linearly() {
+    let mut baseline_peaks: Option<[u64; 11]> = None;
     for factor in [1_u64, 2, 4] {
         let project = TempDir::new().expect("tiny construction project");
         let graph = GraphForge::new(project.path().to_str()).expect("open tiny project");
@@ -2796,6 +2797,51 @@ fn tiny_construction_ladder_resumes_and_scales_bounded_work_linearly() {
         assert!(progress.evidence.peak_resolved_endpoint_name_slots <= 64);
         assert!(progress.evidence.peak_catalog_entries <= 64);
         assert!(progress.evidence.peak_catalog_identifier_bytes <= 64 * 1024);
+        let observed_peaks = [
+            progress.evidence.peak_batch_rows,
+            progress.evidence.peak_batch_bytes,
+            progress.evidence.peak_run_records,
+            progress.evidence.peak_merge_inputs,
+            progress.evidence.peak_merge_temporary_bytes,
+            progress.evidence.peak_accounted_live_bytes,
+            progress.evidence.peak_merge_name_slots,
+            progress.evidence.peak_resolved_endpoint_name_slots,
+            progress.evidence.peak_catalog_entries,
+            progress.evidence.peak_catalog_identifier_bytes,
+            progress.evidence.peak_catalog_decoded_batch_bytes,
+        ];
+        if let Some(baseline) = baseline_peaks {
+            // Input batches can fill by at most one fixed public chunk and
+            // shaping can retain at most one fixed merge/encoding window.
+            // Catalog/name cardinality is data-shape bound and must be equal;
+            // decoded catalog bytes may fill one fixed 64-KiB decode window.
+            let additive_tolerance = [
+                BATCH_ROWS as u64,
+                64 * 1024 * 1024,
+                BATCH_ROWS as u64,
+                1,
+                1024 * 1024,
+                64 * 1024 * 1024,
+                0,
+                0,
+                0,
+                0,
+                64 * 1024,
+            ];
+            for (index, ((observed, base), tolerance)) in observed_peaks
+                .iter()
+                .zip(baseline)
+                .zip(additive_tolerance)
+                .enumerate()
+            {
+                assert!(
+                    *observed <= base.saturating_add(tolerance),
+                    "peak field {index} grew with scale: baseline={base} observed={observed} tolerance={tolerance}"
+                );
+            }
+        } else {
+            baseline_peaks = Some(observed_peaks);
+        }
         assert!(progress.evidence.merge_read_records <= 1_024 * factor);
         assert!(progress.evidence.merge_written_records <= 1_024 * factor);
         assert!(progress.evidence.parquet_write_operations > 0);

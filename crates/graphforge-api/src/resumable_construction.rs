@@ -496,11 +496,10 @@ mod tests {
             )
             .unwrap();
         cancellation.cancel();
-        assert!(
-            session
-                .seal_and_publish_with_cancellation(&cancellation)
-                .is_err()
-        );
+        let error = session
+            .seal_and_publish_with_cancellation(&cancellation)
+            .unwrap_err();
+        assert_eq!(error.code(), "GF_CANCELLED");
         assert_eq!(
             graphforge_storage::resolve_project_generation(&root)
                 .unwrap()

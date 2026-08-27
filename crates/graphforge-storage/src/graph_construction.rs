@@ -8809,11 +8809,11 @@ mod tests {
         let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
         let encoding = session.encode_canonical(&shape, 1).unwrap();
 
-        assert_eq!(
-            session.checkpoint.publication_state,
-            Some(ConstructionPublicationState::Publishing),
-            "the durable intent remains recoverable without claiming commit"
-        );
+        let receipt = session
+            .publish_canonical(&encoding, target, transaction)
+            .unwrap();
+        assert_eq!(receipt.generation_uuid, target);
+        assert!(!receipt.idempotent_replay);
         let current = crate::resolve_project_generation(root.path()).unwrap();
         assert_eq!(current.generation_uuid(), target);
         let inventory = current.graph_files_inventory().unwrap().unwrap();
@@ -8958,6 +8958,7 @@ mod tests {
                 checkpoints == 2
             })
             .unwrap_err();
+        assert_eq!(error.code(), "GF_CANCELLED");
         assert!(error.to_string().contains("before_current_replace"));
         assert_eq!(
             checkpoints, 2,

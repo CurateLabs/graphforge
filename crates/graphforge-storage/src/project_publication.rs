@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use graphforge_core::{GfError, ProjectErrorCode};
+use graphforge_core::{ApiErrorCode, GfError, ProjectErrorCode};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -1396,7 +1396,7 @@ impl ValidatedProjectGeneration {
                 cancellation,
             )
             .map_err(|error| {
-                if matches!(error, GfError::Project { .. }) {
+                if matches!(error, GfError::Project { .. } | GfError::Api { .. }) {
                     error
                 } else {
                     publication_error_from_parts(
@@ -1790,6 +1790,20 @@ fn reconcile_current_replacement_error(
     manifest_sha256: [u8; 32],
     error: &AtomicPublishError,
 ) -> Result<(), GfError> {
+    // `Interrupted` is emitted only by the final predicate inside
+    // `before_replace`; the native namespace operation has not started, so
+    // committed=false is proven without consulting recovery-visible journals.
+    if matches!(error, AtomicPublishError::Io(error) if error.kind() == std::io::ErrorKind::Interrupted)
+    {
+        return Err(GfError::Api {
+            code: ApiErrorCode::Cancelled,
+            message: format!(
+                "transaction_uuid={} generation_uuid={} boundary=project.before_current_replace committed=false",
+                transaction_uuid.hyphenated(),
+                generation_uuid.hyphenated()
+            ),
+        });
+    }
     // The native primitive distinguishes a proved no-op from an outcome whose
     // namespace state requires reconciliation. Re-read CURRENT under the
     // still-held writer lock for every error so callers never receive
