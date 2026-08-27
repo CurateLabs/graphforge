@@ -4970,6 +4970,48 @@ fn manifest_generation(project_dir: &Path) -> Result<Option<u64>, GfError> {
     Ok((manifest.format_version == FORMAT_VERSION).then_some(manifest.current_generation))
 }
 
+pub(crate) fn canonical_v3_manifest_marker(bytes: &[u8], expected_generation: u64) -> bool {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return false;
+    };
+    let Ok(manifest) = serde_json::from_value::<Manifest>(value.clone()) else {
+        return false;
+    };
+    // Serialize the typed v3 schema and require the supplied tree to be a
+    // recursive structural subset. This rejects unknown fields in Manifest,
+    // RunRecord, FileRecord, and BlockRecord without duplicating descriptor
+    // semantics here. Missing serde-default fields remain valid v3.
+    let Ok(canonical_shape) = serde_json::to_value(&manifest) else {
+        return false;
+    };
+    if !json_shape_is_subset(&value, &canonical_shape) {
+        return false;
+    }
+    manifest.format_version == FORMAT_VERSION
+        && manifest.current_generation == expected_generation
+        && validate_run_descriptors(&manifest).is_ok()
+}
+
+fn json_shape_is_subset(candidate: &serde_json::Value, canonical: &serde_json::Value) -> bool {
+    match (candidate, canonical) {
+        (serde_json::Value::Object(candidate), serde_json::Value::Object(canonical)) => {
+            candidate.iter().all(|(key, value)| {
+                canonical
+                    .get(key)
+                    .is_some_and(|known| json_shape_is_subset(value, known))
+            })
+        }
+        (serde_json::Value::Array(candidate), serde_json::Value::Array(canonical)) => {
+            candidate.len() == canonical.len()
+                && candidate
+                    .iter()
+                    .zip(canonical)
+                    .all(|(value, known)| json_shape_is_subset(value, known))
+        }
+        _ => true,
+    }
+}
+
 fn describe_staged_data(
     source: &Path,
     kind: &str,

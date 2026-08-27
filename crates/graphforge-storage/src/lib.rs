@@ -358,6 +358,15 @@ pub use uuid_membership::{
     uuid_membership_index_is_fresh, uuid_membership_index_present,
 };
 
+pub mod ordinal_identity_v4;
+pub use ordinal_identity_v4::{
+    ORDINAL_IDENTITY_MANIFEST, ORDINAL_IDENTITY_V4, V4OrdinalAdmissionMetrics, V4OrdinalArtifact,
+    V4OrdinalArtifactKind, V4OrdinalBlock, V4OrdinalIdentityAuthority, V4OrdinalIdentityError,
+    V4OrdinalIdentityHandle, V4OrdinalIdentityLimits, V4OrdinalIdentityManifest,
+    V4OrdinalIdentityOpen, V4OrdinalLookup, V4OrdinalLookupMetrics, V4OrdinalRange,
+    V4OrdinalTombstoneBlock, V4OrdinalTombstones,
+};
+
 pub mod property_overlay;
 mod property_scan;
 pub use property_overlay::{
