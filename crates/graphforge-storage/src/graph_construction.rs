@@ -3331,6 +3331,7 @@ fn recover_shape_intent(
     if intent.final_evidence.is_some() || checkpoint.evidence != intent.baseline_evidence {
         return Err(storage("incomplete shape changed committed evidence"));
     }
+    cleanup_incomplete_shape_capabilities(root)?;
     for child in root.child_names().map_err(storage)? {
         let Some(name) = child.to_str() else { continue };
         if !name.starts_with("merge-") && !name.starts_with("shaped-") {
@@ -3349,6 +3350,43 @@ fn recover_shape_intent(
         }
     }
     unlink_named(root, SHAPE_INTENT)
+}
+
+fn cleanup_incomplete_shape_capabilities(root: &StableDirectory) -> Result<(), GfError> {
+    for child in root.child_names().map_err(storage)? {
+        let Some(name) = child.to_str() else { continue };
+        if !name.starts_with("shape-receipt-") {
+            continue;
+        }
+        let mut file = root.open_child_file(OsStr::new(name)).map_err(storage)?;
+        if file_link_count(&file).map_err(storage)? != 1 {
+            return Err(storage("shaped writer capability has extra links"));
+        }
+        let identity = file_identity(&file).map_err(storage)?;
+        let receipt: ArtifactReceipt = decode_bounded(&mut file)?;
+        if shape_receipt_name(&receipt.name) != name {
+            return Err(storage("shaped writer capability name changed"));
+        }
+        if !is_shape_artifact_name(&receipt.name) {
+            continue;
+        }
+        if !is_canonical_sha256(&receipt.sha256) {
+            return Err(storage("shaped writer capability digest changed"));
+        }
+        match root.open_child_file(OsStr::new(&receipt.name)) {
+            Ok(artifact) => {
+                drop(artifact);
+                authenticate_shaped_output(root, &receipt)?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(storage(error)),
+        }
+        drop(file);
+        root.unlink_child_if_identity(OsStr::new(name), identity)
+            .map_err(storage)?;
+        root.sync().map_err(storage)?;
+    }
+    Ok(())
 }
 
 fn validate_shape_binding(intent: &ShapeIntent, checkpoint: &Checkpoint) -> Result<(), GfError> {
@@ -3703,9 +3741,53 @@ fn shape_receipt_name(name: &str) -> String {
 
 fn persist_shape_receipt(root: &StableDirectory, receipt: &ArtifactReceipt) -> Result<(), GfError> {
     if is_shape_artifact_name(&receipt.name) || canonical_artifact_target(&receipt.name) {
-        install_control(root, &shape_receipt_name(&receipt.name), receipt)?;
+        let capability_name = shape_receipt_name(&receipt.name);
+        match root.open_child_file(OsStr::new(&capability_name)) {
+            Ok(mut file) => {
+                if file_link_count(&file).map_err(storage)? != 1 {
+                    return Err(storage("shaped writer capability has extra links"));
+                }
+                let existing: ArtifactReceipt = decode_bounded(&mut file)?;
+                if existing != *receipt {
+                    return Err(storage("shaped writer capability changed"));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                install_control(root, &capability_name, receipt)?;
+            }
+            Err(error) => return Err(storage(error)),
+        }
     }
     Ok(())
+}
+
+fn unlink_writer_capability(
+    root: &StableDirectory,
+    name: &str,
+    expected: Option<&ArtifactReceipt>,
+) -> Result<(), GfError> {
+    let capability_name = shape_receipt_name(name);
+    let mut file = match root.open_child_file(OsStr::new(&capability_name)) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(storage(error)),
+    };
+    if file_link_count(&file).map_err(storage)? != 1 {
+        return Err(storage("writer capability has extra links"));
+    }
+    let identity = file_identity(&file).map_err(storage)?;
+    let receipt: ArtifactReceipt = decode_bounded(&mut file)?;
+    if receipt.name != name
+        || shape_receipt_name(&receipt.name) != capability_name
+        || expected.is_some_and(|expected| expected != &receipt)
+    {
+        return Err(storage("writer capability differs from artifact authority"));
+    }
+    authenticate_shaped_output(root, &receipt)?;
+    drop(file);
+    root.unlink_child_if_identity(OsStr::new(&capability_name), identity)
+        .map_err(storage)?;
+    root.sync().map_err(storage)
 }
 
 fn authenticate_shaped_output(
@@ -3941,7 +4023,7 @@ fn copy_authenticated_run<const N: usize>(
         write_operations: bytes.div_ceil(BLOCK_BYTES as u64),
         fsync_operations: 2,
     };
-    install_control(root, &shape_receipt_name(output), &output_receipt)?;
+    persist_shape_receipt(root, &output_receipt)?;
     evidence.merge_fsync_operations = evidence.merge_fsync_operations.saturating_add(2);
     Ok(())
 }
@@ -6205,6 +6287,7 @@ fn unlink_artifact(root: &StableDirectory, receipt: &ArtifactReceipt) -> Result<
     if !receipt.identity.matches(identity) || file_link_count(&file).map_err(storage)? != 1 {
         return Err(storage("orphan artifact identity changed"));
     }
+    unlink_writer_capability(root, &receipt.name, Some(receipt))?;
     drop(file);
     root.unlink_child_if_identity(OsStr::new(&receipt.name), identity)
         .map_err(storage)?;
@@ -6262,6 +6345,7 @@ fn remove_unrecorded_artifact(
         }
         validate_sorted_run(&mut file, width)?;
     }
+    unlink_writer_capability(root, name, None)?;
     root.unlink_child_if_identity(OsStr::new(name), identity)
         .map_err(storage)?;
     root.sync().map_err(storage)
@@ -6428,6 +6512,24 @@ mod tests {
                 !entry.file_name().to_string_lossy().ends_with(".tmp")
             }
         })
+    }
+
+    #[test]
+    fn shaped_writer_capability_resume_adopts_only_the_exact_receipt() {
+        let temporary = TempDir::new().unwrap();
+        let root = StableDirectory::open(temporary.path()).unwrap();
+        std::fs::write(temporary.path().join("shaped-identities.run"), b"identity").unwrap();
+        let (receipt, _) = receipt_for_existing_with_work(&root, "shaped-identities.run").unwrap();
+
+        persist_shape_receipt(&root, &receipt).unwrap();
+        persist_shape_receipt(&root, &receipt).unwrap();
+
+        let mut mismatched = receipt;
+        mismatched.sha256 = "0".repeat(64);
+        let error = persist_shape_receipt(&root, &mismatched)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("shaped writer capability changed"));
     }
 
     fn node_batch(first: u128, rows: usize) -> RecordBatch {
@@ -7154,13 +7256,15 @@ mod tests {
                 "windows={windows} slots={}",
                 session.evidence().peak_resolved_endpoint_name_slots
             );
-            let expected_inventory_bytes = std::iter::once(&shape.identities)
+            let shaped_outputs = std::iter::once(&shape.identities)
                 .chain(shape.node_details.iter())
                 .chain(shape.edge_details.iter())
                 .chain(shape.node_rows.iter())
                 .chain(shape.edge_rows.iter())
                 .chain(shape.edge_endpoints.iter())
-                .chain(std::iter::once(&shape.runtime_catalog))
+                .chain(std::iter::once(&shape.runtime_catalog));
+            let expected_payload_bytes = shaped_outputs
+                .clone()
                 .map(|name| {
                     session
                         .root
@@ -7171,10 +7275,22 @@ mod tests {
                         .len()
                 })
                 .sum::<u64>();
+            let expected_capability_bytes = shaped_outputs
+                .map(|name| {
+                    session
+                        .root
+                        .open_child_file(OsStr::new(&shape_receipt_name(name)))
+                        .unwrap()
+                        .metadata()
+                        .unwrap()
+                        .len()
+                })
+                .sum::<u64>();
             assert_eq!(
                 session.evidence().shaped_output_authentication_bytes,
-                expected_inventory_bytes
+                expected_capability_bytes
             );
+            assert!(expected_capability_bytes < expected_payload_bytes);
             assert!(session.evidence().shaped_output_authentication_operations > 0);
         }
     }
@@ -9321,7 +9437,8 @@ mod tests {
             .to_string();
         assert!(
             error.contains("authenticated graph file metadata changed")
-                || error.contains("digest or length changed"),
+                || error.contains("digest or length changed")
+                || error.contains("graph object source is not the declared regular file"),
             "unexpected corruption error: {error}"
         );
         assert_eq!(
