@@ -1192,7 +1192,10 @@ mod windows {
     use std::os::windows::io::AsRawHandle as _;
     use std::path::{Path, PathBuf};
 
-    use windows_sys::Win32::Foundation::{GENERIC_WRITE, LocalFree};
+    use windows_sys::Win32::Foundation::{
+        ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED, GENERIC_WRITE,
+        LocalFree,
+    };
     #[cfg(test)]
     use windows_sys::Win32::Security::Authorization::{
         ConvertSecurityDescriptorToStringSecurityDescriptorW, GetNamedSecurityInfoW, SE_FILE_OBJECT,
@@ -1414,9 +1417,30 @@ mod windows {
             )
         };
         if deleted == 0 {
-            Err(io::Error::last_os_error())
+            Err(readonly_safe_delete_error(io::Error::last_os_error()))
         } else {
             Ok(())
+        }
+    }
+
+    fn readonly_safe_delete_error(error: io::Error) -> io::Error {
+        let unsupported = [
+            ERROR_INVALID_FUNCTION as i32,
+            ERROR_NOT_SUPPORTED as i32,
+            ERROR_INVALID_PARAMETER as i32,
+        ];
+        if error
+            .raw_os_error()
+            .is_some_and(|code| unsupported.contains(&code))
+        {
+            io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "readonly-safe child deletion requires Windows 10 version 1709 or Windows Server version 1709 or newer: {error}"
+                ),
+            )
+        } else {
+            error
         }
     }
 
@@ -1844,6 +1868,19 @@ mod windows {
                 ),
                 ReplaceFileError::StateUnknown(_)
             ));
+        }
+
+        #[test]
+        fn readonly_safe_delete_maps_unsupported_platform_errors_actionably() {
+            let unsupported = readonly_safe_delete_error(io::Error::from_raw_os_error(
+                ERROR_NOT_SUPPORTED as i32,
+            ));
+            assert_eq!(unsupported.kind(), io::ErrorKind::Unsupported);
+            assert!(unsupported.to_string().contains("Windows 10 version 1709"));
+
+            let denied = readonly_safe_delete_error(io::Error::from_raw_os_error(5));
+            assert_eq!(denied.kind(), io::ErrorKind::PermissionDenied);
+            assert_eq!(denied.raw_os_error(), Some(5));
         }
 
         #[test]
@@ -2498,22 +2535,40 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn stable_directory_unlinks_exact_readonly_child_without_clearing_attributes() {
+    fn stable_directory_unlinks_exact_readonly_child_without_unsealing_hard_link() {
+        use std::io::Write as _;
+
         let root = tempfile::tempdir().unwrap();
         let stable = StableDirectory::open(root.path()).unwrap();
-        let path = root.path().join("readonly");
-        std::fs::write(&path, b"sealed").unwrap();
-        let identity = path_identity(&path).unwrap();
-        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        let temporary_path = root.path().join("temporary");
+        let installed_path = root.path().join("installed");
+        let mut temporary = stable.create_child_file(OsStr::new("temporary")).unwrap();
+        temporary.write_all(b"sealed").unwrap();
+        temporary.sync_all().unwrap();
+        let identity = file_identity(&temporary).unwrap();
+        std::fs::hard_link(&temporary_path, &installed_path).unwrap();
+        assert_eq!(path_identity(&installed_path).unwrap(), identity);
+        let mut permissions = temporary.metadata().unwrap().permissions();
         permissions.set_readonly(true);
-        std::fs::set_permissions(&path, permissions).unwrap();
-        assert!(std::fs::metadata(&path).unwrap().permissions().readonly());
+        temporary.set_permissions(permissions).unwrap();
+        assert!(temporary.metadata().unwrap().permissions().readonly());
+        assert!(
+            std::fs::metadata(&installed_path)
+                .unwrap()
+                .permissions()
+                .readonly()
+        );
 
         stable
-            .unlink_child_if_identity(OsStr::new("readonly"), identity)
+            .unlink_child_if_identity(OsStr::new("temporary"), identity)
             .unwrap();
 
-        assert!(!path.exists());
+        assert!(!temporary_path.exists());
+        assert_eq!(std::fs::read(&installed_path).unwrap(), b"sealed");
+        assert_eq!(path_identity(&installed_path).unwrap(), identity);
+        let installed = File::open(&installed_path).unwrap();
+        assert!(installed.metadata().unwrap().permissions().readonly());
+        assert_eq!(file_link_count(&installed).unwrap(), 1);
     }
 
     #[test]

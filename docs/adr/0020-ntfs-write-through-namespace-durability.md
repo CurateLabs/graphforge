@@ -42,7 +42,11 @@ replacement, and deterministic reconciliation without weakening
 GraphForge supports Windows durability only on fixed, writable local **NTFS**
 volumes whose storage stack honestly honors write-through completion. ReFS is
 stable unsupported/unproven and returns `GF_UNSUPPORTED_FILESYSTEM` before the
-project root is mutated.
+project root is mutated. The supported OS floor is Windows 10 version 1709 or
+Windows Server version 1709 because readonly-safe retained-handle deletion uses
+`FileDispositionInfoEx` with `FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE`.
+Older implementations fail with an actionable unsupported-platform error;
+GraphForge never clears a readonly attribute shared by a published hard link.
 
 For each probed file publication, GraphForge:
 
