@@ -545,6 +545,7 @@ test_suite(
         ":public_facade_remaining_conformance",
         ":public_lifecycle_conformance",
         ":release_load_construction",
+        ":resumable_construction_surface",
         ":scale_g500_ladder",
         ":scale_g500_scale20",
         ":strict_runtime_properties",
