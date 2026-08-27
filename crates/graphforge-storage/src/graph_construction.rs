@@ -743,6 +743,15 @@ pub struct GraphConstructionSession {
     _reservation: ProcessReservation,
 }
 
+impl Drop for GraphConstructionSession {
+    fn drop(&mut self) {
+        // Release the descriptor lock before the process reservation. Relying
+        // on platform-specific close semantics leaves a window where an
+        // immediate authenticated resume can observe the retired owner.
+        let _ = crate::file_lock::unlock(&self._session_lock);
+    }
+}
+
 impl GraphConstructionSession {
     /// Durably bind the sealed private inventory to the one target that the
     /// existing project publisher will stage. This records replay authority;
