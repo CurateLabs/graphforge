@@ -30,9 +30,17 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use graphforge_core::GfError;
 
 use crate::adjacency::{
-    ALL_RELATIONS_STEM, BuildEntry, CsrIndex, CsrRow, Direction, adjacency_dir, csr_from_entries,
-    usable_stem,
+    ALL_RELATIONS_STEM, BuildEntry, CsrIndex, CsrRow, Direction, adjacency_dir,
+    adjacency_relation_key, csr_from_entries, is_adjacency_relation_key,
 };
+
+fn normalized_relation_stem(stem: &str) -> std::borrow::Cow<'_, str> {
+    if stem == ALL_RELATIONS_STEM || is_adjacency_relation_key(stem) {
+        std::borrow::Cow::Borrowed(stem)
+    } else {
+        std::borrow::Cow::Owned(adjacency_relation_key(stem))
+    }
+}
 use crate::schemas::ADJACENCY_DELTA_SCHEMA;
 use crate::staging::RewriteBatch;
 
@@ -236,8 +244,9 @@ pub fn prune_delta_segments(project_dir: &Path, up_to: u64) {
 /// plus the chain's, for `stem`.
 ///
 /// `stem == _all` takes every delta edge; a per-relation `stem` takes edges
-/// whose `rel_type_name == stem` (and `usable_stem`, matching the builder, so a
-/// hostile relation name can never be materialized at a per-relation path).
+/// whose exact relation key matches `stem`. Raw names are normalized for
+/// compatibility; callers address the literal `_all` relation through its
+/// encoded key because `_all` itself remains the wildcard selector.
 ///
 /// Implementation: reconstruct the base `(src, edge, dst)` entries from the CSR,
 /// concatenate the filtered delta entries, and re-run
@@ -253,10 +262,11 @@ pub fn apply_delta_segments(
     chain: &[DeltaSegment],
 ) -> CsrIndex {
     let mut entries: Vec<BuildEntry> = base_entries(base, direction);
+    let stem = normalized_relation_stem(stem);
     let take_all = stem == ALL_RELATIONS_STEM;
     for seg in chain {
         for e in &seg.edges {
-            if take_all || (e.rel_type_name == stem && usable_stem(&e.rel_type_name)) {
+            if take_all || adjacency_relation_key(&e.rel_type_name) == stem {
                 entries.push((e.src_id, e.edge_id, e.dst_id));
             }
         }
@@ -344,13 +354,14 @@ pub fn overlay_delta_segments(
     direction: Direction,
     chain: &[DeltaSegment],
 ) -> CsrDeltaOverlay {
+    let stem = normalized_relation_stem(stem);
     let take_all = stem == ALL_RELATIONS_STEM;
     let mut delta_by_key: HashMap<u64, Vec<(u64, u64)>> = HashMap::new();
     let mut max_key = 0_u64;
     let mut saw_key = false;
     for seg in chain {
         for e in &seg.edges {
-            if take_all || (e.rel_type_name == stem && usable_stem(&e.rel_type_name)) {
+            if take_all || adjacency_relation_key(&e.rel_type_name) == stem {
                 let (key, neighbor) = match direction {
                     Direction::Out => (e.src_id, e.dst_id),
                     Direction::In => (e.dst_id, e.src_id),
