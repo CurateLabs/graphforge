@@ -2560,6 +2560,7 @@ mod tests {
                 .permissions()
                 .readonly()
         );
+        drop(temporary);
 
         stable
             .unlink_child_if_identity(OsStr::new("temporary"), identity)

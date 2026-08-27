@@ -2238,6 +2238,11 @@ where
         verify_and_seal_graph_object(&existing, digest, expected_length, &cas.diagnostic_root)?;
         false
     };
+    // Windows cannot open a deletion handle while the original temporary
+    // handle remains open without delete sharing. Publication and concurrent
+    // winner authentication are complete, so release it before exact-identity
+    // cleanup; the installed hard link remains sealed.
+    drop(temporary);
     cas.tmp
         .unlink_child_if_identity(&temporary_name, temporary_identity)
         .map_err(|error| {
