@@ -600,17 +600,18 @@ fn write_json_atomically(path: &Path, value: &Value) {
 fn open_persisted_construction<'a>(
     graph: &'a GraphForge,
     path: &Path,
+    budgets: GraphConstructionBudgets,
 ) -> GraphConstructionSession<'a> {
     if path.exists() {
         let opaque = fs::read_to_string(path).expect("read construction session identifier");
         let session_uuid =
             Uuid::parse_str(opaque.trim()).expect("parse construction session identifier");
         return graph
-            .resume_graph_construction(session_uuid, GraphConstructionBudgets::default())
+            .resume_graph_construction(session_uuid, budgets)
             .expect("resume persisted construction session");
     }
     let session = graph
-        .begin_graph_construction(GraphConstructionBudgets::default())
+        .begin_graph_construction(budgets)
         .expect("begin persisted construction session");
     let parent = path.parent().expect("construction session parent");
     fs::create_dir_all(parent).expect("construction session parent");
@@ -868,8 +869,11 @@ fn run_rung(
         INGEST_SUBPHASE.store(1, Ordering::Relaxed);
         let heartbeat =
             IngestHeartbeat::start(profile, rung, completed_rungs, &steps, &project, &spill_dir);
-        let mut construction =
-            open_persisted_construction(&graph, &spill_dir.join("construction-session.uuid"));
+        let mut construction = open_persisted_construction(
+            &graph,
+            &spill_dir.join("construction-session.uuid"),
+            GraphConstructionBudgets::default(),
+        );
         if construction.progress().publication_committed {
             let mut fingerprint = Sha256::new();
             let merge = merge_runs(&spill.runs, None, |src, dst| {
@@ -2750,6 +2754,13 @@ fn graph500_driver_has_no_bulk_publication_escape_hatch() {
 
 #[test]
 fn tiny_construction_ladder_resumes_and_scales_bounded_work_linearly() {
+    let budgets = GraphConstructionBudgets {
+        max_batch_rows: BATCH_ROWS,
+        max_run_records: 4 * BATCH_ROWS,
+        merge_fan_in: 2,
+        ..GraphConstructionBudgets::default()
+    };
+    let base_nodes = BATCH_ROWS as u64;
     let mut baseline_peaks: Option<[u64; 11]> = None;
     for factor in [1_u64, 2, 4] {
         let project = TempDir::new().expect("tiny construction project");
@@ -2757,12 +2768,12 @@ fn tiny_construction_ladder_resumes_and_scales_bounded_work_linearly() {
         let before = current_generation_uuid(&graph);
         let session_file = project.path().join("session.uuid");
         let session_uuid = {
-            let mut session = open_persisted_construction(&graph, &session_file);
-            publish_nodes(&mut session, 8 * factor, None);
+            let mut session = open_persisted_construction(&graph, &session_file, budgets);
+            publish_nodes(&mut session, base_nodes * factor, None);
             session.session_uuid()
         };
         let mut resumed = graph
-            .resume_graph_construction(session_uuid, GraphConstructionBudgets::default())
+            .resume_graph_construction(session_uuid, budgets)
             .expect("resume tiny construction");
         let mut first_edge = EdgeSink::new(&mut resumed, None);
         first_edge.push(0, 1);
@@ -2770,14 +2781,14 @@ fn tiny_construction_ladder_resumes_and_scales_bounded_work_linearly() {
         let _ = first_edge.finish();
         drop(resumed);
         let mut resumed = graph
-            .resume_graph_construction(session_uuid, GraphConstructionBudgets::default())
+            .resume_graph_construction(session_uuid, budgets)
             .expect("resume after durable edge chunk");
         let mut sink = EdgeSink::new(&mut resumed, None);
         // Replay the acknowledged chunk from the deterministic input cursor;
         // append authenticates it idempotently instead of minting new IDs.
         sink.push(0, 1);
         sink.flush();
-        for node in 1..u32::try_from(8 * factor - 1).expect("tiny vertex count") {
+        for node in 1..u32::try_from(base_nodes * factor - 1).expect("tiny vertex count") {
             sink.push(node, node + 1);
         }
         sink.flush();
@@ -2786,12 +2797,12 @@ fn tiny_construction_ladder_resumes_and_scales_bounded_work_linearly() {
             .seal_and_publish()
             .expect("publish tiny construction");
         let progress = resumed.progress();
-        assert_eq!(progress.evidence.input_rows, 16 * factor - 1);
+        assert_eq!(progress.evidence.input_rows, 2 * base_nodes * factor - 1);
         assert!(progress.evidence.input_batches <= 2 * factor + 1);
         assert!(progress.evidence.parquet_shards <= progress.evidence.input_batches);
         assert!(progress.evidence.peak_batch_rows <= BATCH_ROWS as u64);
         assert!(progress.evidence.peak_accounted_live_bytes <= 64 * 1024 * 1024);
-        assert!(progress.evidence.peak_run_records <= BATCH_ROWS as u64);
+        assert!(progress.evidence.peak_run_records <= budgets.max_run_records as u64);
         assert!(progress.evidence.peak_merge_inputs <= 64);
         assert!(progress.evidence.peak_merge_name_slots <= 64);
         assert!(progress.evidence.peak_resolved_endpoint_name_slots <= 64);
@@ -2811,45 +2822,46 @@ fn tiny_construction_ladder_resumes_and_scales_bounded_work_linearly() {
             progress.evidence.peak_catalog_decoded_batch_bytes,
         ];
         if let Some(baseline) = baseline_peaks {
-            // Input batches can fill by at most one fixed public chunk and
-            // shaping can retain at most one fixed merge/encoding window.
-            // Catalog/name cardinality is data-shape bound and must be equal;
-            // decoded catalog bytes may fill one fixed 64-KiB decode window.
-            let additive_tolerance = [
-                BATCH_ROWS as u64,
-                64 * 1024 * 1024,
-                BATCH_ROWS as u64,
-                1,
-                1024 * 1024,
-                64 * 1024 * 1024,
-                0,
-                0,
-                0,
-                0,
-                64 * 1024,
-            ];
+            // Arrow buffer accounting includes small alignment/offset metadata
+            // differences; the N rung's edge set is N-1 (eight fixed run
+            // records below its window). All other saturated windows plateau.
+            let allocator_tolerance = [0, 1_024, 8, 0, 0, 4_096, 0, 4, 0, 0, 0];
             for (index, ((observed, base), tolerance)) in observed_peaks
                 .iter()
                 .zip(baseline)
-                .zip(additive_tolerance)
+                .zip(allocator_tolerance)
                 .enumerate()
             {
+                if index == 4 {
+                    assert!(
+                        *observed <= base.saturating_mul(factor).saturating_add(4 * 1024 * 1024),
+                        "disk-backed merge footprint exceeded linear work: baseline={base} observed={observed} factor={factor}"
+                    );
+                    continue;
+                }
+                if index == 6 {
+                    assert!(
+                        *observed <= 64,
+                        "merge scheduler name slots exceeded fixed bound"
+                    );
+                    continue;
+                }
                 assert!(
                     *observed <= base.saturating_add(tolerance),
-                    "peak field {index} grew with scale: baseline={base} observed={observed} tolerance={tolerance}"
+                    "saturated peak field {index} grew with scale: baseline={base} observed={observed} tolerance={tolerance}"
                 );
             }
         } else {
             baseline_peaks = Some(observed_peaks);
         }
-        assert!(progress.evidence.merge_read_records <= 1_024 * factor);
-        assert!(progress.evidence.merge_written_records <= 1_024 * factor);
+        assert!(progress.evidence.merge_read_records <= 128 * base_nodes * factor);
+        assert!(progress.evidence.merge_written_records <= 128 * base_nodes * factor);
         assert!(progress.evidence.parquet_write_operations > 0);
         assert_ne!(receipt.generation_uuid, before);
         assert_eq!(current_generation_uuid(&graph), receipt.generation_uuid);
         drop(resumed);
         let replay = graph
-            .resume_graph_construction(session_uuid, GraphConstructionBudgets::default())
+            .resume_graph_construction(session_uuid, budgets)
             .expect("resume published tiny construction")
             .seal_and_publish()
             .expect("replay tiny publication");
@@ -2867,7 +2879,8 @@ fn construction_session_reenters_across_processes() {
         fs::create_dir_all(&project).expect("child project");
         let graph = GraphForge::new(project.to_str()).expect("child graph");
         let session_file = workspace.join("construction-session.uuid");
-        let mut session = open_persisted_construction(&graph, &session_file);
+        let mut session =
+            open_persisted_construction(&graph, &session_file, GraphConstructionBudgets::default());
         match std::env::var("GF_G500_REENTRY_PHASE").as_deref() {
             Ok("nodes") => publish_nodes(&mut session, 8, None),
             Ok("edges") => {

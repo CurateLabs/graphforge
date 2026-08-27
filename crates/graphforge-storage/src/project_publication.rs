@@ -1757,10 +1757,7 @@ fn replace_current(
             // single native replacement commit point. After replacement,
             // reconciliation owns the result and cancellation cannot undo it.
             if cancellation.as_mut().is_some_and(|cancelled| cancelled()) {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Interrupted,
-                    "publication cancelled at project.before_current_replace",
-                ));
+                return Err(std::io::Error::other(CancelledBeforeReplace));
             }
             Ok(())
         },
@@ -1793,8 +1790,7 @@ fn reconcile_current_replacement_error(
     // `Interrupted` is emitted only by the final predicate inside
     // `before_replace`; the native namespace operation has not started, so
     // committed=false is proven without consulting recovery-visible journals.
-    if matches!(error, AtomicPublishError::Io(error) if error.kind() == std::io::ErrorKind::Interrupted)
-    {
+    if matches!(error, AtomicPublishError::CancelledBeforeReplace) {
         return Err(GfError::Api {
             code: ApiErrorCode::Cancelled,
             message: format!(
@@ -2419,6 +2415,7 @@ pub(crate) fn write_journal(path: &Path, journal: &JournalRecord) -> Result<(), 
 pub(crate) enum AtomicPublishError {
     Io(std::io::Error),
     Replacement(graphforge_filesystem::ReplaceFileError),
+    CancelledBeforeReplace,
 }
 
 impl std::fmt::Display for AtomicPublishError {
@@ -2426,6 +2423,7 @@ impl std::fmt::Display for AtomicPublishError {
         match self {
             Self::Io(error) => error.fmt(formatter),
             Self::Replacement(error) => error.fmt(formatter),
+            Self::CancelledBeforeReplace => formatter.write_str("cancelled before replacement"),
         }
     }
 }
@@ -2434,9 +2432,26 @@ impl std::error::Error for AtomicPublishError {}
 
 impl From<std::io::Error> for AtomicPublishError {
     fn from(error: std::io::Error) -> Self {
-        Self::Io(error)
+        if let Some(source) = error.get_ref()
+            && source.is::<CancelledBeforeReplace>()
+        {
+            Self::CancelledBeforeReplace
+        } else {
+            Self::Io(error)
+        }
     }
 }
+
+#[derive(Debug)]
+struct CancelledBeforeReplace;
+
+impl std::fmt::Display for CancelledBeforeReplace {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("publication cancelled at project.before_current_replace")
+    }
+}
+
+impl std::error::Error for CancelledBeforeReplace {}
 
 pub(crate) fn publish_atomic_bytes(
     path: &Path,
@@ -4129,6 +4144,32 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.code(), "GF_PROJECT_CORRUPT");
+    }
+
+    #[test]
+    fn generic_eintr_is_reconciled_and_never_masquerades_as_cancellation() {
+        let root = project();
+        let interrupted = AtomicPublishError::from(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "injected unrelated EINTR",
+        ));
+        assert!(matches!(interrupted, AtomicPublishError::Io(_)));
+        let error = reconcile_current_replacement_error(
+            root.path(),
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            [0x42; 32],
+            &interrupted,
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "GF_PUBLICATION_FAILED");
+        assert!(error.to_string().contains("committed=false"));
+
+        let cancellation = AtomicPublishError::from(std::io::Error::other(CancelledBeforeReplace));
+        assert!(matches!(
+            cancellation,
+            AtomicPublishError::CancelledBeforeReplace
+        ));
     }
 
     #[test]
