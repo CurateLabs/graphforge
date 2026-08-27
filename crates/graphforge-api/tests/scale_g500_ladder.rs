@@ -973,6 +973,13 @@ fn run_rung(
             .seal_and_publish()
             .expect("publish rung construction");
         let construction_evidence = construction.progress().evidence;
+        let edge_batch_commits = INGEST_CHUNK_INDEX.load(Ordering::SeqCst);
+        let node_batch_commits = (1_u64 << rung.scale).div_ceil(BATCH_ROWS as u64);
+        assert_eq!(
+            construction_evidence.input_batches,
+            node_batch_commits.saturating_add(edge_batch_commits),
+            "authenticated node and edge batch receipts must cover construction input batches"
+        );
         let published_generation_sha256 =
             generation_identity_sha256(publication_receipt.generation_uuid);
         drop(construction);
@@ -1030,6 +1037,7 @@ fn run_rung(
                 "construction": {
                     "input_rows": construction_evidence.input_rows,
                     "input_batches": construction_evidence.input_batches,
+                    "edge_batch_commits": edge_batch_commits,
                     "parquet_shards": construction_evidence.parquet_shards,
                     "write_bytes": construction_evidence.write_bytes,
                     "write_operations": construction_evidence.write_operations,
@@ -1389,19 +1397,17 @@ impl<'a, 'graph> EdgeSink<'a, 'graph> {
                     &batch,
                 )
                 .expect("append construction edge chunk");
+            let committed_chunks = INGEST_CHUNK_INDEX.fetch_add(1, Ordering::SeqCst) + 1;
+            if std::env::var_os("GF_G500_S20_WORK_ROOT").is_some() {
+                S20_INGEST_COMMIT_RSS
+                    .lock()
+                    .expect("record committed-chunk RSS")
+                    .push((
+                        committed_chunks,
+                        current_rss_bytes().expect("committed-chunk RSS probe"),
+                    ));
+            }
             offset = end;
-        }
-        let committed_chunks =
-            u64::try_from(self.chunk_index.saturating_add(1)).unwrap_or(u64::MAX);
-        INGEST_CHUNK_INDEX.store(committed_chunks, Ordering::SeqCst);
-        if std::env::var_os("GF_G500_S20_WORK_ROOT").is_some() {
-            S20_INGEST_COMMIT_RSS
-                .lock()
-                .expect("record committed-chunk RSS")
-                .push((
-                    committed_chunks,
-                    current_rss_bytes().expect("committed-chunk RSS probe"),
-                ));
         }
         INGEST_SUBPHASE.store(3, Ordering::Relaxed);
         INGEST_SUBPHASE.store(4, Ordering::Relaxed);
