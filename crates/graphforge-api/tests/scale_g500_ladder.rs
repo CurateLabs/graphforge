@@ -769,7 +769,17 @@ fn run_rung(
     let temporary_workspace;
     let workspace = if let Ok(root) = std::env::var("GF_G500_LADDER_WORKSPACE") {
         PathBuf::from(root).join(&rung.id)
+    } else if let Ok(journal) = std::env::var("GF_G500_LADDER_JOURNAL_OUT") {
+        PathBuf::from(journal)
+            .parent()
+            .expect("ladder journal parent")
+            .join("workspace")
+            .join(&rung.id)
     } else {
+        assert_ne!(
+            rung.tier, "provisioned",
+            "provisioned rungs require GF_G500_LADDER_WORKSPACE or GF_G500_LADDER_JOURNAL_OUT"
+        );
         temporary_workspace = TempDir::new().expect("rung workspace");
         temporary_workspace.path().to_path_buf()
     };
@@ -2740,6 +2750,51 @@ fn tiny_construction_ladder_resumes_and_scales_bounded_work_linearly() {
         assert_eq!(replay.generation_uuid, receipt.generation_uuid);
         assert_eq!(current_generation_uuid(&graph), receipt.generation_uuid);
     }
+}
+
+#[test]
+fn construction_session_reenters_across_processes() {
+    if let Ok(workspace) = std::env::var("GF_G500_REENTRY_CHILD") {
+        let workspace = PathBuf::from(workspace);
+        let project = workspace.join("project");
+        fs::create_dir_all(&project).expect("child project");
+        let graph = GraphForge::new(project.to_str()).expect("child graph");
+        let session_file = workspace.join("construction-session.uuid");
+        let mut session = open_persisted_construction(&graph, &session_file);
+        match std::env::var("GF_G500_REENTRY_PHASE").as_deref() {
+            Ok("nodes") => publish_nodes(&mut session, 8, None),
+            Ok("edges") => {
+                let mut sink = EdgeSink::new(&mut session, None);
+                sink.push(0, 1);
+                sink.push(1, 2);
+                sink.flush();
+                let _ = sink.finish();
+                session.seal_and_publish().expect("child publish");
+            }
+            _ => panic!("unknown re-entry phase"),
+        }
+        return;
+    }
+
+    let workspace = TempDir::new().expect("re-entry workspace");
+    let run_child = |phase: &str| {
+        let status = Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "construction_session_reenters_across_processes",
+                "--nocapture",
+            ])
+            .env("GF_G500_REENTRY_CHILD", workspace.path())
+            .env("GF_G500_REENTRY_PHASE", phase)
+            .status()
+            .expect("run re-entry child");
+        assert!(status.success(), "re-entry child {phase} failed");
+    };
+    run_child("nodes");
+    run_child("edges");
+    let graph = GraphForge::new(workspace.path().join("project").to_str()).expect("reopen result");
+    assert_eq!(graph.node_count(NODE_LABEL).unwrap(), 8);
+    assert_eq!(scalar_count(&graph.execute(COUNT_EDGES).unwrap()), 2);
 }
 
 #[test]

@@ -109,6 +109,12 @@ stops — no larger rung is attempted and no SCALE-26 pass is claimed.
 > (`vmhwm` | `ps_sampled`) so a `ps_sampled` value is read as a floor. Run
 > provisioned certification rungs on **Linux**.
 
+Provisioned runs must set `GF_G500_LADDER_WORKSPACE` to a stable run directory.
+If omitted, the runner derives `workspace/<rung>` beside
+`GF_G500_LADDER_JOURNAL_OUT`; it refuses a provisioned rung when neither path is
+available. The fsynced opaque construction-session UUID and spill/project state
+therefore survive process replacement and are reused on re-entry.
+
 > Ingest-phase attribution: construction writes bounded node and edge Arrow
 > windows into immutable Parquet shards and retains only bounded merge/probe
 > state; accumulated topology remains disk-owned. While ingest runs, the atomic journal is
