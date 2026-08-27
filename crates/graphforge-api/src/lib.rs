@@ -1064,6 +1064,38 @@ impl GraphForge {
         }
     }
 
+    fn adjacency_provider_for_mode(
+        &self,
+        execution_mode: OntologyMode,
+    ) -> Arc<graphforge_exec::PersistentAdjacencyProvider> {
+        if self.tempdir.is_some() {
+            // Mutable workspaces have no immutable generation authority to
+            // authenticate a cross-query derived cache. Keep their provider
+            // query-scoped; a coarse generation counter is insufficient when
+            // one statement performs multiple topology mutations.
+            return Arc::new(
+                graphforge_exec::PersistentAdjacencyProvider::new_with_cache(
+                    self.dir.clone(),
+                    self.adjacency_cache_guard.path(),
+                    execution_mode,
+                ),
+            );
+        }
+        if execution_mode == self.ontology_mode {
+            return Arc::clone(&self.adjacency_provider);
+        }
+        Arc::new(
+            graphforge_exec::PersistentAdjacencyProvider::new_with_authenticated_cache(
+                self.dir.clone(),
+                self.adjacency_cache_guard.path(),
+                execution_mode,
+                graphforge_storage::adjacency::AdjacencySourceIdentity::from_generation(
+                    &self.resolved_generation,
+                ),
+            ),
+        )
+    }
+
     #[allow(clippy::too_many_lines)]
     fn prepare_observed_read(
         &self,
@@ -1155,20 +1187,7 @@ impl GraphForge {
                     | graphforge_ontology::ActivationMode::Advisory => OntologyMode::Advisory,
                 }
             });
-        let adjacency_provider = if execution_mode == self.ontology_mode {
-            Arc::clone(&self.adjacency_provider)
-        } else {
-            Arc::new(
-                graphforge_exec::PersistentAdjacencyProvider::new_with_authenticated_cache(
-                    self.dir.clone(),
-                    self.adjacency_cache_guard.path(),
-                    execution_mode,
-                    graphforge_storage::adjacency::AdjacencySourceIdentity::from_generation(
-                        &self.resolved_generation,
-                    ),
-                ),
-            )
-        };
+        let adjacency_provider = self.adjacency_provider_for_mode(execution_mode);
         let session = graphforge_exec::ExecutionSession::new_with_target_provider_and_resources(
             catalog,
             self.ontology.clone(),
@@ -1555,20 +1574,7 @@ impl GraphForge {
         // legacy workspace ontology profile remains exploratory. Its writes
         // must never fall back to `_untyped` host routing.
         let execution_mode = composition_mode.unwrap_or(self.ontology_mode);
-        let adjacency_provider = if execution_mode == self.ontology_mode {
-            Arc::clone(&self.adjacency_provider)
-        } else {
-            Arc::new(
-                graphforge_exec::PersistentAdjacencyProvider::new_with_authenticated_cache(
-                    self.dir.clone(),
-                    self.adjacency_cache_guard.path(),
-                    execution_mode,
-                    graphforge_storage::adjacency::AdjacencySourceIdentity::from_generation(
-                        &self.resolved_generation,
-                    ),
-                ),
-            )
-        };
+        let adjacency_provider = self.adjacency_provider_for_mode(execution_mode);
         let session = ExecutionSession::new_with_target_provider_and_resources(
             catalog,
             self.ontology.clone(),
