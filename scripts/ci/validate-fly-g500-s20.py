@@ -76,6 +76,8 @@ def validate(
     if lifecycle["source_authority_fingerprint"] != lifecycle["imported_authority_fingerprint"]:
         raise EvidenceError("source/import authority fingerprints differ")
     construction = value["rung"]["construction"]
+    if construction["input_batches"] != construction["edge_batch_commits"] + 128:
+        raise EvidenceError("construction batch count does not reconcile node and edge commits")
     if (
         construction["published_generation_sha256"]
         != construction["recovered_generation_sha256"]
@@ -175,6 +177,8 @@ def validate(
         or bands[2][1] != windows["final_committed_chunks"]
     ):
         raise EvidenceError("ingest late band must end at final committed progress")
+    if windows["final_committed_chunks"] != construction["edge_batch_commits"]:
+        raise EvidenceError("ingest RSS progress differs from authenticated edge commits")
     if bounded_working_set != value["rung"]["construction"]["peak_accounted_live_bytes"]:
         raise EvidenceError("ingest working-set budget differs from construction evidence")
     if windows["allowed_growth_bytes"] != allowed:

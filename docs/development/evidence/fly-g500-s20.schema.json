@@ -17,9 +17,10 @@
     },
     "construction": {
       "type": "object", "additionalProperties": false,
-      "required": ["input_rows", "input_batches", "parquet_shards", "write_bytes", "write_operations", "authentication_read_bytes", "authentication_read_operations", "peak_batch_rows", "peak_batch_bytes", "peak_accounted_live_bytes", "peak_run_records", "merge_read_records", "merge_written_records", "merge_groups", "peak_merge_inputs", "merge_read_bytes", "merge_written_bytes", "merge_fsync_operations", "parquet_read_bytes", "parquet_read_operations", "parquet_write_bytes", "parquet_write_operations", "retained_probe_read_bytes", "retained_probe_block_loads", "storage_transient_peak_allocated_bytes", "publication_commits", "recovery_replay", "published_generation_sha256", "recovered_generation_sha256"],
+      "required": ["input_rows", "input_batches", "edge_batch_commits", "parquet_shards", "write_bytes", "write_operations", "authentication_read_bytes", "authentication_read_operations", "peak_batch_rows", "peak_batch_bytes", "peak_accounted_live_bytes", "peak_run_records", "merge_read_records", "merge_written_records", "merge_groups", "peak_merge_inputs", "merge_read_bytes", "merge_written_bytes", "merge_fsync_operations", "parquet_read_bytes", "parquet_read_operations", "parquet_write_bytes", "parquet_write_operations", "retained_probe_read_bytes", "retained_probe_block_loads", "storage_transient_peak_allocated_bytes", "publication_commits", "recovery_replay", "published_generation_sha256", "recovered_generation_sha256"],
       "properties": {
         "input_rows": {"type": "integer", "minimum": 1}, "input_batches": {"type": "integer", "minimum": 1},
+        "edge_batch_commits": {"type": "integer", "minimum": 9},
         "parquet_shards": {"type": "integer", "minimum": 1}, "write_bytes": {"type": "integer", "minimum": 1},
         "write_operations": {"type": "integer", "minimum": 1}, "authentication_read_bytes": {"type": "integer", "minimum": 0},
         "authentication_read_operations": {"type": "integer", "minimum": 0}, "peak_batch_rows": {"type": "integer", "minimum": 1},

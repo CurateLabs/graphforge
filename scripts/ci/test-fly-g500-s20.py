@@ -77,6 +77,8 @@ def construction():
     value = dict.fromkeys(keys, 1)
     value.update(
         {
+            "input_batches": 428,
+            "edge_batch_commits": 300,
             "peak_accounted_live_bytes": 268_435_456,
             "publication_commits": 1,
             "recovery_replay": True,
@@ -1062,6 +1064,24 @@ def test_ingest_progress_bands_reject_gaps_and_missing_final_coverage():
     wrong_source["ingest_memory_windows"]["sampling_source"] = "timer_poll"
     with pytest.raises(validator.EvidenceError, match="schema violation"):
         validator.validate(wrong_source, "a" * 40, "sha256:" + "b" * 64, "den")
+
+
+def test_authenticated_edge_commit_count_is_required_and_cross_reconciled():
+    missing = evidence()
+    del missing["rung"]["construction"]["edge_batch_commits"]
+    with pytest.raises(validator.EvidenceError, match="schema violation"):
+        validator.validate(missing, "a" * 40, "sha256:" + "b" * 64, "den")
+
+    wrong_total = evidence()
+    wrong_total["rung"]["construction"]["input_batches"] += 1
+    with pytest.raises(validator.EvidenceError, match="batch count does not reconcile"):
+        validator.validate(wrong_total, "a" * 40, "sha256:" + "b" * 64, "den")
+
+    wrong_progress = evidence()
+    wrong_progress["rung"]["construction"]["edge_batch_commits"] += 1
+    wrong_progress["rung"]["construction"]["input_batches"] += 1
+    with pytest.raises(validator.EvidenceError, match="RSS progress differs"):
+        validator.validate(wrong_progress, "a" * 40, "sha256:" + "b" * 64, "den")
 
 
 def test_machine_relative_allowance_cannot_hide_growth_over_bounded_workset():
