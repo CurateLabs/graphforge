@@ -84,11 +84,11 @@ class Flyctl:
     def json(self, args: Sequence[str], *, timeout: float = 120) -> Any:
         return json.loads(self.run([*args, "--json"], timeout=timeout).stdout)
 
-    def resource_absent(self, kind: str, app: str, resource_id: str, *, timeout: float) -> bool:
+    def resource_absent(self, kind: str, app: str, resource_id: str, *, deadline: float) -> bool:
         """Return true only for an authenticated provider 404."""
         if kind not in {"machines", "volumes"}:
             raise ControllerError("unsupported provider absence probe")
-        token = self.run(["auth", "token"], timeout=timeout).stdout.strip()
+        token = self.run(["auth", "token"], timeout=_cleanup_timeout(deadline)).stdout.strip()
         if not token:
             raise ControllerError("Fly authentication token is unavailable during cleanup")
         request = urllib.request.Request(
@@ -96,7 +96,7 @@ class Flyctl:
             headers={"Authorization": f"Bearer {token}"},
         )
         try:
-            with urllib.request.urlopen(request, timeout=timeout):
+            with urllib.request.urlopen(request, timeout=_cleanup_timeout(deadline)):
                 return False
         except urllib.error.HTTPError as error:
             if error.code == 404:
@@ -604,10 +604,8 @@ def cleanup_owned(
             0, (teardown_end - time.monotonic()) / remaining_resources
         )
         for attempt in range(CLEANUP_ATTEMPTS):
-            remaining = max(0.1, slice_end - time.monotonic())
-            timeout = min(30.0, remaining)
             try:
-                result = fly.run(destroy, check=False, timeout=timeout)
+                result = fly.run(destroy, check=False, timeout=_cleanup_timeout(slice_end))
                 if result.returncode not in (0, 1):
                     errors.append(f"destroy rc={result.returncode}")
             except (subprocess.SubprocessError, ControllerError) as error:
@@ -615,9 +613,9 @@ def cleanup_owned(
             absent = False
             try:
                 if probe is not None:
-                    absent = fly.resource_absent(probe[0], app, probe[1], timeout=timeout)
+                    absent = fly.resource_absent(probe[0], app, probe[1], deadline=slice_end)
                 else:
-                    apps = fly.json(["apps", "list"], timeout=timeout)
+                    apps = fly.json(["apps", "list"], timeout=_cleanup_timeout(slice_end))
                     absent = not any(
                         item.get("Name") == app or item.get("name") == app for item in apps
                     )
@@ -659,17 +657,13 @@ def verify_absent(
     failures = []
     if machine_id:
         try:
-            if not fly.resource_absent(
-                "machines", app, machine_id, timeout=_cleanup_timeout(deadline)
-            ):
+            if not fly.resource_absent("machines", app, machine_id, deadline=deadline):
                 failures.append("owned Machine remains after cleanup")
         except (subprocess.SubprocessError, ControllerError) as error:
             failures.append(f"Machine absence probe failed: {type(error).__name__}")
     if volume_id:
         try:
-            if not fly.resource_absent(
-                "volumes", app, volume_id, timeout=_cleanup_timeout(deadline)
-            ):
+            if not fly.resource_absent("volumes", app, volume_id, deadline=deadline):
                 failures.append("owned volume remains after cleanup")
         except (subprocess.SubprocessError, ControllerError) as error:
             failures.append(f"volume absence probe failed: {type(error).__name__}")

@@ -594,34 +594,69 @@ def test_provider_absence_requires_authenticated_http_404(monkeypatch):
         return raise_error
 
     monkeypatch.setattr(controller.urllib.request, "urlopen", http_error(404))
-    assert fly.resource_absent("machines", "app", "machine", timeout=3)
+    assert fly.resource_absent(
+        "machines", "app", "machine", deadline=controller.time.monotonic() + 3
+    )
     monkeypatch.setattr(controller.urllib.request, "urlopen", http_error(401))
     with pytest.raises(controller.ControllerError, match="HTTP 401"):
-        fly.resource_absent("machines", "app", "machine", timeout=3)
+        fly.resource_absent("machines", "app", "machine", deadline=controller.time.monotonic() + 3)
+
+
+def test_provider_probe_recomputes_timeout_between_token_and_http(monkeypatch):
+    fly = controller.Flyctl()
+    clock = [0.0]
+    observed = []
+    monkeypatch.setattr(controller.time, "monotonic", lambda: clock[0])
+
+    def token(*_args, **kwargs):
+        observed.append(kwargs["timeout"])
+        clock[0] += kwargs["timeout"]
+        return argparse.Namespace(stdout="token\n")
+
+    def not_found(*_args, **kwargs):
+        observed.append(kwargs["timeout"])
+        raise controller.urllib.error.HTTPError("url", 404, "missing", None, None)
+
+    monkeypatch.setattr(fly, "run", token)
+    monkeypatch.setattr(controller.urllib.request, "urlopen", not_found)
+    assert fly.resource_absent("machines", "app", "machine", deadline=50)
+    assert observed == [30, 20]
 
 
 def test_cleanup_caps_every_call_inside_one_reservation_deadline(monkeypatch):
-    monkeypatch.setattr(controller, "CLEANUP_RESERVE_SECONDS", 1)
+    monkeypatch.setattr(controller, "CLEANUP_RESERVE_SECONDS", 100)
     monkeypatch.setattr(controller, "CLEANUP_ATTEMPTS", 1)
+    clock = [0.0]
+    monkeypatch.setattr(controller.time, "monotonic", lambda: clock[0])
     timeouts = []
+    calls = []
 
     class Fly:
-        def run(self, _command, **kwargs):
+        def run(self, command, **kwargs):
+            calls.append(command[:2])
             timeouts.append(kwargs["timeout"])
+            clock[0] += kwargs["timeout"]
             return argparse.Namespace(returncode=0)
 
-        def json(self, _command, **kwargs):
+        def json(self, command, **kwargs):
+            calls.append(command[:2])
             timeouts.append(kwargs["timeout"])
+            clock[0] += kwargs["timeout"]
             return [{"name": "gf-s20-unique"}]
 
         def resource_absent(self, *_args, **kwargs):
-            timeouts.append(kwargs["timeout"])
+            calls.append(["provider", _args[0]])
+            clock[0] = kwargs["deadline"]
             return False
 
     with pytest.raises(controller.ControllerError):
         controller.cleanup_owned(Fly(), "gf-s20-unique", "machine", "volume", True)
     assert timeouts
-    assert all(0 < timeout <= 1 for timeout in timeouts)
+    assert all(0 < timeout <= 30 for timeout in timeouts)
+    assert clock[0] <= 100
+    assert ["machine", "destroy"] in calls
+    assert ["volumes", "destroy"] in calls
+    assert ["apps", "destroy"] in calls
 
 
 def test_post_cleanup_absence_is_verified_child_to_parent():
