@@ -524,8 +524,10 @@ mod tests {
         assert_eq!(before.generation, after.generation);
         assert_ne!(before.fingerprint, after.fingerprint);
 
-        let mut limits = VectorLifecycleLimits::default();
-        limits.source_bytes = std::fs::metadata(&paths[0]).unwrap().len();
+        let limits = VectorLifecycleLimits {
+            source_bytes: std::fs::metadata(&paths[0]).unwrap().len(),
+            ..VectorLifecycleLimits::default()
+        };
         assert!(matches!(
             capture_topology_snapshot(dir.path(), limits, || Ok(())),
             Err(SearchArtifactError::ResourceExhausted {

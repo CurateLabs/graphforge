@@ -44,8 +44,8 @@ use graphforge_api::{
 };
 use pyo3::create_exception;
 use pyo3::exceptions::{
-    PyException, PyImportError, PyModuleNotFoundError, PyNotImplementedError, PyRuntimeError,
-    PyRuntimeWarning, PyTypeError,
+    PyException, PyImportError, PyModuleNotFoundError, PyNotImplementedError, PyRuntimeWarning,
+    PyTypeError,
 };
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyInt, PyList};
@@ -1605,7 +1605,7 @@ fn result_to_pyarrow(py: Python<'_>, result: &ExecutionResult) -> PyResult<Py<Py
         RecordBatch::new_empty(Arc::clone(&result.schema))
     } else {
         arrow::compute::concat_batches(&result.schema, &result.batches)
-            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?
+            .map_err(|error| to_pyerr(py, &GfError::Execution(error.to_string())))?
     };
     let batch = logical.to_pyarrow(py)?;
     let schema = result.schema.to_pyarrow(py)?;

@@ -324,6 +324,14 @@ mod tests {
             fs::read(target.path().join("topology/edges/knows.parquet")).unwrap(),
             b"edges"
         );
+        assert_eq!(
+            fs::read(target.path().join("derived/uuid-membership.json")).unwrap(),
+            b"manifest"
+        );
+        assert_eq!(
+            fs::read(target.path().join("derived/uuid-membership/run.uuidx")).unwrap(),
+            b"run"
+        );
         assert!(!target.path().join("writer.lock").exists());
     }
 

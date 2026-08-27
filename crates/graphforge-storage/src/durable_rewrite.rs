@@ -272,9 +272,11 @@ impl Drop for RewriteGuard {
 }
 
 fn acquire(root: &Path) -> Result<RewriteGuard, GfError> {
+    // This mutex owns ordering only; the durable journal owns recovery state.
+    // A panicking holder must not disable every later rewrite in the process.
     let process = PROCESS_REWRITE_LOCK
         .lock()
-        .map_err(|_| storage("process rewrite lock is poisoned"))?;
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // The lifecycle guard binds the named project root. Ephemeral mode avoids
     // repeating the expensive filesystem probe; durable projects have already
     // passed it at facade admission.
@@ -1073,6 +1075,21 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn poisoned_process_ordering_lock_does_not_disable_later_rewrites() {
+        std::thread::spawn(|| {
+            let _guard = PROCESS_REWRITE_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            panic!("poison process rewrite ordering lock");
+        })
+        .join()
+        .expect_err("poisoning thread must panic");
+
+        let root = TempDir::new().unwrap();
+        drop(acquire(root.path()).unwrap());
+    }
 
     fn entry(destination: &str, class: EntryClass) -> Entry {
         Entry {
