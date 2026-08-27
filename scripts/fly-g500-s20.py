@@ -50,6 +50,7 @@ JOURNAL_PATH = "/work/s20-journal.json"
 ACTIVE_PHASE_PATH = "/work/s20-active-phase.json"
 CLEANUP_ATTEMPTS = 60
 CLEANUP_POLL_SECONDS = 2.0
+AUTH_TOKEN_TTL_SECONDS = 300.0
 PHASES = {
     "generate",
     "ingest",
@@ -91,35 +92,87 @@ class Flyctl:
     def json(self, args: Sequence[str], *, timeout: float = 120) -> Any:
         return json.loads(self.run([*args, "--json"], timeout=timeout).stdout)
 
-    def auth_token(self, *, deadline: float | None = None) -> str:
+    def auth_token(
+        self, *, deadline: float | None = None, force_refresh: bool = False
+    ) -> str:
         cached = getattr(self, "_cached_auth_token", None)
-        if isinstance(cached, str) and cached:
+        fetched_at = getattr(self, "_cached_auth_token_at", 0.0)
+        if (
+            not force_refresh
+            and isinstance(cached, str)
+            and cached
+            and time.monotonic() - fetched_at < AUTH_TOKEN_TTL_SECONDS
+        ):
             return cached
         timeout = _cleanup_timeout(deadline) if deadline is not None else 120
-        token = self.run(["auth", "token"], timeout=timeout).stdout.strip()
+        token = self.run(["auth", "token", "--quiet"], timeout=timeout).stdout.strip()
         if not token:
             raise ControllerError("Fly authentication token is unavailable")
         self._cached_auth_token = token
+        self._cached_auth_token_at = time.monotonic()
         return token
+
+    def api_json(
+        self,
+        method: str,
+        path: str,
+        *,
+        data: dict[str, Any] | None = None,
+        timeout: float = 30,
+        deadline: float | None = None,
+        absent_ok: bool = False,
+    ) -> Any:
+        """Call the Machines API, refreshing once on authentication expiry."""
+        for attempt in range(2):
+            token = self.auth_token(deadline=deadline, force_refresh=attempt == 1)
+            headers = {"Authorization": f"Bearer {token}"}
+            encoded = None
+            if data is not None:
+                headers["Content-Type"] = "application/json"
+                encoded = json.dumps(data).encode()
+            request = urllib.request.Request(
+                f"https://api.machines.dev{path}",
+                data=encoded,
+                headers=headers,
+                method=method,
+            )
+            request_timeout = _cleanup_timeout(deadline) if deadline is not None else timeout
+            try:
+                with urllib.request.urlopen(request, timeout=request_timeout) as response:
+                    body = response.read()
+                    return json.loads(body) if body else None
+            except urllib.error.HTTPError as error:
+                if error.code == 401 and attempt == 0:
+                    continue
+                if error.code == 404 and absent_ok:
+                    return None
+                raise ControllerError(f"Fly API returned HTTP {error.code}") from None
+            except (urllib.error.URLError, TimeoutError):
+                raise ControllerError("Fly API connection failed") from None
+        raise ControllerError("Fly API authentication refresh failed")
 
     def resource_absent(self, kind: str, app: str, resource_id: str, *, deadline: float) -> bool:
         """Return true only for an authenticated provider 404."""
         if kind not in {"machines", "volumes"}:
             raise ControllerError("unsupported provider absence probe")
-        token = self.auth_token(deadline=deadline)
-        request = urllib.request.Request(
-            f"https://api.machines.dev/v1/apps/{app}/{kind}/{resource_id}",
-            headers={"Authorization": f"Bearer {token}"},
+        return (
+            self.api_json(
+                "GET",
+                f"/v1/apps/{app}/{kind}/{resource_id}",
+                deadline=deadline,
+                absent_ok=True,
+            )
+            is None
         )
-        try:
-            with urllib.request.urlopen(request, timeout=_cleanup_timeout(deadline)):
-                return False
-        except urllib.error.HTTPError as error:
-            if error.code == 404:
-                return True
-            raise ControllerError(f"Fly {kind} absence probe returned HTTP {error.code}") from None
-        except urllib.error.URLError:
-            raise ControllerError(f"Fly {kind} absence probe failed") from None
+
+    def machine_runtime(self, app: str, machine_id: str) -> dict[str, Any]:
+        """Read Machine runtime state from the stable authenticated provider API."""
+        value = self.api_json(
+            "GET", f"/v1/apps/{app}/machines/{machine_id}", absent_ok=True
+        )
+        if value is None:
+            return {"state": "destroyed", "oom": False}
+        return normalize_machine_runtime(value)
 
 
 def validate_inputs(args: argparse.Namespace) -> None:
@@ -734,7 +787,7 @@ def create_machine(
     digest: str,
     source_snapshot: str,
 ) -> dict[str, Any]:
-    token = fly.run(["auth", "token"]).stdout.strip()
+    token = fly.auth_token()
     if not token:
         raise ControllerError("Fly authentication token is unavailable")
     request = urllib.request.Request(
@@ -784,6 +837,12 @@ def cleanup_owned(
 ) -> None:
     """Destroy only identifiers observed from resources created in this invocation."""
     deadline = time.monotonic() + CLEANUP_RESERVE_SECONDS
+    attempt_failures = []
+    if isinstance(fly, Flyctl):
+        try:
+            fly.auth_token(deadline=deadline, force_refresh=True)
+        except (ControllerError, subprocess.SubprocessError):
+            attempt_failures.append("teardown credential refresh failed")
     resources = []
     if machine_id:
         resources.append(
@@ -803,7 +862,6 @@ def cleanup_owned(
         )
     if app_created:
         resources.append(("app", ["apps", "destroy", app, "--yes"], None))
-    attempt_failures = []
     for resource_index, (label, destroy, probe) in enumerate(resources):
         errors = []
         # Divide the remaining teardown window so one stuck child cannot starve
@@ -881,6 +939,8 @@ def verify_absent(
     deadline: float | None = None,
 ) -> None:
     deadline = deadline if deadline is not None else time.monotonic() + 60
+    if isinstance(fly, Flyctl):
+        fly.auth_token(deadline=deadline, force_refresh=True)
     failures = []
     if machine_id:
         try:
@@ -924,20 +984,64 @@ def observed_phase(path: Path) -> str:
 
 
 def terminal_machine_diagnostic(machine: Any, phase: str) -> dict[str, str] | None:
-    if not isinstance(machine, dict):
-        raise ControllerError("Machine status response is malformed")
+    if (
+        not isinstance(machine, dict)
+        or set(machine) != {"state", "oom"}
+        or not isinstance(machine.get("oom"), bool)
+    ):
+        raise ControllerError("normalized Machine runtime response is malformed")
     state = machine.get("state")
     if state not in {"stopped", "destroyed"}:
         return None
-    events = machine.get("events", [])
-    encoded = json.dumps(events, sort_keys=True).lower() if isinstance(events, list) else ""
-    code = "machine_oom" if "oom" in encoded or "out of memory" in encoded else "machine_exit"
+    code = "machine_oom" if machine["oom"] else "machine_exit"
     return {
         "schema": "graphforge-fly-g500-s20-diagnostic/1",
         "status": "failure",
         "phase": phase,
         "code": code,
     }
+
+
+def normalize_machine_runtime(machine: Any) -> dict[str, Any]:
+    """Reduce an extensible provider response to a closed state/OOM projection."""
+    if not isinstance(machine, dict):
+        raise ControllerError("Fly Machine runtime response is malformed")
+    state = machine.get("state")
+    if state not in {
+        "created",
+        "starting",
+        "started",
+        "stopping",
+        "stopped",
+        "suspended",
+        "destroying",
+        "destroyed",
+        "replacing",
+    }:
+        raise ControllerError("Fly Machine runtime state is unrecognized")
+    oom = False
+    events = machine.get("events", [])
+    if isinstance(events, list):
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            request = event.get("request")
+            exit_event = request.get("exit_event") if isinstance(request, dict) else None
+            monitor_event = (
+                request.get("monitor_event", request.get("MonitorEvent"))
+                if isinstance(request, dict)
+                else None
+            )
+            monitor_exit = (
+                monitor_event.get("exit_event") if isinstance(monitor_event, dict) else None
+            )
+            if (
+                isinstance(exit_event, dict) and exit_event.get("oom_killed") is True
+            ) or (
+                isinstance(monitor_exit, dict) and monitor_exit.get("oom_killed") is True
+            ):
+                oom = True
+    return {"state": state, "oom": oom}
 
 
 def validate_container_result(value: Any) -> dict[str, str]:
@@ -1084,7 +1188,7 @@ def execute(
                 if phase == "runner":
                     phase = observed_phase(journal_file)
                 terminal = terminal_machine_diagnostic(
-                    fly.json(["machine", "status", machine_id, "--app", args.app_name]), phase
+                    fly.machine_runtime(args.app_name, machine_id), phase
                 )
                 if terminal:
                     args.diagnostic_out.write_text(

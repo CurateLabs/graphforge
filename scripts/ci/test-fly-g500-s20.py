@@ -7,7 +7,9 @@ from decimal import Decimal
 import importlib.util
 import json
 from pathlib import Path
+import shutil
 import subprocess
+import urllib.error
 
 import pytest
 
@@ -1267,13 +1269,236 @@ def test_terminal_machine_oom_uses_last_allowlisted_phase(tmp_path):
     active.write_text(json.dumps({"phase": "ingest", "private": "/secret"}))
     assert controller.observed_phase(active) == "ingest"
     assert controller.terminal_machine_diagnostic(
-        {"state": "stopped", "events": [{"type": "oom", "secret": "hidden"}]}, "ingest"
+        controller.normalize_machine_runtime(
+            {
+                "state": "stopped",
+                "events": [{"request": {"exit_event": {"oom_killed": True}}}],
+            }
+        ),
+        "ingest",
     ) == {
         "schema": "graphforge-fly-g500-s20-diagnostic/1",
         "status": "failure",
         "phase": "ingest",
         "code": "machine_oom",
     }
+
+
+def test_machine_runtime_uses_authenticated_api_and_closed_projection(monkeypatch):
+    observed = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "id": "provider-id",
+                    "state": "stopped",
+                    "private": "must-not-leak",
+                    "events": [
+                        {
+                            "type": "exit",
+                            "request": {
+                                "exit_event": {"oom_killed": True}
+                            },
+                        }
+                    ],
+                }
+            ).encode()
+
+    def urlopen(request, **kwargs):
+        observed.append((request.full_url, request.headers, kwargs))
+        return Response()
+
+    monkeypatch.setattr(controller.urllib.request, "urlopen", urlopen)
+    fly = controller.Flyctl()
+    fly._cached_auth_token = "token"
+    fly._cached_auth_token_at = controller.time.monotonic()
+    assert fly.machine_runtime("gf-s20-owned", "machine-observed") == {
+        "state": "stopped",
+        "oom": True,
+    }
+    assert observed[0][0].endswith("/apps/gf-s20-owned/machines/machine-observed")
+    assert observed[0][1]["Authorization"] == "Bearer token"
+    assert observed[0][2]["timeout"] == 30
+
+
+def test_machine_runtime_oom_uses_only_official_boolean_fields():
+    assert controller.normalize_machine_runtime(
+        {
+            "state": "stopped",
+            "events": [
+                {"request": {"MonitorEvent": {"exit_event": {"oom_killed": True}}}}
+            ],
+        }
+    )["oom"] is True
+    assert controller.normalize_machine_runtime(
+        {
+            "state": "stopped",
+            "events": [
+                {
+                    "type": "exit",
+                    "secret": "out of memory",
+                    "request": {"exit_event": {"oom_killed": False}},
+                }
+            ],
+        }
+    )["oom"] is False
+    for unsupported in ("oom", "out_of_memory"):
+        assert controller.normalize_machine_runtime(
+            {"state": "stopped", "events": [{"type": unsupported}]}
+        )["oom"] is False
+
+
+def test_machine_runtime_normalizes_provider_404_to_destroyed(monkeypatch):
+    def missing(*_args, **_kwargs):
+        raise urllib.error.HTTPError("url", 404, "not found", {}, None)
+
+    monkeypatch.setattr(controller.urllib.request, "urlopen", missing)
+    fly = controller.Flyctl()
+    fly._cached_auth_token = "token"
+    fly._cached_auth_token_at = controller.time.monotonic()
+    assert fly.machine_runtime("gf-s20-owned", "machine-observed") == {
+        "state": "destroyed",
+        "oom": False,
+    }
+
+
+def test_api_refreshes_expired_token_once_on_401_without_leaking_it(monkeypatch):
+    tokens = []
+    responses = [401, {"state": "started"}]
+
+    class Response:
+        def __init__(self, value):
+            self.value = value
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(self.value).encode()
+
+    def urlopen(request, **_kwargs):
+        tokens.append(request.headers["Authorization"])
+        value = responses.pop(0)
+        if value == 401:
+            raise urllib.error.HTTPError("url", 401, "unauthorized", {}, None)
+        return Response(value)
+
+    fly = controller.Flyctl()
+    issued = iter(("expired-test-token", "fresh-test-token"))
+    monkeypatch.setattr(
+        fly,
+        "auth_token",
+        lambda **_kwargs: next(issued),
+    )
+    monkeypatch.setattr(controller.urllib.request, "urlopen", urlopen)
+    assert fly.api_json("GET", "/v1/apps/app/machines/id") == {"state": "started"}
+    assert tokens == ["Bearer expired-test-token", "Bearer fresh-test-token"]
+
+
+def test_cleanup_forces_credential_refresh_before_teardown_and_final_proof(monkeypatch):
+    refreshes = []
+    fly = controller.Flyctl()
+    monkeypatch.setattr(
+        fly,
+        "auth_token",
+        lambda **kwargs: refreshes.append(kwargs.get("force_refresh")) or "test-token",
+    )
+    monkeypatch.setattr(fly, "json", lambda *_args, **_kwargs: [])
+    controller.cleanup_owned(fly, "gf-s20-owned", None, None, True)
+    assert refreshes == [True, True]
+
+
+def test_failed_teardown_token_refresh_does_not_skip_any_destroy(monkeypatch):
+    calls = []
+
+    class Fly(controller.Flyctl):
+        def auth_token(self, **_kwargs):
+            raise controller.ControllerError("test credential failure")
+
+        def run(self, command, **_kwargs):
+            calls.append(command)
+            return argparse.Namespace(returncode=0)
+
+        def resource_absent(self, *_args, **_kwargs):
+            return True
+
+        def json(self, command, **_kwargs):
+            calls.append(command)
+            return []
+
+    monkeypatch.setattr(controller, "CLEANUP_ATTEMPTS", 1)
+    with pytest.raises(controller.ControllerError, match="credential refresh"):
+        controller.cleanup_owned(
+            Fly(), "gf-s20-owned", "machine-observed", "volume-observed", True
+        )
+    assert [command[:2] for command in calls if command[1] == "destroy"] == [
+        ["machine", "destroy"],
+        ["volumes", "destroy"],
+        ["apps", "destroy"],
+    ]
+
+
+def test_attempt_two_regression_monitor_never_uses_machine_status_cli():
+    calls = []
+
+    class Fly:
+        def machine_runtime(self, app, machine_id):
+            calls.append((app, machine_id))
+            return {"state": "stopped", "oom": False}
+
+        def json(self, command, **_kwargs):
+            assert command[:2] != ["machine", "status"]
+            return []
+
+    diagnostic = controller.terminal_machine_diagnostic(
+        Fly().machine_runtime("gf-s20-owned", "machine-observed"), "runner"
+    )
+    assert diagnostic == {
+        "schema": "graphforge-fly-g500-s20-diagnostic/1",
+        "status": "failure",
+        "phase": "runner",
+        "code": "machine_exit",
+    }
+    assert calls == [("gf-s20-owned", "machine-observed")]
+
+
+@pytest.mark.skipif(shutil.which("flyctl") is None, reason="flyctl is not installed")
+@pytest.mark.parametrize(
+    ("command", "required_flags"),
+    [
+        (("apps", "create"), ("--org",)),
+        (("apps", "list"), ("--json",)),
+        (
+            ("volumes", "create"),
+            ("--app", "--region", "--size", "--scheduled-snapshots", "--yes", "--json"),
+        ),
+        (("machine", "destroy"), ("--app", "--force")),
+        (("volumes", "destroy"), ("--app", "--yes")),
+        (("apps", "destroy"), ("--yes",)),
+        (("auth", "docker"), ()),
+        (("auth", "token"), ()),
+        (("ssh", "sftp", "get"), ("--app", "--machine")),
+        (("machine", "exec"), ("--app",)),
+    ],
+)
+def test_installed_flyctl_supports_every_controller_cli_flag(command, required_flags):
+    result = subprocess.run(
+        ["flyctl", *command, "--help"], text=True, capture_output=True, check=False
+    )
+    assert result.returncode == 0, result.stderr
+    output = result.stdout + result.stderr
+    for flag in required_flags:
+        assert flag in output
 
 
 def test_closed_evidence_accepts_only_pinned_sanitized_s20():
