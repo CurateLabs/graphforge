@@ -8801,6 +8801,15 @@ mod tests {
                 .iter()
                 .any(|entry| { entry.relative_path == "topology/uuid-membership/manifest.json" })
         );
+        let current_path = root.path().join("CURRENT");
+        let current_bytes = std::fs::read(&current_path).unwrap();
+        std::fs::write(&current_path, b"concurrently-advanced-current\n").unwrap();
+        assert_eq!(
+            compact_parent_surrogate_tails(root.path(), &inventory).unwrap(),
+            Some((2, 0)),
+            "pinned compact-parent tails must not consult mutable CURRENT"
+        );
+        std::fs::write(&current_path, current_bytes).unwrap();
         let materialized = TempDir::new().unwrap();
         let materialized_graph = materialized.path().join("graph");
         std::fs::create_dir(&materialized_graph).unwrap();

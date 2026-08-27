@@ -2109,15 +2109,7 @@ where
     let bucket = cas.digest_bucket(digest, true)?;
     let destination_name = std::ffi::OsStr::new(&digest[2..]);
     if let Ok(file) = bucket.open_child_file(destination_name) {
-        verify_file(file, digest, expected_length, &cas.diagnostic_root)?;
-        let file = bucket.open_child_file(destination_name).map_err(|error| {
-            storage(
-                "reopen graph object for sealing",
-                &cas.diagnostic_root,
-                error,
-            )
-        })?;
-        seal_graph_object(&file, &cas.diagnostic_root)?;
+        verify_and_seal_graph_object(&file, digest, expected_length, &cas.diagnostic_root)?;
         return Ok(GraphObjectInstallEvidence {
             reused_existing: true,
             ..GraphObjectInstallEvidence::default()
@@ -2225,6 +2217,22 @@ fn verify_file(
         return Err(validation("graph object digest does not match its address"));
     }
     Ok(())
+}
+
+fn verify_and_seal_graph_object(
+    file: &File,
+    digest: &str,
+    expected_length: u64,
+    diagnostic: &Path,
+) -> Result<(), GfError> {
+    verify_file(
+        file.try_clone()
+            .map_err(|error| storage("clone graph object for authentication", diagnostic, error))?,
+        digest,
+        expected_length,
+        diagnostic,
+    )?;
+    seal_graph_object(file, diagnostic)
 }
 
 fn seal_graph_object(file: &File, diagnostic: &Path) -> Result<(), GfError> {
@@ -2775,6 +2783,29 @@ mod tests {
         let mut decoded = Vec::new();
         reader.read_to_end(&mut decoded).unwrap();
         assert_eq!(decoded, payload);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reuse_seals_the_authenticated_descriptor_not_a_replaced_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let payload = b"descriptor-bound payload";
+        let (digest, _) = install_graph_object_bytes(root.path(), payload).unwrap();
+        let path = graph_object_path(root.path(), &digest).unwrap();
+        let displaced = path.with_extension("displaced");
+        let descriptor = File::open(&path).unwrap();
+
+        fs::rename(&path, &displaced).unwrap();
+        fs::set_permissions(&displaced, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::write(&path, b"hostile replacement").unwrap();
+        verify_and_seal_graph_object(&descriptor, &digest, payload.len() as u64, root.path())
+            .unwrap();
+
+        assert!(fs::metadata(&displaced).unwrap().permissions().readonly());
+        assert!(!fs::metadata(&path).unwrap().permissions().readonly());
+        assert!(open_graph_object_by_digest(root.path(), &digest, payload.len() as u64).is_err());
     }
 
     #[cfg(unix)]
