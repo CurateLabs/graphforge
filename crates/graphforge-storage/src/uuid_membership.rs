@@ -1074,6 +1074,26 @@ pub(crate) fn pin_uuid_construction_snapshot(
     Ok(token)
 }
 
+#[allow(clippy::struct_field_names)]
+pub(crate) struct ConstructionReferenceAuthentication<'a> {
+    pub(crate) source_root: &'a str,
+    pub(crate) source_root_volume: u64,
+    pub(crate) source_root_file_id: &'a str,
+    pub(crate) source_path: &'a str,
+    pub(crate) source_volume: u64,
+    pub(crate) source_file_id: &'a str,
+    pub(crate) target_path: &'a str,
+    pub(crate) bytes: u64,
+    pub(crate) sha256: &'a str,
+    pub(crate) parent_manifest_sha256: &'a str,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ConstructionReferenceAuthenticationWork {
+    pub(crate) global_revalidation_bytes: u64,
+    pub(crate) referenced_payload_bytes: u64,
+}
+
 impl AuthenticatedUuidIndexSnapshot {
     fn open_retained_file(&self, record: &FileRecord) -> Result<File, GfError> {
         let (held, expected) = self
@@ -1135,40 +1155,75 @@ impl AuthenticatedUuidIndexSnapshot {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn authenticate_construction_reference(
+    pub(crate) fn authenticate_construction_references(
         &self,
-        source_root: &str,
-        source_root_volume: u64,
-        source_root_file_id: &str,
-        source_path: &str,
-        source_volume: u64,
-        source_file_id: &str,
-        target_path: &str,
-        bytes: u64,
-        sha256: &str,
-        parent_manifest_sha256: &str,
-    ) -> Result<(), GfError> {
+        references: &[ConstructionReferenceAuthentication<'_>],
+    ) -> Result<ConstructionReferenceAuthenticationWork, GfError> {
+        self.authenticate_construction_references_with(references, || {})
+    }
+
+    fn authenticate_construction_references_with(
+        &self,
+        references: &[ConstructionReferenceAuthentication<'_>],
+        before_final_revalidation: impl FnOnce(),
+    ) -> Result<ConstructionReferenceAuthenticationWork, GfError> {
         self.revalidate()?;
-        if source_root != self.graph_root_path.to_string_lossy()
-            || source_root_volume != self.graph_root_identity.volume_serial
-            || source_root_file_id != hex_bytes(&self.graph_root_identity.file_id)
-            || parent_manifest_sha256 != self.manifest_sha256
-            || !target_path.starts_with(&format!("{INDEX_DIR}/"))
+        let mut referenced_payload_bytes = 0_u64;
+        for reference in references {
+            referenced_payload_bytes = referenced_payload_bytes
+                .saturating_add(self.authenticate_construction_reference_once(reference)?);
+        }
+        before_final_revalidation();
+        self.revalidate()?;
+        Ok(ConstructionReferenceAuthenticationWork {
+            global_revalidation_bytes: self.snapshot_authentication_bytes().saturating_mul(2),
+            referenced_payload_bytes,
+        })
+    }
+
+    fn snapshot_authentication_bytes(&self) -> u64 {
+        let manifest_bytes = self
+            .manifest_file
+            .metadata()
+            .map_or(0, |metadata| metadata.len());
+        self.manifest
+            .runs
+            .iter()
+            .fold(manifest_bytes, |total, run| {
+                total
+                    .saturating_add(run.identities.count.saturating_mul(IDENTITY_RECORD_BYTES))
+                    .saturating_add(
+                        run.node_surrogates
+                            .count
+                            .saturating_mul(NODE_LOOKUP_RECORD_BYTES),
+                    )
+            })
+    }
+
+    fn authenticate_construction_reference_once(
+        &self,
+        reference: &ConstructionReferenceAuthentication<'_>,
+    ) -> Result<u64, GfError> {
+        if reference.source_root != self.graph_root_path.to_string_lossy()
+            || reference.source_root_volume != self.graph_root_identity.volume_serial
+            || reference.source_root_file_id != hex_bytes(&self.graph_root_identity.file_id)
+            || reference.parent_manifest_sha256 != self.manifest_sha256
+            || !reference.target_path.starts_with(&format!("{INDEX_DIR}/"))
         {
             return Err(storage_err(
                 "retained construction reference authority changed",
             ));
         }
-        let name = target_path
+        let name = reference
+            .target_path
             .strip_prefix(&format!("{INDEX_DIR}/"))
             .ok_or_else(|| storage_err("retained construction target path is invalid"))?;
         let expected_source = self
             .cas_source_paths
             .as_ref()
             .and_then(|paths| paths.get(name))
-            .map_or(target_path, |(path, _, _)| path.as_str());
-        if source_path != expected_source {
+            .map_or(reference.target_path, |(path, _, _)| path.as_str());
+        if reference.source_path != expected_source {
             return Err(storage_err("retained construction source path changed"));
         }
         let record = self
@@ -1200,26 +1255,26 @@ impl AuthenticatedUuidIndexSnapshot {
             digest.update(&block[..count]);
             actual_bytes = actual_bytes.saturating_add(count as u64);
         }
-        if identity.volume_serial != source_volume
-            || hex_bytes(&identity.file_id) != source_file_id
-            || bytes != expected_bytes
+        if identity.volume_serial != reference.source_volume
+            || hex_bytes(&identity.file_id) != reference.source_file_id
+            || reference.bytes != expected_bytes
             || actual_bytes != expected_bytes
-            || sha256 != record.sha256
+            || reference.sha256 != record.sha256
             || hex_bytes(&digest.finalize()) != record.sha256
         {
             return Err(storage_err(format!(
                 "retained construction reference changed: volume={} expected_volume={} file_id={} expected_file_id={} bytes={} expected_bytes={} reference_sha={} manifest_sha={}",
                 identity.volume_serial,
-                source_volume,
+                reference.source_volume,
                 hex_bytes(&identity.file_id),
-                source_file_id,
+                reference.source_file_id,
                 actual_bytes,
                 expected_bytes,
-                sha256,
+                reference.sha256,
                 record.sha256
             )));
         }
-        self.revalidate()
+        Ok(actual_bytes)
     }
 
     pub(crate) fn open_at_generation(project_dir: &Path, generation: u64) -> Result<Self, GfError> {
@@ -6080,6 +6135,128 @@ mod tests {
         .unwrap_err();
         assert!(
             error.to_string().contains("block authentication"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn compact_retained_reference_authentication_is_batched_and_linear() {
+        let source = tempfile::tempdir().unwrap();
+        crate::generation::force_bump_topology_generation_for_test(source.path()).unwrap();
+        append_uuid_membership_delta(
+            source.path(),
+            1,
+            &[(Uuid::from_u128(1), 1), (Uuid::from_u128(2), 2)],
+            &[Uuid::from_u128(100)],
+        )
+        .unwrap();
+        crate::generation::force_bump_topology_generation_for_test(source.path()).unwrap();
+        append_uuid_membership_delta(
+            source.path(),
+            2,
+            &[(Uuid::from_u128(3), 3)],
+            &[Uuid::from_u128(101)],
+        )
+        .unwrap();
+        let (inventory, _) = crate::capture_graph_files(source.path()).unwrap();
+
+        let container = tempfile::tempdir().unwrap();
+        crate::open_or_initialize_project(container.path()).unwrap();
+        let lease = crate::begin_graph_object_publication(container.path()).unwrap();
+        let paths = inventory
+            .files
+            .iter()
+            .map(|entry| PathBuf::from(&entry.relative_path))
+            .collect::<Vec<_>>();
+        crate::append_graph_files_v2(
+            &lease,
+            source.path(),
+            &mut crate::GraphManifestState::empty(),
+            &paths,
+            &[],
+        )
+        .unwrap();
+        drop(lease);
+
+        let snapshot = AuthenticatedUuidIndexSnapshot::open_from_compact_inventory(
+            container.path(),
+            &inventory,
+            2,
+        )
+        .unwrap();
+        let retained = snapshot
+            .manifest
+            .runs
+            .iter()
+            .flat_map(|run| [&run.identities, &run.node_surrogates])
+            .map(|record| snapshot.retained_reference(record).unwrap())
+            .collect::<Vec<_>>();
+        assert!(retained.len() > 2);
+        let references = retained
+            .iter()
+            .map(|reference| ConstructionReferenceAuthentication {
+                source_root: &reference.source_root,
+                source_root_volume: reference.source_root_volume,
+                source_root_file_id: &reference.source_root_file_id,
+                source_path: &reference.source_path,
+                source_volume: reference.source_volume,
+                source_file_id: &reference.source_file_id,
+                target_path: &reference.target_path,
+                bytes: reference.bytes,
+                sha256: &reference.sha256,
+                parent_manifest_sha256: &reference.parent_manifest_sha256,
+            })
+            .collect::<Vec<_>>();
+        let work = snapshot
+            .authenticate_construction_references(&references)
+            .unwrap();
+        assert_eq!(
+            work.global_revalidation_bytes,
+            snapshot.snapshot_authentication_bytes() * 2
+        );
+        assert_eq!(
+            work.referenced_payload_bytes,
+            retained
+                .iter()
+                .map(|reference| reference.bytes)
+                .sum::<u64>()
+        );
+
+        let victim_reference = retained
+            .iter()
+            .find(|reference| reference.bytes > 0)
+            .expect("one retained UUID payload is non-empty");
+        let victim = Path::new(&victim_reference.source_root).join(&victim_reference.source_path);
+        let original = fs::read(&victim).unwrap();
+        let mut permissions = fs::metadata(&victim).unwrap().permissions();
+        permissions.set_readonly(false);
+        fs::set_permissions(&victim, permissions).unwrap();
+        fs::write(&victim, vec![0_u8; original.len()]).unwrap();
+        assert!(
+            snapshot
+                .authenticate_construction_references(&references)
+                .is_err()
+        );
+        fs::write(&victim, &original).unwrap();
+        let mut permissions = fs::metadata(&victim).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&victim, permissions).unwrap();
+
+        let error = snapshot
+            .authenticate_construction_references_with(&references, || {
+                let mut permissions = fs::metadata(&victim).unwrap().permissions();
+                permissions.set_readonly(false);
+                fs::set_permissions(&victim, permissions).unwrap();
+                fs::write(&victim, vec![0_u8; original.len()]).unwrap();
+                let mut permissions = fs::metadata(&victim).unwrap().permissions();
+                permissions.set_readonly(true);
+                fs::set_permissions(&victim, permissions).unwrap();
+            })
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("digest does not match its address"),
             "{error}"
         );
     }

@@ -1788,26 +1788,30 @@ fn authenticate_inventory(
         let parent = parent_index
             .ok_or_else(|| storage("retained artifacts lack authenticated parent snapshot"))?;
         let mut previous = None;
+        let mut references = Vec::with_capacity(inventory.retained_artifacts.len());
         for retained in &inventory.retained_artifacts {
             if previous.is_some_and(|value: &str| value >= retained.target_path.as_str()) {
                 return Err(storage(
                     "retained artifact targets are not unique and sorted",
                 ));
             }
-            parent.authenticate_construction_reference(
-                &retained.source_root,
-                retained.source_root_volume,
-                &retained.source_root_file_id,
-                &retained.source_path,
-                retained.source_volume,
-                &retained.source_file_id,
-                &retained.target_path,
-                retained.bytes,
-                &retained.sha256,
-                &retained.parent_manifest_sha256,
-            )?;
+            references.push(
+                crate::uuid_membership::ConstructionReferenceAuthentication {
+                    source_root: &retained.source_root,
+                    source_root_volume: retained.source_root_volume,
+                    source_root_file_id: &retained.source_root_file_id,
+                    source_path: &retained.source_path,
+                    source_volume: retained.source_volume,
+                    source_file_id: &retained.source_file_id,
+                    target_path: &retained.target_path,
+                    bytes: retained.bytes,
+                    sha256: &retained.sha256,
+                    parent_manifest_sha256: &retained.parent_manifest_sha256,
+                },
+            );
             previous = Some(retained.target_path.as_str());
         }
+        parent.authenticate_construction_references(&references)?;
     }
     Ok(())
 }
