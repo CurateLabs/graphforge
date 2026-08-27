@@ -77,6 +77,7 @@ def construction():
     value = dict.fromkeys(keys, 1)
     value.update(
         {
+            "peak_accounted_live_bytes": 268_435_456,
             "publication_commits": 1,
             "recovery_replay": True,
             "published_generation_sha256": "sha256:" + "9" * 64,
@@ -192,7 +193,19 @@ def evidence(**changes):
             "early_rss_peak_bytes": 500_000_000,
             "middle_rss_peak_bytes": 600_000_000,
             "late_rss_peak_bytes": 700_000_000,
-            "allowed_growth_bytes": 536_870_912,
+            "early_sample_count": 4,
+            "middle_sample_count": 4,
+            "late_sample_count": 4,
+            "early_progress_start": 1,
+            "early_progress_end": 100,
+            "middle_progress_start": 101,
+            "middle_progress_end": 200,
+            "late_progress_start": 201,
+            "late_progress_end": 300,
+            "final_committed_chunks": 300,
+            "bounded_working_set_bytes": 268_435_456,
+            "sampling_tolerance_bytes": 67_108_864,
+            "allowed_growth_bytes": 335_544_320,
             "observed_growth_bytes": 200_000_000,
             "plateau_pass": True,
             "envelope_bytes": 4_294_967_296,
@@ -1007,8 +1020,53 @@ def test_ingest_windows_recompute_growth_headroom_and_plateau():
 
     unexplained_allowance = evidence()
     unexplained_allowance["ingest_memory_windows"]["allowed_growth_bytes"] = 1
-    with pytest.raises(validator.EvidenceError, match=r"schema violation|one eighth"):
+    with pytest.raises(validator.EvidenceError, match="working set plus tolerance"):
         validator.validate(unexplained_allowance, "a" * 40, "sha256:" + "b" * 64, "den")
+
+    falsified_budget = evidence()
+    falsified_budget["ingest_memory_windows"]["bounded_working_set_bytes"] += 1
+    falsified_budget["ingest_memory_windows"]["allowed_growth_bytes"] += 1
+    with pytest.raises(validator.EvidenceError, match="construction evidence"):
+        validator.validate(falsified_budget, "a" * 40, "sha256:" + "b" * 64, "den")
+
+
+@pytest.mark.parametrize(
+    "field", ["early_sample_count", "middle_sample_count", "late_sample_count"]
+)
+def test_ingest_progress_bands_reject_sparse_samples(field):
+    sparse = evidence()
+    sparse["ingest_memory_windows"][field] = 3
+    with pytest.raises(validator.EvidenceError, match="schema violation"):
+        validator.validate(sparse, "a" * 40, "sha256:" + "b" * 64, "den")
+
+
+def test_ingest_progress_bands_reject_gaps_and_missing_final_coverage():
+    gap = evidence()
+    gap["ingest_memory_windows"]["middle_progress_start"] += 1
+    with pytest.raises(validator.EvidenceError, match="exactly contiguous"):
+        validator.validate(gap, "a" * 40, "sha256:" + "b" * 64, "den")
+
+    incomplete = evidence()
+    incomplete["ingest_memory_windows"]["final_committed_chunks"] += 1
+    with pytest.raises(validator.EvidenceError, match="final committed progress"):
+        validator.validate(incomplete, "a" * 40, "sha256:" + "b" * 64, "den")
+
+
+def test_machine_relative_allowance_cannot_hide_growth_over_bounded_workset():
+    growing = evidence()
+    windows = growing["ingest_memory_windows"]
+    windows.update(
+        {
+            "early_rss_peak_bytes": 500_000_000,
+            "middle_rss_peak_bytes": 700_000_000,
+            "late_rss_peak_bytes": 900_000_000,
+            "observed_growth_bytes": 400_000_000,
+            "headroom_bytes": windows["envelope_bytes"] - 900_000_000,
+        }
+    )
+    assert windows["observed_growth_bytes"] < windows["envelope_bytes"] // 8
+    with pytest.raises(validator.EvidenceError, match="does not plateau"):
+        validator.validate(growing, "a" * 40, "sha256:" + "b" * 64, "den")
 
 
 @pytest.mark.parametrize(

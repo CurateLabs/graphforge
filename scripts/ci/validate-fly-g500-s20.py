@@ -144,7 +144,9 @@ def validate(
     middle = windows["middle_rss_peak_bytes"]
     late = windows["late_rss_peak_bytes"]
     envelope = windows["envelope_bytes"]
-    allowed = envelope // 8
+    bounded_working_set = windows["bounded_working_set_bytes"]
+    tolerance = windows["sampling_tolerance_bytes"]
+    allowed = bounded_working_set + tolerance
     observed = max(
         0,
         middle - early,
@@ -152,8 +154,24 @@ def validate(
         late - early,
     )
     headroom = envelope - max(early, middle, late)
+    bands = [
+        (windows["early_progress_start"], windows["early_progress_end"]),
+        (windows["middle_progress_start"], windows["middle_progress_end"]),
+        (windows["late_progress_start"], windows["late_progress_end"]),
+    ]
+    if bands[0][0] != 1 or any(start > end for start, end in bands):
+        raise EvidenceError("ingest progress bands must start at one and be nonempty")
+    if bands[1][0] != bands[0][1] + 1 or bands[2][0] != bands[1][1] + 1:
+        raise EvidenceError("ingest progress bands must be exactly contiguous")
+    if (
+        bands[2][1] != max(end for _, end in bands)
+        or bands[2][1] != windows["final_committed_chunks"]
+    ):
+        raise EvidenceError("ingest late band must end at final committed progress")
+    if bounded_working_set != value["rung"]["construction"]["peak_accounted_live_bytes"]:
+        raise EvidenceError("ingest working-set budget differs from construction evidence")
     if windows["allowed_growth_bytes"] != allowed:
-        raise EvidenceError("ingest allowed growth is not one eighth of the envelope")
+        raise EvidenceError("ingest allowed growth differs from working set plus tolerance")
     if windows["observed_growth_bytes"] != observed:
         raise EvidenceError("ingest observed growth does not match window peaks")
     if observed > allowed or windows["plateau_pass"] is not True:
