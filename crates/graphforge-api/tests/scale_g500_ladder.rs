@@ -532,7 +532,13 @@ fn exact_descriptor_allocation(paths: &[PathBuf]) -> Value {
 }
 
 fn storage_attribution_value(project: &Path) -> Value {
-    serde_json::to_value(storage_attribution(project)).expect("serialize storage attribution")
+    let mut value =
+        serde_json::to_value(storage_attribution(project)).expect("serialize storage attribution");
+    value
+        .as_object_mut()
+        .expect("storage attribution object")
+        .remove("generation_uuid");
+    value
 }
 
 fn storage_attribution(project: &Path) -> graphforge_storage::StorageAttributionSnapshot {
@@ -934,6 +940,7 @@ fn run_rung(
             &spill_dir.join("construction-session.uuid"),
             GraphConstructionBudgets::default(),
         );
+        let construction_session_uuid = construction.session_uuid();
         if construction.progress().publication_committed {
             let mut fingerprint = Sha256::new();
             let merge = merge_runs(&spill.runs, None, |src, dst| {
@@ -955,13 +962,34 @@ fn run_rung(
             duplicates_rejected = merge.duplicates_rejected;
             input_fingerprint = format!("sha256:{}", hex_encode(sink.finish()));
         }
-        construction
+        let publication_receipt = construction
             .seal_and_publish()
             .expect("publish rung construction");
         let construction_evidence = construction.progress().evidence;
+        let published_generation_sha256 =
+            generation_identity_sha256(publication_receipt.generation_uuid);
+        drop(construction);
+        drop(graph);
+        let recovery_graph = GraphForge::new(Some(project.to_str().expect("utf8 project")))
+            .expect("reopen GraphForge for publication recovery");
+        let recovery_receipt = recovery_graph
+            .resume_graph_construction(
+                construction_session_uuid,
+                GraphConstructionBudgets::default(),
+            )
+            .expect("resume published construction")
+            .seal_and_publish()
+            .expect("recover published construction receipt");
+        assert!(
+            recovery_receipt.idempotent_replay,
+            "publication recovery must replay the committed receipt"
+        );
+        let recovered_generation_sha256 =
+            generation_identity_sha256(recovery_receipt.generation_uuid);
+        assert_eq!(published_generation_sha256, recovered_generation_sha256);
+        drop(recovery_graph);
         INGEST_SUBPHASE.store(0, Ordering::Relaxed);
         heartbeat.stop();
-        drop(graph);
         let committed_snapshot = storage_attribution(&project);
         let ingest_disk_used_bytes =
             generator_allocated_bytes.saturating_add(committed_snapshot.allocated_bytes);
@@ -1010,6 +1038,10 @@ fn run_rung(
                     "retained_probe_read_bytes": construction_evidence.retained_probe_read_bytes,
                     "retained_probe_block_loads": construction_evidence.retained_probe_block_loads,
                     "storage_transient_peak_allocated_bytes": construction_evidence.storage_transient_peak_allocated_bytes,
+                    "publication_commits": 1,
+                    "recovery_replay": recovery_receipt.idempotent_replay,
+                    "published_generation_sha256": published_generation_sha256,
+                    "recovered_generation_sha256": recovered_generation_sha256,
                 },
                 "committed_storage": committed_storage,
             }
@@ -2265,6 +2297,13 @@ fn current_generation_uuid(graph: &GraphForge) -> Uuid {
     Uuid::from_bytes(bytes)
 }
 
+fn generation_identity_sha256(generation: Uuid) -> String {
+    format!(
+        "sha256:{}",
+        hex_encode(Sha256::digest(generation.as_bytes()))
+    )
+}
+
 fn create_bounded_drill_package(root: &Path, limits: PortableV2Limits) -> (PathBuf, String) {
     let project = root.join("drill-source");
     let package = root.join("drill.gfpb");
@@ -3190,29 +3229,68 @@ struct PhaseMemoryPeak {
 
 struct S20PhaseSampler {
     stop: Arc<AtomicBool>,
-    peaks: Arc<std::sync::Mutex<[PhaseMemoryPeak; 10]>>,
+    peaks: Arc<std::sync::Mutex<[PhaseMemoryPeak; 12]>>,
+    ingest_rss_samples: Arc<std::sync::Mutex<Vec<u64>>>,
     worker: Option<JoinHandle<()>>,
 }
 
+fn ingest_memory_windows(samples: &[u64], envelope_bytes: u64) -> Value {
+    assert!(
+        samples.len() >= 3,
+        "ingest must have early/middle/late RSS samples"
+    );
+    let first_end = samples.len().div_ceil(3);
+    let second_end = (samples.len() * 2).div_ceil(3);
+    let window_peak = |values: &[u64]| values.iter().copied().max().unwrap_or(0);
+    let early = window_peak(&samples[..first_end]);
+    let middle = window_peak(&samples[first_end..second_end]);
+    let late = window_peak(&samples[second_end..]);
+    // A saturated streaming phase may move by at most one eighth of the
+    // actual machine envelope between temporal thirds. Check both adjacent
+    // transitions and the cumulative early-to-late delta so monotonic growth
+    // cannot hide behind an earlier transient peak.
+    let allowed_growth = envelope_bytes / 8;
+    let observed_growth = middle
+        .saturating_sub(early)
+        .max(late.saturating_sub(middle))
+        .max(late.saturating_sub(early));
+    let peak = early.max(middle).max(late);
+    json!({
+        "early_rss_peak_bytes": early,
+        "middle_rss_peak_bytes": middle,
+        "late_rss_peak_bytes": late,
+        "allowed_growth_bytes": allowed_growth,
+        "observed_growth_bytes": observed_growth,
+        "plateau_pass": observed_growth <= allowed_growth,
+        "envelope_bytes": envelope_bytes,
+        "headroom_bytes": envelope_bytes.saturating_sub(peak),
+        "sample_interval_ms": 250,
+    })
+}
+
 impl S20PhaseSampler {
-    const NAMES: [&'static str; 10] = [
+    const NAMES: [&'static str; 12] = [
         "generate",
         "ingest",
         "source_reopen",
-        "source_query",
+        "source_query_1hop",
+        "source_query_2hop",
         "export",
         "verify",
         "import",
-        "import_reopen",
-        "import_query",
+        "imported_reopen",
+        "imported_query_1hop",
+        "imported_query_2hop",
         "finalize",
     ];
 
     fn start(work_root: &Path) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
-        let peaks = Arc::new(std::sync::Mutex::new([PhaseMemoryPeak::default(); 10]));
+        let peaks = Arc::new(std::sync::Mutex::new([PhaseMemoryPeak::default(); 12]));
+        let ingest_rss_samples = Arc::new(std::sync::Mutex::new(Vec::new()));
         let worker_stop = Arc::clone(&stop);
         let worker_peaks = Arc::clone(&peaks);
+        let worker_ingest_samples = Arc::clone(&ingest_rss_samples);
         let volume_root = work_root.to_path_buf();
         let baseline_used = observed_filesystem_used_bytes(work_root);
         let worker = thread::spawn(move || {
@@ -3223,11 +3301,16 @@ impl S20PhaseSampler {
                     && index < Self::NAMES.len()
                 {
                     let sample = s20_memory_snapshot();
+                    let rss = sample["rss_bytes"].as_u64().unwrap_or(0);
+                    if index == 1 {
+                        worker_ingest_samples
+                            .lock()
+                            .expect("ingest RSS samples")
+                            .push(rss);
+                    }
                     let mut values = worker_peaks.lock().expect("phase memory peaks");
                     let peak = &mut values[index];
-                    peak.rss_bytes = peak
-                        .rss_bytes
-                        .max(sample["rss_bytes"].as_u64().unwrap_or(0));
+                    peak.rss_bytes = peak.rss_bytes.max(rss);
                     peak.hwm_bytes = peak
                         .hwm_bytes
                         .max(sample["hwm_bytes"].as_u64().unwrap_or(0));
@@ -3251,6 +3334,7 @@ impl S20PhaseSampler {
         Self {
             stop,
             peaks,
+            ingest_rss_samples,
             worker: Some(worker),
         }
     }
@@ -3259,13 +3343,13 @@ impl S20PhaseSampler {
         set_s20_active_phase(index);
     }
 
-    fn finish(mut self) -> Value {
-        Self::enter(9);
+    fn finish(mut self, envelope_bytes: u64) -> (Value, Value) {
+        Self::enter(11);
         thread::sleep(Duration::from_millis(300));
         self.stop.store(true, Ordering::SeqCst);
         self.worker.take().unwrap().join().expect("phase sampler");
         let peaks = *self.peaks.lock().expect("phase memory peaks");
-        Value::Object(
+        let phase_memory = Value::Object(
             Self::NAMES
                 .iter()
                 .zip(peaks)
@@ -3283,7 +3367,10 @@ impl S20PhaseSampler {
                     )
                 })
                 .collect(),
-        )
+        );
+        let samples = self.ingest_rss_samples.lock().expect("ingest RSS samples");
+        let windows = ingest_memory_windows(&samples, envelope_bytes);
+        (phase_memory, windows)
     }
 }
 
@@ -3317,6 +3404,20 @@ fn query_evidence_value(value: &graphforge_exec::demand::DemandSnapshot) -> Valu
     })
 }
 
+fn persist_s20_lifecycle_steps(steps: &[&str]) {
+    let path = PathBuf::from(
+        std::env::var("GF_G500_LADDER_JOURNAL_OUT")
+            .expect("GF_G500_LADDER_JOURNAL_OUT is required for S20"),
+    );
+    write_json_atomically(
+        &path,
+        &json!({
+            "schema": "graphforge-fly-s20-lifecycle-journal/1",
+            "completed_steps": steps,
+        }),
+    );
+}
+
 /// The paid S20 runner intentionally starts at the real operational rung. It
 /// does not invent lower-rung admission criteria or size RAM from edge count.
 #[test]
@@ -3345,11 +3446,14 @@ fn fly_s20_full_lifecycle_evidence() {
         rung_outcome.passed,
         "S20 construction/reopen/query rung failed"
     );
+    let mut durable_steps = vec!["construction_published", "construction_recovered"];
+    persist_s20_lifecycle_steps(&durable_steps);
 
     let source = work_root.join("S20/project");
     let package = work_root.join("project.gfpb");
     let imported = work_root.join("imported");
     assert!(!imported.exists(), "import destination must be clean");
+    S20PhaseSampler::enter(2);
     let source_graph =
         GraphForge::new(Some(source.to_str().expect("UTF-8 source"))).expect("reopen S20 source");
     let source_nodes = source_graph
@@ -3360,17 +3464,25 @@ fn fly_s20_full_lifecycle_evidence() {
             .execute(COUNT_EDGES)
             .expect("source edge count"),
     );
+    durable_steps.push("source_reopened");
+    persist_s20_lifecycle_steps(&durable_steps);
+    S20PhaseSampler::enter(3);
     let source_one = source_graph.execute_observed(ONE_HOP);
     let source_one_result = source_one.result.expect("source one-hop query");
     let source_one_fingerprint = result_fingerprint(&source_one_result);
+    durable_steps.push("source_query_1hop_completed");
+    persist_s20_lifecycle_steps(&durable_steps);
+    S20PhaseSampler::enter(4);
     let source_two = source_graph.execute_observed(TWO_HOP);
     let source_two_result = source_two.result.expect("source two-hop query");
     let source_two_fingerprint = result_fingerprint(&source_two_result);
     let source_authority = authority_fingerprint(&source_graph);
     let source_storage = storage_attribution_value(&source);
     let source_generation = current_generation_uuid(&source_graph);
+    durable_steps.push("source_query_2hop_completed");
+    persist_s20_lifecycle_steps(&durable_steps);
     let limits = PortableV2Limits::default();
-    S20PhaseSampler::enter(4);
+    S20PhaseSampler::enter(5);
     let exported = source_graph
         .export_portable_v2(
             &PortableV2ExportRequest {
@@ -3386,8 +3498,10 @@ fn fly_s20_full_lifecycle_evidence() {
         )
         .expect("export S20 project");
     assert_eq!(exported.generation_uuid, source_generation);
+    durable_steps.push("export_completed");
+    persist_s20_lifecycle_steps(&durable_steps);
     drop(source_graph);
-    S20PhaseSampler::enter(5);
+    S20PhaseSampler::enter(6);
     let verified = verify_portable_v2(
         &PortableVerifyRequest {
             input: package.clone(),
@@ -3398,7 +3512,9 @@ fn fly_s20_full_lifecycle_evidence() {
     )
     .expect("verify S20 package");
     assert_eq!(verified.package_digest, exported.package_digest);
-    S20PhaseSampler::enter(6);
+    durable_steps.push("verify_completed");
+    persist_s20_lifecycle_steps(&durable_steps);
+    S20PhaseSampler::enter(7);
     let imported_receipt = GraphForge::import_portable_v2(
         &imported,
         &PortableV2ImportRequest {
@@ -3409,7 +3525,9 @@ fn fly_s20_full_lifecycle_evidence() {
         None,
     )
     .expect("clean S20 import");
-    S20PhaseSampler::enter(7);
+    durable_steps.push("import_completed");
+    persist_s20_lifecycle_steps(&durable_steps);
+    S20PhaseSampler::enter(8);
     let imported_graph =
         GraphForge::new(Some(imported.to_str().expect("UTF-8 import"))).expect("reopen S20 import");
     let imported_nodes = imported_graph
@@ -3420,10 +3538,15 @@ fn fly_s20_full_lifecycle_evidence() {
             .execute(COUNT_EDGES)
             .expect("imported edge count"),
     );
-    S20PhaseSampler::enter(8);
+    durable_steps.push("imported_reopened");
+    persist_s20_lifecycle_steps(&durable_steps);
+    S20PhaseSampler::enter(9);
     let imported_one = imported_graph.execute_observed(ONE_HOP);
     let imported_one_result = imported_one.result.expect("imported one-hop query");
     let imported_one_fingerprint = result_fingerprint(&imported_one_result);
+    durable_steps.push("imported_query_1hop_completed");
+    persist_s20_lifecycle_steps(&durable_steps);
+    S20PhaseSampler::enter(10);
     let imported_two = imported_graph.execute_observed(TWO_HOP);
     let imported_two_result = imported_two.result.expect("imported two-hop query");
     let imported_two_fingerprint = result_fingerprint(&imported_two_result);
@@ -3436,6 +3559,8 @@ fn fly_s20_full_lifecycle_evidence() {
     assert_eq!(source_one_fingerprint, imported_one_fingerprint);
     assert_eq!(source_two_fingerprint, imported_two_fingerprint);
     assert_eq!(source_authority, imported_authority);
+    durable_steps.push("imported_query_2hop_completed");
+    persist_s20_lifecycle_steps(&durable_steps);
 
     let generated_edges = rung_outcome.evidence["counts"]["live_unique_edges"]
         .as_u64()
@@ -3486,7 +3611,7 @@ fn fly_s20_full_lifecycle_evidence() {
         observed_capacity <= required_env_u64("GF_G500_S20_DISK_BYTES"),
         "observed volume is larger than the authorized disk envelope"
     );
-    let phase_memory = phase_sampler.finish();
+    let (phase_memory, ingest_memory_windows) = phase_sampler.finish(envelope.rss_bytes);
     let observed_volume_peak = phase_memory
         .as_object()
         .expect("phase memory object")
@@ -3518,6 +3643,7 @@ fn fly_s20_full_lifecycle_evidence() {
             "duplicates_rejected": duplicates_rejected,
         },
         "phase_memory": phase_memory,
+        "ingest_memory_windows": ingest_memory_windows,
         "storage": {
             "logical_bytes": source_storage["logical_bytes"].as_u64().unwrap_or(0)
                 .saturating_add(imported_storage["logical_bytes"].as_u64().unwrap_or(0))
@@ -3541,8 +3667,9 @@ fn fly_s20_full_lifecycle_evidence() {
         "lifecycle": {
             "source_nodes": source_nodes, "source_edges": source_edges,
             "imported_nodes": imported_nodes, "imported_edges": imported_edges,
-            "source_generation": source_generation.to_string(),
-            "imported_generation": imported_receipt.generation_uuid.to_string(),
+            "source_export_generation_authenticated": exported.generation_uuid == source_generation,
+            "import_receipt_reopen_authenticated": current_generation_uuid(&imported_graph) == imported_receipt.generation_uuid,
+            "source_import_generations_distinct": source_generation != imported_receipt.generation_uuid,
             "package_digest": exported.package_digest,
             "portable_contract": verified.contract,
             "source_one_hop": { "fingerprint": source_one_fingerprint, "evidence": query_evidence_value(&source_one.evidence) },
@@ -3554,6 +3681,13 @@ fn fly_s20_full_lifecycle_evidence() {
             "source_storage": source_storage,
             "imported_storage": imported_storage,
             "package_storage": package_storage,
+            "durable_steps": durable_steps,
+            "publication": {
+                "commits": construction["publication_commits"],
+                "recovery_replay": construction["recovery_replay"],
+                "published_generation_sha256": construction["published_generation_sha256"],
+                "recovered_generation_sha256": construction["recovered_generation_sha256"],
+            },
         },
         "memory": s20_memory_snapshot(),
         "wall_time_s": started.elapsed().as_secs_f64(),
@@ -3564,6 +3698,24 @@ fn fly_s20_full_lifecycle_evidence() {
         std::env::var("GF_G500_S20_EVIDENCE_OUT").expect("GF_G500_S20_EVIDENCE_OUT is required"),
     );
     write_json_atomically(&evidence_out, &evidence);
+}
+
+#[test]
+fn ingest_memory_windows_detect_monotonic_and_regrowth_pressure() {
+    let gib = 1024 * 1024 * 1024_u64;
+    let envelope = 4 * gib;
+    let plateau = ingest_memory_windows(&[gib, gib, gib], envelope);
+    assert_eq!(plateau["allowed_growth_bytes"], envelope / 8);
+    assert_eq!(plateau["observed_growth_bytes"], 0);
+    assert_eq!(plateau["plateau_pass"], true);
+
+    let monotonic = ingest_memory_windows(&[gib, gib + 300_000_000, gib + 600_000_000], envelope);
+    assert_eq!(monotonic["observed_growth_bytes"], 600_000_000_u64);
+    assert_eq!(monotonic["plateau_pass"], false);
+
+    let regrowth = ingest_memory_windows(&[2 * gib, gib, 2 * gib], envelope);
+    assert_eq!(regrowth["observed_growth_bytes"], gib);
+    assert_eq!(regrowth["plateau_pass"], false);
 }
 
 fn normalized_filesystem(path: &Path) -> String {
