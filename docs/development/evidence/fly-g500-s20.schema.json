@@ -17,7 +17,7 @@
     },
     "construction": {
       "type": "object", "additionalProperties": false,
-      "required": ["input_rows", "input_batches", "parquet_shards", "write_bytes", "write_operations", "authentication_read_bytes", "authentication_read_operations", "peak_batch_rows", "peak_batch_bytes", "peak_accounted_live_bytes", "peak_run_records", "merge_read_records", "merge_written_records", "merge_groups", "peak_merge_inputs", "merge_read_bytes", "merge_written_bytes", "merge_fsync_operations", "parquet_read_bytes", "parquet_read_operations", "parquet_write_bytes", "parquet_write_operations", "retained_probe_read_bytes", "retained_probe_block_loads", "storage_transient_peak_allocated_bytes"],
+      "required": ["input_rows", "input_batches", "parquet_shards", "write_bytes", "write_operations", "authentication_read_bytes", "authentication_read_operations", "peak_batch_rows", "peak_batch_bytes", "peak_accounted_live_bytes", "peak_run_records", "merge_read_records", "merge_written_records", "merge_groups", "peak_merge_inputs", "merge_read_bytes", "merge_written_bytes", "merge_fsync_operations", "parquet_read_bytes", "parquet_read_operations", "parquet_write_bytes", "parquet_write_operations", "retained_probe_read_bytes", "retained_probe_block_loads", "storage_transient_peak_allocated_bytes", "publication_commits", "recovery_replay", "published_generation_sha256", "recovered_generation_sha256"],
       "properties": {
         "input_rows": {"type": "integer", "minimum": 1}, "input_batches": {"type": "integer", "minimum": 1},
         "parquet_shards": {"type": "integer", "minimum": 1}, "write_bytes": {"type": "integer", "minimum": 1},
@@ -31,7 +31,10 @@
         "parquet_read_bytes": {"type": "integer", "minimum": 0}, "parquet_read_operations": {"type": "integer", "minimum": 0},
         "parquet_write_bytes": {"type": "integer", "minimum": 1}, "parquet_write_operations": {"type": "integer", "minimum": 1},
         "retained_probe_read_bytes": {"type": "integer", "minimum": 0}, "retained_probe_block_loads": {"type": "integer", "minimum": 0},
-        "storage_transient_peak_allocated_bytes": {"type": "integer", "minimum": 1}
+        "storage_transient_peak_allocated_bytes": {"type": "integer", "minimum": 1},
+        "publication_commits": {"const": 1}, "recovery_replay": {"const": true},
+        "published_generation_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "recovered_generation_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
       }
     },
     "query": {
@@ -74,7 +77,7 @@
       "properties": {"category": {"const": "portable_bundle"}, "logical_bytes": {"type": "integer", "minimum": 1}, "allocated_bytes": {"type": "integer", "minimum": 1}, "logical_references": {"const": 1}, "physical_objects": {"const": 1}, "source": {"const": "portable_bundle_exact_descriptor"}}
     }
   },
-  "required": ["schema", "git_sha", "build_provenance", "image_digest", "provider", "region", "scale", "machine", "volume_gb", "result", "counts", "phase_memory", "storage", "run", "rung", "lifecycle", "memory", "wall_time_s", "first_failure"],
+  "required": ["schema", "git_sha", "build_provenance", "image_digest", "provider", "region", "scale", "machine", "volume_gb", "result", "counts", "phase_memory", "ingest_memory_windows", "storage", "run", "rung", "lifecycle", "memory", "wall_time_s", "first_failure"],
   "properties": {
     "schema": {"const": "graphforge-fly-g500-s20/1"},
     "git_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
@@ -115,18 +118,35 @@
     },
     "phase_memory": {
       "type": "object", "additionalProperties": false,
-      "required": ["generate", "ingest", "source_reopen", "source_query", "export", "verify", "import", "import_reopen", "import_query", "finalize"],
+      "required": ["generate", "ingest", "source_reopen", "source_query_1hop", "source_query_2hop", "export", "verify", "import", "imported_reopen", "imported_query_1hop", "imported_query_2hop", "finalize"],
       "properties": {
         "generate": {"$ref": "#/$defs/phase_memory"},
         "ingest": {"$ref": "#/$defs/phase_memory"},
         "source_reopen": {"$ref": "#/$defs/phase_memory"},
-        "source_query": {"$ref": "#/$defs/phase_memory"},
+        "source_query_1hop": {"$ref": "#/$defs/phase_memory"},
+        "source_query_2hop": {"$ref": "#/$defs/phase_memory"},
         "export": {"$ref": "#/$defs/phase_memory"},
         "verify": {"$ref": "#/$defs/phase_memory"},
         "import": {"$ref": "#/$defs/phase_memory"},
-        "import_reopen": {"$ref": "#/$defs/phase_memory"},
-        "import_query": {"$ref": "#/$defs/phase_memory"},
+        "imported_reopen": {"$ref": "#/$defs/phase_memory"},
+        "imported_query_1hop": {"$ref": "#/$defs/phase_memory"},
+        "imported_query_2hop": {"$ref": "#/$defs/phase_memory"},
         "finalize": {"$ref": "#/$defs/phase_memory"}
+      }
+    },
+    "ingest_memory_windows": {
+      "type": "object", "additionalProperties": false,
+      "required": ["early_rss_peak_bytes", "middle_rss_peak_bytes", "late_rss_peak_bytes", "allowed_growth_bytes", "observed_growth_bytes", "plateau_pass", "envelope_bytes", "headroom_bytes", "sample_interval_ms"],
+      "properties": {
+        "early_rss_peak_bytes": {"type": "integer", "minimum": 1},
+        "middle_rss_peak_bytes": {"type": "integer", "minimum": 1},
+        "late_rss_peak_bytes": {"type": "integer", "minimum": 1},
+        "allowed_growth_bytes": {"const": 536870912},
+        "observed_growth_bytes": {"type": "integer", "minimum": 0},
+        "plateau_pass": {"const": true},
+        "envelope_bytes": {"const": 4294967296},
+        "headroom_bytes": {"type": "integer", "minimum": 1},
+        "sample_interval_ms": {"const": 250}
       }
     },
     "storage": {
@@ -146,13 +166,34 @@
     "rung": {"type": "object", "additionalProperties": false, "required": ["pass", "reconciles", "construction"], "properties": {"pass": {"const": true}, "reconciles": {"const": true}, "construction": {"$ref": "#/$defs/construction"}}},
     "lifecycle": {
       "type": "object", "additionalProperties": false,
-      "required": ["source_nodes", "source_edges", "imported_nodes", "imported_edges", "source_export_generation_authenticated", "import_receipt_reopen_authenticated", "source_import_generations_distinct", "package_digest", "portable_contract", "source_one_hop", "source_two_hop", "imported_one_hop", "imported_two_hop", "source_authority_fingerprint", "imported_authority_fingerprint", "source_storage", "imported_storage", "package_storage"],
+      "required": ["source_nodes", "source_edges", "imported_nodes", "imported_edges", "source_export_generation_authenticated", "import_receipt_reopen_authenticated", "source_import_generations_distinct", "durable_steps", "publication", "package_digest", "portable_contract", "source_one_hop", "source_two_hop", "imported_one_hop", "imported_two_hop", "source_authority_fingerprint", "imported_authority_fingerprint", "source_storage", "imported_storage", "package_storage"],
       "properties": {
         "source_nodes": {"type": "integer", "minimum": 1}, "source_edges": {"type": "integer", "minimum": 1},
         "imported_nodes": {"type": "integer", "minimum": 1}, "imported_edges": {"type": "integer", "minimum": 1},
         "source_export_generation_authenticated": {"const": true},
         "import_receipt_reopen_authenticated": {"const": true},
         "source_import_generations_distinct": {"const": true},
+        "durable_steps": {
+          "type": "array", "minItems": 11, "maxItems": 11,
+          "prefixItems": [
+            {"const": "construction_published"}, {"const": "construction_recovered"},
+            {"const": "source_reopened"}, {"const": "source_query_1hop_completed"},
+            {"const": "source_query_2hop_completed"}, {"const": "export_completed"},
+            {"const": "verify_completed"}, {"const": "import_completed"},
+            {"const": "imported_reopened"}, {"const": "imported_query_1hop_completed"},
+            {"const": "imported_query_2hop_completed"}
+          ],
+          "items": false
+        },
+        "publication": {
+          "type": "object", "additionalProperties": false,
+          "required": ["commits", "recovery_replay", "published_generation_sha256", "recovered_generation_sha256"],
+          "properties": {
+            "commits": {"const": 1}, "recovery_replay": {"const": true},
+            "published_generation_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+            "recovered_generation_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+          }
+        },
         "package_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}, "portable_contract": {"const": "graphforge-portable-verify/2"},
         "source_one_hop": {"$ref": "#/$defs/query"}, "source_two_hop": {"$ref": "#/$defs/query"},
         "imported_one_hop": {"$ref": "#/$defs/query"}, "imported_two_hop": {"$ref": "#/$defs/query"},

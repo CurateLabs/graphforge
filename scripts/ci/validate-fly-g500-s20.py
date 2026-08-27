@@ -75,6 +75,20 @@ def validate(
             raise EvidenceError(f"source/import {suffix} fingerprints differ")
     if lifecycle["source_authority_fingerprint"] != lifecycle["imported_authority_fingerprint"]:
         raise EvidenceError("source/import authority fingerprints differ")
+    construction = value["rung"]["construction"]
+    if (
+        construction["published_generation_sha256"]
+        != construction["recovered_generation_sha256"]
+    ):
+        raise EvidenceError("construction recovery generation identity differs")
+    publication = lifecycle["publication"]
+    if publication["published_generation_sha256"] != publication["recovered_generation_sha256"]:
+        raise EvidenceError("lifecycle recovery generation identity differs")
+    if (
+        construction["published_generation_sha256"]
+        != publication["published_generation_sha256"]
+    ):
+        raise EvidenceError("construction and lifecycle publication identities differ")
     for name in ("source_storage", "imported_storage"):
         attribution = lifecycle[name]
         fields = (
@@ -125,6 +139,27 @@ def validate(
             raise EvidenceError(f"phase {phase} memory categories understate RSS")
         if memory["rss_peak_bytes"] > 4096 * 1024 * 1024:
             raise EvidenceError(f"phase {phase} exceeds the 4096 MiB S20 memory envelope")
+    windows = value["ingest_memory_windows"]
+    early = windows["early_rss_peak_bytes"]
+    middle = windows["middle_rss_peak_bytes"]
+    late = windows["late_rss_peak_bytes"]
+    envelope = windows["envelope_bytes"]
+    allowed = envelope // 8
+    observed = max(
+        0,
+        middle - early,
+        late - middle,
+        late - early,
+    )
+    headroom = envelope - max(early, middle, late)
+    if windows["allowed_growth_bytes"] != allowed:
+        raise EvidenceError("ingest allowed growth is not one eighth of the envelope")
+    if windows["observed_growth_bytes"] != observed:
+        raise EvidenceError("ingest observed growth does not match window peaks")
+    if observed > allowed or windows["plateau_pass"] is not True:
+        raise EvidenceError("ingest RSS does not plateau within the allowed growth")
+    if headroom <= 0 or windows["headroom_bytes"] != headroom:
+        raise EvidenceError("ingest headroom does not match the memory envelope")
 
     def reject_sensitive(item: Any) -> None:
         if isinstance(item, dict):

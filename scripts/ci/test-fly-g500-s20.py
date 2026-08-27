@@ -74,7 +74,16 @@ def construction():
         "retained_probe_block_loads",
         "storage_transient_peak_allocated_bytes",
     }
-    return dict.fromkeys(keys, 1)
+    value = dict.fromkeys(keys, 1)
+    value.update(
+        {
+            "publication_commits": 1,
+            "recovery_replay": True,
+            "published_generation_sha256": "sha256:" + "9" * 64,
+            "recovered_generation_sha256": "sha256:" + "9" * 64,
+        }
+    )
+    return value
 
 
 def query_proof():
@@ -168,14 +177,27 @@ def evidence(**changes):
                 "generate",
                 "ingest",
                 "source_reopen",
-                "source_query",
+                "source_query_1hop",
+                "source_query_2hop",
                 "export",
                 "verify",
                 "import",
-                "import_reopen",
-                "import_query",
+                "imported_reopen",
+                "imported_query_1hop",
+                "imported_query_2hop",
                 "finalize",
             )
+        },
+        "ingest_memory_windows": {
+            "early_rss_peak_bytes": 500_000_000,
+            "middle_rss_peak_bytes": 600_000_000,
+            "late_rss_peak_bytes": 700_000_000,
+            "allowed_growth_bytes": 536_870_912,
+            "observed_growth_bytes": 200_000_000,
+            "plateau_pass": True,
+            "envelope_bytes": 4_294_967_296,
+            "headroom_bytes": 3_594_967_296,
+            "sample_interval_ms": 250,
         },
         "storage": {
             "logical_bytes": 1_003,
@@ -196,6 +218,25 @@ def evidence(**changes):
             "source_export_generation_authenticated": True,
             "import_receipt_reopen_authenticated": True,
             "source_import_generations_distinct": True,
+            "durable_steps": [
+                "construction_published",
+                "construction_recovered",
+                "source_reopened",
+                "source_query_1hop_completed",
+                "source_query_2hop_completed",
+                "export_completed",
+                "verify_completed",
+                "import_completed",
+                "imported_reopened",
+                "imported_query_1hop_completed",
+                "imported_query_2hop_completed",
+            ],
+            "publication": {
+                "commits": 1,
+                "recovery_replay": True,
+                "published_generation_sha256": "sha256:" + "9" * 64,
+                "recovered_generation_sha256": "sha256:" + "9" * 64,
+            },
             "package_digest": "sha256:" + "d" * 64,
             "portable_contract": "graphforge-portable-verify/2",
             "source_one_hop": query_proof(),
@@ -909,6 +950,90 @@ def test_raw_generation_uuid_is_forbidden_everywhere(location):
     target["generation_uuid"] = "00000000-0000-4000-8000-000000000001"
     with pytest.raises(validator.EvidenceError, match="schema violation"):
         validator.validate(leaked, "a" * 40, "sha256:" + "b" * 64, "den")
+
+
+def test_durable_lifecycle_order_is_required_closed_and_immutable():
+    missing = evidence()
+    del missing["lifecycle"]["durable_steps"]
+    with pytest.raises(validator.EvidenceError, match="schema violation"):
+        validator.validate(missing, "a" * 40, "sha256:" + "b" * 64, "den")
+
+    reordered = evidence()
+    reordered["lifecycle"]["durable_steps"][3:5] = reversed(
+        reordered["lifecycle"]["durable_steps"][3:5]
+    )
+    with pytest.raises(validator.EvidenceError, match="schema violation"):
+        validator.validate(reordered, "a" * 40, "sha256:" + "b" * 64, "den")
+
+    unknown = evidence()
+    unknown["lifecycle"]["publication"]["receipt_path"] = "/private/work"
+    with pytest.raises(validator.EvidenceError, match="schema violation"):
+        validator.validate(unknown, "a" * 40, "sha256:" + "b" * 64, "den")
+
+
+@pytest.mark.parametrize("location", ["construction", "publication"])
+def test_one_publication_recovery_proof_rejects_deletion_and_falsification(location):
+    def target(value):
+        if location == "construction":
+            return value["rung"]["construction"]
+        return value["lifecycle"]["publication"]
+
+    missing = evidence()
+    del target(missing)["recovery_replay"]
+    with pytest.raises(validator.EvidenceError, match="schema violation"):
+        validator.validate(missing, "a" * 40, "sha256:" + "b" * 64, "den")
+
+    falsified = evidence()
+    target(falsified)["recovered_generation_sha256"] = "sha256:" + "8" * 64
+    with pytest.raises(validator.EvidenceError, match="generation identity differs"):
+        validator.validate(falsified, "a" * 40, "sha256:" + "b" * 64, "den")
+
+
+def test_ingest_windows_recompute_growth_headroom_and_plateau():
+    missing = evidence()
+    del missing["ingest_memory_windows"]["middle_rss_peak_bytes"]
+    with pytest.raises(validator.EvidenceError, match="schema violation"):
+        validator.validate(missing, "a" * 40, "sha256:" + "b" * 64, "den")
+
+    wrong_growth = evidence()
+    wrong_growth["ingest_memory_windows"]["observed_growth_bytes"] -= 1
+    with pytest.raises(validator.EvidenceError, match="observed growth"):
+        validator.validate(wrong_growth, "a" * 40, "sha256:" + "b" * 64, "den")
+
+    wrong_headroom = evidence()
+    wrong_headroom["ingest_memory_windows"]["headroom_bytes"] -= 1
+    with pytest.raises(validator.EvidenceError, match="headroom"):
+        validator.validate(wrong_headroom, "a" * 40, "sha256:" + "b" * 64, "den")
+
+    unexplained_allowance = evidence()
+    unexplained_allowance["ingest_memory_windows"]["allowed_growth_bytes"] = 1
+    with pytest.raises(validator.EvidenceError, match=r"schema violation|one eighth"):
+        validator.validate(unexplained_allowance, "a" * 40, "sha256:" + "b" * 64, "den")
+
+
+@pytest.mark.parametrize(
+    ("early", "middle", "late"),
+    [
+        (1_500_000_000, 500_000_000, 1_200_000_000),
+        (500_000_000, 800_000_000, 1_100_000_000),
+    ],
+)
+def test_ingest_plateau_rejects_regrowth_and_cumulative_growth(early, middle, late):
+    growing = evidence()
+    windows = growing["ingest_memory_windows"]
+    windows.update(
+        {
+            "early_rss_peak_bytes": early,
+            "middle_rss_peak_bytes": middle,
+            "late_rss_peak_bytes": late,
+            "observed_growth_bytes": max(
+                0, middle - early, late - middle, late - early
+            ),
+            "headroom_bytes": windows["envelope_bytes"] - max(early, middle, late),
+        }
+    )
+    with pytest.raises(validator.EvidenceError, match="does not plateau"):
+        validator.validate(growing, "a" * 40, "sha256:" + "b" * 64, "den")
 
 
 def test_evidence_rejects_tiny_relabel_cross_count_and_memory_overage():
