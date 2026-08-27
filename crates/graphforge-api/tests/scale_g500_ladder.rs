@@ -766,9 +766,15 @@ fn run_rung(
     completed_rungs: &[Value],
 ) -> RungOutcome {
     let started = Instant::now();
-    let workspace = TempDir::new().expect("rung workspace");
-    let spill_dir = workspace.path().join("spill");
-    let project = workspace.path().join("project");
+    let temporary_workspace;
+    let workspace = if let Ok(root) = std::env::var("GF_G500_LADDER_WORKSPACE") {
+        PathBuf::from(root).join(&rung.id)
+    } else {
+        temporary_workspace = TempDir::new().expect("rung workspace");
+        temporary_workspace.path().to_path_buf()
+    };
+    let spill_dir = workspace.join("spill");
+    let project = workspace.join("project");
     fs::create_dir_all(&spill_dir).expect("spill dir");
     fs::create_dir_all(&project).expect("project dir");
 
@@ -863,10 +869,10 @@ fn run_rung(
         live_unique_edges = merge.live_unique_edges;
         duplicates_rejected = merge.duplicates_rejected;
         input_fingerprint = format!("sha256:{}", hex_encode(sink.finish()));
-        let construction_evidence = construction.progress().evidence;
         construction
             .seal_and_publish()
             .expect("publish rung construction");
+        let construction_evidence = construction.progress().evidence;
         INGEST_SUBPHASE.store(0, Ordering::Relaxed);
         heartbeat.stop();
         drop(graph);
@@ -896,6 +902,23 @@ fn run_rung(
                     "write_operations": construction_evidence.write_operations,
                     "authentication_read_bytes": construction_evidence.authentication_read_bytes,
                     "authentication_read_operations": construction_evidence.authentication_read_operations,
+                    "peak_batch_rows": construction_evidence.peak_batch_rows,
+                    "peak_batch_bytes": construction_evidence.peak_batch_bytes,
+                    "peak_accounted_live_bytes": construction_evidence.peak_accounted_live_bytes,
+                    "peak_run_records": construction_evidence.peak_run_records,
+                    "merge_read_records": construction_evidence.merge_read_records,
+                    "merge_written_records": construction_evidence.merge_written_records,
+                    "merge_groups": construction_evidence.merge_groups,
+                    "peak_merge_inputs": construction_evidence.peak_merge_inputs,
+                    "merge_read_bytes": construction_evidence.merge_read_bytes,
+                    "merge_written_bytes": construction_evidence.merge_written_bytes,
+                    "merge_fsync_operations": construction_evidence.merge_fsync_operations,
+                    "parquet_read_bytes": construction_evidence.parquet_read_bytes,
+                    "parquet_read_operations": construction_evidence.parquet_read_operations,
+                    "parquet_write_bytes": construction_evidence.parquet_write_bytes,
+                    "parquet_write_operations": construction_evidence.parquet_write_operations,
+                    "retained_probe_read_bytes": construction_evidence.retained_probe_read_bytes,
+                    "retained_probe_block_loads": construction_evidence.retained_probe_block_loads,
                 },
             }
         }));
@@ -1154,11 +1177,12 @@ impl<'a, 'graph> EdgeSink<'a, 'graph> {
         session: &'a mut GraphConstructionSession<'graph>,
         cancellation: Option<&'a AtomicBool>,
     ) -> Self {
+        let chunk_index = u128::from(session.progress().accepted_chunks);
         EdgeSink {
             session,
             cancellation,
             buf: Vec::with_capacity(EDGE_PUBLISH_ROWS),
-            chunk_index: 0,
+            chunk_index,
             hasher: Sha256::new(),
         }
     }
@@ -2675,8 +2699,16 @@ fn tiny_construction_ladder_resumes_and_scales_bounded_work_linearly() {
         let mut resumed = graph
             .resume_graph_construction(session_uuid, GraphConstructionBudgets::default())
             .expect("resume tiny construction");
+        let mut first_edge = EdgeSink::new(&mut resumed, None);
+        first_edge.push(0, 1);
+        first_edge.flush();
+        let _ = first_edge.finish();
+        drop(resumed);
+        let mut resumed = graph
+            .resume_graph_construction(session_uuid, GraphConstructionBudgets::default())
+            .expect("resume after durable edge chunk");
         let mut sink = EdgeSink::new(&mut resumed, None);
-        for node in 0..u32::try_from(8 * factor - 1).expect("tiny vertex count") {
+        for node in 1..u32::try_from(8 * factor - 1).expect("tiny vertex count") {
             sink.push(node, node + 1);
         }
         sink.flush();
