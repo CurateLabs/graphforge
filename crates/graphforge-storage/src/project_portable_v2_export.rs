@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -52,17 +52,24 @@ pub struct PortableV2ExportProgress {
     /// Planned source payload bytes.
     pub bytes_total: u64,
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct PlannedFile {
     source: PlannedSource,
     path: String,
     length: u64,
     digest: [u8; 32],
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum PlannedSource {
-    File { path: PathBuf, identity: Identity },
-    Cas(crate::graph_object_store::AuthenticatedGraphObject),
+    File {
+        path: PathBuf,
+        identity: Identity,
+    },
+    Cas {
+        lease: crate::graph_object_store::GraphObjectReadLease,
+        digest: String,
+        length: u64,
+    },
     Control(Vec<u8>),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +81,7 @@ struct Identity {
     len: u64,
     modified: Option<std::time::SystemTime>,
 }
+#[derive(Clone)]
 /// Immutable pinned-generation metadata plan; contains no payload buffers.
 pub struct PortableV2ExportPlan {
     generation_uuid: Uuid,
@@ -850,11 +858,19 @@ pub fn plan_selected_portable_v2(
     if selection.include_graph_tree
         && let Some(inv) = g.graph_files_inventory()?
     {
+        let graph_authority = g.declared_graph_files_participant()?;
+        let graph_cas = if matches!(graph_authority, Some(crate::GraphFilesParticipant::V2(_))) {
+            Some(crate::graph_object_store::begin_graph_object_read(
+                g.container_root(),
+            )?)
+        } else {
+            None
+        };
         let id = "graph-tree".to_owned();
         let mut owned = Vec::new();
         for e in inv.files {
             let path = format!("data/components/graph-data/{id}/{}", e.relative_path);
-            let f = match g.declared_graph_files_participant()? {
+            let f = match &graph_authority {
                 Some(crate::GraphFilesParticipant::V1(_)) => inspect(
                     &g.graph_tree_root().join(&e.relative_path),
                     &path,
@@ -862,7 +878,7 @@ pub fn plan_selected_portable_v2(
                     &mut total,
                 )?,
                 Some(crate::GraphFilesParticipant::V2(_)) => inspect_cas(
-                    g.container_root(),
+                    graph_cas.as_ref().expect("compact authority has CAS lease"),
                     &e.content_sha256,
                     e.byte_length,
                     &path,
@@ -1496,7 +1512,7 @@ fn inspect(
     })
 }
 fn inspect_cas(
-    root: &Path,
+    lease: &crate::graph_object_store::GraphObjectReadLease,
     digest: &str,
     expected_length: u64,
     path: &str,
@@ -1513,14 +1529,17 @@ fn inspect_cas(
     if *total > limits.max_total_bytes {
         return Err(limit("total too large"));
     }
-    let source =
-        crate::graph_object_store::open_graph_object_by_digest(root, digest, expected_length)?;
-    let digest = parse_sha256(digest)?;
+    let _authenticated = lease.open(digest, expected_length)?;
+    let digest_bytes = parse_sha256(digest)?;
     Ok(PlannedFile {
-        source: PlannedSource::Cas(source),
+        source: PlannedSource::Cas {
+            lease: lease.clone(),
+            digest: digest.to_owned(),
+            length: expected_length,
+        },
         path: path.into(),
         length: expected_length,
-        digest,
+        digest: digest_bytes,
     })
 }
 fn inline_control(
@@ -1651,7 +1670,16 @@ fn open_planned_source(planned: &PlannedFile) -> Result<(File, Option<Identity>)
             }
             Ok((input, Some(*expected)))
         }
-        PlannedSource::Cas(source) => Ok((source.try_clone_file().map_err(storage)?, None)),
+        PlannedSource::Cas {
+            lease,
+            digest,
+            length,
+        } => {
+            let source = lease.open(digest, *length)?;
+            let mut file = source.try_clone_file().map_err(storage)?;
+            file.seek(SeekFrom::Start(0)).map_err(storage)?;
+            Ok((file, None))
+        }
         PlannedSource::Control(_) => unreachable!("control source returned above"),
     }
 }
@@ -2757,7 +2785,9 @@ mod tests {
             .source
         {
             PlannedSource::Control(bytes) => bytes.clone(),
-            PlannedSource::File { .. } => panic!("projected module must be an inline control"),
+            PlannedSource::File { .. } | PlannedSource::Cas { .. } => {
+                panic!("projected module must be an inline control")
+            }
         };
         let mut module: serde_json::Value = serde_json::from_slice(&module_bytes).unwrap();
         module["ontology_id"] = "https://graphforge.dev/ontology/tampered".into();
@@ -2787,7 +2817,9 @@ mod tests {
             .source
         {
             PlannedSource::Control(bytes) => bytes.clone(),
-            PlannedSource::File { .. } => panic!("composition must be an inline control"),
+            PlannedSource::File { .. } | PlannedSource::Cas { .. } => {
+                panic!("composition must be an inline control")
+            }
         };
         let mut control: serde_json::Value = serde_json::from_slice(&control_bytes).unwrap();
         control["required_features"]
@@ -2837,7 +2869,9 @@ mod tests {
             .source
         {
             PlannedSource::Control(bytes) => bytes.clone(),
-            PlannedSource::File { .. } => panic!("projected bridge must be an inline control"),
+            PlannedSource::File { .. } | PlannedSource::Cas { .. } => {
+                panic!("projected bridge must be an inline control")
+            }
         };
         let mut bridge: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         bridge["authored_version"] = "tampered-v2".into();
@@ -3751,7 +3785,7 @@ mod tests {
             .iter()
             .find_map(|file| match &file.source {
                 PlannedSource::File { path, .. } => Some(path),
-                PlannedSource::Control(_) => None,
+                PlannedSource::Control(_) | PlannedSource::Cas { .. } => None,
             })
             .unwrap();
         let original = fs::read(source).unwrap();

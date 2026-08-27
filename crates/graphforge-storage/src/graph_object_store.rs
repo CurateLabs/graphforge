@@ -1940,7 +1940,36 @@ pub fn read_graph_object_by_digest(
 /// Open and stream-authenticate one immutable CAS object without allocating its payload.
 pub(crate) struct AuthenticatedGraphObject {
     file: File,
-    _cas: ReadOnlyCasRoot,
+    _cas: std::sync::Arc<ReadOnlyCasRoot>,
+}
+
+#[derive(Clone)]
+pub(crate) struct GraphObjectReadLease {
+    cas: std::sync::Arc<ReadOnlyCasRoot>,
+}
+
+impl std::fmt::Debug for GraphObjectReadLease {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GraphObjectReadLease")
+            .finish_non_exhaustive()
+    }
+}
+
+pub(crate) fn begin_graph_object_read(root: &Path) -> Result<GraphObjectReadLease, GfError> {
+    Ok(GraphObjectReadLease {
+        cas: std::sync::Arc::new(ReadOnlyCasRoot::open(root)?),
+    })
+}
+
+impl GraphObjectReadLease {
+    pub(crate) fn open(
+        &self,
+        digest: &str,
+        expected_length: u64,
+    ) -> Result<AuthenticatedGraphObject, GfError> {
+        open_graph_object_with_read_lease(self, digest, expected_length)
+    }
 }
 
 impl std::fmt::Debug for AuthenticatedGraphObject {
@@ -2004,11 +2033,22 @@ pub(crate) fn open_graph_object_by_digest(
     digest: &str,
     expected_length: u64,
 ) -> Result<AuthenticatedGraphObject, GfError> {
-    let cas = ReadOnlyCasRoot::open(root)?;
-    let mut file = cas.open_digest(digest)?;
-    let metadata = file
-        .metadata()
-        .map_err(|error| storage("inspect stable graph object", root, error))?;
+    begin_graph_object_read(root)?.open(digest, expected_length)
+}
+
+fn open_graph_object_with_read_lease(
+    lease: &GraphObjectReadLease,
+    digest: &str,
+    expected_length: u64,
+) -> Result<AuthenticatedGraphObject, GfError> {
+    let mut file = lease.cas.open_digest(digest)?;
+    let metadata = file.metadata().map_err(|error| {
+        storage(
+            "inspect stable graph object",
+            &lease.cas.diagnostic_root,
+            error,
+        )
+    })?;
     // CAS payloads are deliberately hard-linked into private materializations,
     // so their link count is not an authority signal. The stable no-follow CAS
     // traversal, exact digest address, exact length, and streamed digest bind
@@ -2022,9 +2062,13 @@ pub(crate) fn open_graph_object_by_digest(
     let mut hasher = Sha256::new();
     let mut block = vec![0_u8; 1 << 20];
     loop {
-        let count = file
-            .read(&mut block)
-            .map_err(|error| storage("authenticate graph object", root, error))?;
+        let count = file.read(&mut block).map_err(|error| {
+            storage(
+                "authenticate graph object",
+                &lease.cas.diagnostic_root,
+                error,
+            )
+        })?;
         if count == 0 {
             break;
         }
@@ -2034,8 +2078,11 @@ pub(crate) fn open_graph_object_by_digest(
         return Err(validation("graph object digest does not match its address"));
     }
     file.rewind()
-        .map_err(|error| storage("rewind graph object", root, error))?;
-    Ok(AuthenticatedGraphObject { file, _cas: cas })
+        .map_err(|error| storage("rewind graph object", &lease.cas.diagnostic_root, error))?;
+    Ok(AuthenticatedGraphObject {
+        file,
+        _cas: std::sync::Arc::clone(&lease.cas),
+    })
 }
 
 fn read_graph_object_by_digest_from_read_only_cas(
