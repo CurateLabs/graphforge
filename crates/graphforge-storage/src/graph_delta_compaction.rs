@@ -622,22 +622,11 @@ fn canonical_topology_rows(
 ) -> Result<u64, GfError> {
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     let mut paths = crate::mutator::node_parquet_files(root)?;
-    let edges = root.join("topology/edges");
-    if edges.exists() {
-        for entry in fs::read_dir(&edges)
-            .map_err(|error| storage("list compacted edge files", &edges, error))?
-        {
-            let path = entry
-                .map_err(|error| storage("read compacted edge entry", &edges, error))?
-                .path();
-            if path
-                .extension()
-                .is_some_and(|extension| extension == "parquet")
-            {
-                paths.push(path);
-            }
-        }
-    }
+    paths.extend(
+        crate::mutator::edge_parquet_files(root, None)?
+            .into_iter()
+            .map(|(_, path)| path),
+    );
     let mut rows = 0_u64;
     let mut rows_since_cancel = 0_u64;
     for path in paths {
@@ -818,6 +807,48 @@ mod crash_oracle_tests {
         AuthorityClass, PublicationIds, PublicationPhase, default_durable_ids, expected_authority,
         publication_ops, simulate_crash,
     };
+
+    #[test]
+    fn canonical_topology_rows_counts_nested_edge_shards() {
+        let root = tempfile::tempdir().unwrap();
+        let left = Uuid::now_v7();
+        let right = Uuid::now_v7();
+        let mut first = crate::GraphWriter::open_at(
+            root.path(),
+            graphforge_core::OntologyMode::Strict,
+            1_700_000_000_000_000,
+        )
+        .unwrap();
+        first.create_node(left, graphforge_core::TypeId(0)).unwrap();
+        first
+            .create_node(right, graphforge_core::TypeId(0))
+            .unwrap();
+        first
+            .create_edge(Uuid::now_v7(), "KNOWS", &left, &right)
+            .unwrap();
+        first.flush().unwrap();
+
+        let mut second = crate::GraphWriter::open_at(
+            root.path(),
+            graphforge_core::OntologyMode::Strict,
+            1_700_000_000_000_001,
+        )
+        .unwrap();
+        second.register_existing_node(left, 1).unwrap();
+        second.register_existing_node(right, 2).unwrap();
+        second
+            .create_edge(Uuid::now_v7(), "KNOWS", &right, &left)
+            .unwrap();
+        second.flush().unwrap();
+
+        assert_eq!(
+            crate::mutator::edge_parquet_files(root.path(), Some("KNOWS"))
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(canonical_topology_rows(root.path(), 1, 1, None).unwrap(), 4);
+    }
 
     fn publish_graph_base(root: &Path) {
         publish_graph_base_with_mode(

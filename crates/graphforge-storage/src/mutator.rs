@@ -292,6 +292,11 @@ pub(crate) fn edge_parquet_files(
         let stem = entry.file_name().into_string().map_err(|_| {
             GfError::Storage("edge topology relation directory is not UTF-8".into())
         })?;
+        if stem.ends_with(".parquet") {
+            return Err(GfError::Storage(
+                "edge topology Parquet path is not a regular file".into(),
+            ));
+        }
         if relation.is_some_and(|expected| expected != stem) {
             continue;
         }
@@ -526,9 +531,8 @@ pub fn stage_delete_edges<S: BuildHasher>(
     }
     let mut removed = 0u64;
     for (_, path) in edge_parquet_files(dir, None)? {
-        if let Some(schema) = discover_parquet_schema(&path) {
-            removed += stage_rewrite_dropping(staged, &path, schema, "edge_uuid", edge_uuids)?;
-        }
+        let schema = discover_parquet_schema_detailed(&path).map_err(pq_err)?;
+        removed += stage_rewrite_dropping(staged, &path, schema, "edge_uuid", edge_uuids)?;
     }
     for route in crate::catalog::list_edge_property_stems(dir) {
         crate::writer::stage_property_tombstones(
@@ -555,9 +559,8 @@ pub fn stage_delete_edges_authenticated<S: BuildHasher>(
     }
     let mut removed = 0u64;
     for (_, path) in edge_parquet_files(dir, None)? {
-        if let Some(schema) = discover_parquet_schema(&path) {
-            removed += stage_rewrite_dropping(staged, &path, schema, "edge_uuid", edge_uuids)?;
-        }
+        let schema = discover_parquet_schema_detailed(&path).map_err(pq_err)?;
+        removed += stage_rewrite_dropping(staged, &path, schema, "edge_uuid", edge_uuids)?;
     }
     let routes = inventory
         .routes(crate::PropertyRouteKind::Edge)
@@ -1031,6 +1034,37 @@ mod tests {
         .unwrap();
 
         assert!(incident_edge_uuids(dir.path(), &set(&[a])).is_err());
+    }
+
+    #[test]
+    fn edge_deletion_fails_closed_on_corrupt_topology_for_both_staging_paths() {
+        let (dir, _a, _b, _c) = chain();
+        let (captured, _) = crate::capture_graph_files(dir.path()).unwrap();
+        let inventory =
+            crate::AuthenticatedPropertyInventory::from_entries_at_root(dir.path(), captured.files)
+                .unwrap();
+        fs::write(
+            dir.path().join("topology/edges/KNOWS.parquet"),
+            b"not parquet",
+        )
+        .unwrap();
+        let target = set(&[new_v7()]);
+
+        let mut ordinary = RewriteBatch::new();
+        assert!(stage_delete_edges(&mut ordinary, dir.path(), &target).is_err());
+        let mut authenticated = RewriteBatch::new();
+        assert!(
+            stage_delete_edges_authenticated(&mut authenticated, dir.path(), &inventory, &target,)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn edge_enumeration_rejects_parquet_named_relation_directories() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join("topology/edges/KNOWS.parquet")).unwrap();
+        assert!(edge_parquet_files(dir.path(), None).is_err());
+        assert!(edge_parquet_files(dir.path(), Some("KNOWS.parquet")).is_err());
     }
 
     #[test]

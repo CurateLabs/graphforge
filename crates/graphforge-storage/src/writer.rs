@@ -3070,7 +3070,7 @@ impl GraphWriter {
 
         let legacy = topology.join("nodes.parquet");
         let path = if !legacy.exists() && !topology.join("nodes").exists() {
-            legacy
+            legacy.clone()
         } else {
             let first = self.nodes.first().map_or(0, |row| row.node_id);
             let last = self.nodes.last().map_or(first, |row| row.node_id);
@@ -3078,6 +3078,11 @@ impl GraphWriter {
                 .join("nodes")
                 .join(format!("{first:020}-{last:020}.parquet"))
         };
+        if path != legacy && (path.exists() || staged.staged_temp(&path).is_some()) {
+            return Err(GfError::Storage(
+                "node shard surrogate range already exists".into(),
+            ));
+        }
         staged.stage(&path, TOPOLOGY_NODES_SCHEMA.clone(), &batch)?;
         crate::io_stats::record_topology_rewrite(0, batch.num_rows() as u64);
         self.record_topology_shard(staged, &path, batch.num_rows() as u64)?;
@@ -6558,6 +6563,26 @@ mod tests {
         assert_eq!(rows, 2);
         let mut third = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
         assert_eq!(third.create_node(new_v7(), TypeId(0)).unwrap(), 3);
+    }
+
+    #[test]
+    fn node_append_rejects_an_existing_surrogate_range_shard() {
+        let dir = TempDir::new().unwrap();
+        let mut first = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
+        first.create_node(new_v7(), TypeId(0)).unwrap();
+        first.flush().unwrap();
+
+        let mut second = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS + 1).unwrap();
+        second.create_node(new_v7(), TypeId(0)).unwrap();
+        let collision = dir
+            .path()
+            .join("topology/nodes/00000000000000000002-00000000000000000002.parquet");
+        fs::create_dir_all(collision.parent().unwrap()).unwrap();
+        fs::write(&collision, b"planted collision").unwrap();
+
+        let error = second.flush().unwrap_err().to_string();
+        assert!(error.contains("node shard surrogate range already exists"));
+        assert_eq!(fs::read(collision).unwrap(), b"planted collision");
     }
 
     #[test]
