@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import copy
+from decimal import Decimal
 import importlib.util
 import json
 from pathlib import Path
@@ -100,6 +102,20 @@ def evidence(**changes):
     return value
 
 
+def pricing_html(*, region="den", rate="0.00002484", duplicate=False, volume="0.15"):
+    row = f"""
+      <tr><th>performance-2x</th><td>2 performance</td><td>4GB</td>
+      <td>${rate}</td><td>$0.0894</td><td>$64.39</td></tr>
+    """
+    return f"""
+      <div id="started-machines-pricing-matrix-{region}">
+        <table>{row}{row if duplicate else ''}</table>
+      </div>
+      <p>Fly Volumes are local persistent storage for Machines.</p>
+      <p>${volume}/GB per month</p><p>Volume billing is pro-rated to the hour.</p>
+    """
+
+
 def test_contract_fixes_resources_and_rejects_mutable_image(tmp_path):
     digest = controller.validate_inputs(args(tmp_path))
     payload = controller.machine_payload(args(tmp_path), "vol-id", digest)
@@ -147,14 +163,92 @@ def test_durable_budget_reservations_survive_and_accumulate(tmp_path):
         controller.reserve_budget(ledger, "run-one", first)
 
 
-def test_current_official_pricing_must_match_committed_worst_case():
-    controller.verify_current_pricing(
-        "performance-2x $0.00003864 per second; volumes $0.15/GB per month"
+def test_current_official_pricing_selects_fixed_region_and_derives_ledger():
+    compute, volume = controller.parse_current_pricing(pricing_html(), "den")
+    assert (compute, volume) == (Decimal("0.00002484"), Decimal("0.15"))
+    reservation = controller.price_reservation(500, compute, volume)
+    assert reservation["compute_rate_usd_per_second"] == 0.00002484
+    assert reservation["reserved_usd"] == 0.90
+
+
+@pytest.mark.parametrize(
+    ("html", "region", "message"),
+    [
+        (pricing_html(region="ord"), "den", "no table"),
+        (pricing_html(duplicate=True), "den", "one applicable"),
+        (pricing_html(rate="0.00009999"), "den", "exceeds"),
+        (
+            pricing_html()
+            + "<p>Fly Volumes $0.20/GB per month Volume billing is pro-rated</p>",
+            "den",
+            "ambiguous volume",
+        ),
+    ],
+)
+def test_current_official_pricing_fails_closed_on_wrong_ambiguous_or_higher_rows(
+    html, region, message
+):
+    with pytest.raises(controller.ControllerError, match=message):
+        controller.parse_current_pricing(html, region)
+
+
+def test_oci_inspection_authenticates_repo_digest_revision_and_runtime(monkeypatch):
+    image = "registry.example/graphforge@sha256:" + "b" * 64
+    inspected = [{
+        "RepoDigests": [image],
+        "Config": {"Labels": {
+            "org.opencontainers.image.revision": "a" * 40,
+            "dev.graphforge.fly-s20": "graphforge-fly-s20-runtime/1",
+        }},
+    }]
+    calls = []
+
+    def run(command, **_kwargs):
+        calls.append(command)
+        stdout = json.dumps(inspected) if command[1:3] == ["image", "inspect"] else ""
+        return argparse.Namespace(stdout=stdout)
+
+    monkeypatch.setattr(controller.subprocess, "run", run)
+    controller.inspect_image(image, "a" * 40, "sha256:" + "b" * 64)
+    assert calls == [["docker", "pull", image], ["docker", "image", "inspect", image]]
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ({"RepoDigests": ["registry.example/other@sha256:" + "b" * 64]}, "repo digest"),
+        (
+            {"Config": {"Labels": {
+                "org.opencontainers.image.revision": "c" * 40,
+                "dev.graphforge.fly-s20": "graphforge-fly-s20-runtime/1",
+            }}},
+            "revision",
+        ),
+        (
+            {"Config": {"Labels": {
+                "org.opencontainers.image.revision": "a" * 40,
+                "dev.graphforge.fly-s20": "unknown",
+            }}},
+            "runtime schema",
+        ),
+    ],
+)
+def test_oci_inspection_rejects_provenance_mismatch(monkeypatch, change, message):
+    image = "registry.example/graphforge@sha256:" + "b" * 64
+    inspected = {"RepoDigests": [image], "Config": {"Labels": {
+        "org.opencontainers.image.revision": "a" * 40,
+        "dev.graphforge.fly-s20": "graphforge-fly-s20-runtime/1",
+    }}}
+    inspected.update(change)
+    monkeypatch.setattr(
+        controller.subprocess,
+        "run",
+        lambda command, **_kwargs: argparse.Namespace(
+            stdout=json.dumps([inspected]) if command[1:3] == ["image", "inspect"] else ""
+        ),
     )
-    with pytest.raises(controller.ControllerError, match="no longer matches"):
-        controller.verify_current_pricing(
-            "performance-2x $0.00009999 per second; volumes $0.15/GB per month"
-        )
+    with pytest.raises(controller.ControllerError, match=message):
+        controller.inspect_image(image, "a" * 40, "sha256:" + "b" * 64)
 
 
 def test_existing_app_is_refused_before_budget_or_creation(tmp_path):
@@ -275,6 +369,12 @@ def test_terminal_failure_is_persisted_promptly_and_still_verified_cleaned(tmp_p
         },
     }
     monkeypatch.setattr(controller, "create_machine", lambda *_args: machine)
+    monkeypatch.setattr(controller, "inspect_image", lambda *_args: None)
+    monkeypatch.setattr(
+        controller,
+        "fetch_current_pricing",
+        lambda _region: (Decimal("0.00002484"), Decimal("0.15")),
+    )
 
     class Fly:
         def __init__(self):

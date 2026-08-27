@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Sequence
+from decimal import ROUND_CEILING, Decimal
 import fcntl
+from html.parser import HTMLParser
 import importlib.util
 import json
 import os
@@ -34,8 +36,8 @@ MEMORY_MB = 4096
 MAX_COST_USD = 10.0
 PRICING_SOURCE = "https://fly.io/docs/about/pricing/"
 # Largest currently published regional performance-2x/4GB price (2026-08-27).
-COMPUTE_USD_PER_SECOND = 0.00003864
 VOLUME_USD_PER_GB_MONTH = 0.15
+COMPUTE_PRICE_CEILING_USD_PER_SECOND = 0.00003864
 RUN_SECONDS = 14_400
 CLEANUP_RESERVE_SECONDS = 600
 VOLUME_BILLING_HOURS = 5
@@ -109,34 +111,100 @@ def check_source(expected_sha: str) -> None:
         raise ControllerError("exact expected SHA must be checked out in a clean tree")
 
 
-def price_reservation(volume_size_gb: int) -> dict[str, Any]:
-    compute = (RUN_SECONDS + CLEANUP_RESERVE_SECONDS) * COMPUTE_USD_PER_SECOND
-    volume = volume_size_gb * VOLUME_USD_PER_GB_MONTH / (30 * 24) * VOLUME_BILLING_HOURS
-    total_cents = int((compute + volume) * 100 + 0.999999999)
+def price_reservation(
+    volume_size_gb: int,
+    compute_rate: Decimal = Decimal(str(COMPUTE_PRICE_CEILING_USD_PER_SECOND)),
+    volume_rate: Decimal = Decimal(str(VOLUME_USD_PER_GB_MONTH)),
+) -> dict[str, Any]:
+    compute = Decimal(RUN_SECONDS + CLEANUP_RESERVE_SECONDS) * compute_rate
+    volume = Decimal(volume_size_gb) * volume_rate / Decimal(30 * 24) * VOLUME_BILLING_HOURS
+    total_cents = ((compute + volume) * 100).quantize(Decimal("1"), rounding=ROUND_CEILING)
     return {
         "pricing_source": PRICING_SOURCE,
-        "compute_rate_usd_per_second": COMPUTE_USD_PER_SECOND,
-        "volume_rate_usd_per_gb_month": VOLUME_USD_PER_GB_MONTH,
+        "compute_rate_usd_per_second": float(compute_rate),
+        "volume_rate_usd_per_gb_month": float(volume_rate),
         "runtime_seconds": RUN_SECONDS,
         "cleanup_reserve_seconds": CLEANUP_RESERVE_SECONDS,
         "volume_billing_hours": VOLUME_BILLING_HOURS,
         "volume_size_gb": volume_size_gb,
-        "reserved_usd": total_cents / 100,
+        "reserved_usd": float(total_cents / 100),
     }
 
 
-def verify_current_pricing(html: str) -> None:
-    """Fail closed if Fly no longer publishes the rates used by the ledger."""
-    compact = re.sub(r"\s+", "", html)
-    compute = f"{COMPUTE_USD_PER_SECOND:.8f}".rstrip("0")
-    volume = f"{VOLUME_USD_PER_GB_MONTH:.2f}".rstrip("0").rstrip(".")
-    if compute not in compact or f"${volume}/GBpermonth" not in compact:
-        raise ControllerError(
-            "official Fly pricing no longer matches the committed worst-case rates"
-        )
+class _PricingTables(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.table_id: str | None = None
+        self.rows: dict[str, list[list[str]]] = {}
+        self.row: list[str] | None = None
+        self.cell: list[str] | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes = dict(attrs)
+        if tag == "div" and (identifier := attributes.get("id")) and identifier.startswith(
+            "started-machines-pricing-matrix-"
+        ):
+            self.table_id = identifier
+            self.rows.setdefault(identifier, [])
+        elif self.table_id and tag == "tr":
+            self.row = []
+        elif self.row is not None and tag in {"td", "th"}:
+            self.cell = []
+
+    def handle_data(self, data: str) -> None:
+        if self.cell is not None:
+            self.cell.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in {"td", "th"} and self.cell is not None and self.row is not None:
+            self.row.append(" ".join("".join(self.cell).split()))
+            self.cell = None
+        elif tag == "tr" and self.row is not None and self.table_id:
+            self.rows[self.table_id].append(self.row)
+            self.row = None
+        elif tag == "div" and self.table_id:
+            self.table_id = None
 
 
-def fetch_current_pricing() -> None:
+def parse_current_pricing(html: str, region: str) -> tuple[Decimal, Decimal]:
+    """Select exactly one official fixed-region performance-2x/4GB price row."""
+    parser = _PricingTables()
+    parser.feed(html)
+    table = parser.rows.get(f"started-machines-pricing-matrix-{region}")
+    if table is None:
+        raise ControllerError("official Fly pricing has no table for the fixed region")
+    preset = None
+    matches: list[Decimal] = []
+    for cells in table:
+        if cells and re.fullmatch(r"performance-\d+x", cells[0]):
+            preset = cells[0]
+        if preset != "performance-2x" or "4GB" not in cells or "2 performance" not in cells:
+            continue
+        prices = [
+            Decimal(value)
+            for value in re.findall(r"\$([0-9]+(?:\.[0-9]+)?)", " ".join(cells))
+        ]
+        if len(prices) != 3:
+            raise ControllerError("official Fly pricing row has ambiguous price columns")
+        matches.append(prices[0])
+    if len(matches) != 1:
+        raise ControllerError("official Fly pricing does not contain one applicable compute row")
+    volume_sections = re.findall(r"Fly Volumes(?:(?!Volume billing).)*Volume billing", html, re.S)
+    volume_matches = {
+        match
+        for section in volume_sections
+        for match in re.findall(r"\$([0-9]+(?:\.[0-9]+)?)/GB\s+per\s+month", section)
+    }
+    if len(volume_matches) != 1:
+        raise ControllerError("official Fly pricing has ambiguous volume rates")
+    compute = matches[0]
+    volume = Decimal(next(iter(volume_matches)))
+    if compute > Decimal(str(COMPUTE_PRICE_CEILING_USD_PER_SECOND)):
+        raise ControllerError("applicable Fly compute price exceeds the authorized ceiling")
+    return compute, volume
+
+
+def fetch_current_pricing(region: str) -> tuple[Decimal, Decimal]:
     request = urllib.request.Request(
         PRICING_SOURCE, headers={"User-Agent": "graphforge-fly-s20-controller/1"}
     )
@@ -144,9 +212,39 @@ def fetch_current_pricing() -> None:
         with urllib.request.urlopen(request, timeout=30) as response:
             if response.geturl() != PRICING_SOURCE:
                 raise ControllerError("official Fly pricing request redirected")
-            verify_current_pricing(response.read().decode("utf-8"))
+            return parse_current_pricing(response.read().decode("utf-8"), region)
     except urllib.error.URLError:
         raise ControllerError("official Fly pricing is unavailable") from None
+
+
+def inspect_image(image: str, expected_sha: str, digest: str) -> None:
+    """Pull and authenticate the local OCI config before any provider mutation."""
+    subprocess.run(
+        ["docker", "pull", image], check=True, text=True, capture_output=True, timeout=900
+    )
+    result = subprocess.run(
+        ["docker", "image", "inspect", image],
+        check=True,
+        text=True,
+        capture_output=True,
+        timeout=120,
+    )
+    inspected = json.loads(result.stdout)
+    if not isinstance(inspected, list) or len(inspected) != 1:
+        raise ControllerError("OCI inspection did not return exactly one image")
+    image_data = inspected[0]
+    repo_digests = image_data.get("RepoDigests")
+    labels = image_data.get("Config", {}).get("Labels")
+    requested_repo = image.rsplit("@", 1)[0]
+    if not isinstance(repo_digests, list) or f"{requested_repo}@{digest}" not in repo_digests:
+        raise ControllerError("pulled OCI image does not authenticate the requested repo digest")
+    if (
+        not isinstance(labels, dict)
+        or labels.get("org.opencontainers.image.revision") != expected_sha
+    ):
+        raise ControllerError("OCI revision label does not equal the exact expected SHA")
+    if labels.get("dev.graphforge.fly-s20") != "graphforge-fly-s20-runtime/1":
+        raise ControllerError("OCI runtime schema label is missing or unsupported")
 
 
 def reserve_budget(path: Path, run_id: str, reservation: dict[str, Any]) -> None:
@@ -335,8 +433,13 @@ def execute(args: argparse.Namespace, fly: Flyctl, digest: str) -> None:
             item.get("Name") == args.app_name or item.get("name") == args.app_name for item in apps
         ):
             raise ControllerError("refusing to reuse an existing app")
-        fetch_current_pricing()
-        reserve_budget(args.ledger, args.app_name, price_reservation(args.volume_size_gb))
+        inspect_image(args.image, args.expected_sha, digest)
+        compute_rate, volume_rate = fetch_current_pricing(args.region)
+        reserve_budget(
+            args.ledger,
+            args.app_name,
+            price_reservation(args.volume_size_gb, compute_rate, volume_rate),
+        )
         fly.run(["apps", "create", args.app_name, "--org", args.org])
         app_created = True
         volume = fly.json(
