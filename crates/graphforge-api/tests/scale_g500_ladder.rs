@@ -3122,6 +3122,36 @@ fn s20_memory_snapshot() -> Value {
     })
 }
 
+fn query_evidence_value(value: &graphforge_exec::demand::DemandSnapshot) -> Value {
+    json!({
+        "hops": value.hops.iter().map(|(id, hop)| json!({
+            "id": id,
+            "input_rows": hop.input_rows,
+            "candidates_generated": hop.candidates_generated,
+            "rows_emitted": hop.rows_emitted,
+            "edge_rows_scanned": hop.edge_rows_scanned,
+            "edge_full_reads": hop.edge_full_reads,
+            "node_rows_scanned": hop.node_rows_scanned,
+            "node_full_reads": hop.node_full_reads,
+        })).collect::<Vec<_>>(),
+        "sorts": value.sorts.iter().map(|sort| json!({
+            "ordinal": sort.ordinal,
+            "fetch": sort.fetch,
+            "output_rows": sort.output_rows,
+            "spill_count": sort.spill_count,
+            "spilled_bytes": sort.spilled_bytes,
+            "memory_used_after": sort.memory_used_after,
+        })).collect::<Vec<_>>(),
+        "memory_reserved_before": value.memory_reserved_before,
+        "memory_reserved_after": value.memory_reserved_after,
+        "returned_batch_bytes": value.returned_batch_bytes,
+        "operator_rss": {
+            "expand_peak_bytes": value.operator_rss.expand_peak_bytes,
+            "sort_peak_bytes": value.operator_rss.sort_peak_bytes,
+        },
+    })
+}
+
 /// The paid S20 runner intentionally starts at the real operational rung. It
 /// does not invent lower-rung admission criteria or size RAM from edge count.
 #[test]
@@ -3252,10 +3282,10 @@ fn fly_s20_full_lifecycle_evidence() {
             "imported_generation": imported_receipt.generation_uuid.to_string(),
             "package_digest": exported.package_digest,
             "portable_contract": verified.contract,
-            "source_one_hop": { "fingerprint": source_one_fingerprint, "evidence": source_one.evidence },
-            "source_two_hop": { "fingerprint": source_two_fingerprint, "evidence": source_two.evidence },
-            "imported_one_hop": { "fingerprint": imported_one_fingerprint, "evidence": imported_one.evidence },
-            "imported_two_hop": { "fingerprint": imported_two_fingerprint, "evidence": imported_two.evidence },
+            "source_one_hop": { "fingerprint": source_one_fingerprint, "evidence": query_evidence_value(&source_one.evidence) },
+            "source_two_hop": { "fingerprint": source_two_fingerprint, "evidence": query_evidence_value(&source_two.evidence) },
+            "imported_one_hop": { "fingerprint": imported_one_fingerprint, "evidence": query_evidence_value(&imported_one.evidence) },
+            "imported_two_hop": { "fingerprint": imported_two_fingerprint, "evidence": query_evidence_value(&imported_two.evidence) },
             "source_authority_fingerprint": source_authority,
             "imported_authority_fingerprint": imported_authority,
             "source_storage": source_storage,
