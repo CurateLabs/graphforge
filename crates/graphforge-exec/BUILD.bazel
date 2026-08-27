@@ -12,6 +12,7 @@ filegroup(
 )
 
 _EXEC_DEPS = [
+    "@crates//:tokio",
     "//crates/graphforge-core:graphforge_core",
     "//crates/graphforge-ir:graphforge_ir",
     "//crates/graphforge-ontology:graphforge_ontology",
