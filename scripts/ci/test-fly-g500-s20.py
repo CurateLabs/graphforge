@@ -193,9 +193,9 @@ def evidence(**changes):
             "early_rss_peak_bytes": 500_000_000,
             "middle_rss_peak_bytes": 600_000_000,
             "late_rss_peak_bytes": 700_000_000,
-            "early_sample_count": 4,
-            "middle_sample_count": 4,
-            "late_sample_count": 4,
+            "early_sample_count": 100,
+            "middle_sample_count": 100,
+            "late_sample_count": 100,
             "early_progress_start": 1,
             "early_progress_end": 100,
             "middle_progress_start": 101,
@@ -203,6 +203,7 @@ def evidence(**changes):
             "late_progress_start": 201,
             "late_progress_end": 300,
             "final_committed_chunks": 300,
+            "sampling_source": "authenticated_edge_chunk_commit",
             "bounded_working_set_bytes": 268_435_456,
             "sampling_tolerance_bytes": 67_108_864,
             "allowed_growth_bytes": 335_544_320,
@@ -210,7 +211,6 @@ def evidence(**changes):
             "plateau_pass": True,
             "envelope_bytes": 4_294_967_296,
             "headroom_bytes": 3_594_967_296,
-            "sample_interval_ms": 250,
         },
         "storage": {
             "logical_bytes": 1_003,
@@ -1035,7 +1035,7 @@ def test_ingest_windows_recompute_growth_headroom_and_plateau():
 )
 def test_ingest_progress_bands_reject_sparse_samples(field):
     sparse = evidence()
-    sparse["ingest_memory_windows"][field] = 3
+    sparse["ingest_memory_windows"][field] = 2
     with pytest.raises(validator.EvidenceError, match="schema violation"):
         validator.validate(sparse, "a" * 40, "sha256:" + "b" * 64, "den")
 
@@ -1050,6 +1050,18 @@ def test_ingest_progress_bands_reject_gaps_and_missing_final_coverage():
     incomplete["ingest_memory_windows"]["final_committed_chunks"] += 1
     with pytest.raises(validator.EvidenceError, match="final committed progress"):
         validator.validate(incomplete, "a" * 40, "sha256:" + "b" * 64, "den")
+
+    duplicate_or_missing_sample = evidence()
+    duplicate_or_missing_sample["ingest_memory_windows"]["middle_sample_count"] -= 1
+    with pytest.raises(validator.EvidenceError, match="distinct committed chunk coverage"):
+        validator.validate(
+            duplicate_or_missing_sample, "a" * 40, "sha256:" + "b" * 64, "den"
+        )
+
+    wrong_source = evidence()
+    wrong_source["ingest_memory_windows"]["sampling_source"] = "timer_poll"
+    with pytest.raises(validator.EvidenceError, match="schema violation"):
+        validator.validate(wrong_source, "a" * 40, "sha256:" + "b" * 64, "den")
 
 
 def test_machine_relative_allowance_cannot_hide_growth_over_bounded_workset():

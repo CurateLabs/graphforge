@@ -163,6 +163,13 @@ def validate(
         raise EvidenceError("ingest progress bands must start at one and be nonempty")
     if bands[1][0] != bands[0][1] + 1 or bands[2][0] != bands[1][1] + 1:
         raise EvidenceError("ingest progress bands must be exactly contiguous")
+    sample_counts = [
+        windows["early_sample_count"],
+        windows["middle_sample_count"],
+        windows["late_sample_count"],
+    ]
+    if any(count != end - start + 1 for count, (start, end) in zip(sample_counts, bands)):
+        raise EvidenceError("ingest sample counts must equal distinct committed chunk coverage")
     if (
         bands[2][1] != max(end for _, end in bands)
         or bands[2][1] != windows["final_committed_chunks"]
