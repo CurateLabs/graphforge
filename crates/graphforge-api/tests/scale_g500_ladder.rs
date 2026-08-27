@@ -870,15 +870,27 @@ fn run_rung(
             IngestHeartbeat::start(profile, rung, completed_rungs, &steps, &project, &spill_dir);
         let mut construction =
             open_persisted_construction(&graph, &spill_dir.join("construction-session.uuid"));
-        publish_nodes(&mut construction, 1u64 << rung.scale, None);
-        INGEST_SUBPHASE.store(2, Ordering::Relaxed);
-        let mut sink = EdgeSink::new(&mut construction, None);
-        let merge =
-            merge_runs(&spill.runs, None, |src, dst| sink.push(src, dst)).expect("rung merge");
-        sink.flush();
-        live_unique_edges = merge.live_unique_edges;
-        duplicates_rejected = merge.duplicates_rejected;
-        input_fingerprint = format!("sha256:{}", hex_encode(sink.finish()));
+        if construction.progress().publication_committed {
+            let mut fingerprint = Sha256::new();
+            let merge = merge_runs(&spill.runs, None, |src, dst| {
+                fingerprint.update(src.to_le_bytes());
+                fingerprint.update(dst.to_le_bytes());
+            })
+            .expect("reconcile already-published rung");
+            live_unique_edges = merge.live_unique_edges;
+            duplicates_rejected = merge.duplicates_rejected;
+            input_fingerprint = format!("sha256:{}", hex_encode(fingerprint.finalize()));
+        } else {
+            publish_nodes(&mut construction, 1u64 << rung.scale, None);
+            INGEST_SUBPHASE.store(2, Ordering::Relaxed);
+            let mut sink = EdgeSink::new(&mut construction, None);
+            let merge =
+                merge_runs(&spill.runs, None, |src, dst| sink.push(src, dst)).expect("rung merge");
+            sink.flush();
+            live_unique_edges = merge.live_unique_edges;
+            duplicates_rejected = merge.duplicates_rejected;
+            input_fingerprint = format!("sha256:{}", hex_encode(sink.finish()));
+        }
         construction
             .seal_and_publish()
             .expect("publish rung construction");
@@ -2820,6 +2832,12 @@ fn construction_session_reenters_across_processes() {
                 let _ = sink.finish();
                 session.seal_and_publish().expect("child publish");
             }
+            Ok("recover") => {
+                let receipt = session
+                    .seal_and_publish()
+                    .expect("recover publication receipt");
+                assert!(receipt.idempotent_replay);
+            }
             _ => panic!("unknown re-entry phase"),
         }
         return;
@@ -2842,6 +2860,11 @@ fn construction_session_reenters_across_processes() {
     run_child("nodes");
     run_child("edges");
     let graph = GraphForge::new(workspace.path().join("project").to_str()).expect("reopen result");
+    let published = current_generation_uuid(&graph);
+    drop(graph);
+    run_child("recover");
+    let graph = GraphForge::new(workspace.path().join("project").to_str()).expect("reopen result");
+    assert_eq!(current_generation_uuid(&graph), published);
     assert_eq!(graph.node_count(NODE_LABEL).unwrap(), 8);
     assert_eq!(scalar_count(&graph.execute(COUNT_EDGES).unwrap()), 2);
 }

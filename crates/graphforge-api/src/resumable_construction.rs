@@ -21,6 +21,8 @@ pub struct GraphConstructionProgress {
     pub parent_topology_generation: u64,
     /// Number of durably accepted chunks.
     pub accepted_chunks: u64,
+    /// Whether the sole project publication commit point was crossed.
+    pub publication_committed: bool,
     /// Storage-measured bounded-work evidence.
     pub evidence: GraphConstructionEvidence,
 }
@@ -207,6 +209,7 @@ impl GraphConstructionSession<'_> {
             state: self.inner.state(),
             parent_topology_generation: self.inner.parent_topology_generation(),
             accepted_chunks: self.inner.accepted_chunks(),
+            publication_committed: self.inner.publication_committed(),
             evidence: self.inner.evidence().clone(),
         }
     }

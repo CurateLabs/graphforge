@@ -1673,6 +1673,12 @@ impl GraphConstructionSession {
         self.checkpoint.state
     }
 
+    /// Whether this session crossed its sole project publication commit point.
+    #[must_use]
+    pub fn publication_committed(&self) -> bool {
+        self.checkpoint.publication_state == Some(ConstructionPublicationState::Published)
+    }
+
     /// Pinned parent topology generation.
     #[must_use]
     pub const fn parent_topology_generation(&self) -> u64 {
