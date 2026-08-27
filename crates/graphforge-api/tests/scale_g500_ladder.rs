@@ -3084,6 +3084,195 @@ fn certification_target_live_full_lifecycle_evidence() {
         .expect("write certification evidence");
 }
 
+fn required_env_u64(name: &str) -> u64 {
+    std::env::var(name)
+        .unwrap_or_else(|_| panic!("{name} is required"))
+        .parse::<u64>()
+        .unwrap_or_else(|_| panic!("{name} must be an unsigned integer"))
+}
+
+fn s20_memory_snapshot() -> Value {
+    let status = fs::read_to_string("/proc/self/status").unwrap_or_default();
+    let kib = |name: &str| {
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix(name))
+            .and_then(|value| value.split_whitespace().next())
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0)
+            .saturating_mul(1024)
+    };
+    let smaps = fs::read_to_string("/proc/self/smaps_rollup").unwrap_or_default();
+    let smaps_kib = |name: &str| {
+        smaps
+            .lines()
+            .find_map(|line| line.strip_prefix(name))
+            .and_then(|value| value.split_whitespace().next())
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0)
+            .saturating_mul(1024)
+    };
+    let rss = smaps_kib("Rss:").max(kib("VmRSS:"));
+    let anonymous = smaps_kib("Anonymous:");
+    json!({
+        "rss_bytes": rss,
+        "hwm_bytes": kib("VmHWM:"),
+        "anonymous_bytes": anonymous,
+        "file_bytes": rss.saturating_sub(anonymous),
+    })
+}
+
+/// The paid S20 runner intentionally starts at the real operational rung. It
+/// does not invent lower-rung admission criteria or size RAM from edge count.
+#[test]
+#[ignore = "provisioned Fly S20 full lifecycle; requires explicit work and evidence paths"]
+fn fly_s20_full_lifecycle_evidence() {
+    let profile = load_profile();
+    let rung = profile
+        .rungs
+        .iter()
+        .find(|candidate| candidate.id == "S20" && candidate.scale == 20)
+        .expect("committed S20 rung");
+    let work_root = PathBuf::from(
+        std::env::var("GF_G500_S20_WORK_ROOT").expect("GF_G500_S20_WORK_ROOT is required"),
+    );
+    assert!(!work_root.exists(), "S20 work root must be fresh");
+    fs::create_dir_all(&work_root).expect("create S20 work root");
+    let started = Instant::now();
+    let envelope = RunEnvelope {
+        rss_bytes: required_env_u64("GF_G500_S20_MEMORY_BYTES"),
+        disk_bytes: required_env_u64("GF_G500_S20_DISK_BYTES"),
+        timeout_s: 14_400,
+    };
+    let rung_outcome = run_rung(&profile, rung, envelope, profile.edgefactor, started, &[]);
+    assert!(
+        rung_outcome.passed,
+        "S20 construction/reopen/query rung failed"
+    );
+
+    let source = work_root.join("S20/project");
+    let package = work_root.join("project.gfpb");
+    let imported = work_root.join("imported");
+    assert!(!imported.exists(), "import destination must be clean");
+    let source_graph =
+        GraphForge::new(Some(source.to_str().expect("UTF-8 source"))).expect("reopen S20 source");
+    let source_nodes = source_graph
+        .node_count(NODE_LABEL)
+        .expect("source node count");
+    let source_edges = scalar_count(
+        &source_graph
+            .execute(COUNT_EDGES)
+            .expect("source edge count"),
+    );
+    let source_one = source_graph.execute_observed(ONE_HOP);
+    let source_one_result = source_one.result.expect("source one-hop query");
+    let source_one_fingerprint = result_fingerprint(&source_one_result);
+    let source_two = source_graph.execute_observed(TWO_HOP);
+    let source_two_result = source_two.result.expect("source two-hop query");
+    let source_two_fingerprint = result_fingerprint(&source_two_result);
+    let source_authority = authority_fingerprint(&source_graph);
+    let source_storage = storage_attribution_value(&source);
+    let source_generation = current_generation_uuid(&source_graph);
+    let limits = PortableV2Limits::default();
+    let exported = source_graph
+        .export_portable_v2(
+            &PortableV2ExportRequest {
+                selection: PortableSelection::Current,
+                output_path: package.clone(),
+                representation: PortableV2Output::Bundle,
+                profile: PortableV2SelectionProfile::Complete,
+                subset: None,
+                limits,
+            },
+            None,
+            |_| {},
+        )
+        .expect("export S20 project");
+    assert_eq!(exported.generation_uuid, source_generation);
+    drop(source_graph);
+    let verified = verify_portable_v2(
+        &PortableVerifyRequest {
+            input: package.clone(),
+            mode: PortableV2Mode::Full,
+            limits,
+        },
+        None,
+    )
+    .expect("verify S20 package");
+    assert_eq!(verified.package_digest, exported.package_digest);
+    let imported_receipt = GraphForge::import_portable_v2(
+        &imported,
+        &PortableV2ImportRequest {
+            input: package.clone(),
+            operation_id: OperationId(uuidv7(0x900)),
+            limits,
+        },
+        None,
+    )
+    .expect("clean S20 import");
+    let imported_graph =
+        GraphForge::new(Some(imported.to_str().expect("UTF-8 import"))).expect("reopen S20 import");
+    let imported_nodes = imported_graph
+        .node_count(NODE_LABEL)
+        .expect("imported node count");
+    let imported_edges = scalar_count(
+        &imported_graph
+            .execute(COUNT_EDGES)
+            .expect("imported edge count"),
+    );
+    let imported_one = imported_graph.execute_observed(ONE_HOP);
+    let imported_one_result = imported_one.result.expect("imported one-hop query");
+    let imported_one_fingerprint = result_fingerprint(&imported_one_result);
+    let imported_two = imported_graph.execute_observed(TWO_HOP);
+    let imported_two_result = imported_two.result.expect("imported two-hop query");
+    let imported_two_fingerprint = result_fingerprint(&imported_two_result);
+    let imported_authority = authority_fingerprint(&imported_graph);
+    let imported_storage = storage_attribution_value(&imported);
+    assert_eq!(
+        (source_nodes, source_edges),
+        (imported_nodes, imported_edges)
+    );
+    assert_eq!(source_one_fingerprint, imported_one_fingerprint);
+    assert_eq!(source_two_fingerprint, imported_two_fingerprint);
+    assert_eq!(source_authority, imported_authority);
+
+    let evidence = json!({
+        "schema": "graphforge-fly-s20-evidence/1",
+        "git_sha": std::env::var("GF_G500_S20_EXPECTED_SHA").expect("exact SHA"),
+        "image_digest": std::env::var("GF_G500_S20_IMAGE_DIGEST").expect("image digest"),
+        "region": std::env::var("GF_G500_S20_REGION").expect("fixed region"),
+        "machine": { "class": "performance", "cpus": 2, "memory_mb": 4096 },
+        "volume_gb": required_env_u64("GF_G500_S20_VOLUME_GB"),
+        "run": { "scale": 20, "edgefactor": profile.edgefactor, "seed": profile.seed },
+        "rung": rung_outcome.evidence,
+        "lifecycle": {
+            "source_nodes": source_nodes, "source_edges": source_edges,
+            "imported_nodes": imported_nodes, "imported_edges": imported_edges,
+            "source_generation": source_generation.to_string(),
+            "imported_generation": imported_receipt.generation_uuid.to_string(),
+            "package_digest": exported.package_digest,
+            "portable_contract": verified.contract,
+            "source_one_hop": { "fingerprint": source_one_fingerprint, "evidence": source_one.evidence },
+            "source_two_hop": { "fingerprint": source_two_fingerprint, "evidence": source_two.evidence },
+            "imported_one_hop": { "fingerprint": imported_one_fingerprint, "evidence": imported_one.evidence },
+            "imported_two_hop": { "fingerprint": imported_two_fingerprint, "evidence": imported_two.evidence },
+            "source_authority_fingerprint": source_authority,
+            "imported_authority_fingerprint": imported_authority,
+            "source_storage": source_storage,
+            "imported_storage": imported_storage,
+            "package_storage": exact_descriptor_allocation(std::slice::from_ref(&package)),
+        },
+        "memory": s20_memory_snapshot(),
+        "wall_time_s": started.elapsed().as_secs_f64(),
+        "result": "pass",
+        "first_failure": null,
+    });
+    let evidence_out = PathBuf::from(
+        std::env::var("GF_G500_S20_EVIDENCE_OUT").expect("GF_G500_S20_EVIDENCE_OUT is required"),
+    );
+    write_json_atomically(&evidence_out, &evidence);
+}
+
 fn normalized_filesystem(path: &Path) -> String {
     match command_text("stat", &["-f", "-c", "%T", path.to_str().unwrap()]).as_str() {
         "ext2/ext3" => "ext4".to_owned(),
