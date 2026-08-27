@@ -497,6 +497,47 @@ struct RungOutcome {
     evidence: Value,
 }
 
+fn exact_descriptor_allocation(paths: &[PathBuf]) -> Value {
+    let mut logical_bytes = 0_u64;
+    let mut allocated = 0_u64;
+    for path in paths {
+        logical_bytes = logical_bytes.saturating_add(
+            fs::metadata(path)
+                .expect("generator descriptor metadata")
+                .len(),
+        );
+        allocated = allocated
+            .saturating_add(allocated_bytes(path).expect("generator descriptor allocated bytes"));
+    }
+    json!({
+        "category": "generator_spill",
+        "logical_bytes": logical_bytes,
+        "allocated_bytes": allocated,
+        "logical_references": paths.len(),
+        "physical_objects": paths.len(),
+        "source": "generator_exact_descriptors",
+    })
+}
+
+fn storage_attribution_value(project: &Path) -> Value {
+    serde_json::to_value(storage_attribution(project)).expect("serialize storage attribution")
+}
+
+fn storage_attribution(project: &Path) -> graphforge_storage::StorageAttributionSnapshot {
+    let generation = graphforge_storage::resolve_project_generation(project)
+        .expect("resolve exact generation for attribution");
+    let snapshot = graphforge_storage::capture_storage_attribution(&generation)
+        .expect("capture authenticated storage attribution");
+    snapshot
+        .validate_reconciliation()
+        .expect("storage attribution reconciliation");
+    assert!(
+        snapshot.is_fully_classified(),
+        "qualification refuses unclassified retained artifacts"
+    );
+    snapshot
+}
+
 /// Check the envelope after a phase. Returns `Some(error_class)` on the first
 /// violation so the caller can stop the ladder. `ladder_started` is the
 /// ladder-level clock so the 4 h wall-clock fail-safe bounds the whole run, not each
@@ -504,14 +545,12 @@ struct RungOutcome {
 fn envelope_violation(
     env: &RunEnvelope,
     ladder_started: Instant,
-    project: &Path,
-    spill: &Path,
+    disk_used_bytes: u64,
 ) -> Option<&'static str> {
     if peak_rss().is_some_and(|(rss, _)| rss > env.rss_bytes) {
         return Some("oom");
     }
-    let disk = directory_bytes(project).unwrap_or(0) + directory_bytes(spill).unwrap_or(0);
-    if disk > env.disk_bytes {
+    if disk_used_bytes > env.disk_bytes {
         return Some("disk_exhaustion");
     }
     if ladder_started.elapsed().as_secs() > env.timeout_s {
@@ -681,8 +720,6 @@ impl IngestHeartbeat {
         rung: &Rung,
         completed_rungs: &[Value],
         steps: &[Value],
-        project: &Path,
-        spill: &Path,
     ) -> Self {
         let Ok(path) = std::env::var("GF_G500_LADDER_JOURNAL_OUT") else {
             return Self {
@@ -698,8 +735,6 @@ impl IngestHeartbeat {
         let scale = rung.scale;
         let completed_rungs = completed_rungs.to_vec();
         let steps = steps.to_vec();
-        let project = project.to_path_buf();
-        let spill = spill.to_path_buf();
         let handle = thread::spawn(move || {
             loop {
                 let value = json!({
@@ -714,8 +749,6 @@ impl IngestHeartbeat {
                     "active_chunk_index": INGEST_CHUNK_INDEX.load(Ordering::Relaxed),
                     "process_memory": linux_process_memory(),
                     "storage_io": storage_io_value(),
-                    "disk_used_bytes": directory_bytes(&project).unwrap_or(0)
-                        .saturating_add(directory_bytes(&spill).unwrap_or(0)),
                     "completed_rungs": completed_rungs,
                     "active_steps": steps,
                     "first_failing_phase": null,
@@ -815,7 +848,11 @@ fn run_rung(
         None,
     );
     let generate_s = gen_started.elapsed().as_secs_f64();
-    let gen_violation = envelope_violation(&env, ladder_started, &project, &spill_dir);
+    let generator_allocation = exact_descriptor_allocation(&spill.runs);
+    let generator_allocated_bytes = generator_allocation["allocated_bytes"]
+        .as_u64()
+        .expect("generator allocated bytes");
+    let gen_violation = envelope_violation(&env, ladder_started, generator_allocated_bytes);
     if let Some(class) = gen_violation {
         first_failing_phase = Some("generate");
         error_class = Some(class);
@@ -831,6 +868,7 @@ fn run_rung(
             "peak_buffer_len": spill.peak_buffer_len,
             "buffer_edges": rung.buffer_edges,
             "run_count": spill.runs.len(),
+            "storage": generator_allocation,
         }
     }));
     persist_phase_journal(
@@ -868,8 +906,7 @@ fn run_rung(
         graphforge_storage::io_stats::reset();
         INGEST_CHUNK_INDEX.store(0, Ordering::Relaxed);
         INGEST_SUBPHASE.store(1, Ordering::Relaxed);
-        let heartbeat =
-            IngestHeartbeat::start(profile, rung, completed_rungs, &steps, &project, &spill_dir);
+        let heartbeat = IngestHeartbeat::start(profile, rung, completed_rungs, &steps);
         let mut construction = open_persisted_construction(
             &graph,
             &spill_dir.join("construction-session.uuid"),
@@ -909,9 +946,14 @@ fn run_rung(
         INGEST_SUBPHASE.store(0, Ordering::Relaxed);
         heartbeat.stop();
         drop(graph);
+        let committed_snapshot = storage_attribution(&project);
+        let ingest_disk_used_bytes =
+            generator_allocated_bytes.saturating_add(committed_snapshot.allocated_bytes);
+        let committed_storage =
+            serde_json::to_value(committed_snapshot).expect("serialize committed storage");
         ingest_ran = true;
         let ingest_s = ingest_started.elapsed().as_secs_f64();
-        let ingest_violation = envelope_violation(&env, ladder_started, &project, &spill_dir);
+        let ingest_violation = envelope_violation(&env, ladder_started, ingest_disk_used_bytes);
         if let Some(class) = ingest_violation {
             first_failing_phase = Some("ingest");
             error_class = Some(class);
@@ -921,8 +963,7 @@ fn run_rung(
             "pass": ingest_violation.is_none(),
             "wall_time_s": ingest_s,
             "rss_peak_bytes": rss_value(),
-            "disk_used_bytes": directory_bytes(&project).unwrap_or(0)
-                .saturating_add(directory_bytes(&spill_dir).unwrap_or(0)),
+            "disk_used_bytes": ingest_disk_used_bytes,
             "detail": {
                 "live_unique_edges": live_unique_edges,
                 "duplicates_rejected": duplicates_rejected,
@@ -959,7 +1000,9 @@ fn run_rung(
                     "parquet_write_operations": construction_evidence.parquet_write_operations,
                     "retained_probe_read_bytes": construction_evidence.retained_probe_read_bytes,
                     "retained_probe_block_loads": construction_evidence.retained_probe_block_loads,
+                    "storage_transient_peak_allocated_bytes": construction_evidence.storage_transient_peak_allocated_bytes,
                 },
+                "committed_storage": committed_storage,
             }
         }));
         persist_phase_journal(
@@ -998,7 +1041,9 @@ fn run_rung(
         edge_count = scalar_count(&graph.execute(COUNT_EDGES).expect("edge count"));
         let reopen_s = reopen_started.elapsed().as_secs_f64();
         gsi = gsi_undirected(node_count, edge_count);
-        let reopen_violation = envelope_violation(&env, ladder_started, &project, &spill_dir);
+        let reopen_disk_used_bytes =
+            generator_allocated_bytes.saturating_add(storage_attribution(&project).allocated_bytes);
+        let reopen_violation = envelope_violation(&env, ladder_started, reopen_disk_used_bytes);
         if let Some(class) = reopen_violation {
             first_failing_phase = Some("reopen");
             error_class = Some(class);
@@ -1054,7 +1099,9 @@ fn run_rung(
                 "wall_time_s": hop2_started.elapsed().as_secs_f64(),
                 "detail": { "rows": hop2_rows }
             }));
-            let query_violation = envelope_violation(&env, ladder_started, &project, &spill_dir);
+            let query_disk_used_bytes = generator_allocated_bytes
+                .saturating_add(storage_attribution(&project).allocated_bytes);
+            let query_violation = envelope_violation(&env, ladder_started, query_disk_used_bytes);
             if let Some(class) = query_violation {
                 first_failing_phase = Some("query");
                 error_class = Some(class);
@@ -1076,8 +1123,11 @@ fn run_rung(
         drop(graph);
     }
 
-    let disk_used_bytes =
-        directory_bytes(&project).unwrap_or(0) + directory_bytes(&spill_dir).unwrap_or(0);
+    let disk_used_bytes = generator_allocated_bytes.saturating_add(
+        ingest_ran
+            .then(|| storage_attribution(&project).allocated_bytes)
+            .unwrap_or(0),
+    );
     // Tri-state: reconciliation is only *evaluated* once ingest has run. A rung
     // stopped in the generate phase is reported as null (not evaluated), never
     // as a forced `true`.
@@ -1421,26 +1471,6 @@ fn git_sha() -> Value {
         .filter(|output| output.status.success())
         .and_then(|output| String::from_utf8(output.stdout).ok())
         .map_or(Value::Null, |sha| Value::String(sha.trim().to_owned()))
-}
-
-fn directory_bytes(path: &Path) -> std::io::Result<u64> {
-    if !path.exists() {
-        return Ok(0);
-    }
-    if path.is_file() {
-        return Ok(path.metadata()?.len());
-    }
-    let mut total = 0u64;
-    for entry in fs::read_dir(path)? {
-        let entry = entry?;
-        let metadata = entry.metadata()?;
-        total += if metadata.is_dir() {
-            directory_bytes(&entry.path())?
-        } else {
-            metadata.len()
-        };
-    }
-    Ok(total)
 }
 
 /// Returns `(bytes, source)`. `"vmhwm"` (Linux `/proc/self/status`) is a true
@@ -2507,6 +2537,9 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
     assert_eq!(source_2hop, imported_2hop);
     assert_eq!(source_authority_fingerprint, imported_authority_fingerprint);
     journal.pass("imported_query_2hop", phase, Some(imported_2hop.clone()));
+    let source_storage = storage_attribution_value(&source);
+    let imported_storage = storage_attribution_value(&imported);
+    let package_storage = exact_descriptor_allocation(std::slice::from_ref(&package));
 
     // Representative drills use the same verifier/import boundaries but never
     // repeat the billion-edge payload.
@@ -2619,6 +2652,11 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
         "compatibility": serde_json::to_value(verified.compatibility).expect("compatibility JSON"),
         "source_authority_fingerprint": source_authority_fingerprint,
         "imported_authority_fingerprint": imported_authority_fingerprint,
+        "storage": {
+            "source": source_storage,
+            "portable_package": package_storage,
+            "clean_import": imported_storage,
+        },
         "phases": journal.phases,
     })
 }
@@ -2803,6 +2841,21 @@ fn submitted_chunk_count(evidence: &graphforge_storage::GraphConstructionEvidenc
 }
 
 #[test]
+fn active_ingest_heartbeat_does_not_recursively_scan_storage() {
+    let source = include_str!("scale_g500_ladder.rs");
+    let heartbeat = source
+        .split("struct IngestHeartbeat")
+        .nth(1)
+        .and_then(|tail| tail.split("fn run_rung").next())
+        .expect("heartbeat source boundary");
+    let recursive_probe = ["directory", "bytes"].join("_");
+    assert!(
+        !heartbeat.contains(&recursive_probe),
+        "active heartbeat must consume counters, not enumerate project paths"
+    );
+}
+
+#[test]
 fn tiny_construction_ladder_resumes_and_scales_bounded_work_linearly() {
     let budgets = GraphConstructionBudgets {
         max_batch_rows: CONSTRUCTION_BATCH_ROWS,
@@ -2812,6 +2865,7 @@ fn tiny_construction_ladder_resumes_and_scales_bounded_work_linearly() {
     };
     let base_nodes = CONSTRUCTION_BATCH_ROWS as u64;
     let mut baseline_peaks: Option<[u64; 11]> = None;
+    let mut baseline_storage: Option<(u64, u64)> = None;
     for factor in [1_u64, 2, 4] {
         let project = TempDir::new().expect("tiny construction project");
         let graph = GraphForge::new(project.path().to_str()).expect("open tiny project");
@@ -2931,6 +2985,29 @@ fn tiny_construction_ladder_resumes_and_scales_bounded_work_linearly() {
         assert!(progress.evidence.parquet_write_operations > 0);
         assert_ne!(receipt.generation_uuid, before);
         assert_eq!(current_generation_uuid(&graph), receipt.generation_uuid);
+        let generation = graphforge_storage::resolve_project_generation(project.path())
+            .expect("resolve tiny generation");
+        let storage = graphforge_storage::capture_storage_attribution(&generation)
+            .expect("capture tiny storage attribution");
+        storage
+            .validate_reconciliation()
+            .expect("reconcile tiny storage attribution");
+        assert!(
+            storage.is_fully_classified(),
+            "unclassified tiny construction storage: {storage:#?}"
+        );
+        if let Some((base_logical, base_allocated)) = baseline_storage {
+            assert!(
+                storage.logical_bytes <= base_logical.saturating_mul(factor),
+                "authenticated logical bytes exceeded linear growth"
+            );
+            assert!(
+                storage.allocated_bytes <= base_allocated.saturating_mul(factor),
+                "deduplicated allocated bytes exceeded linear growth"
+            );
+        } else {
+            baseline_storage = Some((storage.logical_bytes, storage.allocated_bytes));
+        }
         drop(resumed);
         let replay = graph
             .resume_graph_construction(session_uuid, budgets)
