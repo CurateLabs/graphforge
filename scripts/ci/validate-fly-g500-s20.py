@@ -15,6 +15,10 @@ ROOT = Path(__file__).resolve().parents[2]
 SCHEMA = ROOT / "docs/development/evidence/fly-g500-s20.schema.json"
 SENSITIVE_KEY = re.compile(r"(?:token|secret|machine[_-]?id|volume[_-]?id)", re.I)
 ABSOLUTE_PATH = re.compile(r"^(?:/|\\\\|\\[^\\]|[A-Za-z]:\\)")
+RAW_UUID = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    re.I,
+)
 
 
 class EvidenceError(RuntimeError):
@@ -131,8 +135,11 @@ def validate(
         elif isinstance(item, list):
             for child in item:
                 reject_sensitive(child)
-        elif isinstance(item, str) and ABSOLUTE_PATH.match(item):
-            raise EvidenceError("evidence contains an absolute path")
+        elif isinstance(item, str):
+            if ABSOLUTE_PATH.match(item):
+                raise EvidenceError("evidence contains an absolute path")
+            if RAW_UUID.fullmatch(item):
+                raise EvidenceError("evidence contains a raw UUID")
 
     reject_sensitive(value)
 

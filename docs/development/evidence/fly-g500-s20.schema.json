@@ -59,9 +59,8 @@
     },
     "attribution": {
       "type": "object", "additionalProperties": false,
-      "required": ["generation_uuid", "generation_manifest_sha256", "categories", "logical_references", "logical_bytes", "physical_objects", "physical_logical_bytes", "allocated_bytes"],
+      "required": ["generation_manifest_sha256", "categories", "logical_references", "logical_bytes", "physical_objects", "physical_logical_bytes", "allocated_bytes"],
       "properties": {
-        "generation_uuid": {"type": "string", "format": "uuid"},
         "generation_manifest_sha256": {"type": "array", "minItems": 32, "maxItems": 32, "items": {"type": "integer", "minimum": 0, "maximum": 255}},
         "categories": {"type": "object", "additionalProperties": false, "required": ["topology_nodes", "topology_edges", "properties", "uuid_and_surrogates", "adjacency", "catalog_and_manifests", "other"], "properties": {"topology_nodes": {"$ref": "#/$defs/artifact_totals"}, "topology_edges": {"$ref": "#/$defs/artifact_totals"}, "properties": {"$ref": "#/$defs/artifact_totals"}, "uuid_and_surrogates": {"$ref": "#/$defs/artifact_totals"}, "adjacency": {"$ref": "#/$defs/artifact_totals"}, "catalog_and_manifests": {"$ref": "#/$defs/artifact_totals"}, "other": {"$ref": "#/$defs/artifact_totals"}}},
         "logical_references": {"type": "integer", "minimum": 1}, "logical_bytes": {"type": "integer", "minimum": 1},
@@ -147,11 +146,13 @@
     "rung": {"type": "object", "additionalProperties": false, "required": ["pass", "reconciles", "construction"], "properties": {"pass": {"const": true}, "reconciles": {"const": true}, "construction": {"$ref": "#/$defs/construction"}}},
     "lifecycle": {
       "type": "object", "additionalProperties": false,
-      "required": ["source_nodes", "source_edges", "imported_nodes", "imported_edges", "source_generation", "imported_generation", "package_digest", "portable_contract", "source_one_hop", "source_two_hop", "imported_one_hop", "imported_two_hop", "source_authority_fingerprint", "imported_authority_fingerprint", "source_storage", "imported_storage", "package_storage"],
+      "required": ["source_nodes", "source_edges", "imported_nodes", "imported_edges", "source_export_generation_authenticated", "import_receipt_reopen_authenticated", "source_import_generations_distinct", "package_digest", "portable_contract", "source_one_hop", "source_two_hop", "imported_one_hop", "imported_two_hop", "source_authority_fingerprint", "imported_authority_fingerprint", "source_storage", "imported_storage", "package_storage"],
       "properties": {
         "source_nodes": {"type": "integer", "minimum": 1}, "source_edges": {"type": "integer", "minimum": 1},
         "imported_nodes": {"type": "integer", "minimum": 1}, "imported_edges": {"type": "integer", "minimum": 1},
-        "source_generation": {"type": "string", "format": "uuid"}, "imported_generation": {"type": "string", "format": "uuid"},
+        "source_export_generation_authenticated": {"const": true},
+        "import_receipt_reopen_authenticated": {"const": true},
+        "source_import_generations_distinct": {"const": true},
         "package_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}, "portable_contract": {"const": "graphforge-portable-verify/2"},
         "source_one_hop": {"$ref": "#/$defs/query"}, "source_two_hop": {"$ref": "#/$defs/query"},
         "imported_one_hop": {"$ref": "#/$defs/query"}, "imported_two_hop": {"$ref": "#/$defs/query"},

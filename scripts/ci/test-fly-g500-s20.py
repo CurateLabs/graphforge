@@ -125,7 +125,6 @@ def attribution():
     }
     categories["topology_nodes"] = dict(totals)
     return {
-        "generation_uuid": "00000000-0000-4000-8000-000000000001",
         "generation_manifest_sha256": [1] * 32,
         "categories": categories,
         **totals,
@@ -194,8 +193,9 @@ def evidence(**changes):
             "source_edges": 16_000_000,
             "imported_nodes": 1_048_576,
             "imported_edges": 16_000_000,
-            "source_generation": "00000000-0000-4000-8000-000000000001",
-            "imported_generation": "00000000-0000-4000-8000-000000000002",
+            "source_export_generation_authenticated": True,
+            "import_receipt_reopen_authenticated": True,
+            "source_import_generations_distinct": True,
             "package_digest": "sha256:" + "d" * 64,
             "portable_contract": "graphforge-portable-verify/2",
             "source_one_hop": query_proof(),
@@ -875,6 +875,40 @@ def test_closed_evidence_rejects_deleted_falsified_and_nested_unknown_proof():
     }
     with pytest.raises(validator.EvidenceError, match=r"does not reconcile|unclassified"):
         validator.validate(unclassified, "a" * 40, "sha256:" + "b" * 64, "den")
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "source_export_generation_authenticated",
+        "import_receipt_reopen_authenticated",
+        "source_import_generations_distinct",
+    ],
+)
+def test_generation_proof_is_required_true_and_closed(field):
+    missing = evidence()
+    del missing["lifecycle"][field]
+    with pytest.raises(validator.EvidenceError, match="schema violation"):
+        validator.validate(missing, "a" * 40, "sha256:" + "b" * 64, "den")
+
+    falsified = evidence()
+    falsified["lifecycle"][field] = False
+    with pytest.raises(validator.EvidenceError, match="schema violation"):
+        validator.validate(falsified, "a" * 40, "sha256:" + "b" * 64, "den")
+
+    unknown = evidence()
+    unknown["lifecycle"][f"{field}_detail"] = "opaque"
+    with pytest.raises(validator.EvidenceError, match="schema violation"):
+        validator.validate(unknown, "a" * 40, "sha256:" + "b" * 64, "den")
+
+
+@pytest.mark.parametrize("location", ["lifecycle", "source_storage", "imported_storage"])
+def test_raw_generation_uuid_is_forbidden_everywhere(location):
+    leaked = evidence()
+    target = leaked["lifecycle"] if location == "lifecycle" else leaked["lifecycle"][location]
+    target["generation_uuid"] = "00000000-0000-4000-8000-000000000001"
+    with pytest.raises(validator.EvidenceError, match="schema violation"):
+        validator.validate(leaked, "a" * 40, "sha256:" + "b" * 64, "den")
 
 
 def test_evidence_rejects_tiny_relabel_cross_count_and_memory_overage():
