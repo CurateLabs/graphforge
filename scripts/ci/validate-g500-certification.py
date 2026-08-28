@@ -153,6 +153,18 @@ def validate(evidence: dict[str, Any], expected_sha: str | None) -> None:
     if counts.get("source_nodes") != 1 << scale:
         raise EvidenceError("source/imported node count does not match the declared scale")
 
+    storage = evidence.get("storage_attribution", {})
+    selected_source = storage.get("source", {}).get("allocated_bytes")
+    source_project = storage.get("source_project_current_allocated_bytes")
+    workspace = storage.get("workspace_current_allocated_bytes")
+    peak = evidence.get("envelope", {}).get("peak_disk_bytes")
+    if not all(isinstance(value, int) for value in (selected_source, source_project, workspace, peak)):
+        raise EvidenceError("storage union numerators must be integers")
+    if not selected_source <= source_project <= workspace <= peak:
+        raise EvidenceError(
+            "selected source, source project, workspace, and peak unions do not reconcile"
+        )
+
     identities = evidence.get("identities", {})
     for proof in (
         "source_export_generation_authenticated",

@@ -89,6 +89,7 @@ def storage_attribution(unit=1):
     }
     return {
         "source": snapshot,
+        "source_project_current_allocated_bytes": 7 * unit,
         "portable_package": {
             "category": "portable_package", "logical_bytes": unit,
             "allocated_bytes": unit, "logical_references": unit,
@@ -216,6 +217,14 @@ def test_actual_certification_contract_builds_and_validates_adjacent_qualificati
     qualification = json.loads(output.read_text())
     QUALIFICATION.validate(qualification)
     assert qualification["projection"]["source_rungs"] == ["S20", "S22"]
+    for source, rung in zip((low, high), qualification["rungs"], strict=True):
+        selected = source["storage_attribution"]["source"]["allocated_bytes"]
+        project_union = rung["source_project_current_allocated_bytes"]
+        assert project_union > selected
+        assert rung["ratios"]["authoritative_project_bytes_per_live_edge"] == {
+            "numerator_bytes": project_union,
+            "denominator_count": rung["live_edges"],
+        }
 
 
 @pytest.mark.parametrize(

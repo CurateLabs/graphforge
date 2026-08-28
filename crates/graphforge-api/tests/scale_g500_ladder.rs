@@ -2775,6 +2775,13 @@ fn run_integrated_certification_with_edge_factor(
     assert_eq!(source_authority_fingerprint, imported_authority_fingerprint);
     journal.pass("imported_query_2hop", phase, Some(imported_2hop.clone()));
     let source_storage = storage_attribution_value(&source);
+    let source_project_current_allocated_bytes =
+        graphforge_storage::capture_project_storage_identity_union(
+            &graphforge_storage::resolve_project_generation(&source)
+                .expect("resolve authoritative source project"),
+        )
+        .expect("capture authoritative source project identity union")
+        .allocated_bytes;
     let imported_storage = storage_attribution_value(&imported);
     let package_storage = portable_export_allocation(&exported);
     // Representative drills use the same verifier/import boundaries but never
@@ -2944,6 +2951,7 @@ fn run_integrated_certification_with_edge_factor(
         "imported_authority_fingerprint": imported_authority_fingerprint,
         "storage": {
             "source": source_storage,
+            "source_project_current_allocated_bytes": source_project_current_allocated_bytes,
             "portable_package": package_storage,
             "clean_import": imported_storage,
             "construction": sanitized_construction_evidence(&construction_evidence),

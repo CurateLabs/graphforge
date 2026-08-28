@@ -87,6 +87,8 @@ def validate(evidence: dict[str, Any]) -> None:
         allocated = sum(artifact["allocated_bytes"] for artifact in rung["artifacts"])
         retained_views = sum(artifact["current_retained_bytes"] for artifact in rung["artifacts"])
         retained = rung["totals"]["current_retained_bytes"]
+        if retained != rung["workspace_current_allocated_bytes"]:
+            raise EvidenceError("workspace numerator disagrees with retained identity union")
         # Category peaks are diagnostics, not a total: categories coexist.
         # The total is an independently observed phase-boundary union high-water
         # mark and must not be reconstructed as max(category).
@@ -107,17 +109,23 @@ def validate(evidence: dict[str, Any]) -> None:
             raise EvidenceError("retained allocation exceeds category allocation")
         if transient_peak < retained:
             raise EvidenceError("lifecycle peak is below current retained allocation")
+        source_project = rung["source_project_current_allocated_bytes"]
+        selected_source = sum(
+            item["allocated_bytes"]
+            for item in rung["artifacts"]
+            if item["source"] == "storage_owned_snapshot"
+        )
+        if source_project < selected_source:
+            raise EvidenceError("source project union is below its selected generation")
+        if source_project > retained:
+            raise EvidenceError("source project union exceeds the workspace union")
         live, nodes = rung["live_edges"], rung["live_nodes"]
         by_category = {item["category"]: item for item in rung["artifacts"]}
         expected = {
             "canonical_node_bytes_per_live_node": {"numerator_bytes": by_category["canonical_node_topology"]["logical_bytes"], "denominator_count": nodes},
             "canonical_edge_bytes_per_live_edge": {"numerator_bytes": by_category["canonical_edge_topology"]["logical_bytes"], "denominator_count": live},
             "authoritative_project_bytes_per_live_edge": {
-                "numerator_bytes": sum(
-                    item["allocated_bytes"]
-                    for item in rung["artifacts"]
-                    if item["source"] == "storage_owned_snapshot"
-                ),
+                "numerator_bytes": source_project,
                 "denominator_count": live,
             },
             "full_lifecycle_peak_bytes_per_live_edge": {"numerator_bytes": transient_peak, "denominator_count": live},

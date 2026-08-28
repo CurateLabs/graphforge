@@ -46,6 +46,8 @@ def rung(scale: int, live: int, unit: int) -> dict:
     logical = sum(item["logical_bytes"] for item in artifacts)
     allocated = sum(item["allocated_bytes"] for item in artifacts)
     retained = sum(item["current_retained_bytes"] for item in artifacts)
+    selected_source = sum(item["allocated_bytes"] for item in artifacts[:6])
+    source_project = selected_source + unit
     # Independent union high-water observation; deliberately larger than any
     # one category peak because categories coexist at lifecycle boundaries.
     peak = sum(item["transient_peak_allocated_bytes"] for item in artifacts)
@@ -55,13 +57,15 @@ def rung(scale: int, live: int, unit: int) -> dict:
         "scale": scale,
         "live_nodes": live // 16,
         "live_edges": live,
+        "source_project_current_allocated_bytes": source_project,
+        "workspace_current_allocated_bytes": retained,
         "artifacts": artifacts,
         "phases": phases,
         "totals": {"logical_bytes": logical, "allocated_bytes": allocated, "current_retained_bytes": retained, "transient_peak_allocated_bytes": peak, "phase_read_bytes": unit * 9, "phase_write_bytes": unit * 9, "phase_read_calls": 9, "phase_write_calls": 9, "phase_object_count": 9, "phase_block_count": 9, "phase_fsync_calls": 9},
         "ratios": {
             "canonical_node_bytes_per_live_node": {"numerator_bytes": artifacts[0]["logical_bytes"], "denominator_count": live // 16},
             "canonical_edge_bytes_per_live_edge": {"numerator_bytes": artifacts[1]["logical_bytes"], "denominator_count": live},
-            "authoritative_project_bytes_per_live_edge": {"numerator_bytes": sum(item["allocated_bytes"] for item in artifacts[:6]), "denominator_count": live},
+            "authoritative_project_bytes_per_live_edge": {"numerator_bytes": source_project, "denominator_count": live},
             "full_lifecycle_peak_bytes_per_live_edge": {"numerator_bytes": peak, "denominator_count": live},
         },
     }
@@ -246,6 +250,7 @@ def certification_document(scale: int, edges: int, unit: int) -> dict:
                 "categories": categories,
                 "allocated_bytes": sum(item["allocated_bytes"] for item in categories.values()),
             },
+            "source_project_current_allocated_bytes": unit * 28,
             "portable_package": descriptor,
             "clean_import": descriptor,
             "construction": {

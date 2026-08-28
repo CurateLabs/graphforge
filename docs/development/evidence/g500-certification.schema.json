@@ -107,8 +107,8 @@
     },
     "storageAttribution": {
       "type": "object", "additionalProperties": false,
-      "required": ["source", "portable_package", "clean_import", "construction", "application_io_phases", "workspace_current_allocated_bytes"],
-      "properties": { "source": { "$ref": "#/$defs/snapshot" }, "portable_package": { "$ref": "#/$defs/portableAllocation" }, "clean_import": { "$ref": "#/$defs/snapshot" }, "construction": { "$ref": "#/$defs/construction" }, "application_io_phases": { "$ref": "#/$defs/phaseAttribution" }, "workspace_current_allocated_bytes": { "$ref": "#/$defs/nonNegative" } }
+      "required": ["source", "source_project_current_allocated_bytes", "portable_package", "clean_import", "construction", "application_io_phases", "workspace_current_allocated_bytes"],
+      "properties": { "source": { "$ref": "#/$defs/snapshot" }, "source_project_current_allocated_bytes": { "$ref": "#/$defs/nonNegative" }, "portable_package": { "$ref": "#/$defs/portableAllocation" }, "clean_import": { "$ref": "#/$defs/snapshot" }, "construction": { "$ref": "#/$defs/construction" }, "application_io_phases": { "$ref": "#/$defs/phaseAttribution" }, "workspace_current_allocated_bytes": { "$ref": "#/$defs/nonNegative" } }
     },
     "phase": { "type": "object", "additionalProperties": false, "required": ["id", "status", "elapsed_ms", "rss_peak_bytes", "disk_peak_bytes"], "properties": { "id": { "type": "string", "pattern": "^[a-z0-9_-]+$" }, "status": { "enum": ["pass", "fail", "cancelled"] }, "elapsed_ms": { "type": "integer", "minimum": 0 }, "rss_peak_bytes": { "type": "integer", "minimum": 0 }, "disk_peak_bytes": { "type": "integer", "minimum": 0 }, "fingerprint": { "anyOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] }, "failure_code": { "type": ["string", "null"], "maxLength": 96 } } }
   }

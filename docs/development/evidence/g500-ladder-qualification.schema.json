@@ -43,9 +43,10 @@
     },
     "rung": {
       "type": "object", "additionalProperties": false,
-      "required": ["id", "scale", "live_nodes", "live_edges", "artifacts", "phases", "totals", "ratios"],
+      "required": ["id", "scale", "live_nodes", "live_edges", "source_project_current_allocated_bytes", "workspace_current_allocated_bytes", "artifacts", "phases", "totals", "ratios"],
       "properties": {
         "id": {"enum": ["S20", "S22", "S24", "S26"]}, "scale": {"enum": [20, 22, 24, 26]}, "live_nodes": {"$ref": "#/$defs/positive"}, "live_edges": {"$ref": "#/$defs/positive"},
+        "source_project_current_allocated_bytes": {"$ref": "#/$defs/nonNegative"}, "workspace_current_allocated_bytes": {"$ref": "#/$defs/nonNegative"},
         "artifacts": {"type": "array", "minItems": 9, "maxItems": 9, "items": {"$ref": "#/$defs/artifact"}}, "phases": {"type": "array", "minItems": 9, "maxItems": 9, "items": {"$ref": "#/$defs/phase"}},
         "totals": {"$ref": "#/$defs/totals"},
         "ratios": {"type": "object", "additionalProperties": false, "required": ["canonical_node_bytes_per_live_node", "canonical_edge_bytes_per_live_edge", "authoritative_project_bytes_per_live_edge", "full_lifecycle_peak_bytes_per_live_edge"], "properties": {

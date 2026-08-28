@@ -211,9 +211,12 @@ Artifact rows are local ownership views and may refer to the same physical CAS
 object. Their allocated/current columns therefore are not summed to obtain the
 workspace footprint. `totals.current_retained_bytes` is the independently
 reconciled native-identity union across all simultaneously retained owners.
-The authoritative-project ratio uses only the selected source project's
-authenticated allocation; it does not include construction staging, the
-portable package, drills, or the clean imported project.
+The authoritative-project ratio uses a separate source-project native-identity
+union captured at the stable source boundary. It includes the project controls,
+every retained generation, and every CAS object not yet removed by an exact GC
+receipt. It is therefore bounded below by the selected-generation snapshot and
+above by the independent workspace union, but it does not include construction
+staging, the portable package, drills, or the clean imported project.
 
 The lifecycle peak is not reconstructed by adding category peaks or directory
 sizes. Storage owns a reference-counted union keyed by authenticated native

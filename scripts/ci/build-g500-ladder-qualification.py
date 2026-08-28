@@ -91,10 +91,13 @@ def rung(cert: dict) -> dict:
         totals[f"phase_{field}"] = sum(phase[field] for phase in phases)
     nodes, edges = cert["counts"]["source_nodes"], cert["counts"]["source_edges"]
     by_name = {row["category"]: row for row in rows}
-    return {"id": f"S{cert['run']['scale']}", "scale": cert["run"]["scale"], "live_nodes": nodes, "live_edges": edges, "artifacts": rows, "phases": phases, "totals": totals, "ratios": {
+    return {"id": f"S{cert['run']['scale']}", "scale": cert["run"]["scale"], "live_nodes": nodes, "live_edges": edges,
+        "source_project_current_allocated_bytes": storage["source_project_current_allocated_bytes"],
+        "workspace_current_allocated_bytes": storage["workspace_current_allocated_bytes"],
+        "artifacts": rows, "phases": phases, "totals": totals, "ratios": {
         "canonical_node_bytes_per_live_node": {"numerator_bytes": by_name["canonical_node_topology"]["logical_bytes"], "denominator_count": nodes},
         "canonical_edge_bytes_per_live_edge": {"numerator_bytes": by_name["canonical_edge_topology"]["logical_bytes"], "denominator_count": edges},
-        "authoritative_project_bytes_per_live_edge": {"numerator_bytes": source["allocated_bytes"], "denominator_count": edges},
+        "authoritative_project_bytes_per_live_edge": {"numerator_bytes": storage["source_project_current_allocated_bytes"], "denominator_count": edges},
         "full_lifecycle_peak_bytes_per_live_edge": {"numerator_bytes": totals["transient_peak_allocated_bytes"], "denominator_count": edges},
     }}
 
