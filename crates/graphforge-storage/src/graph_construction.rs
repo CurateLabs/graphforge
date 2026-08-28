@@ -322,6 +322,12 @@ pub struct GraphConstructionEvidence {
     /// Application-observed published payload bytes read while hydrating the workspace.
     #[serde(default)]
     pub hydration_application_read_bytes: u64,
+    /// Artifact bytes authenticated while repairing an interrupted append.
+    #[serde(default)]
+    pub recovery_application_read_bytes: u64,
+    /// Bounded artifact reads used by interrupted-append recovery.
+    #[serde(default)]
+    pub recovery_application_read_operations: u64,
     /// New canonical graph payload bytes emitted by encoding.
     #[serde(default)]
     pub canonical_output_bytes: u64,
@@ -337,6 +343,12 @@ pub struct GraphConstructionEvidence {
     /// committed-generation allocation.
     #[serde(default)]
     pub storage_transient_peak_allocated_bytes: BTreeMap<crate::ArtifactCategory, u64>,
+    /// High-water mark of the union of all simultaneously retained,
+    /// receipt-authenticated construction artifacts. Unlike the per-category
+    /// diagnostics above, this is a total and categories are never treated as
+    /// mutually exclusive.
+    #[serde(default)]
+    pub storage_transient_peak_total_allocated_bytes: u64,
     /// Rows accepted.
     pub input_rows: u64,
     /// Non-replay chunks accepted.
@@ -450,6 +462,7 @@ impl GraphConstructionEvidence {
             .saturating_add(self.publication_application_read_bytes)
             .saturating_add(self.cas_application_read_bytes)
             .saturating_add(self.hydration_application_read_bytes)
+            .saturating_add(self.recovery_application_read_bytes)
     }
 }
 
@@ -2539,7 +2552,19 @@ impl GraphConstructionSession {
                 if receipt != receipt_from_intent(&intent)? {
                     return Err(storage("recovered receipt differs from durable intent"));
                 }
-                validate_receipt_artifacts(&self.root, &receipt)?;
+                let recovery_work = validate_receipt_artifacts(&self.root, &receipt)?;
+                self.checkpoint.evidence.recovery_application_read_bytes = self
+                    .checkpoint
+                    .evidence
+                    .recovery_application_read_bytes
+                    .saturating_add(recovery_work.bytes);
+                self.checkpoint
+                    .evidence
+                    .recovery_application_read_operations = self
+                    .checkpoint
+                    .evidence
+                    .recovery_application_read_operations
+                    .saturating_add(recovery_work.operations);
                 let body = serde_json::to_vec(&receipt).map_err(storage)?;
                 if intent.sequence < self.checkpoint.next_sequence
                     && self.checkpoint.last_receipt_sha256.as_deref()
@@ -2585,7 +2610,19 @@ impl GraphConstructionSession {
                 .into_iter()
                 .flatten()
                 {
-                    authenticate_artifact(&self.root, &artifact)?;
+                    let recovery_work = authenticate_artifact(&self.root, &artifact)?;
+                    self.checkpoint.evidence.recovery_application_read_bytes = self
+                        .checkpoint
+                        .evidence
+                        .recovery_application_read_bytes
+                        .saturating_add(recovery_work.bytes);
+                    self.checkpoint
+                        .evidence
+                        .recovery_application_read_operations = self
+                        .checkpoint
+                        .evidence
+                        .recovery_application_read_operations
+                        .saturating_add(recovery_work.operations);
                     unlink_artifact(&self.root, &artifact)?;
                 }
                 let stem = artifact_stem(intent.sequence, intent.kind);
@@ -2675,26 +2712,13 @@ impl GraphConstructionSession {
         evidence.peak_accounted_live_bytes = evidence
             .peak_accounted_live_bytes
             .max(receipt.accounted_live_bytes);
-        let topology_category = if receipt.kind == ConstructionChunkKind::Node {
-            crate::ArtifactCategory::TopologyNodes
-        } else {
-            crate::ArtifactCategory::TopologyEdges
-        };
-        for (artifact, category) in [
-            (&receipt.parquet, topology_category),
-            (
-                &receipt.identities,
-                crate::ArtifactCategory::UuidAndSurrogates,
-            ),
-            (&receipt.details, topology_category),
-        ]
-        .into_iter()
-        .chain(
-            receipt
-                .endpoints
-                .iter()
-                .map(|artifact| (artifact, crate::ArtifactCategory::TopologyEdges)),
-        ) {
+        // Chunk receipts describe private construction inputs. They are not
+        // canonical topology until shaping, encoding, and generation-last
+        // publication succeed, so attribution must keep them in staging.
+        for artifact in [&receipt.parquet, &receipt.identities, &receipt.details]
+            .into_iter()
+            .chain(receipt.endpoints.iter())
+        {
             evidence.immutable_artifacts = evidence.immutable_artifacts.saturating_add(1);
             evidence.write_bytes = evidence.write_bytes.saturating_add(artifact.bytes);
             evidence.write_operations = evidence
@@ -2703,7 +2727,10 @@ impl GraphConstructionSession {
             evidence.fsync_operations = evidence
                 .fsync_operations
                 .saturating_add(artifact.fsync_operations);
-            let totals = evidence.storage_current.entry(category).or_default();
+            let totals = evidence
+                .storage_current
+                .entry(crate::ArtifactCategory::ConstructionStaging)
+                .or_default();
             totals.logical_references = totals.logical_references.saturating_add(1);
             totals.logical_bytes = totals.logical_bytes.saturating_add(artifact.bytes);
             totals.physical_objects = totals.physical_objects.saturating_add(1);
@@ -2714,9 +2741,18 @@ impl GraphConstructionSession {
                 .saturating_add(artifact.allocated_bytes);
             evidence
                 .storage_transient_peak_allocated_bytes
-                .entry(category)
+                .entry(crate::ArtifactCategory::ConstructionStaging)
                 .and_modify(|peak| *peak = (*peak).max(totals.allocated_bytes))
                 .or_insert(totals.allocated_bytes);
+            let current_union = evidence
+                .storage_current
+                .values()
+                .fold(0_u64, |total, item| {
+                    total.saturating_add(item.allocated_bytes)
+                });
+            evidence.storage_transient_peak_total_allocated_bytes = evidence
+                .storage_transient_peak_total_allocated_bytes
+                .max(current_union);
         }
         self.checkpoint.next_sequence = self.checkpoint.next_sequence.saturating_add(1);
         self.checkpoint.saw_edge |= receipt.kind == ConstructionChunkKind::Edge;
@@ -7475,18 +7511,25 @@ mod tests {
             assert!(session.evidence().write_operations < session.evidence().input_rows);
             assert!(session.evidence().fsync_operations > 0);
             assert!(session.evidence().peak_accounted_live_bytes > 0);
-            let node_storage =
-                &session.evidence().storage_current[&crate::ArtifactCategory::TopologyNodes];
-            let uuid_storage =
-                &session.evidence().storage_current[&crate::ArtifactCategory::UuidAndSurrogates];
-            assert_eq!(node_storage.logical_references, chunks * 2);
-            assert_eq!(uuid_storage.logical_references, chunks);
-            assert_eq!(node_storage.physical_objects, chunks * 2);
-            assert_eq!(uuid_storage.physical_objects, chunks);
+            let staging_storage =
+                &session.evidence().storage_current[&crate::ArtifactCategory::ConstructionStaging];
+            assert_eq!(staging_storage.logical_references, chunks * 3);
+            assert_eq!(staging_storage.physical_objects, chunks * 3);
             assert_eq!(
                 session.evidence().storage_transient_peak_allocated_bytes
-                    [&crate::ArtifactCategory::TopologyNodes],
-                node_storage.allocated_bytes
+                    [&crate::ArtifactCategory::ConstructionStaging],
+                staging_storage.allocated_bytes
+            );
+            assert_eq!(
+                session
+                    .evidence()
+                    .storage_transient_peak_total_allocated_bytes,
+                session
+                    .evidence()
+                    .storage_current
+                    .values()
+                    .map(|totals| totals.allocated_bytes)
+                    .sum::<u64>()
             );
             let persisted_storage = session.evidence().storage_current.clone();
             let checkpoint_bytes = session

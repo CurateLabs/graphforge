@@ -131,7 +131,9 @@ impl ConstructionPhaseAttribution {
         phases.insert(
             StorageIoPhase::AppendMerge,
             PhaseIoTotals {
+                read_bytes: evidence.replay_validation_read_bytes,
                 write_bytes: evidence.write_bytes,
+                read_calls: evidence.replay_validation_read_operations,
                 write_calls: evidence.write_operations,
                 object_count: evidence.parquet_shards,
                 ..Default::default()
@@ -141,9 +143,7 @@ impl ConstructionPhaseAttribution {
             StorageIoPhase::SealAuthentication,
             PhaseIoTotals {
                 read_bytes: evidence.seal_application_read_bytes,
-                read_calls: evidence
-                    .authentication_read_operations
-                    .saturating_add(evidence.replay_validation_read_operations),
+                read_calls: evidence.authentication_read_operations,
                 ..Default::default()
             },
         );
@@ -198,6 +198,14 @@ impl ConstructionPhaseAttribution {
                 fsync_calls: evidence
                     .fsync_operations
                     .saturating_add(evidence.merge_fsync_operations),
+                ..Default::default()
+            },
+        );
+        phases.insert(
+            StorageIoPhase::RecoveryReauthentication,
+            PhaseIoTotals {
+                read_bytes: evidence.recovery_application_read_bytes,
+                read_calls: evidence.recovery_application_read_operations,
                 ..Default::default()
             },
         );
@@ -707,6 +715,8 @@ mod tests {
             publication_application_read_bytes: 19,
             cas_application_read_bytes: 23,
             hydration_application_read_bytes: 29,
+            recovery_application_read_bytes: 41,
+            recovery_application_read_operations: 2,
             canonical_output_bytes: 31,
             write_bytes: 37,
             write_operations: 3,
@@ -717,7 +727,11 @@ mod tests {
         let mut attribution = ConstructionPhaseAttribution::from_construction(&evidence);
         attribution.validate_reconciliation().unwrap();
         assert_eq!(attribution.phases.len(), StorageIoPhase::ALL.len());
-        assert_eq!(attribution.totals.read_bytes, 112);
+        assert_eq!(attribution.totals.read_bytes, 153);
+        assert_eq!(
+            attribution.phases[&StorageIoPhase::RecoveryReauthentication].read_calls,
+            2
+        );
         assert_eq!(attribution.totals.write_bytes, 68);
         attribution
             .phases
