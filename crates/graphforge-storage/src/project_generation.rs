@@ -110,6 +110,7 @@ pub(crate) struct PinnedGraphFile {
     pub(crate) entry: crate::GraphFileEntry,
     pub(crate) file: File,
     pub(crate) identity: graphforge_filesystem::FileIdentity,
+    _cas_lease: Option<crate::graph_object_store::AuthenticatedGraphObject>,
 }
 
 impl Drop for GenerationLease {
@@ -148,13 +149,13 @@ impl ResolvedProjectGeneration {
         };
         let mut pinned = Vec::with_capacity(entries.len());
         for entry in entries.into_iter().filter(|entry| selected(entry)) {
-            let file = match &participant {
+            let (file, cas_lease) = match &participant {
                 crate::GraphFilesParticipant::V1(_) => {
-                    crate::graph_files::resolve_v1_inventory_entry_retained(
+                    let retained = crate::graph_files::resolve_v1_inventory_entry_retained(
                         &self.graph_tree_root(),
                         &entry,
-                    )?
-                    .file
+                    )?;
+                    (retained.file, None)
                 }
                 crate::GraphFilesParticipant::V2(_) => {
                     let lease = crate::graph_object_store::open_graph_object_by_digest(
@@ -162,9 +163,10 @@ impl ResolvedProjectGeneration {
                         &entry.content_sha256,
                         entry.byte_length,
                     )?;
-                    lease.try_clone_file().map_err(|error| {
+                    let file = lease.try_clone_file().map_err(|error| {
                         GfError::Storage(format!("retain authenticated graph object: {error}"))
-                    })?
+                    })?;
+                    (file, Some(lease))
                 }
             };
             let identity = graphforge_filesystem::file_identity(&file).map_err(|error| {
@@ -174,6 +176,7 @@ impl ResolvedProjectGeneration {
                 entry,
                 file,
                 identity,
+                _cas_lease: cas_lease,
             });
         }
         Ok(Some(pinned))

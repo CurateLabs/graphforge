@@ -6032,7 +6032,7 @@ fn stage_v4_ordinal_rebuild_locked(
         )?;
     }
     let manifest_bytes = serde_json::to_vec(&manifest).map_err(storage_err)?;
-    if manifest_bytes.len() as u64 > MAX_MANIFEST_BYTES {
+    if manifest_bytes.len() as u64 > crate::ordinal_identity_v4::MAX_MANIFEST_BYTES {
         return Err(storage_err("v4 ordinal manifest exceeds bound"));
     }
     batch.stage_bytes(&destination.join(V4_ORDINAL_MANIFEST), &manifest_bytes)?;
