@@ -63,7 +63,8 @@ pub struct PortableV2ImportResult {
     /// Exact private-materialization identity allocation for lifecycle qualification.
     #[doc(hidden)]
     pub materialized_identity_allocated_bytes: std::collections::BTreeMap<String, u64>,
-    /// Exact published-generation identity allocation for lifecycle qualification.
+    /// Exact published-project identity union for lifecycle qualification,
+    /// including controls and every retained generation.
     #[doc(hidden)]
     pub published_identity_allocated_bytes: std::collections::BTreeMap<String, u64>,
 }

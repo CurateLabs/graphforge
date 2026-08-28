@@ -2367,10 +2367,12 @@ fn create_bounded_drill_package(
     drop(construction);
     drop(graph);
     let graph = GraphForge::new(project.to_str()).expect("reopen bounded drill project");
-    let project_identities = graph
-        .storage_attribution()
-        .expect("bounded drill project attribution")
-        .physical_identity_allocated_bytes;
+    let project_generation = graphforge_storage::resolve_project_generation(&project)
+        .expect("resolve bounded drill project");
+    let project_identities =
+        graphforge_storage::capture_project_storage_identity_union(&project_generation)
+            .expect("bounded drill retained project attribution")
+            .physical_identity_allocated_bytes;
     let expanded = root.join("drill-expanded");
     let expanded_receipt = graph
         .export_portable_v2(

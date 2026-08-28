@@ -988,6 +988,42 @@ mod tests {
     use super::*;
     use std::io::Write as _;
 
+    fn publish_compact_fixture(
+        project: &Path,
+        workspace: &Path,
+    ) -> crate::ResolvedProjectGeneration {
+        let (_, graph) = crate::capture_graph_files(workspace).unwrap();
+        let mut participants = crate::empty_workspace_participants().unwrap();
+        participants.insert(0, graph);
+        let request = crate::ProjectGenerationRequest {
+            transaction_uuid: uuid::Uuid::now_v7(),
+            generation_uuid: uuid::Uuid::now_v7(),
+            capabilities: vec![
+                crate::ProjectCapability {
+                    capability_id: crate::GRAPH_CAPABILITY_ID.into(),
+                    capability_version: crate::GRAPH_CAPABILITY_VERSION,
+                },
+                crate::ProjectCapability {
+                    capability_id: "workspace".into(),
+                    capability_version: 1,
+                },
+            ],
+            participants,
+        };
+        let crate::ProjectStageOutcome::Staged(staged) =
+            crate::stage_project_generation_with_graph_tree(project, &request, Some(workspace))
+                .unwrap()
+        else {
+            panic!("fresh compact fixture unexpectedly replayed");
+        };
+        staged
+            .validate(|_| Ok(()), |_, _| Ok(()))
+            .unwrap()
+            .publish()
+            .unwrap();
+        crate::resolve_project_generation(project).unwrap()
+    }
+
     #[test]
     fn classifier_is_exhaustive_and_specific() {
         assert_eq!(
@@ -1100,6 +1136,81 @@ mod tests {
         lifecycle.remove_owner("import").unwrap();
         assert_eq!(lifecycle.current_allocated_bytes(), 0);
         assert_eq!(lifecycle.peak_allocated_bytes(), 16_384);
+    }
+
+    #[test]
+    fn project_union_keeps_noncurrent_generations_and_deduplicates_shared_cas_identity() {
+        let project = tempfile::tempdir().unwrap();
+        let initial = crate::open_or_initialize_project(project.path()).unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let topology = workspace.path().join("topology");
+        std::fs::create_dir_all(&topology).unwrap();
+        std::fs::write(topology.join("nodes.parquet"), b"shared compact payload").unwrap();
+
+        let first = publish_compact_fixture(project.path(), workspace.path());
+        let first_snapshot = capture_storage_attribution(&first).unwrap();
+        let current = publish_compact_fixture(project.path(), workspace.path());
+        let current_snapshot = capture_storage_attribution(&current).unwrap();
+        let union = capture_project_storage_identity_union(&current).unwrap();
+
+        assert_ne!(first.generation_uuid(), current.generation_uuid());
+        assert!(
+            union
+                .retained_generation_uuids
+                .contains(&initial.generation_uuid())
+        );
+        assert!(
+            union
+                .retained_generation_uuids
+                .contains(&first.generation_uuid())
+        );
+        assert!(
+            union
+                .retained_generation_uuids
+                .contains(&current.generation_uuid())
+        );
+        for identity in first_snapshot
+            .physical_identity_allocated_bytes
+            .keys()
+            .chain(current_snapshot.physical_identity_allocated_bytes.keys())
+        {
+            assert!(
+                union
+                    .physical_identity_allocated_bytes
+                    .contains_key(identity)
+            );
+        }
+        let shared = first_snapshot
+            .physical_identity_allocated_bytes
+            .keys()
+            .filter(|identity| {
+                current_snapshot
+                    .physical_identity_allocated_bytes
+                    .contains_key(*identity)
+            })
+            .count();
+        assert!(shared > 0, "compact generations must share a CAS identity");
+        let naive = first_snapshot
+            .allocated_bytes
+            .saturating_add(current_snapshot.allocated_bytes);
+        let mut deduplicated = first_snapshot.physical_identity_allocated_bytes.clone();
+        merge_identity_allocations(
+            &mut deduplicated,
+            &current_snapshot.physical_identity_allocated_bytes,
+        )
+        .unwrap();
+        assert!(
+            deduplicated.values().copied().sum::<u64>() < naive,
+            "shared identities must not be counted twice"
+        );
+        assert_eq!(
+            union.allocated_bytes,
+            union
+                .physical_identity_allocated_bytes
+                .values()
+                .copied()
+                .sum::<u64>()
+        );
     }
 
     #[test]

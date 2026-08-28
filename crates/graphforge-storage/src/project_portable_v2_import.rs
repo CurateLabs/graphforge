@@ -38,7 +38,8 @@ pub struct PortableV2ImportReceipt {
     pub staged_composition: Option<PortableV2StagedCompositionReceipt>,
     /// Exact native identities simultaneously retained by private materialization.
     pub materialized_identity_allocated_bytes: std::collections::BTreeMap<String, u64>,
-    /// Exact authenticated identity union of the published generation.
+    /// Exact authenticated identity union of the published project container,
+    /// including controls and every retained generation.
     pub published_identity_allocated_bytes: std::collections::BTreeMap<String, u64>,
 }
 
@@ -615,9 +616,11 @@ fn import_materialized(
         publication,
         staged_composition,
         materialized_identity_allocated_bytes: std::collections::BTreeMap::new(),
-        published_identity_allocated_bytes: crate::capture_storage_attribution(&reopened)
-            .map_err(storage)?
-            .physical_identity_allocated_bytes,
+        published_identity_allocated_bytes: crate::capture_project_storage_identity_union(
+            &reopened,
+        )
+        .map_err(storage)?
+        .physical_identity_allocated_bytes,
     })
 }
 
