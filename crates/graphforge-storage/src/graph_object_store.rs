@@ -1562,8 +1562,10 @@ pub(crate) fn verify_graph_object_with_lease(
     )
 }
 
-/// Materialize a verified logical inventory as hard links to immutable CAS
-/// objects. The target must be empty.
+/// Materialize a verified logical inventory into a private graph tree. Ordinary
+/// immutable payloads reuse CAS inodes; the v4 ordinal authority facet is
+/// copied into single-link files because its reader intentionally rejects
+/// shared inodes. The target must be empty.
 pub fn materialize_graph_objects(
     root: &Path,
     inventory: &GraphFilesInventory,
@@ -1580,9 +1582,13 @@ pub fn materialize_graph_objects(
         ..GraphFilesOpenEvidence::default()
     };
     for entry in &inventory.files {
-        materialize_from_cas(&lease.cas, &target_directory, entry)?;
-        evidence.files_reused = evidence.files_reused.saturating_add(1);
-        evidence.bytes_reused = evidence.bytes_reused.saturating_add(entry.byte_length);
+        if materialize_from_cas(&lease.cas, &target_directory, entry)? {
+            evidence.files_copied = evidence.files_copied.saturating_add(1);
+            evidence.bytes_copied = evidence.bytes_copied.saturating_add(entry.byte_length);
+        } else {
+            evidence.files_reused = evidence.files_reused.saturating_add(1);
+            evidence.bytes_reused = evidence.bytes_reused.saturating_add(entry.byte_length);
+        }
     }
     lease.revalidate_for_publish()?;
     Ok(evidence)
@@ -1592,7 +1598,7 @@ fn materialize_from_cas(
     cas: &CasRoot,
     target: &StableDirectory,
     entry: &crate::GraphFileEntry,
-) -> Result<(), GfError> {
+) -> Result<bool, GfError> {
     validate_logical_path(Path::new(&entry.relative_path))?;
     let bucket = cas.digest_bucket(&entry.content_sha256, false)?;
     let source_name = std::ffi::OsStr::new(&entry.content_sha256[2..]);
@@ -1624,6 +1630,10 @@ fn materialize_from_cas(
             })?);
         } else {
             let parent = parent.as_ref().unwrap_or(target);
+            if requires_single_link_materialization(&entry.relative_path) {
+                copy_single_link_materialized_object(cas, &source, parent, name, entry)?;
+                return Ok(true);
+            }
             let (installed, installed_identity) = bucket
                 .link_child_into(source_name, &source, source_identity, parent, name)
                 .map_err(|error| {
@@ -1644,7 +1654,142 @@ fn materialize_from_cas(
             }
         }
     }
-    Ok(())
+    Ok(false)
+}
+
+fn requires_single_link_materialization(relative_path: &str) -> bool {
+    let Some(name) = relative_path.strip_prefix("topology/uuid-membership/") else {
+        return false;
+    };
+    !name.contains('/')
+        && (matches!(
+            name,
+            "ordinal-v4-manifest.json" | "ordinal-v4-receipt.json" | "ordinal-v4.lock"
+        ) || (!name.starts_with(".v4-")
+            && crate::uuid_membership::is_exact_private_v4_name(name)))
+}
+
+fn copy_single_link_materialized_object(
+    cas: &CasRoot,
+    source: &File,
+    parent: &StableDirectory,
+    name: &std::ffi::OsStr,
+    entry: &crate::GraphFileEntry,
+) -> Result<(), GfError> {
+    let temporary_name = std::ffi::OsString::from(format!(
+        ".ordinal-v4-materialize-{}.tmp",
+        Uuid::new_v4().simple()
+    ));
+    let mut input = source
+        .try_clone()
+        .map_err(|error| storage("clone materialization source", &cas.diagnostic_root, error))?;
+    input
+        .rewind()
+        .map_err(|error| storage("rewind materialization source", &cas.diagnostic_root, error))?;
+    let mut output = parent
+        .create_replaceable_child_file(&temporary_name)
+        .map_err(|error| {
+            storage(
+                "create private materialization file",
+                &cas.diagnostic_root,
+                error,
+            )
+        })?;
+    let output_identity = graphforge_filesystem::file_identity(&output).map_err(|error| {
+        storage(
+            "identify private materialization file",
+            &cas.diagnostic_root,
+            error,
+        )
+    })?;
+    let mut installed = false;
+    let result = (|| -> Result<(), GfError> {
+        let mut digest = Sha256::new();
+        let mut length = 0_u64;
+        let mut buffer = [0_u8; BUFFER_BYTES];
+        loop {
+            let read = input.read(&mut buffer).map_err(|error| {
+                storage("read materialization source", &cas.diagnostic_root, error)
+            })?;
+            if read == 0 {
+                break;
+            }
+            output.write_all(&buffer[..read]).map_err(|error| {
+                storage(
+                    "write private materialization file",
+                    &cas.diagnostic_root,
+                    error,
+                )
+            })?;
+            digest.update(&buffer[..read]);
+            length = length
+                .checked_add(read as u64)
+                .ok_or_else(|| validation("private materialization length overflows"))?;
+        }
+        if length != entry.byte_length
+            || hex_digest(digest.finalize().into()) != entry.content_sha256
+        {
+            return Err(validation(
+                "private materialization bytes do not match inventory",
+            ));
+        }
+        output.sync_all().map_err(|error| {
+            storage(
+                "sync private materialization file",
+                &cas.diagnostic_root,
+                error,
+            )
+        })?;
+        drop(output);
+        parent
+            .replace_child(&temporary_name, output_identity, name)
+            .map_err(|error| {
+                storage(
+                    "install private materialization file",
+                    &cas.diagnostic_root,
+                    error,
+                )
+            })?;
+        installed = true;
+        parent.sync().map_err(|error| {
+            storage(
+                "sync private materialization directory",
+                &cas.diagnostic_root,
+                error,
+            )
+        })?;
+        let installed = parent.open_child_file(name).map_err(|error| {
+            storage(
+                "open private materialization file",
+                &cas.diagnostic_root,
+                error,
+            )
+        })?;
+        if graphforge_filesystem::file_link_count(&installed).map_err(|error| {
+            storage(
+                "inspect private materialization links",
+                &cas.diagnostic_root,
+                error,
+            )
+        })? != 1
+        {
+            return Err(validation(
+                "private materialization file is multiply linked",
+            ));
+        }
+        verify_file(
+            installed,
+            &entry.content_sha256,
+            entry.byte_length,
+            &cas.diagnostic_root,
+        )
+    })();
+    if result.is_err() {
+        let cleanup_name = if installed { name } else { &temporary_name };
+        let _ = parent.unlink_child_if_identity(cleanup_name, output_identity);
+        let _ = parent.sync();
+    }
+    result
 }
 
 #[cfg(unix)]
@@ -3574,6 +3719,53 @@ mod tests {
         assert_eq!(evidence.files_reused, 1);
         assert_eq!(evidence.bytes_reused, payload.len() as u64);
         assert_eq!(evidence.files_copied, 0);
+    }
+
+    #[test]
+    fn materialization_gives_v4_ordinal_authority_private_single_link_inodes() {
+        let root = tempfile::tempdir().unwrap();
+        let files = [
+            ("topology/uuid-membership/ordinal-v4.lock", &b""[..]),
+            (
+                "topology/uuid-membership/ordinal-v4-manifest.json",
+                &b"manifest"[..],
+            ),
+            (
+                "topology/uuid-membership/ordinal-v4-receipt.json",
+                &b"receipt"[..],
+            ),
+            (
+                "topology/uuid-membership/ordinal-v4-1-0123456789abcdef.uuidx",
+                &b"ordinal"[..],
+            ),
+        ];
+        let mut entries = Vec::new();
+        for (relative_path, payload) in files {
+            let (digest, _) = install_graph_object_bytes(root.path(), payload).unwrap();
+            entries.push(crate::GraphFileEntry {
+                relative_path: relative_path.to_owned(),
+                byte_length: payload.len() as u64,
+                content_sha256: digest,
+                role: crate::GraphFileRole::Topology,
+            });
+        }
+        entries.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+        let inventory = crate::graph_files::inventory_from_entries(entries).unwrap();
+        let owner = tempfile::tempdir().unwrap();
+        let target = owner.path().join("workspace");
+
+        let evidence = materialize_graph_objects(root.path(), &inventory, &target).unwrap();
+
+        assert_eq!(evidence.files_copied, inventory.file_count);
+        assert_eq!(evidence.files_reused, 0);
+        for entry in &inventory.files {
+            let file = File::open(target.join(&entry.relative_path)).unwrap();
+            assert_eq!(graphforge_filesystem::file_link_count(&file).unwrap(), 1);
+            assert_eq!(
+                fs::read(target.join(&entry.relative_path)).unwrap().len() as u64,
+                entry.byte_length
+            );
+        }
     }
 
     #[cfg(unix)]
