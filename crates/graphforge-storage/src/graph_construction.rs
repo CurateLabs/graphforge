@@ -1647,7 +1647,7 @@ impl GraphConstructionSession {
             let graph_source = StableDirectory::open(graph_source_dir).map_err(storage)?;
             load_parent_runtime_catalog(&graph_source, parent_topology_generation, budgets)?
         };
-        let mut checkpoint = if let Some(checkpoint) = recovered_checkpoint {
+        let checkpoint = if let Some(checkpoint) = recovered_checkpoint {
             checkpoint
         } else {
             let evidence = GraphConstructionEvidence {
@@ -1708,11 +1708,6 @@ impl GraphConstructionSession {
             parent_generation_uuid,
             &parent_generation_manifest_sha256,
         )?;
-        if checkpoint.next_sequence != 0 && checkpoint.evidence.immutable_artifacts == 0 {
-            checkpoint.evidence.immutable_artifacts =
-                authenticated_receipt_artifact_count(&root, &checkpoint)?;
-            replace_control(&root, CHECKPOINT, &checkpoint)?;
-        }
         let compact_parent = compact_inventory;
         let mut session = Self {
             project_path: project_dir.to_path_buf(),
@@ -1729,6 +1724,13 @@ impl GraphConstructionSession {
         recover_shape_intent(&session.root, &mut session.checkpoint)?;
         session.recover_intent()?;
         session.revalidate_authority()?;
+        if session.checkpoint.next_sequence != 0
+            && session.checkpoint.evidence.immutable_artifacts == 0
+        {
+            session.checkpoint.evidence.immutable_artifacts =
+                authenticated_receipt_artifact_count(&session.root, &session.checkpoint)?;
+            replace_control(&session.root, CHECKPOINT, &session.checkpoint)?;
+        }
         Ok(session)
     }
 
@@ -7262,6 +7264,39 @@ mod tests {
         .expect("incompatible checkpoint must fail admission");
         assert!(error.to_string().contains("checkpoint authority"));
         assert_eq!(std::fs::read(checkpoint_path).unwrap(), before);
+    }
+
+    #[test]
+    fn complete_legacy_shape_intent_recovers_before_artifact_backfill() {
+        let root = TempDir::new().unwrap();
+        let operation = Uuid::from_u128(9_805);
+        let mut session = open(&root, operation.as_u128());
+        session
+            .append(ConstructionChunkKind::Node, "node", &node_batch(1, 2))
+            .unwrap();
+        session.seal().unwrap();
+        let expected_shape = session.shape_canonical_with_cancellation(|| false).unwrap();
+
+        let mut intent_file = session
+            .root
+            .open_child_file(OsStr::new(SHAPE_INTENT))
+            .unwrap();
+        let mut intent = decode_shape_intent(&mut intent_file).unwrap();
+        intent.baseline_evidence.immutable_artifacts = 0;
+        intent.final_evidence.as_mut().unwrap().immutable_artifacts = 0;
+        session.checkpoint.evidence = intent.baseline_evidence.clone();
+        session.checkpoint.shape_authority_sha256 = None;
+        replace_control(&session.root, SHAPE_INTENT, &intent).unwrap();
+        replace_control(&session.root, CHECKPOINT, &session.checkpoint).unwrap();
+        drop(session);
+
+        let mut resumed = open(&root, operation.as_u128());
+        assert_eq!(resumed.evidence().immutable_artifacts, 3);
+        assert!(resumed.checkpoint.shape_authority_sha256.is_some());
+        assert_eq!(
+            resumed.shape_canonical_with_cancellation(|| false).unwrap(),
+            expected_shape
+        );
     }
 
     #[test]

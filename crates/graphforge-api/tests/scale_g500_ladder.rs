@@ -929,7 +929,7 @@ fn run_rung(
                 "input_fingerprint": input_fingerprint,
                 "construction": {
                     "configured_rows_per_chunk": CONSTRUCTION_BATCH_ROWS,
-                    "submitted_chunks": construction_evidence.input_batches,
+                    "submitted_chunks": submitted_chunk_count(&construction_evidence),
                     "append_wall_time_s": append_s,
                     "reconciliation_wall_time_s": reconciliation_s,
                     "seal_publication_wall_time_s": seal_publication_s,
@@ -2793,6 +2793,13 @@ fn million_edge_sink_uses_sixteen_durable_chunks_and_replays_stably() {
     assert_eq!(replayed.evidence.input_batches, 17);
     assert_eq!(replayed.evidence.immutable_artifacts, 67);
     assert_eq!(replayed.evidence.replayed_chunks, 16);
+    assert_eq!(submitted_chunk_count(&replayed.evidence), 33);
+}
+
+fn submitted_chunk_count(evidence: &graphforge_storage::GraphConstructionEvidence) -> u64 {
+    evidence
+        .input_batches
+        .saturating_add(evidence.replayed_chunks)
 }
 
 #[test]
