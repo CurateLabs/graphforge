@@ -8747,6 +8747,18 @@ pub(crate) mod tests {
     }
 
     fn assert_exact_v4_reopen(project: &Path, generation: u64) {
+        assert_exact_v4_reopen_values(
+            project,
+            generation,
+            vec![
+                Some(Uuid::from_u128(3)),
+                Some(Uuid::from_u128(1)),
+                Some(Uuid::from_u128(2)),
+            ],
+        );
+    }
+
+    fn assert_exact_v4_reopen_values(project: &Path, generation: u64, expected: Vec<Option<Uuid>>) {
         let index = project.join(INDEX_DIR);
         let manifest_bytes = fs::read(index.join(V4_ORDINAL_MANIFEST)).unwrap();
         let receipt: TopologyIndexReceipt =
@@ -8779,11 +8791,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             handle.lookup_node_uuids(&[1, 2, 3]).unwrap().values,
-            vec![
-                Some(Uuid::from_u128(3)),
-                Some(Uuid::from_u128(1)),
-                Some(Uuid::from_u128(2)),
-            ]
+            expected
         );
     }
 
@@ -9271,6 +9279,89 @@ pub(crate) mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn v4_orphan_cleanup_subprocess_crash_retry_preserves_authenticated_union() {
+        const CHILD_ROOT: &str = "GRAPHFORGE_V4_ORPHAN_CHILD_ROOT";
+        const RETRY: &str = "GRAPHFORGE_V4_ORPHAN_RETRY";
+        if let Ok(root) = std::env::var(CHILD_ROOT) {
+            let root = Path::new(&root);
+            let manifest_bytes = fs::read(root.join(INDEX_DIR).join(V4_ORDINAL_MANIFEST)).unwrap();
+            let receipt: TopologyIndexReceipt = serde_json::from_slice(
+                &fs::read(root.join(INDEX_DIR).join(V4_ORDINAL_RECEIPT)).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(receipt.manifest_sha256, hex_sha256(&manifest_bytes));
+            let authority = crate::AuthenticatedV4OrdinalIdentityAuthority {
+                authority: crate::ordinal_identity_v4::V4OrdinalIdentityAuthority {
+                    topology_generation: receipt.expected_generation,
+                    manifest_sha256: receipt.manifest_sha256,
+                },
+            };
+            maintain_uuid_membership_orphans_with_ordinal_authority(root, 16, Some(&authority))
+                .unwrap();
+            if std::env::var(RETRY).is_err() {
+                panic!("configured v4 orphan cleanup failpoint did not terminate the process");
+            }
+            return;
+        }
+
+        for failpoint in ["v4_cleanup.before_unlink", "v4_cleanup.after_unlink"] {
+            let (dir, nodes, _) = fixture();
+            fs::write(
+                dir.path().join("topology/generation.json"),
+                b"{\"topology_generation\":7,\"search_generation\":0,\"property_generation\":0}\n",
+            )
+            .unwrap();
+            rebuild_uuid_membership_indexes(dir.path(), UuidIndexBuildLimits::default()).unwrap();
+            let (referenced, _) = install_test_v4_facet(dir.path(), 7, &nodes);
+            let orphan = dir
+                .path()
+                .join(INDEX_DIR)
+                .join("forward-v4-7-0000000000000000.uuidx");
+            fs::write(&orphan, b"authenticated-orphan-candidate").unwrap();
+
+            let child = |retry: bool| {
+                let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+                command
+                    .arg("--exact")
+                    .arg(
+                        "uuid_membership::tests::v4_orphan_cleanup_subprocess_crash_retry_preserves_authenticated_union",
+                    )
+                    .arg("--nocapture")
+                    .env(CHILD_ROOT, dir.path());
+                if retry {
+                    command.env(RETRY, "1");
+                } else {
+                    command
+                        .env(
+                            "GRAPHFORGE_PROJECT_FAILPOINTS",
+                            "graphforge-internal-subprocess-v1",
+                        )
+                        .env("GRAPHFORGE_PROJECT_FAILPOINT", failpoint);
+                }
+                command.status().unwrap()
+            };
+            assert_eq!(
+                child(false).code(),
+                Some(crate::project_failpoint::exit_code()),
+                "{failpoint}"
+            );
+            assert!(child(true).success(), "{failpoint}");
+            assert!(!orphan.exists(), "{failpoint}");
+            for name in &referenced {
+                assert!(
+                    dir.path().join(INDEX_DIR).join(name).is_file(),
+                    "{failpoint}"
+                );
+            }
+            assert_exact_v4_reopen_values(
+                dir.path(),
+                7,
+                vec![Some(Uuid::from_u128(3)), Some(Uuid::from_u128(1)), None],
+            );
+        }
     }
 
     #[cfg(unix)]
