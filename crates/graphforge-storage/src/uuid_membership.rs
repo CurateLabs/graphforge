@@ -185,14 +185,19 @@ fn clone_pinned_v4_file(
     pinned: &crate::ordinal_identity_v4::V4OrdinalPinnedUpdateInputs,
     name: &str,
 ) -> Result<File, GfError> {
-    pinned
+    let mut file = pinned
         .artifacts
         .iter()
         .find(|artifact| artifact.descriptor.name == name)
         .ok_or_else(|| storage_err("authenticated v4 update input is absent"))?
         .file
         .try_clone()
-        .map_err(storage_err)
+        .map_err(storage_err)?;
+    // Update inputs are writer-exclusive retained handles. `try_clone` may
+    // share an OS file offset with the retained handle, so every sequential
+    // consumer must establish its own logical start before reading.
+    file.seek(SeekFrom::Start(0)).map_err(storage_err)?;
+    Ok(file)
 }
 
 /// Encode the already-canonical construction node stream without rescanning
@@ -6367,6 +6372,17 @@ pub(crate) fn prepare_v4_ordinal_delta(
     )?;
 
     let prior_names = v4_manifest_artifact_names(&pinned.manifest);
+    let staged_artifact_bytes = outputs.iter().try_fold(0_u64, |sum, (_, path)| {
+        sum.checked_add(path.metadata().map_err(storage_err)?.len())
+            .ok_or_else(|| storage_err("v4 staged artifact byte count overflow"))
+    })?;
+    let control_bytes =
+        u64::try_from(receipt_bytes.len() + manifest_bytes.len()).map_err(storage_err)?;
+    let staged_write_blocks = outputs.iter().try_fold(0_u64, |sum, (_, path)| {
+        let bytes = path.metadata().map_err(storage_err)?.len();
+        sum.checked_add(bytes.div_ceil(crate::staging::STAGE_FILE_BLOCK_BYTES as u64))
+            .ok_or_else(|| storage_err("v4 staged write block count overflow"))
+    })?;
     let sorting_temporary_upper = u64::try_from(nodes.len())
         .map_err(storage_err)?
         .checked_mul(24 * 4)
@@ -6385,9 +6401,8 @@ pub(crate) fn prepare_v4_ordinal_delta(
             .artifact_bytes
             .saturating_add(tombstone_bytes)
             .saturating_add(compaction.write_bytes)
-            .checked_add(
-                u64::try_from(receipt_bytes.len() + manifest_bytes.len()).map_err(storage_err)?,
-            )
+            .saturating_add(staged_artifact_bytes)
+            .checked_add(control_bytes)
             .ok_or_else(|| storage_err("v4 publication byte count overflow"))?,
         compactions: compaction.compactions,
         sequential_read_bytes: compaction.read_bytes,
@@ -6395,20 +6410,27 @@ pub(crate) fn prepare_v4_ordinal_delta(
         write_blocks: build
             .write_blocks
             .saturating_add(tombstone_blocks)
-            .saturating_add(compaction.write_blocks),
+            .saturating_add(compaction.write_blocks)
+            .saturating_add(staged_write_blocks)
+            .saturating_add(2),
         peak_buffer_bytes: build
             .peak_buffer_bytes
             .max(V4_ORDINAL_BLOCK_BYTES * 3)
+            .max(crate::staging::STAGE_FILE_BLOCK_BYTES)
             .max(external_peak_buffer),
         peak_temporary_bytes: build
             .peak_temporary_bytes
             .saturating_add(tombstone_bytes)
             .saturating_add(compaction.write_bytes)
+            .saturating_add(staged_artifact_bytes)
+            .saturating_add(control_bytes)
             .saturating_add(sorting_temporary_upper),
         fsync_operations: build
             .fsync_operations
-            .saturating_add(tombstone_blocks)
-            .saturating_add(compaction.fsync_operations),
+            .saturating_add(1)
+            .saturating_add(compaction.fsync_operations)
+            .saturating_add(u64::try_from(outputs.len()).map_err(storage_err)?)
+            .saturating_add(2),
         ..Default::default()
     };
     Ok(PreparedV4OrdinalDelta {
@@ -8481,7 +8503,10 @@ pub(crate) mod tests {
         assert_eq!(planned_third.manifest.forward_identities.len(), 2);
         assert_eq!(planned_third.manifest.ordinal_ranges.len(), 2);
         assert_eq!(planned_third.manifest.tombstones.len(), 2);
-        assert!(planned_third.metrics.peak_buffer_bytes <= V4_ORDINAL_BLOCK_BYTES * 3);
+        assert_eq!(
+            planned_third.metrics.peak_buffer_bytes,
+            crate::staging::STAGE_FILE_BLOCK_BYTES
+        );
         install_v4_plan(&third);
 
         let manifest_bytes = serde_json::to_vec(&planned_third.manifest).unwrap();
@@ -8576,11 +8601,15 @@ pub(crate) mod tests {
             .collect::<Vec<_>>();
         let (mut manifest, _) = stage_v4_ordinal_artifacts(base, 1, &index, || false).unwrap();
         let mut observed = Vec::new();
+        let mut next_node_id = ROWS_PER_GENERATION + 1;
         for generation in 2..=5_u64 {
             let pinned = pinned_v4_update(root.path(), manifest);
             let mut batch = crate::staging::RewriteBatch::new();
-            let first = (generation - 1) * ROWS_PER_GENERATION + 1;
-            let last = generation * ROWS_PER_GENERATION;
+            let multiplier = 1_u64 << (generation - 2);
+            let input_rows = ROWS_PER_GENERATION * multiplier;
+            let first = next_node_id;
+            let last = first + input_rows - 1;
+            next_node_id = last + 1;
             let nodes = (first..=last)
                 .map(|id| (Uuid::from_u128(u128::from(id)), id))
                 .collect::<Vec<_>>();
@@ -8595,10 +8624,13 @@ pub(crate) mod tests {
                 &"44".repeat(32),
             )
             .unwrap();
-            assert_eq!(planned.metrics.input_identities, ROWS_PER_GENERATION);
+            assert_eq!(planned.metrics.input_identities, input_rows);
             assert_eq!(planned.metrics.prior_topology_rows_decoded, 0);
             assert_eq!(planned.metrics.per_record_seeks, 0);
-            assert!(planned.metrics.peak_buffer_bytes <= V4_ORDINAL_BLOCK_BYTES * 3);
+            assert_eq!(
+                planned.metrics.peak_buffer_bytes,
+                crate::staging::STAGE_FILE_BLOCK_BYTES
+            );
             assert!(planned.metrics.peak_temporary_bytes != 0);
             assert!(planned.metrics.fsync_operations >= 3);
             assert!(planned.metrics.created_artifacts >= 3);
@@ -8610,9 +8642,17 @@ pub(crate) mod tests {
                 assert!(planned.metrics.sequential_read_bytes != 0);
                 assert!(planned.metrics.sequential_read_calls != 0);
             }
-            let live_rows = generation * ROWS_PER_GENERATION;
-            let bounded_amplification = live_rows * 40 * 4 + MAX_MANIFEST_BYTES;
-            assert!(planned.metrics.physical_bytes_written < bounded_amplification);
+            let control_bytes = planned.auxiliary.bytes
+                + u64::try_from(serde_json::to_vec(&planned.manifest).unwrap().len()).unwrap();
+            let data_bytes = planned.metrics.physical_bytes_written - control_bytes;
+            let new_payload_bytes = input_rows * 40;
+            assert!(data_bytes >= new_payload_bytes * 2);
+            assert!(
+                data_bytes
+                    <= (new_payload_bytes + planned.metrics.sequential_read_bytes)
+                        .saturating_mul(2)
+            );
+            assert!(planned.metrics.write_blocks <= data_bytes.div_ceil(16) + 2);
             observed.push((
                 planned.metrics.compactions,
                 planned.metrics.physical_bytes_written,
@@ -8627,6 +8667,7 @@ pub(crate) mod tests {
         );
         assert_eq!(manifest.forward_identities.len(), 2);
         assert_eq!(manifest.ordinal_ranges.len(), 2);
+        assert_eq!(next_node_id - 1, ROWS_PER_GENERATION * 16);
         assert!(observed.iter().all(|row| row.1 != 0));
     }
 

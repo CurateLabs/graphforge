@@ -37,6 +37,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use tempfile::NamedTempFile;
 
+pub(crate) const STAGE_FILE_BLOCK_BYTES: usize = 1024 * 1024;
+
 use graphforge_core::GfError;
 
 const STAGED_TEMP_DIRS: [&str; 3] = ["topology", "properties", "edge_properties"];
@@ -177,7 +179,7 @@ impl RewriteBatch {
             crate::io_stats::record_uuid_file_open();
             crate::io_stats::record_uuid_file_open();
         }
-        let mut block = vec![0_u8; 1024 * 1024];
+        let mut block = vec![0_u8; STAGE_FILE_BLOCK_BYTES];
         loop {
             let count =
                 std::io::Read::read(&mut input, &mut block).map_err(|error| io_err(&error))?;
