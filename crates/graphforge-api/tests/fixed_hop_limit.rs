@@ -35,6 +35,7 @@ static IO_GUARD: Mutex<()> = Mutex::new(());
 const ONE_HOP: &str = "MATCH (a)-[r]->(b) RETURN b.node_uuid AS id LIMIT 1000";
 const TWO_HOP: &str = "MATCH (a)-[r1]->(b)-[r2]->(c) \
                        RETURN c.node_uuid AS id LIMIT 1000";
+const ORDERED_ONE_HOP: &str = "MATCH (a)-[r]->(b) RETURN b.node_uuid AS id ORDER BY id LIMIT 1000";
 
 /// Deterministic ring: each node points to its next `fan_out` successors.
 fn generate_graph(dir: &Path, nodes: usize, fan_out: usize) {
@@ -388,6 +389,80 @@ fn scattered_node_hydration_is_neighborhood_proportional() {
         "scattered node work must stay bounded across 10x graph growth: \
          small={small_io:#?}, large={large_io:#?}"
     );
+}
+
+fn run_ordered_projection_scale(nodes: usize) -> (Vec<Vec<u8>>, DemandSnapshot) {
+    let dir = TempDir::new().unwrap();
+    generate_graph(dir.path(), nodes, FAN_OUT);
+    let forge = open_forge(dir.path());
+    let plan = forge.explain(ORDERED_ONE_HOP).unwrap();
+    assert!(plan.contains("ExpandExec"), "{plan}");
+    assert!(plan.contains("SortExec"), "{plan}");
+    assert!(plan.contains("projection=1"), "{plan}");
+
+    io_stats::reset();
+    demand::reset();
+    let first = forge.execute(ORDERED_ONE_HOP).unwrap();
+    demand::disable();
+    let io = io_stats::snapshot();
+    let snapshot = demand::snapshot();
+    let first_values = fixed_binary_values(&first, "id");
+    assert_eq!(first_values.len(), LIMIT);
+    assert!(first_values.windows(2).all(|pair| pair[0] <= pair[1]));
+    let node_scan = forge
+        .execute("MATCH (b) RETURN b.node_uuid AS id ORDER BY id")
+        .unwrap();
+    let expected = fixed_binary_values(&node_scan, "id")
+        .into_iter()
+        .flat_map(|uuid| std::iter::repeat_n(uuid, FAN_OUT))
+        .take(LIMIT)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        first_values, expected,
+        "ordered fixed hop differs from scan oracle"
+    );
+    assert_eq!(io.edge_full_reads + io.edge_filtered_reads, 0, "{io:#?}");
+    assert_eq!(io.node_full_reads + io.node_filtered_reads, 0, "{io:#?}");
+    let hop = snapshot.hops.values().next().expect("one projected hop");
+    assert!(hop.projected_chunks > 1, "{snapshot:#?}");
+    assert_eq!(hop.projected_rows, (nodes * FAN_OUT) as u64);
+    assert_eq!(hop.projected_columns, 1);
+    assert_eq!(hop.identity_per_record_seeks, 0);
+    assert!(hop.identity_read_calls > 0, "{snapshot:#?}");
+    assert!(hop.identity_bytes_read > 0, "{snapshot:#?}");
+    assert!(hop.identity_peak_buffer_bytes <= 16 * 1024 * 1024);
+
+    let repeated = forge.execute(ORDERED_ONE_HOP).unwrap();
+    assert_eq!(
+        fixed_binary_values(&repeated, "id"),
+        first_values,
+        "ordered result changed across identical execution"
+    );
+    (first_values, snapshot)
+}
+
+#[test]
+fn ordered_destination_uuid_projection_is_exact_and_linear_at_1x_2x_4x() {
+    let _guard = IO_GUARD.lock().unwrap();
+    let mut work = Vec::new();
+    for nodes in [4_096, 8_192, 16_384] {
+        let (_, snapshot) = run_ordered_projection_scale(nodes);
+        let hop = snapshot.hops.values().next().unwrap();
+        work.push((
+            hop.projected_rows,
+            hop.identity_bytes_read,
+            hop.identity_read_calls,
+        ));
+    }
+    for pair in work.windows(2) {
+        let (prior_rows, prior_bytes, prior_calls) = pair[0];
+        let (next_rows, next_bytes, next_calls) = pair[1];
+        assert_eq!(next_rows, prior_rows * 2, "{work:?}");
+        // Fixed block/range boundaries may add one coalesced read, but neither
+        // bytes nor calls may acquire a chunk-times-graph multiplier.
+        assert!(next_bytes <= prior_bytes * 2 + 2 * 1024 * 1024, "{work:?}");
+        assert!(next_calls <= prior_calls * 2 + 2, "{work:?}");
+    }
 }
 
 #[test]

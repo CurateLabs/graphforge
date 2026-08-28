@@ -3327,7 +3327,7 @@ impl DisplayAs for ExpandExec {
         };
         write!(
             f,
-            "ExpandExec: rel={}, dir={arrow}, adjacency={}, fetch={}, demand_batch={}, cancel={}",
+            "ExpandExec: rel={}, dir={arrow}, adjacency={}, fetch={}, demand_batch={}, projection={}, cancel={}",
             self.rel_type_name,
             self.provider
                 .status(&self.rel_type_name, self.direction)
@@ -3336,6 +3336,10 @@ impl DisplayAs for ExpandExec {
                 .map_or_else(|| "all".to_owned(), |n| n.to_string()),
             self.demand_batch
                 .map_or_else(|| "all".to_owned(), |n| n.to_string()),
+            self.required_output.as_ref().map_or_else(
+                || "all".to_owned(),
+                |mask| mask.iter().filter(|needed| **needed).count().to_string(),
+            ),
             if self.demand.is_some() {
                 "guarded"
             } else {
@@ -3755,13 +3759,40 @@ fn expand_single_hop_chunk(
         Arc::new(demand::HopReadObserver::new(cfg.edge_var))
             as Arc<dyn graphforge_storage::io_stats::FilteredReadObserver>
     });
-    let edge_batches = graphforge_storage::read_edges_filtered_observed(
-        &cfg.dir,
-        &cfg.rel_type_name,
-        cfg.mode,
-        &traversed,
-        edge_observer.as_ref(),
-    )
+    let edge_topology_width = edge_end
+        .saturating_sub(cfg.input_width)
+        .saturating_sub(cfg.edge_prop_count);
+    let relationship_properties_required = required.is_none_or(|mask| {
+        mask[cfg.input_width + edge_topology_width..edge_end]
+            .iter()
+            .any(|needed| *needed)
+    });
+    let mut edge_projection = (0..edge_topology_width)
+        .filter(|offset| required.is_none_or(|mask| mask[cfg.input_width + offset]))
+        .collect::<Vec<_>>();
+    // edge_id keys adjacency entries; edge_uuid keys demanded relationship
+    // properties. Storage adds edge_id automatically.
+    if relationship_properties_required {
+        edge_projection.push(0);
+    }
+    let edge_batches = if required.is_some() {
+        graphforge_storage::read_edges_filtered_projected_observed(
+            &cfg.dir,
+            &cfg.rel_type_name,
+            cfg.mode,
+            &traversed,
+            &edge_projection,
+            edge_observer.as_ref(),
+        )
+    } else {
+        graphforge_storage::read_edges_filtered_observed(
+            &cfg.dir,
+            &cfg.rel_type_name,
+            cfg.mode,
+            &traversed,
+            edge_observer.as_ref(),
+        )
+    }
     .map_err(|e| exec_err(e.to_string()))?;
     drop(edge_permit);
     let edge_schema = edge_batches
@@ -3770,16 +3801,25 @@ fn expand_single_hop_chunk(
         .ok_or_else(|| exec_err("Expand: edge scan returned no batches".into()))?;
     let edge_batch =
         concat_batches(&edge_schema, &edge_batches).map_err(|e| exec_err(e.to_string()))?;
-    let edge_ids_col = u64_column(&edge_batch, 3)?; // edge_id
+    let edge_id_index = edge_batch
+        .schema()
+        .index_of("edge_id")
+        .map_err(|error| exec_err(error.to_string()))?;
+    let edge_ids_col = u64_column(&edge_batch, edge_id_index)?;
     let edge_row: HashMap<u64, usize> = (0..edge_batch.num_rows())
         .filter_map(|i| edge_ids_col.value_at(i).map(|id| (id, i)))
         .collect();
-    let edge_uuids = edge_batch
-        .column(0)
-        .as_any()
-        .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
-        .filter(|a| a.value_length() == 16)
-        .ok_or_else(|| exec_err("Expand: edge_uuid column is not FixedSizeBinary(16)".into()))?;
+    let edge_uuids = relationship_properties_required
+        .then(|| {
+            edge_batch
+                .column_by_name("edge_uuid")
+                .and_then(|column| column.as_any().downcast_ref::<FixedSizeBinaryArray>())
+                .filter(|array| array.value_length() == 16)
+                .ok_or_else(|| {
+                    exec_err("Expand: edge_uuid column is not FixedSizeBinary(16)".into())
+                })
+        })
+        .transpose()?;
 
     // Destination node rows keyed by node_id — read lazily for the reached
     // neighbors only (#838), so an index Hit does not scan the whole node table.
@@ -3794,11 +3834,19 @@ fn expand_single_hop_chunk(
         Arc::new(demand::HopReadObserver::new(cfg.edge_var))
             as Arc<dyn graphforge_storage::io_stats::FilteredReadObserver>
     });
-    let node_batches = graphforge_storage::read_nodes_filtered_observed(
-        &cfg.dir,
-        &reached,
-        node_observer.as_ref(),
-    )
+    let node_projection = (0..dst_width)
+        .filter(|offset| required.is_none_or(|mask| mask[edge_end + offset]))
+        .collect::<Vec<_>>();
+    let node_batches = if required.is_some() {
+        graphforge_storage::read_nodes_filtered_projected_observed(
+            &cfg.dir,
+            &reached,
+            &node_projection,
+            node_observer.as_ref(),
+        )
+    } else {
+        graphforge_storage::read_nodes_filtered_observed(&cfg.dir, &reached, node_observer.as_ref())
+    }
     .map_err(|e| exec_err(e.to_string()))?;
     drop(node_permit);
     let Some(first) = node_batches.first() else {
@@ -3806,7 +3854,11 @@ fn expand_single_hop_chunk(
     };
     let node_batch =
         concat_batches(&first.schema(), &node_batches).map_err(|e| exec_err(e.to_string()))?;
-    let node_ids = u64_column(&node_batch, 1)?;
+    let node_id_index = node_batch
+        .schema()
+        .index_of("node_id")
+        .map_err(|error| exec_err(error.to_string()))?;
+    let node_ids = u64_column(&node_batch, node_id_index)?;
     let node_row: HashMap<u64, usize> = node_ids
         .iter()
         .enumerate()
@@ -3836,14 +3888,16 @@ fn expand_single_hop_chunk(
         src_take.push(to_u32(row)?);
         edge_take.push(to_u32(edge_idx)?);
         dst_take.push(to_u32(dst_idx)?);
-        if edge_uuids.is_null(edge_idx) {
-            return Err(exec_err(format!(
-                "Expand: edge_id {edge_id} has a null edge_uuid"
-            )));
+        if let Some(edge_uuids) = edge_uuids {
+            if edge_uuids.is_null(edge_idx) {
+                return Err(exec_err(format!(
+                    "Expand: edge_id {edge_id} has a null edge_uuid"
+                )));
+            }
+            let mut edge_uuid = [0u8; 16];
+            edge_uuid.copy_from_slice(edge_uuids.value(edge_idx));
+            output_edge_uuids.push(edge_uuid);
         }
-        let mut edge_uuid = [0u8; 16];
-        edge_uuid.copy_from_slice(edge_uuids.value(edge_idx));
-        output_edge_uuids.push(edge_uuid);
     }
     let src_take = arrow::array::UInt32Array::from(src_take);
     let edge_take = arrow::array::UInt32Array::from(edge_take);
@@ -3851,30 +3905,83 @@ fn expand_single_hop_chunk(
 
     // Assemble columns in ExpandNode schema order: input ++ edge topology ++
     // edge properties (nullable) ++ destination node.
-    let edge_topo_width = edge_batch.num_columns();
     let prop_fields: Vec<arrow::datatypes::FieldRef> = cfg
         .out_schema
         .fields()
         .iter()
-        .skip(cfg.input_width + edge_topo_width)
+        .skip(cfg.input_width + edge_topology_width)
         .take(cfg.edge_prop_count)
         .cloned()
         .collect();
     let mut columns = Vec::with_capacity(cfg.out_schema.fields().len());
-    for col in input.columns() {
-        columns.push(take(col, &src_take, None).map_err(|e| exec_err(e.to_string()))?);
+    for (index, column) in input.columns().iter().enumerate() {
+        columns.push(if required.is_none_or(|mask| mask[index]) {
+            take(column, &src_take, None).map_err(|error| exec_err(error.to_string()))?
+        } else {
+            new_null_array(column.data_type(), triples.len())
+        });
     }
-    for col in edge_batch.columns() {
-        columns.push(take(col, &edge_take, None).map_err(|e| exec_err(e.to_string()))?);
+    for (offset, field) in cfg
+        .out_schema
+        .fields()
+        .iter()
+        .skip(cfg.input_width)
+        .take(edge_topology_width)
+        .enumerate()
+    {
+        let index = cfg.input_width + offset;
+        columns.push(if required.is_none_or(|mask| mask[index]) {
+            let column = edge_batch.column_by_name(field.name()).ok_or_else(|| {
+                exec_err(format!(
+                    "Expand: projected edge column {} is absent",
+                    field.name()
+                ))
+            })?;
+            take(column, &edge_take, None).map_err(|error| exec_err(error.to_string()))?
+        } else {
+            new_null_array(field.data_type(), triples.len())
+        });
     }
-    columns.extend(build_edge_prop_children(
+    let demanded_property_fields = prop_fields
+        .iter()
+        .enumerate()
+        .filter(|(offset, _)| {
+            required.is_none_or(|mask| mask[cfg.input_width + edge_topology_width + offset])
+        })
+        .map(|(_, field)| Arc::clone(field))
+        .collect::<Vec<_>>();
+    let demanded_property_columns = build_edge_prop_children(
         &cfg.rel_type_name,
         &cfg.dir,
-        &prop_fields,
+        &demanded_property_fields,
         &output_edge_uuids,
-    )?);
-    for col in node_batch.columns() {
-        columns.push(take(col, &dst_take, None).map_err(|e| exec_err(e.to_string()))?);
+    )?;
+    let demanded_properties = demanded_property_fields
+        .iter()
+        .map(|field| field.name().clone())
+        .zip(demanded_property_columns)
+        .collect::<HashMap<_, _>>();
+    for field in &prop_fields {
+        columns.push(
+            demanded_properties
+                .get(field.name())
+                .cloned()
+                .unwrap_or_else(|| new_null_array(field.data_type(), triples.len())),
+        );
+    }
+    for (offset, field) in cfg.out_schema.fields().iter().skip(edge_end).enumerate() {
+        let index = edge_end + offset;
+        columns.push(if required.is_none_or(|mask| mask[index]) {
+            let column = node_batch.column_by_name(field.name()).ok_or_else(|| {
+                exec_err(format!(
+                    "Expand: projected node column {} is absent",
+                    field.name()
+                ))
+            })?;
+            take(column, &dst_take, None).map_err(|error| exec_err(error.to_string()))?
+        } else {
+            new_null_array(field.data_type(), triples.len())
+        });
     }
     let output = RecordBatch::try_new(cfg.out_schema.clone(), columns)
         .map_err(|e| exec_err(e.to_string()))?;
