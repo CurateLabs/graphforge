@@ -3327,21 +3327,7 @@ impl ExpandExec {
         })
     }
 
-    fn with_required_output(&self, mut required: Vec<bool>) -> Arc<dyn ExecutionPlan> {
-        // Node identity is the provenance boundary between chained expands.
-        // Keep both identity fields materialized even when an intermediate
-        // projection appears not to expose them: a later Expand consumes the
-        // node_id and a qualified ancestor may still bind the sibling UUID.
-        let destination = self
-            .schema
-            .fields()
-            .len()
-            .saturating_sub(graphforge_storage::TOPOLOGY_NODES_SCHEMA.fields().len());
-        for index in [destination, destination.saturating_add(1)] {
-            if let Some(needed) = required.get_mut(index) {
-                *needed = true;
-            }
-        }
+    fn with_required_output(&self, required: Vec<bool>) -> Arc<dyn ExecutionPlan> {
         Arc::new(Self {
             input: Arc::clone(&self.input),
             rel_type_name: self.rel_type_name.clone(),
@@ -3763,15 +3749,14 @@ fn expand_single_hop_chunk(
             "destination UUID projection requires admitted v4 ordinal identity".into(),
         ));
     }
-    if edge_unused && destination_identity_only && cfg.ordinal_identities.is_some() {
+    if edge_unused
+        && destination_identity_only
+        && let Some(ordinal_identities) = cfg.ordinal_identities.as_ref()
+    {
         let mut requested = reached.iter().copied().collect::<Vec<_>>();
         requested.sort_unstable();
         let (resolved, identity_metrics) = if uuid_required {
-            let lookup = cfg
-                .ordinal_identities
-                .as_ref()
-                .expect("identity path availability checked")
-                .lookup_node_uuids(&requested)?;
+            let lookup = ordinal_identities.lookup_node_uuids(&requested)?;
             (lookup.values, lookup.metrics)
         } else {
             (
@@ -3838,9 +3823,9 @@ fn expand_single_hop_chunk(
         }
         let output = RecordBatch::try_new(cfg.out_schema.clone(), columns)
             .map_err(|error| exec_err(error.to_string()))?;
-        let projected_columns = required
-            .map(|mask| mask.iter().filter(|needed| **needed).count())
-            .unwrap_or(cfg.out_schema.fields().len());
+        let projected_columns = required.map_or(cfg.out_schema.fields().len(), |mask| {
+            mask.iter().filter(|needed| **needed).count()
+        });
         demand::record_identity_projection(
             cfg.edge_var,
             output.num_rows(),
@@ -4642,6 +4627,43 @@ pub struct AdjacencyProviderExt(pub Arc<dyn AdjacencyProvider>);
 /// ordinal identity authority.
 struct OrdinalIdentityResolverExt(pub Option<Arc<V4OrdinalIdentitySession>>);
 
+fn plan_expand_extension(
+    expand: &graphforge_plan::ExpandNode,
+    physical_inputs: &[Arc<dyn ExecutionPlan>],
+    session_state: &SessionState,
+) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
+    let input = physical_inputs
+        .first()
+        .cloned()
+        .ok_or_else(|| DataFusionError::Internal("Expand requires one physical input".into()))?;
+    let provider = session_state
+        .config()
+        .get_extension::<AdjacencyProviderExt>()
+        .map_or_else(
+            || {
+                Arc::new(ScanBuildAdjacencyProvider::new(
+                    expand.dir.clone(),
+                    expand.mode,
+                )) as Arc<dyn AdjacencyProvider>
+            },
+            |ext| Arc::clone(&ext.0),
+        );
+    let identity_extension = session_state
+        .config()
+        .get_extension::<OrdinalIdentityResolverExt>();
+    let ordinal_identity_required = identity_extension.is_some();
+    let ordinal_identities = identity_extension
+        .as_ref()
+        .and_then(|extension| extension.0.as_ref().map(Arc::clone));
+    Ok(Arc::new(ExpandExec::new(
+        expand,
+        input,
+        provider,
+        ordinal_identities,
+        ordinal_identity_required,
+    )))
+}
+
 /// Plans GraphForge's custom logical [`Extension`](LogicalPlan::Extension)
 /// nodes into physical [`ExecutionPlan`]s.
 #[derive(Debug, Default)]
@@ -4682,35 +4704,7 @@ impl ExtensionPlanner for GraphForgeExtensionPlanner {
             return Ok(Some(Arc::new(GraphRemoveExec::new(remove, input))));
         }
         if let Some(expand) = node.as_any().downcast_ref::<graphforge_plan::ExpandNode>() {
-            let input = physical_inputs.first().cloned().ok_or_else(|| {
-                DataFusionError::Internal("Expand requires one physical input".into())
-            })?;
-            let provider = session_state
-                .config()
-                .get_extension::<AdjacencyProviderExt>()
-                .map_or_else(
-                    || {
-                        Arc::new(ScanBuildAdjacencyProvider::new(
-                            expand.dir.clone(),
-                            expand.mode,
-                        )) as Arc<dyn AdjacencyProvider>
-                    },
-                    |ext| Arc::clone(&ext.0),
-                );
-            let identity_extension = session_state
-                .config()
-                .get_extension::<OrdinalIdentityResolverExt>();
-            let ordinal_identity_required = identity_extension.is_some();
-            let ordinal_identities = identity_extension
-                .as_ref()
-                .and_then(|extension| extension.0.as_ref().map(Arc::clone));
-            return Ok(Some(Arc::new(ExpandExec::new(
-                expand,
-                input,
-                provider,
-                ordinal_identities,
-                ordinal_identity_required,
-            ))));
+            return plan_expand_extension(expand, physical_inputs, session_state).map(Some);
         }
         if let Some(var_len) = node.as_any().downcast_ref::<VarLenExpandNode>() {
             let input = physical_inputs.first().cloned().ok_or_else(|| {
@@ -4855,6 +4849,12 @@ pub struct ExecutionSession {
     relational_fixed_hop_reference: bool,
 }
 
+#[derive(Default)]
+struct OrdinalIdentityConfig {
+    session: Option<Arc<V4OrdinalIdentitySession>>,
+    required: bool,
+}
+
 impl ExecutionSession {
     /// Create a read/query session.
     ///
@@ -4870,8 +4870,7 @@ impl ExecutionSession {
             PathBuf::new(),
             OntologyMode::Exploratory,
             None,
-            None,
-            false,
+            OrdinalIdentityConfig::default(),
             &SessionResourceConfig::default(),
         ))
     }
@@ -4892,8 +4891,7 @@ impl ExecutionSession {
             dir,
             mode,
             None,
-            None,
-            false,
+            OrdinalIdentityConfig::default(),
             &SessionResourceConfig::default(),
         ))
     }
@@ -4952,20 +4950,20 @@ impl ExecutionSession {
         ordinal_identities: Option<Arc<V4OrdinalIdentityResolver>>,
         resources: &SessionResourceConfig,
     ) -> Result<Self, GfError> {
-        let ordinal_session = ordinal_identities
-            .as_deref()
-            .map(V4OrdinalIdentityResolver::pin)
-            .transpose()?
-            .flatten();
-        let ordinal_identity_required = ordinal_identities.is_some();
+        let identity = match ordinal_identities {
+            Some(resolver) => OrdinalIdentityConfig {
+                session: resolver.pin()?,
+                required: true,
+            },
+            None => OrdinalIdentityConfig::default(),
+        };
         Ok(Self::build(
             catalog,
             ontology,
             dir,
             mode,
             Some(provider),
-            ordinal_session,
-            ordinal_identity_required,
+            identity,
             resources,
         ))
     }
@@ -4976,8 +4974,7 @@ impl ExecutionSession {
         dir: PathBuf,
         mode: OntologyMode,
         shared_provider: Option<Arc<PersistentAdjacencyProvider>>,
-        ordinal_identities: Option<Arc<V4OrdinalIdentitySession>>,
-        ordinal_identity_required: bool,
+        identity: OrdinalIdentityConfig,
         resources: &SessionResourceConfig,
     ) -> Self {
         // The session-scoped adjacency provider (#761), threaded to the
@@ -5002,9 +4999,8 @@ impl ExecutionSession {
             )))
             .with_target_partitions(resources.target_partitions)
             .with_batch_size(resources.batch_size);
-        if ordinal_identity_required {
-            config =
-                config.with_extension(Arc::new(OrdinalIdentityResolverExt(ordinal_identities)));
+        if identity.required {
+            config = config.with_extension(Arc::new(OrdinalIdentityResolverExt(identity.session)));
         }
         // Authenticated overlay scans publish sound physical-row upper bounds.
         // Let DataFusion use those estimates so a small one-partition source is
