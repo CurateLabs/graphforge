@@ -1,0 +1,6 @@
+{
+  "schema": "graphforge-benchmark-profile/1",
+  "id": "local-smoke",
+  "execution": "no-cost",
+  "provider": null
+}

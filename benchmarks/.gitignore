@@ -1,0 +1,7 @@
+.venv/
+generated/
+outputs/
+credentials/
+*.secret
+fly/.env
+target/
