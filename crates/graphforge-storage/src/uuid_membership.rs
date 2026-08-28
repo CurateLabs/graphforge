@@ -122,6 +122,38 @@ pub struct UuidIndexBuildMetrics {
     pub temporary_runs: u64,
 }
 
+/// Explicit source disposition for a v4 ordinal rebuild.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum V4OrdinalRebuildDisposition {
+    /// Rebuilt from canonical topology; v3 reverse runs were not interpreted.
+    CanonicalTopology,
+}
+
+/// Aggregate-only evidence for one explicit v4 rebuild/migration.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct V4OrdinalRebuildEvidence {
+    /// Rebuild source and migration disposition.
+    pub disposition: V4OrdinalRebuildDisposition,
+    /// Exact topology generation published.
+    pub topology_generation: u64,
+    /// Canonical node identities accepted.
+    pub input_identities: u64,
+    /// Maximal contiguous ordinal ranges emitted.
+    pub ordinal_ranges: u64,
+    /// Immutable v4 artifact payload bytes written before publication staging.
+    pub artifact_bytes: u64,
+    /// Fixed-size artifact blocks submitted.
+    pub write_blocks: u64,
+    /// Largest bounded construction buffer.
+    pub peak_buffer_bytes: u64,
+    /// Maximum coexisting construction artifact bytes.
+    pub peak_temporary_bytes: u64,
+    /// Durable artifact flushes completed.
+    pub fsync_operations: u64,
+    /// Existing bounded external-sort evidence.
+    pub build: UuidIndexBuildMetrics,
+}
+
 const V4_ORDINAL_BLOCK_BYTES: usize = 64 * 1024;
 // Durable rewrite admits 16,384 graph-file entries. Reserve generation.json
 // plus forward, tombstone, receipt, and manifest participants.
@@ -7179,6 +7211,14 @@ pub fn rebuild_v4_ordinal_identity(
     project_dir: &Path,
     limits: UuidIndexBuildLimits,
 ) -> Result<UuidIndexBuildMetrics, GfError> {
+    rebuild_v4_ordinal_identity_with_evidence(project_dir, limits).map(|evidence| evidence.build)
+}
+
+/// Rebuild v4 ordinal identity and return its explicit sanitized disposition.
+pub fn rebuild_v4_ordinal_identity_with_evidence(
+    project_dir: &Path,
+    limits: UuidIndexBuildLimits,
+) -> Result<V4OrdinalRebuildEvidence, GfError> {
     let metrics = std::rc::Rc::new(std::cell::RefCell::new(None));
     let callback_metrics = std::rc::Rc::clone(&metrics);
     let root = project_dir.to_path_buf();
@@ -7232,7 +7272,10 @@ pub fn rebuild_v4_ordinal_identity(
         &root,
         participant,
     )?;
-    Ok(metrics.borrow_mut().take().unwrap_or_default())
+    metrics
+        .borrow_mut()
+        .take()
+        .ok_or_else(|| storage_err("v4 ordinal rebuild produced no evidence"))
 }
 
 fn stage_v4_ordinal_rebuild_locked(
@@ -7240,7 +7283,7 @@ fn stage_v4_ordinal_rebuild_locked(
     generation: u64,
     limits: UuidIndexBuildLimits,
     batch: &mut crate::staging::RewriteBatch,
-) -> Result<UuidIndexBuildMetrics, GfError> {
+) -> Result<V4OrdinalRebuildEvidence, GfError> {
     if generation == 0 {
         return Err(storage_err(
             "v4 ordinal identity requires a nonzero topology generation",
@@ -7337,7 +7380,18 @@ fn stage_v4_ordinal_rebuild_locked(
         return Err(storage_err("v4 ordinal manifest exceeds bound"));
     }
     batch.stage_bytes(&destination.join(V4_ORDINAL_MANIFEST), &manifest_bytes)?;
-    Ok(metrics)
+    Ok(V4OrdinalRebuildEvidence {
+        disposition: V4OrdinalRebuildDisposition::CanonicalTopology,
+        topology_generation: generation,
+        input_identities: v4_metrics.input_records,
+        ordinal_ranges: u64::try_from(v4_metrics.ranges).map_err(storage_err)?,
+        artifact_bytes: v4_metrics.artifact_bytes,
+        write_blocks: v4_metrics.write_blocks,
+        peak_buffer_bytes: u64::try_from(v4_metrics.peak_buffer_bytes).map_err(storage_err)?,
+        peak_temporary_bytes: v4_metrics.peak_temporary_bytes,
+        fsync_operations: v4_metrics.fsync_operations,
+        build: metrics,
+    })
 }
 
 /// Ensure the current topology generation has a v3 UUID index before a
@@ -10329,7 +10383,7 @@ pub(crate) mod tests {
         )
         .unwrap();
 
-        let metrics = rebuild_v4_ordinal_identity(
+        let evidence = rebuild_v4_ordinal_identity_with_evidence(
             dir.path(),
             UuidIndexBuildLimits {
                 scan_batch_rows: 1,
@@ -10338,7 +10392,17 @@ pub(crate) mod tests {
             },
         )
         .unwrap();
-        assert_eq!(metrics.node_count, 3);
+        assert_eq!(
+            evidence.disposition,
+            V4OrdinalRebuildDisposition::CanonicalTopology
+        );
+        assert_eq!(evidence.topology_generation, 7);
+        assert_eq!(evidence.input_identities, 3);
+        assert_eq!(evidence.ordinal_ranges, 2);
+        assert!(evidence.artifact_bytes >= 3 * (24 + 16));
+        assert!(evidence.write_blocks >= 3);
+        assert!(evidence.peak_buffer_bytes <= 3 * V4_ORDINAL_BLOCK_BYTES as u64);
+        assert_eq!(evidence.build.node_count, 3);
         let root = dir.path().join(INDEX_DIR);
         let manifest_bytes = fs::read(root.join(V4_ORDINAL_MANIFEST)).unwrap();
         let manifest: crate::V4OrdinalIdentityManifest =
@@ -10390,6 +10454,88 @@ pub(crate) mod tests {
         assert_eq!(metrics.node_count, 3);
         assert!(root.join(V4_ORDINAL_MANIFEST).is_file());
         assert!(root.join(V4_ORDINAL_RECEIPT).is_file());
+    }
+
+    #[test]
+    fn v4_rebuild_subprocess_crash_retry_selects_one_complete_authority() {
+        const CHILD_ROOT: &str = "GRAPHFORGE_V4_REBUILD_CHILD_ROOT";
+        const RETRY: &str = "GRAPHFORGE_V4_REBUILD_RETRY";
+        if let Ok(root) = std::env::var(CHILD_ROOT) {
+            let root = Path::new(&root);
+            crate::durable_rewrite::recover(root).unwrap();
+            if !root.join(INDEX_DIR).join(V4_ORDINAL_MANIFEST).exists() {
+                rebuild_v4_ordinal_identity_with_evidence(root, UuidIndexBuildLimits::default())
+                    .unwrap();
+            }
+            if std::env::var(RETRY).is_err() {
+                panic!("configured v4 rebuild failpoint did not terminate the process");
+            }
+            return;
+        }
+
+        for failpoint in [
+            "rewrite.before_intent",
+            "rewrite.after_preparing_disarm",
+            "rewrite.after_durable_intent",
+        ] {
+            let (dir, _, _) = fixture();
+            fs::write(
+                dir.path().join("topology/generation.json"),
+                b"{\"topology_generation\":7,\"search_generation\":0,\"property_generation\":0}\n",
+            )
+            .unwrap();
+            rebuild_uuid_membership_indexes(dir.path(), UuidIndexBuildLimits::default()).unwrap();
+
+            let child = |retry: bool| {
+                let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+                command
+                    .arg("--exact")
+                    .arg(
+                        "uuid_membership::tests::v4_rebuild_subprocess_crash_retry_selects_one_complete_authority",
+                    )
+                    .arg("--nocapture")
+                    .env(CHILD_ROOT, dir.path());
+                if retry {
+                    command.env(RETRY, "1");
+                } else {
+                    command
+                        .env(
+                            "GRAPHFORGE_PROJECT_FAILPOINTS",
+                            "graphforge-internal-subprocess-v1",
+                        )
+                        .env("GRAPHFORGE_PROJECT_FAILPOINT", failpoint);
+                }
+                command.status().unwrap()
+            };
+            assert_eq!(
+                child(false).code(),
+                Some(crate::project_failpoint::exit_code()),
+                "{failpoint}"
+            );
+            assert!(child(true).success(), "{failpoint}");
+            assert!(!dir.path().join(".graphforge-rewrite-v1.json").exists());
+            assert_eq!(manifest_generation(dir.path()).unwrap(), Some(7));
+            UuidMembershipIndex::open(dir.path()).unwrap();
+
+            let index = dir.path().join(INDEX_DIR);
+            let manifest_bytes = fs::read(index.join(V4_ORDINAL_MANIFEST)).unwrap();
+            let receipt: TopologyIndexReceipt =
+                serde_json::from_slice(&fs::read(index.join(V4_ORDINAL_RECEIPT)).unwrap()).unwrap();
+            assert_eq!(receipt.expected_generation, 7);
+            assert_eq!(receipt.manifest_sha256, hex_sha256(&manifest_bytes));
+            let authority = crate::ordinal_identity_v4::V4OrdinalIdentityAuthority {
+                topology_generation: 7,
+                manifest_sha256: receipt.manifest_sha256,
+            };
+            assert!(matches!(
+                crate::ordinal_identity_v4::V4OrdinalIdentityHandle::open(
+                    dir.path(),
+                    &authority,
+                    crate::V4OrdinalIdentityLimits::default()
+                ),
+                Ok(crate::V4OrdinalIdentityOpen::Ready(_))
+            ));
+        }
     }
 
     #[test]
