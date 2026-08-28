@@ -268,6 +268,29 @@ pub fn import_complete_portable_v2_with_progress(
             return Err(error.with_allocation_identities(materialized_identity_allocated_bytes));
         }
     };
+    // The materializer may atomically replace temporary files after its write
+    // observer runs. Capture the exact final identities at the completed
+    // materialization boundary so cleanup authenticates what it actually owns.
+    materialized_identity_allocated_bytes.clear();
+    record_import_file_identity(&owner_file, &mut materialized_identity_allocated_bytes)?;
+    let stage_directory = graphforge_filesystem::StableDirectory::open(&stage).map_err(|_| {
+        PortableV2Error::new(
+            PortableV2ErrorCode::Io,
+            "cannot authenticate completed import staging",
+        )
+    })?;
+    let entry_count = usize::try_from(report.entry_count).map_err(|_| {
+        PortableV2Error::new(
+            PortableV2ErrorCode::LimitExceeded,
+            "import entry count exceeds platform capacity",
+        )
+    })?;
+    let mut capture_budget = entry_count.saturating_mul(2).saturating_add(1024);
+    capture_import_tree(
+        &stage_directory,
+        &mut materialized_identity_allocated_bytes,
+        &mut capture_budget,
+    )?;
     let materialized_stage_identity = graphforge_filesystem::StableDirectory::open(&stage)
         .map_err(|_| {
             PortableV2Error::new(
@@ -299,14 +322,57 @@ pub fn import_complete_portable_v2_with_progress(
         receipt
     })
     .map_err(|error| {
+        let mut owned = allocation_on_error;
+        if let Ok(directory) = graphforge_filesystem::StableDirectory::open(&stage) {
+            if directory.identity() == materialized_stage_identity {
+                let mut capture_budget = entry_count.saturating_mul(2).saturating_add(1024);
+                if let Err(cleanup_error) =
+                    capture_import_tree(&directory, &mut owned, &mut capture_budget).and_then(
+                        |()| {
+                            cleanup_import_materialization(
+                                &stage,
+                                &owner,
+                                materialized_stage_identity,
+                                &owned,
+                            )
+                            .map(|_| ())
+                        },
+                    )
+                {
+                    return cleanup_error.with_allocation_identities(owned);
+                }
+            }
+        }
         error
-            .with_allocation_identities(allocation_on_error)
+            .with_allocation_identities(owned)
             // The shared verifier has authenticated every materialized payload
             // before finalization begins. Preserve that completed read work on
             // a finalization error instead of rediscovering the staging tree.
             .with_recovery_reauthentication(report.payload_bytes, report.entry_count)
     });
     let result = result.and_then(|mut receipt| {
+        // Finalization can create additional authenticated composition files in
+        // staging. Add their identities to the operation-wide owned union
+        // immediately before cleanup; identities of atomically replaced files
+        // remain attributable even though they are no longer live.
+        let directory = graphforge_filesystem::StableDirectory::open(&stage).map_err(|_| {
+            PortableV2Error::new(
+                PortableV2ErrorCode::Io,
+                "cannot authenticate finalized import staging",
+            )
+        })?;
+        if directory.identity() != materialized_stage_identity {
+            return Err(PortableV2Error::new(
+                PortableV2ErrorCode::Io,
+                "import staging identity changed during finalization",
+            ));
+        }
+        let mut capture_budget = entry_count.saturating_mul(2).saturating_add(1024);
+        capture_import_tree(
+            &directory,
+            &mut receipt.materialized_identity_allocated_bytes,
+            &mut capture_budget,
+        )?;
         receipt.materialized_cleanup = cleanup_import_materialization(
             &stage,
             &owner,
@@ -342,6 +408,7 @@ fn cleanup_import_materialization(
             "cannot durably clean import staging",
         ));
     }
+    let mut removed_identities = std::collections::BTreeMap::new();
     if stage.exists() {
         let parent = graphforge_filesystem::StableDirectory::open(
             stage.parent().unwrap_or_else(|| Path::new(".")),
@@ -368,7 +435,12 @@ fn cleanup_import_materialization(
             ));
         }
         let mut cleanup_budget = identities.len().saturating_mul(2).saturating_add(1024);
-        remove_stable_tree(&directory, identities, &mut cleanup_budget)?;
+        remove_stable_tree(
+            &directory,
+            identities,
+            &mut removed_identities,
+            &mut cleanup_budget,
+        )?;
         parent
             .remove_child_directory_if_identity(name, directory.identity())
             .map_err(|_| {
@@ -403,14 +475,15 @@ fn cleanup_import_materialization(
         let mut observed = std::collections::BTreeMap::new();
         record_import_file_identity(&file, &mut observed)?;
         if observed
-            .iter()
-            .any(|(identity, allocated)| identities.get(identity) != Some(allocated))
+            .keys()
+            .any(|identity| !identities.contains_key(identity))
         {
             return Err(PortableV2Error::new(
                 PortableV2ErrorCode::Io,
                 "import owner identity changed before cleanup",
             ));
         }
+        removed_identities.extend(observed);
         parent
             .unlink_child_if_identity(name, identity)
             .map_err(|_| {
@@ -424,7 +497,7 @@ fn cleanup_import_materialization(
         })?;
     }
     Ok(PortableV2ImportCleanupReceipt {
-        removed_identity_allocated_bytes: identities.clone(),
+        removed_identity_allocated_bytes: removed_identities,
         parent_sync_confirmed: true,
     })
 }
@@ -432,6 +505,7 @@ fn cleanup_import_materialization(
 fn remove_stable_tree(
     directory: &graphforge_filesystem::StableDirectory,
     identities: &std::collections::BTreeMap<String, u64>,
+    removed_identities: &mut std::collections::BTreeMap<String, u64>,
     remaining: &mut usize,
 ) -> Result<(), PortableV2Error> {
     let names = directory.child_names_bounded(*remaining).map_err(|_| {
@@ -443,7 +517,7 @@ fn remove_stable_tree(
     *remaining = (*remaining).saturating_sub(names.len());
     for name in names {
         if let Ok(child) = directory.open_child_directory(&name) {
-            remove_stable_tree(&child, identities, remaining)?;
+            remove_stable_tree(&child, identities, removed_identities, remaining)?;
             directory
                 .remove_child_directory_if_identity(&name, child.identity())
                 .map_err(|_| {
@@ -468,14 +542,15 @@ fn remove_stable_tree(
             let mut observed = std::collections::BTreeMap::new();
             record_import_file_identity(&file, &mut observed)?;
             if observed
-                .iter()
-                .any(|(identity, allocated)| identities.get(identity) != Some(allocated))
+                .keys()
+                .any(|identity| !identities.contains_key(identity))
             {
                 return Err(PortableV2Error::new(
                     PortableV2ErrorCode::Io,
                     "import cleanup entry is not owned materialization",
                 ));
             }
+            removed_identities.extend(observed);
             directory
                 .unlink_child_if_identity(&name, identity)
                 .map_err(|_| {
@@ -845,11 +920,37 @@ fn record_import_file_identity(
         write!(&mut file_id, "{byte:02x}").expect("writing to String cannot fail");
     }
     let key = format!("{:016x}:{file_id}", identity.volume_serial);
-    if identities.insert(key, usage.allocated_bytes).is_some() {
-        return Err(PortableV2Error::new(
+    identities
+        .entry(key)
+        .and_modify(|allocated| *allocated = (*allocated).max(usage.allocated_bytes))
+        .or_insert(usage.allocated_bytes);
+    Ok(())
+}
+
+fn capture_import_tree(
+    directory: &graphforge_filesystem::StableDirectory,
+    identities: &mut std::collections::BTreeMap<String, u64>,
+    remaining: &mut usize,
+) -> Result<(), PortableV2Error> {
+    let names = directory.child_names_bounded(*remaining).map_err(|_| {
+        PortableV2Error::new(
             PortableV2ErrorCode::Io,
-            "owned import identity is duplicated",
-        ));
+            "completed import staging exceeds identity bound",
+        )
+    })?;
+    *remaining = remaining.saturating_sub(names.len());
+    for name in names {
+        if let Ok(child) = directory.open_child_directory(&name) {
+            capture_import_tree(&child, identities, remaining)?;
+        } else {
+            let file = directory.open_child_file(&name).map_err(|_| {
+                PortableV2Error::new(
+                    PortableV2ErrorCode::Io,
+                    "cannot authenticate completed import entry",
+                )
+            })?;
+            record_import_file_identity(&file, identities)?;
+        }
     }
     Ok(())
 }

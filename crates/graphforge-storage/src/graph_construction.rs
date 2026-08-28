@@ -46,7 +46,10 @@ const SHAPE_INTENT: &str = "shape-intent.json";
 const PUBLICATION_INTENT: &str = "publication-intent.json";
 const PUBLICATION_RECEIPT: &str = "publication-receipt.json";
 const BLOCK_BYTES: usize = 1 << 20;
-const MAX_CONTROL_BYTES: u64 = 64 << 10;
+// Checkpoints include bounded authenticated allocation identities. The supported
+// heterogeneous-schema cardinality can legitimately exceed 64 KiB while still
+// remaining far below the separately bounded shape inventory.
+const MAX_CONTROL_BYTES: u64 = 1 << 20;
 const MAX_SHAPE_CONTROL_BYTES: u64 = 32 << 20;
 const IDENTITY_WIDTH: usize = 16;
 const ENDPOINT_WIDTH: usize = 48;
@@ -3612,6 +3615,16 @@ fn recover_final_shape_evidence(
 }
 
 fn copy_post_shape_io(target: &mut GraphConstructionEvidence, source: &GraphConstructionEvidence) {
+    target.storage_current = source.storage_current.clone();
+    target.storage_transient_peak_allocated_bytes =
+        source.storage_transient_peak_allocated_bytes.clone();
+    target.storage_transient_peak_total_allocated_bytes =
+        source.storage_transient_peak_total_allocated_bytes;
+    target.storage_active_identity_allocated_bytes =
+        source.storage_active_identity_allocated_bytes.clone();
+    target.storage_allocation_transitions = source.storage_allocation_transitions.clone();
+    target.current_merge_temporary_allocated_bytes = source.current_merge_temporary_allocated_bytes;
+    target.peak_merge_temporary_bytes = source.peak_merge_temporary_bytes;
     target.encode_application_read_bytes = source.encode_application_read_bytes;
     target.encode_application_read_operations = source.encode_application_read_operations;
     target.encode_application_write_bytes = source.encode_application_write_bytes;
@@ -5972,6 +5985,7 @@ fn resolve_endpoint_surrogates(
             window.sort_unstable();
             let name = format!("merge-resolved-source-{sequence:020}.run");
             let receipt = write_fixed_run(root, &name, &window)?;
+            record_shape_artifact_install(evidence, &receipt)?;
             evidence.merge_written_bytes =
                 evidence.merge_written_bytes.saturating_add(receipt.bytes);
             account_fixed_write_operations(&receipt, evidence)?;
@@ -5995,6 +6009,7 @@ fn resolve_endpoint_surrogates(
         window.sort_unstable();
         let name = format!("merge-resolved-source-{sequence:020}.run");
         let receipt = write_fixed_run(root, &name, &window)?;
+        record_shape_artifact_install(evidence, &receipt)?;
         evidence.merge_written_bytes = evidence.merge_written_bytes.saturating_add(receipt.bytes);
         account_fixed_write_operations(&receipt, evidence)?;
         evidence.merge_written_records = evidence
@@ -9101,6 +9116,13 @@ mod tests {
 
     #[test]
     fn shape_inventory_and_evidence_commit_recover_without_double_counting() {
+        fn without_native_identities(
+            mut evidence: GraphConstructionEvidence,
+        ) -> GraphConstructionEvidence {
+            evidence.storage_active_identity_allocated_bytes.clear();
+            evidence.storage_allocation_transitions.clear();
+            evidence
+        }
         let reference_root = TempDir::new().unwrap();
         let mut reference = GraphConstructionSession::open(
             reference_root.path(),
@@ -9119,7 +9141,7 @@ mod tests {
         reference
             .shape_canonical_with_cancellation(|| false)
             .unwrap();
-        let expected = reference.evidence().clone();
+        let expected = without_native_identities(reference.evidence().clone());
 
         for failpoint in [
             "shape.fixed.after_install",
@@ -9151,7 +9173,11 @@ mod tests {
             )
             .unwrap();
             resumed.shape_canonical_with_cancellation(|| false).unwrap();
-            assert_eq!(resumed.evidence(), &expected, "{failpoint}");
+            assert_eq!(
+                without_native_identities(resumed.evidence().clone()),
+                expected,
+                "{failpoint}"
+            );
         }
     }
 

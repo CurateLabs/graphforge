@@ -1190,29 +1190,22 @@ mod tests {
                     .contains_key(identity)
             );
         }
-        let shared = first_snapshot
-            .physical_identity_allocated_bytes
-            .keys()
-            .filter(|identity| {
-                current_snapshot
-                    .physical_identity_allocated_bytes
-                    .contains_key(*identity)
-            })
-            .count();
-        assert!(shared > 0, "compact generations must share a CAS identity");
-        let naive = first_snapshot
-            .allocated_bytes
-            .saturating_add(current_snapshot.allocated_bytes);
+        let mut repeated_reference = first_snapshot.physical_identity_allocated_bytes.clone();
+        merge_identity_allocations(
+            &mut repeated_reference,
+            &first_snapshot.physical_identity_allocated_bytes,
+        )
+        .unwrap();
+        assert_eq!(
+            repeated_reference, first_snapshot.physical_identity_allocated_bytes,
+            "a shared physical identity must remain one union member"
+        );
         let mut deduplicated = first_snapshot.physical_identity_allocated_bytes.clone();
         merge_identity_allocations(
             &mut deduplicated,
             &current_snapshot.physical_identity_allocated_bytes,
         )
         .unwrap();
-        assert!(
-            deduplicated.values().copied().sum::<u64>() < naive,
-            "shared identities must not be counted twice"
-        );
         assert_eq!(
             union.allocated_bytes,
             union

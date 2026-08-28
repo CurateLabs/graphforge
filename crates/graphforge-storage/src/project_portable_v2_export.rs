@@ -355,7 +355,7 @@ impl PortableV2ExportPlan {
         Ok(())
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 /// Durable publication receipt with separate semantic and transport identities.
 pub struct PortableV2ExportReceipt {
     /// Pinned source generation.
@@ -382,6 +382,22 @@ pub struct PortableV2ExportReceipt {
     #[doc(hidden)]
     pub allocation_physical_objects: u64,
 }
+
+impl PartialEq for PortableV2ExportReceipt {
+    fn eq(&self, other: &Self) -> bool {
+        self.generation_uuid == other.generation_uuid
+            && self.package_digest == other.package_digest
+            && self.transport_digest == other.transport_digest
+            && self.entry_count == other.entry_count
+            && self.payload_bytes == other.payload_bytes
+            && self.output == other.output
+            && self.selection_fingerprint == other.selection_fingerprint
+            && self.allocation_logical_bytes == other.allocation_logical_bytes
+            && self.allocation_physical_objects == other.allocation_physical_objects
+    }
+}
+
+impl Eq for PortableV2ExportReceipt {}
 
 #[derive(Default)]
 struct ExportAllocationObserver {

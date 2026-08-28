@@ -67,9 +67,9 @@ def storage_attribution(unit=1):
         "allocated_bytes": 6 * unit,
     }
     contract = json.loads(VALIDATOR.SCHEMA.read_text())
-    construction = {field: 0 for field in contract["$defs"]["construction"]["required"]}
+    construction = dict.fromkeys(contract["$defs"]["construction"]["required"], 0)
     construction["storage_current"] = {name: artifact_totals(unit) for name in category_names}
-    construction["storage_transient_peak_allocated_bytes"] = {name: unit for name in category_names}
+    construction["storage_transient_peak_allocated_bytes"] = dict.fromkeys(category_names, unit)
     construction["storage_transient_peak_total_allocated_bytes"] = 10 * unit
     phase_names = contract["$defs"]["phaseMap"]["required"]
     phases = {}

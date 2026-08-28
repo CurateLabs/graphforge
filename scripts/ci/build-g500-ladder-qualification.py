@@ -8,7 +8,6 @@ import json
 from pathlib import Path
 import re
 
-
 FORBIDDEN_KEY = re.compile(
     r"(?:secret|credential|token|password|host_path|absolute_path|machine[_-]?id|volume[_-]?id|provider_resource_id)",
     re.I,

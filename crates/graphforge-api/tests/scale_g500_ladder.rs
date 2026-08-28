@@ -16,6 +16,8 @@
 //! certify one billion live edges — that is #745. Small rungs run in normal CI;
 //! large rungs are opt-in via `make bench-g500-ladder`.
 
+#![recursion_limit = "256"]
+
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap};
 use std::fs::{self, File};
@@ -29,6 +31,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use arrow::array::{Array, FixedSizeBinaryArray, Int64Array, StringArray, UInt64Array};
 use arrow::record_batch::RecordBatch;
+
 use graphforge_api::{
     CONSTRUCTION_EDGE_SCHEMA, CONSTRUCTION_NODE_SCHEMA, CancellationToken,
     GraphConstructionBudgets, GraphConstructionSession, GraphForge, OperationId, PortableSelection,
@@ -2506,7 +2509,7 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
 fn run_integrated_certification_with_edge_factor(
     root: &Path,
     target_live: Option<u64>,
-    preflight_edge_factor: Option<u64>,
+    preflight_edge_factor: Option<u32>,
 ) -> Value {
     let source = root.join("source");
     let imported = root.join("imported");
@@ -3016,7 +3019,7 @@ fn equivalent_full_lifecycle_1x_2x_4x_has_bounded_phase_slopes() {
         "fsync_calls",
     ];
     let mut baseline: Option<BTreeMap<String, [u64; 7]>> = None;
-    for factor in [1_u64, 2, 4] {
+    for factor in [1_u32, 2, 4] {
         let root = TempDir::new().expect("full lifecycle ladder root");
         let evidence =
             run_integrated_certification_with_edge_factor(root.path(), None, Some(factor));
@@ -3066,7 +3069,7 @@ fn equivalent_full_lifecycle_1x_2x_4x_has_bounded_phase_slopes() {
                         );
                     } else {
                         assert!(
-                            *value <= first.saturating_mul(factor).saturating_mul(2),
+                            *value <= first.saturating_mul(u64::from(factor)).saturating_mul(2),
                             "{phase}.{} exceeded the documented 2x constant-factor ceiling",
                             FIELDS[index]
                         );
