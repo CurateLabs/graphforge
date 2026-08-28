@@ -2433,6 +2433,12 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
     construction
         .seal_and_publish()
         .expect("publish certification construction");
+    let construction_evidence = construction.progress().evidence;
+    let construction_phases =
+        graphforge_storage::ConstructionPhaseAttribution::from_construction(&construction_evidence);
+    construction_phases
+        .validate_reconciliation()
+        .expect("certification construction phase attribution");
     journal.pass("ingest", phase, Some(input_fingerprint));
 
     let phase = Instant::now();
@@ -2664,6 +2670,8 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
             "source": source_storage,
             "portable_package": package_storage,
             "clean_import": imported_storage,
+            "construction": construction_evidence,
+            "application_io_phases": construction_phases,
         },
         "phases": journal.phases,
     })
@@ -3172,6 +3180,7 @@ fn certification_target_live_full_lifecycle_evidence() {
         },
         "equivalence": { "source_project_fingerprint": lifecycle["source_project_fingerprint"], "imported_project_fingerprint": lifecycle["imported_project_fingerprint"] },
         "authority": { "source_fingerprint": lifecycle["source_authority_fingerprint"], "imported_fingerprint": lifecycle["imported_authority_fingerprint"] },
+        "storage_attribution": lifecycle["storage"],
         "phases": phases,
         "envelope": { "peak_rss_bytes": peak_rss, "peak_disk_bytes": peak_disk, "wall_time_s": elapsed_before_process.saturating_add(started.elapsed()).as_secs_f64() },
         "result": "pass", "first_failure": null,
