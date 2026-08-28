@@ -511,6 +511,19 @@ fn rewrite_materialization(
 
     let mut child_required = required.clone();
     if let Some(filter) = plan.downcast_ref::<FilterExec>() {
+        // A FilterExec may carry DataFusion's own output projection. Its
+        // output ordinals are not input ordinals: map terminal demand through
+        // that projection before adding predicate dependencies. Treating the
+        // ordinals as identical silently selected an earlier same-named field
+        // in multi-hop plans (for example `a.node_uuid` instead of
+        // `c.node_uuid`) and allowed the demanded destination identity to be
+        // replaced with an unused placeholder.
+        if let Some(projection) = filter.projection() {
+            child_required = required
+                .iter()
+                .filter_map(|output| projection.get(*output).copied())
+                .collect();
+        }
         collect_expr_columns(filter.predicate(), &mut child_required);
     }
     if let Some(sort) = plan.downcast_ref::<SortExec>() {
