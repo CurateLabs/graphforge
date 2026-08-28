@@ -39,6 +39,13 @@ opens a v3 reverse run as migration input. Durable-rewrite recovery either
 retains the prior v3-only authority or completes the receipt-bound v4 facet;
 there is no mixed-version read state.
 
+`peak_temporary_bytes` is the total maximum coexisting rebuild scratch, not
+merely the final artifact size. Storage-owned accounting includes scan runs and
+their merge outputs, the UUID-sorted and surrogate-sorted projections, and the
+immutable forward/range artifacts while both projections remain live. It uses
+the exact registered run lengths at lifecycle transitions rather than a
+recursive scan of an active scratch directory.
+
 Standalone graph roots have no project-generation `graph/files` inventory.
 Only the mutation writer has a narrow exception: immediately before entering
 the single durable-rewrite critical section it may pin the already-open sibling
