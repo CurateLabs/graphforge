@@ -3622,7 +3622,9 @@ fn copy_post_shape_io(target: &mut GraphConstructionEvidence, source: &GraphCons
         source.storage_transient_peak_total_allocated_bytes;
     target.storage_active_identity_allocated_bytes =
         source.storage_active_identity_allocated_bytes.clone();
-    target.storage_allocation_transitions = source.storage_allocation_transitions.clone();
+    target
+        .storage_allocation_transitions
+        .clone_from(&source.storage_allocation_transitions);
     target.current_merge_temporary_allocated_bytes = source.current_merge_temporary_allocated_bytes;
     target.peak_merge_temporary_bytes = source.peak_merge_temporary_bytes;
     target.encode_application_read_bytes = source.encode_application_read_bytes;

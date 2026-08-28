@@ -235,70 +235,22 @@ pub fn import_complete_portable_v2_with_progress(
         bytes: 0,
         package_digest: None,
     });
-    let target_name = target
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| {
-            PortableV2Error::new(PortableV2ErrorCode::InvalidPath, "invalid import target")
-        })?;
-    let stage = target
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(format!(
-            ".{target_name}.portable-v2-{}",
-            transaction_uuid.hyphenated()
-        ));
-    let (owner, owned_retry) = claim_stage(&stage, target_name, transaction_uuid, generation_uuid)?;
-    let mut materialized_identity_allocated_bytes = std::collections::BTreeMap::new();
-    let owner_file = fs::File::open(&owner).map_err(|_| {
-        PortableV2Error::new(PortableV2ErrorCode::Io, "cannot open import ownership")
-    })?;
-    record_import_file_identity(&owner_file, &mut materialized_identity_allocated_bytes)?;
-    let report = match crate::project_portable_v2::materialize_verified_portable_v2_observed(
+    let OwnedMaterialization {
+        stage,
+        owner,
+        owned_retry,
+        identities: materialized_identity_allocated_bytes,
+        report,
+        stage_identity: materialized_stage_identity,
+        entry_count,
+    } = materialize_owned_import(
         source,
-        &stage,
+        target,
+        transaction_uuid,
+        generation_uuid,
         limits,
         cancelled,
-        |file| record_import_file_identity(file, &mut materialized_identity_allocated_bytes),
-    ) {
-        Ok(report) => report,
-        Err(error) => {
-            let _ = fs::remove_file(&owner);
-            let _ = sync_parent(&owner);
-            return Err(error.with_allocation_identities(materialized_identity_allocated_bytes));
-        }
-    };
-    // The materializer may atomically replace temporary files after its write
-    // observer runs. Capture the exact final identities at the completed
-    // materialization boundary so cleanup authenticates what it actually owns.
-    materialized_identity_allocated_bytes.clear();
-    record_import_file_identity(&owner_file, &mut materialized_identity_allocated_bytes)?;
-    let stage_directory = graphforge_filesystem::StableDirectory::open(&stage).map_err(|_| {
-        PortableV2Error::new(
-            PortableV2ErrorCode::Io,
-            "cannot authenticate completed import staging",
-        )
-    })?;
-    let entry_count = usize::try_from(report.entry_count).map_err(|_| {
-        PortableV2Error::new(
-            PortableV2ErrorCode::LimitExceeded,
-            "import entry count exceeds platform capacity",
-        )
-    })?;
-    let mut capture_budget = entry_count.saturating_mul(2).saturating_add(1024);
-    capture_import_tree(
-        &stage_directory,
-        &mut materialized_identity_allocated_bytes,
-        &mut capture_budget,
     )?;
-    let materialized_stage_identity = graphforge_filesystem::StableDirectory::open(&stage)
-        .map_err(|_| {
-            PortableV2Error::new(
-                PortableV2ErrorCode::Io,
-                "cannot authenticate materialized import staging",
-            )
-        })?
-        .identity();
     progress(PortableV2ImportProgress {
         phase: PortableV2ImportPhase::Materialized,
         entries: report.entry_count,
@@ -322,29 +274,18 @@ pub fn import_complete_portable_v2_with_progress(
         receipt
     })
     .map_err(|error| {
-        let mut owned = allocation_on_error;
-        if let Ok(directory) = graphforge_filesystem::StableDirectory::open(&stage) {
-            if directory.identity() == materialized_stage_identity {
-                let mut capture_budget = entry_count.saturating_mul(2).saturating_add(1024);
-                if let Err(cleanup_error) =
-                    capture_import_tree(&directory, &mut owned, &mut capture_budget).and_then(
-                        |()| {
-                            cleanup_import_materialization(
-                                &stage,
-                                &owner,
-                                materialized_stage_identity,
-                                &owned,
-                            )
-                            .map(|_| ())
-                        },
-                    )
-                {
-                    return cleanup_error.with_allocation_identities(owned);
-                }
-            }
+        let mut owned_identities = allocation_on_error;
+        if let Err(cleanup_error) = cleanup_failed_import_finalization(
+            &stage,
+            &owner,
+            materialized_stage_identity,
+            &mut owned_identities,
+            entry_count,
+        ) {
+            return cleanup_error.with_allocation_identities(owned_identities);
         }
         error
-            .with_allocation_identities(owned)
+            .with_allocation_identities(owned_identities)
             // The shared verifier has authenticated every materialized payload
             // before finalization begins. Preserve that completed read work on
             // a finalization error instead of rediscovering the staging tree.
@@ -355,23 +296,11 @@ pub fn import_complete_portable_v2_with_progress(
         // staging. Add their identities to the operation-wide owned union
         // immediately before cleanup; identities of atomically replaced files
         // remain attributable even though they are no longer live.
-        let directory = graphforge_filesystem::StableDirectory::open(&stage).map_err(|_| {
-            PortableV2Error::new(
-                PortableV2ErrorCode::Io,
-                "cannot authenticate finalized import staging",
-            )
-        })?;
-        if directory.identity() != materialized_stage_identity {
-            return Err(PortableV2Error::new(
-                PortableV2ErrorCode::Io,
-                "import staging identity changed during finalization",
-            ));
-        }
-        let mut capture_budget = entry_count.saturating_mul(2).saturating_add(1024);
-        capture_import_tree(
-            &directory,
+        capture_finalized_import_identities(
+            &stage,
+            materialized_stage_identity,
             &mut receipt.materialized_identity_allocated_bytes,
-            &mut capture_budget,
+            entry_count,
         )?;
         receipt.materialized_cleanup = cleanup_import_materialization(
             &stage,
@@ -393,6 +322,120 @@ pub fn import_complete_portable_v2_with_progress(
         });
     }
     result
+}
+
+struct OwnedMaterialization {
+    stage: PathBuf,
+    owner: PathBuf,
+    owned_retry: bool,
+    identities: std::collections::BTreeMap<String, u64>,
+    report: PortableV2Report,
+    stage_identity: graphforge_filesystem::FileIdentity,
+    entry_count: usize,
+}
+
+fn materialize_owned_import(
+    source: &Path,
+    target: &Path,
+    transaction_uuid: Uuid,
+    generation_uuid: Uuid,
+    limits: PortableV2Limits,
+    cancelled: Option<&AtomicBool>,
+) -> Result<OwnedMaterialization, PortableV2Error> {
+    let target_name = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            PortableV2Error::new(PortableV2ErrorCode::InvalidPath, "invalid import target")
+        })?;
+    let stage = target
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!(
+            ".{target_name}.portable-v2-{}",
+            transaction_uuid.hyphenated()
+        ));
+    let (owner, owned_retry) = claim_stage(&stage, target_name, transaction_uuid, generation_uuid)?;
+    let mut identities = std::collections::BTreeMap::new();
+    let owner_file = fs::File::open(&owner).map_err(|_| {
+        PortableV2Error::new(PortableV2ErrorCode::Io, "cannot open import ownership")
+    })?;
+    record_import_file_identity(&owner_file, &mut identities)?;
+    let report = match crate::project_portable_v2::materialize_verified_portable_v2_observed(
+        source,
+        &stage,
+        limits,
+        cancelled,
+        |file| record_import_file_identity(file, &mut identities),
+    ) {
+        Ok(report) => report,
+        Err(error) => {
+            let _ = fs::remove_file(&owner);
+            let _ = sync_parent(&owner);
+            return Err(error.with_allocation_identities(identities));
+        }
+    };
+    // Atomic replacement can change identities after the write observer. The
+    // completed boundary is the cleanup authority; the later finalization
+    // capture extends this into the operation-wide identity union.
+    identities.clear();
+    record_import_file_identity(&owner_file, &mut identities)?;
+    let stage_directory = graphforge_filesystem::StableDirectory::open(&stage).map_err(|_| {
+        PortableV2Error::new(
+            PortableV2ErrorCode::Io,
+            "cannot authenticate completed import staging",
+        )
+    })?;
+    let entry_count = usize::try_from(report.entry_count).map_err(|_| {
+        PortableV2Error::new(
+            PortableV2ErrorCode::LimitExceeded,
+            "import entry count exceeds platform capacity",
+        )
+    })?;
+    let mut capture_budget = entry_count.saturating_mul(2).saturating_add(1024);
+    capture_import_tree(&stage_directory, &mut identities, &mut capture_budget)?;
+    Ok(OwnedMaterialization {
+        stage,
+        owner,
+        owned_retry,
+        identities,
+        report,
+        stage_identity: stage_directory.identity(),
+        entry_count,
+    })
+}
+
+fn capture_finalized_import_identities(
+    stage: &Path,
+    expected_stage_identity: graphforge_filesystem::FileIdentity,
+    identities: &mut std::collections::BTreeMap<String, u64>,
+    entry_count: usize,
+) -> Result<(), PortableV2Error> {
+    let directory = graphforge_filesystem::StableDirectory::open(stage).map_err(|_| {
+        PortableV2Error::new(
+            PortableV2ErrorCode::Io,
+            "cannot authenticate finalized import staging",
+        )
+    })?;
+    if directory.identity() != expected_stage_identity {
+        return Err(PortableV2Error::new(
+            PortableV2ErrorCode::Io,
+            "import staging identity changed during finalization",
+        ));
+    }
+    let mut capture_budget = entry_count.saturating_mul(2).saturating_add(1024);
+    capture_import_tree(&directory, identities, &mut capture_budget)
+}
+
+fn cleanup_failed_import_finalization(
+    stage: &Path,
+    owner: &Path,
+    expected_stage_identity: graphforge_filesystem::FileIdentity,
+    identities: &mut std::collections::BTreeMap<String, u64>,
+    entry_count: usize,
+) -> Result<(), PortableV2Error> {
+    capture_finalized_import_identities(stage, expected_stage_identity, identities, entry_count)?;
+    cleanup_import_materialization(stage, owner, expected_stage_identity, identities).map(|_| ())
 }
 
 fn cleanup_import_materialization(
