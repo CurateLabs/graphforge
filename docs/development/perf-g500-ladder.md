@@ -248,6 +248,11 @@ authentication, shape consumption/reauthentication, encode plus post-write
 authentication, publication preauthentication, CAS install, hydration
 verification, synchronization, and recovery reauthentication. Raw bytes,
 calls, blocks, objects, and fsyncs reconcile exactly before ratios are derived.
+Fixed-run merge bytes and calls come from the same instrumented readers and
+writers: `merge_read_operations` and `merge_write_operations` count actual
+non-empty storage submissions, while block counters remain a separate transfer
+granularity metric. Shape-phase totals add the disjoint fixed-run and Parquet
+byte/call counters exactly once.
 Each phase declares whether it was applicable. Every ordinary lifecycle phase
 must contain source-owned activity; a zero row is rejected. Recovery may be
 non-applicable only for an uninterrupted run, while the deterministic durable

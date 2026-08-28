@@ -3414,6 +3414,35 @@ fn tiny_construction_ladder_resumes_and_scales_bounded_work_linearly() {
         let phases =
             graphforge_storage::ConstructionPhaseAttribution::from_construction(&progress.evidence);
         phases.validate_reconciliation().unwrap();
+        let shape =
+            &phases.phases[&graphforge_storage::StorageIoPhase::ShapeConsumeReauthentication];
+        assert!(progress.evidence.merge_read_operations > 0);
+        assert!(progress.evidence.merge_write_operations > 0);
+        assert_eq!(
+            shape.write_bytes,
+            progress
+                .evidence
+                .merge_written_bytes
+                .saturating_add(progress.evidence.parquet_write_bytes)
+        );
+        assert_eq!(
+            shape.write_calls,
+            progress
+                .evidence
+                .merge_write_operations
+                .saturating_add(progress.evidence.parquet_write_operations)
+        );
+        assert_eq!(
+            shape.read_calls,
+            progress
+                .evidence
+                .shape_input_validation_read_operations
+                .saturating_add(progress.evidence.merge_read_operations)
+                .saturating_add(progress.evidence.parquet_read_operations)
+                .saturating_add(progress.evidence.shaped_output_authentication_operations)
+                .saturating_add(progress.evidence.parent_catalog_read_operations)
+                .saturating_add(progress.evidence.retained_probe_block_loads)
+        );
         let phase_observation = (
             phases.totals.read_bytes,
             phases.totals.write_bytes,

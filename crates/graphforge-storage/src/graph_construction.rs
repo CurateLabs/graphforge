@@ -455,8 +455,14 @@ pub struct GraphConstructionEvidence {
     pub replayed_chunks: u64,
     /// Temporary and final fixed-width records read by canonical shaping.
     pub merge_read_records: u64,
+    /// Actual non-empty fixed-run read submissions completed by shaping.
+    #[serde(default)]
+    pub merge_read_operations: u64,
     /// Temporary and final fixed-width records written by canonical shaping.
     pub merge_written_records: u64,
+    /// Actual non-empty fixed-run write submissions completed by shaping.
+    #[serde(default)]
+    pub merge_write_operations: u64,
     /// External merge groups completed (including intermediate levels).
     pub merge_groups: u64,
     /// Highest number of simultaneously open merge inputs.
@@ -4360,8 +4366,8 @@ fn unlink_shape_artifact(
 }
 
 fn account_merge_read<const N: usize>(evidence: &mut GraphConstructionEvidence) {
+    let _ = N;
     evidence.merge_read_records = evidence.merge_read_records.saturating_add(1);
-    evidence.merge_read_bytes = evidence.merge_read_bytes.saturating_add(N as u64);
 }
 
 fn account_merge_write<const N: usize>(evidence: &mut GraphConstructionEvidence) {
@@ -4383,6 +4389,52 @@ fn account_sequential_write(bytes: u64, evidence: &mut GraphConstructionEvidence
             .merge_write_blocks
             .saturating_add(bytes.div_ceil(BLOCK_BYTES as u64));
     }
+}
+
+fn account_fixed_read_operations(
+    counter: &IoCounter,
+    evidence: &mut GraphConstructionEvidence,
+) -> Result<(), GfError> {
+    let (bytes, operations) = counter.values();
+    if (bytes == 0) != (operations == 0) {
+        return Err(storage("fixed-run read bytes and submissions disagree"));
+    }
+    evidence.merge_read_bytes = evidence.merge_read_bytes.saturating_add(bytes);
+    evidence.merge_read_operations = evidence.merge_read_operations.saturating_add(operations);
+    Ok(())
+}
+
+fn open_counted_fixed_reader(
+    root: &StableDirectory,
+    name: &str,
+    evidence: &mut GraphConstructionEvidence,
+) -> Result<(BufReader<CountingRead<File>>, IoCounter), GfError> {
+    let file = root.open_child_file(OsStr::new(name)).map_err(storage)?;
+    account_sequential_read(file.metadata().map_err(storage)?.len(), evidence);
+    let counter = IoCounter::default();
+    Ok((
+        BufReader::with_capacity(
+            BLOCK_BYTES,
+            CountingRead {
+                inner: file,
+                counter: counter.clone(),
+            },
+        ),
+        counter,
+    ))
+}
+
+fn account_fixed_write_operations(
+    receipt: &ArtifactReceipt,
+    evidence: &mut GraphConstructionEvidence,
+) -> Result<(), GfError> {
+    if (receipt.bytes == 0) != (receipt.write_operations == 0) {
+        return Err(storage("fixed-run write bytes and submissions disagree"));
+    }
+    evidence.merge_write_operations = evidence
+        .merge_write_operations
+        .saturating_add(receipt.write_operations);
+    Ok(())
 }
 
 fn convert_identity_run(
@@ -4408,7 +4460,14 @@ fn convert_identity_run(
         .create_replaceable_child_file(OsStr::new(&temporary))
         .map_err(storage)?;
     let identity = file_identity(&file).map_err(storage)?;
-    let mut reader = BufReader::with_capacity(BLOCK_BYTES, input);
+    let read_counter = IoCounter::default();
+    let mut reader = BufReader::with_capacity(
+        BLOCK_BYTES,
+        CountingRead {
+            inner: input,
+            counter: read_counter.clone(),
+        },
+    );
     let hashing = HashingWriter::new(file);
     let mut writer = BufWriter::with_capacity(BLOCK_BYTES, hashing);
     let mut digest = Sha256::new();
@@ -4426,6 +4485,7 @@ fn convert_identity_run(
     if bytes != receipt.identities.bytes || hex(&digest.finalize()) != receipt.identities.sha256 {
         return Err(storage("identity source content changed before merge"));
     }
+    account_fixed_read_operations(&read_counter, evidence)?;
     writer.flush().map_err(storage)?;
     writer.get_ref().inner.sync_all().map_err(storage)?;
     account_sequential_write(writer.get_ref().bytes, evidence);
@@ -4447,6 +4507,7 @@ fn convert_identity_run(
     construction_failpoint("shape.fixed.after_install");
     persist_shape_receipt(root, &output_receipt)?;
     record_shape_artifact_install(evidence, &output_receipt)?;
+    account_fixed_write_operations(&output_receipt, evidence)?;
     evidence.merge_fsync_operations = evidence.merge_fsync_operations.saturating_add(2);
     Ok(())
 }
@@ -4473,7 +4534,14 @@ fn copy_authenticated_run<const N: usize>(
         .create_replaceable_child_file(OsStr::new(&temporary))
         .map_err(storage)?;
     let identity = file_identity(&file).map_err(storage)?;
-    let mut reader = BufReader::with_capacity(BLOCK_BYTES, input);
+    let read_counter = IoCounter::default();
+    let mut reader = BufReader::with_capacity(
+        BLOCK_BYTES,
+        CountingRead {
+            inner: input,
+            counter: read_counter.clone(),
+        },
+    );
     let hashing = HashingWriter::new(file);
     let mut writer = BufWriter::with_capacity(BLOCK_BYTES, hashing);
     let mut digest = Sha256::new();
@@ -4488,12 +4556,14 @@ fn copy_authenticated_run<const N: usize>(
     if bytes != receipt.bytes || hex(&digest.finalize()) != receipt.sha256 {
         return Err(storage("construction merge source content changed"));
     }
+    account_fixed_read_operations(&read_counter, evidence)?;
     writer.flush().map_err(storage)?;
     writer.get_ref().inner.sync_all().map_err(storage)?;
     account_sequential_write(bytes, evidence);
     let allocated_bytes = graphforge_filesystem::file_space_usage(&writer.get_ref().inner)
         .map_err(storage)?
         .allocated_bytes;
+    let write_operations = writer.get_ref().operations;
     drop(writer);
     root.install_child(OsStr::new(&temporary), identity, OsStr::new(output))
         .map_err(storage)?;
@@ -4504,11 +4574,12 @@ fn copy_authenticated_run<const N: usize>(
         allocated_bytes,
         sha256: receipt.sha256.clone(),
         identity: identity.into(),
-        write_operations: bytes.div_ceil(BLOCK_BYTES as u64),
+        write_operations,
         fsync_operations: 2,
     };
     persist_shape_receipt(root, &output_receipt)?;
     record_shape_artifact_install(evidence, &output_receipt)?;
+    account_fixed_write_operations(&output_receipt, evidence)?;
     evidence.merge_fsync_operations = evidence.merge_fsync_operations.saturating_add(2);
     Ok(())
 }
@@ -4666,6 +4737,7 @@ fn merge_fixed_group<const N: usize>(
     cancelled: &mut impl FnMut() -> bool,
     evidence: &mut GraphConstructionEvidence,
 ) -> Result<ArtifactReceipt, GfError> {
+    let read_counter = IoCounter::default();
     let mut readers = inputs
         .iter()
         .map(|name| {
@@ -4674,7 +4746,13 @@ fn merge_fixed_group<const N: usize>(
                     if let Ok(metadata) = file.metadata() {
                         account_sequential_read(metadata.len(), evidence);
                     }
-                    BufReader::with_capacity(BLOCK_BYTES, file)
+                    BufReader::with_capacity(
+                        BLOCK_BYTES,
+                        CountingRead {
+                            inner: file,
+                            counter: read_counter.clone(),
+                        },
+                    )
                 })
                 .map_err(storage)
         })
@@ -4715,6 +4793,7 @@ fn merge_fixed_group<const N: usize>(
         }
     }
     writer.flush().map_err(storage)?;
+    account_fixed_read_operations(&read_counter, evidence)?;
     writer.get_ref().inner.sync_all().map_err(storage)?;
     account_sequential_write(writer.get_ref().bytes, evidence);
     let receipt = ArtifactReceipt {
@@ -4735,6 +4814,7 @@ fn merge_fixed_group<const N: usize>(
     construction_failpoint("shape.fixed_merge.after_install");
     persist_shape_receipt(root, &receipt)?;
     record_shape_artifact_install(evidence, &receipt)?;
+    account_fixed_write_operations(&receipt, evidence)?;
     evidence.merge_fsync_operations = evidence.merge_fsync_operations.saturating_add(2);
     evidence.merge_groups = evidence.merge_groups.saturating_add(1);
     Ok(receipt)
@@ -4933,7 +5013,6 @@ fn merge_row_group(
     record_shape_artifact_install(evidence, &receipt)?;
     evidence.merge_fsync_operations = evidence.merge_fsync_operations.saturating_add(4);
     evidence.merge_groups = evidence.merge_groups.saturating_add(1);
-    evidence.merge_written_bytes = evidence.merge_written_bytes.saturating_add(receipt.bytes);
     evidence.parquet_write_bytes = evidence.parquet_write_bytes.saturating_add(receipt.bytes);
     evidence.parquet_write_operations = evidence
         .parquet_write_operations
@@ -5431,15 +5510,8 @@ fn validate_staged_details(
     cancelled: &mut impl FnMut() -> bool,
     evidence: &mut GraphConstructionEvidence,
 ) -> Result<(u64, u64), GfError> {
-    let mut identities = BufReader::with_capacity(
-        BLOCK_BYTES,
-        root.open_child_file(OsStr::new(identities_name))
-            .map_err(storage)?,
-    );
-    account_sequential_read(
-        identities.get_ref().metadata().map_err(storage)?.len(),
-        evidence,
-    );
+    let (mut identities, identities_counter) =
+        open_counted_fixed_reader(root, identities_name, evidence)?;
     let mut nodes = 0_u64;
     let mut edges = 0_u64;
     while let Some(record) = read_fixed::<BASE_IDENTITY_WIDTH>(&mut identities)? {
@@ -5456,6 +5528,7 @@ fn validate_staged_details(
             reject_cancelled(cancelled)?;
         }
     }
+    account_fixed_read_operations(&identities_counter, evidence)?;
     let count = |name: Option<&str>, width: u64| -> Result<u64, GfError> {
         let Some(name) = name else { return Ok(0) };
         let bytes = root
@@ -5501,17 +5574,14 @@ fn reject_staged_base_conflicts(
     cancelled: &mut impl FnMut() -> bool,
     evidence: &mut GraphConstructionEvidence,
 ) -> Result<(), GfError> {
-    let mut reader = BufReader::with_capacity(
-        BLOCK_BYTES,
-        root.open_child_file(OsStr::new(identities_name))
-            .map_err(storage)?,
-    );
+    let (mut reader, reader_counter) = open_counted_fixed_reader(root, identities_name, evidence)?;
     loop {
         let mut requested = Vec::with_capacity(window_rows);
         for _ in 0..window_rows {
             let Some(record) = read_fixed::<BASE_IDENTITY_WIDTH>(&mut reader)? else {
                 break;
             };
+            account_merge_read::<BASE_IDENTITY_WIDTH>(evidence);
             requested.push(Uuid::from_bytes(
                 record[..16].try_into().expect("fixed UUID"),
             ));
@@ -5532,6 +5602,7 @@ fn reject_staged_base_conflicts(
         }
         reject_cancelled(cancelled)?;
     }
+    account_fixed_read_operations(&reader_counter, evidence)?;
     base.revalidate()?;
     Ok(())
 }
@@ -5550,15 +5621,8 @@ fn validate_unified_and_details(
     cancelled: &mut impl FnMut() -> bool,
     evidence: &mut GraphConstructionEvidence,
 ) -> Result<(u64, u64, u64, u64), GfError> {
-    let mut identities = BufReader::with_capacity(
-        BLOCK_BYTES,
-        root.open_child_file(OsStr::new(identities_name))
-            .map_err(storage)?,
-    );
-    account_sequential_read(
-        identities.get_ref().metadata().map_err(storage)?.len(),
-        evidence,
-    );
+    let (mut identities, identities_counter) =
+        open_counted_fixed_reader(root, identities_name, evidence)?;
     let mut node_count = 0_u64;
     let mut edge_count = 0_u64;
     let mut new_nodes = 0_u64;
@@ -5632,6 +5696,7 @@ fn validate_unified_and_details(
     let max_edge = base_max_edge
         .checked_add(new_edges)
         .ok_or_else(|| storage("edge surrogate overflow"))?;
+    account_fixed_read_operations(&identities_counter, evidence)?;
     Ok((node_count, edge_count, max_node, max_edge))
 }
 
@@ -5646,25 +5711,13 @@ fn validate_detail_domain<const N: usize>(
     let Some(details_name) = details_name else {
         return Ok(());
     };
-    let mut identities = BufReader::with_capacity(
-        BLOCK_BYTES,
-        root.open_child_file(OsStr::new(identities_name))
-            .map_err(storage)?,
-    );
-    let mut details = BufReader::with_capacity(
-        BLOCK_BYTES,
-        root.open_child_file(OsStr::new(details_name))
-            .map_err(storage)?,
-    );
-    account_sequential_read(
-        identities.get_ref().metadata().map_err(storage)?.len(),
-        evidence,
-    );
-    account_sequential_read(
-        details.get_ref().metadata().map_err(storage)?.len(),
-        evidence,
-    );
+    let (mut identities, identities_counter) =
+        open_counted_fixed_reader(root, identities_name, evidence)?;
+    let (mut details, details_counter) = open_counted_fixed_reader(root, details_name, evidence)?;
     let mut identity = read_fixed::<BASE_IDENTITY_WIDTH>(&mut identities)?;
+    if identity.is_some() {
+        account_merge_read::<BASE_IDENTITY_WIDTH>(evidence);
+    }
     let mut count = 0_u64;
     while let Some(detail) = read_fixed::<N>(&mut details)? {
         while identity
@@ -5701,6 +5754,8 @@ fn validate_detail_domain<const N: usize>(
             "identity domain contains a row without canonical detail",
         ));
     }
+    account_fixed_read_operations(&identities_counter, evidence)?;
+    account_fixed_read_operations(&details_counter, evidence)?;
     Ok(())
 }
 
@@ -5722,24 +5777,10 @@ fn validate_endpoints(
         };
     }
     let endpoints_name = endpoints_name.ok_or_else(|| storage("new edges lack endpoints"))?;
-    let mut identities = BufReader::with_capacity(
-        BLOCK_BYTES,
-        root.open_child_file(OsStr::new(identities_name))
-            .map_err(storage)?,
-    );
-    let mut endpoints = BufReader::with_capacity(
-        BLOCK_BYTES,
-        root.open_child_file(OsStr::new(endpoints_name))
-            .map_err(storage)?,
-    );
-    account_sequential_read(
-        identities.get_ref().metadata().map_err(storage)?.len(),
-        evidence,
-    );
-    account_sequential_read(
-        endpoints.get_ref().metadata().map_err(storage)?.len(),
-        evidence,
-    );
+    let (mut identities, identities_counter) =
+        open_counted_fixed_reader(root, identities_name, evidence)?;
+    let (mut endpoints, endpoints_counter) =
+        open_counted_fixed_reader(root, endpoints_name, evidence)?;
     let mut identity = read_fixed::<BASE_IDENTITY_WIDTH>(&mut identities)?;
     let mut endpoint_count = 0_u64;
     while let Some(endpoint) = read_fixed::<ENDPOINT_WIDTH>(&mut endpoints)? {
@@ -5770,6 +5811,8 @@ fn validate_endpoints(
             "edge endpoint cardinality differs from edge domain",
         ));
     }
+    account_fixed_read_operations(&identities_counter, evidence)?;
+    account_fixed_read_operations(&endpoints_counter, evidence)?;
     Ok(())
 }
 
@@ -5787,15 +5830,7 @@ fn assign_surrogates(
         .create_replaceable_child_file(OsStr::new(&temporary))
         .map_err(storage)?;
     let identity = file_identity(&file).map_err(storage)?;
-    let mut reader = BufReader::with_capacity(
-        BLOCK_BYTES,
-        root.open_child_file(OsStr::new(input_name))
-            .map_err(storage)?,
-    );
-    account_sequential_read(
-        reader.get_ref().metadata().map_err(storage)?.len(),
-        evidence,
-    );
+    let (mut reader, reader_counter) = open_counted_fixed_reader(root, input_name, evidence)?;
     let hashing = HashingWriter::new(file);
     let mut writer = BufWriter::with_capacity(BLOCK_BYTES, hashing);
     let mut count = 0_u64;
@@ -5828,6 +5863,7 @@ fn assign_surrogates(
             reject_cancelled(cancelled)?;
         }
     }
+    account_fixed_read_operations(&reader_counter, evidence)?;
     writer.flush().map_err(storage)?;
     writer.get_ref().inner.sync_all().map_err(storage)?;
     account_sequential_write(writer.get_ref().bytes, evidence);
@@ -5848,6 +5884,7 @@ fn assign_surrogates(
     root.sync().map_err(storage)?;
     persist_shape_receipt(root, &output_receipt)?;
     record_shape_artifact_install(evidence, &output_receipt)?;
+    account_fixed_write_operations(&output_receipt, evidence)?;
     evidence.merge_fsync_operations = evidence.merge_fsync_operations.saturating_add(2);
     Ok(output.to_owned())
 }
@@ -5866,24 +5903,10 @@ fn resolve_endpoint_surrogates(
     let Some(endpoints_name) = endpoints_name else {
         return Ok(None);
     };
-    let mut identities = BufReader::with_capacity(
-        BLOCK_BYTES,
-        root.open_child_file(OsStr::new(identities_name))
-            .map_err(storage)?,
-    );
-    let mut endpoints = BufReader::with_capacity(
-        BLOCK_BYTES,
-        root.open_child_file(OsStr::new(endpoints_name))
-            .map_err(storage)?,
-    );
-    account_sequential_read(
-        identities.get_ref().metadata().map_err(storage)?.len(),
-        evidence,
-    );
-    account_sequential_read(
-        endpoints.get_ref().metadata().map_err(storage)?.len(),
-        evidence,
-    );
+    let (mut identities, identities_counter) =
+        open_counted_fixed_reader(root, identities_name, evidence)?;
+    let (mut endpoints, endpoints_counter) =
+        open_counted_fixed_reader(root, endpoints_name, evidence)?;
     let mut identity = read_fixed::<BASE_IDENTITY_WIDTH>(&mut identities)?;
     let mut window = Vec::<[u8; RESOLVED_ENDPOINT_WIDTH]>::with_capacity(window_rows);
     let mut resolved = FixedMergeAccumulator::new("merge-resolved", fan_in, false);
@@ -5950,6 +5973,7 @@ fn resolve_endpoint_surrogates(
             let receipt = write_fixed_run(root, &name, &window)?;
             evidence.merge_written_bytes =
                 evidence.merge_written_bytes.saturating_add(receipt.bytes);
+            account_fixed_write_operations(&receipt, evidence)?;
             evidence.merge_written_records = evidence
                 .merge_written_records
                 .saturating_add(window.len() as u64);
@@ -5971,6 +5995,7 @@ fn resolve_endpoint_surrogates(
         let name = format!("merge-resolved-source-{sequence:020}.run");
         let receipt = write_fixed_run(root, &name, &window)?;
         evidence.merge_written_bytes = evidence.merge_written_bytes.saturating_add(receipt.bytes);
+        account_fixed_write_operations(&receipt, evidence)?;
         evidence.merge_written_records = evidence
             .merge_written_records
             .saturating_add(window.len() as u64);
@@ -5983,6 +6008,8 @@ fn resolve_endpoint_surrogates(
             .peak_resolved_endpoint_name_slots
             .max(resolved.slot_count() as u64);
     }
+    account_fixed_read_operations(&identities_counter, evidence)?;
+    account_fixed_read_operations(&endpoints_counter, evidence)?;
     resolved.finish_optional::<RESOLVED_ENDPOINT_WIDTH>(root, cancelled, evidence)
 }
 
@@ -8150,6 +8177,8 @@ mod tests {
             assert!(session.evidence().merge_read_blocks > 0);
             assert!(session.evidence().merge_write_blocks > 0);
             assert!(session.evidence().merge_fsync_operations > 0);
+            assert!(session.evidence().merge_read_operations > 0);
+            assert!(session.evidence().merge_write_operations > 0);
             assert!(session.evidence().parquet_read_operations > 0);
             assert!(session.evidence().parquet_write_operations > 0);
             if chunks == 4 {

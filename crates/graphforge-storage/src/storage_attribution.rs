@@ -151,11 +151,19 @@ impl ConstructionPhaseAttribution {
             StorageIoPhase::ShapeConsumeReauthentication,
             PhaseIoTotals {
                 read_bytes: evidence.shape_application_read_bytes,
-                write_bytes: evidence.merge_written_bytes,
+                write_bytes: evidence
+                    .merge_written_bytes
+                    .saturating_add(evidence.parquet_write_bytes),
                 read_calls: evidence
                     .shape_input_validation_read_operations
-                    .saturating_add(evidence.parquet_read_operations),
-                write_calls: evidence.parquet_write_operations,
+                    .saturating_add(evidence.merge_read_operations)
+                    .saturating_add(evidence.parquet_read_operations)
+                    .saturating_add(evidence.shaped_output_authentication_operations)
+                    .saturating_add(evidence.parent_catalog_read_operations)
+                    .saturating_add(evidence.retained_probe_block_loads),
+                write_calls: evidence
+                    .merge_write_operations
+                    .saturating_add(evidence.parquet_write_operations),
                 block_count: evidence
                     .merge_read_blocks
                     .saturating_add(evidence.merge_write_blocks),
@@ -1314,7 +1322,14 @@ mod tests {
             seal_application_read_bytes: 11,
             shape_application_read_bytes: 13,
             shape_input_validation_read_operations: 1,
+            merge_read_operations: 2,
+            parquet_read_operations: 3,
+            shaped_output_authentication_operations: 4,
+            parent_catalog_read_operations: 5,
+            retained_probe_block_loads: 6,
             merge_written_bytes: 5,
+            merge_write_operations: 2,
+            parquet_write_bytes: 7,
             parquet_write_operations: 1,
             encode_application_read_bytes: 17,
             encode_application_read_operations: 2,
@@ -1346,6 +1361,16 @@ mod tests {
         attribution.validate_reconciliation().unwrap();
         attribution.validate_for_qualification().unwrap();
         assert_eq!(attribution.phases.len(), StorageIoPhase::ALL.len());
+        assert_eq!(
+            attribution.phases[&StorageIoPhase::ShapeConsumeReauthentication],
+            PhaseIoTotals {
+                read_bytes: 13,
+                write_bytes: 12,
+                read_calls: 21,
+                write_calls: 3,
+                ..Default::default()
+            }
+        );
         assert_eq!(attribution.totals.read_bytes, 153);
         assert_eq!(
             attribution.phases[&StorageIoPhase::RecoveryReauthentication].read_calls,
@@ -1358,9 +1383,9 @@ mod tests {
             50
         );
         assert_eq!(attribution.totals.read_bytes, 162);
-        assert_eq!(attribution.totals.write_bytes, 163);
-        assert_eq!(attribution.totals.read_calls, 22);
-        assert_eq!(attribution.totals.write_calls, 19);
+        assert_eq!(attribution.totals.write_bytes, 170);
+        assert_eq!(attribution.totals.read_calls, 42);
+        assert_eq!(attribution.totals.write_calls, 21);
         assert_eq!(attribution.totals.fsync_calls, 29);
         attribution
             .phases
