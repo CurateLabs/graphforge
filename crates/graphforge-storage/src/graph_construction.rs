@@ -8831,6 +8831,16 @@ mod tests {
             )
             .unwrap();
             assert_eq!(resumed.accepted_chunks(), accepted, "{failpoint}");
+            if accepted == 1 {
+                assert!(
+                    resumed.evidence().recovery_application_read_bytes > 0,
+                    "accepted interrupted append must report recovery bytes: {failpoint}"
+                );
+                assert!(
+                    resumed.evidence().recovery_application_read_operations > 0,
+                    "accepted interrupted append must report recovery calls: {failpoint}"
+                );
+            }
             if accepted == 0 {
                 resumed
                     .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 8))

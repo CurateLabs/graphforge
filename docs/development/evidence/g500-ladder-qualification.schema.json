@@ -24,9 +24,10 @@
     },
     "phase": {
       "type": "object", "additionalProperties": false,
-      "required": ["phase", "read_bytes", "write_bytes", "read_calls", "write_calls", "object_count", "block_count", "fsync_calls"],
+      "required": ["phase", "applicable", "read_bytes", "write_bytes", "read_calls", "write_calls", "object_count", "block_count", "fsync_calls"],
       "properties": {
         "phase": {"enum": ["append_merge", "seal_authentication", "shape_consume_reauthentication", "encode_write_postwrite_authentication", "publication_preauthentication", "cas_install_read_write", "hydration_verification", "fsync_synchronization", "recovery_reauthentication"]},
+        "applicable": {"type": "boolean"},
         "read_bytes": {"$ref": "#/$defs/nonNegative"}, "write_bytes": {"$ref": "#/$defs/nonNegative"}, "read_calls": {"$ref": "#/$defs/nonNegative"}, "write_calls": {"$ref": "#/$defs/nonNegative"},
         "object_count": {"$ref": "#/$defs/nonNegative"}, "block_count": {"$ref": "#/$defs/nonNegative"}, "fsync_calls": {"$ref": "#/$defs/nonNegative"}
       }

@@ -46,7 +46,7 @@ def rung(scale: int, live: int, unit: int) -> dict:
     # Independent union high-water observation; deliberately larger than any
     # one category peak because categories coexist at lifecycle boundaries.
     peak = sum(item["transient_peak_allocated_bytes"] for item in artifacts)
-    phases = [{"phase": phase, "read_bytes": unit, "write_bytes": unit, "read_calls": 1, "write_calls": 1, "object_count": 1, "block_count": 1, "fsync_calls": 1} for phase in PHASES]
+    phases = [{"phase": phase, "applicable": True, "read_bytes": unit, "write_bytes": unit, "read_calls": 1, "write_calls": 1, "object_count": 1, "block_count": 1, "fsync_calls": 1} for phase in PHASES]
     return {
         "id": f"S{scale}",
         "scale": scale,
@@ -119,6 +119,8 @@ def test_accepts_reconciled_adjacent_rungs_and_conservative_projection():
         ("headroom", "does not reconcile"),
         ("unsafe_admit", "contradicts projected headroom"),
         ("peak_below_artifact", "below a category peak"),
+        ("fake_zero_phase", "fake-zero"),
+        ("false_applicability", "applicability contradicts"),
     ],
 )
 def test_rejects_goal_seeking_or_incomplete_evidence(mutation: str, match: str):
@@ -149,6 +151,15 @@ def test_rejects_goal_seeking_or_incomplete_evidence(mutation: str, match: str):
         value["projection"]["reserved_headroom_bytes"] = value["projection"]["headroom_bytes"] + 1
     elif mutation == "peak_below_artifact":
         value["rungs"][0]["totals"]["transient_peak_allocated_bytes"] = 0
+    elif mutation == "fake_zero_phase":
+        phase = value["rungs"][0]["phases"][0]
+        for field in ("read_bytes", "write_bytes", "read_calls", "write_calls", "object_count", "block_count", "fsync_calls"):
+            phase[field] = 0
+        phase["applicable"] = False
+        for field in ("read_bytes", "write_bytes", "read_calls", "write_calls", "object_count", "block_count", "fsync_calls"):
+            value["rungs"][0]["totals"][f"phase_{field}"] -= 1 if field.endswith("calls") or field in ("object_count", "block_count") else 1_000
+    elif mutation == "false_applicability":
+        value["rungs"][0]["phases"][0]["applicable"] = False
     with pytest.raises(VALIDATOR.EvidenceError, match=match):
         VALIDATOR.validate(value)
 

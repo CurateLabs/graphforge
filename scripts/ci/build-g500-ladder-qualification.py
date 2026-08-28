@@ -44,7 +44,12 @@ def rung(cert: dict) -> dict:
     rows.append(artifact("portable_package", storage["portable_package"], "exact_descriptor"))
     rows.append(artifact("clean_imported_project", storage["clean_import"], "clean_import_snapshot"))
     phase_map = storage["application_io_phases"]["phases"]
-    phases = [{"phase": name, **values} for name, values in phase_map.items()]
+    phases = []
+    for name, values in phase_map.items():
+        applicable = any(values[field] != 0 for field in ("read_bytes", "write_bytes", "read_calls", "write_calls", "object_count", "block_count", "fsync_calls"))
+        if name != "recovery_reauthentication" and not applicable:
+            raise ValueError(f"required lifecycle phase has no source-owned observation: {name}")
+        phases.append({"phase": name, "applicable": applicable, **values})
     totals = {
         "logical_bytes": sum(row["logical_bytes"] for row in rows),
         "allocated_bytes": sum(row["allocated_bytes"] for row in rows),

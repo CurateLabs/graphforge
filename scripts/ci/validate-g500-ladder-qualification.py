@@ -70,6 +70,17 @@ def validate(evidence: dict[str, Any]) -> None:
         phase_names = [phase["phase"] for phase in phases]
         if set(phase_names) != REQUIRED_PHASES or len(phase_names) != len(set(phase_names)):
             raise EvidenceError("application I/O phases must be complete and unique")
+        phase_fields = ("read_bytes", "write_bytes", "read_calls", "write_calls", "object_count", "block_count", "fsync_calls")
+        for phase in phases:
+            observed = any(phase[field] != 0 for field in phase_fields)
+            if phase["applicable"] != observed:
+                raise EvidenceError("phase applicability contradicts source-owned counters")
+            if phase["phase"] != "recovery_reauthentication" and not phase["applicable"]:
+                raise EvidenceError("required lifecycle phase has a fake-zero observation")
+            if (phase["read_bytes"] == 0) != (phase["read_calls"] == 0):
+                raise EvidenceError("phase read bytes and calls disagree")
+            if (phase["write_bytes"] == 0) != (phase["write_calls"] == 0):
+                raise EvidenceError("phase write bytes and calls disagree")
         if any(artifact["physical_objects"] > artifact["logical_references"] for artifact in rung["artifacts"]):
             raise EvidenceError("physical identities must be deduplicated from logical references")
         logical = sum(artifact["logical_bytes"] for artifact in rung["artifacts"])
@@ -79,7 +90,7 @@ def validate(evidence: dict[str, Any]) -> None:
         # The total is an independently observed phase-boundary union high-water
         # mark and must not be reconstructed as max(category).
         transient_peak = rung["totals"]["transient_peak_allocated_bytes"]
-        phase_totals = {f"phase_{field}": sum(phase[field] for phase in phases) for field in ("read_bytes", "write_bytes", "read_calls", "write_calls", "object_count", "block_count", "fsync_calls")}
+        phase_totals = {f"phase_{field}": sum(phase[field] for phase in phases) for field in phase_fields}
         expected_totals = {"logical_bytes": logical, "allocated_bytes": allocated, "current_retained_bytes": retained, **phase_totals}
         if {key: rung["totals"][key] for key in expected_totals} != expected_totals:
             raise EvidenceError("artifact or phase totals do not reconcile")
