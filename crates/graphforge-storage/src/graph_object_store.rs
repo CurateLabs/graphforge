@@ -1704,42 +1704,12 @@ fn copy_single_link_materialized_object(
     })?;
     let mut installed = false;
     let result = (|| -> Result<(), GfError> {
-        let mut digest = Sha256::new();
-        let mut length = 0_u64;
-        let mut buffer = [0_u8; BUFFER_BYTES];
-        loop {
-            let read = input.read(&mut buffer).map_err(|error| {
-                storage("read materialization source", &cas.diagnostic_root, error)
-            })?;
-            if read == 0 {
-                break;
-            }
-            output.write_all(&buffer[..read]).map_err(|error| {
-                storage(
-                    "write private materialization file",
-                    &cas.diagnostic_root,
-                    error,
-                )
-            })?;
-            digest.update(&buffer[..read]);
-            length = length
-                .checked_add(read as u64)
-                .ok_or_else(|| validation("private materialization length overflows"))?;
-        }
-        if length != entry.byte_length
-            || hex_digest(digest.finalize().into()) != entry.content_sha256
-        {
-            return Err(validation(
-                "private materialization bytes do not match inventory",
-            ));
-        }
-        output.sync_all().map_err(|error| {
-            storage(
-                "sync private materialization file",
-                &cas.diagnostic_root,
-                error,
-            )
-        })?;
+        copy_and_authenticate_materialized_object(
+            &mut input,
+            &mut output,
+            entry,
+            &cas.diagnostic_root,
+        )?;
         drop(output);
         parent
             .replace_child(&temporary_name, output_identity, name)
@@ -1790,6 +1760,40 @@ fn copy_single_link_materialized_object(
         let _ = parent.sync();
     }
     result
+}
+
+fn copy_and_authenticate_materialized_object(
+    input: &mut File,
+    output: &mut File,
+    entry: &crate::GraphFileEntry,
+    diagnostic_root: &Path,
+) -> Result<(), GfError> {
+    let mut digest = Sha256::new();
+    let mut length = 0_u64;
+    let mut buffer = vec![0_u8; BUFFER_BYTES].into_boxed_slice();
+    loop {
+        let read = input
+            .read(&mut buffer)
+            .map_err(|error| storage("read materialization source", diagnostic_root, error))?;
+        if read == 0 {
+            break;
+        }
+        output.write_all(&buffer[..read]).map_err(|error| {
+            storage("write private materialization file", diagnostic_root, error)
+        })?;
+        digest.update(&buffer[..read]);
+        length = length
+            .checked_add(read as u64)
+            .ok_or_else(|| validation("private materialization length overflows"))?;
+    }
+    if length != entry.byte_length || hex_digest(digest.finalize().into()) != entry.content_sha256 {
+        return Err(validation(
+            "private materialization bytes do not match inventory",
+        ));
+    }
+    output
+        .sync_all()
+        .map_err(|error| storage("sync private materialization file", diagnostic_root, error))
 }
 
 #[cfg(unix)]

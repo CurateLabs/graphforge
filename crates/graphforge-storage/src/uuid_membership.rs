@@ -3068,7 +3068,7 @@ fn canonical_lower_hex(value: &str, length: usize) -> bool {
 
 fn sha256_reader_streaming(reader: &mut impl Read) -> Result<String, GfError> {
     let mut digest = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
+    let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
     loop {
         let read = reader.read(&mut buffer).map_err(storage_err)?;
         if read == 0 {
