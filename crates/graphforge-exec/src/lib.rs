@@ -3693,12 +3693,7 @@ fn expand_single_hop_chunk(
                 .ordinal_identities
                 .as_ref()
                 .expect("identity path availability checked")
-                .lookup_node_uuids(&requested)?
-                .ok_or_else(|| {
-                    GfError::Execution(
-                        "destination UUID projection requires admitted v4 ordinal identity".into(),
-                    )
-                })?;
+                .lookup_node_uuids(&requested)?;
             (lookup.values, lookup.metrics)
         } else {
             (
