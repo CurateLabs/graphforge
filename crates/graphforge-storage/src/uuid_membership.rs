@@ -6197,15 +6197,16 @@ pub(crate) fn prepare_v4_ordinal_delta(
         return Err(storage_err("v4 topology delta digest is noncanonical"));
     }
 
-    let parent = project_dir
-        .parent()
-        .ok_or_else(|| storage_err("project directory has no staging parent"))?;
-    cleanup_abandoned_v4_plan_directories(project_dir, parent)?;
+    let plan_root = open_v4_plan_root(project_dir)?;
+    cleanup_abandoned_v4_plan_directories(&plan_root)?;
+    let plan_root_path = project_dir.join(INDEX_DIR).join(V4_PLAN_ROOT);
     let scratch = tempfile::Builder::new()
-        .prefix("uuid-membership-v4-plan-")
-        .tempdir_in(parent)
+        .prefix(V4_PLAN_PREFIX)
+        .tempdir_in(&plan_root_path)
         .map_err(storage_err)?;
-    initialize_v4_plan_directory(project_dir, scratch.path())?;
+    // The retained capability proves that path lookup did not escape or replace
+    // the authenticated, project-owned planner namespace during creation.
+    plan_root.revalidate_named().map_err(storage_err)?;
     let artifacts_path = scratch.path().join("artifacts");
     fs::create_dir(&artifacts_path).map_err(storage_err)?;
     let artifacts =
@@ -6425,90 +6426,75 @@ pub(crate) fn prepare_v4_ordinal_delta(
 }
 
 const V4_PLAN_PREFIX: &str = "uuid-membership-v4-plan-";
-const V4_PLAN_MARKER: &str = ".graphforge-v4-plan-v1";
+const V4_PLAN_ROOT: &str = ".uuid-membership-v4-plans";
 const V4_PLAN_CLEANUP_CANDIDATES: usize = 16;
-const V4_PLAN_PARENT_ENTRIES: usize = 65_536;
 const V4_PLAN_CLEANUP_ENTRIES: usize = 4096;
 const V4_PLAN_CLEANUP_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
-fn v4_plan_marker(project_dir: &Path) -> Result<Vec<u8>, GfError> {
-    let identity = graphforge_filesystem::path_identity(project_dir).map_err(storage_err)?;
-    Ok(format!(
-        "graphforge-v4-plan-v1\nproject-volume={:016x}\nproject-file={}\n",
-        identity.volume_serial,
-        hex_bytes(&identity.file_id)
-    )
-    .into_bytes())
-}
-
-fn initialize_v4_plan_directory(project_dir: &Path, scratch: &Path) -> Result<(), GfError> {
-    let directory = graphforge_filesystem::StableDirectory::open(scratch).map_err(storage_err)?;
-    let marker = directory
-        .create_child_file(std::ffi::OsStr::new(V4_PLAN_MARKER))
-        .map_err(storage_err)?;
-    (&marker)
-        .write_all(&v4_plan_marker(project_dir)?)
-        .and_then(|()| marker.sync_all())
-        .map_err(storage_err)?;
-    directory.sync().map_err(storage_err)
-}
-
-/// Reclaim only exact, self-authenticating planner siblings left by process
-/// death. Inventory, entry count, and physical bytes are capped; linked,
-/// special, substituted, or structurally unexpected children fail closed.
-fn cleanup_abandoned_v4_plan_directories(
+fn open_v4_plan_root(
     project_dir: &Path,
-    parent_path: &Path,
+) -> Result<graphforge_filesystem::StableDirectory, GfError> {
+    let index = graphforge_filesystem::StableDirectory::open(&project_dir.join(INDEX_DIR))
+        .map_err(storage_err)?;
+    let name = std::ffi::OsStr::new(V4_PLAN_ROOT);
+    let root = match index.create_child_directory(name) {
+        Ok(root) => {
+            index.sync().map_err(storage_err)?;
+            root
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            index.open_child_directory(name).map_err(storage_err)?
+        }
+        Err(error) => return Err(storage_err(error)),
+    };
+    index.revalidate_named().map_err(storage_err)?;
+    Ok(root)
+}
+
+/// Reclaim planner directories from the authenticated project-owned namespace.
+/// Atomic child creation makes every visible entry recognizable immediately;
+/// no forgeable marker or shared-parent scan participates in ownership.
+fn cleanup_abandoned_v4_plan_directories(
+    plan_root: &graphforge_filesystem::StableDirectory,
 ) -> Result<(), GfError> {
-    let parent = graphforge_filesystem::StableDirectory::open(parent_path).map_err(storage_err)?;
-    let expected_marker = v4_plan_marker(project_dir)?;
-    let candidates = parent
-        .child_names_bounded(V4_PLAN_PARENT_ENTRIES)
-        .map_err(|error| {
-            storage_err(format!(
-                "v4 planner parent inventory at {}: {error}",
-                parent_path.display()
-            ))
-        })?
-        .into_iter()
-        .filter(|name| {
-            name.to_str().is_some_and(|text| {
-                text.strip_prefix(V4_PLAN_PREFIX).is_some_and(|nonce| {
-                    !nonce.is_empty() && nonce.bytes().all(|byte| byte.is_ascii_alphanumeric())
-                })
-            })
-        })
-        .take(V4_PLAN_CLEANUP_CANDIDATES + 1)
-        .collect::<Vec<_>>();
+    let candidates = plan_root
+        .child_names_bounded(V4_PLAN_CLEANUP_CANDIDATES + 1)
+        .map_err(|error| storage_err(format!("v4 planner namespace inventory: {error}")))?;
     if candidates.len() > V4_PLAN_CLEANUP_CANDIDATES {
         return Err(storage_err("v4 planner cleanup candidate bound exceeded"));
     }
     for name in candidates {
-        let directory = parent.open_child_directory(&name).map_err(storage_err)?;
-        let mut marker = directory
-            .open_child_file(std::ffi::OsStr::new(V4_PLAN_MARKER))
-            .map_err(storage_err)?;
-        if graphforge_filesystem::file_link_count(&marker).map_err(storage_err)? != 1
-            || marker.metadata().map_err(storage_err)?.len()
-                != u64::try_from(expected_marker.len()).map_err(storage_err)?
-        {
-            return Err(storage_err("v4 planner cleanup marker is not canonical"));
-        }
-        let mut observed_marker = Vec::with_capacity(expected_marker.len());
-        marker
-            .read_to_end(&mut observed_marker)
-            .map_err(storage_err)?;
-        if observed_marker != expected_marker {
+        if !name.to_str().is_some_and(|text| {
+            text.strip_prefix(V4_PLAN_PREFIX).is_some_and(|nonce| {
+                !nonce.is_empty() && nonce.bytes().all(|byte| byte.is_ascii_alphanumeric())
+            })
+        }) {
             return Err(storage_err(
-                "v4 planner cleanup marker authentication failed",
+                "v4 planner namespace contains an unknown child",
             ));
         }
+        let directory = plan_root.open_child_directory(&name).map_err(storage_err)?;
         cleanup_v4_plan_directory(&directory)?;
-        parent
+        crate::project_failpoint::hit(
+            "v4_plan_cleanup.before_unlink",
+            None,
+            None,
+            "V4_PLAN_CLEANUP_BEFORE_UNLINK",
+            false,
+        )?;
+        plan_root
             .remove_child_directory_if_identity(&name, directory.identity())
             .map_err(storage_err)?;
-        parent.sync().map_err(storage_err)?;
+        crate::project_failpoint::hit(
+            "v4_plan_cleanup.after_unlink",
+            None,
+            None,
+            "V4_PLAN_CLEANUP_AFTER_UNLINK",
+            false,
+        )?;
+        plan_root.sync().map_err(storage_err)?;
     }
+    plan_root.revalidate_named().map_err(storage_err)?;
     Ok(())
 }
 
@@ -8687,10 +8673,8 @@ pub(crate) mod tests {
     }
 
     fn v4_plan_sibling_count(project: &Path) -> usize {
-        project
-            .parent()
-            .unwrap()
-            .read_dir()
+        let root = project.join(INDEX_DIR).join(V4_PLAN_ROOT);
+        root.read_dir()
             .unwrap()
             .filter_map(Result::ok)
             .filter(|entry| {
@@ -8719,6 +8703,47 @@ pub(crate) mod tests {
             &mut snapshot,
         )
         .unwrap();
+    }
+
+    fn assert_exact_v4_reopen(project: &Path, generation: u64) {
+        let index = project.join(INDEX_DIR);
+        let manifest_bytes = fs::read(index.join(V4_ORDINAL_MANIFEST)).unwrap();
+        let receipt: TopologyIndexReceipt =
+            serde_json::from_slice(&fs::read(index.join(V4_ORDINAL_RECEIPT)).unwrap()).unwrap();
+        assert_eq!(receipt.expected_generation, generation);
+        assert_eq!(receipt.manifest_sha256, hex_sha256(&manifest_bytes));
+        let authority = crate::ordinal_identity_v4::V4OrdinalIdentityAuthority {
+            topology_generation: generation,
+            manifest_sha256: receipt.manifest_sha256,
+        };
+        let mut handle = match crate::ordinal_identity_v4::V4OrdinalIdentityHandle::open(
+            project,
+            &authority,
+            crate::V4OrdinalIdentityLimits::default(),
+        )
+        .unwrap()
+        {
+            crate::V4OrdinalIdentityOpen::Ready(handle) => handle,
+            crate::V4OrdinalIdentityOpen::RebuildRequired { .. } => {
+                panic!("receipt-authenticated v4 authority unexpectedly requires rebuild")
+            }
+        };
+        let pinned = handle.pinned_update_inputs().unwrap();
+        assert_eq!(pinned.manifest.topology_generation, generation);
+        assert_eq!(
+            pinned.artifacts.len(),
+            pinned.manifest.forward_identities.len()
+                + pinned.manifest.ordinal_ranges.len()
+                + pinned.manifest.tombstones.len()
+        );
+        assert_eq!(
+            handle.lookup_node_uuids(&[1, 2, 3]).unwrap().values,
+            vec![
+                Some(Uuid::from_u128(3)),
+                Some(Uuid::from_u128(1)),
+                Some(Uuid::from_u128(2)),
+            ]
+        );
     }
 
     #[test]
@@ -8805,6 +8830,56 @@ pub(crate) mod tests {
                 receipt_manifest_digest(dir.path()),
                 hex_sha256(&fs::read(dir.path().join(INDEX_DIR).join(MANIFEST)).unwrap())
             );
+            assert_exact_v4_reopen(dir.path(), target);
+        }
+
+        for cleanup_failpoint in [
+            "v4_plan_cleanup.before_unlink",
+            "v4_plan_cleanup.after_unlink",
+        ] {
+            let (dir, _, _) = fixture();
+            fs::write(
+                dir.path().join("topology/generation.json"),
+                b"{\"topology_generation\":7,\"search_generation\":0,\"property_generation\":0}\n",
+            )
+            .unwrap();
+            rebuild_uuid_membership_indexes(dir.path(), UuidIndexBuildLimits::default()).unwrap();
+            rebuild_v4_ordinal_identity(dir.path(), UuidIndexBuildLimits::default()).unwrap();
+
+            let child = |failpoint: &str, retry: bool| {
+                let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+                command
+                    .arg("--exact")
+                    .arg(
+                        "uuid_membership::tests::v4_rewrite_subprocess_crash_retry_matrix_cleans_exact_scratch",
+                    )
+                    .arg("--nocapture")
+                    .env(CHILD_ROOT, dir.path())
+                    .env(
+                        "GRAPHFORGE_PROJECT_FAILPOINTS",
+                        "graphforge-internal-subprocess-v1",
+                    )
+                    .env("GRAPHFORGE_PROJECT_FAILPOINT", failpoint)
+                    .env(TARGET, "8");
+                if retry {
+                    command.env(RETRY, "1");
+                }
+                command.status().unwrap()
+            };
+            assert_eq!(
+                child("v4_append.after_delta_artifacts", false).code(),
+                Some(crate::project_failpoint::exit_code())
+            );
+            assert_eq!(v4_plan_sibling_count(dir.path()), 1);
+            assert_eq!(
+                child(cleanup_failpoint, false).code(),
+                Some(crate::project_failpoint::exit_code()),
+                "{cleanup_failpoint}"
+            );
+            assert!(child("", true).success(), "{cleanup_failpoint}");
+            assert_eq!(v4_plan_sibling_count(dir.path()), 0, "{cleanup_failpoint}");
+            assert_eq!(crate::read_topology_generation(dir.path()).unwrap(), 8);
+            assert_exact_v4_reopen(dir.path(), 8);
         }
     }
 
