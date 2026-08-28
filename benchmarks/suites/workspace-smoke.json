@@ -1,0 +1,6 @@
+{
+  "schema": "graphforge-benchmark-suite/1",
+  "id": "workspace-smoke",
+  "runner": "smoke",
+  "datasets": []
+}

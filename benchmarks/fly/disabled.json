@@ -1,0 +1,6 @@
+{
+  "schema": "graphforge-benchmark-provider-adapter/1",
+  "provider": "fly",
+  "enabled": false,
+  "gate": "complete-stack-merged-and-qualified"
+}

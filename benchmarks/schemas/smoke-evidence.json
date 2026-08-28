@@ -1,0 +1,5 @@
+{
+  "schema": "graphforge-benchmark-evidence-schema/1",
+  "required": ["schema", "result"],
+  "additionalProperties": false
+}
