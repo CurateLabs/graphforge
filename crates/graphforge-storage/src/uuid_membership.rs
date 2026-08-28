@@ -1134,6 +1134,10 @@ pub(crate) fn publish_v4_construction_artifacts(
             sha256: artifact.sha256.clone(),
         })
         .collect::<Vec<_>>();
+    crate::graph_construction::construction_failpoint("v4_publish.after_artifacts");
+    index.sync().map_err(storage_err)?;
+    work.fsync_operations = work.fsync_operations.saturating_add(1);
+    crate::graph_construction::construction_failpoint("v4_publish.after_artifacts_fsync");
     let artifact_bytes = outputs.iter().try_fold(0_u64, |total, output| {
         total
             .checked_add(output.bytes)
@@ -1148,18 +1152,21 @@ pub(crate) fn publish_v4_construction_artifacts(
         &receipt_body,
         &mut work,
     )?);
+    crate::graph_construction::construction_failpoint("v4_publish.after_receipt_install");
     outputs.push(install_construction_bytes(
         &index,
         V4_ORDINAL_MANIFEST,
         &manifest_body,
         &mut work,
     )?);
+    crate::graph_construction::construction_failpoint("v4_publish.after_manifest_install");
     outputs.push(install_construction_bytes(
         &index,
         "ordinal-v4.lock",
         &[],
         &mut work,
     )?);
+    crate::graph_construction::construction_failpoint("v4_publish.after_lock_install");
     index.sync().map_err(storage_err)?;
     topology.sync().map_err(storage_err)?;
     graph.sync().map_err(storage_err)?;
@@ -2791,16 +2798,17 @@ fn authenticate_private_v4_residue(
                 .ok_or_else(|| storage_err("construction recovery inventory name is not UTF-8"))
         })
         .collect::<Result<BTreeSet<_>, _>>()?;
-    let controls = [V4_ORDINAL_RECEIPT, V4_ORDINAL_MANIFEST, "ordinal-v4.lock"];
-    let present_controls = controls.iter().filter(|name| text.contains(**name)).count();
+    let receipt_present = text.contains(V4_ORDINAL_RECEIPT);
+    let manifest_present = text.contains(V4_ORDINAL_MANIFEST);
+    let lock_present = text.contains("ordinal-v4.lock");
     let mut allowed = BTreeSet::new();
 
-    if present_controls != 0 {
-        if present_controls != controls.len() {
-            return Err(storage_err(
-                "private v4 construction controls are incomplete",
-            ));
-        }
+    if manifest_present && !receipt_present || lock_present && !manifest_present {
+        return Err(storage_err(
+            "private v4 construction controls are not an install-order prefix",
+        ));
+    }
+    if receipt_present {
         let receipt_body =
             read_private_construction_child(index, V4_ORDINAL_RECEIPT, MAX_MANIFEST_BYTES)?;
         let receipt: TopologyIndexReceipt =
@@ -2812,6 +2820,10 @@ fn authenticate_private_v4_residue(
             return Err(storage_err(
                 "private v4 construction receipt is noncanonical",
             ));
+        }
+        allowed.insert(V4_ORDINAL_RECEIPT.to_owned());
+        if !manifest_present {
+            return authenticate_private_v4_artifact_residue(index, &text, allowed);
         }
         let manifest_body = read_private_construction_child(
             index,
@@ -2831,13 +2843,16 @@ fn authenticate_private_v4_residue(
             ));
         }
         admit_v4_construction_manifest(&manifest)?;
-        let lock = index
-            .open_child_file(std::ffi::OsStr::new("ordinal-v4.lock"))
-            .map_err(storage_err)?;
-        if lock.metadata().map_err(storage_err)?.len() != 0 {
-            return Err(storage_err("private v4 construction lock is nonempty"));
+        allowed.insert(V4_ORDINAL_MANIFEST.to_owned());
+        if lock_present {
+            let lock = index
+                .open_child_file(std::ffi::OsStr::new("ordinal-v4.lock"))
+                .map_err(storage_err)?;
+            if lock.metadata().map_err(storage_err)?.len() != 0 {
+                return Err(storage_err("private v4 construction lock is nonempty"));
+            }
+            allowed.insert("ordinal-v4.lock".to_owned());
         }
-        allowed.extend(controls.into_iter().map(str::to_owned));
         for artifact in manifest
             .forward_identities
             .iter()
@@ -2853,7 +2868,15 @@ fn authenticate_private_v4_residue(
         }
     }
 
-    for name in &text {
+    authenticate_private_v4_artifact_residue(index, &text, allowed)
+}
+
+fn authenticate_private_v4_artifact_residue(
+    index: &graphforge_filesystem::StableDirectory,
+    text: &BTreeSet<String>,
+    mut allowed: BTreeSet<String>,
+) -> Result<BTreeSet<String>, GfError> {
+    for name in text {
         if allowed.contains(name) || !is_exact_private_v4_name(name) {
             continue;
         }

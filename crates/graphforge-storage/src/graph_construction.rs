@@ -8210,6 +8210,12 @@ mod tests {
             "uuid_encode.after_delta_runs",
             "uuid_encode.after_manifest",
             "uuid_encode.after_intent_removal",
+            "v4_publish.after_artifacts",
+            "v4_publish.after_artifacts_fsync",
+            "v4_publish.after_receipt_install",
+            "v4_publish.after_manifest_install",
+            "v4_publish.after_lock_install",
+            "encode.after_v4_before_inventory",
             "encode.control.after_temp_fsync.inventory.json",
             "encode.control.after_install.inventory.json",
         ] {
