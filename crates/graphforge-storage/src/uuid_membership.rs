@@ -140,6 +140,61 @@ pub(crate) struct V4OrdinalBuildMetrics {
     pub(crate) cancellation_polls: u64,
 }
 
+/// Aggregate-only work evidence for one incremental v4 publication.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct V4OrdinalAppendMetrics {
+    /// New UUID-to-surrogate mappings accepted by this publication.
+    pub input_identities: u64,
+    /// Sorted unique deletion overrides accepted by this publication.
+    pub input_tombstones: u64,
+    /// Canonical topology rows decoded from the prior generation. Always zero.
+    pub prior_topology_rows_decoded: u64,
+    /// Immutable artifacts created, including deterministic compaction outputs.
+    pub created_artifacts: u64,
+    /// Prior immutable artifacts retained without rewriting.
+    pub retained_artifacts: u64,
+    /// Binary-carry compactions completed.
+    pub compactions: u64,
+    /// Exact authenticated input bytes read by compaction.
+    pub sequential_read_bytes: u64,
+    /// Bounded sequential input calls made by compaction.
+    pub sequential_read_calls: u64,
+    /// Exact artifact and control bytes written.
+    pub physical_bytes_written: u64,
+    /// Bounded output blocks submitted.
+    pub write_blocks: u64,
+    /// Largest anonymous writer buffer.
+    pub peak_buffer_bytes: usize,
+    /// Maximum coexisting scratch output bytes.
+    pub peak_temporary_bytes: u64,
+    /// Durable file flushes completed while constructing outputs.
+    pub fsync_operations: u64,
+    /// Per-record filesystem seeks are forbidden.
+    pub per_record_seeks: u64,
+    /// Unreferenced v4 candidates examined after publication.
+    pub orphan_gc_candidates: u64,
+    /// Unreferenced v4 artifacts removed by retained identity.
+    pub orphan_gc_removed: u64,
+    /// Candidates conservatively deferred.
+    pub orphan_gc_deferred: u64,
+    /// Physical orphan bytes reclaimed.
+    pub orphan_gc_bytes: u64,
+}
+
+fn clone_pinned_v4_file(
+    pinned: &crate::ordinal_identity_v4::V4OrdinalPinnedUpdateInputs,
+    name: &str,
+) -> Result<File, GfError> {
+    pinned
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.descriptor.name == name)
+        .ok_or_else(|| storage_err("authenticated v4 update input is absent"))?
+        .file
+        .try_clone()
+        .map_err(storage_err)
+}
+
 /// Encode the already-canonical construction node stream without rescanning
 /// topology or consulting v3 reverse authority. The caller owns the durable
 /// rewrite transaction and publishes the returned manifest later.
@@ -3870,6 +3925,71 @@ fn selected_generation_for_graph_root(
     Ok(Some(selected))
 }
 
+/// Pin a standalone v4 facet through the admitted local receipt while the
+/// caller is about to enter the one project rewrite critical section. Project
+/// generation roots instead require their externally selected graph/files
+/// authority and never use this local path.
+fn standalone_v4_pinned_update(
+    project_root: &Path,
+    generation: u64,
+) -> Result<Option<crate::ordinal_identity_v4::V4OrdinalPinnedUpdateInputs>, GfError> {
+    let index_path = project_root.join(INDEX_DIR);
+    let index = match graphforge_filesystem::StableDirectory::open(&index_path) {
+        Ok(index) => index,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(storage_err(error)),
+    };
+    let mut manifest_file = match index.open_child_file(std::ffi::OsStr::new(V4_ORDINAL_MANIFEST)) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(storage_err(error)),
+    };
+    let mut receipt_file = index
+        .open_child_file(std::ffi::OsStr::new(V4_ORDINAL_RECEIPT))
+        .map_err(storage_err)?;
+    let manifest = read_bounded(
+        &mut manifest_file,
+        crate::ordinal_identity_v4::MAX_MANIFEST_BYTES,
+    )?;
+    let receipt = read_bounded(
+        &mut receipt_file,
+        crate::ordinal_identity_v4::MAX_MANIFEST_BYTES,
+    )?;
+    let receipt: TopologyIndexReceipt = serde_json::from_slice(&receipt).map_err(storage_err)?;
+    let manifest_sha256 = hex_sha256(&manifest);
+    if receipt.expected_generation != generation
+        || receipt.manifest_sha256 != manifest_sha256
+        || receipt.nonce.len() != 32
+        || !receipt
+            .nonce
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        return Err(storage_err(
+            "standalone v4 receipt does not authenticate current authority",
+        ));
+    }
+    index.revalidate_named().map_err(storage_err)?;
+    let authority = crate::ordinal_identity_v4::V4OrdinalIdentityAuthority {
+        topology_generation: generation,
+        manifest_sha256,
+    };
+    match crate::ordinal_identity_v4::V4OrdinalIdentityHandle::open(
+        project_root,
+        &authority,
+        crate::V4OrdinalIdentityLimits::default(),
+    )
+    .map_err(storage_err)?
+    {
+        crate::V4OrdinalIdentityOpen::Ready(handle) => {
+            handle.pinned_update_inputs().map(Some).map_err(storage_err)
+        }
+        crate::V4OrdinalIdentityOpen::RebuildRequired { .. } => Err(storage_err(
+            "standalone v4 ordinal identity requires rebuild before mutation",
+        )),
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn maintain_uuid_membership_orphans_with_ordinal_authority(
     project_dir: &Path,
@@ -3975,9 +4095,34 @@ fn collect_uuid_orphans_locked(
         }
         let bytes = file.metadata().map_err(storage_err)?.len();
         let identity = graphforge_filesystem::file_identity(&file).map_err(storage_err)?;
+        if is_canonical_v4_artifact_prefix(
+            text.strip_suffix(".uuidx")
+                .and_then(|stem| stem.rsplit_once('-').map(|(prefix, _)| prefix))
+                .unwrap_or_default(),
+        ) {
+            crate::project_failpoint::hit(
+                "v4_cleanup.before_unlink",
+                None,
+                None,
+                "V4_CLEANUP_BEFORE_UNLINK",
+                false,
+            )?;
+        }
         index
             .unlink_child_if_identity(&name, identity)
             .map_err(storage_err)?;
+        if text.starts_with("forward-v4-")
+            || text.starts_with("ordinal-v4-")
+            || text.starts_with("tombstones-v4-")
+        {
+            crate::project_failpoint::hit(
+                "v4_cleanup.after_unlink",
+                None,
+                None,
+                "V4_CLEANUP_AFTER_UNLINK",
+                false,
+            )?;
+        }
         work.removed = work.removed.saturating_add(1);
         work.bytes = work.bytes.saturating_add(bytes);
     }
@@ -4075,6 +4220,32 @@ pub(crate) struct PreparedUuidIndexDelta {
     manifest: Manifest,
 }
 
+pub(crate) struct PreparedV4OrdinalDelta {
+    expected_generation: u64,
+    auxiliary: crate::AuxiliaryReceipt,
+    metrics: V4OrdinalAppendMetrics,
+    manifest: crate::V4OrdinalIdentityManifest,
+}
+
+impl PreparedV4OrdinalDelta {
+    pub(crate) fn auxiliary_receipt(&self) -> crate::AuxiliaryReceipt {
+        self.auxiliary.clone()
+    }
+
+    pub(crate) fn verify_generation(&self, committed_generation: u64) -> Result<(), GfError> {
+        if committed_generation != self.expected_generation {
+            return Err(storage_err(
+                "topology commit returned an unexpected v4 ordinal generation",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn metrics(&self) -> &V4OrdinalAppendMetrics {
+        &self.metrics
+    }
+}
+
 pub(crate) struct UuidTopologyDelta {
     pub nodes: Vec<(Uuid, u64)>,
     pub edges: Vec<Uuid>,
@@ -4087,10 +4258,12 @@ pub(crate) enum CommittedUuidTopologyRewrite {
     Committed {
         generation: u64,
         metrics: UuidIndexAppendMetrics,
+        v4_metrics: Option<V4OrdinalAppendMetrics>,
     },
     CommittedNeedsRefresh {
         generation: u64,
         metrics: UuidIndexAppendMetrics,
+        v4_metrics: Option<V4OrdinalAppendMetrics>,
         error: GfError,
     },
 }
@@ -4117,6 +4290,30 @@ pub(crate) fn commit_uuid_topology_rewrite(
         .map(crate::ResolvedProjectGeneration::authenticated_v4_ordinal_authority)
         .transpose()?
         .flatten();
+    let ordinal_inputs = ordinal_authority
+        .as_ref()
+        .map(|authority| {
+            match authority
+                .open(project_dir, crate::V4OrdinalIdentityLimits::default())
+                .map_err(storage_err)?
+            {
+                crate::V4OrdinalIdentityOpen::Ready(handle) => {
+                    handle.pinned_update_inputs().map(Some).map_err(storage_err)
+                }
+                crate::V4OrdinalIdentityOpen::RebuildRequired { .. } => Err(storage_err(
+                    "v4 ordinal identity requires rebuild before mutation",
+                )),
+            }
+        })
+        .transpose()?
+        .flatten();
+    let ordinal_inputs = if ordinal_inputs.is_some() {
+        ordinal_inputs
+    } else if selected.is_none() {
+        standalone_v4_pinned_update(project_dir, crate::read_topology_generation(project_dir)?)?
+    } else {
+        None
+    };
     let membership_authority = selected
         .as_ref()
         .map(authenticated_v3_membership_authority)
@@ -4124,6 +4321,8 @@ pub(crate) fn commit_uuid_topology_rewrite(
         .flatten();
     let prepared = std::rc::Rc::new(std::cell::RefCell::new(None));
     let prepared_from_callback = std::rc::Rc::clone(&prepared);
+    let prepared_v4 = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let prepared_v4_from_callback = std::rc::Rc::clone(&prepared_v4);
     let generations = std::rc::Rc::new(std::cell::Cell::new(None));
     let generations_from_callback = std::rc::Rc::clone(&generations);
     let root = project_dir.to_path_buf();
@@ -4217,19 +4416,61 @@ pub(crate) fn commit_uuid_topology_rewrite(
             let receipt = token
                 .as_ref()
                 .map(PreparedUuidIndexDelta::auxiliary_receipt);
+            let prepared_ordinal = ordinal_inputs
+                .as_ref()
+                .map(|pinned| {
+                    let deleted_node_ids = deleted_nodes
+                        .iter()
+                        .map(|(_, node_id)| *node_id)
+                        .collect::<Vec<_>>();
+                    prepare_v4_ordinal_delta(
+                        context.project_root,
+                        context.prior.topology,
+                        context.next.topology,
+                        pinned,
+                        batch,
+                        &delta.nodes,
+                        &deleted_node_ids,
+                        &topology_delta_sha256(
+                            &delta.nodes,
+                            &delta.edges,
+                            &deleted_nodes,
+                            &deleted_edges,
+                        ),
+                    )
+                })
+                .transpose()?;
+            let receipt = prepared_ordinal
+                .as_ref()
+                .map(PreparedV4OrdinalDelta::auxiliary_receipt)
+                .or(receipt);
             *prepared_from_callback.borrow_mut() = token;
+            *prepared_v4_from_callback.borrow_mut() = prepared_ordinal;
             Ok(receipt)
         });
     let commit =
         crate::generation::commit_topology_aware_with_participant(staged, &root, participant);
     let token = prepared.borrow_mut().take();
+    let v4_token = prepared_v4.borrow_mut().take();
     let committed = match commit {
         Ok(value) => value,
         Err(error) => {
             let (Some(token), Some((prior, next))) = (token.as_ref(), generations.get()) else {
                 return Err(error);
             };
-            match reconcile_uuid_auxiliary(&root, prior, next, token)? {
+            let membership_outcome = reconcile_uuid_auxiliary(&root, prior, next, token)?;
+            let outcome = if let Some(v4) = v4_token.as_ref() {
+                let ordinal_outcome = reconcile_v4_ordinal_auxiliary(&root, prior, next, v4)?;
+                if membership_outcome != ordinal_outcome {
+                    return Err(storage_err(
+                        "v3 and v4 auxiliary reconciliation outcomes disagree",
+                    ));
+                }
+                ordinal_outcome
+            } else {
+                membership_outcome
+            };
+            match outcome {
                 crate::durable_rewrite::AuxiliaryReconcileOutcome::Committed => Some(next.topology),
                 crate::durable_rewrite::AuxiliaryReconcileOutcome::NotCommitted => {
                     return Err(error);
@@ -4238,8 +4479,12 @@ pub(crate) fn commit_uuid_topology_rewrite(
         }
     };
     let mut committed_metrics = UuidIndexAppendMetrics::default();
+    let committed_v4_metrics = v4_token.as_ref().map(|token| token.metrics().clone());
     if let (Some(generation), Some(token)) = (committed, token.as_ref()) {
         token.verify_generation(generation)?;
+        if let Some(v4) = v4_token.as_ref() {
+            v4.verify_generation(generation)?;
+        }
         committed_metrics = token.metrics().clone();
         let refresh = injected_snapshot_refresh_failure().map_or_else(
             || {
@@ -4257,6 +4502,7 @@ pub(crate) fn commit_uuid_topology_rewrite(
             return Ok(CommittedUuidTopologyRewrite::CommittedNeedsRefresh {
                 generation,
                 metrics: committed_metrics,
+                v4_metrics: committed_v4_metrics,
                 error,
             });
         }
@@ -4266,6 +4512,7 @@ pub(crate) fn commit_uuid_topology_rewrite(
         |generation| CommittedUuidTopologyRewrite::Committed {
             generation,
             metrics: committed_metrics,
+            v4_metrics: committed_v4_metrics,
         },
     ))
 }
@@ -4415,6 +4662,52 @@ fn reconcile_uuid_auxiliary(
     {
         return Err(storage_err(
             "committed UUID receipt does not authenticate the expected manifest",
+        ));
+    }
+    Ok(outcome)
+}
+
+fn reconcile_v4_ordinal_auxiliary(
+    project_dir: &Path,
+    prior: crate::durable_rewrite::GenerationPair,
+    next: crate::durable_rewrite::GenerationPair,
+    prepared: &PreparedV4OrdinalDelta,
+) -> Result<crate::durable_rewrite::AuxiliaryReconcileOutcome, GfError> {
+    let outcome = crate::durable_rewrite::reconcile_auxiliary(
+        project_dir,
+        prior,
+        next,
+        &prepared.auxiliary_receipt(),
+    )?;
+    if outcome == crate::durable_rewrite::AuxiliaryReconcileOutcome::NotCommitted {
+        return Ok(outcome);
+    }
+    let index = graphforge_filesystem::StableDirectory::open(&project_dir.join(INDEX_DIR))
+        .map_err(storage_err)?;
+    let mut receipt_file = index
+        .open_child_file(std::ffi::OsStr::new(V4_ORDINAL_RECEIPT))
+        .map_err(storage_err)?;
+    let receipt_body = read_bounded(
+        &mut receipt_file,
+        crate::ordinal_identity_v4::MAX_MANIFEST_BYTES,
+    )?;
+    let receipt: TopologyIndexReceipt =
+        serde_json::from_slice(&receipt_body).map_err(storage_err)?;
+    let mut manifest_file = index
+        .open_child_file(std::ffi::OsStr::new(V4_ORDINAL_MANIFEST))
+        .map_err(storage_err)?;
+    let manifest_body = read_bounded(
+        &mut manifest_file,
+        crate::ordinal_identity_v4::MAX_MANIFEST_BYTES,
+    )?;
+    index.revalidate_named().map_err(storage_err)?;
+    let expected = serde_json::to_vec(&prepared.manifest).map_err(storage_err)?;
+    if receipt.expected_generation != next.topology
+        || receipt.manifest_sha256 != hex_sha256(&manifest_body)
+        || manifest_body != expected
+    {
+        return Err(storage_err(
+            "committed v4 ordinal receipt does not authenticate the expected manifest",
         ));
     }
     Ok(outcome)
@@ -5864,6 +6157,782 @@ fn open_verified(root: &Path, record: &FileRecord, record_bytes: u64) -> Result<
     Ok(file)
 }
 
+/// Stage one incremental v4 node-ordinal delta beside the canonical topology
+/// mutation. The caller supplies a receipt-authenticated, lifetime-pinned prior
+/// snapshot and owns the enclosing generation-last rewrite transaction.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+// One manifest-last planner lifecycle; the ordering between pinned admission,
+// delta artifacts, compaction, receipt, manifest, and evidence is the invariant.
+pub(crate) fn prepare_v4_ordinal_delta(
+    project_dir: &Path,
+    current: u64,
+    generation: u64,
+    pinned: &crate::ordinal_identity_v4::V4OrdinalPinnedUpdateInputs,
+    batch: &mut crate::staging::RewriteBatch,
+    nodes: &[(Uuid, u64)],
+    deleted_node_ids: &[u64],
+    topology_delta_sha256: &str,
+) -> Result<PreparedV4OrdinalDelta, GfError> {
+    if generation
+        != current
+            .checked_add(1)
+            .ok_or_else(|| storage_err("v4 generation overflow"))?
+        || pinned.manifest.topology_generation != current
+    {
+        return Err(storage_err(
+            "prepared v4 ordinal delta is not the next authenticated generation",
+        ));
+    }
+    if topology_delta_sha256.len() != 64
+        || !topology_delta_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        return Err(storage_err("v4 topology delta digest is noncanonical"));
+    }
+
+    let parent = project_dir
+        .parent()
+        .ok_or_else(|| storage_err("project directory has no staging parent"))?;
+    let scratch = tempfile::Builder::new()
+        .prefix("uuid-membership-v4-plan-")
+        .tempdir_in(parent)
+        .map_err(storage_err)?;
+    let artifacts_path = scratch.path().join("artifacts");
+    fs::create_dir(&artifacts_path).map_err(storage_err)?;
+    let artifacts =
+        graphforge_filesystem::StableDirectory::open(&artifacts_path).map_err(storage_err)?;
+
+    let mut build_metrics = UuidIndexBuildMetrics::default();
+    let uuid_sorted = external_sort_v4_nodes(nodes, scratch.path(), &mut build_metrics)?;
+    let ordinal_sorted = build_surrogate_run(
+        &uuid_sorted,
+        scratch.path(),
+        UuidIndexBuildLimits::default(),
+        &mut build_metrics,
+    )?;
+    let mut deleted = deleted_node_ids.to_vec();
+    deleted.sort_unstable();
+    if deleted.contains(&0) || deleted.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(storage_err(
+            "v4 tombstone delta is not sorted unique nonzero",
+        ));
+    }
+
+    let prior_max = pinned
+        .manifest
+        .ordinal_ranges
+        .last()
+        .map(|range| {
+            range
+                .first_node_id
+                .checked_add(range.count.saturating_sub(1))
+                .ok_or_else(|| storage_err("retained v4 ordinal range overflows"))
+        })
+        .transpose()?
+        .unwrap_or(0);
+    let mut ordinal_probe = BufReader::new(File::open(&ordinal_sorted).map_err(storage_err)?);
+    let first_new = read_surrogate_record(&mut ordinal_probe)?;
+    if first_new.is_some_and(|(id, _)| id <= prior_max) {
+        return Err(storage_err(
+            "v4 node surrogate is not monotonic or is reused",
+        ));
+    }
+    if deleted.iter().any(|id| {
+        !pinned.manifest.ordinal_ranges.iter().any(|range| {
+            range
+                .first_node_id
+                .checked_add(range.count.saturating_sub(1))
+                .is_some_and(|last| (range.first_node_id..=last).contains(id))
+        })
+    }) {
+        return Err(storage_err(
+            "v4 tombstone does not name retained ordinal authority",
+        ));
+    }
+
+    let mut writer = V4OrdinalConstructionWriter::start(generation, &artifacts)?;
+    let mut cancelled = || false;
+    let mut forward = BufReader::with_capacity(
+        BULK_IO_BYTES,
+        File::open(&uuid_sorted).map_err(storage_err)?,
+    );
+    while let Some((uuid, node_id)) = read_node_surrogate_record(&mut forward)? {
+        writer.push_forward(Uuid::from_bytes(uuid), node_id, &mut cancelled)?;
+    }
+    let mut ordinal = BufReader::with_capacity(
+        BULK_IO_BYTES,
+        File::open(&ordinal_sorted).map_err(storage_err)?,
+    );
+    while let Some((node_id, uuid)) = read_surrogate_record(&mut ordinal)? {
+        writer.push_ordinal(node_id, Uuid::from_bytes(uuid), &mut cancelled)?;
+    }
+    let (delta_manifest, build) = writer.finish()?;
+    let (tombstones, tombstone_bytes, tombstone_blocks) =
+        write_v4_tombstone_artifact(&artifacts, generation, &deleted)?;
+    crate::project_failpoint::hit(
+        "v4_append.after_delta_artifacts",
+        None,
+        None,
+        "V4_APPEND_ARTIFACTS",
+        false,
+    )?;
+
+    let mut manifest = pinned.manifest.clone();
+    manifest.topology_generation = generation;
+    manifest
+        .forward_identities
+        .extend(delta_manifest.forward_identities);
+    manifest
+        .ordinal_ranges
+        .extend(delta_manifest.ordinal_ranges);
+    manifest.tombstones.push(tombstones);
+    manifest
+        .ordinal_ranges
+        .sort_unstable_by_key(|range| range.first_node_id);
+
+    let mut created = manifest
+        .forward_identities
+        .iter()
+        .chain(manifest.ordinal_ranges.iter().map(|range| &range.artifact))
+        .chain(manifest.tombstones.iter().map(|run| &run.artifact))
+        .filter(|artifact| artifact.generation == generation)
+        .map(|artifact| (artifact.name.clone(), artifacts_path.join(&artifact.name)))
+        .collect::<HashMap<_, _>>();
+    let compaction = compact_v4_binary_carry(
+        pinned,
+        &artifacts,
+        &artifacts_path,
+        &mut manifest,
+        &mut created,
+    )?;
+    if compaction.compactions != 0 {
+        crate::project_failpoint::hit(
+            "v4_compaction.after_outputs",
+            None,
+            None,
+            "V4_COMPACTION_OUTPUTS",
+            false,
+        )?;
+    }
+    admit_v4_construction_manifest(&manifest)?;
+
+    let destination = project_dir.join(INDEX_DIR);
+    let retained_names = v4_manifest_artifact_names(&manifest);
+    let mut outputs = created
+        .into_iter()
+        .filter(|(name, _)| retained_names.contains(name))
+        .collect::<Vec<_>>();
+    outputs.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    for (name, path) in &outputs {
+        batch.stage_file(&destination.join(name), path)?;
+    }
+    let manifest_bytes = serde_json::to_vec(&manifest).map_err(storage_err)?;
+    let receipt = TopologyIndexReceipt {
+        nonce: Uuid::new_v4().simple().to_string(),
+        expected_generation: generation,
+        topology_delta_sha256: topology_delta_sha256.to_owned(),
+        manifest_sha256: hex_sha256(&manifest_bytes),
+    };
+    let receipt_bytes = serde_json::to_vec(&receipt).map_err(storage_err)?;
+    let receipt_path = destination.join(V4_ORDINAL_RECEIPT);
+    let manifest_path = destination.join(V4_ORDINAL_MANIFEST);
+    batch.stage_bytes(&receipt_path, &receipt_bytes)?;
+    crate::project_failpoint::hit(
+        "v4_append.after_receipt_stage",
+        None,
+        None,
+        "V4_APPEND_RECEIPT",
+        false,
+    )?;
+    batch.stage_bytes(&manifest_path, &manifest_bytes)?;
+    batch.move_staged_destination_to_end(&manifest_path);
+    crate::project_failpoint::hit(
+        "v4_append.after_manifest_stage",
+        None,
+        None,
+        "V4_APPEND_MANIFEST",
+        false,
+    )?;
+
+    let prior_names = v4_manifest_artifact_names(&pinned.manifest);
+    let output_bytes = outputs.iter().try_fold(0_u64, |sum, (_, path)| {
+        sum.checked_add(path.metadata().map_err(storage_err)?.len())
+            .ok_or_else(|| storage_err("v4 output byte count overflow"))
+    })?;
+    let sorting_temporary_upper = u64::try_from(nodes.len())
+        .map_err(storage_err)?
+        .checked_mul(24 * 4)
+        .ok_or_else(|| storage_err("v4 sorting temporary byte count overflow"))?;
+    let external_peak_buffer = build_metrics
+        .peak_buffered_records
+        .checked_mul(24)
+        .ok_or_else(|| storage_err("v4 external-sort buffer charge overflow"))?;
+    let metrics = V4OrdinalAppendMetrics {
+        input_identities: u64::try_from(nodes.len()).map_err(storage_err)?,
+        input_tombstones: u64::try_from(deleted.len()).map_err(storage_err)?,
+        created_artifacts: u64::try_from(outputs.len()).map_err(storage_err)?,
+        retained_artifacts: u64::try_from(retained_names.intersection(&prior_names).count())
+            .map_err(storage_err)?,
+        physical_bytes_written: output_bytes
+            .checked_add(
+                u64::try_from(receipt_bytes.len() + manifest_bytes.len()).map_err(storage_err)?,
+            )
+            .ok_or_else(|| storage_err("v4 publication byte count overflow"))?,
+        compactions: compaction.compactions,
+        sequential_read_bytes: compaction.read_bytes,
+        sequential_read_calls: compaction.read_calls,
+        write_blocks: output_bytes.div_ceil(V4_ORDINAL_BLOCK_BYTES as u64),
+        peak_buffer_bytes: build
+            .peak_buffer_bytes
+            .max(V4_ORDINAL_BLOCK_BYTES * 3)
+            .max(external_peak_buffer),
+        peak_temporary_bytes: build
+            .peak_temporary_bytes
+            .saturating_add(tombstone_bytes)
+            .saturating_add(compaction.write_bytes)
+            .saturating_add(sorting_temporary_upper),
+        fsync_operations: build
+            .fsync_operations
+            .saturating_add(tombstone_blocks)
+            .saturating_add(compaction.fsync_operations),
+        ..Default::default()
+    };
+    Ok(PreparedV4OrdinalDelta {
+        expected_generation: generation,
+        auxiliary: crate::AuxiliaryReceipt {
+            kind: "uuid-membership/v4".to_owned(),
+            schema_version: crate::ORDINAL_IDENTITY_V4,
+            path: format!("{INDEX_DIR}/{V4_ORDINAL_RECEIPT}"),
+            digest: hex_sha256(&receipt_bytes),
+            bytes: u64::try_from(receipt_bytes.len()).map_err(storage_err)?,
+        },
+        metrics,
+        manifest,
+    })
+}
+
+fn external_sort_v4_nodes(
+    nodes: &[(Uuid, u64)],
+    scratch: &Path,
+    metrics: &mut UuidIndexBuildMetrics,
+) -> Result<PathBuf, GfError> {
+    let limits = UuidIndexBuildLimits::default();
+    let mut runs = Vec::new();
+    let mut buffer = Vec::with_capacity(limits.run_records);
+    for &(uuid, node_id) in nodes {
+        if uuid.is_nil() || node_id == 0 {
+            return Err(storage_err("v4 node delta contains a zero identity"));
+        }
+        buffer.push((*uuid.as_bytes(), node_id));
+        metrics.peak_buffered_records = metrics.peak_buffered_records.max(buffer.len());
+        if buffer.len() == limits.run_records {
+            flush_entity_surrogate_run(&mut buffer, scratch, "v4-delta", &mut runs, metrics)?;
+        }
+    }
+    if !buffer.is_empty() {
+        flush_entity_surrogate_run(&mut buffer, scratch, "v4-delta", &mut runs, metrics)?;
+    }
+    if runs.is_empty() {
+        let path = scratch.join("v4-delta-empty.run");
+        File::create(&path)
+            .and_then(|file| file.sync_all())
+            .map_err(storage_err)?;
+        runs.push(path);
+    }
+    merge_node_surrogate_runs(runs, scratch, limits.merge_fan_in, metrics)
+}
+
+fn write_v4_tombstone_artifact(
+    index: &graphforge_filesystem::StableDirectory,
+    generation: u64,
+    ids: &[u64],
+) -> Result<(crate::V4OrdinalTombstones, u64, u64), GfError> {
+    let mut writer = V4TombstoneStreamWriter::new(index, generation)?;
+    for &id in ids {
+        writer.push(id)?;
+    }
+    writer.finish()
+}
+
+struct V4TombstoneStreamWriter<'a> {
+    index: &'a graphforge_filesystem::StableDirectory,
+    generation: u64,
+    artifact: StreamingV4Artifact,
+    blocks: Vec<crate::V4OrdinalTombstoneBlock>,
+    block: Vec<u8>,
+    offset: u64,
+    previous: Option<u64>,
+}
+
+impl<'a> V4TombstoneStreamWriter<'a> {
+    fn new(
+        index: &'a graphforge_filesystem::StableDirectory,
+        generation: u64,
+    ) -> Result<Self, GfError> {
+        Ok(Self {
+            index,
+            generation,
+            artifact: StreamingV4Artifact::create(index, "tombstones-delta")?,
+            blocks: Vec::new(),
+            block: Vec::with_capacity(V4_ORDINAL_BLOCK_BYTES),
+            offset: 0,
+            previous: None,
+        })
+    }
+
+    fn push(&mut self, id: u64) -> Result<(), GfError> {
+        if id == 0 || self.previous.is_some_and(|previous| previous >= id) {
+            return Err(storage_err(
+                "v4 tombstone stream is not strictly increasing",
+            ));
+        }
+        self.block.extend_from_slice(&id.to_be_bytes());
+        self.previous = Some(id);
+        if self.block.len() == V4_ORDINAL_BLOCK_BYTES {
+            finish_v4_tombstone_block(
+                &mut self.artifact,
+                &mut self.blocks,
+                &mut self.block,
+                &mut self.offset,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<(crate::V4OrdinalTombstones, u64, u64), GfError> {
+        finish_v4_tombstone_block(
+            &mut self.artifact,
+            &mut self.blocks,
+            &mut self.block,
+            &mut self.offset,
+        )?;
+        let byte_count = self.artifact.bytes;
+        let mut metrics = V4OrdinalBuildMetrics::default();
+        let artifact = finish_streamed_v4_artifact(
+            self.artifact,
+            self.index,
+            "tombstones-v4",
+            self.generation,
+            crate::V4OrdinalArtifactKind::NodeTombstones,
+            &mut metrics,
+        )?;
+        Ok((
+            crate::V4OrdinalTombstones {
+                generation: self.generation,
+                artifact,
+                blocks: self.blocks,
+            },
+            byte_count,
+            metrics.fsync_operations,
+        ))
+    }
+}
+
+fn finish_v4_tombstone_block(
+    writer: &mut StreamingV4Artifact,
+    blocks: &mut Vec<crate::V4OrdinalTombstoneBlock>,
+    bytes: &mut Vec<u8>,
+    offset: &mut u64,
+) -> Result<(), GfError> {
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    let first = u64::from_be_bytes(bytes[..8].try_into().expect("fixed tombstone"));
+    let last = u64::from_be_bytes(
+        bytes[bytes.len() - 8..]
+            .try_into()
+            .expect("fixed tombstone"),
+    );
+    blocks.push(crate::V4OrdinalTombstoneBlock {
+        offset: *offset,
+        count: u64::try_from(bytes.len() / 8).map_err(storage_err)?,
+        first,
+        last,
+        sha256: hex_sha256(bytes),
+    });
+    writer.push(bytes)?;
+    *offset = offset
+        .checked_add(u64::try_from(bytes.len()).map_err(storage_err)?)
+        .ok_or_else(|| storage_err("v4 tombstone offset overflow"))?;
+    bytes.clear();
+    Ok(())
+}
+
+fn v4_manifest_artifact_names(manifest: &crate::V4OrdinalIdentityManifest) -> BTreeSet<String> {
+    manifest
+        .forward_identities
+        .iter()
+        .chain(manifest.ordinal_ranges.iter().map(|range| &range.artifact))
+        .chain(manifest.tombstones.iter().map(|run| &run.artifact))
+        .map(|artifact| artifact.name.clone())
+        .collect()
+}
+
+#[derive(Default)]
+struct V4CompactionWork {
+    compactions: u64,
+    read_bytes: u64,
+    read_calls: u64,
+    write_bytes: u64,
+    write_blocks: u64,
+    fsync_operations: u64,
+}
+
+fn compact_v4_binary_carry(
+    pinned: &crate::ordinal_identity_v4::V4OrdinalPinnedUpdateInputs,
+    artifacts: &graphforge_filesystem::StableDirectory,
+    artifacts_path: &Path,
+    manifest: &mut crate::V4OrdinalIdentityManifest,
+    created: &mut HashMap<String, PathBuf>,
+) -> Result<V4CompactionWork, GfError> {
+    let mut work = V4CompactionWork::default();
+    loop {
+        let intervals = v4_forward_intervals(&manifest.forward_identities)?;
+        if intervals.len() < 3 {
+            break;
+        }
+        let left = intervals[intervals.len() - 2];
+        let right = intervals[intervals.len() - 1];
+        if left.1 - left.0 != right.1 - right.0 {
+            break;
+        }
+        let left_descriptor = manifest.forward_identities[left.2].clone();
+        let right_descriptor = manifest.forward_identities[right.2].clone();
+        let merged_forward = merge_v4_forward_artifacts(
+            v4_planned_file(pinned, created, &left_descriptor.name)?,
+            v4_planned_file(pinned, created, &right_descriptor.name)?,
+            artifacts,
+            right.1,
+            &mut work,
+        )?;
+        created.insert(
+            merged_forward.name.clone(),
+            artifacts_path.join(&merged_forward.name),
+        );
+        manifest
+            .forward_identities
+            .splice(left.2..=right.2, std::iter::once(merged_forward));
+
+        compact_v4_ordinal_interval(
+            pinned,
+            artifacts,
+            artifacts_path,
+            manifest,
+            created,
+            left.0,
+            right.1,
+            &mut work,
+        )?;
+        compact_v4_tombstone_interval(
+            pinned,
+            artifacts,
+            artifacts_path,
+            manifest,
+            created,
+            left.0,
+            right.1,
+            &mut work,
+        )?;
+        work.compactions = work.compactions.saturating_add(1);
+    }
+    Ok(work)
+}
+
+/// Return `(first_generation, last_generation, descriptor_index)`. The first
+/// artifact is the immutable construction base. Every later retained forward
+/// run closes one contiguous delta interval, so binary-carry level is encoded
+/// without expanding the public manifest schema.
+fn v4_forward_intervals(
+    forwards: &[crate::V4OrdinalArtifact],
+) -> Result<Vec<(u64, u64, usize)>, GfError> {
+    let Some(base_generation) = forwards.first().map(|artifact| artifact.generation) else {
+        return Err(storage_err("v4 forward base generation is invalid"));
+    };
+    let mut intervals = vec![(1, base_generation, 0)];
+    let mut prior = base_generation;
+    for (index, artifact) in forwards.iter().enumerate().skip(1) {
+        let first = prior
+            .checked_add(1)
+            .ok_or_else(|| storage_err("v4 forward interval overflows"))?;
+        if artifact.generation < first {
+            return Err(storage_err("v4 forward generations do not increase"));
+        }
+        intervals.push((first, artifact.generation, index));
+        prior = artifact.generation;
+    }
+    Ok(intervals)
+}
+
+fn v4_planned_file(
+    pinned: &crate::ordinal_identity_v4::V4OrdinalPinnedUpdateInputs,
+    created: &HashMap<String, PathBuf>,
+    name: &str,
+) -> Result<File, GfError> {
+    created.get(name).map_or_else(
+        || clone_pinned_v4_file(pinned, name),
+        |path| File::open(path).map_err(storage_err),
+    )
+}
+
+fn read_v4_forward_record(reader: &mut impl Read) -> Result<Option<([u8; 16], u64)>, GfError> {
+    let Some(record) = read_exact_record::<24>(reader)? else {
+        return Ok(None);
+    };
+    Ok(Some((
+        record[..16].try_into().expect("fixed UUID"),
+        u64::from_be_bytes(record[16..].try_into().expect("fixed surrogate")),
+    )))
+}
+
+fn merge_v4_forward_artifacts(
+    left: File,
+    right: File,
+    index: &graphforge_filesystem::StableDirectory,
+    generation: u64,
+    work: &mut V4CompactionWork,
+) -> Result<crate::V4OrdinalArtifact, GfError> {
+    let mut readers = [
+        BufReader::with_capacity(V4_ORDINAL_BLOCK_BYTES, left),
+        BufReader::with_capacity(V4_ORDINAL_BLOCK_BYTES, right),
+    ];
+    let mut heads = [
+        read_v4_forward_record(&mut readers[0])?,
+        read_v4_forward_record(&mut readers[1])?,
+    ];
+    let mut writer = StreamingV4Artifact::create(index, "forward-compact")?;
+    let mut previous = None;
+    loop {
+        let source = match (heads[0], heads[1]) {
+            (None, None) => break,
+            (Some(_), None) => 0,
+            (None, Some(_)) => 1,
+            (Some(left), Some(right)) => usize::from(left.0 >= right.0),
+        };
+        let record = heads[source].expect("selected head");
+        if heads[0].is_some_and(|candidate| candidate.0 == record.0)
+            && heads[1].is_some_and(|candidate| candidate.0 == record.0)
+        {
+            let newer = heads[1].expect("right duplicate");
+            heads[0] = read_v4_forward_record(&mut readers[0])?;
+            heads[1] = read_v4_forward_record(&mut readers[1])?;
+            if record.1 != newer.1 {
+                return Err(storage_err("v4 compaction observed UUID reuse"));
+            }
+            write_v4_forward_record(&mut writer, newer)?;
+            previous = Some(newer.0);
+            continue;
+        }
+        if previous.is_some_and(|uuid| uuid >= record.0) {
+            return Err(storage_err("v4 compaction input is not sorted unique"));
+        }
+        write_v4_forward_record(&mut writer, record)?;
+        previous = Some(record.0);
+        heads[source] = read_v4_forward_record(&mut readers[source])?;
+    }
+    let input_bytes = readers
+        .iter()
+        .map(|reader| {
+            reader
+                .get_ref()
+                .metadata()
+                .map_or(0, |metadata| metadata.len())
+        })
+        .sum::<u64>();
+    work.read_bytes = work.read_bytes.saturating_add(input_bytes);
+    work.read_calls = work
+        .read_calls
+        .saturating_add(input_bytes.div_ceil(V4_ORDINAL_BLOCK_BYTES as u64));
+    let bytes = writer.bytes;
+    let mut metrics = V4OrdinalBuildMetrics::default();
+    let artifact = finish_streamed_v4_artifact(
+        writer,
+        index,
+        "forward-v4",
+        generation,
+        crate::V4OrdinalArtifactKind::ForwardIdentities,
+        &mut metrics,
+    )?;
+    work.write_bytes = work.write_bytes.saturating_add(bytes);
+    work.write_blocks = work
+        .write_blocks
+        .saturating_add(bytes.div_ceil(V4_ORDINAL_BLOCK_BYTES as u64));
+    work.fsync_operations = work
+        .fsync_operations
+        .saturating_add(metrics.fsync_operations);
+    Ok(artifact)
+}
+
+fn write_v4_forward_record(
+    writer: &mut StreamingV4Artifact,
+    (uuid, node_id): ([u8; 16], u64),
+) -> Result<(), GfError> {
+    writer.push(&uuid)?;
+    writer.push(&node_id.to_be_bytes())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compact_v4_ordinal_interval(
+    pinned: &crate::ordinal_identity_v4::V4OrdinalPinnedUpdateInputs,
+    index: &graphforge_filesystem::StableDirectory,
+    artifacts_path: &Path,
+    manifest: &mut crate::V4OrdinalIdentityManifest,
+    created: &mut HashMap<String, PathBuf>,
+    first_generation: u64,
+    last_generation: u64,
+    work: &mut V4CompactionWork,
+) -> Result<(), GfError> {
+    let mut replacement = Vec::new();
+    let mut cursor = 0;
+    while cursor < manifest.ordinal_ranges.len() {
+        let range = &manifest.ordinal_ranges[cursor];
+        if !(first_generation..=last_generation).contains(&range.artifact.generation) {
+            replacement.push(range.clone());
+            cursor += 1;
+            continue;
+        }
+        let start = cursor;
+        let mut end = cursor + 1;
+        let mut prior_end = range
+            .first_node_id
+            .checked_add(range.count - 1)
+            .ok_or_else(|| storage_err("v4 ordinal range overflows"))?;
+        while end < manifest.ordinal_ranges.len() {
+            let next = &manifest.ordinal_ranges[end];
+            if !(first_generation..=last_generation).contains(&next.artifact.generation)
+                || prior_end.checked_add(1) != Some(next.first_node_id)
+            {
+                break;
+            }
+            prior_end = next
+                .first_node_id
+                .checked_add(next.count - 1)
+                .ok_or_else(|| storage_err("v4 ordinal range overflows"))?;
+            end += 1;
+        }
+        if end - start == 1 {
+            replacement.push(manifest.ordinal_ranges[start].clone());
+        } else {
+            let mut writer = V4OrdinalRangeWriter::new(
+                index,
+                replacement.len(),
+                manifest.ordinal_ranges[start].first_node_id,
+            )?;
+            for source in &manifest.ordinal_ranges[start..end] {
+                let mut file = BufReader::with_capacity(
+                    V4_ORDINAL_BLOCK_BYTES,
+                    v4_planned_file(pinned, created, &source.artifact.name)?,
+                );
+                while let Some(uuid) = read_exact_record::<16>(&mut file)? {
+                    writer.push(uuid)?;
+                }
+                work.read_bytes = work.read_bytes.saturating_add(source.artifact.bytes);
+                work.read_calls = work.read_calls.saturating_add(
+                    source
+                        .artifact
+                        .bytes
+                        .div_ceil(V4_ORDINAL_BLOCK_BYTES as u64),
+                );
+            }
+            let mut ranges = Vec::new();
+            let mut metrics = V4OrdinalBuildMetrics::default();
+            finish_streamed_v4_range(index, last_generation, writer, &mut ranges, &mut metrics)?;
+            let merged = ranges.pop().expect("one merged range");
+            created.insert(
+                merged.artifact.name.clone(),
+                artifacts_path.join(&merged.artifact.name),
+            );
+            work.write_bytes = work.write_bytes.saturating_add(merged.artifact.bytes);
+            work.write_blocks = work.write_blocks.saturating_add(
+                merged
+                    .artifact
+                    .bytes
+                    .div_ceil(V4_ORDINAL_BLOCK_BYTES as u64),
+            );
+            work.fsync_operations = work
+                .fsync_operations
+                .saturating_add(metrics.fsync_operations);
+            replacement.push(merged);
+        }
+        cursor = end;
+    }
+    manifest.ordinal_ranges = replacement;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compact_v4_tombstone_interval(
+    pinned: &crate::ordinal_identity_v4::V4OrdinalPinnedUpdateInputs,
+    index: &graphforge_filesystem::StableDirectory,
+    artifacts_path: &Path,
+    manifest: &mut crate::V4OrdinalIdentityManifest,
+    created: &mut HashMap<String, PathBuf>,
+    first_generation: u64,
+    last_generation: u64,
+    work: &mut V4CompactionWork,
+) -> Result<(), GfError> {
+    let selected = manifest
+        .tombstones
+        .iter()
+        .filter(|run| (first_generation..=last_generation).contains(&run.generation))
+        .cloned()
+        .collect::<Vec<_>>();
+    if selected.len() < 2 {
+        return Ok(());
+    }
+    let mut readers = selected
+        .iter()
+        .map(|run| {
+            v4_planned_file(pinned, created, &run.artifact.name)
+                .map(|file| BufReader::with_capacity(V4_ORDINAL_BLOCK_BYTES, file))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut heap = BinaryHeap::<Reverse<(u64, usize)>>::new();
+    for (source, reader) in readers.iter_mut().enumerate() {
+        if let Some(bytes) = read_exact_record::<8>(reader)? {
+            heap.push(Reverse((u64::from_be_bytes(bytes), source)));
+        }
+    }
+    let mut merged = V4TombstoneStreamWriter::new(index, last_generation)?;
+    let mut previous = None;
+    while let Some(Reverse((id, source))) = heap.pop() {
+        if previous != Some(id) {
+            merged.push(id)?;
+            previous = Some(id);
+        }
+        if let Some(bytes) = read_exact_record::<8>(&mut readers[source])? {
+            heap.push(Reverse((u64::from_be_bytes(bytes), source)));
+        }
+    }
+    let (run, bytes, fsyncs) = merged.finish()?;
+    created.insert(
+        run.artifact.name.clone(),
+        artifacts_path.join(&run.artifact.name),
+    );
+    manifest
+        .tombstones
+        .retain(|candidate| !(first_generation..=last_generation).contains(&candidate.generation));
+    manifest.tombstones.push(run);
+    manifest
+        .tombstones
+        .sort_unstable_by_key(|run| run.generation);
+    work.read_bytes = work
+        .read_bytes
+        .saturating_add(selected.iter().map(|run| run.artifact.bytes).sum::<u64>());
+    work.read_calls = work.read_calls.saturating_add(
+        selected
+            .iter()
+            .map(|run| run.artifact.bytes.div_ceil(V4_ORDINAL_BLOCK_BYTES as u64))
+            .sum::<u64>(),
+    );
+    work.write_bytes = work.write_bytes.saturating_add(bytes);
+    work.write_blocks = work
+        .write_blocks
+        .saturating_add(bytes.div_ceil(V4_ORDINAL_BLOCK_BYTES as u64));
+    work.fsync_operations = work.fsync_operations.saturating_add(fsyncs);
+    Ok(())
+}
+
 /// Explicit bounded rebuild/migration path. Immutable data files are completed
 /// and synced first; `manifest.json` is atomically replaced last.
 pub fn rebuild_uuid_membership_indexes(
@@ -7137,6 +8206,251 @@ pub(crate) mod tests {
     use parquet::arrow::ArrowWriter;
 
     use super::*;
+
+    fn pinned_v4_update(
+        root: &Path,
+        manifest: crate::V4OrdinalIdentityManifest,
+    ) -> crate::ordinal_identity_v4::V4OrdinalPinnedUpdateInputs {
+        let index = root.join(INDEX_DIR);
+        let artifacts = manifest
+            .forward_identities
+            .iter()
+            .chain(manifest.ordinal_ranges.iter().map(|range| &range.artifact))
+            .chain(manifest.tombstones.iter().map(|run| &run.artifact))
+            .map(
+                |descriptor| crate::ordinal_identity_v4::PinnedV4OrdinalArtifact {
+                    descriptor: descriptor.clone(),
+                    file: File::open(index.join(&descriptor.name)).unwrap(),
+                },
+            )
+            .collect();
+        crate::ordinal_identity_v4::V4OrdinalPinnedUpdateInputs {
+            manifest,
+            artifacts,
+        }
+    }
+
+    fn install_v4_plan(batch: &crate::staging::RewriteBatch) {
+        let destinations = batch
+            .staged_paths()
+            .map(Path::to_path_buf)
+            .collect::<Vec<_>>();
+        for destination in destinations {
+            let temporary = batch.staged_temp(&destination).unwrap();
+            fs::copy(temporary, &destination).unwrap();
+        }
+    }
+
+    #[test]
+    fn v4_delta_append_delete_binary_carry_reopens_without_resurrection() {
+        let root = tempfile::tempdir().unwrap();
+        let index_path = root.path().join(INDEX_DIR);
+        fs::create_dir_all(&index_path).unwrap();
+        let index = graphforge_filesystem::StableDirectory::open(&index_path).unwrap();
+        let (base, _) = stage_v4_ordinal_artifacts(
+            [(Uuid::from_u128(1), 1_u64), (Uuid::from_u128(2), 2_u64)],
+            1,
+            &index,
+            || false,
+        )
+        .unwrap();
+        fs::write(
+            index_path.join(V4_ORDINAL_MANIFEST),
+            serde_json::to_vec(&base).unwrap(),
+        )
+        .unwrap();
+        fs::write(index_path.join("ordinal-v4.lock"), []).unwrap();
+
+        let pinned = pinned_v4_update(root.path(), base);
+        let mut second = crate::staging::RewriteBatch::new();
+        let planned_second = prepare_v4_ordinal_delta(
+            root.path(),
+            1,
+            2,
+            &pinned,
+            &mut second,
+            &[(Uuid::from_u128(3), 3_u64), (Uuid::from_u128(4), 4_u64)],
+            &[1],
+            &"11".repeat(32),
+        )
+        .unwrap();
+        assert_eq!(planned_second.metrics.input_identities, 2);
+        assert_eq!(planned_second.metrics.input_tombstones, 1);
+        assert_eq!(planned_second.metrics.prior_topology_rows_decoded, 0);
+        assert_eq!(planned_second.metrics.per_record_seeks, 0);
+        assert_eq!(planned_second.metrics.compactions, 0);
+        install_v4_plan(&second);
+
+        let pinned = pinned_v4_update(root.path(), planned_second.manifest);
+        let mut third = crate::staging::RewriteBatch::new();
+        let planned_third = prepare_v4_ordinal_delta(
+            root.path(),
+            2,
+            3,
+            &pinned,
+            &mut third,
+            &[(Uuid::from_u128(5), 5_u64)],
+            &[2],
+            &"22".repeat(32),
+        )
+        .unwrap();
+        assert_eq!(planned_third.metrics.compactions, 1);
+        assert_eq!(planned_third.manifest.forward_identities.len(), 2);
+        assert_eq!(planned_third.manifest.ordinal_ranges.len(), 2);
+        assert_eq!(planned_third.manifest.tombstones.len(), 2);
+        assert!(planned_third.metrics.peak_buffer_bytes <= V4_ORDINAL_BLOCK_BYTES * 3);
+        install_v4_plan(&third);
+
+        let manifest_bytes = serde_json::to_vec(&planned_third.manifest).unwrap();
+        fs::write(index_path.join(V4_ORDINAL_MANIFEST), &manifest_bytes).unwrap();
+        let authority = crate::ordinal_identity_v4::V4OrdinalIdentityAuthority {
+            topology_generation: 3,
+            manifest_sha256: hex_sha256(&manifest_bytes),
+        };
+        let mut handle = match crate::ordinal_identity_v4::V4OrdinalIdentityHandle::open(
+            root.path(),
+            &authority,
+            crate::V4OrdinalIdentityLimits::default(),
+        )
+        .unwrap()
+        {
+            crate::V4OrdinalIdentityOpen::Ready(handle) => handle,
+            crate::V4OrdinalIdentityOpen::RebuildRequired { .. } => panic!("v4 expected"),
+        };
+        let lookup = handle.lookup_node_uuids(&[1, 2, 3, 4, 5]).unwrap();
+        assert_eq!(
+            lookup.values,
+            vec![
+                None,
+                None,
+                Some(Uuid::from_u128(3)),
+                Some(Uuid::from_u128(4)),
+                Some(Uuid::from_u128(5)),
+            ]
+        );
+    }
+
+    #[test]
+    fn v4_delta_rejects_reuse_and_invalid_tombstones_before_staging() {
+        let root = tempfile::tempdir().unwrap();
+        let index_path = root.path().join(INDEX_DIR);
+        fs::create_dir_all(&index_path).unwrap();
+        let index = graphforge_filesystem::StableDirectory::open(&index_path).unwrap();
+        let (base, _) =
+            stage_v4_ordinal_artifacts([(Uuid::from_u128(1), 7_u64)], 1, &index, || false).unwrap();
+        let pinned = pinned_v4_update(root.path(), base);
+
+        for (nodes, tombstones) in [
+            (vec![(Uuid::from_u128(2), 7_u64)], vec![]),
+            (vec![(Uuid::from_u128(2), 8_u64)], vec![0]),
+            (vec![(Uuid::from_u128(2), 8_u64)], vec![99]),
+            (
+                vec![(Uuid::from_u128(2), 8_u64), (Uuid::from_u128(2), 9_u64)],
+                vec![],
+            ),
+        ] {
+            let mut batch = crate::staging::RewriteBatch::new();
+            assert!(
+                prepare_v4_ordinal_delta(
+                    root.path(),
+                    1,
+                    2,
+                    &pinned,
+                    &mut batch,
+                    &nodes,
+                    &tombstones,
+                    &"33".repeat(32),
+                )
+                .is_err()
+            );
+            assert!(batch.is_empty());
+        }
+    }
+
+    #[test]
+    fn v4_delta_one_two_four_history_is_bounded_and_binary_carried() {
+        let root = tempfile::tempdir().unwrap();
+        let index_path = root.path().join(INDEX_DIR);
+        fs::create_dir_all(&index_path).unwrap();
+        let index = graphforge_filesystem::StableDirectory::open(&index_path).unwrap();
+        let (mut manifest, _) =
+            stage_v4_ordinal_artifacts([(Uuid::from_u128(1), 1_u64)], 1, &index, || false).unwrap();
+        let mut observed = Vec::new();
+        for generation in 2..=5_u64 {
+            let pinned = pinned_v4_update(root.path(), manifest);
+            let mut batch = crate::staging::RewriteBatch::new();
+            let planned = prepare_v4_ordinal_delta(
+                root.path(),
+                generation - 1,
+                generation,
+                &pinned,
+                &mut batch,
+                &[(Uuid::from_u128(u128::from(generation)), generation)],
+                &[],
+                &"44".repeat(32),
+            )
+            .unwrap();
+            assert_eq!(planned.metrics.prior_topology_rows_decoded, 0);
+            assert_eq!(planned.metrics.per_record_seeks, 0);
+            assert!(planned.metrics.peak_buffer_bytes <= V4_ORDINAL_BLOCK_BYTES * 3);
+            observed.push((
+                planned.metrics.compactions,
+                planned.metrics.physical_bytes_written,
+                planned.manifest.forward_identities.len(),
+            ));
+            install_v4_plan(&batch);
+            manifest = planned.manifest;
+        }
+        assert_eq!(
+            observed.iter().map(|row| row.0).collect::<Vec<_>>(),
+            [0, 1, 0, 2]
+        );
+        assert_eq!(manifest.forward_identities.len(), 2);
+        assert_eq!(manifest.ordinal_ranges.len(), 2);
+        assert!(observed.iter().all(|row| row.1 != 0));
+    }
+
+    #[test]
+    fn standalone_existing_v4_advances_with_topology_transaction() {
+        let (dir, _, _) = fixture();
+        fs::write(
+            dir.path().join("topology/generation.json"),
+            b"{\"topology_generation\":7,\"search_generation\":0,\"property_generation\":0}\n",
+        )
+        .unwrap();
+        rebuild_uuid_membership_indexes(dir.path(), UuidIndexBuildLimits::default()).unwrap();
+        rebuild_v4_ordinal_identity(dir.path(), UuidIndexBuildLimits::default()).unwrap();
+        let topology = dir.path().join("topology/nodes.parquet");
+        let mut staged = crate::staging::RewriteBatch::new();
+        staged.stage_file(&topology, &topology).unwrap();
+        let mut snapshot = None;
+        let committed = commit_uuid_topology_rewrite(
+            dir.path(),
+            staged,
+            &UuidTopologyDelta {
+                nodes: Vec::new(),
+                edges: Vec::new(),
+                deleted_nodes: Vec::new(),
+                deleted_edges: Vec::new(),
+            },
+            &mut snapshot,
+        )
+        .unwrap();
+        assert!(matches!(
+            committed,
+            CommittedUuidTopologyRewrite::Committed { generation: 8, .. }
+        ));
+        let manifest: crate::V4OrdinalIdentityManifest = serde_json::from_slice(
+            &fs::read(dir.path().join(INDEX_DIR).join(V4_ORDINAL_MANIFEST)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(manifest.topology_generation, 8);
+        assert!(
+            standalone_v4_pinned_update(dir.path(), 8)
+                .unwrap()
+                .is_some()
+        );
+    }
 
     #[test]
     fn shared_v4_builder_rejects_sparse_manifest_above_reader_bound() {
