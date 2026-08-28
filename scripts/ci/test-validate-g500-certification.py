@@ -231,6 +231,7 @@ def test_actual_certification_contract_builds_and_validates_adjacent_qualificati
     ("section", "key", "value"),
     [
         ("tools", "build", "018f6e45-7f12-7c00-8000-000000000001"),
+        ("tools", "build", "00000000-0000-0000-0000-000000000000"),
         ("tools", "build", "/var/lib/graphforge/project"),
         ("tools", "machine_id", "redacted"),
         ("tools", "volume-id", "redacted"),
