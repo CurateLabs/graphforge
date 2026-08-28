@@ -4416,7 +4416,7 @@ pub(crate) fn commit_uuid_topology_rewrite(
             let receipt = token
                 .as_ref()
                 .map(PreparedUuidIndexDelta::auxiliary_receipt);
-            let prepared_ordinal = ordinal_inputs
+            let mut prepared_ordinal = ordinal_inputs
                 .as_ref()
                 .map(|pinned| {
                     let deleted_node_ids = deleted_nodes
@@ -4440,6 +4440,12 @@ pub(crate) fn commit_uuid_topology_rewrite(
                     )
                 })
                 .transpose()?;
+            if let Some(token) = prepared_ordinal.as_mut() {
+                token.metrics.orphan_gc_candidates = orphan_gc.candidates;
+                token.metrics.orphan_gc_removed = orphan_gc.removed;
+                token.metrics.orphan_gc_deferred = orphan_gc.deferred;
+                token.metrics.orphan_gc_bytes = orphan_gc.bytes;
+            }
             let receipt = prepared_ordinal
                 .as_ref()
                 .map(PreparedV4OrdinalDelta::auxiliary_receipt)
@@ -6194,10 +6200,12 @@ pub(crate) fn prepare_v4_ordinal_delta(
     let parent = project_dir
         .parent()
         .ok_or_else(|| storage_err("project directory has no staging parent"))?;
+    cleanup_abandoned_v4_plan_directories(project_dir, parent)?;
     let scratch = tempfile::Builder::new()
         .prefix("uuid-membership-v4-plan-")
         .tempdir_in(parent)
         .map_err(storage_err)?;
+    initialize_v4_plan_directory(project_dir, scratch.path())?;
     let artifacts_path = scratch.path().join("artifacts");
     fs::create_dir(&artifacts_path).map_err(storage_err)?;
     let artifacts =
@@ -6205,6 +6213,7 @@ pub(crate) fn prepare_v4_ordinal_delta(
 
     let mut build_metrics = UuidIndexBuildMetrics::default();
     let uuid_sorted = external_sort_v4_nodes(nodes, scratch.path(), &mut build_metrics)?;
+    reject_prior_v4_uuid_reuse(pinned, &uuid_sorted)?;
     let ordinal_sorted = build_surrogate_run(
         &uuid_sorted,
         scratch.path(),
@@ -6299,6 +6308,7 @@ pub(crate) fn prepare_v4_ordinal_delta(
         .filter(|artifact| artifact.generation == generation)
         .map(|artifact| (artifact.name.clone(), artifacts_path.join(&artifact.name)))
         .collect::<HashMap<_, _>>();
+    let delta_created_artifacts = u64::try_from(created.len()).map_err(storage_err)?;
     let compaction = compact_v4_binary_carry(
         pinned,
         &artifacts,
@@ -6356,10 +6366,6 @@ pub(crate) fn prepare_v4_ordinal_delta(
     )?;
 
     let prior_names = v4_manifest_artifact_names(&pinned.manifest);
-    let output_bytes = outputs.iter().try_fold(0_u64, |sum, (_, path)| {
-        sum.checked_add(path.metadata().map_err(storage_err)?.len())
-            .ok_or_else(|| storage_err("v4 output byte count overflow"))
-    })?;
     let sorting_temporary_upper = u64::try_from(nodes.len())
         .map_err(storage_err)?
         .checked_mul(24 * 4)
@@ -6371,10 +6377,13 @@ pub(crate) fn prepare_v4_ordinal_delta(
     let metrics = V4OrdinalAppendMetrics {
         input_identities: u64::try_from(nodes.len()).map_err(storage_err)?,
         input_tombstones: u64::try_from(deleted.len()).map_err(storage_err)?,
-        created_artifacts: u64::try_from(outputs.len()).map_err(storage_err)?,
+        created_artifacts: delta_created_artifacts.saturating_add(compaction.created_artifacts),
         retained_artifacts: u64::try_from(retained_names.intersection(&prior_names).count())
             .map_err(storage_err)?,
-        physical_bytes_written: output_bytes
+        physical_bytes_written: build
+            .artifact_bytes
+            .saturating_add(tombstone_bytes)
+            .saturating_add(compaction.write_bytes)
             .checked_add(
                 u64::try_from(receipt_bytes.len() + manifest_bytes.len()).map_err(storage_err)?,
             )
@@ -6382,7 +6391,10 @@ pub(crate) fn prepare_v4_ordinal_delta(
         compactions: compaction.compactions,
         sequential_read_bytes: compaction.read_bytes,
         sequential_read_calls: compaction.read_calls,
-        write_blocks: output_bytes.div_ceil(V4_ORDINAL_BLOCK_BYTES as u64),
+        write_blocks: build
+            .write_blocks
+            .saturating_add(tombstone_blocks)
+            .saturating_add(compaction.write_blocks),
         peak_buffer_bytes: build
             .peak_buffer_bytes
             .max(V4_ORDINAL_BLOCK_BYTES * 3)
@@ -6410,6 +6422,187 @@ pub(crate) fn prepare_v4_ordinal_delta(
         metrics,
         manifest,
     })
+}
+
+const V4_PLAN_PREFIX: &str = "uuid-membership-v4-plan-";
+const V4_PLAN_MARKER: &str = ".graphforge-v4-plan-v1";
+const V4_PLAN_CLEANUP_CANDIDATES: usize = 16;
+const V4_PLAN_PARENT_ENTRIES: usize = 65_536;
+const V4_PLAN_CLEANUP_ENTRIES: usize = 4096;
+const V4_PLAN_CLEANUP_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+fn v4_plan_marker(project_dir: &Path) -> Result<Vec<u8>, GfError> {
+    let identity = graphforge_filesystem::path_identity(project_dir).map_err(storage_err)?;
+    Ok(format!(
+        "graphforge-v4-plan-v1\nproject-volume={:016x}\nproject-file={}\n",
+        identity.volume_serial,
+        hex_bytes(&identity.file_id)
+    )
+    .into_bytes())
+}
+
+fn initialize_v4_plan_directory(project_dir: &Path, scratch: &Path) -> Result<(), GfError> {
+    let directory = graphforge_filesystem::StableDirectory::open(scratch).map_err(storage_err)?;
+    let marker = directory
+        .create_child_file(std::ffi::OsStr::new(V4_PLAN_MARKER))
+        .map_err(storage_err)?;
+    (&marker)
+        .write_all(&v4_plan_marker(project_dir)?)
+        .and_then(|()| marker.sync_all())
+        .map_err(storage_err)?;
+    directory.sync().map_err(storage_err)
+}
+
+/// Reclaim only exact, self-authenticating planner siblings left by process
+/// death. Inventory, entry count, and physical bytes are capped; linked,
+/// special, substituted, or structurally unexpected children fail closed.
+fn cleanup_abandoned_v4_plan_directories(
+    project_dir: &Path,
+    parent_path: &Path,
+) -> Result<(), GfError> {
+    let parent = graphforge_filesystem::StableDirectory::open(parent_path).map_err(storage_err)?;
+    let expected_marker = v4_plan_marker(project_dir)?;
+    let candidates = parent
+        .child_names_bounded(V4_PLAN_PARENT_ENTRIES)
+        .map_err(|error| {
+            storage_err(format!(
+                "v4 planner parent inventory at {}: {error}",
+                parent_path.display()
+            ))
+        })?
+        .into_iter()
+        .filter(|name| {
+            name.to_str().is_some_and(|text| {
+                text.strip_prefix(V4_PLAN_PREFIX).is_some_and(|nonce| {
+                    !nonce.is_empty() && nonce.bytes().all(|byte| byte.is_ascii_alphanumeric())
+                })
+            })
+        })
+        .take(V4_PLAN_CLEANUP_CANDIDATES + 1)
+        .collect::<Vec<_>>();
+    if candidates.len() > V4_PLAN_CLEANUP_CANDIDATES {
+        return Err(storage_err("v4 planner cleanup candidate bound exceeded"));
+    }
+    for name in candidates {
+        let directory = parent.open_child_directory(&name).map_err(storage_err)?;
+        let mut marker = directory
+            .open_child_file(std::ffi::OsStr::new(V4_PLAN_MARKER))
+            .map_err(storage_err)?;
+        if graphforge_filesystem::file_link_count(&marker).map_err(storage_err)? != 1
+            || marker.metadata().map_err(storage_err)?.len()
+                != u64::try_from(expected_marker.len()).map_err(storage_err)?
+        {
+            return Err(storage_err("v4 planner cleanup marker is not canonical"));
+        }
+        let mut observed_marker = Vec::with_capacity(expected_marker.len());
+        marker
+            .read_to_end(&mut observed_marker)
+            .map_err(storage_err)?;
+        if observed_marker != expected_marker {
+            return Err(storage_err(
+                "v4 planner cleanup marker authentication failed",
+            ));
+        }
+        cleanup_v4_plan_directory(&directory)?;
+        parent
+            .remove_child_directory_if_identity(&name, directory.identity())
+            .map_err(storage_err)?;
+        parent.sync().map_err(storage_err)?;
+    }
+    Ok(())
+}
+
+fn cleanup_v4_plan_directory(
+    directory: &graphforge_filesystem::StableDirectory,
+) -> Result<(), GfError> {
+    let names = directory
+        .child_names_bounded(V4_PLAN_CLEANUP_ENTRIES)
+        .map_err(|error| storage_err(format!("v4 planner directory inventory: {error}")))?;
+    let mut bytes = 0_u64;
+    for name in names {
+        if name == std::ffi::OsStr::new("artifacts") {
+            let artifacts = directory.open_child_directory(&name).map_err(storage_err)?;
+            cleanup_v4_plan_files(&artifacts, &mut bytes)?;
+            directory
+                .remove_child_directory_if_identity(&name, artifacts.identity())
+                .map_err(storage_err)?;
+        } else {
+            cleanup_v4_plan_file(directory, &name, &mut bytes)?;
+        }
+    }
+    directory.sync().map_err(storage_err)
+}
+
+fn cleanup_v4_plan_files(
+    directory: &graphforge_filesystem::StableDirectory,
+    bytes: &mut u64,
+) -> Result<(), GfError> {
+    let names = directory
+        .child_names_bounded(V4_PLAN_CLEANUP_ENTRIES)
+        .map_err(|error| storage_err(format!("v4 planner artifact inventory: {error}")))?;
+    for name in names {
+        cleanup_v4_plan_file(directory, &name, bytes)?;
+    }
+    directory.sync().map_err(storage_err)
+}
+
+fn cleanup_v4_plan_file(
+    directory: &graphforge_filesystem::StableDirectory,
+    name: &std::ffi::OsStr,
+    bytes: &mut u64,
+) -> Result<(), GfError> {
+    let file = directory.open_child_file(name).map_err(storage_err)?;
+    if graphforge_filesystem::file_link_count(&file).map_err(storage_err)? != 1 {
+        return Err(storage_err("v4 planner cleanup file has unexpected links"));
+    }
+    *bytes = bytes
+        .checked_add(file.metadata().map_err(storage_err)?.len())
+        .ok_or_else(|| storage_err("v4 planner cleanup byte count overflow"))?;
+    if *bytes > V4_PLAN_CLEANUP_BYTES {
+        return Err(storage_err("v4 planner cleanup byte bound exceeded"));
+    }
+    let identity = graphforge_filesystem::file_identity(&file).map_err(storage_err)?;
+    drop(file);
+    directory
+        .unlink_child_if_identity(name, identity)
+        .map_err(storage_err)
+}
+
+/// Prove that an appended UUID has never appeared in retained forward
+/// authority. Tombstones do not release identity: ordinals are monotonic and
+/// UUIDs are never reusable. Both sides are sorted, so each retained run is
+/// checked by one bounded sequential merge before anything enters the caller's
+/// rewrite batch.
+fn reject_prior_v4_uuid_reuse(
+    pinned: &crate::ordinal_identity_v4::V4OrdinalPinnedUpdateInputs,
+    uuid_sorted: &Path,
+) -> Result<(), GfError> {
+    for artifact in &pinned.manifest.forward_identities {
+        let mut prior = BufReader::with_capacity(
+            V4_ORDINAL_BLOCK_BYTES,
+            clone_pinned_v4_file(pinned, &artifact.name)?,
+        );
+        let mut appended = BufReader::with_capacity(
+            V4_ORDINAL_BLOCK_BYTES,
+            File::open(uuid_sorted).map_err(storage_err)?,
+        );
+        let mut prior_head = read_v4_forward_record(&mut prior)?;
+        let mut appended_head = read_node_surrogate_record(&mut appended)?;
+        while let (Some((prior_uuid, _)), Some((appended_uuid, _))) = (prior_head, appended_head) {
+            match prior_uuid.cmp(&appended_uuid) {
+                std::cmp::Ordering::Less => prior_head = read_v4_forward_record(&mut prior)?,
+                std::cmp::Ordering::Greater => {
+                    appended_head = read_node_surrogate_record(&mut appended)?;
+                }
+                std::cmp::Ordering::Equal => {
+                    return Err(storage_err(
+                        "v4 node UUID already exists in retained forward authority",
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn external_sort_v4_nodes(
@@ -6572,6 +6765,7 @@ fn v4_manifest_artifact_names(manifest: &crate::V4OrdinalIdentityManifest) -> BT
 #[derive(Default)]
 struct V4CompactionWork {
     compactions: u64,
+    created_artifacts: u64,
     read_bytes: u64,
     read_calls: u64,
     write_bytes: u64,
@@ -6610,6 +6804,7 @@ fn compact_v4_binary_carry(
             merged_forward.name.clone(),
             artifacts_path.join(&merged_forward.name),
         );
+        work.created_artifacts = work.created_artifacts.saturating_add(1);
         manifest
             .forward_identities
             .splice(left.2..=right.2, std::iter::once(merged_forward));
@@ -6842,6 +7037,7 @@ fn compact_v4_ordinal_interval(
                 merged.artifact.name.clone(),
                 artifacts_path.join(&merged.artifact.name),
             );
+            work.created_artifacts = work.created_artifacts.saturating_add(1);
             work.write_bytes = work.write_bytes.saturating_add(merged.artifact.bytes);
             work.write_blocks = work.write_blocks.saturating_add(
                 merged
@@ -6909,6 +7105,7 @@ fn compact_v4_tombstone_interval(
         run.artifact.name.clone(),
         artifacts_path.join(&run.artifact.name),
     );
+    work.created_artifacts = work.created_artifacts.saturating_add(1);
     manifest
         .tombstones
         .retain(|candidate| !(first_generation..=last_generation).contains(&candidate.generation));
@@ -8340,6 +8537,20 @@ pub(crate) mod tests {
             stage_v4_ordinal_artifacts([(Uuid::from_u128(1), 7_u64)], 1, &index, || false).unwrap();
         let pinned = pinned_v4_update(root.path(), base);
 
+        let mut reused_uuid = crate::staging::RewriteBatch::new();
+        let reused = prepare_v4_ordinal_delta(
+            root.path(),
+            1,
+            2,
+            &pinned,
+            &mut reused_uuid,
+            &[(Uuid::from_u128(1), 8_u64)],
+            &[],
+            &"33".repeat(32),
+        );
+        assert!(reused.is_err(), "prior UUID reuse unexpectedly passed");
+        assert!(reused_uuid.is_empty());
+
         for (nodes, tombstones) in [
             (vec![(Uuid::from_u128(2), 7_u64)], vec![]),
             (vec![(Uuid::from_u128(2), 8_u64)], vec![0]),
@@ -8373,26 +8584,49 @@ pub(crate) mod tests {
         let index_path = root.path().join(INDEX_DIR);
         fs::create_dir_all(&index_path).unwrap();
         let index = graphforge_filesystem::StableDirectory::open(&index_path).unwrap();
-        let (mut manifest, _) =
-            stage_v4_ordinal_artifacts([(Uuid::from_u128(1), 1_u64)], 1, &index, || false).unwrap();
+        const ROWS_PER_GENERATION: u64 = 257;
+        let base = (1..=ROWS_PER_GENERATION)
+            .map(|id| (Uuid::from_u128(u128::from(id)), id))
+            .collect::<Vec<_>>();
+        let (mut manifest, _) = stage_v4_ordinal_artifacts(base, 1, &index, || false).unwrap();
         let mut observed = Vec::new();
         for generation in 2..=5_u64 {
             let pinned = pinned_v4_update(root.path(), manifest);
             let mut batch = crate::staging::RewriteBatch::new();
+            let first = (generation - 1) * ROWS_PER_GENERATION + 1;
+            let last = generation * ROWS_PER_GENERATION;
+            let nodes = (first..=last)
+                .map(|id| (Uuid::from_u128(u128::from(id)), id))
+                .collect::<Vec<_>>();
             let planned = prepare_v4_ordinal_delta(
                 root.path(),
                 generation - 1,
                 generation,
                 &pinned,
                 &mut batch,
-                &[(Uuid::from_u128(u128::from(generation)), generation)],
+                &nodes,
                 &[],
                 &"44".repeat(32),
             )
             .unwrap();
+            assert_eq!(planned.metrics.input_identities, ROWS_PER_GENERATION);
             assert_eq!(planned.metrics.prior_topology_rows_decoded, 0);
             assert_eq!(planned.metrics.per_record_seeks, 0);
             assert!(planned.metrics.peak_buffer_bytes <= V4_ORDINAL_BLOCK_BYTES * 3);
+            assert!(planned.metrics.peak_temporary_bytes != 0);
+            assert!(planned.metrics.fsync_operations >= 3);
+            assert!(planned.metrics.created_artifacts >= 3);
+            assert!(planned.metrics.write_blocks != 0);
+            if planned.metrics.compactions == 0 {
+                assert_eq!(planned.metrics.sequential_read_bytes, 0);
+                assert_eq!(planned.metrics.sequential_read_calls, 0);
+            } else {
+                assert!(planned.metrics.sequential_read_bytes != 0);
+                assert!(planned.metrics.sequential_read_calls != 0);
+            }
+            let live_rows = generation * ROWS_PER_GENERATION;
+            let bounded_amplification = live_rows * 40 * 4 + MAX_MANIFEST_BYTES;
+            assert!(planned.metrics.physical_bytes_written < bounded_amplification);
             observed.push((
                 planned.metrics.compactions,
                 planned.metrics.physical_bytes_written,
@@ -8450,6 +8684,128 @@ pub(crate) mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    fn v4_plan_sibling_count(project: &Path) -> usize {
+        project
+            .parent()
+            .unwrap()
+            .read_dir()
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with(V4_PLAN_PREFIX))
+            })
+            .count()
+    }
+
+    fn run_v4_rewrite_once(project: &Path) {
+        let topology = project.join("topology/nodes.parquet");
+        let mut staged = crate::staging::RewriteBatch::new();
+        staged.stage_file(&topology, &topology).unwrap();
+        let mut snapshot = None;
+        commit_uuid_topology_rewrite(
+            project,
+            staged,
+            &UuidTopologyDelta {
+                nodes: Vec::new(),
+                edges: Vec::new(),
+                deleted_nodes: Vec::new(),
+                deleted_edges: Vec::new(),
+            },
+            &mut snapshot,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn v4_rewrite_subprocess_crash_retry_matrix_cleans_exact_scratch() {
+        const CHILD_ROOT: &str = "GRAPHFORGE_V4_REWRITE_CHILD_ROOT";
+        const RETRY: &str = "GRAPHFORGE_V4_REWRITE_RETRY";
+        const TARGET: &str = "GRAPHFORGE_V4_REWRITE_TARGET";
+        if let Ok(root) = std::env::var(CHILD_ROOT) {
+            let root = Path::new(&root);
+            crate::durable_rewrite::recover(root).unwrap();
+            let target = std::env::var(TARGET).unwrap().parse::<u64>().unwrap();
+            if crate::read_topology_generation(root).unwrap() < target {
+                run_v4_rewrite_once(root);
+            }
+            if std::env::var(RETRY).is_err() {
+                panic!("configured v4 rewrite failpoint did not terminate the process");
+            }
+            return;
+        }
+
+        for (failpoint, target) in [
+            ("v4_append.after_delta_artifacts", 8),
+            ("v4_append.after_receipt_stage", 8),
+            ("v4_append.after_manifest_stage", 8),
+            ("v4_compaction.after_outputs", 9),
+            ("rewrite.before_intent", 8),
+            ("rewrite.after_preparing_disarm", 8),
+            ("rewrite.after_durable_intent", 8),
+        ] {
+            let (dir, _, _) = fixture();
+            fs::write(
+                dir.path().join("topology/generation.json"),
+                b"{\"topology_generation\":7,\"search_generation\":0,\"property_generation\":0}\n",
+            )
+            .unwrap();
+            rebuild_uuid_membership_indexes(dir.path(), UuidIndexBuildLimits::default()).unwrap();
+            rebuild_v4_ordinal_identity(dir.path(), UuidIndexBuildLimits::default()).unwrap();
+            if target == 9 {
+                run_v4_rewrite_once(dir.path());
+            }
+
+            let crashed = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg(
+                    "uuid_membership::tests::v4_rewrite_subprocess_crash_retry_matrix_cleans_exact_scratch",
+                )
+                .arg("--nocapture")
+                .env(CHILD_ROOT, dir.path())
+                .env(
+                    "GRAPHFORGE_PROJECT_FAILPOINTS",
+                    "graphforge-internal-subprocess-v1",
+                )
+                .env("GRAPHFORGE_PROJECT_FAILPOINT", failpoint)
+                .env(TARGET, target.to_string())
+                .status()
+                .unwrap();
+            assert_eq!(
+                crashed.code(),
+                Some(crate::project_failpoint::exit_code()),
+                "{failpoint}"
+            );
+
+            let retry = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg(
+                    "uuid_membership::tests::v4_rewrite_subprocess_crash_retry_matrix_cleans_exact_scratch",
+                )
+                .arg("--nocapture")
+                .env(CHILD_ROOT, dir.path())
+                .env(RETRY, "1")
+                .env(TARGET, target.to_string())
+                .status()
+                .unwrap();
+            assert!(retry.success(), "{failpoint}");
+            assert_eq!(v4_plan_sibling_count(dir.path()), 0, "{failpoint}");
+            assert_eq!(crate::read_topology_generation(dir.path()).unwrap(), target);
+            assert!(!dir.path().join(".graphforge-rewrite-v1.json").exists());
+            let v4: crate::V4OrdinalIdentityManifest = serde_json::from_slice(
+                &fs::read(dir.path().join(INDEX_DIR).join(V4_ORDINAL_MANIFEST)).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(v4.topology_generation, target, "{failpoint}");
+            assert_eq!(
+                receipt_manifest_digest(dir.path()),
+                hex_sha256(&fs::read(dir.path().join(INDEX_DIR).join(MANIFEST)).unwrap())
+            );
+        }
     }
 
     #[test]

@@ -32,6 +32,15 @@ requires the ordinal digest selected by the project receipt. A malformed,
 substituted, or generation-mismatched ordinal facet fails closed and never
 falls back to v3.
 
+Standalone graph roots have no project-generation `graph/files` inventory.
+Only the mutation writer has a narrow exception: immediately before entering
+the single durable-rewrite critical section it may pin the already-open sibling
+manifest and artifacts when the sibling receipt's exact manifest digest and
+generation match current topology authority. That exception advances an
+existing facet; it cannot construct authority, is never used by public readers,
+and does not authorize orphan deletion. Selected project-generation roots must
+always use their externally authenticated `graph/files` authority.
+
 The reader takes the shared ordinal lock before reading the manifest and
 releases it after pinning the manifest and immutable artifacts. The durable
 writer takes the project rewrite lock first and the exclusive ordinal lock

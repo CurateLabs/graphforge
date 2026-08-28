@@ -385,6 +385,14 @@ impl StableDirectory {
         stable_child_names(&self.file, &self.path)
     }
 
+    /// Enumerate no more than `limit` child names from this retained directory.
+    /// Returns `InvalidData` instead of materializing an attacker-sized sibling
+    /// inventory when the bound is exceeded.
+    pub fn child_names_bounded(&self, limit: usize) -> io::Result<Vec<std::ffi::OsString>> {
+        self.revalidate_named()?;
+        stable_child_names_bounded(&self.file, &self.path, limit)
+    }
+
     /// Create a hard link between retained source and destination directories.
     pub fn link_child_into(
         &self,
@@ -654,10 +662,19 @@ fn stable_open_or_create_child_file(parent: &File, path: &Path, name: &OsStr) ->
 }
 
 #[cfg(unix)]
-fn stable_child_names(parent: &File, _path: &Path) -> io::Result<Vec<std::ffi::OsString>> {
+fn stable_child_names(parent: &File, path: &Path) -> io::Result<Vec<std::ffi::OsString>> {
+    stable_child_names_bounded(parent, path, usize::MAX)
+}
+
+#[cfg(unix)]
+fn stable_child_names_bounded(
+    parent: &File,
+    _path: &Path,
+    limit: usize,
+) -> io::Result<Vec<std::ffi::OsString>> {
     use std::os::unix::ffi::OsStrExt as _;
     let directory = rustix::fs::Dir::read_from(parent).map_err(io::Error::from)?;
-    directory
+    let names = directory
         .map(|entry| {
             let entry = entry.map_err(io::Error::from)?;
             let name = OsStr::from_bytes(entry.file_name().to_bytes());
@@ -666,7 +683,15 @@ fn stable_child_names(parent: &File, _path: &Path) -> io::Result<Vec<std::ffi::O
         .filter(|entry| {
             !matches!(entry, Ok(name) if name == OsStr::new(".") || name == OsStr::new(".."))
         })
-        .collect()
+        .take(limit.saturating_add(1))
+        .collect::<io::Result<Vec<_>>>()?;
+    if names.len() > limit {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "stable directory child count exceeds bound",
+        ));
+    }
+    Ok(names)
 }
 
 #[cfg(unix)]
@@ -868,10 +893,27 @@ fn stable_open_or_create_child_file(parent: &File, path: &Path, name: &OsStr) ->
 }
 
 #[cfg(windows)]
-fn stable_child_names(_parent: &File, path: &Path) -> io::Result<Vec<std::ffi::OsString>> {
-    std::fs::read_dir(path)?
+fn stable_child_names(parent: &File, path: &Path) -> io::Result<Vec<std::ffi::OsString>> {
+    stable_child_names_bounded(parent, path, usize::MAX)
+}
+
+#[cfg(windows)]
+fn stable_child_names_bounded(
+    _parent: &File,
+    path: &Path,
+    limit: usize,
+) -> io::Result<Vec<std::ffi::OsString>> {
+    let names = std::fs::read_dir(path)?
         .map(|entry| entry.map(|entry| entry.file_name()))
-        .collect()
+        .take(limit.saturating_add(1))
+        .collect::<io::Result<Vec<_>>>()?;
+    if names.len() > limit {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "stable directory child count exceeds bound",
+        ));
+    }
+    Ok(names)
 }
 
 #[cfg(windows)]
@@ -954,6 +996,15 @@ fn stable_child_names(_parent: &File, _path: &Path) -> io::Result<Vec<std::ffi::
         io::ErrorKind::Unsupported,
         "stable directories unsupported",
     ))
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn stable_child_names_bounded(
+    parent: &File,
+    path: &Path,
+    _limit: usize,
+) -> io::Result<Vec<std::ffi::OsString>> {
+    stable_child_names(parent, path)
 }
 
 #[cfg(all(not(unix), not(windows)))]
