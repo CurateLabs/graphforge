@@ -10,13 +10,19 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use arrow::array::{Array, FixedSizeBinaryArray, Int64Array, StringArray, UInt64Array};
-use graphforge_api::GraphForge;
+use graphforge_api::{
+    GraphForge, OperationId, PortableSelection, PortableV2ExportRequest, PortableV2ImportRequest,
+    PortableVerifyRequest, verify_portable_v2,
+};
 use graphforge_core::uuid::{Uuid, new_v7};
 use graphforge_core::{OntologyMode, TypeId};
 use graphforge_exec::demand::{self, DemandSnapshot};
 use graphforge_ir::IrLiteral;
 use graphforge_storage::adjacency::build_adjacency_index;
-use graphforge_storage::{GraphWriter, io_stats};
+use graphforge_storage::{
+    GraphWriter, PortableV2Limits, PortableV2Mode, PortableV2Output, PortableV2SelectionProfile,
+    io_stats,
+};
 use tempfile::TempDir;
 
 #[path = "support/project_fixture.rs"]
@@ -36,6 +42,42 @@ const ONE_HOP: &str = "MATCH (a)-[r]->(b) RETURN b.node_uuid AS id LIMIT 1000";
 const TWO_HOP: &str = "MATCH (a)-[r1]->(b)-[r2]->(c) \
                        RETURN c.node_uuid AS id LIMIT 1000";
 const ORDERED_ONE_HOP: &str = "MATCH (a)-[r]->(b) RETURN b.node_uuid AS id ORDER BY id LIMIT 1000";
+const ORDERED_TWO_HOP: &str =
+    "MATCH (a)-[r1]->(b)-[r2]->(c) RETURN c.node_uuid AS id ORDER BY id LIMIT 1000";
+
+fn measured_identity_query(forge: &GraphForge, query: &str) -> (Vec<Vec<u8>>, DemandSnapshot) {
+    io_stats::reset();
+    demand::reset();
+    let result = forge.execute(query).unwrap();
+    demand::disable();
+    let io = io_stats::snapshot();
+    assert_eq!(io.edge_full_reads + io.edge_filtered_reads, 0, "{io:#?}");
+    assert_eq!(io.node_full_reads + io.node_filtered_reads, 0, "{io:#?}");
+    let snapshot = demand::snapshot();
+    assert_eq!(
+        snapshot
+            .hops
+            .values()
+            .filter(|hop| hop.identity_revalidation_calls > 0)
+            .count(),
+        1,
+        "{snapshot:#?}"
+    );
+    assert!(
+        snapshot
+            .hops
+            .values()
+            .all(|hop| hop.identity_per_record_seeks == 0
+                && hop.identity_peak_buffer_bytes <= 16 * 1024 * 1024
+                && hop.identity_read_calls
+                    <= hop
+                        .identity_ranges_selected
+                        .saturating_mul(2)
+                        .saturating_add(2)),
+        "{snapshot:#?}"
+    );
+    (fixed_binary_values(&result, "id"), snapshot)
+}
 
 /// Deterministic ring: each node points to its next `fan_out` successors.
 fn generate_graph(dir: &Path, nodes: usize, fan_out: usize, compact_v4: bool) {
@@ -560,6 +602,68 @@ fn ordered_destination_uuid_projection_is_exact_and_linear_at_1x_2x_4x() {
         assert!(
             next_revalidation <= prior_revalidation * 2 + 2,
             "session authentication must be linear in retained artifacts: {work:?}"
+        );
+    }
+}
+
+#[test]
+fn portable_v2_clean_import_preserves_projected_ordered_hops_and_io() {
+    let _guard = IO_GUARD.lock().unwrap();
+    let root = TempDir::new().unwrap();
+    let source_path = root.path().join("source");
+    generate_graph(&source_path, 4_096, FAN_OUT, true);
+    let source = open_forge(&source_path);
+    let source_results =
+        [ORDERED_ONE_HOP, ORDERED_TWO_HOP].map(|query| measured_identity_query(&source, query).0);
+
+    let limits = PortableV2Limits::default();
+    let package = root.path().join("project.gfpb");
+    let exported = source
+        .export_portable_v2(
+            &PortableV2ExportRequest {
+                selection: PortableSelection::Current,
+                output_path: package.clone(),
+                representation: PortableV2Output::Bundle,
+                profile: PortableV2SelectionProfile::Complete,
+                subset: None,
+                limits,
+            },
+            None,
+            |_| {},
+        )
+        .unwrap();
+    drop(source);
+    let verified = verify_portable_v2(
+        &PortableVerifyRequest {
+            input: package.clone(),
+            mode: PortableV2Mode::Full,
+            limits,
+        },
+        None,
+    )
+    .unwrap();
+    assert_eq!(verified.package_digest, exported.package_digest);
+
+    let imported_path = root.path().join("imported");
+    GraphForge::import_portable_v2(
+        &imported_path,
+        &PortableV2ImportRequest {
+            input: package,
+            operation_id: OperationId(Uuid::from_u128(966)),
+            limits,
+        },
+        None,
+    )
+    .unwrap();
+    let imported = open_forge(&imported_path);
+    for (query, expected) in [ORDERED_ONE_HOP, ORDERED_TWO_HOP]
+        .into_iter()
+        .zip(source_results)
+    {
+        assert_eq!(
+            measured_identity_query(&imported, query).0,
+            expected,
+            "{query}"
         );
     }
 }
