@@ -875,8 +875,8 @@ fn run_rung(
             &spill_dir.join("construction-session.uuid"),
             GraphConstructionBudgets::default(),
         );
-        let append_started = Instant::now();
-        if construction.progress().publication_committed {
+        let (append_s, reconciliation_s) = if construction.progress().publication_committed {
+            let reconciliation_started = Instant::now();
             let mut fingerprint = Sha256::new();
             let merge = merge_runs(&spill.runs, None, |src, dst| {
                 fingerprint.update(src.to_le_bytes());
@@ -886,7 +886,9 @@ fn run_rung(
             live_unique_edges = merge.live_unique_edges;
             duplicates_rejected = merge.duplicates_rejected;
             input_fingerprint = format!("sha256:{}", hex_encode(fingerprint.finalize()));
+            (None, Some(reconciliation_started.elapsed().as_secs_f64()))
         } else {
+            let append_started = Instant::now();
             publish_nodes(&mut construction, 1u64 << rung.scale, None);
             INGEST_SUBPHASE.store(2, Ordering::Relaxed);
             let mut sink = EdgeSink::new(&mut construction, None);
@@ -896,8 +898,8 @@ fn run_rung(
             live_unique_edges = merge.live_unique_edges;
             duplicates_rejected = merge.duplicates_rejected;
             input_fingerprint = format!("sha256:{}", hex_encode(sink.finish()));
-        }
-        let append_s = append_started.elapsed().as_secs_f64();
+            (Some(append_started.elapsed().as_secs_f64()), None)
+        };
         let seal_started = Instant::now();
         construction
             .seal_and_publish()
@@ -929,11 +931,12 @@ fn run_rung(
                     "configured_rows_per_chunk": CONSTRUCTION_BATCH_ROWS,
                     "submitted_chunks": construction_evidence.input_batches,
                     "append_wall_time_s": append_s,
+                    "reconciliation_wall_time_s": reconciliation_s,
                     "seal_publication_wall_time_s": seal_publication_s,
                     "input_rows": construction_evidence.input_rows,
                     "input_batches": construction_evidence.input_batches,
                     "parquet_shards": construction_evidence.parquet_shards,
-                    "immutable_artifacts": immutable_artifact_count(1_u64 << rung.scale, &construction_evidence),
+                    "immutable_artifacts": construction_evidence.immutable_artifacts,
                     "write_bytes": construction_evidence.write_bytes,
                     "write_operations": construction_evidence.write_operations,
                     "fsync_operations": construction_evidence.fsync_operations,
@@ -2750,33 +2753,46 @@ fn graph500_driver_has_no_bulk_publication_escape_hatch() {
 }
 
 #[test]
-fn graph500_driver_uses_the_authoritative_construction_batch_budget() {
+fn million_edge_sink_uses_sixteen_durable_chunks_and_replays_stably() {
+    let project = TempDir::new().expect("million-edge construction project");
+    let graph = GraphForge::new(project.path().to_str()).expect("open million-edge project");
+    let budgets = GraphConstructionBudgets::default();
+    assert_eq!(CONSTRUCTION_BATCH_ROWS, budgets.max_batch_rows);
+    let mut session = graph
+        .begin_graph_construction(budgets)
+        .expect("begin million-edge construction");
+    publish_nodes(&mut session, 2, None);
+    let session_uuid = session.session_uuid();
+    let mut sink = EdgeSink::new(&mut session, None);
+    for _ in 0..1_048_576 {
+        sink.push(0, 1);
+    }
+    sink.flush();
+    let first_digest = sink.finish();
+    let first = session.progress();
     assert_eq!(
-        CONSTRUCTION_BATCH_ROWS,
-        GraphConstructionBudgets::default().max_batch_rows
+        first.accepted_chunks, 17,
+        "one node plus sixteen edge chunks"
     );
-    assert_eq!(1_048_576_usize.div_ceil(CONSTRUCTION_BATCH_ROWS), 16);
-    let source = include_str!("scale_g500_ladder.rs");
-    assert!(
-        !source.contains(&["8", "192"].join("_")),
-        "hidden 8,192-row durable transaction boundary reintroduced"
-    );
-}
+    assert_eq!(first.evidence.input_batches, 17);
+    assert_eq!(first.evidence.parquet_shards, 17);
+    assert_eq!(first.evidence.immutable_artifacts, 67);
+    drop(session);
 
-fn immutable_artifact_count(
-    node_rows: u64,
-    evidence: &graphforge_storage::GraphConstructionEvidence,
-) -> u64 {
-    let node_chunks = node_rows.div_ceil(CONSTRUCTION_BATCH_ROWS as u64);
-    let edge_chunks = evidence
-        .input_batches
-        .checked_sub(node_chunks)
-        .expect("accepted chunks must include every node chunk");
-    // Node chunks own Parquet, identity, and detail artifacts. Edge chunks add
-    // the endpoint run. Both are fixed by the construction receipt contract.
-    node_chunks
-        .saturating_mul(3)
-        .saturating_add(edge_chunks.saturating_mul(4))
+    let mut replay = graph
+        .resume_graph_construction(session_uuid, budgets)
+        .expect("resume million-edge construction");
+    let mut sink = EdgeSink::new(&mut replay, None);
+    for _ in 0..1_048_576 {
+        sink.push(0, 1);
+    }
+    sink.flush();
+    assert_eq!(sink.finish(), first_digest);
+    let replayed = replay.progress();
+    assert_eq!(replayed.accepted_chunks, 17);
+    assert_eq!(replayed.evidence.input_batches, 17);
+    assert_eq!(replayed.evidence.immutable_artifacts, 67);
+    assert_eq!(replayed.evidence.replayed_chunks, 16);
 }
 
 #[test]
@@ -2830,10 +2846,7 @@ fn tiny_construction_ladder_resumes_and_scales_bounded_work_linearly() {
             progress.evidence.parquet_shards,
             progress.evidence.input_batches
         );
-        assert_eq!(
-            immutable_artifact_count(base_nodes * factor, &progress.evidence),
-            7 * factor + 4
-        );
+        assert_eq!(progress.evidence.immutable_artifacts, 7 * factor + 4);
         assert_eq!(progress.evidence.fsync_operations, 23 * factor + 13);
         assert!(progress.evidence.peak_batch_rows <= CONSTRUCTION_BATCH_ROWS as u64);
         assert!(progress.evidence.peak_accounted_live_bytes <= 64 * 1024 * 1024);
@@ -2868,8 +2881,25 @@ fn tiny_construction_ladder_resumes_and_scales_bounded_work_linearly() {
                 .enumerate()
             {
                 if index == 4 {
+                    // One bounded edge merge window may overlap its immutable
+                    // identity, endpoint, and detail inputs with the unified
+                    // identity output. These are the construction format's
+                    // fixed record widths, so this is a derived byte bound,
+                    // not general-purpose disk slack.
+                    const IDENTITY_RECORD_BYTES: u64 = 16;
+                    const ENDPOINT_RECORD_BYTES: u64 = 48;
+                    const EDGE_DETAIL_RECORD_BYTES: u64 = 304;
+                    const UNIFIED_IDENTITY_RECORD_BYTES: u64 = 32;
+                    let fixed_edge_merge_window_bytes = CONSTRUCTION_BATCH_ROWS as u64
+                        * (IDENTITY_RECORD_BYTES
+                            + ENDPOINT_RECORD_BYTES
+                            + EDGE_DETAIL_RECORD_BYTES
+                            + UNIFIED_IDENTITY_RECORD_BYTES);
                     assert!(
-                        *observed <= base.saturating_mul(factor).saturating_add(64 * 1024 * 1024),
+                        *observed
+                            <= base
+                                .saturating_mul(factor)
+                                .saturating_add(fixed_edge_merge_window_bytes),
                         "disk-backed merge footprint exceeded linear work: baseline={base} observed={observed} factor={factor}"
                     );
                     continue;

@@ -334,6 +334,9 @@ pub struct GraphConstructionEvidence {
     pub input_batches: u64,
     /// Immutable Parquet shards.
     pub parquet_shards: u64,
+    /// Immutable payload artifacts accepted from authenticated chunk receipts.
+    #[serde(default)]
+    pub immutable_artifacts: u64,
     /// Bytes submitted through measured immutable-artifact writers.
     /// Control-record traffic is deliberately reported by the outer I/O probe.
     pub write_bytes: u64,
@@ -1533,6 +1536,11 @@ impl GraphConstructionSession {
                 return Err(storage("checkpoint private authority changed"));
             }
             recover_publication(project_dir, &root, checkpoint)?;
+            if checkpoint.next_sequence != 0 && checkpoint.evidence.immutable_artifacts == 0 {
+                checkpoint.evidence.immutable_artifacts =
+                    authenticated_receipt_artifact_count(&root, checkpoint)?;
+                replace_control(&root, CHECKPOINT, checkpoint)?;
+            }
         }
         let (parent_generation_uuid, parent_generation_manifest_sha256) =
             match recovered_checkpoint.as_ref() {
@@ -2659,6 +2667,7 @@ impl GraphConstructionSession {
             .into_iter()
             .chain(receipt.endpoints.iter())
         {
+            evidence.immutable_artifacts = evidence.immutable_artifacts.saturating_add(1);
             evidence.write_bytes = evidence.write_bytes.saturating_add(artifact.bytes);
             evidence.write_operations = evidence
                 .write_operations
@@ -6015,6 +6024,11 @@ fn validate_checkpoint(
         ) && checkpoint.encoding_inventory_sha256.is_none()
         || checkpoint.evidence.input_batches != checkpoint.next_sequence
         || checkpoint.evidence.parquet_shards != checkpoint.next_sequence
+        || checkpoint.evidence.immutable_artifacts != 0
+            && (checkpoint.evidence.immutable_artifacts
+                < checkpoint.next_sequence.saturating_mul(3)
+                || checkpoint.evidence.immutable_artifacts
+                    > checkpoint.next_sequence.saturating_mul(4))
         || checkpoint.evidence.peak_batch_rows > budgets.max_batch_rows as u64
         || checkpoint.evidence.peak_batch_bytes > budgets.max_batch_bytes as u64
         || checkpoint.evidence.peak_run_records > budgets.max_run_records as u64
@@ -6414,6 +6428,40 @@ fn artifact_stem(sequence: u64, kind: ConstructionChunkKind) -> String {
 
 fn receipt_name(sequence: u64) -> String {
     format!("receipt-{sequence:020}.json")
+}
+
+fn authenticated_receipt_artifact_count(
+    root: &StableDirectory,
+    checkpoint: &Checkpoint,
+) -> Result<u64, GfError> {
+    let mut count = 0_u64;
+    let mut prior_digest = None;
+    for sequence in 0..checkpoint.next_sequence {
+        let mut file = root
+            .open_child_file(OsStr::new(&receipt_name(sequence)))
+            .map_err(storage)?;
+        let receipt: ConstructionChunkReceipt = decode_bounded(&mut file)?;
+        validate_receipt_semantics(&receipt, sequence, checkpoint.budgets)?;
+        if receipt.operation_uuid != checkpoint.operation_uuid
+            || receipt.project_identity != checkpoint.project_identity
+            || receipt.session_identity != checkpoint.session_identity
+            || receipt.parent_topology_generation != checkpoint.parent_topology_generation
+            || receipt.ontology_mode != checkpoint.ontology_mode
+            || receipt.semantic_authority_sha256 != checkpoint.semantic_authority_sha256
+            || receipt.prior_receipt_sha256 != prior_digest
+        {
+            return Err(storage("legacy receipt authority or chain changed"));
+        }
+        count = count.saturating_add(3 + u64::from(receipt.endpoints.is_some()));
+        let body = serde_json::to_vec(&receipt).map_err(storage)?;
+        prior_digest = Some(sha256(&body));
+    }
+    if prior_digest != checkpoint.last_receipt_sha256 {
+        return Err(storage(
+            "legacy receipt journal tail differs from checkpoint",
+        ));
+    }
+    Ok(count)
 }
 
 fn chunk_key_name(chunk_id: &str) -> String {
@@ -7082,6 +7130,32 @@ mod tests {
                 .to_string()
                 .contains("unsupported")
         );
+    }
+
+    #[test]
+    fn legacy_artifact_evidence_is_authenticated_and_backfilled_before_append() {
+        let root = TempDir::new().unwrap();
+        let operation = 9_801_u128;
+        let mut session = open(&root, operation);
+        session
+            .append(
+                ConstructionChunkKind::Node,
+                "legacy-node",
+                &node_batch(1, 2),
+            )
+            .unwrap();
+        assert_eq!(session.evidence().immutable_artifacts, 3);
+        session.checkpoint.evidence.immutable_artifacts = 0;
+        replace_control(&session.root, CHECKPOINT, &session.checkpoint).unwrap();
+        drop(session);
+
+        let mut resumed = open(&root, operation);
+        assert_eq!(resumed.evidence().immutable_artifacts, 3);
+        resumed
+            .append(ConstructionChunkKind::Node, "new-node", &node_batch(3, 1))
+            .unwrap();
+        assert_eq!(resumed.accepted_chunks(), 2);
+        assert_eq!(resumed.evidence().immutable_artifacts, 6);
     }
 
     #[test]

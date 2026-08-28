@@ -135,9 +135,13 @@ updates, and file/directory durability barriers; choosing a smaller Arrow
 window multiplies that fixed durability work without improving the session's
 bounded-memory guarantee. Ingest evidence records the configured rows per
 chunk, submitted chunks, artifact and synchronization counts, append elapsed
-time, and combined seal/publication elapsed time. Deterministic 1x/2x/4x tests
-require exact chunk counts and bounded peak windows while aggregate merge work
-remains linear in accepted rows.
+time, reconciliation elapsed time, and combined seal/publication elapsed time.
+Fresh staging reports append time and a null reconciliation time; published
+re-entry reports reconciliation time and a null append time. The immutable
+artifact count is storage-owned evidence reconstructed, for legacy
+checkpoints, from the authenticated receipt chain. Deterministic 1x/2x/4x
+tests require exact chunk counts and bounded peak windows while aggregate
+merge work remains linear in accepted rows.
 
 ## Commands
 
