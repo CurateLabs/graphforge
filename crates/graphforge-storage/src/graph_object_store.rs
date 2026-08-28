@@ -682,6 +682,100 @@ pub struct GraphObjectGcEvidence {
     pub objects_removed: u64,
     /// Physical unreachable bytes removed.
     pub bytes_removed: u64,
+    /// Exact native identities and allocated bytes removed by this GC receipt.
+    pub removed_identity_allocated_bytes: BTreeMap<String, u64>,
+}
+
+/// Capture every sealed CAS object and its lifecycle control by native identity.
+///
+/// This is a storage-owned, bounded phase-boundary inventory. It is never used
+/// during active ingest; qualification calls it only while holding the CAS
+/// shared lifecycle lock, so installed-but-unreferenced objects remain charged
+/// until an explicit GC receipt removes them.
+pub(crate) fn capture_retained_graph_object_identities(
+    root: &Path,
+) -> Result<BTreeMap<String, u64>, GfError> {
+    const MAX_RETAINED_OBJECTS: usize = 4_000_000;
+    if !root.join(GRAPH_OBJECTS_DIR).exists() {
+        return Ok(BTreeMap::new());
+    }
+    let cas = ReadOnlyCasRoot::open(root)?;
+    let mut identities = BTreeMap::new();
+    add_retained_identity(&mut identities, &cas.lifecycle)?;
+    let prefixes = cas
+        .sha256
+        .child_names_bounded(256)
+        .map_err(|error| storage("inventory stable graph object prefixes", root, error))?;
+    let mut remaining = MAX_RETAINED_OBJECTS;
+    for prefix in prefixes {
+        let prefix_text = prefix
+            .to_str()
+            .ok_or_else(|| validation("graph object prefix is not UTF-8"))?;
+        if prefix_text.len() != 2
+            || !prefix_text
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            return Err(validation("graph object prefix is not canonical"));
+        }
+        let bucket = cas
+            .sha256
+            .open_child_directory(&prefix)
+            .map_err(|error| storage("open retained graph object bucket", root, error))?;
+        let objects = bucket
+            .child_names_bounded(remaining)
+            .map_err(|error| storage("inventory retained graph object bucket", root, error))?;
+        remaining = remaining.checked_sub(objects.len()).ok_or_else(|| {
+            validation("retained graph object inventory exceeds attribution bound")
+        })?;
+        for object in objects {
+            let suffix = object
+                .to_str()
+                .ok_or_else(|| validation("graph object name is not UTF-8"))?;
+            validate_digest(&format!("{prefix_text}{suffix}"))?;
+            let file = bucket
+                .open_child_file(&object)
+                .map_err(|error| storage("open retained graph object", root, error))?;
+            add_retained_identity(&mut identities, &file)?;
+        }
+    }
+    Ok(identities)
+}
+
+fn add_retained_identity(
+    identities: &mut BTreeMap<String, u64>,
+    file: &File,
+) -> Result<(), GfError> {
+    let identity = graphforge_filesystem::file_identity(file).map_err(|error| {
+        storage(
+            "identify retained graph object",
+            Path::new(GRAPH_OBJECTS_DIR),
+            error,
+        )
+    })?;
+    let usage = graphforge_filesystem::file_space_usage(file).map_err(|error| {
+        storage(
+            "measure retained graph object",
+            Path::new(GRAPH_OBJECTS_DIR),
+            error,
+        )
+    })?;
+    let key = retained_identity_key(identity);
+    match identities.insert(key, usage.allocated_bytes) {
+        Some(existing) if existing != usage.allocated_bytes => {
+            Err(validation("retained graph object allocation changed"))
+        }
+        _ => Ok(()),
+    }
+}
+
+fn retained_identity_key(identity: graphforge_filesystem::FileIdentity) -> String {
+    use std::fmt::Write as _;
+    let mut key = format!("{:016x}:", identity.volume_serial);
+    for byte in identity.file_id {
+        write!(&mut key, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    key
 }
 
 /// Trace compact generation roots, then sweep unreachable CAS objects.
@@ -871,7 +965,21 @@ pub(crate) fn gc_graph_objects_guarded(
                         error,
                     )
                 })?;
-                candidates.push((prefix.clone(), object, identity, metadata.len()));
+                let allocation =
+                    graphforge_filesystem::file_space_usage(&file).map_err(|error| {
+                        storage(
+                            "measure graph object candidate",
+                            &guard.cas.diagnostic_root,
+                            error,
+                        )
+                    })?;
+                candidates.push((
+                    prefix.clone(),
+                    object,
+                    identity,
+                    metadata.len(),
+                    allocation.allocated_bytes,
+                ));
             }
         }
     }
@@ -879,7 +987,7 @@ pub(crate) fn gc_graph_objects_guarded(
         objects_marked: u64::try_from(marked.len()).unwrap_or(u64::MAX),
         ..GraphObjectGcEvidence::default()
     };
-    for (prefix, object, identity, bytes) in candidates {
+    for (prefix, object, identity, bytes, allocated) in candidates {
         let bucket = guard
             .cas
             .sha256
@@ -900,8 +1008,18 @@ pub(crate) fn gc_graph_objects_guarded(
                     error,
                 )
             })?;
+        bucket.sync().map_err(|error| {
+            storage(
+                "sync graph object bucket after GC removal",
+                &guard.cas.diagnostic_root,
+                error,
+            )
+        })?;
         evidence.objects_removed = evidence.objects_removed.saturating_add(1);
         evidence.bytes_removed = evidence.bytes_removed.saturating_add(bytes);
+        evidence
+            .removed_identity_allocated_bytes
+            .insert(retained_identity_key(identity), allocated);
     }
     Ok(evidence)
 }

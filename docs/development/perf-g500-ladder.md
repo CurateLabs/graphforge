@@ -228,10 +228,17 @@ The project owner includes `FORMAT`, `CURRENT`, and every authenticated
 generation still installed in the bounded generation namespace, including
 checkpoint branches and generations not yet reclaimed; publication does not
 discard an old generation from accounting merely because `CURRENT` advanced.
-Only explicit cleanup/GC may remove it. Portable writers record native allocation as files
+It also includes the CAS lifecycle control and every sealed CAS object, including
+objects not referenced by the current generation. Only an exact explicit GC
+receipt may remove those identities. The bounded CAS inventory runs at retained
+phase boundaries, never during active ingest. Portable writers record native allocation as files
 are written, synchronized, published, or removed; they never rediscover a
 large export with a recursive post-write directory pass, and measurement
 failure is a typed operation failure rather than a zero observation.
+Portable import success additionally carries an identity-safe cleanup receipt;
+the materialization owner is removed only after authenticated deletion and
+parent-directory synchronization complete. Cleanup failure is a typed import
+failure and its still-owned identities remain in lifecycle evidence.
 
 The same document carries a closed nine-phase inventory: append/merge, seal
 authentication, shape consumption/reauthentication, encode plus post-write

@@ -415,6 +415,10 @@ pub fn capture_project_storage_identity_union(
         let snapshot = capture_storage_attribution(&generation)?;
         merge_identity_allocations(&mut identities, &snapshot.physical_identity_allocated_bytes)?;
     }
+    let retained_cas = crate::graph_object_store::capture_retained_graph_object_identities(
+        selected.container_root(),
+    )?;
+    merge_identity_allocations(&mut identities, &retained_cas)?;
     let allocated_bytes = identities
         .values()
         .try_fold(0_u64, |total, value| checked_add(total, *value))?;
@@ -1211,6 +1215,47 @@ mod tests {
                 .copied()
                 .sum::<u64>()
         );
+    }
+
+    #[test]
+    fn project_union_retains_unreferenced_cas_identity_until_explicit_gc_receipt() {
+        let project = tempfile::tempdir().unwrap();
+        let generation = crate::open_or_initialize_project(project.path()).unwrap();
+        let (digest, installed) = crate::graph_object_store::install_graph_object_bytes(
+            project.path(),
+            b"unreferenced retained CAS payload",
+        )
+        .unwrap();
+        assert!(installed.bytes_installed > 0);
+        let object = File::open(crate::graph_object_store::graph_object_path(
+            project.path(),
+            &digest,
+        ))
+        .unwrap();
+        let identity = graphforge_filesystem::file_identity(&object).unwrap();
+        let key = native_identity_key(identity.volume_serial, &identity.file_id);
+
+        let before = capture_project_storage_identity_union(&generation).unwrap();
+        assert!(
+            before.physical_identity_allocated_bytes.contains_key(&key),
+            "sealed CAS remains retained even when no generation references it"
+        );
+        let gc = crate::graph_object_store::gc_graph_objects(
+            project.path(),
+            &[],
+            crate::GraphManifestLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(gc.objects_removed, 1);
+        assert!(gc.bytes_removed > 0);
+        assert_eq!(
+            gc.removed_identity_allocated_bytes.get(&key),
+            before.physical_identity_allocated_bytes.get(&key)
+        );
+        let reopened = crate::resolve_project_generation(project.path()).unwrap();
+        let after = capture_project_storage_identity_union(&reopened).unwrap();
+        assert!(!after.physical_identity_allocated_bytes.contains_key(&key));
+        assert!(after.allocated_bytes < before.allocated_bytes);
     }
 
     #[test]
