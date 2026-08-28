@@ -2430,6 +2430,15 @@ fn create_bounded_drill_package(
 
 #[allow(clippy::too_many_lines)]
 fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value {
+    run_integrated_certification_with_edge_factor(root, target_live, None)
+}
+
+#[allow(clippy::too_many_lines)]
+fn run_integrated_certification_with_edge_factor(
+    root: &Path,
+    target_live: Option<u64>,
+    preflight_edge_factor: Option<u64>,
+) -> Value {
     let source = root.join("source");
     let imported = root.join("imported");
     let package = root.join("project.gfpb");
@@ -2461,7 +2470,7 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
     let edge_factor = if target_live.is_some() {
         certification_profile.edgefactor
     } else {
-        4
+        preflight_edge_factor.unwrap_or(4)
     };
     let initiator = if target_live.is_some() {
         certification_profile.initiator
@@ -2842,6 +2851,79 @@ fn certification_lifecycle_journals_equivalent_round_trip_and_drills() {
         evidence["source_generation"],
         evidence["imported_generation"]
     );
+}
+
+#[test]
+fn equivalent_full_lifecycle_1x_2x_4x_has_bounded_phase_slopes() {
+    const FIELDS: [&str; 7] = [
+        "read_bytes",
+        "write_bytes",
+        "read_calls",
+        "write_calls",
+        "object_count",
+        "block_count",
+        "fsync_calls",
+    ];
+    let mut baseline: Option<BTreeMap<String, [u64; 7]>> = None;
+    for factor in [1_u64, 2, 4] {
+        let root = TempDir::new().expect("full lifecycle ladder root");
+        let evidence =
+            run_integrated_certification_with_edge_factor(root.path(), None, Some(factor));
+        assert_eq!(evidence["source_edges"], evidence["imported_edges"]);
+        let phases = evidence["storage"]["application_io_phases"]["phases"]
+            .as_object()
+            .expect("phase evidence object");
+        let attribution: graphforge_storage::ConstructionPhaseAttribution =
+            serde_json::from_value(evidence["storage"]["application_io_phases"].clone())
+                .expect("decode phase evidence");
+        attribution
+            .validate_for_qualification()
+            .expect("full lifecycle phase qualification");
+        let observations = phases
+            .iter()
+            .map(|(name, values)| {
+                let counters = std::array::from_fn(|index| {
+                    values[FIELDS[index]]
+                        .as_u64()
+                        .expect("phase counter is an integer")
+                });
+                (name.clone(), counters)
+            })
+            .collect::<BTreeMap<_, _>>();
+        if let Some(base) = &baseline {
+            assert_eq!(
+                base.keys().collect::<Vec<_>>(),
+                observations.keys().collect::<Vec<_>>()
+            );
+            for (phase, current) in &observations {
+                for (index, value) in current.iter().enumerate() {
+                    let first = base[phase][index];
+                    if first == 0 {
+                        assert_eq!(
+                            *value, 0,
+                            "{phase}.{} appeared only at a larger rung",
+                            FIELDS[index]
+                        );
+                    } else {
+                        assert!(
+                            *value <= first.saturating_mul(factor).saturating_mul(2),
+                            "{phase}.{} exceeded the documented 2x constant-factor ceiling",
+                            FIELDS[index]
+                        );
+                    }
+                }
+            }
+        } else {
+            baseline = Some(observations);
+        }
+        let interrupted = evidence["phases"]
+            .as_array()
+            .expect("lifecycle phases")
+            .iter()
+            .find(|phase| phase["id"] == "drill_interrupted_finalization")
+            .expect("interrupted-finalization recovery drill");
+        assert_eq!(interrupted["status"], "pass");
+    }
 }
 
 #[test]

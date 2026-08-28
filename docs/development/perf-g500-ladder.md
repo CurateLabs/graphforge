@@ -207,6 +207,14 @@ identity deduplicates content-addressed/shared objects. Logical bytes,
 filesystem allocation, current retained allocation, and full-lifecycle
 transient peak remain separate quantities.
 
+Artifact rows are local ownership views and may refer to the same physical CAS
+object. Their allocated/current columns therefore are not summed to obtain the
+workspace footprint. `totals.current_retained_bytes` is the independently
+reconciled native-identity union across all simultaneously retained owners.
+The authoritative-project ratio uses only the selected source project's
+authenticated allocation; it does not include construction staging, the
+portable package, drills, or the clean imported project.
+
 The lifecycle peak is not reconstructed by adding category peaks or directory
 sizes. Storage owns a reference-counted union keyed by authenticated native
 `(volume, file-id)` identities. Append, shaping, encoding, CAS publication,
@@ -215,6 +223,14 @@ drills, and interrupted-import cleanup install or remove exact owners. The
 high-water mark advances at each transition, so aliases count once and files
 that did not coexist are never added together. Certification emits
 `storage_owned_active_identity_union` provenance only from this tracker.
+
+The project owner includes `FORMAT`, `CURRENT`, the selected generation, and
+the complete authenticated ancestor chain; publication does not discard an old
+generation from accounting merely because `CURRENT` advanced. Only explicit
+cleanup/GC may remove it. Portable writers record native allocation as files
+are written, synchronized, published, or removed; they never rediscover a
+large export with a recursive post-write directory pass, and measurement
+failure is a typed operation failure rather than a zero observation.
 
 The same document carries a closed nine-phase inventory: append/merge, seal
 authentication, shape consumption/reauthentication, encode plus post-write
@@ -226,6 +242,11 @@ must contain source-owned activity; a zero row is rejected. Recovery may be
 non-applicable only for an uninterrupted run, while the deterministic durable
 crash matrix separately proves nonzero recovery bytes and calls whenever an
 interrupted intent is accepted.
+The deterministic full-lifecycle 1x/2x/4x ladder executes source construction,
+CSR, reopen/query, export/verify, clean import/reopen/query, corruption,
+cancellation, resource-limit, and interrupted-finalization drills. It validates
+the qualification phase inventory and bounds bytes, calls, objects, blocks, and
+fsyncs per phase rather than relying only on aggregate I/O.
 Node canonical cost uses reopened live nodes; edge canonical, authoritative
 project, and lifecycle peak costs use reopened live edges. Ratios preserve raw
 integer numerators and denominators; rounded decimals are not evidence.
