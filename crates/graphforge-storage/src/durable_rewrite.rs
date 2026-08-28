@@ -154,25 +154,13 @@ pub(crate) fn reconcile_auxiliary(
         },
     )?;
     let current = crate::generation::read_generation_state_raw(root)?;
-    let relative = Path::new(&receipt.path);
     canonical_journal_path(&receipt.path)?;
-    let mut directory = graphforge_filesystem::StableDirectory::open(root).map_err(storage)?;
-    let mut components = relative.components().peekable();
-    let mut file = None;
-    while let Some(component) = components.next() {
-        let Component::Normal(name) = component else {
-            return Err(storage("auxiliary receipt path is not canonical"));
-        };
-        if components.peek().is_some() {
-            directory = directory.open_child_directory(name).map_err(storage)?;
-        } else {
-            file = match directory.open_child_file(name) {
-                Ok(file) => Some(file),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                Err(error) => return Err(storage(error)),
-            };
-        }
-    }
+    let (directory, name) = retained_parent_at(root, &guard.directory, &receipt.path)?;
+    let file = match directory.open_child_file(&name) {
+        Ok(file) => Some(file),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(storage(error)),
+    };
     let exact = if let Some(file) = file {
         let (bytes, digest) = hash_reader(file.try_clone().map_err(storage)?)?;
         directory.revalidate_named().map_err(storage)?;
@@ -222,10 +210,60 @@ fn canonical_relative(root: &Path, path: &Path) -> Result<String, GfError> {
             "rewrite destination is not a canonical relative path",
         ));
     }
-    relative
-        .to_str()
-        .map(str::to_owned)
-        .ok_or_else(|| storage("rewrite destination is not UTF-8"))
+    let mut wire = String::new();
+    for component in relative.components() {
+        let Component::Normal(component) = component else {
+            return Err(storage(
+                "rewrite destination is not a canonical relative path",
+            ));
+        };
+        let component = component
+            .to_str()
+            .ok_or_else(|| storage("rewrite destination is not UTF-8"))?;
+        // Journal paths are a platform-neutral wire format, not native path
+        // strings. A backslash is a separator on Windows and a filename byte
+        // on Unix, so admitting it would make the same authenticated journal
+        // name different objects on different hosts.
+        if component.contains('\\') {
+            return Err(storage("rewrite destination cannot be encoded canonically"));
+        }
+        if !wire.is_empty() {
+            wire.push('/');
+        }
+        wire.push_str(component);
+    }
+    Ok(wire)
+}
+
+/// Decode an authenticated journal path to its canonical, slash-separated
+/// wire spelling. Version-1 journals written by older Windows builds used
+/// native backslashes. They remain recoverable on Windows only when the whole
+/// spelling is unambiguously legacy; mixed separators fail closed.
+fn normalize_journal_path(value: &str, allow_legacy_windows: bool) -> Result<String, GfError> {
+    let has_forward = value.contains('/');
+    let has_back = value.contains('\\');
+    if has_back && (!allow_legacy_windows || has_forward) {
+        return Err(storage("rewrite journal contains non-canonical path"));
+    }
+    let normalized = if has_back {
+        value.replace('\\', "/")
+    } else {
+        value.to_owned()
+    };
+    if normalized.is_empty()
+        || normalized.starts_with('/')
+        || normalized.ends_with('/')
+        || normalized
+            .split('/')
+            .any(|component| component.is_empty() || component == "." || component == "..")
+    {
+        return Err(storage("rewrite journal contains non-canonical path"));
+    }
+    Ok(normalized)
+}
+
+fn decoded_journal_path(value: &str) -> Result<String, GfError> {
+    normalize_journal_path(value, cfg!(windows))
 }
 
 fn hash_reader(mut file: File) -> Result<(u64, String), GfError> {
@@ -482,20 +520,19 @@ fn retained_parent_at(
     root: &StableDirectory,
     relative: &str,
 ) -> Result<(StableDirectory, std::ffi::OsString), GfError> {
-    let path = Path::new(relative);
-    let mut components = path.components().peekable();
+    let wire = decoded_journal_path(relative)?;
+    let mut components = wire.split('/').peekable();
     let mut directory = StableDirectory::open(root_path).map_err(storage)?;
     if directory.identity() != root.identity() {
         return Err(storage("rewrite root identity changed"));
     }
-    while let Some(component) = components.next() {
-        let Component::Normal(name) = component else {
-            return Err(storage("non-canonical journal path"));
-        };
+    while let Some(name) = components.next() {
         if components.peek().is_none() {
-            return Ok((directory, name.to_os_string()));
+            return Ok((directory, std::ffi::OsString::from(name)));
         }
-        directory = directory.open_child_directory(name).map_err(storage)?;
+        directory = directory
+            .open_child_directory(std::ffi::OsStr::new(name))
+            .map_err(storage)?;
     }
     Err(storage("empty journal path"))
 }
@@ -563,6 +600,15 @@ fn recover_locked(
         }
         return remove_journal(root);
     }
+    // The durable intent is the single replay authority for both the live
+    // commit and crash recovery.  Acquire the ordinal lifecycle lock here,
+    // after authenticating the intent, so every v4 replay owns the same
+    // exclusion across all artifact installs and the generation-last switch.
+    let _ordinal_writer = if intent.auxiliary.as_ref().is_some_and(is_v4_ordinal_receipt) {
+        Some(acquire_ordinal_writer_lock(root)?)
+    } else {
+        None
+    };
     let authority_count = intent
         .entries
         .iter()
@@ -613,6 +659,46 @@ fn recover_locked(
         false,
     )?;
     remove_journal(root)
+}
+
+struct OrdinalWriterGuard {
+    _directory: StableDirectory,
+    file: File,
+    _identity: FileIdentity,
+}
+
+impl Drop for OrdinalWriterGuard {
+    fn drop(&mut self) {
+        let _ = crate::file_lock::unlock(&self.file);
+    }
+}
+
+fn acquire_ordinal_writer_lock(root: &StableDirectory) -> Result<OrdinalWriterGuard, GfError> {
+    let directory = root
+        .open_child_directory(std::ffi::OsStr::new("topology"))
+        .and_then(|topology| topology.open_child_directory(std::ffi::OsStr::new("uuid-membership")))
+        .map_err(storage)?;
+    let file = directory
+        .open_child_file(std::ffi::OsStr::new("ordinal-v4.lock"))
+        .map_err(storage)?;
+    if graphforge_filesystem::file_link_count(&file).map_err(storage)? != 1 {
+        return Err(storage("ordinal writer lock has invalid link count"));
+    }
+    crate::file_lock::lock_exclusive(&file).map_err(storage)?;
+    let identity = graphforge_filesystem::file_identity(&file).map_err(storage)?;
+    let named = directory
+        .open_child_file(std::ffi::OsStr::new("ordinal-v4.lock"))
+        .map_err(storage)?;
+    if graphforge_filesystem::file_identity(&named).map_err(storage)? != identity
+        || graphforge_filesystem::file_link_count(&named).map_err(storage)? != 1
+    {
+        return Err(storage("ordinal writer lock identity changed"));
+    }
+    Ok(OrdinalWriterGuard {
+        _directory: directory,
+        file,
+        _identity: identity,
+    })
 }
 
 fn cleanup_preparing_input(
@@ -683,18 +769,25 @@ fn verify_generation_authority(
 }
 
 fn validate_intent(intent: &Intent) -> Result<(), GfError> {
+    validate_intent_for_platform(intent, cfg!(windows))
+}
+
+fn validate_intent_for_platform(
+    intent: &Intent,
+    allow_legacy_windows: bool,
+) -> Result<(), GfError> {
     let mut destinations = std::collections::HashSet::new();
     let mut temporaries = std::collections::HashSet::new();
     for entry in &intent.entries {
-        if !destinations.insert(&entry.destination) || !temporaries.insert(&entry.temporary) {
+        let destination = normalize_journal_path(&entry.destination, allow_legacy_windows)?;
+        let temporary = normalize_journal_path(&entry.temporary, allow_legacy_windows)?;
+        if !destinations.insert(destination.clone()) || !temporaries.insert(temporary.clone()) {
             return Err(storage("rewrite journal contains duplicate paths"));
         }
-        canonical_journal_path(&entry.destination)?;
-        canonical_journal_path(&entry.temporary)?;
-        if entry.destination == JOURNAL
-            || entry.destination == LOCK
-            || entry.temporary == JOURNAL
-            || entry.temporary == LOCK
+        if destination == JOURNAL
+            || destination == LOCK
+            || temporary == JOURNAL
+            || temporary == LOCK
         {
             return Err(storage("rewrite journal targets a reserved control"));
         }
@@ -704,7 +797,10 @@ fn validate_intent(intent: &Intent) -> Result<(), GfError> {
         .iter()
         .filter(|entry| entry.class == EntryClass::GenerationAuthority)
         .collect::<Vec<_>>();
-    if authority.len() != 1 || authority[0].destination != "topology/generation.json" {
+    if authority.len() != 1
+        || normalize_journal_path(&authority[0].destination, allow_legacy_windows)?
+            != "topology/generation.json"
+    {
         return Err(storage("rewrite journal has invalid generation authority"));
     }
     if intent.next.topology < intent.prior.topology
@@ -715,10 +811,14 @@ fn validate_intent(intent: &Intent) -> Result<(), GfError> {
         return Err(storage("rewrite generation transition is not monotonic"));
     }
     if let Some(receipt) = &intent.auxiliary {
+        canonical_journal_path(&receipt.path)?;
         let entry = intent
             .entries
             .iter()
-            .find(|entry| entry.destination == receipt.path)
+            .find(|entry| {
+                normalize_journal_path(&entry.destination, allow_legacy_windows)
+                    .is_ok_and(|destination| destination == receipt.path)
+            })
             .ok_or_else(|| storage("auxiliary receipt path is not staged"))?;
         if entry.class != EntryClass::Data
             || entry.sha256 != receipt.digest
@@ -735,13 +835,7 @@ fn validate_intent(intent: &Intent) -> Result<(), GfError> {
 }
 
 fn canonical_journal_path(value: &str) -> Result<(), GfError> {
-    let path = Path::new(value);
-    if path.as_os_str().is_empty()
-        || path.is_absolute()
-        || path
-            .components()
-            .any(|component| !matches!(component, Component::Normal(_)))
-    {
+    if normalize_journal_path(value, false).is_err() {
         return Err(storage("rewrite journal contains non-canonical path"));
     }
     Ok(())
@@ -910,6 +1004,12 @@ pub(crate) fn commit_with_participant(
     }
     let auxiliary = participant_auxiliary.or(auxiliary);
     let reserved = root.join("topology/uuid-membership");
+    let ordinal_lock_path = reserved.join("ordinal-v4.lock");
+    if stages_ordinal_lock(&batch, &ordinal_lock_path) {
+        return Err(storage(
+            "ordinal writer lock is stable lifecycle state and cannot be staged",
+        ));
+    }
     if has_participant
         && batch
             .staged_paths()
@@ -929,11 +1029,9 @@ pub(crate) fn commit_with_participant(
         ));
     }
     if stages_reserved
-        && auxiliary.as_ref().is_none_or(|receipt| {
-            receipt.kind != "uuid-membership/v3"
-                || receipt.schema_version != 3
-                || receipt.path != "topology/uuid-membership/topology-receipt.json"
-        })
+        && auxiliary
+            .as_ref()
+            .is_none_or(|receipt| !valid_uuid_receipt(receipt))
     {
         return Err(storage(
             "UUID rewrite participant must stage its namespace and exact typed receipt",
@@ -1063,6 +1161,46 @@ pub(crate) fn commit_with_participant(
     guard.revalidate()?;
     crate::io_stats::record_rewrite_commit();
     Ok(next)
+}
+
+fn stages_ordinal_lock(batch: &RewriteBatch, ordinal_lock_path: &Path) -> bool {
+    batch
+        .staged_paths()
+        .any(|destination| destination == ordinal_lock_path)
+}
+
+fn valid_uuid_receipt(receipt: &AuxiliaryReceipt) -> bool {
+    matches!(
+        (
+            receipt.kind.as_str(),
+            receipt.schema_version,
+            receipt.path.as_str()
+        ),
+        (
+            "uuid-membership/v3",
+            3,
+            "topology/uuid-membership/topology-receipt.json"
+        ) | (
+            "uuid-membership/v4",
+            4,
+            "topology/uuid-membership/ordinal-v4-receipt.json"
+        )
+    )
+}
+
+fn is_v4_ordinal_receipt(receipt: &AuxiliaryReceipt) -> bool {
+    matches!(
+        (
+            receipt.kind.as_str(),
+            receipt.schema_version,
+            receipt.path.as_str()
+        ),
+        (
+            "uuid-membership/v4",
+            4,
+            "topology/uuid-membership/ordinal-v4-receipt.json"
+        )
+    )
 }
 
 #[cfg(test)]
@@ -1211,6 +1349,65 @@ mod tests {
         assert!(validate_intent(&valid).is_ok());
         valid.auxiliary.as_mut().unwrap().digest = "00".repeat(32);
         assert!(validate_intent(&valid).is_err());
+
+        let mut cross_paired = valid.auxiliary.unwrap();
+        cross_paired.digest = valid.entries[0].sha256.clone();
+        cross_paired.path = "topology/uuid-membership/ordinal-v4-receipt.json".to_owned();
+        assert!(!valid_uuid_receipt(&cross_paired));
+        cross_paired.kind = "uuid-membership/v4".to_owned();
+        cross_paired.schema_version = 4;
+        assert!(valid_uuid_receipt(&cross_paired));
+    }
+
+    #[test]
+    fn journal_wire_paths_are_slash_canonical_and_bind_legacy_windows_entries() {
+        let root = Path::new("project-root");
+        let native = root
+            .join("topology")
+            .join("uuid-membership")
+            .join("receipt.json");
+        assert_eq!(
+            canonical_relative(root, &native).unwrap(),
+            "topology/uuid-membership/receipt.json"
+        );
+
+        let mut legacy = intent();
+        legacy.auxiliary = Some(AuxiliaryReceipt {
+            kind: "uuid-membership/v3".to_owned(),
+            schema_version: 3,
+            path: legacy.entries[0].destination.clone(),
+            digest: legacy.entries[0].sha256.clone(),
+            bytes: legacy.entries[0].bytes,
+        });
+        for entry in &mut legacy.entries {
+            entry.destination = entry.destination.replace('/', "\\");
+            entry.temporary = entry.temporary.replace('/', "\\");
+        }
+        // The receipt was already platform-neutral while old Windows journal
+        // entries were native-spelled. Their authenticated names still bind.
+        assert!(validate_intent_for_platform(&legacy, true).is_ok());
+        assert!(validate_intent_for_platform(&legacy, false).is_err());
+
+        legacy.entries[0].destination = "topology\\uuid-membership/receipt.json".to_owned();
+        assert!(validate_intent_for_platform(&legacy, true).is_err());
+    }
+
+    #[test]
+    fn legacy_windows_normalization_rejects_cross_spelling_aliases() {
+        let mut aliased = intent();
+        aliased.entries[0].destination = "same/path".to_owned();
+        aliased.entries[1].destination = "same\\path".to_owned();
+        assert!(validate_intent_for_platform(&aliased, true).is_err());
+    }
+
+    #[test]
+    fn ordinal_lifecycle_lock_can_never_be_a_staged_destination() {
+        let root = TempDir::new().unwrap();
+        let path = root.path().join("topology/uuid-membership/ordinal-v4.lock");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut batch = RewriteBatch::new();
+        batch.stage_bytes(&path, b"replacement").unwrap();
+        assert!(stages_ordinal_lock(&batch, &path));
     }
 
     #[test]
@@ -1364,6 +1561,92 @@ mod tests {
 
         let next = single_value_rewrite(armed_root.path(), 13);
         commit(next, armed_root.path(), true, true, false, None).unwrap();
+    }
+
+    #[test]
+    fn subprocess_v4_recovery_waits_for_active_ordinal_reader() {
+        const CHILD_ROOT: &str = "GRAPHFORGE_V4_RECOVERY_CHILD_ROOT";
+        if let Ok(root) = std::env::var(CHILD_ROOT) {
+            std::fs::write(Path::new(&root).join("recovery-started"), []).unwrap();
+            recover(Path::new(&root)).unwrap();
+            std::fs::write(Path::new(&root).join("recovery-finished"), []).unwrap();
+            return;
+        }
+
+        let root = TempDir::new().unwrap();
+        let index = root.path().join("topology/uuid-membership");
+        std::fs::create_dir_all(&index).unwrap();
+        std::fs::write(index.join("ordinal-v4.lock"), []).unwrap();
+        let receipt = br#"{"schema_version":4}"#;
+        let receipt_digest = hex(&Sha256::digest(receipt));
+        let participant: RewriteParticipantPreparer<'_> = Box::new(move |context, batch| {
+            batch.stage_bytes(
+                &context
+                    .project_root
+                    .join("topology/uuid-membership/ordinal-v4-manifest.json"),
+                br#"{"schema_version":4}"#,
+            )?;
+            batch.stage_bytes(
+                &context
+                    .project_root
+                    .join("topology/uuid-membership/ordinal-v4-receipt.json"),
+                receipt,
+            )?;
+            Ok(Some(AuxiliaryReceipt {
+                kind: "uuid-membership/v4".to_owned(),
+                schema_version: 4,
+                path: "topology/uuid-membership/ordinal-v4-receipt.json".to_owned(),
+                digest: receipt_digest,
+                bytes: receipt.len() as u64,
+            }))
+        });
+        FAIL_AFTER_DURABLE_INTENT.set(true);
+        assert!(
+            commit_with_participant(
+                RewriteBatch::new(),
+                root.path(),
+                true,
+                false,
+                false,
+                None,
+                Some(participant),
+            )
+            .is_err()
+        );
+
+        let stable_index = StableDirectory::open(&index).unwrap();
+        let reader_lock = stable_index
+            .open_child_file(std::ffi::OsStr::new("ordinal-v4.lock"))
+            .unwrap();
+        <File as fs4::FileExt>::lock_shared(&reader_lock).unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("durable_rewrite::tests::subprocess_v4_recovery_waits_for_active_ordinal_reader")
+            .arg("--nocapture")
+            .env(CHILD_ROOT, root.path())
+            .spawn()
+            .unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !root.path().join("recovery-started").exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "recovery child did not start"
+            );
+            std::thread::yield_now();
+        }
+        assert_eq!(child.try_wait().unwrap(), None);
+        assert!(!root.path().join("recovery-finished").exists());
+        <File as fs4::FileExt>::unlock(&reader_lock).unwrap();
+        assert!(child.wait().unwrap().success());
+        assert!(root.path().join("recovery-finished").is_file());
+        assert!(!root.path().join(JOURNAL).exists());
+        assert_eq!(
+            crate::generation::read_generation_state_raw(root.path())
+                .unwrap()
+                .topology,
+            1
+        );
     }
 
     #[test]

@@ -87,9 +87,10 @@ domain-separated mapping commitment and count. Strict forward UUID ordering and
 that bounded reconciliation reject duplicate, missing, or cross-generation
 identity mappings without constructing a graph-sized in-memory map.
 
-The retained reader owns a shared capability on `ordinal-v4.lock`; every v4
-publisher must hold that same file exclusively across artifact installation and
-manifest replacement. Each admitted file's stable identity, length, and
+The reader holds `ordinal-v4.lock` shared only during admission, then releases
+it after pinning the immutable files; every v4 publisher holds that same stable
+file exclusively across artifact installation and manifest replacement. Each
+admitted file's stable identity, length, and
 high-resolution modification time are retained as a fast change detector.
 That cooperative ownership is not the cryptographic boundary: every selected
 ordinal or tombstone block is verified against its manifest digest before its
@@ -629,7 +630,7 @@ legacy projects without it use the bounded tail migration path once.
 
 Bulk endpoint resolution uses the persistent authenticated
 `topology/uuid-membership/` snapshot published with each immutable graph
-generation. Its manifest authenticates the
+generation. The existing `manifest.json` facet authenticates the
 topology generation, record counts, lengths, and SHA-256 digests. Nodes have a
 sorted fixed-width `UUID -> node_id` file; edges have a sorted UUID membership
 file. Builds use bounded external sort runs and bounded-fan-in merges. Probes
@@ -642,6 +643,14 @@ and exactly zero per-record filesystem seeks while decoding zero topology rows.
 Duplicate node or edge UUIDs, reuse of one UUID across the node and edge
 domains, stale manifests, and missing, truncated, checksum-mismatched, or
 identity/reverse-inconsistent index files fail closed.
+
+Node ordinal resolution is a distinct, additive authority facet in the same
+directory. Its `ordinal-v4-manifest.json`, `ordinal-v4-receipt.json`, and
+`ordinal-v4.lock` never replace or reinterpret the v3 node-and-edge manifest.
+Both facets name the same topology generation but have independent receipt-bound
+manifest digests. If the ordinal facet is absent while current v3 is canonical,
+discovery returns a typed rebuild requirement. A present ordinal path must pass
+authenticated open and never falls back to v3 when malformed or substituted.
 
 New publications use a compact version-2 `graph/files` root. Payloads and
 fixed-depth radix nodes live once in the project content-addressed object

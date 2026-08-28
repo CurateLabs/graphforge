@@ -590,6 +590,19 @@ migrations: []
 
     #[test]
     fn exploratory_legacy_ids_migrate_to_tagged_form() {
+        const CHILD: &str = "GRAPHFORGE_RUNTIME_LABEL_MIGRATION_IO_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg("runtime_entity_labels::tests::exploratory_legacy_ids_migrate_to_tagged_form")
+                .arg("--nocapture")
+                .env(CHILD, "1")
+                .status()
+                .unwrap();
+            assert!(status.success(), "isolated runtime-label I/O proof failed");
+            return;
+        }
+
         let dir = TempDir::new().unwrap();
         let endpoints = [uuid::Uuid::from_u128(1), uuid::Uuid::from_u128(2)];
         let mut seed =

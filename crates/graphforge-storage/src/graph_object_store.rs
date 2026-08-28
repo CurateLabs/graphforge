@@ -132,9 +132,23 @@ struct CasRoot {
 
 struct TemporaryObject {
     name: std::ffi::OsString,
+    #[cfg(unix)]
+    file: File,
+    #[cfg(windows)]
+    file: graphforge_filesystem::WindowsCasWriter,
+    identity: graphforge_filesystem::FileIdentity,
+}
+
+struct SealedTemporaryObject {
+    name: std::ffi::OsString,
     file: File,
     identity: graphforge_filesystem::FileIdentity,
 }
+
+#[cfg(unix)]
+type CasTemporaryWriter = File;
+#[cfg(windows)]
+type CasTemporaryWriter = graphforge_filesystem::WindowsCasWriter;
 
 struct ReadOnlyCasRoot {
     diagnostic_root: PathBuf,
@@ -1096,9 +1110,10 @@ pub fn migrate_graph_files_v1_to_v2(
     validate_publication_identity(lease)?;
     let mut evidence = GraphFilesMigrationEvidence::default();
     for entry in &inventory.files {
+        let source = crate::graph_files::resolve_v1_inventory_entry(graph_root, entry)?;
         let installed = install_graph_object_file_with_lease(
             lease,
-            &graph_root.join(&entry.relative_path),
+            &source,
             &entry.content_sha256,
             entry.byte_length,
         )?;
@@ -1113,12 +1128,16 @@ pub fn migrate_graph_files_v1_to_v2(
     let mut root_digest =
         install_manifest_node(lease, &empty_branch(0), &mut evidence.bytes_installed)?;
     for entry in &inventory.files {
+        let mut canonical_entry = entry.clone();
+        canonical_entry.relative_path =
+            crate::graph_files::canonical_inventory_relative_text(&entry.relative_path)?;
+        let canonical_path = canonical_entry.relative_path.clone();
         root_digest = update_manifest_path(
             lease,
             Some(&root_digest),
             0,
-            &entry.relative_path,
-            Some(entry.clone()),
+            &canonical_path,
+            Some(canonical_entry),
             &mut evidence.bytes_installed,
         )?
         .ok_or_else(|| validation("radix migration unexpectedly removed the root"))?;
@@ -2246,30 +2265,29 @@ fn install_object<F>(
     write_temporary: F,
 ) -> Result<GraphObjectInstallEvidence, GfError>
 where
-    F: FnOnce(&mut File) -> Result<u64, GfError>,
+    F: FnOnce(&mut CasTemporaryWriter) -> Result<u64, GfError>,
 {
     validate_digest(digest)?;
     let bucket = cas.digest_bucket(digest, true)?;
     let destination_name = std::ffi::OsStr::new(&digest[2..]);
-    if let Ok(file) = bucket.open_child_file(destination_name) {
-        verify_and_seal_graph_object(&file, digest, expected_length, &cas.diagnostic_root)?;
-        return Ok(GraphObjectInstallEvidence {
-            bytes_hashed: expected_length,
-            reused_existing: true,
-            ..GraphObjectInstallEvidence::default()
-        });
+    if let Some(evidence) =
+        try_reuse_existing_object(cas, &bucket, destination_name, digest, expected_length)?
+    {
+        return Ok(evidence);
     }
     let temporary_name = std::ffi::OsString::from(Uuid::new_v4().hyphenated().to_string());
-    let mut temporary = cas
-        .tmp
-        .create_child_file(&temporary_name)
-        .map_err(|error| {
-            storage(
-                "create stable temporary graph object",
-                &cas.diagnostic_root,
-                error,
-            )
-        })?;
+    #[cfg(unix)]
+    let temporary = cas.tmp.create_child_file(&temporary_name);
+    #[cfg(windows)]
+    let temporary = cas.tmp.create_cas_child_file(&temporary_name);
+    let mut temporary = temporary.map_err(|error| {
+        storage(
+            "create stable temporary graph object",
+            &cas.diagnostic_root,
+            error,
+        )
+    })?;
+    #[cfg(unix)]
     let temporary_identity = graphforge_filesystem::file_identity(&temporary).map_err(|error| {
         storage(
             "inspect temporary graph object",
@@ -2277,21 +2295,21 @@ where
             error,
         )
     })?;
+    #[cfg(windows)]
+    let temporary_identity = temporary.identity();
     let bytes_hashed = write_temporary(&mut temporary)?;
     if !writer_authenticated {
         temporary.rewind().map_err(|error| {
             storage("rewind temporary graph object", &cas.diagnostic_root, error)
         })?;
-        verify_file(
-            temporary.try_clone().map_err(|error| {
-                storage("clone temporary graph object", &cas.diagnostic_root, error)
-            })?,
+        verify_stream(
+            &mut temporary,
             digest,
             expected_length,
             &cas.diagnostic_root,
         )?;
     }
-    let installed = finalize_temporary_object(
+    let (installed, sealed_bytes_hashed) = finalize_temporary_object(
         cas,
         &bucket,
         TemporaryObject {
@@ -2309,10 +2327,96 @@ where
             } else {
                 expected_length
             })
+            .saturating_add(sealed_bytes_hashed)
             .saturating_add(if installed { 0 } else { expected_length }),
         bytes_installed: if installed { expected_length } else { 0 },
         reused_existing: !installed,
     })
+}
+
+fn reused_object_evidence(expected_length: u64) -> GraphObjectInstallEvidence {
+    GraphObjectInstallEvidence {
+        bytes_hashed: expected_length,
+        reused_existing: true,
+        ..GraphObjectInstallEvidence::default()
+    }
+}
+
+#[cfg(unix)]
+fn try_reuse_existing_object(
+    cas: &CasRoot,
+    bucket: &StableDirectory,
+    destination_name: &std::ffi::OsStr,
+    digest: &str,
+    expected_length: u64,
+) -> Result<Option<GraphObjectInstallEvidence>, GfError> {
+    let file = match bucket.open_child_file(destination_name) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(storage(
+                "open existing graph object",
+                &cas.diagnostic_root,
+                error,
+            ));
+        }
+    };
+    verify_and_seal_graph_object(
+        &file,
+        digest,
+        expected_length,
+        &graph_object_path(&cas.diagnostic_root, digest)?,
+        &cas.diagnostic_root,
+    )?;
+    Ok(Some(reused_object_evidence(expected_length)))
+}
+
+#[cfg(windows)]
+fn try_reuse_existing_object(
+    cas: &CasRoot,
+    bucket: &StableDirectory,
+    destination_name: &std::ffi::OsStr,
+    digest: &str,
+    expected_length: u64,
+) -> Result<Option<GraphObjectInstallEvidence>, GfError> {
+    let file = match bucket.open_cas_child_file(destination_name) {
+        Ok(file) => file.into_file(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(canonical_error) => {
+            let mut legacy = bucket
+                .open_legacy_cas_child_for_adoption(destination_name)
+                .map_err(|legacy_error| {
+                    storage(
+                        "reject unsealed or busy graph object",
+                        &cas.diagnostic_root,
+                        if legacy_error.kind() == std::io::ErrorKind::NotFound {
+                            canonical_error
+                        } else {
+                            legacy_error
+                        },
+                    )
+                })?;
+            verify_stream(&mut legacy, digest, expected_length, &cas.diagnostic_root)?;
+            bucket
+                .adopt_legacy_cas_child(destination_name, legacy)
+                .map(graphforge_filesystem::WindowsSealedCasFile::into_file)
+                .map_err(|error| {
+                    storage(
+                        "adopt authenticated legacy graph object",
+                        &cas.diagnostic_root,
+                        error,
+                    )
+                })?
+        }
+    };
+    verify_and_seal_graph_object(
+        &file,
+        digest,
+        expected_length,
+        &graph_object_path(&cas.diagnostic_root, digest)?,
+        &cas.diagnostic_root,
+    )?;
+    Ok(Some(reused_object_evidence(expected_length)))
 }
 
 fn finalize_temporary_object(
@@ -2321,9 +2425,34 @@ fn finalize_temporary_object(
     temporary: TemporaryObject,
     digest: &str,
     expected_length: u64,
-) -> Result<bool, GfError> {
+) -> Result<(bool, u64), GfError> {
     let destination_name = std::ffi::OsStr::new(&digest[2..]);
-    seal_graph_object(&temporary.file, &cas.diagnostic_root)?;
+    let temporary_path = cas
+        .diagnostic_root
+        .join(GRAPH_OBJECTS_DIR)
+        .join(TEMP_DIR)
+        .join(&temporary.name);
+    #[cfg(unix)]
+    let temporary = {
+        seal_graph_object(&temporary.file, &temporary_path, &cas.diagnostic_root)?;
+        SealedTemporaryObject {
+            name: temporary.name,
+            file: temporary.file,
+            identity: temporary.identity,
+        }
+    };
+    #[cfg(windows)]
+    let temporary = transition_temporary_to_sealed_reader(
+        &cas.tmp,
+        temporary,
+        digest,
+        expected_length,
+        &cas.diagnostic_root,
+    )?;
+    #[cfg(unix)]
+    let sealed_bytes_hashed = 0;
+    #[cfg(windows)]
+    let sealed_bytes_hashed = expected_length;
     let sealed_metadata = temporary
         .file
         .metadata()
@@ -2347,14 +2476,26 @@ fn finalize_temporary_object(
     ) {
         true
     } else {
-        let existing = bucket.open_child_file(destination_name).map_err(|error| {
+        #[cfg(unix)]
+        let existing = bucket.open_child_file(destination_name);
+        #[cfg(windows)]
+        let existing = bucket
+            .open_cas_child_file(destination_name)
+            .map(graphforge_filesystem::WindowsSealedCasFile::into_file);
+        let existing = existing.map_err(|error| {
             storage(
                 "open concurrently installed graph object",
                 &cas.diagnostic_root,
                 error,
             )
         })?;
-        verify_and_seal_graph_object(&existing, digest, expected_length, &cas.diagnostic_root)?;
+        verify_and_seal_graph_object(
+            &existing,
+            digest,
+            expected_length,
+            &graph_object_path(&cas.diagnostic_root, digest)?,
+            &cas.diagnostic_root,
+        )?;
         false
     };
     returned_error_boundary("install:final-linked")?;
@@ -2391,7 +2532,59 @@ fn finalize_temporary_object(
             error,
         )
     })?;
-    Ok(installed)
+    Ok((installed, sealed_bytes_hashed))
+}
+
+#[cfg(windows)]
+fn transition_temporary_to_sealed_reader(
+    temporary_directory: &StableDirectory,
+    temporary: TemporaryObject,
+    digest: &str,
+    expected_length: u64,
+    diagnostic: &Path,
+) -> Result<SealedTemporaryObject, GfError> {
+    temporary.file.sync_all().map_err(|error| {
+        storage(
+            "sync temporary graph object before sealing",
+            diagnostic,
+            error,
+        )
+    })?;
+    let identity = temporary.identity;
+    let name = temporary.name;
+    let file = temporary_directory
+        .seal_cas_child_file(&name, temporary.file)
+        .map(graphforge_filesystem::WindowsSealedCasFile::into_file)
+        .map_err(|error| storage("reopen sealed temporary graph object", diagnostic, error))?;
+    if graphforge_filesystem::file_identity(&file).map_err(|error| {
+        storage(
+            "reidentify sealed temporary graph object",
+            diagnostic,
+            error,
+        )
+    })? != identity
+    {
+        return Err(validation(
+            "temporary graph object identity changed while sealing",
+        ));
+    }
+    verify_file(
+        file.try_clone().map_err(|error| {
+            storage(
+                "clone sealed temporary graph object for authentication",
+                diagnostic,
+                error,
+            )
+        })?,
+        digest,
+        expected_length,
+        diagnostic,
+    )?;
+    Ok(SealedTemporaryObject {
+        name,
+        file,
+        identity,
+    })
 }
 
 fn verify_file(
@@ -2425,16 +2618,55 @@ fn verify_file(
     Ok(())
 }
 
+fn verify_stream(
+    file: &mut impl Read,
+    digest: &str,
+    expected_length: u64,
+    diagnostic: &Path,
+) -> Result<(), GfError> {
+    let mut hasher = Sha256::new();
+    let mut total = 0_u64;
+    let mut buffer = vec![0_u8; BUFFER_BYTES];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| storage("read graph object handle", diagnostic, error))?;
+        if read == 0 {
+            break;
+        }
+        total = total.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
+        hasher.update(&buffer[..read]);
+    }
+    if total != expected_length || hex_digest(hasher.finalize().into()) != digest {
+        return Err(validation("graph object digest does not match its address"));
+    }
+    Ok(())
+}
+
 fn verify_and_seal_graph_object(
     file: &File,
     digest: &str,
     expected_length: u64,
+    object_path: &Path,
     diagnostic: &Path,
 ) -> Result<(), GfError> {
     // Reuse is safe only after the exact opened inode is no longer writable.
     // Hashing first would leave a window in which the already-authenticated
     // bytes could be changed before the subsequent chmod.
-    seal_graph_object(file, diagnostic)?;
+    #[cfg(unix)]
+    seal_graph_object(file, object_path, diagnostic)?;
+    #[cfg(windows)]
+    {
+        let _ = object_path;
+        if !file
+            .metadata()
+            .map_err(|error| storage("inspect sealed graph object", diagnostic, error))?
+            .permissions()
+            .readonly()
+        {
+            return Err(validation("graph object is not canonically sealed"));
+        }
+    }
     verify_file(
         file.try_clone()
             .map_err(|error| storage("clone graph object for authentication", diagnostic, error))?,
@@ -2455,14 +2687,17 @@ fn verify_and_seal_graph_object(
     Ok(())
 }
 
-fn seal_graph_object(file: &File, diagnostic: &Path) -> Result<(), GfError> {
+#[cfg(unix)]
+fn seal_graph_object(file: &File, object_path: &Path, diagnostic: &Path) -> Result<(), GfError> {
+    let _ = object_path;
     let mut permissions = file
         .metadata()
         .map_err(|error| storage("inspect graph object permissions", diagnostic, error))?
         .permissions();
     permissions.set_readonly(true);
     file.set_permissions(permissions)
-        .map_err(|error| storage("seal graph object permissions", diagnostic, error))
+        .map_err(|error| storage("seal graph object permissions", diagnostic, error))?;
+    Ok(())
 }
 
 fn hash_regular_file(path: &Path) -> Result<[u8; 32], GfError> {
@@ -3094,8 +3329,14 @@ mod tests {
         fs::rename(&path, &displaced).unwrap();
         fs::set_permissions(&displaced, fs::Permissions::from_mode(0o600)).unwrap();
         fs::write(&path, b"hostile replacement").unwrap();
-        verify_and_seal_graph_object(&descriptor, &digest, payload.len() as u64, root.path())
-            .unwrap();
+        verify_and_seal_graph_object(
+            &descriptor,
+            &digest,
+            payload.len() as u64,
+            &displaced,
+            root.path(),
+        )
+        .unwrap();
 
         assert!(fs::metadata(&displaced).unwrap().permissions().readonly());
         assert!(!fs::metadata(&path).unwrap().permissions().readonly());
@@ -3112,7 +3353,7 @@ mod tests {
         fs::write(&path, payload).unwrap();
         let descriptor = File::open(&path).unwrap();
 
-        seal_graph_object(&descriptor, root.path()).unwrap();
+        seal_graph_object(&descriptor, &path, root.path()).unwrap();
         assert!(fs::OpenOptions::new().write(true).open(&path).is_err());
         verify_file(
             descriptor.try_clone().unwrap(),
@@ -3122,6 +3363,150 @@ mod tests {
         )
         .unwrap();
         assert!(descriptor.metadata().unwrap().permissions().readonly());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fresh_write_descriptor_can_be_sealed_without_losing_named_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("fresh-object");
+        let mut descriptor = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        descriptor.write_all(b"fresh payload").unwrap();
+        descriptor.sync_all().unwrap();
+        let identity = graphforge_filesystem::file_identity(&descriptor).unwrap();
+
+        seal_graph_object(&descriptor, &path, root.path()).unwrap();
+
+        assert_eq!(
+            graphforge_filesystem::path_identity(&path).unwrap(),
+            identity
+        );
+        assert!(descriptor.metadata().unwrap().permissions().readonly());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn fresh_cas_transition_excludes_writers_before_and_after_seal() {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        use std::process::Command;
+
+        const HELPER: &str = "GRAPHFORGE_CAS_WRITER_EXCLUSION_HELPER";
+        const FILE_SHARE_READ: u32 = 0x0000_0001;
+        const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+        if let Some(path) = std::env::var_os(HELPER) {
+            let writer = OpenOptions::new()
+                .write(true)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+                .open(path);
+            assert!(writer.is_err(), "child unexpectedly acquired CAS writer");
+            return;
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let directory = StableDirectory::open(root.path()).unwrap();
+        let name = std::ffi::OsStr::new("temporary");
+        let path = root.path().join(name);
+        let payload = b"sealed only after exclusive read admission";
+        let mut writer = directory.create_cas_child_file(name).unwrap();
+        writer.write_all(payload).unwrap();
+
+        let assert_child_writer_denied = || {
+            let status = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "graph_object_store::tests::fresh_cas_transition_excludes_writers_before_and_after_seal",
+                    "--nocapture",
+                ])
+                .env(HELPER, &path)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        };
+        assert_child_writer_denied();
+        let sealed = directory.seal_cas_child_file(name, writer).unwrap();
+        assert_child_writer_denied();
+        assert_eq!(
+            graphforge_filesystem::file_identity(&sealed.into_file()).unwrap(),
+            graphforge_filesystem::path_identity(&path).unwrap()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ordinary_owner_can_cleanup_fresh_cas_temp_and_gc_sealed_object() {
+        let root = tempfile::tempdir().unwrap();
+        let payload = b"owner-only Windows CAS cleanup";
+
+        let (digest, evidence) = install_graph_object_bytes(root.path(), payload).unwrap();
+        assert!(!evidence.reused_existing);
+        let object = graph_object_path(root.path(), &digest).unwrap();
+        assert!(object.exists());
+
+        // Installation must remove the sealed temporary hard link using the
+        // same owner capability available to a restricted, non-admin process.
+        let lease = begin_graph_object_publication(root.path()).unwrap();
+        assert!(lease.cas.tmp.child_names().unwrap().is_empty());
+        drop(lease);
+
+        // GC uses that same narrow capability on the canonical sealed name.
+        let reclaimed =
+            gc_graph_objects(root.path(), &[], crate::GraphManifestLimits::default()).unwrap();
+        assert_eq!(reclaimed.objects_removed, 1);
+        assert_eq!(reclaimed.bytes_removed, payload.len() as u64);
+        assert!(!object.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn reuse_rejects_planted_unsealed_object_without_mutating_it() {
+        let root = tempfile::tempdir().unwrap();
+        let payload = b"planted writable object";
+        let digest = hex_digest(Sha256::digest(payload).into());
+        let lease = begin_graph_object_publication(root.path()).unwrap();
+        let bucket = lease.cas.digest_bucket(&digest, true).unwrap();
+        let name = std::ffi::OsStr::new(&digest[2..]);
+        let path = graph_object_path(root.path(), &digest).unwrap();
+        fs::write(&path, payload).unwrap();
+        assert!(!fs::metadata(&path).unwrap().permissions().readonly());
+        assert!(bucket.open_cas_child_file(name).is_err());
+        drop(lease);
+
+        assert!(install_graph_object_bytes(root.path(), payload).is_err());
+        assert_eq!(fs::read(&path).unwrap(), payload);
+        assert!(!fs::metadata(&path).unwrap().permissions().readonly());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn authenticated_released_readonly_object_is_adopted_canonically() {
+        use std::os::windows::fs::OpenOptionsExt as _;
+
+        const FILE_SHARE_READ: u32 = 0x0000_0001;
+        const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+        let root = tempfile::tempdir().unwrap();
+        let payload = b"released readonly inherited-dacl object";
+        let digest = hex_digest(Sha256::digest(payload).into());
+        let lease = begin_graph_object_publication(root.path()).unwrap();
+        let _bucket = lease.cas.digest_bucket(&digest, true).unwrap();
+        let path = graph_object_path(root.path(), &digest).unwrap();
+        fs::write(&path, payload).unwrap();
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&path, permissions).unwrap();
+        drop(lease);
+
+        let (_, evidence) = install_graph_object_bytes(root.path(), payload).unwrap();
+        assert!(evidence.reused_existing);
+        let writer = OpenOptions::new()
+            .write(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .open(&path);
+        assert!(writer.is_err(), "canonical adoption retained write access");
     }
 
     #[cfg(unix)]
@@ -3224,6 +3609,16 @@ mod tests {
         assert_eq!(first.bytes_hashed, 7);
         assert_eq!(first.bytes_installed, 7);
         assert!(!first.reused_existing);
+        assert!(
+            root.path()
+                .join(GRAPH_OBJECTS_DIR)
+                .join(TEMP_DIR)
+                .read_dir()
+                .unwrap()
+                .next()
+                .is_none(),
+            "fresh installation retained its sealed temporary alias"
+        );
         let (_, second) = install_graph_object_bytes(root.path(), b"payload").unwrap();
         assert!(second.reused_existing);
         assert_eq!(
@@ -3236,6 +3631,23 @@ mod tests {
             b"corrupt",
         );
         assert!(install_graph_object_bytes(root.path(), b"payload").is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_fresh_sealed_install_removes_its_temporary_alias() {
+        let root = tempfile::tempdir().unwrap();
+        install_graph_object_bytes(root.path(), b"windows sealed payload").unwrap();
+
+        assert!(
+            root.path()
+                .join(GRAPH_OBJECTS_DIR)
+                .join(TEMP_DIR)
+                .read_dir()
+                .unwrap()
+                .next()
+                .is_none()
+        );
     }
 
     #[test]
@@ -3302,6 +3714,36 @@ mod tests {
             })
             .unwrap();
         assert_eq!(files, inventory.files);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn migrates_windows_authored_v1_path_into_canonical_v2_manifest() {
+        let container = tempfile::tempdir().unwrap();
+        let graph = tempfile::tempdir().unwrap();
+        let source = graph.path().join("topology/nodes.parquet");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, b"nodes").unwrap();
+        let inventory = crate::GraphFilesInventory {
+            format: "graphforge-graph-files".into(),
+            format_version: 1,
+            files: vec![crate::GraphFileEntry {
+                relative_path: "topology\\nodes.parquet".into(),
+                byte_length: 5,
+                content_sha256: hex_digest(Sha256::digest(b"nodes").into()),
+                role: crate::GraphFileRole::Topology,
+            }],
+            file_count: 1,
+            total_byte_length: 5,
+        };
+        let lease = begin_graph_object_publication(container.path()).unwrap();
+        let (root, _) = migrate_graph_files_v1_to_v2(&lease, graph.path(), &inventory).unwrap();
+        let (files, _) =
+            crate::resolve_graph_manifest(&root, crate::GraphManifestLimits::default(), |digest| {
+                read_graph_object_by_digest(container.path(), digest, 1024 * 1024)
+            })
+            .unwrap();
+        assert_eq!(files[0].relative_path, "topology/nodes.parquet");
     }
 
     #[test]

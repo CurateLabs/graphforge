@@ -873,13 +873,14 @@ pub fn list_delta_runs(
 ) -> Result<Vec<&GraphFileEntry>, GfError> {
     let mut runs = Vec::new();
     for entry in &inventory.files {
-        if !entry.relative_path.starts_with("deltas/") {
+        let relative = crate::graph_files::canonical_inventory_relative_text(&entry.relative_path)?;
+        if !relative.starts_with("deltas/") {
             continue;
         }
         if entry.role != GraphFileRole::Delta {
             return Err(corrupt("delta path has non-delta inventory role"));
         }
-        let sequence = parse_run_sequence(&entry.relative_path)?;
+        let sequence = parse_run_sequence(&relative)?;
         runs.push((sequence, entry));
     }
     runs.sort_by_key(|(sequence, _)| *sequence);
@@ -914,7 +915,7 @@ pub fn load_verified_delta_runs(
         if usize::try_from(entry.byte_length).unwrap_or(usize::MAX) > limits.max_run_bytes {
             return Err(resource_limit("graph delta run bytes"));
         }
-        let path = graph_root.join(&entry.relative_path);
+        let path = crate::graph_files::resolve_v1_inventory_entry(graph_root, entry)?;
         let bytes = fs::read(&path).map_err(|error| storage("read delta run", &path, error))?;
         if bytes.len() as u64 != entry.byte_length {
             return Err(corrupt("graph delta run length mismatch"));
@@ -1159,7 +1160,7 @@ fn preflight_canonical_parquet(
         .iter()
         .filter(|entry| entry.relative_path.ends_with(".parquet"))
     {
-        let path = graph_root.join(&entry.relative_path);
+        let path = crate::graph_files::resolve_v1_inventory_entry(graph_root, entry)?;
         let mut file =
             File::open(&path).map_err(|error| storage("open Parquet preflight", &path, error))?;
         let file_len = file
@@ -1316,8 +1317,9 @@ pub fn prepare_graph_delta(
         GfError::Storage(format!("create graph delta staging directory: {error}"))
     })?;
     for entry in &parent_inventory.files {
-        let source = parent_tree.join(&entry.relative_path);
-        let destination = workspace.path().join(&entry.relative_path);
+        let source = crate::graph_files::resolve_v1_inventory_entry(&parent_tree, entry)?;
+        let relative = crate::graph_files::canonical_inventory_relative_path(&entry.relative_path)?;
+        let destination = workspace.path().join(relative);
         if let Some(parent_dir) = destination.parent() {
             fs::create_dir_all(parent_dir)
                 .map_err(|error| storage("create delta staging parent", parent_dir, error))?;
@@ -1339,13 +1341,8 @@ pub fn prepare_graph_delta(
     file.sync_all()
         .map_err(|error| storage("flush delta run", &new_path, error))?;
     let (inventory, files_participant) = capture_graph_files(workspace.path())?;
-    let unchanged_base_files = count_preserved_base_files(&parent_inventory, &inventory);
-    let parent_base_count = parent_inventory
-        .files
-        .iter()
-        .filter(|entry| !entry.relative_path.starts_with("deltas/"))
-        .filter(|entry| !is_gfdr_path(&entry.relative_path))
-        .count() as u64;
+    let unchanged_base_files = count_preserved_base_files(&parent_inventory, &inventory)?;
+    let parent_base_count = count_base_files(&parent_inventory)?;
     let preserved_base_parquet_digests = unchanged_base_files == parent_base_count
         && parent_inventory
             .files
@@ -1769,19 +1766,30 @@ fn is_gfdr_path(relative: &str) -> bool {
         .is_some_and(|ext| ext.eq_ignore_ascii_case(GRAPH_DELTA_RUN_EXTENSION))
 }
 
-fn count_preserved_base_files(parent: &GraphFilesInventory, child: &GraphFilesInventory) -> u64 {
-    parent
-        .files
-        .iter()
-        .filter(|entry| !is_gfdr_path(&entry.relative_path))
-        .filter(|parent_entry| {
-            child.files.iter().any(|child_entry| {
-                child_entry.relative_path == parent_entry.relative_path
-                    && child_entry.content_sha256 == parent_entry.content_sha256
-                    && child_entry.byte_length == parent_entry.byte_length
-            })
-        })
-        .count() as u64
+fn count_base_files(inventory: &GraphFilesInventory) -> Result<u64, GfError> {
+    inventory.files.iter().try_fold(0_u64, |count, entry| {
+        let relative = crate::graph_files::canonical_inventory_relative_text(&entry.relative_path)?;
+        Ok(count + u64::from(!relative.starts_with("deltas/") && !is_gfdr_path(&relative)))
+    })
+}
+
+fn count_preserved_base_files(
+    parent: &GraphFilesInventory,
+    child: &GraphFilesInventory,
+) -> Result<u64, GfError> {
+    parent.files.iter().try_fold(0_u64, |count, parent_entry| {
+        let parent_path =
+            crate::graph_files::canonical_inventory_relative_text(&parent_entry.relative_path)?;
+        if is_gfdr_path(&parent_path) {
+            return Ok(count);
+        }
+        let preserved = child.files.iter().any(|child_entry| {
+            child_entry.relative_path == parent_path
+                && child_entry.content_sha256 == parent_entry.content_sha256
+                && child_entry.byte_length == parent_entry.byte_length
+        });
+        Ok(count + u64::from(preserved))
+    })
 }
 
 fn parse_run_sequence(relative: &str) -> Result<u64, GfError> {

@@ -767,8 +767,18 @@ pub struct GraphConstructionSession {
     parent_catalog: RuntimeCatalog,
     compact_parent: Option<crate::GraphFilesInventory>,
     semantic_authority: Option<ConstructionSemanticAuthority>,
-    _session_lock: File,
+    session_lock: File,
     _reservation: ProcessReservation,
+}
+
+impl Drop for GraphConstructionSession {
+    fn drop(&mut self) {
+        // A concurrently forked child can retain a duplicate of this open-file
+        // description until exec closes its CLOEXEC descriptors. Unlock before
+        // closing our handle so session ownership ends at this Rust lifetime,
+        // even while such a duplicate is still alive.
+        let _ = crate::file_lock::unlock(&self.session_lock);
+    }
 }
 
 impl GraphConstructionSession {
@@ -1705,7 +1715,7 @@ impl GraphConstructionSession {
             parent_catalog,
             compact_parent,
             semantic_authority,
-            _session_lock: session_lock,
+            session_lock,
             _reservation: reservation,
         };
         recover_shape_intent(&session.root, &mut session.checkpoint)?;
@@ -7975,6 +7985,28 @@ mod tests {
         .unwrap();
         assert_eq!(resumed.accepted_chunks(), 0);
         assert!(resumed.root.open_child_file(OsStr::new(INTENT)).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_drop_unlocks_before_a_duplicated_descriptor_closes() {
+        let root = TempDir::new().unwrap();
+        let operation = Uuid::from_u128(301);
+        let session = open(&root, 301);
+        let inherited_descriptor = session.session_lock.try_clone().unwrap();
+
+        drop(session);
+
+        let resumed = GraphConstructionSession::open(
+            root.path(),
+            operation,
+            0,
+            GraphConstructionBudgets::default(),
+        )
+        .unwrap();
+        assert_eq!(resumed.accepted_chunks(), 0);
+        drop(resumed);
+        drop(inherited_descriptor);
     }
 
     #[test]

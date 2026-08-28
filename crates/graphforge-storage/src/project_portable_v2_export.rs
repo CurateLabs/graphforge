@@ -152,11 +152,10 @@ impl PortableV2ExportPlan {
             ) {
                 continue;
             }
-            let source = staging.path().join(&entry.relative_path);
-            let path = format!(
-                "data/components/graph-data/graph-tree/{}",
-                entry.relative_path
-            );
+            let source = crate::graph_files::resolve_v1_inventory_entry(staging.path(), entry)?;
+            let relative =
+                crate::graph_files::canonical_inventory_relative_text(&entry.relative_path)?;
+            let path = format!("data/components/graph-data/graph-tree/{relative}");
             let planned = inspect(&source, &path, limits, &mut total)?;
             if planned.length != entry.byte_length || hex(planned.digest) != entry.content_sha256 {
                 return Err(err(
@@ -869,10 +868,12 @@ pub fn plan_selected_portable_v2(
         let id = "graph-tree".to_owned();
         let mut owned = Vec::new();
         for e in inv.files {
-            let path = format!("data/components/graph-data/{id}/{}", e.relative_path);
+            let canonical =
+                crate::graph_files::canonical_inventory_relative_text(&e.relative_path)?;
+            let path = format!("data/components/graph-data/{id}/{canonical}");
             let f = match &graph_authority {
                 Some(crate::GraphFilesParticipant::V1(_)) => inspect(
-                    &g.graph_tree_root().join(&e.relative_path),
+                    &crate::graph_files::resolve_v1_inventory_entry(&g.graph_tree_root(), &e)?,
                     &path,
                     limits,
                     &mut total,

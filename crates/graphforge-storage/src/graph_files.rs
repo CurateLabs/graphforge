@@ -5,7 +5,7 @@
 //! lengths, digests, roles). Open paths validate inventory against that tree and
 //! never assemble the complete graph into one in-memory Arrow/binary payload.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashSet};
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
@@ -14,6 +14,7 @@ use graphforge_core::canonical::{CANONICAL_CONTRACT_VERSION, CanonicalDomain, fi
 use graphforge_core::{GfError, ProjectErrorCode};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use unicode_normalization::UnicodeNormalization;
 
 use crate::project_failpoint;
 use crate::project_publication::{ProjectParticipant, ProjectParticipantEncoding};
@@ -297,6 +298,7 @@ pub fn stage_graph_tree(
     generation_root: &Path,
     inventory: &GraphFilesInventory,
 ) -> Result<GraphFilesOpenEvidence, GfError> {
+    validate_inventory_contract(inventory)?;
     let destination_root = graph_tree_root(generation_root);
     if destination_root.exists() {
         return Err(publication_failed(
@@ -311,10 +313,9 @@ pub fn stage_graph_tree(
         ..GraphFilesOpenEvidence::default()
     };
     for entry in &inventory.files {
-        let relative = Path::new(&entry.relative_path);
-        validate_relative_path(relative)?;
-        let source = source_root.join(relative);
-        let destination = destination_root.join(relative);
+        let source = resolve_v1_inventory_entry(source_root, entry)?;
+        let relative = canonical_inventory_relative_path(&entry.relative_path)?;
+        let destination = destination_root.join(&relative);
         reject_link(&source)?;
         let metadata = fs::symlink_metadata(&source)
             .map_err(|error| storage("inspect graph source file", &source, error))?;
@@ -379,21 +380,24 @@ pub fn verify_graph_tree(
         return Err(corrupt("generation graph tree is not a directory"));
     }
 
-    let mut observed = BTreeMap::new();
-    collect_regular_files(graph_root, graph_root, &mut observed)?;
-    let expected: BTreeSet<_> = inventory
-        .files
-        .iter()
-        .map(|entry| entry.relative_path.clone())
-        .collect();
-    let observed_keys: BTreeSet<_> = observed.keys().cloned().collect();
-    if observed_keys != expected {
+    let mut observed = BTreeSet::new();
+    collect_regular_file_paths(graph_root, graph_root, &mut observed)?;
+    let mut resolved = BTreeSet::new();
+    for entry in &inventory.files {
+        let path = resolve_v1_inventory_entry(graph_root, entry)?;
+        resolved.insert(
+            path.strip_prefix(graph_root)
+                .map_err(|_| corrupt("generation graph path escaped tree"))?
+                .to_path_buf(),
+        );
+    }
+    if observed != resolved {
         return Err(corrupt(
             "generation graph tree inventory does not match on-disk files",
         ));
     }
     for entry in &inventory.files {
-        let path = graph_root.join(&entry.relative_path);
+        let path = resolve_v1_inventory_entry(graph_root, entry)?;
         reject_link(&path)?;
         let metadata = fs::symlink_metadata(&path)
             .map_err(|error| storage("inspect generation graph file", &path, error))?;
@@ -436,9 +440,9 @@ pub fn materialize_graph_tree(
         ..GraphFilesOpenEvidence::default()
     };
     for entry in &inventory.files {
-        let relative = Path::new(&entry.relative_path);
-        let source = graph_root.join(relative);
-        let destination = target.join(relative);
+        let source = resolve_v1_inventory_entry(graph_root, entry)?;
+        let relative = canonical_inventory_relative_path(&entry.relative_path)?;
+        let destination = target.join(&relative);
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent)
                 .map_err(|error| storage("create private graph directory", parent, error))?;
@@ -584,6 +588,7 @@ fn validate_inventory_contract(inventory: &GraphFilesInventory) -> Result<(), Gf
     let mut total = 0_u64;
     let mut previous: Option<&str> = None;
     let mut seen = HashSet::new();
+    let mut canonical_destinations = HashSet::new();
     for entry in &inventory.files {
         if previous.is_some_and(|value| value >= entry.relative_path.as_str()) {
             return Err(validation(
@@ -593,7 +598,13 @@ fn validate_inventory_contract(inventory: &GraphFilesInventory) -> Result<(), Gf
         if !seen.insert(entry.relative_path.as_str()) {
             return Err(validation("graph files inventory contains duplicate paths"));
         }
-        validate_relative_path(Path::new(&entry.relative_path))?;
+        let _ = inventory_relative_path_candidates(&entry.relative_path)?;
+        let canonical_destination = canonical_inventory_relative_path(&entry.relative_path)?;
+        if !canonical_destinations.insert(portable_case_collision_key(&canonical_destination)?) {
+            return Err(validation(
+                "graph files inventory paths have an ambiguous canonical destination",
+            ));
+        }
         if entry.content_sha256.len() != 64
             || !entry
                 .content_sha256
@@ -615,6 +626,15 @@ fn validate_inventory_contract(inventory: &GraphFilesInventory) -> Result<(), Gf
         ));
     }
     Ok(())
+}
+
+/// Conservative portable key for filesystems with case-insensitive lookup.
+///
+/// NFC before and after Unicode uppercase expansion makes the comparison
+/// deterministic across hosts without rewriting the authenticated wire path.
+fn portable_case_collision_key(path: &Path) -> Result<String, GfError> {
+    let text = path_text(path)?;
+    Ok(text.nfc().flat_map(char::to_uppercase).nfc().collect())
 }
 
 fn collect_source_files(directory: &Path, paths: &mut Vec<PathBuf>) -> Result<(), GfError> {
@@ -712,10 +732,10 @@ fn collect_source_files_from(
     Ok(())
 }
 
-fn collect_regular_files(
+fn collect_regular_file_paths(
     root: &Path,
     directory: &Path,
-    observed: &mut BTreeMap<String, PathBuf>,
+    observed: &mut BTreeSet<PathBuf>,
 ) -> Result<(), GfError> {
     let mut entries = directory
         .read_dir()
@@ -732,21 +752,16 @@ fn collect_regular_files(
             return Err(corrupt("generation graph tree contains a symbolic link"));
         }
         if file_type.is_dir() {
-            collect_regular_files(root, &path, observed)?;
+            collect_regular_file_paths(root, &path, observed)?;
         } else if file_type.is_file() {
             let relative = path
                 .strip_prefix(root)
                 .map_err(|_| corrupt("generation graph path escaped tree"))?;
-            if is_graph_operational_file(relative) {
-                continue;
-            }
-            validate_relative_path(relative)?;
-            let key = path_text(relative)?;
-            if observed.insert(key, path).is_some() {
-                return Err(corrupt("generation graph tree has duplicate paths"));
-            }
-            if observed.len() > MAX_GRAPH_FILES {
-                return Err(resource_limit("graph files count exceeds limit"));
+            if !is_graph_operational_file(relative) {
+                observed.insert(relative.to_path_buf());
+                if observed.len() > MAX_GRAPH_FILES {
+                    return Err(resource_limit("graph files count exceeds limit"));
+                }
             }
         } else {
             return Err(corrupt("generation graph tree contains a special file"));
@@ -888,9 +903,154 @@ fn validate_relative_path(path: &Path) -> Result<(), GfError> {
 }
 
 fn path_text(path: &Path) -> Result<String, GfError> {
-    path.to_str()
-        .map(str::to_owned)
-        .ok_or_else(|| validation("graph file path is not UTF-8"))
+    let mut encoded = String::new();
+    for component in path.components() {
+        let Component::Normal(component) = component else {
+            return Err(validation("invalid graph file relative path"));
+        };
+        let component = component
+            .to_str()
+            .ok_or_else(|| validation("graph file path is not UTF-8"))?;
+        validate_wire_component(component)?;
+        if !encoded.is_empty() {
+            encoded.push('/');
+        }
+        encoded.push_str(component);
+    }
+    if encoded.is_empty() {
+        return Err(validation("invalid graph file relative path"));
+    }
+    Ok(encoded)
+}
+
+/// Decode the platform-independent inventory spelling without asking the host
+/// path parser to interpret wire separators or aliases.
+fn wire_relative_path(text: &str) -> Result<PathBuf, GfError> {
+    if text.is_empty() || text.starts_with('/') || text.ends_with('/') {
+        return Err(validation("invalid graph file wire path"));
+    }
+    let mut path = PathBuf::new();
+    for component in text.split('/') {
+        validate_wire_component(component)?;
+        path.push(component);
+    }
+    if path_text(&path)? != text {
+        return Err(validation("graph file wire path is not canonical"));
+    }
+    Ok(path)
+}
+
+pub(crate) fn canonical_inventory_relative_path(text: &str) -> Result<PathBuf, GfError> {
+    if text.contains('\\') {
+        wire_relative_path(&text.replace('\\', "/"))
+    } else {
+        wire_relative_path(text)
+    }
+}
+
+pub(crate) fn canonical_inventory_relative_text(text: &str) -> Result<String, GfError> {
+    Ok(canonical_inventory_relative_path(text)?
+        .to_string_lossy()
+        .replace('\\', "/"))
+}
+
+fn inventory_relative_path_candidates(text: &str) -> Result<Vec<PathBuf>, GfError> {
+    if !text.contains('\\') {
+        return wire_relative_path(text).map(|path| vec![path]);
+    }
+    if text.is_empty()
+        || text.starts_with(['/', '\\'])
+        || text.ends_with(['/', '\\'])
+        || text
+            .split(['/', '\\'])
+            .any(|component| component.is_empty() || matches!(component, "." | ".."))
+    {
+        return Err(validation("invalid legacy graph file path"));
+    }
+
+    let exact = text.split('/').fold(PathBuf::new(), |mut path, component| {
+        path.push(component);
+        path
+    });
+    let normalized = canonical_inventory_relative_path(text)?;
+    if exact == normalized {
+        Ok(vec![exact])
+    } else {
+        Ok(vec![exact, normalized])
+    }
+}
+
+pub(crate) fn resolve_v1_inventory_entry(
+    graph_root: &Path,
+    entry: &GraphFileEntry,
+) -> Result<PathBuf, GfError> {
+    let mut authenticated = Vec::new();
+    for relative in inventory_relative_path_candidates(&entry.relative_path)? {
+        let path = graph_root.join(&relative);
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if metadata.file_type().is_symlink()
+            || !metadata.is_file()
+            || metadata.len() != entry.byte_length
+        {
+            continue;
+        }
+        if hex_digest(hash_file(&path)?) == entry.content_sha256 {
+            authenticated.push(path);
+        }
+    }
+    match authenticated.as_slice() {
+        [path] => Ok(path.clone()),
+        [] => Err(corrupt(
+            "generation graph file has no authenticated legacy path resolution",
+        )),
+        _ => Err(corrupt(
+            "generation graph file has ambiguous authenticated legacy path resolutions",
+        )),
+    }
+}
+
+fn validate_wire_component(component: &str) -> Result<(), GfError> {
+    if component.is_empty()
+        || matches!(component, "." | "..")
+        || component.ends_with([' ', '.'])
+        || component.chars().any(|character| {
+            character.is_control()
+                || matches!(character, '<' | '>' | ':' | '"' | '\\' | '|' | '?' | '*')
+        })
+    {
+        return Err(validation("graph file path has a non-portable component"));
+    }
+    let stem = component.split('.').next().unwrap_or(component);
+    if matches!(
+        stem.to_ascii_uppercase().as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    ) {
+        return Err(validation("graph file path has a reserved component"));
+    }
+    Ok(())
 }
 
 fn reject_link(path: &Path) -> Result<(), GfError> {
@@ -975,6 +1135,229 @@ mod tests {
         assert_eq!(inventory.files[1].role, GraphFileRole::Topology);
         assert_eq!(participant.record_family_id, GRAPH_FILES_FAMILY);
         assert_eq!(decode_inventory(&participant.bytes).unwrap(), inventory);
+    }
+
+    #[test]
+    fn wire_paths_are_forward_slash_canonical_and_resolve_v4_controls() {
+        for name in [
+            "topology/uuid-membership/ordinal-v4-manifest.json",
+            "topology/uuid-membership/ordinal-v4-receipt.json",
+            "topology/uuid-membership/ordinal-v4.lock",
+        ] {
+            let decoded = wire_relative_path(name).unwrap();
+            assert_eq!(
+                decoded.components().count(),
+                3,
+                "wire separators must decode as components on every host"
+            );
+            assert_eq!(path_text(&decoded).unwrap(), name);
+        }
+
+        for ambiguous in [
+            "topology\\uuid-membership\\ordinal-v4-manifest.json",
+            "topology//ordinal-v4-manifest.json",
+            "topology/../ordinal-v4-manifest.json",
+            "topology/NUL.json",
+            "topology/trailing.",
+        ] {
+            assert!(wire_relative_path(ambiguous).is_err(), "{ambiguous}");
+        }
+    }
+
+    #[test]
+    fn canonical_inventory_bytes_and_order_do_not_depend_on_host_separators() {
+        let source = tempfile::tempdir().unwrap();
+        fs::create_dir_all(source.path().join("topology/uuid-membership")).unwrap();
+        fs::write(
+            source
+                .path()
+                .join("topology/uuid-membership/ordinal-v4-receipt.json"),
+            b"receipt",
+        )
+        .unwrap();
+        fs::write(
+            source
+                .path()
+                .join("topology/uuid-membership/ordinal-v4-manifest.json"),
+            b"manifest",
+        )
+        .unwrap();
+
+        let (inventory, participant) = capture_graph_files(source.path()).unwrap();
+        assert_eq!(
+            inventory
+                .files
+                .iter()
+                .map(|entry| entry.relative_path.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "topology/uuid-membership/ordinal-v4-manifest.json",
+                "topology/uuid-membership/ordinal-v4-receipt.json",
+            ]
+        );
+        let expected = concat!(
+            "{\"format\":\"graphforge-graph-files\",\"format_version\":1,\"files\":[",
+            "{\"relative_path\":\"topology/uuid-membership/ordinal-v4-manifest.json\",",
+            "\"byte_length\":8,\"content_sha256\":",
+            "\"05b3abf2579a5eb66403cd78be557fd860633a1fe2103c7642030defe32c657f\",",
+            "\"role\":\"topology\"},",
+            "{\"relative_path\":\"topology/uuid-membership/ordinal-v4-receipt.json\",",
+            "\"byte_length\":7,\"content_sha256\":",
+            "\"6f32860910ca0fb2a20c7fda143666b09dbf8db5238195c90a586fb542ff0cad\",",
+            "\"role\":\"topology\"}],\"file_count\":2,\"total_byte_length\":15}\n"
+        );
+        assert_eq!(participant.bytes, expected.as_bytes());
+        assert_eq!(participant.bytes, encode_inventory(&inventory).unwrap());
+        assert_eq!(decode_inventory(&participant.bytes).unwrap(), inventory);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_windows_v1_path_reopens_after_move_and_republishes_canonically() {
+        let graph_root = tempfile::tempdir().unwrap();
+        let canonical = graph_root.path().join("topology/nodes.parquet");
+        fs::create_dir_all(canonical.parent().unwrap()).unwrap();
+        fs::write(&canonical, b"nodes").unwrap();
+        let digest = hex_digest(hash_file(&canonical).unwrap());
+        let inventory = GraphFilesInventory {
+            format: GRAPH_FILES_FORMAT.into(),
+            format_version: GRAPH_FILES_FORMAT_VERSION,
+            files: vec![GraphFileEntry {
+                relative_path: "topology\\nodes.parquet".into(),
+                byte_length: 5,
+                content_sha256: digest,
+                role: GraphFileRole::Topology,
+            }],
+            file_count: 1,
+            total_byte_length: 5,
+        };
+
+        verify_graph_tree(graph_root.path(), &inventory).unwrap();
+        let private = tempfile::tempdir().unwrap();
+        materialize_graph_tree(graph_root.path(), &inventory, private.path()).unwrap();
+        let (republished, participant) = capture_graph_files(private.path()).unwrap();
+        assert_eq!(republished.files[0].relative_path, "topology/nodes.parquet");
+        assert!(!participant.bytes.contains(&b'\\'));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_windows_v1_path_rejects_authenticated_literal_ambiguity() {
+        let graph_root = tempfile::tempdir().unwrap();
+        let canonical = graph_root.path().join("topology/nodes.parquet");
+        fs::create_dir_all(canonical.parent().unwrap()).unwrap();
+        fs::write(&canonical, b"nodes").unwrap();
+        fs::write(graph_root.path().join("topology\\nodes.parquet"), b"nodes").unwrap();
+        let inventory = GraphFilesInventory {
+            format: GRAPH_FILES_FORMAT.into(),
+            format_version: GRAPH_FILES_FORMAT_VERSION,
+            files: vec![GraphFileEntry {
+                relative_path: "topology\\nodes.parquet".into(),
+                byte_length: 5,
+                content_sha256: hex_digest(hash_file(&canonical).unwrap()),
+                role: GraphFileRole::Topology,
+            }],
+            file_count: 1,
+            total_byte_length: 5,
+        };
+
+        assert!(verify_graph_tree(graph_root.path(), &inventory).is_err());
+    }
+
+    #[test]
+    fn legacy_windows_v1_path_rejects_duplicate_canonical_destinations() {
+        let digest = hex_digest(Sha256::digest(b"nodes").into());
+        let inventory = GraphFilesInventory {
+            format: GRAPH_FILES_FORMAT.into(),
+            format_version: GRAPH_FILES_FORMAT_VERSION,
+            files: vec![
+                GraphFileEntry {
+                    relative_path: "topology/nodes.parquet".into(),
+                    byte_length: 5,
+                    content_sha256: digest.clone(),
+                    role: GraphFileRole::Topology,
+                },
+                GraphFileEntry {
+                    relative_path: "topology\\nodes.parquet".into(),
+                    byte_length: 5,
+                    content_sha256: digest,
+                    role: GraphFileRole::Topology,
+                },
+            ],
+            file_count: 2,
+            total_byte_length: 10,
+        };
+
+        assert!(validate_inventory_contract(&inventory).is_err());
+    }
+
+    #[test]
+    fn v1_paths_reject_portable_unicode_case_collisions_before_staging() {
+        let digest = hex_digest(Sha256::digest(b"nodes").into());
+        let inventory = GraphFilesInventory {
+            format: GRAPH_FILES_FORMAT.into(),
+            format_version: GRAPH_FILES_FORMAT_VERSION,
+            files: vec![
+                GraphFileEntry {
+                    relative_path: "topology/Å.parquet".into(),
+                    byte_length: 5,
+                    content_sha256: digest.clone(),
+                    role: GraphFileRole::Topology,
+                },
+                GraphFileEntry {
+                    relative_path: "topology/å.parquet".into(),
+                    byte_length: 5,
+                    content_sha256: digest,
+                    role: GraphFileRole::Topology,
+                },
+            ],
+            file_count: 2,
+            total_byte_length: 10,
+        };
+        let source = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+
+        assert!(stage_graph_tree(source.path(), target.path(), &inventory).is_err());
+        assert!(materialize_graph_tree(source.path(), &inventory, target.path()).is_err());
+        assert!(target.path().read_dir().unwrap().next().is_none());
+    }
+
+    #[test]
+    fn portable_case_key_collides_greek_sigma_and_final_sigma() {
+        assert_eq!(
+            portable_case_collision_key(Path::new("topology/σ.parquet")).unwrap(),
+            portable_case_collision_key(Path::new("topology/ς.parquet")).unwrap()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_windows_v1_literal_unix_name_migrates_to_canonical_path() {
+        let source = tempfile::tempdir().unwrap();
+        let literal = source.path().join("topology\\nodes.parquet");
+        fs::write(&literal, b"nodes").unwrap();
+        let inventory = GraphFilesInventory {
+            format: GRAPH_FILES_FORMAT.into(),
+            format_version: GRAPH_FILES_FORMAT_VERSION,
+            files: vec![GraphFileEntry {
+                relative_path: "topology\\nodes.parquet".into(),
+                byte_length: 5,
+                content_sha256: hex_digest(hash_file(&literal).unwrap()),
+                role: GraphFileRole::Topology,
+            }],
+            file_count: 1,
+            total_byte_length: 5,
+        };
+
+        verify_graph_tree(source.path(), &inventory).unwrap();
+        let generation = tempfile::tempdir().unwrap();
+        stage_graph_tree(source.path(), generation.path(), &inventory).unwrap();
+        let staged = graph_tree_root(generation.path());
+        assert_eq!(
+            fs::read(staged.join("topology/nodes.parquet")).unwrap(),
+            b"nodes"
+        );
+        assert!(!staged.join("topology\\nodes.parquet").exists());
     }
 
     #[test]

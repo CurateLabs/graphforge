@@ -594,11 +594,19 @@ impl AuthenticatedPropertyInventory {
                 let entries = inventory
                     .files
                     .into_iter()
-                    .map(|entry| {
-                        let relative = PathBuf::from(&entry.relative_path);
-                        (entry, relative)
+                    .map(|mut entry| {
+                        let path = crate::graph_files::resolve_v1_inventory_entry(&root, &entry)?;
+                        let relative = path
+                            .strip_prefix(&root)
+                            .map_err(|_| corrupt("legacy graph file escaped its root"))?
+                            .to_path_buf();
+                        entry.relative_path =
+                            crate::graph_files::canonical_inventory_relative_text(
+                                &entry.relative_path,
+                            )?;
+                        Ok((entry, relative))
                     })
-                    .collect();
+                    .collect::<Result<Vec<_>, GfError>>()?;
                 Self::admit_entries(&root, entries, requested_route)
             }
             crate::graph_files::GraphFilesParticipant::V2(_) => {
