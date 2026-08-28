@@ -2930,8 +2930,12 @@ impl GraphWriter {
             crate::uuid_membership::CommittedUuidTopologyRewrite::Committed {
                 generation,
                 metrics,
+                v4_metrics,
             } => {
                 self.record_uuid_append_work(&metrics);
+                if let Some(metrics) = v4_metrics.as_ref() {
+                    self.record_v4_ordinal_append_work(metrics);
+                }
                 self.pending_index_nodes.clear();
                 self.pending_index_edges.clear();
                 Ok(Some(generation))
@@ -2939,9 +2943,13 @@ impl GraphWriter {
             crate::uuid_membership::CommittedUuidTopologyRewrite::CommittedNeedsRefresh {
                 generation,
                 metrics,
+                v4_metrics,
                 error,
             } => {
                 self.record_uuid_append_work(&metrics);
+                if let Some(metrics) = v4_metrics.as_ref() {
+                    self.record_v4_ordinal_append_work(metrics);
+                }
                 self.pending_index_nodes.clear();
                 self.pending_index_edges.clear();
                 self.uuid_snapshot_refresh_needed = Some(generation);
@@ -2980,6 +2988,37 @@ impl GraphWriter {
         work.uuid_validation_random_seeks = work
             .uuid_validation_random_seeks
             .saturating_add(metrics.validation_random_seeks);
+    }
+
+    fn record_v4_ordinal_append_work(
+        &mut self,
+        metrics: &crate::uuid_membership::V4OrdinalAppendMetrics,
+    ) {
+        let work = &mut self.topology_work;
+        work.uuid_input_records = work
+            .uuid_input_records
+            .saturating_add(metrics.input_identities)
+            .saturating_add(metrics.input_tombstones);
+        work.uuid_prior_topology_rows_decoded = work
+            .uuid_prior_topology_rows_decoded
+            .saturating_add(metrics.prior_topology_rows_decoded);
+        work.uuid_physical_bytes_written = work
+            .uuid_physical_bytes_written
+            .saturating_add(metrics.physical_bytes_written);
+        work.uuid_write_blocks = work.uuid_write_blocks.saturating_add(metrics.write_blocks);
+        work.uuid_write_bytes = work.uuid_write_bytes.saturating_add(metrics.write_bytes);
+        work.uuid_peak_buffered_bytes = work
+            .uuid_peak_buffered_bytes
+            .max(u64::try_from(metrics.peak_buffer_bytes).unwrap_or(u64::MAX));
+        work.uuid_validation_blocks = work
+            .uuid_validation_blocks
+            .saturating_add(metrics.sequential_read_blocks);
+        work.uuid_validation_bytes = work
+            .uuid_validation_bytes
+            .saturating_add(metrics.sequential_read_bytes);
+        work.uuid_validation_random_seeks = work
+            .uuid_validation_random_seeks
+            .saturating_add(metrics.per_record_seeks);
     }
 
     /// Best-effort write of the delta segment for `generation` — only when the

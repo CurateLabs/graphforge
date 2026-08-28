@@ -3,7 +3,8 @@
 //! This module deliberately exposes no publication API. Version-three state is
 //! reported as rebuild-required and is never interpreted through this format.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
 use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -165,7 +166,8 @@ pub struct V4OrdinalIdentityManifest {
     pub format_version: u32,
     /// Exact topology generation served by this snapshot.
     pub(crate) topology_generation: u64,
-    /// UUID-sorted forward artifacts, included to reject mixed authority.
+    /// Individually UUID-sorted immutable forward runs in strictly increasing
+    /// publication-generation order, included to reject mixed authority.
     pub forward_identities: Vec<V4OrdinalArtifact>,
     /// Nonoverlapping packed ordinal ranges.
     pub ordinal_ranges: Vec<V4OrdinalRange>,
@@ -355,7 +357,7 @@ pub enum V4OrdinalIdentityError {
 pub struct V4OrdinalAdmissionMetrics {
     /// Immutable files authenticated.
     pub artifacts: u64,
-    /// Bytes authenticated exactly once.
+    /// Bytes read for authentication and bounded cross-run validation.
     pub authenticated_bytes: u64,
     /// Successful sequential artifact reads during admission.
     pub sequential_read_calls: u64,
@@ -433,6 +435,22 @@ struct OpenTombstones {
     blocks: Vec<TombstoneBlock>,
 }
 
+/// One immutable artifact retained by an authenticated v4 handle for a
+/// generation-advancing writer. The cloned file pins the exact admitted inode;
+/// callers must not reopen `descriptor.name` to obtain update input.
+#[derive(Debug)]
+pub(crate) struct PinnedV4OrdinalArtifact {
+    pub(crate) descriptor: V4OrdinalArtifact,
+    pub(crate) file: File,
+}
+
+/// Authenticated, inode-pinned inputs for planning the next v4 generation.
+#[derive(Debug)]
+pub(crate) struct V4OrdinalPinnedUpdateInputs {
+    pub(crate) manifest: V4OrdinalIdentityManifest,
+    pub(crate) artifacts: Vec<PinnedV4OrdinalArtifact>,
+}
+
 #[derive(Debug)]
 struct TombstoneBlockCache {
     entries: BTreeMap<(usize, u64), Vec<u64>>,
@@ -477,6 +495,53 @@ pub struct V4OrdinalIdentityHandle {
 }
 
 impl V4OrdinalIdentityHandle {
+    /// Revalidate this retained generation and clone its already-authenticated
+    /// artifact handles for a bounded append/compaction planner.
+    pub(crate) fn pinned_update_inputs(
+        &self,
+    ) -> Result<V4OrdinalPinnedUpdateInputs, V4OrdinalIdentityError> {
+        self.revalidate()?;
+        let manifest = V4OrdinalIdentityManifest {
+            format_version: ORDINAL_IDENTITY_V4,
+            topology_generation: self.topology_generation,
+            forward_identities: self
+                .forward
+                .iter()
+                .map(|artifact| artifact.descriptor.clone())
+                .collect(),
+            ordinal_ranges: self
+                .ranges
+                .iter()
+                .map(|range| range.descriptor.clone())
+                .collect(),
+            tombstones: self
+                .tombstones
+                .iter()
+                .map(|run| V4OrdinalTombstones {
+                    generation: run.artifact.descriptor.generation,
+                    artifact: run.artifact.descriptor.clone(),
+                    blocks: run.blocks.clone(),
+                })
+                .collect(),
+        };
+        let artifacts = self
+            .forward
+            .iter()
+            .chain(self.ranges.iter().map(|range| &range.artifact))
+            .chain(self.tombstones.iter().map(|run| &run.artifact))
+            .map(|artifact| {
+                Ok(PinnedV4OrdinalArtifact {
+                    descriptor: artifact.descriptor.clone(),
+                    file: artifact.file.try_clone().map_err(io_error)?,
+                })
+            })
+            .collect::<Result<Vec<_>, V4OrdinalIdentityError>>()?;
+        Ok(V4OrdinalPinnedUpdateInputs {
+            manifest,
+            artifacts,
+        })
+    }
+
     /// Return the exact v4 facet names admitted through this retained,
     /// generation-authenticated handle.
     pub(crate) fn referenced_file_names(&self) -> BTreeSet<String> {
@@ -557,7 +622,6 @@ impl V4OrdinalIdentityHandle {
         let mut names = BTreeSet::new();
         let mut forward_commitment = MappingCommitment::default();
         let mut ordinal_commitment = MappingCommitment::default();
-        let mut prior_forward_uuid = None;
         let mut forward = Vec::with_capacity(manifest.forward_identities.len());
         for artifact in &manifest.forward_identities {
             require_kind(
@@ -574,11 +638,11 @@ impl V4OrdinalIdentityHandle {
                 &root,
                 artifact,
                 &manifest.ordinal_ranges,
-                &mut prior_forward_uuid,
                 &mut forward_commitment,
                 &mut admission,
             )?);
         }
+        validate_unique_forward_runs(&mut forward, &mut admission)?;
         let mut ranges = Vec::with_capacity(manifest.ordinal_ranges.len());
         for range in &manifest.ordinal_ranges {
             if !names.insert(range.artifact.name.clone()) {
@@ -903,6 +967,21 @@ fn validate_manifest(
             "forward identity authority is absent",
         ));
     }
+    if manifest.forward_identities.len() > STREAM_BYTES / FORWARD_RECORD_WIDTH_USIZE {
+        return Err(V4OrdinalIdentityError::InvalidDescriptor(
+            "forward run count exceeds bounded admission cursors",
+        ));
+    }
+    let mut prior_forward_generation = 0;
+    for run in &manifest.forward_identities {
+        require_kind(run, V4OrdinalArtifactKind::ForwardIdentities, manifest)?;
+        if run.generation <= prior_forward_generation {
+            return Err(V4OrdinalIdentityError::InvalidDescriptor(
+                "forward runs are not in canonical generation order",
+            ));
+        }
+        prior_forward_generation = run.generation;
+    }
     let mut prior_end = 0_u64;
     for range in &manifest.ordinal_ranges {
         require_kind(
@@ -1066,7 +1145,6 @@ fn admit_forward_artifact(
     root: &StableDirectory,
     descriptor: &V4OrdinalArtifact,
     ranges: &[V4OrdinalRange],
-    prior_uuid: &mut Option<[u8; UUID_WIDTH_USIZE]>,
     commitment: &mut MappingCommitment,
     metrics: &mut V4OrdinalAdmissionMetrics,
 ) -> Result<OpenArtifact, V4OrdinalIdentityError> {
@@ -1079,6 +1157,7 @@ fn admit_forward_artifact(
     let mut buffer = vec![0_u8; stream_bytes];
     let mut whole = Sha256::new();
     let mut remaining = descriptor.bytes;
+    let mut prior_uuid = None;
     while remaining != 0 {
         let read = usize::try_from(remaining.min(stream_bytes as u64))
             .map_err(|_| V4OrdinalIdentityError::Authentication)?;
@@ -1104,13 +1183,111 @@ fn admit_forward_artifact(
                     "forward identity records are noncanonical",
                 ));
             }
-            *prior_uuid = Some(uuid);
+            prior_uuid = Some(uuid);
             commitment.add(&uuid, node_id);
         }
         remaining -= read as u64;
     }
     finish_admission(&mut artifact, whole, metrics)?;
     Ok(artifact)
+}
+
+/// Prove UUID uniqueness across independently sorted forward generations with
+/// one cursor per retained run. This is bounded by descriptor/run count rather
+/// than graph cardinality and performs only sequential reads.
+fn validate_unique_forward_runs(
+    runs: &mut [OpenArtifact],
+    metrics: &mut V4OrdinalAdmissionMetrics,
+) -> Result<(), V4OrdinalIdentityError> {
+    let per_run_buffer = (STREAM_BYTES / runs.len().max(1) / FORWARD_RECORD_WIDTH_USIZE).max(1)
+        * FORWARD_RECORD_WIDTH_USIZE;
+    let buffer_lengths = runs
+        .iter()
+        .map(|run| {
+            usize::try_from(run.descriptor.bytes)
+                .unwrap_or(usize::MAX)
+                .min(per_run_buffer)
+                .max(FORWARD_RECORD_WIDTH_USIZE)
+        })
+        .collect::<Vec<_>>();
+    let cursor_bytes =
+        buffer_lengths
+            .iter()
+            .sum::<usize>()
+            .saturating_add(runs.len().saturating_mul(
+                std::mem::size_of::<ForwardRunCursor>()
+                    + std::mem::size_of::<Reverse<([u8; UUID_WIDTH_USIZE], usize)>>(),
+            ));
+    metrics.peak_buffer_bytes = metrics.peak_buffer_bytes.max(
+        metrics
+            .retained_descriptor_bytes
+            .saturating_add(metrics.manifest_bytes)
+            .saturating_add(cursor_bytes as u64),
+    );
+    let mut cursors = runs
+        .iter()
+        .zip(buffer_lengths)
+        .map(|(run, buffer_len)| ForwardRunCursor {
+            buffer: vec![0; buffer_len],
+            cursor: 0,
+            valid: 0,
+            remaining: run.descriptor.bytes,
+        })
+        .collect::<Vec<_>>();
+    let mut heap = BinaryHeap::with_capacity(runs.len());
+    for (index, run) in runs.iter_mut().enumerate() {
+        run.file.rewind().map_err(io_error)?;
+        if let Some(uuid) = cursors[index].next_uuid(run, metrics)? {
+            heap.push(Reverse((uuid, index)));
+        }
+    }
+    let mut prior = None;
+    while let Some(Reverse((uuid, index))) = heap.pop() {
+        if prior == Some(uuid) {
+            return Err(V4OrdinalIdentityError::InvalidDescriptor(
+                "forward identity UUID is repeated across generations",
+            ));
+        }
+        prior = Some(uuid);
+        if let Some(next) = cursors[index].next_uuid(&mut runs[index], metrics)? {
+            heap.push(Reverse((next, index)));
+        }
+    }
+    Ok(())
+}
+
+struct ForwardRunCursor {
+    buffer: Vec<u8>,
+    cursor: usize,
+    valid: usize,
+    remaining: u64,
+}
+
+impl ForwardRunCursor {
+    fn next_uuid(
+        &mut self,
+        run: &mut OpenArtifact,
+        metrics: &mut V4OrdinalAdmissionMetrics,
+    ) -> Result<Option<[u8; UUID_WIDTH_USIZE]>, V4OrdinalIdentityError> {
+        if self.cursor == self.valid {
+            if self.remaining == 0 {
+                return Ok(None);
+            }
+            self.valid = usize::try_from(self.remaining.min(self.buffer.len() as u64))
+                .map_err(|_| V4OrdinalIdentityError::Authentication)?;
+            run.file
+                .read_exact(&mut self.buffer[..self.valid])
+                .map_err(io_error)?;
+            record_admission_read(metrics, self.valid, self.buffer.len());
+            self.remaining -= self.valid as u64;
+            self.cursor = 0;
+        }
+        let record = &self.buffer[self.cursor..self.cursor + FORWARD_RECORD_WIDTH_USIZE];
+        self.cursor += FORWARD_RECORD_WIDTH_USIZE;
+        Ok(Some(
+            record[..UUID_WIDTH_USIZE].try_into().expect("fixed UUID"),
+        ))
+    }
 }
 fn admit_tombstone_artifact(
     root: &StableDirectory,
@@ -2009,6 +2186,103 @@ mod tests {
     }
 
     #[test]
+    fn generation_ordered_forward_runs_may_have_interleaved_uuid_keys() {
+        let mut fixture = Fixture::new(&[4], &[]);
+        let index = fixture.root.path().join(INDEX_DIR);
+        let encode = |records: &[(u128, u64)]| {
+            records
+                .iter()
+                .flat_map(|(uuid, id)| {
+                    Uuid::from_u128(*uuid)
+                        .into_bytes()
+                        .into_iter()
+                        .chain(id.to_be_bytes())
+                })
+                .collect::<Vec<_>>()
+        };
+        let older = encode(&[(1, 1), (3, 3)]);
+        let newer = encode(&[(2, 2), (4, 4)]);
+        fs::write(index.join("forward-6.uuidx"), &older).unwrap();
+        fs::write(index.join("forward-7.uuidx"), &newer).unwrap();
+        fixture.manifest.forward_identities = vec![
+            artifact(
+                "forward-6.uuidx".into(),
+                V4OrdinalArtifactKind::ForwardIdentities,
+                6,
+                &older,
+            ),
+            artifact(
+                "forward-7.uuidx".into(),
+                V4OrdinalArtifactKind::ForwardIdentities,
+                7,
+                &newer,
+            ),
+        ];
+        fixture.publish();
+
+        let _handle = fixture.open(V4OrdinalIdentityLimits::default());
+    }
+
+    #[test]
+    fn forward_runs_reject_cross_generation_duplicates_and_noncanonical_order() {
+        let mut fixture = Fixture::new(&[4], &[]);
+        let index = fixture.root.path().join(INDEX_DIR);
+        let encode = |records: &[(u128, u64)]| {
+            records
+                .iter()
+                .flat_map(|(uuid, id)| {
+                    Uuid::from_u128(*uuid)
+                        .into_bytes()
+                        .into_iter()
+                        .chain(id.to_be_bytes())
+                })
+                .collect::<Vec<_>>()
+        };
+        let older = encode(&[(1, 1), (3, 3)]);
+        let duplicate = encode(&[(1, 1), (2, 2), (4, 4)]);
+        fs::write(index.join("forward-6.uuidx"), &older).unwrap();
+        fs::write(index.join("forward-7.uuidx"), &duplicate).unwrap();
+        fixture.manifest.forward_identities = vec![
+            artifact(
+                "forward-6.uuidx".into(),
+                V4OrdinalArtifactKind::ForwardIdentities,
+                6,
+                &older,
+            ),
+            artifact(
+                "forward-7.uuidx".into(),
+                V4OrdinalArtifactKind::ForwardIdentities,
+                7,
+                &duplicate,
+            ),
+        ];
+        fixture.publish();
+        assert!(matches!(
+            V4OrdinalIdentityHandle::open(
+                fixture.root.path(),
+                &fixture.authority(7),
+                V4OrdinalIdentityLimits::default()
+            ),
+            Err(V4OrdinalIdentityError::InvalidDescriptor(
+                "forward identity UUID is repeated across generations"
+            ))
+        ));
+
+        fixture.manifest.forward_identities.swap(0, 1);
+        fixture.publish();
+        assert!(matches!(
+            V4OrdinalIdentityHandle::open(
+                fixture.root.path(),
+                &fixture.authority(7),
+                V4OrdinalIdentityLimits::default()
+            ),
+            Err(V4OrdinalIdentityError::InvalidDescriptor(
+                "forward runs are not in canonical generation order"
+            ))
+        ));
+    }
+
+    #[test]
     fn request_limit_fails_before_request_allocation() {
         let fixture = Fixture::new(&[3], &[]);
         let mut handle = fixture.open(V4OrdinalIdentityLimits {
@@ -2194,18 +2468,18 @@ mod tests {
     }
 
     #[test]
-    fn admission_streams_each_artifact_once_with_truthful_linear_counters() {
+    fn admission_streams_artifacts_with_bounded_cross_run_validation_counters() {
         let mut prior_bytes = 0;
         let mut prior_calls = 0;
         let mut prior_metadata = 0;
-        for (count, expected_calls) in [(4_096_u64, 2_u64), (8_192, 3), (16_384, 5)] {
+        for (count, expected_calls) in [(4_096_u64, 3_u64), (8_192, 4), (16_384, 6)] {
             let fixture = Fixture::new(&[count], &[]);
             let handle = fixture.open(V4OrdinalIdentityLimits::default());
             let metrics = handle.admission_metrics();
             assert_eq!(metrics.artifacts, 3);
             assert_eq!(
                 metrics.authenticated_bytes,
-                count * (FORWARD_RECORD_WIDTH + UUID_WIDTH)
+                count * (FORWARD_RECORD_WIDTH * 2 + UUID_WIDTH)
             );
             assert_eq!(metrics.sequential_read_calls, expected_calls);
             assert!(metrics.peak_buffer_bytes <= STREAM_BYTES as u64);
