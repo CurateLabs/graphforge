@@ -2808,6 +2808,14 @@ fn authenticate_private_v4_residue(
             "private v4 construction controls are not an install-order prefix",
         ));
     }
+    authenticate_private_v4_control_temp(
+        index,
+        &text,
+        receipt_present,
+        manifest_present,
+        lock_present,
+        &mut allowed,
+    )?;
     if receipt_present {
         let receipt_body =
             read_private_construction_child(index, V4_ORDINAL_RECEIPT, MAX_MANIFEST_BYTES)?;
@@ -2869,6 +2877,84 @@ fn authenticate_private_v4_residue(
     }
 
     authenticate_private_v4_artifact_residue(index, &text, allowed)
+}
+
+fn authenticate_private_v4_control_temp(
+    index: &graphforge_filesystem::StableDirectory,
+    text: &BTreeSet<String>,
+    receipt_present: bool,
+    manifest_present: bool,
+    lock_present: bool,
+    allowed: &mut BTreeSet<String>,
+) -> Result<(), GfError> {
+    let temporaries = text
+        .iter()
+        .filter_map(|name| {
+            [V4_ORDINAL_RECEIPT, V4_ORDINAL_MANIFEST, "ordinal-v4.lock"]
+                .into_iter()
+                .find_map(|control| {
+                    name.strip_prefix(&format!(".{control}-"))
+                        .and_then(|suffix| suffix.strip_suffix(".tmp"))
+                        .filter(|nonce| canonical_lower_hex(nonce, 32))
+                        .map(|_| (name, control))
+                })
+        })
+        .collect::<Vec<_>>();
+    if temporaries.len() > 1 {
+        return Err(storage_err(
+            "private v4 construction has multiple control temporaries",
+        ));
+    }
+    let Some((name, control)) = temporaries.first().copied() else {
+        return Ok(());
+    };
+    match control {
+        V4_ORDINAL_RECEIPT if !receipt_present && !manifest_present && !lock_present => {
+            let body = read_private_construction_child(index, name, MAX_MANIFEST_BYTES)?;
+            let receipt: TopologyIndexReceipt =
+                serde_json::from_slice(&body).map_err(storage_err)?;
+            if !canonical_lower_hex(&receipt.nonce, 32)
+                || !canonical_lower_hex(&receipt.topology_delta_sha256, 64)
+                || !canonical_lower_hex(&receipt.manifest_sha256, 64)
+            {
+                return Err(storage_err("private v4 receipt temporary is noncanonical"));
+            }
+        }
+        V4_ORDINAL_MANIFEST if receipt_present && !manifest_present && !lock_present => {
+            let receipt_body =
+                read_private_construction_child(index, V4_ORDINAL_RECEIPT, MAX_MANIFEST_BYTES)?;
+            let receipt: TopologyIndexReceipt =
+                serde_json::from_slice(&receipt_body).map_err(storage_err)?;
+            let body = read_private_construction_child(
+                index,
+                name,
+                crate::ordinal_identity_v4::MAX_MANIFEST_BYTES,
+            )?;
+            let manifest: crate::V4OrdinalIdentityManifest =
+                serde_json::from_slice(&body).map_err(storage_err)?;
+            if hex_sha256(&body) != receipt.manifest_sha256
+                || manifest.topology_generation != receipt.expected_generation
+            {
+                return Err(storage_err(
+                    "private v4 manifest temporary is not receipt-bound",
+                ));
+            }
+            admit_v4_construction_manifest(&manifest)?;
+        }
+        "ordinal-v4.lock" if receipt_present && manifest_present && !lock_present => {
+            let body = read_private_construction_child(index, name, 0)?;
+            if !body.is_empty() {
+                return Err(storage_err("private v4 lock temporary is nonempty"));
+            }
+        }
+        _ => {
+            return Err(storage_err(
+                "private v4 control temporary is outside its install boundary",
+            ));
+        }
+    }
+    allowed.insert(name.clone());
+    Ok(())
 }
 
 fn authenticate_private_v4_artifact_residue(
@@ -3446,6 +3532,15 @@ fn install_construction_bytes(
         .max(u64::try_from(bytes.len()).map_err(storage_err)?);
     file.sync_all().map_err(storage_err)?;
     work.fsync_operations = work.fsync_operations.saturating_add(1);
+    let failpoint = match name {
+        V4_ORDINAL_RECEIPT => Some("v4_publish.after_receipt_temp_fsync"),
+        V4_ORDINAL_MANIFEST => Some("v4_publish.after_manifest_temp_fsync"),
+        "ordinal-v4.lock" => Some("v4_publish.after_lock_temp_fsync"),
+        _ => None,
+    };
+    if let Some(failpoint) = failpoint {
+        crate::graph_construction::construction_failpoint(failpoint);
+    }
     drop(file);
     output
         .replace_child(
