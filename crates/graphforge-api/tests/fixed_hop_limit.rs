@@ -6,12 +6,17 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use arrow::array::{Array, FixedSizeBinaryArray, Int64Array, StringArray, UInt64Array};
+use arrow::array::{
+    Array, ArrayRef, FixedSizeBinaryArray, FixedSizeBinaryBuilder, Int64Array, StringArray,
+    UInt64Array,
+};
+use arrow::record_batch::RecordBatch;
 use graphforge_api::{
-    GraphForge, OperationId, PortableSelection, PortableV2ExportRequest, PortableV2ImportRequest,
+    CONSTRUCTION_EDGE_SCHEMA, CONSTRUCTION_NODE_SCHEMA, GraphConstructionBudgets, GraphForge,
+    OperationId, PortableSelection, PortableV2ExportRequest, PortableV2ImportRequest,
     PortableVerifyRequest, verify_portable_v2,
 };
 use graphforge_core::uuid::{Uuid, new_v7};
@@ -81,6 +86,10 @@ fn measured_identity_query(forge: &GraphForge, query: &str) -> (Vec<Vec<u8>>, De
 
 /// Deterministic ring: each node points to its next `fan_out` successors.
 fn generate_graph(dir: &Path, nodes: usize, fan_out: usize, compact_v4: bool) {
+    if compact_v4 {
+        generate_bulk_graph(dir, nodes, fan_out);
+        return;
+    }
     assert!(nodes > fan_out);
     let workspace = TempDir::new().unwrap();
     let uuids: Vec<Uuid> = (0..nodes).map(|_| new_v7()).collect();
@@ -119,6 +128,118 @@ fn generate_graph(dir: &Path, nodes: usize, fan_out: usize, compact_v4: bool) {
     } else {
         project_fixture::publish_graph_workspace(dir, workspace.path());
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct BulkFixtureEvidence {
+    node_rows: usize,
+    edge_rows: usize,
+    node_batches: usize,
+    edge_batches: usize,
+    accepted_chunks: u64,
+    input_rows: u64,
+    peak_batch_rows: u64,
+}
+
+/// Construct scale fixtures through the same bounded Arrow publication path
+/// used by ordinary high-volume ingestion. Scalar `GraphWriter::create_edge`
+/// deliberately checks its in-flight topology window for duplicate UUIDs and
+/// is therefore not a realistic bulk-ingestion primitive.
+fn generate_bulk_graph(dir: &Path, nodes: usize, fan_out: usize) -> BulkFixtureEvidence {
+    assert!(nodes > fan_out);
+    let forge = GraphForge::new(Some(dir.to_str().expect("temp path is UTF-8"))).unwrap();
+    let mut session = forge
+        .begin_graph_construction(GraphConstructionBudgets {
+            max_batch_rows: WRITE_WINDOW,
+            max_run_records: 4 * WRITE_WINDOW,
+            ..GraphConstructionBudgets::default()
+        })
+        .unwrap();
+
+    let mut node_batches = 0;
+    for start in (0..nodes).step_by(WRITE_WINDOW) {
+        let end = start.saturating_add(WRITE_WINDOW).min(nodes);
+        let rows = end - start;
+        let mut identities = FixedSizeBinaryBuilder::with_capacity(rows, 16);
+        for node in start..end {
+            identities
+                .append_value(fixture_node_uuid(node).as_bytes())
+                .unwrap();
+        }
+        let batch = RecordBatch::try_new(
+            Arc::clone(&CONSTRUCTION_NODE_SCHEMA),
+            vec![
+                Arc::new(identities.finish()) as ArrayRef,
+                Arc::new(StringArray::from(vec!["Entity"; rows])),
+            ],
+        )
+        .unwrap();
+        session
+            .append_nodes(&format!("nodes-{start}"), &batch)
+            .unwrap();
+        node_batches += 1;
+    }
+
+    let edge_rows = nodes.saturating_mul(fan_out);
+    let mut edge_batches = 0;
+    for start in (0..edge_rows).step_by(WRITE_WINDOW) {
+        let end = start.saturating_add(WRITE_WINDOW).min(edge_rows);
+        let rows = end - start;
+        let mut identities = FixedSizeBinaryBuilder::with_capacity(rows, 16);
+        let mut sources = FixedSizeBinaryBuilder::with_capacity(rows, 16);
+        let mut targets = FixedSizeBinaryBuilder::with_capacity(rows, 16);
+        for edge in start..end {
+            let source = edge / fan_out;
+            let offset = edge % fan_out + 1;
+            identities
+                .append_value(fixture_edge_uuid(edge).as_bytes())
+                .unwrap();
+            sources
+                .append_value(fixture_node_uuid(source).as_bytes())
+                .unwrap();
+            targets
+                .append_value(fixture_node_uuid((source + offset) % nodes).as_bytes())
+                .unwrap();
+        }
+        let batch = RecordBatch::try_new(
+            Arc::clone(&CONSTRUCTION_EDGE_SCHEMA),
+            vec![
+                Arc::new(identities.finish()) as ArrayRef,
+                Arc::new(StringArray::from(vec!["LINK"; rows])),
+                Arc::new(sources.finish()),
+                Arc::new(targets.finish()),
+            ],
+        )
+        .unwrap();
+        session
+            .append_edges(&format!("edges-{start}"), &batch)
+            .unwrap();
+        edge_batches += 1;
+    }
+
+    session.seal_and_publish().unwrap();
+    let progress = session.progress();
+    drop(session);
+    forge.index_adjacency().unwrap();
+    drop(forge);
+
+    BulkFixtureEvidence {
+        node_rows: nodes,
+        edge_rows,
+        node_batches,
+        edge_batches,
+        accepted_chunks: progress.accepted_chunks,
+        input_rows: progress.evidence.input_rows,
+        peak_batch_rows: progress.evidence.peak_batch_rows,
+    }
+}
+
+fn fixture_node_uuid(index: usize) -> Uuid {
+    Uuid::from_u128(0x1000_0000_0000_0000_0000_0000_0000_0000 | index as u128 + 1)
+}
+
+fn fixture_edge_uuid(index: usize) -> Uuid {
+    Uuid::from_u128(0x2000_0000_0000_0000_0000_0000_0000_0000 | index as u128 + 1)
 }
 
 fn open_forge(dir: &Path) -> GraphForge {
@@ -334,7 +455,7 @@ struct ScaleResult {
 
 fn run_scale(nodes: usize, fan_out: usize) -> ScaleResult {
     let dir = TempDir::new().unwrap();
-    generate_graph(dir.path(), nodes, fan_out, false);
+    generate_bulk_graph(dir.path(), nodes, fan_out);
     let forge = open_forge(dir.path());
 
     let one_plan = forge.explain(ONE_HOP).unwrap();
@@ -383,6 +504,11 @@ fn assert_indexed_limit_io(io: &io_stats::IoSnapshot) {
     assert!(io.node_filtered_reads >= 1, "{io:?}");
 }
 
+fn assert_projected_identity_io(io: &io_stats::IoSnapshot) {
+    assert_eq!(io.edge_full_reads + io.edge_filtered_reads, 0, "{io:?}");
+    assert_eq!(io.node_full_reads + io.node_filtered_reads, 0, "{io:?}");
+}
+
 fn assert_bounded_demand(snapshot: &DemandSnapshot, expected_hops: usize, required: u64) {
     assert_eq!(snapshot.hops.len(), expected_hops, "{snapshot:#?}");
     assert!(snapshot.cancellations >= 1, "{snapshot:#?}");
@@ -416,8 +542,8 @@ fn terminal_limit_keeps_fixed_hop_io_bounded_as_graph_grows() {
     println!("fixed-hop LIMIT structural smoke: small={small:?}, large={large:?}");
 
     for scale in [&small, &large] {
-        assert_indexed_limit_io(&scale.one_hop_io);
-        assert_indexed_limit_io(&scale.two_hop_io);
+        assert_projected_identity_io(&scale.one_hop_io);
+        assert_projected_identity_io(&scale.two_hop_io);
         assert_bounded_demand(&scale.one_hop_demand, 1, LIMIT as u64);
         assert_bounded_demand(&scale.two_hop_demand, 2, LIMIT as u64);
     }
@@ -440,6 +566,34 @@ fn terminal_limit_keeps_fixed_hop_io_bounded_as_graph_grows() {
         large.two_hop_io.node_filtered_rows <= small.two_hop_io.node_filtered_rows * 3,
         "small={small:?}, large={large:?}"
     );
+}
+
+#[test]
+fn scale_fixture_uses_bounded_bulk_publications() {
+    let dir = TempDir::new().unwrap();
+    let nodes = WRITE_WINDOW + 1;
+    let evidence = generate_bulk_graph(dir.path(), nodes, 2);
+    assert_eq!(
+        evidence,
+        BulkFixtureEvidence {
+            node_rows: nodes,
+            edge_rows: nodes * 2,
+            node_batches: 2,
+            edge_batches: 3,
+            accepted_chunks: 5,
+            input_rows: (nodes * 3) as u64,
+            peak_batch_rows: WRITE_WINDOW as u64,
+        }
+    );
+
+    let forge = open_forge(dir.path());
+    let plan = forge.explain(ORDERED_ONE_HOP).unwrap();
+    assert!(plan.contains("adjacency=hit"), "{plan}");
+    assert!(plan.contains("identity=v4"), "{plan}");
+    io_stats::reset();
+    let result = forge.execute(ORDERED_ONE_HOP).unwrap();
+    assert_eq!(result.stats.rows_produced, LIMIT as u64);
+    assert_projected_identity_io(&io_stats::snapshot());
 }
 
 fn run_scattered_destination_scale(
@@ -1155,7 +1309,7 @@ fn release_livejournal_fixed_hop_limits() {
 
 fn release_scale(nodes: usize, fan_out: usize) -> ScaleResult {
     let dir = TempDir::new().unwrap();
-    generate_graph(dir.path(), nodes, fan_out, false);
+    generate_bulk_graph(dir.path(), nodes, fan_out);
     let warm = open_forge(dir.path());
     warm.execute(ONE_HOP).unwrap();
     warm.execute(TWO_HOP).unwrap();
