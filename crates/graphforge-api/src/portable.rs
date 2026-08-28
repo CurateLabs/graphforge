@@ -67,6 +67,13 @@ pub struct PortableV2ImportResult {
     /// including controls and every retained generation.
     #[doc(hidden)]
     pub published_identity_allocated_bytes: std::collections::BTreeMap<String, u64>,
+    /// Exact identities durably removed by private-materialization cleanup.
+    #[doc(hidden)]
+    pub materialized_cleanup_removed_identity_allocated_bytes:
+        std::collections::BTreeMap<String, u64>,
+    /// Whether the cleanup namespace synchronization completed.
+    #[doc(hidden)]
+    pub materialized_cleanup_parent_sync_confirmed: bool,
 }
 
 /// Publish a verified local portable-v2 package to an OCI registry.
@@ -550,6 +557,12 @@ impl GraphForge {
             idempotent_replay: receipt.publication.idempotent_replay,
             materialized_identity_allocated_bytes: receipt.materialized_identity_allocated_bytes,
             published_identity_allocated_bytes: receipt.published_identity_allocated_bytes,
+            materialized_cleanup_removed_identity_allocated_bytes: receipt
+                .materialized_cleanup
+                .removed_identity_allocated_bytes,
+            materialized_cleanup_parent_sync_confirmed: receipt
+                .materialized_cleanup
+                .parent_sync_confirmed,
         })
     }
 }

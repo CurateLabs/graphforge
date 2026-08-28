@@ -203,8 +203,8 @@ pub use project_portable_v2_export::{
     plan_complete_portable_v2, plan_selected_portable_v2, repack_verified_expanded_portable_v2,
 };
 pub use project_portable_v2_import::{
-    PortableV2ImportPhase, PortableV2ImportProgress, PortableV2ImportReceipt,
-    PortableV2SelectiveCandidate, PortableV2StagedCompositionReceipt,
+    PortableV2ImportCleanupReceipt, PortableV2ImportPhase, PortableV2ImportProgress,
+    PortableV2ImportReceipt, PortableV2SelectiveCandidate, PortableV2StagedCompositionReceipt,
     consume_selective_portable_v2, import_complete_portable_v2,
     import_complete_portable_v2_with_progress, load_portable_ontology_staging,
 };

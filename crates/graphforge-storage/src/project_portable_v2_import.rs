@@ -41,6 +41,22 @@ pub struct PortableV2ImportReceipt {
     /// Exact authenticated identity union of the published project container,
     /// including controls and every retained generation.
     pub published_identity_allocated_bytes: std::collections::BTreeMap<String, u64>,
+    /// Identity-safe, durably synchronized removal of private import materialization.
+    pub materialized_cleanup: PortableV2ImportCleanupReceipt,
+}
+
+/// Exact cleanup receipt for private portable-import materialization.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PortableV2ImportCleanupReceipt {
+    /// Native identities confirmed removed from the private staging owner.
+    pub removed_identity_allocated_bytes: std::collections::BTreeMap<String, u64>,
+    /// The containing namespace was synchronized after removal.
+    pub parent_sync_confirmed: bool,
+}
+
+#[cfg(test)]
+thread_local! {
+    static INJECT_IMPORT_CLEANUP_FAILURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -252,6 +268,14 @@ pub fn import_complete_portable_v2_with_progress(
             return Err(error.with_allocation_identities(materialized_identity_allocated_bytes));
         }
     };
+    let materialized_stage_identity = graphforge_filesystem::StableDirectory::open(&stage)
+        .map_err(|_| {
+            PortableV2Error::new(
+                PortableV2ErrorCode::Io,
+                "cannot authenticate materialized import staging",
+            )
+        })?
+        .identity();
     progress(PortableV2ImportProgress {
         phase: PortableV2ImportPhase::Materialized,
         entries: report.entry_count,
@@ -282,9 +306,18 @@ pub fn import_complete_portable_v2_with_progress(
             // a finalization error instead of rediscovering the staging tree.
             .with_recovery_reauthentication(report.payload_bytes, report.entry_count)
     });
-    let _ = fs::remove_dir_all(&stage);
-    let _ = fs::remove_file(&owner);
-    let _ = sync_parent(&owner);
+    let result = result.and_then(|mut receipt| {
+        receipt.materialized_cleanup = cleanup_import_materialization(
+            &stage,
+            &owner,
+            materialized_stage_identity,
+            &receipt.materialized_identity_allocated_bytes,
+        )
+        .map_err(|error| {
+            error.with_allocation_identities(receipt.materialized_identity_allocated_bytes.clone())
+        })?;
+        Ok(receipt)
+    });
     if result.is_ok() {
         progress(PortableV2ImportProgress {
             phase: PortableV2ImportPhase::Published,
@@ -294,6 +327,174 @@ pub fn import_complete_portable_v2_with_progress(
         });
     }
     result
+}
+
+fn cleanup_import_materialization(
+    stage: &Path,
+    owner: &Path,
+    expected_stage_identity: graphforge_filesystem::FileIdentity,
+    identities: &std::collections::BTreeMap<String, u64>,
+) -> Result<PortableV2ImportCleanupReceipt, PortableV2Error> {
+    #[cfg(test)]
+    if INJECT_IMPORT_CLEANUP_FAILURE.with(std::cell::Cell::get) {
+        return Err(PortableV2Error::new(
+            PortableV2ErrorCode::Io,
+            "cannot durably clean import staging",
+        ));
+    }
+    if stage.exists() {
+        let parent = graphforge_filesystem::StableDirectory::open(
+            stage.parent().unwrap_or_else(|| Path::new(".")),
+        )
+        .map_err(|_| {
+            PortableV2Error::new(PortableV2ErrorCode::Io, "cannot open import staging parent")
+        })?;
+        let name = stage.file_name().ok_or_else(|| {
+            PortableV2Error::new(
+                PortableV2ErrorCode::InvalidPath,
+                "invalid import staging path",
+            )
+        })?;
+        let directory = parent.open_child_directory(name).map_err(|_| {
+            PortableV2Error::new(
+                PortableV2ErrorCode::Io,
+                "cannot authenticate import staging",
+            )
+        })?;
+        if directory.identity() != expected_stage_identity {
+            return Err(PortableV2Error::new(
+                PortableV2ErrorCode::Io,
+                "import staging identity changed before cleanup",
+            ));
+        }
+        let mut cleanup_budget = identities.len().saturating_mul(2).saturating_add(1024);
+        remove_stable_tree(&directory, identities, &mut cleanup_budget)?;
+        parent
+            .remove_child_directory_if_identity(name, directory.identity())
+            .map_err(|_| {
+                PortableV2Error::new(
+                    PortableV2ErrorCode::Io,
+                    "cannot remove authenticated import staging",
+                )
+            })?;
+        parent.sync().map_err(|_| {
+            PortableV2Error::new(PortableV2ErrorCode::Io, "cannot sync import staging parent")
+        })?;
+    }
+    if owner.exists() {
+        let parent = graphforge_filesystem::StableDirectory::open(
+            owner.parent().unwrap_or_else(|| Path::new(".")),
+        )
+        .map_err(|_| {
+            PortableV2Error::new(PortableV2ErrorCode::Io, "cannot open import owner parent")
+        })?;
+        let name = owner.file_name().ok_or_else(|| {
+            PortableV2Error::new(
+                PortableV2ErrorCode::InvalidPath,
+                "invalid import owner path",
+            )
+        })?;
+        let file = parent.open_child_file(name).map_err(|_| {
+            PortableV2Error::new(PortableV2ErrorCode::Io, "cannot authenticate import owner")
+        })?;
+        let identity = graphforge_filesystem::file_identity(&file).map_err(|_| {
+            PortableV2Error::new(PortableV2ErrorCode::Io, "cannot identify import owner")
+        })?;
+        let mut observed = std::collections::BTreeMap::new();
+        record_import_file_identity(&file, &mut observed)?;
+        if observed
+            .iter()
+            .any(|(identity, allocated)| identities.get(identity) != Some(allocated))
+        {
+            return Err(PortableV2Error::new(
+                PortableV2ErrorCode::Io,
+                "import owner identity changed before cleanup",
+            ));
+        }
+        parent
+            .unlink_child_if_identity(name, identity)
+            .map_err(|_| {
+                PortableV2Error::new(
+                    PortableV2ErrorCode::Io,
+                    "cannot remove authenticated import owner",
+                )
+            })?;
+        parent.sync().map_err(|_| {
+            PortableV2Error::new(PortableV2ErrorCode::Io, "cannot sync import owner parent")
+        })?;
+    }
+    Ok(PortableV2ImportCleanupReceipt {
+        removed_identity_allocated_bytes: identities.clone(),
+        parent_sync_confirmed: true,
+    })
+}
+
+fn remove_stable_tree(
+    directory: &graphforge_filesystem::StableDirectory,
+    identities: &std::collections::BTreeMap<String, u64>,
+    remaining: &mut usize,
+) -> Result<(), PortableV2Error> {
+    let names = directory.child_names_bounded(*remaining).map_err(|_| {
+        PortableV2Error::new(
+            PortableV2ErrorCode::Io,
+            "import staging cleanup exceeds bound",
+        )
+    })?;
+    *remaining = (*remaining).saturating_sub(names.len());
+    for name in names {
+        match directory.open_child_directory(&name) {
+            Ok(child) => {
+                remove_stable_tree(&child, identities, remaining)?;
+                directory
+                    .remove_child_directory_if_identity(&name, child.identity())
+                    .map_err(|_| {
+                        PortableV2Error::new(
+                            PortableV2ErrorCode::Io,
+                            "cannot remove authenticated import directory",
+                        )
+                    })?;
+            }
+            Err(_) => {
+                let file = directory.open_child_file(&name).map_err(|_| {
+                    PortableV2Error::new(
+                        PortableV2ErrorCode::Io,
+                        "cannot authenticate import cleanup entry",
+                    )
+                })?;
+                let identity = graphforge_filesystem::file_identity(&file).map_err(|_| {
+                    PortableV2Error::new(
+                        PortableV2ErrorCode::Io,
+                        "cannot identify import cleanup entry",
+                    )
+                })?;
+                let mut observed = std::collections::BTreeMap::new();
+                record_import_file_identity(&file, &mut observed)?;
+                if observed
+                    .iter()
+                    .any(|(identity, allocated)| identities.get(identity) != Some(allocated))
+                {
+                    return Err(PortableV2Error::new(
+                        PortableV2ErrorCode::Io,
+                        "import cleanup entry is not owned materialization",
+                    ));
+                }
+                directory
+                    .unlink_child_if_identity(&name, identity)
+                    .map_err(|_| {
+                        PortableV2Error::new(
+                            PortableV2ErrorCode::Io,
+                            "cannot remove authenticated import entry",
+                        )
+                    })?;
+            }
+        }
+    }
+    directory.sync().map_err(|_| {
+        PortableV2Error::new(
+            PortableV2ErrorCode::Io,
+            "cannot sync authenticated import staging",
+        )
+    })
 }
 
 fn claim_stage(
@@ -621,6 +822,7 @@ fn import_materialized(
         )
         .map_err(storage)?
         .physical_identity_allocated_bytes,
+        materialized_cleanup: PortableV2ImportCleanupReceipt::default(),
     })
 }
 
@@ -1465,6 +1667,57 @@ mod tests {
             ));
             assert!(!owner_residue.exists(), "owned marker survived {failpoint}");
         }
+    }
+
+    #[test]
+    fn published_import_fails_closed_when_materialization_cleanup_is_not_durable() {
+        let source_project = tempfile::tempdir().unwrap();
+        let source_generation = crate::open_or_initialize_project(source_project.path()).unwrap();
+        let package_parent = tempfile::tempdir().unwrap();
+        let package = package_parent.path().join("complete.gfproject");
+        let limits = crate::PortableV2ExportLimits::default();
+        let plan = crate::plan_complete_portable_v2(&source_generation, limits).unwrap();
+        crate::export_complete_portable_v2(
+            &plan,
+            &package,
+            crate::PortableV2Output::Expanded,
+            limits,
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .unwrap();
+
+        let target_parent = tempfile::tempdir().unwrap();
+        let target = target_parent.path().join("project");
+        let transaction = Uuid::new_v4();
+        let generation = Uuid::new_v4();
+        INJECT_IMPORT_CLEANUP_FAILURE.with(|value| value.set(true));
+        let error = import_complete_portable_v2(
+            &package,
+            &target,
+            transaction,
+            generation,
+            &supported(),
+            PortableV2Limits::default(),
+            None,
+        )
+        .expect_err("cleanup failure must fail closed");
+        INJECT_IMPORT_CLEANUP_FAILURE.with(|value| value.set(false));
+        assert_eq!(
+            crate::resolve_project_generation(&target)
+                .unwrap()
+                .generation_uuid(),
+            generation,
+            "publication may commit, but must not receive a false cleanup receipt"
+        );
+        assert!(!error.allocation_identity_allocated_bytes.is_empty());
+        let stage = target_parent
+            .path()
+            .join(format!(".project.portable-v2-{}", transaction.hyphenated()));
+        assert!(
+            stage.exists(),
+            "failed cleanup residue must remain attributable"
+        );
     }
 
     #[test]

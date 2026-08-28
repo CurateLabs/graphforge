@@ -2678,6 +2678,11 @@ fn run_integrated_certification_with_edge_factor(
         "clean_import",
         &imported_receipt.published_identity_allocated_bytes,
     );
+    assert!(imported_receipt.materialized_cleanup_parent_sync_confirmed);
+    assert_eq!(
+        imported_receipt.materialized_cleanup_removed_identity_allocated_bytes,
+        imported_receipt.materialized_identity_allocated_bytes
+    );
     journal.remove_allocation_owner("import_materialized");
     assert_ne!(exported.generation_uuid, imported_receipt.generation_uuid);
     journal.pass(
