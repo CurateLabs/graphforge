@@ -142,43 +142,43 @@ pub(crate) struct V4OrdinalBuildMetrics {
 
 /// Aggregate-only work evidence for one incremental v4 publication.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct V4OrdinalAppendMetrics {
+pub(crate) struct V4OrdinalAppendMetrics {
     /// New UUID-to-surrogate mappings accepted by this publication.
-    pub input_identities: u64,
+    pub(crate) input_identities: u64,
     /// Sorted unique deletion overrides accepted by this publication.
-    pub input_tombstones: u64,
+    pub(crate) input_tombstones: u64,
     /// Canonical topology rows decoded from the prior generation. Always zero.
-    pub prior_topology_rows_decoded: u64,
+    pub(crate) prior_topology_rows_decoded: u64,
     /// Immutable artifacts created, including deterministic compaction outputs.
-    pub created_artifacts: u64,
+    pub(crate) created_artifacts: u64,
     /// Prior immutable artifacts retained without rewriting.
-    pub retained_artifacts: u64,
+    pub(crate) retained_artifacts: u64,
     /// Binary-carry compactions completed.
-    pub compactions: u64,
+    pub(crate) compactions: u64,
     /// Exact authenticated input bytes read by compaction.
-    pub sequential_read_bytes: u64,
+    pub(crate) sequential_read_bytes: u64,
     /// Bounded sequential input calls made by compaction.
-    pub sequential_read_calls: u64,
+    pub(crate) sequential_read_calls: u64,
     /// Exact artifact and control bytes written.
-    pub physical_bytes_written: u64,
+    pub(crate) physical_bytes_written: u64,
     /// Bounded output blocks submitted.
-    pub write_blocks: u64,
+    pub(crate) write_blocks: u64,
     /// Largest anonymous writer buffer.
-    pub peak_buffer_bytes: usize,
+    pub(crate) peak_buffer_bytes: usize,
     /// Maximum coexisting scratch output bytes.
-    pub peak_temporary_bytes: u64,
+    pub(crate) peak_temporary_bytes: u64,
     /// Durable file flushes completed while constructing outputs.
-    pub fsync_operations: u64,
+    pub(crate) fsync_operations: u64,
     /// Per-record filesystem seeks are forbidden.
-    pub per_record_seeks: u64,
+    pub(crate) per_record_seeks: u64,
     /// Unreferenced v4 candidates examined after publication.
-    pub orphan_gc_candidates: u64,
+    pub(crate) orphan_gc_candidates: u64,
     /// Unreferenced v4 artifacts removed by retained identity.
-    pub orphan_gc_removed: u64,
+    pub(crate) orphan_gc_removed: u64,
     /// Candidates conservatively deferred.
-    pub orphan_gc_deferred: u64,
+    pub(crate) orphan_gc_deferred: u64,
     /// Physical orphan bytes reclaimed.
-    pub orphan_gc_bytes: u64,
+    pub(crate) orphan_gc_bytes: u64,
 }
 
 fn clone_pinned_v4_file(
