@@ -354,17 +354,20 @@ pub mod uuid_membership;
 pub use uuid_membership::{
     AuthenticatedUuidIndexSnapshot, UuidIndexAppendMetrics, UuidIndexBuildLimits,
     UuidIndexBuildMetrics, UuidIndexKind, UuidIndexOrphanGcWork, UuidMembershipIndex,
-    UuidProbeMetrics, maintain_uuid_membership_orphans, rebuild_uuid_membership_indexes,
-    rebuild_v4_ordinal_identity, uuid_membership_index_is_fresh, uuid_membership_index_present,
+    UuidProbeMetrics, V4OrdinalRebuildDisposition, V4OrdinalRebuildEvidence,
+    maintain_uuid_membership_orphans, rebuild_uuid_membership_indexes, rebuild_v4_ordinal_identity,
+    rebuild_v4_ordinal_identity_with_evidence, uuid_membership_index_is_fresh,
+    uuid_membership_index_present,
 };
 
 pub mod ordinal_identity_v4;
 pub use ordinal_identity_v4::{
     AuthenticatedV4OrdinalIdentityAuthority, ORDINAL_IDENTITY_MANIFEST, ORDINAL_IDENTITY_V4,
     V4OrdinalAdmissionMetrics, V4OrdinalArtifact, V4OrdinalArtifactKind, V4OrdinalBlock,
-    V4OrdinalIdentityDiscovery, V4OrdinalIdentityError, V4OrdinalIdentityLimits,
-    V4OrdinalIdentityManifest, V4OrdinalIdentityOpen, V4OrdinalLookup, V4OrdinalLookupMetrics,
-    V4OrdinalRange, V4OrdinalTombstoneBlock, V4OrdinalTombstones,
+    V4OrdinalFailureEvidence, V4OrdinalFailureKind, V4OrdinalIdentityDiscovery,
+    V4OrdinalIdentityError, V4OrdinalIdentityLimits, V4OrdinalIdentityManifest,
+    V4OrdinalIdentityOpen, V4OrdinalLookup, V4OrdinalLookupMetrics, V4OrdinalRange,
+    V4OrdinalTombstoneBlock, V4OrdinalTombstones,
 };
 
 pub mod property_overlay;

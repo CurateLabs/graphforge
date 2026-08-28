@@ -82,6 +82,20 @@ largest sparse surrogate, and anonymous buffers do not grow with graph
 cardinality. Version-3 state is an explicit rebuild-required disposition; a v4
 reader never interprets or mixes v3 reverse records.
 
+Fixed-hop consumers such as projection-aware expansion retain one authenticated
+generation handle and submit bounded destination-ID batches to it. They do not
+reopen or reauthenticate the full authority for each chunk. The lookup restores
+caller order while exposing sanitized requested/unique/found, selected-range,
+logical-byte, coalesced-call, and peak-buffer evidence. Typed failure evidence
+counts authentication failure without containing graph identities or paths.
+The explicit migration disposition is `CanonicalTopology`: rebuild scans
+canonical topology under the durable rewrite and never treats a v3 reverse run
+as v4 authority. Its temporary-byte peak covers every coexisting external-sort
+run, merge output, surrogate projection, and final artifact through
+storage-owned lifecycle accounting, including retained staging copies and
+control-record temporaries. It is not an artifact-only approximation or a
+recursive observation of the active scratch tree.
+
 Admission also streams both forward and ordinal authorities through the same
 domain-separated mapping commitment and count. Strict forward UUID ordering and
 that bounded reconciliation reject duplicate, missing, or cross-generation

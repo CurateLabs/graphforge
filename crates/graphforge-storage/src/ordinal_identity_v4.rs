@@ -352,6 +352,52 @@ pub enum V4OrdinalIdentityError {
     },
 }
 
+/// Sanitized failure classification for admission and lookup evidence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum V4OrdinalFailureKind {
+    /// Filesystem or decoding failure.
+    Io,
+    /// Noncanonical or internally inconsistent descriptor state.
+    InvalidDescriptor,
+    /// The selected and encoded topology generations differ.
+    GenerationMismatch,
+    /// Authenticated bytes, identities, or retained capabilities disagree.
+    Authentication,
+    /// The caller batch exceeded its configured bound.
+    RequestLimit,
+}
+
+/// Aggregate-only evidence for a failed admission or lookup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct V4OrdinalFailureEvidence {
+    /// Typed first failure without identities, paths, or record contents.
+    pub kind: V4OrdinalFailureKind,
+    /// One when authentication failed, otherwise zero.
+    pub authentication_failures: u64,
+}
+
+impl V4OrdinalIdentityError {
+    /// Return sanitized aggregate evidence for this first failure.
+    #[must_use]
+    pub const fn evidence(&self) -> V4OrdinalFailureEvidence {
+        let kind = match self {
+            Self::Io => V4OrdinalFailureKind::Io,
+            Self::InvalidDescriptor(_) => V4OrdinalFailureKind::InvalidDescriptor,
+            Self::GenerationMismatch { .. } => V4OrdinalFailureKind::GenerationMismatch,
+            Self::Authentication => V4OrdinalFailureKind::Authentication,
+            Self::RequestLimit { .. } => V4OrdinalFailureKind::RequestLimit,
+        };
+        V4OrdinalFailureEvidence {
+            kind,
+            authentication_failures: if matches!(self, Self::Authentication) {
+                1
+            } else {
+                0
+            },
+        }
+    }
+}
+
 /// Aggregate-only admission work.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct V4OrdinalAdmissionMetrics {
@@ -2312,6 +2358,22 @@ mod tests {
                 ))
             ));
         }
+    }
+
+    #[test]
+    fn failure_evidence_is_typed_sanitized_and_counts_authentication() {
+        let authentication = V4OrdinalIdentityError::Authentication.evidence();
+        assert_eq!(authentication.kind, V4OrdinalFailureKind::Authentication);
+        assert_eq!(authentication.authentication_failures, 1);
+
+        let bounded = V4OrdinalIdentityError::RequestLimit {
+            requested: 2,
+            maximum: 1,
+        }
+        .evidence();
+        assert_eq!(bounded.kind, V4OrdinalFailureKind::RequestLimit);
+        assert_eq!(bounded.authentication_failures, 0);
+        assert!(!format!("{bounded:?}").contains('/'));
     }
 
     #[test]

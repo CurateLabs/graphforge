@@ -32,6 +32,22 @@ requires the ordinal digest selected by the project receipt. A malformed,
 substituted, or generation-mismatched ordinal facet fails closed and never
 falls back to v3.
 
+The explicit rebuild API constructs v4 only from canonical topology and returns
+an aggregate `CanonicalTopology` disposition with generation, identity/range,
+artifact-byte, fixed-block, buffer, temporary-run, and fsync evidence. It never
+opens a v3 reverse run as migration input. Durable-rewrite recovery either
+retains the prior v3-only authority or completes the receipt-bound v4 facet;
+there is no mixed-version read state.
+
+`peak_temporary_bytes` is the total maximum coexisting rebuild scratch, not
+merely the final artifact size. Storage-owned accounting includes scan runs and
+their merge outputs, the UUID-sorted and surrogate-sorted projections, and the
+immutable forward/range artifacts while both projections remain live. Each
+retained `stage_file` copy and staged manifest/receipt control is charged at its
+actual lifecycle transition, so a source artifact and its retained copy both
+appear in the peak. Accounting uses exact registered lengths rather than a
+recursive scan of an active scratch directory.
+
 Standalone graph roots have no project-generation `graph/files` inventory.
 Only the mutation writer has a narrow exception: immediately before entering
 the single durable-rewrite critical section it may pin the already-open sibling
@@ -47,6 +63,14 @@ writer takes the project rewrite lock first and the exclusive ordinal lock
 second, retaining it through data installation and the manifest switch. A
 long-lived immutable read handle therefore cannot starve a writer; it advances
 only by opening a newly receipt-authorized generation.
+
+Query execution should open one authenticated handle for its pinned generation
+and reuse it across bounded destination-ID chunks. Each lookup reports only
+requested/unique/found counts, selected ranges, logical bytes, coalesced calls,
+tombstones, and bounded-buffer charges. A typed failure can be reduced to
+sanitized failure evidence, including an authentication-failure count, without
+emitting UUIDs, paths, or record contents. Consumers must not reopen the index
+per chunk or substitute the v3 membership LSM.
 
 Orphan collection starts from the current authenticated v3 manifest and, when
 the ordinal facet exists, requires the opaque authority resolved from a pinned
