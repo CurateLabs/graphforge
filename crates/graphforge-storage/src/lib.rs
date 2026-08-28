@@ -355,7 +355,7 @@ pub use uuid_membership::{
     AuthenticatedUuidIndexSnapshot, UuidIndexAppendMetrics, UuidIndexBuildLimits,
     UuidIndexBuildMetrics, UuidIndexKind, UuidIndexOrphanGcWork, UuidMembershipIndex,
     UuidProbeMetrics, maintain_uuid_membership_orphans, rebuild_uuid_membership_indexes,
-    uuid_membership_index_is_fresh, uuid_membership_index_present,
+    rebuild_v4_ordinal_identity, uuid_membership_index_is_fresh, uuid_membership_index_present,
 };
 
 pub mod ordinal_identity_v4;

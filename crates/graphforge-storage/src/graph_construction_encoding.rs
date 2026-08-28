@@ -470,7 +470,7 @@ pub(crate) fn encode(
     let mut index = crate::uuid_membership::encode_construction_index(
         source,
         &shape.identities,
-        &identities_sha256,
+        identities_sha256,
         &output,
         generation,
         shape.parent_topology_generation,
@@ -506,7 +506,7 @@ pub(crate) fn encode(
                 &output,
                 &manifest,
                 generation,
-                &identities_sha256,
+                identities_sha256,
             )?);
     }
     encode_edges(
