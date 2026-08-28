@@ -274,10 +274,8 @@ impl<'a> V4OrdinalConstructionWriter<'a> {
             .checked_add(1)
             .ok_or_else(|| storage_err("v4 forward record count overflow"))?;
         self.previous_forward_uuid = Some(uuid_bytes);
-        self.metrics.peak_temporary_bytes = self
-            .metrics
-            .peak_temporary_bytes
-            .max(self.forward.bytes);
+        self.metrics.peak_temporary_bytes =
+            self.metrics.peak_temporary_bytes.max(self.forward.bytes);
         Ok(())
     }
 
@@ -2903,7 +2901,7 @@ fn authenticate_private_v4_artifact(
     Ok(())
 }
 
-fn is_exact_private_v4_name(name: &str) -> bool {
+pub(crate) fn is_exact_private_v4_name(name: &str) -> bool {
     if let Some(rest) = name.strip_prefix(".v4-") {
         let Some((role, nonce)) = rest.strip_suffix(".tmp").and_then(|v| v.rsplit_once('-')) else {
             return false;
