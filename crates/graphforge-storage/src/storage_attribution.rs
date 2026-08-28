@@ -321,6 +321,98 @@ pub struct StorageAttributionSnapshot {
     pub physical_identity_allocated_bytes: BTreeMap<String, u64>,
 }
 
+/// Exact native-identity union for the retained project container.
+///
+/// This includes `FORMAT`, `CURRENT`, the selected generation, and every
+/// authenticated ancestor still retained by the generation chain. Shared CAS
+/// objects are deduplicated by native identity. Cleanup is the only operation
+/// allowed to remove an ancestor from this inventory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectStorageIdentityUnion {
+    /// Selected generation at the time of capture.
+    pub selected_generation_uuid: uuid::Uuid,
+    /// Authenticated generation identities represented in the union.
+    pub retained_generation_uuids: BTreeSet<uuid::Uuid>,
+    /// Exact native identities and allocated bytes.
+    pub physical_identity_allocated_bytes: BTreeMap<String, u64>,
+    /// Reconciled allocation of the identity union.
+    pub allocated_bytes: u64,
+}
+
+/// Capture the retained project/container allocation without recursively
+/// scanning the project namespace.
+///
+/// The generation chain and each generation's authenticated inventories are
+/// the authority. This deliberately keeps prior generations in the union until
+/// an explicit cleanup/GC operation removes them.
+pub fn capture_project_storage_identity_union(
+    selected: &ResolvedProjectGeneration,
+) -> Result<ProjectStorageIdentityUnion, GfError> {
+    const MAX_RETAINED_GENERATIONS: usize = 4_096;
+    let mut identities = BTreeMap::new();
+    for control in ["FORMAT", "CURRENT"] {
+        let file = File::open(selected.container_root().join(control)).map_err(storage)?;
+        add_identity_allocation(&mut identities, &file)?;
+    }
+
+    let mut retained = BTreeSet::new();
+    let mut cursor = Some(crate::resolve_generation_by_uuid(
+        selected.container_root(),
+        selected.generation_uuid(),
+    )?);
+    while let Some(generation) = cursor {
+        if !retained.insert(generation.generation_uuid()) {
+            return Err(validation("retained generation chain contains a cycle"));
+        }
+        if retained.len() > MAX_RETAINED_GENERATIONS {
+            return Err(validation(
+                "retained generation chain exceeds attribution bound",
+            ));
+        }
+        let parent = generation.parent_generation_uuid();
+        let snapshot = capture_storage_attribution(&generation)?;
+        merge_identity_allocations(&mut identities, &snapshot.physical_identity_allocated_bytes)?;
+        cursor = parent
+            .map(|uuid| crate::resolve_generation_by_uuid(selected.container_root(), uuid))
+            .transpose()?;
+    }
+    let allocated_bytes = identities
+        .values()
+        .try_fold(0_u64, |total, value| checked_add(total, *value))?;
+    Ok(ProjectStorageIdentityUnion {
+        selected_generation_uuid: selected.generation_uuid(),
+        retained_generation_uuids: retained,
+        physical_identity_allocated_bytes: identities,
+        allocated_bytes,
+    })
+}
+
+fn add_identity_allocation(
+    identities: &mut BTreeMap<String, u64>,
+    file: &File,
+) -> Result<(), GfError> {
+    let identity = graphforge_filesystem::file_identity(file).map_err(storage)?;
+    let usage = graphforge_filesystem::file_space_usage(file).map_err(storage)?;
+    let key = native_identity_key(identity.volume_serial, &identity.file_id);
+    merge_identity_allocations(identities, &BTreeMap::from([(key, usage.allocated_bytes)]))
+}
+
+fn merge_identity_allocations(
+    target: &mut BTreeMap<String, u64>,
+    source: &BTreeMap<String, u64>,
+) -> Result<(), GfError> {
+    for (identity, allocated) in source {
+        if let Some(existing) = target.get(identity) {
+            if existing != allocated {
+                return Err(validation("retained identity allocation changed"));
+            }
+        } else {
+            target.insert(identity.clone(), *allocated);
+        }
+    }
+    Ok(())
+}
+
 /// Exact high-water tracker for simultaneously active authenticated files.
 /// Owners are replaced atomically; aliases share one native identity and are
 /// counted once until the final owner removes it.

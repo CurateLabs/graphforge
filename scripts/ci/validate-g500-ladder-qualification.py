@@ -85,19 +85,24 @@ def validate(evidence: dict[str, Any]) -> None:
             raise EvidenceError("physical identities must be deduplicated from logical references")
         logical = sum(artifact["logical_bytes"] for artifact in rung["artifacts"])
         allocated = sum(artifact["allocated_bytes"] for artifact in rung["artifacts"])
-        retained = sum(artifact["current_retained_bytes"] for artifact in rung["artifacts"])
+        retained_views = sum(artifact["current_retained_bytes"] for artifact in rung["artifacts"])
+        retained = rung["totals"]["current_retained_bytes"]
         # Category peaks are diagnostics, not a total: categories coexist.
         # The total is an independently observed phase-boundary union high-water
         # mark and must not be reconstructed as max(category).
         transient_peak = rung["totals"]["transient_peak_allocated_bytes"]
         phase_totals = {f"phase_{field}": sum(phase[field] for phase in phases) for field in phase_fields}
-        expected_totals = {"logical_bytes": logical, "allocated_bytes": allocated, "current_retained_bytes": retained, **phase_totals}
+        expected_totals = {"logical_bytes": logical, "allocated_bytes": allocated, **phase_totals}
         if {key: rung["totals"][key] for key in expected_totals} != expected_totals:
             raise EvidenceError("artifact or phase totals do not reconcile")
         if transient_peak < max(
             artifact["transient_peak_allocated_bytes"] for artifact in rung["artifacts"]
         ):
             raise EvidenceError("lifecycle peak is below a category peak")
+        if retained > retained_views or retained < max(
+            artifact["current_retained_bytes"] for artifact in rung["artifacts"]
+        ):
+            raise EvidenceError("native retained union is inconsistent with owner views")
         if any(item["current_retained_bytes"] > item["allocated_bytes"] for item in rung["artifacts"]):
             raise EvidenceError("retained allocation exceeds category allocation")
         if transient_peak < retained:
@@ -107,7 +112,14 @@ def validate(evidence: dict[str, Any]) -> None:
         expected = {
             "canonical_node_bytes_per_live_node": {"numerator_bytes": by_category["canonical_node_topology"]["logical_bytes"], "denominator_count": nodes},
             "canonical_edge_bytes_per_live_edge": {"numerator_bytes": by_category["canonical_edge_topology"]["logical_bytes"], "denominator_count": live},
-            "authoritative_project_bytes_per_live_edge": {"numerator_bytes": retained, "denominator_count": live},
+            "authoritative_project_bytes_per_live_edge": {
+                "numerator_bytes": sum(
+                    item["allocated_bytes"]
+                    for item in rung["artifacts"]
+                    if item["source"] == "storage_owned_snapshot"
+                ),
+                "denominator_count": live,
+            },
             "full_lifecycle_peak_bytes_per_live_edge": {"numerator_bytes": transient_peak, "denominator_count": live},
         }
         if rung["ratios"] != expected:

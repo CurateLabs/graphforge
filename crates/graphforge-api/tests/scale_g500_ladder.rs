@@ -2049,16 +2049,14 @@ impl PhaseJournal {
             .observe_allocated_union(self.allocation.current_allocated_bytes());
     }
 
-    fn replace_snapshot_owner(
+    fn replace_project_owner(
         &mut self,
         owner: &str,
-        snapshot: &graphforge_storage::StorageAttributionSnapshot,
+        generation: &graphforge_storage::ResolvedProjectGeneration,
     ) {
-        self.allocation
-            .replace_snapshot_owner(owner, snapshot)
-            .expect("replace generation allocation owner");
-        self.monitor
-            .observe_allocated_union(self.allocation.current_allocated_bytes());
+        let project = graphforge_storage::capture_project_storage_identity_union(generation)
+            .expect("capture retained project identity union");
+        self.replace_allocation_owner(owner, &project.physical_identity_allocated_bytes);
     }
 
     fn remove_allocation_owner(&mut self, owner: &str) {
@@ -2067,6 +2065,10 @@ impl PhaseJournal {
             .expect("remove exact allocation owner");
         self.monitor
             .observe_allocated_union(self.allocation.current_allocated_bytes());
+    }
+
+    fn current_allocated_union(&self) -> u64 {
+        self.allocation.current_allocated_bytes()
     }
 
     fn flush(&self) {
@@ -2545,24 +2547,22 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
     construction_phases
         .validate_for_qualification()
         .expect("certification construction phase attribution");
-    let committed_snapshot = graph
-        .storage_attribution()
-        .expect("ingest generation storage attribution");
     journal.replace_allocation_owner(
         "construction",
         &construction_evidence.storage_active_identity_allocated_bytes,
     );
-    journal.replace_snapshot_owner("source", &committed_snapshot);
+    let committed_generation = graphforge_storage::resolve_project_generation(&source)
+        .expect("resolve committed ingest generation");
+    journal.replace_project_owner("source_project", &committed_generation);
     journal.pass("ingest", phase, Some(input_fingerprint));
 
     let phase = Instant::now();
     let csr = graph
         .rebuild_adjacency(Some(journal.cancellation_token()))
         .expect("build certification CSR");
-    let csr_snapshot = graph
-        .storage_attribution()
-        .expect("CSR generation storage attribution");
-    journal.replace_snapshot_owner("source", &csr_snapshot);
+    let csr_generation = graphforge_storage::resolve_project_generation(&source)
+        .expect("resolve committed CSR generation");
+    journal.replace_project_owner("source_project", &csr_generation);
     journal.pass(
         "csr",
         phase,
@@ -2661,10 +2661,9 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
     );
     let phase = Instant::now();
     let imported_graph = GraphForge::new(imported.to_str()).expect("reopen import");
-    let imported_snapshot = imported_graph
-        .storage_attribution()
-        .expect("import generation storage attribution");
-    journal.replace_snapshot_owner("clean_import", &imported_snapshot);
+    let imported_generation = graphforge_storage::resolve_project_generation(&imported)
+        .expect("resolve clean import generation");
+    journal.replace_project_owner("clean_import_project", &imported_generation);
     let imported_nodes = imported_graph
         .node_count(NODE_LABEL)
         .expect("imported nodes");
@@ -2803,6 +2802,7 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
         digest.update(two_hop.as_bytes());
         format!("sha256:{}", hex_encode(digest.finalize()))
     };
+    let workspace_current_allocated_bytes = journal.current_allocated_union();
     json!({
         "source_generation": exported.generation_uuid.to_string(),
         "package": exported.package_digest, "transport": exported.transport_digest,
@@ -2827,6 +2827,7 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
             "clean_import": imported_storage,
             "construction": sanitized_construction_evidence(&construction_evidence),
             "application_io_phases": construction_phases,
+            "workspace_current_allocated_bytes": workspace_current_allocated_bytes,
         },
         "phases": journal.phases,
     })

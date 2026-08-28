@@ -61,7 +61,7 @@ def rung(scale: int, live: int, unit: int) -> dict:
         "ratios": {
             "canonical_node_bytes_per_live_node": {"numerator_bytes": artifacts[0]["logical_bytes"], "denominator_count": live // 16},
             "canonical_edge_bytes_per_live_edge": {"numerator_bytes": artifacts[1]["logical_bytes"], "denominator_count": live},
-            "authoritative_project_bytes_per_live_edge": {"numerator_bytes": retained, "denominator_count": live},
+            "authoritative_project_bytes_per_live_edge": {"numerator_bytes": sum(item["allocated_bytes"] for item in artifacts[:6]), "denominator_count": live},
             "full_lifecycle_peak_bytes_per_live_edge": {"numerator_bytes": peak, "denominator_count": live},
         },
     }
@@ -242,7 +242,10 @@ def certification_document(scale: int, edges: int, unit: int) -> dict:
             "peak_disk_bytes": unit * 100,
         },
         "storage_attribution": {
-            "source": {"categories": categories},
+            "source": {
+                "categories": categories,
+                "allocated_bytes": sum(item["allocated_bytes"] for item in categories.values()),
+            },
             "portable_package": descriptor,
             "clean_import": descriptor,
             "construction": {
@@ -250,6 +253,7 @@ def certification_document(scale: int, edges: int, unit: int) -> dict:
                 "storage_transient_peak_total_allocated_bytes": unit * 5,
             },
             "application_io_phases": {"phases": phase_values},
+            "workspace_current_allocated_bytes": unit * 30,
         },
     }
 
