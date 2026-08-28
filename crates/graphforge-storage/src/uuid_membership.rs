@@ -159,8 +159,12 @@ pub(crate) struct V4OrdinalAppendMetrics {
     pub(crate) sequential_read_bytes: u64,
     /// Bounded sequential input calls made by compaction.
     pub(crate) sequential_read_calls: u64,
+    /// Fixed-size input blocks covered by compaction reads.
+    pub(crate) sequential_read_blocks: u64,
     /// Exact artifact and control bytes written.
     pub(crate) physical_bytes_written: u64,
+    /// Artifact and control bytes submitted through output writers.
+    pub(crate) write_bytes: u64,
     /// Bounded output blocks submitted.
     pub(crate) write_blocks: u64,
     /// Largest anonymous writer buffer.
@@ -6378,6 +6382,13 @@ pub(crate) fn prepare_v4_ordinal_delta(
     })?;
     let control_bytes =
         u64::try_from(receipt_bytes.len() + manifest_bytes.len()).map_err(storage_err)?;
+    let submitted_write_bytes = build
+        .artifact_bytes
+        .saturating_add(tombstone_bytes)
+        .saturating_add(compaction.write_bytes)
+        .saturating_add(staged_artifact_bytes)
+        .checked_add(control_bytes)
+        .ok_or_else(|| storage_err("v4 submitted write byte count overflow"))?;
     let staged_write_blocks = outputs.iter().try_fold(0_u64, |sum, (_, path)| {
         let bytes = path.metadata().map_err(storage_err)?.len();
         sum.checked_add(bytes.div_ceil(crate::staging::STAGE_FILE_BLOCK_BYTES as u64))
@@ -6397,16 +6408,12 @@ pub(crate) fn prepare_v4_ordinal_delta(
         created_artifacts: delta_created_artifacts.saturating_add(compaction.created_artifacts),
         retained_artifacts: u64::try_from(retained_names.intersection(&prior_names).count())
             .map_err(storage_err)?,
-        physical_bytes_written: build
-            .artifact_bytes
-            .saturating_add(tombstone_bytes)
-            .saturating_add(compaction.write_bytes)
-            .saturating_add(staged_artifact_bytes)
-            .checked_add(control_bytes)
-            .ok_or_else(|| storage_err("v4 publication byte count overflow"))?,
+        physical_bytes_written: submitted_write_bytes,
         compactions: compaction.compactions,
         sequential_read_bytes: compaction.read_bytes,
         sequential_read_calls: compaction.read_calls,
+        sequential_read_blocks: compaction.read_blocks,
+        write_bytes: submitted_write_bytes,
         write_blocks: build
             .write_blocks
             .saturating_add(tombstone_blocks)
@@ -6504,8 +6511,10 @@ fn cleanup_abandoned_v4_plan_directories(
             "V4_PLAN_CLEANUP_BEFORE_UNLINK",
             false,
         )?;
+        let directory_identity = directory.identity();
+        drop(directory);
         plan_root
-            .remove_child_directory_if_identity(&name, directory.identity())
+            .remove_child_directory_if_identity(&name, directory_identity)
             .map_err(storage_err)?;
         crate::project_failpoint::hit(
             "v4_plan_cleanup.after_unlink",
@@ -6531,8 +6540,10 @@ fn cleanup_v4_plan_directory(
         if name == std::ffi::OsStr::new("artifacts") {
             let artifacts = directory.open_child_directory(&name).map_err(storage_err)?;
             cleanup_v4_plan_files(&artifacts, &mut bytes)?;
+            let artifacts_identity = artifacts.identity();
+            drop(artifacts);
             directory
-                .remove_child_directory_if_identity(&name, artifacts.identity())
+                .remove_child_directory_if_identity(&name, artifacts_identity)
                 .map_err(storage_err)?;
         } else {
             cleanup_v4_plan_file(directory, &name, &mut bytes)?;
@@ -6776,6 +6787,7 @@ struct V4CompactionWork {
     created_artifacts: u64,
     read_bytes: u64,
     read_calls: u64,
+    read_blocks: u64,
     write_bytes: u64,
     write_blocks: u64,
     fsync_operations: u64,
@@ -6946,6 +6958,9 @@ fn merge_v4_forward_artifacts(
     work.read_calls = work
         .read_calls
         .saturating_add(input_bytes.div_ceil(V4_ORDINAL_BLOCK_BYTES as u64));
+    work.read_blocks = work
+        .read_blocks
+        .saturating_add(input_bytes.div_ceil(V4_ORDINAL_BLOCK_BYTES as u64));
     let bytes = writer.bytes;
     let mut metrics = V4OrdinalBuildMetrics::default();
     let artifact = finish_streamed_v4_artifact(
@@ -7031,6 +7046,12 @@ fn compact_v4_ordinal_interval(
                 }
                 work.read_bytes = work.read_bytes.saturating_add(source.artifact.bytes);
                 work.read_calls = work.read_calls.saturating_add(
+                    source
+                        .artifact
+                        .bytes
+                        .div_ceil(V4_ORDINAL_BLOCK_BYTES as u64),
+                );
+                work.read_blocks = work.read_blocks.saturating_add(
                     source
                         .artifact
                         .bytes
@@ -7125,6 +7146,12 @@ fn compact_v4_tombstone_interval(
         .read_bytes
         .saturating_add(selected.iter().map(|run| run.artifact.bytes).sum::<u64>());
     work.read_calls = work.read_calls.saturating_add(
+        selected
+            .iter()
+            .map(|run| run.artifact.bytes.div_ceil(V4_ORDINAL_BLOCK_BYTES as u64))
+            .sum::<u64>(),
+    );
+    work.read_blocks = work.read_blocks.saturating_add(
         selected
             .iter()
             .map(|run| run.artifact.bytes.div_ceil(V4_ORDINAL_BLOCK_BYTES as u64))
@@ -8635,12 +8662,18 @@ pub(crate) mod tests {
             assert!(planned.metrics.fsync_operations >= 3);
             assert!(planned.metrics.created_artifacts >= 3);
             assert!(planned.metrics.write_blocks != 0);
+            assert_eq!(
+                planned.metrics.write_bytes,
+                planned.metrics.physical_bytes_written
+            );
             if planned.metrics.compactions == 0 {
                 assert_eq!(planned.metrics.sequential_read_bytes, 0);
                 assert_eq!(planned.metrics.sequential_read_calls, 0);
+                assert_eq!(planned.metrics.sequential_read_blocks, 0);
             } else {
                 assert!(planned.metrics.sequential_read_bytes != 0);
                 assert!(planned.metrics.sequential_read_calls != 0);
+                assert!(planned.metrics.sequential_read_blocks != 0);
             }
             let control_bytes = planned.auxiliary.bytes
                 + u64::try_from(serde_json::to_vec(&planned.manifest).unwrap().len()).unwrap();

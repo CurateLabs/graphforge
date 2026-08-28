@@ -956,6 +956,7 @@ fn stable_remove_child_directory_if_identity(
             "child directory identity changed before removal",
         ));
     }
+    drop(retained);
     std::fs::remove_dir(child)
 }
 

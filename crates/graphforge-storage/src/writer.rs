@@ -3006,15 +3006,13 @@ impl GraphWriter {
             .uuid_physical_bytes_written
             .saturating_add(metrics.physical_bytes_written);
         work.uuid_write_blocks = work.uuid_write_blocks.saturating_add(metrics.write_blocks);
-        work.uuid_write_bytes = work
-            .uuid_write_bytes
-            .saturating_add(metrics.physical_bytes_written);
+        work.uuid_write_bytes = work.uuid_write_bytes.saturating_add(metrics.write_bytes);
         work.uuid_peak_buffered_bytes = work
             .uuid_peak_buffered_bytes
             .max(u64::try_from(metrics.peak_buffer_bytes).unwrap_or(u64::MAX));
         work.uuid_validation_blocks = work
             .uuid_validation_blocks
-            .saturating_add(metrics.sequential_read_calls);
+            .saturating_add(metrics.sequential_read_blocks);
         work.uuid_validation_bytes = work
             .uuid_validation_bytes
             .saturating_add(metrics.sequential_read_bytes);
