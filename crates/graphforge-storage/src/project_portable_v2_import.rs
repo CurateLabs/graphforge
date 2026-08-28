@@ -442,51 +442,48 @@ fn remove_stable_tree(
     })?;
     *remaining = (*remaining).saturating_sub(names.len());
     for name in names {
-        match directory.open_child_directory(&name) {
-            Ok(child) => {
-                remove_stable_tree(&child, identities, remaining)?;
-                directory
-                    .remove_child_directory_if_identity(&name, child.identity())
-                    .map_err(|_| {
-                        PortableV2Error::new(
-                            PortableV2ErrorCode::Io,
-                            "cannot remove authenticated import directory",
-                        )
-                    })?;
-            }
-            Err(_) => {
-                let file = directory.open_child_file(&name).map_err(|_| {
+        if let Ok(child) = directory.open_child_directory(&name) {
+            remove_stable_tree(&child, identities, remaining)?;
+            directory
+                .remove_child_directory_if_identity(&name, child.identity())
+                .map_err(|_| {
                     PortableV2Error::new(
                         PortableV2ErrorCode::Io,
-                        "cannot authenticate import cleanup entry",
+                        "cannot remove authenticated import directory",
                     )
                 })?;
-                let identity = graphforge_filesystem::file_identity(&file).map_err(|_| {
+        } else {
+            let file = directory.open_child_file(&name).map_err(|_| {
+                PortableV2Error::new(
+                    PortableV2ErrorCode::Io,
+                    "cannot authenticate import cleanup entry",
+                )
+            })?;
+            let identity = graphforge_filesystem::file_identity(&file).map_err(|_| {
+                PortableV2Error::new(
+                    PortableV2ErrorCode::Io,
+                    "cannot identify import cleanup entry",
+                )
+            })?;
+            let mut observed = std::collections::BTreeMap::new();
+            record_import_file_identity(&file, &mut observed)?;
+            if observed
+                .iter()
+                .any(|(identity, allocated)| identities.get(identity) != Some(allocated))
+            {
+                return Err(PortableV2Error::new(
+                    PortableV2ErrorCode::Io,
+                    "import cleanup entry is not owned materialization",
+                ));
+            }
+            directory
+                .unlink_child_if_identity(&name, identity)
+                .map_err(|_| {
                     PortableV2Error::new(
                         PortableV2ErrorCode::Io,
-                        "cannot identify import cleanup entry",
+                        "cannot remove authenticated import entry",
                     )
                 })?;
-                let mut observed = std::collections::BTreeMap::new();
-                record_import_file_identity(&file, &mut observed)?;
-                if observed
-                    .iter()
-                    .any(|(identity, allocated)| identities.get(identity) != Some(allocated))
-                {
-                    return Err(PortableV2Error::new(
-                        PortableV2ErrorCode::Io,
-                        "import cleanup entry is not owned materialization",
-                    ));
-                }
-                directory
-                    .unlink_child_if_identity(&name, identity)
-                    .map_err(|_| {
-                        PortableV2Error::new(
-                            PortableV2ErrorCode::Io,
-                            "cannot remove authenticated import entry",
-                        )
-                    })?;
-            }
         }
     }
     directory.sync().map_err(|_| {

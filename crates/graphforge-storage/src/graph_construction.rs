@@ -3553,56 +3553,13 @@ fn recover_shape_intent(
             .final_evidence
             .as_ref()
             .ok_or_else(|| storage("complete shape manifest lacks final evidence"))?;
-        if checkpoint.evidence == intent.baseline_evidence
-            && checkpoint.shape_authority_sha256.is_none()
-        {
-            checkpoint.evidence = final_evidence.clone();
-            checkpoint.shape_authority_sha256 = Some(expected_shape_authority);
-            replace_control(root, CHECKPOINT, checkpoint)?;
-        } else {
-            let mut shape_owned_evidence = checkpoint.evidence.clone();
-            shape_owned_evidence.encode_application_read_bytes =
-                final_evidence.encode_application_read_bytes;
-            shape_owned_evidence.encode_application_read_operations =
-                final_evidence.encode_application_read_operations;
-            shape_owned_evidence.encode_application_write_bytes =
-                final_evidence.encode_application_write_bytes;
-            shape_owned_evidence.encode_application_write_operations =
-                final_evidence.encode_application_write_operations;
-            shape_owned_evidence.encode_fsync_operations = final_evidence.encode_fsync_operations;
-            shape_owned_evidence.publication_application_read_bytes =
-                final_evidence.publication_application_read_bytes;
-            shape_owned_evidence.publication_application_read_operations =
-                final_evidence.publication_application_read_operations;
-            shape_owned_evidence.cas_application_read_bytes =
-                final_evidence.cas_application_read_bytes;
-            shape_owned_evidence.cas_application_read_operations =
-                final_evidence.cas_application_read_operations;
-            shape_owned_evidence.cas_application_write_bytes =
-                final_evidence.cas_application_write_bytes;
-            shape_owned_evidence.cas_application_write_operations =
-                final_evidence.cas_application_write_operations;
-            shape_owned_evidence.cas_fsync_operations = final_evidence.cas_fsync_operations;
-            shape_owned_evidence.hydration_application_read_bytes =
-                final_evidence.hydration_application_read_bytes;
-            shape_owned_evidence.hydration_application_read_operations =
-                final_evidence.hydration_application_read_operations;
-            shape_owned_evidence.hydration_application_write_bytes =
-                final_evidence.hydration_application_write_bytes;
-            shape_owned_evidence.hydration_application_write_operations =
-                final_evidence.hydration_application_write_operations;
-            shape_owned_evidence.hydration_fsync_operations =
-                final_evidence.hydration_fsync_operations;
-            shape_owned_evidence.canonical_output_bytes = final_evidence.canonical_output_bytes;
-            shape_owned_evidence.staged_and_retained_disk_bytes =
-                final_evidence.staged_and_retained_disk_bytes;
-            if shape_owned_evidence == *final_evidence
-                && checkpoint.shape_authority_sha256.as_deref() == Some(&expected_shape_authority)
-            {
-                return Ok(());
-            }
-            return Err(storage("shape evidence authority differs from inventory"));
-        }
+        recover_final_shape_evidence(
+            root,
+            checkpoint,
+            &intent.baseline_evidence,
+            final_evidence,
+            expected_shape_authority,
+        )?;
         return Ok(());
     }
     if intent.shape.is_some() || !intent.outputs.is_empty() {
@@ -3630,6 +3587,50 @@ fn recover_shape_intent(
         }
     }
     unlink_named(root, SHAPE_INTENT)
+}
+
+fn recover_final_shape_evidence(
+    root: &StableDirectory,
+    checkpoint: &mut Checkpoint,
+    baseline: &GraphConstructionEvidence,
+    final_evidence: &GraphConstructionEvidence,
+    expected_authority: String,
+) -> Result<(), GfError> {
+    if checkpoint.evidence == *baseline && checkpoint.shape_authority_sha256.is_none() {
+        checkpoint.evidence = final_evidence.clone();
+        checkpoint.shape_authority_sha256 = Some(expected_authority);
+        return replace_control(root, CHECKPOINT, checkpoint);
+    }
+    let mut observed = checkpoint.evidence.clone();
+    copy_post_shape_io(&mut observed, final_evidence);
+    if observed == *final_evidence
+        && checkpoint.shape_authority_sha256.as_deref() == Some(&expected_authority)
+    {
+        return Ok(());
+    }
+    Err(storage("shape evidence authority differs from inventory"))
+}
+
+fn copy_post_shape_io(target: &mut GraphConstructionEvidence, source: &GraphConstructionEvidence) {
+    target.encode_application_read_bytes = source.encode_application_read_bytes;
+    target.encode_application_read_operations = source.encode_application_read_operations;
+    target.encode_application_write_bytes = source.encode_application_write_bytes;
+    target.encode_application_write_operations = source.encode_application_write_operations;
+    target.encode_fsync_operations = source.encode_fsync_operations;
+    target.publication_application_read_bytes = source.publication_application_read_bytes;
+    target.publication_application_read_operations = source.publication_application_read_operations;
+    target.cas_application_read_bytes = source.cas_application_read_bytes;
+    target.cas_application_read_operations = source.cas_application_read_operations;
+    target.cas_application_write_bytes = source.cas_application_write_bytes;
+    target.cas_application_write_operations = source.cas_application_write_operations;
+    target.cas_fsync_operations = source.cas_fsync_operations;
+    target.hydration_application_read_bytes = source.hydration_application_read_bytes;
+    target.hydration_application_read_operations = source.hydration_application_read_operations;
+    target.hydration_application_write_bytes = source.hydration_application_write_bytes;
+    target.hydration_application_write_operations = source.hydration_application_write_operations;
+    target.hydration_fsync_operations = source.hydration_fsync_operations;
+    target.canonical_output_bytes = source.canonical_output_bytes;
+    target.staged_and_retained_disk_bytes = source.staged_and_retained_disk_bytes;
 }
 
 fn cleanup_incomplete_shape_capabilities(root: &StableDirectory) -> Result<(), GfError> {

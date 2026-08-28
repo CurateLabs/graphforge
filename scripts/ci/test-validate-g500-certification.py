@@ -43,13 +43,19 @@ def artifact_totals(unit=1):
 
 def storage_attribution(unit=1):
     category_names = (
-        "topology_nodes", "topology_edges", "properties", "uuid_and_surrogates",
-        "adjacency", "catalog_and_manifests", "construction_staging",
-        "portable_package", "clean_imported_project", "other",
+        "topology_nodes",
+        "topology_edges",
+        "properties",
+        "uuid_and_surrogates",
+        "adjacency",
+        "catalog_and_manifests",
+        "construction_staging",
+        "portable_package",
+        "clean_imported_project",
+        "other",
     )
     categories = {
-        name: artifact_totals(unit if index < 6 else 0)
-        for index, name in enumerate(category_names)
+        name: artifact_totals(unit if index < 6 else 0) for index, name in enumerate(category_names)
     }
     snapshot = {
         "generation_manifest_sha256": [1] * 32,
@@ -61,15 +67,9 @@ def storage_attribution(unit=1):
         "allocated_bytes": 6 * unit,
     }
     contract = json.loads(VALIDATOR.SCHEMA.read_text())
-    construction = {
-        field: 0 for field in contract["$defs"]["construction"]["required"]
-    }
-    construction["storage_current"] = {
-        name: artifact_totals(unit) for name in category_names
-    }
-    construction["storage_transient_peak_allocated_bytes"] = {
-        name: unit for name in category_names
-    }
+    construction = {field: 0 for field in contract["$defs"]["construction"]["required"]}
+    construction["storage_current"] = {name: artifact_totals(unit) for name in category_names}
+    construction["storage_transient_peak_allocated_bytes"] = {name: unit for name in category_names}
     construction["storage_transient_peak_total_allocated_bytes"] = 10 * unit
     phase_names = contract["$defs"]["phaseMap"]["required"]
     phases = {}
@@ -91,9 +91,12 @@ def storage_attribution(unit=1):
         "source": snapshot,
         "source_project_current_allocated_bytes": 7 * unit,
         "portable_package": {
-            "category": "portable_package", "logical_bytes": unit,
-            "allocated_bytes": unit, "logical_references": unit,
-            "physical_objects": unit, "source": "portable_writer_receipt",
+            "category": "portable_package",
+            "logical_bytes": unit,
+            "allocated_bytes": unit,
+            "logical_references": unit,
+            "physical_objects": unit,
+            "source": "portable_writer_receipt",
         },
         "clean_import": snapshot,
         "construction": construction,
@@ -208,9 +211,14 @@ def test_actual_certification_contract_builds_and_validates_adjacent_qualificati
     monkeypatch.setattr(
         "sys.argv",
         [
-            str(BUILDER_SCRIPT), str(low_path), str(high_path), str(output),
-            "--volume-bytes", str(500 * 1024**3),
-            "--reserved-headroom-bytes", str(75 * 1024**3),
+            str(BUILDER_SCRIPT),
+            str(low_path),
+            str(high_path),
+            str(output),
+            "--volume-bytes",
+            str(500 * 1024**3),
+            "--reserved-headroom-bytes",
+            str(75 * 1024**3),
         ],
     )
     BUILDER.main()
@@ -238,9 +246,7 @@ def test_actual_certification_contract_builds_and_validates_adjacent_qualificati
         ("tools", "provider_resource_id", "redacted"),
     ],
 )
-def test_recursive_sanitizer_rejects_raw_identity_path_and_sensitive_keys(
-    section, key, value
-):
+def test_recursive_sanitizer_rejects_raw_identity_path_and_sensitive_keys(section, key, value):
     unsafe = evidence()
     unsafe[section][key] = value
     with pytest.raises(VALIDATOR.EvidenceError):

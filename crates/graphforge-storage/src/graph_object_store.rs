@@ -2829,19 +2829,7 @@ fn finalize_temporary_object(
         &cas.diagnostic_root,
     )?;
     let sealed_bytes_hashed = sealed_io.bytes;
-    let sealed_metadata = temporary
-        .file
-        .metadata()
-        .map_err(|error| storage("reinspect fresh graph object", &cas.diagnostic_root, error))?;
-    if graphforge_filesystem::file_identity(&temporary.file)
-        .map_err(|error| storage("reidentify fresh graph object", &cas.diagnostic_root, error))?
-        != temporary.identity
-        || !sealed_metadata.is_file()
-        || sealed_metadata.len() != expected_length
-        || !sealed_metadata.permissions().readonly()
-    {
-        return Err(validation("fresh graph object post-hash authority changed"));
-    }
+    validate_sealed_temporary(&temporary, expected_length, &cas.diagnostic_root)?;
     returned_error_boundary("install:temp-sealed")?;
     let mut concurrent_io = ReadIoEvidence::default();
     let installed = if let Ok((_installed, _identity)) = cas.tmp.link_child_into(
@@ -2917,6 +2905,27 @@ fn finalize_temporary_object(
             calls: sealed_io.calls.saturating_add(concurrent_io.calls),
         },
     ))
+}
+
+fn validate_sealed_temporary(
+    temporary: &SealedTemporaryObject,
+    expected_length: u64,
+    diagnostic_root: &Path,
+) -> Result<(), GfError> {
+    let metadata = temporary
+        .file
+        .metadata()
+        .map_err(|error| storage("reinspect fresh graph object", diagnostic_root, error))?;
+    let identity = graphforge_filesystem::file_identity(&temporary.file)
+        .map_err(|error| storage("reidentify fresh graph object", diagnostic_root, error))?;
+    if identity != temporary.identity
+        || !metadata.is_file()
+        || metadata.len() != expected_length
+        || !metadata.permissions().readonly()
+    {
+        return Err(validation("fresh graph object post-hash authority changed"));
+    }
+    Ok(())
 }
 
 #[cfg(windows)]

@@ -26,7 +26,17 @@ CATEGORIES = (
     ("portable_package", "exact_descriptor"),
     ("clean_imported_project", "clean_import_snapshot"),
 )
-PHASES = ("append_merge", "seal_authentication", "shape_consume_reauthentication", "encode_write_postwrite_authentication", "publication_preauthentication", "cas_install_read_write", "hydration_verification", "fsync_synchronization", "recovery_reauthentication")
+PHASES = (
+    "append_merge",
+    "seal_authentication",
+    "shape_consume_reauthentication",
+    "encode_write_postwrite_authentication",
+    "publication_preauthentication",
+    "cas_install_read_write",
+    "hydration_verification",
+    "fsync_synchronization",
+    "recovery_reauthentication",
+)
 
 
 def rung(scale: int, live: int, unit: int) -> dict:
@@ -51,7 +61,20 @@ def rung(scale: int, live: int, unit: int) -> dict:
     # Independent union high-water observation; deliberately larger than any
     # one category peak because categories coexist at lifecycle boundaries.
     peak = sum(item["transient_peak_allocated_bytes"] for item in artifacts)
-    phases = [{"phase": phase, "applicable": True, "read_bytes": unit, "write_bytes": unit, "read_calls": 1, "write_calls": 1, "object_count": 1, "block_count": 1, "fsync_calls": 1} for phase in PHASES]
+    phases = [
+        {
+            "phase": phase,
+            "applicable": True,
+            "read_bytes": unit,
+            "write_bytes": unit,
+            "read_calls": 1,
+            "write_calls": 1,
+            "object_count": 1,
+            "block_count": 1,
+            "fsync_calls": 1,
+        }
+        for phase in PHASES
+    ]
     return {
         "id": f"S{scale}",
         "scale": scale,
@@ -61,12 +84,36 @@ def rung(scale: int, live: int, unit: int) -> dict:
         "workspace_current_allocated_bytes": retained,
         "artifacts": artifacts,
         "phases": phases,
-        "totals": {"logical_bytes": logical, "allocated_bytes": allocated, "current_retained_bytes": retained, "transient_peak_allocated_bytes": peak, "phase_read_bytes": unit * 9, "phase_write_bytes": unit * 9, "phase_read_calls": 9, "phase_write_calls": 9, "phase_object_count": 9, "phase_block_count": 9, "phase_fsync_calls": 9},
+        "totals": {
+            "logical_bytes": logical,
+            "allocated_bytes": allocated,
+            "current_retained_bytes": retained,
+            "transient_peak_allocated_bytes": peak,
+            "phase_read_bytes": unit * 9,
+            "phase_write_bytes": unit * 9,
+            "phase_read_calls": 9,
+            "phase_write_calls": 9,
+            "phase_object_count": 9,
+            "phase_block_count": 9,
+            "phase_fsync_calls": 9,
+        },
         "ratios": {
-            "canonical_node_bytes_per_live_node": {"numerator_bytes": artifacts[0]["logical_bytes"], "denominator_count": live // 16},
-            "canonical_edge_bytes_per_live_edge": {"numerator_bytes": artifacts[1]["logical_bytes"], "denominator_count": live},
-            "authoritative_project_bytes_per_live_edge": {"numerator_bytes": source_project, "denominator_count": live},
-            "full_lifecycle_peak_bytes_per_live_edge": {"numerator_bytes": peak, "denominator_count": live},
+            "canonical_node_bytes_per_live_node": {
+                "numerator_bytes": artifacts[0]["logical_bytes"],
+                "denominator_count": live // 16,
+            },
+            "canonical_edge_bytes_per_live_edge": {
+                "numerator_bytes": artifacts[1]["logical_bytes"],
+                "denominator_count": live,
+            },
+            "authoritative_project_bytes_per_live_edge": {
+                "numerator_bytes": source_project,
+                "denominator_count": live,
+            },
+            "full_lifecycle_peak_bytes_per_live_edge": {
+                "numerator_bytes": peak,
+                "denominator_count": live,
+            },
         },
     }
 
@@ -88,13 +135,11 @@ def evidence() -> dict:
                 "denominator_count": denominator,
             },
             "projected_canonical_node_bytes": VALIDATOR.ceil_ratio(
-                high["artifacts"][0]["current_retained_bytes"]
-                * VALIDATOR.S26_NODES,
+                high["artifacts"][0]["current_retained_bytes"] * VALIDATOR.S26_NODES,
                 high["live_nodes"],
             ),
             "projected_canonical_edge_bytes": VALIDATOR.ceil_ratio(
-                high["artifacts"][1]["current_retained_bytes"]
-                * VALIDATOR.S26_EDGES,
+                high["artifacts"][1]["current_retained_bytes"] * VALIDATOR.S26_EDGES,
                 high["live_edges"],
             ),
             "projected_lifecycle_peak_bytes": projected,
@@ -143,7 +188,9 @@ def test_rejects_goal_seeking_or_incomplete_evidence(mutation: str, match: str):
     elif mutation == "allocated_total":
         value["rungs"][0]["totals"]["allocated_bytes"] += 1
     elif mutation == "denominator":
-        value["rungs"][0]["ratios"]["authoritative_project_bytes_per_live_edge"]["denominator_count"] += 1
+        value["rungs"][0]["ratios"]["authoritative_project_bytes_per_live_edge"][
+            "denominator_count"
+        ] += 1
     elif mutation == "one_rung":
         value["rungs"].pop()
     elif mutation == "nonadjacent":
@@ -160,11 +207,29 @@ def test_rejects_goal_seeking_or_incomplete_evidence(mutation: str, match: str):
         value["rungs"][0]["totals"]["transient_peak_allocated_bytes"] = 0
     elif mutation == "fake_zero_phase":
         phase = value["rungs"][0]["phases"][0]
-        for field in ("read_bytes", "write_bytes", "read_calls", "write_calls", "object_count", "block_count", "fsync_calls"):
+        for field in (
+            "read_bytes",
+            "write_bytes",
+            "read_calls",
+            "write_calls",
+            "object_count",
+            "block_count",
+            "fsync_calls",
+        ):
             phase[field] = 0
         phase["applicable"] = False
-        for field in ("read_bytes", "write_bytes", "read_calls", "write_calls", "object_count", "block_count", "fsync_calls"):
-            value["rungs"][0]["totals"][f"phase_{field}"] -= 1 if field.endswith("calls") or field in ("object_count", "block_count") else 1_000
+        for field in (
+            "read_bytes",
+            "write_bytes",
+            "read_calls",
+            "write_calls",
+            "object_count",
+            "block_count",
+            "fsync_calls",
+        ):
+            value["rungs"][0]["totals"][f"phase_{field}"] -= (
+                1 if field.endswith("calls") or field in ("object_count", "block_count") else 1_000
+            )
     elif mutation == "false_applicability":
         value["rungs"][0]["phases"][0]["applicable"] = False
     with pytest.raises(VALIDATOR.EvidenceError, match=match):
@@ -180,9 +245,7 @@ def test_refuses_when_projection_does_not_leave_reserved_headroom():
 
 def test_refuses_volume_overflow_even_with_zero_reserved_headroom():
     value = evidence()
-    value["projection"]["volume_bytes"] = (
-        value["projection"]["projected_lifecycle_peak_bytes"] - 1
-    )
+    value["projection"]["volume_bytes"] = value["projection"]["projected_lifecycle_peak_bytes"] - 1
     value["projection"]["reserved_headroom_bytes"] = 0
     value["projection"]["headroom_bytes"] = 0
     value["projection"]["decision"] = "refuse"
@@ -192,8 +255,7 @@ def test_refuses_volume_overflow_even_with_zero_reserved_headroom():
 def test_canonical_projection_excludes_package_and_import_copies():
     value = evidence()
     value["projection"]["projected_canonical_edge_bytes"] = VALIDATOR.ceil_ratio(
-        value["rungs"][-1]["totals"]["current_retained_bytes"]
-        * VALIDATOR.S26_EDGES,
+        value["rungs"][-1]["totals"]["current_retained_bytes"] * VALIDATOR.S26_EDGES,
         value["rungs"][-1]["live_edges"],
     )
     with pytest.raises(VALIDATOR.EvidenceError, match="canonical edge projection"):

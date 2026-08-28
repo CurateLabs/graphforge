@@ -158,7 +158,9 @@ def validate(evidence: dict[str, Any], expected_sha: str | None) -> None:
     source_project = storage.get("source_project_current_allocated_bytes")
     workspace = storage.get("workspace_current_allocated_bytes")
     peak = evidence.get("envelope", {}).get("peak_disk_bytes")
-    if not all(isinstance(value, int) for value in (selected_source, source_project, workspace, peak)):
+    if not all(
+        isinstance(value, int) for value in (selected_source, source_project, workspace, peak)
+    ):
         raise EvidenceError("storage union numerators must be integers")
     if not selected_source <= source_project <= workspace <= peak:
         raise EvidenceError(

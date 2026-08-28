@@ -149,26 +149,7 @@ impl ConstructionPhaseAttribution {
         );
         phases.insert(
             StorageIoPhase::ShapeConsumeReauthentication,
-            PhaseIoTotals {
-                read_bytes: evidence.shape_application_read_bytes,
-                write_bytes: evidence
-                    .merge_written_bytes
-                    .saturating_add(evidence.parquet_write_bytes),
-                read_calls: evidence
-                    .shape_input_validation_read_operations
-                    .saturating_add(evidence.merge_read_operations)
-                    .saturating_add(evidence.parquet_read_operations)
-                    .saturating_add(evidence.shaped_output_authentication_operations)
-                    .saturating_add(evidence.parent_catalog_read_operations)
-                    .saturating_add(evidence.retained_probe_block_loads),
-                write_calls: evidence
-                    .merge_write_operations
-                    .saturating_add(evidence.parquet_write_operations),
-                block_count: evidence
-                    .merge_read_blocks
-                    .saturating_add(evidence.merge_write_blocks),
-                ..Default::default()
-            },
+            shape_phase_totals(evidence),
         );
         phases.insert(
             StorageIoPhase::EncodeWritePostwriteAuthentication,
@@ -299,6 +280,29 @@ impl ConstructionPhaseAttribution {
             }
         }
         Ok(())
+    }
+}
+
+fn shape_phase_totals(evidence: &GraphConstructionEvidence) -> PhaseIoTotals {
+    PhaseIoTotals {
+        read_bytes: evidence.shape_application_read_bytes,
+        write_bytes: evidence
+            .merge_written_bytes
+            .saturating_add(evidence.parquet_write_bytes),
+        read_calls: evidence
+            .shape_input_validation_read_operations
+            .saturating_add(evidence.merge_read_operations)
+            .saturating_add(evidence.parquet_read_operations)
+            .saturating_add(evidence.shaped_output_authentication_operations)
+            .saturating_add(evidence.parent_catalog_read_operations)
+            .saturating_add(evidence.retained_probe_block_loads),
+        write_calls: evidence
+            .merge_write_operations
+            .saturating_add(evidence.parquet_write_operations),
+        block_count: evidence
+            .merge_read_blocks
+            .saturating_add(evidence.merge_write_blocks),
+        ..Default::default()
     }
 }
 
@@ -496,18 +500,15 @@ impl StorageAllocationLifecycle {
         self.remove_owner(&owner)?;
         let mut installed = BTreeSet::new();
         for (identity, allocated) in identities {
-            match self.active.get_mut(identity) {
-                Some((existing, references)) => {
-                    if existing != allocated {
-                        return Err(validation("active identity allocation changed"));
-                    }
-                    *references = checked_add(*references, 1)?;
+            if let Some((existing, references)) = self.active.get_mut(identity) {
+                if existing != allocated {
+                    return Err(validation("active identity allocation changed"));
                 }
-                None => {
-                    self.current_allocated_bytes =
-                        checked_add(self.current_allocated_bytes, *allocated)?;
-                    self.active.insert(identity.clone(), (*allocated, 1));
-                }
+                *references = checked_add(*references, 1)?;
+            } else {
+                self.current_allocated_bytes =
+                    checked_add(self.current_allocated_bytes, *allocated)?;
+                self.active.insert(identity.clone(), (*allocated, 1));
             }
             installed.insert(identity.clone());
             self.peak_allocated_bytes = self.peak_allocated_bytes.max(self.current_allocated_bytes);
@@ -553,9 +554,9 @@ impl StorageAllocationLifecycle {
                 "allocation transition installs and removes one identity",
             ));
         }
-        let owned = self.owners.entry(owner).or_default();
+        let owner_identities = self.owners.entry(owner).or_default();
         for identity in &transition.removed {
-            if !owned.remove(identity) {
+            if !owner_identities.remove(identity) {
                 return Err(validation(
                     "allocation transition removes an unowned identity",
                 ));
@@ -577,23 +578,20 @@ impl StorageAllocationLifecycle {
             }
         }
         for (identity, allocated) in &transition.installed {
-            if !owned.insert(identity.clone()) {
+            if !owner_identities.insert(identity.clone()) {
                 return Err(validation(
                     "allocation transition installs an owned identity",
                 ));
             }
-            match self.active.get_mut(identity) {
-                Some((existing, references)) => {
-                    if existing != allocated {
-                        return Err(validation("active identity allocation changed"));
-                    }
-                    *references = checked_add(*references, 1)?;
+            if let Some((existing, references)) = self.active.get_mut(identity) {
+                if existing != allocated {
+                    return Err(validation("active identity allocation changed"));
                 }
-                None => {
-                    self.current_allocated_bytes =
-                        checked_add(self.current_allocated_bytes, *allocated)?;
-                    self.active.insert(identity.clone(), (*allocated, 1));
-                }
+                *references = checked_add(*references, 1)?;
+            } else {
+                self.current_allocated_bytes =
+                    checked_add(self.current_allocated_bytes, *allocated)?;
+                self.active.insert(identity.clone(), (*allocated, 1));
             }
             self.peak_allocated_bytes = self.peak_allocated_bytes.max(self.current_allocated_bytes);
         }
@@ -1235,10 +1233,9 @@ mod tests {
         )
         .unwrap();
         assert!(installed.bytes_installed > 0);
-        let object = File::open(crate::graph_object_store::graph_object_path(
-            project.path(),
-            &digest,
-        ))
+        let object = File::open(
+            crate::graph_object_store::graph_object_path(project.path(), &digest).unwrap(),
+        )
         .unwrap();
         let identity = graphforge_filesystem::file_identity(&object).unwrap();
         let key = native_identity_key(identity.volume_serial, &identity.file_id);
