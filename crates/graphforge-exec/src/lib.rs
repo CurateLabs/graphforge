@@ -3327,7 +3327,33 @@ impl ExpandExec {
         })
     }
 
-    fn with_required_output(&self, required: Vec<bool>) -> Arc<dyn ExecutionPlan> {
+    fn with_required_output(&self, mut required: Vec<bool>) -> Arc<dyn ExecutionPlan> {
+        // Arrow's physical schema drops DataFusion qualifiers. In a chained
+        // Expand, a projected `node_uuid` can therefore arrive at this final
+        // provenance boundary through an identically named input field. Carry
+        // that observed identity demand to this hop's destination UUID; do not
+        // broaden non-identity/property-only projections.
+        let destination = self
+            .schema
+            .fields()
+            .len()
+            .saturating_sub(graphforge_storage::TOPOLOGY_NODES_SCHEMA.fields().len());
+        let observed_uuid = required
+            .iter()
+            .enumerate()
+            .any(|(index, needed)| *needed && self.schema.field(index).name() == "node_uuid");
+        let chained = self
+            .schema
+            .fields()
+            .iter()
+            .filter(|field| field.name() == "node_uuid")
+            .count()
+            > 2;
+        if chained && observed_uuid {
+            if let Some(needed) = required.get_mut(destination) {
+                *needed = true;
+            }
+        }
         Arc::new(Self {
             input: Arc::clone(&self.input),
             rel_type_name: self.rel_type_name.clone(),
@@ -4953,7 +4979,10 @@ impl ExecutionSession {
         let identity = match ordinal_identities {
             Some(resolver) => OrdinalIdentityConfig {
                 session: resolver.pin()?,
-                required: true,
+                // A missing handle is a legitimate pre-v4 generation. A
+                // generation that declares v4 but cannot admit it is rejected
+                // while opening the authenticated handle, before execution.
+                required: false,
             },
             None => OrdinalIdentityConfig::default(),
         };
@@ -4999,7 +5028,7 @@ impl ExecutionSession {
             )))
             .with_target_partitions(resources.target_partitions)
             .with_batch_size(resources.batch_size);
-        if identity.required {
+        if identity.session.is_some() || identity.required {
             config = config.with_extension(Arc::new(OrdinalIdentityResolverExt(identity.session)));
         }
         // Authenticated overlay scans publish sound physical-row upper bounds.

@@ -564,16 +564,17 @@ fn run_ordered_projection_scale(nodes: usize) -> (Vec<Vec<u8>>, DemandSnapshot) 
 }
 
 #[test]
-fn destination_uuid_projection_rejects_legacy_generation_without_v4_authority() {
+fn destination_uuid_projection_uses_authenticated_legacy_hydration_without_v4_authority() {
     let _guard = IO_GUARD.lock().unwrap();
     let dir = TempDir::new().unwrap();
     generate_graph(dir.path(), 64, 4, false);
-    let error = open_forge(dir.path()).execute(ORDERED_ONE_HOP).unwrap_err();
+    let result = open_forge(dir.path()).execute(ORDERED_ONE_HOP).unwrap();
+    let values = fixed_binary_values(&result, "id");
+    assert!(!values.is_empty());
     assert!(
-        error
-            .to_string()
-            .contains("destination UUID projection requires admitted v4 ordinal identity"),
-        "{error:?}"
+        values
+            .iter()
+            .all(|value| value.iter().any(|byte| *byte != 0))
     );
 }
 
