@@ -323,10 +323,10 @@ pub struct StorageAttributionSnapshot {
 
 /// Exact native-identity union for the retained project container.
 ///
-/// This includes `FORMAT`, `CURRENT`, the selected generation, and every
-/// authenticated ancestor still retained by the generation chain. Shared CAS
-/// objects are deduplicated by native identity. Cleanup is the only operation
-/// allowed to remove an ancestor from this inventory.
+/// This includes `FORMAT`, `CURRENT`, and every authenticated generation still
+/// installed in the retained generation namespace. Shared CAS objects are
+/// deduplicated by native identity. Cleanup is the only operation allowed to
+/// remove a generation from this inventory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectStorageIdentityUnion {
     /// Selected generation at the time of capture.
@@ -342,9 +342,11 @@ pub struct ProjectStorageIdentityUnion {
 /// Capture the retained project/container allocation without recursively
 /// scanning the project namespace.
 ///
-/// The generation chain and each generation's authenticated inventories are
-/// the authority. This deliberately keeps prior generations in the union until
-/// an explicit cleanup/GC operation removes them.
+/// The bounded generation namespace and each generation's authenticated
+/// inventories are the authority. Only the immediate `generations/` directory
+/// is enumerated; graph/project payload trees are never recursively scanned.
+/// This deliberately includes checkpoint branches and unreachable generations
+/// until an explicit cleanup/GC operation removes them.
 pub fn capture_project_storage_identity_union(
     selected: &ResolvedProjectGeneration,
 ) -> Result<ProjectStorageIdentityUnion, GfError> {
@@ -355,26 +357,39 @@ pub fn capture_project_storage_identity_union(
         add_identity_allocation(&mut identities, &file)?;
     }
 
-    let mut retained = BTreeSet::new();
-    let mut cursor = Some(crate::resolve_generation_by_uuid(
-        selected.container_root(),
-        selected.generation_uuid(),
-    )?);
-    while let Some(generation) = cursor {
-        if !retained.insert(generation.generation_uuid()) {
-            return Err(validation("retained generation chain contains a cycle"));
-        }
-        if retained.len() > MAX_RETAINED_GENERATIONS {
-            return Err(validation(
-                "retained generation chain exceeds attribution bound",
-            ));
-        }
-        let parent = generation.parent_generation_uuid();
+    let generations_root = selected.container_root().join("generations");
+    let retained = std::fs::read_dir(&generations_root)
+        .map_err(storage)?
+        .map(|entry| {
+            let entry = entry.map_err(storage)?;
+            let file_type = entry.file_type().map_err(storage)?;
+            if !file_type.is_dir() || file_type.is_symlink() {
+                return Err(validation(
+                    "retained generation namespace contains a non-directory entry",
+                ));
+            }
+            let name = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| validation("retained generation name is not UTF-8"))?;
+            uuid::Uuid::parse_str(&name)
+                .map_err(|_| validation("retained generation name is not a UUID"))
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    if retained.len() > MAX_RETAINED_GENERATIONS {
+        return Err(validation(
+            "retained generation namespace exceeds attribution bound",
+        ));
+    }
+    if !retained.contains(&selected.generation_uuid()) {
+        return Err(validation(
+            "selected generation is absent from retained namespace",
+        ));
+    }
+    for uuid in &retained {
+        let generation = crate::resolve_generation_by_uuid(selected.container_root(), *uuid)?;
         let snapshot = capture_storage_attribution(&generation)?;
         merge_identity_allocations(&mut identities, &snapshot.physical_identity_allocated_bytes)?;
-        cursor = parent
-            .map(|uuid| crate::resolve_generation_by_uuid(selected.container_root(), uuid))
-            .transpose()?;
     }
     let allocated_bytes = identities
         .values()

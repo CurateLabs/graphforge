@@ -224,10 +224,11 @@ high-water mark advances at each transition, so aliases count once and files
 that did not coexist are never added together. Certification emits
 `storage_owned_active_identity_union` provenance only from this tracker.
 
-The project owner includes `FORMAT`, `CURRENT`, the selected generation, and
-the complete authenticated ancestor chain; publication does not discard an old
-generation from accounting merely because `CURRENT` advanced. Only explicit
-cleanup/GC may remove it. Portable writers record native allocation as files
+The project owner includes `FORMAT`, `CURRENT`, and every authenticated
+generation still installed in the bounded generation namespace, including
+checkpoint branches and generations not yet reclaimed; publication does not
+discard an old generation from accounting merely because `CURRENT` advanced.
+Only explicit cleanup/GC may remove it. Portable writers record native allocation as files
 are written, synchronized, published, or removed; they never rediscover a
 large export with a recursive post-write directory pass, and measurement
 failure is a typed operation failure rather than a zero observation.
