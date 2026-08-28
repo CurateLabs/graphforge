@@ -135,6 +135,8 @@ pub(crate) struct V4OrdinalBuildMetrics {
     pub(crate) write_blocks: u64,
     pub(crate) ranges: usize,
     pub(crate) peak_buffer_bytes: usize,
+    pub(crate) peak_temporary_bytes: u64,
+    pub(crate) fsync_operations: u64,
     pub(crate) cancellation_polls: u64,
 }
 
@@ -272,6 +274,10 @@ impl<'a> V4OrdinalConstructionWriter<'a> {
             .checked_add(1)
             .ok_or_else(|| storage_err("v4 forward record count overflow"))?;
         self.previous_forward_uuid = Some(uuid_bytes);
+        self.metrics.peak_temporary_bytes = self
+            .metrics
+            .peak_temporary_bytes
+            .max(self.forward.bytes);
         Ok(())
     }
 
@@ -317,6 +323,13 @@ impl<'a> V4OrdinalConstructionWriter<'a> {
             .checked_add(1)
             .ok_or_else(|| storage_err("v4 ordinal record count overflow"))?;
         self.previous_ordinal_node_id = node_id;
+        self.metrics.peak_temporary_bytes = self.metrics.peak_temporary_bytes.max(
+            self.forward.bytes.saturating_add(
+                self.current
+                    .as_ref()
+                    .map_or(0, |range| range.artifact.bytes),
+            ),
+        );
         Ok(())
     }
 
@@ -448,6 +461,10 @@ fn finish_streamed_v4_artifact(
 ) -> Result<crate::V4OrdinalArtifact, GfError> {
     writer.writer.flush().map_err(storage_err)?;
     sync_uuid_file(writer.writer.get_ref())?;
+    metrics.fsync_operations = metrics
+        .fsync_operations
+        .checked_add(1)
+        .ok_or_else(|| storage_err("v4 fsync count overflow"))?;
     let identity =
         graphforge_filesystem::file_identity(writer.writer.get_ref()).map_err(storage_err)?;
     let sha256 = hex_bytes(&writer.digest.finalize());
@@ -1068,12 +1085,20 @@ pub(crate) struct ConstructionIndexEncoding {
     pub peak_temporary_bytes: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct V4OrdinalPublicationMetrics {
+    pub(crate) write_bytes: u64,
+    pub(crate) write_operations: u64,
+    pub(crate) fsync_operations: u64,
+    pub(crate) peak_temporary_bytes: u64,
+}
+
 pub(crate) fn publish_v4_construction_artifacts(
     encoded: &graphforge_filesystem::StableDirectory,
     manifest: &crate::V4OrdinalIdentityManifest,
     generation: u64,
     topology_delta_sha256: &str,
-) -> Result<Vec<ConstructionIndexOutput>, GfError> {
+) -> Result<(Vec<ConstructionIndexOutput>, V4OrdinalPublicationMetrics), GfError> {
     let graph = encoded
         .open_child_directory(std::ffi::OsStr::new("graph"))
         .map_err(storage_err)?;
@@ -1128,7 +1153,16 @@ pub(crate) fn publish_v4_construction_artifacts(
     topology.sync().map_err(storage_err)?;
     graph.sync().map_err(storage_err)?;
     encoded.sync().map_err(storage_err)?;
-    Ok(outputs)
+    work.fsync_operations = work.fsync_operations.saturating_add(4);
+    Ok((
+        outputs,
+        V4OrdinalPublicationMetrics {
+            write_bytes: work.write_bytes,
+            write_operations: work.write_operations,
+            fsync_operations: work.fsync_operations,
+            peak_temporary_bytes: work.peak_temporary_bytes,
+        },
+    ))
 }
 
 #[derive(Default)]

@@ -306,6 +306,36 @@ pub struct GraphConstructionEncodingEvidence {
     pub membership_peak_buffer_bytes: u64,
     /// Peak bytes in owned temporary v3 outputs.
     pub membership_peak_temporary_bytes: u64,
+    /// Canonical node identities streamed into the v4 ordinal index.
+    #[serde(default)]
+    pub ordinal_records: u64,
+    /// Immutable v4 payload bytes written before publication metadata.
+    #[serde(default)]
+    pub ordinal_artifact_write_bytes: u64,
+    /// Bounded payload writes performed by the v4 stream encoder.
+    #[serde(default)]
+    pub ordinal_artifact_write_operations: u64,
+    /// Contiguous ordinal ranges emitted by the v4 stream encoder.
+    #[serde(default)]
+    pub ordinal_ranges: u64,
+    /// Cancellation/work polls performed while streaming v4 identities.
+    #[serde(default)]
+    pub ordinal_work_operations: u64,
+    /// Peak live v4 encoding buffer bytes.
+    #[serde(default)]
+    pub ordinal_peak_buffer_bytes: u64,
+    /// Peak bytes in owned temporary v4 outputs.
+    #[serde(default)]
+    pub ordinal_peak_temporary_bytes: u64,
+    /// v4 payload and publication durability barriers.
+    #[serde(default)]
+    pub ordinal_fsync_operations: u64,
+    /// v4 receipt, manifest, and authority-lock bytes written at publication.
+    #[serde(default)]
+    pub ordinal_publication_write_bytes: u64,
+    /// v4 receipt, manifest, and authority-lock writes at publication.
+    #[serde(default)]
+    pub ordinal_publication_write_operations: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -500,14 +530,30 @@ pub(crate) fn encode(
         if metrics.input_records != shape.node_count {
             return Err(storage("v4 construction count differs from shaped nodes"));
         }
-        index
-            .artifacts
-            .extend(crate::uuid_membership::publish_v4_construction_artifacts(
+        evidence.ordinal_records = metrics.input_records;
+        evidence.ordinal_artifact_write_bytes = metrics.artifact_bytes;
+        evidence.ordinal_artifact_write_operations = metrics.write_blocks;
+        evidence.ordinal_ranges = u64::try_from(metrics.ranges).map_err(storage)?;
+        evidence.ordinal_work_operations = metrics.cancellation_polls;
+        evidence.ordinal_peak_buffer_bytes =
+            u64::try_from(metrics.peak_buffer_bytes).map_err(storage)?;
+        let (v4_artifacts, publication) =
+            crate::uuid_membership::publish_v4_construction_artifacts(
                 &output,
                 &manifest,
                 generation,
                 identities_sha256,
-            )?);
+            )?;
+        evidence.ordinal_publication_write_bytes = publication.write_bytes;
+        evidence.ordinal_publication_write_operations = publication.write_operations;
+        evidence.ordinal_fsync_operations = metrics
+            .fsync_operations
+            .saturating_add(publication.fsync_operations);
+        evidence.ordinal_peak_temporary_bytes = metrics
+            .peak_temporary_bytes
+            .max(publication.peak_temporary_bytes);
+        crate::graph_construction::construction_failpoint("encode.after_v4_before_inventory");
+        index.artifacts.extend(v4_artifacts);
     }
     encode_edges(
         source,
