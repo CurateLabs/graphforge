@@ -273,7 +273,14 @@ pub fn import_complete_portable_v2_with_progress(
         receipt.materialized_identity_allocated_bytes = materialized_identity_allocated_bytes;
         receipt
     })
-    .map_err(|error| error.with_allocation_identities(allocation_on_error));
+    .map_err(|error| {
+        error
+            .with_allocation_identities(allocation_on_error)
+            // The shared verifier has authenticated every materialized payload
+            // before finalization begins. Preserve that completed read work on
+            // a finalization error instead of rediscovering the staging tree.
+            .with_recovery_reauthentication(report.payload_bytes, report.entry_count)
+    });
     let _ = fs::remove_dir_all(&stage);
     let _ = fs::remove_file(&owner);
     let _ = sync_parent(&owner);

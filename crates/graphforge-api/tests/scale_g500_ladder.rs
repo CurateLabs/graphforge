@@ -553,6 +553,17 @@ fn exact_descriptor_identities(paths: &[PathBuf]) -> BTreeMap<String, u64> {
         .collect()
 }
 
+fn portable_export_allocation(receipt: &graphforge_api::PortableV2ExportFacadeResult) -> Value {
+    json!({
+        "category": "portable_package",
+        "logical_bytes": receipt.allocation_logical_bytes,
+        "allocated_bytes": receipt.allocation_identity_allocated_bytes.values().copied().sum::<u64>(),
+        "logical_references": receipt.allocation_physical_objects,
+        "physical_objects": receipt.allocation_physical_objects,
+        "source": "portable_writer_receipt",
+    })
+}
+
 fn storage_attribution_value(project: &Path) -> Value {
     let mut value =
         serde_json::to_value(storage_attribution(project)).expect("serialize storage attribution");
@@ -571,6 +582,10 @@ fn sanitized_construction_evidence(
         .as_object_mut()
         .expect("construction evidence object")
         .remove("storage_active_identity_allocated_bytes");
+    value
+        .as_object_mut()
+        .expect("construction evidence object")
+        .remove("storage_allocation_transitions");
     value
 }
 
@@ -2059,6 +2074,20 @@ impl PhaseJournal {
         self.replace_allocation_owner(owner, &project.physical_identity_allocated_bytes);
     }
 
+    fn replay_allocation_transitions(
+        &mut self,
+        owner: &str,
+        transitions: &[graphforge_storage::StorageAllocationTransition],
+    ) {
+        for transition in transitions {
+            self.allocation
+                .apply_owner_transition(owner, transition)
+                .expect("apply writer-owned allocation transition");
+            self.monitor
+                .observe_allocated_union(self.allocation.current_allocated_bytes());
+        }
+    }
+
     fn remove_allocation_owner(&mut self, owner: &str) {
         self.allocation
             .remove_owner(owner)
@@ -2310,23 +2339,6 @@ struct DrillAllocationEvidence {
     cancelled_export: BTreeMap<String, u64>,
 }
 
-fn bounded_owned_tree_identities(root: &Path) -> BTreeMap<String, u64> {
-    let mut pending = vec![root.to_owned()];
-    let mut files = Vec::new();
-    while let Some(path) = pending.pop() {
-        let metadata = fs::symlink_metadata(&path).expect("bounded drill artifact metadata");
-        if metadata.is_dir() {
-            for entry in fs::read_dir(path).expect("bounded drill directory") {
-                pending.push(entry.expect("bounded drill entry").path());
-            }
-        } else {
-            assert!(metadata.is_file() && !metadata.file_type().is_symlink());
-            files.push(path);
-        }
-    }
-    exact_descriptor_identities(&files)
-}
-
 fn create_bounded_drill_package(
     root: &Path,
     limits: PortableV2Limits,
@@ -2360,7 +2372,7 @@ fn create_bounded_drill_package(
         .expect("bounded drill project attribution")
         .physical_identity_allocated_bytes;
     let expanded = root.join("drill-expanded");
-    graph
+    let expanded_receipt = graph
         .export_portable_v2(
             &PortableV2ExportRequest {
                 selection: PortableSelection::Current,
@@ -2383,7 +2395,7 @@ fn create_bounded_drill_package(
         None,
     )
     .expect("verify compact drill expanded package");
-    let expanded_identities = bounded_owned_tree_identities(&expanded);
+    let expanded_identities = expanded_receipt.allocation_identity_allocated_bytes;
     fs::remove_dir_all(&expanded).expect("remove bounded expanded drill package");
     let cancelled = AtomicBool::new(true);
     let cancelled_path = root.join("drill-cancelled.gfpb");
@@ -2523,6 +2535,9 @@ fn run_integrated_certification_with_edge_factor(
 
     let phase = Instant::now();
     let graph = GraphForge::new(source.to_str()).expect("open certification source");
+    let initial_generation = graphforge_storage::resolve_project_generation(&source)
+        .expect("resolve initial source generation");
+    journal.replace_project_owner("source_project", &initial_generation);
     let mut construction = graph
         .begin_graph_construction(Default::default())
         .expect("begin certification construction");
@@ -2551,14 +2566,14 @@ fn run_integrated_certification_with_edge_factor(
         .seal_and_publish()
         .expect("publish certification construction");
     let construction_evidence = construction.progress().evidence;
-    let construction_phases =
+    let mut construction_phases =
         graphforge_storage::ConstructionPhaseAttribution::from_construction(&construction_evidence);
     construction_phases
         .validate_for_qualification()
         .expect("certification construction phase attribution");
-    journal.replace_allocation_owner(
+    journal.replay_allocation_transitions(
         "construction",
-        &construction_evidence.storage_active_identity_allocated_bytes,
+        &construction_evidence.storage_allocation_transitions,
     );
     let committed_generation = graphforge_storage::resolve_project_generation(&source)
         .expect("resolve committed ingest generation");
@@ -2622,7 +2637,7 @@ fn run_integrated_certification_with_edge_factor(
     assert_eq!(source_generation, exported.generation_uuid);
     journal.replace_allocation_owner(
         "portable_package",
-        &exact_descriptor_identities(std::slice::from_ref(&package)),
+        &exported.allocation_identity_allocated_bytes,
     );
     journal.pass("export", phase, Some(exported.package_digest.clone()));
     let phase = Instant::now();
@@ -2699,7 +2714,7 @@ fn run_integrated_certification_with_edge_factor(
     journal.pass("imported_query_2hop", phase, Some(imported_2hop.clone()));
     let source_storage = storage_attribution_value(&source);
     let imported_storage = storage_attribution_value(&imported);
-    let package_storage = exact_descriptor_allocation(std::slice::from_ref(&package));
+    let package_storage = portable_export_allocation(&exported);
     // Representative drills use the same verifier/import boundaries but never
     // repeat the billion-edge payload.
     let phase = Instant::now();
@@ -2784,16 +2799,50 @@ fn run_integrated_certification_with_edge_factor(
     journal.pass("drill_resource_limit", phase, None);
     let phase = Instant::now();
     let interrupted = root.join("interrupted-target");
-    let interrupted_error = GraphForge::import_portable_v2(
+    let interrupted_operation = uuidv7(0x746);
+    let interrupted_generation = Uuid::new_v5(
+        &interrupted_operation,
+        b"graphforge-portable-v2-import-generation/1",
+    );
+    let interrupted_cancelled = AtomicBool::new(false);
+    let supported_capabilities = [
+        "epistemic",
+        "graph",
+        "knowledge",
+        "provenance",
+        "valid_time",
+        "workspace",
+    ]
+    .into_iter()
+    .map(|capability_id| graphforge_storage::ProjectCapability {
+        capability_id: capability_id.into(),
+        capability_version: 1,
+    })
+    .collect::<Vec<_>>();
+    let interrupted_error = graphforge_storage::import_complete_portable_v2_with_progress(
+        &drill_package,
         &interrupted,
-        &PortableV2ImportRequest {
-            input: drill_package,
-            operation_id: OperationId(uuidv7(0x746)),
-            limits,
+        interrupted_operation,
+        interrupted_generation,
+        &supported_capabilities,
+        limits,
+        Some(&interrupted_cancelled),
+        |progress| {
+            if progress.phase == graphforge_storage::PortableV2ImportPhase::Materialized {
+                interrupted_cancelled.store(true, Ordering::SeqCst);
+            }
         },
-        Some(&AtomicBool::new(true)),
     )
-    .expect_err("cancelled import must fail");
+    .expect_err("cancelled finalization must fail");
+    assert!(interrupted_error.recovery_reauthentication_read_bytes > 0);
+    assert!(interrupted_error.recovery_reauthentication_read_calls > 0);
+    construction_phases.add_recovery_reauthentication(
+        interrupted_error.recovery_reauthentication_read_bytes,
+        interrupted_error.recovery_reauthentication_read_calls,
+    );
+    construction_phases
+        .validate_for_qualification()
+        .expect("interrupted recovery phase attribution");
     journal.replace_allocation_owner(
         "interrupted_import",
         &interrupted_error.allocation_identity_allocated_bytes,
@@ -2879,6 +2928,15 @@ fn equivalent_full_lifecycle_1x_2x_4x_has_bounded_phase_slopes() {
         attribution
             .validate_for_qualification()
             .expect("full lifecycle phase qualification");
+        let recovery = &phases["recovery_reauthentication"];
+        assert!(
+            recovery["read_bytes"].as_u64().unwrap_or(0) > 0,
+            "{factor}x interrupted-finalization recovery must report authenticated bytes"
+        );
+        assert!(
+            recovery["read_calls"].as_u64().unwrap_or(0) > 0,
+            "{factor}x interrupted-finalization recovery must report authenticated calls"
+        );
         let observations = phases
             .iter()
             .map(|(name, values)| {

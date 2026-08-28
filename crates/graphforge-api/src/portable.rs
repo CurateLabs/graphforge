@@ -192,6 +192,18 @@ pub struct PortableV2ExportFacadeResult {
     pub selection_fingerprint: String,
     /// Caller-selected output path.
     pub output: PathBuf,
+    /// Exact writer-owned published allocation for lifecycle qualification.
+    #[doc(hidden)]
+    #[serde(skip)]
+    pub allocation_identity_allocated_bytes: std::collections::BTreeMap<String, u64>,
+    /// Writer-owned logical bytes of the published package identity union.
+    #[doc(hidden)]
+    #[serde(skip)]
+    pub allocation_logical_bytes: u64,
+    /// Writer-owned distinct published package identities.
+    #[doc(hidden)]
+    #[serde(skip)]
+    pub allocation_physical_objects: u64,
 }
 
 /// Stable export result.
@@ -427,6 +439,9 @@ impl GraphForge {
             },
             selection_fingerprint: receipt.selection_fingerprint,
             output: request.output_path.clone(),
+            allocation_identity_allocated_bytes: receipt.allocation_identity_allocated_bytes,
+            allocation_logical_bytes: receipt.allocation_logical_bytes,
+            allocation_physical_objects: receipt.allocation_physical_objects,
         })
     }
 

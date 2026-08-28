@@ -394,6 +394,11 @@ pub struct GraphConstructionEvidence {
     /// without double counting aliases.
     #[serde(default)]
     pub storage_active_identity_allocated_bytes: BTreeMap<String, u64>,
+    /// Writer-owned identity deltas in exact operation order. Unlike the final
+    /// active map, this preserves staging/merge/encoding coexistence for files
+    /// removed before construction returns.
+    #[serde(default)]
+    pub storage_allocation_transitions: Vec<crate::StorageAllocationTransition>,
     /// Rows accepted.
     pub input_rows: u64,
     /// Non-replay chunks accepted.
@@ -2856,13 +2861,12 @@ impl GraphConstructionSession {
                 "{:016x}:{}",
                 artifact.identity.volume_serial, artifact.identity.file_id
             );
-            if evidence
-                .storage_active_identity_allocated_bytes
-                .insert(identity_key, artifact.allocated_bytes)
-                .is_some()
-            {
-                return Err(storage("construction artifact identity was already active"));
-            }
+            record_active_identity_install(
+                evidence,
+                identity_key,
+                artifact.allocated_bytes,
+                "construction artifact identity was already active",
+            )?;
             evidence.write_bytes = evidence.write_bytes.saturating_add(artifact.bytes);
             evidence.write_operations = evidence
                 .write_operations
@@ -4148,6 +4152,45 @@ fn is_shape_artifact_name(name: &str) -> bool {
     })
 }
 
+fn record_active_identity_install(
+    evidence: &mut GraphConstructionEvidence,
+    identity: String,
+    allocated_bytes: u64,
+    duplicate_message: &'static str,
+) -> Result<(), GfError> {
+    if evidence
+        .storage_active_identity_allocated_bytes
+        .insert(identity.clone(), allocated_bytes)
+        .is_some()
+    {
+        return Err(storage(duplicate_message));
+    }
+    evidence
+        .storage_allocation_transitions
+        .push(crate::StorageAllocationTransition {
+            installed: BTreeMap::from([(identity, allocated_bytes)]),
+            removed: BTreeSet::new(),
+        });
+    Ok(())
+}
+
+fn record_active_identity_remove(
+    evidence: &mut GraphConstructionEvidence,
+    identity: &str,
+) -> Result<u64, GfError> {
+    let removed = evidence
+        .storage_active_identity_allocated_bytes
+        .remove(identity)
+        .ok_or_else(|| storage("active construction identity is absent"))?;
+    evidence
+        .storage_allocation_transitions
+        .push(crate::StorageAllocationTransition {
+            installed: BTreeMap::new(),
+            removed: BTreeSet::from([identity.to_owned()]),
+        });
+    Ok(removed)
+}
+
 fn record_shape_artifact_install(
     evidence: &mut GraphConstructionEvidence,
     receipt: &ArtifactReceipt,
@@ -4156,13 +4199,12 @@ fn record_shape_artifact_install(
         "{:016x}:{}",
         receipt.identity.volume_serial, receipt.identity.file_id
     );
-    if evidence
-        .storage_active_identity_allocated_bytes
-        .insert(identity_key, receipt.allocated_bytes)
-        .is_some()
-    {
-        return Err(storage("shape artifact identity installed twice"));
-    }
+    record_active_identity_install(
+        evidence,
+        identity_key,
+        receipt.allocated_bytes,
+        "shape artifact identity installed twice",
+    )?;
     let totals = evidence
         .storage_current
         .entry(crate::ArtifactCategory::ConstructionStaging)
@@ -4238,9 +4280,12 @@ fn record_encoded_active_artifacts(
             }
             continue;
         }
-        evidence
-            .storage_active_identity_allocated_bytes
-            .insert(identity_key, usage.allocated_bytes);
+        record_active_identity_install(
+            evidence,
+            identity_key,
+            usage.allocated_bytes,
+            "encoded artifact identity installed twice",
+        )?;
         let totals = evidence
             .storage_current
             .entry(crate::ArtifactCategory::ConstructionStaging)
@@ -4275,14 +4320,11 @@ fn unlink_shape_artifact(
         "{:016x}:{}",
         receipt.identity.volume_serial, receipt.identity.file_id
     );
-    let removed = evidence
-        .storage_active_identity_allocated_bytes
-        .remove(&identity_key)
-        .ok_or_else(|| {
-            storage(format!(
-                "shape active identity ledger is absent for {name} ({identity_key})"
-            ))
-        })?;
+    let removed = record_active_identity_remove(evidence, &identity_key).map_err(|_| {
+        storage(format!(
+            "shape active identity ledger is absent for {name} ({identity_key})"
+        ))
+    })?;
     if removed != receipt.allocated_bytes {
         return Err(storage("shape active identity allocation changed"));
     }

@@ -229,6 +229,19 @@ impl ConstructionPhaseAttribution {
         Self { phases, totals }
     }
 
+    /// Add writer-reported recovery reauthentication completed outside the
+    /// construction session, such as interrupted portable finalization.
+    pub fn add_recovery_reauthentication(&mut self, read_bytes: u64, read_calls: u64) {
+        let recovery = self
+            .phases
+            .entry(StorageIoPhase::RecoveryReauthentication)
+            .or_default();
+        recovery.read_bytes = recovery.read_bytes.saturating_add(read_bytes);
+        recovery.read_calls = recovery.read_calls.saturating_add(read_calls);
+        self.totals.read_bytes = self.totals.read_bytes.saturating_add(read_bytes);
+        self.totals.read_calls = self.totals.read_calls.saturating_add(read_calls);
+    }
+
     /// Reject missing phases or totals that do not equal the phase sum.
     pub fn validate_reconciliation(&self) -> Result<(), GfError> {
         if StorageIoPhase::ALL
@@ -337,6 +350,17 @@ pub struct ProjectStorageIdentityUnion {
     pub physical_identity_allocated_bytes: BTreeMap<String, u64>,
     /// Reconciled allocation of the identity union.
     pub allocated_bytes: u64,
+}
+
+/// One writer-owned change to an authenticated allocation owner. Transitions
+/// are replayed in durable operation order so files removed before an API call
+/// returns still contribute to the exact full-lifecycle high-water mark.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorageAllocationTransition {
+    /// Newly retained native identities and their allocated bytes.
+    pub installed: BTreeMap<String, u64>,
+    /// Native identities no longer retained by this owner.
+    pub removed: BTreeSet<String>,
 }
 
 /// Capture the retained project/container allocation without recursively
@@ -488,6 +512,80 @@ impl StorageAllocationLifecycle {
     ) -> Result<(), GfError> {
         snapshot.validate_reconciliation()?;
         self.replace_owner(owner, &snapshot.physical_identity_allocated_bytes)
+    }
+
+    /// Apply one writer-owned install/remove transition without reconstructing
+    /// an operation's historical state from its final filesystem layout.
+    pub fn apply_owner_transition(
+        &mut self,
+        owner: impl Into<String>,
+        transition: &StorageAllocationTransition,
+    ) -> Result<(), GfError> {
+        let mut candidate = self.clone();
+        candidate.apply_owner_transition_inner(owner.into(), transition)?;
+        *self = candidate;
+        Ok(())
+    }
+
+    fn apply_owner_transition_inner(
+        &mut self,
+        owner: String,
+        transition: &StorageAllocationTransition,
+    ) -> Result<(), GfError> {
+        if transition
+            .installed
+            .keys()
+            .any(|identity| transition.removed.contains(identity))
+        {
+            return Err(validation(
+                "allocation transition installs and removes one identity",
+            ));
+        }
+        let owned = self.owners.entry(owner).or_default();
+        for identity in &transition.removed {
+            if !owned.remove(identity) {
+                return Err(validation(
+                    "allocation transition removes an unowned identity",
+                ));
+            }
+            let (allocated, references) = self
+                .active
+                .get(identity)
+                .copied()
+                .ok_or_else(|| validation("active transition identity is absent"))?;
+            if references == 1 {
+                self.active.remove(identity);
+                self.current_allocated_bytes = self
+                    .current_allocated_bytes
+                    .checked_sub(allocated)
+                    .ok_or_else(|| validation("active allocation underflow"))?;
+            } else {
+                self.active
+                    .insert(identity.clone(), (allocated, references - 1));
+            }
+        }
+        for (identity, allocated) in &transition.installed {
+            if !owned.insert(identity.clone()) {
+                return Err(validation(
+                    "allocation transition installs an owned identity",
+                ));
+            }
+            match self.active.get_mut(identity) {
+                Some((existing, references)) => {
+                    if existing != allocated {
+                        return Err(validation("active identity allocation changed"));
+                    }
+                    *references = checked_add(*references, 1)?;
+                }
+                None => {
+                    self.current_allocated_bytes =
+                        checked_add(self.current_allocated_bytes, *allocated)?;
+                    self.active.insert(identity.clone(), (*allocated, 1));
+                }
+            }
+            self.peak_allocated_bytes = self.peak_allocated_bytes.max(self.current_allocated_bytes);
+        }
+        Ok(())
     }
 
     /// Remove an owner and decrement every exact identity reference.
@@ -1018,6 +1116,43 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_transition_preserves_removed_intra_operation_peak() {
+        let mut lifecycle = StorageAllocationLifecycle::default();
+        lifecycle
+            .apply_owner_transition(
+                "construction",
+                &StorageAllocationTransition {
+                    installed: BTreeMap::from([
+                        ("dev:staging".to_owned(), 4096),
+                        ("dev:merge".to_owned(), 8192),
+                    ]),
+                    removed: BTreeSet::new(),
+                },
+            )
+            .unwrap();
+        lifecycle
+            .apply_owner_transition(
+                "construction",
+                &StorageAllocationTransition {
+                    installed: BTreeMap::from([("dev:encoded".to_owned(), 16_384)]),
+                    removed: BTreeSet::new(),
+                },
+            )
+            .unwrap();
+        lifecycle
+            .apply_owner_transition(
+                "construction",
+                &StorageAllocationTransition {
+                    installed: BTreeMap::new(),
+                    removed: BTreeSet::from(["dev:staging".to_owned(), "dev:merge".to_owned()]),
+                },
+            )
+            .unwrap();
+        assert_eq!(lifecycle.current_allocated_bytes(), 16_384);
+        assert_eq!(lifecycle.peak_allocated_bytes(), 28_672);
+    }
+
+    #[test]
     fn construction_phase_inventory_reconciles_and_rejects_omission() {
         let evidence = GraphConstructionEvidence {
             seal_application_read_bytes: 11,
@@ -1060,8 +1195,15 @@ mod tests {
             attribution.phases[&StorageIoPhase::RecoveryReauthentication].read_calls,
             2
         );
+        attribution.add_recovery_reauthentication(9, 1);
+        attribution.validate_for_qualification().unwrap();
+        assert_eq!(
+            attribution.phases[&StorageIoPhase::RecoveryReauthentication].read_bytes,
+            50
+        );
+        assert_eq!(attribution.totals.read_bytes, 162);
         assert_eq!(attribution.totals.write_bytes, 163);
-        assert_eq!(attribution.totals.read_calls, 21);
+        assert_eq!(attribution.totals.read_calls, 22);
         assert_eq!(attribution.totals.write_calls, 19);
         assert_eq!(attribution.totals.fsync_calls, 29);
         attribution

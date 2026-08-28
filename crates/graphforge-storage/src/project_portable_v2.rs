@@ -207,6 +207,12 @@ pub struct PortableV2Error {
     /// lifecycle qualification of an interrupted operation.
     #[doc(hidden)]
     pub allocation_identity_allocated_bytes: std::collections::BTreeMap<String, u64>,
+    /// Bytes actually read while reauthenticating an interrupted import.
+    #[doc(hidden)]
+    pub recovery_reauthentication_read_bytes: u64,
+    /// Calls actually completed while reauthenticating an interrupted import.
+    #[doc(hidden)]
+    pub recovery_reauthentication_read_calls: u64,
 }
 
 impl PortableV2Error {
@@ -218,6 +224,8 @@ impl PortableV2Error {
             entry: None,
             detail,
             allocation_identity_allocated_bytes: std::collections::BTreeMap::new(),
+            recovery_reauthentication_read_bytes: 0,
+            recovery_reauthentication_read_calls: 0,
         }
     }
     pub(crate) fn at(code: PortableV2ErrorCode, entry: &str, detail: &'static str) -> Self {
@@ -226,6 +234,8 @@ impl PortableV2Error {
             entry: Some(entry.chars().take(4096).collect()),
             detail,
             allocation_identity_allocated_bytes: std::collections::BTreeMap::new(),
+            recovery_reauthentication_read_bytes: 0,
+            recovery_reauthentication_read_calls: 0,
         }
     }
 
@@ -234,6 +244,16 @@ impl PortableV2Error {
         identities: std::collections::BTreeMap<String, u64>,
     ) -> Self {
         self.allocation_identity_allocated_bytes = identities;
+        self
+    }
+
+    pub(crate) fn with_recovery_reauthentication(
+        mut self,
+        read_bytes: u64,
+        read_calls: u64,
+    ) -> Self {
+        self.recovery_reauthentication_read_bytes = read_bytes;
+        self.recovery_reauthentication_read_calls = read_calls;
         self
     }
 }

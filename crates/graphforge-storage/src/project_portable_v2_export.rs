@@ -375,10 +375,19 @@ pub struct PortableV2ExportReceipt {
     /// Exact native allocation of the published package for lifecycle evidence.
     #[doc(hidden)]
     pub allocation_identity_allocated_bytes: BTreeMap<String, u64>,
+    /// Logical EOF bytes of the exact published identity union.
+    #[doc(hidden)]
+    pub allocation_logical_bytes: u64,
+    /// Distinct physical files in the exact published identity union.
+    #[doc(hidden)]
+    pub allocation_physical_objects: u64,
 }
 
 #[derive(Default)]
-struct ExportAllocationObserver(BTreeMap<String, u64>);
+struct ExportAllocationObserver {
+    allocated: BTreeMap<String, u64>,
+    logical: BTreeMap<String, u64>,
+}
 
 impl ExportAllocationObserver {
     fn observe(&mut self, file: &File) -> Result<(), ExportError> {
@@ -389,10 +398,9 @@ impl ExportAllocationObserver {
             use std::fmt::Write as _;
             write!(&mut file_id, "{byte:02x}").expect("writing to String cannot fail");
         }
-        self.0.insert(
-            format!("{:016x}:{file_id}", identity.volume_serial),
-            usage.allocated_bytes,
-        );
+        let key = format!("{:016x}:{file_id}", identity.volume_serial);
+        self.allocated.insert(key.clone(), usage.allocated_bytes);
+        self.logical.insert(key, usage.logical_bytes);
         Ok(())
     }
 }
@@ -1150,10 +1158,12 @@ pub fn export_complete_portable_v2(
         Ok(d) => d,
         Err(e) => {
             remove(&stage);
-            return Err(e.with_allocation_identities(allocation.0));
+            return Err(e.with_allocation_identities(allocation.allocated));
         }
     };
-    let staged_allocation = allocation.0;
+    let allocation_logical_bytes = allocation.logical.values().copied().sum();
+    let allocation_physical_objects = allocation.logical.len() as u64;
+    let staged_allocation = allocation.allocated;
     if is_cancelled() {
         remove(&stage);
         return Err(err("GF_CANCELLED", "portable export cancelled")
@@ -1201,6 +1211,8 @@ pub fn export_complete_portable_v2(
         output,
         selection_fingerprint: plan.selection_fingerprint.clone(),
         allocation_identity_allocated_bytes: staged_allocation,
+        allocation_logical_bytes,
+        allocation_physical_objects,
     })
 }
 
