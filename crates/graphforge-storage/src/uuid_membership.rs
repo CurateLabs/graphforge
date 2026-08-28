@@ -361,21 +361,32 @@ impl<'a> V4OrdinalConstructionWriter<'a> {
             &mut self.metrics,
         )?;
         self.metrics.ranges = self.ranges.len();
-        Ok((
-            crate::V4OrdinalIdentityManifest {
-                format_version: crate::ORDINAL_IDENTITY_V4,
-                topology_generation: self.generation,
-                forward_identities: vec![forward],
-                ordinal_ranges: self.ranges,
-                tombstones: vec![crate::V4OrdinalTombstones {
-                    generation: self.generation,
-                    artifact: tombstone,
-                    blocks: Vec::new(),
-                }],
-            },
-            self.metrics,
-        ))
+        let manifest = crate::V4OrdinalIdentityManifest {
+            format_version: crate::ORDINAL_IDENTITY_V4,
+            topology_generation: self.generation,
+            forward_identities: vec![forward],
+            ordinal_ranges: self.ranges,
+            tombstones: vec![crate::V4OrdinalTombstones {
+                generation: self.generation,
+                artifact: tombstone,
+                blocks: Vec::new(),
+            }],
+        };
+        admit_v4_construction_manifest(&manifest)?;
+        Ok((manifest, self.metrics))
     }
+}
+
+fn admit_v4_construction_manifest(
+    manifest: &crate::V4OrdinalIdentityManifest,
+) -> Result<(), GfError> {
+    let bytes = serde_json::to_vec(manifest).map_err(storage_err)?;
+    if bytes.len() as u64 > crate::ordinal_identity_v4::MAX_MANIFEST_BYTES {
+        return Err(storage_err(
+            "v4 ordinal manifest exceeds the reader admission bound",
+        ));
+    }
+    Ok(())
 }
 
 fn add_v4_mapping_commitment(commitment: &mut [u8; 32], domain: u8, uuid: [u8; 16], node_id: u64) {
@@ -2696,6 +2707,7 @@ fn cleanup_private_construction_index(
             && !name_text.starts_with(".manifest.json-")
             && !name_text.starts_with("identities-v3")
             && !name_text.starts_with("node-surrogates-v3")
+            && !v4_allowed.contains(name_text)
         {
             return Err(storage_err(
                 "construction recovery inventory contains an unauthorised object",
@@ -2716,6 +2728,197 @@ fn cleanup_private_construction_index(
     topology.sync().map_err(storage_err)?;
     graph.sync().map_err(storage_err)?;
     encoded.sync().map_err(storage_err)
+}
+
+fn authenticate_private_v4_residue(
+    index: &graphforge_filesystem::StableDirectory,
+    names: &[std::ffi::OsString],
+) -> Result<BTreeSet<String>, GfError> {
+    let text = names
+        .iter()
+        .map(|name| {
+            name.to_str()
+                .map(str::to_owned)
+                .ok_or_else(|| storage_err("construction recovery inventory name is not UTF-8"))
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    let controls = [V4_ORDINAL_RECEIPT, V4_ORDINAL_MANIFEST, "ordinal-v4.lock"];
+    let present_controls = controls.iter().filter(|name| text.contains(**name)).count();
+    let mut allowed = BTreeSet::new();
+
+    if present_controls != 0 {
+        if present_controls != controls.len() {
+            return Err(storage_err(
+                "private v4 construction controls are incomplete",
+            ));
+        }
+        let receipt_body =
+            read_private_construction_child(index, V4_ORDINAL_RECEIPT, MAX_MANIFEST_BYTES)?;
+        let receipt: TopologyIndexReceipt =
+            serde_json::from_slice(&receipt_body).map_err(storage_err)?;
+        if !canonical_lower_hex(&receipt.nonce, 32)
+            || !canonical_lower_hex(&receipt.topology_delta_sha256, 64)
+            || !canonical_lower_hex(&receipt.manifest_sha256, 64)
+        {
+            return Err(storage_err(
+                "private v4 construction receipt is noncanonical",
+            ));
+        }
+        let manifest_body = read_private_construction_child(
+            index,
+            V4_ORDINAL_MANIFEST,
+            crate::ordinal_identity_v4::MAX_MANIFEST_BYTES,
+        )?;
+        if hex_sha256(&manifest_body) != receipt.manifest_sha256 {
+            return Err(storage_err(
+                "private v4 construction manifest does not match its receipt",
+            ));
+        }
+        let manifest: crate::V4OrdinalIdentityManifest =
+            serde_json::from_slice(&manifest_body).map_err(storage_err)?;
+        if manifest.topology_generation != receipt.expected_generation {
+            return Err(storage_err(
+                "private v4 construction generation does not match its receipt",
+            ));
+        }
+        admit_v4_construction_manifest(&manifest)?;
+        let lock = index
+            .open_child_file(std::ffi::OsStr::new("ordinal-v4.lock"))
+            .map_err(storage_err)?;
+        if lock.metadata().map_err(storage_err)?.len() != 0 {
+            return Err(storage_err("private v4 construction lock is nonempty"));
+        }
+        allowed.extend(controls.into_iter().map(str::to_owned));
+        for artifact in manifest
+            .forward_identities
+            .iter()
+            .chain(manifest.ordinal_ranges.iter().map(|range| &range.artifact))
+            .chain(manifest.tombstones.iter().map(|run| &run.artifact))
+        {
+            authenticate_private_v4_artifact(index, artifact)?;
+            if !allowed.insert(artifact.name.clone()) {
+                return Err(storage_err(
+                    "private v4 construction manifest repeats an artifact",
+                ));
+            }
+        }
+    }
+
+    for name in &text {
+        if allowed.contains(name) || !is_exact_private_v4_name(name) {
+            continue;
+        }
+        if name.starts_with(".v4-") {
+            allowed.insert(name.clone());
+            continue;
+        }
+        let mut file = index
+            .open_child_file(std::ffi::OsStr::new(name))
+            .map_err(storage_err)?;
+        let length = file.metadata().map_err(storage_err)?.len();
+        let digest = sha256_reader_streaming(&mut file)?;
+        let suffix = name
+            .strip_suffix(".uuidx")
+            .and_then(|name| name.rsplit_once('-'))
+            .map(|(_, digest)| digest)
+            .ok_or_else(|| storage_err("private v4 artifact name is malformed"))?;
+        if length == 0 && !name.starts_with("tombstones-v4-") || !digest.starts_with(suffix) {
+            return Err(storage_err(
+                "private v4 construction artifact fails content authentication",
+            ));
+        }
+        allowed.insert(name.clone());
+    }
+    Ok(allowed)
+}
+
+fn read_private_construction_child(
+    index: &graphforge_filesystem::StableDirectory,
+    name: &str,
+    maximum: u64,
+) -> Result<Vec<u8>, GfError> {
+    let mut file = index
+        .open_child_file(std::ffi::OsStr::new(name))
+        .map_err(storage_err)?;
+    if graphforge_filesystem::file_link_count(&file).map_err(storage_err)? != 1 {
+        return Err(storage_err(
+            "private v4 construction control has extra links",
+        ));
+    }
+    read_bounded(&mut file, maximum)
+}
+
+fn authenticate_private_v4_artifact(
+    index: &graphforge_filesystem::StableDirectory,
+    artifact: &crate::V4OrdinalArtifact,
+) -> Result<(), GfError> {
+    if !is_exact_private_v4_name(&artifact.name) || artifact.name.starts_with(".v4-") {
+        return Err(storage_err("private v4 artifact name is noncanonical"));
+    }
+    let mut file = index
+        .open_child_file(std::ffi::OsStr::new(&artifact.name))
+        .map_err(storage_err)?;
+    if graphforge_filesystem::file_link_count(&file).map_err(storage_err)? != 1
+        || file.metadata().map_err(storage_err)?.len() != artifact.bytes
+        || sha256_reader_streaming(&mut file)? != artifact.sha256
+    {
+        return Err(storage_err("private v4 artifact authentication failed"));
+    }
+    Ok(())
+}
+
+fn is_exact_private_v4_name(name: &str) -> bool {
+    if let Some(rest) = name.strip_prefix(".v4-") {
+        let Some((role, nonce)) = rest.strip_suffix(".tmp").and_then(|v| v.rsplit_once('-')) else {
+            return false;
+        };
+        let role_ok = role == "forward"
+            || role == "tombstones"
+            || role.strip_prefix("ordinal-").is_some_and(|ordinal| {
+                ordinal.len() == 8 && ordinal.bytes().all(|b| b.is_ascii_digit())
+            });
+        return role_ok && canonical_lower_hex(nonce, 32);
+    }
+    let prefix = if name.starts_with("forward-v4-") {
+        "forward-v4-"
+    } else if name.starts_with("ordinal-v4-") {
+        "ordinal-v4-"
+    } else if name.starts_with("tombstones-v4-") {
+        "tombstones-v4-"
+    } else {
+        return false;
+    };
+    let Some((generation, digest)) = name
+        .strip_prefix(prefix)
+        .and_then(|value| value.strip_suffix(".uuidx"))
+        .and_then(|value| value.rsplit_once('-'))
+    else {
+        return false;
+    };
+    generation
+        .parse::<u64>()
+        .is_ok_and(|value| value != 0 && value.to_string() == generation)
+        && canonical_lower_hex(digest, 16)
+}
+
+fn canonical_lower_hex(value: &str, length: usize) -> bool {
+    value.len() == length
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn sha256_reader_streaming(reader: &mut impl Read) -> Result<String, GfError> {
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = reader.read(&mut buffer).map_err(storage_err)?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(hex_bytes(&digest.finalize()))
 }
 
 fn write_construction_intent(
@@ -3166,6 +3369,9 @@ fn install_construction_bytes(
     file.write_all(bytes).map_err(storage_err)?;
     work.write_bytes = work.write_bytes.saturating_add(bytes.len() as u64);
     work.write_operations = work.write_operations.saturating_add(1);
+    work.peak_temporary_bytes = work
+        .peak_temporary_bytes
+        .max(u64::try_from(bytes.len()).map_err(storage_err)?);
     file.sync_all().map_err(storage_err)?;
     work.fsync_operations = work.fsync_operations.saturating_add(1);
     drop(file);

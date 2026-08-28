@@ -34,7 +34,7 @@ const TOMBSTONE_WIDTH_USIZE: usize = 8;
 const TOMBSTONE_BLOCK_BYTES: u64 = 64 * 1024;
 const ORDINAL_BLOCK_BYTES: u64 = 64 * 1024;
 const ORDINAL_BLOCK_BYTES_USIZE: usize = 64 * 1024;
-const MAX_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
+pub(crate) const MAX_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
 const STREAM_BYTES: usize = 1024 * 1024;
 // BTree nodes, sorted request storage, caller-order output, and resolved-map
 // entries are charged conservatively rather than as payload-only scalars.
