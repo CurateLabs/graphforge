@@ -9,7 +9,7 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use arrow::array::{FixedSizeBinaryArray, Int64Array, UInt64Array};
+use arrow::array::{Array, FixedSizeBinaryArray, Int64Array, StringArray, UInt64Array};
 use graphforge_api::GraphForge;
 use graphforge_core::uuid::{Uuid, new_v7};
 use graphforge_core::{OntologyMode, TypeId};
@@ -111,11 +111,87 @@ fn fixed_binary_values(result: &graphforge_api::ExecutionResult, column: &str) -
     values
 }
 
+fn int64_values(result: &graphforge_api::ExecutionResult, column: &str) -> Vec<i64> {
+    result
+        .batches
+        .iter()
+        .flat_map(|batch| {
+            batch
+                .column_by_name(column)
+                .unwrap_or_else(|| panic!("missing {column} column"))
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap_or_else(|| panic!("{column} must be Int64"))
+                .values()
+                .iter()
+                .copied()
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn string_values(result: &graphforge_api::ExecutionResult, column: &str) -> Vec<String> {
+    result
+        .batches
+        .iter()
+        .flat_map(|batch| {
+            let values = batch
+                .column_by_name(column)
+                .unwrap_or_else(|| panic!("missing {column} column"))
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap_or_else(|| panic!("{column} must be Utf8"));
+            (0..values.len())
+                .map(|row| values.value(row).to_owned())
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 fn stable_fixture_uuid(kind: u8, ordinal: usize) -> Uuid {
     let mut bytes = [0u8; 16];
     bytes[0] = kind;
     bytes[8..].copy_from_slice(&(ordinal as u64).to_be_bytes());
     Uuid::from_bytes(bytes)
+}
+
+fn generate_semantic_v4_graph(dir: &Path) -> Vec<Uuid> {
+    let workspace = TempDir::new().unwrap();
+    let nodes = (1..=3)
+        .map(|ordinal| stable_fixture_uuid(3, ordinal))
+        .collect::<Vec<_>>();
+    let mut writer = GraphWriter::open_at(workspace.path(), OntologyMode::Exploratory, TS).unwrap();
+    for (node, name) in nodes.iter().zip(["A", "B", "C"]) {
+        writer.create_node(*node, NODE_TYPE).unwrap();
+        writer
+            .set_properties(
+                node,
+                None,
+                HashMap::from([("name".to_owned(), IrLiteral::Str(name.to_owned()))]),
+            )
+            .unwrap();
+    }
+    for (ordinal, (source, destination, weight)) in
+        [(0_usize, 1_usize, 1_i64), (0, 1, 2), (0, 0, 3), (1, 2, 4)]
+            .into_iter()
+            .enumerate()
+    {
+        let edge = stable_fixture_uuid(4, ordinal + 1);
+        writer
+            .create_edge(edge, "LINK", &nodes[source], &nodes[destination])
+            .unwrap();
+        writer
+            .set_edge_properties(
+                &edge,
+                Some("LINK"),
+                HashMap::from([("weight".to_owned(), IrLiteral::Int(weight))]),
+            )
+            .unwrap();
+    }
+    writer.flush().unwrap();
+    build_adjacency_index(workspace.path(), TS).unwrap();
+    project_fixture::publish_graph_workspace_v4(dir, workspace.path());
+    nodes
 }
 
 /// Build a graph whose first productive edge ids are localized but whose
@@ -504,21 +580,25 @@ fn optimized_v4_two_hop_direction_type_alias_and_quiescence_are_exact() {
         (
             "MATCH (a)-[:LINK]->(b) RETURN b.node_uuid AS id ORDER BY id LIMIT 1000",
             FAN_OUT,
+            true,
         ),
         (
             "MATCH (a)<-[:LINK]-(b) RETURN a.node_uuid AS id ORDER BY id LIMIT 1000",
             FAN_OUT,
+            true,
         ),
         (
             "MATCH (a)-[:LINK]-(b) RETURN b.node_uuid AS id ORDER BY id LIMIT 1000",
             FAN_OUT * 2,
+            false,
         ),
         (
             "MATCH (a)-[:LINK]->(b)-[:LINK]->(c) RETURN c.node_uuid AS id ORDER BY id LIMIT 1000",
             FAN_OUT * FAN_OUT,
+            true,
         ),
     ];
-    for (query, multiplicity) in cases {
+    for (query, multiplicity, identity_only) in cases {
         io_stats::reset();
         demand::reset();
         let result = forge.execute(query).unwrap();
@@ -530,16 +610,18 @@ fn optimized_v4_two_hop_direction_type_alias_and_quiescence_are_exact() {
             .collect::<Vec<_>>();
         assert_eq!(fixed_binary_values(&result, "id"), expected, "{query}");
         let io = io_stats::snapshot();
-        assert_eq!(
-            io.edge_full_reads + io.edge_filtered_reads,
-            0,
-            "{query}: {io:#?}"
-        );
-        assert_eq!(
-            io.node_full_reads + io.node_filtered_reads,
-            0,
-            "{query}: {io:#?}"
-        );
+        if identity_only {
+            assert_eq!(
+                io.edge_full_reads + io.edge_filtered_reads,
+                0,
+                "{query}: {io:#?}"
+            );
+            assert_eq!(
+                io.node_full_reads + io.node_filtered_reads,
+                0,
+                "{query}: {io:#?}"
+            );
+        }
         let snapshot = demand::snapshot();
         assert!(
             snapshot
@@ -577,6 +659,76 @@ fn optimized_v4_two_hop_direction_type_alias_and_quiescence_are_exact() {
         .execute("MATCH (a)-[:MISSING]->(b) RETURN b.node_uuid AS id ORDER BY id LIMIT 1000")
         .unwrap();
     assert_eq!(empty.stats.rows_produced, 0);
+}
+
+#[test]
+fn optimized_v4_preserves_parallel_self_loop_and_demanded_property_semantics() {
+    let _guard = IO_GUARD.lock().unwrap();
+    let dir = TempDir::new().unwrap();
+    let nodes = generate_semantic_v4_graph(dir.path());
+    let forge = open_forge(dir.path());
+
+    let destination_query = "MATCH (a)-[:LINK]->(b) RETURN b.node_uuid AS id ORDER BY id";
+    io_stats::reset();
+    let destinations = forge.execute(destination_query).unwrap();
+    let expected = [nodes[0], nodes[1], nodes[1], nodes[2]]
+        .into_iter()
+        .map(|uuid| uuid.as_bytes().to_vec())
+        .collect::<Vec<_>>();
+    assert_eq!(fixed_binary_values(&destinations, "id"), expected);
+    let io = io_stats::snapshot();
+    assert_eq!(io.edge_full_reads + io.edge_filtered_reads, 0, "{io:#?}");
+    assert_eq!(io.node_full_reads + io.node_filtered_reads, 0, "{io:#?}");
+
+    let relationship = forge
+        .execute("MATCH (a)-[r:LINK]->(b) RETURN r.weight AS weight ORDER BY weight")
+        .unwrap();
+    assert_eq!(int64_values(&relationship, "weight"), [1, 2, 3, 4]);
+
+    let predicate = forge
+        .execute("MATCH (a)-[r:LINK]->(b) WHERE r.weight >= 2 RETURN b.node_uuid AS id ORDER BY id")
+        .unwrap();
+    assert_eq!(
+        fixed_binary_values(&predicate, "id"),
+        [nodes[0], nodes[1], nodes[2]]
+            .into_iter()
+            .map(|uuid| uuid.as_bytes().to_vec())
+            .collect::<Vec<_>>()
+    );
+
+    let node_property = forge
+        .execute("MATCH (a)-[:LINK]->(b) RETURN b.name AS name ORDER BY name")
+        .unwrap();
+    assert_eq!(string_values(&node_property, "name"), ["A", "B", "B", "C"]);
+
+    let undirected = forge
+        .execute("MATCH (a)-[:LINK]-(b) RETURN b.node_uuid AS id ORDER BY id")
+        .unwrap();
+    let values = fixed_binary_values(&undirected, "id");
+    // The undirected self-loop is emitted once, while the two parallel LINK
+    // identities remain two distinct matches in each orientation.
+    assert_eq!(values.len(), 7);
+    assert_eq!(
+        values
+            .iter()
+            .filter(|value| value.as_slice() == nodes[0].as_bytes())
+            .count(),
+        3
+    );
+    assert_eq!(
+        values
+            .iter()
+            .filter(|value| value.as_slice() == nodes[1].as_bytes())
+            .count(),
+        3
+    );
+    assert_eq!(
+        values
+            .iter()
+            .filter(|value| value.as_slice() == nodes[2].as_bytes())
+            .count(),
+        1
+    );
 }
 
 #[test]
