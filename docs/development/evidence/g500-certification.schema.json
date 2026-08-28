@@ -40,11 +40,13 @@
     },
     "identities": {
       "type": "object", "additionalProperties": false,
-      "required": ["source_generation", "package", "transport", "imported_generation"],
+      "required": ["source_export_generation_authenticated", "import_receipt_reopen_authenticated", "source_import_generations_distinct", "package", "transport"],
       "properties": {
-        "source_generation": { "$ref": "#/$defs/nonSecretIdentity" },
+        "source_export_generation_authenticated": { "const": true },
+        "import_receipt_reopen_authenticated": { "const": true },
+        "source_import_generations_distinct": { "const": true },
         "package": { "$ref": "#/$defs/sha256" }, "transport": { "$ref": "#/$defs/sha256" },
-        "imported_generation": { "$ref": "#/$defs/nonSecretIdentity" }
+        "generation_uuid": false
       }
     },
     "package": { "type": "object", "additionalProperties": false, "required": ["contract", "format", "class", "integrity", "compatibility", "policy"], "properties": { "contract": { "const": "graphforge-portable-verify/2" }, "format": { "const": "portable-project-v2-bundle" }, "class": { "const": "complete" }, "integrity": { "const": "verified" }, "compatibility": { "const": "supported" }, "policy": { "const": "complete-current-generation" } } },
@@ -57,7 +59,6 @@
   },
   "$defs": {
     "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
-    "nonSecretIdentity": { "type": "string", "pattern": "^[0-9a-f-]{32,64}$" },
     "phase": { "type": "object", "additionalProperties": false, "required": ["id", "status", "elapsed_ms", "rss_peak_bytes", "disk_peak_bytes"], "properties": { "id": { "type": "string", "pattern": "^[a-z0-9_-]+$" }, "status": { "enum": ["pass", "fail", "cancelled"] }, "elapsed_ms": { "type": "integer", "minimum": 0 }, "rss_peak_bytes": { "type": "integer", "minimum": 0 }, "disk_peak_bytes": { "type": "integer", "minimum": 0 }, "fingerprint": { "anyOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] }, "failure_code": { "type": ["string", "null"], "maxLength": 96 } } }
   }
 }

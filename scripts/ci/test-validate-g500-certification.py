@@ -69,10 +69,11 @@ def evidence():
             "imported_edges": 1_000_000_000,
         },
         "identities": {
-            "source_generation": "11111111-1111-1111-1111-111111111111",
+            "source_export_generation_authenticated": True,
+            "import_receipt_reopen_authenticated": True,
+            "source_import_generations_distinct": True,
             "package": DIGEST_A,
             "transport": DIGEST_B,
-            "imported_generation": "22222222-2222-2222-2222-222222222222",
         },
         "package": {
             "contract": "graphforge-portable-verify/2",
@@ -100,6 +101,40 @@ def test_accepts_complete_sanitized_evidence():
     Draft202012Validator.check_schema(contract)
     Draft202012Validator(contract).validate(evidence())
     VALIDATOR.validate(evidence(), SHA)
+
+
+@pytest.mark.parametrize(
+    ("section", "key", "value"),
+    [
+        ("tools", "build", "018f6e45-7f12-7c00-8000-000000000001"),
+        ("tools", "build", "/var/lib/graphforge/project"),
+        ("tools", "machine_id", "redacted"),
+        ("tools", "volume-id", "redacted"),
+        ("tools", "provider_resource_id", "redacted"),
+    ],
+)
+def test_recursive_sanitizer_rejects_raw_identity_path_and_sensitive_keys(
+    section, key, value
+):
+    unsafe = evidence()
+    unsafe[section][key] = value
+    with pytest.raises(VALIDATOR.EvidenceError):
+        VALIDATOR.validate(unsafe, SHA)
+
+
+@pytest.mark.parametrize(
+    "proof",
+    [
+        "source_export_generation_authenticated",
+        "import_receipt_reopen_authenticated",
+        "source_import_generations_distinct",
+    ],
+)
+def test_generation_proofs_are_closed_and_required_true(proof):
+    unsafe = evidence()
+    unsafe["identities"][proof] = False
+    with pytest.raises(VALIDATOR.EvidenceError):
+        VALIDATOR.validate(unsafe, SHA)
 
 
 @pytest.mark.parametrize(
@@ -144,7 +179,7 @@ def test_rejects_incomplete_or_unsafe_evidence(mutation):
     if mutation == "run":
         value["run"]["seed"] = 2
     if mutation == "identity":
-        value["identities"]["imported_generation"] = value["identities"]["source_generation"]
+        value["identities"]["source_import_generations_distinct"] = False
     if mutation == "authority":
         value["authority"]["imported_fingerprint"] = DIGEST_B
     if mutation == "missing_authority":

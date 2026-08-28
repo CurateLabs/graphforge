@@ -6,6 +6,34 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import re
+
+
+FORBIDDEN_KEY = re.compile(
+    r"(?:secret|credential|token|password|host_path|absolute_path|machine[_-]?id|volume[_-]?id|provider_resource_id)",
+    re.I,
+)
+ABSOLUTE_PATH = re.compile(r"(?:^|[\s=:])(?:/|[A-Za-z]:[\\/])")
+RAW_UUID = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    re.I,
+)
+
+
+def reject_unsanitized(value, trail="$") -> None:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if FORBIDDEN_KEY.search(key):
+                raise ValueError(f"sensitive evidence key at {trail}.{key}")
+            reject_unsanitized(child, f"{trail}.{key}")
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            reject_unsanitized(child, f"{trail}[{index}]")
+    elif isinstance(value, str):
+        if ABSOLUTE_PATH.search(value):
+            raise ValueError(f"absolute host path at {trail}")
+        if RAW_UUID.fullmatch(value):
+            raise ValueError(f"raw UUID at {trail}")
 
 
 CATEGORIES = (
@@ -79,7 +107,10 @@ def main() -> None:
     parser.add_argument("--volume-bytes", type=int, required=True)
     parser.add_argument("--reserved-headroom-bytes", type=int, required=True)
     args = parser.parse_args()
-    rungs = [rung(json.loads(path.read_text())) for path in (args.low, args.high)]
+    certifications = [json.loads(path.read_text()) for path in (args.low, args.high)]
+    for certification in certifications:
+        reject_unsanitized(certification)
+    rungs = [rung(certification) for certification in certifications]
     low, high = rungs
     delta_bytes = high["totals"]["transient_peak_allocated_bytes"] - low["totals"]["transient_peak_allocated_bytes"]
     delta_edges = high["live_edges"] - low["live_edges"]
@@ -95,6 +126,7 @@ def main() -> None:
     headroom = max(0, args.volume_bytes - peak)
     decision = "admit" if peak <= args.volume_bytes and headroom >= args.reserved_headroom_bytes else "refuse"
     value = {"schema": "graphforge-g500-ladder-qualification/3", "rungs": rungs, "projection": {"target": "S26", "source_rungs": [low["id"], high["id"]], "rate": {"numerator_bytes": ratio_num, "denominator_count": ratio_den}, "projected_canonical_node_bytes": canonical_nodes, "projected_canonical_edge_bytes": canonical_edges, "projected_lifecycle_peak_bytes": peak, "volume_bytes": args.volume_bytes, "reserved_headroom_bytes": args.reserved_headroom_bytes, "headroom_bytes": headroom, "decision": decision}}
+    reject_unsanitized(value)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(value, indent=2) + "\n")
 

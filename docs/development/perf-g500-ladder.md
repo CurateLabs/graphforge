@@ -259,6 +259,14 @@ Node canonical cost uses reopened live nodes; edge canonical, authoritative
 project, and lifecycle peak costs use reopened live edges. Ratios preserve raw
 integer numerators and denominators; rounded decimals are not evidence.
 
+Provider and qualification artifacts never expose generation UUIDs. Generation
+agreement and source/import distinctness are checked while the generations are
+lifetime-pinned, then emitted only as required-true authenticated proof fields.
+Before either artifact is written, a recursive sanitizer rejects raw UUID
+strings, absolute host paths, credentials, secrets, tokens, and provider
+machine, volume, or resource identifiers. Storage snapshots likewise omit the
+generation UUID and native file-identity map.
+
 At least two ordered adjacent rungs are required. The S26 rate must be no lower
 than both the newest observed peak ratio and every positive adjacent-rung slope.
 The validator independently recomputes separate projected canonical-node and

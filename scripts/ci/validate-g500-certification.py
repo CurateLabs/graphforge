@@ -32,8 +32,15 @@ REQUIRED_PHASES = (
     "drill_resource_limit",
     "drill_interrupted_finalization",
 )
-FORBIDDEN_KEY = re.compile(r"(secret|credential|token|password|host_path|absolute_path)", re.I)
+FORBIDDEN_KEY = re.compile(
+    r"(secret|credential|token|password|host_path|absolute_path|machine[_-]?id|volume[_-]?id|provider_resource_id)",
+    re.I,
+)
 ABSOLUTE_PATH = re.compile(r"(?:^|[\s=:])(?:/|[A-Za-z]:[\\/])")
+RAW_UUID = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    re.I,
+)
 ROOT = Path(__file__).resolve().parents[2]
 PROFILE = ROOT / "crates/graphforge-api/tests/fixtures/scale_g500_certification.v1.json"
 SCHEMA = ROOT / "docs/development/evidence/g500-certification.schema.json"
@@ -79,8 +86,11 @@ def reject_sensitive(value: Any, trail: str = "$") -> None:
     elif isinstance(value, list):
         for index, child in enumerate(value):
             reject_sensitive(child, f"{trail}[{index}]")
-    elif isinstance(value, str) and ABSOLUTE_PATH.search(value):
-        raise EvidenceError(f"absolute host path at {trail}")
+    elif isinstance(value, str):
+        if ABSOLUTE_PATH.search(value):
+            raise EvidenceError(f"absolute host path at {trail}")
+        if RAW_UUID.fullmatch(value):
+            raise EvidenceError(f"raw UUID at {trail}")
 
 
 def validate(evidence: dict[str, Any], expected_sha: str | None) -> None:
@@ -138,8 +148,13 @@ def validate(evidence: dict[str, Any], expected_sha: str | None) -> None:
         raise EvidenceError("source/imported node counts differ")
 
     identities = evidence.get("identities", {})
-    if identities.get("source_generation") == identities.get("imported_generation"):
-        raise EvidenceError("source and imported generations must be distinct")
+    for proof in (
+        "source_export_generation_authenticated",
+        "import_receipt_reopen_authenticated",
+        "source_import_generations_distinct",
+    ):
+        if identities.get(proof) is not True:
+            raise EvidenceError(f"generation proof is not authenticated: {proof}")
     if len({identities.get("package"), identities.get("transport")}) != 2:
         raise EvidenceError("semantic package and transport identities must be distinct")
     package = evidence.get("package", {})

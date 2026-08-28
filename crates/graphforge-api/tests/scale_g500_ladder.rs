@@ -570,8 +570,63 @@ fn storage_attribution_value(project: &Path) -> Value {
     value
         .as_object_mut()
         .expect("storage attribution object")
+        .remove("generation_uuid");
+    value
+        .as_object_mut()
+        .expect("storage attribution object")
         .remove("physical_identity_allocated_bytes");
     value
+}
+
+fn reject_unsanitized_evidence(value: &Value) -> Result<(), String> {
+    fn visit(value: &Value, trail: &str) -> Result<(), String> {
+        match value {
+            Value::Object(fields) => {
+                for (key, child) in fields {
+                    let normalized = key.to_ascii_lowercase();
+                    if [
+                        "secret",
+                        "credential",
+                        "password",
+                        "token",
+                        "machine_id",
+                        "volume_id",
+                        "provider_resource_id",
+                        "absolute_path",
+                        "host_path",
+                    ]
+                    .iter()
+                    .any(|needle| normalized.contains(needle))
+                    {
+                        return Err(format!("sensitive evidence key at {trail}.{key}"));
+                    }
+                    visit(child, &format!("{trail}.{key}"))?;
+                }
+            }
+            Value::Array(items) => {
+                for (index, child) in items.iter().enumerate() {
+                    visit(child, &format!("{trail}[{index}]"))?;
+                }
+            }
+            Value::String(text) => {
+                if Uuid::parse_str(text).is_ok() {
+                    return Err(format!("raw UUID at {trail}"));
+                }
+                if text.starts_with('/')
+                    || text.starts_with("\\\\")
+                    || (text.len() >= 3
+                        && text.as_bytes()[1] == b':'
+                        && matches!(text.as_bytes()[2], b'/' | b'\\'))
+                    || text.split_whitespace().any(|part| part.starts_with('/'))
+                {
+                    return Err(format!("absolute host path at {trail}"));
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    visit(value, "$")
 }
 
 fn sanitized_construction_evidence(
@@ -2868,10 +2923,11 @@ fn run_integrated_certification_with_edge_factor(
         format!("sha256:{}", hex_encode(digest.finalize()))
     };
     let workspace_current_allocated_bytes = journal.current_allocated_union();
-    json!({
-        "source_generation": exported.generation_uuid.to_string(),
+    let evidence = json!({
+        "source_export_generation_authenticated": source_generation == exported.generation_uuid,
+        "import_receipt_reopen_authenticated": current_generation_uuid(&imported_graph) == imported_receipt.generation_uuid,
+        "source_import_generations_distinct": exported.generation_uuid != imported_receipt.generation_uuid,
         "package": exported.package_digest, "transport": exported.transport_digest,
-        "imported_generation": imported_receipt.generation_uuid.to_string(),
         "raw_attempts": spills.as_ref().map_or_else(|| summary.as_ref().unwrap().raw_attempts, |value| value.raw_attempts),
         "self_loops_rejected": spills.as_ref().map_or_else(|| summary.as_ref().unwrap().self_loops_rejected, |value| value.self_loops_rejected),
         "duplicates_rejected": generated_counts.as_ref().map_or_else(|| summary.as_ref().unwrap().duplicates_rejected, |value| value.duplicates_rejected),
@@ -2895,7 +2951,9 @@ fn run_integrated_certification_with_edge_factor(
             "workspace_current_allocated_bytes": workspace_current_allocated_bytes,
         },
         "phases": journal.phases,
-    })
+    });
+    reject_unsanitized_evidence(&evidence).expect("certification lifecycle evidence is sanitized");
+    evidence
 }
 
 #[test]
@@ -2903,10 +2961,39 @@ fn certification_lifecycle_journals_equivalent_round_trip_and_drills() {
     let root = TempDir::new().expect("certification smoke root");
     let evidence = run_integrated_certification(root.path(), None);
     assert_eq!(evidence["source_edges"], evidence["imported_edges"]);
-    assert_ne!(
-        evidence["source_generation"],
-        evidence["imported_generation"]
-    );
+    assert_eq!(evidence["source_export_generation_authenticated"], true);
+    assert_eq!(evidence["import_receipt_reopen_authenticated"], true);
+    assert_eq!(evidence["source_import_generations_distinct"], true);
+    reject_unsanitized_evidence(&evidence).expect("lifecycle evidence remains sanitized");
+}
+
+#[test]
+fn certification_evidence_sanitizer_rejects_identity_paths_and_sensitive_keys() {
+    for (value, expected) in [
+        (
+            json!({"proof": "018f6e45-7f12-7c00-8000-000000000001"}),
+            "raw UUID",
+        ),
+        (
+            json!({"proof": "/var/lib/graphforge/project"}),
+            "absolute host path",
+        ),
+        (
+            json!({"nested": {"api_token": "redacted"}}),
+            "sensitive evidence key",
+        ),
+    ] {
+        let error = reject_unsanitized_evidence(&value).expect_err("unsafe evidence must fail");
+        assert!(
+            error.contains(expected),
+            "unexpected sanitizer failure: {error}"
+        );
+    }
+    reject_unsanitized_evidence(&json!({
+        "generation_authenticated": true,
+        "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }))
+    .expect("closed proof is safe");
 }
 
 #[test]
@@ -3485,7 +3572,12 @@ fn certification_target_live_full_lifecycle_evidence() {
             "source_nodes": lifecycle["source_nodes"], "source_edges": source_edges,
             "imported_nodes": lifecycle["imported_nodes"], "imported_edges": lifecycle["imported_edges"],
         },
-        "identities": { "source_generation": lifecycle["source_generation"], "package": lifecycle["package"], "transport": lifecycle["transport"], "imported_generation": lifecycle["imported_generation"] },
+        "identities": {
+            "source_export_generation_authenticated": lifecycle["source_export_generation_authenticated"],
+            "import_receipt_reopen_authenticated": lifecycle["import_receipt_reopen_authenticated"],
+            "source_import_generations_distinct": lifecycle["source_import_generations_distinct"],
+            "package": lifecycle["package"], "transport": lifecycle["transport"]
+        },
         "package": {
             "contract": lifecycle["portable_contract"], "format": "portable-project-v2-bundle",
             "class": lifecycle["package_class"], "integrity": lifecycle["integrity"],
@@ -3499,6 +3591,7 @@ fn certification_target_live_full_lifecycle_evidence() {
         "envelope": { "peak_rss_bytes": peak_rss, "peak_disk_bytes": peak_disk, "peak_disk_source": "storage_owned_active_identity_union", "wall_time_s": elapsed_before_process.saturating_add(started.elapsed()).as_secs_f64() },
         "result": "pass", "first_failure": null,
     });
+    reject_unsanitized_evidence(&evidence).expect("provider certification evidence is sanitized");
     let out = PathBuf::from(std::env::var("GF_G500_CERT_EVIDENCE_OUT").expect("evidence output"));
     fs::write(out, serde_json::to_vec_pretty(&evidence).unwrap())
         .expect("write certification evidence");
