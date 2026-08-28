@@ -3837,6 +3837,30 @@ fn expand_single_hop_chunk(
     let node_projection = (0..dst_width)
         .filter(|offset| required.is_none_or(|mask| mask[edge_end + offset]))
         .collect::<Vec<_>>();
+    let edge_key_index =
+        if matches!(cfg.mode, OntologyMode::Exploratory) || cfg.rel_type_name == "*" {
+            graphforge_storage::EXPLORATORY_EDGE_SCHEMA.index_of("edge_id")
+        } else {
+            graphforge_storage::TYPED_EDGE_SCHEMA.index_of("edge_id")
+        }
+        .map_err(|error| exec_err(error.to_string()))?;
+    let edge_key_already_demanded = usize::from(edge_projection.contains(&edge_key_index));
+    let node_key_already_demanded = usize::from(node_projection.contains(&1));
+    demand::record_materialization_projection(
+        cfg.edge_var,
+        edge_projection
+            .len()
+            .saturating_add(1_usize.saturating_sub(edge_key_already_demanded))
+            .saturating_add(required.map_or(cfg.edge_prop_count, |mask| {
+                mask[cfg.input_width + edge_topology_width..edge_end]
+                    .iter()
+                    .filter(|needed| **needed)
+                    .count()
+            })),
+        node_projection
+            .len()
+            .saturating_add(1_usize.saturating_sub(node_key_already_demanded)),
+    );
     let node_batches = if required.is_some() {
         graphforge_storage::read_nodes_filtered_projected_observed(
             &cfg.dir,

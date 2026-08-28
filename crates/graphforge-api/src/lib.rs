@@ -950,6 +950,7 @@ impl GraphForge {
                 generation,
             )?,
         );
+        let ordinal_replacement = ordinal_identity_handle(generation, &self.dir)?;
         *self
             .property_authority
             .lock()
@@ -961,8 +962,7 @@ impl GraphForge {
             .current_generation_uuid
             .lock()
             .expect("generation UUID lock poisoned") = generation.generation_uuid();
-        self.ordinal_identities
-            .replace(ordinal_identity_handle(generation, &self.dir)?);
+        self.ordinal_identities.replace(ordinal_replacement);
         Ok(())
     }
 

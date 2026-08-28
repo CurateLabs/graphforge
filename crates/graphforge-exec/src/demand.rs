@@ -96,6 +96,10 @@ pub struct HopSnapshot {
     pub projected_rows: u64,
     /// Required physical output columns at this hop.
     pub projected_columns: u64,
+    /// Edge topology/property columns physically demanded by this hop.
+    pub edge_projected_columns: u64,
+    /// Destination-node columns physically demanded by this hop.
+    pub node_projected_columns: u64,
     /// V4 ordinal ranges selected across bounded lookup batches.
     pub identity_ranges_selected: u64,
     /// Coalesced V4 ordinal/tombstone reads.
@@ -206,6 +210,21 @@ pub(crate) fn record_identity_projection(
         hop.identity_per_record_seeks = hop
             .identity_per_record_seeks
             .saturating_add(metrics.per_record_seeks);
+    });
+}
+
+pub(crate) fn record_materialization_projection(
+    edge_var: u32,
+    edge_columns: usize,
+    node_columns: usize,
+) {
+    with_hop(edge_var, |hop| {
+        hop.edge_projected_columns = hop
+            .edge_projected_columns
+            .max(edge_columns.try_into().unwrap_or(u64::MAX));
+        hop.node_projected_columns = hop
+            .node_projected_columns
+            .max(node_columns.try_into().unwrap_or(u64::MAX));
     });
 }
 
