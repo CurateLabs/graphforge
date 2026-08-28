@@ -334,6 +334,9 @@ pub struct GraphConstructionEvidence {
     pub input_batches: u64,
     /// Immutable Parquet shards.
     pub parquet_shards: u64,
+    /// Immutable payload artifacts accepted from authenticated chunk receipts.
+    #[serde(default)]
+    pub immutable_artifacts: u64,
     /// Bytes submitted through measured immutable-artifact writers.
     /// Control-record traffic is deliberately reported by the outer I/O probe.
     pub write_bytes: u64,
@@ -1721,6 +1724,13 @@ impl GraphConstructionSession {
         recover_shape_intent(&session.root, &mut session.checkpoint)?;
         session.recover_intent()?;
         session.revalidate_authority()?;
+        if session.checkpoint.next_sequence != 0
+            && session.checkpoint.evidence.immutable_artifacts == 0
+        {
+            session.checkpoint.evidence.immutable_artifacts =
+                authenticated_receipt_artifact_count(&session.root, &session.checkpoint)?;
+            replace_control(&session.root, CHECKPOINT, &session.checkpoint)?;
+        }
         Ok(session)
     }
 
@@ -2659,6 +2669,7 @@ impl GraphConstructionSession {
             .into_iter()
             .chain(receipt.endpoints.iter())
         {
+            evidence.immutable_artifacts = evidence.immutable_artifacts.saturating_add(1);
             evidence.write_bytes = evidence.write_bytes.saturating_add(artifact.bytes);
             evidence.write_operations = evidence
                 .write_operations
@@ -6015,6 +6026,11 @@ fn validate_checkpoint(
         ) && checkpoint.encoding_inventory_sha256.is_none()
         || checkpoint.evidence.input_batches != checkpoint.next_sequence
         || checkpoint.evidence.parquet_shards != checkpoint.next_sequence
+        || checkpoint.evidence.immutable_artifacts != 0
+            && (checkpoint.evidence.immutable_artifacts
+                < checkpoint.next_sequence.saturating_mul(3)
+                || checkpoint.evidence.immutable_artifacts
+                    > checkpoint.next_sequence.saturating_mul(4))
         || checkpoint.evidence.peak_batch_rows > budgets.max_batch_rows as u64
         || checkpoint.evidence.peak_batch_bytes > budgets.max_batch_bytes as u64
         || checkpoint.evidence.peak_run_records > budgets.max_run_records as u64
@@ -6414,6 +6430,48 @@ fn artifact_stem(sequence: u64, kind: ConstructionChunkKind) -> String {
 
 fn receipt_name(sequence: u64) -> String {
     format!("receipt-{sequence:020}.json")
+}
+
+fn authenticated_receipt_artifact_count(
+    root: &StableDirectory,
+    checkpoint: &Checkpoint,
+) -> Result<u64, GfError> {
+    let mut count = 0_u64;
+    let mut prior_digest = None;
+    let mut saw_edge = false;
+    for sequence in 0..checkpoint.next_sequence {
+        let mut file = root
+            .open_child_file(OsStr::new(&receipt_name(sequence)))
+            .map_err(storage)?;
+        let receipt: ConstructionChunkReceipt = decode_bounded(&mut file)?;
+        validate_receipt_semantics(&receipt, sequence, checkpoint.budgets)?;
+        if receipt.kind == ConstructionChunkKind::Node && saw_edge {
+            return Err(storage("node receipt follows edge receipt"));
+        }
+        saw_edge |= receipt.kind == ConstructionChunkKind::Edge;
+        if receipt.operation_uuid != checkpoint.operation_uuid
+            || receipt.project_identity != checkpoint.project_identity
+            || receipt.session_identity != checkpoint.session_identity
+            || receipt.parent_topology_generation != checkpoint.parent_topology_generation
+            || receipt.ontology_mode != checkpoint.ontology_mode
+            || receipt.semantic_authority_sha256 != checkpoint.semantic_authority_sha256
+            || receipt.prior_receipt_sha256 != prior_digest
+        {
+            return Err(storage("legacy receipt authority or chain changed"));
+        }
+        count = count.saturating_add(3 + u64::from(receipt.endpoints.is_some()));
+        let body = serde_json::to_vec(&receipt).map_err(storage)?;
+        prior_digest = Some(sha256(&body));
+    }
+    if prior_digest != checkpoint.last_receipt_sha256 {
+        return Err(storage(
+            "legacy receipt journal tail differs from checkpoint",
+        ));
+    }
+    if saw_edge != checkpoint.saw_edge {
+        return Err(storage("checkpoint phase differs from receipt journal"));
+    }
+    Ok(count)
 }
 
 fn chunk_key_name(chunk_id: &str) -> String {
@@ -7081,6 +7139,163 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("unsupported")
+        );
+    }
+
+    #[test]
+    fn legacy_artifact_evidence_is_authenticated_and_backfilled_before_append() {
+        let root = TempDir::new().unwrap();
+        let operation = 9_801_u128;
+        let mut session = open(&root, operation);
+        session
+            .append(
+                ConstructionChunkKind::Node,
+                "legacy-node",
+                &node_batch(1, 2),
+            )
+            .unwrap();
+        assert_eq!(session.evidence().immutable_artifacts, 3);
+        session.checkpoint.evidence.immutable_artifacts = 0;
+        replace_control(&session.root, CHECKPOINT, &session.checkpoint).unwrap();
+        drop(session);
+
+        let mut resumed = open(&root, operation);
+        assert_eq!(resumed.evidence().immutable_artifacts, 3);
+        resumed
+            .append(ConstructionChunkKind::Node, "new-node", &node_batch(3, 1))
+            .unwrap();
+        assert_eq!(resumed.accepted_chunks(), 2);
+        assert_eq!(resumed.evidence().immutable_artifacts, 6);
+    }
+
+    #[test]
+    fn legacy_artifact_backfill_rejects_corrupt_chain_without_rewriting_checkpoint() {
+        let root = TempDir::new().unwrap();
+        let operation = Uuid::from_u128(9_802);
+        let mut session = open(&root, operation.as_u128());
+        session
+            .append(ConstructionChunkKind::Node, "first", &node_batch(1, 1))
+            .unwrap();
+        session
+            .append(ConstructionChunkKind::Node, "second", &node_batch(2, 1))
+            .unwrap();
+        let mut second = session.read_receipt(1).unwrap();
+        second.prior_receipt_sha256 = Some(sha256(b"corrupt receipt chain"));
+        replace_control(&session.root, &receipt_name(1), &second).unwrap();
+        session.checkpoint.evidence.immutable_artifacts = 0;
+        replace_control(&session.root, CHECKPOINT, &session.checkpoint).unwrap();
+        let checkpoint_path = root
+            .path()
+            .join(PRIVATE_ROOT)
+            .join(operation.simple().to_string())
+            .join(CHECKPOINT);
+        let before = std::fs::read(&checkpoint_path).unwrap();
+        drop(session);
+
+        let error = GraphConstructionSession::open(
+            root.path(),
+            operation,
+            0,
+            GraphConstructionBudgets::default(),
+        )
+        .err()
+        .expect("corrupt receipt chain must fail closed");
+        assert!(error.to_string().contains("receipt authority or chain"));
+        assert_eq!(std::fs::read(checkpoint_path).unwrap(), before);
+    }
+
+    #[test]
+    fn legacy_artifact_backfill_reconciles_phase_without_rewriting_checkpoint() {
+        let root = TempDir::new().unwrap();
+        let operation = Uuid::from_u128(9_803);
+        let mut session = open(&root, operation.as_u128());
+        session
+            .append(ConstructionChunkKind::Edge, "edge", &edge_batch(1, 1))
+            .unwrap();
+        session.checkpoint.evidence.immutable_artifacts = 0;
+        session.checkpoint.saw_edge = false;
+        replace_control(&session.root, CHECKPOINT, &session.checkpoint).unwrap();
+        let checkpoint_path = root
+            .path()
+            .join(PRIVATE_ROOT)
+            .join(operation.simple().to_string())
+            .join(CHECKPOINT);
+        let before = std::fs::read(&checkpoint_path).unwrap();
+        drop(session);
+
+        let error = GraphConstructionSession::open(
+            root.path(),
+            operation,
+            0,
+            GraphConstructionBudgets::default(),
+        )
+        .err()
+        .expect("receipt phase mismatch must fail closed");
+        assert!(error.to_string().contains("checkpoint phase"));
+        assert_eq!(std::fs::read(checkpoint_path).unwrap(), before);
+    }
+
+    #[test]
+    fn incompatible_checkpoint_fails_before_legacy_artifact_backfill_rewrite() {
+        let root = TempDir::new().unwrap();
+        let operation = Uuid::from_u128(9_804);
+        let mut session = open(&root, operation.as_u128());
+        session
+            .append(ConstructionChunkKind::Node, "node", &node_batch(1, 1))
+            .unwrap();
+        session.checkpoint.evidence.immutable_artifacts = 0;
+        session.checkpoint.budgets.max_chunks -= 1;
+        replace_control(&session.root, CHECKPOINT, &session.checkpoint).unwrap();
+        let checkpoint_path = root
+            .path()
+            .join(PRIVATE_ROOT)
+            .join(operation.simple().to_string())
+            .join(CHECKPOINT);
+        let before = std::fs::read(&checkpoint_path).unwrap();
+        drop(session);
+
+        let error = GraphConstructionSession::open(
+            root.path(),
+            operation,
+            0,
+            GraphConstructionBudgets::default(),
+        )
+        .err()
+        .expect("incompatible checkpoint must fail admission");
+        assert!(error.to_string().contains("checkpoint authority"));
+        assert_eq!(std::fs::read(checkpoint_path).unwrap(), before);
+    }
+
+    #[test]
+    fn complete_legacy_shape_intent_recovers_before_artifact_backfill() {
+        let root = TempDir::new().unwrap();
+        let operation = Uuid::from_u128(9_805);
+        let mut session = open(&root, operation.as_u128());
+        session
+            .append(ConstructionChunkKind::Node, "node", &node_batch(1, 2))
+            .unwrap();
+        session.seal().unwrap();
+        let expected_shape = session.shape_canonical_with_cancellation(|| false).unwrap();
+
+        let mut intent_file = session
+            .root
+            .open_child_file(OsStr::new(SHAPE_INTENT))
+            .unwrap();
+        let mut intent = decode_shape_intent(&mut intent_file).unwrap();
+        intent.baseline_evidence.immutable_artifacts = 0;
+        intent.final_evidence.as_mut().unwrap().immutable_artifacts = 0;
+        session.checkpoint.evidence = intent.baseline_evidence.clone();
+        session.checkpoint.shape_authority_sha256 = None;
+        replace_control(&session.root, SHAPE_INTENT, &intent).unwrap();
+        replace_control(&session.root, CHECKPOINT, &session.checkpoint).unwrap();
+        drop(session);
+
+        let mut resumed = open(&root, operation.as_u128());
+        assert_eq!(resumed.evidence().immutable_artifacts, 3);
+        assert!(resumed.checkpoint.shape_authority_sha256.is_some());
+        assert_eq!(
+            resumed.shape_canonical_with_cancellation(|| false).unwrap(),
+            expected_shape
         );
     }
 

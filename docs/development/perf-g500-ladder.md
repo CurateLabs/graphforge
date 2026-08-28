@@ -126,6 +126,23 @@ therefore survive process replacement and are reused on re-entry.
 > batches, writes, and authentication reads so 1x/2x/4x observations can test
 > bounded memory and linear topology work directly.
 
+The scale client has one authoritative construction boundary: 65,536 rows,
+matching `GraphConstructionBudgets::default().max_batch_rows`. Each full Arrow
+batch is submitted as one durable construction chunk. There is no smaller
+8,192-row subdivision and no larger outer edge buffer. This matters because a
+chunk intentionally owns authenticated artifacts, intent/receipt/checkpoint
+updates, and file/directory durability barriers; choosing a smaller Arrow
+window multiplies that fixed durability work without improving the session's
+bounded-memory guarantee. Ingest evidence records the configured rows per
+chunk, submitted chunks, artifact and synchronization counts, append elapsed
+time, reconciliation elapsed time, and combined seal/publication elapsed time.
+Fresh staging reports append time and a null reconciliation time; published
+re-entry reports reconciliation time and a null append time. The immutable
+artifact count is storage-owned evidence reconstructed, for legacy
+checkpoints, from the authenticated receipt chain. Deterministic 1x/2x/4x
+tests require exact chunk counts and bounded peak windows while aggregate
+merge work remains linear in accepted rows.
+
 ## Commands
 
 Always-on CI (SCALE-10 smoke + all reconciliation / determinism / bounded /
