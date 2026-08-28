@@ -224,12 +224,14 @@ version = "0.0.0"
 source = { virtual = "." }
 dependencies = [
     { name = "benchexec" },
+    { name = "jsonschema" },
     { name = "reframe-hpc" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "benchexec", specifier = ">=3.0,<4" },
+    { name = "jsonschema", specifier = ">=4.0,<5" },
     { name = "reframe-hpc", specifier = ">=4.0,<5" },
 ]
 

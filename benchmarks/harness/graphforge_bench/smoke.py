@@ -6,6 +6,8 @@ import importlib
 import json
 from pathlib import Path
 
+from jsonschema import Draft202012Validator
+
 FIXTURE_DIRECTORIES = ("profiles", "suites", "schemas", "fly")
 
 
@@ -26,6 +28,8 @@ def discover_fixtures(root: Path | None = None) -> dict[str, tuple[Path, ...]]:
                 document = json.load(handle)
             if not isinstance(document, dict) or not document.get("schema"):
                 raise RuntimeError(f"fixture has no schema: {fixture.name}")
+            if directory == "schemas":
+                Draft202012Validator.check_schema(document)
         discovered[directory] = fixtures
     return discovered
 

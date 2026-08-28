@@ -1,5 +1,15 @@
 {
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "schema": "graphforge-benchmark-evidence-schema/1",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "graphforge-benchmark-evidence-schema/1"
+    },
+    "result": {
+      "type": "string"
+    }
+  },
   "required": ["schema", "result"],
   "additionalProperties": false
 }
