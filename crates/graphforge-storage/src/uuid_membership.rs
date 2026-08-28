@@ -11,7 +11,7 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap};
 use std::fmt::Write as _;
 use std::fs::{self, File};
-use std::io::{BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use arrow::array::{Array, FixedSizeBinaryArray, UInt64Array};
@@ -121,6 +121,288 @@ pub struct UuidIndexBuildMetrics {
     pub peak_buffered_records: usize,
     /// Number of temporary sort and merge runs produced.
     pub temporary_runs: u64,
+}
+
+const V4_ORDINAL_BLOCK_BYTES: usize = 64 * 1024;
+const V4_MAX_RANGES: usize = 16_384;
+
+/// Aggregate-only evidence from the bounded v4 construction encoder.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct V4OrdinalBuildMetrics {
+    pub(crate) input_records: u64,
+    pub(crate) artifact_bytes: u64,
+    pub(crate) write_blocks: u64,
+    pub(crate) ranges: usize,
+    pub(crate) peak_buffer_bytes: usize,
+    pub(crate) cancellation_polls: u64,
+}
+
+/// Encode the already-canonical construction node stream without rescanning
+/// topology or consulting v3 reverse authority. The caller owns the durable
+/// rewrite transaction and publishes the returned manifest later.
+pub(crate) fn stage_v4_ordinal_artifacts<I, F>(
+    records: I,
+    generation: u64,
+    index: &graphforge_filesystem::StableDirectory,
+    mut cancelled: F,
+) -> Result<(crate::V4OrdinalIdentityManifest, V4OrdinalBuildMetrics), GfError>
+where
+    I: IntoIterator<Item = (Uuid, u64)>,
+    F: FnMut() -> bool,
+{
+    if generation == 0 {
+        return Err(storage_err("v4 ordinal generation is zero"));
+    }
+    let mut forward = StreamingV4Artifact::create(index, "forward")?;
+    let mut ranges = Vec::new();
+    let mut current: Option<V4OrdinalRangeWriter> = None;
+    let mut previous_uuid = None;
+    let mut previous_node_id = 0_u64;
+    let mut metrics = V4OrdinalBuildMetrics {
+        // Forward BufWriter + ordinal BufWriter + ordinal authentication block.
+        peak_buffer_bytes: V4_ORDINAL_BLOCK_BYTES * 3,
+        ..Default::default()
+    };
+
+    for (uuid, node_id) in records {
+        metrics.cancellation_polls = metrics
+            .cancellation_polls
+            .checked_add(1)
+            .ok_or_else(|| storage_err("v4 cancellation poll count overflow"))?;
+        if cancelled() {
+            return Err(storage_err("v4 ordinal construction cancelled"));
+        }
+        let uuid_bytes = *uuid.as_bytes();
+        if uuid_bytes == [0; 16]
+            || previous_uuid.is_some_and(|prior| prior >= uuid_bytes)
+            || node_id == 0
+            || node_id <= previous_node_id
+        {
+            return Err(storage_err(
+                "v4 construction identities are not canonical and increasing",
+            ));
+        }
+        if current.is_some()
+            && previous_node_id
+                .checked_add(1)
+                .is_none_or(|expected| node_id != expected)
+        {
+            finish_streamed_v4_range(
+                index,
+                generation,
+                current.take().expect("range exists"),
+                &mut ranges,
+                &mut metrics,
+            )?;
+        }
+        if current.is_none() {
+            if ranges.len() >= V4_MAX_RANGES {
+                return Err(storage_err("v4 ordinal range inventory exceeds bound"));
+            }
+            current = Some(V4OrdinalRangeWriter::new(index, ranges.len(), node_id)?);
+        }
+        forward.push(&uuid_bytes)?;
+        forward.push(&node_id.to_be_bytes())?;
+        current.as_mut().expect("range exists").push(uuid_bytes)?;
+        metrics.input_records = metrics
+            .input_records
+            .checked_add(1)
+            .ok_or_else(|| storage_err("v4 input record count overflow"))?;
+        previous_uuid = Some(uuid_bytes);
+        previous_node_id = node_id;
+    }
+    if let Some(writer) = current {
+        finish_streamed_v4_range(index, generation, writer, &mut ranges, &mut metrics)?;
+    }
+    let forward = finish_streamed_v4_artifact(
+        forward,
+        index,
+        "forward-v4",
+        generation,
+        crate::V4OrdinalArtifactKind::ForwardIdentities,
+        &mut metrics,
+    )?;
+
+    // Construction has no deletions, but an explicit authenticated empty run
+    // commits that fact instead of leaving tombstone authority implicit.
+    let tombstone = finish_streamed_v4_artifact(
+        StreamingV4Artifact::create(index, "tombstones")?,
+        index,
+        "tombstones-v4",
+        generation,
+        crate::V4OrdinalArtifactKind::NodeTombstones,
+        &mut metrics,
+    )?;
+    metrics.ranges = ranges.len();
+    Ok((
+        crate::V4OrdinalIdentityManifest {
+            format_version: crate::ORDINAL_IDENTITY_V4,
+            topology_generation: generation,
+            forward_identities: vec![forward],
+            ordinal_ranges: ranges,
+            tombstones: vec![crate::V4OrdinalTombstones {
+                generation,
+                artifact: tombstone,
+                blocks: Vec::new(),
+            }],
+        },
+        metrics,
+    ))
+}
+
+struct StreamingV4Artifact {
+    temporary_name: String,
+    writer: BufWriter<File>,
+    digest: Sha256,
+    bytes: u64,
+}
+
+impl StreamingV4Artifact {
+    fn create(index: &graphforge_filesystem::StableDirectory, role: &str) -> Result<Self, GfError> {
+        let temporary_name = format!(".v4-{role}-{}.tmp", Uuid::new_v4().simple());
+        Ok(Self {
+            writer: BufWriter::with_capacity(
+                V4_ORDINAL_BLOCK_BYTES,
+                index
+                    .create_replaceable_child_file(std::ffi::OsStr::new(&temporary_name))
+                    .map_err(storage_err)?,
+            ),
+            temporary_name,
+            digest: Sha256::new(),
+            bytes: 0,
+        })
+    }
+
+    fn push(&mut self, bytes: &[u8]) -> Result<(), GfError> {
+        self.writer.write_all(bytes).map_err(storage_err)?;
+        self.digest.update(bytes);
+        self.bytes = self
+            .bytes
+            .checked_add(u64::try_from(bytes.len()).map_err(storage_err)?)
+            .ok_or_else(|| storage_err("v4 artifact length overflow"))?;
+        Ok(())
+    }
+}
+
+fn finish_streamed_v4_artifact(
+    mut writer: StreamingV4Artifact,
+    index: &graphforge_filesystem::StableDirectory,
+    prefix: &str,
+    generation: u64,
+    kind: crate::V4OrdinalArtifactKind,
+    metrics: &mut V4OrdinalBuildMetrics,
+) -> Result<crate::V4OrdinalArtifact, GfError> {
+    writer.writer.flush().map_err(storage_err)?;
+    sync_uuid_file(writer.writer.get_ref())?;
+    let identity =
+        graphforge_filesystem::file_identity(writer.writer.get_ref()).map_err(storage_err)?;
+    let sha256 = hex_bytes(&writer.digest.finalize());
+    let artifact = crate::V4OrdinalArtifact {
+        name: format!("{prefix}-{generation}-{}.uuidx", &sha256[..16]),
+        kind,
+        generation,
+        bytes: writer.bytes,
+        sha256,
+    };
+    drop(writer.writer);
+    index
+        .replace_child(
+            std::ffi::OsStr::new(&writer.temporary_name),
+            identity,
+            std::ffi::OsStr::new(&artifact.name),
+        )
+        .map_err(storage_err)?;
+    metrics.artifact_bytes = metrics
+        .artifact_bytes
+        .checked_add(artifact.bytes)
+        .ok_or_else(|| storage_err("v4 aggregate artifact length overflow"))?;
+    metrics.write_blocks = metrics
+        .write_blocks
+        .checked_add(artifact.bytes.div_ceil(V4_ORDINAL_BLOCK_BYTES as u64))
+        .ok_or_else(|| storage_err("v4 write block count overflow"))?;
+    Ok(artifact)
+}
+
+struct V4OrdinalRangeWriter {
+    artifact: StreamingV4Artifact,
+    first_node_id: u64,
+    count: u64,
+    block: Vec<u8>,
+    blocks: Vec<crate::V4OrdinalBlock>,
+}
+
+impl V4OrdinalRangeWriter {
+    fn new(
+        index: &graphforge_filesystem::StableDirectory,
+        ordinal: usize,
+        first_node_id: u64,
+    ) -> Result<Self, GfError> {
+        Ok(Self {
+            artifact: StreamingV4Artifact::create(index, &format!("ordinal-{ordinal:08}"))?,
+            first_node_id,
+            count: 0,
+            block: Vec::with_capacity(V4_ORDINAL_BLOCK_BYTES),
+            blocks: Vec::new(),
+        })
+    }
+
+    fn push(&mut self, uuid: [u8; 16]) -> Result<(), GfError> {
+        self.artifact.push(&uuid)?;
+        self.block.extend_from_slice(&uuid);
+        self.count = self
+            .count
+            .checked_add(1)
+            .ok_or_else(|| storage_err("v4 ordinal range count overflow"))?;
+        if self.block.len() == V4_ORDINAL_BLOCK_BYTES {
+            self.finish_block()?;
+        }
+        Ok(())
+    }
+
+    fn finish_block(&mut self) -> Result<(), GfError> {
+        if self.block.is_empty() {
+            return Ok(());
+        }
+        let offset = u64::try_from(self.blocks.len())
+            .map_err(storage_err)?
+            .checked_mul(V4_ORDINAL_BLOCK_BYTES as u64)
+            .ok_or_else(|| storage_err("v4 ordinal block offset overflow"))?;
+        self.blocks.push(crate::V4OrdinalBlock {
+            offset,
+            count: u64::try_from(self.block.len() / 16).map_err(storage_err)?,
+            sha256: hex_sha256(&self.block),
+        });
+        self.block.clear();
+        Ok(())
+    }
+}
+
+fn finish_streamed_v4_range(
+    index: &graphforge_filesystem::StableDirectory,
+    generation: u64,
+    mut writer: V4OrdinalRangeWriter,
+    ranges: &mut Vec<crate::V4OrdinalRange>,
+    metrics: &mut V4OrdinalBuildMetrics,
+) -> Result<(), GfError> {
+    if writer.count == 0 {
+        return Err(storage_err("v4 ordinal range is empty"));
+    }
+    writer.finish_block()?;
+    let artifact = finish_streamed_v4_artifact(
+        writer.artifact,
+        index,
+        "ordinal-v4",
+        generation,
+        crate::V4OrdinalArtifactKind::OrdinalUuids,
+        metrics,
+    )?;
+    ranges.push(crate::V4OrdinalRange {
+        first_node_id: writer.first_node_id,
+        count: writer.count,
+        artifact,
+        blocks: writer.blocks,
+    });
+    Ok(())
 }
 
 /// Aggregate-only evidence for one incremental v3 run publication.
@@ -7172,5 +7454,104 @@ pub(crate) mod tests {
                 .to_string()
                 .contains("invalid node surrogate")
         );
+    }
+
+    #[test]
+    fn v4_stream_builder_emits_maximal_authenticated_ranges() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("index");
+        fs::create_dir(&root).unwrap();
+        let index = graphforge_filesystem::StableDirectory::open(&root).unwrap();
+        let records = (1_u128..=4_100)
+            .map(|value| {
+                let node_id = if value <= 4_096 {
+                    value as u64
+                } else {
+                    value as u64 + 10
+                };
+                (Uuid::from_u128(value), node_id)
+            })
+            .collect::<Vec<_>>();
+        let (manifest, metrics) =
+            stage_v4_ordinal_artifacts(records.clone(), 7, &index, || false).unwrap();
+
+        assert_eq!(metrics.input_records, 4_100);
+        assert_eq!(metrics.ranges, 2);
+        assert_eq!(metrics.cancellation_polls, 4_100);
+        assert_eq!(metrics.peak_buffer_bytes, 3 * V4_ORDINAL_BLOCK_BYTES);
+        assert_eq!(manifest.ordinal_ranges[0].first_node_id, 1);
+        assert_eq!(manifest.ordinal_ranges[0].count, 4_096);
+        assert_eq!(manifest.ordinal_ranges[0].blocks.len(), 1);
+        assert_eq!(manifest.ordinal_ranges[0].blocks[0].count, 4_096);
+        assert_eq!(manifest.ordinal_ranges[1].first_node_id, 4_107);
+        assert_eq!(manifest.ordinal_ranges[1].count, 4);
+        assert_eq!(manifest.tombstones.len(), 1);
+        assert_eq!(manifest.tombstones[0].artifact.bytes, 0);
+        assert_eq!(manifest.tombstones[0].blocks, Vec::new());
+
+        let forward = &manifest.forward_identities[0];
+        let forward_bytes = fs::read(root.join(&forward.name)).unwrap();
+        assert_eq!(forward_bytes.len(), records.len() * 24);
+        assert_eq!(hex_sha256(&forward_bytes), forward.sha256);
+        for range in &manifest.ordinal_ranges {
+            let bytes = fs::read(root.join(&range.artifact.name)).unwrap();
+            assert_eq!(hex_sha256(&bytes), range.artifact.sha256);
+            assert_eq!(bytes.len() as u64, range.count * 16);
+        }
+    }
+
+    #[test]
+    fn v4_stream_builder_rejects_noncanonical_and_cancelled_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let root_a = dir.path().join("index-a");
+        fs::create_dir(&root_a).unwrap();
+        let index_a = graphforge_filesystem::StableDirectory::open(&root_a).unwrap();
+        let error = stage_v4_ordinal_artifacts(
+            [(Uuid::from_u128(2), 1), (Uuid::from_u128(1), 2)],
+            1,
+            &index_a,
+            || false,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("not canonical"));
+
+        let root_b = dir.path().join("index-b");
+        fs::create_dir(&root_b).unwrap();
+        let index_b = graphforge_filesystem::StableDirectory::open(&root_b).unwrap();
+        let mut polls = 0;
+        let error = stage_v4_ordinal_artifacts(
+            [(Uuid::from_u128(1), 1), (Uuid::from_u128(2), 2)],
+            1,
+            &index_b,
+            || {
+                polls += 1;
+                polls == 2
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("cancelled"));
+    }
+
+    #[test]
+    fn v4_stream_builder_packs_sparse_ids_without_sparse_max_allocation() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("index");
+        fs::create_dir(&root).unwrap();
+        let index = graphforge_filesystem::StableDirectory::open(&root).unwrap();
+        let (manifest, metrics) = stage_v4_ordinal_artifacts(
+            [
+                (Uuid::from_u128(1), 1),
+                (Uuid::from_u128(2), u64::MAX - 1),
+                (Uuid::from_u128(3), u64::MAX),
+            ],
+            9,
+            &index,
+            || false,
+        )
+        .unwrap();
+        assert_eq!(manifest.ordinal_ranges.len(), 2);
+        assert_eq!(manifest.ordinal_ranges[0].artifact.bytes, 16);
+        assert_eq!(manifest.ordinal_ranges[1].artifact.bytes, 32);
+        assert_eq!(metrics.artifact_bytes, 3 * 24 + 3 * 16);
     }
 }
