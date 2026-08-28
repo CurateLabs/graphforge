@@ -816,58 +816,22 @@ impl AuthenticatedPropertyInventory {
         let authentication_read_calls = Arc::new(AtomicU64::new(0));
         let budget = Arc::new(LiveByteBudget::new(limits.max_buffered_bytes));
         let decoded = Arc::new(Mutex::new(DecodedRetention::default()));
+        let reader_context = ProjectedReaderContext {
+            inventory: self,
+            scratch,
+            limits,
+            kind,
+            route,
+            selected_properties,
+            counts: &counts,
+            budget: &budget,
+            decoded: &decoded,
+            authentication_bytes: &authentication_bytes,
+            authentication_block_equivalents: &authentication_block_equivalents,
+            authentication_read_calls: &authentication_read_calls,
+        };
         let inputs = fragments.iter().map(|fragment| {
-            let reader = (|| {
-                let opened = self.open_fragment(fragment, scratch)?;
-                authentication_bytes.fetch_add(opened.authentication_bytes, Ordering::Relaxed);
-                authentication_block_equivalents
-                    .fetch_add(opened.authentication_block_equivalents, Ordering::Relaxed);
-                authentication_read_calls
-                    .fetch_add(opened.authentication_read_calls, Ordering::Relaxed);
-                let source = CountingChunkReader {
-                    length: fragment.entry.byte_length,
-                    file: Arc::clone(&opened.file),
-                    counts: Arc::clone(&counts),
-                };
-                let builder =
-                    ParquetRecordBatchReaderBuilder::try_new(source).map_err(parquet_error)?;
-                validate_fragment_schema(
-                    builder.schema().as_ref(),
-                    fragment.id,
-                    fragment.layout,
-                    kind,
-                    route,
-                )?;
-                let projected = projected_property_columns(
-                    builder.schema().as_ref(),
-                    kind,
-                    selected_properties,
-                );
-                let page_reservation_bytes = validate_parquet_resource_admission(
-                    builder.metadata(),
-                    limits,
-                    opened.file.as_ref(),
-                    &counts,
-                    projected.as_ref(),
-                )?;
-                budget.charge(page_reservation_bytes)?;
-                {
-                    let mut retention = decoded.lock().expect("property retention lock");
-                    retention.page_peak = retention.page_peak.max(page_reservation_bytes);
-                }
-                let builder = if let Some(projected) = projected {
-                    let mask =
-                        parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), projected);
-                    builder.with_projection(mask)
-                } else {
-                    builder
-                };
-                let reader = builder
-                    .with_batch_size(admitted_batch_rows(limits))
-                    .build()
-                    .map_err(parquet_error)?;
-                Ok((reader, page_reservation_bytes, opened.file, opened.handle))
-            })();
+            let reader = open_projected_fragment(fragment, &reader_context);
             let (reader, pending_error, page_reservation_bytes, handle) = match reader {
                 Ok((reader, page_reservation_bytes, _file, handle)) => {
                     (Some(reader), None, page_reservation_bytes, Some(handle))
@@ -916,6 +880,86 @@ impl AuthenticatedPropertyInventory {
         );
         Ok(metrics)
     }
+}
+
+struct ProjectedReaderContext<'a> {
+    inventory: &'a AuthenticatedPropertyInventory,
+    scratch: &'a Path,
+    limits: PropertyOverlayLimits,
+    kind: PropertyRouteKind,
+    route: &'a str,
+    selected_properties: Option<&'a BTreeSet<String>>,
+    counts: &'a Arc<ReadCounts>,
+    budget: &'a Arc<LiveByteBudget>,
+    decoded: &'a Arc<Mutex<DecodedRetention>>,
+    authentication_bytes: &'a Arc<AtomicU64>,
+    authentication_block_equivalents: &'a Arc<AtomicU64>,
+    authentication_read_calls: &'a Arc<AtomicU64>,
+}
+
+fn open_projected_fragment(
+    fragment: &AuthenticatedPropertyFragment,
+    context: &ProjectedReaderContext<'_>,
+) -> Result<
+    (
+        ParquetRecordBatchReader,
+        u64,
+        Arc<File>,
+        FragmentHandleGuard,
+    ),
+    GfError,
+> {
+    let opened = context.inventory.open_fragment(fragment, context.scratch)?;
+    context
+        .authentication_bytes
+        .fetch_add(opened.authentication_bytes, Ordering::Relaxed);
+    context
+        .authentication_block_equivalents
+        .fetch_add(opened.authentication_block_equivalents, Ordering::Relaxed);
+    context
+        .authentication_read_calls
+        .fetch_add(opened.authentication_read_calls, Ordering::Relaxed);
+    let source = CountingChunkReader {
+        length: fragment.entry.byte_length,
+        file: Arc::clone(&opened.file),
+        counts: Arc::clone(context.counts),
+    };
+    let builder = ParquetRecordBatchReaderBuilder::try_new(source).map_err(parquet_error)?;
+    validate_fragment_schema(
+        builder.schema().as_ref(),
+        fragment.id,
+        fragment.layout,
+        context.kind,
+        context.route,
+    )?;
+    let projected = projected_property_columns(
+        builder.schema().as_ref(),
+        context.kind,
+        context.selected_properties,
+    );
+    let page_reservation_bytes = validate_parquet_resource_admission(
+        builder.metadata(),
+        context.limits,
+        opened.file.as_ref(),
+        context.counts,
+        projected.as_ref(),
+    )?;
+    context.budget.charge(page_reservation_bytes)?;
+    {
+        let mut retention = context.decoded.lock().expect("property retention lock");
+        retention.page_peak = retention.page_peak.max(page_reservation_bytes);
+    }
+    let builder = if let Some(projected) = projected {
+        let mask = parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), projected);
+        builder.with_projection(mask)
+    } else {
+        builder
+    };
+    let reader = builder
+        .with_batch_size(admitted_batch_rows(context.limits))
+        .build()
+        .map_err(parquet_error)?;
+    Ok((reader, page_reservation_bytes, opened.file, opened.handle))
 }
 
 struct ProjectedMetricSources<'a> {
