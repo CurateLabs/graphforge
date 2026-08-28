@@ -470,17 +470,113 @@ fn ordered_destination_uuid_projection_is_exact_and_linear_at_1x_2x_4x() {
             hop.projected_rows,
             hop.identity_bytes_read,
             hop.identity_read_calls,
+            hop.identity_revalidation_calls,
         ));
     }
     for pair in work.windows(2) {
-        let (prior_rows, prior_bytes, prior_calls) = pair[0];
-        let (next_rows, next_bytes, next_calls) = pair[1];
+        let (prior_rows, prior_bytes, prior_calls, prior_revalidation) = pair[0];
+        let (next_rows, next_bytes, next_calls, next_revalidation) = pair[1];
         assert_eq!(next_rows, prior_rows * 2, "{work:?}");
         // Fixed block/range boundaries may add one coalesced read, but neither
         // bytes nor calls may acquire a chunk-times-graph multiplier.
         assert!(next_bytes <= prior_bytes * 2 + 2 * 1024 * 1024, "{work:?}");
         assert!(next_calls <= prior_calls * 2 + 2, "{work:?}");
+        assert!(
+            next_revalidation <= prior_revalidation * 2 + 2,
+            "session authentication must be linear in retained artifacts: {work:?}"
+        );
     }
+}
+
+#[test]
+fn optimized_v4_two_hop_direction_type_alias_and_quiescence_are_exact() {
+    let _guard = IO_GUARD.lock().unwrap();
+    let dir = TempDir::new().unwrap();
+    let nodes = 4_096;
+    generate_graph(dir.path(), nodes, FAN_OUT, true);
+    let forge = open_forge(dir.path());
+    let scan = forge
+        .execute("MATCH (n) RETURN n.node_uuid AS id ORDER BY id")
+        .unwrap();
+    let node_ids = fixed_binary_values(&scan, "id");
+
+    let cases = [
+        (
+            "MATCH (a)-[:LINK]->(b) RETURN b.node_uuid AS id ORDER BY id LIMIT 1000",
+            FAN_OUT,
+        ),
+        (
+            "MATCH (a)<-[:LINK]-(b) RETURN a.node_uuid AS id ORDER BY id LIMIT 1000",
+            FAN_OUT,
+        ),
+        (
+            "MATCH (a)-[:LINK]-(b) RETURN b.node_uuid AS id ORDER BY id LIMIT 1000",
+            FAN_OUT * 2,
+        ),
+        (
+            "MATCH (a)-[:LINK]->(b)-[:LINK]->(c) RETURN c.node_uuid AS id ORDER BY id LIMIT 1000",
+            FAN_OUT * FAN_OUT,
+        ),
+    ];
+    for (query, multiplicity) in cases {
+        io_stats::reset();
+        demand::reset();
+        let result = forge.execute(query).unwrap();
+        demand::disable();
+        let expected = node_ids
+            .iter()
+            .flat_map(|uuid| std::iter::repeat_n(uuid.clone(), multiplicity))
+            .take(LIMIT)
+            .collect::<Vec<_>>();
+        assert_eq!(fixed_binary_values(&result, "id"), expected, "{query}");
+        let io = io_stats::snapshot();
+        assert_eq!(
+            io.edge_full_reads + io.edge_filtered_reads,
+            0,
+            "{query}: {io:#?}"
+        );
+        assert_eq!(
+            io.node_full_reads + io.node_filtered_reads,
+            0,
+            "{query}: {io:#?}"
+        );
+        let snapshot = demand::snapshot();
+        assert!(
+            snapshot
+                .hops
+                .values()
+                .all(|hop| { hop.identity_per_record_seeks == 0 && hop.reads_after_cancel == 0 }),
+            "{query}: {snapshot:#?}"
+        );
+        assert_eq!(
+            snapshot
+                .hops
+                .values()
+                .map(|hop| hop.identity_revalidation_calls)
+                .filter(|calls| *calls > 0)
+                .count(),
+            1,
+            "one facade session pin must be attributed once: {query}: {snapshot:#?}"
+        );
+    }
+
+    let alias = forge
+        .execute(
+            "MATCH (left)-[:LINK]->(right) RETURN right.node_uuid AS renamed ORDER BY renamed LIMIT 1000",
+        )
+        .unwrap();
+    let canonical = forge
+        .execute("MATCH (a)-[:LINK]->(b) RETURN b.node_uuid AS id ORDER BY id LIMIT 1000")
+        .unwrap();
+    assert_eq!(
+        fixed_binary_values(&alias, "renamed"),
+        fixed_binary_values(&canonical, "id")
+    );
+
+    let empty = forge
+        .execute("MATCH (a)-[:MISSING]->(b) RETURN b.node_uuid AS id ORDER BY id LIMIT 1000")
+        .unwrap();
+    assert_eq!(empty.stats.rows_produced, 0);
 }
 
 #[test]

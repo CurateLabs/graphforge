@@ -110,6 +110,10 @@ pub struct HopSnapshot {
     pub identity_peak_buffer_bytes: u64,
     /// Forbidden per-record seek count (must remain zero).
     pub identity_per_record_seeks: u64,
+    /// Generation-authentication checks charged once per execution session.
+    pub identity_revalidation_calls: u64,
+    /// Artifact payload bytes read by session pinning.
+    pub identity_revalidation_bytes: u64,
 }
 
 /// Rows observed at one selective physical filter.
@@ -210,6 +214,12 @@ pub(crate) fn record_identity_projection(
         hop.identity_per_record_seeks = hop
             .identity_per_record_seeks
             .saturating_add(metrics.per_record_seeks);
+        hop.identity_revalidation_calls = hop
+            .identity_revalidation_calls
+            .saturating_add(metrics.revalidation_calls);
+        hop.identity_revalidation_bytes = hop
+            .identity_revalidation_bytes
+            .saturating_add(metrics.revalidation_bytes);
     });
 }
 

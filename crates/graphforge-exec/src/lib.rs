@@ -226,6 +226,7 @@ mod write_driver;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use arrow::array::{
@@ -3159,10 +3160,7 @@ impl V4OrdinalIdentityResolver {
             handle.map(|handle| Arc::new(Mutex::new(handle)));
     }
 
-    fn lookup_node_uuids(
-        &self,
-        requested: &[u64],
-    ) -> Result<Option<graphforge_storage::V4OrdinalLookup>, GfError> {
+    fn pin(&self) -> Result<Option<Arc<V4OrdinalIdentitySession>>, GfError> {
         let handle = self
             .handle
             .read()
@@ -3171,12 +3169,44 @@ impl V4OrdinalIdentityResolver {
         let Some(handle) = handle else {
             return Ok(None);
         };
-        handle
+        let revalidation = handle
             .lock()
             .expect("ordinal identity handle poisoned")
-            .lookup_node_uuids(requested)
-            .map(Some)
-            .map_err(|error| GfError::Execution(error.to_string()))
+            .revalidate_for_session()
+            .map_err(|error| GfError::Execution(error.to_string()))?;
+        Ok(Some(Arc::new(V4OrdinalIdentitySession {
+            handle,
+            revalidation,
+            attribution_available: AtomicBool::new(true),
+        })))
+    }
+}
+
+/// One exact, already-authenticated ordinal authority pinned for the lifetime
+/// of an execution session.
+#[derive(Debug)]
+struct V4OrdinalIdentitySession {
+    handle: Arc<Mutex<graphforge_storage::ordinal_identity_v4::V4OrdinalIdentityHandle>>,
+    revalidation: graphforge_storage::V4OrdinalRevalidationMetrics,
+    attribution_available: AtomicBool,
+}
+
+impl V4OrdinalIdentitySession {
+    fn lookup_node_uuids(
+        &self,
+        requested: &[u64],
+    ) -> Result<graphforge_storage::V4OrdinalLookup, GfError> {
+        let mut lookup = self
+            .handle
+            .lock()
+            .expect("ordinal identity handle poisoned")
+            .lookup_node_uuids_pinned(requested)
+            .map_err(|error| GfError::Execution(error.to_string()))?;
+        if self.attribution_available.swap(false, Ordering::AcqRel) {
+            lookup.metrics.revalidation_calls = self.revalidation.calls;
+            lookup.metrics.revalidation_bytes = self.revalidation.bytes_read;
+        }
+        Ok(lookup)
     }
 }
 
@@ -3217,7 +3247,7 @@ pub struct ExpandExec {
     /// standalone full-schema contract.
     required_output: Option<Arc<[bool]>>,
     /// Facade-owned generation-pinned ordinal identity authority.
-    ordinal_identities: Option<Arc<V4OrdinalIdentityResolver>>,
+    ordinal_identities: Option<Arc<V4OrdinalIdentitySession>>,
 }
 
 impl ExpandExec {
@@ -3228,7 +3258,7 @@ impl ExpandExec {
         node: &graphforge_plan::ExpandNode,
         input: Arc<dyn ExecutionPlan>,
         provider: Arc<dyn AdjacencyProvider>,
-        ordinal_identities: Option<Arc<V4OrdinalIdentityResolver>>,
+        ordinal_identities: Option<Arc<V4OrdinalIdentitySession>>,
     ) -> Self {
         let schema: SchemaRef = Arc::new(node.schema().as_arrow().clone());
         let props = Arc::new(PlanProperties::new(
@@ -3546,7 +3576,7 @@ struct SingleHopConfig {
     edge_var: u32,
     demand: Option<Arc<demand::QueryDemand>>,
     required_output: Option<Arc<[bool]>>,
-    ordinal_identities: Option<Arc<V4OrdinalIdentityResolver>>,
+    ordinal_identities: Option<Arc<V4OrdinalIdentitySession>>,
 }
 
 /// Resumable position within one input batch. Keeping the raw adjacency offset
@@ -4544,7 +4574,7 @@ pub struct AdjacencyProviderExt(pub Arc<dyn AdjacencyProvider>);
 
 /// `SessionConfig` extension carrying the facade's exact generation-pinned
 /// ordinal identity authority.
-pub struct OrdinalIdentityResolverExt(pub Arc<V4OrdinalIdentityResolver>);
+struct OrdinalIdentityResolverExt(pub Arc<V4OrdinalIdentitySession>);
 
 /// Plans GraphForge's custom logical [`Extension`](LogicalPlan::Extension)
 /// nodes into physical [`ExecutionPlan`]s.
@@ -4850,13 +4880,18 @@ impl ExecutionSession {
         ordinal_identities: Option<Arc<V4OrdinalIdentityResolver>>,
         resources: &SessionResourceConfig,
     ) -> Result<Self, GfError> {
+        let ordinal_session = ordinal_identities
+            .as_deref()
+            .map(V4OrdinalIdentityResolver::pin)
+            .transpose()?
+            .flatten();
         Ok(Self::build(
             catalog,
             ontology,
             dir,
             mode,
             Some(provider),
-            ordinal_identities,
+            ordinal_session,
             resources,
         ))
     }
@@ -4867,7 +4902,7 @@ impl ExecutionSession {
         dir: PathBuf,
         mode: OntologyMode,
         shared_provider: Option<Arc<PersistentAdjacencyProvider>>,
-        ordinal_identities: Option<Arc<V4OrdinalIdentityResolver>>,
+        ordinal_identities: Option<Arc<V4OrdinalIdentitySession>>,
         resources: &SessionResourceConfig,
     ) -> Self {
         // The session-scoped adjacency provider (#761), threaded to the

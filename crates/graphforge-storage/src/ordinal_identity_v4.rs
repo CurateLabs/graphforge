@@ -444,6 +444,21 @@ pub struct V4OrdinalLookupMetrics {
     pub transient_buffer_bytes: u64,
     /// Per-identity seeks are forbidden by contract.
     pub per_record_seeks: u64,
+    /// Generation-authentication file checks charged once to the pinned session.
+    pub revalidation_calls: u64,
+    /// Payload bytes read while revalidating the pinned session. Stamp and
+    /// identity checks read metadata only, so this is normally zero.
+    pub revalidation_bytes: u64,
+}
+
+/// Aggregate-only work required to pin an already admitted v4 authority to one
+/// execution session.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct V4OrdinalRevalidationMetrics {
+    /// Logical root/file identity and stamp checks performed.
+    pub calls: u64,
+    /// Artifact payload bytes read by those checks.
+    pub bytes_read: u64,
 }
 
 /// One caller-ordered lookup result and its sanitized evidence.
@@ -765,13 +780,51 @@ impl V4OrdinalIdentityHandle {
         &mut self,
         requested: &[u64],
     ) -> Result<V4OrdinalLookup, V4OrdinalIdentityError> {
+        let revalidation = self.revalidate_for_session()?;
+        let mut lookup = self.lookup_node_uuids_pinned(requested)?;
+        lookup.metrics.revalidation_calls = revalidation.calls;
+        lookup.metrics.revalidation_bytes = revalidation.bytes_read;
+        Ok(lookup)
+    }
+
+    /// Authenticate the retained authority once before sharing it with one
+    /// execution session. Subsequent lookups through that session use the
+    /// already-open immutable handles and must not repeat the artifact walk.
+    #[doc(hidden)]
+    pub fn revalidate_for_session(
+        &self,
+    ) -> Result<V4OrdinalRevalidationMetrics, V4OrdinalIdentityError> {
+        self.revalidate()?;
+        let artifacts = self
+            .forward
+            .len()
+            .saturating_add(self.ranges.len())
+            .saturating_add(self.tombstones.len());
+        Ok(V4OrdinalRevalidationMetrics {
+            // Root identity, retained+named coordination, retained+named
+            // manifest, then retained+named checks for every artifact.
+            calls: 5_u64.saturating_add(
+                u64::try_from(artifacts)
+                    .unwrap_or(u64::MAX)
+                    .saturating_mul(2),
+            ),
+            bytes_read: 0,
+        })
+    }
+
+    /// Resolve through an authority already authenticated for the surrounding
+    /// execution session.
+    #[doc(hidden)]
+    pub fn lookup_node_uuids_pinned(
+        &mut self,
+        requested: &[u64],
+    ) -> Result<V4OrdinalLookup, V4OrdinalIdentityError> {
         if requested.len() > self.limits.max_requested {
             return Err(V4OrdinalIdentityError::RequestLimit {
                 requested: requested.len(),
                 maximum: self.limits.max_requested,
             });
         }
-        self.revalidate()?;
         let mut metrics = V4OrdinalLookupMetrics {
             requested: requested.len() as u64,
             peak_buffer_bytes: (requested.len() as u64).saturating_mul(REQUEST_ENTRY_CHARGE),
@@ -1845,6 +1898,27 @@ mod tests {
         let referenced = handle.referenced_file_names();
         assert!(referenced.contains("forward.uuidx"));
         assert!(!referenced.contains("planted-forward.uuidx"));
+    }
+
+    #[test]
+    fn session_pin_authenticates_once_then_uses_retained_immutable_handles() {
+        let fixture = Fixture::new(&[4], &[]);
+        let mut handle = fixture.open(V4OrdinalIdentityLimits::default());
+        let pin = handle.revalidate_for_session().unwrap();
+        assert_eq!(pin.calls, 11); // root + coordination/manifest + three artifacts
+        assert_eq!(pin.bytes_read, 0);
+
+        let manifest = fixture.root.path().join(INDEX_DIR).join(MANIFEST_NAME);
+        fs::write(&manifest, b"planted after the session pin").unwrap();
+        let pinned = handle.lookup_node_uuids_pinned(&[1, 4]).unwrap();
+        assert_eq!(pinned.metrics.revalidation_calls, 0);
+        assert_eq!(pinned.metrics.revalidation_bytes, 0);
+        assert!(pinned.values.iter().all(Option::is_some));
+
+        assert_eq!(
+            handle.lookup_node_uuids(&[1]).unwrap_err(),
+            V4OrdinalIdentityError::Authentication
+        );
     }
 
     fn artifact(

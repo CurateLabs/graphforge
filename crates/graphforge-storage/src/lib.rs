@@ -367,7 +367,7 @@ pub use ordinal_identity_v4::{
     V4OrdinalFailureEvidence, V4OrdinalFailureKind, V4OrdinalIdentityDiscovery,
     V4OrdinalIdentityError, V4OrdinalIdentityLimits, V4OrdinalIdentityManifest,
     V4OrdinalIdentityOpen, V4OrdinalLookup, V4OrdinalLookupMetrics, V4OrdinalRange,
-    V4OrdinalTombstoneBlock, V4OrdinalTombstones,
+    V4OrdinalRevalidationMetrics, V4OrdinalTombstoneBlock, V4OrdinalTombstones,
 };
 
 pub mod property_overlay;

@@ -121,14 +121,20 @@ generation-pinned v4 ordinal authority. It opens neither edge topology nor
 destination-node Parquet. Lookup batches are sorted and deduplicated within the
 operator batch, coalesced by the v4 reader, and restored to adjacency order.
 There is no graph-sized identity map and no path-based rediscovery of mutable
-authority.
+authority. The facade authenticates and pins the selected immutable generation
+once when it creates an execution session. Every hop in that session then reads
+through the retained authenticated file handles; it does not repeat a complete
+artifact-name/stamp walk for every bounded expansion chunk. A later session
+revalidates the names and identities again, so a planted replacement cannot be
+adopted as authority.
 
 When relationship or destination-node data is required, filtered readers decode
 only the demanded canonical columns plus their join key. Legacy node layouts and
 typed wildcard unions retain their normalization path before result shaping.
 Aggregate diagnostics report projected columns/chunks/rows and v4 ranges,
 coalesced calls, bytes, peak charged buffers, and forbidden per-record seeks;
-they never report identities or paths. Global `ORDER BY ... LIMIT` still examines
+session revalidation calls/bytes are accounted exactly once rather than hidden
+from lookup evidence. Diagnostics never report identities or paths. Global `ORDER BY ... LIMIT` still examines
 the complete unordered candidate stream and does not use invalid early
 cancellation.
 
