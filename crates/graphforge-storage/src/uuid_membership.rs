@@ -2697,7 +2697,9 @@ fn cleanup_private_construction_index(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(storage_err(error)),
     }
-    for name in index.child_names().map_err(storage_err)? {
+    let names = index.child_names().map_err(storage_err)?;
+    let v4_allowed = authenticate_private_v4_residue(&index, &names)?;
+    for name in names {
         let name_text = name
             .to_str()
             .ok_or_else(|| storage_err("construction recovery inventory name is not UTF-8"))?;
@@ -6863,6 +6865,68 @@ pub(crate) mod tests {
     use parquet::arrow::ArrowWriter;
 
     use super::*;
+
+    #[test]
+    fn shared_v4_builder_rejects_sparse_manifest_above_reader_bound() {
+        let artifact = |name: String| crate::V4OrdinalArtifact {
+            name,
+            kind: crate::V4OrdinalArtifactKind::OrdinalUuids,
+            generation: 1,
+            bytes: 16,
+            sha256: "00".repeat(32),
+        };
+        let ranges = (0..V4_MAX_RANGES)
+            .map(|ordinal| crate::V4OrdinalRange {
+                first_node_id: u64::try_from(ordinal).unwrap() * 2 + 1,
+                count: 1,
+                artifact: artifact(format!("ordinal-v4-1-{ordinal:016x}.uuidx")),
+                blocks: vec![crate::V4OrdinalBlock {
+                    offset: 0,
+                    count: 1,
+                    sha256: "11".repeat(32),
+                }],
+            })
+            .collect::<Vec<_>>();
+        let manifest = crate::V4OrdinalIdentityManifest {
+            format_version: crate::ORDINAL_IDENTITY_V4,
+            topology_generation: 1,
+            forward_identities: vec![crate::V4OrdinalArtifact {
+                name: "forward-v4-1-0000000000000000.uuidx".to_owned(),
+                kind: crate::V4OrdinalArtifactKind::ForwardIdentities,
+                generation: 1,
+                bytes: 24,
+                sha256: "22".repeat(32),
+            }],
+            ordinal_ranges: ranges,
+            tombstones: Vec::new(),
+        };
+        assert!(
+            serde_json::to_vec(&manifest).unwrap().len() as u64
+                > crate::ordinal_identity_v4::MAX_MANIFEST_BYTES
+        );
+        assert!(admit_v4_construction_manifest(&manifest).is_err());
+    }
+
+    #[test]
+    fn cleanup_authenticates_complete_unpublished_v4_facet() {
+        let encoded_dir = tempfile::tempdir().unwrap();
+        let encoded = graphforge_filesystem::StableDirectory::open(encoded_dir.path()).unwrap();
+        let graph = encoded
+            .create_child_directory(std::ffi::OsStr::new("graph"))
+            .unwrap();
+        let topology = graph
+            .create_child_directory(std::ffi::OsStr::new("topology"))
+            .unwrap();
+        let index = topology
+            .create_child_directory(std::ffi::OsStr::new("uuid-membership"))
+            .unwrap();
+        let mappings = [(Uuid::from_u128(1), 1_u64), (Uuid::from_u128(2), 3_u64)];
+        let (manifest, _) = stage_v4_ordinal_artifacts(mappings, 1, &index, || false).unwrap();
+        publish_v4_construction_artifacts(&encoded, &manifest, 1, &hex_sha256(b"delta")).unwrap();
+
+        cleanup_private_construction_index(&encoded).unwrap();
+        assert!(index.child_names().unwrap().is_empty());
+    }
 
     #[test]
     fn construction_encoder_io_geometry_is_block_bounded() {
