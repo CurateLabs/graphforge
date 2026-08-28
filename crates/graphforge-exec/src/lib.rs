@@ -3370,11 +3370,18 @@ impl DisplayAs for ExpandExec {
         };
         write!(
             f,
-            "ExpandExec: rel={}, dir={arrow}, adjacency={}, fetch={}, demand_batch={}, projection={}, cancel={}",
+            "ExpandExec: rel={}, dir={arrow}, adjacency={}, identity={}, fetch={}, demand_batch={}, projection={}, cancel={}",
             self.rel_type_name,
             self.provider
                 .status(&self.rel_type_name, self.direction)
                 .as_str(),
+            if self.ordinal_identities.is_some() {
+                "v4"
+            } else if self.ordinal_identity_required {
+                "required-missing"
+            } else {
+                "legacy"
+            },
             self.fetch
                 .map_or_else(|| "all".to_owned(), |n| n.to_string()),
             self.demand_batch
@@ -3723,9 +3730,12 @@ fn expand_single_hop_chunk(
     let dst_width = graphforge_storage::TOPOLOGY_NODES_SCHEMA.fields().len();
     let edge_end = cfg.out_schema.fields().len().saturating_sub(dst_width);
     let required = cfg.required_output.as_deref();
-    let edge_unused = required.is_some_and(|mask| {
-        mask.get(cfg.input_width..edge_end)
-            .is_some_and(|fields| fields.iter().all(|needed| !needed))
+    let edge_materialization_unused = required.is_some_and(|mask| {
+        mask.get(cfg.input_width..edge_end).is_some_and(|fields| {
+            fields.iter().enumerate().all(|(offset, needed)| {
+                !needed || cfg.out_schema.field(cfg.input_width + offset).name() == "edge_id"
+            })
+        })
     });
     let destination_uuid_index = edge_end;
     let destination_id_index = edge_end + 1;
@@ -3739,7 +3749,7 @@ fn expand_single_hop_chunk(
     });
     let uuid_required =
         required.is_some_and(|mask| mask.get(destination_uuid_index).copied().unwrap_or(false));
-    if edge_unused
+    if edge_materialization_unused
         && destination_identity_only
         && uuid_required
         && cfg.ordinal_identity_required
@@ -3749,7 +3759,7 @@ fn expand_single_hop_chunk(
             "destination UUID projection requires admitted v4 ordinal identity".into(),
         ));
     }
-    if edge_unused
+    if edge_materialization_unused
         && destination_identity_only
         && let Some(ordinal_identities) = cfg.ordinal_identities.as_ref()
     {
@@ -3788,14 +3798,25 @@ fn expand_single_hop_chunk(
             columns
                 .push(take(column, &src_take, None).map_err(|error| exec_err(error.to_string()))?);
         }
-        for field in cfg
+        for (offset, field) in cfg
             .out_schema
             .fields()
             .iter()
             .skip(cfg.input_width)
             .take(edge_end.saturating_sub(cfg.input_width))
+            .enumerate()
         {
-            columns.push(unused_expand_column(field, triples.len())?);
+            let index = cfg.input_width + offset;
+            if required.is_some_and(|mask| mask[index]) && field.name() == "edge_id" {
+                columns.push(Arc::new(UInt64Array::from(
+                    triples
+                        .iter()
+                        .map(|(_, edge_id, _)| *edge_id)
+                        .collect::<Vec<_>>(),
+                )));
+            } else {
+                columns.push(unused_expand_column(field, triples.len())?);
+            }
         }
         for (offset, field) in cfg.out_schema.fields().iter().skip(edge_end).enumerate() {
             let index = edge_end + offset;

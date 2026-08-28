@@ -519,6 +519,7 @@ fn run_ordered_projection_scale(nodes: usize) -> (Vec<Vec<u8>>, DemandSnapshot) 
     let forge = open_forge(dir.path());
     let plan = forge.explain(ORDERED_ONE_HOP).unwrap();
     assert!(plan.contains("ExpandExec"), "{plan}");
+    assert!(plan.contains("identity=v4"), "{plan}");
     assert!(plan.contains("SortExec"), "{plan}");
     assert!(plan.contains("projection=1"), "{plan}");
 
