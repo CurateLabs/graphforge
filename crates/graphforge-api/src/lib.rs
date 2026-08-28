@@ -4044,6 +4044,19 @@ fn materialize_compact_graph_target(
         files_opened_in_place: 0,
         files_reused: reused.files_reused,
         bytes_reused: reused.bytes_reused,
+        application_read_bytes: reused
+            .application_read_bytes
+            .saturating_add(copied.application_read_bytes),
+        application_read_calls: reused
+            .application_read_calls
+            .saturating_add(copied.application_read_calls),
+        application_write_bytes: reused
+            .application_write_bytes
+            .saturating_add(copied.application_write_bytes),
+        application_write_calls: reused
+            .application_write_calls
+            .saturating_add(copied.application_write_calls),
+        fsync_calls: reused.fsync_calls.saturating_add(copied.fsync_calls),
     };
     Ok(evidence)
 }

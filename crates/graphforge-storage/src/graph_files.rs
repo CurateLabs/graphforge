@@ -376,7 +376,9 @@ pub fn stage_graph_tree(
             false,
         )?;
     }
-    sync_directory_tree(&destination_root)?;
+    evidence.fsync_calls = evidence
+        .fsync_calls
+        .saturating_add(sync_directory_tree(&destination_root)?);
     verify_graph_tree(&destination_root, inventory)?;
     Ok(evidence)
 }
@@ -935,7 +937,7 @@ fn sync_file(path: &Path) -> Result<(), GfError> {
         .map_err(|error| storage("fsync graph file", path, error))
 }
 
-fn sync_directory_tree(root: &Path) -> Result<(), GfError> {
+fn sync_directory_tree(root: &Path) -> Result<u64, GfError> {
     let mut directories = vec![root.to_path_buf()];
     let mut index = 0;
     while index < directories.len() {
@@ -955,10 +957,11 @@ fn sync_directory_tree(root: &Path) -> Result<(), GfError> {
         }
         index += 1;
     }
+    let count = u64::try_from(directories.len()).unwrap_or(u64::MAX);
     for directory in directories.into_iter().rev() {
         sync_directory(&directory)?;
     }
-    Ok(())
+    Ok(count)
 }
 
 fn sync_directory(path: &Path) -> Result<(), GfError> {
@@ -1589,6 +1592,14 @@ mod tests {
         let evidence = stage_graph_tree(source.path(), generation.path(), &inventory).unwrap();
         assert_eq!(evidence.files_copied, 2);
         assert_eq!(evidence.bytes_copied, inventory.total_byte_length);
+        assert_eq!(evidence.application_read_bytes, inventory.total_byte_length);
+        assert_eq!(evidence.application_read_calls, 2);
+        assert_eq!(
+            evidence.application_write_bytes,
+            inventory.total_byte_length
+        );
+        assert_eq!(evidence.application_write_calls, 2);
+        assert_eq!(evidence.fsync_calls, 4);
 
         let sealed_source = graph_tree_root(generation.path()).join("properties/Person.parquet");
         let mut sealed_permissions = fs::metadata(&sealed_source).unwrap().permissions();
@@ -1604,6 +1615,11 @@ mod tests {
         .unwrap();
         assert_eq!(opened.strategy, GraphFilesOpenStrategy::PrivateMaterialize);
         assert_eq!(opened.files_copied, 2);
+        assert_eq!(opened.application_read_bytes, inventory.total_byte_length);
+        assert_eq!(opened.application_read_calls, 2);
+        assert_eq!(opened.application_write_bytes, inventory.total_byte_length);
+        assert_eq!(opened.application_write_calls, 2);
+        assert_eq!(opened.fsync_calls, 4);
         let private_copy = private.path().join("properties/Person.parquet");
         assert!(
             fs::metadata(&sealed_source)

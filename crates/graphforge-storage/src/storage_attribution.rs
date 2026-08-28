@@ -722,8 +722,17 @@ mod tests {
             shape_application_read_bytes: 13,
             encode_application_read_bytes: 17,
             publication_application_read_bytes: 19,
+            publication_application_read_operations: 2,
             cas_application_read_bytes: 23,
+            cas_application_read_operations: 3,
+            cas_application_write_bytes: 43,
+            cas_application_write_operations: 4,
+            cas_fsync_operations: 5,
             hydration_application_read_bytes: 29,
+            hydration_application_read_operations: 6,
+            hydration_application_write_bytes: 47,
+            hydration_application_write_operations: 7,
+            hydration_fsync_operations: 8,
             recovery_application_read_bytes: 41,
             recovery_application_read_operations: 2,
             canonical_output_bytes: 31,
@@ -741,7 +750,10 @@ mod tests {
             attribution.phases[&StorageIoPhase::RecoveryReauthentication].read_calls,
             2
         );
-        assert_eq!(attribution.totals.write_bytes, 68);
+        assert_eq!(attribution.totals.write_bytes, 158);
+        assert_eq!(attribution.totals.read_calls, 18);
+        assert_eq!(attribution.totals.write_calls, 14);
+        assert_eq!(attribution.totals.fsync_calls, 20);
         attribution
             .phases
             .remove(&StorageIoPhase::RecoveryReauthentication);

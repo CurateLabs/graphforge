@@ -270,11 +270,7 @@ impl GraphConstructionSession<'_> {
             }
             let (prepared_dir, prepared_guard, hydration_evidence) =
                 super::hydrate_graph_workspace(&resolved, false)?;
-            self.inner.record_hydration_application_read_bytes(
-                hydration_evidence
-                    .bytes_validated
-                    .saturating_add(hydration_evidence.bytes_copied),
-            )?;
+            self.inner.record_hydration_evidence(&hydration_evidence)?;
             let runtime_catalog = super::load_runtime_catalog(&prepared_dir)?;
             let property_inventory = std::sync::Arc::new(
                 graphforge_storage::AuthenticatedPropertyInventory::from_resolved_generation(

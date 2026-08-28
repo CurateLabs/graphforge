@@ -1907,15 +1907,42 @@ impl GraphConstructionSession {
         &self.checkpoint.evidence
     }
 
-    /// Record application-observed reads performed by the facade's post-publication
-    /// hydration before the refreshed workspace becomes visible.
+    /// Record storage-owned application I/O performed by the facade's
+    /// post-publication hydration before the refreshed workspace becomes visible.
     #[doc(hidden)]
-    pub fn record_hydration_application_read_bytes(&mut self, bytes: u64) -> Result<(), GfError> {
+    pub fn record_hydration_evidence(
+        &mut self,
+        hydration: &crate::GraphFilesOpenEvidence,
+    ) -> Result<(), GfError> {
         self.checkpoint.evidence.hydration_application_read_bytes = self
             .checkpoint
             .evidence
             .hydration_application_read_bytes
-            .saturating_add(bytes);
+            .saturating_add(hydration.application_read_bytes);
+        self.checkpoint
+            .evidence
+            .hydration_application_read_operations = self
+            .checkpoint
+            .evidence
+            .hydration_application_read_operations
+            .saturating_add(hydration.application_read_calls);
+        self.checkpoint.evidence.hydration_application_write_bytes = self
+            .checkpoint
+            .evidence
+            .hydration_application_write_bytes
+            .saturating_add(hydration.application_write_bytes);
+        self.checkpoint
+            .evidence
+            .hydration_application_write_operations = self
+            .checkpoint
+            .evidence
+            .hydration_application_write_operations
+            .saturating_add(hydration.application_write_calls);
+        self.checkpoint.evidence.hydration_fsync_operations = self
+            .checkpoint
+            .evidence
+            .hydration_fsync_operations
+            .saturating_add(hydration.fsync_calls);
         replace_control(&self.root, CHECKPOINT, &self.checkpoint)
     }
 
@@ -3466,10 +3493,27 @@ fn recover_shape_intent(
                 final_evidence.encode_application_read_bytes;
             shape_owned_evidence.publication_application_read_bytes =
                 final_evidence.publication_application_read_bytes;
+            shape_owned_evidence.publication_application_read_operations =
+                final_evidence.publication_application_read_operations;
             shape_owned_evidence.cas_application_read_bytes =
                 final_evidence.cas_application_read_bytes;
+            shape_owned_evidence.cas_application_read_operations =
+                final_evidence.cas_application_read_operations;
+            shape_owned_evidence.cas_application_write_bytes =
+                final_evidence.cas_application_write_bytes;
+            shape_owned_evidence.cas_application_write_operations =
+                final_evidence.cas_application_write_operations;
+            shape_owned_evidence.cas_fsync_operations = final_evidence.cas_fsync_operations;
             shape_owned_evidence.hydration_application_read_bytes =
                 final_evidence.hydration_application_read_bytes;
+            shape_owned_evidence.hydration_application_read_operations =
+                final_evidence.hydration_application_read_operations;
+            shape_owned_evidence.hydration_application_write_bytes =
+                final_evidence.hydration_application_write_bytes;
+            shape_owned_evidence.hydration_application_write_operations =
+                final_evidence.hydration_application_write_operations;
+            shape_owned_evidence.hydration_fsync_operations =
+                final_evidence.hydration_fsync_operations;
             shape_owned_evidence.canonical_output_bytes = final_evidence.canonical_output_bytes;
             shape_owned_evidence.staged_and_retained_disk_bytes =
                 final_evidence.staged_and_retained_disk_bytes;
