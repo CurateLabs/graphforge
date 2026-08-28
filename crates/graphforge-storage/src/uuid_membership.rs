@@ -177,6 +177,10 @@ pub(crate) struct V4OrdinalBuildMetrics {
 struct V4RebuildScratchAccounting {
     peak_bytes: u64,
     sorted_projection_bytes: u64,
+    live_artifact_bytes: u64,
+    retained_staged_bytes: u64,
+    staged_control_bytes: u64,
+    scratch_live: bool,
 }
 
 impl V4RebuildScratchAccounting {
@@ -209,10 +213,44 @@ impl V4RebuildScratchAccounting {
     fn register_artifacts(&mut self, artifact_peak: u64) -> Result<(), GfError> {
         // Both final sort projections remain open while the immutable forward
         // and ordinal artifacts are streamed.
-        self.observe(
+        self.live_artifact_bytes = artifact_peak;
+        self.scratch_live = true;
+        self.observe_current()
+    }
+
+    fn register_staged_artifact(&mut self, bytes: u64) -> Result<(), GfError> {
+        self.retained_staged_bytes = self
+            .retained_staged_bytes
+            .checked_add(bytes)
+            .ok_or_else(|| storage_err("v4 rebuild staged artifact byte count overflow"))?;
+        self.observe_current()
+    }
+
+    fn register_staged_control(&mut self, bytes: u64) -> Result<(), GfError> {
+        self.staged_control_bytes = self
+            .staged_control_bytes
+            .checked_add(bytes)
+            .ok_or_else(|| storage_err("v4 rebuild staged control byte count overflow"))?;
+        self.observe_current()
+    }
+
+    fn release_scratch(&mut self) -> Result<(), GfError> {
+        self.scratch_live = false;
+        self.observe_current()
+    }
+
+    fn observe_current(&mut self) -> Result<(), GfError> {
+        let scratch = if self.scratch_live {
             self.sorted_projection_bytes
                 .checked_mul(2)
-                .and_then(|bytes| bytes.checked_add(artifact_peak)),
+                .and_then(|bytes| bytes.checked_add(self.live_artifact_bytes))
+        } else {
+            Some(0)
+        };
+        self.observe(
+            scratch
+                .and_then(|bytes| bytes.checked_add(self.retained_staged_bytes))
+                .and_then(|bytes| bytes.checked_add(self.staged_control_bytes)),
         )
     }
 
@@ -221,6 +259,13 @@ impl V4RebuildScratchAccounting {
         self.peak_bytes = self.peak_bytes.max(bytes);
         Ok(())
     }
+}
+
+struct StagedV4OrdinalRebuild {
+    generation: u64,
+    build: UuidIndexBuildMetrics,
+    artifacts: V4OrdinalBuildMetrics,
+    scratch: V4RebuildScratchAccounting,
 }
 
 /// Aggregate-only work evidence for one incremental v4 publication.
@@ -7275,13 +7320,12 @@ pub fn rebuild_v4_ordinal_identity_with_evidence(
     let root = project_dir.to_path_buf();
     let participant: crate::durable_rewrite::RewriteParticipantPreparer<'_> =
         Box::new(move |context, batch| {
-            let built = stage_v4_ordinal_rebuild_locked(
+            let mut staged = stage_v4_ordinal_rebuild_locked(
                 context.project_root,
                 context.prior.topology,
                 limits,
                 batch,
             )?;
-            *callback_metrics.borrow_mut() = Some(built);
             let manifest_path = context
                 .project_root
                 .join(INDEX_DIR)
@@ -7306,6 +7350,16 @@ pub fn rebuild_v4_ordinal_identity_with_evidence(
                     .join(V4_ORDINAL_RECEIPT),
                 &receipt_bytes,
             )?;
+            staged.scratch.register_staged_control(
+                u64::try_from(receipt_bytes.len())
+                    .map_err(|_| storage_err("v4 rebuild receipt length overflow"))?,
+            )?;
+            *callback_metrics.borrow_mut() = Some(v4_rebuild_evidence(
+                staged.generation,
+                staged.build,
+                &staged.artifacts,
+                staged.scratch,
+            )?);
             // Artifacts, then receipt, then facet manifest. The enclosing
             // generation record remains the durable transaction's last switch.
             batch.move_staged_destination_to_end(&manifest_path);
@@ -7334,7 +7388,7 @@ fn stage_v4_ordinal_rebuild_locked(
     generation: u64,
     limits: UuidIndexBuildLimits,
     batch: &mut crate::staging::RewriteBatch,
-) -> Result<V4OrdinalRebuildEvidence, GfError> {
+) -> Result<StagedV4OrdinalRebuild, GfError> {
     if generation == 0 {
         return Err(storage_err(
             "v4 ordinal identity requires a nonzero topology generation",
@@ -7419,6 +7473,38 @@ fn stage_v4_ordinal_rebuild_locked(
     let (manifest, v4_metrics) = writer.finish()?;
     scratch_accounting.register_artifacts(v4_metrics.peak_temporary_bytes)?;
     metrics.node_count = v4_metrics.input_records;
+    stage_v4_rebuild_artifacts(
+        &manifest,
+        &destination,
+        &artifact_root,
+        batch,
+        &mut scratch_accounting,
+    )?;
+    let manifest_bytes = serde_json::to_vec(&manifest).map_err(storage_err)?;
+    if manifest_bytes.len() as u64 > crate::ordinal_identity_v4::MAX_MANIFEST_BYTES {
+        return Err(storage_err("v4 ordinal manifest exceeds bound"));
+    }
+    batch.stage_bytes(&destination.join(V4_ORDINAL_MANIFEST), &manifest_bytes)?;
+    scratch_accounting.register_staged_control(
+        u64::try_from(manifest_bytes.len())
+            .map_err(|_| storage_err("v4 ordinal manifest length overflow"))?,
+    )?;
+    scratch_accounting.release_scratch()?;
+    Ok(StagedV4OrdinalRebuild {
+        generation,
+        build: metrics,
+        artifacts: v4_metrics,
+        scratch: scratch_accounting,
+    })
+}
+
+fn stage_v4_rebuild_artifacts(
+    manifest: &crate::V4OrdinalIdentityManifest,
+    destination: &Path,
+    artifact_root: &Path,
+    batch: &mut crate::staging::RewriteBatch,
+    scratch: &mut V4RebuildScratchAccounting,
+) -> Result<(), GfError> {
     for artifact in manifest
         .forward_identities
         .iter()
@@ -7429,13 +7515,9 @@ fn stage_v4_ordinal_rebuild_locked(
             &destination.join(&artifact.name),
             &artifact_root.join(&artifact.name),
         )?;
+        scratch.register_staged_artifact(artifact.bytes)?;
     }
-    let manifest_bytes = serde_json::to_vec(&manifest).map_err(storage_err)?;
-    if manifest_bytes.len() as u64 > crate::ordinal_identity_v4::MAX_MANIFEST_BYTES {
-        return Err(storage_err("v4 ordinal manifest exceeds bound"));
-    }
-    batch.stage_bytes(&destination.join(V4_ORDINAL_MANIFEST), &manifest_bytes)?;
-    v4_rebuild_evidence(generation, metrics, &v4_metrics, scratch_accounting)
+    Ok(())
 }
 
 fn v4_rebuild_evidence(
@@ -10544,35 +10626,46 @@ pub(crate) mod tests {
             CompleteV4,
         }
 
-        for (failpoint, expected) in [
-            ("rewrite.before_intent", PreRecoveryDisposition::PriorV3Only),
+        for (failpoint, expected, expected_installed) in [
+            (
+                "rewrite.before_intent",
+                PreRecoveryDisposition::PriorV3Only,
+                0,
+            ),
             (
                 "rewrite.after_preparing_disarm",
                 PreRecoveryDisposition::PriorV3Only,
+                0,
             ),
             (
                 "rewrite.after_durable_intent",
-                PreRecoveryDisposition::CompleteV4,
+                PreRecoveryDisposition::PriorV3Only,
+                0,
             ),
             (
                 "rewrite.after_first_data_install",
-                PreRecoveryDisposition::CompleteV4,
+                PreRecoveryDisposition::IncompleteV4,
+                1,
             ),
             (
                 "rewrite.after_middle_data_install",
-                PreRecoveryDisposition::CompleteV4,
+                PreRecoveryDisposition::IncompleteV4,
+                2,
             ),
             (
                 "rewrite.after_last_data_install",
-                PreRecoveryDisposition::CompleteV4,
+                PreRecoveryDisposition::IncompleteV4,
+                usize::MAX,
             ),
             (
                 "rewrite.before_generation_authority",
-                PreRecoveryDisposition::CompleteV4,
+                PreRecoveryDisposition::IncompleteV4,
+                usize::MAX,
             ),
             (
                 "rewrite.after_generation_authority",
                 PreRecoveryDisposition::CompleteV4,
+                usize::MAX,
             ),
         ] {
             let (dir, _, _) = fixture();
@@ -10612,31 +10705,103 @@ pub(crate) mod tests {
             // Inspect the crashed tree before recovery. The prior v3 authority
             // must remain valid at every boundary; v4 is either absent,
             // incomplete and therefore inadmissible, or already complete.
-            UuidMembershipIndex::open(dir.path()).unwrap();
+            UuidMembershipIndex::open_at_generation(dir.path(), 7).unwrap();
+            let journal_path = dir.path().join(".graphforge-rewrite-v1.json");
+            let journal = fs::read(&journal_path)
+                .ok()
+                .map(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).unwrap());
+            let entries = journal
+                .as_ref()
+                .and_then(|value| value.get("entries"))
+                .and_then(serde_json::Value::as_array);
+            let intended_v4 = entries
+                .into_iter()
+                .flatten()
+                .filter(|entry| {
+                    entry["class"] == "data"
+                        && entry["destination"]
+                            .as_str()
+                            .is_some_and(|path| path.starts_with(INDEX_DIR))
+                })
+                .collect::<Vec<_>>();
+            let installed_v4 = intended_v4
+                .iter()
+                .filter(|entry| {
+                    let path = dir.path().join(entry["destination"].as_str().unwrap());
+                    let expected = entry["temporary_file"].as_str().unwrap();
+                    File::open(path)
+                        .ok()
+                        .and_then(|file| graphforge_filesystem::file_identity(&file).ok())
+                        .is_some_and(|identity| {
+                            identity
+                                .file_id
+                                .iter()
+                                .map(|byte| format!("{byte:02x}"))
+                                .collect::<String>()
+                                == expected
+                        })
+                })
+                .count();
+            if expected_installed == usize::MAX {
+                assert_eq!(installed_v4, intended_v4.len(), "{failpoint}");
+            } else {
+                assert_eq!(
+                    installed_v4, expected_installed,
+                    "{failpoint}: journal={journal:?} intended={intended_v4:?}"
+                );
+            }
+            let generation_selected = entries
+                .into_iter()
+                .flatten()
+                .find(|entry| entry["class"] == "generation_authority")
+                .is_some_and(|entry| {
+                    let expected = entry["temporary_file"].as_str().unwrap();
+                    File::open(dir.path().join("topology/generation.json"))
+                        .ok()
+                        .and_then(|file| graphforge_filesystem::file_identity(&file).ok())
+                        .is_some_and(|identity| {
+                            identity
+                                .file_id
+                                .iter()
+                                .map(|byte| format!("{byte:02x}"))
+                                .collect::<String>()
+                                == expected
+                        })
+                });
             let index = dir.path().join(INDEX_DIR);
-            let manifest = fs::read(index.join(V4_ORDINAL_MANIFEST)).ok();
-            let receipt = fs::read(index.join(V4_ORDINAL_RECEIPT)).ok();
-            let observed = match (manifest.as_deref(), receipt.as_deref()) {
-                (None, None) => PreRecoveryDisposition::PriorV3Only,
+            let coherent_v4 = match (
+                fs::read(index.join(V4_ORDINAL_MANIFEST)).ok(),
+                fs::read(index.join(V4_ORDINAL_RECEIPT)).ok(),
+            ) {
                 (Some(manifest), Some(receipt)) => {
-                    let receipt: TopologyIndexReceipt = serde_json::from_slice(receipt).unwrap();
+                    let receipt: TopologyIndexReceipt = serde_json::from_slice(&receipt).unwrap();
                     assert_eq!(receipt.expected_generation, 7, "{failpoint}");
-                    assert_eq!(receipt.manifest_sha256, hex_sha256(manifest), "{failpoint}");
+                    assert_eq!(
+                        receipt.manifest_sha256,
+                        hex_sha256(&manifest),
+                        "{failpoint}"
+                    );
                     let authority = crate::ordinal_identity_v4::V4OrdinalIdentityAuthority {
                         topology_generation: 7,
                         manifest_sha256: receipt.manifest_sha256,
                     };
-                    assert!(matches!(
+                    matches!(
                         crate::ordinal_identity_v4::V4OrdinalIdentityHandle::open(
                             dir.path(),
                             &authority,
                             crate::V4OrdinalIdentityLimits::default()
                         ),
                         Ok(crate::V4OrdinalIdentityOpen::Ready(_))
-                    ));
-                    PreRecoveryDisposition::CompleteV4
+                    )
                 }
-                _ => PreRecoveryDisposition::IncompleteV4,
+                _ => false,
+            };
+            let observed = if generation_selected && coherent_v4 {
+                PreRecoveryDisposition::CompleteV4
+            } else if installed_v4 == 0 {
+                PreRecoveryDisposition::PriorV3Only
+            } else {
+                PreRecoveryDisposition::IncompleteV4
             };
             assert_eq!(observed, expected, "{failpoint}");
 
@@ -10646,10 +10811,31 @@ pub(crate) mod tests {
             UuidMembershipIndex::open(dir.path()).unwrap();
 
             let manifest_bytes = fs::read(index.join(V4_ORDINAL_MANIFEST)).unwrap();
-            let receipt: TopologyIndexReceipt =
-                serde_json::from_slice(&fs::read(index.join(V4_ORDINAL_RECEIPT)).unwrap()).unwrap();
+            let receipt_bytes = fs::read(index.join(V4_ORDINAL_RECEIPT)).unwrap();
+            let receipt: TopologyIndexReceipt = serde_json::from_slice(&receipt_bytes).unwrap();
             assert_eq!(receipt.expected_generation, 7);
             assert_eq!(receipt.manifest_sha256, hex_sha256(&manifest_bytes));
+            let generation = crate::durable_rewrite::GenerationPair {
+                topology: 7,
+                search: 0,
+                property: 0,
+            };
+            assert_eq!(
+                crate::durable_rewrite::reconcile_auxiliary(
+                    dir.path(),
+                    generation,
+                    generation,
+                    &crate::AuxiliaryReceipt {
+                        kind: "uuid-membership/v4".to_owned(),
+                        schema_version: crate::ORDINAL_IDENTITY_V4,
+                        path: format!("{INDEX_DIR}/{V4_ORDINAL_RECEIPT}"),
+                        digest: hex_sha256(&receipt_bytes),
+                        bytes: u64::try_from(receipt_bytes.len()).unwrap(),
+                    },
+                )
+                .unwrap(),
+                crate::durable_rewrite::AuxiliaryReconcileOutcome::Committed
+            );
             let authority = crate::ordinal_identity_v4::V4OrdinalIdentityAuthority {
                 topology_generation: 7,
                 manifest_sha256: receipt.manifest_sha256,
@@ -10669,26 +10855,55 @@ pub(crate) mod tests {
     fn v4_rebuild_scratch_accounting_is_exact_linear_and_overflow_bounded() {
         for identities in [1_u64, 2, 4] {
             let dir = tempfile::tempdir().unwrap();
-            let uuid = dir.path().join("uuid.run");
-            let ordinal = dir.path().join("ordinal.run");
-            fs::write(&uuid, vec![0_u8; usize::try_from(identities * 24).unwrap()]).unwrap();
+            let uuids = (1..=identities)
+                .map(|identity| Uuid::from_u128(u128::from(identity)))
+                .collect::<Vec<_>>();
+            let node_ids = (1..=identities).collect::<Vec<_>>();
+            write_node_parquet_with_ids(
+                &dir.path().join("topology/nodes.parquet"),
+                &uuids,
+                &node_ids,
+            );
             fs::write(
-                &ordinal,
-                vec![0_u8; usize::try_from(identities * 24).unwrap()],
+                dir.path().join("topology/generation.json"),
+                b"{\"topology_generation\":7,\"search_generation\":0,\"property_generation\":0}\n",
             )
             .unwrap();
-            let mut accounting = V4RebuildScratchAccounting::default();
-            accounting.register_sorted_projection(&uuid).unwrap();
-            accounting.register_surrogate_projection(&ordinal).unwrap();
-            accounting.register_artifacts(identities * 40).unwrap();
-            assert_eq!(accounting.peak_bytes, identities * 88);
+            let evidence = rebuild_v4_ordinal_identity_with_evidence(
+                dir.path(),
+                UuidIndexBuildLimits {
+                    scan_batch_rows: 1,
+                    run_records: 1,
+                    merge_fan_in: 2,
+                },
+            )
+            .unwrap();
+            let index = dir.path().join(INDEX_DIR);
+            let manifest_bytes = fs::metadata(index.join(V4_ORDINAL_MANIFEST)).unwrap().len();
+            let receipt_bytes = fs::metadata(index.join(V4_ORDINAL_RECEIPT)).unwrap().len();
+            let with_live_scratch = identities * 48 + evidence.artifact_bytes * 2 + manifest_bytes;
+            let after_scratch_release = evidence.artifact_bytes + manifest_bytes + receipt_bytes;
+            assert_eq!(
+                evidence.peak_temporary_bytes,
+                with_live_scratch.max(after_scratch_release)
+            );
         }
 
-        let mut accounting = V4RebuildScratchAccounting {
-            peak_bytes: 0,
+        let mut projection_overflow = V4RebuildScratchAccounting {
             sorted_projection_bytes: u64::MAX,
+            ..Default::default()
         };
-        assert!(accounting.register_artifacts(1).is_err());
+        assert!(projection_overflow.register_artifacts(1).is_err());
+        let mut artifact_overflow = V4RebuildScratchAccounting {
+            retained_staged_bytes: u64::MAX,
+            ..Default::default()
+        };
+        assert!(artifact_overflow.register_staged_artifact(1).is_err());
+        let mut control_overflow = V4RebuildScratchAccounting {
+            staged_control_bytes: u64::MAX,
+            ..Default::default()
+        };
+        assert!(control_overflow.register_staged_control(1).is_err());
     }
 
     #[test]

@@ -92,8 +92,9 @@ The explicit migration disposition is `CanonicalTopology`: rebuild scans
 canonical topology under the durable rewrite and never treats a v3 reverse run
 as v4 authority. Its temporary-byte peak covers every coexisting external-sort
 run, merge output, surrogate projection, and final artifact through
-storage-owned lifecycle accounting; it is not an artifact-only approximation
-or a recursive observation of the active scratch tree.
+storage-owned lifecycle accounting, including retained staging copies and
+control-record temporaries. It is not an artifact-only approximation or a
+recursive observation of the active scratch tree.
 
 Admission also streams both forward and ordinal authorities through the same
 domain-separated mapping commitment and count. Strict forward UUID ordering and

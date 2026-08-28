@@ -42,8 +42,10 @@ there is no mixed-version read state.
 `peak_temporary_bytes` is the total maximum coexisting rebuild scratch, not
 merely the final artifact size. Storage-owned accounting includes scan runs and
 their merge outputs, the UUID-sorted and surrogate-sorted projections, and the
-immutable forward/range artifacts while both projections remain live. It uses
-the exact registered run lengths at lifecycle transitions rather than a
+immutable forward/range artifacts while both projections remain live. Each
+retained `stage_file` copy and staged manifest/receipt control is charged at its
+actual lifecycle transition, so a source artifact and its retained copy both
+appear in the peak. Accounting uses exact registered lengths rather than a
 recursive scan of an active scratch directory.
 
 Standalone graph roots have no project-generation `graph/files` inventory.
