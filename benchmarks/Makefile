@@ -3,11 +3,12 @@
 install:
 	uv sync --locked
 
-smoke: install smoke-python smoke-rust
+smoke: smoke-python smoke-rust
 
-smoke-python:
+smoke-python: install
 	PYTHONPATH=harness uv run --locked python -m graphforge_bench.smoke
 	PYTHONPATH=harness uv run --locked python -m unittest discover -s tests -p 'test_*.py'
 
-smoke-rust:
-	cargo test --locked --manifest-path Cargo.toml
+smoke-rust: install
+	CARGO_TARGET_DIR=$(CURDIR)/target cargo test --locked --manifest-path Cargo.toml
+	PYTHONPATH=harness uv run --locked python -m graphforge_bench.check_rust_graph
