@@ -226,10 +226,11 @@ mod write_driver;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, RwLock};
 
 use arrow::array::{
-    Array, ArrayRef, FixedSizeBinaryArray, Int8Array, RecordBatch, StructArray, UInt64Array,
+    Array, ArrayRef, FixedSizeBinaryArray, FixedSizeBinaryBuilder, Int8Array, RecordBatch,
+    StructArray, UInt64Array, new_null_array,
 };
 use arrow::datatypes::{DataType, SchemaRef};
 use async_trait::async_trait;
@@ -3123,6 +3124,57 @@ impl ValueAt for arrow::array::UInt64Array {
 // ExpandExec — adjacency-backed single-hop expansion (#763)
 // ---------------------------------------------------------------------------
 
+/// Generation-pinned destination-identity resolver shared by every query and
+/// hop of one facade. Replacement is atomic with facade generation adoption;
+/// execution never rediscovers mutable identity files by path.
+#[derive(Debug, Default)]
+pub struct V4OrdinalIdentityResolver {
+    handle: RwLock<
+        Option<Arc<Mutex<graphforge_storage::ordinal_identity_v4::V4OrdinalIdentityHandle>>>,
+    >,
+}
+
+impl V4OrdinalIdentityResolver {
+    /// Construct a resolver for an optional admitted generation facet.
+    #[must_use]
+    pub fn new(
+        handle: Option<graphforge_storage::ordinal_identity_v4::V4OrdinalIdentityHandle>,
+    ) -> Self {
+        Self {
+            handle: RwLock::new(handle.map(|handle| Arc::new(Mutex::new(handle)))),
+        }
+    }
+
+    /// Replace the exact generation served by subsequent sessions.
+    pub fn replace(
+        &self,
+        handle: Option<graphforge_storage::ordinal_identity_v4::V4OrdinalIdentityHandle>,
+    ) {
+        *self.handle.write().expect("ordinal identity lock poisoned") =
+            handle.map(|handle| Arc::new(Mutex::new(handle)));
+    }
+
+    fn lookup_node_uuids(
+        &self,
+        requested: &[u64],
+    ) -> Result<Option<graphforge_storage::V4OrdinalLookup>, GfError> {
+        let handle = self
+            .handle
+            .read()
+            .expect("ordinal identity lock poisoned")
+            .clone();
+        let Some(handle) = handle else {
+            return Ok(None);
+        };
+        handle
+            .lock()
+            .expect("ordinal identity handle poisoned")
+            .lookup_node_uuids(requested)
+            .map(Some)
+            .map_err(|error| GfError::Execution(error.to_string()))
+    }
+}
+
 /// Physical node for adjacency-backed single-hop expansion, the physical
 /// counterpart of [`graphforge_plan::ExpandNode`].
 ///
@@ -3156,6 +3208,11 @@ pub struct ExpandExec {
     demand_batch: Option<usize>,
     /// Query-scoped terminal cancellation shared by the bounded hop chain.
     demand: Option<Arc<demand::QueryDemand>>,
+    /// Exact output columns consumed above this operator. `None` preserves the
+    /// standalone full-schema contract.
+    required_output: Option<Arc<[bool]>>,
+    /// Facade-owned generation-pinned ordinal identity authority.
+    ordinal_identities: Option<Arc<V4OrdinalIdentityResolver>>,
 }
 
 impl ExpandExec {
@@ -3166,6 +3223,7 @@ impl ExpandExec {
         node: &graphforge_plan::ExpandNode,
         input: Arc<dyn ExecutionPlan>,
         provider: Arc<dyn AdjacencyProvider>,
+        ordinal_identities: Option<Arc<V4OrdinalIdentityResolver>>,
     ) -> Self {
         let schema: SchemaRef = Arc::new(node.schema().as_arrow().clone());
         let props = Arc::new(PlanProperties::new(
@@ -3196,6 +3254,8 @@ impl ExpandExec {
             edge_var: node.edge_var,
             demand_batch: None,
             demand: None,
+            required_output: None,
+            ordinal_identities,
         }
     }
 
@@ -3220,6 +3280,30 @@ impl ExpandExec {
             edge_var: self.edge_var,
             demand_batch: Some(batch_goal),
             demand: Some(demand),
+            required_output: self.required_output.clone(),
+            ordinal_identities: self.ordinal_identities.clone(),
+        })
+    }
+
+    fn with_required_output(&self, required: Vec<bool>) -> Arc<dyn ExecutionPlan> {
+        Arc::new(Self {
+            input: Arc::clone(&self.input),
+            rel_type_name: self.rel_type_name.clone(),
+            direction: self.direction,
+            dir: self.dir.clone(),
+            mode: self.mode,
+            src_col_idx: self.src_col_idx,
+            edge_prop_count: self.edge_prop_count,
+            input_width: self.input_width,
+            schema: Arc::clone(&self.schema),
+            props: Arc::clone(&self.props),
+            provider: Arc::clone(&self.provider),
+            fetch: self.fetch,
+            edge_var: self.edge_var,
+            demand_batch: self.demand_batch,
+            demand: self.demand.clone(),
+            required_output: Some(required.into()),
+            ordinal_identities: self.ordinal_identities.clone(),
         })
     }
 }
@@ -3298,6 +3382,8 @@ impl ExecutionPlan for ExpandExec {
             edge_var: self.edge_var,
             demand_batch: self.demand_batch,
             demand: self.demand.clone(),
+            required_output: self.required_output.clone(),
+            ordinal_identities: self.ordinal_identities.clone(),
         }))
     }
 
@@ -3318,6 +3404,8 @@ impl ExecutionPlan for ExpandExec {
             edge_var: self.edge_var,
             demand_batch: self.demand_batch,
             demand: self.demand.clone(),
+            required_output: self.required_output.clone(),
+            ordinal_identities: self.ordinal_identities.clone(),
         }))
     }
 
@@ -3355,6 +3443,8 @@ impl ExecutionPlan for ExpandExec {
             provider: self.provider.clone(),
             edge_var: self.edge_var,
             demand: self.demand.clone(),
+            required_output: self.required_output.clone(),
+            ordinal_identities: self.ordinal_identities.clone(),
         };
         let schema = self.schema.clone();
         let batch_size = context.session_config().batch_size();
@@ -3446,6 +3536,8 @@ struct SingleHopConfig {
     provider: Arc<dyn AdjacencyProvider>,
     edge_var: u32,
     demand: Option<Arc<demand::QueryDemand>>,
+    required_output: Option<Arc<[bool]>>,
+    ordinal_identities: Option<Arc<V4OrdinalIdentityResolver>>,
 }
 
 /// Resumable position within one input batch. Keeping the raw adjacency offset
@@ -3533,6 +3625,122 @@ fn expand_single_hop_chunk(
         return Ok(RecordBatch::new_empty(cfg.out_schema.clone()));
     }
     demand::record_candidates(cfg.edge_var, triples.len());
+
+    let dst_width = graphforge_storage::TOPOLOGY_NODES_SCHEMA.fields().len();
+    let edge_end = cfg.out_schema.fields().len().saturating_sub(dst_width);
+    let required = cfg.required_output.as_deref();
+    let edge_unused = required.is_some_and(|mask| {
+        mask.get(cfg.input_width..edge_end)
+            .is_some_and(|fields| fields.iter().all(|needed| !needed))
+    });
+    let destination_uuid_index = edge_end;
+    let destination_id_index = edge_end + 1;
+    let destination_identity_only = required.is_some_and(|mask| {
+        mask.iter()
+            .enumerate()
+            .skip(edge_end)
+            .all(|(index, needed)| {
+                !needed || index == destination_uuid_index || index == destination_id_index
+            })
+    });
+    let uuid_required =
+        required.is_some_and(|mask| mask.get(destination_uuid_index).copied().unwrap_or(false));
+    let identity_path_available = !uuid_required || cfg.ordinal_identities.is_some();
+    if edge_unused && destination_identity_only && identity_path_available {
+        let mut requested = reached.iter().copied().collect::<Vec<_>>();
+        requested.sort_unstable();
+        let (resolved, identity_metrics) = if uuid_required {
+            let lookup = cfg
+                .ordinal_identities
+                .as_ref()
+                .expect("identity path availability checked")
+                .lookup_node_uuids(&requested)?
+                .ok_or_else(|| {
+                    GfError::Execution(
+                        "destination UUID projection requires admitted v4 ordinal identity".into(),
+                    )
+                })?;
+            (lookup.values, lookup.metrics)
+        } else {
+            (
+                vec![None; requested.len()],
+                graphforge_storage::V4OrdinalLookupMetrics::default(),
+            )
+        };
+        let mut uuids = HashMap::with_capacity(requested.len());
+        for (node_id, uuid) in requested.into_iter().zip(resolved) {
+            if uuid_required {
+                let uuid = uuid.ok_or_else(|| {
+                    GfError::Execution(format!(
+                        "Expand reached unknown destination node_id {node_id}"
+                    ))
+                })?;
+                uuids.insert(node_id, *uuid.as_bytes());
+            }
+        }
+        let src_take = arrow::array::UInt32Array::from(
+            triples
+                .iter()
+                .map(|(row, _, _)| {
+                    u32::try_from(*row).map_err(|_| exec_err("row index exceeds u32".into()))
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+        let mut columns = Vec::with_capacity(cfg.out_schema.fields().len());
+        for (index, column) in input.columns().iter().enumerate() {
+            columns.push(if required.is_some_and(|mask| mask[index]) {
+                take(column, &src_take, None).map_err(|error| exec_err(error.to_string()))?
+            } else {
+                new_null_array(column.data_type(), triples.len())
+            });
+        }
+        for field in cfg
+            .out_schema
+            .fields()
+            .iter()
+            .skip(cfg.input_width)
+            .take(edge_end.saturating_sub(cfg.input_width))
+        {
+            columns.push(new_null_array(field.data_type(), triples.len()));
+        }
+        for (offset, field) in cfg.out_schema.fields().iter().skip(edge_end).enumerate() {
+            let index = edge_end + offset;
+            let column: ArrayRef = if required.is_some_and(|mask| mask[index])
+                && index == destination_id_index
+            {
+                Arc::new(UInt64Array::from(
+                    triples
+                        .iter()
+                        .map(|(_, _, neighbor)| *neighbor)
+                        .collect::<Vec<_>>(),
+                ))
+            } else if required.is_some_and(|mask| mask[index]) && index == destination_uuid_index {
+                let mut builder = FixedSizeBinaryBuilder::with_capacity(triples.len(), 16);
+                for (_, _, neighbor) in &triples {
+                    builder
+                        .append_value(uuids[neighbor])
+                        .map_err(|error| exec_err(error.to_string()))?;
+                }
+                Arc::new(builder.finish())
+            } else {
+                new_null_array(field.data_type(), triples.len())
+            };
+            columns.push(column);
+        }
+        let output = RecordBatch::try_new(cfg.out_schema.clone(), columns)
+            .map_err(|error| exec_err(error.to_string()))?;
+        let projected_columns = required
+            .map(|mask| mask.iter().filter(|needed| **needed).count())
+            .unwrap_or(cfg.out_schema.fields().len());
+        demand::record_identity_projection(
+            cfg.edge_var,
+            output.num_rows(),
+            projected_columns,
+            &identity_metrics,
+        );
+        demand::record_emitted(cfg.edge_var, output.num_rows());
+        return Ok(output);
+    }
 
     // Edge rows keyed by edge_id, for the edge topology columns — read
     // lazily for the traversed ids only.
@@ -4198,6 +4406,10 @@ fn unwind_explode(
 /// [`GraphForgeExtensionPlanner`].
 pub struct AdjacencyProviderExt(pub Arc<dyn AdjacencyProvider>);
 
+/// `SessionConfig` extension carrying the facade's exact generation-pinned
+/// ordinal identity authority.
+pub struct OrdinalIdentityResolverExt(pub Arc<V4OrdinalIdentityResolver>);
+
 /// Plans GraphForge's custom logical [`Extension`](LogicalPlan::Extension)
 /// nodes into physical [`ExecutionPlan`]s.
 #[derive(Debug, Default)]
@@ -4253,7 +4465,16 @@ impl ExtensionPlanner for GraphForgeExtensionPlanner {
                     },
                     |ext| Arc::clone(&ext.0),
                 );
-            return Ok(Some(Arc::new(ExpandExec::new(expand, input, provider))));
+            let ordinal_identities = session_state
+                .config()
+                .get_extension::<OrdinalIdentityResolverExt>()
+                .map(|extension| Arc::clone(&extension.0));
+            return Ok(Some(Arc::new(ExpandExec::new(
+                expand,
+                input,
+                provider,
+                ordinal_identities,
+            ))));
         }
         if let Some(var_len) = node.as_any().downcast_ref::<VarLenExpandNode>() {
             let input = physical_inputs.first().cloned().ok_or_else(|| {
@@ -4413,6 +4634,7 @@ impl ExecutionSession {
             PathBuf::new(),
             OntologyMode::Exploratory,
             None,
+            None,
             &SessionResourceConfig::default(),
         ))
     }
@@ -4432,6 +4654,7 @@ impl ExecutionSession {
             ontology,
             dir,
             mode,
+            None,
             None,
             &SessionResourceConfig::default(),
         ))
@@ -4475,12 +4698,29 @@ impl ExecutionSession {
         provider: Arc<PersistentAdjacencyProvider>,
         resources: &SessionResourceConfig,
     ) -> Result<Self, GfError> {
+        Self::new_with_target_provider_resources_and_identity(
+            catalog, ontology, dir, mode, provider, None, resources,
+        )
+    }
+
+    /// Like [`Self::new_with_target_provider_and_resources`] with an exact
+    /// generation-pinned destination identity authority.
+    pub fn new_with_target_provider_resources_and_identity(
+        catalog: GraphCatalog,
+        ontology: Option<OntologyHandle>,
+        dir: PathBuf,
+        mode: OntologyMode,
+        provider: Arc<PersistentAdjacencyProvider>,
+        ordinal_identities: Option<Arc<V4OrdinalIdentityResolver>>,
+        resources: &SessionResourceConfig,
+    ) -> Result<Self, GfError> {
         Ok(Self::build(
             catalog,
             ontology,
             dir,
             mode,
             Some(provider),
+            ordinal_identities,
             resources,
         ))
     }
@@ -4491,6 +4731,7 @@ impl ExecutionSession {
         dir: PathBuf,
         mode: OntologyMode,
         shared_provider: Option<Arc<PersistentAdjacencyProvider>>,
+        ordinal_identities: Option<Arc<V4OrdinalIdentityResolver>>,
         resources: &SessionResourceConfig,
     ) -> Self {
         // The session-scoped adjacency provider (#761), threaded to the
@@ -4515,6 +4756,10 @@ impl ExecutionSession {
             )))
             .with_target_partitions(resources.target_partitions)
             .with_batch_size(resources.batch_size);
+        if let Some(ordinal_identities) = ordinal_identities {
+            config =
+                config.with_extension(Arc::new(OrdinalIdentityResolverExt(ordinal_identities)));
+        }
         // Authenticated overlay scans publish sound physical-row upper bounds.
         // Let DataFusion use those estimates so a small one-partition source is
         // not eagerly repartitioned merely because newest-wins makes its exact
