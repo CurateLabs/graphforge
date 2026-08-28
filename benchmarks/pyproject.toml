@@ -2,6 +2,7 @@
 name = "graphforge-external-benchmarks"
 version = "0.0.0"
 description = "Dependency-isolated external benchmark orchestration for GraphForge"
+license = "Apache-2.0"
 requires-python = ">=3.11"
 dependencies = [
   "benchexec>=3.0,<4",
