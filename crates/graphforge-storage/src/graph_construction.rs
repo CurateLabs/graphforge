@@ -313,6 +313,18 @@ pub struct GraphConstructionEvidence {
     /// All application-observed shaped payload bytes read by canonical encoding.
     #[serde(default)]
     pub encode_application_read_bytes: u64,
+    /// Actual non-empty reads performed by canonical encoding.
+    #[serde(default)]
+    pub encode_application_read_operations: u64,
+    /// Payload bytes submitted by canonical artifact writers.
+    #[serde(default)]
+    pub encode_application_write_bytes: u64,
+    /// Actual canonical artifact write submissions.
+    #[serde(default)]
+    pub encode_application_write_operations: u64,
+    /// Canonical encoding file and directory durability barriers.
+    #[serde(default)]
+    pub encode_fsync_operations: u64,
     /// Application-observed durable control bytes read immediately before publication.
     #[serde(default)]
     pub publication_application_read_bytes: u64,
@@ -376,6 +388,12 @@ pub struct GraphConstructionEvidence {
     /// mutually exclusive.
     #[serde(default)]
     pub storage_transient_peak_total_allocated_bytes: u64,
+    /// Exact currently retained construction allocation keyed by authenticated
+    /// native `(volume, file-id)` identity. This is persisted with the
+    /// checkpoint so lifecycle qualification can union it with other owners
+    /// without double counting aliases.
+    #[serde(default)]
+    pub storage_active_identity_allocated_bytes: BTreeMap<String, u64>,
     /// Rows accepted.
     pub input_rows: u64,
     /// Non-replay chunks accepted.
@@ -999,12 +1017,46 @@ impl GraphConstructionSession {
             self.checkpoint.budgets,
             &mut cancelled,
         )?;
+        record_encoded_active_artifacts(&self.root, &encoded, &mut self.checkpoint.evidence)?;
         self.checkpoint.evidence.encode_application_read_bytes = self
             .checkpoint
             .evidence
             .encode_application_read_bytes
             .saturating_add(encoded.evidence.input_read_bytes)
             .saturating_add(encoded.evidence.membership_read_bytes);
+        self.checkpoint.evidence.encode_application_read_operations = self
+            .checkpoint
+            .evidence
+            .encode_application_read_operations
+            .saturating_add(encoded.evidence.input_read_operations)
+            .saturating_add(encoded.evidence.membership_read_operations)
+            .saturating_add(encoded.evidence.source_spool_read_operations);
+        self.checkpoint.evidence.encode_application_write_bytes = self
+            .checkpoint
+            .evidence
+            .encode_application_write_bytes
+            .saturating_add(encoded.evidence.output_write_bytes)
+            .saturating_add(encoded.evidence.membership_total_write_bytes)
+            .saturating_add(encoded.evidence.source_spool_write_bytes)
+            .saturating_add(encoded.evidence.ordinal_artifact_write_bytes)
+            .saturating_add(encoded.evidence.ordinal_publication_write_bytes);
+        self.checkpoint.evidence.encode_application_write_operations = self
+            .checkpoint
+            .evidence
+            .encode_application_write_operations
+            .saturating_add(encoded.evidence.output_write_operations)
+            .saturating_add(encoded.evidence.membership_write_operations)
+            .saturating_add(encoded.evidence.source_spool_write_operations)
+            .saturating_add(encoded.evidence.ordinal_artifact_write_operations)
+            .saturating_add(encoded.evidence.ordinal_publication_write_operations);
+        self.checkpoint.evidence.encode_fsync_operations = self
+            .checkpoint
+            .evidence
+            .encode_fsync_operations
+            .saturating_add(encoded.evidence.fsync_operations)
+            .saturating_add(encoded.evidence.membership_fsync_operations)
+            .saturating_add(encoded.evidence.source_spool_fsync_operations)
+            .saturating_add(encoded.evidence.ordinal_fsync_operations);
         self.checkpoint.evidence.canonical_output_bytes = encoded
             .artifacts
             .iter()
@@ -2800,6 +2852,17 @@ impl GraphConstructionSession {
             .chain(receipt.endpoints.iter())
         {
             evidence.immutable_artifacts = evidence.immutable_artifacts.saturating_add(1);
+            let identity_key = format!(
+                "{:016x}:{}",
+                artifact.identity.volume_serial, artifact.identity.file_id
+            );
+            if evidence
+                .storage_active_identity_allocated_bytes
+                .insert(identity_key, artifact.allocated_bytes)
+                .is_some()
+            {
+                return Err(storage("construction artifact identity was already active"));
+            }
             evidence.write_bytes = evidence.write_bytes.saturating_add(artifact.bytes);
             evidence.write_operations = evidence
                 .write_operations
@@ -3490,6 +3553,13 @@ fn recover_shape_intent(
             let mut shape_owned_evidence = checkpoint.evidence.clone();
             shape_owned_evidence.encode_application_read_bytes =
                 final_evidence.encode_application_read_bytes;
+            shape_owned_evidence.encode_application_read_operations =
+                final_evidence.encode_application_read_operations;
+            shape_owned_evidence.encode_application_write_bytes =
+                final_evidence.encode_application_write_bytes;
+            shape_owned_evidence.encode_application_write_operations =
+                final_evidence.encode_application_write_operations;
+            shape_owned_evidence.encode_fsync_operations = final_evidence.encode_fsync_operations;
             shape_owned_evidence.publication_application_read_bytes =
                 final_evidence.publication_application_read_bytes;
             shape_owned_evidence.publication_application_read_operations =
@@ -4081,7 +4151,18 @@ fn is_shape_artifact_name(name: &str) -> bool {
 fn record_shape_artifact_install(
     evidence: &mut GraphConstructionEvidence,
     receipt: &ArtifactReceipt,
-) {
+) -> Result<(), GfError> {
+    let identity_key = format!(
+        "{:016x}:{}",
+        receipt.identity.volume_serial, receipt.identity.file_id
+    );
+    if evidence
+        .storage_active_identity_allocated_bytes
+        .insert(identity_key, receipt.allocated_bytes)
+        .is_some()
+    {
+        return Err(storage("shape artifact identity installed twice"));
+    }
     let totals = evidence
         .storage_current
         .entry(crate::ArtifactCategory::ConstructionStaging)
@@ -4113,6 +4194,74 @@ fn record_shape_artifact_install(
     evidence.storage_transient_peak_total_allocated_bytes = evidence
         .storage_transient_peak_total_allocated_bytes
         .max(union);
+    Ok(())
+}
+
+fn record_encoded_active_artifacts(
+    session_root: &StableDirectory,
+    encoding: &GraphConstructionEncoding,
+    evidence: &mut GraphConstructionEvidence,
+) -> Result<(), GfError> {
+    let encoded_root = session_root
+        .open_child_directory(OsStr::new(&encoding.root))
+        .map_err(storage)?
+        .open_child_directory(OsStr::new("graph"))
+        .map_err(storage)?;
+    for artifact in &encoding.artifacts {
+        let components = Path::new(&artifact.path)
+            .components()
+            .map(|component| match component {
+                std::path::Component::Normal(value) => Ok(value.to_owned()),
+                _ => Err(storage("encoded artifact path is not normalized")),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let (name, directories) = components
+            .split_last()
+            .ok_or_else(|| storage("encoded artifact path is empty"))?;
+        let mut directory = encoded_root.try_clone().map_err(storage)?;
+        for child in directories {
+            directory = directory.open_child_directory(child).map_err(storage)?;
+        }
+        let file = directory.open_child_file(name).map_err(storage)?;
+        let identity = file_identity(&file).map_err(storage)?;
+        let usage = graphforge_filesystem::file_space_usage(&file).map_err(storage)?;
+        if usage.logical_bytes != artifact.bytes {
+            return Err(storage("encoded artifact allocation authority changed"));
+        }
+        let identity_key = format!("{:016x}:{}", identity.volume_serial, hex(&identity.file_id));
+        if let Some(existing) = evidence
+            .storage_active_identity_allocated_bytes
+            .get(&identity_key)
+        {
+            if *existing != usage.allocated_bytes {
+                return Err(storage("encoded artifact identity allocation changed"));
+            }
+            continue;
+        }
+        evidence
+            .storage_active_identity_allocated_bytes
+            .insert(identity_key, usage.allocated_bytes);
+        let totals = evidence
+            .storage_current
+            .entry(crate::ArtifactCategory::ConstructionStaging)
+            .or_default();
+        totals.logical_references = totals.logical_references.saturating_add(1);
+        totals.logical_bytes = totals.logical_bytes.saturating_add(usage.logical_bytes);
+        totals.physical_objects = totals.physical_objects.saturating_add(1);
+        totals.physical_logical_bytes = totals
+            .physical_logical_bytes
+            .saturating_add(usage.logical_bytes);
+        totals.allocated_bytes = totals.allocated_bytes.saturating_add(usage.allocated_bytes);
+        let active_total = evidence
+            .storage_active_identity_allocated_bytes
+            .values()
+            .try_fold(0_u64, |total, value| total.checked_add(*value))
+            .ok_or_else(|| storage("active construction allocation overflow"))?;
+        evidence.storage_transient_peak_total_allocated_bytes = evidence
+            .storage_transient_peak_total_allocated_bytes
+            .max(active_total);
+    }
+    Ok(())
 }
 
 fn unlink_shape_artifact(
@@ -4122,6 +4271,17 @@ fn unlink_shape_artifact(
 ) -> Result<(), GfError> {
     let receipt = receipt_for_existing(root, name)?;
     unlink_artifact(root, &receipt)?;
+    let identity_key = format!(
+        "{:016x}:{}",
+        receipt.identity.volume_serial, receipt.identity.file_id
+    );
+    let removed = evidence
+        .storage_active_identity_allocated_bytes
+        .remove(&identity_key)
+        .ok_or_else(|| storage("shape active identity ledger is absent"))?;
+    if removed != receipt.allocated_bytes {
+        return Err(storage("shape active identity allocation changed"));
+    }
     let totals = evidence
         .storage_current
         .get_mut(&crate::ArtifactCategory::ConstructionStaging)
@@ -4289,7 +4449,7 @@ fn copy_authenticated_run<const N: usize>(
         fsync_operations: 2,
     };
     persist_shape_receipt(root, &output_receipt)?;
-    record_shape_artifact_install(evidence, &output_receipt);
+    record_shape_artifact_install(evidence, &output_receipt)?;
     evidence.merge_fsync_operations = evidence.merge_fsync_operations.saturating_add(2);
     Ok(())
 }
@@ -4515,7 +4675,7 @@ fn merge_fixed_group<const N: usize>(
     root.sync().map_err(storage)?;
     construction_failpoint("shape.fixed_merge.after_install");
     persist_shape_receipt(root, &receipt)?;
-    record_shape_artifact_install(evidence, &receipt);
+    record_shape_artifact_install(evidence, &receipt)?;
     evidence.merge_fsync_operations = evidence.merge_fsync_operations.saturating_add(2);
     evidence.merge_groups = evidence.merge_groups.saturating_add(1);
     Ok(receipt)
@@ -4711,7 +4871,7 @@ fn merge_row_group(
     root.sync().map_err(storage)?;
     construction_failpoint("shape.row_merge.after_install");
     persist_shape_receipt(root, &receipt)?;
-    record_shape_artifact_install(evidence, &receipt);
+    record_shape_artifact_install(evidence, &receipt)?;
     evidence.merge_fsync_operations = evidence.merge_fsync_operations.saturating_add(4);
     evidence.merge_groups = evidence.merge_groups.saturating_add(1);
     evidence.merge_written_bytes = evidence.merge_written_bytes.saturating_add(receipt.bytes);
@@ -5628,7 +5788,7 @@ fn assign_surrogates(
         .map_err(storage)?;
     root.sync().map_err(storage)?;
     persist_shape_receipt(root, &output_receipt)?;
-    record_shape_artifact_install(evidence, &output_receipt);
+    record_shape_artifact_install(evidence, &output_receipt)?;
     evidence.merge_fsync_operations = evidence.merge_fsync_operations.saturating_add(2);
     Ok(output.to_owned())
 }

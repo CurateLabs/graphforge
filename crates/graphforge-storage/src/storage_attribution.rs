@@ -166,8 +166,10 @@ impl ConstructionPhaseAttribution {
             StorageIoPhase::EncodeWritePostwriteAuthentication,
             PhaseIoTotals {
                 read_bytes: evidence.encode_application_read_bytes,
-                write_bytes: evidence.canonical_output_bytes,
-                read_calls: evidence.shaped_output_authentication_operations,
+                write_bytes: evidence.encode_application_write_bytes,
+                read_calls: evidence.encode_application_read_operations,
+                write_calls: evidence.encode_application_write_operations,
+                fsync_calls: evidence.encode_fsync_operations,
                 ..Default::default()
             },
         );
@@ -246,6 +248,37 @@ impl ConstructionPhaseAttribution {
         }
         Ok(())
     }
+
+    /// Validate the qualification semantics in addition to arithmetic
+    /// reconciliation. Ordinary lifecycle phases must carry source-owned work;
+    /// recovery alone may be absent for an uninterrupted run. Byte and call
+    /// counters are paired so a synthetic byte-only or call-only row cannot be
+    /// presented as observed application I/O.
+    pub fn validate_for_qualification(&self) -> Result<(), GfError> {
+        self.validate_reconciliation()?;
+        for phase in StorageIoPhase::ALL {
+            let totals = &self.phases[&phase];
+            let observed = totals.read_bytes != 0
+                || totals.write_bytes != 0
+                || totals.read_calls != 0
+                || totals.write_calls != 0
+                || totals.object_count != 0
+                || totals.block_count != 0
+                || totals.fsync_calls != 0;
+            if phase != StorageIoPhase::RecoveryReauthentication && !observed {
+                return Err(validation(
+                    "required lifecycle phase has no source-owned observation",
+                ));
+            }
+            if (totals.read_bytes == 0) != (totals.read_calls == 0) {
+                return Err(validation("phase read bytes and calls disagree"));
+            }
+            if (totals.write_bytes == 0) != (totals.write_calls == 0) {
+                return Err(validation("phase write bytes and calls disagree"));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Reconciled totals for one artifact category.
@@ -282,6 +315,109 @@ pub struct StorageAttributionSnapshot {
     pub physical_logical_bytes: u64,
     /// Reconciled distinct-file allocated bytes across categories.
     pub allocated_bytes: u64,
+    /// Distinct native identities and their allocation. This authenticated
+    /// union is the cross-owner input to lifecycle peak tracking.
+    #[serde(skip)]
+    pub physical_identity_allocated_bytes: BTreeMap<String, u64>,
+}
+
+/// Exact high-water tracker for simultaneously active authenticated files.
+/// Owners are replaced atomically; aliases share one native identity and are
+/// counted once until the final owner removes it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorageAllocationLifecycle {
+    owners: BTreeMap<String, BTreeSet<String>>,
+    active: BTreeMap<String, (u64, u64)>,
+    current_allocated_bytes: u64,
+    peak_allocated_bytes: u64,
+}
+
+impl StorageAllocationLifecycle {
+    /// Replace an owner's exact authenticated identity inventory.
+    pub fn replace_owner(
+        &mut self,
+        owner: impl Into<String>,
+        identities: &BTreeMap<String, u64>,
+    ) -> Result<(), GfError> {
+        let mut candidate = self.clone();
+        candidate.replace_owner_inner(owner.into(), identities)?;
+        *self = candidate;
+        Ok(())
+    }
+
+    fn replace_owner_inner(
+        &mut self,
+        owner: String,
+        identities: &BTreeMap<String, u64>,
+    ) -> Result<(), GfError> {
+        self.remove_owner(&owner)?;
+        let mut installed = BTreeSet::new();
+        for (identity, allocated) in identities {
+            match self.active.get_mut(identity) {
+                Some((existing, references)) => {
+                    if existing != allocated {
+                        return Err(validation("active identity allocation changed"));
+                    }
+                    *references = checked_add(*references, 1)?;
+                }
+                None => {
+                    self.current_allocated_bytes =
+                        checked_add(self.current_allocated_bytes, *allocated)?;
+                    self.active.insert(identity.clone(), (*allocated, 1));
+                }
+            }
+            installed.insert(identity.clone());
+            self.peak_allocated_bytes = self.peak_allocated_bytes.max(self.current_allocated_bytes);
+        }
+        self.owners.insert(owner, installed);
+        Ok(())
+    }
+
+    /// Replace an owner from a generation-bound storage snapshot.
+    pub fn replace_snapshot_owner(
+        &mut self,
+        owner: impl Into<String>,
+        snapshot: &StorageAttributionSnapshot,
+    ) -> Result<(), GfError> {
+        snapshot.validate_reconciliation()?;
+        self.replace_owner(owner, &snapshot.physical_identity_allocated_bytes)
+    }
+
+    /// Remove an owner and decrement every exact identity reference.
+    pub fn remove_owner(&mut self, owner: &str) -> Result<(), GfError> {
+        let Some(identities) = self.owners.remove(owner) else {
+            return Ok(());
+        };
+        for identity in identities {
+            let (allocated, references) = self
+                .active
+                .get(&identity)
+                .copied()
+                .ok_or_else(|| validation("active identity owner is absent"))?;
+            if references == 1 {
+                self.active.remove(&identity);
+                self.current_allocated_bytes = self
+                    .current_allocated_bytes
+                    .checked_sub(allocated)
+                    .ok_or_else(|| validation("active allocation underflow"))?;
+            } else {
+                self.active.insert(identity, (allocated, references - 1));
+            }
+        }
+        Ok(())
+    }
+
+    /// Current exact identity-union allocation.
+    #[must_use]
+    pub const fn current_allocated_bytes(&self) -> u64 {
+        self.current_allocated_bytes
+    }
+
+    /// Exact high-water allocation observed after every owner transition.
+    #[must_use]
+    pub const fn peak_allocated_bytes(&self) -> u64 {
+        self.peak_allocated_bytes
+    }
 }
 
 impl StorageAttributionSnapshot {
@@ -313,6 +449,17 @@ impl StorageAttributionSnapshot {
             || total.allocated_bytes != self.allocated_bytes
         {
             return Err(validation("storage attribution totals do not reconcile"));
+        }
+        let identity_allocated = self
+            .physical_identity_allocated_bytes
+            .values()
+            .try_fold(0_u64, |total, value| checked_add(total, *value))?;
+        if identity_allocated != self.allocated_bytes
+            || self.physical_identity_allocated_bytes.len() as u64 != self.physical_objects
+        {
+            return Err(validation(
+                "storage attribution identity union does not reconcile",
+            ));
         }
         Ok(())
     }
@@ -494,6 +641,7 @@ struct Accumulator {
     generation_manifest_sha256: [u8; 32],
     categories: BTreeMap<ArtifactCategory, ArtifactStorageTotals>,
     physical_seen: BTreeSet<(u64, [u8; 16])>,
+    physical_identity_allocated_bytes: BTreeMap<String, u64>,
 }
 
 impl Accumulator {
@@ -506,6 +654,7 @@ impl Accumulator {
                 .map(|category| (category, ArtifactStorageTotals::default()))
                 .collect(),
             physical_seen: BTreeSet::new(),
+            physical_identity_allocated_bytes: BTreeMap::new(),
         }
     }
 
@@ -536,6 +685,10 @@ impl Accumulator {
             .physical_seen
             .insert((identity.volume_serial, identity.file_id))
         {
+            self.physical_identity_allocated_bytes.insert(
+                native_identity_key(identity.volume_serial, &identity.file_id),
+                usage.allocated_bytes,
+            );
             let totals = self
                 .categories
                 .get_mut(&category)
@@ -562,6 +715,7 @@ impl Accumulator {
             physical_objects: total.physical_objects,
             physical_logical_bytes: total.physical_logical_bytes,
             allocated_bytes: total.allocated_bytes,
+            physical_identity_allocated_bytes: self.physical_identity_allocated_bytes,
         };
         snapshot.validate_reconciliation()?;
         Ok(snapshot)
@@ -605,6 +759,15 @@ fn add_phase_totals_saturating(target: &mut PhaseIoTotals, value: &PhaseIoTotals
 fn checked_add(left: u64, right: u64) -> Result<u64, GfError> {
     left.checked_add(right)
         .ok_or_else(|| validation("storage attribution counter overflow"))
+}
+
+fn native_identity_key(volume_serial: u64, file_id: &[u8; 16]) -> String {
+    use std::fmt::Write as _;
+    let mut value = format!("{volume_serial:016x}:");
+    for byte in file_id {
+        write!(&mut value, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    value
 }
 
 fn validation(message: impl Into<String>) -> GfError {
@@ -683,6 +846,7 @@ mod tests {
             physical_objects: 0,
             physical_logical_bytes: 0,
             allocated_bytes: 0,
+            physical_identity_allocated_bytes: BTreeMap::new(),
         };
         snapshot.validate_reconciliation().unwrap();
         snapshot.logical_bytes = 8;
@@ -710,9 +874,40 @@ mod tests {
             physical_objects: 0,
             physical_logical_bytes: 0,
             allocated_bytes: 0,
+            physical_identity_allocated_bytes: BTreeMap::new(),
         };
         assert!(snapshot.validate_reconciliation().is_ok());
         assert!(snapshot.validate_for_qualification().is_err());
+    }
+
+    #[test]
+    fn lifecycle_union_deduplicates_identities_and_decrements_owners() {
+        let mut lifecycle = StorageAllocationLifecycle::default();
+        let first = BTreeMap::from([("dev:a".to_owned(), 4096), ("dev:b".to_owned(), 8192)]);
+        let alias = BTreeMap::from([("dev:b".to_owned(), 8192), ("dev:c".to_owned(), 4096)]);
+        lifecycle.replace_owner("source", &first).unwrap();
+        assert_eq!(lifecycle.current_allocated_bytes(), 12_288);
+        lifecycle.replace_owner("import", &alias).unwrap();
+        assert_eq!(lifecycle.current_allocated_bytes(), 16_384);
+        assert_eq!(lifecycle.peak_allocated_bytes(), 16_384);
+        lifecycle.remove_owner("source").unwrap();
+        assert_eq!(lifecycle.current_allocated_bytes(), 12_288);
+        lifecycle.remove_owner("import").unwrap();
+        assert_eq!(lifecycle.current_allocated_bytes(), 0);
+        assert_eq!(lifecycle.peak_allocated_bytes(), 16_384);
+    }
+
+    #[test]
+    fn lifecycle_union_rejects_identity_allocation_disagreement() {
+        let mut lifecycle = StorageAllocationLifecycle::default();
+        lifecycle
+            .replace_owner("first", &BTreeMap::from([("dev:a".to_owned(), 4096)]))
+            .unwrap();
+        assert!(
+            lifecycle
+                .replace_owner("alias", &BTreeMap::from([("dev:a".to_owned(), 8192)]))
+                .is_err()
+        );
     }
 
     #[test]
@@ -720,7 +915,14 @@ mod tests {
         let evidence = GraphConstructionEvidence {
             seal_application_read_bytes: 11,
             shape_application_read_bytes: 13,
+            shape_input_validation_read_operations: 1,
+            merge_written_bytes: 5,
+            parquet_write_operations: 1,
             encode_application_read_bytes: 17,
+            encode_application_read_operations: 2,
+            encode_application_write_bytes: 31,
+            encode_application_write_operations: 4,
+            encode_fsync_operations: 9,
             publication_application_read_bytes: 19,
             publication_application_read_operations: 2,
             cas_application_read_bytes: 23,
@@ -744,16 +946,17 @@ mod tests {
         };
         let mut attribution = ConstructionPhaseAttribution::from_construction(&evidence);
         attribution.validate_reconciliation().unwrap();
+        attribution.validate_for_qualification().unwrap();
         assert_eq!(attribution.phases.len(), StorageIoPhase::ALL.len());
         assert_eq!(attribution.totals.read_bytes, 153);
         assert_eq!(
             attribution.phases[&StorageIoPhase::RecoveryReauthentication].read_calls,
             2
         );
-        assert_eq!(attribution.totals.write_bytes, 158);
-        assert_eq!(attribution.totals.read_calls, 18);
-        assert_eq!(attribution.totals.write_calls, 14);
-        assert_eq!(attribution.totals.fsync_calls, 20);
+        assert_eq!(attribution.totals.write_bytes, 163);
+        assert_eq!(attribution.totals.read_calls, 21);
+        assert_eq!(attribution.totals.write_calls, 19);
+        assert_eq!(attribution.totals.fsync_calls, 29);
         attribution
             .phases
             .remove(&StorageIoPhase::RecoveryReauthentication);

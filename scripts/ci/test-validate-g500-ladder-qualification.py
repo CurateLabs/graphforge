@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import copy
 import importlib.util
+import json
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
@@ -191,3 +194,84 @@ def test_canonical_projection_excludes_package_and_import_copies():
     )
     with pytest.raises(VALIDATOR.EvidenceError, match="canonical edge projection"):
         VALIDATOR.validate(value)
+
+
+def certification_document(scale: int, edges: int, unit: int) -> dict:
+    phase_values = {
+        phase: {
+            "read_bytes": unit,
+            "write_bytes": unit,
+            "read_calls": 1,
+            "write_calls": 1,
+            "object_count": 1,
+            "block_count": 1,
+            "fsync_calls": 1,
+        }
+        for phase in PHASES
+    }
+    categories = {
+        key: {
+            "logical_references": index + 2,
+            "logical_bytes": unit * (index + 1),
+            "physical_objects": index + 1,
+            "physical_logical_bytes": unit * (index + 1),
+            "allocated_bytes": unit * (index + 2),
+        }
+        for index, key in enumerate(
+            (
+                "topology_nodes",
+                "topology_edges",
+                "properties",
+                "uuid_and_surrogates",
+                "adjacency",
+                "catalog_and_manifests",
+            )
+        )
+    }
+    descriptor = {
+        "logical_bytes": unit,
+        "allocated_bytes": unit * 2,
+        "logical_references": 1,
+        "physical_objects": 1,
+    }
+    return {
+        "run": {"scale": scale},
+        "counts": {"source_nodes": 1 << scale, "source_edges": edges},
+        "envelope": {
+            "peak_disk_source": "storage_owned_active_identity_union",
+            "peak_disk_bytes": unit * 100,
+        },
+        "storage_attribution": {
+            "source": {"categories": categories},
+            "portable_package": descriptor,
+            "clean_import": descriptor,
+            "construction": {
+                "storage_current": {"construction_staging": descriptor},
+                "storage_transient_peak_total_allocated_bytes": unit * 5,
+            },
+            "application_io_phases": {"phases": phase_values},
+        },
+    }
+
+
+def test_real_certification_companion_builds_then_validates(tmp_path: Path):
+    low = tmp_path / "s20.json"
+    high = tmp_path / "s22.json"
+    output = tmp_path / "qualification.json"
+    low.write_text(json.dumps(certification_document(20, 1 << 24, 1_000)))
+    high.write_text(json.dumps(certification_document(22, 1 << 26, 4_000)))
+    subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).with_name("build-g500-ladder-qualification.py")),
+            str(low),
+            str(high),
+            str(output),
+            "--volume-bytes",
+            "500000000000",
+            "--reserved-headroom-bytes",
+            "1000000000",
+        ],
+        check=True,
+    )
+    VALIDATOR.validate(json.loads(output.read_text()))

@@ -60,6 +60,12 @@ pub struct PortableV2ImportResult {
     pub generation_uuid: Uuid,
     /// Whether the operation replayed an identical publication.
     pub idempotent_replay: bool,
+    /// Exact private-materialization identity allocation for lifecycle qualification.
+    #[doc(hidden)]
+    pub materialized_identity_allocated_bytes: std::collections::BTreeMap<String, u64>,
+    /// Exact published-generation identity allocation for lifecycle qualification.
+    #[doc(hidden)]
+    pub published_identity_allocated_bytes: std::collections::BTreeMap<String, u64>,
 }
 
 /// Publish a verified local portable-v2 package to an OCI registry.
@@ -526,6 +532,8 @@ impl GraphForge {
             transport_digest: receipt.transport_digest,
             generation_uuid: receipt.publication.generation_uuid,
             idempotent_replay: receipt.publication.idempotent_replay,
+            materialized_identity_allocated_bytes: receipt.materialized_identity_allocated_bytes,
+            published_identity_allocated_bytes: receipt.published_identity_allocated_bytes,
         })
     }
 }

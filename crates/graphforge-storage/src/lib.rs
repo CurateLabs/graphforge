@@ -22,8 +22,8 @@ pub mod adjacency_delta;
 pub mod storage_attribution;
 pub use storage_attribution::{
     ArtifactCategory, ArtifactStorageTotals, ConstructionPhaseAttribution, PhaseIoTotals,
-    StorageAttributionSnapshot, StorageIoPhase, capture_storage_attribution,
-    classify_graph_artifact,
+    StorageAllocationLifecycle, StorageAttributionSnapshot, StorageIoPhase,
+    capture_storage_attribution, classify_graph_artifact,
 };
 
 pub mod generation;

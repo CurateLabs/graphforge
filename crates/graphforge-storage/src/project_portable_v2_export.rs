@@ -1,6 +1,6 @@
 //! Bounded deterministic portable-project v2 complete-package export.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -1111,16 +1111,22 @@ pub fn export_complete_portable_v2(
     let digest = match result {
         Ok(d) => d,
         Err(e) => {
+            let allocation = capture_owned_export_identities(&stage).unwrap_or_default();
             remove(&stage);
-            return Err(e);
+            return Err(e.with_allocation_identities(allocation));
         }
     };
+    let staged_allocation = capture_owned_export_identities(&stage)?;
     if is_cancelled() {
         remove(&stage);
-        return Err(err("GF_CANCELLED", "portable export cancelled"));
+        return Err(err("GF_CANCELLED", "portable export cancelled")
+            .with_allocation_identities(staged_allocation));
     }
     let verified = verify_portable_v2(&stage, PortableV2Mode::Full, limits, Some(cancelled))
-        .inspect_err(|_| remove(&stage))?;
+        .map_err(|error| {
+            remove(&stage);
+            error.with_allocation_identities(staged_allocation.clone())
+        })?;
     let expected_transport = format!("sha256:{}", hex(digest));
     if verified.package_class != plan.package_class
         || verified.package_digest != format!("sha256:{}", hex(plan.package_digest))
@@ -1129,22 +1135,24 @@ pub fn export_complete_portable_v2(
         return Err(PortableV2Error::new(
             PortableV2ErrorCode::DigestMismatch,
             "writer and verifier semantic receipts disagree",
-        ));
+        )
+        .with_allocation_identities(staged_allocation.clone()));
     }
     if verified.transport_digest.as_deref() != Some(expected_transport.as_str()) {
         remove(&stage);
         return Err(PortableV2Error::new(
             PortableV2ErrorCode::DigestMismatch,
             "writer and verifier transport receipts disagree",
-        ));
+        )
+        .with_allocation_identities(staged_allocation.clone()));
     }
     publish_no_replace(&stage, dst).map_err(|error| {
         remove(&stage);
-        storage(error)
+        storage(error).with_allocation_identities(staged_allocation.clone())
     })?;
     if let Err(error) = sync_dir(parent) {
         remove(dst);
-        return Err(error);
+        return Err(error.with_allocation_identities(staged_allocation));
     }
     Ok(PortableV2ExportReceipt {
         generation_uuid: plan.generation_uuid,
@@ -1156,6 +1164,47 @@ pub fn export_complete_portable_v2(
         output,
         selection_fingerprint: plan.selection_fingerprint.clone(),
     })
+}
+
+fn capture_owned_export_identities(stage: &Path) -> Result<BTreeMap<String, u64>, ExportError> {
+    if !stage.exists() {
+        return Ok(BTreeMap::new());
+    }
+    let mut pending = vec![stage.to_owned()];
+    let mut identities = BTreeMap::new();
+    while let Some(path) = pending.pop() {
+        let metadata = fs::symlink_metadata(&path).map_err(storage)?;
+        if metadata.is_dir() {
+            for entry in fs::read_dir(&path).map_err(storage)? {
+                pending.push(entry.map_err(storage)?.path());
+            }
+            continue;
+        }
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(err(
+                "GF_IO",
+                "export staging contains a non-regular artifact",
+            ));
+        }
+        let file = File::open(&path).map_err(storage)?;
+        let identity = graphforge_filesystem::file_identity(&file).map_err(storage)?;
+        let usage = graphforge_filesystem::file_space_usage(&file).map_err(storage)?;
+        let mut file_id = String::with_capacity(32);
+        for byte in identity.file_id {
+            use std::fmt::Write as _;
+            write!(&mut file_id, "{byte:02x}").expect("writing to String cannot fail");
+        }
+        if identities
+            .insert(
+                format!("{:016x}:{file_id}", identity.volume_serial),
+                usage.allocated_bytes,
+            )
+            .is_some()
+        {
+            return Err(err("GF_IO", "export staging repeats a native identity"));
+        }
+    }
+    Ok(identities)
 }
 
 /// Repack a fully verified expanded portable-v2 package into canonical bundle bytes.

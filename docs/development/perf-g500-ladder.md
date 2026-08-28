@@ -207,6 +207,15 @@ identity deduplicates content-addressed/shared objects. Logical bytes,
 filesystem allocation, current retained allocation, and full-lifecycle
 transient peak remain separate quantities.
 
+The lifecycle peak is not reconstructed by adding category peaks or directory
+sizes. Storage owns a reference-counted union keyed by authenticated native
+`(volume, file-id)` identities. Append, shaping, encoding, CAS publication,
+portable export, private import materialization, clean publication, corruption
+drills, and interrupted-import cleanup install or remove exact owners. The
+high-water mark advances at each transition, so aliases count once and files
+that did not coexist are never added together. Certification emits
+`storage_owned_active_identity_union` provenance only from this tracker.
+
 The same document carries a closed nine-phase inventory: append/merge, seal
 authentication, shape consumption/reauthentication, encode plus post-write
 authentication, publication preauthentication, CAS install, hydration
@@ -228,10 +237,16 @@ canonical-edge allocation plus the lifecycle peak,
 volume headroom, and the admit/refuse decision. A single successful rung is not
 a projection, and insufficient reserved headroom always refuses SCALE-26.
 
-Validate a captured companion document with:
+Build and validate a companion document from two adjacent real certification
+documents with:
 
 ```bash
-make g500-ladder-qualification-check EVIDENCE=build/g500-ladder-qualification.json
+make g500-ladder-qualification \
+  LOW_CERT=build/s20-certification.json \
+  HIGH_CERT=build/s22-certification.json \
+  EVIDENCE=build/g500-ladder-qualification.json \
+  VOLUME_BYTES=536870912000 \
+  RESERVED_HEADROOM_BYTES=53687091200
 ```
 
 ## CI placement

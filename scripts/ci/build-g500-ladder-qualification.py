@@ -92,6 +92,7 @@ def main() -> None:
     headroom = max(0, args.volume_bytes - peak)
     decision = "admit" if peak <= args.volume_bytes and headroom >= args.reserved_headroom_bytes else "refuse"
     value = {"schema": "graphforge-g500-ladder-qualification/3", "rungs": rungs, "projection": {"target": "S26", "source_rungs": [low["id"], high["id"]], "rate": {"numerator_bytes": ratio_num, "denominator_count": ratio_den}, "projected_canonical_node_bytes": canonical_nodes, "projected_canonical_edge_bytes": canonical_edges, "projected_lifecycle_peak_bytes": peak, "volume_bytes": args.volume_bytes, "reserved_headroom_bytes": args.reserved_headroom_bytes, "headroom_bytes": headroom, "decision": decision}}
+    args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(value, indent=2) + "\n")
 
 

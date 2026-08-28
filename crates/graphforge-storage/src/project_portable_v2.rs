@@ -203,6 +203,10 @@ pub struct PortableV2Error {
     pub code: PortableV2ErrorCode,
     pub entry: Option<String>,
     detail: &'static str,
+    /// Content-free native allocation evidence retained only for local
+    /// lifecycle qualification of an interrupted operation.
+    #[doc(hidden)]
+    pub allocation_identity_allocated_bytes: std::collections::BTreeMap<String, u64>,
 }
 
 impl PortableV2Error {
@@ -213,6 +217,7 @@ impl PortableV2Error {
             code,
             entry: None,
             detail,
+            allocation_identity_allocated_bytes: std::collections::BTreeMap::new(),
         }
     }
     pub(crate) fn at(code: PortableV2ErrorCode, entry: &str, detail: &'static str) -> Self {
@@ -220,7 +225,16 @@ impl PortableV2Error {
             code,
             entry: Some(entry.chars().take(4096).collect()),
             detail,
+            allocation_identity_allocated_bytes: std::collections::BTreeMap::new(),
         }
+    }
+
+    pub(crate) fn with_allocation_identities(
+        mut self,
+        identities: std::collections::BTreeMap<String, u64>,
+    ) -> Self {
+        self.allocation_identity_allocated_bytes = identities;
+        self
     }
 }
 impl fmt::Display for PortableV2Error {
@@ -385,9 +399,9 @@ pub fn verify_portable_v2(
             )
         })?;
         if metadata.is_dir() {
-            materialize_expanded(source, staging.path(), limits, cancelled)?;
+            materialize_expanded(source, staging.path(), limits, cancelled, &mut |_| Ok(()))?;
         } else {
-            materialize_bundle(source, staging.path(), limits, cancelled)?;
+            materialize_bundle(source, staging.path(), limits, cancelled, &mut |_| Ok(()))?;
         }
         validate_materialized_ontology_composition(staging.path(), &report, limits, cancelled)?;
     }
@@ -839,6 +853,16 @@ pub fn materialize_verified_portable_v2(
     limits: PortableV2Limits,
     cancelled: Option<&AtomicBool>,
 ) -> Result<PortableV2Report, PortableV2Error> {
+    materialize_verified_portable_v2_observed(source, destination, limits, cancelled, |_| Ok(()))
+}
+
+pub(crate) fn materialize_verified_portable_v2_observed(
+    source: impl AsRef<Path>,
+    destination: impl AsRef<Path>,
+    limits: PortableV2Limits,
+    cancelled: Option<&AtomicBool>,
+    mut observed: impl FnMut(&File) -> Result<(), PortableV2Error>,
+) -> Result<PortableV2Report, PortableV2Error> {
     let source = source.as_ref();
     let destination = destination.as_ref();
     if destination.exists() {
@@ -854,9 +878,9 @@ pub fn materialize_verified_portable_v2(
         PortableV2Error::new(PortableV2ErrorCode::Io, "cannot create materialization")
     })?;
     let result = if before.is_dir() {
-        materialize_expanded(source, destination, limits, cancelled)
+        materialize_expanded(source, destination, limits, cancelled, &mut observed)
     } else {
-        materialize_bundle(source, destination, limits, cancelled)
+        materialize_bundle(source, destination, limits, cancelled, &mut observed)
     };
     if let Err(error) = result {
         let _ = fs::remove_dir_all(destination);
@@ -906,6 +930,7 @@ fn materialize_expanded(
     destination: &Path,
     limits: PortableV2Limits,
     cancelled: Option<&AtomicBool>,
+    observed: &mut impl FnMut(&File) -> Result<(), PortableV2Error>,
 ) -> Result<(), PortableV2Error> {
     let mut paths = Vec::new();
     walk(source, source, &mut paths, limits, cancelled)?;
@@ -934,6 +959,7 @@ fn materialize_expanded(
         output.sync_all().map_err(|_| {
             PortableV2Error::at(PortableV2ErrorCode::Io, &relative, "cannot sync entry")
         })?;
+        observed(&output)?;
         let after = fs::metadata(&input_path).map_err(|_| {
             PortableV2Error::at(
                 PortableV2ErrorCode::ConcurrentMutation,
@@ -957,6 +983,7 @@ fn materialize_bundle(
     destination: &Path,
     limits: PortableV2Limits,
     cancelled: Option<&AtomicBool>,
+    observed: &mut impl FnMut(&File) -> Result<(), PortableV2Error>,
 ) -> Result<(), PortableV2Error> {
     let mut input = File::open(source)
         .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::Io, "cannot reopen bundle"))?;
@@ -1008,6 +1035,7 @@ fn materialize_bundle(
             output.sync_all().map_err(|_| {
                 PortableV2Error::at(PortableV2ErrorCode::Io, &path, "cannot sync entry")
             })?;
+            observed(&output)?;
         } else {
             skip_exact(&mut input, size, limits.copy_buffer_bytes, cancelled)?;
         }

@@ -39,6 +39,7 @@ cucumber = { workspace = true }
 tokio = { workspace = true }
 graphforge-cypher = { path = "../graphforge-cypher" }
 graphforge-storage = { path = "../graphforge-storage", features = ["test-failpoints", "test-support"] }
+graphforge-filesystem = { path = "../graphforge-filesystem" }
 
 # BDD runner for the public-API + TCK feature files (tests/features/).
 # A custom-harness target (cucumber drives its own main).

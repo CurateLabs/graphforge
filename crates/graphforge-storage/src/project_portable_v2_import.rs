@@ -36,6 +36,10 @@ pub struct PortableV2ImportReceipt {
     pub publication: ProjectPublicationReceipt,
     /// Durable non-authoritative composition candidate, when imported.
     pub staged_composition: Option<PortableV2StagedCompositionReceipt>,
+    /// Exact native identities simultaneously retained by private materialization.
+    pub materialized_identity_allocated_bytes: std::collections::BTreeMap<String, u64>,
+    /// Exact authenticated identity union of the published generation.
+    pub published_identity_allocated_bytes: std::collections::BTreeMap<String, u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -228,12 +232,23 @@ pub fn import_complete_portable_v2_with_progress(
             transaction_uuid.hyphenated()
         ));
     let (owner, owned_retry) = claim_stage(&stage, target_name, transaction_uuid, generation_uuid)?;
-    let report = match materialize_verified_portable_v2(source, &stage, limits, cancelled) {
+    let mut materialized_identity_allocated_bytes = std::collections::BTreeMap::new();
+    let owner_file = fs::File::open(&owner).map_err(|_| {
+        PortableV2Error::new(PortableV2ErrorCode::Io, "cannot open import ownership")
+    })?;
+    record_import_file_identity(&owner_file, &mut materialized_identity_allocated_bytes)?;
+    let report = match crate::project_portable_v2::materialize_verified_portable_v2_observed(
+        source,
+        &stage,
+        limits,
+        cancelled,
+        |file| record_import_file_identity(file, &mut materialized_identity_allocated_bytes),
+    ) {
         Ok(report) => report,
         Err(error) => {
             let _ = fs::remove_file(&owner);
             let _ = sync_parent(&owner);
-            return Err(error);
+            return Err(error.with_allocation_identities(materialized_identity_allocated_bytes));
         }
     };
     progress(PortableV2ImportProgress {
@@ -242,6 +257,7 @@ pub fn import_complete_portable_v2_with_progress(
         bytes: report.payload_bytes,
         package_digest: Some(report.package_digest.clone()),
     });
+    let allocation_on_error = materialized_identity_allocated_bytes.clone();
     let result = import_materialized(
         &stage,
         target,
@@ -252,7 +268,12 @@ pub fn import_complete_portable_v2_with_progress(
         cancelled,
         &report,
         owned_retry,
-    );
+    )
+    .map(|mut receipt| {
+        receipt.materialized_identity_allocated_bytes = materialized_identity_allocated_bytes;
+        receipt
+    })
+    .map_err(|error| error.with_allocation_identities(allocation_on_error));
     let _ = fs::remove_dir_all(&stage);
     let _ = fs::remove_file(&owner);
     let _ = sync_parent(&owner);
@@ -586,7 +607,42 @@ fn import_materialized(
         transport_digest: report.transport_digest.clone(),
         publication,
         staged_composition,
+        materialized_identity_allocated_bytes: std::collections::BTreeMap::new(),
+        published_identity_allocated_bytes: crate::capture_storage_attribution(&reopened)
+            .map_err(storage)?
+            .physical_identity_allocated_bytes,
     })
+}
+
+fn record_import_file_identity(
+    file: &fs::File,
+    identities: &mut std::collections::BTreeMap<String, u64>,
+) -> Result<(), PortableV2Error> {
+    let identity = graphforge_filesystem::file_identity(file).map_err(|_| {
+        PortableV2Error::new(
+            PortableV2ErrorCode::Io,
+            "cannot identify owned import artifact",
+        )
+    })?;
+    let usage = graphforge_filesystem::file_space_usage(file).map_err(|_| {
+        PortableV2Error::new(
+            PortableV2ErrorCode::Io,
+            "cannot measure owned import artifact",
+        )
+    })?;
+    let mut file_id = String::with_capacity(32);
+    for byte in identity.file_id {
+        use std::fmt::Write as _;
+        write!(&mut file_id, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    let key = format!("{:016x}:{file_id}", identity.volume_serial);
+    if identities.insert(key, usage.allocated_bytes).is_some() {
+        return Err(PortableV2Error::new(
+            PortableV2ErrorCode::Io,
+            "owned import identity is duplicated",
+        ));
+    }
+    Ok(())
 }
 
 fn parse_mode(value: &str) -> Result<ActivationMode, PortableV2Error> {
