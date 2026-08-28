@@ -8460,7 +8460,10 @@ mod tests {
         assert_eq!(encoding.evidence.ordinal_work_operations, 3);
         assert_eq!(encoding.evidence.ordinal_peak_buffer_bytes, 3 * 64 * 1024);
         assert_eq!(encoding.evidence.ordinal_publication_write_operations, 3);
-        assert_eq!(encoding.evidence.ordinal_fsync_operations, 13);
+        // Three artifact file syncs, one artifact-directory barrier, two
+        // barriers for each of receipt/manifest/lock, and four ancestor
+        // directory barriers after the complete facet is installed.
+        assert_eq!(encoding.evidence.ordinal_fsync_operations, 14);
         let ordinal_publication_bytes = encoding
             .artifacts
             .iter()
