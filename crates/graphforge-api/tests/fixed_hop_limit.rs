@@ -687,24 +687,28 @@ fn optimized_v4_two_hop_direction_type_alias_and_quiescence_are_exact() {
             "MATCH (a)-[:LINK]->(b) RETURN b.node_uuid AS id ORDER BY id LIMIT 1000",
             FAN_OUT,
             true,
+            true,
         ),
         (
             "MATCH (a)<-[:LINK]-(b) RETURN a.node_uuid AS id ORDER BY id LIMIT 1000",
             FAN_OUT,
             true,
+            false,
         ),
         (
             "MATCH (a)-[:LINK]-(b) RETURN b.node_uuid AS id ORDER BY id LIMIT 1000",
             FAN_OUT * 2,
             false,
+            true,
         ),
         (
             "MATCH (a)-[:LINK]->(b)-[:LINK]->(c) RETURN c.node_uuid AS id ORDER BY id LIMIT 1000",
             FAN_OUT * FAN_OUT,
             true,
+            true,
         ),
     ];
-    for (query, multiplicity, identity_only) in cases {
+    for (query, multiplicity, identity_only, expects_v4_lookup) in cases {
         io_stats::reset();
         demand::reset();
         let result = forge.execute(query).unwrap();
@@ -736,15 +740,16 @@ fn optimized_v4_two_hop_direction_type_alias_and_quiescence_are_exact() {
                 .all(|hop| { hop.identity_per_record_seeks == 0 && hop.reads_after_cancel == 0 }),
             "{query}: {snapshot:#?}"
         );
+        let pinned_hops = snapshot
+            .hops
+            .values()
+            .map(|hop| hop.identity_revalidation_calls)
+            .filter(|calls| *calls > 0)
+            .count();
         assert_eq!(
-            snapshot
-                .hops
-                .values()
-                .map(|hop| hop.identity_revalidation_calls)
-                .filter(|calls| *calls > 0)
-                .count(),
-            1,
-            "one facade session pin must be attributed once: {query}: {snapshot:#?}"
+            pinned_hops,
+            usize::from(expects_v4_lookup),
+            "a facade session pin is attributed exactly when destination identity lookup is required: {query}: {snapshot:#?}"
         );
     }
 
@@ -775,6 +780,15 @@ fn optimized_v4_preserves_parallel_self_loop_and_demanded_property_semantics() {
     let forge = open_forge(dir.path());
 
     let destination_query = "MATCH (a)-[:LINK]->(b) RETURN b.node_uuid AS id ORDER BY id";
+    let destination_plan = forge.explain(destination_query).unwrap();
+    assert!(
+        destination_plan.contains("identity=v4"),
+        "{destination_plan}"
+    );
+    assert!(
+        destination_plan.contains("projection=1"),
+        "{destination_plan}"
+    );
     io_stats::reset();
     let destinations = forge.execute(destination_query).unwrap();
     let expected = [nodes[0], nodes[1], nodes[1], nodes[2]]
@@ -901,7 +915,8 @@ fn selective_filter_tops_up_without_crossing_blockers() {
         "MATCH ()-[r]->() RETURN count(r) AS total LIMIT 1",
     ] {
         let plan = forge.explain(query).unwrap();
-        assert!(plan.contains("demand_batch=all, cancel=none"), "{plan}");
+        assert!(plan.contains("demand_batch=all"), "{plan}");
+        assert!(plan.contains("cancel=none"), "{plan}");
         assert!(!plan.contains("DemandGuardExec"), "{plan}");
     }
 
@@ -909,10 +924,8 @@ fn selective_filter_tops_up_without_crossing_blockers() {
         .explain("MATCH ()-[r1]->()-[r2]->() RETURN r1, r2")
         .unwrap();
     assert!(!unlimited.contains("DemandGuardExec"), "{unlimited}");
-    assert!(
-        unlimited.contains("demand_batch=all, cancel=none"),
-        "{unlimited}"
-    );
+    assert!(unlimited.contains("demand_batch=all"), "{unlimited}");
+    assert!(unlimited.contains("cancel=none"), "{unlimited}");
 }
 
 #[test]

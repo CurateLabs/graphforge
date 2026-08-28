@@ -443,7 +443,7 @@ impl PhysicalOptimizerRule for FixedHopDemandRule {
         plan: Arc<dyn ExecutionPlan>,
         config: &ConfigOptions,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let plan = if contains_demand_expand(&plan) {
+        let plan = if contains_materializable_expand(&plan) {
             let required = (0..plan.schema().fields().len()).collect::<BTreeSet<_>>();
             rewrite_materialization(plan, &required)?
         } else {
@@ -627,6 +627,18 @@ fn contains_demand_expand(plan: &Arc<dyn ExecutionPlan>) -> bool {
         return true;
     }
     is_fetch_transparent(plan.as_ref()) && plan.children().into_iter().any(contains_demand_expand)
+}
+
+/// Whether the plan contains a fixed hop whose physical columns can be
+/// narrowed. Materialization demand is independent of bounded-fetch demand:
+/// it may safely cross an order-preserving sort even though cancellation must
+/// stop at that blocking boundary.
+fn contains_materializable_expand(plan: &Arc<dyn ExecutionPlan>) -> bool {
+    plan.is::<ExpandExec>()
+        || plan
+            .children()
+            .into_iter()
+            .any(contains_materializable_expand)
 }
 
 fn rewrite_bounded(
