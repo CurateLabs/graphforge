@@ -175,6 +175,7 @@ impl ConstructionPhaseAttribution {
             StorageIoPhase::PublicationPreauthentication,
             PhaseIoTotals {
                 read_bytes: evidence.publication_application_read_bytes,
+                read_calls: evidence.publication_application_read_operations,
                 ..Default::default()
             },
         );
@@ -182,6 +183,10 @@ impl ConstructionPhaseAttribution {
             StorageIoPhase::CasInstallReadWrite,
             PhaseIoTotals {
                 read_bytes: evidence.cas_application_read_bytes,
+                write_bytes: evidence.cas_application_write_bytes,
+                read_calls: evidence.cas_application_read_operations,
+                write_calls: evidence.cas_application_write_operations,
+                fsync_calls: evidence.cas_fsync_operations,
                 ..Default::default()
             },
         );
@@ -189,6 +194,10 @@ impl ConstructionPhaseAttribution {
             StorageIoPhase::HydrationVerification,
             PhaseIoTotals {
                 read_bytes: evidence.hydration_application_read_bytes,
+                write_bytes: evidence.hydration_application_write_bytes,
+                read_calls: evidence.hydration_application_read_operations,
+                write_calls: evidence.hydration_application_write_operations,
+                fsync_calls: evidence.hydration_fsync_operations,
                 ..Default::default()
             },
         );

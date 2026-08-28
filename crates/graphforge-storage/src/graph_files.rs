@@ -115,6 +115,16 @@ pub struct GraphFilesOpenEvidence {
     pub files_reused: u64,
     /// Logical bytes represented by reused immutable objects.
     pub bytes_reused: u64,
+    /// Bytes returned by application-level hydration/verification reads.
+    pub application_read_bytes: u64,
+    /// Non-empty application-level hydration/verification reads.
+    pub application_read_calls: u64,
+    /// Bytes submitted by application-level copy operations.
+    pub application_write_bytes: u64,
+    /// Application-level copy submissions.
+    pub application_write_calls: u64,
+    /// File and directory durability barriers completed while hydrating.
+    pub fsync_calls: u64,
 }
 
 /// Open/materialization strategy for a file-backed graph.
@@ -331,7 +341,21 @@ pub fn stage_graph_tree(
             fs::create_dir_all(parent)
                 .map_err(|error| storage("create graph tree directory", parent, error))?;
         }
-        let digest = copy_regular_file(&source, &destination)?;
+        let copied = copy_regular_file(&source, &destination)?;
+        let digest = copied.digest;
+        evidence.application_read_bytes = evidence
+            .application_read_bytes
+            .saturating_add(copied.read_bytes);
+        evidence.application_read_calls = evidence
+            .application_read_calls
+            .saturating_add(copied.read_calls);
+        evidence.application_write_bytes = evidence
+            .application_write_bytes
+            .saturating_add(copied.write_bytes);
+        evidence.application_write_calls = evidence
+            .application_write_calls
+            .saturating_add(copied.write_calls);
+        evidence.fsync_calls = evidence.fsync_calls.saturating_add(copied.fsync_calls);
         if hex_digest(digest) != entry.content_sha256 {
             return Err(validation(
                 "graph tree source digest does not match inventory",
@@ -446,8 +470,22 @@ pub fn materialize_graph_tree(
             fs::create_dir_all(parent)
                 .map_err(|error| storage("create private graph directory", parent, error))?;
         }
-        copy_regular_file(&source, &destination)?;
+        let copied = copy_regular_file(&source, &destination)?;
+        evidence.application_read_bytes = evidence
+            .application_read_bytes
+            .saturating_add(copied.read_bytes);
+        evidence.application_read_calls = evidence
+            .application_read_calls
+            .saturating_add(copied.read_calls);
+        evidence.application_write_bytes = evidence
+            .application_write_bytes
+            .saturating_add(copied.write_bytes);
+        evidence.application_write_calls = evidence
+            .application_write_calls
+            .saturating_add(copied.write_calls);
+        evidence.fsync_calls = evidence.fsync_calls.saturating_add(copied.fsync_calls);
         make_private_copy_owner_writable(&destination)?;
+        evidence.fsync_calls = evidence.fsync_calls.saturating_add(1);
         evidence.files_copied = evidence.files_copied.saturating_add(1);
         evidence.bytes_copied = evidence.bytes_copied.saturating_add(entry.byte_length);
     }
@@ -466,6 +504,7 @@ pub fn pinned_open_evidence(inventory: &GraphFilesInventory) -> GraphFilesOpenEv
         files_opened_in_place: u64::try_from(inventory.files.len()).unwrap_or(u64::MAX),
         files_reused: 0,
         bytes_reused: 0,
+        ..GraphFilesOpenEvidence::default()
     }
 }
 
@@ -788,16 +827,52 @@ fn ensure_empty_directory(target: &Path) -> Result<(), GfError> {
     Ok(())
 }
 
-fn copy_regular_file(source: &Path, destination: &Path) -> Result<[u8; 32], GfError> {
+struct CopyIoEvidence {
+    digest: [u8; 32],
+    read_bytes: u64,
+    read_calls: u64,
+    write_bytes: u64,
+    write_calls: u64,
+    fsync_calls: u64,
+}
+
+fn copy_regular_file(source: &Path, destination: &Path) -> Result<CopyIoEvidence, GfError> {
     reject_link(source)?;
     // Prefer filesystem copy so sparse/holey sources stay sparse when the OS
     // supports it (Linux copy_file_range). Digest the destination so staged
     // bytes remain verified without assembling them into one buffer.
-    fs::copy(source, destination)
+    let copied = fs::copy(source, destination)
         .map_err(|error| storage("copy graph source file", destination, error))?;
-    let digest = hash_file(destination)?;
+    let (digest, read_bytes, read_calls) = hash_file_io_counted(destination)?;
     sync_file(destination)?;
-    Ok(digest)
+    Ok(CopyIoEvidence {
+        digest,
+        read_bytes,
+        read_calls,
+        write_bytes: copied,
+        write_calls: u64::from(copied != 0),
+        fsync_calls: 1,
+    })
+}
+
+fn hash_file_io_counted(path: &Path) -> Result<([u8; 32], u64, u64), GfError> {
+    let mut file = File::open(path).map_err(|error| storage("open graph file", path, error))?;
+    let mut digest = Sha256::new();
+    let mut bytes = 0_u64;
+    let mut calls = 0_u64;
+    let mut buffer = vec![0_u8; HASH_BUFFER_BYTES];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| storage("read graph file", path, error))?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+        bytes = bytes.saturating_add(read as u64);
+        calls = calls.saturating_add(1);
+    }
+    Ok((digest.finalize().into(), bytes, calls))
 }
 
 #[cfg(unix)]
@@ -824,6 +899,7 @@ fn make_private_copy_owner_writable(path: &Path) -> Result<(), GfError> {
     sync_file(path)
 }
 
+#[cfg(test)]
 fn hash_file(path: &Path) -> Result<[u8; 32], GfError> {
     hash_file_counted(path).map(|(digest, _)| digest)
 }

@@ -316,12 +316,39 @@ pub struct GraphConstructionEvidence {
     /// Application-observed durable control bytes read immediately before publication.
     #[serde(default)]
     pub publication_application_read_bytes: u64,
+    /// Actual non-empty durable-control reads immediately before publication.
+    #[serde(default)]
+    pub publication_application_read_operations: u64,
     /// Application-observed source or reused-object payload bytes read by CAS adoption.
     #[serde(default)]
     pub cas_application_read_bytes: u64,
+    /// Actual non-empty CAS source/authentication reads.
+    #[serde(default)]
+    pub cas_application_read_operations: u64,
+    /// Payload bytes submitted to CAS temporary-object writers.
+    #[serde(default)]
+    pub cas_application_write_bytes: u64,
+    /// Actual CAS temporary-object write submissions.
+    #[serde(default)]
+    pub cas_application_write_operations: u64,
+    /// CAS file and directory durability barriers.
+    #[serde(default)]
+    pub cas_fsync_operations: u64,
     /// Application-observed published payload bytes read while hydrating the workspace.
     #[serde(default)]
     pub hydration_application_read_bytes: u64,
+    /// Actual non-empty reads performed during hydration and verification.
+    #[serde(default)]
+    pub hydration_application_read_operations: u64,
+    /// Payload bytes submitted to hydrated workspace writers.
+    #[serde(default)]
+    pub hydration_application_write_bytes: u64,
+    /// Actual hydrated workspace write submissions.
+    #[serde(default)]
+    pub hydration_application_write_operations: u64,
+    /// Hydration file and directory durability barriers.
+    #[serde(default)]
+    pub hydration_fsync_operations: u64,
     /// Artifact bytes authenticated while repairing an interrupted append.
     #[serde(default)]
     pub recovery_application_read_bytes: u64,
@@ -1073,7 +1100,7 @@ impl GraphConstructionSession {
         if encoding.generation != self.checkpoint.parent_topology_generation.saturating_add(1) {
             return Err(storage("publication topology generation changed"));
         }
-        let inventory_control_bytes =
+        let inventory_control =
             crate::graph_construction_encoding::authenticate_inventory_control_for_publication(
                 &self.root, encoding,
             )?;
@@ -1081,7 +1108,14 @@ impl GraphConstructionSession {
             .checkpoint
             .evidence
             .publication_application_read_bytes
-            .saturating_add(inventory_control_bytes);
+            .saturating_add(inventory_control.read_bytes);
+        self.checkpoint
+            .evidence
+            .publication_application_read_operations = self
+            .checkpoint
+            .evidence
+            .publication_application_read_operations
+            .saturating_add(inventory_control.read_calls);
         let admission = crate::filesystem_admission::admit_project_lifecycle(
             &self.project_path,
             self.checkpoint.lifecycle_mode,
@@ -1172,6 +1206,26 @@ impl GraphConstructionSession {
             .evidence
             .cas_application_read_bytes
             .saturating_add(cas_evidence.payload_bytes_hashed);
+        self.checkpoint.evidence.cas_application_read_operations = self
+            .checkpoint
+            .evidence
+            .cas_application_read_operations
+            .saturating_add(cas_evidence.read_calls);
+        self.checkpoint.evidence.cas_application_write_bytes = self
+            .checkpoint
+            .evidence
+            .cas_application_write_bytes
+            .saturating_add(cas_evidence.write_bytes);
+        self.checkpoint.evidence.cas_application_write_operations = self
+            .checkpoint
+            .evidence
+            .cas_application_write_operations
+            .saturating_add(cas_evidence.write_calls);
+        self.checkpoint.evidence.cas_fsync_operations = self
+            .checkpoint
+            .evidence
+            .cas_fsync_operations
+            .saturating_add(cas_evidence.fsync_calls);
         if graphforge_filesystem::path_identity(&workspace).map_err(storage)?
             != encoded_directory.identity()
         {

@@ -563,6 +563,14 @@ pub struct GraphObjectInstallEvidence {
     pub bytes_installed: u64,
     /// Whether an already installed exact object satisfied the request.
     pub reused_existing: bool,
+    /// Non-empty source or authentication reads completed by the application.
+    pub read_calls: u64,
+    /// Temporary-object write submissions completed by the application.
+    pub write_calls: u64,
+    /// Payload bytes submitted to temporary-object writers.
+    pub write_bytes: u64,
+    /// File and directory durability barriers completed by this installation.
+    pub fsync_calls: u64,
 }
 
 /// One-time v1 expanded-tree to v2 object-store migration evidence.
@@ -587,6 +595,14 @@ pub struct GraphFilesAppendEvidence {
     pub payload_bytes_hashed: u64,
     /// Logical object bytes newly installed.
     pub bytes_installed: u64,
+    /// Actual non-empty payload reads performed by object installation.
+    pub read_calls: u64,
+    /// Actual payload write submissions performed by object installation.
+    pub write_calls: u64,
+    /// Payload bytes submitted to object writers.
+    pub write_bytes: u64,
+    /// File and directory durability barriers completed by object installation.
+    pub fsync_calls: u64,
 }
 
 /// A graph file whose content identity was established by an upstream durable
@@ -1001,6 +1017,10 @@ fn append_graph_files_v2_inner(
         evidence.bytes_installed = evidence
             .bytes_installed
             .saturating_add(installed.bytes_installed);
+        evidence.read_calls = evidence.read_calls.saturating_add(installed.read_calls);
+        evidence.write_calls = evidence.write_calls.saturating_add(installed.write_calls);
+        evidence.write_bytes = evidence.write_bytes.saturating_add(installed.write_bytes);
+        evidence.fsync_calls = evidence.fsync_calls.saturating_add(installed.fsync_calls);
         let relative_path = relative
             .to_str()
             .ok_or_else(|| validation("sealed graph path is not UTF-8"))?
@@ -1453,7 +1473,14 @@ fn install_graph_object_bytes_with_lease(
         // file verification below is an application-observed payload read.
         Ok(0)
     })
-    .map(|evidence| (digest, evidence))
+    .map(|mut evidence| {
+        if !evidence.reused_existing {
+            evidence.write_bytes = expected_length;
+            evidence.write_calls = u64::from(!bytes.is_empty());
+            evidence.fsync_calls = evidence.fsync_calls.saturating_add(1);
+        }
+        (digest, evidence)
+    })
 }
 
 /// Stream, hash, and install a new payload object from a regular source file.
@@ -1482,7 +1509,9 @@ fn install_graph_object_file_with_lease(
             "graph object source is not the declared regular file",
         ));
     }
-    install_object(
+    let read_calls = std::cell::Cell::new(0_u64);
+    let write_calls = std::cell::Cell::new(0_u64);
+    let result = install_object(
         &lease.cas,
         expected_digest,
         expected_length,
@@ -1500,6 +1529,7 @@ fn install_graph_object_file_with_lease(
                 if read == 0 {
                     break;
                 }
+                read_calls.set(read_calls.get().saturating_add(1));
                 output.write_all(&buffer[..read]).map_err(|error| {
                     storage(
                         "write temporary graph object",
@@ -1507,6 +1537,7 @@ fn install_graph_object_file_with_lease(
                         error,
                     )
                 })?;
+                write_calls.set(write_calls.get().saturating_add(1));
                 hasher.update(&buffer[..read]);
                 total = total.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
             }
@@ -1524,7 +1555,16 @@ fn install_graph_object_file_with_lease(
             })?;
             Ok(total)
         },
-    )
+    );
+    result.map(|mut evidence| {
+        if !evidence.reused_existing {
+            evidence.read_calls = evidence.read_calls.saturating_add(read_calls.get());
+            evidence.write_calls = evidence.write_calls.saturating_add(write_calls.get());
+            evidence.write_bytes = evidence.write_bytes.saturating_add(expected_length);
+            evidence.fsync_calls = evidence.fsync_calls.saturating_add(1);
+        }
+        evidence
+    })
 }
 
 /// Read and cryptographically verify an immutable object.
@@ -2482,6 +2522,11 @@ where
             .saturating_add(if installed { 0 } else { expected_length }),
         bytes_installed: if installed { expected_length } else { 0 },
         reused_existing: !installed,
+        // The source-copy/authentication submissions are added by the caller.
+        // Fresh installation always durably synchronizes the destination bucket
+        // and temporary namespace; reuse performs neither operation here.
+        fsync_calls: if installed { 2 } else { 0 },
+        ..GraphObjectInstallEvidence::default()
     })
 }
 
