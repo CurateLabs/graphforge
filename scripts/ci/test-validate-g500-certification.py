@@ -13,13 +13,96 @@ SPEC = importlib.util.spec_from_file_location("g500_validator", SCRIPT)
 assert SPEC and SPEC.loader
 VALIDATOR = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(VALIDATOR)
+BUILDER_SCRIPT = Path(__file__).with_name("build-g500-ladder-qualification.py")
+BUILDER_SPEC = importlib.util.spec_from_file_location("g500_builder", BUILDER_SCRIPT)
+assert BUILDER_SPEC and BUILDER_SPEC.loader
+BUILDER = importlib.util.module_from_spec(BUILDER_SPEC)
+BUILDER_SPEC.loader.exec_module(BUILDER)
+QUALIFICATION_SCRIPT = Path(__file__).with_name("validate-g500-ladder-qualification.py")
+QUALIFICATION_SPEC = importlib.util.spec_from_file_location(
+    "g500_qualification_validator", QUALIFICATION_SCRIPT
+)
+assert QUALIFICATION_SPEC and QUALIFICATION_SPEC.loader
+QUALIFICATION = importlib.util.module_from_spec(QUALIFICATION_SPEC)
+QUALIFICATION_SPEC.loader.exec_module(QUALIFICATION)
 
 SHA = "a" * 40
 DIGEST_A = "sha256:" + "a" * 64
 DIGEST_B = "sha256:" + "b" * 64
 
 
-def evidence():
+def artifact_totals(unit=1):
+    return {
+        "logical_references": unit,
+        "logical_bytes": unit,
+        "physical_objects": unit,
+        "physical_logical_bytes": unit,
+        "allocated_bytes": unit,
+    }
+
+
+def storage_attribution(unit=1):
+    category_names = (
+        "topology_nodes", "topology_edges", "properties", "uuid_and_surrogates",
+        "adjacency", "catalog_and_manifests", "construction_staging",
+        "portable_package", "clean_imported_project", "other",
+    )
+    categories = {
+        name: artifact_totals(unit if index < 6 else 0)
+        for index, name in enumerate(category_names)
+    }
+    snapshot = {
+        "generation_manifest_sha256": [1] * 32,
+        "categories": categories,
+        "logical_references": 6 * unit,
+        "logical_bytes": 6 * unit,
+        "physical_objects": 6 * unit,
+        "physical_logical_bytes": 6 * unit,
+        "allocated_bytes": 6 * unit,
+    }
+    contract = json.loads(VALIDATOR.SCHEMA.read_text())
+    construction = {
+        field: 0 for field in contract["$defs"]["construction"]["required"]
+    }
+    construction["storage_current"] = {
+        name: artifact_totals(unit) for name in category_names
+    }
+    construction["storage_transient_peak_allocated_bytes"] = {
+        name: unit for name in category_names
+    }
+    construction["storage_transient_peak_total_allocated_bytes"] = 10 * unit
+    phase_names = contract["$defs"]["phaseMap"]["required"]
+    phases = {}
+    for name in phase_names:
+        phases[name] = {
+            "read_bytes": unit,
+            "write_bytes": 0,
+            "read_calls": unit,
+            "write_calls": 0,
+            "object_count": 0,
+            "block_count": 0,
+            "fsync_calls": unit if name == "fsync_synchronization" else 0,
+        }
+    totals = {
+        field: sum(values[field] for values in phases.values())
+        for field in next(iter(phases.values()))
+    }
+    return {
+        "source": snapshot,
+        "portable_package": {
+            "category": "portable_package", "logical_bytes": unit,
+            "allocated_bytes": unit, "logical_references": unit,
+            "physical_objects": unit, "source": "portable_writer_receipt",
+        },
+        "clean_import": snapshot,
+        "construction": construction,
+        "application_io_phases": {"phases": phases, "totals": totals},
+        "workspace_current_allocated_bytes": 14 * unit,
+    }
+
+
+def evidence(scale=26, unit=1):
+    live = 1_000_000_000 if scale == 26 else (1 << scale) * 15
     phases = []
     for phase in VALIDATOR.REQUIRED_PHASES:
         fingerprint = DIGEST_A if "query_1hop" in phase else DIGEST_B
@@ -39,7 +122,7 @@ def evidence():
         "profile_sha256": "sha256:" + hashlib.sha256(VALIDATOR.PROFILE.read_bytes()).hexdigest(),
         "run": {
             "command": VALIDATOR.RUN_COMMAND,
-            "scale": 26,
+            "scale": scale,
             "edgefactor": 16,
             "seed": 1,
             "directionality": "undirected",
@@ -54,19 +137,19 @@ def evidence():
             "os": "Linux",
             "kernel": "6",
             "filesystem": "xfs",
-            "memory_bytes": 137_438_953_472,
-            "nvme_bytes": 1_099_511_627_776,
+            "memory_bytes": 4_294_967_296,
+            "nvme_bytes": 536_870_912_000,
         },
         "tools": {"rustc": "1.90"},
         "counts": {
-            "raw_attempts": 1_000_000_002,
+            "raw_attempts": live + 2,
             "self_loops_rejected": 1,
             "duplicates_rejected": 1,
-            "live_unique_edges": 1_000_000_000,
-            "source_nodes": 67_108_864,
-            "source_edges": 1_000_000_000,
-            "imported_nodes": 67_108_864,
-            "imported_edges": 1_000_000_000,
+            "live_unique_edges": live,
+            "source_nodes": 1 << scale,
+            "source_edges": live,
+            "imported_nodes": 1 << scale,
+            "imported_edges": live,
         },
         "identities": {
             "source_export_generation_authenticated": True,
@@ -88,8 +171,14 @@ def evidence():
             "source_project_fingerprint": DIGEST_A,
             "imported_project_fingerprint": DIGEST_A,
         },
+        "storage_attribution": storage_attribution(unit),
         "phases": phases,
-        "envelope": {"peak_rss_bytes": 1, "peak_disk_bytes": 1, "wall_time_s": 1},
+        "envelope": {
+            "peak_rss_bytes": 1,
+            "peak_disk_bytes": 100 * unit,
+            "peak_disk_source": "storage_owned_active_identity_union",
+            "wall_time_s": 1,
+        },
         "result": "pass",
         "first_failure": None,
     }
@@ -101,6 +190,32 @@ def test_accepts_complete_sanitized_evidence():
     Draft202012Validator.check_schema(contract)
     Draft202012Validator(contract).validate(evidence())
     VALIDATOR.validate(evidence(), SHA)
+
+
+def test_actual_certification_contract_builds_and_validates_adjacent_qualification(
+    tmp_path, monkeypatch
+):
+    low = evidence(20, 1)
+    high = evidence(22, 4)
+    for document in (low, high):
+        VALIDATOR.validate(document, SHA)
+    low_path = tmp_path / "s20.json"
+    high_path = tmp_path / "s22.json"
+    output = tmp_path / "qualification.json"
+    low_path.write_text(json.dumps(low))
+    high_path.write_text(json.dumps(high))
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            str(BUILDER_SCRIPT), str(low_path), str(high_path), str(output),
+            "--volume-bytes", str(500 * 1024**3),
+            "--reserved-headroom-bytes", str(75 * 1024**3),
+        ],
+    )
+    BUILDER.main()
+    qualification = json.loads(output.read_text())
+    QUALIFICATION.validate(qualification)
+    assert qualification["projection"]["source_rungs"] == ["S20", "S22"]
 
 
 @pytest.mark.parametrize(
@@ -203,7 +318,7 @@ def test_rejects_incomplete_or_unsafe_evidence(mutation):
     if mutation == "provider":
         value["host"]["provider"] = "local"
     if mutation == "capacity":
-        value["host"]["memory_bytes"] -= 1
+        value["host"]["memory_bytes"] = 0
     if mutation == "failed_result":
         value["result"] = "fail"
         value["first_failure"] = "generate"

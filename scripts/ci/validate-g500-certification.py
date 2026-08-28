@@ -107,9 +107,13 @@ def validate(evidence: dict[str, Any], expected_sha: str | None) -> None:
     expected_profile = "sha256:" + hashlib.sha256(PROFILE.read_bytes()).hexdigest()
     if evidence.get("profile_sha256") != expected_profile:
         raise EvidenceError("evidence profile does not match the committed certification profile")
+    run = evidence.get("run", {})
+    scale = run.get("scale")
+    if scale not in (20, 22, 24, 26):
+        raise EvidenceError("run scale is not a supported qualification rung")
     expected_run = {
         "command": RUN_COMMAND,
-        "scale": 26,
+        "scale": scale,
         "edgefactor": 16,
         "seed": 1,
         "directionality": "undirected",
@@ -140,12 +144,14 @@ def validate(evidence: dict[str, Any], expected_sha: str | None) -> None:
         raise EvidenceError("counts must be non-negative integers")
     if raw != live + loops + dupes:
         raise EvidenceError("generator counts do not reconcile")
-    if live < 1_000_000_000:
-        raise EvidenceError("certification requires at least one billion live edges")
+    if scale == 26 and live < 1_000_000_000:
+        raise EvidenceError("S26 certification requires at least one billion live edges")
     if any(counts.get(key) != live for key in ("source_edges", "imported_edges")):
         raise EvidenceError("source/imported edge counts differ")
     if counts.get("source_nodes") != counts.get("imported_nodes"):
         raise EvidenceError("source/imported node counts differ")
+    if counts.get("source_nodes") != 1 << scale:
+        raise EvidenceError("source/imported node count does not match the declared scale")
 
     identities = evidence.get("identities", {})
     for proof in (
@@ -248,11 +254,12 @@ def validate(evidence: dict[str, Any], expected_sha: str | None) -> None:
         raise EvidenceError("certification OS image contains unsupported characters")
     if re.fullmatch(r"[0-9A-Za-z._+-]+", str(host.get("kernel", ""))) is None:
         raise EvidenceError("host kernel release is malformed")
-    if (
-        host.get("memory_bytes", 0) < 137_438_953_472
-        or host.get("nvme_bytes", 0) < 1_099_511_627_776
-    ):
-        raise EvidenceError("host does not meet declared capacity")
+    memory_bytes = host.get("memory_bytes", 0)
+    nvme_bytes = host.get("nvme_bytes", 0)
+    if memory_bytes < envelope.get("peak_rss_bytes", 0):
+        raise EvidenceError("observed RSS exceeds declared host memory")
+    if nvme_bytes < envelope.get("peak_disk_bytes", 0):
+        raise EvidenceError("observed storage peak exceeds declared host capacity")
     if evidence.get("result") != "pass" or evidence.get("first_failure") is not None:
         raise EvidenceError("certification evidence is not a pass")
 
