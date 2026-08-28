@@ -838,20 +838,11 @@ impl AuthenticatedPropertyInventory {
                     kind,
                     route,
                 )?;
-                let projected = selected_properties.map(|selected_properties| {
-                    builder
-                        .schema()
-                        .fields()
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, field)| {
-                            field.name() == kind.uuid_field()
-                                || field.name() == PROPERTY_TOMBSTONE_FIELD
-                                || selected_properties.contains(field.name())
-                        })
-                        .map(|(index, _)| index)
-                        .collect::<BTreeSet<_>>()
-                });
+                let projected = projected_property_columns(
+                    builder.schema().as_ref(),
+                    kind,
+                    selected_properties,
+                );
                 let page_reservation_bytes = validate_parquet_resource_admission(
                     builder.metadata(),
                     limits,
@@ -909,7 +900,7 @@ impl AuthenticatedPropertyInventory {
             visit_newest_property_snapshots(inputs, scratch, limits, budget.as_ref(), emit)?;
         finalize_projected_metrics(
             &mut metrics,
-            ProjectedMetricSources {
+            &ProjectedMetricSources {
                 counts: &counts,
                 authentication_bytes: &authentication_bytes,
                 authentication_block_equivalents: &authentication_block_equivalents,
@@ -937,9 +928,29 @@ struct ProjectedMetricSources<'a> {
     authenticated_snapshot_peak_bytes: u64,
 }
 
+fn projected_property_columns(
+    schema: &arrow::datatypes::Schema,
+    kind: PropertyRouteKind,
+    selected_properties: Option<&BTreeSet<String>>,
+) -> Option<BTreeSet<usize>> {
+    selected_properties.map(|selected| {
+        schema
+            .fields()
+            .iter()
+            .enumerate()
+            .filter(|(_, field)| {
+                field.name() == kind.uuid_field()
+                    || field.name() == PROPERTY_TOMBSTONE_FIELD
+                    || selected.contains(field.name())
+            })
+            .map(|(index, _)| index)
+            .collect()
+    })
+}
+
 fn finalize_projected_metrics(
     metrics: &mut PropertyOverlayMetrics,
-    sources: ProjectedMetricSources<'_>,
+    sources: &ProjectedMetricSources<'_>,
 ) {
     metrics.authentication_bytes = sources.authentication_bytes.load(Ordering::Relaxed);
     metrics.authentication_block_equivalents = sources

@@ -3618,7 +3618,7 @@ fn unused_expand_column(field: &Field, rows: usize) -> Result<ArrayRef, GfError>
             })
         }
         DataType::List(item) if item.data_type() == &DataType::UInt32 => {
-            let mut builder = ListBuilder::new(UInt32Builder::new());
+            let mut builder = ListBuilder::new(UInt32Builder::new()).with_field(Arc::clone(item));
             for _ in 0..rows {
                 builder.append(true);
             }
@@ -5845,6 +5845,17 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let catalog = GraphCatalog::open(dir.path(), None, &RuntimeCatalog::new()).unwrap();
         ExecutionSession::new(catalog, None).unwrap()
+    }
+
+    #[test]
+    fn unused_list_output_preserves_exact_non_nullable_child_schema() {
+        let item = Arc::new(Field::new("item", DataType::UInt32, false));
+        let field = Field::new("type_ids", DataType::List(Arc::clone(&item)), false);
+        let column = unused_expand_column(&field, 3).unwrap();
+
+        assert_eq!(column.data_type(), field.data_type());
+        assert_eq!(column.len(), 3);
+        assert_eq!(column.null_count(), 0);
     }
 
     #[test]
