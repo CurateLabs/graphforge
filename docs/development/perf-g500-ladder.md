@@ -212,6 +212,11 @@ authentication, shape consumption/reauthentication, encode plus post-write
 authentication, publication preauthentication, CAS install, hydration
 verification, synchronization, and recovery reauthentication. Raw bytes,
 calls, blocks, objects, and fsyncs reconcile exactly before ratios are derived.
+Each phase declares whether it was applicable. Every ordinary lifecycle phase
+must contain source-owned activity; a zero row is rejected. Recovery may be
+non-applicable only for an uninterrupted run, while the deterministic durable
+crash matrix separately proves nonzero recovery bytes and calls whenever an
+interrupted intent is accepted.
 Node canonical cost uses reopened live nodes; edge canonical, authoritative
 project, and lifecycle peak costs use reopened live edges. Ratios preserve raw
 integer numerators and denominators; rounded decimals are not evidence.
