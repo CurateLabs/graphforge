@@ -230,10 +230,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use arrow::array::{
-    Array, ArrayRef, FixedSizeBinaryArray, FixedSizeBinaryBuilder, Int8Array, RecordBatch,
-    StructArray, UInt64Array, new_null_array,
+    Array, ArrayRef, FixedSizeBinaryArray, FixedSizeBinaryBuilder, Int8Array, ListBuilder,
+    RecordBatch, StringArray, StructArray, TimestampMicrosecondArray, UInt32Array, UInt32Builder,
+    UInt64Array, new_null_array,
 };
-use arrow::datatypes::{DataType, SchemaRef};
+use arrow::datatypes::{DataType, Field, SchemaRef, TimeUnit};
 use async_trait::async_trait;
 use datafusion::common::{DFSchema, DFSchemaRef, DataFusionError};
 use datafusion::execution::context::{ExecutionProps, QueryPlanner, SessionState};
@@ -3590,6 +3591,49 @@ struct SingleHopPosition {
     seen_edges: std::collections::HashSet<u64>,
 }
 
+/// Build a schema-valid value column for an output that is provably unused by
+/// every operator above this Expand. Nullable fields use Arrow nulls; required
+/// physical fields receive inert values so the unchanged logical schema stays
+/// valid without forcing their backing Parquet columns to be read.
+fn unused_expand_column(field: &Field, rows: usize) -> Result<ArrayRef, GfError> {
+    if field.is_nullable() {
+        return Ok(new_null_array(field.data_type(), rows));
+    }
+    let column: ArrayRef = match field.data_type() {
+        DataType::FixedSizeBinary(width) => Arc::new(
+            FixedSizeBinaryArray::try_from_iter(
+                (0..rows).map(|_| vec![0_u8; usize::try_from(*width).unwrap_or(0)]),
+            )
+            .map_err(|error| GfError::Execution(error.to_string()))?,
+        ),
+        DataType::UInt64 => Arc::new(UInt64Array::from(vec![0_u64; rows])),
+        DataType::UInt32 => Arc::new(UInt32Array::from(vec![0_u32; rows])),
+        DataType::Utf8 => Arc::new(StringArray::from(vec![""; rows])),
+        DataType::Timestamp(TimeUnit::Microsecond, timezone) => {
+            let values = TimestampMicrosecondArray::from(vec![0_i64; rows]);
+            Arc::new(if let Some(timezone) = timezone {
+                values.with_timezone(Arc::clone(timezone))
+            } else {
+                values
+            })
+        }
+        DataType::List(item) if item.data_type() == &DataType::UInt32 => {
+            let mut builder = ListBuilder::new(UInt32Builder::new());
+            for _ in 0..rows {
+                builder.append(true);
+            }
+            Arc::new(builder.finish())
+        }
+        data_type => {
+            return Err(GfError::Execution(format!(
+                "Expand cannot synthesize unused non-nullable output '{}' with type {data_type}",
+                field.name()
+            )));
+        }
+    };
+    Ok(column)
+}
+
 /// Execute the adjacency-backed single-hop expansion: for every input row's
 /// source node, emit one output row per adjacency entry, assembling input,
 /// edge-topology, edge-property (nullable), and destination-node columns in
@@ -3726,12 +3770,9 @@ fn expand_single_hop_chunk(
                 .collect::<Result<Vec<_>, _>>()?,
         );
         let mut columns = Vec::with_capacity(cfg.out_schema.fields().len());
-        for (index, column) in input.columns().iter().enumerate() {
-            columns.push(if required.is_some_and(|mask| mask[index]) {
-                take(column, &src_take, None).map_err(|error| exec_err(error.to_string()))?
-            } else {
-                new_null_array(column.data_type(), triples.len())
-            });
+        for column in input.columns() {
+            columns
+                .push(take(column, &src_take, None).map_err(|error| exec_err(error.to_string()))?);
         }
         for field in cfg
             .out_schema
@@ -3740,7 +3781,7 @@ fn expand_single_hop_chunk(
             .skip(cfg.input_width)
             .take(edge_end.saturating_sub(cfg.input_width))
         {
-            columns.push(new_null_array(field.data_type(), triples.len()));
+            columns.push(unused_expand_column(field, triples.len())?);
         }
         for (offset, field) in cfg.out_schema.fields().iter().skip(edge_end).enumerate() {
             let index = edge_end + offset;
@@ -3762,7 +3803,7 @@ fn expand_single_hop_chunk(
                 }
                 Arc::new(builder.finish())
             } else {
-                new_null_array(field.data_type(), triples.len())
+                unused_expand_column(field, triples.len())?
             };
             columns.push(column);
         }
@@ -3973,12 +4014,8 @@ fn expand_single_hop_chunk(
         .cloned()
         .collect();
     let mut columns = Vec::with_capacity(cfg.out_schema.fields().len());
-    for (index, column) in input.columns().iter().enumerate() {
-        columns.push(if required.is_none_or(|mask| mask[index]) {
-            take(column, &src_take, None).map_err(|error| exec_err(error.to_string()))?
-        } else {
-            new_null_array(column.data_type(), triples.len())
-        });
+    for column in input.columns() {
+        columns.push(take(column, &src_take, None).map_err(|error| exec_err(error.to_string()))?);
     }
     for (offset, field) in cfg
         .out_schema
@@ -3998,7 +4035,7 @@ fn expand_single_hop_chunk(
             })?;
             take(column, &edge_take, None).map_err(|error| exec_err(error.to_string()))?
         } else {
-            new_null_array(field.data_type(), triples.len())
+            unused_expand_column(field, triples.len())?
         });
     }
     let demanded_property_fields = prop_fields
@@ -4025,7 +4062,7 @@ fn expand_single_hop_chunk(
             demanded_properties
                 .get(field.name())
                 .cloned()
-                .unwrap_or_else(|| new_null_array(field.data_type(), triples.len())),
+                .map_or_else(|| unused_expand_column(field, triples.len()), Ok)?,
         );
     }
     for (offset, field) in cfg.out_schema.fields().iter().skip(edge_end).enumerate() {
@@ -4039,7 +4076,7 @@ fn expand_single_hop_chunk(
             })?;
             take(column, &dst_take, None).map_err(|error| exec_err(error.to_string()))?
         } else {
-            new_null_array(field.data_type(), triples.len())
+            unused_expand_column(field, triples.len())?
         });
     }
     let output = RecordBatch::try_new(cfg.out_schema.clone(), columns)

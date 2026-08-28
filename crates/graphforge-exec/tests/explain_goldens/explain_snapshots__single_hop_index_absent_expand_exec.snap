@@ -7,7 +7,7 @@ ProjectionExec: expr=[name@0 as bn]
     FilterExec: array_has(type_ids@1, 1073741824), projection=[node_uuid@0]
       RepartitionExec: partitioning=RoundRobinBatch(<N>), input_partitions=1
         ProjectionExec: expr=[node_uuid@15 as node_uuid, type_ids@18 as type_ids]
-          ExpandExec: rel=KNOWS, dir=->, adjacency=building, fetch=all, demand_batch=all, cancel=none
+          ExpandExec: rel=KNOWS, dir=->, adjacency=building, fetch=all, demand_batch=all, projection=all, cancel=none
             HashJoinExec: mode=CollectLeft, join_type=Right, on=[(node_uuid@0, node_uuid@0)], projection=[node_uuid@2, node_id@3, type_id@4, type_ids@5, created_at@6, updated_at@7, name@1]
               PropertyOverlayExec: route=_untyped
               FilterExec: array_has(type_ids@3, 1073741824)

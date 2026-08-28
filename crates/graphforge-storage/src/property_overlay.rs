@@ -907,46 +907,71 @@ impl AuthenticatedPropertyInventory {
         });
         let mut metrics =
             visit_newest_property_snapshots(inputs, scratch, limits, budget.as_ref(), emit)?;
-        metrics.authentication_bytes = authentication_bytes.load(Ordering::Relaxed);
-        metrics.authentication_block_equivalents =
-            authentication_block_equivalents.load(Ordering::Relaxed);
-        metrics.authentication_read_calls = authentication_read_calls.load(Ordering::Relaxed);
-        metrics.property_authentication_bytes = metrics.authentication_bytes;
-        metrics.authenticated_snapshot_bytes = metrics.authentication_bytes;
-        metrics.authenticated_snapshot_peak_bytes = fragments
-            .iter()
-            .map(|fragment| fragment.entry.byte_length)
-            .max()
-            .unwrap_or(0);
-        metrics.property_authentication_block_equivalents =
-            metrics.authentication_block_equivalents;
-        metrics.property_authentication_read_calls = metrics.authentication_read_calls;
-        metrics.validation_bytes = counts.bytes.load(Ordering::Relaxed);
-        metrics.physical_bytes = metrics
-            .authentication_bytes
-            .saturating_add(metrics.validation_bytes);
-        metrics.read_calls = counts.blocks.load(Ordering::Relaxed);
-        metrics.validation_read_calls = metrics.read_calls;
-        metrics.physical_blocks = metrics
-            .authentication_read_calls
-            .saturating_add(metrics.read_calls);
-        metrics.range_seeks = counts.range_seeks.load(Ordering::Relaxed);
-        let decoded = decoded.lock().expect("property retention lock");
-        metrics.decoder_peak_rows = decoded.peak_rows;
-        metrics.decoder_peak_bytes = decoded.peak_bytes;
-        metrics.decoder_page_reservation_bytes = decoded.page_peak;
-        metrics.emitted_batches = decoded.batches;
-        metrics.merge_peak_rows = metrics.peak_buffered_rows;
-        metrics.merge_peak_bytes = metrics.peak_buffered_bytes;
-        metrics.peak_buffered_rows = metrics
-            .decoder_peak_rows
-            .saturating_add(metrics.merge_peak_rows);
-        metrics.peak_buffered_bytes = metrics
-            .decoder_peak_bytes
-            .saturating_add(metrics.merge_peak_bytes);
-        metrics.peak_buffered_bytes = budget.peak();
+        finalize_projected_metrics(
+            &mut metrics,
+            ProjectedMetricSources {
+                counts: &counts,
+                authentication_bytes: &authentication_bytes,
+                authentication_block_equivalents: &authentication_block_equivalents,
+                authentication_read_calls: &authentication_read_calls,
+                decoded: &decoded,
+                budget: budget.as_ref(),
+                authenticated_snapshot_peak_bytes: fragments
+                    .iter()
+                    .map(|fragment| fragment.entry.byte_length)
+                    .max()
+                    .unwrap_or(0),
+            },
+        );
         Ok(metrics)
     }
+}
+
+struct ProjectedMetricSources<'a> {
+    counts: &'a ReadCounts,
+    authentication_bytes: &'a AtomicU64,
+    authentication_block_equivalents: &'a AtomicU64,
+    authentication_read_calls: &'a AtomicU64,
+    decoded: &'a Mutex<DecodedRetention>,
+    budget: &'a LiveByteBudget,
+    authenticated_snapshot_peak_bytes: u64,
+}
+
+fn finalize_projected_metrics(
+    metrics: &mut PropertyOverlayMetrics,
+    sources: ProjectedMetricSources<'_>,
+) {
+    metrics.authentication_bytes = sources.authentication_bytes.load(Ordering::Relaxed);
+    metrics.authentication_block_equivalents = sources
+        .authentication_block_equivalents
+        .load(Ordering::Relaxed);
+    metrics.authentication_read_calls = sources.authentication_read_calls.load(Ordering::Relaxed);
+    metrics.property_authentication_bytes = metrics.authentication_bytes;
+    metrics.authenticated_snapshot_bytes = metrics.authentication_bytes;
+    metrics.authenticated_snapshot_peak_bytes = sources.authenticated_snapshot_peak_bytes;
+    metrics.property_authentication_block_equivalents = metrics.authentication_block_equivalents;
+    metrics.property_authentication_read_calls = metrics.authentication_read_calls;
+    metrics.validation_bytes = sources.counts.bytes.load(Ordering::Relaxed);
+    metrics.physical_bytes = metrics
+        .authentication_bytes
+        .saturating_add(metrics.validation_bytes);
+    metrics.read_calls = sources.counts.blocks.load(Ordering::Relaxed);
+    metrics.validation_read_calls = metrics.read_calls;
+    metrics.physical_blocks = metrics
+        .authentication_read_calls
+        .saturating_add(metrics.read_calls);
+    metrics.range_seeks = sources.counts.range_seeks.load(Ordering::Relaxed);
+    let decoded = sources.decoded.lock().expect("property retention lock");
+    metrics.decoder_peak_rows = decoded.peak_rows;
+    metrics.decoder_peak_bytes = decoded.peak_bytes;
+    metrics.decoder_page_reservation_bytes = decoded.page_peak;
+    metrics.emitted_batches = decoded.batches;
+    metrics.merge_peak_rows = metrics.peak_buffered_rows;
+    metrics.merge_peak_bytes = metrics.peak_buffered_bytes;
+    metrics.peak_buffered_rows = metrics
+        .decoder_peak_rows
+        .saturating_add(metrics.merge_peak_rows);
+    metrics.peak_buffered_bytes = sources.budget.peak();
 }
 
 fn decode_sha256(value: &str) -> Result<[u8; 32], GfError> {

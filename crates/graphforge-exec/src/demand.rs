@@ -443,8 +443,12 @@ impl PhysicalOptimizerRule for FixedHopDemandRule {
         plan: Arc<dyn ExecutionPlan>,
         config: &ConfigOptions,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let required = (0..plan.schema().fields().len()).collect::<BTreeSet<_>>();
-        let plan = rewrite_materialization(plan, &required)?;
+        let plan = if contains_demand_expand(&plan) {
+            let required = (0..plan.schema().fields().len()).collect::<BTreeSet<_>>();
+            rewrite_materialization(plan, &required)?
+        } else {
+            plan
+        };
         let Some(terminal) = find_terminal_demand(&plan) else {
             return Ok(plan);
         };
