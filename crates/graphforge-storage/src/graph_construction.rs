@@ -8466,6 +8466,13 @@ mod tests {
             encoding.evidence.ordinal_publication_write_bytes,
             ordinal_publication_bytes
         );
+        assert_eq!(
+            encoding.evidence.ordinal_peak_temporary_bytes,
+            encoding
+                .evidence
+                .ordinal_artifact_write_bytes
+                .saturating_add(ordinal_publication_bytes)
+        );
 
         let graph = root
             .path()

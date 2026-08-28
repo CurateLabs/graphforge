@@ -321,13 +321,20 @@ impl<'a> V4OrdinalConstructionWriter<'a> {
             .checked_add(1)
             .ok_or_else(|| storage_err("v4 ordinal record count overflow"))?;
         self.previous_ordinal_node_id = node_id;
-        self.metrics.peak_temporary_bytes = self.metrics.peak_temporary_bytes.max(
-            self.forward.bytes.saturating_add(
-                self.current
-                    .as_ref()
-                    .map_or(0, |range| range.artifact.bytes),
-            ),
-        );
+        let live_temporary_bytes = self
+            .metrics
+            .artifact_bytes
+            .checked_add(self.forward.bytes)
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    self.current
+                        .as_ref()
+                        .map_or(0, |range| range.artifact.bytes),
+                )
+            })
+            .ok_or_else(|| storage_err("v4 live temporary byte count overflow"))?;
+        self.metrics.peak_temporary_bytes =
+            self.metrics.peak_temporary_bytes.max(live_temporary_bytes);
         Ok(())
     }
 
@@ -485,6 +492,7 @@ fn finish_streamed_v4_artifact(
         .artifact_bytes
         .checked_add(artifact.bytes)
         .ok_or_else(|| storage_err("v4 aggregate artifact length overflow"))?;
+    metrics.peak_temporary_bytes = metrics.peak_temporary_bytes.max(metrics.artifact_bytes);
     metrics.write_blocks = metrics
         .write_blocks
         .checked_add(artifact.bytes.div_ceil(V4_ORDINAL_BLOCK_BYTES as u64))
@@ -1126,6 +1134,11 @@ pub(crate) fn publish_v4_construction_artifacts(
             sha256: artifact.sha256.clone(),
         })
         .collect::<Vec<_>>();
+    let artifact_bytes = outputs.iter().try_fold(0_u64, |total, output| {
+        total
+            .checked_add(output.bytes)
+            .ok_or_else(|| storage_err("v4 publication artifact byte count overflow"))
+    })?;
     // The selected project generation is still unpublished. Install the
     // receipt first, then its manifest, and create the lock last so every
     // visible construction inventory is complete and reopenable.
@@ -1158,7 +1171,9 @@ pub(crate) fn publish_v4_construction_artifacts(
             write_bytes: work.write_bytes,
             write_operations: work.write_operations,
             fsync_operations: work.fsync_operations,
-            peak_temporary_bytes: work.peak_temporary_bytes,
+            peak_temporary_bytes: artifact_bytes
+                .checked_add(work.write_bytes)
+                .ok_or_else(|| storage_err("v4 publication temporary byte count overflow"))?,
         },
     ))
 }
@@ -8244,6 +8259,8 @@ pub(crate) mod tests {
         assert_eq!(metrics.ranges, 2);
         assert_eq!(metrics.cancellation_polls, 4_100);
         assert_eq!(metrics.peak_buffer_bytes, 3 * V4_ORDINAL_BLOCK_BYTES);
+        assert_eq!(metrics.peak_temporary_bytes, 4_100 * (24 + 16));
+        assert_eq!(metrics.fsync_operations, 4);
         assert_eq!(manifest.ordinal_ranges[0].first_node_id, 1);
         assert_eq!(manifest.ordinal_ranges[0].count, 4_096);
         assert_eq!(manifest.ordinal_ranges[0].blocks.len(), 1);
@@ -8400,5 +8417,7 @@ pub(crate) mod tests {
         assert_eq!(manifest.ordinal_ranges[0].artifact.bytes, 16);
         assert_eq!(manifest.ordinal_ranges[1].artifact.bytes, 32);
         assert_eq!(metrics.artifact_bytes, 3 * 24 + 3 * 16);
+        assert_eq!(metrics.peak_temporary_bytes, metrics.artifact_bytes);
+        assert_eq!(metrics.fsync_operations, 4);
     }
 }
