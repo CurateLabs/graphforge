@@ -429,6 +429,20 @@ impl StableDirectory {
         self.revalidate_named()
     }
 
+    /// Remove one empty child directory only while its retained and named
+    /// identities still match. Callers must first authenticate and empty the
+    /// directory through the returned child capability.
+    pub fn remove_child_directory_if_identity(
+        &self,
+        name: &OsStr,
+        expected: FileIdentity,
+    ) -> io::Result<()> {
+        validate_child_name(name)?;
+        self.revalidate_named()?;
+        stable_remove_child_directory_if_identity(&self.file, &self.path, name, expected)?;
+        self.revalidate_named()
+    }
+
     /// Atomically publish a retained temporary child as `target` within this
     /// retained directory. Cooperative publishers must serialize the target.
     pub fn replace_child(
@@ -713,6 +727,43 @@ fn stable_unlink_child_if_identity(
     rustix::fs::unlinkat(parent, name, AtFlags::empty()).map_err(io::Error::from)
 }
 
+#[cfg(unix)]
+fn stable_remove_child_directory_if_identity(
+    parent: &File,
+    _path: &Path,
+    name: &OsStr,
+    expected: FileIdentity,
+) -> io::Result<()> {
+    use rustix::fs::{AtFlags, Mode, OFlags};
+    let opened = rustix::fs::openat(
+        parent,
+        name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(io::Error::from)?;
+    if file_identity(&opened)? != expected {
+        return Err(io::Error::other(
+            "child directory identity changed before removal",
+        ));
+    }
+    let named =
+        rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW).map_err(io::Error::from)?;
+    #[allow(clippy::cast_sign_loss, clippy::unnecessary_cast)]
+    let volume_serial = named.st_dev as u64;
+    let named_identity = FileIdentity {
+        volume_serial,
+        file_id: u128::from(named.st_ino).to_le_bytes(),
+    };
+    if named_identity != expected {
+        return Err(io::Error::other(
+            "child directory identity changed before removal",
+        ));
+    }
+    rustix::fs::unlinkat(parent, name, AtFlags::REMOVEDIR).map_err(io::Error::from)
+}
+
 #[cfg(windows)]
 fn stable_open_directory(path: &Path) -> io::Result<File> {
     use std::os::windows::fs::OpenOptionsExt as _;
@@ -849,6 +900,23 @@ fn stable_unlink_child_if_identity(
     windows::delete_file_by_handle(&child, expected)
 }
 
+#[cfg(windows)]
+fn stable_remove_child_directory_if_identity(
+    _parent: &File,
+    path: &Path,
+    name: &OsStr,
+    expected: FileIdentity,
+) -> io::Result<()> {
+    let child = path.join(name);
+    let retained = stable_open_directory(&child)?;
+    if file_identity(&retained)? != expected || path_identity(&child)? != expected {
+        return Err(io::Error::other(
+            "child directory identity changed before removal",
+        ));
+    }
+    std::fs::remove_dir(child)
+}
+
 #[cfg(all(not(unix), not(windows)))]
 fn stable_open_directory(_path: &Path) -> io::Result<File> {
     Err(io::Error::new(
@@ -905,6 +973,19 @@ fn stable_link_child(
 
 #[cfg(all(not(unix), not(windows)))]
 fn stable_unlink_child_if_identity(
+    _parent: &File,
+    _path: &Path,
+    _name: &OsStr,
+    _expected: FileIdentity,
+) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "stable directories unsupported",
+    ))
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn stable_remove_child_directory_if_identity(
     _parent: &File,
     _path: &Path,
     _name: &OsStr,
