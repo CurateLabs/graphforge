@@ -3005,9 +3005,14 @@ fn build_edge_prop_children(
         vec![rel_type_name.to_owned()]
     };
     let mut prop_batches_by_rel = Vec::with_capacity(stems.len());
+    let property_names = prop_fields
+        .iter()
+        .map(|field| field.name().clone())
+        .collect::<Vec<_>>();
     for stem in &stems {
-        let batches = graphforge_storage::read_edge_properties(dir, stem)
-            .map_err(|e| exec_err(e.to_string()))?;
+        let batches =
+            graphforge_storage::read_edge_properties_projected(dir, stem, &property_names)
+                .map_err(|e| exec_err(e.to_string()))?;
         if let Some(first) = batches.first() {
             prop_batches_by_rel.push(
                 concat_batches(&first.schema(), &batches).map_err(|e| exec_err(e.to_string()))?,

@@ -1475,11 +1475,28 @@ fn read_property_overlay(
     stem: &str,
     is_edge: bool,
 ) -> Result<Vec<RecordBatch>, DataFusionError> {
+    read_property_overlay_projected(dir, stem, is_edge, None)
+}
+
+fn read_property_overlay_projected(
+    dir: &Path,
+    stem: &str,
+    is_edge: bool,
+    selected_properties: Option<&std::collections::BTreeSet<String>>,
+) -> Result<Vec<RecordBatch>, DataFusionError> {
     let mut batches = Vec::new();
-    visit_property_overlay_batched(dir, stem, is_edge, 8_192, |batch| {
-        batches.push(batch.clone());
-        Ok(true)
-    })?;
+    visit_property_overlay_batched_projected(
+        dir,
+        None,
+        stem,
+        is_edge,
+        8_192,
+        selected_properties,
+        |batch| {
+            batches.push(batch.clone());
+            Ok(true)
+        },
+    )?;
     Ok(batches)
 }
 
@@ -1493,7 +1510,7 @@ pub(crate) fn visit_property_overlay_batched<F>(
 where
     F: FnMut(&RecordBatch) -> Result<bool, DataFusionError>,
 {
-    visit_property_overlay_batched_with_inventory(dir, None, stem, is_edge, batch_size, visit)
+    visit_property_overlay_batched_projected(dir, None, stem, is_edge, batch_size, None, visit)
 }
 
 pub(crate) fn visit_property_overlay_batched_with_inventory<F>(
@@ -1502,6 +1519,22 @@ pub(crate) fn visit_property_overlay_batched_with_inventory<F>(
     stem: &str,
     is_edge: bool,
     batch_size: usize,
+    mut visit: F,
+) -> Result<(), DataFusionError>
+where
+    F: FnMut(&RecordBatch) -> Result<bool, DataFusionError>,
+{
+    visit_property_overlay_batched_projected(dir, inventory, stem, is_edge, batch_size, None, visit)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn visit_property_overlay_batched_projected<F>(
+    dir: &Path,
+    inventory: Option<&crate::AuthenticatedPropertyInventory>,
+    stem: &str,
+    is_edge: bool,
+    batch_size: usize,
+    selected_properties: Option<&std::collections::BTreeSet<String>>,
     mut visit: F,
 ) -> Result<(), DataFusionError>
 where
@@ -1529,11 +1562,12 @@ where
     let mut rows = Vec::with_capacity(batch_size.max(1));
     let mut stopped = false;
     inventory
-        .visit_route(
+        .visit_route_projected(
             kind,
             stem,
             scratch.path(),
             crate::property_overlay::PropertyOverlayLimits::default(),
+            selected_properties,
             |row| {
                 if stopped {
                     return Ok(());
@@ -1549,6 +1583,8 @@ where
                         graphforge_core::GfError::Storage("property batch disappeared".into())
                     })?;
                     let batch = normalize_property_batch(batch, schema.as_ref())?;
+                    let batch =
+                        project_property_batch(batch, kind.uuid_field(), selected_properties)?;
                     stopped = !visit(&batch)
                         .map_err(|error| graphforge_core::GfError::Storage(error.to_string()))?;
                 }
@@ -1562,9 +1598,34 @@ where
             .ok_or_else(|| DataFusionError::Execution("property batch disappeared".into()))?;
         let batch = normalize_property_batch(batch, schema.as_ref())
             .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+        let batch = project_property_batch(batch, kind.uuid_field(), selected_properties)
+            .map_err(|error| DataFusionError::Execution(error.to_string()))?;
         let _ = visit(&batch)?;
     }
     Ok(())
+}
+
+fn project_property_batch(
+    batch: RecordBatch,
+    uuid_field: &str,
+    selected_properties: Option<&std::collections::BTreeSet<String>>,
+) -> Result<RecordBatch, graphforge_core::GfError> {
+    let Some(selected_properties) = selected_properties else {
+        return Ok(batch);
+    };
+    let indices = batch
+        .schema()
+        .fields()
+        .iter()
+        .enumerate()
+        .filter(|(_, field)| {
+            field.name() == uuid_field || selected_properties.contains(field.name())
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    batch
+        .project(&indices)
+        .map_err(|error| graphforge_core::GfError::Storage(error.to_string()))
 }
 
 fn normalize_property_batch(
@@ -2092,6 +2153,18 @@ where
 /// Propagates Parquet / Arrow errors encountered while reading.
 pub fn read_edge_properties(dir: &Path, stem: &str) -> Result<Vec<RecordBatch>, DataFusionError> {
     read_property_overlay(dir, stem, true)
+}
+
+/// Read an authenticated newest-wins edge-property overlay while decoding
+/// only the requested property names plus the mandatory edge UUID key.
+#[doc(hidden)]
+pub fn read_edge_properties_projected(
+    dir: &Path,
+    stem: &str,
+    property_names: &[String],
+) -> Result<Vec<RecordBatch>, DataFusionError> {
+    let selected = property_names.iter().cloned().collect();
+    read_property_overlay_projected(dir, stem, true, Some(&selected))
 }
 
 /// Stems (relation names) of every `edge_properties/<stem>.parquet` under

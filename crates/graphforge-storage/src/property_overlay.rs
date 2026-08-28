@@ -790,6 +790,23 @@ impl AuthenticatedPropertyInventory {
     where
         F: FnMut(PropertySnapshotRow) -> Result<(), GfError>,
     {
+        self.visit_route_projected(kind, route, scratch, limits, None, emit)
+    }
+
+    /// Visit one route while decoding only selected property columns plus the
+    /// UUID and tombstone keys required by newest-wins overlay semantics.
+    pub(crate) fn visit_route_projected<F>(
+        &self,
+        kind: PropertyRouteKind,
+        route: &str,
+        scratch: &Path,
+        limits: PropertyOverlayLimits,
+        selected_properties: Option<&BTreeSet<String>>,
+        emit: F,
+    ) -> Result<PropertyOverlayMetrics, GfError>
+    where
+        F: FnMut(PropertySnapshotRow) -> Result<(), GfError>,
+    {
         let Some(fragments) = self.routes.get(&(kind, route.to_owned())) else {
             return Ok(PropertyOverlayMetrics::default());
         };
@@ -821,17 +838,39 @@ impl AuthenticatedPropertyInventory {
                     kind,
                     route,
                 )?;
+                let projected = selected_properties.map(|selected_properties| {
+                    builder
+                        .schema()
+                        .fields()
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, field)| {
+                            field.name() == kind.uuid_field()
+                                || field.name() == PROPERTY_TOMBSTONE_FIELD
+                                || selected_properties.contains(field.name())
+                        })
+                        .map(|(index, _)| index)
+                        .collect::<BTreeSet<_>>()
+                });
                 let page_reservation_bytes = validate_parquet_resource_admission(
                     builder.metadata(),
                     limits,
                     opened.file.as_ref(),
                     &counts,
+                    projected.as_ref(),
                 )?;
                 budget.charge(page_reservation_bytes)?;
                 {
                     let mut retention = decoded.lock().expect("property retention lock");
                     retention.page_peak = retention.page_peak.max(page_reservation_bytes);
                 }
+                let builder = if let Some(projected) = projected {
+                    let mask =
+                        parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), projected);
+                    builder.with_projection(mask)
+                } else {
+                    builder
+                };
                 let reader = builder
                     .with_batch_size(admitted_batch_rows(limits))
                     .build()
@@ -2036,6 +2075,7 @@ pub fn read_authenticated_property_snapshots_for_inventory(
             PropertyOverlayLimits::default(),
             opened.file.as_ref(),
             &counts,
+            None,
         )?;
         metrics.decoder_page_reservation_bytes = metrics
             .decoder_page_reservation_bytes
@@ -2346,6 +2386,7 @@ fn validate_parquet_resource_admission(
     limits: PropertyOverlayLimits,
     file: &File,
     counts: &Arc<ReadCounts>,
+    projected_columns: Option<&BTreeSet<usize>>,
 ) -> Result<u64, GfError> {
     const MAX_PAGE_HEADER_BYTES: usize = 64 * 1024;
     let max_page_bytes = limits.max_buffered_bytes / 4;
@@ -2355,7 +2396,8 @@ fn validate_parquet_resource_admission(
     let mut largest_group_exposure = 0_u64;
     for group in metadata.row_groups() {
         let mut group_exposure = 0_u64;
-        for column in group.columns() {
+        for (column_index, column) in group.columns().iter().enumerate() {
+            let selected = projected_columns.is_none_or(|columns| columns.contains(&column_index));
             let mut dictionary_exposure = 0_u64;
             let mut data_exposure = 0_u64;
             let _uncompressed = u64::try_from(column.uncompressed_size())
@@ -2400,15 +2442,17 @@ fn validate_parquet_resource_admission(
                 let uncompressed_page = u64::try_from(header.uncompressed_page_size)
                     .map_err(|_| corrupt("property page has negative uncompressed size"))?;
                 if header_bytes == 0
-                    || uncompressed_page > max_page_bytes
+                    || (selected && uncompressed_page > max_page_bytes)
                     || compressed_page > compressed
                 {
                     return Err(corrupt("property page exceeds pre-decode byte admission"));
                 }
-                if header.type_ == parquet::format::PageType::DICTIONARY_PAGE {
-                    dictionary_exposure = dictionary_exposure.max(uncompressed_page);
-                } else {
-                    data_exposure = data_exposure.max(uncompressed_page);
+                if selected {
+                    if header.type_ == parquet::format::PageType::DICTIONARY_PAGE {
+                        dictionary_exposure = dictionary_exposure.max(uncompressed_page);
+                    } else {
+                        data_exposure = data_exposure.max(uncompressed_page);
+                    }
                 }
                 position = position
                     .checked_add(header_bytes)
@@ -2423,23 +2467,25 @@ fn validate_parquet_resource_admission(
                     "property page sequence does not cover its column chunk",
                 ));
             }
-            group_exposure = group_exposure
-                .checked_add(data_exposure)
-                .and_then(|bytes| {
-                    dictionary_exposure
-                        .checked_mul(u64::try_from(admitted_batch_rows(limits)).ok()?)
-                        .and_then(|decoded_dictionary| bytes.checked_add(decoded_dictionary))
-                })
-                .and_then(|bytes| {
-                    // Validity, offsets, and values buffers are live together.
-                    // Sixteen bytes/value/column deliberately over-reserves the
-                    // fixed Arrow bookkeeping before the builder allocates it.
-                    u64::try_from(admitted_batch_rows(limits))
-                        .ok()?
-                        .checked_mul(16)
-                        .and_then(|overhead| bytes.checked_add(overhead))
-                })
-                .ok_or_else(|| corrupt("property projected page exposure overflows"))?;
+            if selected {
+                group_exposure = group_exposure
+                    .checked_add(data_exposure)
+                    .and_then(|bytes| {
+                        dictionary_exposure
+                            .checked_mul(u64::try_from(admitted_batch_rows(limits)).ok()?)
+                            .and_then(|decoded_dictionary| bytes.checked_add(decoded_dictionary))
+                    })
+                    .and_then(|bytes| {
+                        // Validity, offsets, and values buffers are live together.
+                        // Sixteen bytes/value/column deliberately over-reserves the
+                        // fixed Arrow bookkeeping before the builder allocates it.
+                        u64::try_from(admitted_batch_rows(limits))
+                            .ok()?
+                            .checked_mul(16)
+                            .and_then(|overhead| bytes.checked_add(overhead))
+                    })
+                    .ok_or_else(|| corrupt("property projected page exposure overflows"))?;
+            }
             if group_exposure > max_page_bytes {
                 return Err(corrupt(
                     "property projected pages exceed pre-decode live-byte admission",
@@ -4114,6 +4160,103 @@ mod tests {
         .unwrap();
         let error = limited.await.unwrap().unwrap_err();
         assert!(error.to_string().contains("GF_PROJECT_CORRUPT"), "{error}");
+    }
+
+    #[test]
+    fn projected_overlay_decodes_only_selected_values_and_mandatory_keys() {
+        let root = TempDir::new().unwrap();
+        let scratch = TempDir::new().unwrap();
+        let id = PropertyFragmentId {
+            generation: 1,
+            ordinal: 0,
+        };
+        let route_dir = root.path().join("edge_properties/KNOWS");
+        fs::create_dir_all(&route_dir).unwrap();
+        let schema = Arc::new(Schema::new_with_metadata(
+            vec![
+                Field::new("edge_uuid", DataType::FixedSizeBinary(16), false),
+                Field::new(PROPERTY_TOMBSTONE_FIELD, DataType::Boolean, false),
+                Field::new("keep", DataType::Utf8, true),
+                Field::new("unused", DataType::Utf8, true),
+            ],
+            HashMap::from([
+                (
+                    PROPERTY_OVERLAY_FORMAT_KEY.into(),
+                    PROPERTY_OVERLAY_FORMAT.into(),
+                ),
+                (PROPERTY_ROUTE_KEY.into(), "KNOWS".into()),
+                (PROPERTY_KIND_KEY.into(), "edge".into()),
+                (PROPERTY_GENERATION_KEY.into(), "1".into()),
+                (PROPERTY_ORDINAL_KEY.into(), "0".into()),
+            ]),
+        ));
+        let rows = 128;
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(
+                    FixedSizeBinaryArray::try_from_iter(
+                        (0..rows).map(|row| vec![u8::try_from(row + 1).unwrap(); 16]),
+                    )
+                    .unwrap(),
+                ),
+                Arc::new(BooleanArray::from(vec![false; rows])),
+                Arc::new(StringArray::from(vec![Some("kept"); rows])),
+                Arc::new(StringArray::from(vec![Some("x".repeat(8_192)); rows])),
+            ],
+        )
+        .unwrap();
+        let path = route_dir.join(id.file_name());
+        let mut writer = ArrowWriter::try_new(File::create(&path).unwrap(), schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        let bytes = fs::read(&path).unwrap();
+        let inventory = AuthenticatedPropertyInventory::from_entries_at_root(
+            root.path(),
+            vec![crate::GraphFileEntry {
+                relative_path: format!("edge_properties/KNOWS/{}", id.file_name()),
+                byte_length: u64::try_from(bytes.len()).unwrap(),
+                content_sha256: digest_hex(&Sha256::digest(&bytes)),
+                role: crate::GraphFileRole::Properties,
+            }],
+        )
+        .unwrap();
+
+        let mut full_rows = Vec::new();
+        let full = inventory
+            .visit_route(
+                PropertyRouteKind::Edge,
+                "KNOWS",
+                scratch.path(),
+                PropertyOverlayLimits::default(),
+                |row| {
+                    full_rows.push(row);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        let mut projected_rows = Vec::new();
+        let projected = inventory
+            .visit_route_projected(
+                PropertyRouteKind::Edge,
+                "KNOWS",
+                scratch.path(),
+                PropertyOverlayLimits::default(),
+                Some(&BTreeSet::from(["keep".to_owned()])),
+                |row| {
+                    projected_rows.push(row);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(projected_rows.len(), full_rows.len());
+        assert!(
+            projected_rows.iter().all(|row| {
+                row.values.contains_key("keep") && !row.values.contains_key("unused")
+            })
+        );
+        assert!(projected.validation_bytes < full.validation_bytes);
+        assert_eq!(projected.per_record_seeks, 0);
     }
 
     #[test]
