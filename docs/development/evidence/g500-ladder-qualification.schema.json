@@ -54,10 +54,10 @@
     },
     "projection": {
       "type": "object", "additionalProperties": false,
-      "required": ["target", "source_rungs", "rate", "projected_canonical_bytes", "projected_lifecycle_peak_bytes", "volume_bytes", "reserved_headroom_bytes", "headroom_bytes", "decision"],
+      "required": ["target", "source_rungs", "rate", "projected_canonical_node_bytes", "projected_canonical_edge_bytes", "projected_lifecycle_peak_bytes", "volume_bytes", "reserved_headroom_bytes", "headroom_bytes", "decision"],
       "properties": {
         "target": {"const": "S26"}, "source_rungs": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"enum": ["S20", "S22", "S24"]}}, "rate": {"$ref": "#/$defs/ratio"},
-        "projected_canonical_bytes": {"$ref": "#/$defs/nonNegative"}, "projected_lifecycle_peak_bytes": {"$ref": "#/$defs/nonNegative"}, "volume_bytes": {"$ref": "#/$defs/positive"},
+        "projected_canonical_node_bytes": {"$ref": "#/$defs/nonNegative"}, "projected_canonical_edge_bytes": {"$ref": "#/$defs/nonNegative"}, "projected_lifecycle_peak_bytes": {"$ref": "#/$defs/nonNegative"}, "volume_bytes": {"$ref": "#/$defs/positive"},
         "reserved_headroom_bytes": {"$ref": "#/$defs/nonNegative"}, "headroom_bytes": {"$ref": "#/$defs/nonNegative"}, "decision": {"enum": ["admit", "refuse"]}
       }
     }

@@ -544,6 +544,22 @@ impl std::fmt::Debug for GraphForge {
 }
 
 impl GraphForge {
+    /// Capture authenticated logical and physical storage attribution for the
+    /// generation visible to this facade.
+    ///
+    /// The storage layer walks only the generation's authenticated inventories
+    /// and opens retained file capabilities. It never recursively scans the
+    /// project directory, and qualification fails closed on an unclassified
+    /// graph artifact.
+    pub fn storage_attribution(
+        &self,
+    ) -> Result<graphforge_storage::StorageAttributionSnapshot, GfError> {
+        let generation = self.generation_for_read()?;
+        let snapshot = graphforge_storage::capture_storage_attribution(&generation)?;
+        snapshot.validate_for_qualification()?;
+        Ok(snapshot)
+    }
+
     pub(crate) fn stage_project_generation(
         &self,
         request: &graphforge_storage::ProjectGenerationRequest,

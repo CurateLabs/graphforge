@@ -28,6 +28,7 @@ REQUIRED_PHASES = {
     "recovery_reauthentication",
 }
 S26_EDGES = 1 << 30  # SCALE=26, edgefactor=16 raw target; conservative live denominator.
+S26_NODES = 1 << 26
 
 
 class EvidenceError(ValueError):
@@ -120,15 +121,20 @@ def validate(evidence: dict[str, Any]) -> None:
     if projection["projected_lifecycle_peak_bytes"] != projected:
         raise EvidenceError("S26 projected peak is not reproducible from the declared rate")
     latest_categories = {item["category"]: item for item in rungs[-1]["artifacts"]}
-    canonical_bytes = (
+    canonical_node_projected = ceil_ratio(
         latest_categories["canonical_node_topology"]["current_retained_bytes"]
-        + latest_categories["canonical_edge_topology"]["current_retained_bytes"]
+        * S26_NODES,
+        rungs[-1]["live_nodes"],
     )
-    canonical_projected = ceil_ratio(
-        canonical_bytes * S26_EDGES, rungs[-1]["live_edges"]
+    canonical_edge_projected = ceil_ratio(
+        latest_categories["canonical_edge_topology"]["current_retained_bytes"]
+        * S26_EDGES,
+        rungs[-1]["live_edges"],
     )
-    if projection["projected_canonical_bytes"] != canonical_projected:
-        raise EvidenceError("S26 canonical projection is not reproducible")
+    if projection["projected_canonical_node_bytes"] != canonical_node_projected:
+        raise EvidenceError("S26 canonical node projection is not reproducible")
+    if projection["projected_canonical_edge_bytes"] != canonical_edge_projected:
+        raise EvidenceError("S26 canonical edge projection is not reproducible")
     if projected > projection["volume_bytes"]:
         expected_headroom = 0
     else:

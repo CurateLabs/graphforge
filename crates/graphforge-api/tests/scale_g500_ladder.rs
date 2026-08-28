@@ -524,10 +524,10 @@ fn storage_attribution_value(project: &Path) -> Value {
 }
 
 fn storage_attribution(project: &Path) -> graphforge_storage::StorageAttributionSnapshot {
-    let generation = graphforge_storage::resolve_project_generation(project)
-        .expect("resolve exact generation for attribution");
-    let snapshot = graphforge_storage::capture_storage_attribution(&generation)
-        .expect("capture authenticated storage attribution");
+    let graph = GraphForge::new(project.to_str()).expect("open attribution facade");
+    let snapshot = graph
+        .storage_attribution()
+        .expect("capture authenticated storage attribution through public facade");
     snapshot
         .validate_reconciliation()
         .expect("storage attribution reconciliation");
@@ -536,6 +536,17 @@ fn storage_attribution(project: &Path) -> graphforge_storage::StorageAttribution
         "qualification refuses unclassified retained artifacts"
     );
     snapshot
+}
+
+#[test]
+fn public_storage_attribution_is_generation_bound_and_fully_classified() {
+    let project = TempDir::new().expect("storage attribution project");
+    let graph = GraphForge::new(project.path().to_str()).expect("open attribution facade");
+    let snapshot = graph
+        .storage_attribution()
+        .expect("public facade storage attribution");
+    snapshot.validate_for_qualification().unwrap();
+    assert!(snapshot.is_fully_classified());
 }
 
 /// Check the envelope after a phase. Returns `Some(error_class)` on the first

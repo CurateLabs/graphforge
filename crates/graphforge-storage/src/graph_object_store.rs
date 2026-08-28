@@ -2647,12 +2647,8 @@ fn try_reuse_existing_object(
                         },
                     )
                 })?;
-            adoption_io = verify_stream_counted(
-                &mut legacy,
-                digest,
-                expected_length,
-                &cas.diagnostic_root,
-            )?;
+            adoption_io =
+                verify_stream_counted(&mut legacy, digest, expected_length, &cas.diagnostic_root)?;
             bucket
                 .adopt_legacy_cas_child(destination_name, legacy)
                 .map(graphforge_filesystem::WindowsSealedCasFile::into_file)

@@ -218,7 +218,8 @@ integer numerators and denominators; rounded decimals are not evidence.
 
 At least two ordered adjacent rungs are required. The S26 rate must be no lower
 than both the newest observed peak ratio and every positive adjacent-rung slope.
-The validator independently recomputes projected canonical/lifecycle peak,
+The validator independently recomputes separate projected canonical-node and
+canonical-edge allocation plus the lifecycle peak,
 volume headroom, and the admit/refuse decision. A single successful rung is not
 a projection, and insufficient reserved headroom always refuses SCALE-26.
 

@@ -78,11 +78,13 @@ def main() -> None:
         ratio_num, ratio_den = delta_bytes, delta_edges
     target_edges = 1 << 30
     peak = (ratio_num * target_edges + ratio_den - 1) // ratio_den
-    canonical = sum(row["current_retained_bytes"] for row in high["artifacts"][:2])
-    canonical = (canonical * target_edges + high["live_edges"] - 1) // high["live_edges"]
+    target_nodes = 1 << 26
+    by_category = {row["category"]: row for row in high["artifacts"]}
+    canonical_nodes = (by_category["canonical_node_topology"]["current_retained_bytes"] * target_nodes + high["live_nodes"] - 1) // high["live_nodes"]
+    canonical_edges = (by_category["canonical_edge_topology"]["current_retained_bytes"] * target_edges + high["live_edges"] - 1) // high["live_edges"]
     headroom = max(0, args.volume_bytes - peak)
     decision = "admit" if peak <= args.volume_bytes and headroom >= args.reserved_headroom_bytes else "refuse"
-    value = {"schema": "graphforge-g500-ladder-qualification/3", "rungs": rungs, "projection": {"target": "S26", "source_rungs": [low["id"], high["id"]], "rate": {"numerator_bytes": ratio_num, "denominator_count": ratio_den}, "projected_canonical_bytes": canonical, "projected_lifecycle_peak_bytes": peak, "volume_bytes": args.volume_bytes, "reserved_headroom_bytes": args.reserved_headroom_bytes, "headroom_bytes": headroom, "decision": decision}}
+    value = {"schema": "graphforge-g500-ladder-qualification/3", "rungs": rungs, "projection": {"target": "S26", "source_rungs": [low["id"], high["id"]], "rate": {"numerator_bytes": ratio_num, "denominator_count": ratio_den}, "projected_canonical_node_bytes": canonical_nodes, "projected_canonical_edge_bytes": canonical_edges, "projected_lifecycle_peak_bytes": peak, "volume_bytes": args.volume_bytes, "reserved_headroom_bytes": args.reserved_headroom_bytes, "headroom_bytes": headroom, "decision": decision}}
     args.output.write_text(json.dumps(value, indent=2) + "\n")
 
 

@@ -80,8 +80,13 @@ def evidence() -> dict:
                 "numerator_bytes": numerator,
                 "denominator_count": denominator,
             },
-            "projected_canonical_bytes": VALIDATOR.ceil_ratio(
-                sum(item["current_retained_bytes"] for item in high["artifacts"][:2])
+            "projected_canonical_node_bytes": VALIDATOR.ceil_ratio(
+                high["artifacts"][0]["current_retained_bytes"]
+                * VALIDATOR.S26_NODES,
+                high["live_nodes"],
+            ),
+            "projected_canonical_edge_bytes": VALIDATOR.ceil_ratio(
+                high["artifacts"][1]["current_retained_bytes"]
                 * VALIDATOR.S26_EDGES,
                 high["live_edges"],
             ),
@@ -168,10 +173,10 @@ def test_refuses_volume_overflow_even_with_zero_reserved_headroom():
 
 def test_canonical_projection_excludes_package_and_import_copies():
     value = evidence()
-    value["projection"]["projected_canonical_bytes"] = VALIDATOR.ceil_ratio(
+    value["projection"]["projected_canonical_edge_bytes"] = VALIDATOR.ceil_ratio(
         value["rungs"][-1]["totals"]["current_retained_bytes"]
         * VALIDATOR.S26_EDGES,
         value["rungs"][-1]["live_edges"],
     )
-    with pytest.raises(VALIDATOR.EvidenceError, match="canonical projection"):
+    with pytest.raises(VALIDATOR.EvidenceError, match="canonical edge projection"):
         VALIDATOR.validate(value)
