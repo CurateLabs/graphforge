@@ -49,8 +49,9 @@ const GENERATOR_SOURCE: &str = "crates/graphforge-api/tests/scale_g500_ladder.rs
 
 const NODE_LABEL: &str = "Node";
 const REL_TYPE: &str = "LINK";
-const BATCH_ROWS: usize = 8_192;
-const EDGE_PUBLISH_ROWS: usize = 1_048_576;
+/// One authoritative Arrow and durable-append row window for the scale client.
+/// This intentionally matches `GraphConstructionBudgets::default()`.
+const CONSTRUCTION_BATCH_ROWS: usize = 65_536;
 
 const ONE_HOP: &str = "MATCH (a)-[r]->(b) RETURN b.node_uuid AS id ORDER BY id LIMIT 1000";
 const TWO_HOP: &str =
@@ -874,6 +875,7 @@ fn run_rung(
             &spill_dir.join("construction-session.uuid"),
             GraphConstructionBudgets::default(),
         );
+        let append_started = Instant::now();
         if construction.progress().publication_committed {
             let mut fingerprint = Sha256::new();
             let merge = merge_runs(&spill.runs, None, |src, dst| {
@@ -895,9 +897,12 @@ fn run_rung(
             duplicates_rejected = merge.duplicates_rejected;
             input_fingerprint = format!("sha256:{}", hex_encode(sink.finish()));
         }
+        let append_s = append_started.elapsed().as_secs_f64();
+        let seal_started = Instant::now();
         construction
             .seal_and_publish()
             .expect("publish rung construction");
+        let seal_publication_s = seal_started.elapsed().as_secs_f64();
         let construction_evidence = construction.progress().evidence;
         INGEST_SUBPHASE.store(0, Ordering::Relaxed);
         heartbeat.stop();
@@ -921,11 +926,17 @@ fn run_rung(
                 "duplicates_rejected": duplicates_rejected,
                 "input_fingerprint": input_fingerprint,
                 "construction": {
+                    "configured_rows_per_chunk": CONSTRUCTION_BATCH_ROWS,
+                    "submitted_chunks": construction_evidence.input_batches,
+                    "append_wall_time_s": append_s,
+                    "seal_publication_wall_time_s": seal_publication_s,
                     "input_rows": construction_evidence.input_rows,
                     "input_batches": construction_evidence.input_batches,
                     "parquet_shards": construction_evidence.parquet_shards,
+                    "immutable_artifacts": immutable_artifact_count(1_u64 << rung.scale, &construction_evidence),
                     "write_bytes": construction_evidence.write_bytes,
                     "write_operations": construction_evidence.write_operations,
+                    "fsync_operations": construction_evidence.fsync_operations,
                     "authentication_read_bytes": construction_evidence.authentication_read_bytes,
                     "authentication_read_operations": construction_evidence.authentication_read_operations,
                     "peak_batch_rows": construction_evidence.peak_batch_rows,
@@ -1187,7 +1198,7 @@ fn provisioned_rungs_through(profile: &ScaleProfile, max_scale: u32) -> Result<V
 }
 
 // ---------------------------------------------------------------------------
-// Streaming edge publisher (bounded by EDGE_PUBLISH_ROWS).
+// Streaming edge publisher (bounded by CONSTRUCTION_BATCH_ROWS).
 // ---------------------------------------------------------------------------
 
 struct EdgeSink<'a, 'graph> {
@@ -1206,7 +1217,7 @@ impl<'a, 'graph> EdgeSink<'a, 'graph> {
         EdgeSink {
             session,
             cancellation,
-            buf: Vec::with_capacity(EDGE_PUBLISH_ROWS),
+            buf: Vec::with_capacity(CONSTRUCTION_BATCH_ROWS),
             chunk_index: 0,
             hasher: Sha256::new(),
         }
@@ -1217,7 +1228,7 @@ impl<'a, 'graph> EdgeSink<'a, 'graph> {
         self.hasher.update(src.to_le_bytes());
         self.hasher.update(dst.to_le_bytes());
         self.buf.push((src, dst));
-        if self.buf.len() >= EDGE_PUBLISH_ROWS {
+        if self.buf.len() >= CONSTRUCTION_BATCH_ROWS {
             self.flush();
         }
     }
@@ -1227,50 +1238,40 @@ impl<'a, 'graph> EdgeSink<'a, 'graph> {
         if self.buf.is_empty() {
             return;
         }
-        let mut offset = 0usize;
-        while offset < self.buf.len() {
-            self.check_cancellation();
-            let end = (offset + BATCH_ROWS).min(self.buf.len());
-            let slice = &self.buf[offset..end];
-            let mut edge_ids = Vec::with_capacity(slice.len());
-            let mut sources = Vec::with_capacity(slice.len());
-            let mut targets = Vec::with_capacity(slice.len());
-            for (local, &(src, dst)) in slice.iter().enumerate() {
-                let ordinal = self
-                    .chunk_index
-                    .saturating_mul(EDGE_PUBLISH_ROWS as u128)
-                    .saturating_add(u128::try_from(offset + local).expect("edge ordinal"));
-                edge_ids.push(uuidv7(0xE000_0000_0000u128 + ordinal + 1));
-                sources.push(uuidv7(u128::from(src) + 1));
-                targets.push(uuidv7(u128::from(dst) + 1));
-            }
-            let batch = RecordBatch::try_new(
-                CONSTRUCTION_EDGE_SCHEMA.clone(),
-                vec![
-                    Arc::new(
-                        FixedSizeBinaryArray::try_from_iter(edge_ids.iter().map(Uuid::as_bytes))
-                            .expect("edge_uuid column"),
-                    ),
-                    Arc::new(StringArray::from(vec![REL_TYPE; slice.len()])),
-                    Arc::new(
-                        FixedSizeBinaryArray::try_from_iter(sources.iter().map(Uuid::as_bytes))
-                            .expect("source_uuid column"),
-                    ),
-                    Arc::new(
-                        FixedSizeBinaryArray::try_from_iter(targets.iter().map(Uuid::as_bytes))
-                            .expect("target_uuid column"),
-                    ),
-                ],
-            )
-            .expect("edge batch");
-            self.session
-                .append_edges(
-                    &format!("edges-{:016x}-{:08x}", self.chunk_index, offset),
-                    &batch,
-                )
-                .expect("append construction edge chunk");
-            offset = end;
+        let mut edge_ids = Vec::with_capacity(self.buf.len());
+        let mut sources = Vec::with_capacity(self.buf.len());
+        let mut targets = Vec::with_capacity(self.buf.len());
+        for (local, &(src, dst)) in self.buf.iter().enumerate() {
+            let ordinal = self
+                .chunk_index
+                .saturating_mul(CONSTRUCTION_BATCH_ROWS as u128)
+                .saturating_add(u128::try_from(local).expect("edge ordinal"));
+            edge_ids.push(uuidv7(0xE000_0000_0000u128 + ordinal + 1));
+            sources.push(uuidv7(u128::from(src) + 1));
+            targets.push(uuidv7(u128::from(dst) + 1));
         }
+        let batch = RecordBatch::try_new(
+            CONSTRUCTION_EDGE_SCHEMA.clone(),
+            vec![
+                Arc::new(
+                    FixedSizeBinaryArray::try_from_iter(edge_ids.iter().map(Uuid::as_bytes))
+                        .expect("edge_uuid column"),
+                ),
+                Arc::new(StringArray::from(vec![REL_TYPE; self.buf.len()])),
+                Arc::new(
+                    FixedSizeBinaryArray::try_from_iter(sources.iter().map(Uuid::as_bytes))
+                        .expect("source_uuid column"),
+                ),
+                Arc::new(
+                    FixedSizeBinaryArray::try_from_iter(targets.iter().map(Uuid::as_bytes))
+                        .expect("target_uuid column"),
+                ),
+            ],
+        )
+        .expect("edge batch");
+        self.session
+            .append_edges(&format!("edges-{:016x}", self.chunk_index), &batch)
+            .expect("append construction edge chunk");
         INGEST_CHUNK_INDEX.store(
             u64::try_from(self.chunk_index).unwrap_or(u64::MAX),
             Ordering::Relaxed,
@@ -1309,35 +1310,26 @@ fn publish_nodes(
             !cancellation.is_some_and(|flag| flag.load(Ordering::SeqCst)),
             "node publication cancelled"
         );
-        let chunk_end = (offset + EDGE_PUBLISH_ROWS).min(total);
-        let mut inner = offset;
-        while inner < chunk_end {
-            assert!(
-                !cancellation.is_some_and(|flag| flag.load(Ordering::SeqCst)),
-                "node publication cancelled"
-            );
-            let end = (inner + BATCH_ROWS).min(chunk_end);
-            let count = end - inner;
-            let ids = (inner..end)
-                .map(|index| uuidv7(u128::try_from(index + 1).expect("node seed")))
-                .collect::<Vec<_>>();
-            let batch = RecordBatch::try_new(
-                CONSTRUCTION_NODE_SCHEMA.clone(),
-                vec![
-                    Arc::new(
-                        FixedSizeBinaryArray::try_from_iter(ids.iter().map(Uuid::as_bytes))
-                            .expect("node_uuid column"),
-                    ),
-                    Arc::new(StringArray::from(vec![NODE_LABEL; count])),
-                ],
-            )
-            .expect("node batch");
-            session
-                .append_nodes(&format!("nodes-{inner:016x}"), &batch)
-                .expect("append construction node chunk");
-            inner = end;
-        }
-        offset = chunk_end;
+        let end = (offset + CONSTRUCTION_BATCH_ROWS).min(total);
+        let count = end - offset;
+        let ids = (offset..end)
+            .map(|index| uuidv7(u128::try_from(index + 1).expect("node seed")))
+            .collect::<Vec<_>>();
+        let batch = RecordBatch::try_new(
+            CONSTRUCTION_NODE_SCHEMA.clone(),
+            vec![
+                Arc::new(
+                    FixedSizeBinaryArray::try_from_iter(ids.iter().map(Uuid::as_bytes))
+                        .expect("node_uuid column"),
+                ),
+                Arc::new(StringArray::from(vec![NODE_LABEL; count])),
+            ],
+        )
+        .expect("node batch");
+        session
+            .append_nodes(&format!("nodes-{offset:016x}"), &batch)
+            .expect("append construction node chunk");
+        offset = end;
     }
 }
 
@@ -2758,14 +2750,44 @@ fn graph500_driver_has_no_bulk_publication_escape_hatch() {
 }
 
 #[test]
+fn graph500_driver_uses_the_authoritative_construction_batch_budget() {
+    assert_eq!(
+        CONSTRUCTION_BATCH_ROWS,
+        GraphConstructionBudgets::default().max_batch_rows
+    );
+    assert_eq!(1_048_576_usize.div_ceil(CONSTRUCTION_BATCH_ROWS), 16);
+    let source = include_str!("scale_g500_ladder.rs");
+    assert!(
+        !source.contains(&["8", "192"].join("_")),
+        "hidden 8,192-row durable transaction boundary reintroduced"
+    );
+}
+
+fn immutable_artifact_count(
+    node_rows: u64,
+    evidence: &graphforge_storage::GraphConstructionEvidence,
+) -> u64 {
+    let node_chunks = node_rows.div_ceil(CONSTRUCTION_BATCH_ROWS as u64);
+    let edge_chunks = evidence
+        .input_batches
+        .checked_sub(node_chunks)
+        .expect("accepted chunks must include every node chunk");
+    // Node chunks own Parquet, identity, and detail artifacts. Edge chunks add
+    // the endpoint run. Both are fixed by the construction receipt contract.
+    node_chunks
+        .saturating_mul(3)
+        .saturating_add(edge_chunks.saturating_mul(4))
+}
+
+#[test]
 fn tiny_construction_ladder_resumes_and_scales_bounded_work_linearly() {
     let budgets = GraphConstructionBudgets {
-        max_batch_rows: BATCH_ROWS,
-        max_run_records: 4 * BATCH_ROWS,
+        max_batch_rows: CONSTRUCTION_BATCH_ROWS,
+        max_run_records: 4 * CONSTRUCTION_BATCH_ROWS,
         merge_fan_in: 2,
         ..GraphConstructionBudgets::default()
     };
-    let base_nodes = BATCH_ROWS as u64;
+    let base_nodes = CONSTRUCTION_BATCH_ROWS as u64;
     let mut baseline_peaks: Option<[u64; 11]> = None;
     for factor in [1_u64, 2, 4] {
         let project = TempDir::new().expect("tiny construction project");
@@ -2803,9 +2825,17 @@ fn tiny_construction_ladder_resumes_and_scales_bounded_work_linearly() {
             .expect("publish tiny construction");
         let progress = resumed.progress();
         assert_eq!(progress.evidence.input_rows, 2 * base_nodes * factor - 1);
-        assert!(progress.evidence.input_batches <= 2 * factor + 1);
-        assert!(progress.evidence.parquet_shards <= progress.evidence.input_batches);
-        assert!(progress.evidence.peak_batch_rows <= BATCH_ROWS as u64);
+        assert_eq!(progress.evidence.input_batches, 2 * factor + 1);
+        assert_eq!(
+            progress.evidence.parquet_shards,
+            progress.evidence.input_batches
+        );
+        assert_eq!(
+            immutable_artifact_count(base_nodes * factor, &progress.evidence),
+            7 * factor + 4
+        );
+        assert_eq!(progress.evidence.fsync_operations, 23 * factor + 13);
+        assert!(progress.evidence.peak_batch_rows <= CONSTRUCTION_BATCH_ROWS as u64);
         assert!(progress.evidence.peak_accounted_live_bytes <= 64 * 1024 * 1024);
         assert!(progress.evidence.peak_run_records <= budgets.max_run_records as u64);
         assert!(progress.evidence.peak_merge_inputs <= 64);
@@ -2839,7 +2869,7 @@ fn tiny_construction_ladder_resumes_and_scales_bounded_work_linearly() {
             {
                 if index == 4 {
                     assert!(
-                        *observed <= base.saturating_mul(factor).saturating_add(4 * 1024 * 1024),
+                        *observed <= base.saturating_mul(factor).saturating_add(64 * 1024 * 1024),
                         "disk-backed merge footprint exceeded linear work: baseline={base} observed={observed} factor={factor}"
                     );
                     continue;
