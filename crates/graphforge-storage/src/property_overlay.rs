@@ -591,22 +591,8 @@ impl AuthenticatedPropertyInventory {
         let mut admitted = match participant {
             crate::graph_files::GraphFilesParticipant::V1(_) => {
                 let root = generation.graph_tree_root();
-                let entries = inventory
-                    .files
-                    .into_iter()
-                    .map(|mut entry| {
-                        let path = crate::graph_files::resolve_v1_inventory_entry(&root, &entry)?;
-                        let relative = path
-                            .strip_prefix(&root)
-                            .map_err(|_| corrupt("legacy graph file escaped its root"))?
-                            .to_path_buf();
-                        entry.relative_path =
-                            crate::graph_files::canonical_inventory_relative_text(
-                                &entry.relative_path,
-                            )?;
-                        Ok((entry, relative))
-                    })
-                    .collect::<Result<Vec<_>, GfError>>()?;
+                let entries =
+                    resolve_v1_property_entries_for_route(&root, inventory.files, requested_route)?;
                 Self::admit_entries(&root, entries, requested_route)
             }
             crate::graph_files::GraphFilesParticipant::V2(_) => {
@@ -1183,6 +1169,52 @@ fn parse_inventory_property_path(
         ))),
         _ => Err(corrupt("property inventory path is not canonical")),
     }
+}
+
+fn inventory_entry_reaches_route(
+    role: crate::GraphFileRole,
+    canonical_relative: &str,
+    requested_route: Option<(PropertyRouteKind, &str)>,
+) -> Result<bool, GfError> {
+    let parsed = parse_inventory_property_path(canonical_relative)?;
+    if role != crate::GraphFileRole::Properties {
+        if parsed.is_some() {
+            return Err(corrupt("property inventory entry has the wrong role"));
+        }
+        // Preserve full-inventory admission: only the explicitly targeted
+        // route path may avoid resolving unrelated graph payloads.
+        return Ok(requested_route.is_none());
+    }
+    let Some((kind, route, _, _)) = parsed else {
+        return Err(corrupt("properties role names a non-property path"));
+    };
+    Ok(requested_route.is_none_or(|requested| (kind, route.as_str()) == requested))
+}
+
+fn resolve_v1_property_entries_for_route(
+    root: &Path,
+    entries: Vec<crate::GraphFileEntry>,
+    requested_route: Option<(PropertyRouteKind, &str)>,
+) -> Result<Vec<(crate::GraphFileEntry, PathBuf)>, GfError> {
+    let mut selected = Vec::new();
+    for mut entry in entries {
+        let canonical =
+            crate::graph_files::canonical_inventory_relative_text(&entry.relative_path)?;
+        if !inventory_entry_reaches_route(entry.role, &canonical, requested_route)? {
+            continue;
+        }
+        // Resolve with the original spelling so a legacy backslash-authored
+        // inventory can still authenticate its one unambiguous physical path.
+        // Logical classification above uses the portable canonical spelling.
+        let path = crate::graph_files::resolve_v1_inventory_entry(root, &entry)?;
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|_| corrupt("legacy graph file escaped its root"))?
+            .to_path_buf();
+        entry.relative_path = canonical;
+        selected.push((entry, relative));
+    }
+    Ok(selected)
 }
 
 fn open_retained_under(
@@ -3430,6 +3462,29 @@ mod tests {
             content_sha256: digest_hex(&Sha256::digest(&bytes)),
             role: crate::GraphFileRole::Properties,
         };
+        let missing_unrelated = crate::GraphFileEntry {
+            relative_path: format!("properties/Unrelated/{}", id.file_name()),
+            byte_length: u64::MAX,
+            content_sha256: "00".repeat(32),
+            role: crate::GraphFileRole::Properties,
+        };
+        let resolved = resolve_v1_property_entries_for_route(
+            dir.path(),
+            vec![entry.clone(), missing_unrelated.clone()],
+            Some((PropertyRouteKind::Node, "Person")),
+        )
+        .unwrap();
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].0.relative_path, entry.relative_path);
+        assert!(
+            resolve_v1_property_entries_for_route(
+                dir.path(),
+                vec![entry.clone(), missing_unrelated],
+                None,
+            )
+            .is_err(),
+            "full V1 admission must continue authenticating unrelated graph payloads"
+        );
         let inventory = Arc::new(
             AuthenticatedPropertyInventory::from_entries_at_root(dir.path(), vec![entry.clone()])
                 .unwrap(),

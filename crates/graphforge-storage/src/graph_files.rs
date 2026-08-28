@@ -384,23 +384,11 @@ pub fn verify_graph_tree(
     collect_regular_file_paths(graph_root, graph_root, &mut observed)?;
     let mut resolved = BTreeSet::new();
     for entry in &inventory.files {
-        let path = resolve_v1_inventory_entry(graph_root, entry)?;
-        resolved.insert(
-            path.strip_prefix(graph_root)
-                .map_err(|_| corrupt("generation graph path escaped tree"))?
-                .to_path_buf(),
-        );
-    }
-    if observed != resolved {
-        return Err(corrupt(
-            "generation graph tree inventory does not match on-disk files",
-        ));
-    }
-    for entry in &inventory.files {
-        let path = resolve_v1_inventory_entry(graph_root, entry)?;
-        reject_link(&path)?;
-        let metadata = fs::symlink_metadata(&path)
-            .map_err(|error| storage("inspect generation graph file", &path, error))?;
+        let retained = resolve_v1_inventory_entry_retained(graph_root, entry)?;
+        let metadata = retained
+            .file
+            .metadata()
+            .map_err(|error| storage("inspect generation graph file", &retained.path, error))?;
         if !metadata.is_file() {
             return Err(corrupt("generation graph entry is not a regular file"));
         }
@@ -409,12 +397,23 @@ pub fn verify_graph_tree(
                 "generation graph file length does not match inventory",
             ));
         }
-        let digest = hash_file(&path)?;
-        if hex_digest(digest) != entry.content_sha256 {
-            return Err(corrupt(
-                "generation graph file digest does not match inventory",
-            ));
+        if graphforge_filesystem::file_identity(&retained.file).ok() != Some(retained.identity)
+            || graphforge_filesystem::path_identity(&retained.path).ok() != Some(retained.identity)
+        {
+            return Err(corrupt("generation graph file identity changed"));
         }
+        resolved.insert(
+            retained
+                .path
+                .strip_prefix(graph_root)
+                .map_err(|_| corrupt("generation graph path escaped tree"))?
+                .to_path_buf(),
+        );
+    }
+    if observed != resolved {
+        return Err(corrupt(
+            "generation graph tree inventory does not match on-disk files",
+        ));
     }
     Ok(())
 }
@@ -831,6 +830,10 @@ fn hash_file(path: &Path) -> Result<[u8; 32], GfError> {
 
 fn hash_file_counted(path: &Path) -> Result<([u8; 32], u64), GfError> {
     let mut file = File::open(path).map_err(|error| storage("open graph file", path, error))?;
+    hash_reader(&mut file, path)
+}
+
+fn hash_reader(file: &mut File, path: &Path) -> Result<([u8; 32], u64), GfError> {
     let mut hasher = Sha256::new();
     let mut read_calls = 0_u64;
     let mut buffer = vec![0_u8; HASH_BUFFER_BYTES];
@@ -984,24 +987,54 @@ pub(crate) fn resolve_v1_inventory_entry(
     graph_root: &Path,
     entry: &GraphFileEntry,
 ) -> Result<PathBuf, GfError> {
+    resolve_v1_inventory_entry_retained(graph_root, entry).map(|resolved| resolved.path)
+}
+
+struct RetainedV1InventoryEntry {
+    path: PathBuf,
+    file: File,
+    identity: graphforge_filesystem::FileIdentity,
+}
+
+fn resolve_v1_inventory_entry_retained(
+    graph_root: &Path,
+    entry: &GraphFileEntry,
+) -> Result<RetainedV1InventoryEntry, GfError> {
     let mut authenticated = Vec::new();
     for relative in inventory_relative_path_candidates(&entry.relative_path)? {
         let path = graph_root.join(&relative);
-        let Ok(metadata) = fs::symlink_metadata(&path) else {
+        let Ok(mut file) = open_retained_relative_file(graph_root, &relative) else {
             continue;
         };
-        if metadata.file_type().is_symlink()
-            || !metadata.is_file()
-            || metadata.len() != entry.byte_length
-        {
+        let metadata = file
+            .metadata()
+            .map_err(|error| storage("inspect retained graph file", &path, error))?;
+        if !metadata.is_file() || metadata.len() != entry.byte_length {
             continue;
         }
-        if hex_digest(hash_file(&path)?) == entry.content_sha256 {
-            authenticated.push(path);
+        let identity = graphforge_filesystem::file_identity(&file)
+            .map_err(|error| storage("identify retained graph file", &path, error))?;
+        if graphforge_filesystem::path_identity(&path).ok() != Some(identity) {
+            continue;
+        }
+        if hex_digest(hash_reader(&mut file, &path)?.0) == entry.content_sha256
+            && graphforge_filesystem::path_identity(&path).ok() == Some(identity)
+        {
+            authenticated.push(RetainedV1InventoryEntry {
+                path,
+                file,
+                identity,
+            });
         }
     }
     match authenticated.as_slice() {
-        [path] => Ok(path.clone()),
+        [resolved] => Ok(RetainedV1InventoryEntry {
+            path: resolved.path.clone(),
+            file: resolved.file.try_clone().map_err(|error| {
+                storage("retain authenticated graph file", &resolved.path, error)
+            })?,
+            identity: resolved.identity,
+        }),
         [] => Err(corrupt(
             "generation graph file has no authenticated legacy path resolution",
         )),
@@ -1009,6 +1042,22 @@ pub(crate) fn resolve_v1_inventory_entry(
             "generation graph file has ambiguous authenticated legacy path resolutions",
         )),
     }
+}
+
+fn open_retained_relative_file(graph_root: &Path, relative: &Path) -> std::io::Result<File> {
+    let mut directory = graphforge_filesystem::StableDirectory::open(graph_root)?;
+    let mut components = relative.components().peekable();
+    while let Some(component) = components.next() {
+        let Component::Normal(name) = component else {
+            return Err(std::io::Error::other("graph file path is not canonical"));
+        };
+        if components.peek().is_some() {
+            directory = directory.open_child_directory(name)?;
+        } else {
+            return directory.open_child_file(name);
+        }
+    }
+    Err(std::io::Error::other("graph file path is empty"))
 }
 
 fn validate_wire_component(component: &str) -> Result<(), GfError> {

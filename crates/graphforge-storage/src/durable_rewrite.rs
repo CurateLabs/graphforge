@@ -701,6 +701,31 @@ fn acquire_ordinal_writer_lock(root: &StableDirectory) -> Result<OrdinalWriterGu
     })
 }
 
+fn initialize_ordinal_writer_lock(root: &StableDirectory) -> Result<(), GfError> {
+    let directory = root
+        .open_child_directory(std::ffi::OsStr::new("topology"))
+        .and_then(|topology| topology.open_child_directory(std::ffi::OsStr::new("uuid-membership")))
+        .map_err(storage)?;
+    let file = directory
+        .open_or_create_child_file(std::ffi::OsStr::new("ordinal-v4.lock"))
+        .map_err(storage)?;
+    if graphforge_filesystem::file_link_count(&file).map_err(storage)? != 1 {
+        return Err(storage("ordinal writer lock has invalid link count"));
+    }
+    let identity = graphforge_filesystem::file_identity(&file).map_err(storage)?;
+    file.sync_all().map_err(storage)?;
+    directory.sync().map_err(storage)?;
+    let named = directory
+        .open_child_file(std::ffi::OsStr::new("ordinal-v4.lock"))
+        .map_err(storage)?;
+    if graphforge_filesystem::file_identity(&named).map_err(storage)? != identity
+        || graphforge_filesystem::file_link_count(&named).map_err(storage)? != 1
+    {
+        return Err(storage("ordinal writer lock identity changed"));
+    }
+    Ok(())
+}
+
 fn cleanup_preparing_input(
     root_path: &Path,
     root: &StableDirectory,
@@ -1115,6 +1140,12 @@ pub(crate) fn commit_with_participant(
     };
     validate_intent(&intent)?;
     intent.checksum = checksum(&intent)?;
+    if intent.auxiliary.as_ref().is_some_and(is_v4_ordinal_receipt) {
+        // Recovery requires this stable lifecycle lock before it can install
+        // any v4 artifact. Make the lock durable before publishing even a
+        // preparing intent so every durable receipt is recoverable.
+        initialize_ordinal_writer_lock(&guard.directory)?;
+    }
     crate::project_failpoint::hit(
         "rewrite.before_intent",
         None,
@@ -1576,7 +1607,7 @@ mod tests {
         let root = TempDir::new().unwrap();
         let index = root.path().join("topology/uuid-membership");
         std::fs::create_dir_all(&index).unwrap();
-        std::fs::write(index.join("ordinal-v4.lock"), []).unwrap();
+        assert!(!index.join("ordinal-v4.lock").exists());
         let receipt = br#"{"schema_version":4}"#;
         let receipt_digest = hex(&Sha256::digest(receipt));
         let participant: RewriteParticipantPreparer<'_> = Box::new(move |context, batch| {
@@ -1613,6 +1644,7 @@ mod tests {
             )
             .is_err()
         );
+        assert!(index.join("ordinal-v4.lock").is_file());
 
         let stable_index = StableDirectory::open(&index).unwrap();
         let reader_lock = stable_index

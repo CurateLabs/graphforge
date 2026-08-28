@@ -2298,7 +2298,9 @@ where
     #[cfg(windows)]
     let temporary_identity = temporary.identity();
     let bytes_hashed = write_temporary(&mut temporary)?;
-    if !writer_authenticated {
+    let preseal_bytes_hashed = if writer_authenticated || cfg!(windows) {
+        0
+    } else {
         temporary.rewind().map_err(|error| {
             storage("rewind temporary graph object", &cas.diagnostic_root, error)
         })?;
@@ -2308,7 +2310,11 @@ where
             expected_length,
             &cas.diagnostic_root,
         )?;
-    }
+        expected_length
+    };
+    // Windows must close the writable handle and reopen an exact-identity,
+    // protected read handle before publication. That transition authenticates
+    // the complete payload below, so a second pre-seal read would be redundant.
     let (installed, sealed_bytes_hashed) = finalize_temporary_object(
         cas,
         &bucket,
@@ -2322,11 +2328,7 @@ where
     )?;
     Ok(GraphObjectInstallEvidence {
         bytes_hashed: bytes_hashed
-            .saturating_add(if writer_authenticated {
-                0
-            } else {
-                expected_length
-            })
+            .saturating_add(preseal_bytes_hashed)
             .saturating_add(sealed_bytes_hashed)
             .saturating_add(if installed { 0 } else { expected_length }),
         bytes_installed: if installed { expected_length } else { 0 },

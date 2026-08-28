@@ -1343,21 +1343,12 @@ pub fn prepare_graph_delta(
     let (inventory, files_participant) = capture_graph_files(workspace.path())?;
     let unchanged_base_files = count_preserved_base_files(&parent_inventory, &inventory)?;
     let parent_base_count = count_base_files(&parent_inventory)?;
-    let preserved_base_parquet_digests = unchanged_base_files == parent_base_count
-        && parent_inventory
-            .files
-            .iter()
-            .filter(|entry| {
-                Path::new(&entry.relative_path)
-                    .extension()
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("parquet"))
-            })
-            .all(|parent_entry| {
-                inventory.files.iter().any(|child| {
-                    child.relative_path == parent_entry.relative_path
-                        && child.content_sha256 == parent_entry.content_sha256
-                })
-            });
+    let preserved_base_parquet_digests = base_parquet_digests_preserved(
+        &parent_inventory,
+        &inventory,
+        unchanged_base_files,
+        parent_base_count,
+    )?;
     let state_fingerprint =
         bounded_materialized_fingerprint(workspace.path(), &inventory, request.limits)?;
     Ok(PreparedGraphDelta {
@@ -1792,6 +1783,42 @@ fn count_preserved_base_files(
     })
 }
 
+fn base_parquet_digests_preserved(
+    parent: &GraphFilesInventory,
+    child: &GraphFilesInventory,
+    unchanged_base_files: u64,
+    parent_base_count: u64,
+) -> Result<bool, GfError> {
+    if unchanged_base_files != parent_base_count {
+        return Ok(false);
+    }
+    for parent_entry in &parent.files {
+        let parent_path =
+            crate::graph_files::canonical_inventory_relative_text(&parent_entry.relative_path)?;
+        if !Path::new(&parent_path)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("parquet"))
+        {
+            continue;
+        }
+        let mut preserved = false;
+        for child_entry in &child.files {
+            let child_path =
+                crate::graph_files::canonical_inventory_relative_text(&child_entry.relative_path)?;
+            if child_path == parent_path
+                && child_entry.content_sha256 == parent_entry.content_sha256
+            {
+                preserved = true;
+                break;
+            }
+        }
+        if !preserved {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 fn parse_run_sequence(relative: &str) -> Result<u64, GfError> {
     let prefix = "deltas/run_";
     let suffix = format!(".{GRAPH_DELTA_RUN_EXTENSION}");
@@ -1890,6 +1917,30 @@ mod crash_oracle_tests {
         AuthorityClass, PublicationIds, PublicationPhase, default_durable_ids, expected_authority,
         publication_ops, simulate_crash,
     };
+
+    #[test]
+    fn legacy_parent_path_spelling_preserves_exact_parquet_digest_evidence() {
+        let inventory = |relative_path: &str, digest: &str| GraphFilesInventory {
+            format: "graphforge-graph-files".to_owned(),
+            format_version: 1,
+            files: vec![GraphFileEntry {
+                relative_path: relative_path.to_owned(),
+                byte_length: 7,
+                content_sha256: digest.to_owned(),
+                role: GraphFileRole::Topology,
+            }],
+            file_count: 1,
+            total_byte_length: 7,
+        };
+        let parent = inventory("topology\\nodes.parquet", &"11".repeat(32));
+        let child = inventory("topology/nodes.parquet", &"11".repeat(32));
+        let unchanged = count_preserved_base_files(&parent, &child).unwrap();
+        let base_count = count_base_files(&parent).unwrap();
+        assert!(base_parquet_digests_preserved(&parent, &child, unchanged, base_count).unwrap());
+
+        let substituted = inventory("topology/nodes.parquet", &"22".repeat(32));
+        assert!(!base_parquet_digests_preserved(&parent, &substituted, 1, 1).unwrap());
+    }
 
     #[test]
     fn parquet_footer_limit_fails_before_decoder_allocation() {
