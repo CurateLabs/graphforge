@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+from pathlib import Path
 import tempfile
 import unittest
-from pathlib import Path
 
 from graphforge_bench.smoke import FIXTURE_DIRECTORIES, discover_fixtures, workspace_root
 
