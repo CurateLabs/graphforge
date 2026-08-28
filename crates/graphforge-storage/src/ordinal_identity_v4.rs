@@ -527,7 +527,6 @@ impl V4OrdinalIdentityHandle {
         let artifacts = self
             .forward
             .iter()
-            .map(|artifact| artifact)
             .chain(self.ranges.iter().map(|range| &range.artifact))
             .chain(self.tombstones.iter().map(|run| &run.artifact))
             .map(|artifact| {
