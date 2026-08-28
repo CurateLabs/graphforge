@@ -198,14 +198,23 @@ rejected as certification evidence.
 
 ### Disk attribution and S26 admission
 
-The versioned `graphforge-g500-ladder-qualification/2` companion document is
+The versioned `graphforge-g500-ladder-qualification/3` companion document is
 validated by `scripts/ci/validate-g500-ladder-qualification.py`. Every observed
-rung has exactly one deduplicated row for generator spill, canonical generation,
-derived adjacency, portable package, and clean import. Each row separates
-logical file length from allocated blocks and identifies its authority:
-generator/package descriptors or a storage-owned snapshot. Totals and exact
-integer byte/live-edge ratios must reconcile; rounded decimal ratios are not
-accepted.
+rung has exactly one row for canonical node topology, canonical edge topology,
+properties, UUID/surrogate indexes, adjacency/CSR, catalogs/manifests,
+construction staging/spill, portable package, and clean import. Native file
+identity deduplicates content-addressed/shared objects. Logical bytes,
+filesystem allocation, current retained allocation, and full-lifecycle
+transient peak remain separate quantities.
+
+The same document carries a closed nine-phase inventory: append/merge, seal
+authentication, shape consumption/reauthentication, encode plus post-write
+authentication, publication preauthentication, CAS install, hydration
+verification, synchronization, and recovery reauthentication. Raw bytes,
+calls, blocks, objects, and fsyncs reconcile exactly before ratios are derived.
+Node canonical cost uses reopened live nodes; edge canonical, authoritative
+project, and lifecycle peak costs use reopened live edges. Ratios preserve raw
+integer numerators and denominators; rounded decimals are not evidence.
 
 At least two ordered adjacent rungs are required. The S26 rate must be no lower
 than both the newest observed peak ratio and every positive adjacent-rung slope.

@@ -15,11 +15,17 @@ from jsonschema.exceptions import SchemaError, ValidationError
 ROOT = Path(__file__).resolve().parents[2]
 SCHEMA = ROOT / "docs/development/evidence/g500-ladder-qualification.schema.json"
 REQUIRED_CATEGORIES = {
-    "generator_spill",
-    "canonical_generation",
-    "derived_adjacency",
+    "canonical_node_topology", "canonical_edge_topology", "properties",
+    "uuid_surrogate_indexes", "adjacency_csr", "catalog_manifests",
+    "construction_staging_spill",
     "portable_package",
-    "clean_import",
+    "clean_imported_project",
+}
+REQUIRED_PHASES = {
+    "append_merge", "seal_authentication", "shape_consume_reauthentication",
+    "encode_write_postwrite_authentication", "publication_preauthentication",
+    "cas_install_read_write", "hydration_verification", "fsync_synchronization",
+    "recovery_reauthentication",
 }
 S26_EDGES = 1 << 30  # SCALE=26, edgefactor=16 raw target; conservative live denominator.
 
@@ -59,49 +65,56 @@ def validate(evidence: dict[str, Any]) -> None:
         categories = [artifact["category"] for artifact in rung["artifacts"]]
         if set(categories) != REQUIRED_CATEGORIES or len(categories) != len(set(categories)):
             raise EvidenceError("artifact categories must be complete and unique")
-        if any(
-            artifact["physical_objects"] > artifact["logical_references"]
-            for artifact in rung["artifacts"]
-        ):
+        phases = rung["phases"]
+        phase_names = [phase["phase"] for phase in phases]
+        if set(phase_names) != REQUIRED_PHASES or len(phase_names) != len(set(phase_names)):
+            raise EvidenceError("application I/O phases must be complete and unique")
+        if any(artifact["physical_objects"] > artifact["logical_references"] for artifact in rung["artifacts"]):
             raise EvidenceError("physical identities must be deduplicated from logical references")
         logical = sum(artifact["logical_bytes"] for artifact in rung["artifacts"])
         allocated = sum(artifact["allocated_bytes"] for artifact in rung["artifacts"])
-        if rung["totals"] != {"logical_bytes": logical, "allocated_bytes": allocated}:
-            raise EvidenceError("artifact totals do not reconcile")
-        live = rung["live_edges"]
+        retained = sum(artifact["current_retained_bytes"] for artifact in rung["artifacts"])
+        transient_peak = max(artifact["transient_peak_allocated_bytes"] for artifact in rung["artifacts"])
+        phase_totals = {f"phase_{field}": sum(phase[field] for phase in phases) for field in ("read_bytes", "write_bytes", "read_calls", "write_calls", "object_count", "block_count", "fsync_calls")}
+        expected_totals = {"logical_bytes": logical, "allocated_bytes": allocated, "current_retained_bytes": retained, "transient_peak_allocated_bytes": transient_peak, **phase_totals}
+        if rung["totals"] != expected_totals:
+            raise EvidenceError("artifact or phase totals do not reconcile")
+        if any(item["current_retained_bytes"] > item["allocated_bytes"] for item in rung["artifacts"]):
+            raise EvidenceError("retained allocation exceeds category allocation")
+        if transient_peak < retained:
+            raise EvidenceError("lifecycle peak is below current retained allocation")
+        live, nodes = rung["live_edges"], rung["live_nodes"]
+        by_category = {item["category"]: item for item in rung["artifacts"]}
         expected = {
-            "logical_bytes_per_live_edge": {
-                "numerator_bytes": logical,
-                "denominator_edges": live,
-            },
-            "allocated_bytes_per_live_edge": {
-                "numerator_bytes": allocated,
-                "denominator_edges": live,
-            },
+            "canonical_node_bytes_per_live_node": {"numerator_bytes": by_category["canonical_node_topology"]["logical_bytes"], "denominator_count": nodes},
+            "canonical_edge_bytes_per_live_edge": {"numerator_bytes": by_category["canonical_edge_topology"]["logical_bytes"], "denominator_count": live},
+            "authoritative_project_bytes_per_live_edge": {"numerator_bytes": retained, "denominator_count": live},
+            "full_lifecycle_peak_bytes_per_live_edge": {"numerator_bytes": transient_peak, "denominator_count": live},
         }
         if rung["ratios"] != expected:
             raise EvidenceError("ratios must preserve exact reproducible denominators")
-        if rung["phase_peak_allocated_bytes"] < max(
-            artifact["allocated_bytes"] for artifact in rung["artifacts"]
-        ):
-            raise EvidenceError("phase peak is below an observed artifact allocation")
 
     rate = evidence["projection"]["rate"]
-    rn, rd = rate["numerator_bytes"], rate["denominator_edges"]
+    rn, rd = rate["numerator_bytes"], rate["denominator_count"]
     for low, high in pairwise(rungs):
         delta_edges = high["live_edges"] - low["live_edges"]
-        delta_bytes = high["phase_peak_allocated_bytes"] - low["phase_peak_allocated_bytes"]
+        delta_bytes = high["totals"]["transient_peak_allocated_bytes"] - low["totals"]["transient_peak_allocated_bytes"]
         if delta_edges <= 0:
             raise EvidenceError("live-edge denominator must increase across adjacent rungs")
         if delta_bytes > 0 and rn * delta_edges < delta_bytes * rd:
             raise EvidenceError("projection rate is below an observed adjacent-rung slope")
-        if rn * high["live_edges"] < high["phase_peak_allocated_bytes"] * rd:
+        if rn * high["live_edges"] < high["totals"]["transient_peak_allocated_bytes"] * rd:
             raise EvidenceError("projection rate is below the latest observed peak ratio")
 
     projected = ceil_ratio(rn * S26_EDGES, rd)
     projection = evidence["projection"]
-    if projection["projected_canonical_lifecycle_peak_bytes"] != projected:
+    if projection["source_rungs"] != [rungs[-2]["id"], rungs[-1]["id"]]:
+        raise EvidenceError("projection must cite the newest adjacent source rungs")
+    if projection["projected_lifecycle_peak_bytes"] != projected:
         raise EvidenceError("S26 projected peak is not reproducible from the declared rate")
+    canonical_projected = ceil_ratio(rungs[-1]["totals"]["current_retained_bytes"] * S26_EDGES, rungs[-1]["live_edges"])
+    if projection["projected_canonical_bytes"] != canonical_projected:
+        raise EvidenceError("S26 canonical projection is not reproducible")
     if projected > projection["volume_bytes"]:
         expected_headroom = 0
     else:

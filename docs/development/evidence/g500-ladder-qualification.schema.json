@@ -1,65 +1,64 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://graphforge.dev/schemas/g500-ladder-qualification-2.json",
-  "title": "GraphForge disk-bound G500 ladder qualification",
-  "type": "object",
-  "additionalProperties": false,
+  "$id": "https://graphforge.dev/schemas/g500-ladder-qualification-3.json",
+  "type": "object", "additionalProperties": false,
   "required": ["schema", "rungs", "projection"],
   "properties": {
-    "schema": { "const": "graphforge-g500-ladder-qualification/2" },
-    "rungs": { "type": "array", "minItems": 2, "maxItems": 4, "items": { "$ref": "#/$defs/rung" } },
-    "projection": { "$ref": "#/$defs/projection" }
+    "schema": {"const": "graphforge-g500-ladder-qualification/3"},
+    "rungs": {"type": "array", "minItems": 2, "maxItems": 4, "items": {"$ref": "#/$defs/rung"}},
+    "projection": {"$ref": "#/$defs/projection"}
   },
   "$defs": {
-    "nonNegative": { "type": "integer", "minimum": 0 },
-    "positive": { "type": "integer", "minimum": 1 },
-    "ratio": {
-      "type": "object", "additionalProperties": false,
-      "required": ["numerator_bytes", "denominator_edges"],
-      "properties": { "numerator_bytes": { "$ref": "#/$defs/nonNegative" }, "denominator_edges": { "$ref": "#/$defs/positive" } }
-    },
+    "nonNegative": {"type": "integer", "minimum": 0}, "positive": {"type": "integer", "minimum": 1},
+    "ratio": {"type": "object", "additionalProperties": false, "required": ["numerator_bytes", "denominator_count"], "properties": {"numerator_bytes": {"$ref": "#/$defs/nonNegative"}, "denominator_count": {"$ref": "#/$defs/positive"}}},
     "artifact": {
       "type": "object", "additionalProperties": false,
-      "required": ["category", "logical_bytes", "allocated_bytes", "logical_references", "physical_objects", "source"],
+      "required": ["category", "logical_bytes", "allocated_bytes", "current_retained_bytes", "transient_peak_allocated_bytes", "logical_references", "physical_objects", "source"],
       "properties": {
-        "category": { "enum": ["generator_spill", "canonical_generation", "derived_adjacency", "portable_package", "clean_import"] },
-        "logical_bytes": { "$ref": "#/$defs/nonNegative" },
-        "allocated_bytes": { "$ref": "#/$defs/nonNegative" },
-        "logical_references": { "$ref": "#/$defs/positive" },
-        "physical_objects": { "$ref": "#/$defs/positive" },
-        "source": { "enum": ["generator_exact_descriptors", "storage_owned_snapshot", "portable_exact_descriptor", "clean_import_snapshot"] }
+        "category": {"enum": ["canonical_node_topology", "canonical_edge_topology", "properties", "uuid_surrogate_indexes", "adjacency_csr", "catalog_manifests", "construction_staging_spill", "portable_package", "clean_imported_project"]},
+        "logical_bytes": {"$ref": "#/$defs/nonNegative"}, "allocated_bytes": {"$ref": "#/$defs/nonNegative"},
+        "current_retained_bytes": {"$ref": "#/$defs/nonNegative"}, "transient_peak_allocated_bytes": {"$ref": "#/$defs/nonNegative"},
+        "logical_references": {"$ref": "#/$defs/nonNegative"}, "physical_objects": {"$ref": "#/$defs/nonNegative"},
+        "source": {"enum": ["storage_owned_snapshot", "construction_receipts", "exact_descriptor", "clean_import_snapshot"]}
+      }
+    },
+    "phase": {
+      "type": "object", "additionalProperties": false,
+      "required": ["phase", "read_bytes", "write_bytes", "read_calls", "write_calls", "object_count", "block_count", "fsync_calls"],
+      "properties": {
+        "phase": {"enum": ["append_merge", "seal_authentication", "shape_consume_reauthentication", "encode_write_postwrite_authentication", "publication_preauthentication", "cas_install_read_write", "hydration_verification", "fsync_synchronization", "recovery_reauthentication"]},
+        "read_bytes": {"$ref": "#/$defs/nonNegative"}, "write_bytes": {"$ref": "#/$defs/nonNegative"}, "read_calls": {"$ref": "#/$defs/nonNegative"}, "write_calls": {"$ref": "#/$defs/nonNegative"},
+        "object_count": {"$ref": "#/$defs/nonNegative"}, "block_count": {"$ref": "#/$defs/nonNegative"}, "fsync_calls": {"$ref": "#/$defs/nonNegative"}
+      }
+    },
+    "totals": {
+      "type": "object", "additionalProperties": false,
+      "required": ["logical_bytes", "allocated_bytes", "current_retained_bytes", "transient_peak_allocated_bytes", "phase_read_bytes", "phase_write_bytes", "phase_read_calls", "phase_write_calls", "phase_object_count", "phase_block_count", "phase_fsync_calls"],
+      "properties": {
+        "logical_bytes": {"$ref": "#/$defs/nonNegative"}, "allocated_bytes": {"$ref": "#/$defs/nonNegative"}, "current_retained_bytes": {"$ref": "#/$defs/nonNegative"}, "transient_peak_allocated_bytes": {"$ref": "#/$defs/nonNegative"},
+        "phase_read_bytes": {"$ref": "#/$defs/nonNegative"}, "phase_write_bytes": {"$ref": "#/$defs/nonNegative"}, "phase_read_calls": {"$ref": "#/$defs/nonNegative"}, "phase_write_calls": {"$ref": "#/$defs/nonNegative"},
+        "phase_object_count": {"$ref": "#/$defs/nonNegative"}, "phase_block_count": {"$ref": "#/$defs/nonNegative"}, "phase_fsync_calls": {"$ref": "#/$defs/nonNegative"}
       }
     },
     "rung": {
       "type": "object", "additionalProperties": false,
-      "required": ["id", "scale", "live_edges", "artifacts", "totals", "ratios", "phase_peak_allocated_bytes"],
+      "required": ["id", "scale", "live_nodes", "live_edges", "artifacts", "phases", "totals", "ratios"],
       "properties": {
-        "id": { "enum": ["S20", "S22", "S24", "S26"] },
-        "scale": { "enum": [20, 22, 24, 26] },
-        "live_edges": { "$ref": "#/$defs/positive" },
-        "artifacts": { "type": "array", "minItems": 5, "maxItems": 5, "items": { "$ref": "#/$defs/artifact" } },
-        "totals": {
-          "type": "object", "additionalProperties": false, "required": ["logical_bytes", "allocated_bytes"],
-          "properties": { "logical_bytes": { "$ref": "#/$defs/nonNegative" }, "allocated_bytes": { "$ref": "#/$defs/nonNegative" } }
-        },
-        "ratios": {
-          "type": "object", "additionalProperties": false, "required": ["logical_bytes_per_live_edge", "allocated_bytes_per_live_edge"],
-          "properties": { "logical_bytes_per_live_edge": { "$ref": "#/$defs/ratio" }, "allocated_bytes_per_live_edge": { "$ref": "#/$defs/ratio" } }
-        },
-        "phase_peak_allocated_bytes": { "$ref": "#/$defs/nonNegative" }
+        "id": {"enum": ["S20", "S22", "S24", "S26"]}, "scale": {"enum": [20, 22, 24, 26]}, "live_nodes": {"$ref": "#/$defs/positive"}, "live_edges": {"$ref": "#/$defs/positive"},
+        "artifacts": {"type": "array", "minItems": 9, "maxItems": 9, "items": {"$ref": "#/$defs/artifact"}}, "phases": {"type": "array", "minItems": 9, "maxItems": 9, "items": {"$ref": "#/$defs/phase"}},
+        "totals": {"$ref": "#/$defs/totals"},
+        "ratios": {"type": "object", "additionalProperties": false, "required": ["canonical_node_bytes_per_live_node", "canonical_edge_bytes_per_live_edge", "authoritative_project_bytes_per_live_edge", "full_lifecycle_peak_bytes_per_live_edge"], "properties": {
+          "canonical_node_bytes_per_live_node": {"$ref": "#/$defs/ratio"}, "canonical_edge_bytes_per_live_edge": {"$ref": "#/$defs/ratio"}, "authoritative_project_bytes_per_live_edge": {"$ref": "#/$defs/ratio"}, "full_lifecycle_peak_bytes_per_live_edge": {"$ref": "#/$defs/ratio"}
+        }}
       }
     },
     "projection": {
       "type": "object", "additionalProperties": false,
-      "required": ["target", "rate", "projected_canonical_lifecycle_peak_bytes", "volume_bytes", "reserved_headroom_bytes", "headroom_bytes", "decision"],
+      "required": ["target", "source_rungs", "rate", "projected_canonical_bytes", "projected_lifecycle_peak_bytes", "volume_bytes", "reserved_headroom_bytes", "headroom_bytes", "decision"],
       "properties": {
-        "target": { "const": "S26" },
-        "rate": { "$ref": "#/$defs/ratio" },
-        "projected_canonical_lifecycle_peak_bytes": { "$ref": "#/$defs/nonNegative" },
-        "volume_bytes": { "$ref": "#/$defs/positive" },
-        "reserved_headroom_bytes": { "$ref": "#/$defs/nonNegative" },
-        "headroom_bytes": { "$ref": "#/$defs/nonNegative" },
-        "decision": { "enum": ["admit", "refuse"] }
+        "target": {"const": "S26"}, "source_rungs": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"enum": ["S20", "S22", "S24"]}}, "rate": {"$ref": "#/$defs/ratio"},
+        "projected_canonical_bytes": {"$ref": "#/$defs/nonNegative"}, "projected_lifecycle_peak_bytes": {"$ref": "#/$defs/nonNegative"}, "volume_bytes": {"$ref": "#/$defs/positive"},
+        "reserved_headroom_bytes": {"$ref": "#/$defs/nonNegative"}, "headroom_bytes": {"$ref": "#/$defs/nonNegative"}, "decision": {"enum": ["admit", "refuse"]}
       }
     }
   }

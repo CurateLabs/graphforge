@@ -4081,6 +4081,9 @@ fn copy_authenticated_run<const N: usize>(
     writer.flush().map_err(storage)?;
     writer.get_ref().inner.sync_all().map_err(storage)?;
     account_sequential_write(bytes, evidence);
+    let allocated_bytes = graphforge_filesystem::file_space_usage(&writer.get_ref().inner)
+        .map_err(storage)?
+        .allocated_bytes;
     drop(writer);
     root.install_child(OsStr::new(&temporary), identity, OsStr::new(output))
         .map_err(storage)?;
@@ -4088,6 +4091,7 @@ fn copy_authenticated_run<const N: usize>(
     let output_receipt = ArtifactReceipt {
         name: output.to_owned(),
         bytes,
+        allocated_bytes,
         sha256: receipt.sha256.clone(),
         identity: identity.into(),
         write_operations: bytes.div_ceil(BLOCK_BYTES as u64),
@@ -4305,6 +4309,9 @@ fn merge_fixed_group<const N: usize>(
     let receipt = ArtifactReceipt {
         name: output.to_owned(),
         bytes: writer.get_ref().bytes,
+        allocated_bytes: graphforge_filesystem::file_space_usage(&writer.get_ref().inner)
+            .map_err(storage)?
+            .allocated_bytes,
         sha256: hex(&writer.get_ref().digest.clone().finalize()),
         identity: identity.into(),
         write_operations: writer.get_ref().operations,
@@ -5420,6 +5427,9 @@ fn assign_surrogates(
     let output_receipt = ArtifactReceipt {
         name: output.to_owned(),
         bytes: writer.get_ref().bytes,
+        allocated_bytes: graphforge_filesystem::file_space_usage(&writer.get_ref().inner)
+            .map_err(storage)?
+            .allocated_bytes,
         sha256: hex(&writer.get_ref().digest.clone().finalize()),
         identity: identity.into(),
         write_operations: writer.get_ref().operations,

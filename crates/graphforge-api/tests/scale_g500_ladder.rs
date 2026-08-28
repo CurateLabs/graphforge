@@ -951,6 +951,13 @@ fn run_rung(
             generator_allocated_bytes.saturating_add(committed_snapshot.allocated_bytes);
         let committed_storage =
             serde_json::to_value(committed_snapshot).expect("serialize committed storage");
+        let construction_phases =
+            graphforge_storage::ConstructionPhaseAttribution::from_construction(
+                &construction_evidence,
+            );
+        construction_phases
+            .validate_reconciliation()
+            .expect("construction phase attribution reconciliation");
         ingest_ran = true;
         let ingest_s = ingest_started.elapsed().as_secs_f64();
         let ingest_violation = envelope_violation(&env, ladder_started, ingest_disk_used_bytes);
@@ -1003,6 +1010,7 @@ fn run_rung(
                     "storage_transient_peak_allocated_bytes": construction_evidence.storage_transient_peak_allocated_bytes,
                 },
                 "committed_storage": committed_storage,
+                "application_io_phases": construction_phases,
             }
         }));
         persist_phase_journal(
@@ -2866,6 +2874,7 @@ fn tiny_construction_ladder_resumes_and_scales_bounded_work_linearly() {
     let base_nodes = CONSTRUCTION_BATCH_ROWS as u64;
     let mut baseline_peaks: Option<[u64; 11]> = None;
     let mut baseline_storage: Option<(u64, u64)> = None;
+    let mut baseline_phase_io: Option<(u64, u64, u64, u64)> = None;
     for factor in [1_u64, 2, 4] {
         let project = TempDir::new().expect("tiny construction project");
         let graph = GraphForge::new(project.path().to_str()).expect("open tiny project");
@@ -2985,6 +2994,27 @@ fn tiny_construction_ladder_resumes_and_scales_bounded_work_linearly() {
         assert!(progress.evidence.parquet_write_operations > 0);
         assert_ne!(receipt.generation_uuid, before);
         assert_eq!(current_generation_uuid(&graph), receipt.generation_uuid);
+        let phases =
+            graphforge_storage::ConstructionPhaseAttribution::from_construction(&progress.evidence);
+        phases.validate_reconciliation().unwrap();
+        let phase_observation = (
+            phases.totals.read_bytes,
+            phases.totals.write_bytes,
+            phases.totals.read_calls,
+            phases.totals.write_calls,
+        );
+        if let Some(baseline) = baseline_phase_io {
+            // Each lifecycle has fixed authenticated control work. Preserve a
+            // documented 2x constant-factor ceiling around ideal linear growth
+            // instead of pretending the intercept is zero at the 1x fixture.
+            let ceiling = |base: u64| base.saturating_mul(factor).saturating_mul(2);
+            assert!(phase_observation.0 <= ceiling(baseline.0));
+            assert!(phase_observation.1 <= ceiling(baseline.1));
+            assert!(phase_observation.2 <= ceiling(baseline.2));
+            assert!(phase_observation.3 <= ceiling(baseline.3));
+        } else {
+            baseline_phase_io = Some(phase_observation);
+        }
         let generation = graphforge_storage::resolve_project_generation(project.path())
             .expect("resolve tiny generation");
         let storage = graphforge_storage::capture_storage_attribution(&generation)

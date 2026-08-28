@@ -13,12 +13,17 @@ VALIDATOR = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(VALIDATOR)
 
 CATEGORIES = (
-    ("generator_spill", "generator_exact_descriptors"),
-    ("canonical_generation", "storage_owned_snapshot"),
-    ("derived_adjacency", "storage_owned_snapshot"),
-    ("portable_package", "portable_exact_descriptor"),
-    ("clean_import", "clean_import_snapshot"),
+    ("canonical_node_topology", "storage_owned_snapshot"),
+    ("canonical_edge_topology", "storage_owned_snapshot"),
+    ("properties", "storage_owned_snapshot"),
+    ("uuid_surrogate_indexes", "storage_owned_snapshot"),
+    ("adjacency_csr", "storage_owned_snapshot"),
+    ("catalog_manifests", "storage_owned_snapshot"),
+    ("construction_staging_spill", "construction_receipts"),
+    ("portable_package", "exact_descriptor"),
+    ("clean_imported_project", "clean_import_snapshot"),
 )
+PHASES = ("append_merge", "seal_authentication", "shape_consume_reauthentication", "encode_write_postwrite_authentication", "publication_preauthentication", "cas_install_read_write", "hydration_verification", "fsync_synchronization", "recovery_reauthentication")
 
 
 def rung(scale: int, live: int, unit: int) -> dict:
@@ -27,6 +32,8 @@ def rung(scale: int, live: int, unit: int) -> dict:
             "category": category,
             "logical_bytes": unit * (index + 1),
             "allocated_bytes": unit * (index + 2),
+            "current_retained_bytes": unit * (index + 1),
+            "transient_peak_allocated_bytes": unit * 100 if index == 0 else unit,
             "logical_references": index + 2,
             "physical_objects": index + 1,
             "source": source,
@@ -35,43 +42,44 @@ def rung(scale: int, live: int, unit: int) -> dict:
     ]
     logical = sum(item["logical_bytes"] for item in artifacts)
     allocated = sum(item["allocated_bytes"] for item in artifacts)
+    retained = sum(item["current_retained_bytes"] for item in artifacts)
+    peak = max(item["transient_peak_allocated_bytes"] for item in artifacts)
+    phases = [{"phase": phase, "read_bytes": unit, "write_bytes": unit, "read_calls": 1, "write_calls": 1, "object_count": 1, "block_count": 1, "fsync_calls": 1} for phase in PHASES]
     return {
         "id": f"S{scale}",
         "scale": scale,
+        "live_nodes": live // 16,
         "live_edges": live,
         "artifacts": artifacts,
-        "totals": {"logical_bytes": logical, "allocated_bytes": allocated},
+        "phases": phases,
+        "totals": {"logical_bytes": logical, "allocated_bytes": allocated, "current_retained_bytes": retained, "transient_peak_allocated_bytes": peak, "phase_read_bytes": unit * 9, "phase_write_bytes": unit * 9, "phase_read_calls": 9, "phase_write_calls": 9, "phase_object_count": 9, "phase_block_count": 9, "phase_fsync_calls": 9},
         "ratios": {
-            "logical_bytes_per_live_edge": {
-                "numerator_bytes": logical,
-                "denominator_edges": live,
-            },
-            "allocated_bytes_per_live_edge": {
-                "numerator_bytes": allocated,
-                "denominator_edges": live,
-            },
+            "canonical_node_bytes_per_live_node": {"numerator_bytes": artifacts[0]["logical_bytes"], "denominator_count": live // 16},
+            "canonical_edge_bytes_per_live_edge": {"numerator_bytes": artifacts[1]["logical_bytes"], "denominator_count": live},
+            "authoritative_project_bytes_per_live_edge": {"numerator_bytes": retained, "denominator_count": live},
+            "full_lifecycle_peak_bytes_per_live_edge": {"numerator_bytes": peak, "denominator_count": live},
         },
-        "phase_peak_allocated_bytes": allocated,
     }
 
 
 def evidence() -> dict:
     low = rung(20, 10_000, 1_000)
     high = rung(22, 40_000, 4_000)
-    # 140000/40000 = 3.5 bytes/edge, exactly matching both observations.
-    numerator, denominator = 140_000, 40_000
+    numerator, denominator = high["totals"]["transient_peak_allocated_bytes"], 40_000
     projected = VALIDATOR.ceil_ratio(numerator * VALIDATOR.S26_EDGES, denominator)
-    volume = 5_000_000_000
+    volume = 50_000_000_000
     return {
-        "schema": "graphforge-g500-ladder-qualification/2",
+        "schema": "graphforge-g500-ladder-qualification/3",
         "rungs": [low, high],
         "projection": {
             "target": "S26",
+            "source_rungs": ["S20", "S22"],
             "rate": {
                 "numerator_bytes": numerator,
-                "denominator_edges": denominator,
+                "denominator_count": denominator,
             },
-            "projected_canonical_lifecycle_peak_bytes": projected,
+            "projected_canonical_bytes": VALIDATOR.ceil_ratio(high["totals"]["current_retained_bytes"] * VALIDATOR.S26_EDGES, high["live_edges"]),
+            "projected_lifecycle_peak_bytes": projected,
             "volume_bytes": volume,
             "reserved_headroom_bytes": 500_000_000,
             "headroom_bytes": volume - projected,
@@ -99,7 +107,7 @@ def test_accepts_reconciled_adjacent_rungs_and_conservative_projection():
         ("projection", "not reproducible"),
         ("headroom", "does not reconcile"),
         ("unsafe_admit", "contradicts projected headroom"),
-        ("peak_below_artifact", "below an observed artifact"),
+        ("peak_below_artifact", "totals do not reconcile"),
     ],
 )
 def test_rejects_goal_seeking_or_incomplete_evidence(mutation: str, match: str):
@@ -115,7 +123,7 @@ def test_rejects_goal_seeking_or_incomplete_evidence(mutation: str, match: str):
     elif mutation == "allocated_total":
         value["rungs"][0]["totals"]["allocated_bytes"] += 1
     elif mutation == "denominator":
-        value["rungs"][0]["ratios"]["allocated_bytes_per_live_edge"]["denominator_edges"] += 1
+        value["rungs"][0]["ratios"]["authoritative_project_bytes_per_live_edge"]["denominator_count"] += 1
     elif mutation == "one_rung":
         value["rungs"].pop()
     elif mutation == "nonadjacent":
@@ -123,13 +131,13 @@ def test_rejects_goal_seeking_or_incomplete_evidence(mutation: str, match: str):
     elif mutation == "understated_slope":
         value["projection"]["rate"]["numerator_bytes"] = 1
     elif mutation == "projection":
-        value["projection"]["projected_canonical_lifecycle_peak_bytes"] += 1
+        value["projection"]["projected_lifecycle_peak_bytes"] += 1
     elif mutation == "headroom":
         value["projection"]["headroom_bytes"] += 1
     elif mutation == "unsafe_admit":
         value["projection"]["reserved_headroom_bytes"] = value["projection"]["headroom_bytes"] + 1
     elif mutation == "peak_below_artifact":
-        value["rungs"][0]["phase_peak_allocated_bytes"] = 0
+        value["rungs"][0]["artifacts"][0]["transient_peak_allocated_bytes"] = 0
     with pytest.raises(VALIDATOR.EvidenceError, match=match):
         VALIDATOR.validate(value)
 

@@ -7,7 +7,9 @@ use std::path::Path;
 use graphforge_core::GfError;
 use serde::{Deserialize, Serialize};
 
-use crate::{GraphFileEntry, GraphFilesParticipant, ResolvedProjectGeneration};
+use crate::{
+    GraphConstructionEvidence, GraphFileEntry, GraphFilesParticipant, ResolvedProjectGeneration,
+};
 
 /// Exhaustive storage categories used by scale qualification evidence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -25,21 +27,208 @@ pub enum ArtifactCategory {
     Adjacency,
     /// Runtime catalogs, generation participants, and compact-manifest nodes.
     CatalogAndManifests,
+    /// Receipt-authenticated construction staging and spill artifacts.
+    ConstructionStaging,
+    /// One immutable portable export package.
+    PortablePackage,
+    /// The authoritative retained project produced by a clean import.
+    CleanImportedProject,
     /// Unclassified retained graph artifact. Qualification must reject this.
     Other,
 }
 
 impl ArtifactCategory {
     /// Canonical category inventory, including zero-valued categories.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 10] = [
         Self::TopologyNodes,
         Self::TopologyEdges,
         Self::Properties,
         Self::UuidAndSurrogates,
         Self::Adjacency,
         Self::CatalogAndManifests,
+        Self::ConstructionStaging,
+        Self::PortablePackage,
+        Self::CleanImportedProject,
         Self::Other,
     ];
+}
+
+/// Closed lifecycle-phase inventory for application-observed storage I/O.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageIoPhase {
+    /// Chunk append and bounded external merge work.
+    AppendMerge,
+    /// Seal-time authentication of staged inputs.
+    SealAuthentication,
+    /// Canonical shape consumption and reauthentication.
+    ShapeConsumeReauthentication,
+    /// Canonical encoding plus post-write authentication.
+    EncodeWritePostwriteAuthentication,
+    /// Publication control preauthentication.
+    PublicationPreauthentication,
+    /// Content-addressed installation reads and writes.
+    CasInstallReadWrite,
+    /// Workspace hydration and verification.
+    HydrationVerification,
+    /// Explicit file and directory synchronization barriers.
+    FsyncSynchronization,
+    /// Crash-recovery reauthentication.
+    RecoveryReauthentication,
+}
+
+impl StorageIoPhase {
+    /// Complete phase inventory, including phases with zero observations.
+    pub const ALL: [Self; 9] = [
+        Self::AppendMerge,
+        Self::SealAuthentication,
+        Self::ShapeConsumeReauthentication,
+        Self::EncodeWritePostwriteAuthentication,
+        Self::PublicationPreauthentication,
+        Self::CasInstallReadWrite,
+        Self::HydrationVerification,
+        Self::FsyncSynchronization,
+        Self::RecoveryReauthentication,
+    ];
+}
+
+/// Exact application-I/O totals owned by one lifecycle phase.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PhaseIoTotals {
+    /// Payload and control bytes returned to the application.
+    pub read_bytes: u64,
+    /// Payload and control bytes submitted by the application.
+    pub write_bytes: u64,
+    /// Application-observed read calls.
+    pub read_calls: u64,
+    /// Application-observed write calls.
+    pub write_calls: u64,
+    /// Immutable objects handled by this phase.
+    pub object_count: u64,
+    /// Fixed-size authenticated or buffered blocks handled by this phase.
+    pub block_count: u64,
+    /// File and directory durability barriers completed by this phase.
+    pub fsync_calls: u64,
+}
+
+/// Closed, reconciled phase attribution for one construction lifecycle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConstructionPhaseAttribution {
+    /// Every lifecycle phase exactly once, including zero observations.
+    pub phases: BTreeMap<StorageIoPhase, PhaseIoTotals>,
+    /// Exact sum of all phase rows.
+    pub totals: PhaseIoTotals,
+}
+
+impl ConstructionPhaseAttribution {
+    /// Derive phase ownership from storage-owned construction counters.
+    #[must_use]
+    pub fn from_construction(evidence: &GraphConstructionEvidence) -> Self {
+        let mut phases: BTreeMap<_, _> = StorageIoPhase::ALL
+            .into_iter()
+            .map(|phase| (phase, PhaseIoTotals::default()))
+            .collect();
+        phases.insert(
+            StorageIoPhase::AppendMerge,
+            PhaseIoTotals {
+                write_bytes: evidence.write_bytes,
+                write_calls: evidence.write_operations,
+                object_count: evidence.parquet_shards,
+                ..Default::default()
+            },
+        );
+        phases.insert(
+            StorageIoPhase::SealAuthentication,
+            PhaseIoTotals {
+                read_bytes: evidence.seal_application_read_bytes,
+                read_calls: evidence
+                    .authentication_read_operations
+                    .saturating_add(evidence.replay_validation_read_operations),
+                ..Default::default()
+            },
+        );
+        phases.insert(
+            StorageIoPhase::ShapeConsumeReauthentication,
+            PhaseIoTotals {
+                read_bytes: evidence.shape_application_read_bytes,
+                write_bytes: evidence.merge_written_bytes,
+                read_calls: evidence
+                    .shape_input_validation_read_operations
+                    .saturating_add(evidence.parquet_read_operations),
+                write_calls: evidence.parquet_write_operations,
+                block_count: evidence
+                    .merge_read_blocks
+                    .saturating_add(evidence.merge_write_blocks),
+                ..Default::default()
+            },
+        );
+        phases.insert(
+            StorageIoPhase::EncodeWritePostwriteAuthentication,
+            PhaseIoTotals {
+                read_bytes: evidence.encode_application_read_bytes,
+                write_bytes: evidence.canonical_output_bytes,
+                read_calls: evidence.shaped_output_authentication_operations,
+                ..Default::default()
+            },
+        );
+        phases.insert(
+            StorageIoPhase::PublicationPreauthentication,
+            PhaseIoTotals {
+                read_bytes: evidence.publication_application_read_bytes,
+                ..Default::default()
+            },
+        );
+        phases.insert(
+            StorageIoPhase::CasInstallReadWrite,
+            PhaseIoTotals {
+                read_bytes: evidence.cas_application_read_bytes,
+                ..Default::default()
+            },
+        );
+        phases.insert(
+            StorageIoPhase::HydrationVerification,
+            PhaseIoTotals {
+                read_bytes: evidence.hydration_application_read_bytes,
+                ..Default::default()
+            },
+        );
+        phases.insert(
+            StorageIoPhase::FsyncSynchronization,
+            PhaseIoTotals {
+                fsync_calls: evidence
+                    .fsync_operations
+                    .saturating_add(evidence.merge_fsync_operations),
+                ..Default::default()
+            },
+        );
+        let totals = phases
+            .values()
+            .fold(PhaseIoTotals::default(), |mut total, value| {
+                add_phase_totals_saturating(&mut total, value);
+                total
+            });
+        Self { phases, totals }
+    }
+
+    /// Reject missing phases or totals that do not equal the phase sum.
+    pub fn validate_reconciliation(&self) -> Result<(), GfError> {
+        if StorageIoPhase::ALL
+            .iter()
+            .any(|phase| !self.phases.contains_key(phase))
+        {
+            return Err(validation("storage phase attribution is missing a phase"));
+        }
+        let mut total = PhaseIoTotals::default();
+        for phase in StorageIoPhase::ALL {
+            add_phase_totals(&mut total, &self.phases[&phase])?;
+        }
+        if total != self.totals {
+            return Err(validation(
+                "storage phase attribution totals do not reconcile",
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Reconciled totals for one artifact category.
@@ -375,6 +564,27 @@ fn add_totals(
     Ok(())
 }
 
+fn add_phase_totals(target: &mut PhaseIoTotals, value: &PhaseIoTotals) -> Result<(), GfError> {
+    target.read_bytes = checked_add(target.read_bytes, value.read_bytes)?;
+    target.write_bytes = checked_add(target.write_bytes, value.write_bytes)?;
+    target.read_calls = checked_add(target.read_calls, value.read_calls)?;
+    target.write_calls = checked_add(target.write_calls, value.write_calls)?;
+    target.object_count = checked_add(target.object_count, value.object_count)?;
+    target.block_count = checked_add(target.block_count, value.block_count)?;
+    target.fsync_calls = checked_add(target.fsync_calls, value.fsync_calls)?;
+    Ok(())
+}
+
+fn add_phase_totals_saturating(target: &mut PhaseIoTotals, value: &PhaseIoTotals) {
+    target.read_bytes = target.read_bytes.saturating_add(value.read_bytes);
+    target.write_bytes = target.write_bytes.saturating_add(value.write_bytes);
+    target.read_calls = target.read_calls.saturating_add(value.read_calls);
+    target.write_calls = target.write_calls.saturating_add(value.write_calls);
+    target.object_count = target.object_count.saturating_add(value.object_count);
+    target.block_count = target.block_count.saturating_add(value.block_count);
+    target.fsync_calls = target.fsync_calls.saturating_add(value.fsync_calls);
+}
+
 fn checked_add(left: u64, right: u64) -> Result<u64, GfError> {
     left.checked_add(right)
         .ok_or_else(|| validation("storage attribution counter overflow"))
@@ -486,6 +696,41 @@ mod tests {
         };
         assert!(snapshot.validate_reconciliation().is_ok());
         assert!(snapshot.validate_for_qualification().is_err());
+    }
+
+    #[test]
+    fn construction_phase_inventory_reconciles_and_rejects_omission() {
+        let evidence = GraphConstructionEvidence {
+            seal_application_read_bytes: 11,
+            shape_application_read_bytes: 13,
+            encode_application_read_bytes: 17,
+            publication_application_read_bytes: 19,
+            cas_application_read_bytes: 23,
+            hydration_application_read_bytes: 29,
+            canonical_output_bytes: 31,
+            write_bytes: 37,
+            write_operations: 3,
+            authentication_read_operations: 5,
+            merge_fsync_operations: 7,
+            ..Default::default()
+        };
+        let mut attribution = ConstructionPhaseAttribution::from_construction(&evidence);
+        attribution.validate_reconciliation().unwrap();
+        assert_eq!(attribution.phases.len(), StorageIoPhase::ALL.len());
+        assert_eq!(attribution.totals.read_bytes, 112);
+        assert_eq!(attribution.totals.write_bytes, 68);
+        attribution
+            .phases
+            .remove(&StorageIoPhase::RecoveryReauthentication);
+        assert!(attribution.validate_reconciliation().is_err());
+    }
+
+    #[test]
+    fn construction_phase_inventory_rejects_double_counted_total() {
+        let mut attribution =
+            ConstructionPhaseAttribution::from_construction(&GraphConstructionEvidence::default());
+        attribution.totals.read_bytes = 1;
+        assert!(attribution.validate_reconciliation().is_err());
     }
 
     #[test]
