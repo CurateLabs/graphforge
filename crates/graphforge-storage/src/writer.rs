@@ -6392,6 +6392,24 @@ mod tests {
 
     #[test]
     fn authenticated_endpoint_registration_decodes_zero_topology_rows() {
+        const CHILD: &str = "GRAPHFORGE_ENDPOINT_REGISTRATION_IO_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg(
+                    "writer::tests::authenticated_endpoint_registration_decodes_zero_topology_rows",
+                )
+                .arg("--nocapture")
+                .env(CHILD, "1")
+                .status()
+                .unwrap();
+            assert!(
+                status.success(),
+                "isolated endpoint-registration I/O proof failed"
+            );
+            return;
+        }
+
         let dir = TempDir::new().unwrap();
         let left = new_v7();
         let right = new_v7();

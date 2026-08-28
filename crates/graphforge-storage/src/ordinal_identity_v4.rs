@@ -18,10 +18,13 @@ use uuid::Uuid;
 /// Immutable v4 manifest version.
 pub const ORDINAL_IDENTITY_V4: u32 = 4;
 /// Canonical location below a graph project.
-pub const ORDINAL_IDENTITY_MANIFEST: &str = "topology/uuid-membership/manifest.json";
+pub const ORDINAL_IDENTITY_MANIFEST: &str = "topology/uuid-membership/ordinal-v4-manifest.json";
 const INDEX_DIR: &str = "topology/uuid-membership";
-const MANIFEST_NAME: &str = "manifest.json";
+const MANIFEST_NAME: &str = "ordinal-v4-manifest.json";
 const LOCK_NAME: &str = "ordinal-v4.lock";
+const RECEIPT_FILE_NAME: &str = "ordinal-v4-receipt.json";
+const RECEIPT_NAME: &str = "topology/uuid-membership/ordinal-v4-receipt.json";
+const GENERATION_NAME: &str = "topology/generation.json";
 const UUID_WIDTH: u64 = 16;
 const FORWARD_RECORD_WIDTH: u64 = UUID_WIDTH + 8;
 const FORWARD_RECORD_WIDTH_USIZE: usize = UUID_WIDTH_USIZE + 8;
@@ -161,7 +164,7 @@ pub struct V4OrdinalIdentityManifest {
     /// Must equal [`ORDINAL_IDENTITY_V4`].
     pub format_version: u32,
     /// Exact topology generation served by this snapshot.
-    pub topology_generation: u64,
+    pub(crate) topology_generation: u64,
     /// UUID-sorted forward artifacts, included to reject mixed authority.
     pub forward_identities: Vec<V4OrdinalArtifact>,
     /// Nonoverlapping packed ordinal ranges.
@@ -176,7 +179,121 @@ pub struct V4OrdinalIdentityAuthority {
     /// Exact topology generation authorized by the project root.
     pub topology_generation: u64,
     /// Lowercase SHA-256 of the authorized membership manifest bytes.
-    pub manifest_sha256: String,
+    pub(crate) manifest_sha256: String,
+}
+
+/// Opaque ordinal authority authenticated through one pinned project generation.
+#[derive(Clone, Debug)]
+pub struct AuthenticatedV4OrdinalIdentityAuthority {
+    pub(crate) authority: V4OrdinalIdentityAuthority,
+}
+
+impl AuthenticatedV4OrdinalIdentityAuthority {
+    #[cfg(test)]
+    pub(crate) fn authority(&self) -> &V4OrdinalIdentityAuthority {
+        &self.authority
+    }
+
+    /// Open the selected ordinal facet at an admitted graph root.
+    pub fn open(
+        &self,
+        graph_root: &Path,
+        limits: V4OrdinalIdentityLimits,
+    ) -> Result<V4OrdinalIdentityOpen, V4OrdinalIdentityError> {
+        V4OrdinalIdentityHandle::open(graph_root, &self.authority, limits)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SelectedOrdinalReceipt {
+    nonce: String,
+    expected_generation: u64,
+    topology_delta_sha256: String,
+    manifest_sha256: String,
+}
+
+impl crate::ResolvedProjectGeneration {
+    /// Resolve the ordinal receipt through the pinned generation's authenticated
+    /// graph/files participant. Absence is a clean rebuild requirement; any
+    /// partial or malformed residue fails closed.
+    pub fn authenticated_v4_ordinal_authority(
+        &self,
+    ) -> Result<Option<AuthenticatedV4OrdinalIdentityAuthority>, graphforge_core::GfError> {
+        let mut targeted_state = crate::graph_manifest::GraphManifestTargetedState::default();
+        let receipt = self.authenticated_graph_file_bytes_with_state(
+            RECEIPT_NAME,
+            MAX_MANIFEST_BYTES,
+            Some(&mut targeted_state),
+        )?;
+        let manifest = self.authenticated_graph_file_bytes_with_state(
+            ORDINAL_IDENTITY_MANIFEST,
+            MAX_MANIFEST_BYTES,
+            Some(&mut targeted_state),
+        )?;
+        match (receipt, manifest) {
+            (None, None) => Ok(None),
+            (None, Some(_)) | (Some(_), None) => Err(graphforge_core::GfError::Validation(
+                "selected ordinal facet has incomplete authority residue".into(),
+            )),
+            (Some((_, receipt_bytes)), Some((manifest_entry, manifest_bytes))) => {
+                let receipt: SelectedOrdinalReceipt = serde_json::from_slice(&receipt_bytes)
+                    .map_err(|_| {
+                        graphforge_core::GfError::Validation(
+                            "selected ordinal receipt is malformed".into(),
+                        )
+                    })?;
+                let generation = self
+                    .authenticated_graph_file_bytes_with_state(
+                        GENERATION_NAME,
+                        MAX_MANIFEST_BYTES,
+                        Some(&mut targeted_state),
+                    )?
+                    .ok_or_else(|| {
+                        graphforge_core::GfError::Validation(
+                            "selected topology generation authority is absent".into(),
+                        )
+                    })?;
+                let generation: serde_json::Value =
+                    serde_json::from_slice(&generation.1).map_err(|_| {
+                        graphforge_core::GfError::Validation(
+                            "selected topology generation authority is malformed".into(),
+                        )
+                    })?;
+                let selected_generation = generation
+                    .get("topology_generation")
+                    .and_then(serde_json::Value::as_u64)
+                    .ok_or_else(|| {
+                        graphforge_core::GfError::Validation(
+                            "selected topology generation is missing".into(),
+                        )
+                    })?;
+                let manifest_digest = hex(&Sha256::digest(&manifest_bytes));
+                let canonical_hex = |value: &str, length: usize| {
+                    value.len() == length
+                        && value
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+                };
+                if !canonical_hex(&receipt.nonce, 32)
+                    || !canonical_hex(&receipt.topology_delta_sha256, 64)
+                    || receipt.expected_generation != selected_generation
+                    || receipt.manifest_sha256 != manifest_entry.content_sha256
+                    || receipt.manifest_sha256 != manifest_digest
+                {
+                    return Err(graphforge_core::GfError::Validation(
+                        "selected ordinal receipt does not authenticate its manifest".into(),
+                    ));
+                }
+                Ok(Some(AuthenticatedV4OrdinalIdentityAuthority {
+                    authority: V4OrdinalIdentityAuthority {
+                        topology_generation: selected_generation,
+                        manifest_sha256: manifest_digest,
+                    },
+                }))
+            }
+        }
+    }
 }
 
 /// Typed open disposition. V3 is never parsed as v4.
@@ -187,6 +304,18 @@ pub enum V4OrdinalIdentityOpen {
     /// A valid version marker that requires an explicit rebuild.
     RebuildRequired {
         /// Version found in the manifest.
+        found_version: u32,
+    },
+}
+
+/// Discovery result for the additive ordinal facet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum V4OrdinalIdentityDiscovery {
+    /// The v4 path exists and must be authenticated by [`V4OrdinalIdentityHandle::open`].
+    Present,
+    /// Current canonical v3 node/edge authority is valid but ordinal v4 is absent.
+    RebuildRequired {
+        /// Canonical legacy facet version that requires ordinal construction.
         found_version: u32,
     },
 }
@@ -348,14 +477,67 @@ pub struct V4OrdinalIdentityHandle {
 }
 
 impl V4OrdinalIdentityHandle {
+    /// Return the exact v4 facet names admitted through this retained,
+    /// generation-authenticated handle.
+    pub(crate) fn referenced_file_names(&self) -> BTreeSet<String> {
+        std::iter::once(MANIFEST_NAME.to_owned())
+            .chain(std::iter::once(RECEIPT_FILE_NAME.to_owned()))
+            .chain(std::iter::once(LOCK_NAME.to_owned()))
+            .chain(
+                self.forward
+                    .iter()
+                    .map(|artifact| artifact.descriptor.name.clone()),
+            )
+            .chain(
+                self.ranges
+                    .iter()
+                    .map(|range| range.artifact.descriptor.name.clone()),
+            )
+            .chain(
+                self.tombstones
+                    .iter()
+                    .map(|run| run.artifact.descriptor.name.clone()),
+            )
+            .collect()
+    }
+
+    /// Classify the additive ordinal facet without treating a present file as
+    /// trusted. A present malformed v4 remains `Present` and subsequently
+    /// fails authenticated open; discovery never falls back around it.
+    pub fn discover(
+        project_dir: &Path,
+        topology_generation: u64,
+    ) -> Result<V4OrdinalIdentityDiscovery, V4OrdinalIdentityError> {
+        let root = StableDirectory::open(&project_dir.join(INDEX_DIR)).map_err(io_error)?;
+        match root.open_child_file(MANIFEST_NAME.as_ref()) {
+            Ok(_) => return Ok(V4OrdinalIdentityDiscovery::Present),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(io_error(error)),
+        }
+        if crate::UuidMembershipIndex::open_at_generation(project_dir, topology_generation).is_err()
+        {
+            return Err(V4OrdinalIdentityError::InvalidDescriptor(
+                "current v3 authority failed authentication",
+            ));
+        }
+        Ok(V4OrdinalIdentityDiscovery::RebuildRequired { found_version: 3 })
+    }
+
     /// Open and authenticate one immutable v4 generation.
-    pub fn open(
+    #[allow(clippy::too_many_lines)] // One admission lifecycle; ordering is the authority invariant.
+    pub(crate) fn open(
         project_dir: &Path,
         authority: &V4OrdinalIdentityAuthority,
         limits: V4OrdinalIdentityLimits,
     ) -> Result<V4OrdinalIdentityOpen, V4OrdinalIdentityError> {
         validate_limits(limits)?;
         let root = StableDirectory::open(&project_dir.join(INDEX_DIR)).map_err(io_error)?;
+        let coordination_file = root.open_child_file(LOCK_NAME.as_ref()).map_err(io_error)?;
+        if file_link_count(&coordination_file).map_err(io_error)? != 1 {
+            return Err(V4OrdinalIdentityError::Authentication);
+        }
+        <File as fs4::FileExt>::lock_shared(&coordination_file).map_err(io_error)?;
+        let coordination_identity = file_identity(&coordination_file).map_err(io_error)?;
         let mut manifest_file = root
             .open_child_file(MANIFEST_NAME.as_ref())
             .map_err(io_error)?;
@@ -365,15 +547,9 @@ impl V4OrdinalIdentityHandle {
         }
         let body = read_bounded(&mut manifest_file, MAX_MANIFEST_BYTES)?;
         authenticate_manifest_authority(&body, authority)?;
-        let Some(manifest) = parse_manifest(&body, authority.topology_generation)? else {
-            return Ok(V4OrdinalIdentityOpen::RebuildRequired { found_version: 3 });
-        };
-        let coordination_file = root.open_child_file(LOCK_NAME.as_ref()).map_err(io_error)?;
-        if file_link_count(&coordination_file).map_err(io_error)? != 1 {
-            return Err(V4OrdinalIdentityError::Authentication);
-        }
-        <File as fs4::FileExt>::lock_shared(&coordination_file).map_err(io_error)?;
-        let coordination_identity = file_identity(&coordination_file).map_err(io_error)?;
+        let manifest = parse_manifest(&body, authority.topology_generation)?.ok_or(
+            V4OrdinalIdentityError::InvalidDescriptor("v3 occupies the v4 manifest path"),
+        )?;
         validate_manifest(&manifest, authority.topology_generation)?;
 
         let mut admission =
@@ -439,6 +615,11 @@ impl V4OrdinalIdentityHandle {
                 blocks: run.blocks.clone(),
             });
         }
+        // The coordination lock protects admission from a concurrent writer,
+        // not the lifetime of an immutable snapshot. Releasing it here keeps
+        // retained handles from starving publication. Revalidation below
+        // still pins the manifest, lock inode, and every immutable artifact.
+        <File as fs4::FileExt>::unlock(&coordination_file).map_err(io_error)?;
         admission.ranges = ranges.len() as u64;
         admission.tombstone_runs = tombstones.len() as u64;
         Ok(V4OrdinalIdentityOpen::Ready(Box::new(Self {
@@ -1426,6 +1607,23 @@ mod tests {
         }
     }
 
+    #[test]
+    fn retained_authenticated_handle_never_reenumerates_replaced_manifest_names() {
+        let fixture = Fixture::new(&[2], &[1]);
+        let handle = fixture.open(V4OrdinalIdentityLimits::default());
+        let mut replacement = fixture.manifest.clone();
+        replacement.forward_identities[0].name = "planted-forward.uuidx".into();
+        fs::write(
+            fixture.root.path().join(INDEX_DIR).join(MANIFEST_NAME),
+            serde_json::to_vec(&replacement).unwrap(),
+        )
+        .unwrap();
+
+        let referenced = handle.referenced_file_names();
+        assert!(referenced.contains("forward.uuidx"));
+        assert!(!referenced.contains("planted-forward.uuidx"));
+    }
+
     fn artifact(
         name: String,
         kind: V4OrdinalArtifactKind,
@@ -1469,22 +1667,6 @@ mod tests {
                 sha256: hex(&Sha256::digest(block)),
             })
             .collect()
-    }
-
-    fn v3_file_json(name: &str, width: u32) -> serde_json::Value {
-        let key_hex_len = if width == 32 { 32 } else { 16 };
-        serde_json::json!({
-            "name": name,
-            "count": 1,
-            "sha256": "0".repeat(64),
-            "blocks": [{
-                "offset": 0,
-                "len": width,
-                "first_key": "1".repeat(key_hex_len),
-                "last_key": "1".repeat(key_hex_len),
-                "sha256": "2".repeat(64)
-            }]
-        })
     }
 
     #[test]
@@ -1537,83 +1719,81 @@ mod tests {
     }
 
     #[test]
-    fn v3_is_explicitly_rebuild_required_and_mixed_kind_fails() {
+    fn absent_v4_classifies_valid_v3_and_present_malformed_v4_never_falls_back() {
+        let (root, _, _) = crate::uuid_membership::tests::fixture();
+        fs::write(
+            root.path().join("topology/generation.json"),
+            b"{\"topology_generation\":7,\"search_generation\":0,\"property_generation\":0}\n",
+        )
+        .unwrap();
+        crate::rebuild_uuid_membership_indexes(root.path(), crate::UuidIndexBuildLimits::default())
+            .unwrap();
+        let index = root.path().join(INDEX_DIR);
+        fs::write(index.join(LOCK_NAME), []).unwrap();
+        let v4_path = index.join(MANIFEST_NAME);
+        let v3_path = index.join("manifest.json");
+        let v3 = fs::read(&v3_path).unwrap();
+        assert!(matches!(
+            V4OrdinalIdentityHandle::discover(root.path(), 7).unwrap(),
+            V4OrdinalIdentityDiscovery::RebuildRequired { found_version: 3 }
+        ));
+        assert!(matches!(
+            V4OrdinalIdentityHandle::open(
+                root.path(),
+                &V4OrdinalIdentityAuthority {
+                    topology_generation: 7,
+                    manifest_sha256: "00".repeat(32),
+                },
+                V4OrdinalIdentityLimits::default()
+            ),
+            Err(V4OrdinalIdentityError::Io)
+        ));
+        fs::remove_file(&v3_path).unwrap();
+        assert!(matches!(
+            V4OrdinalIdentityHandle::discover(root.path(), 7),
+            Err(V4OrdinalIdentityError::InvalidDescriptor(_))
+        ));
+        fs::write(&v3_path, &v3).unwrap();
+        let v3_manifest: serde_json::Value = serde_json::from_slice(&v3).unwrap();
+        let run_name = v3_manifest["runs"][0]["identities"]["name"]
+            .as_str()
+            .unwrap();
+        let run_path = index.join(run_name);
+        let mut run = fs::read(&run_path).unwrap();
+        run[0] ^= 1;
+        fs::write(&run_path, run).unwrap();
+        assert!(matches!(
+            V4OrdinalIdentityHandle::discover(root.path(), 7),
+            Err(V4OrdinalIdentityError::InvalidDescriptor(_))
+        ));
+
+        fs::write(&v4_path, b"{\"format_version\":4}").unwrap();
+        assert_eq!(
+            V4OrdinalIdentityHandle::discover(root.path(), 7).unwrap(),
+            V4OrdinalIdentityDiscovery::Present
+        );
+        let malformed_digest = hex(&Sha256::digest(b"{\"format_version\":4}"));
+        assert!(matches!(
+            V4OrdinalIdentityHandle::open(
+                root.path(),
+                &V4OrdinalIdentityAuthority {
+                    topology_generation: 7,
+                    manifest_sha256: malformed_digest,
+                },
+                V4OrdinalIdentityLimits::default()
+            ),
+            Err(V4OrdinalIdentityError::InvalidDescriptor(_)) | Err(V4OrdinalIdentityError::Io)
+        ));
+
         let fixture = Fixture::new(&[2], &[]);
-        let manifest_path = fixture.root.path().join(INDEX_DIR).join(MANIFEST_NAME);
-        let v3 = serde_json::json!({
-            "format_version": 3,
-            "base_generation": 7,
-            "current_generation": 7,
-            "live_node_count": 1,
-            "live_edge_count": 0,
-            "runs": [{
-                "base": true,
-                "level": 0,
-                "first_generation": 0,
-                "last_generation": 7,
-                "identities": v3_file_json("identities.bin", 32),
-                "node_surrogates": v3_file_json("node-surrogates.bin", 24),
-                "node_count": 1,
-                "edge_count": 0,
-                "deleted_node_count": 0,
-                "deleted_edge_count": 0
-            }]
-        });
-        fs::write(&manifest_path, serde_json::to_vec(&v3).unwrap()).unwrap();
-        fs::remove_file(fixture.root.path().join(INDEX_DIR).join(LOCK_NAME)).unwrap();
-        assert!(matches!(
-            V4OrdinalIdentityHandle::open(
-                fixture.root.path(),
-                &fixture.authority(7),
-                V4OrdinalIdentityLimits::default()
-            )
-            .unwrap(),
-            V4OrdinalIdentityOpen::RebuildRequired { found_version: 3 }
-        ));
-        fs::write(fixture.root.path().join(INDEX_DIR).join(LOCK_NAME), []).unwrap();
-
-        let mut mixed_v3 = v3.clone();
-        mixed_v3["ordinal_ranges"] = serde_json::json!([]);
-        fs::write(&manifest_path, serde_json::to_vec(&mixed_v3).unwrap()).unwrap();
-        assert!(matches!(
-            V4OrdinalIdentityHandle::open(
-                fixture.root.path(),
-                &fixture.authority(7),
-                V4OrdinalIdentityLimits::default()
-            ),
-            Err(V4OrdinalIdentityError::InvalidDescriptor(_))
-        ));
-        let mut run_mixed = v3.clone();
-        run_mixed["runs"][0]["v4_generation"] = serde_json::json!(7);
-        let mut file_mixed = v3.clone();
-        file_mixed["runs"][0]["identities"]["v4_digest"] = serde_json::json!("mixed");
-        let mut block_mixed = v3.clone();
-        block_mixed["runs"][0]["identities"]["blocks"][0]["v4_offset"] = serde_json::json!(0);
-        for nested_mixed in [run_mixed, file_mixed, block_mixed] {
-            fs::write(&manifest_path, serde_json::to_vec(&nested_mixed).unwrap()).unwrap();
-            assert!(matches!(
-                V4OrdinalIdentityHandle::open(
-                    fixture.root.path(),
-                    &fixture.authority(7),
-                    V4OrdinalIdentityLimits::default()
-                ),
-                Err(V4OrdinalIdentityError::InvalidDescriptor(_))
-            ));
-        }
-        fs::write(&manifest_path, br#"{"format_version":5}"#).unwrap();
-        assert!(matches!(
-            V4OrdinalIdentityHandle::open(
-                fixture.root.path(),
-                &fixture.authority(7),
-                V4OrdinalIdentityLimits::default()
-            ),
-            Err(V4OrdinalIdentityError::InvalidDescriptor(_))
-        ));
-
         fixture.publish();
         let mut mixed = fixture.manifest.clone();
         mixed.ordinal_ranges[0].artifact.kind = V4OrdinalArtifactKind::ForwardIdentities;
-        fs::write(&manifest_path, serde_json::to_vec(&mixed).unwrap()).unwrap();
+        fs::write(
+            fixture.root.path().join(INDEX_DIR).join(MANIFEST_NAME),
+            serde_json::to_vec(&mixed).unwrap(),
+        )
+        .unwrap();
         assert!(matches!(
             V4OrdinalIdentityHandle::open(
                 fixture.root.path(),

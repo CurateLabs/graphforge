@@ -1720,8 +1720,9 @@ pub fn materialize_semantic_migration(
         let mut max_batch_rows = 0_usize;
         for entry in &inventory.files {
             checkpoint()?;
-            let source = source_graph_root.join(&entry.relative_path);
-            let relative = PathBuf::from(&entry.relative_path);
+            let source = crate::graph_files::resolve_v1_inventory_entry(source_graph_root, entry)?;
+            let relative =
+                crate::graph_files::canonical_inventory_relative_path(&entry.relative_path)?;
             let old_route = semantic_route_from_relative(&relative);
             let target_relative = migrated_semantic_relative(&relative, &route_moves);
             let target = staging_graph_root.join(target_relative);

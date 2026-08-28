@@ -17,6 +17,89 @@ pub struct FileIdentity {
     pub file_id: [u8; 16],
 }
 
+/// Exclusive Windows capability used while constructing one CAS object.
+#[cfg(windows)]
+#[derive(Debug)]
+pub struct WindowsCasWriter {
+    file: File,
+    identity: FileIdentity,
+}
+
+#[cfg(windows)]
+impl io::Write for WindowsCasWriter {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        io::Write::write(&mut self.file, buffer)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        io::Write::flush(&mut self.file)
+    }
+}
+
+#[cfg(windows)]
+impl io::Read for WindowsCasWriter {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        io::Read::read(&mut self.file, buffer)
+    }
+}
+
+#[cfg(windows)]
+impl io::Seek for WindowsCasWriter {
+    fn seek(&mut self, position: io::SeekFrom) -> io::Result<u64> {
+        io::Seek::seek(&mut self.file, position)
+    }
+}
+
+#[cfg(windows)]
+impl WindowsCasWriter {
+    /// Flush the exact retained writer.
+    pub fn sync_all(&self) -> io::Result<()> {
+        self.file.sync_all()
+    }
+
+    /// Return the immutable identity captured at exclusive creation.
+    #[must_use]
+    pub fn identity(&self) -> FileIdentity {
+        self.identity
+    }
+}
+
+/// Read-only Windows capability for a canonically sealed CAS object.
+#[cfg(windows)]
+#[derive(Debug)]
+pub struct WindowsSealedCasFile(File);
+
+#[cfg(windows)]
+impl WindowsSealedCasFile {
+    /// Consume the sealed capability as a standard read-only file handle.
+    #[must_use]
+    pub fn into_file(self) -> File {
+        self.0
+    }
+}
+
+/// Exclusive retained handle for authenticating a released legacy Windows CAS object.
+#[cfg(windows)]
+#[derive(Debug)]
+pub struct WindowsLegacyCasAdopter {
+    file: File,
+    identity: FileIdentity,
+}
+
+#[cfg(windows)]
+impl io::Read for WindowsLegacyCasAdopter {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        io::Read::read(&mut self.file, buffer)
+    }
+}
+
+#[cfg(windows)]
+impl io::Seek for WindowsLegacyCasAdopter {
+    fn seek(&mut self, position: io::SeekFrom) -> io::Result<u64> {
+        io::Seek::seek(&mut self.file, position)
+    }
+}
+
 /// Retained directory capability whose children are opened without following
 /// links or reparse points.
 #[derive(Debug)]
@@ -145,6 +228,132 @@ impl StableDirectory {
         validate_stable_child_file(&file, &path)?;
         self.revalidate_named()?;
         Ok(file)
+    }
+
+    /// Create a Windows CAS child with exclusive data-write authority.
+    ///
+    /// Readers may coexist, but no second writer can be admitted. The handle
+    /// retains the native authority needed for the irreversible seal.
+    #[cfg(windows)]
+    pub fn create_cas_child_file(&self, name: &OsStr) -> io::Result<WindowsCasWriter> {
+        validate_child_name(name)?;
+        self.revalidate_named()?;
+        let path = self.path.join(name);
+        let file = windows::create_cas_writer(&path)?;
+        validate_stable_child_file(&file, &path)?;
+        self.revalidate_named()?;
+        Ok(WindowsCasWriter {
+            identity: file_identity(&file)?,
+            file,
+        })
+    }
+
+    /// Convert an exact Windows CAS writer into an identity-matched sealed reader.
+    #[cfg(windows)]
+    pub fn seal_cas_child_file(
+        &self,
+        name: &OsStr,
+        writer: WindowsCasWriter,
+    ) -> io::Result<WindowsSealedCasFile> {
+        validate_child_name(name)?;
+        self.revalidate_named()?;
+        let path = self.path.join(name);
+        let expected = writer.identity;
+        if file_identity(&writer.file)? != expected || path_identity(&path)? != expected {
+            return Err(io::Error::other(
+                "CAS writer identity changed before sealing",
+            ));
+        }
+        windows::seal_cas_writer(&writer.file)?;
+        if file_identity(&writer.file)? != expected || path_identity(&path)? != expected {
+            return Err(io::Error::other(
+                "CAS writer identity changed while sealing",
+            ));
+        }
+        let bridge = windows::open_cas_bridge(&path)?;
+        if file_identity(&bridge)? != expected {
+            return Err(io::Error::other(
+                "CAS bridge identity changed while sealing",
+            ));
+        }
+        drop(writer.file);
+        let reader = windows::open_sealed_cas_reader(&path)?;
+        validate_stable_child_file(&reader, &path)?;
+        if file_identity(&reader)? != expected || path_identity(&path)? != expected {
+            return Err(io::Error::other(
+                "CAS identity changed while reopening sealed reader",
+            ));
+        }
+        drop(bridge);
+        self.revalidate_named()?;
+        Ok(WindowsSealedCasFile(reader))
+    }
+
+    /// Open a canonically sealed Windows CAS child while excluding writers.
+    #[cfg(windows)]
+    pub fn open_cas_child_file(&self, name: &OsStr) -> io::Result<WindowsSealedCasFile> {
+        validate_child_name(name)?;
+        self.revalidate_named()?;
+        let path = self.path.join(name);
+        let reader = windows::open_sealed_cas_reader(&path)?;
+        validate_stable_child_file(&reader, &path)?;
+        if !reader.metadata()?.permissions().readonly()
+            || !windows::has_canonical_cas_dacl(&reader)?
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "CAS child is not canonically sealed",
+            ));
+        }
+        self.revalidate_named()?;
+        Ok(WindowsSealedCasFile(reader))
+    }
+
+    /// Retain an exclusive metadata handle for authenticating a legacy sealed CAS child.
+    #[cfg(windows)]
+    pub fn open_legacy_cas_child_for_adoption(
+        &self,
+        name: &OsStr,
+    ) -> io::Result<WindowsLegacyCasAdopter> {
+        validate_child_name(name)?;
+        self.revalidate_named()?;
+        let path = self.path.join(name);
+        let file = windows::open_legacy_cas_adopter(&path)?;
+        validate_stable_child_file(&file, &path)?;
+        let identity = file_identity(&file)?;
+        if path_identity(&path)? != identity {
+            return Err(io::Error::other("legacy CAS identity changed during open"));
+        }
+        self.revalidate_named()?;
+        Ok(WindowsLegacyCasAdopter { file, identity })
+    }
+
+    /// Canonically seal a retained legacy CAS child after caller authentication.
+    #[cfg(windows)]
+    pub fn adopt_legacy_cas_child(
+        &self,
+        name: &OsStr,
+        adopter: WindowsLegacyCasAdopter,
+    ) -> io::Result<WindowsSealedCasFile> {
+        validate_child_name(name)?;
+        self.revalidate_named()?;
+        let path = self.path.join(name);
+        windows::set_canonical_cas_dacl(&adopter.file)?;
+        let bridge = windows::open_cas_bridge(&path)?;
+        if file_identity(&bridge)? != adopter.identity {
+            return Err(io::Error::other("legacy CAS bridge identity changed"));
+        }
+        drop(adopter.file);
+        let reader = windows::open_sealed_cas_reader(&path)?;
+        if file_identity(&reader)? != adopter.identity || path_identity(&path)? != adopter.identity
+        {
+            return Err(io::Error::other(
+                "legacy CAS identity changed during adoption",
+            ));
+        }
+        drop(bridge);
+        self.revalidate_named()?;
+        Ok(WindowsSealedCasFile(reader))
     }
 
     /// Create a new regular child whose retained handle permits an atomic
@@ -1204,14 +1413,20 @@ mod windows {
         ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
     };
     #[cfg(test)]
-    use windows_sys::Win32::Security::{DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION};
-    use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
+    use windows_sys::Win32::Security::OWNER_SECURITY_INFORMATION;
+    use windows_sys::Win32::Security::{
+        ACL, ACL_SIZE_INFORMATION, AclSizeInformation, DACL_SECURITY_INFORMATION,
+        GetAclInformation, GetSecurityDescriptorControl, GetSecurityDescriptorDacl,
+        PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SE_DACL_PROTECTED,
+        SECURITY_ATTRIBUTES,
+    };
     use windows_sys::Win32::Storage::FileSystem::{
-        BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, DELETE, FILE_DISPOSITION_FLAG_DELETE,
+        BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, DELETE, FILE_ATTRIBUTE_READONLY,
+        FILE_BASIC_INFO, FILE_DISPOSITION_FLAG_DELETE,
         FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_INFO_EX,
         FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_WRITE_THROUGH,
         FILE_ID_INFO, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO,
-        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES, FileBasicInfo,
         FileDispositionInfoEx, FileIdInfo, FileRenameInfo, FileRenameInfoEx, GetDriveTypeW,
         GetFileInformationByHandle, GetFileInformationByHandleEx, GetFinalPathNameByHandleW,
         GetVolumeInformationW, GetVolumePathNameW, SetFileInformationByHandle, VOLUME_NAME_DOS,
@@ -1230,6 +1445,278 @@ mod windows {
     const FILESYSTEM_NAME_CAPACITY: usize = 256;
     const FILE_RENAME_REPLACE_IF_EXISTS_FLAG: u32 = 0x0000_0001;
     const FILE_RENAME_POSIX_SEMANTICS_FLAG: u32 = 0x0000_0002;
+
+    pub(super) fn create_cas_writer(path: &Path) -> io::Result<File> {
+        use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
+        use windows_sys::Win32::Storage::FileSystem::WRITE_DAC;
+        std::fs::OpenOptions::new()
+            // `access_mode` supplies the exact native rights below, but the
+            // standard library still requires a write intent when a create
+            // disposition is requested.
+            .write(true)
+            .create_new(true)
+            .access_mode(GENERIC_READ | GENERIC_WRITE | WRITE_DAC)
+            .share_mode(FILE_SHARE_READ)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH)
+            .open(path)
+    }
+
+    pub(super) fn seal_cas_writer(writer: &File) -> io::Result<()> {
+        writer.sync_all()?;
+        let current_attributes = information(writer)?.dwFileAttributes;
+        let mut basic = FILE_BASIC_INFO {
+            CreationTime: 0,
+            LastAccessTime: 0,
+            LastWriteTime: 0,
+            ChangeTime: 0,
+            FileAttributes: current_attributes | FILE_ATTRIBUTE_READONLY,
+        };
+        // SAFETY: `writer` is live and the fixed-size input is valid.
+        if unsafe {
+            SetFileInformationByHandle(
+                writer.as_raw_handle(),
+                FileBasicInfo,
+                (&raw mut basic).cast(),
+                u32::try_from(std::mem::size_of::<FILE_BASIC_INFO>())
+                    .expect("FILE_BASIC_INFO size fits u32"),
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+
+        set_canonical_cas_dacl(writer)?;
+        writer.sync_all()
+    }
+
+    fn canonical_cas_descriptor() -> io::Result<PSECURITY_DESCRIPTOR> {
+        // The owner is the ordinary (non-administrator) GraphForge process.
+        // Keep the sealed payload non-writable while retaining exactly the
+        // metadata right required by FileDispositionInfoEx's
+        // IGNORE_READONLY_ATTRIBUTE deletion path: FILE_GENERIC_READ | DELETE
+        // | FILE_WRITE_ATTRIBUTES. Use the file-specific mapped mask so the
+        // stored ACE has no generic bits. In particular, this grants neither
+        // data write/append nor WRITE_DAC.
+        cas_descriptor("D:P(A;;0x00130189;;;OW)(A;;FA;;;SY)(A;;FA;;;BA)")
+    }
+
+    fn cas_descriptor(sddl: &str) -> io::Result<PSECURITY_DESCRIPTOR> {
+        let descriptor_text = wide(OsStr::new(sddl))?;
+        let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        // SAFETY: the SDDL input and descriptor output are valid.
+        if unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                descriptor_text.as_ptr(),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                std::ptr::null_mut(),
+            )
+        } == 0
+        {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(descriptor)
+        }
+    }
+
+    pub(super) fn set_canonical_cas_dacl(writer: &File) -> io::Result<()> {
+        let descriptor = canonical_cas_descriptor()?;
+        set_cas_dacl(writer, descriptor)
+    }
+
+    fn set_cas_dacl(writer: &File, descriptor: PSECURITY_DESCRIPTOR) -> io::Result<()> {
+        let mut present = 0;
+        let mut defaulted = 0;
+        let mut dacl = std::ptr::null_mut();
+        // SAFETY: the converted descriptor is live and outputs are valid.
+        let got_dacl = unsafe {
+            GetSecurityDescriptorDacl(descriptor, &mut present, &mut dacl, &mut defaulted)
+        };
+        let operation = if got_dacl == 0 || present == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            // SAFETY: the writer owns WRITE_DAC and the DACL remains live.
+            let status = unsafe {
+                windows_sys::Win32::Security::Authorization::SetSecurityInfo(
+                    writer.as_raw_handle(),
+                    windows_sys::Win32::Security::Authorization::SE_FILE_OBJECT,
+                    DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    dacl,
+                    std::ptr::null_mut(),
+                )
+            };
+            if status == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::from_raw_os_error(
+                    i32::try_from(status).unwrap_or(i32::MAX),
+                ))
+            }
+        };
+        // SAFETY: conversion allocated this descriptor with LocalAlloc.
+        unsafe { LocalFree(descriptor.cast()) };
+        operation
+    }
+
+    #[cfg(test)]
+    pub(super) fn replace_with_owner_only_cas_dacl(path: &Path) -> io::Result<()> {
+        use windows_sys::Win32::Foundation::GENERIC_READ;
+        use windows_sys::Win32::Storage::FileSystem::WRITE_DAC;
+        let file = std::fs::OpenOptions::new()
+            .access_mode(GENERIC_READ | WRITE_DAC)
+            .share_mode(FILE_SHARE_READ)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)?;
+        let descriptor = cas_descriptor("D:P(A;;0x00130189;;;OW)")?;
+        set_cas_dacl(&file, descriptor)
+    }
+
+    pub(super) fn open_sealed_cas_reader(path: &Path) -> io::Result<File> {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+    }
+
+    pub(super) fn open_cas_bridge(path: &Path) -> io::Result<File> {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+    }
+
+    pub(super) fn open_legacy_cas_adopter(path: &Path) -> io::Result<File> {
+        use windows_sys::Win32::Foundation::GENERIC_READ;
+        use windows_sys::Win32::Storage::FileSystem::WRITE_DAC;
+        // Released Windows objects carry the read-only attribute but inherited
+        // DACLs. This exclusive metadata handle safely upgrades only those
+        // objects. Writable planted files and files with a pre-opened writer
+        // are rejected rather than blessed as CAS authority.
+        let writer = std::fs::OpenOptions::new()
+            .access_mode(GENERIC_READ | WRITE_DAC | FILE_WRITE_ATTRIBUTES)
+            .share_mode(FILE_SHARE_READ)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH)
+            .open(path)?;
+        if information(&writer)?.dwFileAttributes & FILE_ATTRIBUTE_READONLY == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "unsealed CAS child cannot be adopted",
+            ));
+        }
+        Ok(writer)
+    }
+
+    pub(super) fn has_canonical_cas_dacl(file: &File) -> io::Result<bool> {
+        use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
+
+        let expected_descriptor = canonical_cas_descriptor()?;
+        let mut actual: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        // SAFETY: all optional component outputs are null and the descriptor
+        // output is released below.
+        let status = unsafe {
+            GetSecurityInfo(
+                file.as_raw_handle(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &raw mut actual,
+            )
+        };
+        if status != 0 {
+            // SAFETY: canonical descriptor was allocated with LocalAlloc.
+            unsafe { LocalFree(expected_descriptor.cast()) };
+            return Err(io::Error::from_raw_os_error(
+                i32::try_from(status).unwrap_or(i32::MAX),
+            ));
+        }
+        let result = descriptors_have_same_protected_dacl(actual, expected_descriptor);
+        // SAFETY: actual was allocated by GetSecurityInfo.
+        unsafe { LocalFree(actual.cast()) };
+        // SAFETY: canonical descriptor was allocated with LocalAlloc.
+        unsafe { LocalFree(expected_descriptor.cast()) };
+        result
+    }
+
+    fn descriptors_have_same_protected_dacl(
+        actual: PSECURITY_DESCRIPTOR,
+        expected: PSECURITY_DESCRIPTOR,
+    ) -> io::Result<bool> {
+        let mut control = 0;
+        let mut revision = 0;
+        // The protection bit is the security property we require. Other
+        // descriptor-control bits (notably SE_DACL_AUTO_INHERITED) describe
+        // provenance and may legitimately differ after SetSecurityInfo.
+        if unsafe { GetSecurityDescriptorControl(actual, &raw mut control, &raw mut revision) } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        if control & SE_DACL_PROTECTED == 0 {
+            return Ok(false);
+        }
+
+        let actual_dacl = descriptor_dacl(actual)?;
+        let expected_dacl = descriptor_dacl(expected)?;
+        let actual_bytes = acl_bytes_in_use(actual_dacl)?;
+        let expected_bytes = acl_bytes_in_use(expected_dacl)?;
+        if actual_bytes != expected_bytes {
+            return Ok(false);
+        }
+        // SAFETY: both ACL pointers remain owned by their live descriptors and
+        // GetAclInformation proved the byte ranges occupied by their ACEs.
+        Ok(unsafe {
+            std::slice::from_raw_parts(actual_dacl.cast::<u8>(), actual_bytes)
+                == std::slice::from_raw_parts(expected_dacl.cast::<u8>(), expected_bytes)
+        })
+    }
+
+    fn descriptor_dacl(descriptor: PSECURITY_DESCRIPTOR) -> io::Result<*mut ACL> {
+        let mut present = 0;
+        let mut defaulted = 0;
+        let mut dacl = std::ptr::null_mut();
+        if unsafe {
+            GetSecurityDescriptorDacl(
+                descriptor,
+                &raw mut present,
+                &raw mut dacl,
+                &raw mut defaulted,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        if present == 0 || dacl.is_null() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "security descriptor has no explicit DACL",
+            ));
+        }
+        Ok(dacl)
+    }
+
+    fn acl_bytes_in_use(dacl: *const ACL) -> io::Result<usize> {
+        let mut information = ACL_SIZE_INFORMATION::default();
+        if unsafe {
+            GetAclInformation(
+                dacl,
+                (&raw mut information).cast(),
+                u32::try_from(std::mem::size_of::<ACL_SIZE_INFORMATION>())
+                    .expect("ACL_SIZE_INFORMATION size fits u32"),
+                AclSizeInformation,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        usize::try_from(information.AclBytesInUse)
+            .map_err(|_| io::Error::other("ACL byte length does not fit usize"))
+    }
 
     pub(super) fn replace_file(
         directory: &File,
@@ -2537,22 +3024,77 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn stable_directory_unlinks_exact_readonly_child_without_unsealing_hard_link() {
+    fn stable_directory_adopts_readonly_legacy_cas_without_data_write_authority() {
+        use std::io::Read as _;
+        use std::os::windows::fs::OpenOptionsExt as _;
+
+        const FILE_SHARE_READ: u32 = 0x0000_0001;
+        const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("legacy");
+        let payload = b"authenticated legacy payload";
+        std::fs::write(&path, payload).unwrap();
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        let stable = StableDirectory::open(root.path()).unwrap();
+        let expected = path_identity(&path).unwrap();
+
+        let mut adopter = stable
+            .open_legacy_cas_child_for_adoption(OsStr::new("legacy"))
+            .unwrap();
+        let mut authenticated = Vec::new();
+        adopter.read_to_end(&mut authenticated).unwrap();
+        assert_eq!(authenticated, payload);
+        assert!(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+                .open(&path)
+                .is_err()
+        );
+
+        let adopted = stable
+            .adopt_legacy_cas_child(OsStr::new("legacy"), adopter)
+            .unwrap();
+        assert_eq!(file_identity(&adopted.0).unwrap(), expected);
+        assert_eq!(std::fs::read(&path).unwrap(), payload);
+        drop(adopted);
+        assert!(stable.open_cas_child_file(OsStr::new("legacy")).is_ok());
+        assert!(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+                .open(&path)
+                .is_err()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stable_directory_unlinks_canonical_cas_child_without_unsealing_hard_link() {
         use std::io::Write as _;
 
         let root = tempfile::tempdir().unwrap();
         let stable = StableDirectory::open(root.path()).unwrap();
         let temporary_path = root.path().join("temporary");
         let installed_path = root.path().join("installed");
-        let mut temporary = stable.create_child_file(OsStr::new("temporary")).unwrap();
+        let mut temporary = stable
+            .create_cas_child_file(OsStr::new("temporary"))
+            .unwrap();
         temporary.write_all(b"sealed").unwrap();
         temporary.sync_all().unwrap();
-        let identity = file_identity(&temporary).unwrap();
+        let identity = temporary.identity();
+        let temporary = stable
+            .seal_cas_child_file(OsStr::new("temporary"), temporary)
+            .unwrap()
+            .into_file();
+        assert!(
+            stable.open_cas_child_file(OsStr::new("temporary")).is_ok(),
+            "a freshly sealed CAS child must pass canonical reopen"
+        );
         std::fs::hard_link(&temporary_path, &installed_path).unwrap();
         assert_eq!(path_identity(&installed_path).unwrap(), identity);
-        let mut permissions = temporary.metadata().unwrap().permissions();
-        permissions.set_readonly(true);
-        temporary.set_permissions(permissions).unwrap();
         assert!(temporary.metadata().unwrap().permissions().readonly());
         assert!(
             std::fs::metadata(&installed_path)
@@ -2561,6 +3103,8 @@ mod tests {
                 .readonly()
         );
         drop(temporary);
+        windows::replace_with_owner_only_cas_dacl(&temporary_path).unwrap();
+        assert_eq!(path_identity(&temporary_path).unwrap(), identity);
 
         stable
             .unlink_child_if_identity(OsStr::new("temporary"), identity)

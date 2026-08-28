@@ -105,6 +105,17 @@ pub struct GraphManifestResolveEvidence {
     pub work_units: u64,
 }
 
+/// Shared admission state for a bounded set of exact-path lookups against one
+/// authenticated root. Cached nodes are decoded and charged only once, while
+/// traversal work and examined leaf entries remain aggregate across lookups.
+#[derive(Debug, Default)]
+pub(crate) struct GraphManifestTargetedState {
+    nodes: BTreeMap<String, GraphManifestNode>,
+    decoded_bytes: u64,
+    work_units: u64,
+    entries_examined: usize,
+}
+
 /// Encode one validated node as canonical JSON-line bytes.
 pub fn encode_node(node: &GraphManifestNode) -> Result<Vec<u8>, GfError> {
     validate_node(node)?;
@@ -284,6 +295,142 @@ where
         ));
     }
     Ok((files, evidence))
+}
+
+/// Resolve and authenticate one exact logical path without opening unrelated
+/// graph payload objects or walking unrelated radix branches.
+pub(crate) fn resolve_manifest_entry<F>(
+    root: &GraphFilesRootV2,
+    relative_path: &str,
+    limits: GraphManifestLimits,
+    load: F,
+) -> Result<Option<GraphFileEntry>, GfError>
+where
+    F: FnMut(&str) -> Result<Vec<u8>, GfError>,
+{
+    let mut state = GraphManifestTargetedState::default();
+    resolve_manifest_entry_with_state(root, relative_path, limits, &mut state, load)
+}
+
+/// Resolve one exact path while sharing cache and aggregate admission counters
+/// with sibling lookups against the same authenticated root.
+#[allow(clippy::too_many_lines)]
+pub(crate) fn resolve_manifest_entry_with_state<F>(
+    root: &GraphFilesRootV2,
+    relative_path: &str,
+    limits: GraphManifestLimits,
+    state: &mut GraphManifestTargetedState,
+    mut load: F,
+) -> Result<Option<GraphFileEntry>, GfError>
+where
+    F: FnMut(&str) -> Result<Vec<u8>, GfError>,
+{
+    validate_root(root)?;
+    let route = hex_digest(logical_path_digest(relative_path));
+    let mut digest = root.root_node_sha256.clone();
+    let mut depth = 0_u8;
+    let mut visited = BTreeSet::new();
+    for _ in 0..=GRAPH_RADIX_DEPTH {
+        if !visited.insert(digest.clone()) {
+            return Err(validation("graph manifest targeted path contains a cycle"));
+        }
+        let node = if let Some(node) = state.nodes.get(&digest) {
+            node.clone()
+        } else {
+            if state.nodes.len() >= limits.max_segments {
+                return Err(validation("graph manifest targeted segment limit exceeded"));
+            }
+            let bytes = load(&digest)?;
+            state.decoded_bytes = state
+                .decoded_bytes
+                .checked_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX))
+                .ok_or_else(|| validation("graph manifest targeted decode total overflow"))?;
+            if state.decoded_bytes > limits.max_decoded_bytes {
+                return Err(validation("graph manifest targeted decode limit exceeded"));
+            }
+            if object_digest(&bytes) != digest {
+                return Err(validation("graph manifest node digest mismatch"));
+            }
+            let node = decode_node(&bytes)?;
+            state.nodes.insert(digest.clone(), node.clone());
+            node
+        };
+        state.work_units = state
+            .work_units
+            .checked_add(1)
+            .ok_or_else(|| validation("graph manifest targeted work overflow"))?;
+        if state.work_units > limits.max_work_units {
+            return Err(validation("graph manifest targeted work limit exceeded"));
+        }
+        if node.depth != depth {
+            return Err(validation("graph manifest radix depth mismatch"));
+        }
+        let prefix_end = usize::from(depth)
+            .checked_add(node.prefix.len())
+            .ok_or_else(|| validation("graph manifest prefix overflow"))?;
+        if prefix_end > usize::from(GRAPH_RADIX_DEPTH)
+            || route.get(usize::from(depth)..prefix_end) != Some(node.prefix.as_str())
+        {
+            return Ok(None);
+        }
+        depth = u8::try_from(prefix_end)
+            .map_err(|_| validation("graph manifest prefix depth overflow"))?;
+        match node.kind {
+            GraphManifestNodeKind::Branch { children } => {
+                state.work_units = state
+                    .work_units
+                    .checked_add(u64::try_from(children.len()).unwrap_or(u64::MAX))
+                    .ok_or_else(|| validation("graph manifest targeted work overflow"))?;
+                if state.work_units > limits.max_work_units {
+                    return Err(validation("graph manifest targeted work limit exceeded"));
+                }
+                if depth >= GRAPH_RADIX_DEPTH {
+                    return Err(validation("graph manifest branch exceeds radix depth"));
+                }
+                let nibble = route
+                    .get(usize::from(depth)..=usize::from(depth))
+                    .ok_or_else(|| validation("graph manifest route is incomplete"))?;
+                validate_nibble(nibble)?;
+                let Some(child) = children.get(nibble) else {
+                    return Ok(None);
+                };
+                digest.clone_from(child);
+                depth = depth.saturating_add(1);
+            }
+            GraphManifestNodeKind::Leaf {
+                path_sha256,
+                entries,
+            } => {
+                state.entries_examined = state
+                    .entries_examined
+                    .checked_add(entries.len())
+                    .ok_or_else(|| validation("graph manifest targeted entry total overflow"))?;
+                if state.entries_examined > limits.max_entries {
+                    return Err(validation("graph manifest targeted entry limit exceeded"));
+                }
+                state.work_units = state
+                    .work_units
+                    .checked_add(u64::try_from(entries.len()).unwrap_or(u64::MAX))
+                    .ok_or_else(|| validation("graph manifest targeted work overflow"))?;
+                if state.work_units > limits.max_work_units {
+                    return Err(validation("graph manifest targeted work limit exceeded"));
+                }
+                if depth != GRAPH_RADIX_DEPTH || path_sha256 != route {
+                    return Err(validation("graph manifest leaf is not terminal"));
+                }
+                for entry in entries {
+                    if hex_digest(logical_path_digest(&entry.relative_path)) != path_sha256 {
+                        return Err(validation("graph manifest leaf path digest mismatch"));
+                    }
+                    if entry.relative_path == relative_path {
+                        return Ok(Some(entry));
+                    }
+                }
+                return Ok(None);
+            }
+        }
+    }
+    Err(validation("graph manifest path exceeds radix depth"))
 }
 
 fn admit_work(
@@ -666,5 +813,114 @@ mod tests {
         let (entries, _) =
             resolve_manifest(&root, GraphManifestLimits::default(), |_| Ok(bytes.clone())).unwrap();
         assert_eq!(entries.len(), 1);
+        assert_eq!(
+            resolve_manifest_entry(&root, path, GraphManifestLimits::default(), |_| Ok(
+                bytes.clone()
+            ))
+            .unwrap()
+            .unwrap()
+            .relative_path,
+            path
+        );
+        assert!(
+            resolve_manifest_entry(
+                &root,
+                "topology/other.parquet",
+                GraphManifestLimits::default(),
+                |_| Ok(bytes.clone())
+            )
+            .unwrap()
+            .is_none()
+        );
+        let tight = GraphManifestLimits {
+            max_decoded_bytes: bytes.len() as u64 - 1,
+            ..GraphManifestLimits::default()
+        };
+        assert!(resolve_manifest_entry(&root, path, tight, |_| Ok(bytes.clone())).is_err());
+        let no_work = GraphManifestLimits {
+            max_work_units: 0,
+            ..GraphManifestLimits::default()
+        };
+        assert!(resolve_manifest_entry(&root, path, no_work, |_| Ok(bytes.clone())).is_err());
+    }
+
+    #[test]
+    fn sibling_targeted_lookups_share_one_union_segment_budget() {
+        let mut selected = BTreeMap::<String, String>::new();
+        for candidate in 0..10_000 {
+            let path = format!("topology/authority-{candidate}.json");
+            let route = hex_digest(logical_path_digest(&path));
+            selected.entry(route[..1].into()).or_insert(path);
+            if selected.len() == 3 {
+                break;
+            }
+        }
+        assert_eq!(selected.len(), 3);
+
+        let mut objects = BTreeMap::new();
+        let mut children = BTreeMap::new();
+        for (nibble, path) in &selected {
+            let route = hex_digest(logical_path_digest(path));
+            let leaf = GraphManifestNode {
+                format: GRAPH_MANIFEST_NODE_FORMAT.into(),
+                format_version: GRAPH_MANIFEST_NODE_VERSION,
+                depth: 1,
+                prefix: route[1..].into(),
+                kind: GraphManifestNodeKind::Leaf {
+                    path_sha256: route,
+                    entries: vec![GraphFileEntry {
+                        relative_path: path.clone(),
+                        byte_length: 1,
+                        content_sha256: "a".repeat(64),
+                        role: GraphFileRole::Topology,
+                    }],
+                },
+            };
+            let bytes = encode_node(&leaf).unwrap();
+            let digest = object_digest(&bytes);
+            objects.insert(digest.clone(), bytes);
+            children.insert(nibble.clone(), digest);
+        }
+        let root_node = GraphManifestNode {
+            format: GRAPH_MANIFEST_NODE_FORMAT.into(),
+            format_version: GRAPH_MANIFEST_NODE_VERSION,
+            depth: 0,
+            prefix: String::new(),
+            kind: GraphManifestNodeKind::Branch { children },
+        };
+        let root_bytes = encode_node(&root_node).unwrap();
+        let root_digest = object_digest(&root_bytes);
+        objects.insert(root_digest.clone(), root_bytes);
+        let root = GraphFilesRootV2 {
+            format: GRAPH_FILES_V2_FORMAT.into(),
+            format_version: GRAPH_FILES_V2_VERSION,
+            root_node_sha256: root_digest,
+            logical_file_count: 3,
+            logical_byte_length: 3,
+        };
+        let limits = GraphManifestLimits {
+            max_segments: 3,
+            max_entries: 3,
+            max_decoded_bytes: 64 * 1024,
+            max_work_units: 64,
+        };
+        for path in selected.values() {
+            assert!(
+                resolve_manifest_entry(&root, path, limits, |digest| Ok(objects[digest].clone()))
+                    .unwrap()
+                    .is_some()
+            );
+        }
+
+        let mut state = GraphManifestTargetedState::default();
+        let mut results = selected.values().map(|path| {
+            resolve_manifest_entry_with_state(&root, path, limits, &mut state, |digest| {
+                Ok(objects[digest].clone())
+            })
+        });
+        assert!(results.next().unwrap().unwrap().is_some());
+        assert!(results.next().unwrap().unwrap().is_some());
+        let error = results.next().unwrap().unwrap_err();
+        assert!(error.to_string().contains("segment limit"), "{error}");
     }
 }

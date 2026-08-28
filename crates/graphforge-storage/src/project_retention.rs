@@ -1528,4 +1528,24 @@ mod tests {
                 .exists()
         );
     }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_gc_unlinks_an_unreachable_canonically_sealed_object() {
+        let root = tempfile::tempdir().unwrap();
+        open_or_initialize_project(root.path()).unwrap();
+        let (digest, _) =
+            crate::install_graph_object_bytes(root.path(), b"windows unreachable").unwrap();
+
+        let report =
+            execute_project_cleanup(root.path(), policy(2), ProjectRetentionLimits::default())
+                .unwrap();
+
+        assert_eq!(report.graph_object_sweep.objects_removed, 1);
+        assert!(
+            !crate::graph_object_path(root.path(), &digest)
+                .unwrap()
+                .exists()
+        );
+    }
 }

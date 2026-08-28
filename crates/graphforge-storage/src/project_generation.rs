@@ -112,6 +112,89 @@ impl Drop for GenerationLease {
 }
 
 impl ResolvedProjectGeneration {
+    pub(crate) fn authenticated_graph_file_bytes_with_state(
+        &self,
+        relative_path: &str,
+        maximum: u64,
+        targeted_state: Option<&mut crate::graph_manifest::GraphManifestTargetedState>,
+    ) -> Result<Option<(crate::GraphFileEntry, Vec<u8>)>, GfError> {
+        let Some(participant) = self.declared_graph_files_participant()? else {
+            return Ok(None);
+        };
+        let entry = match &participant {
+            crate::GraphFilesParticipant::V1(inventory) => {
+                let legacy_path = relative_path.replace('/', "\\");
+                let exact = inventory
+                    .files
+                    .binary_search_by(|entry| entry.relative_path.as_str().cmp(relative_path))
+                    .ok();
+                let legacy = inventory
+                    .files
+                    .binary_search_by(|entry| entry.relative_path.as_str().cmp(&legacy_path))
+                    .ok();
+                match (exact, legacy) {
+                    (Some(index), None) | (None, Some(index)) => {
+                        Some(inventory.files[index].clone())
+                    }
+                    (None, None) => None,
+                    (Some(_), Some(_)) => {
+                        return Err(corrupt(
+                            "selected graph control has ambiguous legacy inventory paths",
+                        ));
+                    }
+                }
+            }
+            crate::GraphFilesParticipant::V2(root) => {
+                let limits = crate::GraphManifestLimits {
+                    max_segments: 65,
+                    max_entries: 1024,
+                    max_decoded_bytes: 16 * 1024 * 1024,
+                    max_work_units: 4096,
+                };
+                let mut local_state = crate::graph_manifest::GraphManifestTargetedState::default();
+                let state = targeted_state.unwrap_or(&mut local_state);
+                crate::graph_manifest::resolve_manifest_entry_with_state(
+                    root,
+                    relative_path,
+                    limits,
+                    state,
+                    |digest| {
+                        crate::read_graph_object_by_digest(
+                            self.container_root(),
+                            digest,
+                            4 * 1024 * 1024,
+                        )
+                    },
+                )?
+            }
+        };
+        let Some(entry) = entry else { return Ok(None) };
+        if entry.byte_length > maximum {
+            return Err(corrupt("selected graph control exceeds its read bound"));
+        }
+        let bytes = match participant {
+            crate::GraphFilesParticipant::V1(_) => {
+                let graph_root = self.graph_tree_root();
+                let path = crate::graph_files::resolve_v1_inventory_entry(&graph_root, &entry)?;
+                let relative = path
+                    .strip_prefix(&graph_root)
+                    .map_err(|_| corrupt("selected graph control escaped graph root"))?;
+                read_stable_graph_control(&graph_root, relative, entry.byte_length, maximum)?
+            }
+            crate::GraphFilesParticipant::V2(_) => crate::read_graph_object_by_digest(
+                self.container_root(),
+                &entry.content_sha256,
+                maximum,
+            )?,
+        };
+        crate::graph_manifest::verify_object_bytes(
+            &entry.content_sha256,
+            entry.byte_length,
+            &bytes,
+        )?;
+        Ok(Some((entry, bytes)))
+    }
+
     /// Canonical project container root used for this resolution.
     #[must_use]
     pub fn container_root(&self) -> &Path {
@@ -1497,6 +1580,56 @@ fn read_bounded_regular_file(path: &Path, maximum: u64) -> Result<Vec<u8>, std::
     Ok(bytes)
 }
 
+fn read_stable_graph_control(
+    graph_root: &Path,
+    relative: &Path,
+    expected_length: u64,
+    maximum: u64,
+) -> Result<Vec<u8>, GfError> {
+    let mut directory = graphforge_filesystem::StableDirectory::open(graph_root)
+        .map_err(|_| corrupt("selected graph root cannot be retained"))?;
+    let mut components = relative.components().peekable();
+    let mut file = None;
+    while let Some(component) = components.next() {
+        let Component::Normal(name) = component else {
+            return Err(corrupt("selected graph control path is not canonical"));
+        };
+        if components.peek().is_some() {
+            directory = directory
+                .open_child_directory(name)
+                .map_err(|_| corrupt("selected graph control parent cannot be retained"))?;
+        } else {
+            file = Some(
+                directory
+                    .open_child_file(name)
+                    .map_err(|_| corrupt("selected graph control is not a regular child"))?,
+            );
+        }
+    }
+    let file = file.ok_or_else(|| corrupt("selected graph control path is empty"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| corrupt("selected graph control metadata is unreadable"))?;
+    if metadata.len() != expected_length || expected_length > maximum {
+        return Err(corrupt(
+            "selected graph control length differs from inventory",
+        ));
+    }
+    let capacity = usize::try_from(expected_length)
+        .map_err(|_| corrupt("selected graph control length exceeds address space"))?;
+    let mut bytes = Vec::with_capacity(capacity);
+    file.take(expected_length.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|_| corrupt("selected graph control cannot be read"))?;
+    if bytes.len() as u64 != expected_length {
+        return Err(corrupt("selected graph control changed while reading"));
+    }
+    directory
+        .revalidate_named()
+        .map_err(|_| corrupt("selected graph control parent identity changed"))?;
+    Ok(bytes)
+}
+
 fn read_exact_participant(path: &Path, expected_length: u64) -> Result<Vec<u8>, GfError> {
     let file = open_regular_file(path)
         .map_err(|_| corrupt("participant is missing, linked, or unreadable"))?;
@@ -1605,6 +1738,99 @@ mod tests {
         fs::write(root.join(CURRENT_FILE), canonical_line(&current)).unwrap();
     }
 
+    fn install_graph_generation(
+        root: &Path,
+        generation_uuid: Uuid,
+        generation: u64,
+        compact: bool,
+        omit_receipt: bool,
+        wrong_receipt_generation: bool,
+        include_v4: bool,
+    ) -> [u8; 32] {
+        let generation_root = root
+            .join("generations")
+            .join(generation_uuid.hyphenated().to_string());
+        let graph = crate::graph_tree_root(&generation_root);
+        let index = graph.join("topology/uuid-membership");
+        fs::create_dir_all(&index).unwrap();
+        fs::write(generation_root.join(LEASE_FILE), []).unwrap();
+        let manifest_bytes = format!("{{\"format_version\":4,\"topology_generation\":{generation},\"forward_identities\":[],\"ordinal_ranges\":[],\"tombstones\":[]}}").into_bytes();
+        let manifest_digest = sha256_hex(Sha256::digest(&manifest_bytes).into());
+        if include_v4 {
+            fs::write(index.join("ordinal-v4-manifest.json"), &manifest_bytes).unwrap();
+            fs::write(index.join("ordinal-v4.lock"), []).unwrap();
+        }
+        let receipt = serde_json::json!({
+            "nonce": Uuid::now_v7().simple().to_string(),
+            "expected_generation": if wrong_receipt_generation { generation + 1 } else { generation },
+            "topology_delta_sha256": "1".repeat(64),
+            "manifest_sha256": manifest_digest,
+        });
+        if include_v4 {
+            fs::write(
+                index.join("ordinal-v4-receipt.json"),
+                serde_json::to_vec(&receipt).unwrap(),
+            )
+            .unwrap();
+        }
+        fs::write(
+            graph.join("topology/generation.json"),
+            format!("{{\"topology_generation\":{generation}}}"),
+        )
+        .unwrap();
+        if include_v4 && omit_receipt {
+            fs::remove_file(index.join("ordinal-v4-receipt.json")).unwrap();
+        }
+        crate::rebuild_uuid_membership_indexes(&graph, crate::UuidIndexBuildLimits::default())
+            .unwrap();
+        let (inventory, expanded) = crate::capture_graph_files(&graph).unwrap();
+        let participant = if compact {
+            let lease = crate::begin_graph_object_publication(root).unwrap();
+            let (compact_root, _) =
+                crate::graph_object_store::migrate_graph_files_v1_to_v2(&lease, &graph, &inventory)
+                    .unwrap();
+            crate::graph_files_root_participant(&compact_root).unwrap()
+        } else {
+            expanded
+        };
+        let relative = "graph/files.json";
+        let participant_path = generation_root.join(PARTICIPANTS_DIR).join(relative);
+        fs::create_dir_all(participant_path.parent().unwrap()).unwrap();
+        fs::write(&participant_path, &participant.bytes).unwrap();
+        let descriptor = ParticipantDescriptor {
+            capability_id: participant.capability_id.clone(),
+            capability_version: participant.capability_version,
+            record_family_id: participant.record_family_id.clone(),
+            record_version: participant.record_version,
+            relative_path: relative.into(),
+            encoding: match participant.encoding {
+                crate::ProjectParticipantEncoding::Parquet => "parquet",
+                crate::ProjectParticipantEncoding::Arrow => "arrow",
+                crate::ProjectParticipantEncoding::Json => "json",
+            }
+            .into(),
+            byte_length: participant.bytes.len() as u64,
+            row_count: participant.row_count,
+            schema_fingerprint: sha256_hex(participant.schema_fingerprint),
+            content_sha256: sha256_hex(Sha256::digest(&participant.bytes).into()),
+        };
+        let manifest = GenerationManifest {
+            format: "graphforge-generation".into(),
+            format_version: 1,
+            generation_uuid: generation_uuid.hyphenated().to_string(),
+            parent_generation_uuid: None,
+            transaction_uuid: Uuid::now_v7().hyphenated().to_string(),
+            capabilities: vec![CapabilityDescriptor {
+                capability_id: "graph".into(),
+                capability_version: 1,
+            }],
+            participants: vec![descriptor],
+        };
+        let bytes = canonical_line(&manifest);
+        fs::write(generation_root.join(MANIFEST_FILE), &bytes).unwrap();
+        Sha256::digest(&bytes).into()
+    }
+
     fn project() -> (tempfile::TempDir, Uuid) {
         let root = tempfile::tempdir().unwrap();
         fs::write(root.path().join(FORMAT_FILE), PROJECT_FORMAT_BYTES).unwrap();
@@ -1613,6 +1839,169 @@ mod tests {
         let digest = install_generation(root.path(), generation_uuid);
         write_current(root.path(), generation_uuid, digest);
         (root, generation_uuid)
+    }
+
+    #[test]
+    fn pinned_v1_graph_inventory_authenticates_ordinal_receipt_and_generation() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join(FORMAT_FILE), PROJECT_FORMAT_BYTES).unwrap();
+        fs::create_dir(root.path().join("generations")).unwrap();
+        let first = Uuid::now_v7();
+        let first_digest =
+            install_graph_generation(root.path(), first, 7, false, false, false, true);
+        write_current(root.path(), first, first_digest);
+        let pinned = resolve_project_generation(root.path()).unwrap();
+        let authority = pinned
+            .authenticated_v4_ordinal_authority()
+            .unwrap()
+            .unwrap();
+        assert_eq!(authority.authority().topology_generation, 7);
+
+        let second = Uuid::now_v7();
+        let second_digest =
+            install_graph_generation(root.path(), second, 8, false, false, false, true);
+        write_current(root.path(), second, second_digest);
+        assert_eq!(
+            pinned
+                .authenticated_v4_ordinal_authority()
+                .unwrap()
+                .unwrap()
+                .authority()
+                .topology_generation,
+            7
+        );
+        assert_eq!(
+            resolve_project_generation(root.path())
+                .unwrap()
+                .authenticated_v4_ordinal_authority()
+                .unwrap()
+                .unwrap()
+                .authority()
+                .topology_generation,
+            8
+        );
+    }
+
+    #[test]
+    fn compact_v2_graph_inventory_authenticates_selected_ordinal_controls() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join(FORMAT_FILE), PROJECT_FORMAT_BYTES).unwrap();
+        fs::create_dir(root.path().join("generations")).unwrap();
+        let generation = Uuid::now_v7();
+        let digest = install_graph_generation(root.path(), generation, 9, true, false, false, true);
+        write_current(root.path(), generation, digest);
+        let authority = resolve_project_generation(root.path())
+            .unwrap()
+            .authenticated_v4_ordinal_authority()
+            .unwrap()
+            .unwrap();
+        assert_eq!(authority.authority().topology_generation, 9);
+    }
+
+    #[test]
+    fn ordinal_selection_distinguishes_clean_absence_from_partial_residue() {
+        let clean = tempfile::tempdir().unwrap();
+        let selected = open_or_initialize_project(clean.path()).unwrap();
+        assert!(
+            selected
+                .authenticated_v4_ordinal_authority()
+                .unwrap()
+                .is_none()
+        );
+
+        let residue = tempfile::tempdir().unwrap();
+        fs::write(residue.path().join(FORMAT_FILE), PROJECT_FORMAT_BYTES).unwrap();
+        fs::create_dir(residue.path().join("generations")).unwrap();
+        let generation = Uuid::now_v7();
+        let digest =
+            install_graph_generation(residue.path(), generation, 7, false, true, false, true);
+        write_current(residue.path(), generation, digest);
+        assert!(
+            resolve_project_generation(residue.path())
+                .unwrap()
+                .authenticated_v4_ordinal_authority()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn ordinal_selection_rejects_a_receipt_from_another_topology_generation() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join(FORMAT_FILE), PROJECT_FORMAT_BYTES).unwrap();
+        fs::create_dir(root.path().join("generations")).unwrap();
+        let generation = Uuid::now_v7();
+        let digest = install_graph_generation(root.path(), generation, 7, false, false, true, true);
+        write_current(root.path(), generation, digest);
+        assert!(
+            resolve_project_generation(root.path())
+                .unwrap()
+                .authenticated_v4_ordinal_authority()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn ordinal_selection_rejects_manifest_mutation_under_authentic_receipt() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join(FORMAT_FILE), PROJECT_FORMAT_BYTES).unwrap();
+        fs::create_dir(root.path().join("generations")).unwrap();
+        let generation = Uuid::now_v7();
+        let digest =
+            install_graph_generation(root.path(), generation, 7, false, false, false, true);
+        write_current(root.path(), generation, digest);
+        let selected = resolve_project_generation(root.path()).unwrap();
+        fs::write(
+            selected
+                .graph_tree_root()
+                .join("topology/uuid-membership/ordinal-v4-manifest.json"),
+            b"substituted",
+        )
+        .unwrap();
+        assert!(selected.authenticated_v4_ordinal_authority().is_err());
+    }
+
+    #[test]
+    fn public_orphan_maintenance_rejects_selected_v3_manifest_substitution() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join(FORMAT_FILE), PROJECT_FORMAT_BYTES).unwrap();
+        fs::create_dir(root.path().join("generations")).unwrap();
+        let generation = Uuid::now_v7();
+        let digest =
+            install_graph_generation(root.path(), generation, 7, false, false, false, false);
+        write_current(root.path(), generation, digest);
+        let selected = resolve_project_generation(root.path()).unwrap();
+        crate::maintain_uuid_membership_orphans(&selected.graph_tree_root(), 16).unwrap();
+
+        let manifest = selected
+            .graph_tree_root()
+            .join("topology/uuid-membership/manifest.json");
+        fs::write(&manifest, b"substituted").unwrap();
+        assert!(crate::maintain_uuid_membership_orphans(&selected.graph_tree_root(), 16).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn selected_v1_ordinal_control_rejects_a_peerless_fifo_without_blocking() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join(FORMAT_FILE), PROJECT_FORMAT_BYTES).unwrap();
+        fs::create_dir(root.path().join("generations")).unwrap();
+        let generation = Uuid::now_v7();
+        let digest =
+            install_graph_generation(root.path(), generation, 7, false, false, false, true);
+        write_current(root.path(), generation, digest);
+        let selected = resolve_project_generation(root.path()).unwrap();
+        let receipt = selected
+            .graph_tree_root()
+            .join("topology/uuid-membership/ordinal-v4-receipt.json");
+        fs::remove_file(&receipt).unwrap();
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&receipt)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(selected.authenticated_v4_ordinal_authority().is_err());
     }
 
     fn open_generation_lease(root: &Path, generation: Uuid) -> File {
