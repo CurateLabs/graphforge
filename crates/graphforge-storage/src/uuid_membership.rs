@@ -5835,22 +5835,38 @@ fn stage_v4_ordinal_rebuild_locked(
     // graph inventory before opening any topology payload. Standalone graph
     // roots have no enclosing inventory authority and retain the admitted,
     // validated Parquet path used by the existing explicit v3 rebuild.
-    if let Some(selected) = selected_generation_for_graph_root(project_dir)? {
-        selected.graph_files_inventory()?.ok_or_else(|| {
-            storage_err("selected project generation has no authenticated graph inventory")
-        })?;
-    }
+    let uuid_runs = if let Some(selected) = selected_generation_for_graph_root(project_dir)? {
+        let mut pinned = selected
+            .authenticated_graph_files_pinned_where(|entry| {
+                canonical_node_topology_inventory_path(&entry.relative_path)
+            })?
+            .ok_or_else(|| {
+                storage_err("selected project generation has no authenticated graph inventory")
+            })?;
+        pinned.sort_by(|left, right| left.entry.relative_path.cmp(&right.entry.relative_path));
+        scan_pinned_entity_surrogate_runs(
+            &pinned,
+            "node_uuid",
+            "node_id",
+            "v4-node",
+            scratch.path(),
+            limits,
+            &mut metrics,
+        )?
+    } else {
+        // Standalone roots have no immutable project inventory authority.
+        let node_paths = crate::mutator::node_parquet_files(project_dir).map_err(storage_err)?;
+        scan_entity_surrogate_runs(
+            &node_paths,
+            "node_uuid",
+            "node_id",
+            "v4-node",
+            scratch.path(),
+            limits,
+            &mut metrics,
+        )?
+    };
     // No v3 index file is opened or used as migration authority.
-    let node_paths = crate::mutator::node_parquet_files(project_dir).map_err(storage_err)?;
-    let uuid_runs = scan_entity_surrogate_runs(
-        &node_paths,
-        "node_uuid",
-        "node_id",
-        "v4-node",
-        scratch.path(),
-        limits,
-        &mut metrics,
-    )?;
     let uuid_sorted =
         merge_node_surrogate_runs(uuid_runs, scratch.path(), limits.merge_fan_in, &mut metrics)?;
     let ordinal_sorted = build_surrogate_run(&uuid_sorted, scratch.path(), limits, &mut metrics)?;
@@ -6526,6 +6542,97 @@ fn scan_entity_surrogate_runs(
                     flush_entity_surrogate_run(&mut buffer, scratch, prefix, &mut runs, metrics)?;
                 }
             }
+        }
+    }
+    if !buffer.is_empty() {
+        flush_entity_surrogate_run(&mut buffer, scratch, prefix, &mut runs, metrics)?;
+    }
+    if runs.is_empty() {
+        let path = scratch.join(format!("{prefix}-surrogates-empty.run"));
+        File::create(&path)
+            .map_err(storage_err)?
+            .sync_all()
+            .map_err(storage_err)?;
+        runs.push(path);
+    }
+    Ok(runs)
+}
+
+fn canonical_node_topology_inventory_path(relative: &str) -> bool {
+    relative == "topology/nodes.parquet"
+        || relative
+            .strip_prefix("topology/nodes/")
+            .is_some_and(|name| !name.contains('/') && name.ends_with(".parquet"))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scan_pinned_entity_surrogate_runs(
+    inputs: &[crate::project_generation::PinnedGraphFile],
+    uuid_column: &str,
+    surrogate_column: &str,
+    prefix: &str,
+    scratch: &Path,
+    limits: UuidIndexBuildLimits,
+    metrics: &mut UuidIndexBuildMetrics,
+) -> Result<Vec<PathBuf>, GfError> {
+    let mut buffer = Vec::<([u8; 16], u64)>::with_capacity(limits.run_records);
+    let mut runs = Vec::new();
+    for input in inputs {
+        let identity = graphforge_filesystem::file_identity(&input.file).map_err(storage_err)?;
+        if identity != input.identity
+            || input.file.metadata().map_err(storage_err)?.len() != input.entry.byte_length
+        {
+            return Err(storage_err(
+                "authenticated topology payload identity changed before scan",
+            ));
+        }
+        let reader =
+            ParquetRecordBatchReaderBuilder::try_new(input.file.try_clone().map_err(storage_err)?)
+                .map_err(storage_err)?
+                .with_batch_size(limits.scan_batch_rows)
+                .build()
+                .map_err(storage_err)?;
+        for batch in reader {
+            let batch = batch.map_err(storage_err)?;
+            let uuids = batch
+                .column_by_name(uuid_column)
+                .and_then(|column| column.as_any().downcast_ref::<FixedSizeBinaryArray>())
+                .ok_or_else(|| {
+                    storage_err(format!("{} lacks {uuid_column}", input.entry.relative_path))
+                })?;
+            let surrogates = batch
+                .column_by_name(surrogate_column)
+                .and_then(|column| column.as_any().downcast_ref::<UInt64Array>())
+                .ok_or_else(|| {
+                    storage_err(format!(
+                        "{} lacks {surrogate_column}",
+                        input.entry.relative_path
+                    ))
+                })?;
+            if uuids.len() != surrogates.len() {
+                return Err(storage_err(
+                    "identity UUID and surrogate columns differ in length",
+                ));
+            }
+            for row in 0..uuids.len() {
+                if uuids.is_null(row) || uuids.value(row).len() != 16 || surrogates.is_null(row) {
+                    return Err(storage_err(format!("invalid entity identity at row {row}")));
+                }
+                buffer.push((
+                    uuids.value(row).try_into().expect("length checked"),
+                    surrogates.value(row),
+                ));
+                metrics.peak_buffered_records = metrics.peak_buffered_records.max(buffer.len());
+                if buffer.len() == limits.run_records {
+                    flush_entity_surrogate_run(&mut buffer, scratch, prefix, &mut runs, metrics)?;
+                }
+            }
+        }
+        if graphforge_filesystem::file_identity(&input.file).map_err(storage_err)? != input.identity
+        {
+            return Err(storage_err(
+                "authenticated topology payload identity changed during scan",
+            ));
         }
     }
     if !buffer.is_empty() {
