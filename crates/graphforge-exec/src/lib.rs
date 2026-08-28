@@ -3254,7 +3254,7 @@ impl ExpandExec {
     /// Build the physical node from its logical counterpart, planned input,
     /// and the session's adjacency provider.
     #[must_use]
-    pub fn new(
+    pub(crate) fn new(
         node: &graphforge_plan::ExpandNode,
         input: Arc<dyn ExecutionPlan>,
         provider: Arc<dyn AdjacencyProvider>,
