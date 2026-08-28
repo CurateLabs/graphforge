@@ -3684,8 +3684,13 @@ fn expand_single_hop_chunk(
     });
     let uuid_required =
         required.is_some_and(|mask| mask.get(destination_uuid_index).copied().unwrap_or(false));
-    let identity_path_available = !uuid_required || cfg.ordinal_identities.is_some();
-    if edge_unused && destination_identity_only && identity_path_available {
+    if edge_unused && destination_identity_only && uuid_required && cfg.ordinal_identities.is_none()
+    {
+        return Err(GfError::Execution(
+            "destination UUID projection requires admitted v4 ordinal identity".into(),
+        ));
+    }
+    if edge_unused && destination_identity_only {
         let mut requested = reached.iter().copied().collect::<Vec<_>>();
         requested.sort_unstable();
         let (resolved, identity_metrics) = if uuid_required {
