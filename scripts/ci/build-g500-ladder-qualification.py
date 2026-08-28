@@ -33,6 +33,8 @@ def artifact(category: str, totals: dict, source: str, peak: int | None = None) 
 
 
 def rung(cert: dict) -> dict:
+    if cert.get("envelope", {}).get("peak_disk_source") != "storage_owned_active_identity_union":
+        raise ValueError("certification peak disk is not a storage-owned active identity union")
     storage = cert["storage_attribution"]
     source = storage["source"]
     rows = [artifact(name, source["categories"][key], owner) for name, key, owner in CATEGORIES]

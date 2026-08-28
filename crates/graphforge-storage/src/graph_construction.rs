@@ -452,6 +452,10 @@ pub struct GraphConstructionEvidence {
     pub merge_passes: u64,
     /// Largest measured temporary merge footprint.
     pub peak_merge_temporary_bytes: u64,
+    /// Currently retained filesystem allocation owned by authenticated
+    /// shape/merge artifacts.
+    #[serde(default)]
+    pub current_merge_temporary_allocated_bytes: u64,
     /// Largest explicitly retained application buffer set during append. This
     /// includes input Arrow buffers, extracted fixed runs, sorted Arrow output,
     /// and a conservative full-batch Parquet encoding window; allocator/RSS is
@@ -2511,11 +2515,6 @@ impl GraphConstructionSession {
             &mut cancelled,
             &mut self.checkpoint.evidence,
         )?;
-        self.checkpoint.evidence.peak_merge_temporary_bytes = self
-            .checkpoint
-            .evidence
-            .peak_merge_temporary_bytes
-            .max(measured_shape_bytes(&self.root)?);
         let shape = ConstructionShape {
             ontology_mode: self.checkpoint.ontology_mode,
             semantic_authority_sha256: self.checkpoint.semantic_authority_sha256.clone(),
@@ -4079,21 +4078,79 @@ fn is_shape_artifact_name(name: &str) -> bool {
     })
 }
 
-fn measured_shape_bytes(root: &StableDirectory) -> Result<u64, GfError> {
-    let mut bytes = 0_u64;
-    for name in root.child_names().map_err(storage)? {
-        let Some(name) = name.to_str() else { continue };
-        if is_shape_artifact_name(name) {
-            bytes = bytes.saturating_add(
-                root.open_child_file(OsStr::new(name))
-                    .map_err(storage)?
-                    .metadata()
-                    .map_err(storage)?
-                    .len(),
-            );
-        }
-    }
-    Ok(bytes)
+fn record_shape_artifact_install(
+    evidence: &mut GraphConstructionEvidence,
+    receipt: &ArtifactReceipt,
+) {
+    let totals = evidence
+        .storage_current
+        .entry(crate::ArtifactCategory::ConstructionStaging)
+        .or_default();
+    totals.logical_references = totals.logical_references.saturating_add(1);
+    totals.logical_bytes = totals.logical_bytes.saturating_add(receipt.bytes);
+    totals.physical_objects = totals.physical_objects.saturating_add(1);
+    totals.physical_logical_bytes = totals.physical_logical_bytes.saturating_add(receipt.bytes);
+    totals.allocated_bytes = totals
+        .allocated_bytes
+        .saturating_add(receipt.allocated_bytes);
+    evidence.current_merge_temporary_allocated_bytes = evidence
+        .current_merge_temporary_allocated_bytes
+        .saturating_add(receipt.allocated_bytes);
+    evidence.peak_merge_temporary_bytes = evidence
+        .peak_merge_temporary_bytes
+        .max(evidence.current_merge_temporary_allocated_bytes);
+    evidence
+        .storage_transient_peak_allocated_bytes
+        .entry(crate::ArtifactCategory::ConstructionStaging)
+        .and_modify(|peak| *peak = (*peak).max(totals.allocated_bytes))
+        .or_insert(totals.allocated_bytes);
+    let union = evidence
+        .storage_current
+        .values()
+        .fold(0_u64, |total, item| {
+            total.saturating_add(item.allocated_bytes)
+        });
+    evidence.storage_transient_peak_total_allocated_bytes = evidence
+        .storage_transient_peak_total_allocated_bytes
+        .max(union);
+}
+
+fn unlink_shape_artifact(
+    root: &StableDirectory,
+    name: &str,
+    evidence: &mut GraphConstructionEvidence,
+) -> Result<(), GfError> {
+    let receipt = receipt_for_existing(root, name)?;
+    unlink_artifact(root, &receipt)?;
+    let totals = evidence
+        .storage_current
+        .get_mut(&crate::ArtifactCategory::ConstructionStaging)
+        .ok_or_else(|| storage("shape allocation ledger is absent"))?;
+    totals.logical_references = totals
+        .logical_references
+        .checked_sub(1)
+        .ok_or_else(|| storage("shape logical-reference ledger underflow"))?;
+    totals.logical_bytes = totals
+        .logical_bytes
+        .checked_sub(receipt.bytes)
+        .ok_or_else(|| storage("shape logical-byte ledger underflow"))?;
+    totals.physical_objects = totals
+        .physical_objects
+        .checked_sub(1)
+        .ok_or_else(|| storage("shape physical-object ledger underflow"))?;
+    totals.physical_logical_bytes = totals
+        .physical_logical_bytes
+        .checked_sub(receipt.bytes)
+        .ok_or_else(|| storage("shape physical-logical ledger underflow"))?;
+    totals.allocated_bytes = totals
+        .allocated_bytes
+        .checked_sub(receipt.allocated_bytes)
+        .ok_or_else(|| storage("shape allocated-byte ledger underflow"))?;
+    evidence.current_merge_temporary_allocated_bytes = evidence
+        .current_merge_temporary_allocated_bytes
+        .checked_sub(receipt.allocated_bytes)
+        .ok_or_else(|| storage("shape active-allocation ledger underflow"))?;
+    Ok(())
 }
 
 fn account_merge_read<const N: usize>(evidence: &mut GraphConstructionEvidence) {
@@ -4232,6 +4289,7 @@ fn copy_authenticated_run<const N: usize>(
         fsync_operations: 2,
     };
     persist_shape_receipt(root, &output_receipt)?;
+    record_shape_artifact_install(evidence, &output_receipt);
     evidence.merge_fsync_operations = evidence.merge_fsync_operations.saturating_add(2);
     Ok(())
 }
@@ -4307,7 +4365,7 @@ impl FixedMergeAccumulator {
             )?;
             for input in inputs {
                 if input.starts_with("merge-") {
-                    unlink_named(root, &input)?;
+                    unlink_shape_artifact(root, &input, evidence)?;
                 }
             }
             level += 1;
@@ -4366,7 +4424,7 @@ impl FixedMergeAccumulator {
                 )?;
                 for input in inputs {
                     if input.starts_with("merge-") {
-                        unlink_named(root, &input)?;
+                        unlink_shape_artifact(root, &input, evidence)?;
                     }
                 }
                 output
@@ -4457,11 +4515,9 @@ fn merge_fixed_group<const N: usize>(
     root.sync().map_err(storage)?;
     construction_failpoint("shape.fixed_merge.after_install");
     persist_shape_receipt(root, &receipt)?;
+    record_shape_artifact_install(evidence, &receipt);
     evidence.merge_fsync_operations = evidence.merge_fsync_operations.saturating_add(2);
     evidence.merge_groups = evidence.merge_groups.saturating_add(1);
-    evidence.peak_merge_temporary_bytes = evidence
-        .peak_merge_temporary_bytes
-        .max(measured_shape_bytes(root)?);
     Ok(receipt)
 }
 
@@ -4655,6 +4711,7 @@ fn merge_row_group(
     root.sync().map_err(storage)?;
     construction_failpoint("shape.row_merge.after_install");
     persist_shape_receipt(root, &receipt)?;
+    record_shape_artifact_install(evidence, &receipt);
     evidence.merge_fsync_operations = evidence.merge_fsync_operations.saturating_add(4);
     evidence.merge_groups = evidence.merge_groups.saturating_add(1);
     evidence.merge_written_bytes = evidence.merge_written_bytes.saturating_add(receipt.bytes);
@@ -4665,9 +4722,6 @@ fn merge_row_group(
     for counter in counters {
         counter.add_to(evidence);
     }
-    evidence.peak_merge_temporary_bytes = evidence
-        .peak_merge_temporary_bytes
-        .max(measured_shape_bytes(root)?);
     Ok(receipt)
 }
 
@@ -4734,7 +4788,7 @@ impl RowMergeAccumulator {
             )?;
             for input in inputs {
                 if input.starts_with("merge-rows-") {
-                    unlink_named(root, &input)?;
+                    unlink_shape_artifact(root, &input, evidence)?;
                 }
             }
             level += 1;
@@ -4779,7 +4833,7 @@ impl RowMergeAccumulator {
                 )?;
                 for input in inputs {
                     if input.starts_with("merge-rows-") {
-                        unlink_named(root, &input)?;
+                        unlink_shape_artifact(root, &input, evidence)?;
                     }
                 }
                 return Ok(receipt);
@@ -4805,7 +4859,7 @@ impl RowMergeAccumulator {
                 )?;
                 for input in inputs {
                     if input.starts_with("merge-rows-") {
-                        unlink_named(root, &input)?;
+                        unlink_shape_artifact(root, &input, evidence)?;
                     }
                 }
                 output_name
@@ -5574,6 +5628,7 @@ fn assign_surrogates(
         .map_err(storage)?;
     root.sync().map_err(storage)?;
     persist_shape_receipt(root, &output_receipt)?;
+    record_shape_artifact_install(evidence, &output_receipt);
     evidence.merge_fsync_operations = evidence.merge_fsync_operations.saturating_add(2);
     Ok(output.to_owned())
 }

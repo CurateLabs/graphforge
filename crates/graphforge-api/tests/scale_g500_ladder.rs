@@ -506,8 +506,19 @@ fn exact_descriptor_allocation(paths: &[PathBuf]) -> Value {
                 .expect("generator descriptor metadata")
                 .len(),
         );
-        allocated = allocated
-            .saturating_add(allocated_bytes(path).expect("generator descriptor allocated bytes"));
+        let file = File::open(path).expect("open exact allocation descriptor");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            allocated = allocated.saturating_add(
+                file.metadata()
+                    .expect("exact descriptor metadata")
+                    .blocks()
+                    .saturating_mul(512),
+            );
+        }
+        #[cfg(not(unix))]
+        panic!("certification descriptor allocation requires Unix stat blocks");
     }
     json!({
         "category": "generator_spill",
@@ -1946,17 +1957,16 @@ struct PhaseJournal {
 }
 
 impl PhaseJournal {
-    fn new(path: PathBuf, workspace: &Path, envelope: Envelope) -> Self {
+    fn new(path: PathBuf, _workspace: &Path, envelope: Envelope) -> Self {
         Self {
             path,
             phases: Vec::new(),
-            monitor: ResourceMonitor::start(workspace.to_path_buf(), envelope),
+            monitor: ResourceMonitor::start(envelope),
         }
     }
 
     fn pass(&mut self, id: &str, started: Instant, fingerprint: Option<String>) {
         let fingerprint = fingerprint.map_or(Value::Null, Value::String);
-        self.monitor.sample_disk();
         if let Some(code) = self.monitor.failure_code() {
             self.phases.push(json!({
                 "id": id, "status": "fail",
@@ -1989,6 +1999,10 @@ impl PhaseJournal {
         self.monitor.cancellation.clone()
     }
 
+    fn observe_allocated_union(&self, bytes: u64) {
+        self.monitor.observe_allocated_union(bytes);
+    }
+
     fn flush(&self) {
         let staged = self.path.with_extension("json.tmp");
         fs::write(
@@ -2014,7 +2028,6 @@ impl Drop for PhaseJournal {
             .failure_code()
             .or_else(|| std::thread::panicking().then_some("operation_failed"));
         if let Some(code) = failure_code {
-            self.monitor.sample_disk();
             self.phases.push(json!({
                 "id": CERTIFICATION_PHASES[self.phases.len()], "status": "fail",
                 "elapsed_ms": 0,
@@ -2028,7 +2041,6 @@ impl Drop for PhaseJournal {
 }
 
 struct ResourceMonitor {
-    workspace: PathBuf,
     cancellation: CancellationToken,
     stop: Arc<AtomicBool>,
     peak_rss: Arc<AtomicU64>,
@@ -2039,29 +2051,24 @@ struct ResourceMonitor {
 }
 
 impl ResourceMonitor {
-    fn start(workspace: PathBuf, envelope: Envelope) -> Self {
+    fn start(envelope: Envelope) -> Self {
         let initial_rss = current_rss_bytes().expect("certification host must expose process RSS");
-        let initial_disk = allocated_bytes(&workspace)
-            .expect("certification host must expose allocated disk bytes");
         let cancellation = CancellationToken::new();
         let stop = Arc::new(AtomicBool::new(false));
         let peak_rss = Arc::new(AtomicU64::new(initial_rss));
-        let peak_disk = Arc::new(AtomicU64::new(initial_disk));
+        let peak_disk = Arc::new(AtomicU64::new(0));
         let failure = Arc::new(AtomicU64::new(0));
         let worker_cancellation = cancellation.clone();
         let worker_stop = Arc::clone(&stop);
         let worker_peak_rss = Arc::clone(&peak_rss);
-        let worker_peak_disk = Arc::clone(&peak_disk);
         let worker_failure = Arc::clone(&failure);
-        let worker_workspace = workspace.clone();
         let started = Instant::now();
         let elapsed_before_process = certification_elapsed_before_process();
         let worker = thread::spawn(move || {
-            let mut samples = 0_u8;
             while !worker_stop.load(Ordering::Relaxed) {
                 let rss = current_rss_bytes().expect("certification RSS probe failed");
                 worker_peak_rss.fetch_max(rss, Ordering::Relaxed);
-                let mut code = if rss > envelope.rss_bytes {
+                let code = if rss > envelope.rss_bytes {
                     1
                 } else if elapsed_before_process
                     .saturating_add(started.elapsed())
@@ -2072,14 +2079,6 @@ impl ResourceMonitor {
                 } else {
                     0
                 };
-                if samples == 0 {
-                    let disk = allocated_bytes(&worker_workspace)
-                        .expect("certification disk probe failed");
-                    worker_peak_disk.fetch_max(disk, Ordering::Relaxed);
-                    if disk > envelope.disk_bytes {
-                        code = 2;
-                    }
-                }
                 if code != 0 {
                     worker_failure
                         .compare_exchange(0, code, Ordering::SeqCst, Ordering::Relaxed)
@@ -2087,12 +2086,10 @@ impl ResourceMonitor {
                     worker_cancellation.cancel();
                     break;
                 }
-                samples = (samples + 1) % 20;
                 thread::sleep(Duration::from_millis(250));
             }
         });
         Self {
-            workspace,
             cancellation,
             stop,
             peak_rss,
@@ -2103,10 +2100,9 @@ impl ResourceMonitor {
         }
     }
 
-    fn sample_disk(&self) {
-        let disk = allocated_bytes(&self.workspace).expect("certification disk probe failed");
-        self.peak_disk.fetch_max(disk, Ordering::Relaxed);
-        if disk > self.envelope.disk_bytes {
+    fn observe_allocated_union(&self, bytes: u64) {
+        self.peak_disk.fetch_max(bytes, Ordering::Relaxed);
+        if bytes > self.envelope.disk_bytes {
             self.failure
                 .compare_exchange(0, 2, Ordering::SeqCst, Ordering::Relaxed)
                 .ok();
@@ -2161,23 +2157,6 @@ impl Drop for ResourceMonitor {
             worker.join().expect("resource watchdog thread");
         }
     }
-}
-
-fn allocated_bytes(path: &Path) -> Result<u64, &'static str> {
-    let output = Command::new("du").arg("-sk").arg(path).output();
-    output
-        .ok()
-        .filter(|out| out.status.success())
-        .and_then(|out| {
-            String::from_utf8(out.stdout)
-                .ok()?
-                .split_whitespace()
-                .next()?
-                .parse::<u64>()
-                .ok()
-        })
-        .map(|kibibytes| kibibytes.saturating_mul(1024))
-        .ok_or("allocated disk usage is unavailable")
 }
 
 fn result_fingerprint(result: &graphforge_api::ExecutionResult) -> String {
@@ -2450,12 +2429,37 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
     construction_phases
         .validate_reconciliation()
         .expect("certification construction phase attribution");
+    let spill_allocated = spills.as_ref().map_or(0, |spill| {
+        exact_descriptor_allocation(&spill.runs)["allocated_bytes"]
+            .as_u64()
+            .expect("spill allocated bytes")
+    });
+    let committed_allocated = graph
+        .storage_attribution()
+        .expect("ingest generation storage attribution")
+        .allocated_bytes;
+    let construction_peak = construction_evidence.storage_transient_peak_total_allocated_bytes;
+    journal.observe_allocated_union(
+        spill_allocated
+            .saturating_add(committed_allocated)
+            .saturating_add(construction_peak),
+    );
     journal.pass("ingest", phase, Some(input_fingerprint));
 
     let phase = Instant::now();
     let csr = graph
         .rebuild_adjacency(Some(journal.cancellation_token()))
         .expect("build certification CSR");
+    journal.observe_allocated_union(
+        spill_allocated
+            .saturating_add(
+                graph
+                    .storage_attribution()
+                    .expect("CSR generation storage attribution")
+                    .allocated_bytes,
+            )
+            .saturating_add(construction_peak),
+    );
     journal.pass(
         "csr",
         phase,
@@ -2565,6 +2569,24 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
     let source_storage = storage_attribution_value(&source);
     let imported_storage = storage_attribution_value(&imported);
     let package_storage = exact_descriptor_allocation(std::slice::from_ref(&package));
+    let retained_union = spill_allocated
+        .saturating_add(
+            source_storage["allocated_bytes"]
+                .as_u64()
+                .expect("source allocation"),
+        )
+        .saturating_add(
+            imported_storage["allocated_bytes"]
+                .as_u64()
+                .expect("import allocation"),
+        )
+        .saturating_add(
+            package_storage["allocated_bytes"]
+                .as_u64()
+                .expect("package allocation"),
+        )
+        .saturating_add(construction_peak);
+    journal.observe_allocated_union(retained_union);
 
     // Representative drills use the same verifier/import boundaries but never
     // repeat the billion-edge payload.
@@ -2880,6 +2902,17 @@ fn active_ingest_heartbeat_does_not_recursively_scan_storage() {
         !heartbeat.contains(&recursive_probe),
         "active heartbeat must consume counters, not enumerate project paths"
     );
+    let monitor = source
+        .split("struct ResourceMonitor")
+        .nth(1)
+        .and_then(|tail| tail.split("fn certification_elapsed_before_process").next())
+        .expect("resource monitor source boundary");
+    for forbidden in ["read_dir", "walkdir", "du\""] {
+        assert!(
+            !monitor.contains(forbidden),
+            "resource monitor must use storage-owned observations, not {forbidden}"
+        );
+    }
 }
 
 #[test]
@@ -3193,7 +3226,7 @@ fn certification_target_live_full_lifecycle_evidence() {
         "authority": { "source_fingerprint": lifecycle["source_authority_fingerprint"], "imported_fingerprint": lifecycle["imported_authority_fingerprint"] },
         "storage_attribution": lifecycle["storage"],
         "phases": phases,
-        "envelope": { "peak_rss_bytes": peak_rss, "peak_disk_bytes": peak_disk, "wall_time_s": elapsed_before_process.saturating_add(started.elapsed()).as_secs_f64() },
+        "envelope": { "peak_rss_bytes": peak_rss, "peak_disk_bytes": peak_disk, "peak_disk_source": "storage_owned_active_identity_union", "wall_time_s": elapsed_before_process.saturating_add(started.elapsed()).as_secs_f64() },
         "result": "pass", "first_failure": null,
     });
     let out = PathBuf::from(std::env::var("GF_G500_CERT_EVIDENCE_OUT").expect("evidence output"));
