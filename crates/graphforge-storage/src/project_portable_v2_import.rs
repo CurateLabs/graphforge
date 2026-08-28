@@ -1361,6 +1361,10 @@ mod tests {
             )
             .unwrap_err();
             assert_eq!(error.code, PortableV2ErrorCode::LimitExceeded, "{name}");
+            assert!(
+                !error.allocation_identity_allocated_bytes.is_empty(),
+                "{name} must report its durable ownership allocation"
+            );
             assert!(!target.exists(), "{name}");
         }
     }

@@ -4278,7 +4278,11 @@ fn unlink_shape_artifact(
     let removed = evidence
         .storage_active_identity_allocated_bytes
         .remove(&identity_key)
-        .ok_or_else(|| storage("shape active identity ledger is absent"))?;
+        .ok_or_else(|| {
+            storage(format!(
+                "shape active identity ledger is absent for {name} ({identity_key})"
+            ))
+        })?;
     if removed != receipt.allocated_bytes {
         return Err(storage("shape active identity allocation changed"));
     }
@@ -4382,12 +4386,25 @@ fn convert_identity_run(
     }
     writer.flush().map_err(storage)?;
     writer.get_ref().inner.sync_all().map_err(storage)?;
-    account_sequential_write(bytes.saturating_mul(2), evidence);
+    account_sequential_write(writer.get_ref().bytes, evidence);
+    let output_receipt = ArtifactReceipt {
+        name: output.to_owned(),
+        bytes: writer.get_ref().bytes,
+        allocated_bytes: graphforge_filesystem::file_space_usage(&writer.get_ref().inner)
+            .map_err(storage)?
+            .allocated_bytes,
+        sha256: hex(&writer.get_ref().digest.clone().finalize()),
+        identity: identity.into(),
+        write_operations: writer.get_ref().operations,
+        fsync_operations: 2,
+    };
     drop(writer);
     root.install_child(OsStr::new(&temporary), identity, OsStr::new(output))
         .map_err(storage)?;
     root.sync().map_err(storage)?;
     construction_failpoint("shape.fixed.after_install");
+    persist_shape_receipt(root, &output_receipt)?;
+    record_shape_artifact_install(evidence, &output_receipt)?;
     evidence.merge_fsync_operations = evidence.merge_fsync_operations.saturating_add(2);
     Ok(())
 }

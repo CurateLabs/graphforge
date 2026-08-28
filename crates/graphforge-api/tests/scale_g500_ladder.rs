@@ -2374,7 +2374,7 @@ fn create_bounded_drill_package(
         .expect("export compact drill expanded package");
     verify_portable_v2(
         &PortableVerifyRequest {
-            input: expanded,
+            input: expanded.clone(),
             mode: PortableV2Mode::Full,
             limits,
         },
