@@ -1519,7 +1519,7 @@ pub(crate) fn visit_property_overlay_batched_with_inventory<F>(
     stem: &str,
     is_edge: bool,
     batch_size: usize,
-    mut visit: F,
+    visit: F,
 ) -> Result<(), DataFusionError>
 where
     F: FnMut(&RecordBatch) -> Result<bool, DataFusionError>,
@@ -4175,7 +4175,7 @@ mod tests {
                 .iter()
                 .map(|field| field.name().as_str())
                 .collect::<Vec<_>>(),
-            ["rel_type_name", "edge_id"]
+            ["edge_id", "rel_type_name"]
         );
     }
 

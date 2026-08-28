@@ -38,7 +38,7 @@ const TWO_HOP: &str = "MATCH (a)-[r1]->(b)-[r2]->(c) \
 const ORDERED_ONE_HOP: &str = "MATCH (a)-[r]->(b) RETURN b.node_uuid AS id ORDER BY id LIMIT 1000";
 
 /// Deterministic ring: each node points to its next `fan_out` successors.
-fn generate_graph(dir: &Path, nodes: usize, fan_out: usize) {
+fn generate_graph(dir: &Path, nodes: usize, fan_out: usize, compact_v4: bool) {
     assert!(nodes > fan_out);
     let workspace = TempDir::new().unwrap();
     let uuids: Vec<Uuid> = (0..nodes).map(|_| new_v7()).collect();
@@ -72,7 +72,11 @@ fn generate_graph(dir: &Path, nodes: usize, fan_out: usize) {
         writer.flush().unwrap();
     }
     build_adjacency_index(workspace.path(), TS).unwrap();
-    project_fixture::publish_graph_workspace(dir, workspace.path());
+    if compact_v4 {
+        project_fixture::publish_graph_workspace_v4(dir, workspace.path());
+    } else {
+        project_fixture::publish_graph_workspace(dir, workspace.path());
+    }
 }
 
 fn open_forge(dir: &Path) -> GraphForge {
@@ -212,7 +216,7 @@ struct ScaleResult {
 
 fn run_scale(nodes: usize, fan_out: usize) -> ScaleResult {
     let dir = TempDir::new().unwrap();
-    generate_graph(dir.path(), nodes, fan_out);
+    generate_graph(dir.path(), nodes, fan_out, false);
     let forge = open_forge(dir.path());
 
     let one_plan = forge.explain(ONE_HOP).unwrap();
@@ -393,7 +397,7 @@ fn scattered_node_hydration_is_neighborhood_proportional() {
 
 fn run_ordered_projection_scale(nodes: usize) -> (Vec<Vec<u8>>, DemandSnapshot) {
     let dir = TempDir::new().unwrap();
-    generate_graph(dir.path(), nodes, FAN_OUT);
+    generate_graph(dir.path(), nodes, FAN_OUT, true);
     let forge = open_forge(dir.path());
     let plan = forge.explain(ORDERED_ONE_HOP).unwrap();
     assert!(plan.contains("ExpandExec"), "{plan}");
@@ -442,6 +446,20 @@ fn run_ordered_projection_scale(nodes: usize) -> (Vec<Vec<u8>>, DemandSnapshot) 
 }
 
 #[test]
+fn destination_uuid_projection_rejects_legacy_generation_without_v4_authority() {
+    let _guard = IO_GUARD.lock().unwrap();
+    let dir = TempDir::new().unwrap();
+    generate_graph(dir.path(), 64, 4, false);
+    let error = open_forge(dir.path()).execute(ORDERED_ONE_HOP).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("destination UUID projection requires admitted v4 ordinal identity"),
+        "{error:?}"
+    );
+}
+
+#[test]
 fn ordered_destination_uuid_projection_is_exact_and_linear_at_1x_2x_4x() {
     let _guard = IO_GUARD.lock().unwrap();
     let mut work = Vec::new();
@@ -469,7 +487,7 @@ fn ordered_destination_uuid_projection_is_exact_and_linear_at_1x_2x_4x() {
 fn limits_sweep_bounded_multi_hop_work_and_repartition() {
     let _guard = IO_GUARD.lock().unwrap();
     let dir = TempDir::new().unwrap();
-    generate_graph(dir.path(), 4_096, FAN_OUT);
+    generate_graph(dir.path(), 4_096, FAN_OUT, false);
     let forge = open_forge(dir.path());
 
     for limit in [10_u64, 100, 1_000] {
@@ -497,7 +515,7 @@ fn limits_sweep_bounded_multi_hop_work_and_repartition() {
 fn selective_filter_tops_up_without_crossing_blockers() {
     let _guard = IO_GUARD.lock().unwrap();
     let dir = TempDir::new().unwrap();
-    generate_graph(dir.path(), 64, 4);
+    generate_graph(dir.path(), 64, 4, false);
     let forge = open_forge(dir.path());
 
     let selective = "MATCH (a)-[r1]->(b)-[r2]->(c) \
@@ -574,7 +592,7 @@ fn high_degree_source_resumes_without_losing_neighbors() {
 fn fixed_hop_limit_preserves_skip_parameters_filters_and_blockers() {
     let _guard = IO_GUARD.lock().unwrap();
     let dir = TempDir::new().unwrap();
-    generate_graph(dir.path(), 64, 4);
+    generate_graph(dir.path(), 64, 4, false);
     let forge = open_forge(dir.path());
 
     io_stats::reset();
@@ -770,7 +788,7 @@ fn release_livejournal_fixed_hop_limits() {
 
 fn release_scale(nodes: usize, fan_out: usize) -> ScaleResult {
     let dir = TempDir::new().unwrap();
-    generate_graph(dir.path(), nodes, fan_out);
+    generate_graph(dir.path(), nodes, fan_out, false);
     let warm = open_forge(dir.path());
     warm.execute(ONE_HOP).unwrap();
     warm.execute(TWO_HOP).unwrap();

@@ -60,7 +60,7 @@ impl PropertyRouteKind {
         }
     }
 
-    fn uuid_field(self) -> &'static str {
+    pub(crate) fn uuid_field(self) -> &'static str {
         match self {
             Self::Node => "node_uuid",
             Self::Edge => "edge_uuid",
