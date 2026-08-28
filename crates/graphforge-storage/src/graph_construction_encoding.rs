@@ -306,6 +306,36 @@ pub struct GraphConstructionEncodingEvidence {
     pub membership_peak_buffer_bytes: u64,
     /// Peak bytes in owned temporary v3 outputs.
     pub membership_peak_temporary_bytes: u64,
+    /// Canonical node identities streamed into the v4 ordinal index.
+    #[serde(default)]
+    pub ordinal_records: u64,
+    /// Immutable v4 payload bytes written before publication metadata.
+    #[serde(default)]
+    pub ordinal_artifact_write_bytes: u64,
+    /// Bounded payload writes performed by the v4 stream encoder.
+    #[serde(default)]
+    pub ordinal_artifact_write_operations: u64,
+    /// Contiguous ordinal ranges emitted by the v4 stream encoder.
+    #[serde(default)]
+    pub ordinal_ranges: u64,
+    /// Cancellation/work polls performed while streaming v4 identities.
+    #[serde(default)]
+    pub ordinal_work_operations: u64,
+    /// Peak live v4 encoding buffer bytes.
+    #[serde(default)]
+    pub ordinal_peak_buffer_bytes: u64,
+    /// Peak bytes in owned temporary v4 outputs.
+    #[serde(default)]
+    pub ordinal_peak_temporary_bytes: u64,
+    /// v4 payload and publication durability barriers.
+    #[serde(default)]
+    pub ordinal_fsync_operations: u64,
+    /// v4 receipt, manifest, and authority-lock bytes written at publication.
+    #[serde(default)]
+    pub ordinal_publication_write_bytes: u64,
+    /// v4 receipt, manifest, and authority-lock writes at publication.
+    #[serde(default)]
+    pub ordinal_publication_write_operations: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -466,7 +496,21 @@ pub(crate) fn encode(
         .map(ConstructionSemanticAuthority::context)
         .transpose()?;
 
-    encode_nodes(
+    let identities_sha256 = shaped_output_sha256(shape_outputs, &shape.identities)?;
+    let mut index = crate::uuid_membership::encode_construction_index(
+        source,
+        &shape.identities,
+        identities_sha256,
+        &output,
+        generation,
+        shape.parent_topology_generation,
+        parent_index,
+        shape.node_count,
+        shape.edge_count,
+        cancelled,
+    )?;
+
+    let v4 = encode_nodes(
         source,
         &output,
         shape,
@@ -476,10 +520,41 @@ pub(crate) fn encode(
         semantic_context.as_ref(),
         semantic_authority.map(|authority| &authority.bindings),
         budgets,
+        generation,
+        shape.parent_topology_generation == 0,
         cancelled,
         &mut artifacts,
         &mut evidence,
     )?;
+    if let Some((manifest, metrics)) = v4 {
+        if metrics.input_records != shape.node_count {
+            return Err(storage("v4 construction count differs from shaped nodes"));
+        }
+        evidence.ordinal_records = metrics.input_records;
+        evidence.ordinal_artifact_write_bytes = metrics.artifact_bytes;
+        evidence.ordinal_artifact_write_operations = metrics.write_blocks;
+        evidence.ordinal_ranges = u64::try_from(metrics.ranges).map_err(storage)?;
+        evidence.ordinal_work_operations = metrics.cancellation_polls;
+        evidence.ordinal_peak_buffer_bytes =
+            u64::try_from(metrics.peak_buffer_bytes).map_err(storage)?;
+        let (v4_artifacts, publication) =
+            crate::uuid_membership::publish_v4_construction_artifacts(
+                &output,
+                &manifest,
+                generation,
+                identities_sha256,
+            )?;
+        evidence.ordinal_publication_write_bytes = publication.write_bytes;
+        evidence.ordinal_publication_write_operations = publication.write_operations;
+        evidence.ordinal_fsync_operations = metrics
+            .fsync_operations
+            .saturating_add(publication.fsync_operations);
+        evidence.ordinal_peak_temporary_bytes = metrics
+            .peak_temporary_bytes
+            .max(publication.peak_temporary_bytes);
+        crate::graph_construction::construction_failpoint("encode.after_v4_before_inventory");
+        index.artifacts.extend(v4_artifacts);
+    }
     encode_edges(
         source,
         &output,
@@ -511,18 +586,6 @@ pub(crate) fn encode(
         &mut evidence,
     )?;
 
-    let index = crate::uuid_membership::encode_construction_index(
-        source,
-        &shape.identities,
-        shaped_output_sha256(shape_outputs, &shape.identities)?,
-        &output,
-        generation,
-        shape.parent_topology_generation,
-        parent_index,
-        shape.node_count,
-        shape.edge_count,
-        cancelled,
-    )?;
     evidence.membership_records = index.input_records;
     evidence.membership_read_bytes = index.read_bytes;
     evidence.membership_write_bytes = index.final_write_bytes;
@@ -699,12 +762,34 @@ fn encode_nodes(
     semantic_context: Option<&CompositionBindingContext>,
     semantic_bindings: Option<&SemanticStorageBindings>,
     budgets: GraphConstructionBudgets,
+    generation: u64,
+    build_v4: bool,
     cancelled: &mut impl FnMut() -> bool,
     artifacts: &mut Vec<ConstructionEncodedArtifact>,
     evidence: &mut GraphConstructionEncodingEvidence,
-) -> Result<(), GfError> {
+) -> Result<
+    Option<(
+        crate::V4OrdinalIdentityManifest,
+        crate::uuid_membership::V4OrdinalBuildMetrics,
+    )>,
+    GfError,
+> {
     if shape.node_rows.is_empty() {
-        return Ok(());
+        if !build_v4 {
+            return Ok(None);
+        }
+        let graph = output
+            .open_child_directory(OsStr::new("graph"))
+            .map_err(storage)?;
+        let topology = graph
+            .open_child_directory(OsStr::new("topology"))
+            .map_err(storage)?;
+        let index = topology
+            .open_child_directory(OsStr::new("uuid-membership"))
+            .map_err(storage)?;
+        return crate::uuid_membership::V4OrdinalConstructionWriter::start(generation, &index)?
+            .finish()
+            .map(Some);
     }
     let details_name = shape
         .node_details
@@ -712,6 +797,25 @@ fn encode_nodes(
         .ok_or_else(|| storage("node rows lack canonical details"))?;
     let mut identities =
         FixedReader::<IDENTITY_WIDTH>::open(source, shape_outputs, &shape.identities)?;
+    let v4_index = if build_v4 {
+        let graph = output
+            .open_child_directory(OsStr::new("graph"))
+            .map_err(storage)?;
+        let topology = graph
+            .open_child_directory(OsStr::new("topology"))
+            .map_err(storage)?;
+        Some(
+            topology
+                .open_child_directory(OsStr::new("uuid-membership"))
+                .map_err(storage)?,
+        )
+    } else {
+        None
+    };
+    let mut v4 = v4_index
+        .as_ref()
+        .map(|index| crate::uuid_membership::V4OrdinalConstructionWriter::start(generation, index))
+        .transpose()?;
     let mut details = FixedReader::<NODE_DETAIL_WIDTH>::open(source, shape_outputs, details_name)?;
     let rows_per_window = budgets
         .max_batch_rows
@@ -761,10 +865,12 @@ fn encode_nodes(
                     .get(label)
                     .ok_or_else(|| storage("node label is absent from runtime catalog"))?,
             };
+            let node_id = u64::from_be_bytes(identity[24..32].try_into().expect("fixed"));
+            if let Some(v4) = v4.as_mut() {
+                v4.push_pair(Uuid::from_bytes(uuid), node_id, cancelled)?;
+            }
             out_uuid.push(uuid);
-            out_id.push(u64::from_be_bytes(
-                identity[24..32].try_into().expect("fixed"),
-            ));
+            out_id.push(node_id);
             out_type.push(type_id);
             if out_uuid.len().is_multiple_of(4096) && cancelled() {
                 return Err(storage("construction encoding cancelled"));
@@ -802,7 +908,9 @@ fn encode_nodes(
         cancelled,
         artifacts,
         evidence,
-    )
+    )?;
+    v4.map(crate::uuid_membership::V4OrdinalConstructionWriter::finish)
+        .transpose()
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]

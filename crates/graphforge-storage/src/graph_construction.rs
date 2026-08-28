@@ -8210,6 +8210,15 @@ mod tests {
             "uuid_encode.after_delta_runs",
             "uuid_encode.after_manifest",
             "uuid_encode.after_intent_removal",
+            "v4_publish.after_artifacts",
+            "v4_publish.after_artifacts_fsync",
+            "v4_publish.after_receipt_temp_fsync",
+            "v4_publish.after_receipt_install",
+            "v4_publish.after_manifest_temp_fsync",
+            "v4_publish.after_manifest_install",
+            "v4_publish.after_lock_temp_fsync",
+            "v4_publish.after_lock_install",
+            "encode.after_v4_before_inventory",
             "encode.control.after_temp_fsync.inventory.json",
             "encode.control.after_install.inventory.json",
         ] {
@@ -8444,6 +8453,38 @@ mod tests {
         assert_eq!(encoding.evidence.prior_topology_rows_decoded, 0);
         assert_eq!(encoding.evidence.retained_topology_bytes_copied, 0);
         assert_eq!(encoding.evidence.membership_records, 5);
+        assert_eq!(encoding.evidence.ordinal_records, 3);
+        assert_eq!(encoding.evidence.ordinal_artifact_write_bytes, 120);
+        assert_eq!(encoding.evidence.ordinal_artifact_write_operations, 2);
+        assert_eq!(encoding.evidence.ordinal_ranges, 1);
+        assert_eq!(encoding.evidence.ordinal_work_operations, 3);
+        assert_eq!(encoding.evidence.ordinal_peak_buffer_bytes, 3 * 64 * 1024);
+        assert_eq!(encoding.evidence.ordinal_publication_write_operations, 3);
+        // Three artifact file syncs, one artifact-directory barrier, two
+        // barriers for each of receipt/manifest/lock, and four ancestor
+        // directory barriers after the complete facet is installed.
+        assert_eq!(encoding.evidence.ordinal_fsync_operations, 14);
+        let ordinal_publication_bytes = encoding
+            .artifacts
+            .iter()
+            .filter(|artifact| {
+                artifact.path.ends_with("ordinal-v4-receipt.json")
+                    || artifact.path.ends_with("ordinal-v4-manifest.json")
+                    || artifact.path.ends_with("ordinal-v4.lock")
+            })
+            .map(|artifact| artifact.bytes)
+            .sum::<u64>();
+        assert_eq!(
+            encoding.evidence.ordinal_publication_write_bytes,
+            ordinal_publication_bytes
+        );
+        assert_eq!(
+            encoding.evidence.ordinal_peak_temporary_bytes,
+            encoding
+                .evidence
+                .ordinal_artifact_write_bytes
+                .saturating_add(ordinal_publication_bytes)
+        );
 
         let graph = root
             .path()
@@ -8486,6 +8527,61 @@ mod tests {
 
         let resumed = session.encode_canonical(&shape, 1).unwrap();
         assert_eq!(resumed, encoding);
+    }
+
+    #[test]
+    fn fresh_construction_publishes_selected_authenticated_v4_exact_lookup() {
+        let root = TempDir::new().unwrap();
+        let operation = Uuid::from_u128(9_321);
+        let target = Uuid::from_u128(9_322);
+        crate::open_or_initialize_project(root.path()).unwrap();
+        let mut session = GraphConstructionSession::open(
+            root.path(),
+            operation,
+            0,
+            GraphConstructionBudgets::default(),
+        )
+        .unwrap();
+        session
+            .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 3))
+            .unwrap();
+        session.seal().unwrap();
+        let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
+        let encoding = session.encode_canonical(&shape, 1).unwrap();
+        session
+            .publish_canonical(&encoding, target, Uuid::from_u128(9_323))
+            .unwrap();
+
+        let selected = crate::resolve_project_generation(root.path()).unwrap();
+        assert_eq!(selected.generation_uuid(), target);
+        let authority = selected
+            .authenticated_v4_ordinal_authority()
+            .unwrap()
+            .expect("fresh construction publishes v4 authority");
+        let inventory = selected.graph_files_inventory().unwrap().unwrap();
+        let materialized = TempDir::new().unwrap();
+        let graph = materialized.path().join("graph");
+        std::fs::create_dir(&graph).unwrap();
+        crate::materialize_graph_objects(root.path(), &inventory, &graph).unwrap();
+        let mut handle = match authority
+            .open(&graph, crate::V4OrdinalIdentityLimits::default())
+            .unwrap()
+        {
+            crate::V4OrdinalIdentityOpen::Ready(handle) => handle,
+            crate::V4OrdinalIdentityOpen::RebuildRequired { found_version } => {
+                panic!("fresh v4 unexpectedly requires rebuild from {found_version}")
+            }
+        };
+        let lookup = handle.lookup_node_uuids(&[3, 1, 4, 2]).unwrap();
+        assert_eq!(
+            lookup.values,
+            vec![
+                Some(Uuid::from_u128(3)),
+                Some(Uuid::from_u128(1)),
+                None,
+                Some(Uuid::from_u128(2)),
+            ]
+        );
     }
 
     #[test]

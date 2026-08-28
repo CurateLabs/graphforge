@@ -990,13 +990,13 @@ pub(crate) fn resolve_v1_inventory_entry(
     resolve_v1_inventory_entry_retained(graph_root, entry).map(|resolved| resolved.path)
 }
 
-struct RetainedV1InventoryEntry {
-    path: PathBuf,
-    file: File,
-    identity: graphforge_filesystem::FileIdentity,
+pub(crate) struct RetainedV1InventoryEntry {
+    pub(crate) path: PathBuf,
+    pub(crate) file: File,
+    pub(crate) identity: graphforge_filesystem::FileIdentity,
 }
 
-fn resolve_v1_inventory_entry_retained(
+pub(crate) fn resolve_v1_inventory_entry_retained(
     graph_root: &Path,
     entry: &GraphFileEntry,
 ) -> Result<RetainedV1InventoryEntry, GfError> {

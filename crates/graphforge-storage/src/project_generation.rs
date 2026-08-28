@@ -105,6 +105,14 @@ pub struct ResolvedProjectGeneration {
 #[derive(Debug)]
 struct GenerationLease(File);
 
+/// One manifest-authenticated graph payload retained by exact file identity.
+pub(crate) struct PinnedGraphFile {
+    pub(crate) entry: crate::GraphFileEntry,
+    pub(crate) file: File,
+    pub(crate) identity: graphforge_filesystem::FileIdentity,
+    _cas_lease: Option<crate::graph_object_store::AuthenticatedGraphObject>,
+}
+
 impl Drop for GenerationLease {
     fn drop(&mut self) {
         let _ = crate::file_lock::unlock(&self.0);
@@ -112,6 +120,68 @@ impl Drop for GenerationLease {
 }
 
 impl ResolvedProjectGeneration {
+    /// Authenticate the selected graph inventory and retain the exact payload
+    /// handles used by subsequent streaming consumers. No caller needs to
+    /// rediscover a mutable path after admission.
+    pub(crate) fn authenticated_graph_files_pinned_where(
+        &self,
+        mut selected: impl FnMut(&crate::GraphFileEntry) -> bool,
+    ) -> Result<Option<Vec<PinnedGraphFile>>, GfError> {
+        let Some(participant) = self.declared_graph_files_participant()? else {
+            return Ok(None);
+        };
+        let entries = match &participant {
+            crate::GraphFilesParticipant::V1(inventory) => inventory.files.clone(),
+            crate::GraphFilesParticipant::V2(root) => {
+                let (files, _) = crate::resolve_graph_manifest(
+                    root,
+                    crate::GraphManifestLimits::default(),
+                    |digest| {
+                        crate::read_graph_object_by_digest(
+                            self.container_root(),
+                            digest,
+                            64 * 1024 * 1024,
+                        )
+                    },
+                )?;
+                files
+            }
+        };
+        let mut pinned = Vec::with_capacity(entries.len());
+        for entry in entries.into_iter().filter(|entry| selected(entry)) {
+            let (file, cas_lease) = match &participant {
+                crate::GraphFilesParticipant::V1(_) => {
+                    let retained = crate::graph_files::resolve_v1_inventory_entry_retained(
+                        &self.graph_tree_root(),
+                        &entry,
+                    )?;
+                    (retained.file, None)
+                }
+                crate::GraphFilesParticipant::V2(_) => {
+                    let lease = crate::graph_object_store::open_graph_object_by_digest(
+                        self.container_root(),
+                        &entry.content_sha256,
+                        entry.byte_length,
+                    )?;
+                    let file = lease.try_clone_file().map_err(|error| {
+                        GfError::Storage(format!("retain authenticated graph object: {error}"))
+                    })?;
+                    (file, Some(lease))
+                }
+            };
+            let identity = graphforge_filesystem::file_identity(&file).map_err(|error| {
+                GfError::Storage(format!("identify authenticated graph payload: {error}"))
+            })?;
+            pinned.push(PinnedGraphFile {
+                entry,
+                file,
+                identity,
+                _cas_lease: cas_lease,
+            });
+        }
+        Ok(Some(pinned))
+    }
+
     pub(crate) fn authenticated_graph_file_bytes_with_state(
         &self,
         relative_path: &str,
@@ -1879,6 +1949,45 @@ mod tests {
                 .authority()
                 .topology_generation,
             8
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn authenticated_graph_payload_handle_survives_named_path_substitution() {
+        use std::io::{Seek as _, SeekFrom};
+
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join(FORMAT_FILE), PROJECT_FORMAT_BYTES).unwrap();
+        fs::create_dir(root.path().join("generations")).unwrap();
+        let generation = Uuid::now_v7();
+        let digest =
+            install_graph_generation(root.path(), generation, 7, false, false, false, true);
+        write_current(root.path(), generation, digest);
+        let selected = resolve_project_generation(root.path()).unwrap();
+        let mut pinned = selected
+            .authenticated_graph_files_pinned_where(|entry| {
+                entry.relative_path == "topology/generation.json"
+            })
+            .unwrap()
+            .unwrap();
+        let payload = pinned
+            .iter_mut()
+            .find(|input| input.entry.relative_path == "topology/generation.json")
+            .unwrap();
+        let named = selected.graph_tree_root().join("topology/generation.json");
+        let expected = fs::read(&named).unwrap();
+        let planted = named.with_extension("planted");
+        fs::write(&planted, b"{\"topology_generation\":999}").unwrap();
+        fs::rename(&planted, &named).unwrap();
+
+        payload.file.seek(SeekFrom::Start(0)).unwrap();
+        let mut retained = Vec::new();
+        payload.file.read_to_end(&mut retained).unwrap();
+        assert_eq!(retained, expected);
+        assert_ne!(
+            graphforge_filesystem::path_identity(&named).unwrap(),
+            payload.identity
         );
     }
 

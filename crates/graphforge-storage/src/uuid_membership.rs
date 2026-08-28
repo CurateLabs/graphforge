@@ -11,7 +11,7 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap};
 use std::fmt::Write as _;
 use std::fs::{self, File};
-use std::io::{BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use arrow::array::{Array, FixedSizeBinaryArray, UInt64Array};
@@ -34,7 +34,6 @@ const BULK_IO_BYTES: usize = 1 << 20;
 const INDEX_DIR: &str = "topology/uuid-membership";
 const MANIFEST: &str = "manifest.json";
 const V4_ORDINAL_MANIFEST: &str = "ordinal-v4-manifest.json";
-#[cfg(test)]
 const V4_ORDINAL_RECEIPT: &str = "ordinal-v4-receipt.json";
 const CONSTRUCTION_INTENT: &str = ".construction-intent.json";
 
@@ -121,6 +120,466 @@ pub struct UuidIndexBuildMetrics {
     pub peak_buffered_records: usize,
     /// Number of temporary sort and merge runs produced.
     pub temporary_runs: u64,
+}
+
+const V4_ORDINAL_BLOCK_BYTES: usize = 64 * 1024;
+// Durable rewrite admits 16,384 graph-file entries. Reserve generation.json
+// plus forward, tombstone, receipt, and manifest participants.
+const V4_MAX_RANGES: usize = 16_379;
+
+/// Aggregate-only evidence from the bounded v4 construction encoder.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct V4OrdinalBuildMetrics {
+    pub(crate) input_records: u64,
+    pub(crate) artifact_bytes: u64,
+    pub(crate) write_blocks: u64,
+    pub(crate) ranges: usize,
+    pub(crate) peak_buffer_bytes: usize,
+    pub(crate) peak_temporary_bytes: u64,
+    pub(crate) fsync_operations: u64,
+    pub(crate) cancellation_polls: u64,
+}
+
+/// Encode the already-canonical construction node stream without rescanning
+/// topology or consulting v3 reverse authority. The caller owns the durable
+/// rewrite transaction and publishes the returned manifest later.
+#[cfg(test)]
+pub(crate) fn stage_v4_ordinal_artifacts<I, F>(
+    records: I,
+    generation: u64,
+    index: &graphforge_filesystem::StableDirectory,
+    mut cancelled: F,
+) -> Result<(crate::V4OrdinalIdentityManifest, V4OrdinalBuildMetrics), GfError>
+where
+    I: IntoIterator<Item = (Uuid, u64)>,
+    F: FnMut() -> bool,
+{
+    let mut writer = V4OrdinalConstructionWriter::start(generation, index)?;
+    for (uuid, node_id) in records {
+        writer.push_pair(uuid, node_id, &mut cancelled)?;
+    }
+    writer.finish()
+}
+
+/// Incremental v4 encoder used to tee the already-assigned fresh-construction
+/// node stream without retaining it or reading it a second time.
+pub(crate) struct V4OrdinalConstructionWriter<'a> {
+    generation: u64,
+    index: &'a graphforge_filesystem::StableDirectory,
+    forward: StreamingV4Artifact,
+    ranges: Vec<crate::V4OrdinalRange>,
+    current: Option<V4OrdinalRangeWriter>,
+    previous_forward_uuid: Option<[u8; 16]>,
+    previous_ordinal_node_id: u64,
+    forward_count: u64,
+    ordinal_count: u64,
+    forward_commitment: [u8; 32],
+    ordinal_commitment: [u8; 32],
+    forward_commitment_two: [u8; 32],
+    ordinal_commitment_two: [u8; 32],
+    metrics: V4OrdinalBuildMetrics,
+}
+
+impl<'a> V4OrdinalConstructionWriter<'a> {
+    pub(crate) fn start(
+        generation: u64,
+        index: &'a graphforge_filesystem::StableDirectory,
+    ) -> Result<Self, GfError> {
+        if generation == 0 {
+            return Err(storage_err("v4 ordinal generation is zero"));
+        }
+        Ok(Self {
+            generation,
+            index,
+            forward: StreamingV4Artifact::create(index, "forward")?,
+            ranges: Vec::new(),
+            current: None,
+            previous_forward_uuid: None,
+            previous_ordinal_node_id: 0,
+            forward_count: 0,
+            ordinal_count: 0,
+            forward_commitment: [0; 32],
+            ordinal_commitment: [0; 32],
+            forward_commitment_two: [0; 32],
+            ordinal_commitment_two: [0; 32],
+            metrics: V4OrdinalBuildMetrics {
+                // Forward BufWriter + ordinal BufWriter + ordinal authentication block.
+                peak_buffer_bytes: V4_ORDINAL_BLOCK_BYTES * 3,
+                ..Default::default()
+            },
+        })
+    }
+
+    pub(crate) fn push_pair(
+        &mut self,
+        uuid: Uuid,
+        node_id: u64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), GfError> {
+        self.poll_cancelled(cancelled)?;
+        self.push_forward_inner(uuid, node_id)?;
+        self.push_ordinal_inner(node_id, uuid)
+    }
+
+    pub(crate) fn push_forward(
+        &mut self,
+        uuid: Uuid,
+        node_id: u64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), GfError> {
+        self.poll_cancelled(cancelled)?;
+        self.push_forward_inner(uuid, node_id)
+    }
+
+    pub(crate) fn push_ordinal(
+        &mut self,
+        node_id: u64,
+        uuid: Uuid,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), GfError> {
+        self.poll_cancelled(cancelled)?;
+        self.push_ordinal_inner(node_id, uuid)
+    }
+
+    fn poll_cancelled(&mut self, cancelled: &mut impl FnMut() -> bool) -> Result<(), GfError> {
+        self.metrics.cancellation_polls = self
+            .metrics
+            .cancellation_polls
+            .checked_add(1)
+            .ok_or_else(|| storage_err("v4 cancellation poll count overflow"))?;
+        if cancelled() {
+            return Err(storage_err("v4 ordinal construction cancelled"));
+        }
+        Ok(())
+    }
+
+    fn push_forward_inner(&mut self, uuid: Uuid, node_id: u64) -> Result<(), GfError> {
+        let uuid_bytes = *uuid.as_bytes();
+        if uuid_bytes == [0; 16]
+            || self
+                .previous_forward_uuid
+                .is_some_and(|prior| prior >= uuid_bytes)
+            || node_id == 0
+        {
+            return Err(storage_err(
+                "v4 forward identities are not canonical and increasing",
+            ));
+        }
+        self.forward.push(&uuid_bytes)?;
+        self.forward.push(&node_id.to_be_bytes())?;
+        add_v4_mapping_commitment(&mut self.forward_commitment, 0, uuid_bytes, node_id);
+        add_v4_mapping_commitment(&mut self.forward_commitment_two, 1, uuid_bytes, node_id);
+        self.forward_count = self
+            .forward_count
+            .checked_add(1)
+            .ok_or_else(|| storage_err("v4 forward record count overflow"))?;
+        self.previous_forward_uuid = Some(uuid_bytes);
+        self.metrics.peak_temporary_bytes =
+            self.metrics.peak_temporary_bytes.max(self.forward.bytes);
+        Ok(())
+    }
+
+    fn push_ordinal_inner(&mut self, node_id: u64, uuid: Uuid) -> Result<(), GfError> {
+        let uuid_bytes = *uuid.as_bytes();
+        if uuid_bytes == [0; 16] || node_id == 0 || node_id <= self.previous_ordinal_node_id {
+            return Err(storage_err(
+                "v4 ordinal identities are not canonical and increasing",
+            ));
+        }
+        if self.current.is_some()
+            && self
+                .previous_ordinal_node_id
+                .checked_add(1)
+                .is_none_or(|expected| node_id != expected)
+        {
+            finish_streamed_v4_range(
+                self.index,
+                self.generation,
+                self.current.take().expect("range exists"),
+                &mut self.ranges,
+                &mut self.metrics,
+            )?;
+        }
+        if self.current.is_none() {
+            if self.ranges.len() >= V4_MAX_RANGES {
+                return Err(storage_err("v4 ordinal range inventory exceeds bound"));
+            }
+            self.current = Some(V4OrdinalRangeWriter::new(
+                self.index,
+                self.ranges.len(),
+                node_id,
+            )?);
+        }
+        self.current
+            .as_mut()
+            .expect("range exists")
+            .push(uuid_bytes)?;
+        add_v4_mapping_commitment(&mut self.ordinal_commitment, 0, uuid_bytes, node_id);
+        add_v4_mapping_commitment(&mut self.ordinal_commitment_two, 1, uuid_bytes, node_id);
+        self.ordinal_count = self
+            .ordinal_count
+            .checked_add(1)
+            .ok_or_else(|| storage_err("v4 ordinal record count overflow"))?;
+        self.previous_ordinal_node_id = node_id;
+        let live_temporary_bytes = self
+            .metrics
+            .artifact_bytes
+            .checked_add(self.forward.bytes)
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    self.current
+                        .as_ref()
+                        .map_or(0, |range| range.artifact.bytes),
+                )
+            })
+            .ok_or_else(|| storage_err("v4 live temporary byte count overflow"))?;
+        self.metrics.peak_temporary_bytes =
+            self.metrics.peak_temporary_bytes.max(live_temporary_bytes);
+        Ok(())
+    }
+
+    pub(crate) fn finish(
+        mut self,
+    ) -> Result<(crate::V4OrdinalIdentityManifest, V4OrdinalBuildMetrics), GfError> {
+        if self.forward_count != self.ordinal_count
+            || self.forward_commitment != self.ordinal_commitment
+            || self.forward_commitment_two != self.ordinal_commitment_two
+        {
+            return Err(storage_err(
+                "v4 forward and ordinal projections describe different mappings",
+            ));
+        }
+        self.metrics.input_records = self.forward_count;
+        if let Some(writer) = self.current.take() {
+            finish_streamed_v4_range(
+                self.index,
+                self.generation,
+                writer,
+                &mut self.ranges,
+                &mut self.metrics,
+            )?;
+        }
+        let forward = finish_streamed_v4_artifact(
+            self.forward,
+            self.index,
+            "forward-v4",
+            self.generation,
+            crate::V4OrdinalArtifactKind::ForwardIdentities,
+            &mut self.metrics,
+        )?;
+
+        // Construction has no deletions, but an explicit authenticated empty run
+        // commits that fact instead of leaving tombstone authority implicit.
+        let tombstone = finish_streamed_v4_artifact(
+            StreamingV4Artifact::create(self.index, "tombstones")?,
+            self.index,
+            "tombstones-v4",
+            self.generation,
+            crate::V4OrdinalArtifactKind::NodeTombstones,
+            &mut self.metrics,
+        )?;
+        self.metrics.ranges = self.ranges.len();
+        let manifest = crate::V4OrdinalIdentityManifest {
+            format_version: crate::ORDINAL_IDENTITY_V4,
+            topology_generation: self.generation,
+            forward_identities: vec![forward],
+            ordinal_ranges: self.ranges,
+            tombstones: vec![crate::V4OrdinalTombstones {
+                generation: self.generation,
+                artifact: tombstone,
+                blocks: Vec::new(),
+            }],
+        };
+        admit_v4_construction_manifest(&manifest)?;
+        Ok((manifest, self.metrics))
+    }
+}
+
+fn admit_v4_construction_manifest(
+    manifest: &crate::V4OrdinalIdentityManifest,
+) -> Result<(), GfError> {
+    let bytes = serde_json::to_vec(manifest).map_err(storage_err)?;
+    if bytes.len() as u64 > crate::ordinal_identity_v4::MAX_MANIFEST_BYTES {
+        return Err(storage_err(
+            "v4 ordinal manifest exceeds the reader admission bound",
+        ));
+    }
+    Ok(())
+}
+
+fn add_v4_mapping_commitment(commitment: &mut [u8; 32], domain: u8, uuid: [u8; 16], node_id: u64) {
+    let mut digest = Sha256::new();
+    digest.update(b"graphforge-v4-mapping-v1\0");
+    digest.update([domain]);
+    digest.update(uuid);
+    digest.update(node_id.to_be_bytes());
+    let mapping: [u8; 32] = digest.finalize().into();
+    let mut carry = 0_u16;
+    for (target, value) in commitment.iter_mut().rev().zip(mapping.iter().rev()) {
+        let sum = u16::from(*target) + u16::from(*value) + carry;
+        *target = sum.to_be_bytes()[1];
+        carry = sum >> 8;
+    }
+}
+
+struct StreamingV4Artifact {
+    temporary_name: String,
+    writer: BufWriter<File>,
+    digest: Sha256,
+    bytes: u64,
+}
+
+impl StreamingV4Artifact {
+    fn create(index: &graphforge_filesystem::StableDirectory, role: &str) -> Result<Self, GfError> {
+        let temporary_name = format!(".v4-{role}-{}.tmp", Uuid::new_v4().simple());
+        Ok(Self {
+            writer: BufWriter::with_capacity(
+                V4_ORDINAL_BLOCK_BYTES,
+                index
+                    .create_replaceable_child_file(std::ffi::OsStr::new(&temporary_name))
+                    .map_err(storage_err)?,
+            ),
+            temporary_name,
+            digest: Sha256::new(),
+            bytes: 0,
+        })
+    }
+
+    fn push(&mut self, bytes: &[u8]) -> Result<(), GfError> {
+        self.writer.write_all(bytes).map_err(storage_err)?;
+        self.digest.update(bytes);
+        self.bytes = self
+            .bytes
+            .checked_add(u64::try_from(bytes.len()).map_err(storage_err)?)
+            .ok_or_else(|| storage_err("v4 artifact length overflow"))?;
+        Ok(())
+    }
+}
+
+fn finish_streamed_v4_artifact(
+    mut writer: StreamingV4Artifact,
+    index: &graphforge_filesystem::StableDirectory,
+    prefix: &str,
+    generation: u64,
+    kind: crate::V4OrdinalArtifactKind,
+    metrics: &mut V4OrdinalBuildMetrics,
+) -> Result<crate::V4OrdinalArtifact, GfError> {
+    writer.writer.flush().map_err(storage_err)?;
+    sync_uuid_file(writer.writer.get_ref())?;
+    metrics.fsync_operations = metrics
+        .fsync_operations
+        .checked_add(1)
+        .ok_or_else(|| storage_err("v4 fsync count overflow"))?;
+    let identity =
+        graphforge_filesystem::file_identity(writer.writer.get_ref()).map_err(storage_err)?;
+    let sha256 = hex_bytes(&writer.digest.finalize());
+    let artifact = crate::V4OrdinalArtifact {
+        name: format!("{prefix}-{generation}-{}.uuidx", &sha256[..16]),
+        kind,
+        generation,
+        bytes: writer.bytes,
+        sha256,
+    };
+    drop(writer.writer);
+    index
+        .replace_child(
+            std::ffi::OsStr::new(&writer.temporary_name),
+            identity,
+            std::ffi::OsStr::new(&artifact.name),
+        )
+        .map_err(storage_err)?;
+    metrics.artifact_bytes = metrics
+        .artifact_bytes
+        .checked_add(artifact.bytes)
+        .ok_or_else(|| storage_err("v4 aggregate artifact length overflow"))?;
+    metrics.peak_temporary_bytes = metrics.peak_temporary_bytes.max(metrics.artifact_bytes);
+    metrics.write_blocks = metrics
+        .write_blocks
+        .checked_add(artifact.bytes.div_ceil(V4_ORDINAL_BLOCK_BYTES as u64))
+        .ok_or_else(|| storage_err("v4 write block count overflow"))?;
+    Ok(artifact)
+}
+
+struct V4OrdinalRangeWriter {
+    artifact: StreamingV4Artifact,
+    first_node_id: u64,
+    count: u64,
+    block: Vec<u8>,
+    blocks: Vec<crate::V4OrdinalBlock>,
+}
+
+impl V4OrdinalRangeWriter {
+    fn new(
+        index: &graphforge_filesystem::StableDirectory,
+        ordinal: usize,
+        first_node_id: u64,
+    ) -> Result<Self, GfError> {
+        Ok(Self {
+            artifact: StreamingV4Artifact::create(index, &format!("ordinal-{ordinal:08}"))?,
+            first_node_id,
+            count: 0,
+            block: Vec::with_capacity(V4_ORDINAL_BLOCK_BYTES),
+            blocks: Vec::new(),
+        })
+    }
+
+    fn push(&mut self, uuid: [u8; 16]) -> Result<(), GfError> {
+        self.artifact.push(&uuid)?;
+        self.block.extend_from_slice(&uuid);
+        self.count = self
+            .count
+            .checked_add(1)
+            .ok_or_else(|| storage_err("v4 ordinal range count overflow"))?;
+        if self.block.len() == V4_ORDINAL_BLOCK_BYTES {
+            self.finish_block()?;
+        }
+        Ok(())
+    }
+
+    fn finish_block(&mut self) -> Result<(), GfError> {
+        if self.block.is_empty() {
+            return Ok(());
+        }
+        let offset = u64::try_from(self.blocks.len())
+            .map_err(storage_err)?
+            .checked_mul(V4_ORDINAL_BLOCK_BYTES as u64)
+            .ok_or_else(|| storage_err("v4 ordinal block offset overflow"))?;
+        self.blocks.push(crate::V4OrdinalBlock {
+            offset,
+            count: u64::try_from(self.block.len() / 16).map_err(storage_err)?,
+            sha256: hex_sha256(&self.block),
+        });
+        self.block.clear();
+        Ok(())
+    }
+}
+
+fn finish_streamed_v4_range(
+    index: &graphforge_filesystem::StableDirectory,
+    generation: u64,
+    mut writer: V4OrdinalRangeWriter,
+    ranges: &mut Vec<crate::V4OrdinalRange>,
+    metrics: &mut V4OrdinalBuildMetrics,
+) -> Result<(), GfError> {
+    if writer.count == 0 {
+        return Err(storage_err("v4 ordinal range is empty"));
+    }
+    writer.finish_block()?;
+    let artifact = finish_streamed_v4_artifact(
+        writer.artifact,
+        index,
+        "ordinal-v4",
+        generation,
+        crate::V4OrdinalArtifactKind::OrdinalUuids,
+        metrics,
+    )?;
+    ranges.push(crate::V4OrdinalRange {
+        first_node_id: writer.first_node_id,
+        count: writer.count,
+        artifact,
+        blocks: writer.blocks,
+    });
+    Ok(())
 }
 
 /// Aggregate-only evidence for one incremental v3 run publication.
@@ -630,6 +1089,100 @@ pub(crate) struct ConstructionIndexEncoding {
     pub retained_payload_bytes: u64,
     pub peak_buffer_bytes: u64,
     pub peak_temporary_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct V4OrdinalPublicationMetrics {
+    pub(crate) write_bytes: u64,
+    pub(crate) write_operations: u64,
+    pub(crate) fsync_operations: u64,
+    pub(crate) peak_temporary_bytes: u64,
+}
+
+pub(crate) fn publish_v4_construction_artifacts(
+    encoded: &graphforge_filesystem::StableDirectory,
+    manifest: &crate::V4OrdinalIdentityManifest,
+    generation: u64,
+    topology_delta_sha256: &str,
+) -> Result<(Vec<ConstructionIndexOutput>, V4OrdinalPublicationMetrics), GfError> {
+    let graph = encoded
+        .open_child_directory(std::ffi::OsStr::new("graph"))
+        .map_err(storage_err)?;
+    let topology = graph
+        .open_child_directory(std::ffi::OsStr::new("topology"))
+        .map_err(storage_err)?;
+    let index = topology
+        .open_child_directory(std::ffi::OsStr::new("uuid-membership"))
+        .map_err(storage_err)?;
+    let manifest_body = serde_json::to_vec(manifest).map_err(storage_err)?;
+    let receipt = TopologyIndexReceipt {
+        nonce: Uuid::new_v4().simple().to_string(),
+        expected_generation: generation,
+        topology_delta_sha256: topology_delta_sha256.to_owned(),
+        manifest_sha256: hex_sha256(&manifest_body),
+    };
+    let receipt_body = serde_json::to_vec(&receipt).map_err(storage_err)?;
+    let mut work = ConstructionIndexWork::default();
+    let mut outputs = manifest
+        .forward_identities
+        .iter()
+        .chain(manifest.ordinal_ranges.iter().map(|range| &range.artifact))
+        .chain(manifest.tombstones.iter().map(|run| &run.artifact))
+        .map(|artifact| ConstructionIndexOutput {
+            name: artifact.name.clone(),
+            bytes: artifact.bytes,
+            sha256: artifact.sha256.clone(),
+        })
+        .collect::<Vec<_>>();
+    crate::graph_construction::construction_failpoint("v4_publish.after_artifacts");
+    index.sync().map_err(storage_err)?;
+    work.fsync_operations = work.fsync_operations.saturating_add(1);
+    crate::graph_construction::construction_failpoint("v4_publish.after_artifacts_fsync");
+    let artifact_bytes = outputs.iter().try_fold(0_u64, |total, output| {
+        total
+            .checked_add(output.bytes)
+            .ok_or_else(|| storage_err("v4 publication artifact byte count overflow"))
+    })?;
+    // The selected project generation is still unpublished. Install the
+    // receipt first, then its manifest, and create the lock last so every
+    // visible construction inventory is complete and reopenable.
+    outputs.push(install_construction_bytes(
+        &index,
+        V4_ORDINAL_RECEIPT,
+        &receipt_body,
+        &mut work,
+    )?);
+    crate::graph_construction::construction_failpoint("v4_publish.after_receipt_install");
+    outputs.push(install_construction_bytes(
+        &index,
+        V4_ORDINAL_MANIFEST,
+        &manifest_body,
+        &mut work,
+    )?);
+    crate::graph_construction::construction_failpoint("v4_publish.after_manifest_install");
+    outputs.push(install_construction_bytes(
+        &index,
+        "ordinal-v4.lock",
+        &[],
+        &mut work,
+    )?);
+    crate::graph_construction::construction_failpoint("v4_publish.after_lock_install");
+    index.sync().map_err(storage_err)?;
+    topology.sync().map_err(storage_err)?;
+    graph.sync().map_err(storage_err)?;
+    encoded.sync().map_err(storage_err)?;
+    work.fsync_operations = work.fsync_operations.saturating_add(4);
+    Ok((
+        outputs,
+        V4OrdinalPublicationMetrics {
+            write_bytes: work.write_bytes,
+            write_operations: work.write_operations,
+            fsync_operations: work.fsync_operations,
+            peak_temporary_bytes: artifact_bytes
+                .checked_add(work.write_bytes)
+                .ok_or_else(|| storage_err("v4 publication temporary byte count overflow"))?,
+        },
+    ))
 }
 
 #[derive(Default)]
@@ -2198,7 +2751,9 @@ fn cleanup_private_construction_index(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(storage_err(error)),
     }
-    for name in index.child_names().map_err(storage_err)? {
+    let names = index.child_names().map_err(storage_err)?;
+    let v4_allowed = authenticate_private_v4_residue(&index, &names)?;
+    for name in names {
         let name_text = name
             .to_str()
             .ok_or_else(|| storage_err("construction recovery inventory name is not UTF-8"))?;
@@ -2208,6 +2763,7 @@ fn cleanup_private_construction_index(
             && !name_text.starts_with(".manifest.json-")
             && !name_text.starts_with("identities-v3")
             && !name_text.starts_with("node-surrogates-v3")
+            && !v4_allowed.contains(name_text)
         {
             return Err(storage_err(
                 "construction recovery inventory contains an unauthorised object",
@@ -2228,6 +2784,299 @@ fn cleanup_private_construction_index(
     topology.sync().map_err(storage_err)?;
     graph.sync().map_err(storage_err)?;
     encoded.sync().map_err(storage_err)
+}
+
+fn authenticate_private_v4_residue(
+    index: &graphforge_filesystem::StableDirectory,
+    names: &[std::ffi::OsString],
+) -> Result<BTreeSet<String>, GfError> {
+    let text = names
+        .iter()
+        .map(|name| {
+            name.to_str()
+                .map(str::to_owned)
+                .ok_or_else(|| storage_err("construction recovery inventory name is not UTF-8"))
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    let receipt_present = text.contains(V4_ORDINAL_RECEIPT);
+    let manifest_present = text.contains(V4_ORDINAL_MANIFEST);
+    let lock_present = text.contains("ordinal-v4.lock");
+    let mut allowed = BTreeSet::new();
+
+    if manifest_present && !receipt_present || lock_present && !manifest_present {
+        return Err(storage_err(
+            "private v4 construction controls are not an install-order prefix",
+        ));
+    }
+    authenticate_private_v4_control_temp(
+        index,
+        &text,
+        receipt_present,
+        manifest_present,
+        lock_present,
+        &mut allowed,
+    )?;
+    if receipt_present {
+        let receipt_body =
+            read_private_construction_child(index, V4_ORDINAL_RECEIPT, MAX_MANIFEST_BYTES)?;
+        let receipt: TopologyIndexReceipt =
+            serde_json::from_slice(&receipt_body).map_err(storage_err)?;
+        if !canonical_lower_hex(&receipt.nonce, 32)
+            || !canonical_lower_hex(&receipt.topology_delta_sha256, 64)
+            || !canonical_lower_hex(&receipt.manifest_sha256, 64)
+        {
+            return Err(storage_err(
+                "private v4 construction receipt is noncanonical",
+            ));
+        }
+        allowed.insert(V4_ORDINAL_RECEIPT.to_owned());
+        if !manifest_present {
+            return authenticate_private_v4_artifact_residue(index, &text, allowed);
+        }
+        let manifest_body = read_private_construction_child(
+            index,
+            V4_ORDINAL_MANIFEST,
+            crate::ordinal_identity_v4::MAX_MANIFEST_BYTES,
+        )?;
+        if hex_sha256(&manifest_body) != receipt.manifest_sha256 {
+            return Err(storage_err(
+                "private v4 construction manifest does not match its receipt",
+            ));
+        }
+        let manifest: crate::V4OrdinalIdentityManifest =
+            serde_json::from_slice(&manifest_body).map_err(storage_err)?;
+        if manifest.topology_generation != receipt.expected_generation {
+            return Err(storage_err(
+                "private v4 construction generation does not match its receipt",
+            ));
+        }
+        admit_v4_construction_manifest(&manifest)?;
+        allowed.insert(V4_ORDINAL_MANIFEST.to_owned());
+        if lock_present {
+            let lock = index
+                .open_child_file(std::ffi::OsStr::new("ordinal-v4.lock"))
+                .map_err(storage_err)?;
+            if lock.metadata().map_err(storage_err)?.len() != 0 {
+                return Err(storage_err("private v4 construction lock is nonempty"));
+            }
+            allowed.insert("ordinal-v4.lock".to_owned());
+        }
+        for artifact in manifest
+            .forward_identities
+            .iter()
+            .chain(manifest.ordinal_ranges.iter().map(|range| &range.artifact))
+            .chain(manifest.tombstones.iter().map(|run| &run.artifact))
+        {
+            authenticate_private_v4_artifact(index, artifact)?;
+            if !allowed.insert(artifact.name.clone()) {
+                return Err(storage_err(
+                    "private v4 construction manifest repeats an artifact",
+                ));
+            }
+        }
+    }
+
+    authenticate_private_v4_artifact_residue(index, &text, allowed)
+}
+
+fn authenticate_private_v4_control_temp(
+    index: &graphforge_filesystem::StableDirectory,
+    text: &BTreeSet<String>,
+    receipt_present: bool,
+    manifest_present: bool,
+    lock_present: bool,
+    allowed: &mut BTreeSet<String>,
+) -> Result<(), GfError> {
+    let temporaries = text
+        .iter()
+        .filter_map(|name| {
+            [V4_ORDINAL_RECEIPT, V4_ORDINAL_MANIFEST, "ordinal-v4.lock"]
+                .into_iter()
+                .find_map(|control| {
+                    name.strip_prefix(&format!(".{control}-"))
+                        .and_then(|suffix| suffix.strip_suffix(".tmp"))
+                        .filter(|nonce| canonical_lower_hex(nonce, 32))
+                        .map(|_| (name, control))
+                })
+        })
+        .collect::<Vec<_>>();
+    if temporaries.len() > 1 {
+        return Err(storage_err(
+            "private v4 construction has multiple control temporaries",
+        ));
+    }
+    let Some((name, control)) = temporaries.first().copied() else {
+        return Ok(());
+    };
+    match control {
+        V4_ORDINAL_RECEIPT if !receipt_present && !manifest_present && !lock_present => {
+            let body = read_private_construction_child(index, name, MAX_MANIFEST_BYTES)?;
+            let receipt: TopologyIndexReceipt =
+                serde_json::from_slice(&body).map_err(storage_err)?;
+            if !canonical_lower_hex(&receipt.nonce, 32)
+                || !canonical_lower_hex(&receipt.topology_delta_sha256, 64)
+                || !canonical_lower_hex(&receipt.manifest_sha256, 64)
+            {
+                return Err(storage_err("private v4 receipt temporary is noncanonical"));
+            }
+        }
+        V4_ORDINAL_MANIFEST if receipt_present && !manifest_present && !lock_present => {
+            let receipt_body =
+                read_private_construction_child(index, V4_ORDINAL_RECEIPT, MAX_MANIFEST_BYTES)?;
+            let receipt: TopologyIndexReceipt =
+                serde_json::from_slice(&receipt_body).map_err(storage_err)?;
+            let body = read_private_construction_child(
+                index,
+                name,
+                crate::ordinal_identity_v4::MAX_MANIFEST_BYTES,
+            )?;
+            let manifest: crate::V4OrdinalIdentityManifest =
+                serde_json::from_slice(&body).map_err(storage_err)?;
+            if hex_sha256(&body) != receipt.manifest_sha256
+                || manifest.topology_generation != receipt.expected_generation
+            {
+                return Err(storage_err(
+                    "private v4 manifest temporary is not receipt-bound",
+                ));
+            }
+            admit_v4_construction_manifest(&manifest)?;
+        }
+        "ordinal-v4.lock" if receipt_present && manifest_present && !lock_present => {
+            let body = read_private_construction_child(index, name, 0)?;
+            if !body.is_empty() {
+                return Err(storage_err("private v4 lock temporary is nonempty"));
+            }
+        }
+        _ => {
+            return Err(storage_err(
+                "private v4 control temporary is outside its install boundary",
+            ));
+        }
+    }
+    allowed.insert(name.clone());
+    Ok(())
+}
+
+fn authenticate_private_v4_artifact_residue(
+    index: &graphforge_filesystem::StableDirectory,
+    text: &BTreeSet<String>,
+    mut allowed: BTreeSet<String>,
+) -> Result<BTreeSet<String>, GfError> {
+    for name in text {
+        if allowed.contains(name) || !is_exact_private_v4_name(name) {
+            continue;
+        }
+        if name.starts_with(".v4-") {
+            allowed.insert(name.clone());
+            continue;
+        }
+        let mut file = index
+            .open_child_file(std::ffi::OsStr::new(name))
+            .map_err(storage_err)?;
+        let length = file.metadata().map_err(storage_err)?.len();
+        let digest = sha256_reader_streaming(&mut file)?;
+        let suffix = name
+            .strip_suffix(".uuidx")
+            .and_then(|name| name.rsplit_once('-'))
+            .map(|(_, digest)| digest)
+            .ok_or_else(|| storage_err("private v4 artifact name is malformed"))?;
+        if length == 0 && !name.starts_with("tombstones-v4-") || !digest.starts_with(suffix) {
+            return Err(storage_err(
+                "private v4 construction artifact fails content authentication",
+            ));
+        }
+        allowed.insert(name.clone());
+    }
+    Ok(allowed)
+}
+
+fn read_private_construction_child(
+    index: &graphforge_filesystem::StableDirectory,
+    name: &str,
+    maximum: u64,
+) -> Result<Vec<u8>, GfError> {
+    let mut file = index
+        .open_child_file(std::ffi::OsStr::new(name))
+        .map_err(storage_err)?;
+    if graphforge_filesystem::file_link_count(&file).map_err(storage_err)? != 1 {
+        return Err(storage_err(
+            "private v4 construction control has extra links",
+        ));
+    }
+    read_bounded(&mut file, maximum)
+}
+
+fn authenticate_private_v4_artifact(
+    index: &graphforge_filesystem::StableDirectory,
+    artifact: &crate::V4OrdinalArtifact,
+) -> Result<(), GfError> {
+    if !is_exact_private_v4_name(&artifact.name) || artifact.name.starts_with(".v4-") {
+        return Err(storage_err("private v4 artifact name is noncanonical"));
+    }
+    let mut file = index
+        .open_child_file(std::ffi::OsStr::new(&artifact.name))
+        .map_err(storage_err)?;
+    if graphforge_filesystem::file_link_count(&file).map_err(storage_err)? != 1
+        || file.metadata().map_err(storage_err)?.len() != artifact.bytes
+        || sha256_reader_streaming(&mut file)? != artifact.sha256
+    {
+        return Err(storage_err("private v4 artifact authentication failed"));
+    }
+    Ok(())
+}
+
+pub(crate) fn is_exact_private_v4_name(name: &str) -> bool {
+    if let Some(rest) = name.strip_prefix(".v4-") {
+        let Some((role, nonce)) = rest.strip_suffix(".tmp").and_then(|v| v.rsplit_once('-')) else {
+            return false;
+        };
+        let role_ok = role == "forward"
+            || role == "tombstones"
+            || role.strip_prefix("ordinal-").is_some_and(|ordinal| {
+                ordinal.len() == 8 && ordinal.bytes().all(|b| b.is_ascii_digit())
+            });
+        return role_ok && canonical_lower_hex(nonce, 32);
+    }
+    let prefix = if name.starts_with("forward-v4-") {
+        "forward-v4-"
+    } else if name.starts_with("ordinal-v4-") {
+        "ordinal-v4-"
+    } else if name.starts_with("tombstones-v4-") {
+        "tombstones-v4-"
+    } else {
+        return false;
+    };
+    let Some((generation, digest)) = name
+        .strip_prefix(prefix)
+        .and_then(|value| value.strip_suffix(".uuidx"))
+        .and_then(|value| value.rsplit_once('-'))
+    else {
+        return false;
+    };
+    generation
+        .parse::<u64>()
+        .is_ok_and(|value| value != 0 && value.to_string() == generation)
+        && canonical_lower_hex(digest, 16)
+}
+
+fn canonical_lower_hex(value: &str, length: usize) -> bool {
+    value.len() == length
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn sha256_reader_streaming(reader: &mut impl Read) -> Result<String, GfError> {
+    let mut digest = Sha256::new();
+    let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
+    loop {
+        let read = reader.read(&mut buffer).map_err(storage_err)?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(hex_bytes(&digest.finalize()))
 }
 
 fn write_construction_intent(
@@ -2678,8 +3527,20 @@ fn install_construction_bytes(
     file.write_all(bytes).map_err(storage_err)?;
     work.write_bytes = work.write_bytes.saturating_add(bytes.len() as u64);
     work.write_operations = work.write_operations.saturating_add(1);
+    work.peak_temporary_bytes = work
+        .peak_temporary_bytes
+        .max(u64::try_from(bytes.len()).map_err(storage_err)?);
     file.sync_all().map_err(storage_err)?;
     work.fsync_operations = work.fsync_operations.saturating_add(1);
+    let failpoint = match name {
+        V4_ORDINAL_RECEIPT => Some("v4_publish.after_receipt_temp_fsync"),
+        V4_ORDINAL_MANIFEST => Some("v4_publish.after_manifest_temp_fsync"),
+        "ordinal-v4.lock" => Some("v4_publish.after_lock_temp_fsync"),
+        _ => None,
+    };
+    if let Some(failpoint) = failpoint {
+        crate::graph_construction::construction_failpoint(failpoint);
+    }
     drop(file);
     output
         .replace_child(
@@ -5012,6 +5873,172 @@ pub fn rebuild_uuid_membership_indexes(
     migrate_uuid_membership_indexes(project_dir, limits, true)
 }
 
+/// Rebuild v4 ordinal identity from canonical topology, never v3 reverse state.
+pub fn rebuild_v4_ordinal_identity(
+    project_dir: &Path,
+    limits: UuidIndexBuildLimits,
+) -> Result<UuidIndexBuildMetrics, GfError> {
+    let metrics = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let callback_metrics = std::rc::Rc::clone(&metrics);
+    let root = project_dir.to_path_buf();
+    let participant: crate::durable_rewrite::RewriteParticipantPreparer<'_> =
+        Box::new(move |context, batch| {
+            let built = stage_v4_ordinal_rebuild_locked(
+                context.project_root,
+                context.prior.topology,
+                limits,
+                batch,
+            )?;
+            *callback_metrics.borrow_mut() = Some(built);
+            let manifest_path = context
+                .project_root
+                .join(INDEX_DIR)
+                .join(V4_ORDINAL_MANIFEST);
+            let manifest_bytes = fs::read(
+                batch
+                    .staged_temp(&manifest_path)
+                    .ok_or_else(|| storage_err("v4 rebuild did not stage its manifest"))?,
+            )
+            .map_err(storage_err)?;
+            let receipt = TopologyIndexReceipt {
+                nonce: Uuid::new_v4().simple().to_string(),
+                expected_generation: context.prior.topology,
+                topology_delta_sha256: hex_sha256(b"uuid-membership-v4-canonical-rebuild"),
+                manifest_sha256: hex_sha256(&manifest_bytes),
+            };
+            let receipt_bytes = serde_json::to_vec(&receipt).map_err(storage_err)?;
+            batch.stage_bytes(
+                &context
+                    .project_root
+                    .join(INDEX_DIR)
+                    .join(V4_ORDINAL_RECEIPT),
+                &receipt_bytes,
+            )?;
+            // Artifacts, then receipt, then facet manifest. The enclosing
+            // generation record remains the durable transaction's last switch.
+            batch.move_staged_destination_to_end(&manifest_path);
+            Ok(Some(crate::AuxiliaryReceipt {
+                kind: "uuid-membership/v4".to_owned(),
+                schema_version: crate::ORDINAL_IDENTITY_V4,
+                path: format!("{INDEX_DIR}/{V4_ORDINAL_RECEIPT}"),
+                digest: hex_sha256(&receipt_bytes),
+                bytes: u64::try_from(receipt_bytes.len())
+                    .map_err(|_| storage_err("receipt length overflow"))?,
+            }))
+        });
+    crate::generation::commit_topology_aware_with_participant(
+        crate::staging::RewriteBatch::new(),
+        &root,
+        participant,
+    )?;
+    Ok(metrics.borrow_mut().take().unwrap_or_default())
+}
+
+fn stage_v4_ordinal_rebuild_locked(
+    project_dir: &Path,
+    generation: u64,
+    limits: UuidIndexBuildLimits,
+    batch: &mut crate::staging::RewriteBatch,
+) -> Result<UuidIndexBuildMetrics, GfError> {
+    if generation == 0 {
+        return Err(storage_err(
+            "v4 ordinal identity requires a nonzero topology generation",
+        ));
+    }
+    let limits = limits.validate()?;
+    let destination = project_dir.join(INDEX_DIR);
+    fs::create_dir_all(&destination).map_err(storage_err)?;
+    let staging = project_dir
+        .parent()
+        .ok_or_else(|| storage_err("project directory has no staging parent"))?;
+    let scratch = tempfile::Builder::new()
+        .prefix("uuid-membership-v4-build-")
+        .tempdir_in(staging)
+        .map_err(storage_err)?;
+    let artifact_root = scratch.path().join("artifacts");
+    fs::create_dir(&artifact_root).map_err(storage_err)?;
+    let artifact_directory =
+        graphforge_filesystem::StableDirectory::open(&artifact_root).map_err(storage_err)?;
+    let mut metrics = UuidIndexBuildMetrics::default();
+
+    // Both bounded projections originate from this single canonical topology
+    // scan. For an immutable project generation, authenticate its declared
+    // graph inventory before opening any topology payload. Standalone graph
+    // roots have no enclosing inventory authority and retain the admitted,
+    // validated Parquet path used by the existing explicit v3 rebuild.
+    let uuid_runs = if let Some(selected) = selected_generation_for_graph_root(project_dir)? {
+        let mut pinned = selected
+            .authenticated_graph_files_pinned_where(|entry| {
+                canonical_node_topology_inventory_path(&entry.relative_path)
+            })?
+            .ok_or_else(|| {
+                storage_err("selected project generation has no authenticated graph inventory")
+            })?;
+        pinned.sort_by(|left, right| left.entry.relative_path.cmp(&right.entry.relative_path));
+        scan_pinned_entity_surrogate_runs(
+            &pinned,
+            "node_uuid",
+            "node_id",
+            "v4-node",
+            scratch.path(),
+            limits,
+            &mut metrics,
+        )?
+    } else {
+        // Standalone roots have no immutable project inventory authority.
+        let node_paths = crate::mutator::node_parquet_files(project_dir).map_err(storage_err)?;
+        scan_entity_surrogate_runs(
+            &node_paths,
+            "node_uuid",
+            "node_id",
+            "v4-node",
+            scratch.path(),
+            limits,
+            &mut metrics,
+        )?
+    };
+    // No v3 index file is opened or used as migration authority.
+    let uuid_sorted =
+        merge_node_surrogate_runs(uuid_runs, scratch.path(), limits.merge_fan_in, &mut metrics)?;
+    let ordinal_sorted = build_surrogate_run(&uuid_sorted, scratch.path(), limits, &mut metrics)?;
+
+    let mut writer = V4OrdinalConstructionWriter::start(generation, &artifact_directory)?;
+    let mut cancelled = || false;
+    let mut forward = BufReader::with_capacity(
+        BULK_IO_BYTES,
+        File::open(&uuid_sorted).map_err(storage_err)?,
+    );
+    while let Some((uuid, node_id)) = read_node_surrogate_record(&mut forward)? {
+        writer.push_forward(Uuid::from_bytes(uuid), node_id, &mut cancelled)?;
+    }
+    let mut ordinal = BufReader::with_capacity(
+        BULK_IO_BYTES,
+        File::open(&ordinal_sorted).map_err(storage_err)?,
+    );
+    while let Some((node_id, uuid)) = read_surrogate_record(&mut ordinal)? {
+        writer.push_ordinal(node_id, Uuid::from_bytes(uuid), &mut cancelled)?;
+    }
+    let (manifest, v4_metrics) = writer.finish()?;
+    metrics.node_count = v4_metrics.input_records;
+    for artifact in manifest
+        .forward_identities
+        .iter()
+        .chain(manifest.ordinal_ranges.iter().map(|range| &range.artifact))
+        .chain(manifest.tombstones.iter().map(|run| &run.artifact))
+    {
+        batch.stage_file(
+            &destination.join(&artifact.name),
+            &artifact_root.join(&artifact.name),
+        )?;
+    }
+    let manifest_bytes = serde_json::to_vec(&manifest).map_err(storage_err)?;
+    if manifest_bytes.len() as u64 > crate::ordinal_identity_v4::MAX_MANIFEST_BYTES {
+        return Err(storage_err("v4 ordinal manifest exceeds bound"));
+    }
+    batch.stage_bytes(&destination.join(V4_ORDINAL_MANIFEST), &manifest_bytes)?;
+    Ok(metrics)
+}
+
 /// Ensure the current topology generation has a v3 UUID index before a
 /// topology mutation enters its sealed rewrite callback.
 pub(crate) fn ensure_uuid_membership_migrated(project_dir: &Path) -> Result<(), GfError> {
@@ -5662,6 +6689,97 @@ fn scan_entity_surrogate_runs(
     Ok(runs)
 }
 
+fn canonical_node_topology_inventory_path(relative: &str) -> bool {
+    relative == "topology/nodes.parquet"
+        || relative
+            .strip_prefix("topology/nodes/")
+            .is_some_and(|name| !name.contains('/') && name.ends_with(".parquet"))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scan_pinned_entity_surrogate_runs(
+    inputs: &[crate::project_generation::PinnedGraphFile],
+    uuid_column: &str,
+    surrogate_column: &str,
+    prefix: &str,
+    scratch: &Path,
+    limits: UuidIndexBuildLimits,
+    metrics: &mut UuidIndexBuildMetrics,
+) -> Result<Vec<PathBuf>, GfError> {
+    let mut buffer = Vec::<([u8; 16], u64)>::with_capacity(limits.run_records);
+    let mut runs = Vec::new();
+    for input in inputs {
+        let identity = graphforge_filesystem::file_identity(&input.file).map_err(storage_err)?;
+        if identity != input.identity
+            || input.file.metadata().map_err(storage_err)?.len() != input.entry.byte_length
+        {
+            return Err(storage_err(
+                "authenticated topology payload identity changed before scan",
+            ));
+        }
+        let reader =
+            ParquetRecordBatchReaderBuilder::try_new(input.file.try_clone().map_err(storage_err)?)
+                .map_err(storage_err)?
+                .with_batch_size(limits.scan_batch_rows)
+                .build()
+                .map_err(storage_err)?;
+        for batch in reader {
+            let batch = batch.map_err(storage_err)?;
+            let uuids = batch
+                .column_by_name(uuid_column)
+                .and_then(|column| column.as_any().downcast_ref::<FixedSizeBinaryArray>())
+                .ok_or_else(|| {
+                    storage_err(format!("{} lacks {uuid_column}", input.entry.relative_path))
+                })?;
+            let surrogates = batch
+                .column_by_name(surrogate_column)
+                .and_then(|column| column.as_any().downcast_ref::<UInt64Array>())
+                .ok_or_else(|| {
+                    storage_err(format!(
+                        "{} lacks {surrogate_column}",
+                        input.entry.relative_path
+                    ))
+                })?;
+            if uuids.len() != surrogates.len() {
+                return Err(storage_err(
+                    "identity UUID and surrogate columns differ in length",
+                ));
+            }
+            for row in 0..uuids.len() {
+                if uuids.is_null(row) || uuids.value(row).len() != 16 || surrogates.is_null(row) {
+                    return Err(storage_err(format!("invalid entity identity at row {row}")));
+                }
+                buffer.push((
+                    uuids.value(row).try_into().expect("length checked"),
+                    surrogates.value(row),
+                ));
+                metrics.peak_buffered_records = metrics.peak_buffered_records.max(buffer.len());
+                if buffer.len() == limits.run_records {
+                    flush_entity_surrogate_run(&mut buffer, scratch, prefix, &mut runs, metrics)?;
+                }
+            }
+        }
+        if graphforge_filesystem::file_identity(&input.file).map_err(storage_err)? != input.identity
+        {
+            return Err(storage_err(
+                "authenticated topology payload identity changed during scan",
+            ));
+        }
+    }
+    if !buffer.is_empty() {
+        flush_entity_surrogate_run(&mut buffer, scratch, prefix, &mut runs, metrics)?;
+    }
+    if runs.is_empty() {
+        let path = scratch.join(format!("{prefix}-surrogates-empty.run"));
+        File::create(&path)
+            .map_err(storage_err)?
+            .sync_all()
+            .map_err(storage_err)?;
+        runs.push(path);
+    }
+    Ok(runs)
+}
+
 fn scan_node_surrogate_validation_runs(
     paths: &[PathBuf],
     scratch: &Path,
@@ -6019,6 +7137,68 @@ pub(crate) mod tests {
     use parquet::arrow::ArrowWriter;
 
     use super::*;
+
+    #[test]
+    fn shared_v4_builder_rejects_sparse_manifest_above_reader_bound() {
+        let artifact = |name: String| crate::V4OrdinalArtifact {
+            name,
+            kind: crate::V4OrdinalArtifactKind::OrdinalUuids,
+            generation: 1,
+            bytes: 16,
+            sha256: "00".repeat(32),
+        };
+        let ranges = (0..V4_MAX_RANGES)
+            .map(|ordinal| crate::V4OrdinalRange {
+                first_node_id: u64::try_from(ordinal).unwrap() * 2 + 1,
+                count: 1,
+                artifact: artifact(format!("ordinal-v4-1-{ordinal:016x}.uuidx")),
+                blocks: vec![crate::V4OrdinalBlock {
+                    offset: 0,
+                    count: 1,
+                    sha256: "11".repeat(32),
+                }],
+            })
+            .collect::<Vec<_>>();
+        let manifest = crate::V4OrdinalIdentityManifest {
+            format_version: crate::ORDINAL_IDENTITY_V4,
+            topology_generation: 1,
+            forward_identities: vec![crate::V4OrdinalArtifact {
+                name: "forward-v4-1-0000000000000000.uuidx".to_owned(),
+                kind: crate::V4OrdinalArtifactKind::ForwardIdentities,
+                generation: 1,
+                bytes: 24,
+                sha256: "22".repeat(32),
+            }],
+            ordinal_ranges: ranges,
+            tombstones: Vec::new(),
+        };
+        assert!(
+            serde_json::to_vec(&manifest).unwrap().len() as u64
+                > crate::ordinal_identity_v4::MAX_MANIFEST_BYTES
+        );
+        assert!(admit_v4_construction_manifest(&manifest).is_err());
+    }
+
+    #[test]
+    fn cleanup_authenticates_complete_unpublished_v4_facet() {
+        let encoded_dir = tempfile::tempdir().unwrap();
+        let encoded = graphforge_filesystem::StableDirectory::open(encoded_dir.path()).unwrap();
+        let graph = encoded
+            .create_child_directory(std::ffi::OsStr::new("graph"))
+            .unwrap();
+        let topology = graph
+            .create_child_directory(std::ffi::OsStr::new("topology"))
+            .unwrap();
+        let index = topology
+            .create_child_directory(std::ffi::OsStr::new("uuid-membership"))
+            .unwrap();
+        let mappings = [(Uuid::from_u128(1), 1_u64), (Uuid::from_u128(2), 3_u64)];
+        let (manifest, _) = stage_v4_ordinal_artifacts(mappings, 1, &index, || false).unwrap();
+        publish_v4_construction_artifacts(&encoded, &manifest, 1, &hex_sha256(b"delta")).unwrap();
+
+        cleanup_private_construction_index(&encoded).unwrap();
+        assert!(index.child_names().unwrap().is_empty());
+    }
 
     #[test]
     fn construction_encoder_io_geometry_is_block_bounded() {
@@ -7172,5 +8352,190 @@ pub(crate) mod tests {
                 .to_string()
                 .contains("invalid node surrogate")
         );
+    }
+
+    #[test]
+    fn v4_stream_builder_emits_maximal_authenticated_ranges() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("index");
+        fs::create_dir(&root).unwrap();
+        let index = graphforge_filesystem::StableDirectory::open(&root).unwrap();
+        let records = (1_u128..=4_100)
+            .map(|value| {
+                let node_id = if value <= 4_096 {
+                    value as u64
+                } else {
+                    value as u64 + 10
+                };
+                (Uuid::from_u128(value), node_id)
+            })
+            .collect::<Vec<_>>();
+        let (manifest, metrics) =
+            stage_v4_ordinal_artifacts(records.clone(), 7, &index, || false).unwrap();
+
+        assert_eq!(metrics.input_records, 4_100);
+        assert_eq!(metrics.ranges, 2);
+        assert_eq!(metrics.cancellation_polls, 4_100);
+        assert_eq!(metrics.peak_buffer_bytes, 3 * V4_ORDINAL_BLOCK_BYTES);
+        assert_eq!(metrics.peak_temporary_bytes, 4_100 * (24 + 16));
+        assert_eq!(metrics.fsync_operations, 4);
+        assert_eq!(manifest.ordinal_ranges[0].first_node_id, 1);
+        assert_eq!(manifest.ordinal_ranges[0].count, 4_096);
+        assert_eq!(manifest.ordinal_ranges[0].blocks.len(), 1);
+        assert_eq!(manifest.ordinal_ranges[0].blocks[0].count, 4_096);
+        assert_eq!(manifest.ordinal_ranges[1].first_node_id, 4_107);
+        assert_eq!(manifest.ordinal_ranges[1].count, 4);
+        assert_eq!(manifest.tombstones.len(), 1);
+        assert_eq!(manifest.tombstones[0].artifact.bytes, 0);
+        assert_eq!(manifest.tombstones[0].blocks, Vec::new());
+
+        let forward = &manifest.forward_identities[0];
+        let forward_bytes = fs::read(root.join(&forward.name)).unwrap();
+        assert_eq!(forward_bytes.len(), records.len() * 24);
+        assert_eq!(hex_sha256(&forward_bytes), forward.sha256);
+        for range in &manifest.ordinal_ranges {
+            let bytes = fs::read(root.join(&range.artifact.name)).unwrap();
+            assert_eq!(hex_sha256(&bytes), range.artifact.sha256);
+            assert_eq!(bytes.len() as u64, range.count * 16);
+        }
+    }
+
+    #[test]
+    fn explicit_v4_rebuild_uses_topology_and_independent_projection_orders() {
+        let dir = tempfile::tempdir().unwrap();
+        let nodes = [
+            Uuid::from_u128(30),
+            Uuid::from_u128(10),
+            Uuid::from_u128(20),
+        ];
+        write_node_parquet_with_ids(
+            &dir.path().join("topology/nodes.parquet"),
+            &nodes,
+            &[2, 7, 3],
+        );
+        fs::write(
+            dir.path().join("topology/generation.json"),
+            b"{\"topology_generation\":7,\"search_generation\":0,\"property_generation\":0}\n",
+        )
+        .unwrap();
+
+        let metrics = rebuild_v4_ordinal_identity(
+            dir.path(),
+            UuidIndexBuildLimits {
+                scan_batch_rows: 1,
+                run_records: 1,
+                merge_fan_in: 2,
+            },
+        )
+        .unwrap();
+        assert_eq!(metrics.node_count, 3);
+        let root = dir.path().join(INDEX_DIR);
+        let manifest_bytes = fs::read(root.join(V4_ORDINAL_MANIFEST)).unwrap();
+        let manifest: crate::V4OrdinalIdentityManifest =
+            serde_json::from_slice(&manifest_bytes).unwrap();
+        assert_eq!(manifest.topology_generation, 7);
+        assert_eq!(manifest.ordinal_ranges.len(), 2);
+        assert_eq!(manifest.ordinal_ranges[0].first_node_id, 2);
+        assert_eq!(manifest.ordinal_ranges[0].count, 2);
+        assert_eq!(manifest.ordinal_ranges[1].first_node_id, 7);
+        let forward = fs::read(root.join(&manifest.forward_identities[0].name)).unwrap();
+        let forward_uuids = forward
+            .chunks_exact(24)
+            .map(|record| Uuid::from_bytes(record[..16].try_into().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            forward_uuids,
+            vec![
+                Uuid::from_u128(10),
+                Uuid::from_u128(20),
+                Uuid::from_u128(30)
+            ]
+        );
+        let receipt: TopologyIndexReceipt =
+            serde_json::from_slice(&fs::read(root.join(V4_ORDINAL_RECEIPT)).unwrap()).unwrap();
+        assert_eq!(receipt.expected_generation, 7);
+        assert_eq!(receipt.manifest_sha256, hex_sha256(&manifest_bytes));
+        assert!(!dir.path().join(".graphforge-rewrite-v1.json").exists());
+    }
+
+    #[test]
+    fn explicit_v4_rebuild_does_not_trust_corrupt_v3_reverse_state() {
+        let (dir, _, _) = fixture();
+        fs::write(
+            dir.path().join("topology/generation.json"),
+            b"{\"topology_generation\":3,\"search_generation\":0,\"property_generation\":0}\n",
+        )
+        .unwrap();
+        rebuild_uuid_membership_indexes(dir.path(), UuidIndexBuildLimits::default()).unwrap();
+        let root = dir.path().join(INDEX_DIR);
+        let v3: Manifest = serde_json::from_slice(&fs::read(root.join(MANIFEST)).unwrap()).unwrap();
+        fs::write(
+            root.join(&v3.runs[0].node_surrogates.name),
+            b"planted-corrupt-v3-reverse",
+        )
+        .unwrap();
+
+        let metrics =
+            rebuild_v4_ordinal_identity(dir.path(), UuidIndexBuildLimits::default()).unwrap();
+        assert_eq!(metrics.node_count, 3);
+        assert!(root.join(V4_ORDINAL_MANIFEST).is_file());
+        assert!(root.join(V4_ORDINAL_RECEIPT).is_file());
+    }
+
+    #[test]
+    fn v4_stream_builder_rejects_noncanonical_and_cancelled_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let root_a = dir.path().join("index-a");
+        fs::create_dir(&root_a).unwrap();
+        let index_a = graphforge_filesystem::StableDirectory::open(&root_a).unwrap();
+        let error = stage_v4_ordinal_artifacts(
+            [(Uuid::from_u128(2), 1), (Uuid::from_u128(1), 2)],
+            1,
+            &index_a,
+            || false,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("not canonical"));
+
+        let root_b = dir.path().join("index-b");
+        fs::create_dir(&root_b).unwrap();
+        let index_b = graphforge_filesystem::StableDirectory::open(&root_b).unwrap();
+        let mut polls = 0;
+        let error = stage_v4_ordinal_artifacts(
+            [(Uuid::from_u128(1), 1), (Uuid::from_u128(2), 2)],
+            1,
+            &index_b,
+            || {
+                polls += 1;
+                polls == 2
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("cancelled"));
+    }
+
+    #[test]
+    fn v4_stream_builder_packs_sparse_ids_without_sparse_max_allocation() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("index");
+        fs::create_dir(&root).unwrap();
+        let index = graphforge_filesystem::StableDirectory::open(&root).unwrap();
+        let (manifest, metrics) = stage_v4_ordinal_artifacts(
+            [
+                (Uuid::from_u128(1), 1),
+                (Uuid::from_u128(2), u64::MAX - 1),
+                (Uuid::from_u128(3), u64::MAX),
+            ],
+            9,
+            &index,
+            || false,
+        )
+        .unwrap();
+        assert_eq!(manifest.ordinal_ranges.len(), 2);
+        assert_eq!(manifest.ordinal_ranges[0].artifact.bytes, 16);
+        assert_eq!(manifest.ordinal_ranges[1].artifact.bytes, 32);
+        assert_eq!(metrics.artifact_bytes, 3 * 24 + 3 * 16);
+        assert_eq!(metrics.peak_temporary_bytes, metrics.artifact_bytes);
+        assert_eq!(metrics.fsync_operations, 4);
     }
 }
