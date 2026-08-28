@@ -43,7 +43,9 @@ def rung(scale: int, live: int, unit: int) -> dict:
     logical = sum(item["logical_bytes"] for item in artifacts)
     allocated = sum(item["allocated_bytes"] for item in artifacts)
     retained = sum(item["current_retained_bytes"] for item in artifacts)
-    peak = max(item["transient_peak_allocated_bytes"] for item in artifacts)
+    # Independent union high-water observation; deliberately larger than any
+    # one category peak because categories coexist at lifecycle boundaries.
+    peak = sum(item["transient_peak_allocated_bytes"] for item in artifacts)
     phases = [{"phase": phase, "read_bytes": unit, "write_bytes": unit, "read_calls": 1, "write_calls": 1, "object_count": 1, "block_count": 1, "fsync_calls": 1} for phase in PHASES]
     return {
         "id": f"S{scale}",
@@ -78,7 +80,11 @@ def evidence() -> dict:
                 "numerator_bytes": numerator,
                 "denominator_count": denominator,
             },
-            "projected_canonical_bytes": VALIDATOR.ceil_ratio(high["totals"]["current_retained_bytes"] * VALIDATOR.S26_EDGES, high["live_edges"]),
+            "projected_canonical_bytes": VALIDATOR.ceil_ratio(
+                sum(item["current_retained_bytes"] for item in high["artifacts"][:2])
+                * VALIDATOR.S26_EDGES,
+                high["live_edges"],
+            ),
             "projected_lifecycle_peak_bytes": projected,
             "volume_bytes": volume,
             "reserved_headroom_bytes": 500_000_000,
@@ -107,7 +113,7 @@ def test_accepts_reconciled_adjacent_rungs_and_conservative_projection():
         ("projection", "not reproducible"),
         ("headroom", "does not reconcile"),
         ("unsafe_admit", "contradicts projected headroom"),
-        ("peak_below_artifact", "totals do not reconcile"),
+        ("peak_below_artifact", "below a category peak"),
     ],
 )
 def test_rejects_goal_seeking_or_incomplete_evidence(mutation: str, match: str):
@@ -137,7 +143,7 @@ def test_rejects_goal_seeking_or_incomplete_evidence(mutation: str, match: str):
     elif mutation == "unsafe_admit":
         value["projection"]["reserved_headroom_bytes"] = value["projection"]["headroom_bytes"] + 1
     elif mutation == "peak_below_artifact":
-        value["rungs"][0]["artifacts"][0]["transient_peak_allocated_bytes"] = 0
+        value["rungs"][0]["totals"]["transient_peak_allocated_bytes"] = 0
     with pytest.raises(VALIDATOR.EvidenceError, match=match):
         VALIDATOR.validate(value)
 
@@ -147,3 +153,25 @@ def test_refuses_when_projection_does_not_leave_reserved_headroom():
     value["projection"]["reserved_headroom_bytes"] = value["projection"]["headroom_bytes"] + 1
     value["projection"]["decision"] = "refuse"
     VALIDATOR.validate(value)
+
+
+def test_refuses_volume_overflow_even_with_zero_reserved_headroom():
+    value = evidence()
+    value["projection"]["volume_bytes"] = (
+        value["projection"]["projected_lifecycle_peak_bytes"] - 1
+    )
+    value["projection"]["reserved_headroom_bytes"] = 0
+    value["projection"]["headroom_bytes"] = 0
+    value["projection"]["decision"] = "refuse"
+    VALIDATOR.validate(value)
+
+
+def test_canonical_projection_excludes_package_and_import_copies():
+    value = evidence()
+    value["projection"]["projected_canonical_bytes"] = VALIDATOR.ceil_ratio(
+        value["rungs"][-1]["totals"]["current_retained_bytes"]
+        * VALIDATOR.S26_EDGES,
+        value["rungs"][-1]["live_edges"],
+    )
+    with pytest.raises(VALIDATOR.EvidenceError, match="canonical projection"):
+        VALIDATOR.validate(value)

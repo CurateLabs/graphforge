@@ -74,11 +74,18 @@ def validate(evidence: dict[str, Any]) -> None:
         logical = sum(artifact["logical_bytes"] for artifact in rung["artifacts"])
         allocated = sum(artifact["allocated_bytes"] for artifact in rung["artifacts"])
         retained = sum(artifact["current_retained_bytes"] for artifact in rung["artifacts"])
-        transient_peak = max(artifact["transient_peak_allocated_bytes"] for artifact in rung["artifacts"])
+        # Category peaks are diagnostics, not a total: categories coexist.
+        # The total is an independently observed phase-boundary union high-water
+        # mark and must not be reconstructed as max(category).
+        transient_peak = rung["totals"]["transient_peak_allocated_bytes"]
         phase_totals = {f"phase_{field}": sum(phase[field] for phase in phases) for field in ("read_bytes", "write_bytes", "read_calls", "write_calls", "object_count", "block_count", "fsync_calls")}
-        expected_totals = {"logical_bytes": logical, "allocated_bytes": allocated, "current_retained_bytes": retained, "transient_peak_allocated_bytes": transient_peak, **phase_totals}
-        if rung["totals"] != expected_totals:
+        expected_totals = {"logical_bytes": logical, "allocated_bytes": allocated, "current_retained_bytes": retained, **phase_totals}
+        if {key: rung["totals"][key] for key in expected_totals} != expected_totals:
             raise EvidenceError("artifact or phase totals do not reconcile")
+        if transient_peak < max(
+            artifact["transient_peak_allocated_bytes"] for artifact in rung["artifacts"]
+        ):
+            raise EvidenceError("lifecycle peak is below a category peak")
         if any(item["current_retained_bytes"] > item["allocated_bytes"] for item in rung["artifacts"]):
             raise EvidenceError("retained allocation exceeds category allocation")
         if transient_peak < retained:
@@ -112,7 +119,14 @@ def validate(evidence: dict[str, Any]) -> None:
         raise EvidenceError("projection must cite the newest adjacent source rungs")
     if projection["projected_lifecycle_peak_bytes"] != projected:
         raise EvidenceError("S26 projected peak is not reproducible from the declared rate")
-    canonical_projected = ceil_ratio(rungs[-1]["totals"]["current_retained_bytes"] * S26_EDGES, rungs[-1]["live_edges"])
+    latest_categories = {item["category"]: item for item in rungs[-1]["artifacts"]}
+    canonical_bytes = (
+        latest_categories["canonical_node_topology"]["current_retained_bytes"]
+        + latest_categories["canonical_edge_topology"]["current_retained_bytes"]
+    )
+    canonical_projected = ceil_ratio(
+        canonical_bytes * S26_EDGES, rungs[-1]["live_edges"]
+    )
     if projection["projected_canonical_bytes"] != canonical_projected:
         raise EvidenceError("S26 canonical projection is not reproducible")
     if projected > projection["volume_bytes"]:
@@ -121,9 +135,9 @@ def validate(evidence: dict[str, Any]) -> None:
         expected_headroom = projection["volume_bytes"] - projected
     if projection["headroom_bytes"] != expected_headroom:
         raise EvidenceError("headroom does not reconcile")
-    expected_decision = (
-        "admit" if expected_headroom >= projection["reserved_headroom_bytes"] else "refuse"
-    )
+    expected_decision = "refuse"
+    if projected <= projection["volume_bytes"] and expected_headroom >= projection["reserved_headroom_bytes"]:
+        expected_decision = "admit"
     if projection["decision"] != expected_decision:
         raise EvidenceError("S26 admission decision contradicts projected headroom")
 
