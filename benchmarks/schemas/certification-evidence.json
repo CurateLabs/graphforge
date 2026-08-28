@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schema": "graphforge-public-certification-evidence-schema/1",
+  "type": "object",
+  "properties": {
+    "schema": { "const": "graphforge-public-certification/1" },
+    "profile_id": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,80}$" },
+    "status": { "enum": ["passed", "failed"] },
+    "phases": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 10,
+      "items": { "$ref": "#/$defs/phase" }
+    },
+    "failed_phase": {
+      "oneOf": [
+        { "$ref": "#/$defs/phaseName" },
+        { "type": "null" }
+      ]
+    }
+  },
+  "required": ["schema", "profile_id", "status", "phases", "failed_phase"],
+  "additionalProperties": false,
+  "$defs": {
+    "phaseName": {
+      "enum": [
+        "admission",
+        "generate",
+        "ingest",
+        "reopen",
+        "recount",
+        "query",
+        "export",
+        "verify",
+        "clean_import",
+        "reopen_proof"
+      ]
+    },
+    "phase": {
+      "type": "object",
+      "properties": {
+        "phase": { "$ref": "#/$defs/phaseName" },
+        "status": { "enum": ["passed", "failed"] },
+        "duration_ms": { "type": "integer", "minimum": 0 },
+        "peak_rss_bytes": {
+          "oneOf": [
+            { "type": "integer", "minimum": 0 },
+            { "type": "null" }
+          ]
+        },
+        "exit_code": {
+          "oneOf": [
+            { "type": "integer" },
+            { "type": "null" }
+          ]
+        },
+        "failure": {
+          "enum": ["command_failed", "command_unavailable"]
+        }
+      },
+      "required": ["phase", "status", "duration_ms", "peak_rss_bytes", "exit_code"],
+      "allOf": [
+        {
+          "if": {
+            "properties": { "status": { "const": "failed" } },
+            "required": ["status"]
+          },
+          "then": { "required": ["failure"] },
+          "else": { "not": { "required": ["failure"] } }
+        }
+      ],
+      "additionalProperties": false
+    }
+  }
+}

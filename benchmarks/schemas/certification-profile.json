@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schema": "graphforge-public-certification-profile-schema/1",
+  "type": "object",
+  "properties": {
+    "schema": { "const": "graphforge-public-certification-profile/1" },
+    "id": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,80}$" },
+    "executable": { "type": "string", "pattern": "(^|[/\\\\])gf(\\.exe)?$" },
+    "phases": {
+      "type": "array",
+      "minItems": 10,
+      "maxItems": 10,
+      "prefixItems": [
+        { "$ref": "#/$defs/admission" },
+        { "$ref": "#/$defs/generate" },
+        { "$ref": "#/$defs/ingest" },
+        { "$ref": "#/$defs/reopen" },
+        { "$ref": "#/$defs/recount" },
+        { "$ref": "#/$defs/query" },
+        { "$ref": "#/$defs/export" },
+        { "$ref": "#/$defs/verify" },
+        { "$ref": "#/$defs/cleanImport" },
+        { "$ref": "#/$defs/reopenProof" }
+      ],
+      "items": false
+    }
+  },
+  "required": ["schema", "id", "executable", "phases"],
+  "additionalProperties": false,
+  "$defs": {
+    "command": {
+      "type": "object",
+      "properties": {
+        "phase": { "type": "string" },
+        "args": { "type": "array", "items": { "type": "string" } }
+      },
+      "required": ["phase", "args"],
+      "additionalProperties": false
+    },
+    "admission": { "allOf": [{ "$ref": "#/$defs/command" }, { "properties": { "phase": { "const": "admission" } } }] },
+    "generate": { "allOf": [{ "$ref": "#/$defs/command" }, { "properties": { "phase": { "const": "generate" } } }] },
+    "ingest": { "allOf": [{ "$ref": "#/$defs/command" }, { "properties": { "phase": { "const": "ingest" } } }] },
+    "reopen": { "allOf": [{ "$ref": "#/$defs/command" }, { "properties": { "phase": { "const": "reopen" } } }] },
+    "recount": { "allOf": [{ "$ref": "#/$defs/command" }, { "properties": { "phase": { "const": "recount" } } }] },
+    "query": { "allOf": [{ "$ref": "#/$defs/command" }, { "properties": { "phase": { "const": "query" } } }] },
+    "export": { "allOf": [{ "$ref": "#/$defs/command" }, { "properties": { "phase": { "const": "export" } } }] },
+    "verify": { "allOf": [{ "$ref": "#/$defs/command" }, { "properties": { "phase": { "const": "verify" } } }] },
+    "cleanImport": { "allOf": [{ "$ref": "#/$defs/command" }, { "properties": { "phase": { "const": "clean_import" } } }] },
+    "reopenProof": { "allOf": [{ "$ref": "#/$defs/command" }, { "properties": { "phase": { "const": "reopen_proof" } } }] }
+  }
+}

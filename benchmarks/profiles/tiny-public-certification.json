@@ -1,0 +1,17 @@
+{
+  "schema": "graphforge-public-certification-profile/1",
+  "id": "tiny-public-certification",
+  "executable": "gf",
+  "phases": [
+    { "phase": "admission", "args": ["--info"] },
+    { "phase": "generate", "args": ["--info"] },
+    { "phase": "ingest", "args": ["--info"] },
+    { "phase": "reopen", "args": ["--info"] },
+    { "phase": "recount", "args": ["--info"] },
+    { "phase": "query", "args": ["--info"] },
+    { "phase": "export", "args": ["--info"] },
+    { "phase": "verify", "args": ["--info"] },
+    { "phase": "clean_import", "args": ["--info"] },
+    { "phase": "reopen_proof", "args": ["--info"] }
+  ]
+}

@@ -1,0 +1,533 @@
+#![forbid(unsafe_code)]
+
+use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::fs;
+use std::path::Path;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
+
+pub const EVIDENCE_SCHEMA: &str = "graphforge-public-certification/1";
+pub const PHASE_EVENT_SCHEMA: &str = "graphforge-public-certification-phase-event/1";
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Phase {
+    Admission,
+    Generate,
+    Ingest,
+    Reopen,
+    Recount,
+    Query,
+    Export,
+    Verify,
+    CleanImport,
+    ReopenProof,
+}
+
+impl Phase {
+    pub const ALL: [Self; 10] = [
+        Self::Admission,
+        Self::Generate,
+        Self::Ingest,
+        Self::Reopen,
+        Self::Recount,
+        Self::Query,
+        Self::Export,
+        Self::Verify,
+        Self::CleanImport,
+        Self::ReopenProof,
+    ];
+}
+
+impl fmt::Display for Phase {
+    fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = serde_json::to_value(self).map_err(|_| fmt::Error)?;
+        output.write_str(value.as_str().ok_or(fmt::Error)?)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Profile {
+    pub schema: String,
+    pub id: String,
+    pub executable: String,
+    pub phases: Vec<PhaseCommand>,
+}
+
+impl Profile {
+    pub fn validate(&self) -> Result<(), RunnerError> {
+        if self.schema != "graphforge-public-certification-profile/1" {
+            return Err(RunnerError::Profile("unsupported profile schema"));
+        }
+        if !is_safe_token(&self.id) {
+            return Err(RunnerError::Profile("profile id must be a safe token"));
+        }
+        if !is_graphforge_executable(&self.executable) {
+            return Err(RunnerError::Profile(
+                "executable must resolve to the public gf command",
+            ));
+        }
+        if self.phases.len() != Phase::ALL.len()
+            || self
+                .phases
+                .iter()
+                .map(|command| command.phase)
+                .ne(Phase::ALL)
+        {
+            return Err(RunnerError::Profile(
+                "profile must declare every phase once in lifecycle order",
+            ));
+        }
+        if self
+            .phases
+            .iter()
+            .any(|command| command.args.iter().any(|argument| argument.contains('\0')))
+        {
+            return Err(RunnerError::Profile("arguments must not contain NUL"));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PhaseCommand {
+    pub phase: Phase,
+    pub args: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Execution {
+    pub exit_code: Option<i32>,
+    pub duration_ms: u64,
+    pub peak_rss_bytes: Option<u64>,
+}
+
+pub trait PhaseExecutor {
+    fn execute(&mut self, executable: &str, command: &PhaseCommand) -> Result<Execution, String>;
+}
+
+#[derive(Default)]
+pub struct PublicProcessExecutor;
+
+impl PhaseExecutor for PublicProcessExecutor {
+    fn execute(&mut self, executable: &str, command: &PhaseCommand) -> Result<Execution, String> {
+        let started = Instant::now();
+        let mut child = Command::new(executable)
+            .args(&command.args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|_| "public command could not start".to_owned())?;
+        let mut peak_rss_bytes = None;
+        loop {
+            peak_rss_bytes = max_optional(peak_rss_bytes, resident_bytes(child.id()));
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|_| "public command wait failed".to_owned())?
+            {
+                return Ok(Execution {
+                    exit_code: status.code(),
+                    duration_ms: millis(started.elapsed()),
+                    peak_rss_bytes,
+                });
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutcomeStatus {
+    Passed,
+    Failed,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureKind {
+    CommandFailed,
+    CommandUnavailable,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PhaseOutcome {
+    pub phase: Phase,
+    pub status: OutcomeStatus,
+    pub duration_ms: u64,
+    pub peak_rss_bytes: Option<u64>,
+    pub exit_code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure: Option<FailureKind>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Evidence {
+    pub schema: String,
+    pub profile_id: String,
+    pub status: OutcomeStatus,
+    pub phases: Vec<PhaseOutcome>,
+    pub failed_phase: Option<Phase>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PhaseEvent {
+    pub schema: &'static str,
+    pub profile_id: String,
+    pub outcome: PhaseOutcome,
+}
+
+pub fn certify(
+    profile: &Profile,
+    executor: &mut dyn PhaseExecutor,
+) -> Result<Evidence, RunnerError> {
+    certify_with_events(profile, executor, |_| Ok(()))
+}
+
+pub fn certify_with_events(
+    profile: &Profile,
+    executor: &mut dyn PhaseExecutor,
+    mut emit: impl FnMut(&PhaseEvent) -> Result<(), RunnerError>,
+) -> Result<Evidence, RunnerError> {
+    profile.validate()?;
+    let mut phases = Vec::with_capacity(Phase::ALL.len());
+    for command in &profile.phases {
+        let outcome = match executor.execute(&profile.executable, command) {
+            Ok(execution) => {
+                let passed = execution.exit_code == Some(0);
+                PhaseOutcome {
+                    phase: command.phase,
+                    status: if passed {
+                        OutcomeStatus::Passed
+                    } else {
+                        OutcomeStatus::Failed
+                    },
+                    duration_ms: execution.duration_ms,
+                    peak_rss_bytes: execution.peak_rss_bytes,
+                    exit_code: execution.exit_code,
+                    failure: (!passed).then_some(FailureKind::CommandFailed),
+                }
+            }
+            Err(_) => PhaseOutcome {
+                phase: command.phase,
+                status: OutcomeStatus::Failed,
+                duration_ms: 0,
+                peak_rss_bytes: None,
+                exit_code: None,
+                failure: Some(FailureKind::CommandUnavailable),
+            },
+        };
+        let failed = outcome.status == OutcomeStatus::Failed;
+        emit(&PhaseEvent {
+            schema: PHASE_EVENT_SCHEMA,
+            profile_id: profile.id.clone(),
+            outcome: outcome.clone(),
+        })?;
+        phases.push(outcome);
+        if failed {
+            break;
+        }
+    }
+    let failed_phase = phases
+        .iter()
+        .find(|outcome| outcome.status == OutcomeStatus::Failed)
+        .map(|outcome| outcome.phase);
+    Ok(Evidence {
+        schema: EVIDENCE_SCHEMA.to_owned(),
+        profile_id: profile.id.clone(),
+        status: if failed_phase.is_some() {
+            OutcomeStatus::Failed
+        } else {
+            OutcomeStatus::Passed
+        },
+        phases,
+        failed_phase,
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum EvidenceInput {
+    Current(Evidence),
+    Legacy(LegacyEvidence),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyEvidence {
+    profile: String,
+    phases: Vec<LegacyPhase>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyPhase {
+    name: Phase,
+    ok: bool,
+    duration_secs: f64,
+    max_rss_kib: Option<u64>,
+    exit_code: Option<i32>,
+}
+
+pub fn normalize_evidence(input: &[u8]) -> Result<Evidence, RunnerError> {
+    match serde_json::from_slice(input).map_err(|_| RunnerError::Legacy)? {
+        EvidenceInput::Current(evidence) => validate_evidence(evidence),
+        EvidenceInput::Legacy(legacy) => {
+            if !is_safe_token(&legacy.profile) || legacy.phases.is_empty() {
+                return Err(RunnerError::Legacy);
+            }
+            let mut phases = Vec::with_capacity(legacy.phases.len());
+            for phase in legacy.phases {
+                if !phase.duration_secs.is_finite() || phase.duration_secs < 0.0 {
+                    return Err(RunnerError::Legacy);
+                }
+                phases.push(PhaseOutcome {
+                    phase: phase.name,
+                    status: if phase.ok {
+                        OutcomeStatus::Passed
+                    } else {
+                        OutcomeStatus::Failed
+                    },
+                    duration_ms: (phase.duration_secs * 1_000.0).round() as u64,
+                    peak_rss_bytes: phase.max_rss_kib.and_then(|value| value.checked_mul(1_024)),
+                    exit_code: phase.exit_code,
+                    failure: (!phase.ok).then_some(FailureKind::CommandFailed),
+                });
+                if !phase.ok {
+                    break;
+                }
+            }
+            let failed_phase = phases
+                .iter()
+                .find(|outcome| outcome.status == OutcomeStatus::Failed)
+                .map(|outcome| outcome.phase);
+            validate_evidence(Evidence {
+                schema: EVIDENCE_SCHEMA.to_owned(),
+                profile_id: legacy.profile,
+                status: if failed_phase.is_some() {
+                    OutcomeStatus::Failed
+                } else {
+                    OutcomeStatus::Passed
+                },
+                phases,
+                failed_phase,
+            })
+        }
+    }
+}
+
+fn validate_evidence(evidence: Evidence) -> Result<Evidence, RunnerError> {
+    if evidence.schema != EVIDENCE_SCHEMA
+        || !is_safe_token(&evidence.profile_id)
+        || evidence.phases.is_empty()
+        || evidence
+            .phases
+            .iter()
+            .map(|outcome| outcome.phase)
+            .ne(Phase::ALL.into_iter().take(evidence.phases.len()))
+    {
+        return Err(RunnerError::Legacy);
+    }
+    let observed_failure = evidence
+        .phases
+        .iter()
+        .find(|outcome| outcome.status == OutcomeStatus::Failed)
+        .map(|outcome| outcome.phase);
+    let statuses_are_consistent = evidence.phases.iter().enumerate().all(|(index, outcome)| {
+        let failed = outcome.status == OutcomeStatus::Failed;
+        failed == outcome.failure.is_some() && (!failed || index + 1 == evidence.phases.len())
+    });
+    if observed_failure != evidence.failed_phase
+        || (observed_failure.is_some()) != (evidence.status == OutcomeStatus::Failed)
+        || !statuses_are_consistent
+    {
+        return Err(RunnerError::Legacy);
+    }
+    Ok(evidence)
+}
+
+pub fn read_profile(path: &Path) -> Result<Profile, RunnerError> {
+    let input = fs::read(path).map_err(|_| RunnerError::Io)?;
+    serde_json::from_slice(&input).map_err(|_| RunnerError::Profile("invalid profile JSON"))
+}
+
+pub fn write_evidence(path: &Path, evidence: &Evidence) -> Result<(), RunnerError> {
+    let encoded = serde_json::to_vec_pretty(evidence).map_err(|_| RunnerError::Io)?;
+    fs::write(path, encoded).map_err(|_| RunnerError::Io)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RunnerError {
+    Io,
+    Legacy,
+    Profile(&'static str),
+}
+
+fn is_safe_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 80
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+fn is_graphforge_executable(value: &str) -> bool {
+    !value.contains('\0')
+        && Path::new(value)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| matches!(name, "gf" | "gf.exe"))
+}
+
+fn millis(duration: Duration) -> u64 {
+    duration.as_millis().try_into().unwrap_or(u64::MAX)
+}
+
+fn max_optional(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        (left, right) => left.or(right),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn resident_bytes(pid: u32) -> Option<u64> {
+    let status = fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    let rss_kib = status
+        .lines()
+        .find_map(|line| line.strip_prefix("VmRSS:"))?
+        .split_ascii_whitespace()
+        .next()?
+        .parse::<u64>()
+        .ok()?;
+    rss_kib.checked_mul(1_024)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn resident_bytes(_pid: u32) -> Option<u64> {
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::VecDeque;
+
+    struct FakeExecutor {
+        executions: VecDeque<Result<Execution, String>>,
+        calls: Vec<Phase>,
+    }
+
+    impl PhaseExecutor for FakeExecutor {
+        fn execute(
+            &mut self,
+            _executable: &str,
+            command: &PhaseCommand,
+        ) -> Result<Execution, String> {
+            self.calls.push(command.phase);
+            self.executions.pop_front().expect("fixture execution")
+        }
+    }
+
+    fn tiny_profile() -> Profile {
+        Profile {
+            schema: "graphforge-public-certification-profile/1".to_owned(),
+            id: "tiny-public".to_owned(),
+            executable: "gf".to_owned(),
+            phases: Phase::ALL
+                .into_iter()
+                .map(|phase| PhaseCommand {
+                    phase,
+                    args: vec!["--json".to_owned(), phase.to_string()],
+                })
+                .collect(),
+        }
+    }
+
+    fn passed_execution(index: u64) -> Result<Execution, String> {
+        Ok(Execution {
+            exit_code: Some(0),
+            duration_ms: index + 1,
+            peak_rss_bytes: Some((index + 1) * 1_024),
+        })
+    }
+
+    #[test]
+    fn tiny_fixture_proves_every_phase_and_sanitized_evidence() {
+        let mut executor = FakeExecutor {
+            executions: (0..10).map(passed_execution).collect(),
+            calls: Vec::new(),
+        };
+        let evidence = certify(&tiny_profile(), &mut executor).unwrap();
+        assert_eq!(executor.calls, Phase::ALL);
+        assert_eq!(evidence.status, OutcomeStatus::Passed);
+        assert_eq!(evidence.phases.len(), 10);
+        assert!(
+            evidence
+                .phases
+                .iter()
+                .all(|phase| phase.peak_rss_bytes.is_some())
+        );
+        let encoded = serde_json::to_string(&evidence).unwrap();
+        for forbidden in ["args", "stdout", "stderr", "path", "credential", "secret"] {
+            assert!(!encoded.contains(forbidden));
+        }
+    }
+
+    #[test]
+    fn first_failure_stops_before_later_public_commands() {
+        let mut executions: VecDeque<_> = (0..3).map(passed_execution).collect();
+        executions.push_back(Ok(Execution {
+            exit_code: Some(7),
+            duration_ms: 4,
+            peak_rss_bytes: Some(4_096),
+        }));
+        executions.extend((4..10).map(passed_execution));
+        let mut executor = FakeExecutor {
+            executions,
+            calls: Vec::new(),
+        };
+        let mut events = Vec::new();
+        let evidence = certify_with_events(&tiny_profile(), &mut executor, |event| {
+            events.push(event.clone());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(evidence.failed_phase, Some(Phase::Reopen));
+        assert_eq!(executor.calls, Phase::ALL[..4]);
+        assert_eq!(evidence.phases.len(), 4);
+        assert_eq!(events.len(), 4);
+        assert_eq!(events.last().unwrap().outcome.status, OutcomeStatus::Failed);
+    }
+
+    #[test]
+    fn legacy_evidence_normalizes_to_current_typed_contract() {
+        let normalized = normalize_evidence(
+            br#"{"profile":"legacy-s20","phases":[{"name":"admission","ok":true,"duration_secs":1.25,"max_rss_kib":2,"exit_code":0}]}"#,
+        )
+        .unwrap();
+        assert_eq!(normalized.schema, EVIDENCE_SCHEMA);
+        assert_eq!(normalized.phases[0].duration_ms, 1_250);
+        assert_eq!(normalized.phases[0].peak_rss_bytes, Some(2_048));
+    }
+
+    #[test]
+    fn profile_rejects_non_graphforge_executable() {
+        let mut profile = tiny_profile();
+        profile.executable = "/usr/bin/true".to_owned();
+        assert_eq!(
+            profile.validate(),
+            Err(RunnerError::Profile(
+                "executable must resolve to the public gf command"
+            ))
+        );
+    }
+}

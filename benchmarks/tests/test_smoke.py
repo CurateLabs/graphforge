@@ -26,6 +26,40 @@ class WorkspaceSmokeTests(unittest.TestCase):
             }
         )
 
+    def test_public_certification_profile_matches_its_schema(self) -> None:
+        root = workspace_root()
+        schema = json.loads(
+            (root / "schemas" / "certification-profile.json").read_text(encoding="utf-8")
+        )
+        profile = json.loads(
+            (root / "profiles" / "tiny-public-certification.json").read_text(encoding="utf-8")
+        )
+        Draft202012Validator(schema).validate(profile)
+
+    def test_public_certification_evidence_schema_accepts_sanitized_outcome(self) -> None:
+        schema = json.loads(
+            (workspace_root() / "schemas" / "certification-evidence.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        Draft202012Validator(schema).validate(
+            {
+                "schema": "graphforge-public-certification/1",
+                "profile_id": "tiny-public-certification",
+                "status": "passed",
+                "phases": [
+                    {
+                        "phase": "admission",
+                        "status": "passed",
+                        "duration_ms": 1,
+                        "peak_rss_bytes": 1024,
+                        "exit_code": 0,
+                    }
+                ],
+                "failed_phase": None,
+            }
+        )
+
     def test_product_manifests_do_not_reference_benchmark_dependencies(self) -> None:
         repository = workspace_root().parent
         manifests = sorted(repository.rglob("Cargo.toml")) + sorted(
