@@ -466,7 +466,21 @@ pub(crate) fn encode(
         .map(ConstructionSemanticAuthority::context)
         .transpose()?;
 
-    encode_nodes(
+    let identities_sha256 = shaped_output_sha256(shape_outputs, &shape.identities)?;
+    let mut index = crate::uuid_membership::encode_construction_index(
+        source,
+        &shape.identities,
+        &identities_sha256,
+        &output,
+        generation,
+        shape.parent_topology_generation,
+        parent_index,
+        shape.node_count,
+        shape.edge_count,
+        cancelled,
+    )?;
+
+    let v4 = encode_nodes(
         source,
         &output,
         shape,
@@ -476,10 +490,25 @@ pub(crate) fn encode(
         semantic_context.as_ref(),
         semantic_authority.map(|authority| &authority.bindings),
         budgets,
+        generation,
+        shape.parent_topology_generation == 0,
         cancelled,
         &mut artifacts,
         &mut evidence,
     )?;
+    if let Some((manifest, metrics)) = v4 {
+        if metrics.input_records != shape.node_count {
+            return Err(storage("v4 construction count differs from shaped nodes"));
+        }
+        index
+            .artifacts
+            .extend(crate::uuid_membership::publish_v4_construction_artifacts(
+                &output,
+                &manifest,
+                generation,
+                &identities_sha256,
+            )?);
+    }
     encode_edges(
         source,
         &output,
@@ -511,18 +540,6 @@ pub(crate) fn encode(
         &mut evidence,
     )?;
 
-    let index = crate::uuid_membership::encode_construction_index(
-        source,
-        &shape.identities,
-        shaped_output_sha256(shape_outputs, &shape.identities)?,
-        &output,
-        generation,
-        shape.parent_topology_generation,
-        parent_index,
-        shape.node_count,
-        shape.edge_count,
-        cancelled,
-    )?;
     evidence.membership_records = index.input_records;
     evidence.membership_read_bytes = index.read_bytes;
     evidence.membership_write_bytes = index.final_write_bytes;
@@ -699,12 +716,34 @@ fn encode_nodes(
     semantic_context: Option<&CompositionBindingContext>,
     semantic_bindings: Option<&SemanticStorageBindings>,
     budgets: GraphConstructionBudgets,
+    generation: u64,
+    build_v4: bool,
     cancelled: &mut impl FnMut() -> bool,
     artifacts: &mut Vec<ConstructionEncodedArtifact>,
     evidence: &mut GraphConstructionEncodingEvidence,
-) -> Result<(), GfError> {
+) -> Result<
+    Option<(
+        crate::V4OrdinalIdentityManifest,
+        crate::uuid_membership::V4OrdinalBuildMetrics,
+    )>,
+    GfError,
+> {
     if shape.node_rows.is_empty() {
-        return Ok(());
+        if !build_v4 {
+            return Ok(None);
+        }
+        let graph = output
+            .open_child_directory(OsStr::new("graph"))
+            .map_err(storage)?;
+        let topology = graph
+            .open_child_directory(OsStr::new("topology"))
+            .map_err(storage)?;
+        let index = topology
+            .open_child_directory(OsStr::new("uuid-membership"))
+            .map_err(storage)?;
+        return crate::uuid_membership::V4OrdinalConstructionWriter::start(generation, &index)?
+            .finish()
+            .map(Some);
     }
     let details_name = shape
         .node_details
@@ -712,6 +751,25 @@ fn encode_nodes(
         .ok_or_else(|| storage("node rows lack canonical details"))?;
     let mut identities =
         FixedReader::<IDENTITY_WIDTH>::open(source, shape_outputs, &shape.identities)?;
+    let v4_index = if build_v4 {
+        let graph = output
+            .open_child_directory(OsStr::new("graph"))
+            .map_err(storage)?;
+        let topology = graph
+            .open_child_directory(OsStr::new("topology"))
+            .map_err(storage)?;
+        Some(
+            topology
+                .open_child_directory(OsStr::new("uuid-membership"))
+                .map_err(storage)?,
+        )
+    } else {
+        None
+    };
+    let mut v4 = v4_index
+        .as_ref()
+        .map(|index| crate::uuid_membership::V4OrdinalConstructionWriter::start(generation, index))
+        .transpose()?;
     let mut details = FixedReader::<NODE_DETAIL_WIDTH>::open(source, shape_outputs, details_name)?;
     let rows_per_window = budgets
         .max_batch_rows
@@ -761,10 +819,12 @@ fn encode_nodes(
                     .get(label)
                     .ok_or_else(|| storage("node label is absent from runtime catalog"))?,
             };
+            let node_id = u64::from_be_bytes(identity[24..32].try_into().expect("fixed"));
+            if let Some(v4) = v4.as_mut() {
+                v4.push_pair(Uuid::from_bytes(uuid), node_id, cancelled)?;
+            }
             out_uuid.push(uuid);
-            out_id.push(u64::from_be_bytes(
-                identity[24..32].try_into().expect("fixed"),
-            ));
+            out_id.push(node_id);
             out_type.push(type_id);
             if out_uuid.len().is_multiple_of(4096) && cancelled() {
                 return Err(storage("construction encoding cancelled"));
@@ -802,7 +862,9 @@ fn encode_nodes(
         cancelled,
         artifacts,
         evidence,
-    )
+    )?;
+    v4.map(crate::uuid_membership::V4OrdinalConstructionWriter::finish)
+        .transpose()
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
