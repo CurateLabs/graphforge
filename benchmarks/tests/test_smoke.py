@@ -26,16 +26,6 @@ class WorkspaceSmokeTests(unittest.TestCase):
             }
         )
 
-    def test_public_certification_profile_matches_its_schema(self) -> None:
-        root = workspace_root()
-        schema = json.loads(
-            (root / "schemas" / "certification-profile.json").read_text(encoding="utf-8")
-        )
-        profile = json.loads(
-            (root / "profiles" / "tiny-public-certification.json").read_text(encoding="utf-8")
-        )
-        Draft202012Validator(schema).validate(profile)
-
     def test_public_certification_evidence_schema_accepts_sanitized_outcome(self) -> None:
         schema = json.loads(
             (workspace_root() / "schemas" / "certification-evidence.json").read_text(

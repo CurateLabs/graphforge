@@ -84,9 +84,11 @@ impl Profile {
         if self
             .phases
             .iter()
-            .any(|command| command.args.iter().any(|argument| argument.contains('\0')))
+            .any(|command| !action_matches_phase(command))
         {
-            return Err(RunnerError::Profile("arguments must not contain NUL"));
+            return Err(RunnerError::Profile(
+                "phase action must select the matching benchmark or public gf operation",
+            ));
         }
         Ok(())
     }
@@ -96,7 +98,20 @@ impl Profile {
 #[serde(deny_unknown_fields)]
 pub struct PhaseCommand {
     pub phase: Phase,
-    pub args: Vec<String>,
+    pub action: PhaseAction,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(tag = "interface", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PhaseAction {
+    BenchmarkGenerator {
+        identity: String,
+        executable: String,
+        args: Vec<String>,
+    },
+    GraphForgeCli {
+        args: Vec<String>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -107,17 +122,23 @@ pub struct Execution {
 }
 
 pub trait PhaseExecutor {
-    fn execute(&mut self, executable: &str, command: &PhaseCommand) -> Result<Execution, String>;
+    fn execute(&mut self, profile: &Profile, command: &PhaseCommand) -> Result<Execution, String>;
 }
 
 #[derive(Default)]
 pub struct PublicProcessExecutor;
 
 impl PhaseExecutor for PublicProcessExecutor {
-    fn execute(&mut self, executable: &str, command: &PhaseCommand) -> Result<Execution, String> {
+    fn execute(&mut self, profile: &Profile, command: &PhaseCommand) -> Result<Execution, String> {
+        let (executable, args) = match &command.action {
+            PhaseAction::BenchmarkGenerator {
+                executable, args, ..
+            } => (executable.as_str(), args.as_slice()),
+            PhaseAction::GraphForgeCli { args } => (profile.executable.as_str(), args.as_slice()),
+        };
         let started = Instant::now();
         let mut child = Command::new(executable)
-            .args(&command.args)
+            .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -200,7 +221,7 @@ pub fn certify_with_events(
     profile.validate()?;
     let mut phases = Vec::with_capacity(Phase::ALL.len());
     for command in &profile.phases {
-        let outcome = match executor.execute(&profile.executable, command) {
+        let outcome = match executor.execute(profile, command) {
             Ok(execution) => {
                 let passed = execution.exit_code == Some(0);
                 PhaseOutcome {
@@ -387,6 +408,50 @@ fn is_graphforge_executable(value: &str) -> bool {
             .is_some_and(|name| matches!(name, "gf" | "gf.exe"))
 }
 
+fn action_matches_phase(command: &PhaseCommand) -> bool {
+    if let PhaseAction::BenchmarkGenerator {
+        identity,
+        executable,
+        args,
+    } = &command.action
+    {
+        return command.phase == Phase::Generate
+            && is_safe_token(identity)
+            && !executable.is_empty()
+            && !executable.contains('\0')
+            && args.iter().all(|argument| !argument.contains('\0'));
+    }
+    let PhaseAction::GraphForgeCli { args } = &command.action else {
+        return false;
+    };
+    if command.phase == Phase::Generate || args.iter().any(|argument| argument.contains('\0')) {
+        return false;
+    }
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    if args
+        .iter()
+        .any(|argument| matches!(*argument, "--version" | "--help"))
+    {
+        return false;
+    }
+    match command.phase {
+        Phase::Admission => args.as_slice() == ["--info"],
+        Phase::Generate => false,
+        Phase::Ingest => contains_command(&args, &["import-session"]),
+        Phase::Reopen => contains_command(&args, &["recovery"]),
+        Phase::Recount | Phase::Query | Phase::ReopenProof => contains_command(&args, &["query"]),
+        Phase::Export => contains_command(&args, &["portable", "export"]),
+        Phase::Verify => contains_command(&args, &["portable", "verify"]),
+        Phase::CleanImport => contains_command(&args, &["portable", "import"]),
+    }
+}
+
+fn contains_command(arguments: &[&str], command: &[&str]) -> bool {
+    arguments
+        .windows(command.len())
+        .any(|window| window == command)
+}
+
 fn millis(duration: Duration) -> u64 {
     duration.as_millis().try_into().unwrap_or(u64::MAX)
 }
@@ -403,7 +468,7 @@ fn resident_bytes(pid: u32) -> Option<u64> {
     let status = fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
     let rss_kib = status
         .lines()
-        .find_map(|line| line.strip_prefix("VmRSS:"))?
+        .find_map(|line| line.strip_prefix("VmHWM:"))?
         .split_ascii_whitespace()
         .next()?
         .parse::<u64>()
@@ -429,7 +494,7 @@ mod tests {
     impl PhaseExecutor for FakeExecutor {
         fn execute(
             &mut self,
-            _executable: &str,
+            _profile: &Profile,
             command: &PhaseCommand,
         ) -> Result<Execution, String> {
             self.calls.push(command.phase);
@@ -446,10 +511,82 @@ mod tests {
                 .into_iter()
                 .map(|phase| PhaseCommand {
                     phase,
-                    args: vec!["--json".to_owned(), phase.to_string()],
+                    action: if phase == Phase::Generate {
+                        PhaseAction::BenchmarkGenerator {
+                            identity: "tiny-generator-v1".to_owned(),
+                            executable: "tiny-generator".to_owned(),
+                            args: vec!["--scale".to_owned(), "tiny".to_owned()],
+                        }
+                    } else {
+                        PhaseAction::GraphForgeCli {
+                            args: tiny_args(phase),
+                        }
+                    },
                 })
                 .collect(),
         }
+    }
+
+    fn tiny_args(phase: Phase) -> Vec<String> {
+        let values: &[&str] = match phase {
+            Phase::Admission => &["--info"],
+            Phase::Generate => unreachable!("generate uses the benchmark-owned typed action"),
+            Phase::Ingest => &[
+                "--project",
+                "generated/tiny-source",
+                "import-session",
+                "open",
+            ],
+            Phase::Reopen => &["--project", "generated/tiny-source", "recovery"],
+            Phase::Recount => &[
+                "--project",
+                "generated/tiny-source",
+                "query",
+                "--cypher",
+                "MATCH (n) RETURN count(n)",
+                "--output",
+                "generated/recount.arrow",
+            ],
+            Phase::Query => &[
+                "--project",
+                "generated/tiny-source",
+                "query",
+                "--cypher",
+                "MATCH (n) RETURN n.id",
+                "--output",
+                "generated/query.arrow",
+            ],
+            Phase::Export => &[
+                "--project",
+                "generated/tiny-source",
+                "portable",
+                "export",
+                "--current",
+                "--output",
+                "generated/tiny-portable",
+            ],
+            Phase::Verify => &["portable", "verify", "--input", "generated/tiny-portable"],
+            Phase::CleanImport => &[
+                "--project",
+                "generated/tiny-import",
+                "portable",
+                "import",
+                "--input",
+                "generated/tiny-portable",
+                "--idempotency-key",
+                "00000000-0000-4000-8000-000000000001",
+            ],
+            Phase::ReopenProof => &[
+                "--project",
+                "generated/tiny-import",
+                "query",
+                "--cypher",
+                "MATCH (n) RETURN count(n)",
+                "--output",
+                "generated/reopen-proof.arrow",
+            ],
+        };
+        values.iter().map(|value| (*value).to_owned()).collect()
     }
 
     fn passed_execution(index: u64) -> Result<Execution, String> {
@@ -527,6 +664,22 @@ mod tests {
             profile.validate(),
             Err(RunnerError::Profile(
                 "executable must resolve to the public gf command"
+            ))
+        );
+    }
+
+    #[test]
+    fn profile_rejects_noop_commands_labeled_as_lifecycle_phases() {
+        let mut profile = tiny_profile();
+        for command in &mut profile.phases {
+            command.action = PhaseAction::GraphForgeCli {
+                args: vec!["--version".to_owned()],
+            };
+        }
+        assert_eq!(
+            profile.validate(),
+            Err(RunnerError::Profile(
+                "phase action must select the matching benchmark or public gf operation"
             ))
         );
     }

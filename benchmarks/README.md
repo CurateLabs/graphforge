@@ -29,23 +29,26 @@ belongs to issue #959, after parity is proven.
 ## Public-interface certification runner
 
 `runners/certify` owns the admission through reopen-proof lifecycle. A profile
-declares one ordinary `gf` command for each phase, in order. The runner starts
-the installed public executable as a child process; it does not link product
-crates, call storage internals, provision a host, or enforce CPU, memory, disk,
-or time limits. BenchExec or another outer orchestrator owns deadlines and may
-terminate the runner; the certification binary does not silently convert a
-policy timeout into product evidence.
+declares a typed benchmark-owned generator action for `generate` and one
+ordinary `gf` public command action for every product phase, in order. Runtime
+validation binds each product phase to its real command family and rejects
+global help/version no-ops. The runner does not link product crates, call
+storage internals, provision a host, or enforce CPU, memory, disk, or time
+limits. BenchExec or another outer orchestrator owns deadlines and may terminate
+the runner; the certification binary does not silently convert a policy timeout
+into product evidence.
 
 ```bash
 cargo run --locked --manifest-path benchmarks/Cargo.toml \
   --bin graphforge-benchmark-certify -- \
-  run benchmarks/profiles/tiny-public-certification.json \
-  benchmarks/outputs/tiny-evidence.json
+  run PROFILE.json benchmarks/outputs/evidence.json
 ```
 
-The checked-in tiny profile is an interface/admission fixture, not a scale
-certification. Graph500 profiles supply the real generate, ingest, recount,
-query, portable export/verify/import, and reopen commands in #956.
+Tiny in-process fixtures exercise every phase and first-failure behavior without
+opening a project. Graph500 profiles supply the real generate, ingest, recount,
+query, portable export/verify/import, and reopen commands in #956; a placeholder
+profile that merely labels no-op commands as lifecycle work is intentionally not
+shipped.
 
 Evidence contains only phase names, typed pass/fail state, exit codes, elapsed
 milliseconds, and observed peak RSS bytes. Command arguments and child output
