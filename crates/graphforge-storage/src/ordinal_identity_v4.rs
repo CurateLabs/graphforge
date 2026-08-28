@@ -968,6 +968,11 @@ fn validate_manifest(
             "forward identity authority is absent",
         ));
     }
+    if manifest.forward_identities.len() > STREAM_BYTES / FORWARD_RECORD_WIDTH_USIZE {
+        return Err(V4OrdinalIdentityError::InvalidDescriptor(
+            "forward run count exceeds bounded admission cursors",
+        ));
+    }
     let mut prior_forward_generation = 0;
     for run in &manifest.forward_identities {
         require_kind(run, V4OrdinalArtifactKind::ForwardIdentities, manifest)?;
@@ -1206,7 +1211,14 @@ fn validate_unique_forward_runs(
                 .max(FORWARD_RECORD_WIDTH_USIZE)
         })
         .collect::<Vec<_>>();
-    let cursor_bytes = buffer_lengths.iter().sum::<usize>();
+    let cursor_bytes =
+        buffer_lengths
+            .iter()
+            .sum::<usize>()
+            .saturating_add(runs.len().saturating_mul(
+                std::mem::size_of::<ForwardRunCursor>()
+                    + std::mem::size_of::<Reverse<([u8; UUID_WIDTH_USIZE], usize)>>(),
+            ));
     metrics.peak_buffer_bytes = metrics.peak_buffer_bytes.max(
         metrics
             .retained_descriptor_bytes
