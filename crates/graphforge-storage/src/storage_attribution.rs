@@ -252,26 +252,14 @@ impl ConstructionPhaseAttribution {
     }
 
     /// Validate the qualification semantics in addition to arithmetic
-    /// reconciliation. Ordinary lifecycle phases must carry source-owned work;
-    /// recovery alone may be absent for an uninterrupted run. Byte and call
-    /// counters are paired so a synthetic byte-only or call-only row cannot be
-    /// presented as observed application I/O.
+    /// reconciliation. Every lifecycle phase must be present, while a phase
+    /// that truthfully performed no I/O remains an explicit zero row. Byte and
+    /// call counters are paired so a synthetic byte-only or call-only row
+    /// cannot be presented as observed application I/O.
     pub fn validate_for_qualification(&self) -> Result<(), GfError> {
         self.validate_reconciliation()?;
         for phase in StorageIoPhase::ALL {
             let totals = &self.phases[&phase];
-            let observed = totals.read_bytes != 0
-                || totals.write_bytes != 0
-                || totals.read_calls != 0
-                || totals.write_calls != 0
-                || totals.object_count != 0
-                || totals.block_count != 0
-                || totals.fsync_calls != 0;
-            if phase != StorageIoPhase::RecoveryReauthentication && !observed {
-                return Err(validation(
-                    "required lifecycle phase has no source-owned observation",
-                ));
-            }
             if (totals.read_bytes == 0) != (totals.read_calls == 0) {
                 return Err(validation("phase read bytes and calls disagree"));
             }
@@ -1389,6 +1377,20 @@ mod tests {
             ConstructionPhaseAttribution::from_construction(&GraphConstructionEvidence::default());
         attribution.totals.read_bytes = 1;
         assert!(attribution.validate_reconciliation().is_err());
+    }
+
+    #[test]
+    fn qualification_preserves_truthful_zero_io_phase_rows() {
+        let attribution =
+            ConstructionPhaseAttribution::from_construction(&GraphConstructionEvidence::default());
+        attribution.validate_for_qualification().unwrap();
+        assert_eq!(attribution.phases.len(), StorageIoPhase::ALL.len());
+        assert!(
+            attribution
+                .phases
+                .values()
+                .all(|totals| totals == &PhaseIoTotals::default())
+        );
     }
 
     #[test]

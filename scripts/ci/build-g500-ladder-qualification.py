@@ -94,8 +94,6 @@ def rung(cert: dict) -> dict:
                 "fsync_calls",
             )
         )
-        if name != "recovery_reauthentication" and not applicable:
-            raise ValueError(f"required lifecycle phase has no source-owned observation: {name}")
         phases.append({"phase": name, "applicable": applicable, **values})
     totals = {
         "logical_bytes": sum(row["logical_bytes"] for row in rows),

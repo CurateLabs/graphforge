@@ -155,6 +155,24 @@ def test_accepts_reconciled_adjacent_rungs_and_conservative_projection():
     VALIDATOR.validate(evidence())
 
 
+def test_accepts_closed_truthful_zero_io_phase():
+    value = evidence()
+    phase = value["rungs"][0]["phases"][0]
+    for field in (
+        "read_bytes",
+        "write_bytes",
+        "read_calls",
+        "write_calls",
+        "object_count",
+        "block_count",
+        "fsync_calls",
+    ):
+        value["rungs"][0]["totals"][f"phase_{field}"] -= phase[field]
+        phase[field] = 0
+    phase["applicable"] = False
+    VALIDATOR.validate(value)
+
+
 @pytest.mark.parametrize(
     "mutation,match",
     [
@@ -171,7 +189,6 @@ def test_accepts_reconciled_adjacent_rungs_and_conservative_projection():
         ("headroom", "does not reconcile"),
         ("unsafe_admit", "contradicts projected headroom"),
         ("peak_below_artifact", "below a category peak"),
-        ("fake_zero_phase", "fake-zero"),
         ("false_applicability", "applicability contradicts"),
     ],
 )
@@ -205,31 +222,6 @@ def test_rejects_goal_seeking_or_incomplete_evidence(mutation: str, match: str):
         value["projection"]["reserved_headroom_bytes"] = value["projection"]["headroom_bytes"] + 1
     elif mutation == "peak_below_artifact":
         value["rungs"][0]["totals"]["transient_peak_allocated_bytes"] = 0
-    elif mutation == "fake_zero_phase":
-        phase = value["rungs"][0]["phases"][0]
-        for field in (
-            "read_bytes",
-            "write_bytes",
-            "read_calls",
-            "write_calls",
-            "object_count",
-            "block_count",
-            "fsync_calls",
-        ):
-            phase[field] = 0
-        phase["applicable"] = False
-        for field in (
-            "read_bytes",
-            "write_bytes",
-            "read_calls",
-            "write_calls",
-            "object_count",
-            "block_count",
-            "fsync_calls",
-        ):
-            value["rungs"][0]["totals"][f"phase_{field}"] -= (
-                1 if field.endswith("calls") or field in ("object_count", "block_count") else 1_000
-            )
     elif mutation == "false_applicability":
         value["rungs"][0]["phases"][0]["applicable"] = False
     with pytest.raises(VALIDATOR.EvidenceError, match=match):

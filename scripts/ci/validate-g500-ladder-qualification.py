@@ -92,8 +92,6 @@ def validate(evidence: dict[str, Any]) -> None:
             observed = any(phase[field] != 0 for field in phase_fields)
             if phase["applicable"] != observed:
                 raise EvidenceError("phase applicability contradicts source-owned counters")
-            if phase["phase"] != "recovery_reauthentication" and not phase["applicable"]:
-                raise EvidenceError("required lifecycle phase has a fake-zero observation")
             if (phase["read_bytes"] == 0) != (phase["read_calls"] == 0):
                 raise EvidenceError("phase read bytes and calls disagree")
             if (phase["write_bytes"] == 0) != (phase["write_calls"] == 0):

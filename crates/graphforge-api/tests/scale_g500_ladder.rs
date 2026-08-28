@@ -3092,7 +3092,8 @@ fn equivalent_full_lifecycle_1x_2x_4x_has_bounded_phase_slopes() {
 #[test]
 fn certification_watchdog_persists_typed_first_failure() {
     let root = TempDir::new().expect("watchdog root");
-    fs::write(root.path().join("allocated.bin"), [0_u8; 4096]).expect("allocated fixture");
+    let allocated = root.path().join("allocated.bin");
+    fs::write(&allocated, [0_u8; 4096]).expect("allocated fixture");
     let journal_path = root.path().join("journal.json");
     let mut journal = PhaseJournal::new(
         journal_path.clone(),
@@ -3102,6 +3103,10 @@ fn certification_watchdog_persists_typed_first_failure() {
             disk_bytes: 0,
             timeout_s: u64::MAX,
         },
+    );
+    journal.replace_allocation_owner(
+        "watchdog_fixture",
+        &exact_descriptor_identities(&[allocated]),
     );
     let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         journal.pass("resource_probe", Instant::now(), None);
