@@ -418,6 +418,62 @@ def _one_receipt(graphforge: Mapping[str, Any], contract: str) -> Mapping[str, A
     return matching[0]
 
 
+def _storage_receipt(graphforge: Mapping[str, Any], phase: str) -> Mapping[str, Any]:
+    receipts = _phase_receipts(graphforge, phase)
+    matching = [
+        receipt
+        for receipt in receipts
+        if receipt.get("contract") == "graphforge-storage-attribution-command/1"
+    ]
+    if len(matching) != 1 or matching[0].get("reopen_agrees") is not True:
+        raise ControllerError(f"ordinary storage receipt is missing or ambiguous: {phase}")
+    storage = matching[0].get("storage")
+    if (
+        not isinstance(storage, Mapping)
+        or storage.get("contract") != "graphforge-storage-attribution/1"
+    ):
+        raise ControllerError("ordinary storage receipt is incomplete")
+    for name in (
+        "logical_references",
+        "logical_bytes",
+        "retained_logical_eof_bytes",
+        "allocated_physical_bytes",
+        "physical_objects",
+    ):
+        if (
+            isinstance(storage.get(name), bool)
+            or not isinstance(storage.get(name), int)
+            or storage[name] < 0
+        ):
+            raise ControllerError(f"ordinary storage receipt omitted {name}")
+    return storage
+
+
+def _construction_metrics(import_receipt: Mapping[str, Any]) -> dict[str, int]:
+    construction = import_receipt.get("construction")
+    if not isinstance(construction, Mapping):
+        raise ControllerError("ordinary import construction evidence is absent")
+    application_io = construction.get("application_io")
+    totals = application_io.get("totals") if isinstance(application_io, Mapping) else None
+    publication = construction.get("publication_work")
+    values = {
+        "transient_peak_allocated_bytes": construction.get("transient_peak_allocated_bytes"),
+        "logical_read_bytes": totals.get("read_bytes") if isinstance(totals, Mapping) else None,
+        "logical_write_bytes": totals.get("write_bytes") if isinstance(totals, Mapping) else None,
+        "reader_calls": totals.get("read_calls") if isinstance(totals, Mapping) else None,
+        "publication_work_units": publication.get("semantic_total_operations")
+        if isinstance(publication, Mapping)
+        and publication.get("contract") == "graphforge-publication-work/1"
+        else None,
+    }
+    if any(
+        isinstance(value, bool) or not isinstance(value, int) or value < 0
+        for value in values.values()
+    ):
+        raise ControllerError("ordinary import construction metrics are incomplete")
+    return {name: int(value) for name, value in values.items()}
+
+
 def assemble_rung_evidence(
     *, root: Path, scale: int, graphforge: Mapping[str, Any], benchexec: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -432,7 +488,10 @@ def assemble_rung_evidence(
     if len(imports) != 1:
         raise ControllerError("ordinary import commit receipt is missing or ambiguous")
     require_bulk_ingest_capability(imports[0])
-    storage = _one_receipt(graphforge, "graphforge-storage-attribution/1")
+    source_storage = _storage_receipt(graphforge, "reopen")
+    imported_storage = _storage_receipt(graphforge, "reopen_proof")
+    lifecycle_storage = _one_receipt(graphforge, "graphforge-lifecycle-storage/1")
+    construction = _construction_metrics(imports[0])
     expected_edges = 16 * (1 << scale)
     source_counts = _query_receipts(graphforge, "recount", 2)
     source_hops = _query_receipts(graphforge, "query", 2)
@@ -453,21 +512,14 @@ def assemble_rung_evidence(
         for source, imported_receipt in zip(source_hops, imported_hops, strict=True)
     ):
         raise ControllerError("source/imported query evidence contradicts the selected rung")
-    storage_names = (
-        "retained_storage_bytes",
-        "transient_peak_storage_bytes",
-        "logical_read_bytes",
-        "logical_write_bytes",
-        "reader_calls",
-        "publication_work_units",
-    )
-    for name in storage_names:
+    lifecycle_names = ("retained_storage_bytes", "transient_peak_storage_bytes")
+    for name in lifecycle_names:
         if (
-            isinstance(storage.get(name), bool)
-            or not isinstance(storage.get(name), int)
-            or storage[name] < 0
+            isinstance(lifecycle_storage.get(name), bool)
+            or not isinstance(lifecycle_storage.get(name), int)
+            or lifecycle_storage[name] < 0
         ):
-            raise ControllerError(f"storage attribution receipt omitted {name}")
+            raise ControllerError(f"lifecycle storage receipt omitted {name}")
     authority = benchexec.get("authority")
     if not isinstance(authority, Mapping):
         raise ControllerError("BenchExec authority is missing")
@@ -483,7 +535,16 @@ def assemble_rung_evidence(
         "metrics": {
             "wall_seconds": int(float(authority["wall_seconds"]) + 0.999_999),
             "peak_rss_bytes": int(authority["peak_rss_bytes"]),
-            **{name: storage[name] for name in storage_names},
+            **{name: lifecycle_storage[name] for name in lifecycle_names},
+            **{
+                name: construction[name]
+                for name in (
+                    "logical_read_bytes",
+                    "logical_write_bytes",
+                    "reader_calls",
+                    "publication_work_units",
+                )
+            },
             "physical_read_bytes": int(authority["read_bytes"]),
             "physical_write_bytes": int(authority["write_bytes"]),
         },
@@ -494,8 +555,22 @@ def assemble_rung_evidence(
                 "physical_read_bytes",
                 "physical_write_bytes",
             ],
-            "storage_attribution": list(storage_names),
+            "storage_attribution": [
+                "retained_storage_bytes",
+                "transient_peak_storage_bytes",
+                "logical_read_bytes",
+                "logical_write_bytes",
+                "reader_calls",
+                "publication_work_units",
+            ],
             "query_qualification": ["live_edges", "correctness"],
+        },
+        "storage_components": {
+            "source_allocated_physical_bytes": source_storage["allocated_physical_bytes"],
+            "source_retained_logical_eof_bytes": source_storage["retained_logical_eof_bytes"],
+            "imported_allocated_physical_bytes": imported_storage["allocated_physical_bytes"],
+            "imported_retained_logical_eof_bytes": imported_storage["retained_logical_eof_bytes"],
+            **construction,
         },
         "failure": None,
     }

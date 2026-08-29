@@ -409,7 +409,7 @@ fn sanitize_receipt(value: &serde_json::Value) -> Option<serde_json::Value> {
             }
             if object
                 .get("construction")
-                .is_some_and(|construction| !sanitized_numeric_tree(construction))
+                .is_some_and(|construction| !sanitized_construction_tree(construction))
             {
                 return None;
             }
@@ -447,18 +447,21 @@ fn sanitize_receipt(value: &serde_json::Value) -> Option<serde_json::Value> {
             }
             Some(receipt.into())
         }
-        Some("graphforge-storage-attribution/1") => copy_closed_receipt(
+        Some("graphforge-storage-attribution-command/1") => sanitize_storage_command(object),
+        Some("graphforge-lifecycle-storage/1") => copy_closed_receipt(
             object,
             &[
                 "contract",
                 "retained_storage_bytes",
                 "transient_peak_storage_bytes",
-                "logical_read_bytes",
-                "logical_write_bytes",
-                "reader_calls",
-                "publication_work_units",
             ],
-        ),
+        )
+        .filter(|receipt| {
+            sanitized_numeric_fields(
+                receipt,
+                &["retained_storage_bytes", "transient_peak_storage_bytes"],
+            )
+        }),
         Some("graphforge-query-qualification/1") => copy_closed_receipt(
             object,
             &[
@@ -523,6 +526,111 @@ fn sanitized_numeric_tree(value: &serde_json::Value) -> bool {
         }),
         serde_json::Value::String(_) => false,
     }
+}
+
+fn sanitized_construction_tree(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(items) => items.iter().all(|(key, value)| {
+            key.len() <= 80
+                && key
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+                && if key == "contract" {
+                    value.as_str() == Some("graphforge-publication-work/1")
+                } else {
+                    sanitized_construction_tree(value)
+                }
+        }),
+        _ => sanitized_numeric_tree(value),
+    }
+}
+
+fn sanitized_numeric_fields(value: &serde_json::Value, keys: &[&str]) -> bool {
+    value.as_object().is_some_and(|object| {
+        keys.iter().all(|key| {
+            object
+                .get(*key)
+                .and_then(serde_json::Value::as_u64)
+                .is_some()
+        })
+    })
+}
+
+fn sanitize_storage_command(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Option<serde_json::Value> {
+    if object
+        .keys()
+        .any(|key| !matches!(key.as_str(), "contract" | "storage" | "reopen_agrees"))
+        || object
+            .get("reopen_agrees")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+    {
+        return None;
+    }
+    let storage = object.get("storage")?.as_object()?;
+    const STORAGE_KEYS: [&str; 7] = [
+        "contract",
+        "categories",
+        "logical_references",
+        "logical_bytes",
+        "retained_logical_eof_bytes",
+        "allocated_physical_bytes",
+        "physical_objects",
+    ];
+    if storage
+        .keys()
+        .any(|key| !STORAGE_KEYS.contains(&key.as_str()))
+        || storage.get("contract").and_then(serde_json::Value::as_str)
+            != Some("graphforge-storage-attribution/1")
+        || !sanitized_numeric_fields(
+            &serde_json::Value::Object(storage.clone()),
+            &STORAGE_KEYS[2..],
+        )
+        || !sanitized_storage_categories(storage.get("categories")?)
+    {
+        return None;
+    }
+    Some(serde_json::json!({
+        "contract": "graphforge-storage-attribution-command/1",
+        "storage": storage,
+        "reopen_agrees": true,
+    }))
+}
+
+fn sanitized_storage_categories(value: &serde_json::Value) -> bool {
+    const CATEGORIES: [&str; 10] = [
+        "topology_nodes",
+        "topology_edges",
+        "properties",
+        "uuid_and_surrogates",
+        "adjacency",
+        "catalog_and_manifests",
+        "construction_staging",
+        "portable_package",
+        "clean_imported_project",
+        "other",
+    ];
+    const TOTAL_KEYS: [&str; 5] = [
+        "logical_references",
+        "logical_bytes",
+        "physical_objects",
+        "physical_logical_bytes",
+        "allocated_bytes",
+    ];
+    value.as_object().is_some_and(|categories| {
+        categories.len() == CATEGORIES.len()
+            && CATEGORIES.iter().all(|category| {
+                categories.get(*category).is_some_and(|totals| {
+                    totals.as_object().is_some_and(|object| {
+                        object.len() == TOTAL_KEYS.len()
+                            && object.keys().all(|key| TOTAL_KEYS.contains(&key.as_str()))
+                            && sanitized_numeric_fields(totals, &TOTAL_KEYS)
+                    })
+                })
+            })
+    })
 }
 
 fn copy_closed_receipt(
@@ -831,8 +939,9 @@ fn action_matches_phase(command: &PhaseCommand) -> bool {
     if let PhaseAction::GraphForgeCliWorkflow { commands } = &command.action {
         return match command.phase {
             Phase::Ingest => ingest_workflow_is_valid(commands),
+            Phase::Reopen => reopen_workflow_is_valid(commands),
             Phase::Recount | Phase::Query => query_workflow_is_valid(commands, 2),
-            Phase::ReopenProof => query_workflow_is_valid(commands, 4),
+            Phase::ReopenProof => reopen_proof_workflow_is_valid(commands),
             _ => false,
         };
     }
@@ -879,6 +988,26 @@ fn query_workflow_is_valid(commands: &[Vec<String>], expected: usize) -> bool {
                     &["query"],
                 )
         })
+}
+
+fn reopen_workflow_is_valid(commands: &[Vec<String>]) -> bool {
+    commands.len() == 2
+        && cli_command_is_valid(&commands[0], &["recovery"])
+        && cli_command_is_valid(&commands[1], &["storage-attribution"])
+}
+
+fn reopen_proof_workflow_is_valid(commands: &[Vec<String>]) -> bool {
+    commands.len() == 5
+        && query_workflow_is_valid(&commands[..4], 4)
+        && cli_command_is_valid(&commands[4], &["storage-attribution"])
+}
+
+fn cli_command_is_valid(args: &[String], operation: &[&str]) -> bool {
+    args.iter().all(|argument| !argument.contains('\0'))
+        && contains_command(
+            &args.iter().map(String::as_str).collect::<Vec<_>>(),
+            operation,
+        )
 }
 
 fn ingest_workflow_is_valid(commands: &[Vec<String>]) -> bool {
@@ -952,6 +1081,57 @@ mod tests {
         assert!(parse_receipts(br#"{"contract":"unknown/1"}"#, true).is_err());
         assert!(parse_receipts(&[], true).is_err());
         assert!(parse_receipts(b"human output\n", false).unwrap().is_empty());
+        let import = br#"{"contract":"graphforge-import-session/1","outcome":"committed","construction":{"configured_batch_rows":65536,"publication_work":{"contract":"graphforge-publication-work/1","semantic_total_operations":9}}}"#;
+        assert_eq!(parse_receipts(import, true).unwrap().len(), 1);
+        let leaked = br#"{"contract":"graphforge-import-session/1","outcome":"committed","construction":{"project_path":"/secret"}}"#;
+        assert!(parse_receipts(leaked, true).is_err());
+    }
+
+    #[test]
+    fn storage_receipts_are_closed_and_preserve_only_semantic_attribution() {
+        let totals = serde_json::json!({
+            "logical_references": 0,
+            "logical_bytes": 0,
+            "physical_objects": 0,
+            "physical_logical_bytes": 0,
+            "allocated_bytes": 0
+        });
+        let categories = [
+            "topology_nodes",
+            "topology_edges",
+            "properties",
+            "uuid_and_surrogates",
+            "adjacency",
+            "catalog_and_manifests",
+            "construction_staging",
+            "portable_package",
+            "clean_imported_project",
+            "other",
+        ]
+        .into_iter()
+        .map(|name| (name.to_owned(), totals.clone()))
+        .collect::<serde_json::Map<_, _>>();
+        let receipt = serde_json::json!({
+            "contract": "graphforge-storage-attribution-command/1",
+            "storage": {
+                "contract": "graphforge-storage-attribution/1",
+                "categories": categories,
+                "logical_references": 0,
+                "logical_bytes": 0,
+                "retained_logical_eof_bytes": 64,
+                "allocated_physical_bytes": 128,
+                "physical_objects": 1
+            },
+            "reopen_agrees": true
+        });
+        let encoded = serde_json::to_vec(&receipt).expect("storage receipt JSON");
+        let sanitized = parse_receipts(&encoded, true).expect("closed storage receipt");
+        assert_eq!(sanitized[0]["storage"]["allocated_physical_bytes"], 128);
+
+        let mut leaked = receipt;
+        leaked["storage"]["project_path"] = serde_json::json!("/secret");
+        let encoded = serde_json::to_vec(&leaked).expect("leaked receipt JSON");
+        assert!(parse_receipts(&encoded, true).is_err());
     }
 
     struct FakeExecutor {

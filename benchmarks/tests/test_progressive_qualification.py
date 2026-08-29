@@ -63,6 +63,17 @@ def rung(scale: int, *, rss: int = 1_000_000_000, wall: int = 100) -> dict:
             ],
             "query_qualification": ["live_edges", "correctness"],
         },
+        "storage_components": {
+            "source_allocated_physical_bytes": 400_000 * multiplier,
+            "source_retained_logical_eof_bytes": 500_000 * multiplier,
+            "imported_allocated_physical_bytes": 400_000 * multiplier,
+            "imported_retained_logical_eof_bytes": 500_000 * multiplier,
+            "transient_peak_allocated_bytes": 1_500_000 * multiplier,
+            "logical_read_bytes": 2_000_000 * multiplier,
+            "logical_write_bytes": 3_000_000 * multiplier,
+            "reader_calls": 1_000 * multiplier,
+            "publication_work_units": 2_000 * multiplier,
+        },
         "failure": None,
     }
 

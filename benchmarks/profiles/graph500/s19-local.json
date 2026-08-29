@@ -98,12 +98,20 @@
     {
       "phase": "reopen",
       "action": {
-        "interface": "graph_forge_cli",
-        "args": [
-          "--json",
-          "--project",
-          "workspace/s19/source",
-          "recovery"
+        "interface": "graph_forge_cli_workflow",
+        "commands": [
+          [
+            "--json",
+            "--project",
+            "workspace/s19/source",
+            "recovery"
+          ],
+          [
+            "--json",
+            "--project",
+            "workspace/s19/source",
+            "storage-attribution"
+          ]
         ]
       }
     },
@@ -253,6 +261,12 @@
             "MATCH (a)-[r1]->(b)-[r2]->(c) RETURN a, r1, b, r2, c LIMIT 1024",
             "--output",
             "workspace/s19/imported-two-hop.arrow"
+          ],
+          [
+            "--json",
+            "--project",
+            "workspace/s19/imported",
+            "storage-attribution"
           ]
         ]
       }

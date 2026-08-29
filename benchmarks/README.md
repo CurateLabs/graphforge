@@ -195,14 +195,21 @@ The controller derives bulk-ingest capability from the same run's bounded
 ordinary `gf import-session commit --json` receipt: its construction evidence
 must identify a configuration of at least 65,536 rows, accepted bulk chunks,
 and the single committed publication. There is no separately plantable
-capability file. BenchExec XML is the sole wall/RSS/physical-I/O authority;
-closed ordinary storage-attribution and query-qualification receipts are the
-sole authorities for logical I/O, retained/transient storage, reader and
-publication work, counts, fixed-hop results, and source/import equality.
-Missing or contradictory receipts cause a typed first failure. Until #951 and
-#904 provide those exact ordinary receipts, a real rung remains fail-closed;
-the controller never manufactures values from command counts, recursive file
-scans, or synthetic labels.
+capability file. BenchExec XML is the sole wall/RSS/physical-I/O authority.
+Ordinary `storage-attribution --json` receipts preserve source and clean-import
+allocated and logical-EOF components separately. Construction evidence owns
+logical I/O, reader-call, transient-construction, and publication-work
+components; it is not relabeled as a whole-lifecycle storage peak. Passed rung
+evidence therefore also requires an authenticated `graphforge-lifecycle-storage/1`
+owner-union receipt for retained and transient lifecycle maxima. The controller
+fails closed while that ordinary receipt is absent rather than summing project
+owners or treating portable logical payload bytes as allocated storage.
+
+Ordinary result-sink receipts independently own scalar counts, fixed-hop result
+cardinality, query evidence, and source/import logical-result digests. Missing
+or contradictory storage, construction, or query receipts cause a typed first
+failure; the controller never manufactures values from command counts,
+recursive file scans, portable payload size, or synthetic labels.
 
 ## Native local admission deployment
 

@@ -75,6 +75,17 @@ def passed_rung(scale: int) -> dict:
             ],
             "query_qualification": ["live_edges", "correctness"],
         },
+        "storage_components": {
+            "source_allocated_physical_bytes": 100,
+            "source_retained_logical_eof_bytes": 110,
+            "imported_allocated_physical_bytes": 120,
+            "imported_retained_logical_eof_bytes": 130,
+            "transient_peak_allocated_bytes": 300,
+            "logical_read_bytes": 400,
+            "logical_write_bytes": 500,
+            "reader_calls": 8,
+            "publication_work_units": 9,
+        },
         "failure": None,
     }
 
@@ -159,18 +170,24 @@ def authoritative_receipts(scale: int) -> dict[str, list[dict]]:
                 "publication_committed": True,
                 "input_rows": 65_536 * 64,
                 "input_batches": 64,
+                "transient_peak_allocated_bytes": 300,
+                "application_io": {
+                    "totals": {"read_bytes": 400, "write_bytes": 500, "read_calls": 8}
+                },
+                "publication_work": {
+                    "contract": "graphforge-publication-work/1",
+                    "semantic_total_operations": 9,
+                },
             },
         },
         {
-            "contract": "graphforge-storage-attribution/1",
+            "contract": "graphforge-lifecycle-storage/1",
             "retained_storage_bytes": 200,
             "transient_peak_storage_bytes": 300,
-            "logical_read_bytes": 400,
-            "logical_write_bytes": 500,
-            "reader_calls": 8,
-            "publication_work_units": 9,
         },
     ]
+    source_storage = storage_receipt(100, 110)
+    imported_storage = storage_receipt(120, 130)
     nodes, edges = 1 << scale, 16 * (1 << scale)
     node_count = sink("a" * 64, rows=1, scalar=nodes)
     edge_count = sink("b" * 64, rows=1, scalar=edges)
@@ -178,9 +195,47 @@ def authoritative_receipts(scale: int) -> dict[str, list[dict]]:
     two_hop = sink("d" * 64, rows=1024)
     return {
         "ingest": construction,
+        "reopen": [source_storage],
         "recount": [node_count, edge_count],
         "query": [one_hop, two_hop],
-        "reopen_proof": [node_count, edge_count, one_hop, two_hop],
+        "reopen_proof": [node_count, edge_count, one_hop, two_hop, imported_storage],
+    }
+
+
+def storage_receipt(allocated: int, logical_eof: int) -> dict:
+    categories = {
+        name: {
+            "logical_references": 0,
+            "logical_bytes": 0,
+            "physical_objects": 0,
+            "physical_logical_bytes": 0,
+            "allocated_bytes": 0,
+        }
+        for name in (
+            "topology_nodes",
+            "topology_edges",
+            "properties",
+            "uuid_and_surrogates",
+            "adjacency",
+            "catalog_and_manifests",
+            "construction_staging",
+            "portable_package",
+            "clean_imported_project",
+            "other",
+        )
+    }
+    return {
+        "contract": "graphforge-storage-attribution-command/1",
+        "storage": {
+            "contract": "graphforge-storage-attribution/1",
+            "categories": categories,
+            "logical_references": 0,
+            "logical_bytes": 0,
+            "retained_logical_eof_bytes": logical_eof,
+            "allocated_physical_bytes": allocated,
+            "physical_objects": 0,
+        },
+        "reopen_agrees": True,
     }
 
 
@@ -318,6 +373,27 @@ class ProgressiveRunControllerTests(unittest.TestCase):
         }
         changed_gf = graphforge(18, contradictory)
         with self.assertRaisesRegex(ControllerError, "contradicts"):
+            assemble_rung_evidence(
+                root=ROOT, scale=18, graphforge=changed_gf, benchexec=benchexec(changed_gf)
+            )
+        missing_lifecycle = authoritative_receipts(18)
+        missing_lifecycle["ingest"] = [missing_lifecycle["ingest"][0]]
+        changed_gf = graphforge(18, missing_lifecycle)
+        with self.assertRaisesRegex(ControllerError, "graphforge-lifecycle-storage/1"):
+            assemble_rung_evidence(
+                root=ROOT, scale=18, graphforge=changed_gf, benchexec=benchexec(changed_gf)
+            )
+        contradictory_storage = authoritative_receipts(18)
+        contradictory_storage["reopen"][0]["reopen_agrees"] = False
+        changed_gf = graphforge(18, contradictory_storage)
+        with self.assertRaisesRegex(ControllerError, "ordinary storage receipt"):
+            assemble_rung_evidence(
+                root=ROOT, scale=18, graphforge=changed_gf, benchexec=benchexec(changed_gf)
+            )
+        missing_publication = authoritative_receipts(18)
+        del missing_publication["ingest"][0]["construction"]["publication_work"]
+        changed_gf = graphforge(18, missing_publication)
+        with self.assertRaisesRegex(ControllerError, "construction metrics"):
             assemble_rung_evidence(
                 root=ROOT, scale=18, graphforge=changed_gf, benchexec=benchexec(changed_gf)
             )

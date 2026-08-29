@@ -98,12 +98,20 @@
     {
       "phase": "reopen",
       "action": {
-        "interface": "graph_forge_cli",
-        "args": [
-          "--json",
-          "--project",
-          "workspace/s25/source",
-          "recovery"
+        "interface": "graph_forge_cli_workflow",
+        "commands": [
+          [
+            "--json",
+            "--project",
+            "workspace/s25/source",
+            "recovery"
+          ],
+          [
+            "--json",
+            "--project",
+            "workspace/s25/source",
+            "storage-attribution"
+          ]
         ]
       }
     },
@@ -233,6 +241,32 @@
             "MATCH ()-[r]->() RETURN count(r)",
             "--output",
             "workspace/s25/imported-edge-count.arrow"
+          ],
+          [
+            "--json",
+            "--project",
+            "workspace/s25/imported",
+            "query",
+            "--cypher",
+            "MATCH (a)-[r]->(b) RETURN a, r, b LIMIT 1024",
+            "--output",
+            "workspace/s25/imported-one-hop.arrow"
+          ],
+          [
+            "--json",
+            "--project",
+            "workspace/s25/imported",
+            "query",
+            "--cypher",
+            "MATCH (a)-[r1]->(b)-[r2]->(c) RETURN a, r1, b, r2, c LIMIT 1024",
+            "--output",
+            "workspace/s25/imported-two-hop.arrow"
+          ],
+          [
+            "--json",
+            "--project",
+            "workspace/s25/imported",
+            "storage-attribution"
           ]
         ]
       }

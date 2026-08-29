@@ -34,12 +34,28 @@
         "query_qualification": {"const": ["live_edges", "correctness"]}
       }
     },
+    "storage_components": {
+      "type": "object", "additionalProperties": false,
+      "required": ["source_allocated_physical_bytes", "source_retained_logical_eof_bytes", "imported_allocated_physical_bytes", "imported_retained_logical_eof_bytes", "transient_peak_allocated_bytes", "logical_read_bytes", "logical_write_bytes", "reader_calls", "publication_work_units"],
+      "properties": {
+        "source_allocated_physical_bytes": {"$ref": "#/$defs/nonnegative"},
+        "source_retained_logical_eof_bytes": {"$ref": "#/$defs/nonnegative"},
+        "imported_allocated_physical_bytes": {"$ref": "#/$defs/nonnegative"},
+        "imported_retained_logical_eof_bytes": {"$ref": "#/$defs/nonnegative"},
+        "transient_peak_allocated_bytes": {"$ref": "#/$defs/nonnegative"},
+        "logical_read_bytes": {"$ref": "#/$defs/nonnegative"},
+        "logical_write_bytes": {"$ref": "#/$defs/nonnegative"},
+        "reader_calls": {"$ref": "#/$defs/nonnegative"},
+        "publication_work_units": {"$ref": "#/$defs/nonnegative"}
+      }
+    },
     "failure": {"type": ["string", "null"], "enum": [null, "admission", "generate", "ingest", "reopen", "recount", "query", "export", "verify", "clean_import", "reopen_proof", "timeout", "oom", "storage", "correctness", "harness"]}
   },
   "allOf": [
     {
       "if": {"properties": {"status": {"const": "passed"}}, "required": ["status"]},
       "then": {
+        "required": ["storage_components"],
         "properties": {
           "correctness": {"const": true},
           "phases": {"const": ["admission", "generate", "ingest", "reopen", "recount", "query", "export", "verify", "clean_import", "reopen_proof"]},
