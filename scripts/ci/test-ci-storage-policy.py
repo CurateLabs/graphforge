@@ -98,7 +98,7 @@ EXPECTED_ARTIFACT_UPLOADS = Counter(
         "native-durability-aggregate-${{ github.sha }}": 1,
         "m6-memory-${{ github.sha }}-blacksmith-4vcpu-ubuntu-2404": 1,
         "g500-certification-${{ inputs.commit_sha }}": 1,
-        "native-local-admission-${{ github.sha }}": 1,
+        "native-local-admission-${{ matrix.authority }}-${{ github.sha }}": 1,
     }
 )
 EXPECTED_ARTIFACT_DOWNLOADS = Counter(

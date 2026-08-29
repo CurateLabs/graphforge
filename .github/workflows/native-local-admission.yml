@@ -21,8 +21,16 @@ permissions:
 
 jobs:
   native-admission:
-    name: BenchExec cgroups-v2 admission
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    name: BenchExec admission (${{ matrix.authority }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - authority: blacksmith-ubuntu-24.04
+            runner: blacksmith-4vcpu-ubuntu-2404
+          - authority: github-ubuntu-24.04
+            runner: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 10
     steps:
       - name: Checkout code
@@ -66,7 +74,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: native-local-admission-${{ github.sha }}
+          name: native-local-admission-${{ matrix.authority }}-${{ github.sha }}
           path: benchmarks/outputs/local-admission-evidence.json
           if-no-files-found: error
           retention-days: 1

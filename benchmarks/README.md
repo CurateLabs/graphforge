@@ -114,8 +114,11 @@ schema independently, and uploads the sanitized document even when admission
 fails. An uploaded disqualification is diagnostic evidence, never a green
 qualification.
 
-The hosted workflow uses one explicit root authority for both BenchExec's
-cgroup preflight and the measured fixture because the ephemeral runner's normal
-UID is not delegated a writable cgroup subtree. This is recorded as a boolean
-fact in evidence. It does not disable namespace containers, bypass cgroups, or
-grant authority to a persistent/shared host.
+The hosted workflow evaluates bare Blacksmith and GitHub-hosted Ubuntu 24.04 as
+separate explicit authorities. Each runner uses one root authority for both
+BenchExec's cgroup preflight and the measured fixture because the ephemeral
+runner's normal UID may not be delegated a writable cgroup subtree. Each job is
+independently strict and uploads a provider-labelled evidence document; one
+provider is never a fallback that hides the other's disqualification. Root use
+is recorded as a boolean fact in evidence. It does not disable namespace
+containers, bypass cgroups, or grant authority to a persistent/shared host.
