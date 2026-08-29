@@ -145,6 +145,19 @@ checkpoints, from the authenticated receipt chain. Deterministic 1x/2x/4x
 tests require exact chunk counts and bounded peak windows while aggregate
 merge work remains linear in accepted rows.
 
+Query-phase ordered-LIMIT evidence must distinguish complete candidate
+examination from materialization amplification. For the canonical fixed-hop
+destination-UUID query, record expansion chunks/candidates/projected columns,
+edge and node Parquet calls/rows, and v4 ordinal ranges/coalesced calls/bytes/
+peak charged buffer/per-record seeks plus session revalidation calls/bytes.
+Generation authentication is charged once per execution session and must scale
+linearly with retained immutable artifacts, never expansion chunks multiplied
+by artifact count. Edge and node Parquet calls are exactly
+zero, per-record seeks are exactly zero, ordered source and imported results
+are byte-identical, and 1x/2x/4x ordinal work remains a linear constant factor
+of candidates examined. A bounded RSS result does not pass if logical reads
+grow as expansion chunks multiplied by graph size.
+
 ## Commands
 
 Always-on CI (SCALE-10 smoke + all reconciliation / determinism / bounded /

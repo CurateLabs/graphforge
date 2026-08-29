@@ -226,12 +226,15 @@ mod write_driver;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 
 use arrow::array::{
-    Array, ArrayRef, FixedSizeBinaryArray, Int8Array, RecordBatch, StructArray, UInt64Array,
+    Array, ArrayRef, FixedSizeBinaryArray, FixedSizeBinaryBuilder, Int8Array, ListBuilder,
+    RecordBatch, StringArray, StructArray, TimestampMicrosecondArray, UInt32Array, UInt32Builder,
+    UInt64Array, new_null_array,
 };
-use arrow::datatypes::{DataType, SchemaRef};
+use arrow::datatypes::{DataType, Field, SchemaRef, TimeUnit};
 use async_trait::async_trait;
 use datafusion::common::{DFSchema, DFSchemaRef, DataFusionError};
 use datafusion::execution::context::{ExecutionProps, QueryPlanner, SessionState};
@@ -3004,9 +3007,14 @@ fn build_edge_prop_children(
         vec![rel_type_name.to_owned()]
     };
     let mut prop_batches_by_rel = Vec::with_capacity(stems.len());
+    let property_names = prop_fields
+        .iter()
+        .map(|field| field.name().clone())
+        .collect::<Vec<_>>();
     for stem in &stems {
-        let batches = graphforge_storage::read_edge_properties(dir, stem)
-            .map_err(|e| exec_err(e.to_string()))?;
+        let batches =
+            graphforge_storage::read_edge_properties_projected(dir, stem, &property_names)
+                .map_err(|e| exec_err(e.to_string()))?;
         if let Some(first) = batches.first() {
             prop_batches_by_rel.push(
                 concat_batches(&first.schema(), &batches).map_err(|e| exec_err(e.to_string()))?,
@@ -3123,6 +3131,97 @@ impl ValueAt for arrow::array::UInt64Array {
 // ExpandExec — adjacency-backed single-hop expansion (#763)
 // ---------------------------------------------------------------------------
 
+/// Generation-pinned destination-identity resolver shared by every query and
+/// hop of one facade. Replacement is atomic with facade generation adoption;
+/// execution never rediscovers mutable identity files by path.
+#[derive(Debug, Default)]
+pub struct V4OrdinalIdentityResolver {
+    handle: RwLock<
+        Option<Arc<Mutex<graphforge_storage::ordinal_identity_v4::V4OrdinalIdentityHandle>>>,
+    >,
+}
+
+struct V4OrdinalIdentityPin {
+    session: Option<Arc<V4OrdinalIdentitySession>>,
+    required: bool,
+}
+
+impl V4OrdinalIdentityResolver {
+    /// Construct a resolver for an optional admitted generation facet.
+    #[must_use]
+    pub fn new(
+        handle: Option<graphforge_storage::ordinal_identity_v4::V4OrdinalIdentityHandle>,
+    ) -> Self {
+        Self {
+            handle: RwLock::new(handle.map(|handle| Arc::new(Mutex::new(handle)))),
+        }
+    }
+
+    /// Replace the exact generation served by subsequent sessions.
+    pub fn replace(
+        &self,
+        handle: Option<graphforge_storage::ordinal_identity_v4::V4OrdinalIdentityHandle>,
+    ) {
+        *self.handle.write().expect("ordinal identity lock poisoned") =
+            handle.map(|handle| Arc::new(Mutex::new(handle)));
+    }
+
+    fn pin(&self) -> Result<V4OrdinalIdentityPin, GfError> {
+        let handle = self
+            .handle
+            .read()
+            .expect("ordinal identity lock poisoned")
+            .clone();
+        let Some(handle) = handle else {
+            return Ok(V4OrdinalIdentityPin {
+                session: None,
+                required: false,
+            });
+        };
+        let revalidation = handle
+            .lock()
+            .expect("ordinal identity handle poisoned")
+            .revalidate_for_session()
+            .map_err(|error| GfError::Execution(error.to_string()))?;
+        Ok(V4OrdinalIdentityPin {
+            session: Some(Arc::new(V4OrdinalIdentitySession {
+                handle,
+                revalidation,
+                attribution_available: AtomicBool::new(true),
+            })),
+            required: true,
+        })
+    }
+}
+
+/// One exact, already-authenticated ordinal authority pinned for the lifetime
+/// of an execution session.
+#[derive(Debug)]
+struct V4OrdinalIdentitySession {
+    handle: Arc<Mutex<graphforge_storage::ordinal_identity_v4::V4OrdinalIdentityHandle>>,
+    revalidation: graphforge_storage::V4OrdinalRevalidationMetrics,
+    attribution_available: AtomicBool,
+}
+
+impl V4OrdinalIdentitySession {
+    fn lookup_node_uuids(
+        &self,
+        requested: &[u64],
+    ) -> Result<graphforge_storage::V4OrdinalLookup, GfError> {
+        let mut lookup = self
+            .handle
+            .lock()
+            .expect("ordinal identity handle poisoned")
+            .lookup_node_uuids_pinned(requested)
+            .map_err(|error| GfError::Execution(error.to_string()))?;
+        if self.attribution_available.swap(false, Ordering::AcqRel) {
+            lookup.metrics.revalidation_calls = self.revalidation.calls;
+            lookup.metrics.revalidation_bytes = self.revalidation.bytes_read;
+        }
+        Ok(lookup)
+    }
+}
+
 /// Physical node for adjacency-backed single-hop expansion, the physical
 /// counterpart of [`graphforge_plan::ExpandNode`].
 ///
@@ -3156,16 +3255,26 @@ pub struct ExpandExec {
     demand_batch: Option<usize>,
     /// Query-scoped terminal cancellation shared by the bounded hop chain.
     demand: Option<Arc<demand::QueryDemand>>,
+    /// Exact output columns consumed above this operator. `None` preserves the
+    /// standalone full-schema contract.
+    required_output: Option<Arc<[bool]>>,
+    /// Facade-owned generation-pinned ordinal identity authority.
+    ordinal_identities: Option<Arc<V4OrdinalIdentitySession>>,
+    /// A facade configured an identity authority, but admission may have
+    /// failed closed for this generation. Standalone sessions leave this false.
+    ordinal_identity_required: bool,
 }
 
 impl ExpandExec {
     /// Build the physical node from its logical counterpart, planned input,
     /// and the session's adjacency provider.
     #[must_use]
-    pub fn new(
+    pub(crate) fn new(
         node: &graphforge_plan::ExpandNode,
         input: Arc<dyn ExecutionPlan>,
         provider: Arc<dyn AdjacencyProvider>,
+        ordinal_identities: Option<Arc<V4OrdinalIdentitySession>>,
+        ordinal_identity_required: bool,
     ) -> Self {
         let schema: SchemaRef = Arc::new(node.schema().as_arrow().clone());
         let props = Arc::new(PlanProperties::new(
@@ -3196,6 +3305,9 @@ impl ExpandExec {
             edge_var: node.edge_var,
             demand_batch: None,
             demand: None,
+            required_output: None,
+            ordinal_identities,
+            ordinal_identity_required,
         }
     }
 
@@ -3220,6 +3332,32 @@ impl ExpandExec {
             edge_var: self.edge_var,
             demand_batch: Some(batch_goal),
             demand: Some(demand),
+            required_output: self.required_output.clone(),
+            ordinal_identities: self.ordinal_identities.clone(),
+            ordinal_identity_required: self.ordinal_identity_required,
+        })
+    }
+
+    fn with_required_output(&self, required: Vec<bool>) -> Arc<dyn ExecutionPlan> {
+        Arc::new(Self {
+            input: Arc::clone(&self.input),
+            rel_type_name: self.rel_type_name.clone(),
+            direction: self.direction,
+            dir: self.dir.clone(),
+            mode: self.mode,
+            src_col_idx: self.src_col_idx,
+            edge_prop_count: self.edge_prop_count,
+            input_width: self.input_width,
+            schema: Arc::clone(&self.schema),
+            props: Arc::clone(&self.props),
+            provider: Arc::clone(&self.provider),
+            fetch: self.fetch,
+            edge_var: self.edge_var,
+            demand_batch: self.demand_batch,
+            demand: self.demand.clone(),
+            required_output: Some(required.into()),
+            ordinal_identities: self.ordinal_identities.clone(),
+            ordinal_identity_required: self.ordinal_identity_required,
         })
     }
 }
@@ -3243,15 +3381,26 @@ impl DisplayAs for ExpandExec {
         };
         write!(
             f,
-            "ExpandExec: rel={}, dir={arrow}, adjacency={}, fetch={}, demand_batch={}, cancel={}",
+            "ExpandExec: rel={}, dir={arrow}, adjacency={}, identity={}, fetch={}, demand_batch={}, projection={}, cancel={}",
             self.rel_type_name,
             self.provider
                 .status(&self.rel_type_name, self.direction)
                 .as_str(),
+            if self.ordinal_identities.is_some() {
+                "v4"
+            } else if self.ordinal_identity_required {
+                "required-missing"
+            } else {
+                "legacy"
+            },
             self.fetch
                 .map_or_else(|| "all".to_owned(), |n| n.to_string()),
             self.demand_batch
                 .map_or_else(|| "all".to_owned(), |n| n.to_string()),
+            self.required_output.as_ref().map_or_else(
+                || "all".to_owned(),
+                |mask| mask.iter().filter(|needed| **needed).count().to_string(),
+            ),
             if self.demand.is_some() {
                 "guarded"
             } else {
@@ -3298,6 +3447,9 @@ impl ExecutionPlan for ExpandExec {
             edge_var: self.edge_var,
             demand_batch: self.demand_batch,
             demand: self.demand.clone(),
+            required_output: self.required_output.clone(),
+            ordinal_identities: self.ordinal_identities.clone(),
+            ordinal_identity_required: self.ordinal_identity_required,
         }))
     }
 
@@ -3318,6 +3470,9 @@ impl ExecutionPlan for ExpandExec {
             edge_var: self.edge_var,
             demand_batch: self.demand_batch,
             demand: self.demand.clone(),
+            required_output: self.required_output.clone(),
+            ordinal_identities: self.ordinal_identities.clone(),
+            ordinal_identity_required: self.ordinal_identity_required,
         }))
     }
 
@@ -3355,6 +3510,9 @@ impl ExecutionPlan for ExpandExec {
             provider: self.provider.clone(),
             edge_var: self.edge_var,
             demand: self.demand.clone(),
+            required_output: self.required_output.clone(),
+            ordinal_identities: self.ordinal_identities.clone(),
+            ordinal_identity_required: self.ordinal_identity_required,
         };
         let schema = self.schema.clone();
         let batch_size = context.session_config().batch_size();
@@ -3446,6 +3604,9 @@ struct SingleHopConfig {
     provider: Arc<dyn AdjacencyProvider>,
     edge_var: u32,
     demand: Option<Arc<demand::QueryDemand>>,
+    required_output: Option<Arc<[bool]>>,
+    ordinal_identities: Option<Arc<V4OrdinalIdentitySession>>,
+    ordinal_identity_required: bool,
 }
 
 /// Resumable position within one input batch. Keeping the raw adjacency offset
@@ -3457,6 +3618,58 @@ struct SingleHopPosition {
     row: usize,
     neighbor_offset: usize,
     seen_edges: std::collections::HashSet<u64>,
+}
+
+/// Build a schema-valid value column for an output that is provably unused by
+/// every operator above this Expand. Nullable fields use Arrow nulls; required
+/// physical fields receive inert values so the unchanged logical schema stays
+/// valid without forcing their backing Parquet columns to be read.
+fn unused_expand_column(field: &Field, rows: usize) -> Result<ArrayRef, GfError> {
+    if field.is_nullable() {
+        return Ok(new_null_array(field.data_type(), rows));
+    }
+    let column: ArrayRef = match field.data_type() {
+        DataType::FixedSizeBinary(width) => Arc::new(
+            FixedSizeBinaryArray::try_from_iter(
+                (0..rows).map(|_| vec![0_u8; usize::try_from(*width).unwrap_or(0)]),
+            )
+            .map_err(|error| GfError::Execution(error.to_string()))?,
+        ),
+        DataType::UInt64 => Arc::new(UInt64Array::from(vec![0_u64; rows])),
+        DataType::UInt32 => Arc::new(UInt32Array::from(vec![0_u32; rows])),
+        DataType::Utf8 => Arc::new(StringArray::from(vec![""; rows])),
+        DataType::Timestamp(TimeUnit::Microsecond, timezone) => {
+            let values = TimestampMicrosecondArray::from(vec![0_i64; rows]);
+            Arc::new(if let Some(timezone) = timezone {
+                values.with_timezone(Arc::clone(timezone))
+            } else {
+                values
+            })
+        }
+        DataType::List(item) if item.data_type() == &DataType::UInt32 => {
+            let mut builder = ListBuilder::new(UInt32Builder::new()).with_field(Arc::clone(item));
+            for _ in 0..rows {
+                builder.append(true);
+            }
+            Arc::new(builder.finish())
+        }
+        data_type => {
+            return Err(GfError::Execution(format!(
+                "Expand cannot synthesize unused non-nullable output '{}' with type {data_type}",
+                field.name()
+            )));
+        }
+    };
+    Ok(column)
+}
+
+fn require_admitted_ordinal_identity(required: bool, admitted: bool) -> Result<(), GfError> {
+    if required && !admitted {
+        return Err(GfError::Execution(
+            "destination UUID projection requires admitted v4 ordinal identity".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Execute the adjacency-backed single-hop expansion: for every input row's
@@ -3534,6 +3747,132 @@ fn expand_single_hop_chunk(
     }
     demand::record_candidates(cfg.edge_var, triples.len());
 
+    let dst_width = graphforge_storage::TOPOLOGY_NODES_SCHEMA.fields().len();
+    let edge_end = cfg.out_schema.fields().len().saturating_sub(dst_width);
+    let required = cfg.required_output.as_deref();
+    let edge_materialization_unused = required.is_some_and(|mask| {
+        mask.get(cfg.input_width..edge_end).is_some_and(|fields| {
+            fields.iter().enumerate().all(|(offset, needed)| {
+                !needed || cfg.out_schema.field(cfg.input_width + offset).name() == "edge_id"
+            })
+        })
+    });
+    let destination_uuid_index = edge_end;
+    let destination_id_index = edge_end + 1;
+    let destination_identity_only = required.is_some_and(|mask| {
+        mask.iter()
+            .enumerate()
+            .skip(edge_end)
+            .all(|(index, needed)| {
+                !needed || index == destination_uuid_index || index == destination_id_index
+            })
+    });
+    let uuid_required =
+        required.is_some_and(|mask| mask.get(destination_uuid_index).copied().unwrap_or(false));
+    if edge_materialization_unused && destination_identity_only && uuid_required {
+        require_admitted_ordinal_identity(
+            cfg.ordinal_identity_required,
+            cfg.ordinal_identities.is_some(),
+        )?;
+    }
+    if edge_materialization_unused
+        && destination_identity_only
+        && let Some(ordinal_identities) = cfg.ordinal_identities.as_ref()
+    {
+        let mut requested = reached.iter().copied().collect::<Vec<_>>();
+        requested.sort_unstable();
+        let (resolved, identity_metrics) = if uuid_required {
+            let lookup = ordinal_identities.lookup_node_uuids(&requested)?;
+            (lookup.values, lookup.metrics)
+        } else {
+            (
+                vec![None; requested.len()],
+                graphforge_storage::V4OrdinalLookupMetrics::default(),
+            )
+        };
+        let mut uuids = HashMap::with_capacity(requested.len());
+        for (node_id, uuid) in requested.into_iter().zip(resolved) {
+            if uuid_required {
+                let uuid = uuid.ok_or_else(|| {
+                    GfError::Execution(format!(
+                        "Expand reached unknown destination node_id {node_id}"
+                    ))
+                })?;
+                uuids.insert(node_id, *uuid.as_bytes());
+            }
+        }
+        let src_take = arrow::array::UInt32Array::from(
+            triples
+                .iter()
+                .map(|(row, _, _)| {
+                    u32::try_from(*row).map_err(|_| exec_err("row index exceeds u32".into()))
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+        let mut columns = Vec::with_capacity(cfg.out_schema.fields().len());
+        for column in input.columns() {
+            columns
+                .push(take(column, &src_take, None).map_err(|error| exec_err(error.to_string()))?);
+        }
+        for (offset, field) in cfg
+            .out_schema
+            .fields()
+            .iter()
+            .skip(cfg.input_width)
+            .take(edge_end.saturating_sub(cfg.input_width))
+            .enumerate()
+        {
+            let index = cfg.input_width + offset;
+            if required.is_some_and(|mask| mask[index]) && field.name() == "edge_id" {
+                columns.push(Arc::new(UInt64Array::from(
+                    triples
+                        .iter()
+                        .map(|(_, edge_id, _)| *edge_id)
+                        .collect::<Vec<_>>(),
+                )));
+            } else {
+                columns.push(unused_expand_column(field, triples.len())?);
+            }
+        }
+        for (offset, field) in cfg.out_schema.fields().iter().skip(edge_end).enumerate() {
+            let index = edge_end + offset;
+            let column: ArrayRef = if required.is_some_and(|mask| mask[index])
+                && index == destination_id_index
+            {
+                Arc::new(UInt64Array::from(
+                    triples
+                        .iter()
+                        .map(|(_, _, neighbor)| *neighbor)
+                        .collect::<Vec<_>>(),
+                ))
+            } else if required.is_some_and(|mask| mask[index]) && index == destination_uuid_index {
+                let mut builder = FixedSizeBinaryBuilder::with_capacity(triples.len(), 16);
+                for (_, _, neighbor) in &triples {
+                    builder
+                        .append_value(uuids[neighbor])
+                        .map_err(|error| exec_err(error.to_string()))?;
+                }
+                Arc::new(builder.finish())
+            } else {
+                unused_expand_column(field, triples.len())?
+            };
+            columns.push(column);
+        }
+        let output = RecordBatch::try_new(cfg.out_schema.clone(), columns)
+            .map_err(|error| exec_err(error.to_string()))?;
+        let projected_columns = required.map_or(cfg.out_schema.fields().len(), |mask| {
+            mask.iter().filter(|needed| **needed).count()
+        });
+        demand::record_identity_projection(
+            cfg.edge_var,
+            output.num_rows(),
+            projected_columns,
+            &identity_metrics,
+        );
+        demand::record_emitted(cfg.edge_var, output.num_rows());
+        return Ok(output);
+    }
+
     // Edge rows keyed by edge_id, for the edge topology columns — read
     // lazily for the traversed ids only.
     let edge_permit = cfg
@@ -3547,13 +3886,40 @@ fn expand_single_hop_chunk(
         Arc::new(demand::HopReadObserver::new(cfg.edge_var))
             as Arc<dyn graphforge_storage::io_stats::FilteredReadObserver>
     });
-    let edge_batches = graphforge_storage::read_edges_filtered_observed(
-        &cfg.dir,
-        &cfg.rel_type_name,
-        cfg.mode,
-        &traversed,
-        edge_observer.as_ref(),
-    )
+    let edge_topology_width = edge_end
+        .saturating_sub(cfg.input_width)
+        .saturating_sub(cfg.edge_prop_count);
+    let relationship_properties_required = required.is_none_or(|mask| {
+        mask[cfg.input_width + edge_topology_width..edge_end]
+            .iter()
+            .any(|needed| *needed)
+    });
+    let mut edge_projection = (0..edge_topology_width)
+        .filter(|offset| required.is_none_or(|mask| mask[cfg.input_width + offset]))
+        .collect::<Vec<_>>();
+    // edge_id keys adjacency entries; edge_uuid keys demanded relationship
+    // properties. Storage adds edge_id automatically.
+    if relationship_properties_required {
+        edge_projection.push(0);
+    }
+    let edge_batches = if required.is_some() {
+        graphforge_storage::read_edges_filtered_projected_observed(
+            &cfg.dir,
+            &cfg.rel_type_name,
+            cfg.mode,
+            &traversed,
+            &edge_projection,
+            edge_observer.as_ref(),
+        )
+    } else {
+        graphforge_storage::read_edges_filtered_observed(
+            &cfg.dir,
+            &cfg.rel_type_name,
+            cfg.mode,
+            &traversed,
+            edge_observer.as_ref(),
+        )
+    }
     .map_err(|e| exec_err(e.to_string()))?;
     drop(edge_permit);
     let edge_schema = edge_batches
@@ -3562,16 +3928,25 @@ fn expand_single_hop_chunk(
         .ok_or_else(|| exec_err("Expand: edge scan returned no batches".into()))?;
     let edge_batch =
         concat_batches(&edge_schema, &edge_batches).map_err(|e| exec_err(e.to_string()))?;
-    let edge_ids_col = u64_column(&edge_batch, 3)?; // edge_id
+    let edge_id_index = edge_batch
+        .schema()
+        .index_of("edge_id")
+        .map_err(|error| exec_err(error.to_string()))?;
+    let edge_ids_col = u64_column(&edge_batch, edge_id_index)?;
     let edge_row: HashMap<u64, usize> = (0..edge_batch.num_rows())
         .filter_map(|i| edge_ids_col.value_at(i).map(|id| (id, i)))
         .collect();
-    let edge_uuids = edge_batch
-        .column(0)
-        .as_any()
-        .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
-        .filter(|a| a.value_length() == 16)
-        .ok_or_else(|| exec_err("Expand: edge_uuid column is not FixedSizeBinary(16)".into()))?;
+    let edge_uuids = relationship_properties_required
+        .then(|| {
+            edge_batch
+                .column_by_name("edge_uuid")
+                .and_then(|column| column.as_any().downcast_ref::<FixedSizeBinaryArray>())
+                .filter(|array| array.value_length() == 16)
+                .ok_or_else(|| {
+                    exec_err("Expand: edge_uuid column is not FixedSizeBinary(16)".into())
+                })
+        })
+        .transpose()?;
 
     // Destination node rows keyed by node_id — read lazily for the reached
     // neighbors only (#838), so an index Hit does not scan the whole node table.
@@ -3586,11 +3961,43 @@ fn expand_single_hop_chunk(
         Arc::new(demand::HopReadObserver::new(cfg.edge_var))
             as Arc<dyn graphforge_storage::io_stats::FilteredReadObserver>
     });
-    let node_batches = graphforge_storage::read_nodes_filtered_observed(
-        &cfg.dir,
-        &reached,
-        node_observer.as_ref(),
-    )
+    let node_projection = (0..dst_width)
+        .filter(|offset| required.is_none_or(|mask| mask[edge_end + offset]))
+        .collect::<Vec<_>>();
+    let edge_key_index =
+        if matches!(cfg.mode, OntologyMode::Exploratory) || cfg.rel_type_name == "*" {
+            graphforge_storage::EXPLORATORY_EDGE_SCHEMA.index_of("edge_id")
+        } else {
+            graphforge_storage::TYPED_EDGE_SCHEMA.index_of("edge_id")
+        }
+        .map_err(|error| exec_err(error.to_string()))?;
+    let edge_key_already_demanded = usize::from(edge_projection.contains(&edge_key_index));
+    let node_key_already_demanded = usize::from(node_projection.contains(&1));
+    demand::record_materialization_projection(
+        cfg.edge_var,
+        edge_projection
+            .len()
+            .saturating_add(1_usize.saturating_sub(edge_key_already_demanded))
+            .saturating_add(required.map_or(cfg.edge_prop_count, |mask| {
+                mask[cfg.input_width + edge_topology_width..edge_end]
+                    .iter()
+                    .filter(|needed| **needed)
+                    .count()
+            })),
+        node_projection
+            .len()
+            .saturating_add(1_usize.saturating_sub(node_key_already_demanded)),
+    );
+    let node_batches = if required.is_some() {
+        graphforge_storage::read_nodes_filtered_projected_observed(
+            &cfg.dir,
+            &reached,
+            &node_projection,
+            node_observer.as_ref(),
+        )
+    } else {
+        graphforge_storage::read_nodes_filtered_observed(&cfg.dir, &reached, node_observer.as_ref())
+    }
     .map_err(|e| exec_err(e.to_string()))?;
     drop(node_permit);
     let Some(first) = node_batches.first() else {
@@ -3598,7 +4005,11 @@ fn expand_single_hop_chunk(
     };
     let node_batch =
         concat_batches(&first.schema(), &node_batches).map_err(|e| exec_err(e.to_string()))?;
-    let node_ids = u64_column(&node_batch, 1)?;
+    let node_id_index = node_batch
+        .schema()
+        .index_of("node_id")
+        .map_err(|error| exec_err(error.to_string()))?;
+    let node_ids = u64_column(&node_batch, node_id_index)?;
     let node_row: HashMap<u64, usize> = node_ids
         .iter()
         .enumerate()
@@ -3628,14 +4039,16 @@ fn expand_single_hop_chunk(
         src_take.push(to_u32(row)?);
         edge_take.push(to_u32(edge_idx)?);
         dst_take.push(to_u32(dst_idx)?);
-        if edge_uuids.is_null(edge_idx) {
-            return Err(exec_err(format!(
-                "Expand: edge_id {edge_id} has a null edge_uuid"
-            )));
+        if let Some(edge_uuids) = edge_uuids {
+            if edge_uuids.is_null(edge_idx) {
+                return Err(exec_err(format!(
+                    "Expand: edge_id {edge_id} has a null edge_uuid"
+                )));
+            }
+            let mut edge_uuid = [0u8; 16];
+            edge_uuid.copy_from_slice(edge_uuids.value(edge_idx));
+            output_edge_uuids.push(edge_uuid);
         }
-        let mut edge_uuid = [0u8; 16];
-        edge_uuid.copy_from_slice(edge_uuids.value(edge_idx));
-        output_edge_uuids.push(edge_uuid);
     }
     let src_take = arrow::array::UInt32Array::from(src_take);
     let edge_take = arrow::array::UInt32Array::from(edge_take);
@@ -3643,30 +4056,79 @@ fn expand_single_hop_chunk(
 
     // Assemble columns in ExpandNode schema order: input ++ edge topology ++
     // edge properties (nullable) ++ destination node.
-    let edge_topo_width = edge_batch.num_columns();
     let prop_fields: Vec<arrow::datatypes::FieldRef> = cfg
         .out_schema
         .fields()
         .iter()
-        .skip(cfg.input_width + edge_topo_width)
+        .skip(cfg.input_width + edge_topology_width)
         .take(cfg.edge_prop_count)
         .cloned()
         .collect();
     let mut columns = Vec::with_capacity(cfg.out_schema.fields().len());
-    for col in input.columns() {
-        columns.push(take(col, &src_take, None).map_err(|e| exec_err(e.to_string()))?);
+    for column in input.columns() {
+        columns.push(take(column, &src_take, None).map_err(|error| exec_err(error.to_string()))?);
     }
-    for col in edge_batch.columns() {
-        columns.push(take(col, &edge_take, None).map_err(|e| exec_err(e.to_string()))?);
+    for (offset, field) in cfg
+        .out_schema
+        .fields()
+        .iter()
+        .skip(cfg.input_width)
+        .take(edge_topology_width)
+        .enumerate()
+    {
+        let index = cfg.input_width + offset;
+        columns.push(if required.is_none_or(|mask| mask[index]) {
+            let column = edge_batch.column_by_name(field.name()).ok_or_else(|| {
+                exec_err(format!(
+                    "Expand: projected edge column {} is absent",
+                    field.name()
+                ))
+            })?;
+            take(column, &edge_take, None).map_err(|error| exec_err(error.to_string()))?
+        } else {
+            unused_expand_column(field, triples.len())?
+        });
     }
-    columns.extend(build_edge_prop_children(
+    let demanded_property_fields = prop_fields
+        .iter()
+        .enumerate()
+        .filter(|(offset, _)| {
+            required.is_none_or(|mask| mask[cfg.input_width + edge_topology_width + offset])
+        })
+        .map(|(_, field)| Arc::clone(field))
+        .collect::<Vec<_>>();
+    let demanded_property_columns = build_edge_prop_children(
         &cfg.rel_type_name,
         &cfg.dir,
-        &prop_fields,
+        &demanded_property_fields,
         &output_edge_uuids,
-    )?);
-    for col in node_batch.columns() {
-        columns.push(take(col, &dst_take, None).map_err(|e| exec_err(e.to_string()))?);
+    )?;
+    let demanded_properties = demanded_property_fields
+        .iter()
+        .map(|field| field.name().clone())
+        .zip(demanded_property_columns)
+        .collect::<HashMap<_, _>>();
+    for field in &prop_fields {
+        columns.push(
+            demanded_properties
+                .get(field.name())
+                .cloned()
+                .map_or_else(|| unused_expand_column(field, triples.len()), Ok)?,
+        );
+    }
+    for (offset, field) in cfg.out_schema.fields().iter().skip(edge_end).enumerate() {
+        let index = edge_end + offset;
+        columns.push(if required.is_none_or(|mask| mask[index]) {
+            let column = node_batch.column_by_name(field.name()).ok_or_else(|| {
+                exec_err(format!(
+                    "Expand: projected node column {} is absent",
+                    field.name()
+                ))
+            })?;
+            take(column, &dst_take, None).map_err(|error| exec_err(error.to_string()))?
+        } else {
+            unused_expand_column(field, triples.len())?
+        });
     }
     let output = RecordBatch::try_new(cfg.out_schema.clone(), columns)
         .map_err(|e| exec_err(e.to_string()))?;
@@ -4198,6 +4660,47 @@ fn unwind_explode(
 /// [`GraphForgeExtensionPlanner`].
 pub struct AdjacencyProviderExt(pub Arc<dyn AdjacencyProvider>);
 
+/// `SessionConfig` extension carrying the facade's exact generation-pinned
+/// ordinal identity authority.
+struct OrdinalIdentityResolverExt(pub Option<Arc<V4OrdinalIdentitySession>>);
+
+fn plan_expand_extension(
+    expand: &graphforge_plan::ExpandNode,
+    physical_inputs: &[Arc<dyn ExecutionPlan>],
+    session_state: &SessionState,
+) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
+    let input = physical_inputs
+        .first()
+        .cloned()
+        .ok_or_else(|| DataFusionError::Internal("Expand requires one physical input".into()))?;
+    let provider = session_state
+        .config()
+        .get_extension::<AdjacencyProviderExt>()
+        .map_or_else(
+            || {
+                Arc::new(ScanBuildAdjacencyProvider::new(
+                    expand.dir.clone(),
+                    expand.mode,
+                )) as Arc<dyn AdjacencyProvider>
+            },
+            |ext| Arc::clone(&ext.0),
+        );
+    let identity_extension = session_state
+        .config()
+        .get_extension::<OrdinalIdentityResolverExt>();
+    let ordinal_identity_required = identity_extension.is_some();
+    let ordinal_identities = identity_extension
+        .as_ref()
+        .and_then(|extension| extension.0.as_ref().map(Arc::clone));
+    Ok(Arc::new(ExpandExec::new(
+        expand,
+        input,
+        provider,
+        ordinal_identities,
+        ordinal_identity_required,
+    )))
+}
+
 /// Plans GraphForge's custom logical [`Extension`](LogicalPlan::Extension)
 /// nodes into physical [`ExecutionPlan`]s.
 #[derive(Debug, Default)]
@@ -4238,22 +4741,7 @@ impl ExtensionPlanner for GraphForgeExtensionPlanner {
             return Ok(Some(Arc::new(GraphRemoveExec::new(remove, input))));
         }
         if let Some(expand) = node.as_any().downcast_ref::<graphforge_plan::ExpandNode>() {
-            let input = physical_inputs.first().cloned().ok_or_else(|| {
-                DataFusionError::Internal("Expand requires one physical input".into())
-            })?;
-            let provider = session_state
-                .config()
-                .get_extension::<AdjacencyProviderExt>()
-                .map_or_else(
-                    || {
-                        Arc::new(ScanBuildAdjacencyProvider::new(
-                            expand.dir.clone(),
-                            expand.mode,
-                        )) as Arc<dyn AdjacencyProvider>
-                    },
-                    |ext| Arc::clone(&ext.0),
-                );
-            return Ok(Some(Arc::new(ExpandExec::new(expand, input, provider))));
+            return plan_expand_extension(expand, physical_inputs, session_state).map(Some);
         }
         if let Some(var_len) = node.as_any().downcast_ref::<VarLenExpandNode>() {
             let input = physical_inputs.first().cloned().ok_or_else(|| {
@@ -4398,6 +4886,12 @@ pub struct ExecutionSession {
     relational_fixed_hop_reference: bool,
 }
 
+#[derive(Default)]
+struct OrdinalIdentityConfig {
+    session: Option<Arc<V4OrdinalIdentitySession>>,
+    required: bool,
+}
+
 impl ExecutionSession {
     /// Create a read/query session.
     ///
@@ -4413,6 +4907,7 @@ impl ExecutionSession {
             PathBuf::new(),
             OntologyMode::Exploratory,
             None,
+            OrdinalIdentityConfig::default(),
             &SessionResourceConfig::default(),
         ))
     }
@@ -4433,6 +4928,7 @@ impl ExecutionSession {
             dir,
             mode,
             None,
+            OrdinalIdentityConfig::default(),
             &SessionResourceConfig::default(),
         ))
     }
@@ -4475,12 +4971,43 @@ impl ExecutionSession {
         provider: Arc<PersistentAdjacencyProvider>,
         resources: &SessionResourceConfig,
     ) -> Result<Self, GfError> {
+        Self::new_with_target_provider_resources_and_identity(
+            catalog, ontology, dir, mode, provider, None, resources,
+        )
+    }
+
+    /// Like [`Self::new_with_target_provider_and_resources`] with an exact
+    /// generation-pinned destination identity authority.
+    pub fn new_with_target_provider_resources_and_identity(
+        catalog: GraphCatalog,
+        ontology: Option<OntologyHandle>,
+        dir: PathBuf,
+        mode: OntologyMode,
+        provider: Arc<PersistentAdjacencyProvider>,
+        ordinal_identities: Option<Arc<V4OrdinalIdentityResolver>>,
+        resources: &SessionResourceConfig,
+    ) -> Result<Self, GfError> {
+        let identity = match ordinal_identities {
+            Some(resolver) => {
+                let pin = resolver.pin()?;
+                OrdinalIdentityConfig {
+                    // Requirement and payload come from one resolver snapshot.
+                    // Keep them separate so the expansion boundary remains
+                    // fail-closed if a future planner/config rewrite loses the
+                    // pinned authority.
+                    required: pin.required,
+                    session: pin.session,
+                }
+            }
+            None => OrdinalIdentityConfig::default(),
+        };
         Ok(Self::build(
             catalog,
             ontology,
             dir,
             mode,
             Some(provider),
+            identity,
             resources,
         ))
     }
@@ -4491,6 +5018,7 @@ impl ExecutionSession {
         dir: PathBuf,
         mode: OntologyMode,
         shared_provider: Option<Arc<PersistentAdjacencyProvider>>,
+        identity: OrdinalIdentityConfig,
         resources: &SessionResourceConfig,
     ) -> Self {
         // The session-scoped adjacency provider (#761), threaded to the
@@ -4515,6 +5043,9 @@ impl ExecutionSession {
             )))
             .with_target_partitions(resources.target_partitions)
             .with_batch_size(resources.batch_size);
+        if identity.session.is_some() || identity.required {
+            config = config.with_extension(Arc::new(OrdinalIdentityResolverExt(identity.session)));
+        }
         // Authenticated overlay scans publish sound physical-row upper bounds.
         // Let DataFusion use those estimates so a small one-partition source is
         // not eagerly repartitioned merely because newest-wins makes its exact
@@ -5392,6 +5923,17 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let catalog = GraphCatalog::open(dir.path(), None, &RuntimeCatalog::new()).unwrap();
         ExecutionSession::new(catalog, None).unwrap()
+    }
+
+    #[test]
+    fn unused_list_output_preserves_exact_non_nullable_child_schema() {
+        let item = Arc::new(Field::new("item", DataType::UInt32, false));
+        let field = Field::new("type_ids", DataType::List(Arc::clone(&item)), false);
+        let column = unused_expand_column(&field, 3).unwrap();
+
+        assert_eq!(column.data_type(), field.data_type());
+        assert_eq!(column.len(), 3);
+        assert_eq!(column.null_count(), 0);
     }
 
     #[test]
@@ -6515,6 +7057,19 @@ mod tests {
         )
         .unwrap();
         assert!(u64_column(&utf8, 0).is_err());
+    }
+
+    #[test]
+    fn required_v4_destination_identity_fails_closed_without_admitted_session() {
+        let error = require_admitted_ordinal_identity(true, false)
+            .expect_err("required v4 identity must not fall back without its admitted session");
+        assert!(
+            error
+                .to_string()
+                .contains("requires admitted v4 ordinal identity")
+        );
+        require_admitted_ordinal_identity(true, true).expect("admitted v4 session");
+        require_admitted_ordinal_identity(false, false).expect("legacy generation fallback");
     }
 
     #[test]

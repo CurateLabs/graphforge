@@ -6,17 +6,28 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use arrow::array::{FixedSizeBinaryArray, Int64Array, UInt64Array};
-use graphforge_api::GraphForge;
+use arrow::array::{
+    Array, ArrayRef, FixedSizeBinaryArray, FixedSizeBinaryBuilder, Int64Array, StringArray,
+    UInt64Array,
+};
+use arrow::record_batch::RecordBatch;
+use graphforge_api::{
+    CONSTRUCTION_EDGE_SCHEMA, CONSTRUCTION_NODE_SCHEMA, GraphConstructionBudgets, GraphForge,
+    OperationId, PortableSelection, PortableV2ExportRequest, PortableV2ImportRequest,
+    PortableVerifyRequest, verify_portable_v2,
+};
 use graphforge_core::uuid::{Uuid, new_v7};
 use graphforge_core::{OntologyMode, TypeId};
 use graphforge_exec::demand::{self, DemandSnapshot};
 use graphforge_ir::IrLiteral;
 use graphforge_storage::adjacency::build_adjacency_index;
-use graphforge_storage::{GraphWriter, io_stats};
+use graphforge_storage::{
+    GraphWriter, PortableV2Limits, PortableV2Mode, PortableV2Output, PortableV2SelectionProfile,
+    io_stats,
+};
 use tempfile::TempDir;
 
 #[path = "support/project_fixture.rs"]
@@ -35,9 +46,50 @@ static IO_GUARD: Mutex<()> = Mutex::new(());
 const ONE_HOP: &str = "MATCH (a)-[r]->(b) RETURN b.node_uuid AS id LIMIT 1000";
 const TWO_HOP: &str = "MATCH (a)-[r1]->(b)-[r2]->(c) \
                        RETURN c.node_uuid AS id LIMIT 1000";
+const ORDERED_ONE_HOP: &str = "MATCH (a)-[r]->(b) RETURN b.node_uuid AS id ORDER BY id LIMIT 1000";
+const ORDERED_TWO_HOP: &str =
+    "MATCH (a)-[r1]->(b)-[r2]->(c) RETURN c.node_uuid AS id ORDER BY id LIMIT 1000";
+
+fn measured_identity_query(forge: &GraphForge, query: &str) -> (Vec<Vec<u8>>, DemandSnapshot) {
+    io_stats::reset();
+    demand::reset();
+    let result = forge.execute(query).unwrap();
+    demand::disable();
+    let io = io_stats::snapshot();
+    assert_eq!(io.edge_full_reads + io.edge_filtered_reads, 0, "{io:#?}");
+    assert_eq!(io.node_full_reads + io.node_filtered_reads, 0, "{io:#?}");
+    let snapshot = demand::snapshot();
+    assert_eq!(
+        snapshot
+            .hops
+            .values()
+            .filter(|hop| hop.identity_revalidation_calls > 0)
+            .count(),
+        1,
+        "{snapshot:#?}"
+    );
+    assert!(
+        snapshot
+            .hops
+            .values()
+            .all(|hop| hop.identity_per_record_seeks == 0
+                && hop.identity_peak_buffer_bytes <= 16 * 1024 * 1024
+                && hop.identity_read_calls
+                    <= hop
+                        .identity_ranges_selected
+                        .saturating_mul(2)
+                        .saturating_add(2)),
+        "{snapshot:#?}"
+    );
+    (fixed_binary_values(&result, "id"), snapshot)
+}
 
 /// Deterministic ring: each node points to its next `fan_out` successors.
-fn generate_graph(dir: &Path, nodes: usize, fan_out: usize) {
+fn generate_graph(dir: &Path, nodes: usize, fan_out: usize, compact_v4: bool) {
+    if compact_v4 {
+        generate_bulk_graph(dir, nodes, fan_out);
+        return;
+    }
     assert!(nodes > fan_out);
     let workspace = TempDir::new().unwrap();
     let uuids: Vec<Uuid> = (0..nodes).map(|_| new_v7()).collect();
@@ -74,6 +126,118 @@ fn generate_graph(dir: &Path, nodes: usize, fan_out: usize) {
     project_fixture::publish_graph_workspace(dir, workspace.path());
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct BulkFixtureEvidence {
+    node_rows: usize,
+    edge_rows: usize,
+    node_batches: usize,
+    edge_batches: usize,
+    accepted_chunks: u64,
+    input_rows: u64,
+    peak_batch_rows: u64,
+}
+
+/// Construct scale fixtures through the same bounded Arrow publication path
+/// used by ordinary high-volume ingestion. Scalar `GraphWriter::create_edge`
+/// deliberately checks its in-flight topology window for duplicate UUIDs and
+/// is therefore not a realistic bulk-ingestion primitive.
+fn generate_bulk_graph(dir: &Path, nodes: usize, fan_out: usize) -> BulkFixtureEvidence {
+    assert!(nodes > fan_out);
+    let forge = GraphForge::new(Some(dir.to_str().expect("temp path is UTF-8"))).unwrap();
+    let mut session = forge
+        .begin_graph_construction(GraphConstructionBudgets {
+            max_batch_rows: WRITE_WINDOW,
+            max_run_records: 4 * WRITE_WINDOW,
+            ..GraphConstructionBudgets::default()
+        })
+        .unwrap();
+
+    let mut node_batches = 0;
+    for start in (0..nodes).step_by(WRITE_WINDOW) {
+        let end = start.saturating_add(WRITE_WINDOW).min(nodes);
+        let rows = end - start;
+        let mut identities = FixedSizeBinaryBuilder::with_capacity(rows, 16);
+        for node in start..end {
+            identities
+                .append_value(fixture_node_uuid(node).as_bytes())
+                .unwrap();
+        }
+        let batch = RecordBatch::try_new(
+            Arc::clone(&CONSTRUCTION_NODE_SCHEMA),
+            vec![
+                Arc::new(identities.finish()) as ArrayRef,
+                Arc::new(StringArray::from(vec!["Entity"; rows])),
+            ],
+        )
+        .unwrap();
+        session
+            .append_nodes(&format!("nodes-{start}"), &batch)
+            .unwrap();
+        node_batches += 1;
+    }
+
+    let edge_rows = nodes.saturating_mul(fan_out);
+    let mut edge_batches = 0;
+    for start in (0..edge_rows).step_by(WRITE_WINDOW) {
+        let end = start.saturating_add(WRITE_WINDOW).min(edge_rows);
+        let rows = end - start;
+        let mut identities = FixedSizeBinaryBuilder::with_capacity(rows, 16);
+        let mut sources = FixedSizeBinaryBuilder::with_capacity(rows, 16);
+        let mut targets = FixedSizeBinaryBuilder::with_capacity(rows, 16);
+        for edge in start..end {
+            let source = edge / fan_out;
+            let offset = edge % fan_out + 1;
+            identities
+                .append_value(fixture_edge_uuid(edge).as_bytes())
+                .unwrap();
+            sources
+                .append_value(fixture_node_uuid(source).as_bytes())
+                .unwrap();
+            targets
+                .append_value(fixture_node_uuid((source + offset) % nodes).as_bytes())
+                .unwrap();
+        }
+        let batch = RecordBatch::try_new(
+            Arc::clone(&CONSTRUCTION_EDGE_SCHEMA),
+            vec![
+                Arc::new(identities.finish()) as ArrayRef,
+                Arc::new(StringArray::from(vec!["LINK"; rows])),
+                Arc::new(sources.finish()),
+                Arc::new(targets.finish()),
+            ],
+        )
+        .unwrap();
+        session
+            .append_edges(&format!("edges-{start}"), &batch)
+            .unwrap();
+        edge_batches += 1;
+    }
+
+    session.seal_and_publish().unwrap();
+    let progress = session.progress();
+    drop(session);
+    forge.index_adjacency().unwrap();
+    drop(forge);
+
+    BulkFixtureEvidence {
+        node_rows: nodes,
+        edge_rows,
+        node_batches,
+        edge_batches,
+        accepted_chunks: progress.accepted_chunks,
+        input_rows: progress.evidence.input_rows,
+        peak_batch_rows: progress.evidence.peak_batch_rows,
+    }
+}
+
+fn fixture_node_uuid(index: usize) -> Uuid {
+    Uuid::from_u128(0x1000_0000_0000_0000_0000_0000_0000_0000 | index as u128 + 1)
+}
+
+fn fixture_edge_uuid(index: usize) -> Uuid {
+    Uuid::from_u128(0x2000_0000_0000_0000_0000_0000_0000_0000 | index as u128 + 1)
+}
+
 fn open_forge(dir: &Path) -> GraphForge {
     GraphForge::new(Some(dir.to_str().expect("temp path is UTF-8"))).unwrap()
 }
@@ -106,11 +270,87 @@ fn fixed_binary_values(result: &graphforge_api::ExecutionResult, column: &str) -
     values
 }
 
+fn int64_values(result: &graphforge_api::ExecutionResult, column: &str) -> Vec<i64> {
+    result
+        .batches
+        .iter()
+        .flat_map(|batch| {
+            batch
+                .column_by_name(column)
+                .unwrap_or_else(|| panic!("missing {column} column"))
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap_or_else(|| panic!("{column} must be Int64"))
+                .values()
+                .iter()
+                .copied()
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn string_values(result: &graphforge_api::ExecutionResult, column: &str) -> Vec<String> {
+    result
+        .batches
+        .iter()
+        .flat_map(|batch| {
+            let values = batch
+                .column_by_name(column)
+                .unwrap_or_else(|| panic!("missing {column} column"))
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap_or_else(|| panic!("{column} must be Utf8"));
+            (0..values.len())
+                .map(|row| values.value(row).to_owned())
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 fn stable_fixture_uuid(kind: u8, ordinal: usize) -> Uuid {
     let mut bytes = [0u8; 16];
     bytes[0] = kind;
     bytes[8..].copy_from_slice(&(ordinal as u64).to_be_bytes());
     Uuid::from_bytes(bytes)
+}
+
+fn generate_semantic_v4_graph(dir: &Path) -> Vec<Uuid> {
+    let workspace = TempDir::new().unwrap();
+    let nodes = (1..=3)
+        .map(|ordinal| stable_fixture_uuid(3, ordinal))
+        .collect::<Vec<_>>();
+    let mut writer = GraphWriter::open_at(workspace.path(), OntologyMode::Exploratory, TS).unwrap();
+    for (node, name) in nodes.iter().zip(["A", "B", "C"]) {
+        writer.create_node(*node, NODE_TYPE).unwrap();
+        writer
+            .set_properties(
+                node,
+                None,
+                HashMap::from([("name".to_owned(), IrLiteral::Str(name.to_owned()))]),
+            )
+            .unwrap();
+    }
+    for (ordinal, (source, destination, weight)) in
+        [(0_usize, 1_usize, 1_i64), (0, 1, 2), (0, 0, 3), (1, 2, 4)]
+            .into_iter()
+            .enumerate()
+    {
+        let edge = stable_fixture_uuid(4, ordinal + 1);
+        writer
+            .create_edge(edge, "LINK", &nodes[source], &nodes[destination])
+            .unwrap();
+        writer
+            .set_edge_properties(
+                &edge,
+                Some("LINK"),
+                HashMap::from([("weight".to_owned(), IrLiteral::Int(weight))]),
+            )
+            .unwrap();
+    }
+    writer.flush().unwrap();
+    build_adjacency_index(workspace.path(), TS).unwrap();
+    project_fixture::publish_graph_workspace_v4(dir, workspace.path());
+    nodes
 }
 
 /// Build a graph whose first productive edge ids are localized but whose
@@ -211,7 +451,7 @@ struct ScaleResult {
 
 fn run_scale(nodes: usize, fan_out: usize) -> ScaleResult {
     let dir = TempDir::new().unwrap();
-    generate_graph(dir.path(), nodes, fan_out);
+    generate_bulk_graph(dir.path(), nodes, fan_out);
     let forge = open_forge(dir.path());
 
     let one_plan = forge.explain(ONE_HOP).unwrap();
@@ -260,6 +500,11 @@ fn assert_indexed_limit_io(io: &io_stats::IoSnapshot) {
     assert!(io.node_filtered_reads >= 1, "{io:?}");
 }
 
+fn assert_projected_identity_io(io: &io_stats::IoSnapshot) {
+    assert_eq!(io.edge_full_reads + io.edge_filtered_reads, 0, "{io:?}");
+    assert_eq!(io.node_full_reads + io.node_filtered_reads, 0, "{io:?}");
+}
+
 fn assert_bounded_demand(snapshot: &DemandSnapshot, expected_hops: usize, required: u64) {
     assert_eq!(snapshot.hops.len(), expected_hops, "{snapshot:#?}");
     assert!(snapshot.cancellations >= 1, "{snapshot:#?}");
@@ -293,8 +538,8 @@ fn terminal_limit_keeps_fixed_hop_io_bounded_as_graph_grows() {
     println!("fixed-hop LIMIT structural smoke: small={small:?}, large={large:?}");
 
     for scale in [&small, &large] {
-        assert_indexed_limit_io(&scale.one_hop_io);
-        assert_indexed_limit_io(&scale.two_hop_io);
+        assert_projected_identity_io(&scale.one_hop_io);
+        assert_projected_identity_io(&scale.two_hop_io);
         assert_bounded_demand(&scale.one_hop_demand, 1, LIMIT as u64);
         assert_bounded_demand(&scale.two_hop_demand, 2, LIMIT as u64);
     }
@@ -317,6 +562,35 @@ fn terminal_limit_keeps_fixed_hop_io_bounded_as_graph_grows() {
         large.two_hop_io.node_filtered_rows <= small.two_hop_io.node_filtered_rows * 3,
         "small={small:?}, large={large:?}"
     );
+}
+
+#[test]
+fn scale_fixture_uses_bounded_bulk_publications() {
+    let _guard = IO_GUARD.lock().unwrap();
+    let dir = TempDir::new().unwrap();
+    let nodes = WRITE_WINDOW + 1;
+    let evidence = generate_bulk_graph(dir.path(), nodes, 2);
+    assert_eq!(
+        evidence,
+        BulkFixtureEvidence {
+            node_rows: nodes,
+            edge_rows: nodes * 2,
+            node_batches: 2,
+            edge_batches: 3,
+            accepted_chunks: 5,
+            input_rows: (nodes * 3) as u64,
+            peak_batch_rows: WRITE_WINDOW as u64,
+        }
+    );
+
+    let forge = open_forge(dir.path());
+    let plan = forge.explain(ORDERED_ONE_HOP).unwrap();
+    assert!(plan.contains("adjacency=hit"), "{plan}");
+    assert!(plan.contains("identity=v4"), "{plan}");
+    io_stats::reset();
+    let result = forge.execute(ORDERED_ONE_HOP).unwrap();
+    assert_eq!(result.stats.rows_produced, LIMIT as u64);
+    assert_projected_identity_io(&io_stats::snapshot());
 }
 
 fn run_scattered_destination_scale(
@@ -390,11 +664,349 @@ fn scattered_node_hydration_is_neighborhood_proportional() {
     );
 }
 
+fn run_ordered_projection_scale(nodes: usize) -> (Vec<Vec<u8>>, DemandSnapshot) {
+    let dir = TempDir::new().unwrap();
+    generate_graph(dir.path(), nodes, FAN_OUT, true);
+    let forge = open_forge(dir.path());
+    let plan = forge.explain(ORDERED_ONE_HOP).unwrap();
+    assert!(plan.contains("ExpandExec"), "{plan}");
+    assert!(plan.contains("identity=v4"), "{plan}");
+    assert!(plan.contains("SortExec"), "{plan}");
+    assert!(plan.contains("projection=1"), "{plan}");
+
+    io_stats::reset();
+    demand::reset();
+    let first = forge.execute(ORDERED_ONE_HOP).unwrap();
+    demand::disable();
+    let io = io_stats::snapshot();
+    let snapshot = demand::snapshot();
+    let first_values = fixed_binary_values(&first, "id");
+    assert_eq!(first_values.len(), LIMIT);
+    assert!(first_values.windows(2).all(|pair| pair[0] <= pair[1]));
+    let node_scan = forge
+        .execute("MATCH (b) RETURN b.node_uuid AS id ORDER BY id")
+        .unwrap();
+    let expected = fixed_binary_values(&node_scan, "id")
+        .into_iter()
+        .flat_map(|uuid| std::iter::repeat_n(uuid, FAN_OUT))
+        .take(LIMIT)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        first_values, expected,
+        "ordered fixed hop differs from scan oracle"
+    );
+    assert_eq!(io.edge_full_reads + io.edge_filtered_reads, 0, "{io:#?}");
+    assert_eq!(io.node_full_reads + io.node_filtered_reads, 0, "{io:#?}");
+    let hop = snapshot.hops.values().next().expect("one projected hop");
+    assert!(hop.projected_chunks > 1, "{snapshot:#?}");
+    assert_eq!(hop.projected_rows, (nodes * FAN_OUT) as u64);
+    assert_eq!(hop.projected_columns, 1);
+    assert_eq!(hop.identity_per_record_seeks, 0);
+    assert!(hop.identity_read_calls > 0, "{snapshot:#?}");
+    assert!(hop.identity_bytes_read > 0, "{snapshot:#?}");
+    assert!(hop.identity_peak_buffer_bytes <= 16 * 1024 * 1024);
+
+    let repeated = forge.execute(ORDERED_ONE_HOP).unwrap();
+    assert_eq!(
+        fixed_binary_values(&repeated, "id"),
+        first_values,
+        "ordered result changed across identical execution"
+    );
+    (first_values, snapshot)
+}
+
+#[test]
+fn destination_uuid_projection_uses_authenticated_legacy_hydration_without_v4_authority() {
+    let _guard = IO_GUARD.lock().unwrap();
+    let dir = TempDir::new().unwrap();
+    generate_graph(dir.path(), 64, 4, false);
+    let result = open_forge(dir.path()).execute(ORDERED_ONE_HOP).unwrap();
+    let values = fixed_binary_values(&result, "id");
+    assert!(!values.is_empty());
+    assert!(
+        values
+            .iter()
+            .all(|value| value.iter().any(|byte| *byte != 0))
+    );
+}
+
+#[test]
+fn ordered_destination_uuid_projection_is_exact_and_linear_at_1x_2x_4x() {
+    let _guard = IO_GUARD.lock().unwrap();
+    let mut work = Vec::new();
+    for nodes in [4_096, 8_192, 16_384] {
+        let (_, snapshot) = run_ordered_projection_scale(nodes);
+        let hop = snapshot.hops.values().next().unwrap();
+        work.push((
+            hop.projected_rows,
+            hop.identity_bytes_read,
+            hop.identity_read_calls,
+            hop.identity_revalidation_calls,
+        ));
+    }
+    for pair in work.windows(2) {
+        let (prior_rows, prior_bytes, prior_calls, prior_revalidation) = pair[0];
+        let (next_rows, next_bytes, next_calls, next_revalidation) = pair[1];
+        assert_eq!(next_rows, prior_rows * 2, "{work:?}");
+        // Fixed block/range boundaries may add one coalesced read, but neither
+        // bytes nor calls may acquire a chunk-times-graph multiplier.
+        assert!(next_bytes <= prior_bytes * 2 + 2 * 1024 * 1024, "{work:?}");
+        assert!(next_calls <= prior_calls * 2 + 2, "{work:?}");
+        assert!(
+            next_revalidation <= prior_revalidation * 2 + 2,
+            "session authentication must be linear in retained artifacts: {work:?}"
+        );
+    }
+}
+
+#[test]
+fn portable_v2_clean_import_preserves_projected_ordered_hops_and_io() {
+    let _guard = IO_GUARD.lock().unwrap();
+    let root = TempDir::new().unwrap();
+    let source_path = root.path().join("source");
+    generate_graph(&source_path, 4_096, FAN_OUT, true);
+    let source = open_forge(&source_path);
+    let source_results =
+        [ORDERED_ONE_HOP, ORDERED_TWO_HOP].map(|query| measured_identity_query(&source, query).0);
+
+    let limits = PortableV2Limits::default();
+    let package = root.path().join("project.gfpb");
+    let exported = source
+        .export_portable_v2(
+            &PortableV2ExportRequest {
+                selection: PortableSelection::Current,
+                output_path: package.clone(),
+                representation: PortableV2Output::Bundle,
+                profile: PortableV2SelectionProfile::Complete,
+                subset: None,
+                limits,
+            },
+            None,
+            |_| {},
+        )
+        .unwrap();
+    drop(source);
+    let verified = verify_portable_v2(
+        &PortableVerifyRequest {
+            input: package.clone(),
+            mode: PortableV2Mode::Full,
+            limits,
+        },
+        None,
+    )
+    .unwrap();
+    assert_eq!(verified.package_digest, exported.package_digest);
+
+    let imported_path = root.path().join("imported");
+    GraphForge::import_portable_v2(
+        &imported_path,
+        &PortableV2ImportRequest {
+            input: package,
+            operation_id: OperationId(Uuid::from_u128(966)),
+            limits,
+        },
+        None,
+    )
+    .unwrap();
+    let imported = open_forge(&imported_path);
+    for (query, expected) in [ORDERED_ONE_HOP, ORDERED_TWO_HOP]
+        .into_iter()
+        .zip(source_results)
+    {
+        assert_eq!(
+            measured_identity_query(&imported, query).0,
+            expected,
+            "{query}"
+        );
+    }
+}
+
+#[test]
+fn optimized_v4_two_hop_direction_type_alias_and_quiescence_are_exact() {
+    let _guard = IO_GUARD.lock().unwrap();
+    let dir = TempDir::new().unwrap();
+    let nodes = 4_096;
+    generate_graph(dir.path(), nodes, FAN_OUT, true);
+    let forge = open_forge(dir.path());
+    let scan = forge
+        .execute("MATCH (n) RETURN n.node_uuid AS id ORDER BY id")
+        .unwrap();
+    let node_ids = fixed_binary_values(&scan, "id");
+
+    let cases = [
+        (
+            "MATCH (a)-[:LINK]->(b) RETURN b.node_uuid AS id ORDER BY id LIMIT 1000",
+            FAN_OUT,
+            true,
+            true,
+        ),
+        (
+            "MATCH (a)<-[:LINK]-(b) RETURN a.node_uuid AS id ORDER BY id LIMIT 1000",
+            FAN_OUT,
+            true,
+            false,
+        ),
+        (
+            "MATCH (a)-[:LINK]-(b) RETURN b.node_uuid AS id ORDER BY id LIMIT 1000",
+            FAN_OUT * 2,
+            false,
+            true,
+        ),
+        (
+            "MATCH (a)-[:LINK]->(b)-[:LINK]->(c) RETURN c.node_uuid AS id ORDER BY id LIMIT 1000",
+            FAN_OUT * FAN_OUT,
+            true,
+            true,
+        ),
+    ];
+    for (query, multiplicity, identity_only, expects_v4_lookup) in cases {
+        io_stats::reset();
+        demand::reset();
+        let result = forge.execute(query).unwrap();
+        demand::disable();
+        let expected = node_ids
+            .iter()
+            .flat_map(|uuid| std::iter::repeat_n(uuid.clone(), multiplicity))
+            .take(LIMIT)
+            .collect::<Vec<_>>();
+        assert_eq!(fixed_binary_values(&result, "id"), expected, "{query}");
+        let io = io_stats::snapshot();
+        if identity_only {
+            assert_eq!(
+                io.edge_full_reads + io.edge_filtered_reads,
+                0,
+                "{query}: {io:#?}"
+            );
+            assert_eq!(
+                io.node_full_reads + io.node_filtered_reads,
+                0,
+                "{query}: {io:#?}"
+            );
+        }
+        let snapshot = demand::snapshot();
+        assert!(
+            snapshot
+                .hops
+                .values()
+                .all(|hop| { hop.identity_per_record_seeks == 0 && hop.reads_after_cancel == 0 }),
+            "{query}: {snapshot:#?}"
+        );
+        let pinned_hops = snapshot
+            .hops
+            .values()
+            .map(|hop| hop.identity_revalidation_calls)
+            .filter(|calls| *calls > 0)
+            .count();
+        assert_eq!(
+            pinned_hops,
+            usize::from(expects_v4_lookup),
+            "a facade session pin is attributed exactly when destination identity lookup is required: {query}: {snapshot:#?}"
+        );
+    }
+
+    let alias = forge
+        .execute(
+            "MATCH (left)-[:LINK]->(right) RETURN right.node_uuid AS renamed ORDER BY renamed LIMIT 1000",
+        )
+        .unwrap();
+    let canonical = forge
+        .execute("MATCH (a)-[:LINK]->(b) RETURN b.node_uuid AS id ORDER BY id LIMIT 1000")
+        .unwrap();
+    assert_eq!(
+        fixed_binary_values(&alias, "renamed"),
+        fixed_binary_values(&canonical, "id")
+    );
+
+    let empty = forge
+        .execute("MATCH (a)-[:MISSING]->(b) RETURN b.node_uuid AS id ORDER BY id LIMIT 1000")
+        .unwrap();
+    assert_eq!(empty.stats.rows_produced, 0);
+}
+
+#[test]
+fn optimized_v4_preserves_parallel_self_loop_and_demanded_property_semantics() {
+    let _guard = IO_GUARD.lock().unwrap();
+    let dir = TempDir::new().unwrap();
+    let nodes = generate_semantic_v4_graph(dir.path());
+    let forge = open_forge(dir.path());
+
+    let destination_query = "MATCH (a)-[:LINK]->(b) RETURN b.node_uuid AS id ORDER BY id";
+    let destination_plan = forge.explain(destination_query).unwrap();
+    assert!(
+        destination_plan.contains("identity=v4"),
+        "{destination_plan}"
+    );
+    assert!(
+        destination_plan.contains("projection=1"),
+        "{destination_plan}"
+    );
+    io_stats::reset();
+    let destinations = forge.execute(destination_query).unwrap();
+    let expected = [nodes[0], nodes[1], nodes[1], nodes[2]]
+        .into_iter()
+        .map(|uuid| uuid.as_bytes().to_vec())
+        .collect::<Vec<_>>();
+    assert_eq!(fixed_binary_values(&destinations, "id"), expected);
+    let io = io_stats::snapshot();
+    assert_eq!(io.edge_full_reads + io.edge_filtered_reads, 0, "{io:#?}");
+    assert_eq!(io.node_full_reads + io.node_filtered_reads, 0, "{io:#?}");
+
+    let relationship = forge
+        .execute("MATCH (a)-[r:LINK]->(b) RETURN r.weight AS weight ORDER BY weight")
+        .unwrap();
+    assert_eq!(int64_values(&relationship, "weight"), [1, 2, 3, 4]);
+
+    let predicate = forge
+        .execute("MATCH (a)-[r:LINK]->(b) WHERE r.weight >= 2 RETURN b.node_uuid AS id ORDER BY id")
+        .unwrap();
+    assert_eq!(
+        fixed_binary_values(&predicate, "id"),
+        [nodes[0], nodes[1], nodes[2]]
+            .into_iter()
+            .map(|uuid| uuid.as_bytes().to_vec())
+            .collect::<Vec<_>>()
+    );
+
+    let node_property = forge
+        .execute("MATCH (a)-[:LINK]->(b) RETURN b.name AS name ORDER BY name")
+        .unwrap();
+    assert_eq!(string_values(&node_property, "name"), ["A", "B", "B", "C"]);
+
+    let undirected = forge
+        .execute("MATCH (a)-[:LINK]-(b) RETURN b.node_uuid AS id ORDER BY id")
+        .unwrap();
+    let values = fixed_binary_values(&undirected, "id");
+    // The undirected self-loop is emitted once, while the two parallel LINK
+    // identities remain two distinct matches in each orientation.
+    assert_eq!(values.len(), 7);
+    assert_eq!(
+        values
+            .iter()
+            .filter(|value| value.as_slice() == nodes[0].as_bytes())
+            .count(),
+        3
+    );
+    assert_eq!(
+        values
+            .iter()
+            .filter(|value| value.as_slice() == nodes[1].as_bytes())
+            .count(),
+        3
+    );
+    assert_eq!(
+        values
+            .iter()
+            .filter(|value| value.as_slice() == nodes[2].as_bytes())
+            .count(),
+        1
+    );
+}
+
 #[test]
 fn limits_sweep_bounded_multi_hop_work_and_repartition() {
     let _guard = IO_GUARD.lock().unwrap();
     let dir = TempDir::new().unwrap();
-    generate_graph(dir.path(), 4_096, FAN_OUT);
+    generate_graph(dir.path(), 4_096, FAN_OUT, false);
     let forge = open_forge(dir.path());
 
     for limit in [10_u64, 100, 1_000] {
@@ -422,7 +1034,7 @@ fn limits_sweep_bounded_multi_hop_work_and_repartition() {
 fn selective_filter_tops_up_without_crossing_blockers() {
     let _guard = IO_GUARD.lock().unwrap();
     let dir = TempDir::new().unwrap();
-    generate_graph(dir.path(), 64, 4);
+    generate_graph(dir.path(), 64, 4, false);
     let forge = open_forge(dir.path());
 
     let selective = "MATCH (a)-[r1]->(b)-[r2]->(c) \
@@ -454,7 +1066,8 @@ fn selective_filter_tops_up_without_crossing_blockers() {
         "MATCH ()-[r]->() RETURN count(r) AS total LIMIT 1",
     ] {
         let plan = forge.explain(query).unwrap();
-        assert!(plan.contains("demand_batch=all, cancel=none"), "{plan}");
+        assert!(plan.contains("demand_batch=all"), "{plan}");
+        assert!(plan.contains("cancel=none"), "{plan}");
         assert!(!plan.contains("DemandGuardExec"), "{plan}");
     }
 
@@ -462,10 +1075,8 @@ fn selective_filter_tops_up_without_crossing_blockers() {
         .explain("MATCH ()-[r1]->()-[r2]->() RETURN r1, r2")
         .unwrap();
     assert!(!unlimited.contains("DemandGuardExec"), "{unlimited}");
-    assert!(
-        unlimited.contains("demand_batch=all, cancel=none"),
-        "{unlimited}"
-    );
+    assert!(unlimited.contains("demand_batch=all"), "{unlimited}");
+    assert!(unlimited.contains("cancel=none"), "{unlimited}");
 }
 
 #[test]
@@ -499,7 +1110,7 @@ fn high_degree_source_resumes_without_losing_neighbors() {
 fn fixed_hop_limit_preserves_skip_parameters_filters_and_blockers() {
     let _guard = IO_GUARD.lock().unwrap();
     let dir = TempDir::new().unwrap();
-    generate_graph(dir.path(), 64, 4);
+    generate_graph(dir.path(), 64, 4, false);
     let forge = open_forge(dir.path());
 
     io_stats::reset();
@@ -695,7 +1306,7 @@ fn release_livejournal_fixed_hop_limits() {
 
 fn release_scale(nodes: usize, fan_out: usize) -> ScaleResult {
     let dir = TempDir::new().unwrap();
-    generate_graph(dir.path(), nodes, fan_out);
+    generate_bulk_graph(dir.path(), nodes, fan_out);
     let warm = open_forge(dir.path());
     warm.execute(ONE_HOP).unwrap();
     warm.execute(TWO_HOP).unwrap();

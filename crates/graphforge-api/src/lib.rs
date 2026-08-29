@@ -441,6 +441,9 @@ pub struct GraphForge {
     current_generation_uuid: Arc<Mutex<uuid::Uuid>>,
     /// Authenticated UUID index handle cached for one topology generation.
     uuid_membership_index: Mutex<Option<graphforge_storage::UuidMembershipIndex>>,
+    /// Exact generation-pinned ordinal destination identity authority shared
+    /// by every fixed-hop session.
+    ordinal_identities: Arc<graphforge_exec::V4OrdinalIdentityResolver>,
     /// Injected durable-write UTC microsecond clock.
     clock: Mutex<Arc<dyn Fn() -> Result<i64, GfError> + Send + Sync>>,
     /// Project directory backing topology/properties Parquet files. For an
@@ -623,6 +626,7 @@ impl GraphForge {
             hydrate_graph_workspace(&resolved_generation, false)?;
         let property_inventory =
             property_inventory_for_hydrated_generation(&resolved_generation, &dir)?;
+        let ordinal_identities = ordinal_identity_resolver(&resolved_generation, &dir)?;
         Ok(Self {
             identity: GraphIdentity::new(),
             path: None,
@@ -636,6 +640,7 @@ impl GraphForge {
             read_only: false,
             current_generation_uuid: Arc::new(Mutex::new(generation_uuid)),
             uuid_membership_index: Mutex::new(None),
+            ordinal_identities,
             clock: Mutex::new(Arc::new(system_time_micros)),
             adjacency_provider: Arc::new(graphforge_exec::PersistentAdjacencyProvider::new(
                 dir.clone(),
@@ -765,6 +770,7 @@ impl GraphForge {
             hydrate_graph_workspace(&resolved_generation, read_only)?;
         let property_inventory =
             property_inventory_for_hydrated_generation(&resolved_generation, &dir)?;
+        let ordinal_identities = ordinal_identity_resolver(&resolved_generation, &dir)?;
 
         let runtime_catalog = load_runtime_catalog(&dir)?;
         let semantic_storage_bindings =
@@ -843,6 +849,7 @@ impl GraphForge {
             read_only,
             current_generation_uuid: Arc::new(Mutex::new(generation_uuid)),
             uuid_membership_index: Mutex::new(None),
+            ordinal_identities,
             clock: Mutex::new(Arc::new(system_time_micros)),
             adjacency_provider: Arc::new(graphforge_exec::PersistentAdjacencyProvider::new(
                 dir.clone(),
@@ -959,6 +966,7 @@ impl GraphForge {
                 generation,
             )?,
         );
+        let ordinal_replacement = ordinal_identity_handle(generation, &self.dir)?;
         *self
             .property_authority
             .lock()
@@ -970,6 +978,7 @@ impl GraphForge {
             .current_generation_uuid
             .lock()
             .expect("generation UUID lock poisoned") = generation.generation_uuid();
+        self.ordinal_identities.replace(ordinal_replacement);
         Ok(())
     }
 
@@ -1405,12 +1414,13 @@ impl GraphForge {
                 execution_mode,
             ))
         };
-        let session = ExecutionSession::new_with_target_provider_and_resources(
+        let session = ExecutionSession::new_with_target_provider_resources_and_identity(
             catalog,
             self.ontology.clone(),
             self.dir.clone(),
             execution_mode,
             adjacency_provider,
+            Some(Arc::clone(&self.ordinal_identities)),
             &self.session_resource_config(),
         )?;
 
@@ -1805,6 +1815,12 @@ impl GraphForge {
             ));
         }
 
+        // Pin every generation-coupled session participant while publication is
+        // excluded. `install_property_generation` replaces the authenticated
+        // property inventory and ordinal identity authority as one publication
+        // transition; opening them without this guard could otherwise combine
+        // participants from adjacent generations.
+        let _read_visibility = self.graph_visibility.read()?;
         let catalog = {
             let rc = self
                 .runtime_catalog
@@ -1818,12 +1834,13 @@ impl GraphForge {
             )
             .map_err(|e| GfError::Storage(e.to_string()))?
         };
-        let session = ExecutionSession::new_with_target_provider_and_resources(
+        let session = ExecutionSession::new_with_target_provider_resources_and_identity(
             catalog,
             self.ontology.clone(),
             self.dir.clone(),
             self.ontology_mode,
             Arc::clone(&self.adjacency_provider),
+            Some(Arc::clone(&self.ordinal_identities)),
             &self.session_resource_config(),
         )?;
 
@@ -3261,6 +3278,10 @@ impl GraphForge {
         let graph_ir =
             serde_json::to_string_pretty(&plan).map_err(|e| GfError::Plan(e.to_string()))?;
 
+        // EXPLAIN constructs a real physical session. Pin all of its
+        // generation-coupled authorities against same-instance publication,
+        // just like query execution does.
+        let _read_visibility = self.graph_visibility.read()?;
         // Open the catalog from the same snapshot so the logical and physical
         // stages resolve property names interned during this bind (a None
         // catalog would render them as `prop_<id>` and fail to lower).
@@ -3309,14 +3330,16 @@ impl GraphForge {
             explained.unwrap_or_else(|e| format!("(logical plan unavailable: {e})"))
         };
 
-        let session = graphforge_exec::ExecutionSession::new_with_target_provider_and_resources(
-            catalog,
-            self.ontology.clone(),
-            self.dir.clone(),
-            self.ontology_mode,
-            Arc::clone(&self.adjacency_provider),
-            &self.session_resource_config(),
-        )?;
+        let session =
+            graphforge_exec::ExecutionSession::new_with_target_provider_resources_and_identity(
+                catalog,
+                self.ontology.clone(),
+                self.dir.clone(),
+                self.ontology_mode,
+                Arc::clone(&self.adjacency_provider),
+                Some(Arc::clone(&self.ordinal_identities)),
+                &self.session_resource_config(),
+            )?;
         let physical = self.block_on(async move { session.explain_physical(&plan).await })?;
 
         Ok(format!(
@@ -3854,6 +3877,38 @@ fn property_inventory_for_hydrated_generation(
         graphforge_storage::AuthenticatedPropertyInventory::from_resolved_generation(generation)?
     };
     Ok(Arc::new(admitted))
+}
+
+fn ordinal_identity_handle(
+    generation: &ResolvedProjectGeneration,
+    graph_root: &Path,
+) -> Result<Option<graphforge_storage::ordinal_identity_v4::V4OrdinalIdentityHandle>, GfError> {
+    let Some(authority) = generation.authenticated_v4_ordinal_authority()? else {
+        return Ok(None);
+    };
+    match authority
+        .open(
+            graph_root,
+            graphforge_storage::V4OrdinalIdentityLimits::default(),
+        )
+        .map_err(|error| GfError::Storage(error.to_string()))?
+    {
+        graphforge_storage::V4OrdinalIdentityOpen::Ready(handle) => Ok(Some(*handle)),
+        graphforge_storage::V4OrdinalIdentityOpen::RebuildRequired { found_version } => {
+            Err(GfError::Validation(format!(
+                "selected graph generation requires ordinal identity rebuild from version {found_version}"
+            )))
+        }
+    }
+}
+
+fn ordinal_identity_resolver(
+    generation: &ResolvedProjectGeneration,
+    graph_root: &Path,
+) -> Result<Arc<graphforge_exec::V4OrdinalIdentityResolver>, GfError> {
+    Ok(Arc::new(graphforge_exec::V4OrdinalIdentityResolver::new(
+        ordinal_identity_handle(generation, graph_root)?,
+    )))
 }
 
 fn hydrate_graph_workspace(
@@ -7034,6 +7089,63 @@ mod tests {
                 "authority snapshot was split: {observed:?}"
             );
         }
+    }
+
+    #[test]
+    fn streaming_and_explain_session_pins_wait_for_generation_publication() {
+        use std::sync::mpsc::{self, RecvTimeoutError};
+        use std::time::Duration;
+
+        let graph = GraphForge::new(None).expect("open ephemeral project");
+        graph.execute("CREATE (:Person)").expect("seed graph");
+
+        std::thread::scope(|scope| {
+            let publication = graph.graph_visibility.lock().expect("publication lock");
+            let ready = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let (sent, received) = mpsc::channel();
+            let graph = &graph;
+            let child_ready = std::sync::Arc::clone(&ready);
+            scope.spawn(move || {
+                child_ready.wait();
+                sent.send(graph.explain("MATCH (n:Person) RETURN n.node_uuid"))
+                    .expect("send explain result");
+            });
+            ready.wait();
+            assert!(matches!(
+                received.recv_timeout(Duration::from_millis(100)),
+                Err(RecvTimeoutError::Timeout)
+            ));
+            drop(publication);
+            received
+                .recv_timeout(Duration::from_secs(5))
+                .expect("explain completes after publication")
+                .expect("explain session");
+        });
+
+        std::thread::scope(|scope| {
+            let publication = graph.graph_visibility.lock().expect("publication lock");
+            let ready = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let (sent, received) = mpsc::channel();
+            let graph = &graph;
+            let child_ready = std::sync::Arc::clone(&ready);
+            scope.spawn(move || {
+                child_ready.wait();
+                let result = graph
+                    .execute_stream("MATCH (n:Person) RETURN n.node_uuid")
+                    .map(drop);
+                sent.send(result).expect("send stream result");
+            });
+            ready.wait();
+            assert!(matches!(
+                received.recv_timeout(Duration::from_millis(100)),
+                Err(RecvTimeoutError::Timeout)
+            ));
+            drop(publication);
+            received
+                .recv_timeout(Duration::from_secs(5))
+                .expect("stream session completes after publication")
+                .expect("stream session");
+        });
     }
 
     #[test]

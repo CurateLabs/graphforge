@@ -113,6 +113,31 @@ execution paths consume it through a single `AdjacencyProvider` abstraction:
 | `VarLenExpandExec` | Iterative BFS over the `AdjacencyProvider` for `*min..max` patterns (replaces the per-query in-memory adjacency build) |
 | `ExpandExec` | Adjacency-backed single-hop expansion: chosen at lowering time when the provider reports a `hit` for a typed relation (any direction; undirected wraps in `DISTINCT`, mirroring the join path's union+distinct). Exploratory single-hop and uncovered patterns keep the DataFusion join chain. |
 
+`ExpandExec` receives exact physical column demand through projections, filters,
+sorts, and limits; unknown or multi-input physical operators are conservative
+materialization barriers. A destination-identity-only hop carries the CSR
+neighbor `node_id` directly and resolves `node_uuid` through the facade's exact
+generation-pinned v4 ordinal authority. It opens neither edge topology nor
+destination-node Parquet. Lookup batches are sorted and deduplicated within the
+operator batch, coalesced by the v4 reader, and restored to adjacency order.
+There is no graph-sized identity map and no path-based rediscovery of mutable
+authority. The facade authenticates and pins the selected immutable generation
+once when it creates an execution session. Every hop in that session then reads
+through the retained authenticated file handles; it does not repeat a complete
+artifact-name/stamp walk for every bounded expansion chunk. A later session
+revalidates the names and identities again, so a planted replacement cannot be
+adopted as authority.
+
+When relationship or destination-node data is required, filtered readers decode
+only the demanded canonical columns plus their join key. Legacy node layouts and
+typed wildcard unions retain their normalization path before result shaping.
+Aggregate diagnostics report projected columns/chunks/rows and v4 ranges,
+coalesced calls, bytes, peak charged buffers, and forbidden per-record seeks;
+session revalidation calls/bytes are accounted exactly once rather than hidden
+from lookup evidence. Diagnostics never report identities or paths. Global `ORDER BY ... LIMIT` still examines
+the complete unordered candidate stream and does not use invalid early
+cancellation.
+
 **Selection is a planner choice, not an IR change.** The Graph IR is unchanged: variable-length
 traversal is still encoded on `Expand { …, min_hops, max_hops }`. A lowering rule selects an
 adjacency-backed physical node when the provider covers the relation type + direction, and falls
