@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Mapping
-
+from typing import Any
 
 SCHEMA = "graphforge-benchexec-phase/1"
 
@@ -77,7 +77,7 @@ def _integer(values: Mapping[str, Any], key: str) -> int:
 
 def _outcome(result: Mapping[str, Any]) -> tuple[Outcome, int | None, int | None]:
     termination = result.get("termination_reason")
-    if termination == "cputime" or termination == "walltime":
+    if termination in {"cputime", "walltime"}:
         return Outcome.TIMEOUT, None, None
     if termination == "memory":
         return Outcome.OOM, None, None

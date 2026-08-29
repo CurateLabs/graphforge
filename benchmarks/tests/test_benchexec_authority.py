@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import unittest
 import json
 from pathlib import Path
-
-from jsonschema import Draft202012Validator
+import unittest
 
 from graphforge_bench.benchexec_authority import (
     EvidenceError,
@@ -14,7 +12,7 @@ from graphforge_bench.benchexec_authority import (
     normalize_phase,
 )
 from graphforge_bench.tools.graphforge_certify import Tool
-
+from jsonschema import Draft202012Validator
 
 LIMITS = Limits(10.0, 8.0, 1024, (0, 1))
 
