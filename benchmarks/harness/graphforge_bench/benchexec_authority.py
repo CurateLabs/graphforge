@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
-SCHEMA = "graphforge-benchexec-phase/1"
+SCHEMA = "graphforge-benchexec-run/1"
 
 
 class EvidenceError(ValueError):
@@ -54,6 +54,9 @@ def adapt_run_result(raw: Mapping[str, Any], *, correctness: bool) -> dict[str, 
         "peak_rss_bytes": raw.get("memory"),
         "read_bytes": raw.get("blkio-read"),
         "write_bytes": raw.get("blkio-write"),
+        "pressure_cpu_seconds": raw.get("pressure-cpu-some"),
+        "pressure_io_seconds": raw.get("pressure-io-some"),
+        "pressure_memory_seconds": raw.get("pressure-memory-some"),
         "termination_reason": raw.get("terminationreason"),
         "exit_code": value,
         "signal": signal,
@@ -100,17 +103,14 @@ def _outcome(result: Mapping[str, Any]) -> tuple[Outcome, int | None, int | None
     return Outcome.PASSED, 0, None
 
 
-def normalize_phase(
+def normalize_run(
     *,
-    phase: str,
     benchexec: Mapping[str, Any],
     graphforge: Mapping[str, Any],
     limits: Limits,
 ) -> dict[str, Any]:
     """Preserve both sources while making BenchExec authoritative for resources."""
     limits.validate()
-    if not phase or any(character not in "abcdefghijklmnopqrstuvwxyz_" for character in phase):
-        raise EvidenceError("invalid phase")
     outcome, exit_code, signal = _outcome(benchexec)
     authority = {
         "wall_seconds": _number(benchexec, "wall_seconds"),
@@ -118,24 +118,31 @@ def normalize_phase(
         "peak_rss_bytes": _integer(benchexec, "peak_rss_bytes"),
         "read_bytes": _integer(benchexec, "read_bytes"),
         "write_bytes": _integer(benchexec, "write_bytes"),
+        "pressure_cpu_seconds": _number(benchexec, "pressure_cpu_seconds"),
+        "pressure_io_seconds": _number(benchexec, "pressure_io_seconds"),
+        "pressure_memory_seconds": _number(benchexec, "pressure_memory_seconds"),
     }
-    gf_phase = graphforge.get("phase")
     gf_status = graphforge.get("status")
-    if gf_phase != phase or gf_status not in ("passed", "failed"):
-        raise EvidenceError("GraphForge phase telemetry is malformed")
+    phases = graphforge.get("phases")
+    if gf_status not in ("passed", "failed") or not isinstance(phases, list) or not phases:
+        raise EvidenceError("GraphForge run telemetry is malformed")
+    duration_ms = 0
+    for phase in phases:
+        if not isinstance(phase, dict) or not isinstance(phase.get("phase"), str):
+            raise EvidenceError("GraphForge phase telemetry is malformed")
+        value = phase.get("duration_ms")
+        if not isinstance(value, int) or value < 0:
+            raise EvidenceError("GraphForge phase duration_ms is malformed")
+        duration_ms += value
     disagreements: list[str] = []
     if (gf_status == "passed") != (outcome == Outcome.PASSED):
         disagreements.append("status")
-    gf_duration_ms = graphforge.get("duration_ms")
-    if not isinstance(gf_duration_ms, int) or gf_duration_ms < 0:
-        raise EvidenceError("GraphForge duration_ms is malformed")
-    if abs(gf_duration_ms / 1000 - authority["wall_seconds"]) > max(
+    if abs(duration_ms / 1000 - authority["wall_seconds"]) > max(
         1.0, authority["wall_seconds"] * 0.1
     ):
         disagreements.append("wall_time")
     return {
         "schema": SCHEMA,
-        "phase": phase,
         "outcome": outcome,
         "exit_code": exit_code,
         "signal": signal,

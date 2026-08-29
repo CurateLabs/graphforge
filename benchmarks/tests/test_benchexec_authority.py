@@ -9,7 +9,7 @@ from graphforge_bench.benchexec_authority import (
     Limits,
     Outcome,
     adapt_run_result,
-    normalize_phase,
+    normalize_run,
 )
 from graphforge_bench.tools.graphforge_certify import Tool
 from jsonschema import Draft202012Validator
@@ -24,6 +24,9 @@ def result(**changes):
         "peak_rss_bytes": 400,
         "read_bytes": 500,
         "write_bytes": 600,
+        "pressure_cpu_seconds": 0.1,
+        "pressure_io_seconds": 0.2,
+        "pressure_memory_seconds": 0.3,
         "exit_code": 0,
         "correctness": True,
     }
@@ -44,6 +47,9 @@ class BenchExecAuthorityTests(unittest.TestCase):
                 "memory": 99,
                 "blkio-read": 10,
                 "blkio-write": 20,
+                "pressure-cpu-some": 0.1,
+                "pressure-io-some": 0.2,
+                "pressure-memory-some": 0.3,
                 "exitcode": Exit(),
             },
             correctness=True,
@@ -56,7 +62,8 @@ class BenchExecAuthorityTests(unittest.TestCase):
                 peak_rss_bytes=99,
                 read_bytes=10,
                 write_bytes=20,
-            ) | {"termination_reason": None, "signal": None},
+            )
+            | {"termination_reason": None, "signal": None},
         )
 
     def test_tool_info_invokes_only_versioned_public_runner_shape(self):
@@ -74,19 +81,16 @@ class BenchExecAuthorityTests(unittest.TestCase):
         )
 
     def test_preserves_tree_authority_and_graphforge_telemetry(self):
-        evidence = normalize_phase(
-            phase="ingest",
+        evidence = normalize_run(
             benchexec=result(),
-            graphforge={"phase": "ingest", "status": "passed", "duration_ms": 2000},
+            graphforge={"status": "passed", "phases": [{"phase": "ingest", "duration_ms": 2000}]},
             limits=LIMITS,
         )
         self.assertEqual(evidence["outcome"], Outcome.PASSED)
         self.assertEqual(evidence["authority"]["cpu_seconds"], 3.0)
         self.assertEqual(evidence["limits"]["cores"], [0, 1])
         self.assertEqual(evidence["disagreements"], [])
-        schema = json.loads(
-            Path("benchmarks/schemas/benchexec-phase-evidence.json").read_text()
-        )
+        schema = json.loads(Path("benchmarks/schemas/benchexec-run-evidence.json").read_text())
         Draft202012Validator(schema).validate(evidence)
 
     def test_typed_termination_outcomes_remain_distinct(self):
@@ -100,10 +104,12 @@ class BenchExecAuthorityTests(unittest.TestCase):
         ]
         for changes, expected in cases:
             with self.subTest(expected=expected):
-                evidence = normalize_phase(
-                    phase="query",
+                evidence = normalize_run(
                     benchexec=result(**changes),
-                    graphforge={"phase": "query", "status": "failed", "duration_ms": 2000},
+                    graphforge={
+                        "status": "failed",
+                        "phases": [{"phase": "query", "duration_ms": 2000}],
+                    },
                     limits=LIMITS,
                 )
                 self.assertEqual(evidence["outcome"], expected)
@@ -112,26 +118,29 @@ class BenchExecAuthorityTests(unittest.TestCase):
         malformed = result()
         del malformed["read_bytes"]
         with self.assertRaisesRegex(EvidenceError, "read_bytes"):
-            normalize_phase(
-                phase="export",
+            normalize_run(
                 benchexec=malformed,
-                graphforge={"phase": "export", "status": "passed", "duration_ms": 2000},
+                graphforge={
+                    "status": "passed",
+                    "phases": [{"phase": "export", "duration_ms": 2000}],
+                },
                 limits=LIMITS,
             )
 
         with self.assertRaisesRegex(EvidenceError, "limits"):
-            normalize_phase(
-                phase="export",
+            normalize_run(
                 benchexec=result(),
-                graphforge={"phase": "export", "status": "passed", "duration_ms": 2000},
+                graphforge={
+                    "status": "passed",
+                    "phases": [{"phase": "export", "duration_ms": 2000}],
+                },
                 limits=Limits(0, 8, 1024, (0,)),
             )
 
     def test_reports_status_and_wall_time_disagreement(self):
-        evidence = normalize_phase(
-            phase="verify",
+        evidence = normalize_run(
             benchexec=result(),
-            graphforge={"phase": "verify", "status": "failed", "duration_ms": 9000},
+            graphforge={"status": "failed", "phases": [{"phase": "verify", "duration_ms": 9000}]},
             limits=LIMITS,
         )
         self.assertEqual(evidence["disagreements"], ["status", "wall_time"])

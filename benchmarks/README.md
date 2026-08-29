@@ -84,7 +84,7 @@ certification binary. BenchExec owns the complete process tree, limits,
 termination, wall/CPU time, peak RSS, and read/write byte evidence; the Rust
 runner's per-phase telemetry remains preserved as the product-side account.
 
-`graphforge_bench.benchexec_authority.normalize_phase` fails closed unless all
+`graphforge_bench.benchexec_authority.normalize_run` fails closed unless all
 mandatory process-tree resource fields and a correctness verdict are present.
 It reports timeout, OOM, non-zero exit, signal, harness termination, and
 correctness failure as distinct typed outcomes. Status or wall-time disagreement
