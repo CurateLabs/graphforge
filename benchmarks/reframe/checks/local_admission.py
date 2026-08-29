@@ -1,16 +1,14 @@
-import json
-
 import reframe as rfm
 import reframe.utility.sanity as sn
 
 
 @rfm.simple_test
 class LocalBenchExecAdmission(rfm.RunOnlyRegressionTest):
-    valid_systems = ["graphforge-local:local"]
-    valid_prog_environs = ["builtin"]
+    valid_systems = ["graphforge-local:local"]  # noqa: RUF012
+    valid_prog_environs = ["builtin"]  # noqa: RUF012
     executable = "python"
-    executable_opts = ["-m", "graphforge_bench.local_admission"]
+    executable_opts = ["-m", "graphforge_bench.local_admission"]  # noqa: RUF012
 
-    @sanity_function
+    @rfm.sanity_function
     def validate_typed_result(self):
         return sn.assert_found(r'"result": "(passed|disqualified)"', self.stdout)

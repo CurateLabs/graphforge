@@ -27,7 +27,21 @@ def main() -> None:
         root = Path(directory)
         heartbeat = root / "descendant.heartbeat"
         output = root / "run.log"
+        descendant = root / "descendant.py"
         worker = root / "worker.py"
+        descendant.write_text(
+            """\
+from pathlib import Path
+import sys
+import time
+
+heartbeat = Path(sys.argv[1])
+while True:
+    heartbeat.write_bytes(b"x" * 65536)
+    time.sleep(0.02)
+""",
+            encoding="utf-8",
+        )
         worker.write_text(
             """\
 from pathlib import Path
@@ -36,13 +50,9 @@ import sys
 import time
 
 heartbeat = Path(sys.argv[1])
+descendant = Path(sys.argv[2])
 subprocess.Popen(
-    [
-        sys.executable,
-        "-c",
-        "from pathlib import Path; import sys,time; p=Path(sys.argv[1]); exec('while True:\\n p.write_bytes(b\\\"x\\\"*65536)\\n time.sleep(0.02)')",
-        str(heartbeat),
-    ],
+    [sys.executable, str(descendant), str(heartbeat)],
     start_new_session=True,
 )
 while True:
@@ -66,7 +76,7 @@ while True:
             },
         )
         result = executor.execute_run(
-            [sys.executable, str(worker), str(heartbeat)],
+            [sys.executable, str(worker), str(heartbeat), str(descendant)],
             str(output),
             walltimelimit=1,
             memlimit=128 * 1024 * 1024,

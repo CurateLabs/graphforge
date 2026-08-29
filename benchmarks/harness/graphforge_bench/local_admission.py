@@ -7,14 +7,13 @@ dynamic-loader error instead of a useful qualification result.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 import json
 from pathlib import Path
 import platform
 import subprocess
 import sys
-from typing import Callable, Mapping, Sequence
-
 
 SCHEMA = "graphforge-local-admission-evidence/1"
 REQUIRED_METRICS = ("walltime", "cputime", "memory", "blkio-read", "blkio-write")
@@ -85,9 +84,7 @@ def qualify_local_host(
     if not all(facts[name] for name in ("mount_namespace", "pid_namespace", "user_namespace")):
         return _evidence("disqualified", "namespace_controls_unavailable", facts)
 
-    check = runner(
-        [sys.executable, "-m", "benchexec.check_cgroups", "--wait", "0", "--no-thread"]
-    )
+    check = runner([sys.executable, "-m", "benchexec.check_cgroups", "--wait", "0", "--no-thread"])
     if check.returncode != 0:
         return _evidence("disqualified", "benchexec_cgroups_unavailable", facts)
 
