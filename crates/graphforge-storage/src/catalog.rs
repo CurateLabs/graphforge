@@ -315,6 +315,13 @@ pub fn read_edges_filtered_projected_observed(
     for (_, path) in crate::mutator::edge_parquet_files(dir, Some(stem))
         .map_err(|error| DataFusionError::Execution(error.to_string()))?
     {
+        let file_schema = admitted_parquet(&path)?.schema().clone();
+        if file_schema.fields() != schema.fields() {
+            return Err(DataFusionError::Execution(format!(
+                "projected edge read requires canonical schema: {}",
+                path.display()
+            )));
+        }
         batches.extend(read_parquet_filtered_u64_projected(
             &path,
             schema.clone(),
@@ -4177,6 +4184,36 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["edge_id", "rel_type_name"]
         );
+    }
+
+    #[test]
+    fn projected_edge_read_rejects_reordered_physical_schema() {
+        let dir = TempDir::new().unwrap();
+        let path = dir
+            .path()
+            .join("topology")
+            .join("edges")
+            .join("KNOWS.parquet");
+        write_typed_edge(&path, 7, 1, 2);
+        let batches = read_parquet_or_empty(&path, TYPED_EDGE_SCHEMA.clone()).unwrap();
+        let order = [3, 0, 1, 2, 4, 5, 6];
+        let reordered = batches[0].project(&order).unwrap();
+        let file = File::create(&path).unwrap();
+        let mut writer = ArrowWriter::try_new(file, reordered.schema(), None).unwrap();
+        writer.write(&reordered).unwrap();
+        writer.close().unwrap();
+
+        let ids = [7].into_iter().collect();
+        let error = read_edges_filtered_projected_observed(
+            dir.path(),
+            "KNOWS",
+            OntologyMode::Strict,
+            &ids,
+            &[TYPED_EDGE_SCHEMA.index_of("src_id").unwrap()],
+            None,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("requires canonical schema"));
     }
 
     #[test]

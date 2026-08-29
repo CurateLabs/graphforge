@@ -123,11 +123,7 @@ fn generate_graph(dir: &Path, nodes: usize, fan_out: usize, compact_v4: bool) {
         writer.flush().unwrap();
     }
     build_adjacency_index(workspace.path(), TS).unwrap();
-    if compact_v4 {
-        project_fixture::publish_graph_workspace_v4(dir, workspace.path());
-    } else {
-        project_fixture::publish_graph_workspace(dir, workspace.path());
-    }
+    project_fixture::publish_graph_workspace(dir, workspace.path());
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -570,6 +566,7 @@ fn terminal_limit_keeps_fixed_hop_io_bounded_as_graph_grows() {
 
 #[test]
 fn scale_fixture_uses_bounded_bulk_publications() {
+    let _guard = IO_GUARD.lock().unwrap();
     let dir = TempDir::new().unwrap();
     let nodes = WRITE_WINDOW + 1;
     let evidence = generate_bulk_graph(dir.path(), nodes, 2);

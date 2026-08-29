@@ -937,20 +937,27 @@ fn open_projected_fragment(
         context.kind,
         context.selected_properties,
     );
+    let projection_mask = projected.as_ref().map(|roots| {
+        parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), roots.iter().copied())
+    });
+    let projected_leaves = projection_mask.as_ref().map(|mask| {
+        (0..builder.parquet_schema().num_columns())
+            .filter(|index| mask.leaf_included(*index))
+            .collect::<BTreeSet<_>>()
+    });
     let page_reservation_bytes = validate_parquet_resource_admission(
         builder.metadata(),
         context.limits,
         opened.file.as_ref(),
         context.counts,
-        projected.as_ref(),
+        projected_leaves.as_ref(),
     )?;
     context.budget.charge(page_reservation_bytes)?;
     {
         let mut retention = context.decoded.lock().expect("property retention lock");
         retention.page_peak = retention.page_peak.max(page_reservation_bytes);
     }
-    let builder = if let Some(projected) = projected {
-        let mask = parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), projected);
+    let builder = if let Some(mask) = projection_mask {
         builder.with_projection(mask)
     } else {
         builder
