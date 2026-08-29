@@ -154,6 +154,17 @@ class ProgressiveQualificationTests(unittest.TestCase):
         contradictory = copy.deepcopy(evidence)
         contradictory["checks"]["rss_headroom"] = False
         self.assertFalse(self.evidence_schema.is_valid(contradictory))
+        wrong_sources = copy.deepcopy(evidence)
+        wrong_sources["source_scales"] = [24, 25]
+        self.assertFalse(self.evidence_schema.is_valid(wrong_sources))
+        missing_capacity = copy.deepcopy(evidence)
+        missing_capacity["provider_capacity"] = None
+        self.assertFalse(self.evidence_schema.is_valid(missing_capacity))
+
+    def test_profile_schema_rejects_non_string_generator_identity(self) -> None:
+        profile = json.loads((ROOT / "profiles/graph500/s18-local.json").read_text())
+        profile["generator"]["identity"] = 42
+        self.assertFalse(self.profile_schema.is_valid(profile))
 
     def test_each_capacity_dimension_refuses_independently(self) -> None:
         cases = {
@@ -207,6 +218,12 @@ class ProgressiveQualificationTests(unittest.TestCase):
         evidence = project(self.profiles[2], [rung(18), rung(19)], constrained)
         self.assertFalse(evidence["checks"]["io_reader_publication_headroom"])
         self.assertEqual(evidence["decision"], "refused")
+
+    def test_provider_capacity_evidence_is_a_closed_rate_allowlist(self) -> None:
+        capacity = CAPACITY | {"provider_id": "must-not-escape", "secret": "must-not-escape"}
+        evidence = project(self.profiles[2], [rung(18), rung(19)], capacity)
+        self.assertEqual(evidence["provider_capacity"], CAPACITY)
+        self.assertNotIn("must-not-escape", json.dumps(evidence))
 
     def test_projection_uses_worse_latest_ratio_not_only_small_delta(self) -> None:
         low, high = rung(18), rung(19)

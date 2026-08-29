@@ -80,11 +80,7 @@ impl Profile {
             return Err(RunnerError::Profile("profile id must be a safe token"));
         }
         if self.schema == "graphforge-progressive-qualification-profile/1"
-            && (self.scale.is_none()
-                || !matches!(self.execution.as_deref(), Some("local" | "provider"))
-                || self.generator.is_none()
-                || self.lifecycle.is_none()
-                || self.gate.is_none())
+            && !self.progressive_contract_is_valid()
         {
             return Err(RunnerError::Profile(
                 "progressive profile requires its qualification contract",
@@ -117,6 +113,102 @@ impl Profile {
         }
         Ok(())
     }
+
+    fn progressive_contract_is_valid(&self) -> bool {
+        let (Some(scale), Some(execution), Some(generator), Some(lifecycle), Some(gate)) = (
+            self.scale,
+            self.execution.as_deref(),
+            self.generator.clone(),
+            self.lifecycle.clone(),
+            self.gate.clone(),
+        ) else {
+            return false;
+        };
+        let Ok(generator) = serde_json::from_value::<ProgressiveGenerator>(generator) else {
+            return false;
+        };
+        let Ok(lifecycle) = serde_json::from_value::<ProgressiveLifecycle>(lifecycle) else {
+            return false;
+        };
+        let Ok(gate) = serde_json::from_value::<ProgressiveGate>(gate) else {
+            return false;
+        };
+        let expected = match scale {
+            18 | 19 => ("local", None),
+            20 => ("provider", Some([18, 19])),
+            22 => ("provider", Some([19, 20])),
+            26 => ("provider", Some([24, 25])),
+            _ => return false,
+        };
+        execution == expected.0
+            && generator.identity == generator_identity(&self.phases)
+            && generator.edge_factor == 16
+            && generator.seed == 13_907_095_936_298_285_200
+            && lifecycle.mechanics == "public-certification-v1"
+            && lifecycle.phases == Phase::ALL
+            && lifecycle.evidence_schema == EVIDENCE_SCHEMA
+            && gate.requires_previous_pass
+            && gate.projection_source_scales == expected.1
+            && gate.limits.wall_seconds == 14_400
+            && gate.limits.rss_bytes == 4_294_967_296
+            && gate.limits.volume_bytes == 536_870_912_000
+            && gate.headroom.time_fraction == 0.2
+            && gate.headroom.rss_fraction == 0.2
+            && gate.headroom.storage_fraction == 0.15
+            && gate.headroom.max_adjacent_rss_growth_fraction == 0.1
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProgressiveGenerator {
+    identity: String,
+    edge_factor: u8,
+    seed: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProgressiveLifecycle {
+    mechanics: String,
+    phases: Vec<Phase>,
+    evidence_schema: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProgressiveGate {
+    requires_previous_pass: bool,
+    projection_source_scales: Option<[u8; 2]>,
+    limits: ProgressiveLimits,
+    headroom: ProgressiveHeadroom,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProgressiveLimits {
+    wall_seconds: u64,
+    rss_bytes: u64,
+    volume_bytes: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProgressiveHeadroom {
+    time_fraction: f64,
+    rss_fraction: f64,
+    storage_fraction: f64,
+    max_adjacent_rss_growth_fraction: f64,
+}
+
+fn generator_identity(phases: &[PhaseCommand]) -> String {
+    phases
+        .iter()
+        .find_map(|command| match &command.action {
+            PhaseAction::BenchmarkGenerator { identity, .. } => Some(identity.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -526,7 +618,10 @@ fn action_matches_phase(command: &PhaseCommand) -> bool {
 
 fn is_sha256_identity(value: &str) -> bool {
     value.strip_prefix("sha256:").is_some_and(|digest| {
-        digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
     })
 }
 
@@ -650,6 +745,41 @@ mod tests {
             lifecycle: None,
             gate: None,
         }
+    }
+
+    fn progressive_profile() -> Profile {
+        let mut profile = tiny_profile();
+        let identity = generator_identity(&profile.phases);
+        profile.schema = "graphforge-progressive-qualification-profile/1".to_owned();
+        profile.id = "graph500-s20-provider".to_owned();
+        profile.scale = Some(20);
+        profile.execution = Some("provider".to_owned());
+        profile.generator = Some(serde_json::json!({
+            "identity": identity,
+            "edge_factor": 16,
+            "seed": 13_907_095_936_298_285_200_u64
+        }));
+        profile.lifecycle = Some(serde_json::json!({
+            "mechanics": "public-certification-v1",
+            "phases": Phase::ALL,
+            "evidence_schema": EVIDENCE_SCHEMA
+        }));
+        profile.gate = Some(serde_json::json!({
+            "requires_previous_pass": true,
+            "projection_source_scales": [18, 19],
+            "limits": {
+                "wall_seconds": 14_400,
+                "rss_bytes": 4_294_967_296_u64,
+                "volume_bytes": 536_870_912_000_u64
+            },
+            "headroom": {
+                "time_fraction": 0.2,
+                "rss_fraction": 0.2,
+                "storage_fraction": 0.15,
+                "max_adjacent_rss_growth_fraction": 0.1
+            }
+        }));
+        profile
     }
 
     fn ingest_commands() -> Vec<Vec<String>> {
@@ -842,6 +972,33 @@ mod tests {
         };
         commands.swap(3, 4);
         assert!(profile.validate().is_err());
+    }
+
+    #[test]
+    fn progressive_profile_contract_is_typed_and_scale_specific() {
+        let profile = progressive_profile();
+        assert_eq!(profile.validate(), Ok(()));
+        for malformed in [
+            serde_json::json!([]),
+            serde_json::json!({}),
+            serde_json::json!({"identity": 42, "edge_factor": 16, "seed": 1}),
+        ] {
+            let mut profile = progressive_profile();
+            profile.generator = Some(malformed);
+            assert!(profile.validate().is_err());
+        }
+        let mut profile = progressive_profile();
+        profile.scale = Some(0);
+        assert!(profile.validate().is_err());
+        let mut profile = progressive_profile();
+        profile.gate.as_mut().unwrap()["projection_source_scales"] = serde_json::json!([24, 25]);
+        assert!(profile.validate().is_err());
+    }
+
+    #[test]
+    fn generator_digest_must_be_lowercase_hex() {
+        assert!(is_sha256_identity(&format!("sha256:{}", "a".repeat(64))));
+        assert!(!is_sha256_identity(&format!("sha256:{}", "A".repeat(64))));
     }
 
     #[cfg(unix)]

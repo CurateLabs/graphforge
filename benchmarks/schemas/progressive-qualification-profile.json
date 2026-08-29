@@ -25,7 +25,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["identity", "edge_factor", "seed"],
       "properties": {
-        "identity": {"pattern": "^sha256:[0-9a-f]{64}$"},
+        "identity": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
         "edge_factor": {"const": 16},
         "seed": {"const": 13907095936298285200}
       }

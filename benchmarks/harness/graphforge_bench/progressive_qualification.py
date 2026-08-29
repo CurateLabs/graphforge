@@ -272,7 +272,9 @@ def project(
         },
         "projected": projected | {"storage_peak_bytes": storage_peak},
         "required_rates": required_rates,
-        "provider_capacity": dict(capacity) if measured_capacity else None,
+        "provider_capacity": (
+            {name: capacity[name] for name in required_rates} if measured_capacity else None
+        ),
         "slopes_observed": {
             name: _integer(high["metrics"], name) - _integer(low["metrics"], name)
             for name in (

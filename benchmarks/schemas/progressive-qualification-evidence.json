@@ -35,6 +35,7 @@
       "if": {"properties": {"decision": {"const": "admitted"}}, "required": ["decision"]},
       "then": {
         "properties": {
+          "provider_capacity": {"$ref": "#/$defs/rates"},
           "checks": {
             "properties": {
               "time_headroom": {"const": true}, "rss_headroom": {"const": true},
@@ -46,6 +47,18 @@
           }
         }
       }
+    },
+    {
+      "if": {"properties": {"target": {"const": "S20"}}, "required": ["target"]},
+      "then": {"properties": {"source_scales": {"const": [18, 19]}}}
+    },
+    {
+      "if": {"properties": {"target": {"const": "S22"}}, "required": ["target"]},
+      "then": {"properties": {"source_scales": {"const": [19, 20]}}}
+    },
+    {
+      "if": {"properties": {"target": {"const": "S26"}}, "required": ["target"]},
+      "then": {"properties": {"source_scales": {"const": [24, 25]}}}
     }
   ],
   "$defs": {
