@@ -2310,7 +2310,8 @@ impl PhaseJournal {
     }
 
     fn fail_with_detail(&mut self, id: &str, started: Instant, code: &str, detail: Value) {
-        self.monitor.sample_disk();
+        self.monitor
+            .observe_allocated_union(self.allocation.current_allocated_bytes());
         self.phases.push(json!({
             "id": id, "status": "fail",
             "elapsed_ms": u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
