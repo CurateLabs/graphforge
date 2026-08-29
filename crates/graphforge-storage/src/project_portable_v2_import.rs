@@ -300,13 +300,23 @@ pub fn import_complete_portable_v2_with_progress(
         // staging. Add their identities to the operation-wide owned union
         // immediately before cleanup; identities of atomically replaced files
         // remain attributable even though they are no longer live.
+        let mut finalized_live_identities = std::collections::BTreeMap::new();
         capture_finalized_import_identities(
             &stage,
             materialized_stage_identity,
-            &mut receipt.materialized_identity_allocated_bytes,
+            &mut finalized_live_identities,
             entry_count,
         )?;
-        receipt.materialized_cleanup = cleanup_import_materialization(
+        let historically_removed_identities = receipt
+            .materialized_identity_allocated_bytes
+            .iter()
+            .filter(|(identity, _)| !finalized_live_identities.contains_key(*identity))
+            .map(|(identity, allocated)| (identity.clone(), *allocated))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        receipt
+            .materialized_identity_allocated_bytes
+            .extend(finalized_live_identities);
+        let mut cleanup = cleanup_import_materialization(
             &stage,
             &owner,
             materialized_stage_identity,
@@ -315,6 +325,10 @@ pub fn import_complete_portable_v2_with_progress(
         .map_err(|error| {
             error.with_allocation_identities(receipt.materialized_identity_allocated_bytes.clone())
         })?;
+        cleanup
+            .removed_identity_allocated_bytes
+            .extend(historically_removed_identities);
+        receipt.materialized_cleanup = cleanup;
         Ok(receipt)
     });
     if result.is_ok() {
@@ -1575,6 +1589,11 @@ mod tests {
         )
         .unwrap();
         assert!(first.staged_composition.is_some());
+        assert!(first.materialized_cleanup.parent_sync_confirmed);
+        assert_eq!(
+            first.materialized_cleanup.removed_identity_allocated_bytes,
+            first.materialized_identity_allocated_bytes
+        );
         let reopened = crate::resolve_project_generation(&target).unwrap();
         let staged = load_portable_ontology_staging(&reopened, PortableV2Limits::default())
             .unwrap()
@@ -1606,6 +1625,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(replay.publication.generation_uuid, generation);
+        assert!(replay.materialized_cleanup.parent_sync_confirmed);
+        assert_eq!(
+            replay.materialized_cleanup.removed_identity_allocated_bytes,
+            replay.materialized_identity_allocated_bytes
+        );
         let conflict = import_complete_portable_v2(
             &package,
             &target,

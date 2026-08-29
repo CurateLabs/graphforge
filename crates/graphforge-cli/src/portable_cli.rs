@@ -461,12 +461,8 @@ fn import_transient_peak(
     result: &graphforge_api::PortableV2ImportResult,
 ) -> Result<u64, graphforge_api::GfError> {
     if !result.materialized_cleanup_parent_sync_confirmed
-        || result
-            .materialized_cleanup_removed_identity_allocated_bytes
-            .iter()
-            .any(|(identity, allocated)| {
-                result.materialized_identity_allocated_bytes.get(identity) != Some(allocated)
-            })
+        || result.materialized_cleanup_removed_identity_allocated_bytes
+            != result.materialized_identity_allocated_bytes
     {
         return Err(graphforge_api::GfError::Validation(
             "storage.portable_import_allocation_cleanup: portable import allocation cleanup did not reconcile"
@@ -809,11 +805,6 @@ mod lifecycle_storage_tests {
     #[test]
     fn portable_import_peak_deduplicates_shared_native_identity() {
         assert_eq!(import_transient_peak(&import_result()).unwrap(), 20);
-        let mut result = import_result();
-        result
-            .materialized_cleanup_removed_identity_allocated_bytes
-            .remove("stage");
-        assert_eq!(import_transient_peak(&result).unwrap(), 20);
     }
 
     #[test]
@@ -821,12 +812,7 @@ mod lifecycle_storage_tests {
         let mut result = import_result();
         result
             .materialized_cleanup_removed_identity_allocated_bytes
-            .insert("foreign".to_owned(), 1);
-        assert!(import_transient_peak(&result).is_err());
-        let mut result = import_result();
-        result
-            .materialized_cleanup_removed_identity_allocated_bytes
-            .insert("stage".to_owned(), 7);
+            .remove("stage");
         assert!(import_transient_peak(&result).is_err());
         let mut result = import_result();
         result.materialized_cleanup_parent_sync_confirmed = false;
