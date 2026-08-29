@@ -79,7 +79,7 @@ def passed_rung(scale: int) -> dict:
     }
 
 
-def graphforge(scale: int, receipts: list[dict] | None = None) -> dict:
+def graphforge(scale: int, receipts: dict[str, list[dict]] | list[dict] | None = None) -> dict:
     phases = [
         {
             "phase": phase,
@@ -90,7 +90,11 @@ def graphforge(scale: int, receipts: list[dict] | None = None) -> dict:
         }
         for phase in PHASES
     ]
-    if receipts is not None:
+    if isinstance(receipts, dict):
+        by_name = {phase["phase"]: phase for phase in phases}
+        for name, values in receipts.items():
+            by_name[name]["receipts"] = values
+    elif receipts is not None:
         phases[2]["receipts"] = receipts
     return {
         "schema": "graphforge-public-certification/1",
@@ -128,8 +132,24 @@ def benchexec(gf: dict) -> dict:
     }
 
 
-def authoritative_receipts(scale: int) -> list[dict]:
-    return [
+def sink(digest: str, *, rows: int, scalar: int | None = None) -> dict:
+    receipt = {
+        "contract": "graphforge-result-sink/2",
+        "format": "ArrowIpc",
+        "rows": rows,
+        "batches": 1,
+        "bytes": 64,
+        "complete": True,
+        "result_sha256": digest,
+        "query_evidence": {"contract": "graphforge-query-evidence/1"},
+    }
+    if scalar is not None:
+        receipt["scalar_u64"] = scalar
+    return receipt
+
+
+def authoritative_receipts(scale: int) -> dict[str, list[dict]]:
+    construction = [
         {
             "contract": "graphforge-import-session/1",
             "outcome": "committed",
@@ -150,17 +170,18 @@ def authoritative_receipts(scale: int) -> list[dict]:
             "reader_calls": 8,
             "publication_work_units": 9,
         },
-        {
-            "contract": "graphforge-query-qualification/1",
-            "live_nodes": 1 << scale,
-            "live_edges": 16 * (1 << scale),
-            "one_hop_rows": 1024,
-            "two_hop_rows": 1024,
-            "source_fingerprint": "sha256:" + "a" * 64,
-            "imported_fingerprint": "sha256:" + "a" * 64,
-            "equivalent": True,
-        },
     ]
+    nodes, edges = 1 << scale, 16 * (1 << scale)
+    node_count = sink("a" * 64, rows=1, scalar=nodes)
+    edge_count = sink("b" * 64, rows=1, scalar=edges)
+    one_hop = sink("c" * 64, rows=1024)
+    two_hop = sink("d" * 64, rows=1024)
+    return {
+        "ingest": construction,
+        "recount": [node_count, edge_count],
+        "query": [one_hop, two_hop],
+        "reopen_proof": [node_count, edge_count, one_hop, two_hop],
+    }
 
 
 class ProgressiveRunControllerTests(unittest.TestCase):
@@ -284,15 +305,17 @@ class ProgressiveRunControllerTests(unittest.TestCase):
         rung = assemble_rung_evidence(root=ROOT, scale=18, graphforge=gf, benchexec=benchexec(gf))
         self.assertEqual(rung["status"], "passed")
         self.assertEqual(rung["metrics"]["physical_read_bytes"], 0)
-        for omitted in range(len(receipts)):
+        for omitted in receipts:
             with self.subTest(omitted=omitted), self.assertRaises(ControllerError):
-                changed = receipts[:omitted] + receipts[omitted + 1 :]
+                changed = {name: values for name, values in receipts.items() if name != omitted}
                 changed_gf = graphforge(18, changed)
                 assemble_rung_evidence(
                     root=ROOT, scale=18, graphforge=changed_gf, benchexec=benchexec(changed_gf)
                 )
         contradictory = authoritative_receipts(18)
-        contradictory[2]["imported_fingerprint"] = "sha256:" + "b" * 64
+        contradictory["reopen_proof"][2] = contradictory["reopen_proof"][2] | {
+            "result_sha256": "e" * 64
+        }
         changed_gf = graphforge(18, contradictory)
         with self.assertRaisesRegex(ControllerError, "contradicts"):
             assemble_rung_evidence(

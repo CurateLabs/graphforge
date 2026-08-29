@@ -428,9 +428,19 @@ fn sanitize_receipt(value: &serde_json::Value) -> Option<serde_json::Value> {
             }
             Some(receipt.into())
         }
-        Some("graphforge-result-sink/1") => {
+        Some("graphforge-result-sink/1" | "graphforge-result-sink/2") => {
             let mut receipt = serde_json::Map::new();
-            for key in ["contract", "format", "rows", "batches", "bytes", "complete"] {
+            for key in [
+                "contract",
+                "format",
+                "rows",
+                "batches",
+                "bytes",
+                "complete",
+                "result_sha256",
+                "scalar_u64",
+                "query_evidence",
+            ] {
                 if let Some(item) = object.get(key) {
                     receipt.insert(key.to_owned(), item.clone());
                 }
@@ -821,7 +831,8 @@ fn action_matches_phase(command: &PhaseCommand) -> bool {
     if let PhaseAction::GraphForgeCliWorkflow { commands } = &command.action {
         return match command.phase {
             Phase::Ingest => ingest_workflow_is_valid(commands),
-            Phase::Recount | Phase::Query | Phase::ReopenProof => query_workflow_is_valid(commands),
+            Phase::Recount | Phase::Query => query_workflow_is_valid(commands, 2),
+            Phase::ReopenProof => query_workflow_is_valid(commands, 4),
             _ => false,
         };
     }
@@ -859,8 +870,8 @@ fn is_sha256_identity(value: &str) -> bool {
     })
 }
 
-fn query_workflow_is_valid(commands: &[Vec<String>]) -> bool {
-    commands.len() == 2
+fn query_workflow_is_valid(commands: &[Vec<String>], expected: usize) -> bool {
+    commands.len() == expected
         && commands.iter().all(|args| {
             args.iter().all(|argument| !argument.contains('\0'))
                 && contains_command(

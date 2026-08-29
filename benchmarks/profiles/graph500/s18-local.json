@@ -233,6 +233,26 @@
             "MATCH ()-[r]->() RETURN count(r)",
             "--output",
             "workspace/s18/imported-edge-count.arrow"
+          ],
+          [
+            "--json",
+            "--project",
+            "workspace/s18/imported",
+            "query",
+            "--cypher",
+            "MATCH (a)-[r]->(b) RETURN a, r, b LIMIT 1024",
+            "--output",
+            "workspace/s18/imported-one-hop.arrow"
+          ],
+          [
+            "--json",
+            "--project",
+            "workspace/s18/imported",
+            "query",
+            "--cypher",
+            "MATCH (a)-[r1]->(b)-[r2]->(c) RETURN a, r1, b, r2, c LIMIT 1024",
+            "--output",
+            "workspace/s18/imported-two-hop.arrow"
           ]
         ]
       }

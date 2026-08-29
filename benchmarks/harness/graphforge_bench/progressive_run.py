@@ -373,6 +373,44 @@ def _receipts(graphforge: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     return result
 
 
+def _phase_receipts(graphforge: Mapping[str, Any], name: str) -> list[Mapping[str, Any]]:
+    phases = graphforge.get("phases")
+    if not isinstance(phases, list):
+        raise ControllerError("GraphForge phases are missing")
+    matching = [
+        phase for phase in phases if isinstance(phase, Mapping) and phase.get("phase") == name
+    ]
+    if len(matching) != 1 or not isinstance(matching[0].get("receipts", []), list):
+        raise ControllerError(f"GraphForge phase receipts are missing: {name}")
+    receipts = matching[0].get("receipts", [])
+    if any(not isinstance(receipt, Mapping) for receipt in receipts):
+        raise ControllerError(f"GraphForge phase receipts are malformed: {name}")
+    return receipts
+
+
+def _query_receipts(
+    graphforge: Mapping[str, Any], phase: str, expected: int
+) -> list[Mapping[str, Any]]:
+    receipts = [
+        receipt
+        for receipt in _phase_receipts(graphforge, phase)
+        if receipt.get("contract") == "graphforge-result-sink/2"
+    ]
+    if len(receipts) != expected:
+        raise ControllerError(f"ordinary query receipts are missing or ambiguous: {phase}")
+    for receipt in receipts:
+        digest = receipt.get("result_sha256")
+        if (
+            receipt.get("complete") is not True
+            or not isinstance(digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+            or not isinstance(receipt.get("query_evidence"), Mapping)
+            or receipt["query_evidence"].get("contract") != "graphforge-query-evidence/1"
+        ):
+            raise ControllerError("ordinary query receipt is incomplete")
+    return receipts
+
+
 def _one_receipt(graphforge: Mapping[str, Any], contract: str) -> Mapping[str, Any]:
     matching = [receipt for receipt in _receipts(graphforge) if receipt.get("contract") == contract]
     if len(matching) != 1:
@@ -395,18 +433,24 @@ def assemble_rung_evidence(
         raise ControllerError("ordinary import commit receipt is missing or ambiguous")
     require_bulk_ingest_capability(imports[0])
     storage = _one_receipt(graphforge, "graphforge-storage-attribution/1")
-    query = _one_receipt(graphforge, "graphforge-query-qualification/1")
     expected_edges = 16 * (1 << scale)
-    for name in ("live_nodes", "live_edges", "one_hop_rows", "two_hop_rows"):
-        if isinstance(query.get(name), bool) or not isinstance(query.get(name), int):
-            raise ControllerError(f"query qualification receipt omitted {name}")
-    if (
-        query["live_nodes"] != 1 << scale
-        or query["live_edges"] != expected_edges
-        or query["one_hop_rows"] <= 0
-        or query["two_hop_rows"] <= 0
-        or query.get("equivalent") is not True
-        or query.get("source_fingerprint") != query.get("imported_fingerprint")
+    source_counts = _query_receipts(graphforge, "recount", 2)
+    source_hops = _query_receipts(graphforge, "query", 2)
+    imported = _query_receipts(graphforge, "reopen_proof", 4)
+    imported_counts, imported_hops = imported[:2], imported[2:]
+    expected_counts = (1 << scale, expected_edges)
+    for index, expected in enumerate(expected_counts):
+        source_value = source_counts[index].get("scalar_u64")
+        imported_value = imported_counts[index].get("scalar_u64")
+        if source_value != expected or imported_value != expected:
+            raise ControllerError("recount evidence contradicts the selected rung")
+        if source_counts[index]["result_sha256"] != imported_counts[index]["result_sha256"]:
+            raise ControllerError("source/imported recount evidence disagrees")
+    if any(
+        source.get("rows") != 1024
+        or imported_receipt.get("rows") != 1024
+        or source["result_sha256"] != imported_receipt["result_sha256"]
+        for source, imported_receipt in zip(source_hops, imported_hops, strict=True)
     ):
         raise ControllerError("source/imported query evidence contradicts the selected rung")
     storage_names = (
