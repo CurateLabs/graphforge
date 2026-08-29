@@ -162,6 +162,7 @@ class LiveMachineSize:
     name: str
     cpus: int
     memory_mb: int
+    baseline_apps: frozenset[str]
 
 
 def validate_invocation(invocation: TinyQualificationInvocation) -> None:
@@ -221,6 +222,13 @@ def verify_live_capacity(
         transport.json(("flyctl", "apps", "list", "--json"), timeout=CREATE_TIMEOUT_SECONDS),
         "app",
     )
+    baseline_apps = frozenset(
+        item.get("Name") or item.get("name") for item in apps if isinstance(item, dict)
+    )
+    if len(baseline_apps) != len(apps) or any(
+        not isinstance(name, str) or not SAFE_NAME.fullmatch(name) for name in baseline_apps
+    ):
+        raise QualificationError("provision_failed", "app inventory is malformed")
     if any(
         item.get("Name") == invocation.app or item.get("name") == invocation.app for item in apps
     ):
@@ -267,7 +275,10 @@ def verify_live_capacity(
             "authorization_refused", "requested Machine is not the smallest performance preset"
         )
     return LiveMachineSize(
-        name=smallest[0], cpus=smallest[1]["cpus"], memory_mb=smallest[1]["memory_mb"]
+        name=smallest[0],
+        cpus=smallest[1]["cpus"],
+        memory_mb=smallest[1]["memory_mb"],
+        baseline_apps=baseline_apps,
     )
 
 
@@ -460,6 +471,7 @@ def _cleanup(
     invocation: TinyQualificationInvocation,
     ledger: ResourceLedger,
     ledger_path: Path,
+    baseline_apps: frozenset[str],
 ) -> None:
     """Best-effort child-first cleanup followed by independent empty inventory."""
     failures = False
@@ -471,7 +483,20 @@ def _cleanup(
         except (subprocess.SubprocessError, OSError):
             failures = True
 
-    if ledger.app_owned:
+    try:
+        current_apps = _list(
+            transport.json(("flyctl", "apps", "list", "--json"), timeout=CREATE_TIMEOUT_SECONDS),
+            "app",
+        )
+        current_names = {
+            item.get("Name") or item.get("name") for item in current_apps if isinstance(item, dict)
+        }
+    except (QualificationError, subprocess.SubprocessError, OSError):
+        current_names = set()
+        failures = True
+    app_exists = invocation.app in current_names
+
+    if app_exists:
         # The app was proven absent before creation, so every child in this
         # owned app belongs to this attempt even if a crash preceded ID capture.
         try:
@@ -576,7 +601,8 @@ def _cleanup(
         except (QualificationError, subprocess.SubprocessError, OSError):
             failures = True
 
-        best_effort(("flyctl", "apps", "destroy", invocation.app, "--yes"))
+        if app_exists:
+            best_effort(("flyctl", "apps", "destroy", invocation.app, "--yes"))
 
     try:
         apps = _list(
@@ -587,10 +613,10 @@ def _cleanup(
         apps = []
         failures = True
     else:
-        if any(
-            item.get("Name") == invocation.app or item.get("name") == invocation.app
-            for item in apps
-        ):
+        final_names = {
+            item.get("Name") or item.get("name") for item in apps if isinstance(item, dict)
+        }
+        if final_names != set(baseline_apps):
             failures = True
     if failures:
         _save_ledger(ledger_path, ledger)
@@ -732,7 +758,7 @@ def execute(
         failure.__cause__ = error
     finally:
         try:
-            _cleanup(transport, invocation, ledger, ledger_path)
+            _cleanup(transport, invocation, ledger, ledger_path, live_size.baseline_apps)
         except QualificationError as cleanup_error:
             failure = cleanup_error
 

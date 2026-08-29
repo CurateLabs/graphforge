@@ -71,6 +71,7 @@ class FakeTransport:
         self.teardown_machine = teardown_machine
         self.machine_created = False
         self.auto_destroy = auto_destroy
+        self.app_created = False
 
     def run(
         self, argv: tuple[str, ...], *, timeout: int, check: bool = True
@@ -80,6 +81,10 @@ class FakeTransport:
             if self.build_fails:
                 raise subprocess.CalledProcessError(1, argv)
             return subprocess.CompletedProcess(argv, 0, "", "")
+        if argv[:3] == ("flyctl", "apps", "create"):
+            self.app_created = True
+        if argv[:3] == ("flyctl", "apps", "destroy"):
+            self.app_created = False
         if argv[:4] == ("flyctl", "ssh", "sftp", "get"):
             Path(argv[5]).write_text(json.dumps(evidence()), encoding="utf-8")
         if argv[:3] == ("flyctl", "machine", "run"):
@@ -143,7 +148,7 @@ class FakeTransport:
         if argv[1:3] in {("volumes", "list"), ("secrets", "list")}:
             return []
         if argv[1:3] == ("apps", "list"):
-            return []
+            return [{"Name": "gf-q958-test"}] if self.app_created else []
         raise AssertionError(f"unexpected JSON command: {argv}")
 
 
