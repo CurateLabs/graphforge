@@ -1,0 +1,265 @@
+{
+  "schema": "graphforge-progressive-qualification-profile/1",
+  "id": "graph500-s26-provider",
+  "scale": 26,
+  "execution": "provider",
+  "executable": "gf",
+  "phases": [
+    {
+      "phase": "admission",
+      "action": {
+        "interface": "graph_forge_cli",
+        "args": [
+          "--info"
+        ]
+      }
+    },
+    {
+      "phase": "generate",
+      "action": {
+        "interface": "benchmark_generator",
+        "identity": "sha256:3b4bdf5ae4f41523f911dc1998db2328dadd2fa9e5f95e49478f148e81a14ce2",
+        "executable": "graphforge-benchmark-graph500-generator",
+        "args": [
+          "--scale",
+          "26",
+          "--edge-factor",
+          "16",
+          "--seed",
+          "13907095936298285200",
+          "--nodes",
+          "workspace/s26/nodes.parquet",
+          "--edges",
+          "workspace/s26/edges.parquet"
+        ]
+      }
+    },
+    {
+      "phase": "ingest",
+      "action": {
+        "interface": "graph_forge_cli_workflow",
+        "commands": [
+          [
+            "--project",
+            "workspace/s26/source",
+            "import-session",
+            "begin",
+            "--operation-uuid",
+            "00000000-0000-4000-8000-000000000026"
+          ],
+          [
+            "--project",
+            "workspace/s26/source",
+            "import-session",
+            "register-parquet",
+            "--session-uuid",
+            "00000000-0000-4000-8000-000000000026",
+            "--path",
+            "workspace/s26/nodes.parquet",
+            "--kind",
+            "nodes"
+          ],
+          [
+            "--project",
+            "workspace/s26/source",
+            "import-session",
+            "register-parquet",
+            "--session-uuid",
+            "00000000-0000-4000-8000-000000000026",
+            "--path",
+            "workspace/s26/edges.parquet",
+            "--kind",
+            "edges"
+          ],
+          [
+            "--project",
+            "workspace/s26/source",
+            "import-session",
+            "validate",
+            "--session-uuid",
+            "00000000-0000-4000-8000-000000000026"
+          ],
+          [
+            "--project",
+            "workspace/s26/source",
+            "import-session",
+            "commit",
+            "--session-uuid",
+            "00000000-0000-4000-8000-000000000026"
+          ]
+        ]
+      }
+    },
+    {
+      "phase": "reopen",
+      "action": {
+        "interface": "graph_forge_cli",
+        "args": [
+          "--project",
+          "workspace/s26/source",
+          "recovery"
+        ]
+      }
+    },
+    {
+      "phase": "recount",
+      "action": {
+        "interface": "graph_forge_cli_workflow",
+        "commands": [
+          [
+            "--project",
+            "workspace/s26/source",
+            "query",
+            "--cypher",
+            "MATCH (n) RETURN count(n)",
+            "--output",
+            "workspace/s26/node-count.arrow"
+          ],
+          [
+            "--project",
+            "workspace/s26/source",
+            "query",
+            "--cypher",
+            "MATCH ()-[r]->() RETURN count(r)",
+            "--output",
+            "workspace/s26/edge-count.arrow"
+          ]
+        ]
+      }
+    },
+    {
+      "phase": "query",
+      "action": {
+        "interface": "graph_forge_cli_workflow",
+        "commands": [
+          [
+            "--project",
+            "workspace/s26/source",
+            "query",
+            "--cypher",
+            "MATCH (a)-[r]->(b) RETURN a, r, b LIMIT 1024",
+            "--output",
+            "workspace/s26/one-hop.arrow"
+          ],
+          [
+            "--project",
+            "workspace/s26/source",
+            "query",
+            "--cypher",
+            "MATCH (a)-[r1]->(b)-[r2]->(c) RETURN a, r1, b, r2, c LIMIT 1024",
+            "--output",
+            "workspace/s26/two-hop.arrow"
+          ]
+        ]
+      }
+    },
+    {
+      "phase": "export",
+      "action": {
+        "interface": "graph_forge_cli",
+        "args": [
+          "--project",
+          "workspace/s26/source",
+          "portable",
+          "export",
+          "--current",
+          "--output",
+          "workspace/s26/portable"
+        ]
+      }
+    },
+    {
+      "phase": "verify",
+      "action": {
+        "interface": "graph_forge_cli",
+        "args": [
+          "portable",
+          "verify",
+          "--input",
+          "workspace/s26/portable"
+        ]
+      }
+    },
+    {
+      "phase": "clean_import",
+      "action": {
+        "interface": "graph_forge_cli",
+        "args": [
+          "--project",
+          "workspace/s26/imported",
+          "portable",
+          "import",
+          "--input",
+          "workspace/s26/portable",
+          "--idempotency-key",
+          "00000000-0000-4000-8000-000000000026"
+        ]
+      }
+    },
+    {
+      "phase": "reopen_proof",
+      "action": {
+        "interface": "graph_forge_cli_workflow",
+        "commands": [
+          [
+            "--project",
+            "workspace/s26/imported",
+            "query",
+            "--cypher",
+            "MATCH (n) RETURN count(n)",
+            "--output",
+            "workspace/s26/imported-node-count.arrow"
+          ],
+          [
+            "--project",
+            "workspace/s26/imported",
+            "query",
+            "--cypher",
+            "MATCH ()-[r]->() RETURN count(r)",
+            "--output",
+            "workspace/s26/imported-edge-count.arrow"
+          ]
+        ]
+      }
+    }
+  ],
+  "generator": {
+    "identity": "sha256:3b4bdf5ae4f41523f911dc1998db2328dadd2fa9e5f95e49478f148e81a14ce2",
+    "edge_factor": 16,
+    "seed": 13907095936298285200
+  },
+  "lifecycle": {
+    "mechanics": "public-certification-v1",
+    "phases": [
+      "admission",
+      "generate",
+      "ingest",
+      "reopen",
+      "recount",
+      "query",
+      "export",
+      "verify",
+      "clean_import",
+      "reopen_proof"
+    ],
+    "evidence_schema": "graphforge-public-certification/1"
+  },
+  "gate": {
+    "requires_previous_pass": true,
+    "projection_source_scales": [
+      24,
+      25
+    ],
+    "limits": {
+      "wall_seconds": 14400,
+      "rss_bytes": 4294967296,
+      "volume_bytes": 536870912000
+    },
+    "headroom": {
+      "time_fraction": 0.2,
+      "rss_fraction": 0.2,
+      "storage_fraction": 0.15,
+      "max_adjacent_rss_growth_fraction": 0.1
+    }
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schema": "graphforge-progressive-qualification-rung-evidence-schema/1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["profile_id", "source", "scale", "live_edges", "status", "correctness", "phases", "metrics", "failure"],
+  "properties": {
+    "profile_id": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,80}$"},
+    "source": {"enum": ["progressive_profile", "canonical_ladder"]},
+    "scale": {"type": "integer", "minimum": 1, "maximum": 26},
+    "live_edges": {"type": "integer", "minimum": 1},
+    "status": {"enum": ["passed", "failed"]},
+    "correctness": {"type": "boolean"},
+    "phases": {
+      "type": "array", "minItems": 1, "maxItems": 10,
+      "items": {"enum": ["admission", "generate", "ingest", "reopen", "recount", "query", "export", "verify", "clean_import", "reopen_proof"]}
+    },
+    "metrics": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "wall_seconds": {"$ref": "#/$defs/nonnegative"}, "peak_rss_bytes": {"$ref": "#/$defs/nonnegative"},
+        "retained_storage_bytes": {"$ref": "#/$defs/nonnegative"}, "transient_peak_storage_bytes": {"$ref": "#/$defs/nonnegative"},
+        "logical_read_bytes": {"$ref": "#/$defs/nonnegative"}, "logical_write_bytes": {"$ref": "#/$defs/nonnegative"},
+        "physical_read_bytes": {"$ref": "#/$defs/nonnegative"}, "physical_write_bytes": {"$ref": "#/$defs/nonnegative"},
+        "reader_calls": {"$ref": "#/$defs/nonnegative"}, "publication_work_units": {"$ref": "#/$defs/nonnegative"}
+      }
+    },
+    "failure": {"type": ["string", "null"], "enum": [null, "admission", "generate", "ingest", "reopen", "recount", "query", "export", "verify", "clean_import", "reopen_proof", "timeout", "oom", "storage", "correctness", "harness"]}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "passed"}}, "required": ["status"]},
+      "then": {
+        "properties": {
+          "correctness": {"const": true},
+          "phases": {"const": ["admission", "generate", "ingest", "reopen", "recount", "query", "export", "verify", "clean_import", "reopen_proof"]},
+          "failure": {"type": "null"},
+          "metrics": {"required": ["wall_seconds", "peak_rss_bytes", "retained_storage_bytes", "transient_peak_storage_bytes", "logical_read_bytes", "logical_write_bytes", "physical_read_bytes", "physical_write_bytes", "reader_calls", "publication_work_units"]}
+        }
+      },
+      "else": {"properties": {"failure": {"type": "string"}}}
+    }
+  ],
+  "$defs": {"nonnegative": {"type": "integer", "minimum": 0}}
+}

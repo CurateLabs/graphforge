@@ -55,15 +55,40 @@ pub struct Profile {
     pub id: String,
     pub executable: String,
     pub phases: Vec<PhaseCommand>,
+    #[serde(default)]
+    pub scale: Option<u8>,
+    #[serde(default)]
+    pub execution: Option<String>,
+    #[serde(default)]
+    pub generator: Option<serde_json::Value>,
+    #[serde(default)]
+    pub lifecycle: Option<serde_json::Value>,
+    #[serde(default)]
+    pub gate: Option<serde_json::Value>,
 }
 
 impl Profile {
     pub fn validate(&self) -> Result<(), RunnerError> {
-        if self.schema != "graphforge-public-certification-profile/1" {
+        if !matches!(
+            self.schema.as_str(),
+            "graphforge-public-certification-profile/1"
+                | "graphforge-progressive-qualification-profile/1"
+        ) {
             return Err(RunnerError::Profile("unsupported profile schema"));
         }
         if !is_safe_token(&self.id) {
             return Err(RunnerError::Profile("profile id must be a safe token"));
+        }
+        if self.schema == "graphforge-progressive-qualification-profile/1"
+            && (self.scale.is_none()
+                || !matches!(self.execution.as_deref(), Some("local" | "provider"))
+                || self.generator.is_none()
+                || self.lifecycle.is_none()
+                || self.gate.is_none())
+        {
+            return Err(RunnerError::Profile(
+                "progressive profile requires its qualification contract",
+            ));
         }
         if !is_graphforge_executable(&self.executable) {
             return Err(RunnerError::Profile(
@@ -112,6 +137,9 @@ pub enum PhaseAction {
     GraphForgeCli {
         args: Vec<String>,
     },
+    GraphForgeCliWorkflow {
+        commands: Vec<Vec<String>>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -119,6 +147,7 @@ pub struct Execution {
     pub exit_code: Option<i32>,
     pub duration_ms: u64,
     pub peak_rss_bytes: Option<u64>,
+    pub failure: Option<FailureKind>,
 }
 
 pub trait PhaseExecutor {
@@ -130,35 +159,73 @@ pub struct PublicProcessExecutor;
 
 impl PhaseExecutor for PublicProcessExecutor {
     fn execute(&mut self, profile: &Profile, command: &PhaseCommand) -> Result<Execution, String> {
+        if let PhaseAction::GraphForgeCliWorkflow { commands } = &command.action {
+            let started = Instant::now();
+            let mut peak_rss_bytes = None;
+            for args in commands {
+                let execution = match execute_process(&profile.executable, args) {
+                    Ok(execution) => execution,
+                    Err(_) => {
+                        return Ok(Execution {
+                            exit_code: None,
+                            duration_ms: millis(started.elapsed()),
+                            peak_rss_bytes,
+                            failure: Some(FailureKind::CommandUnavailable),
+                        });
+                    }
+                };
+                peak_rss_bytes = max_optional(peak_rss_bytes, execution.peak_rss_bytes);
+                if execution.exit_code != Some(0) {
+                    return Ok(Execution {
+                        exit_code: execution.exit_code,
+                        duration_ms: millis(started.elapsed()),
+                        peak_rss_bytes,
+                        failure: execution.failure,
+                    });
+                }
+            }
+            return Ok(Execution {
+                exit_code: Some(0),
+                duration_ms: millis(started.elapsed()),
+                peak_rss_bytes,
+                failure: None,
+            });
+        }
         let (executable, args) = match &command.action {
             PhaseAction::BenchmarkGenerator {
                 executable, args, ..
             } => (executable.as_str(), args.as_slice()),
             PhaseAction::GraphForgeCli { args } => (profile.executable.as_str(), args.as_slice()),
+            PhaseAction::GraphForgeCliWorkflow { .. } => unreachable!("handled above"),
         };
-        let started = Instant::now();
-        let mut child = Command::new(executable)
-            .args(args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|_| "public command could not start".to_owned())?;
-        let mut peak_rss_bytes = None;
-        loop {
-            peak_rss_bytes = max_optional(peak_rss_bytes, resident_bytes(child.id()));
-            if let Some(status) = child
-                .try_wait()
-                .map_err(|_| "public command wait failed".to_owned())?
-            {
-                return Ok(Execution {
-                    exit_code: status.code(),
-                    duration_ms: millis(started.elapsed()),
-                    peak_rss_bytes,
-                });
-            }
-            thread::sleep(Duration::from_millis(10));
+        execute_process(executable, args)
+    }
+}
+
+fn execute_process(executable: &str, args: &[String]) -> Result<Execution, String> {
+    let started = Instant::now();
+    let mut child = Command::new(executable)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| "public command could not start".to_owned())?;
+    let mut peak_rss_bytes = None;
+    loop {
+        peak_rss_bytes = max_optional(peak_rss_bytes, resident_bytes(child.id()));
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|_| "public command wait failed".to_owned())?
+        {
+            return Ok(Execution {
+                exit_code: status.code(),
+                duration_ms: millis(started.elapsed()),
+                peak_rss_bytes,
+                failure: None,
+            });
         }
+        thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -223,7 +290,7 @@ pub fn certify_with_events(
     for command in &profile.phases {
         let outcome = match executor.execute(profile, command) {
             Ok(execution) => {
-                let passed = execution.exit_code == Some(0);
+                let passed = execution.exit_code == Some(0) && execution.failure.is_none();
                 PhaseOutcome {
                     phase: command.phase,
                     status: if passed {
@@ -234,7 +301,11 @@ pub fn certify_with_events(
                     duration_ms: execution.duration_ms,
                     peak_rss_bytes: execution.peak_rss_bytes,
                     exit_code: execution.exit_code,
-                    failure: (!passed).then_some(FailureKind::CommandFailed),
+                    failure: if passed {
+                        None
+                    } else {
+                        execution.failure.or(Some(FailureKind::CommandFailed))
+                    },
                 }
             }
             Err(_) => PhaseOutcome {
@@ -416,10 +487,17 @@ fn action_matches_phase(command: &PhaseCommand) -> bool {
     } = &command.action
     {
         return command.phase == Phase::Generate
-            && is_safe_token(identity)
+            && is_sha256_identity(identity)
             && !executable.is_empty()
             && !executable.contains('\0')
             && args.iter().all(|argument| !argument.contains('\0'));
+    }
+    if let PhaseAction::GraphForgeCliWorkflow { commands } = &command.action {
+        return match command.phase {
+            Phase::Ingest => ingest_workflow_is_valid(commands),
+            Phase::Recount | Phase::Query | Phase::ReopenProof => query_workflow_is_valid(commands),
+            _ => false,
+        };
     }
     let PhaseAction::GraphForgeCli { args } = &command.action else {
         return false;
@@ -444,6 +522,42 @@ fn action_matches_phase(command: &PhaseCommand) -> bool {
         Phase::Verify => contains_command(&args, &["portable", "verify"]),
         Phase::CleanImport => contains_command(&args, &["portable", "import"]),
     }
+}
+
+fn is_sha256_identity(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
+}
+
+fn query_workflow_is_valid(commands: &[Vec<String>]) -> bool {
+    commands.len() == 2
+        && commands.iter().all(|args| {
+            args.iter().all(|argument| !argument.contains('\0'))
+                && contains_command(
+                    &args.iter().map(String::as_str).collect::<Vec<_>>(),
+                    &["query"],
+                )
+        })
+}
+
+fn ingest_workflow_is_valid(commands: &[Vec<String>]) -> bool {
+    const OPERATIONS: [&str; 5] = [
+        "begin",
+        "register-parquet",
+        "register-parquet",
+        "validate",
+        "commit",
+    ];
+    commands.len() == OPERATIONS.len()
+        && commands.iter().zip(OPERATIONS).all(|(args, operation)| {
+            !args.is_empty()
+                && args.iter().all(|argument| !argument.contains('\0'))
+                && contains_command(
+                    &args.iter().map(String::as_str).collect::<Vec<_>>(),
+                    &["import-session", operation],
+                )
+        })
 }
 
 fn contains_command(arguments: &[&str], command: &[&str]) -> bool {
@@ -485,6 +599,8 @@ fn resident_bytes(_pid: u32) -> Option<u64> {
 mod tests {
     use super::*;
     use std::collections::VecDeque;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     struct FakeExecutor {
         executions: VecDeque<Result<Execution, String>>,
@@ -513,9 +629,13 @@ mod tests {
                     phase,
                     action: if phase == Phase::Generate {
                         PhaseAction::BenchmarkGenerator {
-                            identity: "tiny-generator-v1".to_owned(),
+                            identity: format!("sha256:{}", "0".repeat(64)),
                             executable: "tiny-generator".to_owned(),
                             args: vec!["--scale".to_owned(), "tiny".to_owned()],
+                        }
+                    } else if phase == Phase::Ingest {
+                        PhaseAction::GraphForgeCliWorkflow {
+                            commands: ingest_commands(),
                         }
                     } else {
                         PhaseAction::GraphForgeCli {
@@ -524,7 +644,35 @@ mod tests {
                     },
                 })
                 .collect(),
+            scale: None,
+            execution: None,
+            generator: None,
+            lifecycle: None,
+            gate: None,
         }
+    }
+
+    fn ingest_commands() -> Vec<Vec<String>> {
+        [
+            "begin",
+            "register-parquet",
+            "register-parquet",
+            "validate",
+            "commit",
+        ]
+        .into_iter()
+        .map(|operation| {
+            [
+                "--project",
+                "generated/tiny-source",
+                "import-session",
+                operation,
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+        })
+        .collect()
     }
 
     fn tiny_args(phase: Phase) -> Vec<String> {
@@ -594,6 +742,7 @@ mod tests {
             exit_code: Some(0),
             duration_ms: index + 1,
             peak_rss_bytes: Some((index + 1) * 1_024),
+            failure: None,
         })
     }
 
@@ -626,6 +775,7 @@ mod tests {
             exit_code: Some(7),
             duration_ms: 4,
             peak_rss_bytes: Some(4_096),
+            failure: None,
         }));
         executions.extend((4..10).map(passed_execution));
         let mut executor = FakeExecutor {
@@ -682,5 +832,70 @@ mod tests {
                 "phase action must select the matching benchmark or public gf operation"
             ))
         );
+    }
+
+    #[test]
+    fn ingest_workflow_requires_the_complete_ordered_transaction() {
+        let mut profile = tiny_profile();
+        let PhaseAction::GraphForgeCliWorkflow { commands } = &mut profile.phases[2].action else {
+            panic!("ingest fixture must be a workflow");
+        };
+        commands.swap(3, 4);
+        assert!(profile.validate().is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn public_executor_runs_ingest_transaction_in_order() {
+        let root = std::env::temp_dir().join(format!("gf-certify-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let executable = root.join("gf");
+        let state = root.join("state");
+        fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nstate='{}'\nn=0\n[ ! -f \"$state\" ] || n=$(cat \"$state\")\ncase \"$*\" in\n  *'import-session begin') expected=0;;\n  *'import-session register-parquet') if [ \"$n\" = 1 ]; then expected=1; else expected=2; fi;;\n  *'import-session validate') expected=3;;\n  *'import-session commit') expected=4;;\n  *) exit 41;;\nesac\n[ \"$n\" = \"$expected\" ] || exit 42\necho $((n + 1)) > \"$state\"\n",
+                state.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut profile = tiny_profile();
+        profile.executable = executable.to_string_lossy().into_owned();
+        let mut executor = PublicProcessExecutor;
+        let result = executor.execute(&profile, &profile.phases[2]).unwrap();
+        assert_eq!(result.exit_code, Some(0));
+        assert_eq!(fs::read_to_string(state).unwrap().trim(), "5");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn public_executor_stops_ingest_at_first_child_failure() {
+        let root = std::env::temp_dir().join(format!("gf-certify-fail-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let executable = root.join("gf");
+        let calls = root.join("calls");
+        fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\necho \"$*\" >> '{}'\ncase \"$*\" in *'import-session validate'*) exit 23;; esac\n",
+                calls.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut profile = tiny_profile();
+        profile.executable = executable.to_string_lossy().into_owned();
+        let result = PublicProcessExecutor
+            .execute(&profile, &profile.phases[2])
+            .unwrap();
+        assert_eq!(result.exit_code, Some(23));
+        let calls = fs::read_to_string(calls).unwrap();
+        assert_eq!(calls.lines().count(), 4);
+        assert!(!calls.contains("import-session commit"));
+        fs::remove_dir_all(root).unwrap();
     }
 }

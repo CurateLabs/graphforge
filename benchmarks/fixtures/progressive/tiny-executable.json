@@ -1,0 +1,224 @@
+{
+  "schema": "graphforge-public-certification-profile/1",
+  "id": "graph500-tiny-executable",
+  "executable": "gf",
+  "phases": [
+    {
+      "phase": "admission",
+      "action": {
+        "interface": "graph_forge_cli",
+        "args": [
+          "--info"
+        ]
+      }
+    },
+    {
+      "phase": "generate",
+      "action": {
+        "interface": "benchmark_generator",
+        "identity": "sha256:3b4bdf5ae4f41523f911dc1998db2328dadd2fa9e5f95e49478f148e81a14ce2",
+        "executable": "graphforge-benchmark-graph500-generator",
+        "args": [
+          "--scale",
+          "1",
+          "--edge-factor",
+          "16",
+          "--seed",
+          "13907095936298285200",
+          "--nodes",
+          "workspace/tiny/nodes.parquet",
+          "--edges",
+          "workspace/tiny/edges.parquet"
+        ]
+      }
+    },
+    {
+      "phase": "ingest",
+      "action": {
+        "interface": "graph_forge_cli_workflow",
+        "commands": [
+          [
+            "--project",
+            "workspace/tiny/source",
+            "import-session",
+            "begin",
+            "--operation-uuid",
+            "00000000-0000-4000-8000-000000000018"
+          ],
+          [
+            "--project",
+            "workspace/tiny/source",
+            "import-session",
+            "register-parquet",
+            "--session-uuid",
+            "00000000-0000-4000-8000-000000000018",
+            "--path",
+            "workspace/tiny/nodes.parquet",
+            "--kind",
+            "nodes"
+          ],
+          [
+            "--project",
+            "workspace/tiny/source",
+            "import-session",
+            "register-parquet",
+            "--session-uuid",
+            "00000000-0000-4000-8000-000000000018",
+            "--path",
+            "workspace/tiny/edges.parquet",
+            "--kind",
+            "edges"
+          ],
+          [
+            "--project",
+            "workspace/tiny/source",
+            "import-session",
+            "validate",
+            "--session-uuid",
+            "00000000-0000-4000-8000-000000000018"
+          ],
+          [
+            "--project",
+            "workspace/tiny/source",
+            "import-session",
+            "commit",
+            "--session-uuid",
+            "00000000-0000-4000-8000-000000000018"
+          ]
+        ]
+      }
+    },
+    {
+      "phase": "reopen",
+      "action": {
+        "interface": "graph_forge_cli",
+        "args": [
+          "--project",
+          "workspace/tiny/source",
+          "recovery"
+        ]
+      }
+    },
+    {
+      "phase": "recount",
+      "action": {
+        "interface": "graph_forge_cli_workflow",
+        "commands": [
+          [
+            "--project",
+            "workspace/tiny/source",
+            "query",
+            "--cypher",
+            "MATCH (n) RETURN count(n)",
+            "--output",
+            "workspace/tiny/node-count.arrow"
+          ],
+          [
+            "--project",
+            "workspace/tiny/source",
+            "query",
+            "--cypher",
+            "MATCH ()-[r]->() RETURN count(r)",
+            "--output",
+            "workspace/tiny/edge-count.arrow"
+          ]
+        ]
+      }
+    },
+    {
+      "phase": "query",
+      "action": {
+        "interface": "graph_forge_cli_workflow",
+        "commands": [
+          [
+            "--project",
+            "workspace/tiny/source",
+            "query",
+            "--cypher",
+            "MATCH (a)-[r]->(b) RETURN a, r, b LIMIT 1024",
+            "--output",
+            "workspace/tiny/one-hop.arrow"
+          ],
+          [
+            "--project",
+            "workspace/tiny/source",
+            "query",
+            "--cypher",
+            "MATCH (a)-[r1]->(b)-[r2]->(c) RETURN a, r1, b, r2, c LIMIT 1024",
+            "--output",
+            "workspace/tiny/two-hop.arrow"
+          ]
+        ]
+      }
+    },
+    {
+      "phase": "export",
+      "action": {
+        "interface": "graph_forge_cli",
+        "args": [
+          "--project",
+          "workspace/tiny/source",
+          "portable",
+          "export",
+          "--current",
+          "--output",
+          "workspace/tiny/portable"
+        ]
+      }
+    },
+    {
+      "phase": "verify",
+      "action": {
+        "interface": "graph_forge_cli",
+        "args": [
+          "portable",
+          "verify",
+          "--input",
+          "workspace/tiny/portable"
+        ]
+      }
+    },
+    {
+      "phase": "clean_import",
+      "action": {
+        "interface": "graph_forge_cli",
+        "args": [
+          "--project",
+          "workspace/tiny/imported",
+          "portable",
+          "import",
+          "--input",
+          "workspace/tiny/portable",
+          "--idempotency-key",
+          "00000000-0000-4000-8000-000000000018"
+        ]
+      }
+    },
+    {
+      "phase": "reopen_proof",
+      "action": {
+        "interface": "graph_forge_cli_workflow",
+        "commands": [
+          [
+            "--project",
+            "workspace/tiny/imported",
+            "query",
+            "--cypher",
+            "MATCH (n) RETURN count(n)",
+            "--output",
+            "workspace/tiny/imported-node-count.arrow"
+          ],
+          [
+            "--project",
+            "workspace/tiny/imported",
+            "query",
+            "--cypher",
+            "MATCH ()-[r]->() RETURN count(r)",
+            "--output",
+            "workspace/tiny/imported-edge-count.arrow"
+          ]
+        ]
+      }
+    }
+  ]
+}

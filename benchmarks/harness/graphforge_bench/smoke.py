@@ -20,7 +20,7 @@ def discover_fixtures(root: Path | None = None) -> dict[str, tuple[Path, ...]]:
     discovered: dict[str, tuple[Path, ...]] = {}
     for directory in FIXTURE_DIRECTORIES:
         fixture_root = base / directory
-        fixtures = tuple(sorted(fixture_root.glob("*.json")))
+        fixtures = tuple(sorted(fixture_root.rglob("*.json")))
         if not fixtures:
             raise RuntimeError(f"no fixtures found in {directory}")
         for fixture in fixtures:

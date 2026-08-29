@@ -16,6 +16,10 @@ fn main() {
 fn run() -> Result<(), &'static str> {
     let arguments: Vec<String> = env::args().skip(1).collect();
     match arguments.as_slice() {
+        [command, profile] if command == "validate" => {
+            let profile = read_profile(Path::new(profile)).map_err(|_| "invalid profile")?;
+            profile.validate().map_err(|_| "invalid profile")
+        }
         [command, profile, evidence] if command == "run" => {
             let profile = read_profile(Path::new(profile)).map_err(|_| "invalid profile")?;
             let mut executor = PublicProcessExecutor;
@@ -39,6 +43,8 @@ fn run() -> Result<(), &'static str> {
             let evidence = normalize_evidence(&input).map_err(|_| "legacy evidence invalid")?;
             write_evidence(Path::new(output), &evidence).map_err(|_| "evidence write failed")
         }
-        _ => Err("usage: graphforge-benchmark-certify <run PROFILE OUTPUT|normalize INPUT OUTPUT>"),
+        _ => Err(
+            "usage: graphforge-benchmark-certify <validate PROFILE|run PROFILE OUTPUT|normalize INPUT OUTPUT>",
+        ),
     }
 }

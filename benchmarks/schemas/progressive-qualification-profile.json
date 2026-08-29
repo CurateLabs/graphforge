@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schema": "graphforge-progressive-qualification-profile-schema/1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "id", "scale", "execution", "executable", "phases", "generator", "lifecycle", "gate"],
+  "properties": {
+    "schema": {"const": "graphforge-progressive-qualification-profile/1"},
+    "id": {"enum": ["graph500-s18-local", "graph500-s19-local", "graph500-s20-provider", "graph500-s22-provider", "graph500-s26-provider"]},
+    "scale": {"enum": [18, 19, 20, 22, 26]},
+    "execution": {"enum": ["local", "provider"]},
+    "executable": {"const": "gf"},
+    "phases": {
+      "type": "array", "minItems": 10, "maxItems": 10,
+      "prefixItems": [
+        {"$ref": "#/$defs/admission"}, {"$ref": "#/$defs/generate"},
+        {"$ref": "#/$defs/ingest"}, {"$ref": "#/$defs/reopen"},
+        {"$ref": "#/$defs/recount"}, {"$ref": "#/$defs/query"},
+        {"$ref": "#/$defs/export"}, {"$ref": "#/$defs/verify"},
+        {"$ref": "#/$defs/clean_import"}, {"$ref": "#/$defs/reopen_proof"}
+      ],
+      "items": false
+    },
+    "generator": {
+      "type": "object", "additionalProperties": false,
+      "required": ["identity", "edge_factor", "seed"],
+      "properties": {
+        "identity": {"pattern": "^sha256:[0-9a-f]{64}$"},
+        "edge_factor": {"const": 16},
+        "seed": {"const": 13907095936298285200}
+      }
+    },
+    "lifecycle": {
+      "type": "object", "additionalProperties": false,
+      "required": ["mechanics", "phases", "evidence_schema"],
+      "properties": {
+        "mechanics": {"const": "public-certification-v1"},
+        "evidence_schema": {"const": "graphforge-public-certification/1"},
+        "phases": {
+          "const": ["admission", "generate", "ingest", "reopen", "recount", "query", "export", "verify", "clean_import", "reopen_proof"]
+        }
+      }
+    },
+    "gate": {
+      "type": "object", "additionalProperties": false,
+      "required": ["requires_previous_pass", "projection_source_scales", "limits", "headroom"],
+      "properties": {
+        "requires_previous_pass": {"const": true},
+        "projection_source_scales": {
+          "oneOf": [
+            {"type": "null"},
+            {"type": "array", "minItems": 2, "maxItems": 2, "uniqueItems": true, "items": {"type": "integer", "minimum": 1}}
+          ]
+        },
+        "limits": {
+          "type": "object", "additionalProperties": false,
+          "required": ["wall_seconds", "rss_bytes", "volume_bytes"],
+          "properties": {
+            "wall_seconds": {"const": 14400},
+            "rss_bytes": {"const": 4294967296},
+            "volume_bytes": {"const": 536870912000}
+          }
+        },
+        "headroom": {
+          "type": "object", "additionalProperties": false,
+          "required": ["time_fraction", "rss_fraction", "storage_fraction", "max_adjacent_rss_growth_fraction"],
+          "properties": {
+            "time_fraction": {"const": 0.2},
+            "rss_fraction": {"const": 0.2},
+            "storage_fraction": {"const": 0.15},
+            "max_adjacent_rss_growth_fraction": {"const": 0.1}
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "command": {
+      "type": "object", "additionalProperties": false,
+      "required": ["phase", "action"],
+      "properties": {
+        "phase": {"type": "string"},
+        "action": {
+          "type": "object", "required": ["interface"],
+          "properties": {"interface": {"type": "string"}},
+          "additionalProperties": true
+        }
+      }
+    },
+    "admission": {"allOf": [{"$ref": "#/$defs/command"}, {"properties": {"phase": {"const": "admission"}}}]},
+    "generate": {"allOf": [{"$ref": "#/$defs/command"}, {"properties": {"phase": {"const": "generate"}, "action": {"properties": {"interface": {"const": "benchmark_generator"}, "executable": {"const": "graphforge-benchmark-graph500-generator"}}, "required": ["executable"]}}}]},
+    "ingest": {"allOf": [{"$ref": "#/$defs/command"}, {"properties": {"phase": {"const": "ingest"}, "action": {"properties": {"interface": {"const": "graph_forge_cli_workflow"}}}}}]},
+    "reopen": {"allOf": [{"$ref": "#/$defs/command"}, {"properties": {"phase": {"const": "reopen"}}}]},
+    "recount": {"allOf": [{"$ref": "#/$defs/command"}, {"properties": {"phase": {"const": "recount"}}}]},
+    "query": {"allOf": [{"$ref": "#/$defs/command"}, {"properties": {"phase": {"const": "query"}}}]},
+    "export": {"allOf": [{"$ref": "#/$defs/command"}, {"properties": {"phase": {"const": "export"}}}]},
+    "verify": {"allOf": [{"$ref": "#/$defs/command"}, {"properties": {"phase": {"const": "verify"}}}]},
+    "clean_import": {"allOf": [{"$ref": "#/$defs/command"}, {"properties": {"phase": {"const": "clean_import"}}}]},
+    "reopen_proof": {"allOf": [{"$ref": "#/$defs/command"}, {"properties": {"phase": {"const": "reopen_proof"}}}]}
+  }
+}
