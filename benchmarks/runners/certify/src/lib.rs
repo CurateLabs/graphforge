@@ -528,7 +528,7 @@ fn execute_process(executable: &str, args: &[String]) -> Result<Execution, Strin
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::null())
         .spawn()
         .map_err(|_| "public command could not start".to_owned())?;
     let stdout = child
@@ -536,11 +536,6 @@ fn execute_process(executable: &str, args: &[String]) -> Result<Execution, Strin
         .take()
         .ok_or_else(|| "public command stdout unavailable".to_owned())?;
     let stdout_reader = thread::spawn(move || read_bounded(stdout, 1_048_576));
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| "public command stderr unavailable".to_owned())?;
-    let stderr_reader = thread::spawn(move || read_bounded(stderr, 65_536));
     let mut peak_rss_bytes = None;
     loop {
         peak_rss_bytes = max_optional(peak_rss_bytes, resident_bytes(child.id()));
@@ -551,12 +546,6 @@ fn execute_process(executable: &str, args: &[String]) -> Result<Execution, Strin
             let stdout = stdout_reader
                 .join()
                 .map_err(|_| "public command stdout reader failed".to_owned())??;
-            let stderr = stderr_reader
-                .join()
-                .map_err(|_| "public command stderr reader failed".to_owned())??;
-            if !status.success() {
-                emit_internal_diagnostic(&stderr);
-            }
             let receipts = parse_receipts(
                 &stdout,
                 status.success() && args.iter().any(|argument| argument == "--json"),
@@ -570,16 +559,6 @@ fn execute_process(executable: &str, args: &[String]) -> Result<Execution, Strin
             });
         }
         thread::sleep(Duration::from_millis(10));
-    }
-}
-
-fn emit_internal_diagnostic(stderr: &[u8]) {
-    for line in stderr.split(|byte| *byte == b'\n') {
-        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(line)
-            && value.get("portable_import_internal_diagnostic").is_some()
-        {
-            eprintln!("{value}");
-        }
     }
 }
 

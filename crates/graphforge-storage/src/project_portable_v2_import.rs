@@ -898,15 +898,6 @@ fn import_materialized(
                 &right.participant.record_family_id,
             ))
     });
-    let request = ProjectGenerationRequest {
-        transaction_uuid,
-        generation_uuid,
-        capabilities,
-        participants: participants
-            .iter()
-            .map(|participant| participant.participant.clone())
-            .collect(),
-    };
     let admission = crate::filesystem_admission::admit_project_lifecycle(
         target,
         crate::filesystem_admission::ProjectLifecycleMode::Durable,
@@ -939,27 +930,56 @@ fn import_materialized(
         None => open_or_initialize_project_admitted(admission.root())
             .map_err(|error| storage(&error))?,
     };
-    let graph_tree = runtime
+    let package_graph_tree = runtime
         .graph_tree
         .as_ref()
         .map(|_| stage.join("data/components/graph-data/graph-tree"));
+    let graph_object_lease = prepare_compact_import_graph(
+        admission.root(),
+        package_graph_tree.as_deref(),
+        &mut participants,
+        usize::try_from(report.entry_count).map_err(|_| {
+            PortableV2Error::new(
+                PortableV2ErrorCode::LimitExceeded,
+                "import entry count exceeds platform capacity",
+            )
+        })?,
+    )?;
+    let request = ProjectGenerationRequest {
+        transaction_uuid,
+        generation_uuid,
+        capabilities,
+        participants: participants
+            .iter()
+            .map(|participant| participant.participant.clone())
+            .collect(),
+    };
+    let generation_graph_tree = graph_object_lease
+        .is_none()
+        .then_some(package_graph_tree)
+        .flatten();
     let publication = match stage_project_generation_from_files_admitted(
         admission,
         parent,
         &request,
         &participants,
-        graph_tree.as_deref(),
+        generation_graph_tree.as_deref(),
         cancelled,
         limits.copy_buffer_bytes,
     )
-    .map_err(|error| storage_or_cancel(error, cancelled))?
+    .map_err(|error| storage_or_cancel(&error, cancelled))?
     {
         ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
         ProjectStageOutcome::Staged(staged) => {
             let validated = staged
                 .validate(|_| Ok(()), |_, _| Ok(()))
                 .map_err(|error| storage(&error))?;
-            validated.publish().map_err(|error| storage(&error))?
+            match graph_object_lease.as_ref() {
+                Some(lease) => validated
+                    .publish_with_graph_objects(lease)
+                    .map_err(|error| storage(&error))?,
+                None => validated.publish().map_err(|error| storage(&error))?,
+            }
         }
     };
     let reopened = crate::resolve_project_generation(target).map_err(|error| storage(&error))?;
@@ -982,6 +1002,108 @@ fn import_materialized(
         .physical_identity_allocated_bytes,
         materialized_cleanup: PortableV2ImportCleanupReceipt::default(),
     })
+}
+
+fn prepare_compact_import_graph(
+    target: &Path,
+    package_graph_tree: Option<&Path>,
+    participants: &mut [ProjectFileParticipant],
+    entry_count: usize,
+) -> Result<Option<crate::GraphObjectPublicationLease>, PortableV2Error> {
+    let Some(graph_tree) = package_graph_tree else {
+        return Ok(None);
+    };
+    let Some(participant) = participants.iter_mut().find(|participant| {
+        participant.participant.capability_id == crate::GRAPH_CAPABILITY_ID
+            && participant.participant.record_family_id == crate::GRAPH_FILES_FAMILY
+    }) else {
+        return Err(PortableV2Error::new(
+            PortableV2ErrorCode::InvalidStructure,
+            "graph tree requires a graph/files participant",
+        ));
+    };
+    if participant.participant.record_version != crate::GRAPH_FILES_V2_RECORD_VERSION {
+        return Ok(None);
+    }
+    let lease = crate::begin_graph_object_publication(target).map_err(|error| storage(&error))?;
+    let directory = graphforge_filesystem::StableDirectory::open(graph_tree).map_err(|_| {
+        PortableV2Error::new(
+            PortableV2ErrorCode::Io,
+            "cannot authenticate portable graph tree",
+        )
+    })?;
+    let mut paths = Vec::new();
+    let mut remaining = entry_count.saturating_mul(2).saturating_add(1024);
+    collect_portable_graph_paths(&directory, Path::new(""), &mut paths, &mut remaining)?;
+    paths.sort();
+    let (root, _) = crate::graph_object_store::append_graph_files_v2(
+        &lease,
+        graph_tree,
+        &mut crate::graph_object_store::GraphManifestState::empty(),
+        &paths,
+        &[],
+    )
+    .map_err(|error| storage(&error))?;
+    let bytes = crate::graph_manifest::encode_root(&root).map_err(|error| storage(&error))?;
+    crate::project_publication::publish_atomic_bytes(
+        &participant.source,
+        &bytes,
+        || Ok(()),
+        || Ok(()),
+        || Ok(()),
+    )
+    .map_err(|_| {
+        PortableV2Error::new(
+            PortableV2ErrorCode::Io,
+            "cannot publish imported compact graph root",
+        )
+    })?;
+    let file = fs::File::open(&participant.source).map_err(|_| {
+        PortableV2Error::new(
+            PortableV2ErrorCode::Io,
+            "cannot reopen imported compact graph root",
+        )
+    })?;
+    participant.byte_length = bytes.len() as u64;
+    participant.content_sha256 = Sha256::digest(&bytes).into();
+    file.sync_all().map_err(|_| {
+        PortableV2Error::new(
+            PortableV2ErrorCode::Io,
+            "cannot sync imported compact graph root",
+        )
+    })?;
+    Ok(Some(lease))
+}
+
+fn collect_portable_graph_paths(
+    directory: &graphforge_filesystem::StableDirectory,
+    relative: &Path,
+    paths: &mut Vec<PathBuf>,
+    remaining: &mut usize,
+) -> Result<(), PortableV2Error> {
+    let names = directory.child_names_bounded(*remaining).map_err(|_| {
+        PortableV2Error::new(
+            PortableV2ErrorCode::LimitExceeded,
+            "portable graph tree exceeds identity bound",
+        )
+    })?;
+    *remaining = remaining.saturating_sub(names.len());
+    for name in names {
+        let path = relative.join(&name);
+        match directory.open_child_directory(&name) {
+            Ok(child) => collect_portable_graph_paths(&child, &path, paths, remaining)?,
+            Err(_) => match directory.open_child_file(&name) {
+                Ok(_) => paths.push(path),
+                Err(_) => {
+                    return Err(PortableV2Error::new(
+                        PortableV2ErrorCode::Io,
+                        "portable graph entry is not an authenticated file or directory",
+                    ));
+                }
+            },
+        }
+    }
+    Ok(())
 }
 
 fn record_import_file_identity(
@@ -1490,30 +1612,18 @@ fn parse_digest(value: &str) -> Result<[u8; 32], PortableV2Error> {
 }
 
 fn storage(error: &GfError) -> PortableV2Error {
-    // Temporary native tiny-profile diagnostic. This is enabled only by the
-    // no-secret generated CI fixture and is removed with the root repair.
-    if std::env::var_os("GRAPHFORGE_TINY_LIFECYCLE_DIAGNOSTIC").is_some() {
-        let message = bounded_internal_diagnostic(error);
-        eprintln!(
-            "{}",
-            serde_json::json!({"portable_import_internal_diagnostic": message})
-        );
-    }
+    let _ = error;
     PortableV2Error::new(
         PortableV2ErrorCode::Io,
         "portable import publication failed",
     )
 }
 
-fn bounded_internal_diagnostic(error: &GfError) -> String {
-    error.to_string().chars().take(512).collect()
-}
-
-fn storage_or_cancel(error: GfError, cancelled: Option<&AtomicBool>) -> PortableV2Error {
+fn storage_or_cancel(error: &GfError, cancelled: Option<&AtomicBool>) -> PortableV2Error {
     if cancelled.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
         PortableV2Error::new(PortableV2ErrorCode::Cancelled, "verification cancelled")
     } else {
-        storage(&error)
+        storage(error)
     }
 }
 
@@ -1535,6 +1645,56 @@ mod tests {
                 capability_version: 1,
             },
         ]
+    }
+
+    #[test]
+    fn compact_package_tree_is_rebuilt_as_project_cas_authority() {
+        let target = tempfile::tempdir().unwrap();
+        crate::open_or_initialize_project(target.path()).unwrap();
+        let package = tempfile::tempdir().unwrap();
+        fs::write(package.path().join("nodes.parquet"), b"nodes").unwrap();
+        fs::create_dir(package.path().join("properties")).unwrap();
+        fs::write(package.path().join("properties/Person.parquet"), b"people").unwrap();
+        let placeholder = crate::graph_files_root_participant(&crate::GraphFilesRootV2 {
+            format: "graphforge-graph-files-root".into(),
+            format_version: crate::GRAPH_FILES_V2_RECORD_VERSION,
+            root_node_sha256: "0".repeat(64),
+            logical_file_count: 0,
+            logical_byte_length: 0,
+        })
+        .unwrap();
+        let participant_directory = tempfile::tempdir().unwrap();
+        let participant_path = participant_directory.path().join("graph-files.json");
+        fs::write(&participant_path, &placeholder.bytes).unwrap();
+        let mut participants = vec![ProjectFileParticipant {
+            participant: placeholder.clone(),
+            source: participant_path.clone(),
+            byte_length: placeholder.bytes.len() as u64,
+            content_sha256: Sha256::digest(&placeholder.bytes).into(),
+        }];
+
+        let lease =
+            prepare_compact_import_graph(target.path(), Some(package.path()), &mut participants, 2)
+                .unwrap()
+                .expect("v2 import must hold a CAS publication lease");
+        lease.revalidate_for_publish().unwrap();
+        let root = crate::decode_graph_files_root_v2(&fs::read(participant_path).unwrap()).unwrap();
+        let (files, _) =
+            crate::resolve_graph_manifest(&root, crate::GraphManifestLimits::default(), |digest| {
+                crate::read_graph_object_by_digest(target.path(), digest, 64 * 1024 * 1024)
+            })
+            .unwrap();
+        assert_eq!(
+            files
+                .iter()
+                .map(|entry| entry.relative_path.as_str())
+                .collect::<Vec<_>>(),
+            ["nodes.parquet", "properties/Person.parquet"]
+        );
+        for entry in files {
+            crate::verify_graph_object(target.path(), &entry.content_sha256, entry.byte_length)
+                .unwrap();
+        }
     }
 
     fn composition_package() -> (tempfile::TempDir, PathBuf) {
