@@ -25,7 +25,10 @@ def main() -> None:
         output = root / "run.log"
         descendant = root / "descendant.py"
         worker = root / "worker.py"
-        overlay_probe = Path("/var/tmp") / f"graphforge-benchexec-{root.name}"
+        # Exercise the overlay through a path the unprivileged benchmark user
+        # can ordinarily write. System-owned temporary directories may be
+        # intentionally unwritable after BenchExec enters its user namespace.
+        overlay_probe = Path.home() / f"graphforge-benchexec-{root.name}"
         descendant.write_text(
             """\
 from pathlib import Path
