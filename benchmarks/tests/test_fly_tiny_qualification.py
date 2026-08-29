@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from graphforge_bench.fly_adapter import AdapterError, ResourceLedger
 from graphforge_bench.fly_tiny_qualification import (
+    FlyctlTransport,
     TinyQualificationInvocation,
     _machine_command,
     execute,
@@ -153,6 +154,50 @@ class FakeTransport:
 
 
 class FlyTinyQualificationTests(unittest.TestCase):
+    def test_registry_and_machine_api_tokens_remain_in_memory(self) -> None:
+        class TokenTransport(FlyctlTransport):
+            def run(
+                self, argv: tuple[str, ...], *, timeout: int, check: bool = True
+            ) -> subprocess.CompletedProcess[str]:
+                del timeout, check
+                self.last_command = argv
+                return subprocess.CompletedProcess(argv, 0, "secret-token\n", "")
+
+        class Response:
+            def __init__(self, payload: object | None = None):
+                self.headers = {"Docker-Content-Digest": DIGEST}
+                self.payload = payload
+
+            def __enter__(self) -> Response:
+                return self
+
+            def __exit__(self, *args: object) -> None:
+                del args
+
+            def read(self) -> bytes:
+                return json.dumps(self.payload).encode()
+
+        transport = TokenTransport()
+        requests: list[object] = []
+
+        def open_request(request: object, timeout: int) -> Response:
+            self.assertGreater(timeout, 0)
+            requests.append(request)
+            if "registry.fly.io" in request.full_url:  # type: ignore[attr-defined]
+                return Response()
+            return Response({"id": "abcdef01234567", "config": {}})
+
+        with patch("graphforge_bench.fly_tiny_qualification.urllib.request.urlopen", open_request):
+            self.assertEqual(transport.resolve_image("gf-q958-test", "fixture", timeout=30), IMAGE)
+            self.assertEqual(
+                transport.machine_state("gf-q958-test", "abcdef01234567", timeout=30)["id"],
+                "abcdef01234567",
+            )
+        self.assertTrue(
+            all(request.headers["Authorization"] == "Bearer secret-token" for request in requests)
+        )  # type: ignore[attr-defined]
+        self.assertNotIn("secret-token", json.dumps(evidence()))
+
     def test_tiny_invocation_is_not_a_ladder_rung(self) -> None:
         validate_invocation(invocation())
         with self.assertRaisesRegex(AdapterError, "smallest performance"):
