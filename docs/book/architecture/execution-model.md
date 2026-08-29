@@ -142,9 +142,10 @@ Ordinary streaming result sinks retain the same aggregate evidence through the
 terminal stream boundary. `gf --json query` emits `graphforge-result-sink/2`
 with nested `graphforge-query-evidence/1`: named hop reader, logical-row,
 projection, identity-byte, TopK/spill, memory-release, and operator-RSS fields.
-The receipt also includes the SHA-256 of the atomically published result and an
-optional `scalar_u64` only for an exact one-row, one-`UInt64` result. Evidence is
-content-free: it contains no graph values, identities, paths, or provider names.
+The receipt also includes the SHA-256 of a bounded logical Arrow encoding of the
+published result and an optional `scalar_u64` only for an exact one-row integer
+result representable as `u64`. Evidence is content-free: it contains no graph
+values, identities, paths, or provider names.
 
 **Selection is a planner choice, not an IR change.** The Graph IR is unchanged: variable-length
 traversal is still encoded on `Expand { …, min_hops, max_hops }`. A lowering rule selects an

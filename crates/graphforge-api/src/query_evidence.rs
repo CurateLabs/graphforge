@@ -134,7 +134,7 @@ pub struct QueryOperatorRssEvidence {
 pub struct QuerySinkEvidenceReceipt {
     /// Atomic result-sink publication receipt.
     pub sink: ResultSinkReceipt,
-    /// SHA-256 of the atomically published result artifact.
+    /// SHA-256 of the published result's bounded logical Arrow encoding.
     pub result_sha256: String,
     /// Exact unsigned scalar for a one-row integer result representable as `u64`.
     pub scalar_u64: Option<u64>,

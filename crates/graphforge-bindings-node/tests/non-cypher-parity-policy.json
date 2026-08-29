@@ -242,7 +242,8 @@
       "GraphForge.execute_to_parquet": {
         "nodeMembers": [
           "GraphForge.plan",
-          "PlanHandle.sinkParquet"
+          "PlanHandle.sinkParquet",
+          "PlanHandle.sinkArrowIpc"
         ],
         "reason": "Node uses the asynchronous PlanHandle Parquet sink."
       },
