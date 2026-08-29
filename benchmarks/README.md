@@ -121,9 +121,12 @@ authority; the locked Python workspace does not install its own BenchExec. A
 hard `python3 -m benchexec.check_cgroups` preflight runs before the identical
 ReFrame check, and the measured fixture uses that same system interpreter. Per
 BenchExec's cgroups-v2 installation guidance, both commands execute in one
-`systemd-run --scope -p Delegate=yes` scope. The workflow prefers the supported
-user scope; if the ephemeral runner has no user bus, it uses an explicit system
-scope and proves that systemd reports `Delegate=yes` from inside that scope.
+`systemd-run --scope -p Delegate=yes` user scope. Two separately named system
+authorities also use transient system services that explicitly delegate
+`cpu cpuset io memory` while executing as the original unprivileged runner UID.
+The in-unit driver proves the live unit's delegation property and its process
+UID before admission; it never writes cgroup control files or runs the benchmark
+as root.
 Each job is independently strict and uploads a provider-labelled evidence
 document; one provider is never a fallback that hides the other's
 disqualification. The workflow does not disable namespace containers, bypass

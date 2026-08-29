@@ -5,14 +5,25 @@ set -uo pipefail
 workspace=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$workspace"
 
+if [[ $(id -u) != "${GRAPHFORGE_EXPECTED_UID:?}" ]]; then
+  echo "delegated unit did not preserve the runner UID" >&2
+  exit 1
+fi
+
 if [[ ${GRAPHFORGE_SYSTEMD_SCOPE_MODE:?} == user ]]; then
   delegate=$(systemctl --user show "${GRAPHFORGE_SYSTEMD_SCOPE:?}" -p Delegate --value)
+  if [[ $delegate != yes ]]; then
+    echo "user systemd scope did not prove Delegate=yes" >&2
+    exit 1
+  fi
 else
   delegate=$(systemctl show "${GRAPHFORGE_SYSTEMD_SCOPE:?}" -p Delegate --value)
-fi
-if [[ $delegate != yes ]]; then
-  echo "systemd scope did not prove Delegate=yes" >&2
-  exit 1
+  for controller in cpu cpuset io memory; do
+    if [[ " $delegate " != *" $controller "* ]]; then
+      echo "system systemd service did not delegate $controller" >&2
+      exit 1
+    fi
+  done
 fi
 
 python3 -m benchexec.check_cgroups
