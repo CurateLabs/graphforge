@@ -2164,6 +2164,7 @@ dependencies = [
  "graphforge-core",
  "graphforge-cypher",
  "graphforge-exec",
+ "graphforge-filesystem",
  "graphforge-io",
  "graphforge-ir",
  "graphforge-knowledge",

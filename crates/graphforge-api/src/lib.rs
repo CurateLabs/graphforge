@@ -547,6 +547,22 @@ impl std::fmt::Debug for GraphForge {
 }
 
 impl GraphForge {
+    /// Capture authenticated logical and physical storage attribution for the
+    /// generation visible to this facade.
+    ///
+    /// The storage layer walks only the generation's authenticated inventories
+    /// and opens retained file capabilities. It never recursively scans the
+    /// project directory, and qualification fails closed on an unclassified
+    /// graph artifact.
+    pub fn storage_attribution(
+        &self,
+    ) -> Result<graphforge_storage::StorageAttributionSnapshot, GfError> {
+        let generation = self.generation_for_read()?;
+        let snapshot = graphforge_storage::capture_storage_attribution(&generation)?;
+        snapshot.validate_for_qualification()?;
+        Ok(snapshot)
+    }
+
     pub(crate) fn stage_project_generation(
         &self,
         request: &graphforge_storage::ProjectGenerationRequest,
@@ -4099,6 +4115,19 @@ fn materialize_compact_graph_target(
         files_opened_in_place: 0,
         files_reused: reused.files_reused,
         bytes_reused: reused.bytes_reused,
+        application_read_bytes: reused
+            .application_read_bytes
+            .saturating_add(copied.application_read_bytes),
+        application_read_calls: reused
+            .application_read_calls
+            .saturating_add(copied.application_read_calls),
+        application_write_bytes: reused
+            .application_write_bytes
+            .saturating_add(copied.application_write_bytes),
+        application_write_calls: reused
+            .application_write_calls
+            .saturating_add(copied.application_write_calls),
+        fsync_calls: reused.fsync_calls.saturating_add(copied.fsync_calls),
     };
     Ok(evidence)
 }

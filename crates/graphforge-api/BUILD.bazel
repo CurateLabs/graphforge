@@ -210,7 +210,7 @@ gf_rust_integration_test(
     data = _API_TEST_DATA,
     size = "large",
     timeout = "long",
-    deps = _API_DEPS,
+    deps = _API_DEPS + ["//crates/graphforge-filesystem:graphforge_filesystem"],
 )
 
 gf_rust_integration_test(
