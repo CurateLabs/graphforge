@@ -17,7 +17,7 @@ use arrow::record_batch::RecordBatch;
 use graphforge_api::{
     CONSTRUCTION_EDGE_SCHEMA, CONSTRUCTION_NODE_SCHEMA, GraphConstructionBudgets, GraphForge,
     OperationId, PortableSelection, PortableV2ExportRequest, PortableV2ImportRequest,
-    PortableVerifyRequest, verify_portable_v2,
+    PortableVerifyRequest, ResultSinkFormat, ResultSinkOptions, verify_portable_v2,
 };
 use graphforge_core::uuid::{Uuid, new_v7};
 use graphforge_core::{OntologyMode, TypeId};
@@ -790,6 +790,91 @@ fn ordered_destination_uuid_projection_is_exact_and_linear_at_1x_2x_4x() {
             "session authentication must be linear in retained artifacts: {work:?}"
         );
     }
+}
+
+#[test]
+fn ordinary_streaming_sink_exposes_deterministic_query_evidence() {
+    let _guard = IO_GUARD.lock().unwrap();
+    let root = TempDir::new().unwrap();
+    generate_graph(root.path(), 4_096, FAN_OUT, true);
+    let forge = open_forge(root.path());
+    let outputs = TempDir::new().unwrap();
+    let options = ResultSinkOptions::default();
+    let params = HashMap::new();
+
+    let mut fingerprints = Vec::new();
+    for (ordinal, query) in [ORDERED_ONE_HOP, ORDERED_TWO_HOP].into_iter().enumerate() {
+        let output = outputs.path().join(format!("query-{ordinal}.parquet"));
+        let receipt = forge
+            .execute_to_result_sink_with_evidence(
+                query,
+                &params,
+                output.to_str().unwrap(),
+                ResultSinkFormat::Parquet,
+                &options,
+                None,
+            )
+            .unwrap();
+        assert_eq!(receipt.evidence.contract, "graphforge-query-evidence/1");
+        assert_eq!(receipt.evidence.hops.len(), ordinal + 1);
+        assert_eq!(receipt.evidence.sorts.len(), 1);
+        assert_eq!(receipt.evidence.sorts[0].fetch_rows, Some(LIMIT));
+        assert_eq!(receipt.evidence.sorts[0].retained_bytes, 0);
+        assert!(
+            receipt.evidence.memory_reserved_after
+                <= receipt
+                    .evidence
+                    .memory_reserved_before
+                    .saturating_add(receipt.evidence.returned_batch_bytes)
+        );
+        assert!(
+            receipt.evidence.hops.iter().all(|hop| {
+                hop.edge_reader_calls == 0
+                    && hop.node_reader_calls == 0
+                    && hop.identity_per_record_seeks == 0
+            }),
+            "{:?}",
+            receipt.evidence.hops
+        );
+        assert!(
+            receipt
+                .evidence
+                .hops
+                .iter()
+                .map(|hop| hop.identity_reader_calls)
+                .sum::<u64>()
+                > 0,
+            "the query must exercise the bounded reusable identity reader"
+        );
+        assert_eq!(receipt.scalar_u64, None);
+        fingerprints.push(receipt.result_sha256);
+    }
+    assert_ne!(fingerprints[0], fingerprints[1]);
+    let repeated_output = outputs.path().join("query-repeat.parquet");
+    let repeated = forge
+        .execute_to_result_sink_with_evidence(
+            ORDERED_ONE_HOP,
+            &params,
+            repeated_output.to_str().unwrap(),
+            ResultSinkFormat::Parquet,
+            &options,
+            None,
+        )
+        .unwrap();
+    assert_eq!(repeated.result_sha256, fingerprints[0]);
+
+    let count_output = outputs.path().join("count.parquet");
+    let count = forge
+        .execute_to_result_sink_with_evidence(
+            "MATCH (n) RETURN count(n) AS total",
+            &params,
+            count_output.to_str().unwrap(),
+            ResultSinkFormat::Parquet,
+            &options,
+            None,
+        )
+        .unwrap();
+    assert_eq!(count.scalar_u64, Some(4_096));
 }
 
 #[test]
