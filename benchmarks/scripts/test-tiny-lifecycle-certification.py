@@ -20,6 +20,18 @@ def executable(value: str) -> Path:
     return path
 
 
+def decoded_objects(text: str) -> list[dict[str, object]]:
+    objects = []
+    for line in text.splitlines():
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            objects.append(value)
+    return objects
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--gf", required=True, type=executable)
@@ -62,10 +74,14 @@ def main() -> None:
             env=environment,
             check=False,
         )
-        evidence = json.loads(evidence_path.read_text())
         if completed.returncode != 0:
+            evidence = json.loads(evidence_path.read_text()) if evidence_path.is_file() else {}
             failed_phase = evidence.get("failed_phase")
-            diagnostic: dict[str, object] = {"failed_phase": failed_phase}
+            diagnostic: dict[str, object] = {
+                "failed_phase": failed_phase,
+                "returncode": completed.returncode,
+                "evidence_present": evidence_path.is_file(),
+            }
             if failed_phase == "clean_import":
                 profile = json.loads(
                     (root / "fixtures/progressive/tiny-executable.json").read_text()
@@ -80,8 +96,7 @@ def main() -> None:
                     text=True,
                 )
                 ordinary = []
-                for line in replay.stdout.splitlines():
-                    value = json.loads(line)
+                for value in decoded_objects(replay.stdout):
                     ordinary.append(
                         {
                             "contract": value.get("contract"),
@@ -103,18 +118,19 @@ def main() -> None:
                             .get("semantic_code"),
                             "diagnostics": [
                                 {
-                                    "code": diagnostic.get("code"),
-                                    "message": diagnostic.get("message"),
+                                    "code": item.get("code"),
+                                    "message": item.get("message"),
                                 }
-                                for diagnostic in value.get("error", {}).get("diagnostics", [])
+                                for item in value.get("error", {}).get("diagnostics", [])
+                                if isinstance(item, dict)
                             ],
                         }
-                        for line in replay.stderr.splitlines()
-                        if (value := json.loads(line))
+                        for value in decoded_objects(replay.stderr)
                     ],
                 }
             print(json.dumps({"tiny_lifecycle_failure": diagnostic}, sort_keys=True))
             raise SystemExit("real tiny lifecycle certification failed")
+        evidence = json.loads(evidence_path.read_text())
         schema = json.loads((root / "schemas/certification-evidence.json").read_text())
         jsonschema.Draft202012Validator(schema).validate(evidence)
         if evidence["status"] != "passed" or len(evidence["phases"]) != 10:

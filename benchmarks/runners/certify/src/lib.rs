@@ -316,6 +316,8 @@ impl LifecycleStorageSession {
                 if let Some(path) = argument_path(args, flag) {
                     if path.is_file() {
                         merge_file_identity(&mut files, path)?;
+                    } else if flag == "--output" && path.is_dir() {
+                        merge_directory_identities(&mut files, path)?;
                     }
                 }
             }
@@ -428,9 +430,50 @@ fn merge_file_identity(identities: &mut BTreeMap<String, u64>, path: &Path) -> R
     let file = directory
         .open_child_file(name)
         .map_err(|_| "lifecycle allocation owner is not a stable regular file".to_owned())?;
-    let identity = graphforge_filesystem::file_identity(&file)
+    merge_open_file_identity(identities, &file)
+}
+
+fn merge_directory_identities(
+    identities: &mut BTreeMap<String, u64>,
+    path: &Path,
+) -> Result<(), String> {
+    let directory = graphforge_filesystem::StableDirectory::open(path)
+        .map_err(|_| "lifecycle allocation directory could not be retained".to_owned())?;
+    let mut remaining = 1_000_000_usize;
+    merge_stable_directory_identities(identities, &directory, &mut remaining)
+}
+
+fn merge_stable_directory_identities(
+    identities: &mut BTreeMap<String, u64>,
+    directory: &graphforge_filesystem::StableDirectory,
+    remaining: &mut usize,
+) -> Result<(), String> {
+    let names = directory
+        .child_names_bounded(*remaining)
+        .map_err(|_| "lifecycle allocation directory exceeds identity bound".to_owned())?;
+    *remaining = remaining.saturating_sub(names.len());
+    for name in names {
+        match directory.open_child_directory(&name) {
+            Ok(child) => merge_stable_directory_identities(identities, &child, remaining)?,
+            Err(_) => {
+                let file = directory.open_child_file(&name).map_err(|_| {
+                    "lifecycle allocation entry is not an authenticated file or directory"
+                        .to_owned()
+                })?;
+                merge_open_file_identity(identities, &file)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn merge_open_file_identity(
+    identities: &mut BTreeMap<String, u64>,
+    file: &fs::File,
+) -> Result<(), String> {
+    let identity = graphforge_filesystem::file_identity(file)
         .map_err(|_| "lifecycle allocation identity unavailable".to_owned())?;
-    let usage = graphforge_filesystem::file_space_usage(&file)
+    let usage = graphforge_filesystem::file_space_usage(file)
         .map_err(|_| "lifecycle allocation usage unavailable".to_owned())?;
     let key = format!(
         "{:016x}:{}",
@@ -546,10 +589,22 @@ fn execute_process(executable: &str, args: &[String]) -> Result<Execution, Strin
             let stdout = stdout_reader
                 .join()
                 .map_err(|_| "public command stdout reader failed".to_owned())??;
-            let receipts = parse_receipts(
+            let receipts = match parse_receipts(
                 &stdout,
                 status.success() && args.iter().any(|argument| argument == "--json"),
-            )?;
+            ) {
+                Ok(receipts) => receipts,
+                Err(_) if status.success() => {
+                    return Ok(Execution {
+                        exit_code: status.code(),
+                        duration_ms: millis(started.elapsed()),
+                        peak_rss_bytes,
+                        failure: Some(FailureKind::EvidenceInvalid),
+                        receipts: Vec::new(),
+                    });
+                }
+                Err(error) => return Err(error),
+            };
             return Ok(Execution {
                 exit_code: status.code(),
                 duration_ms: millis(started.elapsed()),
@@ -1983,13 +2038,36 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn public_executor_classifies_invalid_success_receipt_as_evidence_invalid() {
+        let root = std::env::temp_dir().join(format!(
+            "gf-certify-invalid-receipt-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let executable = root.join("gf");
+        fs::write(
+            &executable,
+            "#!/bin/sh\nprintf '%s\\n' '{\"contract\":\"graphforge-portable-import/2\"}'\n",
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        let result = execute_process(
+            executable.to_str().unwrap(),
+            &["--json".to_owned()],
+        )
+        .unwrap();
+        assert_eq!(result.exit_code, Some(0));
+        assert_eq!(result.failure, Some(FailureKind::EvidenceInvalid));
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn lifecycle_storage_deduplicates_aliases_and_finalizes_once() {
-        let root = std::env::temp_dir().join(format!(
-            "gf-certify-lifecycle-{}-{}",
-            std::process::id(),
-            Instant::now().elapsed().as_nanos()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("gf-certify-lifecycle-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         let nodes = root.join("nodes.parquet");
@@ -2031,8 +2109,22 @@ mod tests {
         session
             .observe(Phase::Ingest, &ingest, &[committed])
             .unwrap();
+        let expanded = root.join("portable-expanded");
+        let nested = expanded.join("graph");
+        fs::create_dir_all(&nested).unwrap();
+        fs::hard_link(&nodes, nested.join("nodes.parquet")).unwrap();
+        let export = PhaseCommand {
+            phase: Phase::Export,
+            action: PhaseAction::GraphForgeCli {
+                args: vec![
+                    "--output".to_owned(),
+                    expanded.to_string_lossy().into_owned(),
+                ],
+            },
+        };
+        session.observe(Phase::Export, &export, &[]).unwrap();
+        assert!(session.portable_package_observed);
         session.source_project_observed = true;
-        session.portable_package_observed = true;
         session.portable_import_peak_observed = true;
         session.imported_project_observed = true;
 
