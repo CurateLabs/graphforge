@@ -113,3 +113,9 @@ runner, requires ReFrame to report `passed`, validates the closed evidence
 schema independently, and uploads the sanitized document even when admission
 fails. An uploaded disqualification is diagnostic evidence, never a green
 qualification.
+
+The hosted workflow uses one explicit root authority for both BenchExec's
+cgroup preflight and the measured fixture because the ephemeral runner's normal
+UID is not delegated a writable cgroup subtree. This is recorded as a boolean
+fact in evidence. It does not disable namespace containers, bypass cgroups, or
+grant authority to a persistent/shared host.

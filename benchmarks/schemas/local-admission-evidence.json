@@ -29,11 +29,12 @@
         "cgroups_version": {"type": ["integer", "null"]},
         "required_controllers": {"type": "boolean"},
         "kernel_memory_accounting": {"type": "boolean"},
+        "privileged_execution": {"type": "boolean"},
         "benchexec_cgroup_delegation": {"type": "boolean"},
         "namespace_isolation": {"type": "boolean"},
         "overlay_isolation": {"type": "boolean"}
       },
-      "required": ["operating_system", "cgroups_version", "required_controllers", "kernel_memory_accounting", "benchexec_cgroup_delegation", "namespace_isolation", "overlay_isolation"],
+      "required": ["operating_system", "cgroups_version", "required_controllers", "kernel_memory_accounting", "privileged_execution", "benchexec_cgroup_delegation", "namespace_isolation", "overlay_isolation"],
       "additionalProperties": false
     },
     "measurements": {

@@ -44,7 +44,15 @@ jobs:
           GRAPHFORGE_ADMISSION_EVIDENCE: ${{ github.workspace }}/benchmarks/outputs/local-admission-evidence.json
         run: |
           mkdir -p outputs
-          make local-admission
+          PYTHONPATH="$PWD/harness" uv run --locked reframe \
+            -C reframe/settings.py -c reframe/checks \
+            -n '^LocalBenchExecAdmission$' -l | grep -F LocalBenchExecAdmission
+          sudo --preserve-env=GRAPHFORGE_ADMISSION_EVIDENCE env \
+            "PATH=$PWD/.venv/bin:$PATH" \
+            "PYTHONPATH=$PWD/harness" \
+            "$PWD/.venv/bin/reframe" \
+            -C reframe/settings.py -c reframe/checks \
+            -n '^LocalBenchExecAdmission$' -r
 
       - name: Validate passed-only sanitized evidence
         if: always()

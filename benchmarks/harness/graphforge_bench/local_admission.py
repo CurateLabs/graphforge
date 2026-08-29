@@ -57,6 +57,7 @@ def _facts(
         "cgroups_version": 2 if linux and (cgroup_root / "cgroup.controllers").is_file() else None,
         "required_controllers": all(name in controllers for name in REQUIRED_CONTROLLERS),
         "kernel_memory_accounting": linux and (major, minor) >= (5, 19),
+        "privileged_execution": linux and os.geteuid() == 0,
         "benchexec_cgroup_delegation": False,
         "namespace_isolation": False,
         "overlay_isolation": False,
