@@ -1,5 +1,5 @@
 [workspace]
-members = ["runners/smoke"]
+members = ["runners/certify", "runners/smoke"]
 resolver = "2"
 
 [workspace.package]
@@ -7,3 +7,7 @@ edition = "2024"
 license = "Apache-2.0"
 publish = false
 rust-version = "1.85"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
