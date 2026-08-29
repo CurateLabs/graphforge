@@ -117,7 +117,7 @@ pub fn consume_selective_portable_v2<T>(
         (
             Some(
                 crate::WorkspacePortableOntologyStaging::from_canonical_json(&bytes)
-                    .map_err(storage)?,
+                    .map_err(|error| storage(&error))?,
             ),
             Some(receipt),
         )
@@ -144,7 +144,7 @@ pub fn load_portable_ontology_staging(
 ) -> Result<Option<crate::WorkspacePortableOntologyStaging>, PortableV2Error> {
     let present = generation
         .participant_descriptors()
-        .map_err(storage)?
+        .map_err(|error| storage(&error))?
         .iter()
         .any(|descriptor| {
             descriptor.capability_id == crate::WORKSPACE_CAPABILITY_ID
@@ -158,11 +158,11 @@ pub fn load_portable_ontology_staging(
             crate::WORKSPACE_CAPABILITY_ID,
             crate::WORKSPACE_PORTABLE_ONTOLOGY_STAGING_FAMILY,
         )
-        .map_err(storage)?;
+        .map_err(|error| storage(&error))?;
     let bytes = read_bounded_payload(&path, limits.max_manifest_bytes, "staged composition")?;
     crate::WorkspacePortableOntologyStaging::from_canonical_json(&bytes)
         .map(Some)
-        .map_err(storage)
+        .map_err(|error| storage(&error))
 }
 
 /// Sanitized import lifecycle phase.
@@ -718,7 +718,7 @@ fn claim_stage(
         "IMPORT_OWNER",
         false,
     )
-    .map_err(storage)?;
+    .map_err(|error| storage(&error))?;
     Ok((owner, owned_retry))
 }
 
@@ -826,8 +826,8 @@ fn import_materialized(
                 crate::semantic_bindings::MAX_SEMANTIC_BINDING_BYTES as u64,
                 "semantic bindings",
             )?;
-            let bindings =
-                crate::SemanticStorageBindings::from_canonical_json(&bytes).map_err(storage)?;
+            let bindings = crate::SemanticStorageBindings::from_canonical_json(&bytes)
+                .map_err(|error| storage(&error))?;
             semantic_composition_fingerprint = Some(bindings.composition_fingerprint);
         }
         let encoding = match participant.encoding.as_str() {
@@ -868,7 +868,7 @@ fn import_materialized(
             )?;
             let staged =
                 crate::WorkspacePortableOntologyStaging::from_canonical_json(&staged_bytes)
-                    .map_err(storage)?;
+                    .map_err(|error| storage(&error))?;
             if staged.composition.composition_fingerprint != expected {
                 return Err(PortableV2Error::new(
                     PortableV2ErrorCode::Incompatible,
@@ -912,28 +912,32 @@ fn import_materialized(
         crate::filesystem_admission::ProjectLifecycleMode::Durable,
         crate::filesystem_admission::ProjectRootRequirement::CreateIfMissing,
     )
-    .map_err(storage)?;
-    admission.revalidate_identity().map_err(storage)?;
+    .map_err(|error| storage(&error))?;
+    admission
+        .revalidate_identity()
+        .map_err(|error| storage(&error))?;
     let replay = crate::published_project_transaction(admission.root(), transaction_uuid)
-        .map_err(storage)?
+        .map_err(|error| storage(&error))?
         .is_some();
     let existing = if replay {
-        Some(crate::resolve_project_generation(admission.root()).map_err(storage)?)
+        Some(crate::resolve_project_generation(admission.root()).map_err(|error| storage(&error))?)
     } else if owned_retry {
-        let generation = semantically_pristine_generation(admission.root()).map_err(storage)?;
+        let generation =
+            semantically_pristine_generation(admission.root()).map_err(|error| storage(&error))?;
         if generation.is_none() {
             return Err(PortableV2Error::new(
                 PortableV2ErrorCode::Io,
                 "owned retry target is not pristine",
             ));
         }
-        Some(crate::resolve_project_generation(admission.root()).map_err(storage)?)
+        Some(crate::resolve_project_generation(admission.root()).map_err(|error| storage(&error))?)
     } else {
-        prepare_import_target(admission.root()).map_err(storage)?
+        prepare_import_target(admission.root()).map_err(|error| storage(&error))?
     };
     let parent = match existing {
         Some(parent) => parent,
-        None => open_or_initialize_project_admitted(admission.root()).map_err(storage)?,
+        None => open_or_initialize_project_admitted(admission.root())
+            .map_err(|error| storage(&error))?,
     };
     let graph_tree = runtime
         .graph_tree
@@ -954,11 +958,11 @@ fn import_materialized(
         ProjectStageOutcome::Staged(staged) => {
             let validated = staged
                 .validate(|_| Ok(()), |_, _| Ok(()))
-                .map_err(storage)?;
-            validated.publish().map_err(storage)?
+                .map_err(|error| storage(&error))?;
+            validated.publish().map_err(|error| storage(&error))?
         }
     };
-    let reopened = crate::resolve_project_generation(target).map_err(storage)?;
+    let reopened = crate::resolve_project_generation(target).map_err(|error| storage(&error))?;
     if reopened.generation_uuid() != generation_uuid {
         return Err(PortableV2Error::new(
             PortableV2ErrorCode::Io,
@@ -974,7 +978,7 @@ fn import_materialized(
         published_identity_allocated_bytes: crate::capture_project_storage_identity_union(
             &reopened,
         )
-        .map_err(storage)?
+        .map_err(|error| storage(&error))?
         .physical_identity_allocated_bytes,
         materialized_cleanup: PortableV2ImportCleanupReceipt::default(),
     })
@@ -1272,7 +1276,9 @@ fn persist_staged_composition(
     stage: &Path,
     staged: &crate::WorkspacePortableOntologyStaging,
 ) -> Result<(ProjectParticipant, PathBuf, Vec<u8>), PortableV2Error> {
-    let participant = staged.to_project_participant().map_err(storage)?;
+    let participant = staged
+        .to_project_participant()
+        .map_err(|error| storage(&error))?;
     let bytes = participant.bytes.clone();
     let source = stage.join("portable-ontology-staging.json");
     let mut output = OpenOptions::new()
@@ -1301,7 +1307,9 @@ fn persist_composition_authority(
     stage: &Path,
     composition: &crate::WorkspaceOntologyComposition,
 ) -> Result<ProjectFileParticipant, PortableV2Error> {
-    let participant = composition.to_project_participant().map_err(storage)?;
+    let participant = composition
+        .to_project_participant()
+        .map_err(|error| storage(&error))?;
     let bytes = participant.bytes.clone();
     let source = stage.join("ontology-composition-authority.json");
     let mut output = OpenOptions::new()
@@ -1481,11 +1489,11 @@ fn parse_digest(value: &str) -> Result<[u8; 32], PortableV2Error> {
     Ok(digest)
 }
 
-fn storage(error: GfError) -> PortableV2Error {
+fn storage(error: &GfError) -> PortableV2Error {
     // Temporary native tiny-profile diagnostic. This is enabled only by the
     // no-secret generated CI fixture and is removed with the root repair.
     if std::env::var_os("GRAPHFORGE_TINY_LIFECYCLE_DIAGNOSTIC").is_some() {
-        let message = error.to_string().chars().take(512).collect::<String>();
+        let message = bounded_internal_diagnostic(error);
         eprintln!(
             "{}",
             serde_json::json!({"portable_import_internal_diagnostic": message})
@@ -1497,11 +1505,15 @@ fn storage(error: GfError) -> PortableV2Error {
     )
 }
 
+fn bounded_internal_diagnostic(error: &GfError) -> String {
+    error.to_string().chars().take(512).collect()
+}
+
 fn storage_or_cancel(error: GfError, cancelled: Option<&AtomicBool>) -> PortableV2Error {
     if cancelled.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
         PortableV2Error::new(PortableV2ErrorCode::Cancelled, "verification cancelled")
     } else {
-        storage(error)
+        storage(&error)
     }
 }
 
