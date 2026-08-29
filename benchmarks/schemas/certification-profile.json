@@ -35,7 +35,8 @@
         "action": {
           "oneOf": [
             { "$ref": "#/$defs/benchmarkGenerator" },
-            { "$ref": "#/$defs/graphForgeCli" }
+            { "$ref": "#/$defs/graphForgeCli" },
+            { "$ref": "#/$defs/graphForgeCliWorkflow" }
           ]
         }
       },
@@ -46,7 +47,7 @@
       "type": "object",
       "properties": {
         "interface": { "const": "benchmark_generator" },
-        "identity": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,80}$" },
+        "identity": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
         "executable": { "type": "string", "minLength": 1 },
         "args": { "type": "array", "items": { "type": "string" } }
       },
@@ -62,6 +63,18 @@
       "required": ["interface", "args"],
       "additionalProperties": false
     },
+    "graphForgeCliWorkflow": {
+      "type": "object",
+      "properties": {
+        "interface": { "const": "graph_forge_cli_workflow" },
+        "commands": {
+          "type": "array", "minItems": 2, "maxItems": 5,
+          "items": { "type": "array", "minItems": 1, "items": { "type": "string" } }
+        }
+      },
+      "required": ["interface", "commands"],
+      "additionalProperties": false
+    },
     "graphForgeCommand": {
       "allOf": [
         { "$ref": "#/$defs/command" },
@@ -74,15 +87,33 @@
         { "properties": { "action": { "$ref": "#/$defs/benchmarkGenerator" } } }
       ]
     },
+    "workflowCommand": {
+      "allOf": [
+        { "$ref": "#/$defs/command" },
+        { "properties": { "action": { "$ref": "#/$defs/graphForgeCliWorkflow" } } }
+      ]
+    },
     "admission": { "allOf": [{ "$ref": "#/$defs/graphForgeCommand" }, { "properties": { "phase": { "const": "admission" } } }] },
     "generate": { "allOf": [{ "$ref": "#/$defs/generatorCommand" }, { "properties": { "phase": { "const": "generate" } } }] },
-    "ingest": { "allOf": [{ "$ref": "#/$defs/graphForgeCommand" }, { "properties": { "phase": { "const": "ingest" } } }] },
+    "ingest": { "oneOf": [
+      { "allOf": [{ "$ref": "#/$defs/graphForgeCommand" }, { "properties": { "phase": { "const": "ingest" } } }] },
+      { "allOf": [{ "$ref": "#/$defs/workflowCommand" }, { "properties": { "phase": { "const": "ingest" } } }] }
+    ] },
     "reopen": { "allOf": [{ "$ref": "#/$defs/graphForgeCommand" }, { "properties": { "phase": { "const": "reopen" } } }] },
-    "recount": { "allOf": [{ "$ref": "#/$defs/graphForgeCommand" }, { "properties": { "phase": { "const": "recount" } } }] },
-    "query": { "allOf": [{ "$ref": "#/$defs/graphForgeCommand" }, { "properties": { "phase": { "const": "query" } } }] },
+    "recount": { "oneOf": [
+      { "allOf": [{ "$ref": "#/$defs/graphForgeCommand" }, { "properties": { "phase": { "const": "recount" } } }] },
+      { "allOf": [{ "$ref": "#/$defs/workflowCommand" }, { "properties": { "phase": { "const": "recount" } } }] }
+    ] },
+    "query": { "oneOf": [
+      { "allOf": [{ "$ref": "#/$defs/graphForgeCommand" }, { "properties": { "phase": { "const": "query" } } }] },
+      { "allOf": [{ "$ref": "#/$defs/workflowCommand" }, { "properties": { "phase": { "const": "query" } } }] }
+    ] },
     "export": { "allOf": [{ "$ref": "#/$defs/graphForgeCommand" }, { "properties": { "phase": { "const": "export" } } }] },
     "verify": { "allOf": [{ "$ref": "#/$defs/graphForgeCommand" }, { "properties": { "phase": { "const": "verify" } } }] },
     "cleanImport": { "allOf": [{ "$ref": "#/$defs/graphForgeCommand" }, { "properties": { "phase": { "const": "clean_import" } } }] },
-    "reopenProof": { "allOf": [{ "$ref": "#/$defs/graphForgeCommand" }, { "properties": { "phase": { "const": "reopen_proof" } } }] }
+    "reopenProof": { "oneOf": [
+      { "allOf": [{ "$ref": "#/$defs/graphForgeCommand" }, { "properties": { "phase": { "const": "reopen_proof" } } }] },
+      { "allOf": [{ "$ref": "#/$defs/workflowCommand" }, { "properties": { "phase": { "const": "reopen_proof" } } }] }
+    ] }
   }
 }

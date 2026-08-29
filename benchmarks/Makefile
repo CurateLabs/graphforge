@@ -1,4 +1,4 @@
-.PHONY: install smoke smoke-python smoke-rust local-admission
+.PHONY: install smoke smoke-python smoke-rust local-admission progressive-qualification-list
 
 install:
 	uv sync --locked
@@ -18,3 +18,6 @@ smoke-rust: install
 local-admission: install
 	PYTHONPATH=$(CURDIR)/harness uv run --locked reframe -C reframe/settings.py -c reframe/checks -n '^LocalBenchExecAdmission$$' -l | grep -F LocalBenchExecAdmission
 	PYTHONPATH=$(CURDIR)/harness uv run --locked reframe -C reframe/settings.py -c reframe/checks -n '^LocalBenchExecAdmission$$' -r
+
+progressive-qualification-list: install
+	PYTHONPATH=$(CURDIR)/harness uv run --locked reframe -C reframe/settings.py -c reframe/checks -n '^Graph500ProgressiveQualificationProfile' -l

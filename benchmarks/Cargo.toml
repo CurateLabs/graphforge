@@ -1,5 +1,5 @@
 [workspace]
-members = ["runners/certify", "runners/smoke"]
+members = ["runners/certify", "runners/graph500-generator", "runners/smoke"]
 resolver = "2"
 
 [workspace.package]
@@ -11,3 +11,5 @@ rust-version = "1.85"
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+arrow = "=58.3.0"
+parquet = { version = "=58.3.0", features = ["arrow"] }

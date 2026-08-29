@@ -29,10 +29,12 @@ belongs to issue #959, after parity is proven.
 ## Public-interface certification runner
 
 `runners/certify` owns the admission through reopen-proof lifecycle. A profile
-declares a typed benchmark-owned generator action for `generate` and one
-ordinary `gf` public command action for every product phase, in order. Runtime
-validation binds each product phase to its real command family and rejects
-global help/version no-ops. The runner does not link product crates, call
+declares a typed benchmark-owned generator action for `generate` and ordinary
+`gf` public command actions for every product phase, in order. Ingest, recount,
+query, and imported reopen proof use ordered multi-command actions; the runner
+executes each child directly, stops on the first failure, and aggregates phase
+duration and peak RSS. Runtime validation binds each product phase to its real
+command family and rejects global help/version no-ops. The runner does not link product crates, call
 storage internals, provision a host, or enforce CPU, memory, disk, or time
 limits. BenchExec or another outer orchestrator owns deadlines and may terminate
 the runner; the certification binary does not silently convert a policy timeout
@@ -44,9 +46,10 @@ cargo run --locked --manifest-path benchmarks/Cargo.toml \
   run PROFILE.json benchmarks/outputs/evidence.json
 ```
 
-Tiny in-process fixtures exercise every phase and first-failure behavior without
-opening a project. Graph500 profiles supply the real generate, ingest, recount,
-query, portable export/verify/import, and reopen commands in #956; a placeholder
+Tiny fixtures exercise every phase and first-failure behavior, including one
+executable scale-1 fixture that opens a real project and completes the ordinary
+source/export/verify/clean-import/reopen lifecycle. Graph500 profiles supply the
+real generate, ingest, recount, query, portable export/verify/import, and reopen commands in #956; a placeholder
 profile that merely labels no-op commands as lifecycle work is intentionally not
 shipped.
 
@@ -120,6 +123,44 @@ Unsupported hosts return sanitized typed disqualification evidence. In
 particular, macOS and Docker Desktop do not prove native Linux admission and
 must not be used as substitutes. This probe creates no Fly resources and does
 not authorize a Graph500 scale run.
+
+## Progressive Graph500 qualification
+
+`profiles/graph500/` contains distinct declarative S18 and S19 local profiles
+and S20, S22, and S26 provider profiles. They pin the reference generator,
+edge factor 16, seed, the same ten-phase public certification lifecycle, and a
+closed sanitized evidence contract. Provider profiles describe environment
+classes only; they contain no app, machine, volume, account, region, or secret
+identifier.
+
+The Python qualification policy consumes completed, correct ordinary-lifecycle
+evidence and stops at the first failed rung. S20 requires S18 and S19. S22 has
+its own S19/S20 gate. S26 is separately refused without adjacent S24/S25 disk
+and bounded-RSS observations from the canonical ladder. Projections preserve
+wall time, peak RSS, retained and transient storage, logical and physical I/O,
+reader calls, and publication work as independent dimensions.
+
+The provider ceiling is four hours, 4 GiB RSS, and 500 GiB storage. Admission
+reserves 20% time and RSS headroom and 15% storage headroom (425 GiB usable),
+which covers runtime variance and filesystem/package transients without
+turning the M5 ceiling into a sizing target. Adjacent RSS growth above 10% is
+an architectural refusal signal: GraphForge is expected to plateau in memory
+while storage and I/O grow. These are engineering qualification claims only,
+never official Graph500 submission claims.
+
+The ReFrame cases are manual execution entry points and are deliberately
+excluded from normal CI and `smoke`; list them with:
+
+```bash
+make -C benchmarks progressive-qualification-list
+```
+
+Actual Linux resource execution remains under the versioned 4 GiB/four-hour
+BenchExec definition and public certification runner. Provider cases are not
+valid on the local ReFrame system. Provider provisioning is a later, separate
+operation; listing these profiles launches nothing.
+
+## Native local admission deployment
 
 The command is fail-closed: only `passed` exits successfully. A typed
 `disqualified` result exits with status 2 and an execution failure exits with

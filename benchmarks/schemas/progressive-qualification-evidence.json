@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schema": "graphforge-progressive-qualification-evidence-schema/1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "target", "source_scales", "decision", "limits", "headroom", "projected", "required_rates", "provider_capacity", "slopes_observed", "rss_growth_fraction", "checks", "claim"],
+  "properties": {
+    "schema": {"const": "graphforge-progressive-qualification-evidence/1"},
+    "target": {"enum": ["S20", "S22", "S26"]},
+    "source_scales": {"type": "array", "minItems": 2, "maxItems": 2, "uniqueItems": true, "items": {"type": "integer", "minimum": 1}},
+    "decision": {"enum": ["admitted", "refused"]},
+    "limits": {"$ref": "#/$defs/limits"},
+    "headroom": {"$ref": "#/$defs/headroom"},
+    "projected": {"$ref": "#/$defs/projected"},
+    "required_rates": {"$ref": "#/$defs/rates"},
+    "provider_capacity": {"oneOf": [{"$ref": "#/$defs/rates"}, {"type": "null"}]},
+    "slopes_observed": {"$ref": "#/$defs/slopes"},
+    "rss_growth_fraction": {"type": "number"},
+    "checks": {
+      "type": "object", "additionalProperties": false,
+      "required": ["time_headroom", "rss_headroom", "retained_storage_headroom", "transient_storage_headroom", "storage_headroom", "rss_bounded_or_plateaued", "io_reader_publication_capacity_measured", "io_reader_publication_headroom", "correctness"],
+      "properties": {
+        "time_headroom": {"type": "boolean"}, "rss_headroom": {"type": "boolean"},
+        "retained_storage_headroom": {"type": "boolean"}, "transient_storage_headroom": {"type": "boolean"},
+        "storage_headroom": {"type": "boolean"}, "rss_bounded_or_plateaued": {"type": "boolean"},
+        "io_reader_publication_capacity_measured": {"type": "boolean"},
+        "io_reader_publication_headroom": {"type": "boolean"},
+        "correctness": {"const": true}
+      }
+    },
+    "claim": {"const": "engineering_evidence_only"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"decision": {"const": "admitted"}}, "required": ["decision"]},
+      "then": {
+        "properties": {
+          "provider_capacity": {"$ref": "#/$defs/rates"},
+          "checks": {
+            "properties": {
+              "time_headroom": {"const": true}, "rss_headroom": {"const": true},
+              "retained_storage_headroom": {"const": true}, "transient_storage_headroom": {"const": true},
+              "storage_headroom": {"const": true}, "rss_bounded_or_plateaued": {"const": true},
+              "io_reader_publication_capacity_measured": {"const": true},
+              "io_reader_publication_headroom": {"const": true}, "correctness": {"const": true}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"target": {"const": "S20"}}, "required": ["target"]},
+      "then": {"properties": {"source_scales": {"const": [18, 19]}}}
+    },
+    {
+      "if": {"properties": {"target": {"const": "S22"}}, "required": ["target"]},
+      "then": {"properties": {"source_scales": {"const": [19, 20]}}}
+    },
+    {
+      "if": {"properties": {"target": {"const": "S26"}}, "required": ["target"]},
+      "then": {"properties": {"source_scales": {"const": [24, 25]}}}
+    }
+  ],
+  "$defs": {
+    "nonnegative": {"type": "integer", "minimum": 0},
+    "limits": {
+      "type": "object", "additionalProperties": false, "required": ["wall_seconds", "rss_bytes", "volume_bytes"],
+      "properties": {"wall_seconds": {"const": 14400}, "rss_bytes": {"const": 4294967296}, "volume_bytes": {"const": 536870912000}}
+    },
+    "headroom": {
+      "type": "object", "additionalProperties": false, "required": ["time_fraction", "rss_fraction", "storage_fraction"],
+      "properties": {"time_fraction": {"const": 0.2}, "rss_fraction": {"const": 0.2}, "storage_fraction": {"const": 0.15}}
+    },
+    "projected": {
+      "type": "object", "additionalProperties": false,
+      "required": ["wall_seconds", "peak_rss_bytes", "retained_storage_bytes", "transient_peak_storage_bytes", "logical_read_bytes", "logical_write_bytes", "physical_read_bytes", "physical_write_bytes", "reader_calls", "publication_work_units", "storage_peak_bytes"],
+      "properties": {
+        "wall_seconds": {"$ref": "#/$defs/nonnegative"}, "peak_rss_bytes": {"$ref": "#/$defs/nonnegative"},
+        "retained_storage_bytes": {"$ref": "#/$defs/nonnegative"}, "transient_peak_storage_bytes": {"$ref": "#/$defs/nonnegative"},
+        "logical_read_bytes": {"$ref": "#/$defs/nonnegative"}, "logical_write_bytes": {"$ref": "#/$defs/nonnegative"},
+        "physical_read_bytes": {"$ref": "#/$defs/nonnegative"}, "physical_write_bytes": {"$ref": "#/$defs/nonnegative"},
+        "reader_calls": {"$ref": "#/$defs/nonnegative"}, "publication_work_units": {"$ref": "#/$defs/nonnegative"},
+        "storage_peak_bytes": {"$ref": "#/$defs/nonnegative"}
+      }
+    },
+    "rates": {
+      "type": "object", "additionalProperties": false,
+      "required": ["physical_read_bytes_per_second", "physical_write_bytes_per_second", "reader_calls_per_second", "publication_work_per_second"],
+      "properties": {
+        "physical_read_bytes_per_second": {"$ref": "#/$defs/nonnegative"},
+        "physical_write_bytes_per_second": {"$ref": "#/$defs/nonnegative"},
+        "reader_calls_per_second": {"$ref": "#/$defs/nonnegative"},
+        "publication_work_per_second": {"$ref": "#/$defs/nonnegative"}
+      }
+    },
+    "slopes": {
+      "type": "object", "additionalProperties": false,
+      "required": ["logical_read_bytes", "logical_write_bytes", "physical_read_bytes", "physical_write_bytes", "reader_calls", "publication_work_units"],
+      "properties": {
+        "logical_read_bytes": {"type": "integer"}, "logical_write_bytes": {"type": "integer"},
+        "physical_read_bytes": {"type": "integer"}, "physical_write_bytes": {"type": "integer"},
+        "reader_calls": {"type": "integer"}, "publication_work_units": {"type": "integer"}
+      }
+    }
+  }
+}
