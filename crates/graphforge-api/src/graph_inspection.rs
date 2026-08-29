@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use arrow::array::{Array, ArrayRef, ListArray, StringArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
+use futures::StreamExt;
 use graphforge_core::{ApiErrorCode, GfError};
 
 use crate::GraphForge;
@@ -112,69 +113,100 @@ impl GraphForge {
             .clone();
         view.runtime_catalog = Arc::new(Mutex::new(catalog));
 
-        let nodes = view.execute_read_only(NODE_LABELS_QUERY)?;
-        let relationships = view.execute_read_only(RELATIONSHIP_TYPES_QUERY)?;
-        inspection_from_results(&nodes.batches, &relationships.batches)
+        let node_stream = view.execute_stream(NODE_LABELS_QUERY)?;
+        let inspection = view.block_on(inspection_from_node_stream(node_stream))?;
+        let relationship_stream = view.execute_stream(RELATIONSHIP_TYPES_QUERY)?;
+        view.block_on(inspection_from_relationship_stream(
+            relationship_stream,
+            inspection,
+        ))
     }
 }
 
-fn inspection_from_results(
-    node_batches: &[RecordBatch],
-    relationship_batches: &[RecordBatch],
+async fn inspection_from_node_stream(
+    mut stream: graphforge_exec::SendableRecordBatchStream,
 ) -> Result<GraphInspection, GfError> {
     let mut inspection = GraphInspection::default();
-    for batch in node_batches {
-        inspection.total_nodes = inspection
-            .total_nodes
-            .checked_add(
-                u64::try_from(batch.num_rows())
-                    .map_err(|_| resource_limit("graph inspection node batch exceeds UInt64"))?,
-            )
-            .ok_or_else(|| resource_limit("graph inspection node count exceeds UInt64"))?;
-        let labels = batch
-            .column_by_name("labels")
-            .and_then(|column| column.as_any().downcast_ref::<ListArray>())
-            .ok_or_else(|| schema_error("graph inspection labels column is not List<Utf8>"))?;
-        for row in 0..batch.num_rows() {
-            if labels.is_null(row) {
-                return Err(schema_error("graph inspection labels row is null"));
-            }
-            let values = labels.value(row);
-            let values = values
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .ok_or_else(|| schema_error("graph inspection label item is not Utf8"))?;
-            let mut unique = BTreeSet::new();
-            for index in 0..values.len() {
-                if values.is_null(index) {
-                    return Err(schema_error("graph inspection label item is null"));
-                }
-                unique.insert(values.value(index));
-            }
-            for label in unique {
-                increment(&mut inspection.label_counts, label)?;
-            }
-        }
-    }
-
-    for batch in relationship_batches {
-        let relationship_types = batch
-            .column_by_name("relationship_type")
-            .and_then(|column| column.as_any().downcast_ref::<StringArray>())
-            .ok_or_else(|| schema_error("graph inspection relationship_type column is not Utf8"))?;
-        for row in 0..batch.num_rows() {
-            if relationship_types.is_null(row) {
-                return Err(schema_error(
-                    "graph inspection relationship_type row is null",
-                ));
-            }
-            increment(
-                &mut inspection.relationship_type_counts,
-                relationship_types.value(row),
-            )?;
-        }
+    while let Some(batch) = stream.next().await {
+        accumulate_node_batch(
+            &mut inspection,
+            &batch.map_err(|error| GfError::Execution(error.to_string()))?,
+        )?;
     }
     Ok(inspection)
+}
+
+async fn inspection_from_relationship_stream(
+    mut stream: graphforge_exec::SendableRecordBatchStream,
+    mut inspection: GraphInspection,
+) -> Result<GraphInspection, GfError> {
+    while let Some(batch) = stream.next().await {
+        accumulate_relationship_batch(
+            &mut inspection,
+            &batch.map_err(|error| GfError::Execution(error.to_string()))?,
+        )?;
+    }
+    Ok(inspection)
+}
+
+fn accumulate_node_batch(
+    inspection: &mut GraphInspection,
+    batch: &RecordBatch,
+) -> Result<(), GfError> {
+    inspection.total_nodes = inspection
+        .total_nodes
+        .checked_add(
+            u64::try_from(batch.num_rows())
+                .map_err(|_| resource_limit("graph inspection node batch exceeds UInt64"))?,
+        )
+        .ok_or_else(|| resource_limit("graph inspection node count exceeds UInt64"))?;
+    let labels = batch
+        .column_by_name("labels")
+        .and_then(|column| column.as_any().downcast_ref::<ListArray>())
+        .ok_or_else(|| schema_error("graph inspection labels column is not List<Utf8>"))?;
+    for row in 0..batch.num_rows() {
+        if labels.is_null(row) {
+            return Err(schema_error("graph inspection labels row is null"));
+        }
+        let values = labels.value(row);
+        let values = values
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or_else(|| schema_error("graph inspection label item is not Utf8"))?;
+        let mut unique = BTreeSet::new();
+        for index in 0..values.len() {
+            if values.is_null(index) {
+                return Err(schema_error("graph inspection label item is null"));
+            }
+            unique.insert(values.value(index));
+        }
+        for label in unique {
+            increment(&mut inspection.label_counts, label)?;
+        }
+    }
+    Ok(())
+}
+
+fn accumulate_relationship_batch(
+    inspection: &mut GraphInspection,
+    batch: &RecordBatch,
+) -> Result<(), GfError> {
+    let relationship_types = batch
+        .column_by_name("relationship_type")
+        .and_then(|column| column.as_any().downcast_ref::<StringArray>())
+        .ok_or_else(|| schema_error("graph inspection relationship_type column is not Utf8"))?;
+    for row in 0..batch.num_rows() {
+        if relationship_types.is_null(row) {
+            return Err(schema_error(
+                "graph inspection relationship_type row is null",
+            ));
+        }
+        increment(
+            &mut inspection.relationship_type_counts,
+            relationship_types.value(row),
+        )?;
+    }
+    Ok(())
 }
 
 fn increment(counts: &mut BTreeMap<String, u64>, name: &str) -> Result<(), GfError> {

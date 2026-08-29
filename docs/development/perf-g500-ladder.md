@@ -119,7 +119,9 @@ therefore survive process replacement and are reused on re-entry.
 > windows into immutable Parquet shards and retains only bounded merge/probe
 > state; accumulated topology remains disk-owned. While ingest runs, the atomic journal is
 > refreshed every two seconds with the current subphase, edge-chunk index,
-> anonymous/file RSS, disk usage, and aggregate topology rewrite counters. An
+> anonymous/file RSS, and aggregate topology rewrite counters. It deliberately
+> does not recursively walk the active project. Disk attribution comes from
+> storage-owned counters and exact descriptors at completed phase boundaries. An
 > `oom` with `first_failing_phase: "ingest"` therefore remains an upstream
 > construction failure, not a generator-memory regression. Each completed
 > ingest phase records elapsed time, RSS, disk bytes, shard count, input rows,
@@ -206,6 +208,104 @@ One object per attempted rung (schema
 Wall-clock and RSS numbers are hardware-specific observations, never CI
 millisecond gates. For #745, `sut` must name the cloud SKU; laptop SUTs are
 rejected as certification evidence.
+
+### Disk attribution and S26 admission
+
+The versioned `graphforge-g500-ladder-qualification/3` companion document is
+validated by `scripts/ci/validate-g500-ladder-qualification.py`. Every observed
+rung has exactly one row for canonical node topology, canonical edge topology,
+properties, UUID/surrogate indexes, adjacency/CSR, catalogs/manifests,
+construction staging/spill, portable package, and clean import. Native file
+identity deduplicates content-addressed/shared objects. Logical bytes,
+filesystem allocation, current retained allocation, and full-lifecycle
+transient peak remain separate quantities.
+
+Artifact rows are local ownership views and may refer to the same physical CAS
+object. Their allocated/current columns therefore are not summed to obtain the
+workspace footprint. `totals.current_retained_bytes` is the independently
+reconciled native-identity union across all simultaneously retained owners.
+The authoritative-project ratio uses a separate source-project native-identity
+union captured at the stable source boundary. It includes the project controls,
+every retained generation, and every CAS object not yet removed by an exact GC
+receipt. It is therefore bounded below by the selected-generation snapshot and
+above by the independent workspace union, but it does not include construction
+staging, the portable package, drills, or the clean imported project.
+
+The lifecycle peak is not reconstructed by adding category peaks or directory
+sizes. Storage owns a reference-counted union keyed by authenticated native
+`(volume, file-id)` identities. Append, shaping, encoding, CAS publication,
+portable export, private import materialization, clean publication, corruption
+drills, and interrupted-import cleanup install or remove exact owners. The
+high-water mark advances at each transition, so aliases count once and files
+that did not coexist are never added together. Certification emits
+`storage_owned_active_identity_union` provenance only from this tracker.
+
+The project owner includes `FORMAT`, `CURRENT`, and every authenticated
+generation still installed in the bounded generation namespace, including
+checkpoint branches and generations not yet reclaimed; publication does not
+discard an old generation from accounting merely because `CURRENT` advanced.
+It also includes the CAS lifecycle control and every sealed CAS object, including
+objects not referenced by the current generation. Only an exact explicit GC
+receipt may remove those identities. The bounded CAS inventory runs at retained
+phase boundaries, never during active ingest. Portable writers record native allocation as files
+are written, synchronized, published, or removed; they never rediscover a
+large export with a recursive post-write directory pass, and measurement
+failure is a typed operation failure rather than a zero observation.
+Portable import success additionally carries an identity-safe cleanup receipt;
+the materialization owner is removed only after authenticated deletion and
+parent-directory synchronization complete. Cleanup failure is a typed import
+failure and its still-owned identities remain in lifecycle evidence.
+
+The same document carries a closed nine-phase inventory: append/merge, seal
+authentication, shape consumption/reauthentication, encode plus post-write
+authentication, publication preauthentication, CAS install, hydration
+verification, synchronization, and recovery reauthentication. Raw bytes,
+calls, blocks, objects, and fsyncs reconcile exactly before ratios are derived.
+Fixed-run merge bytes and calls come from the same instrumented readers and
+writers: `merge_read_operations` and `merge_write_operations` count actual
+non-empty storage submissions, while block counters remain a separate transfer
+granularity metric. Shape-phase totals add the disjoint fixed-run and Parquet
+byte/call counters exactly once.
+Each phase declares whether it was applicable. Every ordinary lifecycle phase
+must contain source-owned activity; a zero row is rejected. Recovery may be
+non-applicable only for an uninterrupted run, while the deterministic durable
+crash matrix separately proves nonzero recovery bytes and calls whenever an
+interrupted intent is accepted.
+The deterministic full-lifecycle 1x/2x/4x ladder executes source construction,
+CSR, reopen/query, export/verify, clean import/reopen/query, corruption,
+cancellation, resource-limit, and interrupted-finalization drills. It validates
+the qualification phase inventory and bounds bytes, calls, objects, blocks, and
+fsyncs per phase rather than relying only on aggregate I/O.
+Node canonical cost uses reopened live nodes; edge canonical, authoritative
+project, and lifecycle peak costs use reopened live edges. Ratios preserve raw
+integer numerators and denominators; rounded decimals are not evidence.
+
+Provider and qualification artifacts never expose generation UUIDs. Generation
+agreement and source/import distinctness are checked while the generations are
+lifetime-pinned, then emitted only as required-true authenticated proof fields.
+Before either artifact is written, a recursive sanitizer rejects raw UUID
+strings, absolute host paths, credentials, secrets, tokens, and provider
+machine, volume, or resource identifiers. Storage snapshots likewise omit the
+generation UUID and native file-identity map.
+
+At least two ordered adjacent rungs are required. The S26 rate must be no lower
+than both the newest observed peak ratio and every positive adjacent-rung slope.
+The validator independently recomputes separate projected canonical-node and
+canonical-edge allocation plus the lifecycle peak,
+volume headroom, and the admit/refuse decision. A single successful rung is not
+a projection, and insufficient reserved headroom always refuses SCALE-26.
+
+Build and validate a companion document from two adjacent real certification
+documents with:
+
+```bash
+make g500-ladder-qualification \
+  LOW_CERT=build/s20-certification.json \
+  HIGH_CERT=build/s22-certification.json \
+  EVIDENCE=build/g500-ladder-qualification.json \
+  VOLUME_BYTES=536870912000 \
+  RESERVED_HEADROOM_BYTES=53687091200
+```
 
 ## CI placement
 

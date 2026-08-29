@@ -563,6 +563,14 @@ pub struct GraphObjectInstallEvidence {
     pub bytes_installed: u64,
     /// Whether an already installed exact object satisfied the request.
     pub reused_existing: bool,
+    /// Non-empty source or authentication reads completed by the application.
+    pub read_calls: u64,
+    /// Temporary-object write submissions completed by the application.
+    pub write_calls: u64,
+    /// Payload bytes submitted to temporary-object writers.
+    pub write_bytes: u64,
+    /// File and directory durability barriers completed by this installation.
+    pub fsync_calls: u64,
 }
 
 /// One-time v1 expanded-tree to v2 object-store migration evidence.
@@ -587,6 +595,14 @@ pub struct GraphFilesAppendEvidence {
     pub payload_bytes_hashed: u64,
     /// Logical object bytes newly installed.
     pub bytes_installed: u64,
+    /// Actual non-empty payload reads performed by object installation.
+    pub read_calls: u64,
+    /// Actual payload write submissions performed by object installation.
+    pub write_calls: u64,
+    /// Payload bytes submitted to object writers.
+    pub write_bytes: u64,
+    /// File and directory durability barriers completed by object installation.
+    pub fsync_calls: u64,
 }
 
 /// A graph file whose content identity was established by an upstream durable
@@ -666,6 +682,100 @@ pub struct GraphObjectGcEvidence {
     pub objects_removed: u64,
     /// Physical unreachable bytes removed.
     pub bytes_removed: u64,
+    /// Exact native identities and allocated bytes removed by this GC receipt.
+    pub removed_identity_allocated_bytes: BTreeMap<String, u64>,
+}
+
+/// Capture every sealed CAS object and its lifecycle control by native identity.
+///
+/// This is a storage-owned, bounded phase-boundary inventory. It is never used
+/// during active ingest; qualification calls it only while holding the CAS
+/// shared lifecycle lock, so installed-but-unreferenced objects remain charged
+/// until an explicit GC receipt removes them.
+pub(crate) fn capture_retained_graph_object_identities(
+    root: &Path,
+) -> Result<BTreeMap<String, u64>, GfError> {
+    const MAX_RETAINED_OBJECTS: usize = 4_000_000;
+    if !root.join(GRAPH_OBJECTS_DIR).exists() {
+        return Ok(BTreeMap::new());
+    }
+    let cas = ReadOnlyCasRoot::open(root)?;
+    let mut identities = BTreeMap::new();
+    add_retained_identity(&mut identities, &cas.lifecycle)?;
+    let prefixes = cas
+        .sha256
+        .child_names_bounded(256)
+        .map_err(|error| storage("inventory stable graph object prefixes", root, error))?;
+    let mut remaining = MAX_RETAINED_OBJECTS;
+    for prefix in prefixes {
+        let prefix_text = prefix
+            .to_str()
+            .ok_or_else(|| validation("graph object prefix is not UTF-8"))?;
+        if prefix_text.len() != 2
+            || !prefix_text
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            return Err(validation("graph object prefix is not canonical"));
+        }
+        let bucket = cas
+            .sha256
+            .open_child_directory(&prefix)
+            .map_err(|error| storage("open retained graph object bucket", root, error))?;
+        let objects = bucket
+            .child_names_bounded(remaining)
+            .map_err(|error| storage("inventory retained graph object bucket", root, error))?;
+        remaining = remaining.checked_sub(objects.len()).ok_or_else(|| {
+            validation("retained graph object inventory exceeds attribution bound")
+        })?;
+        for object in objects {
+            let suffix = object
+                .to_str()
+                .ok_or_else(|| validation("graph object name is not UTF-8"))?;
+            validate_digest(&format!("{prefix_text}{suffix}"))?;
+            let file = bucket
+                .open_child_file(&object)
+                .map_err(|error| storage("open retained graph object", root, error))?;
+            add_retained_identity(&mut identities, &file)?;
+        }
+    }
+    Ok(identities)
+}
+
+fn add_retained_identity(
+    identities: &mut BTreeMap<String, u64>,
+    file: &File,
+) -> Result<(), GfError> {
+    let identity = graphforge_filesystem::file_identity(file).map_err(|error| {
+        storage(
+            "identify retained graph object",
+            Path::new(GRAPH_OBJECTS_DIR),
+            error,
+        )
+    })?;
+    let usage = graphforge_filesystem::file_space_usage(file).map_err(|error| {
+        storage(
+            "measure retained graph object",
+            Path::new(GRAPH_OBJECTS_DIR),
+            error,
+        )
+    })?;
+    let key = retained_identity_key(identity);
+    match identities.insert(key, usage.allocated_bytes) {
+        Some(existing) if existing != usage.allocated_bytes => {
+            Err(validation("retained graph object allocation changed"))
+        }
+        _ => Ok(()),
+    }
+}
+
+fn retained_identity_key(identity: graphforge_filesystem::FileIdentity) -> String {
+    use std::fmt::Write as _;
+    let mut key = format!("{:016x}:", identity.volume_serial);
+    for byte in identity.file_id {
+        write!(&mut key, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    key
 }
 
 /// Trace compact generation roots, then sweep unreachable CAS objects.
@@ -855,7 +965,21 @@ pub(crate) fn gc_graph_objects_guarded(
                         error,
                     )
                 })?;
-                candidates.push((prefix.clone(), object, identity, metadata.len()));
+                let allocation =
+                    graphforge_filesystem::file_space_usage(&file).map_err(|error| {
+                        storage(
+                            "measure graph object candidate",
+                            &guard.cas.diagnostic_root,
+                            error,
+                        )
+                    })?;
+                candidates.push((
+                    prefix.clone(),
+                    object,
+                    identity,
+                    metadata.len(),
+                    allocation.allocated_bytes,
+                ));
             }
         }
     }
@@ -863,7 +987,7 @@ pub(crate) fn gc_graph_objects_guarded(
         objects_marked: u64::try_from(marked.len()).unwrap_or(u64::MAX),
         ..GraphObjectGcEvidence::default()
     };
-    for (prefix, object, identity, bytes) in candidates {
+    for (prefix, object, identity, bytes, allocated) in candidates {
         let bucket = guard
             .cas
             .sha256
@@ -884,8 +1008,18 @@ pub(crate) fn gc_graph_objects_guarded(
                     error,
                 )
             })?;
+        bucket.sync().map_err(|error| {
+            storage(
+                "sync graph object bucket after GC removal",
+                &guard.cas.diagnostic_root,
+                error,
+            )
+        })?;
         evidence.objects_removed = evidence.objects_removed.saturating_add(1);
         evidence.bytes_removed = evidence.bytes_removed.saturating_add(bytes);
+        evidence
+            .removed_identity_allocated_bytes
+            .insert(retained_identity_key(identity), allocated);
     }
     Ok(evidence)
 }
@@ -1001,6 +1135,10 @@ fn append_graph_files_v2_inner(
         evidence.bytes_installed = evidence
             .bytes_installed
             .saturating_add(installed.bytes_installed);
+        evidence.read_calls = evidence.read_calls.saturating_add(installed.read_calls);
+        evidence.write_calls = evidence.write_calls.saturating_add(installed.write_calls);
+        evidence.write_bytes = evidence.write_bytes.saturating_add(installed.write_bytes);
+        evidence.fsync_calls = evidence.fsync_calls.saturating_add(installed.fsync_calls);
         let relative_path = relative
             .to_str()
             .ok_or_else(|| validation("sealed graph path is not UTF-8"))?
@@ -1453,7 +1591,14 @@ fn install_graph_object_bytes_with_lease(
         // file verification below is an application-observed payload read.
         Ok(0)
     })
-    .map(|evidence| (digest, evidence))
+    .map(|mut evidence| {
+        if !evidence.reused_existing {
+            evidence.write_bytes = expected_length;
+            evidence.write_calls = u64::from(!bytes.is_empty());
+            evidence.fsync_calls = evidence.fsync_calls.saturating_add(1);
+        }
+        (digest, evidence)
+    })
 }
 
 /// Stream, hash, and install a new payload object from a regular source file.
@@ -1482,7 +1627,9 @@ fn install_graph_object_file_with_lease(
             "graph object source is not the declared regular file",
         ));
     }
-    install_object(
+    let read_calls = std::cell::Cell::new(0_u64);
+    let write_calls = std::cell::Cell::new(0_u64);
+    let result = install_object(
         &lease.cas,
         expected_digest,
         expected_length,
@@ -1500,6 +1647,7 @@ fn install_graph_object_file_with_lease(
                 if read == 0 {
                     break;
                 }
+                read_calls.set(read_calls.get().saturating_add(1));
                 output.write_all(&buffer[..read]).map_err(|error| {
                     storage(
                         "write temporary graph object",
@@ -1507,6 +1655,7 @@ fn install_graph_object_file_with_lease(
                         error,
                     )
                 })?;
+                write_calls.set(write_calls.get().saturating_add(1));
                 hasher.update(&buffer[..read]);
                 total = total.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
             }
@@ -1524,7 +1673,16 @@ fn install_graph_object_file_with_lease(
             })?;
             Ok(total)
         },
-    )
+    );
+    result.map(|mut evidence| {
+        if !evidence.reused_existing {
+            evidence.read_calls = evidence.read_calls.saturating_add(read_calls.get());
+            evidence.write_calls = evidence.write_calls.saturating_add(write_calls.get());
+            evidence.write_bytes = evidence.write_bytes.saturating_add(expected_length);
+            evidence.fsync_calls = evidence.fsync_calls.saturating_add(1);
+        }
+        evidence
+    })
 }
 
 /// Read and cryptographically verify an immutable object.
@@ -1582,7 +1740,23 @@ pub fn materialize_graph_objects(
         ..GraphFilesOpenEvidence::default()
     };
     for entry in &inventory.files {
-        if materialize_from_cas(&lease.cas, &target_directory, entry)? {
+        let materialized = materialize_from_cas(&lease.cas, &target_directory, entry)?;
+        evidence.application_read_bytes = evidence
+            .application_read_bytes
+            .saturating_add(materialized.read_bytes);
+        evidence.application_read_calls = evidence
+            .application_read_calls
+            .saturating_add(materialized.read_calls);
+        evidence.application_write_bytes = evidence
+            .application_write_bytes
+            .saturating_add(materialized.write_bytes);
+        evidence.application_write_calls = evidence
+            .application_write_calls
+            .saturating_add(materialized.write_calls);
+        evidence.fsync_calls = evidence
+            .fsync_calls
+            .saturating_add(materialized.fsync_calls);
+        if materialized.copied {
             evidence.files_copied = evidence.files_copied.saturating_add(1);
             evidence.bytes_copied = evidence.bytes_copied.saturating_add(entry.byte_length);
         } else {
@@ -1598,7 +1772,7 @@ fn materialize_from_cas(
     cas: &CasRoot,
     target: &StableDirectory,
     entry: &crate::GraphFileEntry,
-) -> Result<bool, GfError> {
+) -> Result<MaterializeIoEvidence, GfError> {
     validate_logical_path(Path::new(&entry.relative_path))?;
     let bucket = cas.digest_bucket(&entry.content_sha256, false)?;
     let source_name = std::ffi::OsStr::new(&entry.content_sha256[2..]);
@@ -1631,8 +1805,7 @@ fn materialize_from_cas(
         } else {
             let parent = parent.as_ref().unwrap_or(target);
             if requires_single_link_materialization(&entry.relative_path) {
-                copy_single_link_materialized_object(cas, &source, parent, name, entry)?;
-                return Ok(true);
+                return copy_single_link_materialized_object(cas, &source, parent, name, entry);
             }
             let (installed, installed_identity) = bucket
                 .link_child_into(source_name, &source, source_identity, parent, name)
@@ -1643,18 +1816,38 @@ fn materialize_from_cas(
                         error,
                     )
                 })?;
-            if let Err(error) = verify_file(
+            let verified = verify_file_counted(
                 installed,
                 &entry.content_sha256,
                 entry.byte_length,
                 &cas.diagnostic_root,
-            ) {
-                let _ = parent.unlink_child_if_identity(name, installed_identity);
-                return Err(error);
+            );
+            match verified {
+                Ok(io) => {
+                    return Ok(MaterializeIoEvidence {
+                        read_bytes: io.bytes,
+                        read_calls: io.calls,
+                        ..MaterializeIoEvidence::default()
+                    });
+                }
+                Err(error) => {
+                    let _ = parent.unlink_child_if_identity(name, installed_identity);
+                    return Err(error);
+                }
             }
         }
     }
-    Ok(false)
+    Err(validation("materialization path has no final component"))
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct MaterializeIoEvidence {
+    copied: bool,
+    read_bytes: u64,
+    read_calls: u64,
+    write_bytes: u64,
+    write_calls: u64,
+    fsync_calls: u64,
 }
 
 fn requires_single_link_materialization(relative_path: &str) -> bool {
@@ -1675,7 +1868,7 @@ fn copy_single_link_materialized_object(
     parent: &StableDirectory,
     name: &std::ffi::OsStr,
     entry: &crate::GraphFileEntry,
-) -> Result<(), GfError> {
+) -> Result<MaterializeIoEvidence, GfError> {
     let temporary_name = std::ffi::OsString::from(format!(
         ".ordinal-v4-materialize-{}.tmp",
         Uuid::new_v4().simple()
@@ -1703,8 +1896,8 @@ fn copy_single_link_materialized_object(
         )
     })?;
     let mut installed = false;
-    let result = (|| -> Result<(), GfError> {
-        copy_and_authenticate_materialized_object(
+    let result = (|| -> Result<MaterializeIoEvidence, GfError> {
+        let mut io = copy_and_authenticate_materialized_object(
             &mut input,
             &mut output,
             entry,
@@ -1728,6 +1921,7 @@ fn copy_single_link_materialized_object(
                 error,
             )
         })?;
+        io.fsync_calls = io.fsync_calls.saturating_add(1);
         let installed = parent.open_child_file(name).map_err(|error| {
             storage(
                 "open private materialization file",
@@ -1747,12 +1941,16 @@ fn copy_single_link_materialized_object(
                 "private materialization file is multiply linked",
             ));
         }
-        verify_file(
+        let verified = verify_file_counted(
             installed,
             &entry.content_sha256,
             entry.byte_length,
             &cas.diagnostic_root,
-        )
+        )?;
+        io.read_bytes = io.read_bytes.saturating_add(verified.bytes);
+        io.read_calls = io.read_calls.saturating_add(verified.calls);
+        io.copied = true;
+        Ok(io)
     })();
     if result.is_err() {
         let cleanup_name = if installed { name } else { &temporary_name };
@@ -1767,9 +1965,11 @@ fn copy_and_authenticate_materialized_object(
     output: &mut File,
     entry: &crate::GraphFileEntry,
     diagnostic_root: &Path,
-) -> Result<(), GfError> {
+) -> Result<MaterializeIoEvidence, GfError> {
     let mut digest = Sha256::new();
     let mut length = 0_u64;
+    let mut read_calls = 0_u64;
+    let mut write_calls = 0_u64;
     let mut buffer = vec![0_u8; BUFFER_BYTES].into_boxed_slice();
     loop {
         let read = input
@@ -1778,9 +1978,11 @@ fn copy_and_authenticate_materialized_object(
         if read == 0 {
             break;
         }
+        read_calls = read_calls.saturating_add(1);
         output.write_all(&buffer[..read]).map_err(|error| {
             storage("write private materialization file", diagnostic_root, error)
         })?;
+        write_calls = write_calls.saturating_add(1);
         digest.update(&buffer[..read]);
         length = length
             .checked_add(read as u64)
@@ -1793,7 +1995,15 @@ fn copy_and_authenticate_materialized_object(
     }
     output
         .sync_all()
-        .map_err(|error| storage("sync private materialization file", diagnostic_root, error))
+        .map_err(|error| storage("sync private materialization file", diagnostic_root, error))?;
+    Ok(MaterializeIoEvidence {
+        copied: true,
+        read_bytes: length,
+        read_calls,
+        write_bytes: length,
+        write_calls,
+        fsync_calls: 1,
+    })
 }
 
 #[cfg(unix)]
@@ -2447,24 +2657,23 @@ where
     #[cfg(windows)]
     let temporary_identity = temporary.identity();
     let bytes_hashed = write_temporary(&mut temporary)?;
-    let preseal_bytes_hashed = if writer_authenticated || cfg!(windows) {
-        0
+    let preseal_io = if writer_authenticated || cfg!(windows) {
+        ReadIoEvidence::default()
     } else {
         temporary.rewind().map_err(|error| {
             storage("rewind temporary graph object", &cas.diagnostic_root, error)
         })?;
-        verify_stream(
+        verify_stream_counted(
             &mut temporary,
             digest,
             expected_length,
             &cas.diagnostic_root,
-        )?;
-        expected_length
+        )?
     };
     // Windows must close the writable handle and reopen an exact-identity,
     // protected read handle before publication. That transition authenticates
     // the complete payload below, so a second pre-seal read would be redundant.
-    let (installed, sealed_bytes_hashed) = finalize_temporary_object(
+    let (installed, sealed_bytes_hashed, concurrent_io) = finalize_temporary_object(
         cas,
         &bucket,
         TemporaryObject {
@@ -2477,18 +2686,26 @@ where
     )?;
     Ok(GraphObjectInstallEvidence {
         bytes_hashed: bytes_hashed
-            .saturating_add(preseal_bytes_hashed)
+            .saturating_add(preseal_io.bytes)
             .saturating_add(sealed_bytes_hashed)
             .saturating_add(if installed { 0 } else { expected_length }),
         bytes_installed: if installed { expected_length } else { 0 },
         reused_existing: !installed,
+        read_calls: preseal_io.calls.saturating_add(concurrent_io.calls),
+        // The source-copy/authentication submissions are added by the caller.
+        // Fresh installation always durably synchronizes the destination bucket
+        // and temporary namespace; reuse performs neither operation here.
+        fsync_calls: if installed { 2 } else { 0 },
+        ..GraphObjectInstallEvidence::default()
     })
 }
 
-fn reused_object_evidence(expected_length: u64) -> GraphObjectInstallEvidence {
+fn reused_object_evidence(expected_length: u64, io: ReadIoEvidence) -> GraphObjectInstallEvidence {
+    debug_assert_eq!(io.bytes, expected_length);
     GraphObjectInstallEvidence {
-        bytes_hashed: expected_length,
+        bytes_hashed: io.bytes,
         reused_existing: true,
+        read_calls: io.calls,
         ..GraphObjectInstallEvidence::default()
     }
 }
@@ -2512,14 +2729,14 @@ fn try_reuse_existing_object(
             ));
         }
     };
-    verify_and_seal_graph_object(
+    let io = verify_and_seal_graph_object_counted(
         &file,
         digest,
         expected_length,
         &graph_object_path(&cas.diagnostic_root, digest)?,
         &cas.diagnostic_root,
     )?;
-    Ok(Some(reused_object_evidence(expected_length)))
+    Ok(Some(reused_object_evidence(expected_length, io)))
 }
 
 #[cfg(windows)]
@@ -2530,6 +2747,7 @@ fn try_reuse_existing_object(
     digest: &str,
     expected_length: u64,
 ) -> Result<Option<GraphObjectInstallEvidence>, GfError> {
+    let mut adoption_io = ReadIoEvidence::default();
     let file = match bucket.open_cas_child_file(destination_name) {
         Ok(file) => file.into_file(),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -2547,7 +2765,8 @@ fn try_reuse_existing_object(
                         },
                     )
                 })?;
-            verify_stream(&mut legacy, digest, expected_length, &cas.diagnostic_root)?;
+            adoption_io =
+                verify_stream_counted(&mut legacy, digest, expected_length, &cas.diagnostic_root)?;
             bucket
                 .adopt_legacy_cas_child(destination_name, legacy)
                 .map(graphforge_filesystem::WindowsSealedCasFile::into_file)
@@ -2560,14 +2779,17 @@ fn try_reuse_existing_object(
                 })?
         }
     };
-    verify_and_seal_graph_object(
+    let io = verify_and_seal_graph_object_counted(
         &file,
         digest,
         expected_length,
         &graph_object_path(&cas.diagnostic_root, digest)?,
         &cas.diagnostic_root,
     )?;
-    Ok(Some(reused_object_evidence(expected_length)))
+    let mut evidence = reused_object_evidence(expected_length, io);
+    evidence.bytes_hashed = adoption_io.bytes.saturating_add(io.bytes);
+    evidence.read_calls = adoption_io.calls.saturating_add(io.calls);
+    Ok(Some(evidence))
 }
 
 fn finalize_temporary_object(
@@ -2576,7 +2798,7 @@ fn finalize_temporary_object(
     temporary: TemporaryObject,
     digest: &str,
     expected_length: u64,
-) -> Result<(bool, u64), GfError> {
+) -> Result<(bool, u64, ReadIoEvidence), GfError> {
     let destination_name = std::ffi::OsStr::new(&digest[2..]);
     let temporary_path = cas
         .diagnostic_root
@@ -2584,40 +2806,29 @@ fn finalize_temporary_object(
         .join(TEMP_DIR)
         .join(&temporary.name);
     #[cfg(unix)]
-    let temporary = {
+    let (temporary, sealed_io) = {
         seal_graph_object(&temporary.file, &temporary_path, &cas.diagnostic_root)?;
-        SealedTemporaryObject {
-            name: temporary.name,
-            file: temporary.file,
-            identity: temporary.identity,
-        }
+        (
+            SealedTemporaryObject {
+                name: temporary.name,
+                file: temporary.file,
+                identity: temporary.identity,
+            },
+            ReadIoEvidence::default(),
+        )
     };
     #[cfg(windows)]
-    let temporary = transition_temporary_to_sealed_reader(
+    let (temporary, sealed_io) = transition_temporary_to_sealed_reader(
         &cas.tmp,
         temporary,
         digest,
         expected_length,
         &cas.diagnostic_root,
     )?;
-    #[cfg(unix)]
-    let sealed_bytes_hashed = 0;
-    #[cfg(windows)]
-    let sealed_bytes_hashed = expected_length;
-    let sealed_metadata = temporary
-        .file
-        .metadata()
-        .map_err(|error| storage("reinspect fresh graph object", &cas.diagnostic_root, error))?;
-    if graphforge_filesystem::file_identity(&temporary.file)
-        .map_err(|error| storage("reidentify fresh graph object", &cas.diagnostic_root, error))?
-        != temporary.identity
-        || !sealed_metadata.is_file()
-        || sealed_metadata.len() != expected_length
-        || !sealed_metadata.permissions().readonly()
-    {
-        return Err(validation("fresh graph object post-hash authority changed"));
-    }
+    let sealed_bytes_hashed = sealed_io.bytes;
+    validate_sealed_temporary(&temporary, expected_length, &cas.diagnostic_root)?;
     returned_error_boundary("install:temp-sealed")?;
+    let mut concurrent_io = ReadIoEvidence::default();
     let installed = if let Ok((_installed, _identity)) = cas.tmp.link_child_into(
         &temporary.name,
         &temporary.file,
@@ -2640,7 +2851,7 @@ fn finalize_temporary_object(
                 error,
             )
         })?;
-        verify_and_seal_graph_object(
+        concurrent_io = verify_and_seal_graph_object_counted(
             &existing,
             digest,
             expected_length,
@@ -2683,7 +2894,35 @@ fn finalize_temporary_object(
             error,
         )
     })?;
-    Ok((installed, sealed_bytes_hashed))
+    Ok((
+        installed,
+        sealed_bytes_hashed,
+        ReadIoEvidence {
+            bytes: sealed_io.bytes.saturating_add(concurrent_io.bytes),
+            calls: sealed_io.calls.saturating_add(concurrent_io.calls),
+        },
+    ))
+}
+
+fn validate_sealed_temporary(
+    temporary: &SealedTemporaryObject,
+    expected_length: u64,
+    diagnostic_root: &Path,
+) -> Result<(), GfError> {
+    let metadata = temporary
+        .file
+        .metadata()
+        .map_err(|error| storage("reinspect fresh graph object", diagnostic_root, error))?;
+    let identity = graphforge_filesystem::file_identity(&temporary.file)
+        .map_err(|error| storage("reidentify fresh graph object", diagnostic_root, error))?;
+    if identity != temporary.identity
+        || !metadata.is_file()
+        || metadata.len() != expected_length
+        || !metadata.permissions().readonly()
+    {
+        return Err(validation("fresh graph object post-hash authority changed"));
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -2693,7 +2932,7 @@ fn transition_temporary_to_sealed_reader(
     digest: &str,
     expected_length: u64,
     diagnostic: &Path,
-) -> Result<SealedTemporaryObject, GfError> {
+) -> Result<(SealedTemporaryObject, ReadIoEvidence), GfError> {
     temporary.file.sync_all().map_err(|error| {
         storage(
             "sync temporary graph object before sealing",
@@ -2719,7 +2958,7 @@ fn transition_temporary_to_sealed_reader(
             "temporary graph object identity changed while sealing",
         ));
     }
-    verify_file(
+    let io = verify_file_counted(
         file.try_clone().map_err(|error| {
             storage(
                 "clone sealed temporary graph object for authentication",
@@ -2731,19 +2970,37 @@ fn transition_temporary_to_sealed_reader(
         expected_length,
         diagnostic,
     )?;
-    Ok(SealedTemporaryObject {
-        name,
-        file,
-        identity,
-    })
+    Ok((
+        SealedTemporaryObject {
+            name,
+            file,
+            identity,
+        },
+        io,
+    ))
 }
 
 fn verify_file(
-    mut file: File,
+    file: File,
     digest: &str,
     expected_length: u64,
     diagnostic: &Path,
 ) -> Result<(), GfError> {
+    verify_file_counted(file, digest, expected_length, diagnostic).map(|_| ())
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ReadIoEvidence {
+    bytes: u64,
+    calls: u64,
+}
+
+fn verify_file_counted(
+    mut file: File,
+    digest: &str,
+    expected_length: u64,
+    diagnostic: &Path,
+) -> Result<ReadIoEvidence, GfError> {
     let metadata = file
         .metadata()
         .map_err(|error| storage("inspect graph object handle", diagnostic, error))?;
@@ -2753,6 +3010,7 @@ fn verify_file(
         ));
     }
     let mut hasher = Sha256::new();
+    let mut io = ReadIoEvidence::default();
     let mut buffer = vec![0_u8; BUFFER_BYTES];
     loop {
         let read = file
@@ -2761,12 +3019,14 @@ fn verify_file(
         if read == 0 {
             break;
         }
+        io.bytes = io.bytes.saturating_add(read as u64);
+        io.calls = io.calls.saturating_add(1);
         hasher.update(&buffer[..read]);
     }
     if hex_digest(hasher.finalize().into()) != digest {
         return Err(validation("graph object digest does not match its address"));
     }
-    Ok(())
+    Ok(io)
 }
 
 fn verify_stream(
@@ -2775,8 +3035,18 @@ fn verify_stream(
     expected_length: u64,
     diagnostic: &Path,
 ) -> Result<(), GfError> {
+    verify_stream_counted(file, digest, expected_length, diagnostic).map(|_| ())
+}
+
+fn verify_stream_counted(
+    file: &mut impl Read,
+    digest: &str,
+    expected_length: u64,
+    diagnostic: &Path,
+) -> Result<ReadIoEvidence, GfError> {
     let mut hasher = Sha256::new();
     let mut total = 0_u64;
+    let mut calls = 0_u64;
     let mut buffer = vec![0_u8; BUFFER_BYTES];
     loop {
         let read = file
@@ -2786,12 +3056,16 @@ fn verify_stream(
             break;
         }
         total = total.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
+        calls = calls.saturating_add(1);
         hasher.update(&buffer[..read]);
     }
     if total != expected_length || hex_digest(hasher.finalize().into()) != digest {
         return Err(validation("graph object digest does not match its address"));
     }
-    Ok(())
+    Ok(ReadIoEvidence {
+        bytes: total,
+        calls,
+    })
 }
 
 fn verify_and_seal_graph_object(
@@ -2801,6 +3075,17 @@ fn verify_and_seal_graph_object(
     object_path: &Path,
     diagnostic: &Path,
 ) -> Result<(), GfError> {
+    verify_and_seal_graph_object_counted(file, digest, expected_length, object_path, diagnostic)
+        .map(|_| ())
+}
+
+fn verify_and_seal_graph_object_counted(
+    file: &File,
+    digest: &str,
+    expected_length: u64,
+    object_path: &Path,
+    diagnostic: &Path,
+) -> Result<ReadIoEvidence, GfError> {
     // Reuse is safe only after the exact opened inode is no longer writable.
     // Hashing first would leave a window in which the already-authenticated
     // bytes could be changed before the subsequent chmod.
@@ -2818,7 +3103,7 @@ fn verify_and_seal_graph_object(
             return Err(validation("graph object is not canonically sealed"));
         }
     }
-    verify_file(
+    let io = verify_file_counted(
         file.try_clone()
             .map_err(|error| storage("clone graph object for authentication", diagnostic, error))?,
         digest,
@@ -2835,7 +3120,7 @@ fn verify_and_seal_graph_object(
             "graph object became writable during authentication",
         ));
     }
-    Ok(())
+    Ok(io)
 }
 
 #[cfg(unix)]
@@ -3723,6 +4008,11 @@ mod tests {
         assert_eq!(evidence.files_reused, 1);
         assert_eq!(evidence.bytes_reused, payload.len() as u64);
         assert_eq!(evidence.files_copied, 0);
+        assert_eq!(evidence.application_read_bytes, payload.len() as u64);
+        assert_eq!(evidence.application_read_calls, 1);
+        assert_eq!(evidence.application_write_bytes, 0);
+        assert_eq!(evidence.application_write_calls, 0);
+        assert_eq!(evidence.fsync_calls, 0);
     }
 
     #[test]
@@ -3762,6 +4052,17 @@ mod tests {
 
         assert_eq!(evidence.files_copied, inventory.file_count);
         assert_eq!(evidence.files_reused, 0);
+        let nonempty_bytes = inventory.total_byte_length;
+        let nonempty_files = inventory
+            .files
+            .iter()
+            .filter(|entry| entry.byte_length != 0)
+            .count() as u64;
+        assert_eq!(evidence.application_read_bytes, nonempty_bytes * 2);
+        assert_eq!(evidence.application_read_calls, nonempty_files * 2);
+        assert_eq!(evidence.application_write_bytes, nonempty_bytes);
+        assert_eq!(evidence.application_write_calls, nonempty_files);
+        assert_eq!(evidence.fsync_calls, inventory.file_count * 2);
         for entry in &inventory.files {
             let file = File::open(target.join(&entry.relative_path)).unwrap();
             assert_eq!(graphforge_filesystem::file_link_count(&file).unwrap(), 1);
@@ -3807,6 +4108,10 @@ mod tests {
         assert_eq!(first.bytes_hashed, 7);
         assert_eq!(first.bytes_installed, 7);
         assert!(!first.reused_existing);
+        assert_eq!(first.read_calls, 1);
+        assert_eq!(first.write_bytes, 7);
+        assert_eq!(first.write_calls, 1);
+        assert_eq!(first.fsync_calls, 3);
         assert!(
             root.path()
                 .join(GRAPH_OBJECTS_DIR)
@@ -3819,6 +4124,10 @@ mod tests {
         );
         let (_, second) = install_graph_object_bytes(root.path(), b"payload").unwrap();
         assert!(second.reused_existing);
+        assert_eq!(second.read_calls, 1);
+        assert_eq!(second.write_bytes, 0);
+        assert_eq!(second.write_calls, 0);
+        assert_eq!(second.fsync_calls, 0);
         assert_eq!(
             read_graph_object(root.path(), &digest, 7).unwrap(),
             b"payload"

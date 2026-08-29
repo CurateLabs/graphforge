@@ -5596,9 +5596,24 @@ impl ExecutionSession {
         let resolved_plan = self.resolve_row_count_expressions(plan, params).await?;
         let (physical, fallback_schema) = self.plan_physical(&resolved_plan, params).await?;
 
-        let mut batches = collect(Arc::clone(&physical), self.ctx.task_ctx())
-            .await
-            .map_err(|e| GfError::Execution(e.to_string()))?;
+        let task_ctx = self.ctx.task_ctx();
+        let memory_reserved_before = task_ctx.memory_pool().reserved();
+        let collected = collect(Arc::clone(&physical), Arc::clone(&task_ctx)).await;
+        let memory_reserved_after = task_ctx.memory_pool().reserved();
+        let returned_batch_bytes = collected.as_ref().map_or(0, |batches| {
+            batches
+                .iter()
+                .map(arrow::record_batch::RecordBatch::get_array_memory_size)
+                .sum()
+        });
+        demand::record_plan_completion(
+            &physical,
+            memory_reserved_before,
+            memory_reserved_after,
+            returned_batch_bytes,
+            task_ctx.session_config().batch_size(),
+        );
+        let mut batches = collected.map_err(|e| GfError::Execution(e.to_string()))?;
 
         // DataFusion's collect may return zero batches for an empty stream.
         // Public callers (and DF54-era optimistic publish tests) index

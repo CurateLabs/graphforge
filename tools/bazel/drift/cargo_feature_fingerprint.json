@@ -1,6 +1,6 @@
 {
   "schema": "graphforge.cargo-feature-fingerprint.v1",
-  "sha256": "faf566b1023d302f374da985eedf1d2faa6e580fb9caa5dccc17840db4c50023",
+  "sha256": "7bff132d4c674e4bdc233fd065ffb378e9512889b36ca1316fdd40033b9a4e13",
   "entries": [
     {
       "name": "graphforge-api",
@@ -88,6 +88,15 @@
           "optional": false,
           "uses_default_features": true,
           "kind": null,
+          "target": null
+        },
+        {
+          "name": "graphforge-filesystem",
+          "req": "*",
+          "features": [],
+          "optional": false,
+          "uses_default_features": true,
+          "kind": "dev",
           "target": null
         },
         {
@@ -1105,7 +1114,8 @@
             "Win32_Security",
             "Win32_Security_Authorization",
             "Win32_Storage_FileSystem",
-            "Win32_System_IO"
+            "Win32_System_IO",
+            "Win32_System_Ioctl"
           ],
           "optional": false,
           "uses_default_features": true,

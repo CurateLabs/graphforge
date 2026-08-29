@@ -1,6 +1,6 @@
 //! Bounded deterministic portable-project v2 complete-package export.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -355,7 +355,7 @@ impl PortableV2ExportPlan {
         Ok(())
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 /// Durable publication receipt with separate semantic and transport identities.
 pub struct PortableV2ExportReceipt {
     /// Pinned source generation.
@@ -372,6 +372,53 @@ pub struct PortableV2ExportReceipt {
     pub output: PortableV2Output,
     /// Fingerprint of the immutable content-free selection preview used by the writer.
     pub selection_fingerprint: String,
+    /// Exact native allocation of the published package for lifecycle evidence.
+    #[doc(hidden)]
+    pub allocation_identity_allocated_bytes: BTreeMap<String, u64>,
+    /// Logical EOF bytes of the exact published identity union.
+    #[doc(hidden)]
+    pub allocation_logical_bytes: u64,
+    /// Distinct physical files in the exact published identity union.
+    #[doc(hidden)]
+    pub allocation_physical_objects: u64,
+}
+
+impl PartialEq for PortableV2ExportReceipt {
+    fn eq(&self, other: &Self) -> bool {
+        self.generation_uuid == other.generation_uuid
+            && self.package_digest == other.package_digest
+            && self.transport_digest == other.transport_digest
+            && self.entry_count == other.entry_count
+            && self.payload_bytes == other.payload_bytes
+            && self.output == other.output
+            && self.selection_fingerprint == other.selection_fingerprint
+            && self.allocation_logical_bytes == other.allocation_logical_bytes
+            && self.allocation_physical_objects == other.allocation_physical_objects
+    }
+}
+
+impl Eq for PortableV2ExportReceipt {}
+
+#[derive(Default)]
+struct ExportAllocationObserver {
+    allocated: BTreeMap<String, u64>,
+    logical: BTreeMap<String, u64>,
+}
+
+impl ExportAllocationObserver {
+    fn observe(&mut self, file: &File) -> Result<(), ExportError> {
+        let identity = graphforge_filesystem::file_identity(file).map_err(storage)?;
+        let usage = graphforge_filesystem::file_space_usage(file).map_err(storage)?;
+        let mut file_id = String::with_capacity(32);
+        for byte in identity.file_id {
+            use std::fmt::Write as _;
+            write!(&mut file_id, "{byte:02x}").expect("writing to String cannot fail");
+        }
+        let key = format!("{:016x}:{file_id}", identity.volume_serial);
+        self.allocated.insert(key.clone(), usage.allocated_bytes);
+        self.logical.insert(key, usage.logical_bytes);
+        Ok(())
+    }
 }
 
 #[derive(Serialize)]
@@ -1104,23 +1151,45 @@ pub fn export_complete_portable_v2(
         .ok_or_else(|| err("GF_INVALID_DESTINATION", "invalid destination name"))?;
     let stage = parent.join(format!(".{name}.{}.partial", Uuid::new_v4()));
     let is_cancelled = || cancelled.load(Ordering::Relaxed);
+    let mut allocation = ExportAllocationObserver::default();
     let result = match output {
-        PortableV2Output::Expanded => expanded(plan, &stage, limits, &is_cancelled, &mut progress),
-        PortableV2Output::Bundle => bundle(plan, &stage, limits, &is_cancelled, &mut progress),
+        PortableV2Output::Expanded => expanded(
+            plan,
+            &stage,
+            limits,
+            &is_cancelled,
+            &mut progress,
+            &mut allocation,
+        ),
+        PortableV2Output::Bundle => bundle(
+            plan,
+            &stage,
+            limits,
+            &is_cancelled,
+            &mut progress,
+            &mut allocation,
+        ),
     };
     let digest = match result {
         Ok(d) => d,
         Err(e) => {
             remove(&stage);
-            return Err(e);
+            return Err(e.with_allocation_identities(allocation.allocated));
         }
     };
+    let allocation_logical_bytes = allocation.logical.values().copied().sum();
+    let allocation_physical_objects = allocation.logical.len() as u64;
+    let staged_allocation = allocation.allocated;
     if is_cancelled() {
         remove(&stage);
-        return Err(err("GF_CANCELLED", "portable export cancelled"));
+        return Err(err("GF_CANCELLED", "portable export cancelled")
+            .with_allocation_identities(staged_allocation));
     }
     let verified = verify_portable_v2(&stage, PortableV2Mode::Full, limits, Some(cancelled))
-        .inspect_err(|_| remove(&stage))?;
+        .map_err(|error| {
+            remove(&stage);
+            error.with_allocation_identities(staged_allocation.clone())
+        })?;
     let expected_transport = format!("sha256:{}", hex(digest));
     if verified.package_class != plan.package_class
         || verified.package_digest != format!("sha256:{}", hex(plan.package_digest))
@@ -1129,22 +1198,24 @@ pub fn export_complete_portable_v2(
         return Err(PortableV2Error::new(
             PortableV2ErrorCode::DigestMismatch,
             "writer and verifier semantic receipts disagree",
-        ));
+        )
+        .with_allocation_identities(staged_allocation.clone()));
     }
     if verified.transport_digest.as_deref() != Some(expected_transport.as_str()) {
         remove(&stage);
         return Err(PortableV2Error::new(
             PortableV2ErrorCode::DigestMismatch,
             "writer and verifier transport receipts disagree",
-        ));
+        )
+        .with_allocation_identities(staged_allocation.clone()));
     }
     publish_no_replace(&stage, dst).map_err(|error| {
         remove(&stage);
-        storage(error)
+        storage(error).with_allocation_identities(staged_allocation.clone())
     })?;
     if let Err(error) = sync_dir(parent) {
         remove(dst);
-        return Err(error);
+        return Err(error.with_allocation_identities(staged_allocation));
     }
     Ok(PortableV2ExportReceipt {
         generation_uuid: plan.generation_uuid,
@@ -1155,6 +1226,9 @@ pub fn export_complete_portable_v2(
         payload_bytes: plan.payload_bytes,
         output,
         selection_fingerprint: plan.selection_fingerprint.clone(),
+        allocation_identity_allocated_bytes: staged_allocation,
+        allocation_logical_bytes,
+        allocation_physical_objects,
     })
 }
 
@@ -1299,9 +1373,15 @@ fn expanded(
     l: PortableV2ExportLimits,
     cancelled: &impl Fn() -> bool,
     progress: &mut impl FnMut(PortableV2ExportProgress),
+    allocation: &mut ExportAllocationObserver,
 ) -> Result<[u8; 32], ExportError> {
     fs::create_dir(stage).map_err(storage)?;
-    write_bytes(stage, "data/graphforge-project.json", &plan.manifest)?;
+    write_bytes(
+        stage,
+        "data/graphforge-project.json",
+        &plan.manifest,
+        allocation,
+    )?;
     let mut payload = vec![(
         "data/graphforge-project.json".into(),
         plan.manifest.len() as u64,
@@ -1311,15 +1391,22 @@ fn expanded(
     for (i, f) in plan.files.iter().enumerate() {
         let target = stage.join(&f.path);
         parent(&target)?;
-        copy(f, &target, l.copy_buffer_bytes, cancelled, |n| {
-            done += n;
-            progress(PortableV2ExportProgress {
-                entries_completed: i + 1,
-                bytes_completed: done,
-                entries_total: plan.files.len() + 5,
-                bytes_total: plan.payload_bytes,
-            });
-        })?;
+        copy(
+            f,
+            &target,
+            l.copy_buffer_bytes,
+            cancelled,
+            allocation,
+            |n| {
+                done += n;
+                progress(PortableV2ExportProgress {
+                    entries_completed: i + 1,
+                    bytes_completed: done,
+                    entries_total: plan.files.len() + 5,
+                    bytes_total: plan.payload_bytes,
+                });
+            },
+        )?;
         progress(PortableV2ExportProgress {
             entries_completed: i + 2,
             bytes_completed: done,
@@ -1330,9 +1417,9 @@ fn expanded(
     }
     payload.sort_by(|a, b| a.0.cmp(&b.0));
     let inv = inventory(&payload, l.max_tag_manifest_bytes)?;
-    write_bytes(stage, "manifest-sha256.txt", &inv)?;
-    write_bytes(stage, "bagit.txt", BAGIT)?;
-    write_bytes(stage, "bag-info.txt", BAG_INFO)?;
+    write_bytes(stage, "manifest-sha256.txt", &inv, allocation)?;
+    write_bytes(stage, "bagit.txt", BAGIT, allocation)?;
+    write_bytes(stage, "bag-info.txt", BAG_INFO, allocation)?;
     let tags = [
         ("bag-info.txt", BAG_INFO),
         ("bagit.txt", BAGIT),
@@ -1343,7 +1430,7 @@ fn expanded(
         .map(|(p, b)| (p.to_string(), b.len() as u64, Sha256::digest(b).into()))
         .collect::<Vec<_>>();
     let tag = inventory(&tag_rows, l.max_tag_manifest_bytes)?;
-    write_bytes(stage, "tagmanifest-sha256.txt", &tag)?;
+    write_bytes(stage, "tagmanifest-sha256.txt", &tag, allocation)?;
     progress(PortableV2ExportProgress {
         entries_completed: plan.files.len() + 5,
         bytes_completed: done,
@@ -1425,6 +1512,7 @@ fn bundle(
     l: PortableV2ExportLimits,
     cancelled: &impl Fn() -> bool,
     progress: &mut impl FnMut(PortableV2ExportProgress),
+    allocation: &mut ExportAllocationObserver,
 ) -> Result<[u8; 32], ExportError> {
     let mut items = entries(plan, l.max_tag_manifest_bytes)?;
     items.sort_by(|a, b| a.0.cmp(&b.0));
@@ -1440,19 +1528,32 @@ fn bundle(
             return Err(err("GF_CANCELLED", "portable export cancelled"));
         }
         header(&mut out, &mut h, path, src.len())?;
+        allocation.observe(&out)?;
         match src {
-            Src::Bytes(b) => emit(&mut out, &mut h, b)?,
-            Src::File(f) => stream(&mut out, &mut h, f, l.copy_buffer_bytes, cancelled, |n| {
-                done += n;
-                progress(PortableV2ExportProgress {
-                    entries_completed: i,
-                    bytes_completed: done,
-                    entries_total: items.len(),
-                    bytes_total: plan.payload_bytes,
-                });
-            })?,
+            Src::Bytes(b) => {
+                emit(&mut out, &mut h, b)?;
+                allocation.observe(&out)?;
+            }
+            Src::File(f) => stream(
+                &mut out,
+                &mut h,
+                f,
+                l.copy_buffer_bytes,
+                cancelled,
+                allocation,
+                |n| {
+                    done += n;
+                    progress(PortableV2ExportProgress {
+                        entries_completed: i,
+                        bytes_completed: done,
+                        entries_total: items.len(),
+                        bytes_total: plan.payload_bytes,
+                    });
+                },
+            )?,
         }
         pad(&mut out, &mut h, src.len())?;
+        allocation.observe(&out)?;
         progress(PortableV2ExportProgress {
             entries_completed: i + 1,
             bytes_completed: done,
@@ -1462,8 +1563,10 @@ fn bundle(
     }
     let end = [0u8; 1024];
     out.write_all(&end).map_err(storage)?;
+    allocation.observe(&out)?;
     h.update(end);
     out.sync_all().map_err(storage)?;
+    allocation.observe(&out)?;
     Ok(h.finalize().into())
 }
 
@@ -1570,6 +1673,7 @@ fn copy(
     target: &Path,
     size: usize,
     cancelled: &impl Fn() -> bool,
+    allocation: &mut ExportAllocationObserver,
     mut tick: impl FnMut(u64),
 ) -> Result<(), ExportError> {
     let mut output = OpenOptions::new()
@@ -1582,7 +1686,9 @@ fn copy(
             return Err(err("GF_CANCELLED", "portable export cancelled"));
         }
         output.write_all(bytes).map_err(storage)?;
+        allocation.observe(&output)?;
         output.sync_all().map_err(storage)?;
+        allocation.observe(&output)?;
         tick(bytes.len() as u64);
         return Ok(());
     }
@@ -1604,6 +1710,7 @@ fn copy(
         tick(count as u64);
     }
     output.sync_all().map_err(storage)?;
+    allocation.observe(&output)?;
     if bytes_read != planned.length || <[u8; 32]>::from(digest.finalize()) != planned.digest {
         return Err(err("GF_SOURCE_CHANGED", "source changed during export"));
     }
@@ -1620,6 +1727,7 @@ fn stream(
     planned: &PlannedFile,
     size: usize,
     cancelled: &impl Fn() -> bool,
+    allocation: &mut ExportAllocationObserver,
     mut tick: impl FnMut(u64),
 ) -> Result<(), ExportError> {
     if let PlannedSource::Control(bytes) = &planned.source {
@@ -1627,6 +1735,7 @@ fn stream(
             return Err(err("GF_CANCELLED", "portable export cancelled"));
         }
         out.write_all(bytes).map_err(storage)?;
+        allocation.observe(out)?;
         transport.update(bytes);
         tick(bytes.len() as u64);
         return Ok(());
@@ -2077,7 +2186,12 @@ fn publish_no_replace(_: &Path, _: &Path) -> std::io::Result<()> {
 fn parent(p: &Path) -> Result<(), ExportError> {
     fs::create_dir_all(p.parent().unwrap()).map_err(storage)
 }
-fn write_bytes(root: &Path, p: &str, b: &[u8]) -> Result<(), ExportError> {
+fn write_bytes(
+    root: &Path,
+    p: &str,
+    b: &[u8],
+    allocation: &mut ExportAllocationObserver,
+) -> Result<(), ExportError> {
     let p = root.join(p);
     parent(&p)?;
     let mut f = OpenOptions::new()
@@ -2086,7 +2200,9 @@ fn write_bytes(root: &Path, p: &str, b: &[u8]) -> Result<(), ExportError> {
         .open(p)
         .map_err(storage)?;
     f.write_all(b).map_err(storage)?;
-    f.sync_all().map_err(storage)
+    allocation.observe(&f)?;
+    f.sync_all().map_err(storage)?;
+    allocation.observe(&f)
 }
 fn sync_tree(root: &Path) -> Result<(), ExportError> {
     let mut dirs = vec![root.into()];
@@ -2595,8 +2711,25 @@ mod tests {
         let expanded_path = root.join("hostile.gfproject");
         let bundle_path = root.join("hostile.gfpb");
         let limits = PortableV2ExportLimits::default();
-        expanded(plan, &expanded_path, limits, &|| false, &mut |_| {}).unwrap();
-        bundle(plan, &bundle_path, limits, &|| false, &mut |_| {}).unwrap();
+        let mut allocation = ExportAllocationObserver::default();
+        expanded(
+            plan,
+            &expanded_path,
+            limits,
+            &|| false,
+            &mut |_| {},
+            &mut allocation,
+        )
+        .unwrap();
+        bundle(
+            plan,
+            &bundle_path,
+            limits,
+            &|| false,
+            &mut |_| {},
+            &mut allocation,
+        )
+        .unwrap();
         (expanded_path, bundle_path)
     }
 
@@ -2630,6 +2763,15 @@ mod tests {
         assert_eq!(
             expanded_receipt.package_digest,
             bundle_receipt.package_digest
+        );
+        assert!(
+            expanded_receipt.allocation_identity_allocated_bytes.len() > 1,
+            "expanded writer must report each exact published identity"
+        );
+        assert_eq!(
+            bundle_receipt.allocation_identity_allocated_bytes.len(),
+            1,
+            "bundle writer must report its one exact published identity"
         );
         let expanded_report =
             verify_portable_v2(&expanded, PortableV2Mode::Full, limits, Some(&cancelled)).unwrap();
@@ -3926,6 +4068,10 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.code, PortableV2ErrorCode::ConcurrentMutation);
+        assert!(
+            !error.allocation_identity_allocated_bytes.is_empty(),
+            "partial bundle allocation must survive typed failure"
+        );
         assert!(!mutated.exists());
     }
 
@@ -3998,11 +4144,13 @@ mod tests {
         assert_eq!(total, 32 * 1024 * 1024);
         let destination = root.path().join("dense.parquet");
         let mut observed = 0;
+        let mut allocation = ExportAllocationObserver::default();
         copy(
             &planned,
             &destination,
             limits.copy_buffer_bytes,
             &|| false,
+            &mut allocation,
             |bytes| {
                 observed += bytes;
             },

@@ -1928,23 +1928,41 @@ fn authenticate_inventory(
 pub(crate) fn authenticate_inventory_control_for_publication(
     source: &StableDirectory,
     inventory: &GraphConstructionEncoding,
-) -> Result<u64, GfError> {
+) -> Result<PublicationControlIoEvidence, GfError> {
     let encoded = source
         .open_child_directory(OsStr::new(ENCODED_ROOT))
         .map_err(storage)?;
-    let recorded = read_inventory(&encoded)?
-        .ok_or_else(|| storage("canonical encoding inventory is absent"))?;
+    let file = encoded
+        .open_child_file(OsStr::new(INVENTORY))
+        .map_err(storage)?;
+    if file.metadata().map_err(storage)?.len() > MAX_INVENTORY_BYTES {
+        return Err(storage("canonical inventory exceeds bound"));
+    }
+    let counter = IoCounter::default();
+    let recorded: GraphConstructionEncoding = serde_json::from_reader(BufReader::with_capacity(
+        COPY_BUFFER_BYTES,
+        CountingInput {
+            inner: file,
+            counter: counter.clone(),
+        },
+    ))
+    .map_err(storage)?;
     if &recorded != inventory {
         return Err(storage(
             "publication inventory differs from durable encoding",
         ));
     }
-    encoded
-        .open_child_file(OsStr::new(INVENTORY))
-        .map_err(storage)?
-        .metadata()
-        .map(|metadata| metadata.len())
-        .map_err(storage)
+    let (read_bytes, read_calls) = counter.values();
+    Ok(PublicationControlIoEvidence {
+        read_bytes,
+        read_calls,
+    })
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PublicationControlIoEvidence {
+    pub(crate) read_bytes: u64,
+    pub(crate) read_calls: u64,
 }
 
 fn install_json<T: Serialize>(

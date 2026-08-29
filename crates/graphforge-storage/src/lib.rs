@@ -19,6 +19,14 @@ pub mod filesystem_admission;
 pub mod adjacency;
 pub mod adjacency_delta;
 
+pub mod storage_attribution;
+pub use storage_attribution::{
+    ArtifactCategory, ArtifactStorageTotals, ConstructionPhaseAttribution, PhaseIoTotals,
+    ProjectStorageIdentityUnion, StorageAllocationLifecycle, StorageAllocationTransition,
+    StorageAttributionSnapshot, StorageIoPhase, capture_project_storage_identity_union,
+    capture_storage_attribution, classify_graph_artifact,
+};
+
 pub mod generation;
 pub use generation::{
     commit_topology_aware, commit_topology_aware_with_auxiliary, read_search_generation,
@@ -195,8 +203,8 @@ pub use project_portable_v2_export::{
     plan_complete_portable_v2, plan_selected_portable_v2, repack_verified_expanded_portable_v2,
 };
 pub use project_portable_v2_import::{
-    PortableV2ImportPhase, PortableV2ImportProgress, PortableV2ImportReceipt,
-    PortableV2SelectiveCandidate, PortableV2StagedCompositionReceipt,
+    PortableV2ImportCleanupReceipt, PortableV2ImportPhase, PortableV2ImportProgress,
+    PortableV2ImportReceipt, PortableV2SelectiveCandidate, PortableV2StagedCompositionReceipt,
     consume_selective_portable_v2, import_complete_portable_v2,
     import_complete_portable_v2_with_progress, load_portable_ontology_staging,
 };

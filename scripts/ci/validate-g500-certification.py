@@ -32,8 +32,15 @@ REQUIRED_PHASES = (
     "drill_resource_limit",
     "drill_interrupted_finalization",
 )
-FORBIDDEN_KEY = re.compile(r"(secret|credential|token|password|host_path|absolute_path)", re.I)
+FORBIDDEN_KEY = re.compile(
+    r"(secret|credential|token|password|host_path|absolute_path|machine[_-]?id|volume[_-]?id|provider_resource_id)",
+    re.I,
+)
 ABSOLUTE_PATH = re.compile(r"(?:^|[\s=:])(?:/|[A-Za-z]:[\\/])")
+RAW_UUID = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.I,
+)
 ROOT = Path(__file__).resolve().parents[2]
 PROFILE = ROOT / "crates/graphforge-api/tests/fixtures/scale_g500_certification.v1.json"
 SCHEMA = ROOT / "docs/development/evidence/g500-certification.schema.json"
@@ -79,8 +86,11 @@ def reject_sensitive(value: Any, trail: str = "$") -> None:
     elif isinstance(value, list):
         for index, child in enumerate(value):
             reject_sensitive(child, f"{trail}[{index}]")
-    elif isinstance(value, str) and ABSOLUTE_PATH.search(value):
-        raise EvidenceError(f"absolute host path at {trail}")
+    elif isinstance(value, str):
+        if ABSOLUTE_PATH.search(value):
+            raise EvidenceError(f"absolute host path at {trail}")
+        if RAW_UUID.fullmatch(value):
+            raise EvidenceError(f"raw UUID at {trail}")
 
 
 def validate(evidence: dict[str, Any], expected_sha: str | None) -> None:
@@ -97,9 +107,13 @@ def validate(evidence: dict[str, Any], expected_sha: str | None) -> None:
     expected_profile = "sha256:" + hashlib.sha256(PROFILE.read_bytes()).hexdigest()
     if evidence.get("profile_sha256") != expected_profile:
         raise EvidenceError("evidence profile does not match the committed certification profile")
+    run = evidence.get("run", {})
+    scale = run.get("scale")
+    if scale not in (20, 22, 24, 26):
+        raise EvidenceError("run scale is not a supported qualification rung")
     expected_run = {
         "command": RUN_COMMAND,
-        "scale": 26,
+        "scale": scale,
         "edgefactor": 16,
         "seed": 1,
         "directionality": "undirected",
@@ -130,16 +144,37 @@ def validate(evidence: dict[str, Any], expected_sha: str | None) -> None:
         raise EvidenceError("counts must be non-negative integers")
     if raw != live + loops + dupes:
         raise EvidenceError("generator counts do not reconcile")
-    if live < 1_000_000_000:
-        raise EvidenceError("certification requires at least one billion live edges")
+    if scale == 26 and live < 1_000_000_000:
+        raise EvidenceError("S26 certification requires at least one billion live edges")
     if any(counts.get(key) != live for key in ("source_edges", "imported_edges")):
         raise EvidenceError("source/imported edge counts differ")
     if counts.get("source_nodes") != counts.get("imported_nodes"):
         raise EvidenceError("source/imported node counts differ")
+    if counts.get("source_nodes") != 1 << scale:
+        raise EvidenceError("source/imported node count does not match the declared scale")
+
+    storage = evidence.get("storage_attribution", {})
+    selected_source = storage.get("source", {}).get("allocated_bytes")
+    source_project = storage.get("source_project_current_allocated_bytes")
+    workspace = storage.get("workspace_current_allocated_bytes")
+    peak = evidence.get("envelope", {}).get("peak_disk_bytes")
+    if not all(
+        isinstance(value, int) for value in (selected_source, source_project, workspace, peak)
+    ):
+        raise EvidenceError("storage union numerators must be integers")
+    if not selected_source <= source_project <= workspace <= peak:
+        raise EvidenceError(
+            "selected source, source project, workspace, and peak unions do not reconcile"
+        )
 
     identities = evidence.get("identities", {})
-    if identities.get("source_generation") == identities.get("imported_generation"):
-        raise EvidenceError("source and imported generations must be distinct")
+    for proof in (
+        "source_export_generation_authenticated",
+        "import_receipt_reopen_authenticated",
+        "source_import_generations_distinct",
+    ):
+        if identities.get(proof) is not True:
+            raise EvidenceError(f"generation proof is not authenticated: {proof}")
     if len({identities.get("package"), identities.get("transport")}) != 2:
         raise EvidenceError("semantic package and transport identities must be distinct")
     package = evidence.get("package", {})
@@ -233,11 +268,12 @@ def validate(evidence: dict[str, Any], expected_sha: str | None) -> None:
         raise EvidenceError("certification OS image contains unsupported characters")
     if re.fullmatch(r"[0-9A-Za-z._+-]+", str(host.get("kernel", ""))) is None:
         raise EvidenceError("host kernel release is malformed")
-    if (
-        host.get("memory_bytes", 0) < 137_438_953_472
-        or host.get("nvme_bytes", 0) < 1_099_511_627_776
-    ):
-        raise EvidenceError("host does not meet declared capacity")
+    memory_bytes = host.get("memory_bytes", 0)
+    nvme_bytes = host.get("nvme_bytes", 0)
+    if memory_bytes < envelope.get("peak_rss_bytes", 0):
+        raise EvidenceError("observed RSS exceeds declared host memory")
+    if nvme_bytes < envelope.get("peak_disk_bytes", 0):
+        raise EvidenceError("observed storage peak exceeds declared host capacity")
     if evidence.get("result") != "pass" or evidence.get("first_failure") is not None:
         raise EvidenceError("certification evidence is not a pass")
 

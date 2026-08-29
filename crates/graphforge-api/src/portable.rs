@@ -60,6 +60,20 @@ pub struct PortableV2ImportResult {
     pub generation_uuid: Uuid,
     /// Whether the operation replayed an identical publication.
     pub idempotent_replay: bool,
+    /// Exact private-materialization identity allocation for lifecycle qualification.
+    #[doc(hidden)]
+    pub materialized_identity_allocated_bytes: std::collections::BTreeMap<String, u64>,
+    /// Exact published-project identity union for lifecycle qualification,
+    /// including controls and every retained generation.
+    #[doc(hidden)]
+    pub published_identity_allocated_bytes: std::collections::BTreeMap<String, u64>,
+    /// Exact identities durably removed by private-materialization cleanup.
+    #[doc(hidden)]
+    pub materialized_cleanup_removed_identity_allocated_bytes:
+        std::collections::BTreeMap<String, u64>,
+    /// Whether the cleanup namespace synchronization completed.
+    #[doc(hidden)]
+    pub materialized_cleanup_parent_sync_confirmed: bool,
 }
 
 /// Publish a verified local portable-v2 package to an OCI registry.
@@ -186,6 +200,18 @@ pub struct PortableV2ExportFacadeResult {
     pub selection_fingerprint: String,
     /// Caller-selected output path.
     pub output: PathBuf,
+    /// Exact writer-owned published allocation for lifecycle qualification.
+    #[doc(hidden)]
+    #[serde(skip)]
+    pub allocation_identity_allocated_bytes: std::collections::BTreeMap<String, u64>,
+    /// Writer-owned logical bytes of the published package identity union.
+    #[doc(hidden)]
+    #[serde(skip)]
+    pub allocation_logical_bytes: u64,
+    /// Writer-owned distinct published package identities.
+    #[doc(hidden)]
+    #[serde(skip)]
+    pub allocation_physical_objects: u64,
 }
 
 /// Stable export result.
@@ -421,6 +447,9 @@ impl GraphForge {
             },
             selection_fingerprint: receipt.selection_fingerprint,
             output: request.output_path.clone(),
+            allocation_identity_allocated_bytes: receipt.allocation_identity_allocated_bytes,
+            allocation_logical_bytes: receipt.allocation_logical_bytes,
+            allocation_physical_objects: receipt.allocation_physical_objects,
         })
     }
 
@@ -526,6 +555,14 @@ impl GraphForge {
             transport_digest: receipt.transport_digest,
             generation_uuid: receipt.publication.generation_uuid,
             idempotent_replay: receipt.publication.idempotent_replay,
+            materialized_identity_allocated_bytes: receipt.materialized_identity_allocated_bytes,
+            published_identity_allocated_bytes: receipt.published_identity_allocated_bytes,
+            materialized_cleanup_removed_identity_allocated_bytes: receipt
+                .materialized_cleanup
+                .removed_identity_allocated_bytes,
+            materialized_cleanup_parent_sync_confirmed: receipt
+                .materialized_cleanup
+                .parent_sync_confirmed,
         })
     }
 }

@@ -129,22 +129,101 @@ pub struct FilterSnapshot {
     pub output_rows: u64,
 }
 
+/// Aggregate-only evidence from one fetch-aware physical sort.
+#[doc(hidden)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SortSnapshot {
+    /// Stable pre-order ordinal in the executed physical plan.
+    pub ordinal: usize,
+    /// Physical TopK bound. `None` denotes an unbounded full sort.
+    pub fetch: Option<usize>,
+    /// Rows observed by the physical sort's baseline metric. DataFusion
+    /// charges a batch before its fetch wrapper slices the terminal batch, so
+    /// this may exceed `fetch` by at most one configured execution batch.
+    pub output_rows: u64,
+    /// Spill operations performed by the sort.
+    pub spill_count: u64,
+    /// Rows written to spill files.
+    pub spilled_rows: u64,
+    /// Bytes written to spill files.
+    pub spilled_bytes: u64,
+    /// Memory still reserved by the sort after its stream was released.
+    pub retained_bytes: u64,
+}
+
+/// Observational process-RSS samples while one physical operator stream lived.
+/// These are diagnostics, not allocator ownership claims.
+#[doc(hidden)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OperatorRssSnapshot {
+    /// Stable physical-plan traversal ordinal among instrumented operators.
+    pub ordinal: usize,
+    /// Sanitized physical operator class.
+    pub operator: &'static str,
+    /// Process RSS immediately before the operator stream was created.
+    pub before_bytes: u64,
+    /// Highest process RSS sampled while the operator stream was polled.
+    pub peak_bytes: u64,
+    /// Process RSS when the operator stream was released.
+    pub after_bytes: u64,
+}
+
 /// Aggregate-only diagnostic snapshot for the most recently reset capture.
+#[doc(hidden)]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DemandSnapshot {
     /// Per-hop counters keyed by the edge variable id.
     pub hops: BTreeMap<u32, HopSnapshot>,
     /// Selective filter counters.
     pub filters: BTreeMap<usize, FilterSnapshot>,
+    /// Fetch-aware sort work collected from the executed ordinary plan.
+    pub sorts: Vec<SortSnapshot>,
+    /// Per-operator observational RSS lifetimes.
+    pub operator_rss: Vec<OperatorRssSnapshot>,
     /// Number of query cancellation signals.
     pub cancellations: u64,
     /// Maximum simultaneous filtered-read calls.
     pub max_in_flight_reads: u64,
+    /// Query memory-pool reservation before physical execution.
+    pub memory_reserved_before: u64,
+    /// Query memory-pool reservation after every operator stream was dropped.
+    pub memory_reserved_after: u64,
+    /// Arrow bytes retained by the returned result batches.
+    pub returned_batch_bytes: u64,
+    /// DataFusion batch-row budget configured for the executed session.
+    pub execution_batch_rows: u64,
 }
 
 static CAPTURE_ENABLED: AtomicBool = AtomicBool::new(false);
+static CAPTURE_GUARD: Mutex<()> = Mutex::new(());
 static CAPTURE: LazyLock<Mutex<DemandSnapshot>> =
     LazyLock::new(|| Mutex::new(DemandSnapshot::default()));
+
+struct CaptureDisable;
+
+impl Drop for CaptureDisable {
+    fn drop(&mut self) {
+        disable();
+    }
+}
+
+/// Run one ordinary operation with exclusive aggregate diagnostic capture.
+///
+/// Capture is process-global because physical execution may cross worker
+/// threads. Serializing the complete operation prevents concurrent tests or
+/// certification phases from mixing counters while leaving execution itself
+/// unchanged.
+#[doc(hidden)]
+pub fn capture<T>(operation: impl FnOnce() -> T) -> (T, DemandSnapshot) {
+    let _exclusive = CAPTURE_GUARD
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    reset();
+    let disable_on_exit = CaptureDisable;
+    let result = operation();
+    drop(disable_on_exit);
+    (result, snapshot())
+}
 
 /// Reset and enable fixed-hop demand capture.
 #[doc(hidden)]
@@ -168,6 +247,64 @@ pub fn snapshot() -> DemandSnapshot {
 
 pub(crate) fn capture_enabled() -> bool {
     CAPTURE_ENABLED.load(Ordering::Relaxed)
+}
+
+/// Preserve physical-plan and memory evidence after execution, including when
+/// collection failed. This runs on the ordinary execution path; capture merely
+/// decides whether the aggregate counters are retained for a caller/test.
+pub(crate) fn record_plan_completion(
+    plan: &Arc<dyn ExecutionPlan>,
+    memory_reserved_before: usize,
+    memory_reserved_after: usize,
+    returned_batch_bytes: usize,
+    execution_batch_rows: usize,
+) {
+    fn metric(metrics: &datafusion::physical_plan::metrics::MetricsSet, name: &str) -> u64 {
+        metrics
+            .sum_by_name(name)
+            .map_or(0, |value| value.as_usize() as u64)
+    }
+
+    fn visit(plan: &Arc<dyn ExecutionPlan>, sorts: &mut Vec<SortSnapshot>) {
+        if plan.downcast_ref::<SortExec>().is_some() {
+            let metrics = plan.metrics().unwrap_or_default();
+            sorts.push(SortSnapshot {
+                ordinal: sorts.len(),
+                fetch: plan.fetch(),
+                output_rows: metrics.output_rows().map_or(0, |value| value as u64),
+                spill_count: metrics.spill_count().map_or(0, |value| value as u64),
+                spilled_rows: metrics.spilled_rows().map_or(0, |value| value as u64),
+                spilled_bytes: metrics.spilled_bytes().map_or(0, |value| value as u64),
+                retained_bytes: metric(&metrics, "mem_used"),
+            });
+        }
+        for child in plan.children() {
+            visit(child, sorts);
+        }
+    }
+
+    if !capture_enabled() {
+        return;
+    }
+
+    let mut sorts = Vec::new();
+    visit(plan, &mut sorts);
+    let completion_rss = current_rss_bytes();
+    let mut capture = CAPTURE.lock().expect("demand stats lock");
+    // The physical plan can retain an RSS-probe stream after collection has
+    // completed. Treat this ordinary collect-completion boundary as the
+    // authoritative release observation for wrappers that have not dropped.
+    for operator in &mut capture.operator_rss {
+        if operator.after_bytes == 0 {
+            operator.after_bytes = completion_rss;
+            operator.peak_bytes = operator.peak_bytes.max(completion_rss);
+        }
+    }
+    capture.sorts = sorts;
+    capture.memory_reserved_before = memory_reserved_before as u64;
+    capture.memory_reserved_after = memory_reserved_after as u64;
+    capture.returned_batch_bytes = returned_batch_bytes as u64;
+    capture.execution_batch_rows = execution_batch_rows as u64;
 }
 
 fn with_hop(edge_var: u32, update: impl FnOnce(&mut HopSnapshot)) {
@@ -450,9 +587,17 @@ impl PhysicalOptimizerRule for FixedHopDemandRule {
             plan
         };
         let Some(terminal) = find_terminal_demand(&plan) else {
+            if capture_enabled() {
+                let mut rss_ordinal = 0;
+                return instrument_operator_rss(plan, &mut rss_ordinal);
+            }
             return Ok(plan);
         };
         if !contains_demand_expand(&plan) {
+            if capture_enabled() {
+                let mut rss_ordinal = 0;
+                return instrument_operator_rss(plan, &mut rss_ordinal);
+            }
             return Ok(plan);
         }
         let demand = Arc::new(QueryDemand::new());
@@ -467,11 +612,13 @@ impl PhysicalOptimizerRule for FixedHopDemandRule {
             Arc::clone(&demand),
             &mut filter_ordinal,
         )?;
-        Ok(Arc::new(DemandGuardExec::new(
+        let guarded: Arc<dyn ExecutionPlan> = Arc::new(DemandGuardExec::new(
             rewritten,
             demand,
             terminal.cancel_after,
-        )))
+        ));
+        let mut rss_ordinal = 0;
+        instrument_operator_rss(guarded, &mut rss_ordinal)
     }
 
     fn name(&self) -> &str {
@@ -481,6 +628,197 @@ impl PhysicalOptimizerRule for FixedHopDemandRule {
     fn schema_check(&self) -> bool {
         true
     }
+}
+
+fn instrument_operator_rss(
+    plan: Arc<dyn ExecutionPlan>,
+    ordinal: &mut usize,
+) -> Result<Arc<dyn ExecutionPlan>> {
+    let children = plan.children();
+    let rewritten = children
+        .into_iter()
+        .map(|child| instrument_operator_rss(Arc::clone(child), ordinal))
+        .collect::<Result<Vec<_>>>()?;
+    let rebuilt = if rewritten.is_empty() {
+        plan
+    } else {
+        plan.with_new_children(rewritten)?
+    };
+    let operator = if rebuilt.downcast_ref::<ExpandExec>().is_some() {
+        Some("expand")
+    } else if rebuilt.downcast_ref::<SortExec>().is_some() {
+        Some("sort")
+    } else {
+        None
+    };
+    let Some(operator) = operator else {
+        return Ok(rebuilt);
+    };
+    let current = *ordinal;
+    *ordinal += 1;
+    Ok(Arc::new(RssProbeExec::new(rebuilt, current, operator)))
+}
+
+struct RssProbeExec {
+    input: Arc<dyn ExecutionPlan>,
+    ordinal: usize,
+    operator: &'static str,
+    props: Arc<PlanProperties>,
+}
+
+impl RssProbeExec {
+    fn new(input: Arc<dyn ExecutionPlan>, ordinal: usize, operator: &'static str) -> Self {
+        Self {
+            props: Arc::clone(input.properties()),
+            input,
+            ordinal,
+            operator,
+        }
+    }
+}
+
+impl fmt::Debug for RssProbeExec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OperatorRssProbeExec")
+            .field("ordinal", &self.ordinal)
+            .field("operator", &self.operator)
+            .finish_non_exhaustive()
+    }
+}
+
+impl DisplayAs for RssProbeExec {
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "OperatorRssProbeExec: ordinal={}, operator={}",
+            self.ordinal, self.operator
+        )
+    }
+}
+
+impl ExecutionPlan for RssProbeExec {
+    fn name(&self) -> &str {
+        "OperatorRssProbeExec"
+    }
+
+    fn properties(&self) -> &Arc<PlanProperties> {
+        &self.props
+    }
+
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![&self.input]
+    }
+
+    fn with_new_children(
+        self: Arc<Self>,
+        mut children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        let input = children
+            .pop()
+            .ok_or_else(|| DataFusionError::Internal("RSS probe needs one child".into()))?;
+        Ok(Arc::new(Self::new(input, self.ordinal, self.operator)))
+    }
+
+    fn execute(
+        &self,
+        partition: usize,
+        context: Arc<TaskContext>,
+    ) -> Result<SendableRecordBatchStream> {
+        let stream = self.input.execute(partition, context)?;
+        let before = current_rss_bytes();
+        if capture_enabled() {
+            let mut capture = CAPTURE.lock().expect("demand stats lock");
+            if let Some(operator) = capture
+                .operator_rss
+                .iter_mut()
+                .find(|operator| operator.ordinal == self.ordinal)
+            {
+                operator.before_bytes = match (operator.before_bytes, before) {
+                    (0, value) | (value, 0) => value,
+                    (left, right) => left.min(right),
+                };
+                operator.peak_bytes = operator.peak_bytes.max(before);
+            } else {
+                capture.operator_rss.push(OperatorRssSnapshot {
+                    ordinal: self.ordinal,
+                    operator: self.operator,
+                    before_bytes: before,
+                    peak_bytes: before,
+                    after_bytes: 0,
+                });
+            }
+        }
+        Ok(Box::pin(RssProbeStream {
+            schema: stream.schema(),
+            inner: stream,
+            ordinal: self.ordinal,
+        }))
+    }
+}
+
+struct RssProbeStream {
+    schema: SchemaRef,
+    inner: SendableRecordBatchStream,
+    ordinal: usize,
+}
+
+impl Stream for RssProbeStream {
+    type Item = Result<arrow::array::RecordBatch>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let result = Pin::new(&mut self.inner).poll_next(cx);
+        record_operator_rss(self.ordinal, false);
+        result
+    }
+}
+
+impl Drop for RssProbeStream {
+    fn drop(&mut self) {
+        record_operator_rss(self.ordinal, true);
+    }
+}
+
+impl RecordBatchStream for RssProbeStream {
+    fn schema(&self) -> SchemaRef {
+        Arc::clone(&self.schema)
+    }
+}
+
+fn record_operator_rss(ordinal: usize, released: bool) {
+    if !capture_enabled() {
+        return;
+    }
+    let rss = current_rss_bytes();
+    let mut capture = CAPTURE.lock().expect("demand stats lock");
+    if let Some(operator) = capture
+        .operator_rss
+        .iter_mut()
+        .find(|operator| operator.ordinal == ordinal)
+    {
+        operator.peak_bytes = operator.peak_bytes.max(rss);
+        if released {
+            operator.after_bytes = rss;
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn current_rss_bytes() -> u64 {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| {
+            status.lines().find_map(|line| {
+                line.strip_prefix("VmRSS:")
+                    .and_then(|value| value.trim().trim_end_matches(" kB").trim().parse().ok())
+                    .map(|kb: u64| kb.saturating_mul(1024))
+            })
+        })
+        .unwrap_or(0)
+}
+
+#[cfg(not(target_os = "linux"))]
+const fn current_rss_bytes() -> u64 {
+    0
 }
 
 fn collect_expr_columns(expr: &Arc<dyn PhysicalExpr>, required: &mut BTreeSet<usize>) {
