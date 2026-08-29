@@ -3592,7 +3592,9 @@ fn recover_shape_intent(
     if intent.shape.is_some() || !intent.outputs.is_empty() {
         return Err(storage("incomplete shape intent claims completed output"));
     }
-    if intent.final_evidence.is_some() || checkpoint.evidence != intent.baseline_evidence {
+    if intent.final_evidence.is_some()
+        || !persisted_evidence_equivalent(&checkpoint.evidence, &intent.baseline_evidence)
+    {
         return Err(storage("incomplete shape changed committed evidence"));
     }
     cleanup_incomplete_shape_capabilities(root)?;
@@ -3623,7 +3625,9 @@ fn recover_final_shape_evidence(
     final_evidence: &GraphConstructionEvidence,
     expected_authority: String,
 ) -> Result<(), GfError> {
-    if checkpoint.evidence == *baseline && checkpoint.shape_authority_sha256.is_none() {
+    if persisted_evidence_equivalent(&checkpoint.evidence, baseline)
+        && checkpoint.shape_authority_sha256.is_none()
+    {
         checkpoint.evidence = final_evidence.clone();
         checkpoint.shape_authority_sha256 = Some(expected_authority);
         return replace_checkpoint_control(root, checkpoint);
@@ -3636,6 +3640,17 @@ fn recover_final_shape_evidence(
         return Ok(());
     }
     Err(storage("shape evidence authority differs from inventory"))
+}
+
+fn persisted_evidence_equivalent(
+    left: &GraphConstructionEvidence,
+    right: &GraphConstructionEvidence,
+) -> bool {
+    let mut left = left.clone();
+    let mut right = right.clone();
+    left.storage_allocation_transitions.clear();
+    right.storage_allocation_transitions.clear();
+    left == right
 }
 
 fn copy_post_shape_io(target: &mut GraphConstructionEvidence, source: &GraphConstructionEvidence) {
