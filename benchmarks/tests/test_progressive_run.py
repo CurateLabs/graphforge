@@ -8,6 +8,9 @@ import unittest
 from graphforge_bench.progressive_run import (
     ControllerError,
     Executables,
+    _run_benchexec,
+    _safe_stage,
+    _validate,
     build_plan,
     require_bulk_ingest_capability,
     require_order,
@@ -235,6 +238,61 @@ class ProgressiveRunControllerTests(unittest.TestCase):
         evidence = json.loads(path.read_text())
         self.assertEqual(evidence["source_scales"], [18, 19])
         self.assertNotIn("secret", path.read_text())
+
+    def test_staged_executables_are_verified_private_copies(self) -> None:
+        plan = build_plan(
+            root=ROOT,
+            output_dir=self.output,
+            scale=18,
+            commit=COMMIT,
+            executables=self.executables,
+        )
+        profile = ROOT / "profiles/graph500/s18-local.json"
+        stage = _safe_stage(ROOT, profile, self.executables, plan["identities"], self.base)
+        staged_gf = stage / "bin/gf"
+        self.assertFalse(staged_gf.is_symlink())
+        original = staged_gf.read_bytes()
+        self.executables.gf.write_bytes(b"changed-after-planning")
+        self.assertEqual(staged_gf.read_bytes(), original)
+        with self.assertRaisesRegex(ControllerError, "staged executable identity mismatch"):
+            _safe_stage(ROOT, profile, self.executables, plan["identities"], self.base)
+
+    def test_benchexec_python_is_rechecked_immediately_before_invocation(self) -> None:
+        plan = build_plan(
+            root=ROOT,
+            output_dir=self.output,
+            scale=18,
+            commit=COMMIT,
+            executables=self.executables,
+        )
+        stage = self.base / "stage"
+        stage.mkdir()
+        (stage / "bin").mkdir()
+        (stage / "benchmark.xml").write_text("fixture")
+        self.executables.benchexec_python.write_bytes(b"changed-after-planning")
+        with self.assertRaisesRegex(ControllerError, "identity changed after planning"):
+            _run_benchexec(stage, self.executables, plan["identities"])
+
+    def test_failed_result_schema_requires_closed_exact_identities(self) -> None:
+        plan = build_plan(
+            root=ROOT,
+            output_dir=self.output,
+            scale=18,
+            commit=COMMIT,
+            executables=self.executables,
+        )
+        result = {
+            "schema": "graphforge-progressive-run-result/1",
+            "rung": "S18",
+            "status": "failed",
+            "failure": "metrics_evidence_missing",
+            "identities": plan["identities"],
+            "claim": "engineering_evidence_only",
+        }
+        _validate(ROOT, "progressive-run-result.json", result)
+        result["identities"] = {}
+        with self.assertRaisesRegex(ControllerError, "validation failed"):
+            _validate(ROOT, "progressive-run-result.json", result)
 
 
 if __name__ == "__main__":

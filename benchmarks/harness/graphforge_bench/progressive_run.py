@@ -199,7 +199,13 @@ def write_plan(output_dir: Path, plan: Mapping[str, Any]) -> Path:
     return path
 
 
-def _safe_stage(root: Path, profile_path: Path, executables: Executables, parent: Path) -> Path:
+def _safe_stage(
+    root: Path,
+    profile_path: Path,
+    executables: Executables,
+    identities: Mapping[str, Any],
+    parent: Path,
+) -> Path:
     stage = Path(tempfile.mkdtemp(prefix="gf-progressive-", dir=parent))
     shutil.copyfile(profile_path, stage / "profile.json")
     shutil.copyfile(
@@ -207,12 +213,19 @@ def _safe_stage(root: Path, profile_path: Path, executables: Executables, parent
     )
     bin_dir = stage / "bin"
     bin_dir.mkdir()
-    for name, source in (
-        ("gf", executables.gf),
-        ("graphforge-benchmark-certify", executables.certify),
-        ("graphforge-benchmark-graph500-generator", executables.generator),
+    for name, source, identity_key in (
+        ("gf", executables.gf, "gf_sha256"),
+        ("graphforge-benchmark-certify", executables.certify, "certify_sha256"),
+        (
+            "graphforge-benchmark-graph500-generator",
+            executables.generator,
+            "generator_executable_sha256",
+        ),
     ):
-        (bin_dir / name).symlink_to(source)
+        staged = bin_dir / name
+        shutil.copy2(source, staged)
+        if _digest(staged) != identities.get(identity_key):
+            raise ControllerError(f"staged executable identity mismatch: {name}")
     return stage
 
 
@@ -245,7 +258,7 @@ def require_bulk_ingest_capability(
     return evidence
 
 
-def _run_benchexec(stage: Path, executables: Executables) -> int:
+def _run_benchexec(stage: Path, executables: Executables, identities: Mapping[str, Any]) -> int:
     raw_output = stage / "raw"
     raw_output.mkdir()
     home = stage / "home"
@@ -267,6 +280,8 @@ def _run_benchexec(stage: Path, executables: Executables) -> int:
         "graphforge-progressive-qualification-v1",
         str(stage / "benchmark.xml"),
     ]
+    if _digest(executables.benchexec_python) != identities.get("benchexec_python_sha256"):
+        raise ControllerError("BenchExec Python identity changed after planning")
     return subprocess.run(command, env=environment, check=False).returncode
 
 
@@ -292,8 +307,11 @@ def run(
     profile_path, _ = _profile(root, scale)
     output_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="gf-progressive-authority-") as temporary:
-        stage = _safe_stage(root, profile_path, executables, Path(temporary))
-        status = _run_benchexec(stage, executables)
+        identities = plan["identities"]
+        if not isinstance(identities, Mapping):
+            raise ControllerError("run plan identities are malformed")
+        stage = _safe_stage(root, profile_path, executables, identities, Path(temporary))
+        status = _run_benchexec(stage, executables, identities)
         # Raw logs remain in the private temporary directory.  Until the
         # ordinary lifecycle emits every progressive metric, accepting a run
         # would fabricate schema-valid evidence.  Fail closed instead.
