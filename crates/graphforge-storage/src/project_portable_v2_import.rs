@@ -296,39 +296,13 @@ pub fn import_complete_portable_v2_with_progress(
             )
     });
     let result = result.and_then(|mut receipt| {
-        // Finalization can create additional authenticated composition files in
-        // staging. Add their identities to the operation-wide owned union
-        // immediately before cleanup; identities of atomically replaced files
-        // remain attributable even though they are no longer live.
-        let mut finalized_live_identities = std::collections::BTreeMap::new();
-        capture_finalized_import_identities(
-            &stage,
-            materialized_stage_identity,
-            &mut finalized_live_identities,
-            entry_count,
-        )?;
-        let historically_removed_identities = receipt
-            .materialized_identity_allocated_bytes
-            .iter()
-            .filter(|(identity, _)| !finalized_live_identities.contains_key(*identity))
-            .map(|(identity, allocated)| (identity.clone(), *allocated))
-            .collect::<std::collections::BTreeMap<_, _>>();
-        receipt
-            .materialized_identity_allocated_bytes
-            .extend(finalized_live_identities);
-        let mut cleanup = cleanup_import_materialization(
+        finalize_import_materialization_cleanup(
             &stage,
             &owner,
             materialized_stage_identity,
-            &receipt.materialized_identity_allocated_bytes,
-        )
-        .map_err(|error| {
-            error.with_allocation_identities(receipt.materialized_identity_allocated_bytes.clone())
-        })?;
-        cleanup
-            .removed_identity_allocated_bytes
-            .extend(historically_removed_identities);
-        receipt.materialized_cleanup = cleanup;
+            &mut receipt,
+            entry_count,
+        )?;
         Ok(receipt)
     });
     if result.is_ok() {
@@ -340,6 +314,48 @@ pub fn import_complete_portable_v2_with_progress(
         });
     }
     result
+}
+
+fn finalize_import_materialization_cleanup(
+    stage: &Path,
+    owner: &Path,
+    materialized_stage_identity: graphforge_filesystem::FileIdentity,
+    receipt: &mut PortableV2ImportReceipt,
+    entry_count: usize,
+) -> Result<(), PortableV2Error> {
+    // Finalization can atomically replace authenticated staging files. Preserve
+    // the pre-finalization identities as removed ownership while separately
+    // capturing the final live set that deterministic cleanup must remove.
+    let mut finalized_live_identities = std::collections::BTreeMap::new();
+    capture_finalized_import_identities(
+        stage,
+        materialized_stage_identity,
+        &mut finalized_live_identities,
+        entry_count,
+    )?;
+    let historically_removed_identities = receipt
+        .materialized_identity_allocated_bytes
+        .iter()
+        .filter(|(identity, _)| !finalized_live_identities.contains_key(*identity))
+        .map(|(identity, allocated)| (identity.clone(), *allocated))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    receipt
+        .materialized_identity_allocated_bytes
+        .extend(finalized_live_identities);
+    let mut cleanup = cleanup_import_materialization(
+        stage,
+        owner,
+        materialized_stage_identity,
+        &receipt.materialized_identity_allocated_bytes,
+    )
+    .map_err(|error| {
+        error.with_allocation_identities(receipt.materialized_identity_allocated_bytes.clone())
+    })?;
+    cleanup
+        .removed_identity_allocated_bytes
+        .extend(historically_removed_identities);
+    receipt.materialized_cleanup = cleanup;
+    Ok(())
 }
 
 struct OwnedMaterialization {
