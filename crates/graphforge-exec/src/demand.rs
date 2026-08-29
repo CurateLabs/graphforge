@@ -6,7 +6,7 @@
 //! the fixed-hop operators below that semantic boundary. Unknown and blocking
 //! operators are deliberately opaque: demand never crosses them.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -17,13 +17,15 @@ use arrow::datatypes::SchemaRef;
 use datafusion::common::config::ConfigOptions;
 use datafusion::common::{DataFusionError, Result};
 use datafusion::execution::TaskContext;
-use datafusion::physical_expr::ScalarFunctionExpr;
+use datafusion::physical_expr::utils::collect_columns;
+use datafusion::physical_expr::{PhysicalExpr, ScalarFunctionExpr};
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::filter::FilterExec;
 use datafusion::physical_plan::limit::{GlobalLimitExec, LocalLimitExec};
 use datafusion::physical_plan::projection::ProjectionExec;
 use datafusion::physical_plan::repartition::RepartitionExec;
+use datafusion::physical_plan::sorts::sort::SortExec;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties, RecordBatchStream,
     SendableRecordBatchStream,
@@ -88,6 +90,30 @@ pub struct HopSnapshot {
     pub node_validation_fallbacks: u64,
     /// Read attempts rejected after terminal cancellation.
     pub reads_after_cancel: u64,
+    /// Chunks served without edge or destination-node Parquet hydration.
+    pub projected_chunks: u64,
+    /// Candidate rows served by the destination-identity projection.
+    pub projected_rows: u64,
+    /// Required physical output columns at this hop.
+    pub projected_columns: u64,
+    /// Edge topology/property columns physically demanded by this hop.
+    pub edge_projected_columns: u64,
+    /// Destination-node columns physically demanded by this hop.
+    pub node_projected_columns: u64,
+    /// V4 ordinal ranges selected across bounded lookup batches.
+    pub identity_ranges_selected: u64,
+    /// Coalesced V4 ordinal/tombstone reads.
+    pub identity_read_calls: u64,
+    /// V4 ordinal/tombstone bytes read.
+    pub identity_bytes_read: u64,
+    /// Largest charged V4 request/cache/transient buffer.
+    pub identity_peak_buffer_bytes: u64,
+    /// Forbidden per-record seek count (must remain zero).
+    pub identity_per_record_seeks: u64,
+    /// Generation-authentication checks charged once per execution session.
+    pub identity_revalidation_calls: u64,
+    /// Artifact payload bytes read by session pinning.
+    pub identity_revalidation_bytes: u64,
 }
 
 /// Rows observed at one selective physical filter.
@@ -161,6 +187,55 @@ pub(crate) fn record_input(edge_var: u32, rows: usize) {
 
 pub(crate) fn record_candidates(edge_var: u32, rows: usize) {
     with_hop(edge_var, |hop| hop.candidates_generated += rows as u64);
+}
+
+pub(crate) fn record_identity_projection(
+    edge_var: u32,
+    rows: usize,
+    projected_columns: usize,
+    metrics: &graphforge_storage::V4OrdinalLookupMetrics,
+) {
+    with_hop(edge_var, |hop| {
+        hop.projected_chunks = hop.projected_chunks.saturating_add(1);
+        hop.projected_rows = hop.projected_rows.saturating_add(rows as u64);
+        hop.projected_columns = hop
+            .projected_columns
+            .max(projected_columns.try_into().unwrap_or(u64::MAX));
+        hop.identity_ranges_selected = hop
+            .identity_ranges_selected
+            .saturating_add(metrics.ranges_selected);
+        hop.identity_read_calls = hop
+            .identity_read_calls
+            .saturating_add(metrics.sequential_read_calls);
+        hop.identity_bytes_read = hop.identity_bytes_read.saturating_add(metrics.bytes_read);
+        hop.identity_peak_buffer_bytes = hop
+            .identity_peak_buffer_bytes
+            .max(metrics.peak_buffer_bytes);
+        hop.identity_per_record_seeks = hop
+            .identity_per_record_seeks
+            .saturating_add(metrics.per_record_seeks);
+        hop.identity_revalidation_calls = hop
+            .identity_revalidation_calls
+            .saturating_add(metrics.revalidation_calls);
+        hop.identity_revalidation_bytes = hop
+            .identity_revalidation_bytes
+            .saturating_add(metrics.revalidation_bytes);
+    });
+}
+
+pub(crate) fn record_materialization_projection(
+    edge_var: u32,
+    edge_columns: usize,
+    node_columns: usize,
+) {
+    with_hop(edge_var, |hop| {
+        hop.edge_projected_columns = hop
+            .edge_projected_columns
+            .max(edge_columns.try_into().unwrap_or(u64::MAX));
+        hop.node_projected_columns = hop
+            .node_projected_columns
+            .max(node_columns.try_into().unwrap_or(u64::MAX));
+    });
 }
 
 pub(crate) fn record_emitted(edge_var: u32, rows: usize) {
@@ -368,6 +443,12 @@ impl PhysicalOptimizerRule for FixedHopDemandRule {
         plan: Arc<dyn ExecutionPlan>,
         config: &ConfigOptions,
     ) -> Result<Arc<dyn ExecutionPlan>> {
+        let plan = if contains_materializable_expand(&plan) {
+            let required = (0..plan.schema().fields().len()).collect::<BTreeSet<_>>();
+            rewrite_materialization(plan, &required)?
+        } else {
+            plan
+        };
         let Some(terminal) = find_terminal_demand(&plan) else {
             return Ok(plan);
         };
@@ -400,6 +481,107 @@ impl PhysicalOptimizerRule for FixedHopDemandRule {
     fn schema_check(&self) -> bool {
         true
     }
+}
+
+fn collect_expr_columns(expr: &Arc<dyn PhysicalExpr>, required: &mut BTreeSet<usize>) {
+    required.extend(
+        collect_columns(expr)
+            .into_iter()
+            .map(|column| column.index()),
+    );
+}
+
+/// Propagate exact physical output demand through operators whose column
+/// dependency is explicit. Unknown and multi-input operators are conservative
+/// barriers and require every child column.
+fn rewrite_materialization(
+    plan: Arc<dyn ExecutionPlan>,
+    required: &BTreeSet<usize>,
+) -> Result<Arc<dyn ExecutionPlan>> {
+    if let Some(projection) = plan.downcast_ref::<ProjectionExec>() {
+        let mut child_required = BTreeSet::new();
+        for &output in required {
+            if let Some(expr) = projection.expr().get(output) {
+                collect_expr_columns(&expr.expr, &mut child_required);
+            }
+        }
+        let child = rewrite_materialization(Arc::clone(projection.input()), &child_required)?;
+        return plan.with_new_children(vec![child]);
+    }
+
+    let mut child_required = required.clone();
+    if let Some(filter) = plan.downcast_ref::<FilterExec>() {
+        // A FilterExec may carry DataFusion's own output projection. Its
+        // output ordinals are not input ordinals: map terminal demand through
+        // that projection before adding predicate dependencies. Treating the
+        // ordinals as identical silently selected an earlier same-named field
+        // in multi-hop plans (for example `a.node_uuid` instead of
+        // `c.node_uuid`) and allowed the demanded destination identity to be
+        // replaced with an unused placeholder.
+        if let Some(projection) = filter.projection() {
+            child_required = required
+                .iter()
+                .filter_map(|output| projection.get(*output).copied())
+                .collect();
+        }
+        collect_expr_columns(filter.predicate(), &mut child_required);
+    }
+    if let Some(sort) = plan.downcast_ref::<SortExec>() {
+        for expr in sort.expr() {
+            collect_expr_columns(&expr.expr, &mut child_required);
+        }
+    }
+
+    if let Some(expand) = plan.downcast_ref::<ExpandExec>() {
+        let mut input_required = required
+            .iter()
+            .copied()
+            .filter(|index| *index < expand.input_width)
+            .collect::<BTreeSet<_>>();
+        input_required.insert(expand.src_col_idx);
+        let child = rewrite_materialization(Arc::clone(&expand.input), &input_required)?;
+        let rebuilt = plan.with_new_children(vec![child])?;
+        let expand = rebuilt.downcast_ref::<ExpandExec>().ok_or_else(|| {
+            DataFusionError::Internal("ExpandExec rewrite changed physical type".into())
+        })?;
+        let mask = (0..expand.schema().fields().len())
+            .map(|index| required.contains(&index))
+            .collect();
+        return Ok(expand.with_required_output(mask));
+    }
+
+    let children = plan.children();
+    if children.len() != 1 {
+        let rewritten = children
+            .into_iter()
+            .map(|child| {
+                let all = (0..child.schema().fields().len()).collect::<BTreeSet<_>>();
+                rewrite_materialization(Arc::clone(child), &all)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        return if rewritten.is_empty() {
+            Ok(plan)
+        } else {
+            plan.with_new_children(rewritten)
+        };
+    }
+    let child = children[0];
+    let next = if materialization_transparent(plan.as_ref()) {
+        child_required
+    } else {
+        (0..child.schema().fields().len()).collect()
+    };
+    let child = rewrite_materialization(Arc::clone(child), &next)?;
+    plan.with_new_children(vec![child])
+}
+
+fn materialization_transparent(plan: &dyn ExecutionPlan) -> bool {
+    plan.downcast_ref::<FilterExec>().is_some()
+        || plan.downcast_ref::<SortExec>().is_some()
+        || plan.downcast_ref::<GlobalLimitExec>().is_some()
+        || plan.downcast_ref::<LocalLimitExec>().is_some()
+        || plan.downcast_ref::<CoalescePartitionsExec>().is_some()
+        || plan.downcast_ref::<RepartitionExec>().is_some()
 }
 
 fn find_terminal_demand(plan: &Arc<dyn ExecutionPlan>) -> Option<TerminalDemand> {
@@ -445,6 +627,18 @@ fn contains_demand_expand(plan: &Arc<dyn ExecutionPlan>) -> bool {
         return true;
     }
     is_fetch_transparent(plan.as_ref()) && plan.children().into_iter().any(contains_demand_expand)
+}
+
+/// Whether the plan contains a fixed hop whose physical columns can be
+/// narrowed. Materialization demand is independent of bounded-fetch demand:
+/// it may safely cross an order-preserving sort even though cancellation must
+/// stop at that blocking boundary.
+fn contains_materializable_expand(plan: &Arc<dyn ExecutionPlan>) -> bool {
+    plan.is::<ExpandExec>()
+        || plan
+            .children()
+            .into_iter()
+            .any(contains_materializable_expand)
 }
 
 fn rewrite_bounded(

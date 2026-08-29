@@ -3971,6 +3971,7 @@ impl ScalarUDFImpl for CypherRelationshipDisjoint {
 fn relationship_ids(value: &ScalarValue, ids: &mut Vec<Vec<u8>>) {
     match value {
         ScalarValue::FixedSizeBinary(_, Some(uuid)) => ids.push(uuid.clone()),
+        ScalarValue::UInt64(Some(edge_id)) => ids.push(edge_id.to_le_bytes().to_vec()),
         ScalarValue::List(list) if !list.is_null(0) => {
             let values = list.value(0);
             for index in 0..values.len() {
