@@ -334,6 +334,74 @@ pub struct StorageAttributionSnapshot {
     pub physical_identity_allocated_bytes: BTreeMap<String, u64>,
 }
 
+/// Identity-free, closed storage evidence suitable for ordinary CLI output.
+///
+/// This receipt deliberately omits generation identities, native file identities,
+/// paths, and graph content. Every category is present, including truthful zeros.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StorageAttributionReceipt {
+    /// Versioned semantic contract for consumers of this receipt.
+    pub contract: String,
+    /// Every authenticated artifact category exactly once.
+    pub categories: BTreeMap<ArtifactCategory, ArtifactStorageTotals>,
+    /// Reconciled logical references across categories.
+    pub logical_references: u64,
+    /// Reconciled referenced logical bytes across categories.
+    pub logical_bytes: u64,
+    /// Logical EOF bytes of distinct retained physical files.
+    pub retained_logical_eof_bytes: u64,
+    /// Filesystem-allocated bytes of distinct retained physical files.
+    pub allocated_physical_bytes: u64,
+    /// Distinct retained physical files, deduplicated by native identity.
+    pub physical_objects: u64,
+}
+
+impl StorageAttributionReceipt {
+    /// Strip private identities from a validated authenticated snapshot.
+    pub fn from_snapshot(snapshot: &StorageAttributionSnapshot) -> Result<Self, GfError> {
+        snapshot.validate_for_qualification()?;
+        Ok(Self {
+            contract: "graphforge-storage-attribution/1".to_owned(),
+            categories: snapshot.categories.clone(),
+            logical_references: snapshot.logical_references,
+            logical_bytes: snapshot.logical_bytes,
+            retained_logical_eof_bytes: snapshot.physical_logical_bytes,
+            allocated_physical_bytes: snapshot.allocated_bytes,
+            physical_objects: snapshot.physical_objects,
+        })
+    }
+
+    /// Recheck the public arithmetic without relying on stripped identities.
+    pub fn validate_reconciliation(&self) -> Result<(), GfError> {
+        if self.contract != "graphforge-storage-attribution/1"
+            || ArtifactCategory::ALL
+                .iter()
+                .any(|category| !self.categories.contains_key(category))
+            || self.categories.len() != ArtifactCategory::ALL.len()
+        {
+            return Err(validation(
+                "storage attribution receipt contract is incomplete",
+            ));
+        }
+        let mut total = ArtifactStorageTotals::default();
+        for category in ArtifactCategory::ALL {
+            add_totals(&mut total, &self.categories[&category])?;
+        }
+        if total.logical_references != self.logical_references
+            || total.logical_bytes != self.logical_bytes
+            || total.physical_objects != self.physical_objects
+            || total.physical_logical_bytes != self.retained_logical_eof_bytes
+            || total.allocated_bytes != self.allocated_physical_bytes
+        {
+            return Err(validation(
+                "storage attribution receipt totals do not reconcile",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Exact native-identity union for the retained project container.
 ///
 /// This includes `FORMAT`, `CURRENT`, and every authenticated generation still
@@ -1419,5 +1487,15 @@ mod tests {
         assert_eq!(snapshot.physical_objects, 1);
         assert_eq!(snapshot.physical_logical_bytes, 6);
         assert!(snapshot.allocated_bytes >= 6);
+
+        let receipt = StorageAttributionReceipt::from_snapshot(&snapshot).unwrap();
+        receipt.validate_reconciliation().unwrap();
+        assert_eq!(receipt.retained_logical_eof_bytes, 6);
+        assert_eq!(receipt.allocated_physical_bytes, snapshot.allocated_bytes);
+        let json = serde_json::to_string(&receipt).unwrap();
+        assert!(!json.contains(&snapshot.generation_uuid.to_string()));
+        assert!(!json.contains("generation_uuid"));
+        assert!(!json.contains("sha256"));
+        assert!(!json.contains(project.path().to_string_lossy().as_ref()));
     }
 }

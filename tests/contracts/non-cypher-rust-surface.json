@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "499f902e4713931d7b3591fbaf978e6694c3029fde08c5c5476547563e5776e5",
+  "public_method_digest": "59da11b3fe6b32a8c12a77ff9c327546643e90c63dbf5314d33143f81fcaf27a",
   "method_policy": {
     "receiver_defaults": {
       "GraphForge": "release-tested",
@@ -265,10 +265,15 @@
         "GraphForge.publish_bulk_nodes",
         "GraphForge.relationship_types",
         "GraphForge.storage_attribution",
+        "GraphForge.storage_attribution_receipt",
         "GraphForge.workspace_configuration",
         "GraphForge.workspace_ontology"
       ],
       "test_refs": [
+        {
+          "path": "crates/graphforge-api/src/lib.rs",
+          "symbol": "public_storage_attribution_receipt_is_identity_free_and_reconciled"
+        },
         {
           "path": "crates/graphforge-api/tests/scale_g500_ladder.rs",
           "symbol": "public_storage_attribution_is_generation_bound_and_fully_classified"
