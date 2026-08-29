@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "499f902e4713931d7b3591fbaf978e6694c3029fde08c5c5476547563e5776e5",
+  "public_method_digest": "72510094f55ba39627bda6c3c5c0df6845b6c90c602aac54ab3e628274240cab",
   "method_policy": {
     "receiver_defaults": {
       "GraphForge": "release-tested",
@@ -818,6 +818,7 @@
         "GraphForge.execute_to_arrow_ipc_stream_with_params",
         "GraphForge.execute_to_parquet",
         "GraphForge.execute_to_parquet_stream_with_params",
+        "GraphForge.execute_to_result_sink_with_evidence",
         "GraphForge.execute_to_parquet_with_params",
         "GraphForge.execute_with_params",
         "GraphForge.explain",
@@ -826,6 +827,10 @@
         "GraphForge.schema"
       ],
       "test_refs": [
+        {
+          "path": "crates/graphforge-api/tests/fixed_hop_limit.rs",
+          "symbol": "ordinary_streaming_sink_exposes_deterministic_query_evidence"
+        },
         {
           "path": "crates/graphforge-api/src/composition_binding_tests.rs",
           "symbol": "facade_executes_qualified_and_unique_composed_queries"

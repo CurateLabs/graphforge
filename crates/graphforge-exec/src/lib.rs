@@ -226,8 +226,10 @@ mod write_driver;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+use std::task::{Context, Poll};
 
 use arrow::array::{
     Array, ArrayRef, FixedSizeBinaryArray, FixedSizeBinaryBuilder, Int8Array, ListBuilder,
@@ -252,7 +254,7 @@ use datafusion::physical_plan::{
 use datafusion::physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner, PhysicalPlanner};
 use datafusion::prelude::SessionContext;
 use datafusion::scalar::ScalarValue;
-use futures::StreamExt;
+use futures::{Stream, StreamExt};
 
 pub use graphforge_core::GfError;
 use graphforge_core::OntologyMode;
@@ -4857,6 +4859,66 @@ impl Default for SessionResourceConfig {
     }
 }
 
+struct QueryEvidenceStream {
+    inner: Option<SendableRecordBatchStream>,
+    physical: Arc<dyn ExecutionPlan>,
+    task_ctx: Arc<TaskContext>,
+    memory_reserved_before: usize,
+    returned_batch_bytes: usize,
+    finalized: bool,
+}
+
+impl QueryEvidenceStream {
+    fn finalize(&mut self) {
+        if self.finalized {
+            return;
+        }
+        self.finalized = true;
+        drop(self.inner.take());
+        demand::record_plan_completion(
+            &self.physical,
+            self.memory_reserved_before,
+            self.task_ctx.memory_pool().reserved(),
+            self.returned_batch_bytes,
+            self.task_ctx.session_config().batch_size(),
+        );
+    }
+}
+
+impl Stream for QueryEvidenceStream {
+    type Item = Result<RecordBatch, DataFusionError>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        let Some(inner) = this.inner.as_mut() else {
+            return Poll::Ready(None);
+        };
+        match inner.as_mut().poll_next(cx) {
+            Poll::Ready(Some(Ok(batch))) => {
+                this.returned_batch_bytes = this
+                    .returned_batch_bytes
+                    .saturating_add(batch.get_array_memory_size());
+                Poll::Ready(Some(Ok(batch)))
+            }
+            Poll::Ready(Some(Err(error))) => {
+                this.finalize();
+                Poll::Ready(Some(Err(error)))
+            }
+            Poll::Ready(None) => {
+                this.finalize();
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl Drop for QueryEvidenceStream {
+    fn drop(&mut self) {
+        self.finalize();
+    }
+}
+
 /// A configured DataFusion [`SessionContext`] ready to execute [`GraphPlan`]s.
 ///
 /// Construct via [`ExecutionSession::new`] (read/query) or
@@ -5730,8 +5792,23 @@ impl ExecutionSession {
         params: &HashMap<String, graphforge_ir::IrLiteral>,
     ) -> Result<SendableRecordBatchStream, GfError> {
         let (physical, _) = self.plan_physical(plan, params).await?;
-        datafusion::physical_plan::execute_stream(physical, self.ctx.task_ctx())
-            .map_err(|e| GfError::Execution(e.to_string()))
+        let task_ctx = self.ctx.task_ctx();
+        let memory_reserved_before = task_ctx.memory_pool().reserved();
+        let stream =
+            datafusion::physical_plan::execute_stream(Arc::clone(&physical), Arc::clone(&task_ctx))
+                .map_err(|e| GfError::Execution(e.to_string()))?;
+        let schema = stream.schema();
+        Ok(Box::pin(RecordBatchStreamAdapter::new(
+            schema,
+            QueryEvidenceStream {
+                inner: Some(stream),
+                physical,
+                task_ctx,
+                memory_reserved_before,
+                returned_batch_bytes: 0,
+                finalized: false,
+            },
+        )))
     }
 
     /// Render the physical plan for a [`GraphPlan`] (indented, one line per
