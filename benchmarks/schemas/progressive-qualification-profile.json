@@ -32,10 +32,11 @@
     },
     "lifecycle": {
       "type": "object", "additionalProperties": false,
-      "required": ["mechanics", "phases", "evidence_schema"],
+      "required": ["mechanics", "phases", "evidence_schema", "storage_receipt"],
       "properties": {
         "mechanics": {"const": "public-certification-v1"},
         "evidence_schema": {"const": "graphforge-public-certification/1"},
+        "storage_receipt": {"const": "graphforge-lifecycle-storage/1"},
         "phases": {
           "const": ["admission", "generate", "ingest", "reopen", "recount", "query", "export", "verify", "clean_import", "reopen_proof"]
         }

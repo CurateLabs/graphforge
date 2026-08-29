@@ -228,6 +228,13 @@ evidence therefore also requires an authenticated `graphforge-lifecycle-storage/
 owner-union receipt for retained and transient lifecycle maxima. The controller
 fails closed while that ordinary receipt is absent rather than summing project
 owners or treating portable logical payload bytes as allocated storage.
+The Rust certification runner owns that allocation session: it deduplicates
+stable native identities for the generated inputs, source project, result
+sinks, portable package, and clean-imported project; consumes writer-owned
+construction and portable-import transient peaks; and appends exactly one
+identity-free closed receipt after `reopen_proof`. Python only validates and
+assembles the receipt. Missing owners, cleanup contradictions, unstable files,
+or a second finalization fail closed.
 
 Ordinary result-sink receipts independently own scalar counts, fixed-hop result
 cardinality, query evidence, and source/import logical-result digests. Missing

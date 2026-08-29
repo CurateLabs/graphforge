@@ -291,7 +291,8 @@
       "clean_import",
       "reopen_proof"
     ],
-    "evidence_schema": "graphforge-public-certification/1"
+    "evidence_schema": "graphforge-public-certification/1",
+    "storage_receipt": "graphforge-lifecycle-storage/1"
   },
   "gate": {
     "requires_previous_pass": true,

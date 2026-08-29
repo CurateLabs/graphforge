@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
 use std::io::Read;
@@ -150,6 +151,7 @@ impl Profile {
             && lifecycle.mechanics == "public-certification-v1"
             && lifecycle.phases == Phase::ALL
             && lifecycle.evidence_schema == EVIDENCE_SCHEMA
+            && lifecycle.storage_receipt == "graphforge-lifecycle-storage/1"
             && gate.requires_previous_pass
             && gate.projection_source_scales == expected.1
             && gate.limits.wall_seconds == 14_400
@@ -176,6 +178,7 @@ struct ProgressiveLifecycle {
     mechanics: String,
     phases: Vec<Phase>,
     evidence_schema: String,
+    storage_receipt: String,
 }
 
 #[derive(Deserialize)]
@@ -251,10 +254,185 @@ pub trait PhaseExecutor {
 }
 
 #[derive(Default)]
-pub struct PublicProcessExecutor;
+pub struct PublicProcessExecutor {
+    lifecycle: LifecycleStorageSession,
+}
+
+#[derive(Default)]
+struct LifecycleStorageSession {
+    allocation: graphforge_storage::StorageAllocationLifecycle,
+    transient_peak_storage_bytes: u64,
+    generator_observed: bool,
+    construction_peak_observed: bool,
+    source_project_observed: bool,
+    portable_package_observed: bool,
+    portable_import_peak_observed: bool,
+    imported_project_observed: bool,
+    finalized: bool,
+}
+
+impl LifecycleStorageSession {
+    fn observe(
+        &mut self,
+        phase: Phase,
+        command: &PhaseCommand,
+        receipts: &[serde_json::Value],
+    ) -> Result<Option<serde_json::Value>, String> {
+        if self.finalized {
+            return Err("lifecycle storage session was already finalized".to_owned());
+        }
+        let phase_baseline_allocated_bytes = self.allocation.current_allocated_bytes();
+        let commands: Vec<&[String]> = match &command.action {
+            PhaseAction::BenchmarkGenerator { args, .. } | PhaseAction::GraphForgeCli { args } => {
+                vec![args]
+            }
+            PhaseAction::GraphForgeCliWorkflow { commands } => {
+                commands.iter().map(Vec::as_slice).collect()
+            }
+        };
+        let mut files = BTreeMap::new();
+        for args in &commands {
+            for flag in ["--nodes", "--edges", "--output"] {
+                if let Some(path) = argument_path(args, flag) {
+                    if path.is_file() {
+                        merge_file_identity(&mut files, path)?;
+                    }
+                }
+            }
+        }
+        if !files.is_empty() {
+            self.allocation
+                .replace_owner(format!("phase-{phase}"), &files)
+                .map_err(|error| error.to_string())?;
+            if phase == Phase::Generate {
+                self.generator_observed = true;
+            } else if phase == Phase::Export {
+                self.portable_package_observed = true;
+            }
+        }
+        if let Some(project) = commands
+            .iter()
+            .find_map(|args| argument_path(args, "--project"))
+        {
+            if project.join("FORMAT").is_file() && project.join("CURRENT").is_file() {
+                let selected = graphforge_storage::resolve_project_generation(project)
+                    .map_err(|error| error.to_string())?;
+                let union = graphforge_storage::capture_project_storage_identity_union(&selected)
+                    .map_err(|error| error.to_string())?;
+                let owner = if matches!(phase, Phase::CleanImport | Phase::ReopenProof) {
+                    self.imported_project_observed = true;
+                    "imported-project"
+                } else {
+                    self.source_project_observed = true;
+                    "source-project"
+                };
+                self.allocation
+                    .replace_owner(owner, &union.physical_identity_allocated_bytes)
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        for receipt in receipts {
+            if receipt.get("contract").and_then(serde_json::Value::as_str)
+                == Some("graphforge-import-session/1")
+                && receipt.get("outcome").and_then(serde_json::Value::as_str) == Some("committed")
+            {
+                let transient = receipt
+                    .get("construction")
+                    .and_then(|value| value.get("transient_peak_allocated_bytes"))
+                    .and_then(serde_json::Value::as_u64)
+                    .ok_or_else(|| {
+                        "committed import omitted transient allocation evidence".to_owned()
+                    })?;
+                self.transient_peak_storage_bytes = self
+                    .transient_peak_storage_bytes
+                    .max(phase_baseline_allocated_bytes.saturating_add(transient));
+                self.construction_peak_observed = true;
+            }
+            if receipt.get("contract").and_then(serde_json::Value::as_str)
+                == Some("graphforge-portable-import/2")
+            {
+                let transient = receipt
+                    .get("transient_peak_allocated_bytes")
+                    .and_then(serde_json::Value::as_u64)
+                    .ok_or_else(|| {
+                        "portable import omitted transient allocation evidence".to_owned()
+                    })?;
+                self.transient_peak_storage_bytes = self
+                    .transient_peak_storage_bytes
+                    .max(phase_baseline_allocated_bytes.saturating_add(transient));
+                self.portable_import_peak_observed = true;
+            }
+        }
+        self.transient_peak_storage_bytes = self
+            .transient_peak_storage_bytes
+            .max(self.allocation.peak_allocated_bytes());
+        if phase != Phase::ReopenProof {
+            return Ok(None);
+        }
+        if !self.generator_observed
+            || !self.construction_peak_observed
+            || !self.source_project_observed
+            || !self.portable_package_observed
+            || !self.portable_import_peak_observed
+            || !self.imported_project_observed
+        {
+            return Err("lifecycle storage session is missing an authenticated owner or transient phase"
+                .to_owned());
+        }
+        self.finalized = true;
+        let retained = self.allocation.current_allocated_bytes();
+        let peak = self.transient_peak_storage_bytes.max(retained);
+        Ok(Some(serde_json::json!({
+            "contract": "graphforge-lifecycle-storage/1",
+            "retained_storage_bytes": retained,
+            "transient_peak_storage_bytes": peak,
+        })))
+    }
+}
+
+fn argument_path<'a>(args: &'a [String], flag: &str) -> Option<&'a Path> {
+    args.windows(2)
+        .find(|values| values[0] == flag)
+        .map(|values| Path::new(&values[1]))
+}
+
+fn merge_file_identity(identities: &mut BTreeMap<String, u64>, path: &Path) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "lifecycle allocation path has no parent".to_owned())?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| "lifecycle allocation path has no file name".to_owned())?;
+    let directory = graphforge_filesystem::StableDirectory::open(parent)
+        .map_err(|_| "lifecycle allocation parent could not be retained".to_owned())?;
+    let file = directory
+        .open_child_file(name)
+        .map_err(|_| "lifecycle allocation owner is not a stable regular file".to_owned())?;
+    let identity = graphforge_filesystem::file_identity(&file)
+        .map_err(|_| "lifecycle allocation identity unavailable".to_owned())?;
+    let usage = graphforge_filesystem::file_space_usage(&file)
+        .map_err(|_| "lifecycle allocation usage unavailable".to_owned())?;
+    let key = format!(
+        "{:016x}:{}",
+        identity.volume_serial,
+        identity
+            .file_id
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+    match identities.insert(key, usage.allocated_bytes) {
+        Some(existing) if existing != usage.allocated_bytes => {
+            Err("lifecycle allocation changed during observation".to_owned())
+        }
+        _ => Ok(()),
+    }
+}
 
 impl PhaseExecutor for PublicProcessExecutor {
     fn execute(&mut self, profile: &Profile, command: &PhaseCommand) -> Result<Execution, String> {
+        let produce_lifecycle_storage =
+            profile.schema == "graphforge-progressive-qualification-profile/1";
         if let PhaseAction::GraphForgeCliWorkflow { commands } = &command.action {
             let started = Instant::now();
             let mut peak_rss_bytes = None;
@@ -284,13 +462,22 @@ impl PhaseExecutor for PublicProcessExecutor {
                     });
                 }
             }
-            return Ok(Execution {
+            let mut result = Execution {
                 exit_code: Some(0),
                 duration_ms: millis(started.elapsed()),
                 peak_rss_bytes,
                 failure: None,
                 receipts,
-            });
+            };
+            if produce_lifecycle_storage {
+                if let Some(receipt) =
+                    self.lifecycle
+                        .observe(command.phase, command, &result.receipts)?
+                {
+                    result.receipts.push(receipt);
+                }
+            }
+            return Ok(result);
         }
         let (executable, args) = match &command.action {
             PhaseAction::BenchmarkGenerator {
@@ -299,7 +486,16 @@ impl PhaseExecutor for PublicProcessExecutor {
             PhaseAction::GraphForgeCli { args } => (profile.executable.as_str(), args.as_slice()),
             PhaseAction::GraphForgeCliWorkflow { .. } => unreachable!("handled above"),
         };
-        execute_process(executable, args)
+        let mut result = execute_process(executable, args)?;
+        if result.exit_code == Some(0) && produce_lifecycle_storage {
+            if let Some(receipt) =
+                self.lifecycle
+                    .observe(command.phase, command, &result.receipts)?
+            {
+                result.receipts.push(receipt);
+            }
+        }
+        Ok(result)
     }
 }
 
@@ -458,6 +654,19 @@ fn sanitize_receipt(value: &serde_json::Value) -> Option<serde_json::Value> {
                 "equivalent",
             ],
         ),
+        Some("graphforge-portable-import/2") => copy_selected_receipt(
+            object,
+            &[
+                "contract",
+                "package_digest",
+                "transport_digest",
+                "idempotent_replay",
+                "transient_peak_allocated_bytes",
+            ],
+        )
+        .filter(|receipt| {
+            sanitized_numeric_fields(receipt, &["transient_peak_allocated_bytes"])
+        }),
         Some(contract) if contract.starts_with("graphforge-portable-") => copy_selected_receipt(
             object,
             &[
@@ -1440,7 +1649,8 @@ mod tests {
         profile.lifecycle = Some(serde_json::json!({
             "mechanics": "public-certification-v1",
             "phases": Phase::ALL,
-            "evidence_schema": EVIDENCE_SCHEMA
+            "evidence_schema": EVIDENCE_SCHEMA,
+            "storage_receipt": "graphforge-lifecycle-storage/1"
         }));
         profile.gate = Some(serde_json::json!({
             "requires_previous_pass": true,
@@ -1700,7 +1910,7 @@ mod tests {
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
         let mut profile = tiny_profile();
         profile.executable = executable.to_string_lossy().into_owned();
-        let mut executor = PublicProcessExecutor;
+        let mut executor = PublicProcessExecutor::default();
         let result = executor.execute(&profile, &profile.phases[2]).unwrap();
         assert_eq!(result.exit_code, Some(0));
         assert_eq!(fs::read_to_string(state).unwrap().trim(), "5");
@@ -1726,7 +1936,7 @@ mod tests {
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
         let mut profile = tiny_profile();
         profile.executable = executable.to_string_lossy().into_owned();
-        let result = PublicProcessExecutor
+        let result = PublicProcessExecutor::default()
             .execute(&profile, &profile.phases[2])
             .unwrap();
         assert_eq!(result.exit_code, Some(23));
@@ -1734,5 +1944,99 @@ mod tests {
         assert_eq!(calls.lines().count(), 4);
         assert!(!calls.contains("import-session commit"));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn lifecycle_storage_deduplicates_aliases_and_finalizes_once() {
+        let root = std::env::temp_dir().join(format!(
+            "gf-certify-lifecycle-{}-{}",
+            std::process::id(),
+            Instant::now().elapsed().as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let nodes = root.join("nodes.parquet");
+        let alias = root.join("edges.parquet");
+        fs::write(&nodes, vec![7_u8; 8_192]).unwrap();
+        fs::hard_link(&nodes, &alias).unwrap();
+        let mut session = LifecycleStorageSession::default();
+        let generate = PhaseCommand {
+            phase: Phase::Generate,
+            action: PhaseAction::BenchmarkGenerator {
+                identity: format!("sha256:{}", "0".repeat(64)),
+                executable: "generator".to_owned(),
+                args: vec![
+                    "--nodes".to_owned(),
+                    nodes.to_string_lossy().into_owned(),
+                    "--edges".to_owned(),
+                    alias.to_string_lossy().into_owned(),
+                ],
+            },
+        };
+        assert!(
+            session
+                .observe(Phase::Generate, &generate, &[])
+                .unwrap()
+                .is_none()
+        );
+        let one_identity_allocation = session.allocation.current_allocated_bytes();
+        assert!(one_identity_allocation > 0);
+
+        let ingest = PhaseCommand {
+            phase: Phase::Ingest,
+            action: PhaseAction::GraphForgeCli { args: Vec::new() },
+        };
+        let committed = serde_json::json!({
+            "contract": "graphforge-import-session/1",
+            "outcome": "committed",
+            "construction": {"transient_peak_allocated_bytes": 4_096}
+        });
+        session
+            .observe(Phase::Ingest, &ingest, &[committed])
+            .unwrap();
+        session.source_project_observed = true;
+        session.portable_package_observed = true;
+        session.portable_import_peak_observed = true;
+        session.imported_project_observed = true;
+
+        let final_command = PhaseCommand {
+            phase: Phase::ReopenProof,
+            action: PhaseAction::GraphForgeCli { args: Vec::new() },
+        };
+        let receipt = session
+            .observe(Phase::ReopenProof, &final_command, &[])
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            receipt["retained_storage_bytes"].as_u64(),
+            Some(one_identity_allocation)
+        );
+        assert_eq!(
+            receipt["transient_peak_storage_bytes"].as_u64(),
+            Some(one_identity_allocation.saturating_add(4_096))
+        );
+        assert!(
+            session
+                .observe(Phase::ReopenProof, &final_command, &[])
+                .unwrap_err()
+                .contains("already finalized")
+        );
+        let encoded = serde_json::to_string(&receipt).unwrap();
+        for forbidden in ["path", "uuid", "identity", "volume", "file_id"] {
+            assert!(!encoded.contains(forbidden));
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn lifecycle_storage_refuses_close_with_missing_ordinary_authority() {
+        let final_command = PhaseCommand {
+            phase: Phase::ReopenProof,
+            action: PhaseAction::GraphForgeCli { args: Vec::new() },
+        };
+        let error = LifecycleStorageSession::default()
+            .observe(Phase::ReopenProof, &final_command, &[])
+            .unwrap_err();
+        assert!(error.contains("missing an authenticated owner or transient phase"));
     }
 }

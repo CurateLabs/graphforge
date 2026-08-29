@@ -22,7 +22,7 @@ fn run() -> Result<(), &'static str> {
         }
         [command, profile, evidence] if command == "run" => {
             let profile = read_profile(Path::new(profile)).map_err(|_| "invalid profile")?;
-            let mut executor = PublicProcessExecutor;
+            let mut executor = PublicProcessExecutor::default();
             let stdout = io::stdout();
             let mut output = stdout.lock();
             let outcome = certify_with_events(&profile, &mut executor, |event| {

@@ -180,11 +180,6 @@ def authoritative_receipts(scale: int) -> dict[str, list[dict]]:
                 },
             },
         },
-        {
-            "contract": "graphforge-lifecycle-storage/1",
-            "retained_storage_bytes": 200,
-            "transient_peak_storage_bytes": 300,
-        },
     ]
     source_storage = storage_receipt(100, 110)
     imported_storage = storage_receipt(120, 130)
@@ -198,7 +193,18 @@ def authoritative_receipts(scale: int) -> dict[str, list[dict]]:
         "reopen": [source_storage],
         "recount": [node_count, edge_count],
         "query": [one_hop, two_hop],
-        "reopen_proof": [node_count, edge_count, one_hop, two_hop, imported_storage],
+        "reopen_proof": [
+            node_count,
+            edge_count,
+            one_hop,
+            two_hop,
+            imported_storage,
+            {
+                "contract": "graphforge-lifecycle-storage/1",
+                "retained_storage_bytes": 200,
+                "transient_peak_storage_bytes": 300,
+            },
+        ],
     }
 
 
@@ -389,7 +395,7 @@ class ProgressiveRunControllerTests(unittest.TestCase):
                 root=ROOT, scale=18, graphforge=changed_gf, benchexec=benchexec(changed_gf)
             )
         missing_lifecycle = authoritative_receipts(18)
-        missing_lifecycle["ingest"] = [missing_lifecycle["ingest"][0]]
+        missing_lifecycle["reopen_proof"] = missing_lifecycle["reopen_proof"][:-1]
         changed_gf = graphforge(18, missing_lifecycle)
         with self.assertRaisesRegex(ControllerError, "graphforge-lifecycle-storage/1"):
             assemble_rung_evidence(
