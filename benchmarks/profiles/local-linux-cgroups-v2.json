@@ -1,0 +1,10 @@
+{
+  "schema": "graphforge-benchmark-profile/1",
+  "id": "local-linux-cgroups-v2",
+  "execution": "native-local-admission",
+  "provider": null,
+  "scheduler": "local",
+  "launcher": "local",
+  "resource_authority": "benchexec-cgroups-v2",
+  "container_isolation": "benchexec-namespaces"
+}
