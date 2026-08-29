@@ -112,11 +112,53 @@ start a provider, or open a GraphForge project.
 
 `make -C benchmarks local-admission` uses ReFrame's local scheduler and local
 launcher to run the admission probe. The probe admits only native Linux with
-cgroups v2 and the required namespace controls. BenchExec's namespace-enabled
-`RunExecutor` must then account for CPU, wall time, peak memory, reads, and
-writes while terminating a detached descendant tree at the wall-time limit.
+cgroups v2 and the required namespace controls. BenchExec's supported `runexec`
+entrypoint must then account for CPU, wall time, peak memory, reads, writes, and
+pressure while terminating a detached descendant tree at the wall-time limit.
 
 Unsupported hosts return sanitized typed disqualification evidence. In
 particular, macOS and Docker Desktop do not prove native Linux admission and
 must not be used as substitutes. This probe creates no Fly resources and does
 not authorize a Graph500 scale run.
+
+The command is fail-closed: only `passed` exits successfully. A typed
+`disqualified` result exits with status 2 and an execution failure exits with
+status 1. The dedicated `Native Local Admission` workflow is manual because
+ordinary pull-request runners do not promise this host topology. When explicitly
+dispatched it requires ReFrame to report `passed`, validates the closed evidence
+schema independently, and uploads the sanitized document even when admission
+fails. An uploaded disqualification is diagnostic evidence, never a green
+qualification or a masked workflow success.
+
+The hosted workflow evaluates bare Blacksmith and GitHub-hosted Ubuntu 24.04 as
+separate explicit authorities. Both install BenchExec from the official
+SoSy-Lab Ubuntu PPA so its package-managed one-time cgroup setup is the system
+authority. A
+hard `python3 -m benchexec.check_cgroups` preflight runs before the identical
+ReFrame check, and the measured fixture uses that same system interpreter. Per
+BenchExec's cgroups-v2 installation guidance, both commands execute in one
+`systemd-run --scope -p Delegate=yes` user scope. Two separately named system
+authorities also use transient system services that explicitly delegate
+`cpu cpuset io memory` while executing as the original unprivileged runner UID.
+The service uses systemd's `DelegateSubgroup=init.scope` so its process does not
+occupy the delegated unit root. The in-unit driver proves the live unit's
+delegation controllers, initial subgroup, and process UID before admission; it
+never writes cgroup control files or runs the benchmark as root.
+Each job is independently strict and uploads a provider-labelled evidence
+document; one provider is never a fallback that hides the other's
+disqualification. The workflow does not disable namespace containers, bypass
+cgroups, or add custom permission/systemd workarounds.
+
+For a dedicated native Linux authority, provision the administrator-owned user
+manager delegation before qualification:
+
+```bash
+sudo benchmarks/scripts/provision-benchexec-user-delegation.sh
+sudo reboot
+```
+
+The tracked drop-in sets `Delegate=yes` on `user@.service`, as prescribed by
+BenchExec's cgroups-v2/systemd installation guide. A reboot (or complete user
+manager termination and fresh login) is mandatory; editing the unit does not
+retroactively change an already-running user manager. The benchmark and both
+strict checks still run as the unprivileged user.
