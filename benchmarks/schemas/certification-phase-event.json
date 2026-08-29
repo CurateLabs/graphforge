@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schema": "graphforge-public-certification-phase-event-schema/1",
+  "type": "object",
+  "properties": {
+    "schema": { "const": "graphforge-public-certification-phase-event/1" },
+    "profile_id": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,80}$" },
+    "outcome": { "$ref": "certification-evidence.json#/$defs/phase" }
+  },
+  "required": ["schema", "profile_id", "outcome"],
+  "additionalProperties": false
+}
