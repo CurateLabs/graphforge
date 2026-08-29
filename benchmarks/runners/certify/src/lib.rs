@@ -489,11 +489,13 @@ impl PhaseExecutor for PublicProcessExecutor {
                 receipts,
             };
             if produce_lifecycle_storage {
-                if let Some(receipt) =
-                    self.lifecycle
-                        .observe(command.phase, command, &result.receipts)?
+                match self
+                    .lifecycle
+                    .observe(command.phase, command, &result.receipts)
                 {
-                    result.receipts.push(receipt);
+                    Ok(Some(receipt)) => result.receipts.push(receipt),
+                    Ok(None) => {}
+                    Err(_) => result.failure = Some(FailureKind::EvidenceInvalid),
                 }
             }
             return Ok(result);
@@ -507,11 +509,13 @@ impl PhaseExecutor for PublicProcessExecutor {
         };
         let mut result = execute_process(executable, args)?;
         if result.exit_code == Some(0) && produce_lifecycle_storage {
-            if let Some(receipt) =
-                self.lifecycle
-                    .observe(command.phase, command, &result.receipts)?
+            match self
+                .lifecycle
+                .observe(command.phase, command, &result.receipts)
             {
-                result.receipts.push(receipt);
+                Ok(Some(receipt)) => result.receipts.push(receipt),
+                Ok(None) => {}
+                Err(_) => result.failure = Some(FailureKind::EvidenceInvalid),
             }
         }
         Ok(result)
@@ -1099,6 +1103,7 @@ pub enum OutcomeStatus {
 pub enum FailureKind {
     CommandFailed,
     CommandUnavailable,
+    EvidenceInvalid,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -2069,4 +2074,5 @@ mod tests {
             .unwrap_err();
         assert!(error.contains("missing an authenticated owner or transient phase"));
     }
+
 }

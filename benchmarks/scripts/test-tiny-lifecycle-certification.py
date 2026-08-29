@@ -51,7 +51,7 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="gf-tiny-lifecycle-", dir=workspace_root) as directory:
         work = Path(directory)
         evidence_path = work / "evidence.json"
-        subprocess.run(
+        completed = subprocess.run(
             [
                 str(args.certify),
                 "run",
@@ -60,9 +60,44 @@ def main() -> None:
             ],
             cwd=work,
             env=environment,
-            check=True,
+            check=False,
         )
         evidence = json.loads(evidence_path.read_text())
+        if completed.returncode != 0:
+            failed_phase = evidence.get("failed_phase")
+            diagnostic: dict[str, object] = {"failed_phase": failed_phase}
+            if failed_phase == "clean_import":
+                profile = json.loads(
+                    (root / "fixtures/progressive/tiny-executable.json").read_text()
+                )
+                command = profile["phases"][8]["action"]["args"]
+                replay = subprocess.run(
+                    [str(args.gf), *command],
+                    cwd=work,
+                    env=environment,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                ordinary = []
+                for line in replay.stdout.splitlines():
+                    value = json.loads(line)
+                    ordinary.append(
+                        {
+                            "contract": value.get("contract"),
+                            "has_transient_peak": "transient_peak_allocated_bytes" in value,
+                            "transient_peak_allocated_bytes": value.get(
+                                "transient_peak_allocated_bytes"
+                            ),
+                        }
+                    )
+                diagnostic["clean_import_replay"] = {
+                    "returncode": replay.returncode,
+                    "receipts": ordinary,
+                    "stderr_present": bool(replay.stderr),
+                }
+            print(json.dumps({"tiny_lifecycle_failure": diagnostic}, sort_keys=True))
+            raise SystemExit("real tiny lifecycle certification failed")
         schema = json.loads((root / "schemas/certification-evidence.json").read_text())
         jsonschema.Draft202012Validator(schema).validate(evidence)
         if evidence["status"] != "passed" or len(evidence["phases"]) != 10:

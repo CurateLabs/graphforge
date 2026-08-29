@@ -55,7 +55,7 @@
           ]
         },
         "failure": {
-          "enum": ["command_failed", "command_unavailable"]
+          "enum": ["command_failed", "command_unavailable", "evidence_invalid"]
         },
         "receipts": {
           "type": "array",
