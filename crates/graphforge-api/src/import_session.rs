@@ -138,6 +138,9 @@ pub struct ImportConstructionEvidence {
     pub publication_committed: bool,
     /// Exact application-I/O attribution across the closed construction phases.
     pub application_io: graphforge_storage::ConstructionPhaseAttribution,
+    /// Versioned named publication work, derived from the phase counters above.
+    #[serde(default)]
+    pub publication_work: PublicationWorkComponents,
     /// Exact accepted input rows.
     pub input_rows: u64,
     /// Exact non-replay input batches.
@@ -156,6 +159,97 @@ pub struct ImportConstructionEvidence {
     pub peak_batch_bytes: u64,
     /// Exact transient allocation high-water retained across resume.
     pub transient_peak_allocated_bytes: u64,
+}
+
+/// Closed semantic publication-work contract for ordinary construction evidence.
+///
+/// `semantic_total_operations` is exactly the sum of read calls, write calls,
+/// and fsync calls across these five named phase rows. Bytes and call components
+/// remain intact so downstream controllers never need to infer work from time or
+/// filesystem scans.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PublicationWorkComponents {
+    /// Versioned semantic contract.
+    pub contract: String,
+    /// Canonical encoding, write, and post-write authentication.
+    pub encode_write_postwrite_authentication: graphforge_storage::PhaseIoTotals,
+    /// Publication control preauthentication.
+    pub publication_preauthentication: graphforge_storage::PhaseIoTotals,
+    /// Content-addressed installation reads and writes.
+    pub cas_install_read_write: graphforge_storage::PhaseIoTotals,
+    /// Workspace hydration and verification.
+    pub hydration_verification: graphforge_storage::PhaseIoTotals,
+    /// File and directory durability barriers.
+    pub fsync_synchronization: graphforge_storage::PhaseIoTotals,
+    /// Checked sum of read calls, write calls, and fsync calls in the named rows.
+    pub semantic_total_operations: u64,
+}
+
+impl PublicationWorkComponents {
+    fn checked_operation_total(
+        phases: [&graphforge_storage::PhaseIoTotals; 5],
+    ) -> Result<u64, GfError> {
+        let mut total = 0_u64;
+        for phase in phases {
+            total = total
+                .checked_add(phase.read_calls)
+                .and_then(|value| value.checked_add(phase.write_calls))
+                .and_then(|value| value.checked_add(phase.fsync_calls))
+                .ok_or_else(|| validation("publication work operation total overflowed"))?;
+        }
+        Ok(total)
+    }
+
+    fn from_application_io(
+        application_io: &graphforge_storage::ConstructionPhaseAttribution,
+    ) -> Result<Self, GfError> {
+        use graphforge_storage::StorageIoPhase;
+        application_io.validate_for_qualification()?;
+        let phase = |name| {
+            application_io
+                .phases
+                .get(&name)
+                .cloned()
+                .ok_or_else(|| validation("publication work phase is absent"))
+        };
+        let encode_write_postwrite_authentication =
+            phase(StorageIoPhase::EncodeWritePostwriteAuthentication)?;
+        let publication_preauthentication = phase(StorageIoPhase::PublicationPreauthentication)?;
+        let cas_install_read_write = phase(StorageIoPhase::CasInstallReadWrite)?;
+        let hydration_verification = phase(StorageIoPhase::HydrationVerification)?;
+        let fsync_synchronization = phase(StorageIoPhase::FsyncSynchronization)?;
+        let semantic_total_operations = Self::checked_operation_total([
+            &encode_write_postwrite_authentication,
+            &publication_preauthentication,
+            &cas_install_read_write,
+            &hydration_verification,
+            &fsync_synchronization,
+        ])?;
+        Ok(Self {
+            contract: "graphforge-publication-work/1".to_owned(),
+            encode_write_postwrite_authentication,
+            publication_preauthentication,
+            cas_install_read_write,
+            hydration_verification,
+            fsync_synchronization,
+            semantic_total_operations,
+        })
+    }
+
+    /// Verify the version, arithmetic, and exact phase projection.
+    fn validate_against(
+        &self,
+        application_io: &graphforge_storage::ConstructionPhaseAttribution,
+    ) -> Result<(), GfError> {
+        let expected = Self::from_application_io(application_io)?;
+        if self != &expected {
+            return Err(validation(
+                "publication work components do not reconcile with construction phases",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -632,12 +726,14 @@ impl GraphImportSession {
         let application_io =
             graphforge_storage::ConstructionPhaseAttribution::from_construction(&progress.evidence);
         application_io.validate_for_qualification()?;
+        let publication_work = PublicationWorkComponents::from_application_io(&application_io)?;
         self.manifest.progress.construction = Some(ImportConstructionEvidence {
             configured_batch_rows: u64::try_from(self.manifest.limits.batch_rows)
                 .unwrap_or(u64::MAX),
             accepted_chunks: progress.accepted_chunks,
             publication_committed: progress.publication_committed,
             application_io,
+            publication_work,
             input_rows: progress.evidence.input_rows,
             input_batches: progress.evidence.input_batches,
             immutable_artifacts: progress.evidence.immutable_artifacts,
@@ -774,10 +870,22 @@ fn write_manifest(root: &Path, manifest: &SessionManifest) -> Result<(), GfError
 }
 
 fn read_manifest(root: &Path) -> Result<SessionManifest, GfError> {
-    serde_json::from_reader(BufReader::new(
+    let mut manifest: SessionManifest = serde_json::from_reader(BufReader::new(
         File::open(root.join(MANIFEST)).map_err(storage)?,
     ))
-    .map_err(storage)
+    .map_err(storage)?;
+    if let Some(construction) = manifest.progress.construction.as_mut()
+        && construction.publication_work.contract.is_empty()
+    {
+        construction.publication_work =
+            PublicationWorkComponents::from_application_io(&construction.application_io)?;
+    }
+    if let Some(construction) = manifest.progress.construction.as_ref() {
+        construction
+            .publication_work
+            .validate_against(&construction.application_io)?;
+    }
+    Ok(manifest)
 }
 
 fn reject_unsafe_path(path: &Path) -> Result<(), GfError> {
@@ -1104,6 +1212,37 @@ mod tests {
     }
 
     #[test]
+    fn legacy_manifest_without_publication_work_backfills_from_application_io() {
+        let (_directory, _project, graph) = fixture();
+        let mut session = graph
+            .begin_import_session(OperationId(Uuid::now_v7()), ImportSessionLimits::default())
+            .unwrap();
+        session
+            .append_arrow(BulkInputKind::Node, &[nodes(&[Uuid::now_v7()])])
+            .unwrap();
+        session.validate(&graph).unwrap();
+
+        let root = session.root.clone();
+        let mut legacy = serde_json::to_value(&session.manifest).unwrap();
+        let construction = legacy["progress"]["construction"].as_object_mut().unwrap();
+        let application_io: graphforge_storage::ConstructionPhaseAttribution =
+            serde_json::from_value(construction["application_io"].clone()).unwrap();
+        assert!(construction.remove("publication_work").is_some());
+        fs::write(root.join(MANIFEST), serde_json::to_vec(&legacy).unwrap()).unwrap();
+
+        let restored = read_manifest(&root).unwrap();
+        let evidence = restored.progress.construction.unwrap();
+        assert_eq!(
+            evidence.publication_work.contract,
+            "graphforge-publication-work/1"
+        );
+        evidence
+            .publication_work
+            .validate_against(&application_io)
+            .unwrap();
+    }
+
+    #[test]
     fn zero_row_node_and_edge_sources_are_canonical_and_publishable() {
         let (_directory, project, graph) = fixture();
         let empty_nodes = RecordBatch::new_empty(bulk_node_input_schema(Vec::new()).unwrap());
@@ -1247,6 +1386,27 @@ mod tests {
             assert_eq!(receipt.input_rows, (4 * multiplier) as u64);
             assert_eq!(receipt.input_batches, multiplier as u64);
             assert_eq!(receipt.peak_batch_rows, 4);
+            assert_eq!(
+                receipt.publication_work.contract,
+                "graphforge-publication-work/1"
+            );
+            let named = &receipt.publication_work;
+            let expected_total = [
+                &named.encode_write_postwrite_authentication,
+                &named.publication_preauthentication,
+                &named.cas_install_read_write,
+                &named.hydration_verification,
+                &named.fsync_synchronization,
+            ]
+            .iter()
+            .map(|phase| phase.read_calls + phase.write_calls + phase.fsync_calls)
+            .sum::<u64>();
+            assert_eq!(named.semantic_total_operations, expected_total);
+            assert_eq!(
+                named.publication_preauthentication,
+                receipt.application_io.phases
+                    [&graphforge_storage::StorageIoPhase::PublicationPreauthentication]
+            );
 
             drop(graph);
             let reopened = GraphForge::new(project.to_str()).unwrap();

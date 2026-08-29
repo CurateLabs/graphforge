@@ -127,6 +127,7 @@ mod provider_embedding_execution;
 mod provider_find;
 mod provider_rerank;
 mod provider_session;
+mod query_evidence;
 mod repository;
 mod resource_policy;
 mod resumable_construction;
@@ -205,7 +206,11 @@ pub use graphforge_core::{
 };
 pub use import_session::{
     GraphImportSession, ImportConstructionEvidence, ImportPhase, ImportProgress,
-    ImportSessionLimits, ImportSourceKind,
+    ImportSessionLimits, ImportSourceKind, PublicationWorkComponents,
+};
+pub use query_evidence::{
+    QueryExecutionEvidence, QueryHopEvidence, QueryOperatorRssEvidence, QuerySinkEvidenceReceipt,
+    QuerySortEvidence,
 };
 // The Arrow-backed result of [`GraphForge::execute`].
 pub use generation_diff::{
@@ -562,6 +567,13 @@ impl GraphForge {
         let snapshot = graphforge_storage::capture_storage_attribution(&generation)?;
         snapshot.validate_for_qualification()?;
         Ok(snapshot)
+    }
+
+    /// Capture closed, identity-free storage evidence for ordinary consumers.
+    pub fn storage_attribution_receipt(
+        &self,
+    ) -> Result<graphforge_storage::StorageAttributionReceipt, GfError> {
+        graphforge_storage::StorageAttributionReceipt::from_snapshot(&self.storage_attribution()?)
     }
 
     pub(crate) fn stage_project_generation(
@@ -20506,5 +20518,17 @@ mod tests {
             missing.to_string(),
             "execution error: missing query parameter `$absent` for LIMIT"
         );
+    }
+
+    #[test]
+    fn public_storage_attribution_receipt_is_identity_free_and_reconciled() {
+        let project = tempfile::tempdir().unwrap();
+        let graph = GraphForge::new(project.path().to_str()).unwrap();
+        let receipt = graph.storage_attribution_receipt().unwrap();
+        receipt.validate_reconciliation().unwrap();
+        let encoded = serde_json::to_string(&receipt).unwrap();
+        assert!(!encoded.contains("generation_uuid"));
+        assert!(!encoded.contains("sha256"));
+        assert!(!encoded.contains(project.path().to_string_lossy().as_ref()));
     }
 }

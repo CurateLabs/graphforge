@@ -491,32 +491,31 @@ pub(crate) fn run_query(
         graphforge_api::GfError::Validation("query --output must be valid UTF-8".into())
     })?;
     let params = std::collections::HashMap::new();
-    let receipt = match args.format {
-        QuerySinkFormat::Parquet => graph.execute_to_parquet_stream_with_params(
-            &args.cypher,
-            &params,
-            path,
-            &options,
-            None,
-        )?,
-        QuerySinkFormat::ArrowIpc => graph.execute_to_arrow_ipc_stream_with_params(
-            &args.cypher,
-            &params,
-            path,
-            &options,
-            None,
-        )?,
+    let format = match args.format {
+        QuerySinkFormat::Parquet => graphforge_api::ResultSinkFormat::Parquet,
+        QuerySinkFormat::ArrowIpc => graphforge_api::ResultSinkFormat::ArrowIpc,
     };
+    let receipt = graph.execute_to_result_sink_with_evidence(
+        &args.cypher,
+        &params,
+        path,
+        format,
+        &options,
+        None,
+    )?;
     if json {
         write_json(
             &serde_json::json!({
-                "contract": "graphforge-result-sink/1",
-                "destination": receipt.destination,
-                "format": format!("{:?}", receipt.format),
-                "rows": receipt.progress.rows,
-                "batches": receipt.progress.batches,
-                "bytes": receipt.progress.bytes,
-                "complete": receipt.progress.complete,
+                "contract": "graphforge-result-sink/2",
+                "destination": receipt.sink.destination,
+                "format": format!("{:?}", receipt.sink.format),
+                "rows": receipt.sink.progress.rows,
+                "batches": receipt.sink.progress.batches,
+                "bytes": receipt.sink.progress.bytes,
+                "complete": receipt.sink.progress.complete,
+                "result_sha256": receipt.result_sha256,
+                "scalar_u64": receipt.scalar_u64,
+                "query_evidence": receipt.evidence,
             }),
             output,
         )?;
@@ -524,9 +523,9 @@ pub(crate) fn run_query(
         writeln!(
             output,
             "wrote {} rows={} bytes={}",
-            receipt.destination.display(),
-            receipt.progress.rows,
-            receipt.progress.bytes
+            receipt.sink.destination.display(),
+            receipt.sink.progress.rows,
+            receipt.sink.progress.bytes
         )
         .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
     }

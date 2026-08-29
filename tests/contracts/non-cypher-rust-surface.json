@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "499f902e4713931d7b3591fbaf978e6694c3029fde08c5c5476547563e5776e5",
+  "public_method_digest": "87c96476a9ec9403f5d95afc57a2029979e6627903111fd3995329c93aec5a6b",
   "method_policy": {
     "receiver_defaults": {
       "GraphForge": "release-tested",
@@ -265,10 +265,15 @@
         "GraphForge.publish_bulk_nodes",
         "GraphForge.relationship_types",
         "GraphForge.storage_attribution",
+        "GraphForge.storage_attribution_receipt",
         "GraphForge.workspace_configuration",
         "GraphForge.workspace_ontology"
       ],
       "test_refs": [
+        {
+          "path": "crates/graphforge-api/src/lib.rs",
+          "symbol": "public_storage_attribution_receipt_is_identity_free_and_reconciled"
+        },
         {
           "path": "crates/graphforge-api/tests/scale_g500_ladder.rs",
           "symbol": "public_storage_attribution_is_generation_bound_and_fully_classified"
@@ -818,6 +823,7 @@
         "GraphForge.execute_to_arrow_ipc_stream_with_params",
         "GraphForge.execute_to_parquet",
         "GraphForge.execute_to_parquet_stream_with_params",
+        "GraphForge.execute_to_result_sink_with_evidence",
         "GraphForge.execute_to_parquet_with_params",
         "GraphForge.execute_with_params",
         "GraphForge.explain",
@@ -826,6 +832,10 @@
         "GraphForge.schema"
       ],
       "test_refs": [
+        {
+          "path": "crates/graphforge-api/tests/fixed_hop_limit.rs",
+          "symbol": "ordinary_streaming_sink_exposes_deterministic_query_evidence"
+        },
         {
           "path": "crates/graphforge-api/src/composition_binding_tests.rs",
           "symbol": "facade_executes_qualified_and_unique_composed_queries"

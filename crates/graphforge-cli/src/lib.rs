@@ -312,6 +312,58 @@ enum Command {
     },
     /// Emit safe recovery-on-open evidence for the project.
     Recovery,
+    /// Emit authenticated, identity-free retained storage attribution.
+    StorageAttribution,
+}
+
+#[derive(serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct StorageAttributionCommandReceipt {
+    contract: &'static str,
+    storage: graphforge_storage::StorageAttributionReceipt,
+    reopen_agrees: bool,
+}
+
+fn run_storage_attribution(
+    graph: GraphForge,
+    path: &Path,
+    json: bool,
+    output: &mut dyn Write,
+) -> Result<(), graphforge_api::GfError> {
+    let storage = graph.storage_attribution_receipt()?;
+    storage.validate_reconciliation()?;
+    drop(graph);
+    let path_text = path.to_str().ok_or_else(|| {
+        graphforge_api::GfError::Validation("--project must be valid UTF-8".into())
+    })?;
+    let reopened = GraphForge::new(Some(path_text))?;
+    let reopened_storage = reopened.storage_attribution_receipt()?;
+    reopened_storage.validate_reconciliation()?;
+    if reopened_storage != storage {
+        return Err(graphforge_api::GfError::Validation(
+            "storage attribution changed across reopen".into(),
+        ));
+    }
+    if json {
+        serde_json::to_writer(
+            &mut *output,
+            &StorageAttributionCommandReceipt {
+                contract: "graphforge-storage-attribution-command/1",
+                storage,
+                reopen_agrees: true,
+            },
+        )
+        .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
+        writeln!(output).map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
+    } else {
+        writeln!(
+            output,
+            "retained_logical_eof_bytes={} allocated_physical_bytes={} reopen_agrees=true",
+            storage.retained_logical_eof_bytes, storage.allocated_physical_bytes
+        )
+        .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
+    }
+    Ok(())
 }
 
 #[derive(Args)]
@@ -1267,6 +1319,11 @@ fn run(cli: Cli, output: &mut dyn Write) -> Result<i32, CliRuntimeError> {
         }
         Command::Recovery => {
             return maintenance_cli::run_recovery(&graph, cli.json, output)
+                .map(|()| 0)
+                .map_err(Into::into);
+        }
+        Command::StorageAttribution => {
+            return run_storage_attribution(graph, &path, cli.json, output)
                 .map(|()| 0)
                 .map_err(Into::into);
         }
@@ -2591,6 +2648,75 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&delete.stderr)
         );
+    }
+
+    #[test]
+    fn storage_attribution_json_is_closed_sanitized_and_reopen_stable() {
+        let project = tempdir().unwrap();
+        let path = project.path().join("state");
+        fs::create_dir(&path).unwrap();
+        let result = execute([
+            "graphforge".to_owned(),
+            "--json".to_owned(),
+            "--project".to_owned(),
+            path.to_string_lossy().into_owned(),
+            "storage-attribution".to_owned(),
+        ]);
+        assert_eq!(
+            result.exit_code,
+            0,
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let json: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(json["contract"], "graphforge-storage-attribution-command/1");
+        assert_eq!(
+            json["storage"]["contract"],
+            "graphforge-storage-attribution/1"
+        );
+        assert_eq!(json["reopen_agrees"], true);
+        assert_eq!(
+            json["storage"]["categories"].as_object().unwrap().len(),
+            graphforge_storage::ArtifactCategory::ALL.len()
+        );
+        fn assert_sanitized(value: &serde_json::Value) {
+            match value {
+                serde_json::Value::Object(object) => {
+                    for (key, value) in object {
+                        assert!(
+                            !matches!(
+                                key.as_str(),
+                                "uuid"
+                                    | "path"
+                                    | "generation_uuid"
+                                    | "generation_manifest_sha256"
+                                    | "physical_identity_allocated_bytes"
+                                    | "provider_id"
+                                    | "resource_id"
+                                    | "credential"
+                                    | "credentials"
+                                    | "secret"
+                            ),
+                            "sensitive evidence key: {key}"
+                        );
+                        assert_sanitized(value);
+                    }
+                }
+                serde_json::Value::Array(values) => {
+                    values.iter().for_each(assert_sanitized);
+                }
+                serde_json::Value::String(value) => {
+                    assert!(Uuid::parse_str(value).is_err());
+                    assert!(!Path::new(value).is_absolute());
+                }
+                _ => {}
+            }
+        }
+        assert_sanitized(&json);
+        let encoded = String::from_utf8(result.stdout).unwrap();
+        assert!(!encoded.contains("generation_uuid"));
+        assert!(!encoded.contains("sha256"));
+        assert!(!encoded.contains(path.to_string_lossy().as_ref()));
     }
 
     #[test]
