@@ -1714,6 +1714,11 @@ fn dependency_blocked_error(preview: &graphforge_ontology::DeletePreview) -> GfE
 
 fn portable_error(error: graphforge_storage::PortableV2Error) -> GfError {
     use graphforge_storage::PortableV2ErrorCode;
+    // PortableV2Error's Display is deliberately limited to its static,
+    // path-free detail (the optional entry is never rendered). Preserve that
+    // typed producer diagnosis instead of collapsing every storage failure to
+    // the same generic interchange message.
+    let diagnostic_message = bounded_text(&error.to_string());
     let (outer, diagnostic, remediation) = match error.code {
         PortableV2ErrorCode::Cancelled => (
             "GF_CANCELLED",
@@ -1760,7 +1765,7 @@ fn portable_error(error: graphforge_storage::PortableV2Error) -> GfError {
         diagnostics: vec![MultiOntologyDiagnostic {
             code: diagnostic.into(),
             phase: "interchange".into(),
-            message: "portable-v2 ontology staging failed".into(),
+            message: diagnostic_message,
             subjects: bounded_items(subjects, MAX_ERROR_DIAGNOSTICS),
             candidates: Vec::new(),
             remediation: remediation.into(),
@@ -2311,6 +2316,10 @@ mod tests {
             let error = MultiOntologyError::from(PortableV2Error::new(source, "test"));
             assert_eq!(error.code, outer);
             assert_eq!(error.diagnostics[0].code, diagnostic);
+            assert_eq!(
+                error.diagnostics[0].message,
+                format!("portable-v2 {source:?}: test")
+            );
         }
     }
 

@@ -101,6 +101,13 @@ def main() -> None:
                             "semantic_code": value.get("error", {})
                             .get("details", {})
                             .get("semantic_code"),
+                            "diagnostics": [
+                                {
+                                    "code": diagnostic.get("code"),
+                                    "message": diagnostic.get("message"),
+                                }
+                                for diagnostic in value.get("error", {}).get("diagnostics", [])
+                            ],
                         }
                         for line in replay.stderr.splitlines()
                         if (value := json.loads(line))
