@@ -428,25 +428,8 @@ fn sanitize_receipt(value: &serde_json::Value) -> Option<serde_json::Value> {
             }
             Some(receipt.into())
         }
-        Some("graphforge-result-sink/1" | "graphforge-result-sink/2") => {
-            let mut receipt = serde_json::Map::new();
-            for key in [
-                "contract",
-                "format",
-                "rows",
-                "batches",
-                "bytes",
-                "complete",
-                "result_sha256",
-                "scalar_u64",
-                "query_evidence",
-            ] {
-                if let Some(item) = object.get(key) {
-                    receipt.insert(key.to_owned(), item.clone());
-                }
-            }
-            Some(receipt.into())
-        }
+        Some("graphforge-result-sink/1") => sanitize_legacy_result_sink(object),
+        Some("graphforge-result-sink/2") => sanitize_result_sink(object),
         Some("graphforge-storage-attribution-command/1") => sanitize_storage_command(object),
         Some("graphforge-lifecycle-storage/1") => copy_closed_receipt(
             object,
@@ -597,6 +580,207 @@ fn sanitize_storage_command(
         "storage": storage,
         "reopen_agrees": true,
     }))
+}
+
+fn sanitize_legacy_result_sink(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Option<serde_json::Value> {
+    const KEYS: [&str; 7] = [
+        "contract",
+        "destination",
+        "format",
+        "rows",
+        "batches",
+        "bytes",
+        "complete",
+    ];
+    if object.keys().any(|key| !KEYS.contains(&key.as_str()))
+        || !matches!(
+            object.get("format").and_then(serde_json::Value::as_str),
+            Some("ArrowIpc" | "Parquet")
+        )
+        || object.get("complete").and_then(serde_json::Value::as_bool) != Some(true)
+        || !sanitized_numeric_fields(
+            &serde_json::Value::Object(object.clone()),
+            &["rows", "batches", "bytes"],
+        )
+    {
+        return None;
+    }
+    copy_selected_receipt(
+        object,
+        &["contract", "format", "rows", "batches", "bytes", "complete"],
+    )
+}
+
+fn sanitize_result_sink(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Option<serde_json::Value> {
+    const KEYS: [&str; 10] = [
+        "contract",
+        "destination",
+        "format",
+        "rows",
+        "batches",
+        "bytes",
+        "complete",
+        "result_sha256",
+        "scalar_u64",
+        "query_evidence",
+    ];
+    let digest = object.get("result_sha256")?.as_str()?;
+    if object.keys().any(|key| !KEYS.contains(&key.as_str()))
+        || !matches!(
+            object.get("format").and_then(serde_json::Value::as_str),
+            Some("ArrowIpc" | "Parquet")
+        )
+        || object.get("complete").and_then(serde_json::Value::as_bool) != Some(true)
+        || digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        || !sanitized_numeric_fields(
+            &serde_json::Value::Object(object.clone()),
+            &["rows", "batches", "bytes"],
+        )
+        || !object
+            .get("scalar_u64")
+            .is_some_and(|value| value.is_null() || value.as_u64().is_some())
+        || !sanitized_query_evidence(object.get("query_evidence")?)
+    {
+        return None;
+    }
+    copy_selected_receipt(
+        object,
+        &[
+            "contract",
+            "format",
+            "rows",
+            "batches",
+            "bytes",
+            "complete",
+            "result_sha256",
+            "scalar_u64",
+            "query_evidence",
+        ],
+    )
+}
+
+fn sanitized_query_evidence(value: &serde_json::Value) -> bool {
+    const KEYS: [&str; 11] = [
+        "contract",
+        "hops",
+        "sorts",
+        "operator_rss",
+        "max_in_flight_reads",
+        "memory_reserved_before",
+        "memory_reserved_after",
+        "returned_batch_bytes",
+        "execution_batch_rows",
+        "peak_rss_bytes",
+        "rss_after_release_bytes",
+    ];
+    let object = match value.as_object() {
+        Some(object) => object,
+        None => return false,
+    };
+    object.len() == KEYS.len()
+        && object.keys().all(|key| KEYS.contains(&key.as_str()))
+        && object.get("contract").and_then(serde_json::Value::as_str)
+            == Some("graphforge-query-evidence/1")
+        && sanitized_numeric_fields(value, &KEYS[4..])
+        && sanitized_query_records(object.get("hops"), &QUERY_HOP_KEYS, None)
+        && sanitized_query_records(object.get("sorts"), &QUERY_SORT_KEYS, Some("fetch_rows"))
+        && sanitized_operator_rss(object.get("operator_rss"))
+}
+
+const QUERY_HOP_KEYS: [&str; 25] = [
+    "ordinal",
+    "input_batches",
+    "input_rows",
+    "candidates_generated",
+    "rows_emitted",
+    "projected_chunks",
+    "projected_rows",
+    "projected_columns",
+    "edge_projected_columns",
+    "node_projected_columns",
+    "edge_reader_calls",
+    "edge_rows_returned",
+    "edge_logical_rows_scanned",
+    "edge_full_reads",
+    "node_reader_calls",
+    "node_rows_returned",
+    "node_logical_rows_scanned",
+    "node_full_reads",
+    "identity_reader_calls",
+    "identity_logical_bytes",
+    "identity_ranges_selected",
+    "identity_peak_buffer_bytes",
+    "identity_per_record_seeks",
+    "identity_revalidation_calls",
+    "identity_revalidation_bytes",
+];
+
+const QUERY_SORT_KEYS: [&str; 7] = [
+    "ordinal",
+    "fetch_rows",
+    "output_rows",
+    "spill_count",
+    "spilled_rows",
+    "spilled_bytes",
+    "retained_bytes",
+];
+
+fn sanitized_query_records(
+    value: Option<&serde_json::Value>,
+    keys: &[&str],
+    nullable: Option<&str>,
+) -> bool {
+    value
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|records| {
+            records.iter().all(|record| {
+                record.as_object().is_some_and(|object| {
+                    object.len() == keys.len()
+                        && object.keys().all(|key| keys.contains(&key.as_str()))
+                        && keys.iter().all(|key| {
+                            object.get(*key).is_some_and(|value| {
+                                (nullable == Some(*key) && value.is_null())
+                                    || value.as_u64().is_some()
+                            })
+                        })
+                })
+            })
+        })
+}
+
+fn sanitized_operator_rss(value: Option<&serde_json::Value>) -> bool {
+    const KEYS: [&str; 5] = [
+        "ordinal",
+        "operator",
+        "before_bytes",
+        "peak_bytes",
+        "after_bytes",
+    ];
+    value
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|records| {
+            records.iter().all(|record| {
+                record.as_object().is_some_and(|object| {
+                    object.len() == KEYS.len()
+                        && object.keys().all(|key| KEYS.contains(&key.as_str()))
+                        && sanitized_numeric_fields(
+                            record,
+                            &["ordinal", "before_bytes", "peak_bytes", "after_bytes"],
+                        )
+                        && object
+                            .get("operator")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(is_safe_token)
+                })
+            })
+        })
 }
 
 fn sanitized_storage_categories(value: &serde_json::Value) -> bool {
@@ -1085,6 +1269,37 @@ mod tests {
         assert_eq!(parse_receipts(import, true).unwrap().len(), 1);
         let leaked = br#"{"contract":"graphforge-import-session/1","outcome":"committed","construction":{"project_path":"/secret"}}"#;
         assert!(parse_receipts(leaked, true).is_err());
+        let query = serde_json::json!({
+            "contract": "graphforge-result-sink/2",
+            "destination": "/secret/query.arrow",
+            "format": "ArrowIpc",
+            "rows": 1,
+            "batches": 1,
+            "bytes": 64,
+            "complete": true,
+            "result_sha256": "a".repeat(64),
+            "scalar_u64": 7,
+            "query_evidence": {
+                "contract": "graphforge-query-evidence/1",
+                "hops": [],
+                "sorts": [],
+                "operator_rss": [],
+                "max_in_flight_reads": 0,
+                "memory_reserved_before": 0,
+                "memory_reserved_after": 0,
+                "returned_batch_bytes": 8,
+                "execution_batch_rows": 8192,
+                "peak_rss_bytes": 0,
+                "rss_after_release_bytes": 0
+            }
+        });
+        let encoded = serde_json::to_vec(&query).expect("query receipt JSON");
+        let sanitized = parse_receipts(&encoded, true).expect("closed query receipt");
+        assert!(sanitized[0].get("destination").is_none());
+        let mut leaked_query = query;
+        leaked_query["query_evidence"]["project_path"] = serde_json::json!("/secret");
+        let encoded = serde_json::to_vec(&leaked_query).expect("leaked query receipt JSON");
+        assert!(parse_receipts(&encoded, true).is_err());
     }
 
     #[test]
