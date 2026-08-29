@@ -127,6 +127,50 @@ The adapter remains disabled until #956 is complete. The tiny provider
 qualification and independent post-teardown inventory are separate live
 acceptance evidence and are not claimed by these fixtures.
 
+### Tiny Fly environment qualification
+
+After #955, #956, and #957 are merged, the separate
+`graphforge_bench.fly_tiny_qualification` executor closes that live acceptance
+gap without pretending the smoke is S18. It remotely builds the existing #882
+filesystem-smoke image at one clean exact commit, resolves the same-app image
+to its immutable digest, and launches the smallest currently advertised Fly
+performance preset in one fixed, currently admitted region. The attached 10
+GiB encrypted volume has scheduled snapshots disabled. The Machine has no
+service, uses restart/autostop disabled and Fly's `--rm` auto-destroy
+semantics, and is bounded by the smoke's 930-second timeout, 30-second kill
+grace, and 300-second evidence acknowledgement window.
+
+Dry-run performs source and read-only live-capacity admission but creates
+nothing. Supply unique disposable names and an existing output directory:
+
+```bash
+PYTHONPATH=benchmarks/harness uv run --project benchmarks python -m \
+  graphforge_bench.fly_tiny_qualification \
+  --expected-sha "$(git rev-parse HEAD)" \
+  --org personal --app gf-q958-UNIQUE --region dfw \
+  --volume-name gf_q958_unique --machine-name gf-q958-machine \
+  --prerequisite-955 merged --prerequisite-956 merged --prerequisite-957 merged \
+  --ledger /tmp/gf-q958-ledger.json \
+  --evidence-out /tmp/fly-qualification-evidence.json \
+  --result-out /tmp/fly-qualification-result.json
+```
+
+Only after that exact plan is accepted, append `--execute
+--confirm-disposable`. Execution owns exactly one app, one image attachment,
+one volume, and one Machine. It persists the local ownership ledger immediately
+after every create, retrieves only the existing closed sanitized evidence, and
+always runs child-first teardown. Before deleting the app it independently
+requires empty Machine, volume, and secret inventories; afterwards it requires
+the app absent and leaves a cleared ledger. The logged-in `flyctl` credential
+is used directly: the executor creates no secret or temporary token material.
+
+The tiny smoke records phase peak RSS but authorizes no scale run. Its
+`performance-1x` selection is not an S18 sizing result. Subsequent ladder
+Machines must use same-phase RSS plateau evidence and measured headroom;
+continued material memory growth is an architectural failure. Persistent graph
+size remains expected to be disk/I/O-bound, with Fly's 500 GiB/425 GiB usable
+storage envelope evaluated only by the real ladder.
+
 ## Smoke
 
 From the repository root:

@@ -54,6 +54,7 @@ FAILURE_TYPES = frozenset(
         "retrieval_failed",
         "teardown_failed",
         "inventory_not_empty",
+        "qualification_failed",
     }
 )
 
@@ -277,6 +278,7 @@ def provisioning_commands(attempt: FlyAttempt) -> tuple[Command, ...]:
                 str(attempt.volume_gib),
                 "--count",
                 "1",
+                "--scheduled-snapshots=false",
                 "--json",
                 "--yes",
             ),
@@ -306,6 +308,7 @@ def provisioning_commands(attempt: FlyAttempt) -> tuple[Command, ...]:
                 "--autostart=false",
                 "--rootfs-persist",
                 "never",
+                "--rm",
                 "--skip-dns-registration",
                 "--detach",
             ),

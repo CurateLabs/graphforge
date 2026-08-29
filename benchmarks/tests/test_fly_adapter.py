@@ -83,12 +83,15 @@ class FlyAdapterTests(unittest.TestCase):
     def test_provisioning_is_private_fixed_and_thin(self) -> None:
         commands = provisioning_commands(attempt())
         machine = next(c for c in commands if c.operation == "create_machine").argv
+        volume = next(c for c in commands if c.operation == "create_volume").argv
         execute = next(c for c in commands if c.operation == "execute_lifecycle").argv
         self.assertIn("den", machine)
         self.assertIn("performance-4x", machine)
         self.assertIn("--restart", machine)
         self.assertIn("no", machine)
         self.assertIn("--autostop", machine)
+        self.assertIn("--rm", machine)
+        self.assertIn("--scheduled-snapshots=false", volume)
         self.assertNotIn("--port", machine)
         self.assertEqual(shlex.split(execute[-1]), list(attempt().lifecycle.argv))
         self.assertNotIn("threshold", " ".join(execute))
