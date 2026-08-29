@@ -11,8 +11,10 @@ use arrow::record_batch::RecordBatch;
 use graphforge_core::canonical::{CANONICAL_CONTRACT_VERSION, CanonicalDomain, fingerprint};
 use graphforge_core::uuid::Uuid;
 use graphforge_storage::{
-    ProjectCapability, ProjectGenerationRequest, ProjectParticipant, ProjectParticipantEncoding,
-    ProjectStageOutcome,
+    GRAPH_CAPABILITY_ID, GRAPH_CAPABILITY_VERSION, ProjectCapability, ProjectGenerationRequest,
+    ProjectParticipant, ProjectParticipantEncoding, ProjectStageOutcome, UuidIndexBuildLimits,
+    capture_graph_files, rebuild_v4_ordinal_identity, resolve_project_generation,
+    stage_project_generation_with_graph_tree,
 };
 
 const GRAPH_SNAPSHOT_SCHEMA_CANONICAL_BYTES: &[u8] =
@@ -90,6 +92,51 @@ pub(crate) fn publish_graph_workspace(container: &Path, workspace: &Path) {
         panic!("fresh fixture publication unexpectedly replayed");
     };
     let expected_parent = parent.generation_uuid();
+    staged
+        .validate(
+            |_| Ok(()),
+            |actual_parent, _| {
+                assert_eq!(actual_parent.generation_uuid(), expected_parent);
+                Ok(())
+            },
+        )
+        .unwrap()
+        .publish()
+        .unwrap();
+}
+
+/// Publish through the compact graph-files v2 authority after constructing the
+/// v4 ordinal identity artifacts in the exact workspace being committed.
+pub(crate) fn publish_graph_workspace_v4(container: &Path, workspace: &Path) {
+    let _ = graphforge_storage::open_or_initialize_project(container).unwrap();
+    rebuild_v4_ordinal_identity(workspace, UuidIndexBuildLimits::default()).unwrap();
+    let parent = resolve_project_generation(container).unwrap();
+    let expected_parent = parent.generation_uuid();
+    drop(parent);
+
+    let (_, graph_participant) = capture_graph_files(workspace).unwrap();
+    let mut participants = graphforge_storage::empty_workspace_participants().unwrap();
+    participants.insert(0, graph_participant);
+    let request = ProjectGenerationRequest {
+        transaction_uuid: Uuid::now_v7(),
+        generation_uuid: Uuid::now_v7(),
+        capabilities: vec![
+            ProjectCapability {
+                capability_id: GRAPH_CAPABILITY_ID.into(),
+                capability_version: GRAPH_CAPABILITY_VERSION,
+            },
+            ProjectCapability {
+                capability_id: "workspace".into(),
+                capability_version: 1,
+            },
+        ],
+        participants,
+    };
+    let ProjectStageOutcome::Staged(staged) =
+        stage_project_generation_with_graph_tree(container, &request, Some(workspace)).unwrap()
+    else {
+        panic!("fresh v4 fixture publication unexpectedly replayed");
+    };
     staged
         .validate(
             |_| Ok(()),

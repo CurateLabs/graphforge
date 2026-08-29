@@ -278,6 +278,66 @@ pub fn read_edges_filtered_observed(
     Ok(batches)
 }
 
+/// Filter edge topology by `edge_id` while physically decoding only the
+/// requested canonical columns plus the join key.
+#[allow(clippy::implicit_hasher)]
+#[doc(hidden)]
+pub fn read_edges_filtered_projected_observed(
+    dir: &Path,
+    rel_name: &str,
+    mode: OntologyMode,
+    edge_ids: &std::collections::HashSet<u64>,
+    projection: &[usize],
+    observer: Option<&std::sync::Arc<dyn crate::io_stats::FilteredReadObserver>>,
+) -> Result<Vec<RecordBatch>, DataFusionError> {
+    if rel_name == "*" && matches!(mode, OntologyMode::Advisory | OntologyMode::Strict) {
+        // Union normalization synthesizes rel_type_name. Normalize first, then
+        // shape the result; individual typed files still avoid node reads.
+        return read_edges_union(dir, Some(edge_ids), observer).and_then(|batches| {
+            project_batches_with_key(batches, &EXPLORATORY_EDGE_SCHEMA, projection, "edge_id")
+        });
+    }
+    if matches!(mode, OntologyMode::Advisory | OntologyMode::Strict) {
+        let mut components = Path::new(rel_name).components();
+        if !matches!(components.next(), Some(std::path::Component::Normal(_)))
+            || components.next().is_some()
+        {
+            return Err(DataFusionError::Execution(format!(
+                "invalid relation name {rel_name:?}: must be a plain file stem"
+            )));
+        }
+    }
+    let (stem, schema) = match mode {
+        OntologyMode::Exploratory => ("_exploratory", EXPLORATORY_EDGE_SCHEMA.clone()),
+        OntologyMode::Advisory | OntologyMode::Strict => (rel_name, TYPED_EDGE_SCHEMA.clone()),
+    };
+    let mut batches = Vec::new();
+    for (_, path) in crate::mutator::edge_parquet_files(dir, Some(stem))
+        .map_err(|error| DataFusionError::Execution(error.to_string()))?
+    {
+        let file_schema = admitted_parquet(&path)?.schema().clone();
+        if file_schema.fields() != schema.fields() {
+            return Err(DataFusionError::Execution(format!(
+                "projected edge read requires canonical schema: {}",
+                path.display()
+            )));
+        }
+        batches.extend(read_parquet_filtered_u64_projected(
+            &path,
+            schema.clone(),
+            "edge_id",
+            edge_ids,
+            FilteredReadKind::Edge,
+            observer,
+            projection,
+        )?);
+    }
+    if batches.is_empty() {
+        return project_batches_with_key(Vec::new(), &schema, projection, "edge_id");
+    }
+    Ok(batches)
+}
+
 /// Read the union of every relation's edges (#823): the "all relation types"
 /// read for an untyped traversal in a typed project. Enumerates every
 /// `topology/edges/*.parquet` (stem order, for deterministic adjacency/BFS),
@@ -701,7 +761,85 @@ fn read_parquet_filtered_u64(
     if ids.is_empty() || !path.exists() {
         return Ok(vec![RecordBatch::new_empty(fallback_schema)]);
     }
-    read_parquet_filtered_u64_attempt(path, fallback_schema, key_column, ids, kind, observer, true)
+    read_parquet_filtered_u64_attempt(
+        path,
+        fallback_schema,
+        key_column,
+        ids,
+        kind,
+        observer,
+        true,
+        None,
+    )
+}
+
+fn canonical_projection_with_key(
+    schema: &SchemaRef,
+    projection: &[usize],
+    key_column: &str,
+) -> Result<Vec<usize>, DataFusionError> {
+    let mut indices = projection.to_vec();
+    indices.push(
+        schema
+            .index_of(key_column)
+            .map_err(|error| DataFusionError::Execution(format!("filtered read: {error}")))?,
+    );
+    indices.sort_unstable();
+    indices.dedup();
+    if indices.iter().any(|index| *index >= schema.fields().len()) {
+        return Err(DataFusionError::Execution(
+            "filtered read projection index is out of range".into(),
+        ));
+    }
+    Ok(indices)
+}
+
+fn project_batches_with_key(
+    batches: Vec<RecordBatch>,
+    schema: &SchemaRef,
+    projection: &[usize],
+    key_column: &str,
+) -> Result<Vec<RecordBatch>, DataFusionError> {
+    let indices = canonical_projection_with_key(schema, projection, key_column)?;
+    if batches.is_empty() {
+        let projected = Arc::new(arrow::datatypes::Schema::new(
+            indices
+                .iter()
+                .map(|index| schema.field(*index).clone())
+                .collect::<Vec<_>>(),
+        ));
+        return Ok(vec![RecordBatch::new_empty(projected)]);
+    }
+    batches
+        .into_iter()
+        .map(|batch| batch.project(&indices).map_err(Into::into))
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn read_parquet_filtered_u64_projected(
+    path: &Path,
+    fallback_schema: SchemaRef,
+    key_column: &str,
+    ids: &std::collections::HashSet<u64>,
+    kind: FilteredReadKind,
+    observer: Option<&std::sync::Arc<dyn crate::io_stats::FilteredReadObserver>>,
+    projection: &[usize],
+) -> Result<Vec<RecordBatch>, DataFusionError> {
+    let projection = canonical_projection_with_key(&fallback_schema, projection, key_column)?;
+    if ids.is_empty() || !path.exists() {
+        return project_batches_with_key(Vec::new(), &fallback_schema, &projection, key_column);
+    }
+    read_parquet_filtered_u64_attempt(
+        path,
+        fallback_schema,
+        key_column,
+        ids,
+        kind,
+        observer,
+        true,
+        Some(&projection),
+    )
 }
 
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
@@ -713,6 +851,7 @@ fn read_parquet_filtered_u64_attempt(
     kind: FilteredReadKind,
     observer: Option<&std::sync::Arc<dyn crate::io_stats::FilteredReadObserver>>,
     allow_dense_node_selection: bool,
+    projection: Option<&[usize]>,
 ) -> Result<Vec<RecordBatch>, DataFusionError> {
     use parquet::arrow::ProjectionMask;
     use parquet::arrow::arrow_reader::{
@@ -721,6 +860,17 @@ fn read_parquet_filtered_u64_attempt(
     use parquet::file::metadata::PageIndexPolicy;
     use parquet::file::statistics::Statistics;
 
+    let projected_schema = projection.map_or_else(
+        || fallback_schema.clone(),
+        |indices| {
+            Arc::new(arrow::datatypes::Schema::new(
+                indices
+                    .iter()
+                    .map(|index| fallback_schema.field(*index).clone())
+                    .collect::<Vec<_>>(),
+            ))
+        },
+    );
     let mut observation = FilteredReadObservation::new(observer, kind);
     let file = File::open(path).map_err(|e| io_err(&e))?;
     // Optional, NOT required: with_page_index(true) errors on files lacking a
@@ -768,13 +918,18 @@ fn read_parquet_filtered_u64_attempt(
                     .map(|i| Some(!col.is_null(i) && ids.contains(&col.value(i))))
                     .collect()
             };
-            filtered.push(
-                arrow::compute::filter_record_batch(batch, &mask)
-                    .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?,
-            );
+            let filtered_batch = arrow::compute::filter_record_batch(batch, &mask)
+                .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
+            filtered.push(if let Some(indices) = projection {
+                filtered_batch
+                    .project(indices)
+                    .map_err(|error| DataFusionError::ArrowError(Box::new(error), None))?
+            } else {
+                filtered_batch
+            });
         }
         if filtered.is_empty() {
-            filtered.push(RecordBatch::new_empty(fallback_schema));
+            filtered.push(RecordBatch::new_empty(projected_schema));
         }
         record_pruning(
             kind,
@@ -901,6 +1056,12 @@ fn read_parquet_filtered_u64_attempt(
     } else {
         builder
     };
+    let builder = if let Some(indices) = projection {
+        let mask = ProjectionMask::roots(builder.parquet_schema(), indices.iter().copied());
+        builder.with_projection(mask)
+    } else {
+        builder
+    };
     let reader = builder
         .with_row_filter(RowFilter::new(vec![Box::new(predicate)]))
         .build()
@@ -933,13 +1094,14 @@ fn read_parquet_filtered_u64_attempt(
                 kind,
                 observer,
                 false,
+                projection,
             );
         }
     }
     record_pruning(kind, &observation, pruning);
     observation.complete(returned, false);
     if batches.is_empty() {
-        return Ok(vec![RecordBatch::new_empty(fallback_schema)]);
+        return Ok(vec![RecordBatch::new_empty(projected_schema)]);
     }
     Ok(batches)
 }
@@ -1176,6 +1338,62 @@ pub fn read_nodes_filtered_observed(
     Ok(batches)
 }
 
+/// Filter destination nodes by `node_id` while physically decoding only the
+/// requested canonical columns plus the join key. Legacy layouts retain full
+/// normalization before projection.
+#[allow(clippy::implicit_hasher)]
+#[doc(hidden)]
+pub fn read_nodes_filtered_projected_observed(
+    dir: &Path,
+    node_ids: &std::collections::HashSet<u64>,
+    projection: &[usize],
+    observer: Option<&std::sync::Arc<dyn crate::io_stats::FilteredReadObserver>>,
+) -> Result<Vec<RecordBatch>, DataFusionError> {
+    let paths = crate::mutator::node_parquet_files(dir)
+        .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+    let indices = canonical_projection_with_key(&TOPOLOGY_NODES_SCHEMA, projection, "node_id")?;
+    let mut batches = Vec::new();
+    for path in paths {
+        let file_schema = admitted_parquet(&path)?.schema().clone();
+        let canonical = file_schema.fields().len() == TOPOLOGY_NODES_SCHEMA.fields().len()
+            && file_schema
+                .fields()
+                .iter()
+                .zip(TOPOLOGY_NODES_SCHEMA.fields())
+                .all(|(actual, expected)| actual.name() == expected.name());
+        if canonical {
+            batches.extend(read_parquet_filtered_u64_projected(
+                &path,
+                TOPOLOGY_NODES_SCHEMA.clone(),
+                "node_id",
+                node_ids,
+                FilteredReadKind::Node,
+                observer,
+                &indices,
+            )?);
+        } else {
+            let normalized = normalize_topology_nodes(read_parquet_filtered_u64(
+                &path,
+                TOPOLOGY_NODES_SCHEMA.clone(),
+                "node_id",
+                node_ids,
+                FilteredReadKind::Node,
+                observer,
+            )?)?;
+            batches.extend(
+                normalized
+                    .into_iter()
+                    .map(|batch| batch.project(&indices).map_err(Into::into))
+                    .collect::<Result<Vec<_>, DataFusionError>>()?,
+            );
+        }
+    }
+    if batches.is_empty() {
+        return project_batches_with_key(Vec::new(), &TOPOLOGY_NODES_SCHEMA, &indices, "node_id");
+    }
+    Ok(batches)
+}
+
 /// Return the largest `edge_id` surrogate across every edge file under
 /// `topology/edges/` (both typed `<rel>.parquet` and `_exploratory.parquet`),
 /// or `0` if there are no edge files yet.
@@ -1264,11 +1482,28 @@ fn read_property_overlay(
     stem: &str,
     is_edge: bool,
 ) -> Result<Vec<RecordBatch>, DataFusionError> {
+    read_property_overlay_projected(dir, stem, is_edge, None)
+}
+
+fn read_property_overlay_projected(
+    dir: &Path,
+    stem: &str,
+    is_edge: bool,
+    selected_properties: Option<&std::collections::BTreeSet<String>>,
+) -> Result<Vec<RecordBatch>, DataFusionError> {
     let mut batches = Vec::new();
-    visit_property_overlay_batched(dir, stem, is_edge, 8_192, |batch| {
-        batches.push(batch.clone());
-        Ok(true)
-    })?;
+    visit_property_overlay_batched_projected(
+        dir,
+        None,
+        stem,
+        is_edge,
+        8_192,
+        selected_properties,
+        |batch| {
+            batches.push(batch.clone());
+            Ok(true)
+        },
+    )?;
     Ok(batches)
 }
 
@@ -1282,7 +1517,7 @@ pub(crate) fn visit_property_overlay_batched<F>(
 where
     F: FnMut(&RecordBatch) -> Result<bool, DataFusionError>,
 {
-    visit_property_overlay_batched_with_inventory(dir, None, stem, is_edge, batch_size, visit)
+    visit_property_overlay_batched_projected(dir, None, stem, is_edge, batch_size, None, visit)
 }
 
 pub(crate) fn visit_property_overlay_batched_with_inventory<F>(
@@ -1291,6 +1526,22 @@ pub(crate) fn visit_property_overlay_batched_with_inventory<F>(
     stem: &str,
     is_edge: bool,
     batch_size: usize,
+    visit: F,
+) -> Result<(), DataFusionError>
+where
+    F: FnMut(&RecordBatch) -> Result<bool, DataFusionError>,
+{
+    visit_property_overlay_batched_projected(dir, inventory, stem, is_edge, batch_size, None, visit)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn visit_property_overlay_batched_projected<F>(
+    dir: &Path,
+    inventory: Option<&crate::AuthenticatedPropertyInventory>,
+    stem: &str,
+    is_edge: bool,
+    batch_size: usize,
+    selected_properties: Option<&std::collections::BTreeSet<String>>,
     mut visit: F,
 ) -> Result<(), DataFusionError>
 where
@@ -1318,11 +1569,12 @@ where
     let mut rows = Vec::with_capacity(batch_size.max(1));
     let mut stopped = false;
     inventory
-        .visit_route(
+        .visit_route_projected(
             kind,
             stem,
             scratch.path(),
             crate::property_overlay::PropertyOverlayLimits::default(),
+            selected_properties,
             |row| {
                 if stopped {
                     return Ok(());
@@ -1338,6 +1590,8 @@ where
                         graphforge_core::GfError::Storage("property batch disappeared".into())
                     })?;
                     let batch = normalize_property_batch(batch, schema.as_ref())?;
+                    let batch =
+                        project_property_batch(batch, kind.uuid_field(), selected_properties)?;
                     stopped = !visit(&batch)
                         .map_err(|error| graphforge_core::GfError::Storage(error.to_string()))?;
                 }
@@ -1351,9 +1605,34 @@ where
             .ok_or_else(|| DataFusionError::Execution("property batch disappeared".into()))?;
         let batch = normalize_property_batch(batch, schema.as_ref())
             .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+        let batch = project_property_batch(batch, kind.uuid_field(), selected_properties)
+            .map_err(|error| DataFusionError::Execution(error.to_string()))?;
         let _ = visit(&batch)?;
     }
     Ok(())
+}
+
+fn project_property_batch(
+    batch: RecordBatch,
+    uuid_field: &str,
+    selected_properties: Option<&std::collections::BTreeSet<String>>,
+) -> Result<RecordBatch, graphforge_core::GfError> {
+    let Some(selected_properties) = selected_properties else {
+        return Ok(batch);
+    };
+    let indices = batch
+        .schema()
+        .fields()
+        .iter()
+        .enumerate()
+        .filter(|(_, field)| {
+            field.name() == uuid_field || selected_properties.contains(field.name())
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    batch
+        .project(&indices)
+        .map_err(|error| graphforge_core::GfError::Storage(error.to_string()))
 }
 
 fn normalize_property_batch(
@@ -1881,6 +2160,18 @@ where
 /// Propagates Parquet / Arrow errors encountered while reading.
 pub fn read_edge_properties(dir: &Path, stem: &str) -> Result<Vec<RecordBatch>, DataFusionError> {
     read_property_overlay(dir, stem, true)
+}
+
+/// Read an authenticated newest-wins edge-property overlay while decoding
+/// only the requested property names plus the mandatory edge UUID key.
+#[doc(hidden)]
+pub fn read_edge_properties_projected(
+    dir: &Path,
+    stem: &str,
+    property_names: &[String],
+) -> Result<Vec<RecordBatch>, DataFusionError> {
+    let selected = property_names.iter().cloned().collect();
+    read_property_overlay_projected(dir, stem, true, Some(&selected))
 }
 
 /// Stems (relation names) of every `edge_properties/<stem>.parquet` under
@@ -3296,6 +3587,30 @@ mod tests {
     }
 
     #[test]
+    fn projected_node_reader_keeps_only_demand_and_join_key() {
+        let dir = TempDir::new().unwrap();
+        write_nodes_parquet_value(&dir.path().join("topology/nodes.parquet"), 1, 1);
+        let ids = std::collections::HashSet::from([1]);
+        let batches = read_nodes_filtered_projected_observed(
+            dir.path(),
+            &ids,
+            &[TOPOLOGY_NODES_SCHEMA.index_of("node_uuid").unwrap()],
+            None,
+        )
+        .unwrap();
+        assert_eq!(total_rows(&batches), 1);
+        assert_eq!(
+            batches[0]
+                .schema()
+                .fields()
+                .iter()
+                .map(|field| field.name().as_str())
+                .collect::<Vec<_>>(),
+            ["node_uuid", "node_id"]
+        );
+    }
+
+    #[test]
     fn legacy_scalar_node_labels_normalize_to_singleton_sets() {
         let dir = TempDir::new().unwrap();
         std::fs::create_dir_all(dir.path().join("topology")).unwrap();
@@ -3337,6 +3652,17 @@ mod tests {
         let values = labels.value(0);
         let values = values.as_any().downcast_ref::<UInt32Array>().unwrap();
         assert_eq!(values.values(), &[7]);
+
+        let projected = read_nodes_filtered_projected_observed(
+            dir.path(),
+            &std::collections::HashSet::from([1]),
+            &[TOPOLOGY_NODES_SCHEMA.index_of("type_ids").unwrap()],
+            None,
+        )
+        .unwrap();
+        assert_eq!(projected[0].num_columns(), 2);
+        assert!(projected[0].column_by_name("type_ids").is_some());
+        assert!(projected[0].column_by_name("node_id").is_some());
     }
 
     fn write_edge_parquet(path: &Path) {
@@ -3838,6 +4164,56 @@ mod tests {
             edge_rel_pairs(&two),
             vec![(1, "KNOWS".to_owned()), (2, "OWNS".to_owned())]
         );
+
+        let projected = read_edges_filtered_projected_observed(
+            dir.path(),
+            "*",
+            OntologyMode::Strict,
+            &want,
+            &[EXPLORATORY_EDGE_SCHEMA.index_of("rel_type_name").unwrap()],
+            None,
+        )
+        .unwrap();
+        assert_eq!(total_rows(&projected), 1);
+        assert_eq!(
+            projected[0]
+                .schema()
+                .fields()
+                .iter()
+                .map(|field| field.name().as_str())
+                .collect::<Vec<_>>(),
+            ["edge_id", "rel_type_name"]
+        );
+    }
+
+    #[test]
+    fn projected_edge_read_rejects_reordered_physical_schema() {
+        let dir = TempDir::new().unwrap();
+        let path = dir
+            .path()
+            .join("topology")
+            .join("edges")
+            .join("KNOWS.parquet");
+        write_typed_edge(&path, 7, 1, 2);
+        let batches = read_parquet_or_empty(&path, TYPED_EDGE_SCHEMA.clone()).unwrap();
+        let order = [3, 0, 1, 2, 4, 5, 6];
+        let reordered = batches[0].project(&order).unwrap();
+        let file = File::create(&path).unwrap();
+        let mut writer = ArrowWriter::try_new(file, reordered.schema(), None).unwrap();
+        writer.write(&reordered).unwrap();
+        writer.close().unwrap();
+
+        let ids = [7].into_iter().collect();
+        let error = read_edges_filtered_projected_observed(
+            dir.path(),
+            "KNOWS",
+            OntologyMode::Strict,
+            &ids,
+            &[TYPED_EDGE_SCHEMA.index_of("src_id").unwrap()],
+            None,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("requires canonical schema"));
     }
 
     #[test]

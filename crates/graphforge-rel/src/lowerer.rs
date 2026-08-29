@@ -911,16 +911,28 @@ impl<'a> GraphPlanLowerer<'a> {
                     let prior_alias = var_map
                         .get(*prior)
                         .ok_or(LoweringError::UnboundVar(prior.0))?;
-                    let value = |alias: &str| {
-                        if alias.ends_with(graphforge_plan::VAR_LEN_EDGE_LIST_FIELD) {
+                    let edge_is_list =
+                        edge_alias.ends_with(graphforge_plan::VAR_LEN_EDGE_LIST_FIELD);
+                    let prior_is_list =
+                        prior_alias.ends_with(graphforge_plan::VAR_LEN_EDGE_LIST_FIELD);
+                    // Fixed-hop adjacency already carries the exact edge_id.
+                    // Use that internal identity when both operands are fixed
+                    // hops so uniqueness never forces an edge-Parquet UUID
+                    // hydration. Mixed fixed/variable-length comparisons must
+                    // remain on public UUID identity because path lists contain
+                    // edge UUIDs rather than storage ordinals.
+                    let value = |alias: &str, is_list: bool| {
+                        if is_list {
                             col(alias)
+                        } else if !edge_is_list && !prior_is_list {
+                            col(format!("{alias}.edge_id"))
                         } else {
                             col(format!("{alias}.edge_uuid"))
                         }
                     };
                     Ok(crate::expr::relationship_disjoint(
-                        value(edge_alias),
-                        value(prior_alias),
+                        value(edge_alias, edge_is_list),
+                        value(prior_alias, prior_is_list),
                     ))
                 });
                 let Some(mut predicate) = predicates.next().transpose()? else {
