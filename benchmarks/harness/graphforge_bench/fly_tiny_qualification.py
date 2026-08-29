@@ -649,9 +649,7 @@ def _cleanup(
                         failures = True
                 for item in secrets:
                     secret = (
-                        (item.get("Name") or item.get("name"))
-                        if isinstance(item, dict)
-                        else None
+                        (item.get("Name") or item.get("name")) if isinstance(item, dict) else None
                     )
                     if isinstance(secret, str) and SAFE_NAME.fullmatch(secret):
                         best_effort(

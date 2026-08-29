@@ -79,9 +79,7 @@ class FakeTransport:
         self.auto_destroy = auto_destroy
         self.restart_state = {"policy": "no"} if restart_state == "valid" else restart_state
         self.mount_state = (
-            {"volume": "vol_fixture123", "path": "/work"}
-            if mount_state == "valid"
-            else mount_state
+            {"volume": "vol_fixture123", "path": "/work"} if mount_state == "valid" else mount_state
         )
         self.app_created = False
 
