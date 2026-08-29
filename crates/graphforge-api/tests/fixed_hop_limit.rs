@@ -59,6 +59,30 @@ fn measured_identity_query(forge: &GraphForge, query: &str) -> (Vec<Vec<u8>>, De
     assert_eq!(io.edge_full_reads + io.edge_filtered_reads, 0, "{io:#?}");
     assert_eq!(io.node_full_reads + io.node_filtered_reads, 0, "{io:#?}");
     let snapshot = demand::snapshot();
+    assert_eq!(snapshot.sorts.len(), 1, "{snapshot:#?}");
+    let sort = &snapshot.sorts[0];
+    assert_eq!(sort.fetch, Some(LIMIT), "{snapshot:#?}");
+    assert!(
+        sort.output_rows <= (LIMIT + MAX_BATCH_ROWS as usize) as u64,
+        "{snapshot:#?}"
+    );
+    assert_eq!(sort.retained_bytes, 0, "{snapshot:#?}");
+    assert_eq!(snapshot.operator_rss.len(), 2, "{snapshot:#?}");
+    assert!(
+        snapshot.operator_rss.iter().all(|operator| {
+            operator.peak_bytes >= operator.before_bytes
+                && operator.peak_bytes >= operator.after_bytes
+                && (operator.after_bytes > 0 || !cfg!(target_os = "linux"))
+        }),
+        "{snapshot:#?}"
+    );
+    assert!(
+        snapshot.memory_reserved_after
+            <= snapshot
+                .memory_reserved_before
+                .saturating_add(snapshot.returned_batch_bytes),
+        "{snapshot:#?}"
+    );
     assert_eq!(
         snapshot
             .hops
@@ -742,16 +766,22 @@ fn ordered_destination_uuid_projection_is_exact_and_linear_at_1x_2x_4x() {
             hop.identity_bytes_read,
             hop.identity_read_calls,
             hop.identity_revalidation_calls,
+            snapshot.sorts[0].fetch,
+            snapshot.sorts[0].retained_bytes,
         ));
     }
     for pair in work.windows(2) {
-        let (prior_rows, prior_bytes, prior_calls, prior_revalidation) = pair[0];
-        let (next_rows, next_bytes, next_calls, next_revalidation) = pair[1];
+        let (prior_rows, prior_bytes, prior_calls, prior_revalidation, prior_fetch, prior_retained) =
+            pair[0];
+        let (next_rows, next_bytes, next_calls, next_revalidation, next_fetch, next_retained) =
+            pair[1];
         assert_eq!(next_rows, prior_rows * 2, "{work:?}");
         // Fixed block/range boundaries may add one coalesced read, but neither
         // bytes nor calls may acquire a chunk-times-graph multiplier.
         assert!(next_bytes <= prior_bytes * 2 + 2 * 1024 * 1024, "{work:?}");
         assert!(next_calls <= prior_calls * 2 + 2, "{work:?}");
+        assert_eq!((prior_fetch, next_fetch), (Some(LIMIT), Some(LIMIT)));
+        assert_eq!((prior_retained, next_retained), (0, 0));
         assert!(
             next_revalidation <= prior_revalidation * 2 + 2,
             "session authentication must be linear in retained artifacts: {work:?}"
