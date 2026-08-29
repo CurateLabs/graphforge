@@ -10,6 +10,7 @@ from unittest.mock import patch
 from graphforge_bench.fly_adapter import AdapterError, ResourceLedger
 from graphforge_bench.fly_tiny_qualification import (
     FlyctlTransport,
+    QualificationError,
     TinyQualificationInvocation,
     _machine_command,
     execute,
@@ -64,14 +65,24 @@ class FakeTransport:
         *,
         build_fails: bool = False,
         teardown_machine: bool = False,
+        teardown_machine_polls: int = 0,
         auto_destroy: bool = True,
+        restart_state: object = "valid",
+        mount_state: object = "valid",
     ):
         self.commands: list[tuple[str, ...]] = []
         self.machine_lists = 0
         self.build_fails = build_fails
         self.teardown_machine = teardown_machine
+        self.teardown_machine_polls = teardown_machine_polls
         self.machine_created = False
         self.auto_destroy = auto_destroy
+        self.restart_state = {"policy": "no"} if restart_state == "valid" else restart_state
+        self.mount_state = (
+            {"volume": "vol_fixture123", "path": "/work"}
+            if mount_state == "valid"
+            else mount_state
+        )
         self.app_created = False
 
     def run(
@@ -107,10 +118,10 @@ class FakeTransport:
             "image_ref": {"digest": DIGEST},
             "config": {
                 "auto_destroy": self.auto_destroy,
-                "restart": {"policy": "no"},
+                "restart": self.restart_state,
                 "services": [],
                 "guest": {"cpu_kind": "performance", "cpus": 1, "memory_mb": 2048},
-                "mounts": [{"volume": "vol_fixture123", "path": "/work"}],
+                "mounts": [self.mount_state],
             },
         }
 
@@ -145,6 +156,8 @@ class FakeTransport:
             self.machine_lists += 1
             if self.machine_lists == 1:
                 return [{"id": "abcdef01234567", "name": "gf-q958-machine"}]
+            if self.machine_lists <= self.teardown_machine_polls + 1:
+                return [{"id": "abcdef01234567", "state": "destroying"}]
             return [{"id": "abcdef01234567"}] if self.teardown_machine else []
         if argv[1:3] in {("volumes", "list"), ("secrets", "list")}:
             return []
@@ -211,8 +224,10 @@ class FlyTinyQualificationTests(unittest.TestCase):
     def test_live_capacity_requires_current_region_and_smallest_preset(self) -> None:
         transport = FakeTransport()
         verify_live_capacity(transport, invocation())
-        with self.assertRaisesRegex(AdapterError, "smallest performance"):
-            validate_invocation(invocation(machine_class="performance-16x"))
+        with self.assertRaisesRegex(QualificationError, "smallest performance preset"):
+            verify_live_capacity(transport, invocation(machine_class="performance-2x"))
+        with self.assertRaisesRegex(QualificationError, "not currently admitted"):
+            verify_live_capacity(transport, invocation(region="ord"))
 
     def test_machine_argv_is_private_bounded_and_auto_destroying(self) -> None:
         command = _machine_command(invocation(), image=IMAGE, volume_id="vol_fixture123")
@@ -282,15 +297,33 @@ class FlyTinyQualificationTests(unittest.TestCase):
         del check_source
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            result = execute(
-                invocation(),
-                transport=FakeTransport(teardown_machine=True),
-                root=root,
-                ledger_path=root / "ledger.json",
-                evidence_out=root / "evidence.json",
-                dry_run=False,
-            )
+            with patch("graphforge_bench.fly_tiny_qualification.time.sleep"):
+                result = execute(
+                    invocation(),
+                    transport=FakeTransport(teardown_machine=True),
+                    root=root,
+                    ledger_path=root / "ledger.json",
+                    evidence_out=root / "evidence.json",
+                    dry_run=False,
+                )
             self.assertEqual(result["failure"], "teardown_failed")
+
+    @patch("graphforge_bench.fly_tiny_qualification.check_source")
+    def test_teardown_polls_transient_destroying_machine(self, check_source: object) -> None:
+        del check_source
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch("graphforge_bench.fly_tiny_qualification.time.sleep") as sleep:
+                result = execute(
+                    invocation(),
+                    transport=FakeTransport(teardown_machine_polls=2),
+                    root=root,
+                    ledger_path=root / "ledger.json",
+                    evidence_out=root / "evidence.json",
+                    dry_run=False,
+                )
+            self.assertEqual(result["status"], "passed")
+            self.assertEqual(sleep.call_count, 1)
 
     @patch("graphforge_bench.fly_tiny_qualification.check_source")
     def test_observed_auto_destroy_mismatch_fails_closed(self, check_source: object) -> None:
@@ -306,6 +339,24 @@ class FlyTinyQualificationTests(unittest.TestCase):
                 dry_run=False,
             )
             self.assertEqual(result["failure"], "provision_failed")
+
+    @patch("graphforge_bench.fly_tiny_qualification.check_source")
+    def test_malformed_machine_members_fail_through_typed_result(
+        self, check_source: object
+    ) -> None:
+        del check_source
+        for changes in ({"restart_state": None}, {"mount_state": "not-a-mount"}):
+            with self.subTest(changes=changes), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                result = execute(
+                    invocation(),
+                    transport=FakeTransport(**changes),
+                    root=root,
+                    ledger_path=root / "ledger.json",
+                    evidence_out=root / "evidence.json",
+                    dry_run=False,
+                )
+                self.assertEqual(result["failure"], "provision_failed")
 
 
 if __name__ == "__main__":

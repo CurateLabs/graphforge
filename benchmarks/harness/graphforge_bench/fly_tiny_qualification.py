@@ -46,6 +46,8 @@ BUILD_TIMEOUT_SECONDS = 1_800
 CREATE_TIMEOUT_SECONDS = 180
 RETRIEVAL_TIMEOUT_SECONDS = 1_260
 SFTP_TIMEOUT_SECONDS = 120
+TEARDOWN_POLL_ATTEMPTS = 6
+TEARDOWN_POLL_INTERVAL_SECONDS = 2
 
 
 class QualificationError(RuntimeError):
@@ -350,10 +352,12 @@ def verify_machine_state(
         raise QualificationError("provision_failed", "Machine state is incomplete")
     guest = config.get("guest")
     mounts = config.get("mounts")
+    restart = config.get("restart")
     if (
         value.get("region") != invocation.region
         or config.get("auto_destroy") is not True
-        or config.get("restart", {}).get("policy") != "no"
+        or not isinstance(restart, dict)
+        or restart.get("policy") != "no"
         or config.get("services") not in (None, [])
         or not isinstance(guest, dict)
         or guest.get("cpu_kind") != "performance"
@@ -361,6 +365,7 @@ def verify_machine_state(
         or guest.get("memory_mb") != live_size.memory_mb
         or not isinstance(mounts, list)
         or len(mounts) != 1
+        or not isinstance(mounts[0], dict)
         or mounts[0].get("path") != "/work"
         or mounts[0].get("volume") != volume_id
         or image_ref.get("digest") != image.rsplit("@", 1)[1]
@@ -574,32 +579,96 @@ def _cleanup(
         for secret in sorted(secret_names):
             best_effort(("flyctl", "secrets", "unset", secret, "--app", invocation.app, "--yes"))
 
-        # State, not an already-absent delete exit, is authoritative.
-        try:
-            machines = _list(
-                transport.json(
-                    ("flyctl", "machine", "list", "--app", invocation.app, "--json"),
-                    timeout=CREATE_TIMEOUT_SECONDS,
-                ),
-                "Machine",
-            )
-            volumes = _list(
-                transport.json(
-                    ("flyctl", "volumes", "list", "--app", invocation.app, "--json"),
-                    timeout=CREATE_TIMEOUT_SECONDS,
-                ),
-                "volume",
-            )
-            secrets = _list(
-                transport.json(
-                    ("flyctl", "secrets", "list", "--app", invocation.app, "--json"),
-                    timeout=CREATE_TIMEOUT_SECONDS,
-                ),
-                "secret",
-            )
-            failures |= bool(machines or volumes or secrets)
-        except (QualificationError, subprocess.SubprocessError, OSError):
-            failures = True
+        # A successful destroy request may leave a Machine briefly in the
+        # provider's destroying state. Poll only this bounded convergence
+        # window; the last inventory snapshot remains authoritative.
+        children_empty = False
+        for attempt in range(TEARDOWN_POLL_ATTEMPTS):
+            try:
+                machines = _list(
+                    transport.json(
+                        ("flyctl", "machine", "list", "--app", invocation.app, "--json"),
+                        timeout=CREATE_TIMEOUT_SECONDS,
+                    ),
+                    "Machine",
+                )
+                volumes = _list(
+                    transport.json(
+                        ("flyctl", "volumes", "list", "--app", invocation.app, "--json"),
+                        timeout=CREATE_TIMEOUT_SECONDS,
+                    ),
+                    "volume",
+                )
+                secrets = _list(
+                    transport.json(
+                        ("flyctl", "secrets", "list", "--app", invocation.app, "--json"),
+                        timeout=CREATE_TIMEOUT_SECONDS,
+                    ),
+                    "secret",
+                )
+                children_empty = not (machines or volumes or secrets)
+            except (QualificationError, subprocess.SubprocessError, OSError):
+                children_empty = False
+            if children_empty:
+                break
+            if attempt + 1 < TEARDOWN_POLL_ATTEMPTS:
+                # Reissue idempotent child deletes from the independently
+                # observed inventory. In particular, a volume delete can be
+                # rejected while its Machine is still transitioning away.
+                for item in machines:
+                    machine_id = item.get("id") if isinstance(item, dict) else None
+                    if isinstance(machine_id, str) and MACHINE_ID.fullmatch(machine_id):
+                        best_effort(
+                            (
+                                "flyctl",
+                                "machine",
+                                "destroy",
+                                "--app",
+                                invocation.app,
+                                "--force",
+                                machine_id,
+                            )
+                        )
+                    else:
+                        failures = True
+                for item in volumes:
+                    volume_id = item.get("id") if isinstance(item, dict) else None
+                    if isinstance(volume_id, str) and VOLUME_ID.fullmatch(volume_id):
+                        best_effort(
+                            (
+                                "flyctl",
+                                "volumes",
+                                "destroy",
+                                "--app",
+                                invocation.app,
+                                "--yes",
+                                volume_id,
+                            )
+                        )
+                    else:
+                        failures = True
+                for item in secrets:
+                    secret = (
+                        (item.get("Name") or item.get("name"))
+                        if isinstance(item, dict)
+                        else None
+                    )
+                    if isinstance(secret, str) and SAFE_NAME.fullmatch(secret):
+                        best_effort(
+                            (
+                                "flyctl",
+                                "secrets",
+                                "unset",
+                                secret,
+                                "--app",
+                                invocation.app,
+                                "--yes",
+                            )
+                        )
+                    else:
+                        failures = True
+                time.sleep(TEARDOWN_POLL_INTERVAL_SECONDS)
+        failures |= not children_empty
 
         if app_exists:
             best_effort(("flyctl", "apps", "destroy", invocation.app, "--yes"))
