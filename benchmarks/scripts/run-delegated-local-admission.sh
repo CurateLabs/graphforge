@@ -18,8 +18,15 @@ if [[ ${GRAPHFORGE_SYSTEMD_SCOPE_MODE:?} == user ]]; then
   fi
 else
   delegate=$(systemctl show "${GRAPHFORGE_SYSTEMD_SCOPE:?}" -p Delegate --value)
+  if [[ $delegate != yes ]]; then
+    echo "system systemd service did not prove Delegate=yes" >&2
+    exit 1
+  fi
+  delegate_controllers=$(
+    systemctl show "$GRAPHFORGE_SYSTEMD_SCOPE" -p DelegateControllers --value
+  )
   for controller in cpu cpuset io memory; do
-    if [[ " $delegate " != *" $controller "* ]]; then
+    if [[ " $delegate_controllers " != *" $controller "* ]]; then
       echo "system systemd service did not delegate $controller" >&2
       exit 1
     fi
