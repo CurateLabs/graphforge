@@ -160,6 +160,44 @@ BenchExec definition and public certification runner. Provider cases are not
 valid on the local ReFrame system. Provider provisioning is a later, separate
 operation; listing these profiles launches nothing.
 
+The reproducible controller builds and hashes the three exact executables,
+binds the checked-out commit and profile identity, stages the BenchExec XML in
+a private directory, and writes only closed sanitized documents to the explicit
+evidence directory. Planning is safe on unsupported hosts and executes no rung:
+
+```bash
+make -C benchmarks progressive-qualification-plan \
+  RUNG=S18 OUTPUT_DIR=/admitted-volume/graphforge-evidence
+```
+
+The real one-command entry point is intentionally manual and outside normal CI:
+
+```bash
+make -C benchmarks progressive-qualification-run \
+  RUNG=S18 OUTPUT_DIR=/admitted-volume/graphforge-evidence
+```
+
+It accepts only S18 followed by S19, refuses duplicate or out-of-order evidence,
+requires native Linux cgroups-v2 BenchExec admission, and never provisions a
+provider. S19 consumes the schema-valid passed `s18-rung.json` from the same
+directory. After both local rungs pass, the existing progressive projection
+policy consumes them as the adjacent S20 sources with one sanitized command:
+
+```bash
+make -C benchmarks progressive-qualification-project-s20 \
+  OUTPUT_DIR=/admitted-volume/graphforge-evidence \
+  PROVIDER_CAPACITY=/sanitized/provider-capacity.json
+```
+
+The controller also requires `ordinary-ingest-capability.json` to prove that
+the ordinary `gf import-session` path uses bulk construction with at least
+65,536 rows per batch and no scalar durable write loop. The current 8,192-row
+decode plus per-row durable path does not satisfy that contract, so real rungs
+remain refused until the ordinary product path publishes the closed capability
+evidence. Missing retained/transient storage, logical I/O, reader-call, or
+publication-work evidence likewise causes a typed failure; the controller never
+manufactures those values from command counts or recursive file scans.
+
 ## Native local admission deployment
 
 The command is fail-closed: only `passed` exits successfully. A typed
