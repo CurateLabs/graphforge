@@ -127,16 +127,18 @@ not authorize a Graph500 scale run.
 ## Progressive Graph500 qualification
 
 `profiles/graph500/` contains distinct declarative S18 and S19 local profiles
-and S20, S22, and S26 provider profiles. They pin the reference generator,
+and S20, S22, S24, S25, and S26 provider profiles. They pin the reference generator,
 edge factor 16, seed, the same ten-phase public certification lifecycle, and a
 closed sanitized evidence contract. Provider profiles describe environment
 classes only; they contain no app, machine, volume, account, region, or secret
 identifier.
 
 The Python qualification policy consumes completed, correct ordinary-lifecycle
-evidence and stops at the first failed rung. S20 requires S18 and S19. S22 has
-its own S19/S20 gate. S26 is separately refused without adjacent S24/S25 disk
-and bounded-RSS observations from the canonical ladder. Projections preserve
+evidence and stops at the first failed rung. Each provider rung projects from
+the preceding two ladder rungs: S20 from S18/S19, S22 from S19/S20, S24 from
+S20/S22, S25 from S22/S24, and S26 from S24/S25. S26 is separately refused
+unless those adjacent S24/S25 observations came from the canonical ladder.
+Projections preserve
 wall time, peak RSS, retained and transient storage, logical and physical I/O,
 reader calls, and publication work as independent dimensions.
 

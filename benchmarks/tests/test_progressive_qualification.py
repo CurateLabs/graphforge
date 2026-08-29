@@ -83,6 +83,17 @@ class ProgressiveQualificationTests(unittest.TestCase):
             )
             self.assertEqual(raw["generator"]["identity"], digest)
             self.assertEqual(raw["phases"][1]["action"]["identity"], digest)
+            for phase in raw["phases"]:
+                action = phase["action"]
+                if action["interface"] == "graph_forge_cli_workflow":
+                    self.assertTrue(
+                        all(command[0] == "--json" for command in action["commands"])
+                    )
+                elif action["interface"] == "graph_forge_cli":
+                    if phase["phase"] == "admission":
+                        self.assertEqual(action["args"], ["--info"])
+                    else:
+                        self.assertEqual(action["args"][0], "--json")
             ingest = raw["phases"][2]["action"]
             self.assertEqual(ingest["interface"], "graph_forge_cli_workflow")
             self.assertEqual(
@@ -92,16 +103,23 @@ class ProgressiveQualificationTests(unittest.TestCase):
             encoded = json.dumps(raw).lower()
             for forbidden in ("provider_id", "machine_id", "volume_id", "token", "secret"):
                 self.assertNotIn(forbidden, encoded)
-        self.assertEqual([item.scale for item in self.profiles], [18, 19, 20, 22, 26])
+        self.assertEqual(
+            [item.scale for item in self.profiles], [18, 19, 20, 22, 24, 25, 26]
+        )
         self.assertEqual(
             [item.execution for item in self.profiles],
-            ["local", "local", "provider", "provider", "provider"],
+            ["local", "local", "provider", "provider", "provider", "provider", "provider"],
         )
 
     def test_selection_is_progressive_and_stops_after_first_typed_failure(self) -> None:
         self.assertEqual(select_next(self.profiles, []).scale, 18)
         self.assertEqual(select_next(self.profiles, [rung(18)]).scale, 19)
         self.assertEqual(select_next(self.profiles, [rung(18), rung(19)], CAPACITY).scale, 20)
+        completed = [rung(scale) for scale in (18, 19, 20, 22, 24)]
+        self.assertEqual(select_next(self.profiles, completed, CAPACITY).scale, 25)
+        self.assertEqual(
+            select_next(self.profiles, completed + [rung(25)], CAPACITY).scale, 26
+        )
         failed = rung(19) | {"status": "failed", "correctness": False, "failure": "correctness"}
         failed["phases"] = list(PHASES[:6])
         self.rung_schema.validate(failed)
@@ -232,19 +250,27 @@ class ProgressiveQualificationTests(unittest.TestCase):
         evidence = project(self.profiles[2], [low, high], CAPACITY)
         self.assertEqual(evidence["projected"]["retained_storage_bytes"], 202_000_000_000)
 
-    def test_s22_and_s26_keep_separate_declared_gates(self) -> None:
+    def test_every_provider_rung_keeps_its_declared_ladder_gate(self) -> None:
         self.assertEqual(self.profiles[3].projection_sources, (19, 20))
-        self.assertEqual(self.profiles[4].projection_sources, (24, 25))
-        s26 = project(self.profiles[4], [rung(24), rung(25)], CAPACITY)
+        self.assertEqual(self.profiles[4].projection_sources, (20, 22))
+        self.assertEqual(self.profiles[5].projection_sources, (22, 24))
+        self.assertEqual(self.profiles[6].projection_sources, (24, 25))
+        for index, sources in ((3, (19, 20)), (4, (20, 22)), (5, (22, 24))):
+            evidence = project(
+                self.profiles[index], [rung(sources[0]), rung(sources[1])], CAPACITY
+            )
+            self.evidence_schema.validate(evidence)
+            self.assertEqual(evidence["source_scales"], list(sources))
+        s26 = project(self.profiles[6], [rung(24), rung(25)], CAPACITY)
         self.assertEqual(s26["source_scales"], [24, 25])
-        malformed = copy.copy(self.profiles[4])
+        malformed = copy.copy(self.profiles[6])
         object.__setattr__(malformed, "projection_sources", (20, 22))
         with self.assertRaisesRegex(QualificationError, "adjacent S24 and S25"):
             project(malformed, [rung(20), rung(22)], CAPACITY)
         wrong_source = rung(25)
         wrong_source["source"] = "progressive_profile"
         with self.assertRaisesRegex(QualificationError, "canonical S24 and S25"):
-            project(self.profiles[4], [rung(24), wrong_source], CAPACITY)
+            project(self.profiles[6], [rung(24), wrong_source], CAPACITY)
 
 
 if __name__ == "__main__":

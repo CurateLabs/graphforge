@@ -80,6 +80,8 @@ def load_profiles(root: Path | None = None) -> tuple[Profile, ...]:
         19: ("graph500-s19-local", "local", None),
         20: ("graph500-s20-provider", "provider", [18, 19]),
         22: ("graph500-s22-provider", "provider", [19, 20]),
+        24: ("graph500-s24-provider", "provider", [20, 22]),
+        25: ("graph500-s25-provider", "provider", [22, 24]),
         26: ("graph500-s26-provider", "provider", [24, 25]),
     }
     for path in sorted(profiles_root.glob("*.json")):
@@ -99,8 +101,8 @@ def load_profiles(root: Path | None = None) -> tuple[Profile, ...]:
                 projection_sources=tuple(sources) if sources is not None else None,
             )
         )
-    if [value.scale for value in values] != [18, 19, 20, 22, 26]:
-        raise QualificationError("progressive profiles must be S18,S19,S20,S22,S26")
+    if [value.scale for value in values] != [18, 19, 20, 22, 24, 25, 26]:
+        raise QualificationError("progressive profiles must be S18,S19,S20,S22,S24,S25,S26")
     return tuple(values)
 
 
@@ -192,10 +194,18 @@ def project(
         raise QualificationError("both declared projection source rungs must complete") from error
     _validate_rung(low)
     _validate_rung(high)
-    if profile.scale == 20 and profile.projection_sources != (18, 19):
-        raise QualificationError("S20 requires adjacent S18 and S19 evidence")
-    if profile.scale == 26 and profile.projection_sources != (24, 25):
-        raise QualificationError("S26 requires adjacent S24 and S25 evidence")
+    expected_sources = {
+        20: (18, 19),
+        22: (19, 20),
+        24: (20, 22),
+        25: (22, 24),
+        26: (24, 25),
+    }
+    if profile.projection_sources != expected_sources.get(profile.scale):
+        low_scale, high_scale = expected_sources[profile.scale]
+        raise QualificationError(
+            f"S{profile.scale} requires adjacent S{low_scale} and S{high_scale} ladder evidence"
+        )
     if profile.scale == 26 and any(
         item.get("source") != "canonical_ladder" for item in (low, high)
     ):

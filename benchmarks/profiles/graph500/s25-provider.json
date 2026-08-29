@@ -1,7 +1,7 @@
 {
   "schema": "graphforge-progressive-qualification-profile/1",
-  "id": "graph500-s22-provider",
-  "scale": 22,
+  "id": "graph500-s25-provider",
+  "scale": 25,
   "execution": "provider",
   "executable": "gf",
   "phases": [
@@ -22,15 +22,15 @@
         "executable": "graphforge-benchmark-graph500-generator",
         "args": [
           "--scale",
-          "22",
+          "25",
           "--edge-factor",
           "16",
           "--seed",
           "13907095936298285200",
           "--nodes",
-          "workspace/s22/nodes.parquet",
+          "workspace/s25/nodes.parquet",
           "--edges",
-          "workspace/s22/edges.parquet"
+          "workspace/s25/edges.parquet"
         ]
       }
     },
@@ -42,7 +42,7 @@
           [
             "--json",
             "--project",
-            "workspace/s22/source",
+            "workspace/s25/source",
             "import-session",
             "begin",
             "--operation-uuid",
@@ -51,33 +51,33 @@
           [
             "--json",
             "--project",
-            "workspace/s22/source",
+            "workspace/s25/source",
             "import-session",
             "register-parquet",
             "--session-uuid",
             "00000000-0000-4000-8000-000000000022",
             "--path",
-            "workspace/s22/nodes.parquet",
+            "workspace/s25/nodes.parquet",
             "--kind",
             "nodes"
           ],
           [
             "--json",
             "--project",
-            "workspace/s22/source",
+            "workspace/s25/source",
             "import-session",
             "register-parquet",
             "--session-uuid",
             "00000000-0000-4000-8000-000000000022",
             "--path",
-            "workspace/s22/edges.parquet",
+            "workspace/s25/edges.parquet",
             "--kind",
             "edges"
           ],
           [
             "--json",
             "--project",
-            "workspace/s22/source",
+            "workspace/s25/source",
             "import-session",
             "validate",
             "--session-uuid",
@@ -86,7 +86,7 @@
           [
             "--json",
             "--project",
-            "workspace/s22/source",
+            "workspace/s25/source",
             "import-session",
             "commit",
             "--session-uuid",
@@ -102,7 +102,7 @@
         "args": [
           "--json",
           "--project",
-          "workspace/s22/source",
+          "workspace/s25/source",
           "recovery"
         ]
       }
@@ -115,22 +115,22 @@
           [
             "--json",
             "--project",
-            "workspace/s22/source",
+            "workspace/s25/source",
             "query",
             "--cypher",
             "MATCH (n) RETURN count(n)",
             "--output",
-            "workspace/s22/node-count.arrow"
+            "workspace/s25/node-count.arrow"
           ],
           [
             "--json",
             "--project",
-            "workspace/s22/source",
+            "workspace/s25/source",
             "query",
             "--cypher",
             "MATCH ()-[r]->() RETURN count(r)",
             "--output",
-            "workspace/s22/edge-count.arrow"
+            "workspace/s25/edge-count.arrow"
           ]
         ]
       }
@@ -143,22 +143,22 @@
           [
             "--json",
             "--project",
-            "workspace/s22/source",
+            "workspace/s25/source",
             "query",
             "--cypher",
             "MATCH (a)-[r]->(b) RETURN a, r, b LIMIT 1024",
             "--output",
-            "workspace/s22/one-hop.arrow"
+            "workspace/s25/one-hop.arrow"
           ],
           [
             "--json",
             "--project",
-            "workspace/s22/source",
+            "workspace/s25/source",
             "query",
             "--cypher",
             "MATCH (a)-[r1]->(b)-[r2]->(c) RETURN a, r1, b, r2, c LIMIT 1024",
             "--output",
-            "workspace/s22/two-hop.arrow"
+            "workspace/s25/two-hop.arrow"
           ]
         ]
       }
@@ -170,12 +170,12 @@
         "args": [
           "--json",
           "--project",
-          "workspace/s22/source",
+          "workspace/s25/source",
           "portable",
           "export",
           "--current",
           "--output",
-          "workspace/s22/portable"
+          "workspace/s25/portable"
         ]
       }
     },
@@ -188,7 +188,7 @@
           "portable",
           "verify",
           "--input",
-          "workspace/s22/portable"
+          "workspace/s25/portable"
         ]
       }
     },
@@ -199,11 +199,11 @@
         "args": [
           "--json",
           "--project",
-          "workspace/s22/imported",
+          "workspace/s25/imported",
           "portable",
           "import",
           "--input",
-          "workspace/s22/portable",
+          "workspace/s25/portable",
           "--idempotency-key",
           "00000000-0000-4000-8000-000000000022"
         ]
@@ -217,22 +217,22 @@
           [
             "--json",
             "--project",
-            "workspace/s22/imported",
+            "workspace/s25/imported",
             "query",
             "--cypher",
             "MATCH (n) RETURN count(n)",
             "--output",
-            "workspace/s22/imported-node-count.arrow"
+            "workspace/s25/imported-node-count.arrow"
           ],
           [
             "--json",
             "--project",
-            "workspace/s22/imported",
+            "workspace/s25/imported",
             "query",
             "--cypher",
             "MATCH ()-[r]->() RETURN count(r)",
             "--output",
-            "workspace/s22/imported-edge-count.arrow"
+            "workspace/s25/imported-edge-count.arrow"
           ]
         ]
       }
@@ -262,8 +262,8 @@
   "gate": {
     "requires_previous_pass": true,
     "projection_source_scales": [
-      19,
-      20
+      22,
+      24
     ],
     "limits": {
       "wall_seconds": 14400,

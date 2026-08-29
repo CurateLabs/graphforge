@@ -15,6 +15,8 @@ class Graph500ProgressiveQualificationProfile(rfm.RunOnlyRegressionTest):
             "graph500-s19-local",
             "graph500-s20-provider",
             "graph500-s22-provider",
+            "graph500-s24-provider",
+            "graph500-s25-provider",
             "graph500-s26-provider",
         ]
     )
