@@ -1,0 +1,101 @@
+name: Native Local Admission
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-admission:
+    name: BenchExec admission (${{ matrix.authority }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - authority: blacksmith-user-delegated-ubuntu-24.04
+            runner: blacksmith-4vcpu-ubuntu-2404
+            delegation: user
+            unit-suffix: scope
+          - authority: github-user-delegated-ubuntu-24.04
+            runner: ubuntu-24.04
+            delegation: user
+            unit-suffix: scope
+          - authority: blacksmith-system-delegated-ubuntu-24.04
+            runner: blacksmith-4vcpu-ubuntu-2404
+            delegation: system
+            unit-suffix: service
+          - authority: github-system-delegated-ubuntu-24.04
+            runner: ubuntu-24.04
+            delegation: system
+            unit-suffix: service
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.10.9"
+          enable-cache: false
+
+      - name: Install official BenchExec Ubuntu package
+        run: |
+          sudo add-apt-repository --yes ppa:sosy-lab/benchmarking
+          sudo apt-get update
+          sudo apt-get install --yes benchexec
+
+      - name: Install locked benchmark environment
+        working-directory: benchmarks
+        run: uv sync --locked
+
+      - name: Require user systemd authority
+        if: matrix.delegation == 'user'
+        shell: bash
+        run: systemctl --user show-environment >/dev/null
+
+      - name: Run strict admission in delegated systemd scope
+        working-directory: benchmarks
+        env:
+          GRAPHFORGE_ADMISSION_EVIDENCE: ${{ github.workspace }}/benchmarks/outputs/local-admission-evidence.json
+          GRAPHFORGE_SYSTEMD_SCOPE: graphforge-benchexec-${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}.${{ matrix.unit-suffix }}
+        run: |
+          mkdir -p outputs
+          runner_uid=$(id -u)
+          runner_gid=$(id -g)
+          if [[ '${{ matrix.delegation }}' == user ]]; then
+            GRAPHFORGE_EXPECTED_UID="$runner_uid" GRAPHFORGE_SYSTEMD_SCOPE_MODE=user \
+              systemd-run --user --scope --slice=benchexec -p Delegate=yes \
+              --unit="${GRAPHFORGE_SYSTEMD_SCOPE%.scope}" \
+              "$PWD/scripts/run-delegated-local-admission.sh"
+          else
+            sudo systemd-run --wait --collect --pipe --service-type=exec \
+              --uid="$runner_uid" --gid="$runner_gid" \
+              -p 'Delegate=cpu cpuset io memory' \
+              -p DelegateSubgroup=init.scope \
+              --unit="${GRAPHFORGE_SYSTEMD_SCOPE%.service}" \
+              --setenv="GRAPHFORGE_ADMISSION_EVIDENCE=$GRAPHFORGE_ADMISSION_EVIDENCE" \
+              --setenv="GRAPHFORGE_SYSTEMD_SCOPE=$GRAPHFORGE_SYSTEMD_SCOPE" \
+              --setenv=GRAPHFORGE_SYSTEMD_SCOPE_MODE=system \
+              --setenv="GRAPHFORGE_EXPECTED_UID=$runner_uid" \
+              "$PWD/scripts/run-delegated-local-admission.sh"
+          fi
+
+      - name: Validate passed-only sanitized evidence
+        if: always()
+        working-directory: benchmarks
+        run: |
+          PYTHONPATH=harness uv run --locked python -m graphforge_bench.validate_local_admission \
+            outputs/local-admission-evidence.json \
+            schemas/local-admission-evidence.json
+
+      - name: Upload sanitized admission evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-local-admission-${{ matrix.authority }}-${{ github.sha }}
+          path: benchmarks/outputs/local-admission-evidence.json
+          if-no-files-found: error
+          retention-days: 1

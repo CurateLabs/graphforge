@@ -11,13 +11,16 @@
         null,
         "unsupported_operating_system",
         "cgroups_v2_unavailable",
-        "namespace_controls_unavailable",
+        "required_controllers_unavailable",
+        "kernel_memory_accounting_unavailable",
+        "benchexec_cpuset_delegation_unavailable",
         "benchexec_cgroups_unavailable",
         "benchexec_fixture_failed",
         "malformed_benchexec_evidence",
         "mandatory_metric_missing",
         "process_tree_limit_not_enforced",
-        "descendant_survived_termination"
+        "descendant_survived_termination",
+        "container_isolation_not_proven"
       ]
     },
     "facts": {
@@ -25,11 +28,14 @@
       "properties": {
         "operating_system": {"type": "string"},
         "cgroups_version": {"type": ["integer", "null"]},
-        "mount_namespace": {"type": "boolean"},
-        "pid_namespace": {"type": "boolean"},
-        "user_namespace": {"type": "boolean"}
+        "required_controllers": {"type": "boolean"},
+        "kernel_memory_accounting": {"type": "boolean"},
+        "privileged_execution": {"type": "boolean"},
+        "benchexec_cgroup_delegation": {"type": "boolean"},
+        "namespace_isolation": {"type": "boolean"},
+        "overlay_isolation": {"type": "boolean"}
       },
-      "required": ["operating_system", "cgroups_version", "mount_namespace", "pid_namespace", "user_namespace"],
+      "required": ["operating_system", "cgroups_version", "required_controllers", "kernel_memory_accounting", "privileged_execution", "benchexec_cgroup_delegation", "namespace_isolation", "overlay_isolation"],
       "additionalProperties": false
     },
     "measurements": {
@@ -44,9 +50,10 @@
         "pressure-cpu-some": {"type": "number", "minimum": 0},
         "pressure-io-some": {"type": "number", "minimum": 0},
         "pressure-memory-some": {"type": "number", "minimum": 0},
-        "terminationreason": {"type": "string"},
-        "descendant_stopped": {"type": "boolean"}
-      }
+        "terminationreason": {"const": "walltime"},
+        "descendant_stopped": {"const": true}
+      },
+      "additionalProperties": false
     }
   },
   "required": ["schema", "result", "cause", "facts"],
@@ -54,7 +61,27 @@
   "allOf": [
     {
       "if": {"properties": {"result": {"const": "passed"}}, "required": ["result"]},
-      "then": {"required": ["measurements"]}
+      "then": {
+        "required": ["measurements"],
+        "properties": {
+          "cause": {"type": "null"},
+          "facts": {
+            "properties": {
+              "operating_system": {"const": "linux"},
+              "cgroups_version": {"const": 2},
+              "required_controllers": {"const": true},
+              "kernel_memory_accounting": {"const": true},
+              "privileged_execution": {"const": false},
+              "benchexec_cgroup_delegation": {"const": true},
+              "namespace_isolation": {"const": true},
+              "overlay_isolation": {"const": true}
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {"cause": {"type": "string"}}
+      }
     }
   ]
 }
