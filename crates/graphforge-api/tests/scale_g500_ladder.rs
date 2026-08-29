@@ -534,10 +534,7 @@ fn execute_with_bounded_evidence(
     Result<graphforge_api::ExecutionResult, GfError>,
     DemandSnapshot,
 ) {
-    demand::reset();
-    let result = graph.execute(query);
-    demand::disable();
-    (result, demand::snapshot())
+    demand::capture(|| graph.execute(query))
 }
 
 fn query_work_evidence(snapshot: &DemandSnapshot) -> Value {

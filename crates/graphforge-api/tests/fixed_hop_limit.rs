@@ -52,13 +52,11 @@ const ORDERED_TWO_HOP: &str =
 
 fn measured_identity_query(forge: &GraphForge, query: &str) -> (Vec<Vec<u8>>, DemandSnapshot) {
     io_stats::reset();
-    demand::reset();
-    let result = forge.execute(query).unwrap();
-    demand::disable();
+    let (result, snapshot) = demand::capture(|| forge.execute(query));
+    let result = result.unwrap();
     let io = io_stats::snapshot();
     assert_eq!(io.edge_full_reads + io.edge_filtered_reads, 0, "{io:#?}");
     assert_eq!(io.node_full_reads + io.node_filtered_reads, 0, "{io:#?}");
-    let snapshot = demand::snapshot();
     assert_eq!(snapshot.sorts.len(), 1, "{snapshot:#?}");
     let sort = &snapshot.sorts[0];
     assert_eq!(sort.fetch, Some(LIMIT), "{snapshot:#?}");
@@ -67,7 +65,12 @@ fn measured_identity_query(forge: &GraphForge, query: &str) -> (Vec<Vec<u8>>, De
         "{snapshot:#?}"
     );
     assert_eq!(sort.retained_bytes, 0, "{snapshot:#?}");
-    assert_eq!(snapshot.operator_rss.len(), 2, "{snapshot:#?}");
+    let expected_hops = usize::from(query.contains("-[r2]->")) + 1;
+    assert_eq!(
+        snapshot.operator_rss.len(),
+        expected_hops + 1,
+        "{snapshot:#?}"
+    );
     assert!(
         snapshot.operator_rss.iter().all(|operator| {
             operator.peak_bytes >= operator.before_bytes

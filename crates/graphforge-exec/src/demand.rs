@@ -193,8 +193,35 @@ pub struct DemandSnapshot {
 }
 
 static CAPTURE_ENABLED: AtomicBool = AtomicBool::new(false);
+static CAPTURE_GUARD: Mutex<()> = Mutex::new(());
 static CAPTURE: LazyLock<Mutex<DemandSnapshot>> =
     LazyLock::new(|| Mutex::new(DemandSnapshot::default()));
+
+struct CaptureDisable;
+
+impl Drop for CaptureDisable {
+    fn drop(&mut self) {
+        disable();
+    }
+}
+
+/// Run one ordinary operation with exclusive aggregate diagnostic capture.
+///
+/// Capture is process-global because physical execution may cross worker
+/// threads. Serializing the complete operation prevents concurrent tests or
+/// certification phases from mixing counters while leaving execution itself
+/// unchanged.
+#[doc(hidden)]
+pub fn capture<T>(operation: impl FnOnce() -> T) -> (T, DemandSnapshot) {
+    let _exclusive = CAPTURE_GUARD
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    reset();
+    let disable_on_exit = CaptureDisable;
+    let result = operation();
+    drop(disable_on_exit);
+    (result, snapshot())
+}
 
 /// Reset and enable fixed-hop demand capture.
 #[doc(hidden)]
@@ -229,10 +256,6 @@ pub(crate) fn record_plan_completion(
     memory_reserved_after: usize,
     returned_batch_bytes: usize,
 ) {
-    if !capture_enabled() {
-        return;
-    }
-
     fn metric(metrics: &datafusion::physical_plan::metrics::MetricsSet, name: &str) -> u64 {
         metrics
             .sum_by_name(name)
@@ -255,6 +278,10 @@ pub(crate) fn record_plan_completion(
         for child in plan.children() {
             visit(child, sorts);
         }
+    }
+
+    if !capture_enabled() {
+        return;
     }
 
     let mut sorts = Vec::new();
