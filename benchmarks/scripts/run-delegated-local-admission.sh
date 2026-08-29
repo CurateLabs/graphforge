@@ -40,7 +40,7 @@ else
   done
 fi
 
-python3 -m benchexec.check_cgroups
+/usr/bin/python3 -m benchexec.check_cgroups
 preflight_status=$?
 
 PYTHONPATH="$workspace/harness" "$workspace/.venv/bin/reframe" \

@@ -11,6 +11,12 @@ from graphforge_bench.validate_local_admission import validate
 
 
 class LocalAdmissionTests(unittest.TestCase):
+    def test_delegated_preflight_uses_system_benchexec_interpreter(self) -> None:
+        wrapper = (
+            Path(__file__).parents[1] / "scripts/run-delegated-local-admission.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn("/usr/bin/python3 -m benchexec.check_cgroups", wrapper)
+
     def test_runexec_cli_measurements_are_typed(self) -> None:
         self.assertEqual(_parse_runexec_value("1.25s"), 1.25)
         self.assertEqual(_parse_runexec_value("4096B"), 4096)

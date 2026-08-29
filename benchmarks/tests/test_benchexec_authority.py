@@ -277,7 +277,27 @@ class BenchExecAuthorityTests(unittest.TestCase):
             },
         }
         self.assertTrue(list(validator.iter_errors(evidence)))
-        validator.validate(evidence | {"measurements": ADMISSION_MEASUREMENTS})
+        passed = evidence | {"measurements": ADMISSION_MEASUREMENTS}
+        validator.validate(passed)
+        invalid_facts = {
+            "operating_system": "darwin",
+            "cgroups_version": 1,
+            "required_controllers": False,
+            "kernel_memory_accounting": False,
+            "privileged_execution": True,
+            "benchexec_cgroup_delegation": False,
+            "namespace_isolation": False,
+            "overlay_isolation": False,
+        }
+        for name, value in invalid_facts.items():
+            with self.subTest(name=name):
+                invalid = passed | {"facts": passed["facts"] | {name: value}}
+                self.assertTrue(list(validator.iter_errors(invalid)))
+
+        for result in ("failed", "disqualified"):
+            with self.subTest(result=result):
+                invalid = evidence | {"result": result, "cause": None}
+                self.assertTrue(list(validator.iter_errors(invalid)))
 
     def test_reports_status_and_wall_time_disagreement(self):
         evidence = normalize_run(

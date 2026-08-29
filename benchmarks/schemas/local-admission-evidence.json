@@ -63,7 +63,24 @@
       "if": {"properties": {"result": {"const": "passed"}}, "required": ["result"]},
       "then": {
         "required": ["measurements"],
-        "properties": {"cause": {"type": "null"}}
+        "properties": {
+          "cause": {"type": "null"},
+          "facts": {
+            "properties": {
+              "operating_system": {"const": "linux"},
+              "cgroups_version": {"const": 2},
+              "required_controllers": {"const": true},
+              "kernel_memory_accounting": {"const": true},
+              "privileged_execution": {"const": false},
+              "benchexec_cgroup_delegation": {"const": true},
+              "namespace_isolation": {"const": true},
+              "overlay_isolation": {"const": true}
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {"cause": {"type": "string"}}
       }
     }
   ]
