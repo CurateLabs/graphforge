@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schema": "graphforge-benchexec-phase-evidence-schema/1",
+  "$id": "https://graphforge.sh/schemas/benchexec-phase-evidence.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "phase", "outcome", "exit_code", "signal", "authority", "limits", "graphforge", "disagreements"],
+  "properties": {
+    "schema": {"const": "graphforge-benchexec-phase/1"},
+    "phase": {"type": "string", "pattern": "^[a-z_]+$"},
+    "outcome": {"enum": ["passed", "timeout", "oom", "exit", "signal", "harness", "correctness"]},
+    "exit_code": {"type": ["integer", "null"]},
+    "signal": {"type": ["integer", "null"], "minimum": 1},
+    "authority": {
+      "type": "object", "additionalProperties": false,
+      "required": ["wall_seconds", "cpu_seconds", "peak_rss_bytes", "read_bytes", "write_bytes"],
+      "properties": {
+        "wall_seconds": {"type": "number", "minimum": 0},
+        "cpu_seconds": {"type": "number", "minimum": 0},
+        "peak_rss_bytes": {"type": "integer", "minimum": 0},
+        "read_bytes": {"type": "integer", "minimum": 0},
+        "write_bytes": {"type": "integer", "minimum": 0}
+      }
+    },
+    "limits": {
+      "type": "object", "additionalProperties": false,
+      "required": ["wall_seconds", "cpu_seconds", "memory_bytes", "cores"],
+      "properties": {
+        "wall_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "cpu_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "memory_bytes": {"type": "integer", "exclusiveMinimum": 0},
+        "cores": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "integer", "minimum": 0}}
+      }
+    },
+    "graphforge": {
+      "type": "object",
+      "required": ["phase", "status", "duration_ms"],
+      "properties": {
+        "phase": {"type": "string"},
+        "status": {"enum": ["passed", "failed"]},
+        "duration_ms": {"type": "integer", "minimum": 0}
+      }
+    },
+    "disagreements": {"type": "array", "items": {"enum": ["status", "wall_time"]}, "uniqueItems": true}
+  }
+}

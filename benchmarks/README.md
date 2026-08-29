@@ -76,6 +76,21 @@ The accepted legacy shape is `{profile, phases}` with each phase containing
 `name`, `ok`, `duration_secs`, optional `max_rss_kib`, and optional
 `exit_code`. Normalization is fail-closed and stops after the first failure.
 
+## Linux resource authority
+
+`definitions/graphforge-certification-v1.xml` is the versioned BenchExec entry
+point for Linux certification. Its tool-info adapter invokes only the public
+certification binary. BenchExec owns the complete process tree, limits,
+termination, wall/CPU time, peak RSS, and read/write byte evidence; the Rust
+runner's per-phase telemetry remains preserved as the product-side account.
+
+`graphforge_bench.benchexec_authority.normalize_phase` fails closed unless all
+mandatory process-tree resource fields and a correctness verdict are present.
+It reports timeout, OOM, non-zero exit, signal, harness termination, and
+correctness failure as distinct typed outcomes. Status or wall-time disagreement
+between BenchExec and GraphForge is retained explicitly instead of choosing the
+more favorable value. Provider provisioning is outside this layer.
+
 Generated datasets, credentials, execution outputs, and local environments are
 ignored. Fly execution is forbidden until the complete benchmark stack is
 merged and has passed local and hosted qualification.
