@@ -103,9 +103,7 @@ class ProgressiveQualificationTests(unittest.TestCase):
             for phase in raw["phases"]:
                 action = phase["action"]
                 if action["interface"] == "graph_forge_cli_workflow":
-                    self.assertTrue(
-                        all(command[0] == "--json" for command in action["commands"])
-                    )
+                    self.assertTrue(all(command[0] == "--json" for command in action["commands"]))
                 elif action["interface"] == "graph_forge_cli":
                     if phase["phase"] == "admission":
                         self.assertEqual(action["args"], ["--info"])
@@ -120,9 +118,7 @@ class ProgressiveQualificationTests(unittest.TestCase):
             encoded = json.dumps(raw).lower()
             for forbidden in ("provider_id", "machine_id", "volume_id", "token", "secret"):
                 self.assertNotIn(forbidden, encoded)
-        self.assertEqual(
-            [item.scale for item in self.profiles], [18, 19, 20, 22, 24, 25, 26]
-        )
+        self.assertEqual([item.scale for item in self.profiles], [18, 19, 20, 22, 24, 25, 26])
         self.assertEqual(
             [item.execution for item in self.profiles],
             ["local", "local", "provider", "provider", "provider", "provider", "provider"],
@@ -134,9 +130,7 @@ class ProgressiveQualificationTests(unittest.TestCase):
         self.assertEqual(select_next(self.profiles, [rung(18), rung(19)], CAPACITY).scale, 20)
         completed = [rung(scale) for scale in (18, 19, 20, 22, 24)]
         self.assertEqual(select_next(self.profiles, completed, CAPACITY).scale, 25)
-        self.assertEqual(
-            select_next(self.profiles, completed + [rung(25)], CAPACITY).scale, 26
-        )
+        self.assertEqual(select_next(self.profiles, completed + [rung(25)], CAPACITY).scale, 26)
         failed = rung(19) | {"status": "failed", "correctness": False, "failure": "correctness"}
         failed["phases"] = list(PHASES[:6])
         self.rung_schema.validate(failed)
@@ -273,9 +267,7 @@ class ProgressiveQualificationTests(unittest.TestCase):
         self.assertEqual(self.profiles[5].projection_sources, (22, 24))
         self.assertEqual(self.profiles[6].projection_sources, (24, 25))
         for index, sources in ((3, (19, 20)), (4, (20, 22)), (5, (22, 24))):
-            evidence = project(
-                self.profiles[index], [rung(sources[0]), rung(sources[1])], CAPACITY
-            )
+            evidence = project(self.profiles[index], [rung(sources[0]), rung(sources[1])], CAPACITY)
             self.evidence_schema.validate(evidence)
             self.assertEqual(evidence["source_scales"], list(sources))
         s26 = project(self.profiles[6], [rung(24), rung(25)], CAPACITY)

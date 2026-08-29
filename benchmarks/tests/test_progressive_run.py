@@ -323,9 +323,13 @@ class ProgressiveRunControllerTests(unittest.TestCase):
             "pressure-io-some": "0.2s",
             "pressure-memory-some": "0.3s",
         }
-        xml = "<result><run>" + "".join(
-            f'<column title="{name}" value="{value}" />' for name, value in columns.items()
-        ) + "</run></result>"
+        xml = (
+            "<result><run>"
+            + "".join(
+                f'<column title="{name}" value="{value}" />' for name, value in columns.items()
+            )
+            + "</run></result>"
+        )
         (raw / "result.xml").write_text(xml)
         normalized, observed, rung = ingest_benchexec_result(
             root=ROOT, stage=stage, scale=18, plan=plan

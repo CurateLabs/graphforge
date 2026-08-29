@@ -307,7 +307,10 @@ def _parse_graphforge_log(raw_output: Path) -> Mapping[str, Any]:
                 value = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if isinstance(value, Mapping) and value.get("schema") == "graphforge-public-certification/1":
+            if (
+                isinstance(value, Mapping)
+                and value.get("schema") == "graphforge-public-certification/1"
+            ):
                 candidates.append(value)
     if len(candidates) != 1:
         raise ControllerError("exact GraphForge certification evidence is missing or ambiguous")
@@ -415,7 +418,11 @@ def assemble_rung_evidence(
         "publication_work_units",
     )
     for name in storage_names:
-        if isinstance(storage.get(name), bool) or not isinstance(storage.get(name), int) or storage[name] < 0:
+        if (
+            isinstance(storage.get(name), bool)
+            or not isinstance(storage.get(name), int)
+            or storage[name] < 0
+        ):
             raise ControllerError(f"storage attribution receipt omitted {name}")
     authority = benchexec.get("authority")
     if not isinstance(authority, Mapping):
@@ -437,7 +444,12 @@ def assemble_rung_evidence(
             "physical_write_bytes": int(authority["write_bytes"]),
         },
         "metric_sources": {
-            "benchexec": ["wall_seconds", "peak_rss_bytes", "physical_read_bytes", "physical_write_bytes"],
+            "benchexec": [
+                "wall_seconds",
+                "peak_rss_bytes",
+                "physical_read_bytes",
+                "physical_write_bytes",
+            ],
             "storage_attribution": list(storage_names),
             "query_qualification": ["live_edges", "correctness"],
         },
@@ -466,7 +478,9 @@ def ingest_benchexec_result(
     )
     _validate(root, "certification-evidence.json", graphforge)
     _validate(root, "benchexec-run-evidence.json", benchexec)
-    rung = assemble_rung_evidence(root=root, scale=scale, graphforge=graphforge, benchexec=benchexec)
+    rung = assemble_rung_evidence(
+        root=root, scale=scale, graphforge=graphforge, benchexec=benchexec
+    )
     return benchexec, graphforge, rung
 
 
