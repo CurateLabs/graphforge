@@ -1,4 +1,4 @@
-.PHONY: install smoke smoke-python smoke-rust
+.PHONY: install smoke smoke-python smoke-rust local-admission
 
 install:
 	uv sync --locked
@@ -14,3 +14,7 @@ smoke-rust: install
 	CARGO_TARGET_DIR=$(CURDIR)/target cargo clippy --workspace --locked -- -D warnings
 	CARGO_TARGET_DIR=$(CURDIR)/target cargo test --locked --manifest-path Cargo.toml
 	PYTHONPATH=harness uv run --locked python -m graphforge_bench.check_rust_graph
+
+local-admission: install
+	PYTHONPATH=$(CURDIR)/harness uv run --locked reframe -C reframe/settings.py -c reframe/checks -n '^LocalBenchExecAdmission$$' -l | grep -F LocalBenchExecAdmission
+	PYTHONPATH=$(CURDIR)/harness uv run --locked reframe -C reframe/settings.py -c reframe/checks -n '^LocalBenchExecAdmission$$' -r
