@@ -5611,6 +5611,7 @@ impl ExecutionSession {
             memory_reserved_before,
             memory_reserved_after,
             returned_batch_bytes,
+            task_ctx.session_config().batch_size(),
         );
         let mut batches = collected.map_err(|e| GfError::Execution(e.to_string()))?;
 

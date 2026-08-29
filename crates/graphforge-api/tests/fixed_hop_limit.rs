@@ -37,7 +37,6 @@ const TS: i64 = 1_700_000_000_000_000;
 const NODE_TYPE: TypeId = TypeId(0);
 const FAN_OUT: usize = 8;
 const LIMIT: usize = 1_000;
-const MAX_BATCH_ROWS: u64 = 8_192;
 const WRITE_WINDOW: usize = 32 * 1024;
 
 /// Serializes the process-global storage counters used by the assertions.
@@ -60,8 +59,9 @@ fn measured_identity_query(forge: &GraphForge, query: &str) -> (Vec<Vec<u8>>, De
     assert_eq!(snapshot.sorts.len(), 1, "{snapshot:#?}");
     let sort = &snapshot.sorts[0];
     assert_eq!(sort.fetch, Some(LIMIT), "{snapshot:#?}");
+    assert!(snapshot.execution_batch_rows > 0, "{snapshot:#?}");
     assert!(
-        sort.output_rows <= (LIMIT + MAX_BATCH_ROWS as usize) as u64,
+        sort.output_rows <= (LIMIT as u64).saturating_add(snapshot.execution_batch_rows),
         "{snapshot:#?}"
     );
     assert_eq!(sort.retained_bytes, 0, "{snapshot:#?}");
@@ -551,7 +551,7 @@ fn assert_bounded_demand(snapshot: &DemandSnapshot, expected_hops: usize, requir
         assert!(hop.edge_full_reads <= 1, "{snapshot:#?}");
         assert_eq!(hop.node_full_reads, 0, "{snapshot:#?}");
         assert!(
-            hop.candidates_generated <= required + MAX_BATCH_ROWS,
+            hop.candidates_generated <= required + snapshot.execution_batch_rows,
             "required={required}, snapshot={snapshot:#?}"
         );
     }

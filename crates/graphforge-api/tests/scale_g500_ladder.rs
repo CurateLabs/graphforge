@@ -53,7 +53,6 @@ const REL_TYPE: &str = "LINK";
 /// One authoritative Arrow and durable-append row window for the scale client.
 /// This intentionally matches `GraphConstructionBudgets::default()`.
 const CONSTRUCTION_BATCH_ROWS: usize = 65_536;
-const EXECUTION_BATCH_ROWS: u64 = 8_192;
 
 const ONE_HOP: &str = "MATCH (a)-[r]->(b) RETURN b.node_uuid AS id ORDER BY id LIMIT 1000";
 const TWO_HOP: &str =
@@ -570,6 +569,7 @@ fn query_work_evidence(snapshot: &DemandSnapshot) -> Value {
         "memory_reserved_before": snapshot.memory_reserved_before,
         "memory_reserved_after": snapshot.memory_reserved_after,
         "returned_batch_bytes": snapshot.returned_batch_bytes,
+        "execution_batch_rows": snapshot.execution_batch_rows,
         "cancellations": snapshot.cancellations,
         "max_in_flight_reads": snapshot.max_in_flight_reads,
     })
@@ -579,10 +579,12 @@ fn bounded_ordered_limit(snapshot: &DemandSnapshot, expected_hops: usize, limit:
     snapshot.hops.len() == expected_hops
         && snapshot.sorts.len() == 1
         && snapshot.sorts[0].fetch == Some(limit)
+        && snapshot.execution_batch_rows > 0
         // DataFusion's baseline output counter is charged before its final
         // fetch wrapper slices the terminal batch, so it may include at most
         // one physical batch beyond the returned TopK rows.
-        && snapshot.sorts[0].output_rows <= (limit as u64).saturating_add(EXECUTION_BATCH_ROWS)
+        && snapshot.sorts[0].output_rows
+            <= (limit as u64).saturating_add(snapshot.execution_batch_rows)
         && snapshot.sorts[0].retained_bytes == 0
         && snapshot.operator_rss.len() == expected_hops.saturating_add(1)
         && snapshot.operator_rss.iter().all(|operator| {

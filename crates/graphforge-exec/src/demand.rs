@@ -190,6 +190,8 @@ pub struct DemandSnapshot {
     pub memory_reserved_after: u64,
     /// Arrow bytes retained by the returned result batches.
     pub returned_batch_bytes: u64,
+    /// DataFusion batch-row budget configured for the executed session.
+    pub execution_batch_rows: u64,
 }
 
 static CAPTURE_ENABLED: AtomicBool = AtomicBool::new(false);
@@ -255,6 +257,7 @@ pub(crate) fn record_plan_completion(
     memory_reserved_before: usize,
     memory_reserved_after: usize,
     returned_batch_bytes: usize,
+    execution_batch_rows: usize,
 ) {
     fn metric(metrics: &datafusion::physical_plan::metrics::MetricsSet, name: &str) -> u64 {
         metrics
@@ -291,6 +294,7 @@ pub(crate) fn record_plan_completion(
     capture.memory_reserved_before = memory_reserved_before as u64;
     capture.memory_reserved_after = memory_reserved_after as u64;
     capture.returned_batch_bytes = returned_batch_bytes as u64;
+    capture.execution_batch_rows = execution_batch_rows as u64;
 }
 
 fn with_hop(edge_var: u32, update: impl FnOnce(&mut HopSnapshot)) {
