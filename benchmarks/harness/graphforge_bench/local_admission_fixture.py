@@ -117,6 +117,9 @@ while True:
                 "memory",
                 "blkio-read",
                 "blkio-write",
+                "pressure-cpu-some",
+                "pressure-io-some",
+                "pressure-memory-some",
                 "terminationreason",
             )
             if key in result

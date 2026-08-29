@@ -14,6 +14,7 @@ class LocalAdmissionTests(unittest.TestCase):
     def test_runexec_cli_measurements_are_typed(self) -> None:
         self.assertEqual(_parse_runexec_value("1.25s"), 1.25)
         self.assertEqual(_parse_runexec_value("4096B"), 4096)
+        self.assertEqual(_parse_runexec_value("0.003s"), 0.003)
         self.assertEqual(_parse_runexec_value("walltime"), "walltime")
 
     @staticmethod
@@ -63,6 +64,9 @@ class LocalAdmissionTests(unittest.TestCase):
                 "memory": 1048576,
                 "blkio-read": 4096,
                 "blkio-write": 65536,
+                "pressure-cpu-some": 0.0,
+                "pressure-io-some": 0.0,
+                "pressure-memory-some": 0.0,
                 "terminationreason": "walltime",
                 "descendant_stopped": True,
                 "namespace_isolation": True,
@@ -128,6 +132,9 @@ class LocalAdmissionTests(unittest.TestCase):
                         "memory": 1048576,
                         "blkio-read": 4096,
                         "blkio-write": invalid_metric,
+                        "pressure-cpu-some": 0.0,
+                        "pressure-io-some": 0.0,
+                        "pressure-memory-some": 0.0,
                         "terminationreason": "walltime",
                         "descendant_stopped": True,
                         "namespace_isolation": True,
@@ -153,6 +160,9 @@ class LocalAdmissionTests(unittest.TestCase):
                         "memory": 1,
                         "blkio-read": 0,
                         "blkio-write": 1,
+                        "pressure-cpu-some": 0.0,
+                        "pressure-io-some": 0.0,
+                        "pressure-memory-some": 0.0,
                         "terminationreason": "walltime",
                         "descendant_stopped": False,
                         "namespace_isolation": True,

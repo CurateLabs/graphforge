@@ -40,28 +40,31 @@
     },
     "measurements": {
       "type": "object",
+      "required": ["walltime", "cputime", "memory", "blkio-read", "blkio-write", "pressure-cpu-some", "pressure-io-some", "pressure-memory-some", "terminationreason", "descendant_stopped"],
       "properties": {
         "walltime": {"type": "number", "minimum": 0},
         "cputime": {"type": "number", "minimum": 0},
         "memory": {"type": "number", "minimum": 0},
         "blkio-read": {"type": "number", "minimum": 0},
         "blkio-write": {"type": "number", "minimum": 0},
+        "pressure-cpu-some": {"type": "number", "minimum": 0},
+        "pressure-io-some": {"type": "number", "minimum": 0},
+        "pressure-memory-some": {"type": "number", "minimum": 0},
         "terminationreason": {"const": "walltime"},
         "descendant_stopped": {"const": true}
       },
-      "required": ["walltime", "cputime", "memory", "blkio-read", "blkio-write", "terminationreason", "descendant_stopped"],
       "additionalProperties": false
     }
   },
   "required": ["schema", "result", "cause", "facts"],
+  "additionalProperties": false,
   "allOf": [
     {
-      "if": {"properties": {"result": {"const": "passed"}}},
+      "if": {"properties": {"result": {"const": "passed"}}, "required": ["result"]},
       "then": {
         "required": ["measurements"],
         "properties": {"cause": {"type": "null"}}
       }
     }
-  ],
-  "additionalProperties": false
+  ]
 }

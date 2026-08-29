@@ -38,7 +38,8 @@ use graphforge_api::{
     PortableV2ExportRequest, PortableV2ImportRequest, PortableV2Limits, PortableV2Mode,
     PortableV2Output, PortableV2SelectionProfile, PortableVerifyRequest, verify_portable_v2,
 };
-use graphforge_core::uuid::Uuid;
+use graphforge_core::{GfError, uuid::Uuid};
+use graphforge_exec::demand::{self, DemandSnapshot};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -699,6 +700,82 @@ fn rss_value() -> Value {
     peak_rss().map_or(Value::Null, |(bytes, _)| json!(bytes))
 }
 
+fn execute_with_bounded_evidence(
+    graph: &GraphForge,
+    query: &str,
+) -> (
+    Result<graphforge_api::ExecutionResult, GfError>,
+    DemandSnapshot,
+) {
+    demand::capture(|| graph.execute(query))
+}
+
+fn query_work_evidence(snapshot: &DemandSnapshot) -> Value {
+    json!({
+        "hops": snapshot.hops.iter().map(|(edge_var, hop)| json!({
+            "edge_var": edge_var,
+            "input_batches": hop.input_batches,
+            "input_rows": hop.input_rows,
+            "candidates_generated": hop.candidates_generated,
+            "rows_emitted": hop.rows_emitted,
+            "edge_rows_scanned": hop.edge_rows_scanned,
+            "node_rows_scanned": hop.node_rows_scanned,
+            "identity_read_calls": hop.identity_read_calls,
+            "identity_bytes_read": hop.identity_bytes_read,
+            "identity_peak_buffer_bytes": hop.identity_peak_buffer_bytes,
+        })).collect::<Vec<_>>(),
+        "sorts": snapshot.sorts.iter().map(|sort| json!({
+            "ordinal": sort.ordinal,
+            "fetch": sort.fetch,
+            "output_rows": sort.output_rows,
+            "spill_count": sort.spill_count,
+            "spilled_rows": sort.spilled_rows,
+            "spilled_bytes": sort.spilled_bytes,
+            "retained_bytes": sort.retained_bytes,
+        })).collect::<Vec<_>>(),
+        "operator_rss": snapshot.operator_rss.iter().map(|operator| json!({
+            "ordinal": operator.ordinal,
+            "operator": operator.operator,
+            "before_bytes": operator.before_bytes,
+            "peak_bytes": operator.peak_bytes,
+            "after_bytes": operator.after_bytes,
+        })).collect::<Vec<_>>(),
+        "memory_reserved_before": snapshot.memory_reserved_before,
+        "memory_reserved_after": snapshot.memory_reserved_after,
+        "returned_batch_bytes": snapshot.returned_batch_bytes,
+        "execution_batch_rows": snapshot.execution_batch_rows,
+        "cancellations": snapshot.cancellations,
+        "max_in_flight_reads": snapshot.max_in_flight_reads,
+    })
+}
+
+fn bounded_ordered_limit(snapshot: &DemandSnapshot, expected_hops: usize, limit: usize) -> bool {
+    snapshot.hops.len() == expected_hops
+        && snapshot.sorts.len() == 1
+        && snapshot.sorts[0].fetch == Some(limit)
+        && snapshot.execution_batch_rows > 0
+        // DataFusion's baseline output counter is charged before its final
+        // fetch wrapper slices the terminal batch, so it may include at most
+        // one physical batch beyond the returned TopK rows.
+        && snapshot.sorts[0].output_rows
+            <= (limit as u64).saturating_add(snapshot.execution_batch_rows)
+        && snapshot.sorts[0].retained_bytes == 0
+        && snapshot.operator_rss.len() == expected_hops.saturating_add(1)
+        && snapshot.operator_rss.iter().all(|operator| {
+            operator.peak_bytes >= operator.before_bytes
+                && operator.peak_bytes >= operator.after_bytes
+                && (operator.after_bytes > 0 || !cfg!(target_os = "linux"))
+        })
+        && snapshot.memory_reserved_after
+            <= snapshot
+                .memory_reserved_before
+                .saturating_add(snapshot.returned_batch_bytes)
+        && snapshot
+            .hops
+            .values()
+            .all(|hop| hop.reads_after_cancel == 0)
+}
+
 fn linux_process_memory() -> Value {
     let Ok(contents) = fs::read_to_string("/proc/self/status") else {
         return Value::Null;
@@ -1163,7 +1240,7 @@ fn run_rung(
         );
     }
 
-    // ---- reopen + recount ----
+    // ---- reopen + independently durable recount/query boundaries ----
     let mut node_count = 0u64;
     let mut edge_count = 0u64;
     let mut gsi = String::new();
@@ -1180,10 +1257,7 @@ fn run_rung(
         let reopen_started = Instant::now();
         let graph = GraphForge::new(Some(project.to_str().expect("utf8 project")))
             .expect("reopen GraphForge");
-        node_count = graph.node_count(NODE_LABEL).expect("node_count");
-        edge_count = scalar_count(&graph.execute(COUNT_EDGES).expect("edge count"));
         let reopen_s = reopen_started.elapsed().as_secs_f64();
-        gsi = gsi_undirected(node_count, edge_count);
         let reopen_disk_used_bytes =
             generator_allocated_bytes.saturating_add(storage_attribution(&project).allocated_bytes);
         let reopen_violation = envelope_violation(&env, ladder_started, reopen_disk_used_bytes);
@@ -1196,7 +1270,8 @@ fn run_rung(
             "pass": reopen_violation.is_none(),
             "wall_time_s": reopen_s,
             "rss_peak_bytes": rss_value(),
-            "detail": { "node_count": node_count, "edge_count": edge_count, "gsi": gsi }
+            "process_memory": linux_process_memory(),
+            "detail": { "opened": true }
         }));
         persist_phase_journal(
             profile,
@@ -1212,49 +1287,45 @@ fn run_rung(
             first_failing_phase.zip(error_class),
         );
 
-        // ---- deterministic LIMIT queries ----
         if first_failing_phase.is_none() {
-            let hop1_started = Instant::now();
             persist_phase_journal(
                 profile,
                 rung,
                 completed_rungs,
-                "query",
+                "node_count",
                 "running",
                 &steps,
                 None,
             );
-            let hop1 = graph.execute(ONE_HOP).expect("one-hop LIMIT");
-            let hop1_rows = row_count(&hop1);
-            steps.push(json!({
-                "id": "cypher_limit_1hop",
-                "pass": hop1_rows <= 1_000,
-                "wall_time_s": hop1_started.elapsed().as_secs_f64(),
-                "detail": { "rows": hop1_rows }
-            }));
-
-            let hop2_started = Instant::now();
-            let hop2 = graph.execute(TWO_HOP).expect("two-hop LIMIT");
-            let hop2_rows = row_count(&hop2);
-            steps.push(json!({
-                "id": "cypher_limit_2hop",
-                "pass": hop2_rows <= 1_000,
-                "wall_time_s": hop2_started.elapsed().as_secs_f64(),
-                "detail": { "rows": hop2_rows }
-            }));
-            let query_disk_used_bytes = generator_allocated_bytes
+            let count_started = Instant::now();
+            let result = graph.node_count(NODE_LABEL);
+            let failure = result.as_ref().err().map(ToString::to_string);
+            node_count = result.unwrap_or(0);
+            let expected = 1u64 << rung.scale;
+            let count_disk_used_bytes = generator_allocated_bytes
                 .saturating_add(storage_attribution(&project).allocated_bytes);
-            let query_violation = envelope_violation(&env, ladder_started, query_disk_used_bytes);
-            if let Some(class) = query_violation {
-                first_failing_phase = Some("query");
+            let mut violation = envelope_violation(&env, ladder_started, count_disk_used_bytes);
+            if failure.is_some() {
+                violation = Some("execution_failure");
+            } else if node_count != expected {
+                violation = Some("result_mismatch");
+            }
+            if let Some(class) = violation {
+                first_failing_phase = Some("node_count");
                 error_class = Some(class);
             }
+            steps.push(json!({
+                "id": "node_count", "pass": violation.is_none(),
+                "wall_time_s": count_started.elapsed().as_secs_f64(),
+                "rss_peak_bytes": rss_value(), "process_memory": linux_process_memory(),
+                "detail": { "count": node_count, "expected": expected, "failure": failure }
+            }));
             persist_phase_journal(
                 profile,
                 rung,
                 completed_rungs,
-                "query",
-                if query_violation.is_some() {
+                "node_count",
+                if violation.is_some() {
                     "phase_failed"
                 } else {
                     "phase_completed"
@@ -1262,6 +1333,119 @@ fn run_rung(
                 &steps,
                 first_failing_phase.zip(error_class),
             );
+        }
+
+        if first_failing_phase.is_none() {
+            persist_phase_journal(
+                profile,
+                rung,
+                completed_rungs,
+                "edge_count",
+                "running",
+                &steps,
+                None,
+            );
+            let count_started = Instant::now();
+            let (result, work) = execute_with_bounded_evidence(&graph, COUNT_EDGES);
+            let failure = result.as_ref().err().map(ToString::to_string);
+            edge_count = result.as_ref().map_or(0, scalar_count);
+            gsi = gsi_undirected(node_count, edge_count);
+            let count_disk_used_bytes = generator_allocated_bytes
+                .saturating_add(storage_attribution(&project).allocated_bytes);
+            let mut violation = envelope_violation(&env, ladder_started, count_disk_used_bytes);
+            if failure.is_some() {
+                violation = Some("execution_failure");
+            } else if edge_count != live_unique_edges {
+                violation = Some("result_mismatch");
+            } else if work.memory_reserved_after
+                > work
+                    .memory_reserved_before
+                    .saturating_add(work.returned_batch_bytes)
+            {
+                violation = Some("memory_retained");
+            }
+            if let Some(class) = violation {
+                first_failing_phase = Some("edge_count");
+                error_class = Some(class);
+            }
+            steps.push(json!({
+                "id": "edge_count", "pass": violation.is_none(),
+                "wall_time_s": count_started.elapsed().as_secs_f64(),
+                "rss_peak_bytes": rss_value(), "process_memory": linux_process_memory(),
+                "detail": { "count": edge_count, "expected": live_unique_edges, "gsi": gsi,
+                    "failure": failure, "work": query_work_evidence(&work) }
+            }));
+            persist_phase_journal(
+                profile,
+                rung,
+                completed_rungs,
+                "edge_count",
+                if violation.is_some() {
+                    "phase_failed"
+                } else {
+                    "phase_completed"
+                },
+                &steps,
+                first_failing_phase.zip(error_class),
+            );
+        }
+
+        // ---- deterministic LIMIT queries, each with its own atomic journal ----
+        if first_failing_phase.is_none() {
+            for (phase, query, expected_hops) in
+                [("one_hop", ONE_HOP, 1usize), ("two_hop", TWO_HOP, 2usize)]
+            {
+                if first_failing_phase.is_some() {
+                    break;
+                }
+                persist_phase_journal(
+                    profile,
+                    rung,
+                    completed_rungs,
+                    phase,
+                    "running",
+                    &steps,
+                    None,
+                );
+                let query_started = Instant::now();
+                let (result, work) = execute_with_bounded_evidence(&graph, query);
+                let failure = result.as_ref().err().map(ToString::to_string);
+                let rows = result.as_ref().map_or(0, row_count);
+                let query_disk_used_bytes = generator_allocated_bytes
+                    .saturating_add(storage_attribution(&project).allocated_bytes);
+                let mut violation = envelope_violation(&env, ladder_started, query_disk_used_bytes);
+                if failure.is_some() {
+                    violation = Some("execution_failure");
+                } else if rows > 1_000 {
+                    violation = Some("result_mismatch");
+                } else if !bounded_ordered_limit(&work, expected_hops, 1_000) {
+                    violation = Some("operator_budget_violation");
+                }
+                if let Some(class) = violation {
+                    first_failing_phase = Some(phase);
+                    error_class = Some(class);
+                }
+                steps.push(json!({
+                    "id": phase, "pass": violation.is_none(),
+                    "wall_time_s": query_started.elapsed().as_secs_f64(),
+                    "rss_peak_bytes": rss_value(), "process_memory": linux_process_memory(),
+                    "detail": { "rows": rows, "failure": failure,
+                        "work": query_work_evidence(&work) }
+                }));
+                persist_phase_journal(
+                    profile,
+                    rung,
+                    completed_rungs,
+                    phase,
+                    if violation.is_some() {
+                        "phase_failed"
+                    } else {
+                        "phase_completed"
+                    },
+                    &steps,
+                    first_failing_phase.zip(error_class),
+                );
+            }
         }
         drop(graph);
     }
@@ -2043,18 +2227,22 @@ fn phase_journal_atomically_preserves_completed_rungs_and_active_state() {
 // entry point below uses the same phases after target-live generation.
 // ---------------------------------------------------------------------------
 
-const CERTIFICATION_PHASES: [&str; 17] = [
+const CERTIFICATION_PHASES: [&str; 21] = [
     "preflight",
     "generate",
     "ingest",
     "csr",
     "source_reopen",
+    "source_node_count",
+    "source_edge_count",
     "source_query_1hop",
     "source_query_2hop",
     "export",
     "verify",
     "import",
     "imported_reopen",
+    "imported_node_count",
+    "imported_edge_count",
     "imported_query_1hop",
     "imported_query_2hop",
     "drill_corruption",
@@ -2081,6 +2269,16 @@ impl PhaseJournal {
     }
 
     fn pass(&mut self, id: &str, started: Instant, fingerprint: Option<String>) {
+        self.pass_with_detail(id, started, fingerprint, Value::Null);
+    }
+
+    fn pass_with_detail(
+        &mut self,
+        id: &str,
+        started: Instant,
+        fingerprint: Option<String>,
+        detail: Value,
+    ) {
         let fingerprint = fingerprint.map_or(Value::Null, Value::String);
         // Every phase owns the live allocation union for its full duration,
         // even when it does not install or remove an allocation identity.
@@ -2092,7 +2290,7 @@ impl PhaseJournal {
                 "elapsed_ms": u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
                 "rss_peak_bytes": self.monitor.peak_rss.load(Ordering::Relaxed),
                 "disk_peak_bytes": self.monitor.peak_disk.load(Ordering::Relaxed),
-                "fingerprint": fingerprint, "failure_code": code,
+                "fingerprint": fingerprint, "detail": detail, "failure_code": code,
             }));
             self.flush();
             panic!("certification resource watchdog stopped phase {id}: {code}");
@@ -2105,7 +2303,21 @@ impl PhaseJournal {
             "rss_peak_bytes": rss_peak_bytes,
             "disk_peak_bytes": disk_peak_bytes,
             "fingerprint": fingerprint,
+            "detail": detail,
             "failure_code": null,
+        }));
+        self.flush();
+    }
+
+    fn fail_with_detail(&mut self, id: &str, started: Instant, code: &str, detail: Value) {
+        self.monitor
+            .observe_allocated_union(self.allocation.current_allocated_bytes());
+        self.phases.push(json!({
+            "id": id, "status": "fail",
+            "elapsed_ms": u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            "rss_peak_bytes": self.monitor.peak_rss.load(Ordering::Relaxed),
+            "disk_peak_bytes": self.monitor.peak_disk.load(Ordering::Relaxed),
+            "fingerprint": null, "detail": detail, "failure_code": code,
         }));
         self.flush();
     }
@@ -2192,9 +2404,31 @@ impl Drop for PhaseJournal {
                 "elapsed_ms": 0,
                 "rss_peak_bytes": self.monitor.peak_rss.load(Ordering::Relaxed),
                 "disk_peak_bytes": self.monitor.peak_disk.load(Ordering::Relaxed),
-                "fingerprint": null, "failure_code": code,
+                "fingerprint": null, "detail": null, "failure_code": code,
             }));
             self.flush();
+        }
+    }
+}
+
+fn certification_query(
+    graph: &GraphForge,
+    query: &str,
+    phase_id: &str,
+    started: Instant,
+    journal: &mut PhaseJournal,
+) -> (graphforge_api::ExecutionResult, DemandSnapshot) {
+    let (result, work) = execute_with_bounded_evidence(graph, query);
+    match result {
+        Ok(result) => (result, work),
+        Err(error) => {
+            journal.fail_with_detail(
+                phase_id,
+                started,
+                "execution_failure",
+                json!({ "error": error.to_string(), "work": query_work_evidence(&work) }),
+            );
+            panic!("{phase_id} failed: {error}");
         }
     }
 }
@@ -2669,8 +2903,24 @@ fn run_integrated_certification_with_edge_factor(
 
     let phase = Instant::now();
     let graph = GraphForge::new(source.to_str()).expect("reopen source");
+    journal.pass("source_reopen", phase, None);
+    let phase = Instant::now();
     let source_nodes = graph.node_count(NODE_LABEL).expect("source nodes");
-    let source_edges = scalar_count(&graph.execute(COUNT_EDGES).expect("source edges"));
+    journal.pass_with_detail(
+        "source_node_count",
+        phase,
+        None,
+        json!({ "count": source_nodes }),
+    );
+    let phase = Instant::now();
+    let (source_edge_result, source_edge_work) = certification_query(
+        &graph,
+        COUNT_EDGES,
+        "source_edge_count",
+        phase,
+        &mut journal,
+    );
+    let source_edges = scalar_count(&source_edge_result);
     let expected_live_edges = generated_counts.as_ref().map_or_else(
         || {
             summary
@@ -2681,15 +2931,42 @@ fn run_integrated_certification_with_edge_factor(
         |counts| counts.live_unique_edges,
     );
     assert_eq!(source_edges, expected_live_edges);
-    journal.pass("source_reopen", phase, None);
+    journal.pass_with_detail(
+        "source_edge_count",
+        phase,
+        None,
+        json!({ "count": source_edges, "work": query_work_evidence(&source_edge_work) }),
+    );
     let phase = Instant::now();
-    let source_1hop = result_fingerprint(&graph.execute(ONE_HOP).expect("source 1hop"));
-    journal.pass("source_query_1hop", phase, Some(source_1hop.clone()));
+    let (source_1hop_result, source_1hop_work) =
+        certification_query(&graph, ONE_HOP, "source_query_1hop", phase, &mut journal);
+    assert!(
+        bounded_ordered_limit(&source_1hop_work, 1, 1_000),
+        "{source_1hop_work:#?}"
+    );
+    let source_1hop = result_fingerprint(&source_1hop_result);
+    journal.pass_with_detail(
+        "source_query_1hop",
+        phase,
+        Some(source_1hop.clone()),
+        query_work_evidence(&source_1hop_work),
+    );
     let phase = Instant::now();
-    let source_2hop = result_fingerprint(&graph.execute(TWO_HOP).expect("source 2hop"));
+    let (source_2hop_result, source_2hop_work) =
+        certification_query(&graph, TWO_HOP, "source_query_2hop", phase, &mut journal);
+    assert!(
+        bounded_ordered_limit(&source_2hop_work, 2, 1_000),
+        "{source_2hop_work:#?}"
+    );
+    let source_2hop = result_fingerprint(&source_2hop_result);
     let source_authority_fingerprint = authority_fingerprint(&graph);
     let source_generation = current_generation_uuid(&graph);
-    journal.pass("source_query_2hop", phase, Some(source_2hop.clone()));
+    journal.pass_with_detail(
+        "source_query_2hop",
+        phase,
+        Some(source_2hop.clone()),
+        query_work_evidence(&source_2hop_work),
+    );
 
     let phase = Instant::now();
     let exported = graph
@@ -2762,25 +3039,72 @@ fn run_integrated_certification_with_edge_factor(
     );
     let phase = Instant::now();
     let imported_graph = GraphForge::new(imported.to_str()).expect("reopen import");
+    journal.pass("imported_reopen", phase, None);
+    let phase = Instant::now();
     let imported_generation = graphforge_storage::resolve_project_generation(&imported)
         .expect("resolve clean import generation");
     journal.replace_project_owner("clean_import_project", &imported_generation);
     let imported_nodes = imported_graph
         .node_count(NODE_LABEL)
         .expect("imported nodes");
-    let imported_edges =
-        scalar_count(&imported_graph.execute(COUNT_EDGES).expect("imported edges"));
+    journal.pass_with_detail(
+        "imported_node_count",
+        phase,
+        None,
+        json!({ "count": imported_nodes }),
+    );
+    let phase = Instant::now();
+    let (imported_edge_result, imported_edge_work) = certification_query(
+        &imported_graph,
+        COUNT_EDGES,
+        "imported_edge_count",
+        phase,
+        &mut journal,
+    );
+    let imported_edges = scalar_count(&imported_edge_result);
     assert_eq!(
         (source_nodes, source_edges),
         (imported_nodes, imported_edges)
     );
-    journal.pass("imported_reopen", phase, None);
+    journal.pass_with_detail(
+        "imported_edge_count",
+        phase,
+        None,
+        json!({ "count": imported_edges, "work": query_work_evidence(&imported_edge_work) }),
+    );
     let phase = Instant::now();
-    let imported_1hop = result_fingerprint(&imported_graph.execute(ONE_HOP).expect("import 1hop"));
+    let (imported_1hop_result, imported_1hop_work) = certification_query(
+        &imported_graph,
+        ONE_HOP,
+        "imported_query_1hop",
+        phase,
+        &mut journal,
+    );
+    assert!(
+        bounded_ordered_limit(&imported_1hop_work, 1, 1_000),
+        "{imported_1hop_work:#?}"
+    );
+    let imported_1hop = result_fingerprint(&imported_1hop_result);
     assert_eq!(source_1hop, imported_1hop);
-    journal.pass("imported_query_1hop", phase, Some(imported_1hop.clone()));
+    journal.pass_with_detail(
+        "imported_query_1hop",
+        phase,
+        Some(imported_1hop.clone()),
+        query_work_evidence(&imported_1hop_work),
+    );
     let phase = Instant::now();
-    let imported_2hop = result_fingerprint(&imported_graph.execute(TWO_HOP).expect("import 2hop"));
+    let (imported_2hop_result, imported_2hop_work) = certification_query(
+        &imported_graph,
+        TWO_HOP,
+        "imported_query_2hop",
+        phase,
+        &mut journal,
+    );
+    assert!(
+        bounded_ordered_limit(&imported_2hop_work, 2, 1_000),
+        "{imported_2hop_work:#?}"
+    );
+    let imported_2hop = result_fingerprint(&imported_2hop_result);
     let imported_authority_fingerprint = authority_fingerprint(&imported_graph);
     assert_eq!(
         current_generation_uuid(&imported_graph),
@@ -2788,7 +3112,12 @@ fn run_integrated_certification_with_edge_factor(
     );
     assert_eq!(source_2hop, imported_2hop);
     assert_eq!(source_authority_fingerprint, imported_authority_fingerprint);
-    journal.pass("imported_query_2hop", phase, Some(imported_2hop.clone()));
+    journal.pass_with_detail(
+        "imported_query_2hop",
+        phase,
+        Some(imported_2hop.clone()),
+        query_work_evidence(&imported_2hop_work),
+    );
     let source_storage = storage_attribution_value(&source);
     let source_project_current_allocated_bytes =
         graphforge_storage::capture_project_storage_identity_union(

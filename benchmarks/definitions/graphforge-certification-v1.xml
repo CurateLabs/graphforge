@@ -1,0 +1,7 @@
+<?xml version="1.0"?>
+<benchmark tool="graphforge_bench.tools.graphforge_certify" timelimit="14400 s"
+           hardtimelimit="14430 s" memlimit="128 GB" cpuCores="16">
+  <rundefinition name="graphforge-public-certification-v1">
+    <tasks name="profile"><include>profile.json</include></tasks>
+  </rundefinition>
+</benchmark>
