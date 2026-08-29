@@ -358,6 +358,7 @@ pub(crate) fn run_portable_without_graph(
                 None,
             )
             .map_err(map_portable)?;
+            let transient_peak_allocated_bytes = import_transient_peak(&result)?;
             if json {
                 write_json(
                     &serde_json::json!({
@@ -366,6 +367,7 @@ pub(crate) fn run_portable_without_graph(
                         "transport_digest": result.transport_digest,
                         "generation_uuid": result.generation_uuid,
                         "idempotent_replay": result.idempotent_replay,
+                        "transient_peak_allocated_bytes": transient_peak_allocated_bytes,
                     }),
                     output,
                 )?;
@@ -453,6 +455,31 @@ pub(crate) fn run_portable_without_graph(
             Ok(())
         }
     }
+}
+
+fn import_transient_peak(
+    result: &graphforge_api::PortableV2ImportResult,
+) -> Result<u64, graphforge_api::GfError> {
+    if !result.materialized_cleanup_parent_sync_confirmed
+        || result.materialized_cleanup_removed_identity_allocated_bytes
+            != result.materialized_identity_allocated_bytes
+    {
+        return Err(graphforge_api::GfError::Validation(
+            "storage.portable_import_allocation_cleanup: portable import allocation cleanup did not reconcile"
+                .into(),
+        ));
+    }
+    let mut lifecycle = graphforge_storage::StorageAllocationLifecycle::default();
+    lifecycle.replace_owner(
+        "portable-import-materialized",
+        &result.materialized_identity_allocated_bytes,
+    )?;
+    lifecycle.replace_owner(
+        "portable-import-published",
+        &result.published_identity_allocated_bytes,
+    )?;
+    lifecycle.remove_owner("portable-import-materialized")?;
+    Ok(lifecycle.peak_allocated_bytes())
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -745,5 +772,50 @@ fn write_progress(
             progress.rows_accepted, progress.bytes_accepted
         )
         .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_storage_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn import_result() -> graphforge_api::PortableV2ImportResult {
+        graphforge_api::PortableV2ImportResult {
+            package_digest: format!("sha256:{}", "0".repeat(64)),
+            transport_digest: Some(format!("sha256:{}", "1".repeat(64))),
+            generation_uuid: Uuid::nil(),
+            idempotent_replay: false,
+            materialized_identity_allocated_bytes: BTreeMap::from([
+                ("shared".to_owned(), 4),
+                ("stage".to_owned(), 6),
+            ]),
+            published_identity_allocated_bytes: BTreeMap::from([
+                ("project".to_owned(), 10),
+                ("shared".to_owned(), 4),
+            ]),
+            materialized_cleanup_removed_identity_allocated_bytes: BTreeMap::from([
+                ("shared".to_owned(), 4),
+                ("stage".to_owned(), 6),
+            ]),
+            materialized_cleanup_parent_sync_confirmed: true,
+        }
+    }
+
+    #[test]
+    fn portable_import_peak_deduplicates_shared_native_identity() {
+        assert_eq!(import_transient_peak(&import_result()).unwrap(), 20);
+    }
+
+    #[test]
+    fn portable_import_peak_rejects_cleanup_contradiction() {
+        let mut result = import_result();
+        result
+            .materialized_cleanup_removed_identity_allocated_bytes
+            .remove("stage");
+        assert!(import_transient_peak(&result).is_err());
+        let mut result = import_result();
+        result.materialized_cleanup_parent_sync_confirmed = false;
+        assert!(import_transient_peak(&result).is_err());
     }
 }

@@ -2,6 +2,12 @@
   "schema": "graphforge-public-certification-profile/1",
   "id": "graph500-tiny-executable",
   "executable": "gf",
+  "lifecycle": {
+    "mechanics": "public-certification-v1",
+    "phases": ["admission", "generate", "ingest", "reopen", "recount", "query", "export", "verify", "clean_import", "reopen_proof"],
+    "evidence_schema": "graphforge-public-certification/1",
+    "storage_receipt": "graphforge-lifecycle-storage/1"
+  },
   "phases": [
     {
       "phase": "admission",
@@ -38,6 +44,7 @@
         "interface": "graph_forge_cli_workflow",
         "commands": [
           [
+            "--json",
             "--project",
             "workspace/tiny/source",
             "import-session",
@@ -46,6 +53,7 @@
             "00000000-0000-4000-8000-000000000018"
           ],
           [
+            "--json",
             "--project",
             "workspace/tiny/source",
             "import-session",
@@ -58,6 +66,7 @@
             "nodes"
           ],
           [
+            "--json",
             "--project",
             "workspace/tiny/source",
             "import-session",
@@ -70,6 +79,7 @@
             "edges"
           ],
           [
+            "--json",
             "--project",
             "workspace/tiny/source",
             "import-session",
@@ -78,6 +88,7 @@
             "00000000-0000-4000-8000-000000000018"
           ],
           [
+            "--json",
             "--project",
             "workspace/tiny/source",
             "import-session",
@@ -91,11 +102,10 @@
     {
       "phase": "reopen",
       "action": {
-        "interface": "graph_forge_cli",
-        "args": [
-          "--project",
-          "workspace/tiny/source",
-          "recovery"
+        "interface": "graph_forge_cli_workflow",
+        "commands": [
+          ["--json", "--project", "workspace/tiny/source", "recovery"],
+          ["--json", "--project", "workspace/tiny/source", "storage-attribution"]
         ]
       }
     },
@@ -105,6 +115,7 @@
         "interface": "graph_forge_cli_workflow",
         "commands": [
           [
+            "--json",
             "--project",
             "workspace/tiny/source",
             "query",
@@ -114,6 +125,7 @@
             "workspace/tiny/node-count.arrow"
           ],
           [
+            "--json",
             "--project",
             "workspace/tiny/source",
             "query",
@@ -131,6 +143,7 @@
         "interface": "graph_forge_cli_workflow",
         "commands": [
           [
+            "--json",
             "--project",
             "workspace/tiny/source",
             "query",
@@ -140,6 +153,7 @@
             "workspace/tiny/one-hop.arrow"
           ],
           [
+            "--json",
             "--project",
             "workspace/tiny/source",
             "query",
@@ -156,6 +170,7 @@
       "action": {
         "interface": "graph_forge_cli",
         "args": [
+          "--json",
           "--project",
           "workspace/tiny/source",
           "portable",
@@ -171,6 +186,7 @@
       "action": {
         "interface": "graph_forge_cli",
         "args": [
+          "--json",
           "portable",
           "verify",
           "--input",
@@ -183,6 +199,7 @@
       "action": {
         "interface": "graph_forge_cli",
         "args": [
+          "--json",
           "--project",
           "workspace/tiny/imported",
           "portable",
@@ -200,6 +217,7 @@
         "interface": "graph_forge_cli_workflow",
         "commands": [
           [
+            "--json",
             "--project",
             "workspace/tiny/imported",
             "query",
@@ -209,6 +227,7 @@
             "workspace/tiny/imported-node-count.arrow"
           ],
           [
+            "--json",
             "--project",
             "workspace/tiny/imported",
             "query",
@@ -216,6 +235,32 @@
             "MATCH ()-[r]->() RETURN count(r)",
             "--output",
             "workspace/tiny/imported-edge-count.arrow"
+          ],
+          [
+            "--json",
+            "--project",
+            "workspace/tiny/imported",
+            "query",
+            "--cypher",
+            "MATCH (a)-[r]->(b) RETURN a, r, b LIMIT 1024",
+            "--output",
+            "workspace/tiny/imported-one-hop.arrow"
+          ],
+          [
+            "--json",
+            "--project",
+            "workspace/tiny/imported",
+            "query",
+            "--cypher",
+            "MATCH (a)-[r1]->(b)-[r2]->(c) RETURN a, r1, b, r2, c LIMIT 1024",
+            "--output",
+            "workspace/tiny/imported-two-hop.arrow"
+          ],
+          [
+            "--json",
+            "--project",
+            "workspace/tiny/imported",
+            "storage-attribution"
           ]
         ]
       }

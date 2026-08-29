@@ -53,6 +53,11 @@ real generate, ingest, recount, query, portable export/verify/import, and reopen
 profile that merely labels no-op commands as lifecycle work is intentionally not
 shipped.
 
+Required native-Linux CI builds the real generator and certification runner,
+uses the Bazel-built public `gf`, and executes that scale-1 profile through all
+ten phases. The test requires exactly one closed lifecycle storage receipt in
+the assembled evidence and does not invoke BenchExec or a provider.
+
 Evidence contains only phase names, typed pass/fail state, exit codes, elapsed
 milliseconds, and observed peak RSS bytes. Command arguments and child output
 are intentionally excluded so graph contents, credentials, and sensitive paths
@@ -228,6 +233,13 @@ evidence therefore also requires an authenticated `graphforge-lifecycle-storage/
 owner-union receipt for retained and transient lifecycle maxima. The controller
 fails closed while that ordinary receipt is absent rather than summing project
 owners or treating portable logical payload bytes as allocated storage.
+The Rust certification runner owns that allocation session: it deduplicates
+stable native identities for the generated inputs, source project, result
+sinks, portable package, and clean-imported project; consumes writer-owned
+construction and portable-import transient peaks; and appends exactly one
+identity-free closed receipt after `reopen_proof`. Python only validates and
+assembles the receipt. Missing owners, cleanup contradictions, unstable files,
+or a second finalization fail closed.
 
 Ordinary result-sink receipts independently own scalar counts, fixed-hop result
 cardinality, query evidence, and source/import logical-result digests. Missing
