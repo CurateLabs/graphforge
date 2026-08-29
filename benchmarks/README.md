@@ -112,9 +112,9 @@ start a provider, or open a GraphForge project.
 
 `make -C benchmarks local-admission` uses ReFrame's local scheduler and local
 launcher to run the admission probe. The probe admits only native Linux with
-cgroups v2 and the required namespace controls. BenchExec's namespace-enabled
-`RunExecutor` must then account for CPU, wall time, peak memory, reads, and
-writes while terminating a detached descendant tree at the wall-time limit.
+cgroups v2 and the required namespace controls. BenchExec's supported `runexec`
+entrypoint must then account for CPU, wall time, peak memory, reads, writes, and
+pressure while terminating a detached descendant tree at the wall-time limit.
 
 Unsupported hosts return sanitized typed disqualification evidence. In
 particular, macOS and Docker Desktop do not prove native Linux admission and
@@ -123,16 +123,17 @@ not authorize a Graph500 scale run.
 
 The command is fail-closed: only `passed` exits successfully. A typed
 `disqualified` result exits with status 2 and an execution failure exits with
-status 1. The dedicated `Native Local Admission` workflow runs on a bare Linux
-runner, requires ReFrame to report `passed`, validates the closed evidence
+status 1. The dedicated `Native Local Admission` workflow is manual because
+ordinary pull-request runners do not promise this host topology. When explicitly
+dispatched it requires ReFrame to report `passed`, validates the closed evidence
 schema independently, and uploads the sanitized document even when admission
 fails. An uploaded disqualification is diagnostic evidence, never a green
-qualification.
+qualification or a masked workflow success.
 
 The hosted workflow evaluates bare Blacksmith and GitHub-hosted Ubuntu 24.04 as
 separate explicit authorities. Both install BenchExec from the official
 SoSy-Lab Ubuntu PPA so its package-managed one-time cgroup setup is the system
-authority; the locked Python workspace does not install its own BenchExec. A
+authority. A
 hard `python3 -m benchexec.check_cgroups` preflight runs before the identical
 ReFrame check, and the measured fixture uses that same system interpreter. Per
 BenchExec's cgroups-v2 installation guidance, both commands execute in one
