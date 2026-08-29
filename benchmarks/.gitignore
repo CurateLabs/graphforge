@@ -1,6 +1,8 @@
 .venv/
 generated/
 outputs/
+output/
+stage/
 credentials/
 *.secret
 fly/.env

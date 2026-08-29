@@ -107,3 +107,16 @@ The smoke installs only the locked benchmark environment, imports ReFrame and
 BenchExec, discovers the checked-in fixtures, runs the Python unit tests, and
 checks the dependency-free Rust smoke runner. It does not run a benchmark,
 start a provider, or open a GraphForge project.
+
+## Native local admission
+
+`make -C benchmarks local-admission` uses ReFrame's local scheduler and local
+launcher to run the admission probe. The probe admits only native Linux with
+cgroups v2 and the required namespace controls. BenchExec's namespace-enabled
+`RunExecutor` must then account for CPU, wall time, peak memory, reads, and
+writes while terminating a detached descendant tree at the wall-time limit.
+
+Unsupported hosts return sanitized typed disqualification evidence. In
+particular, macOS and Docker Desktop do not prove native Linux admission and
+must not be used as substitutes. This probe creates no Fly resources and does
+not authorize a Graph500 scale run.
