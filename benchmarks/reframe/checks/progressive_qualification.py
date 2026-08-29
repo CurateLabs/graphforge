@@ -27,9 +27,7 @@ class Graph500ProgressiveQualificationProfile(rfm.RunOnlyRegressionTest):
         root = Path(__file__).resolve().parents[2]
         execution = "local" if self.profile_id.endswith("-local") else "provider"
         self.valid_systems = (  # unavailable provider profiles cannot pass on local
-            ["graphforge-local:local"]
-            if execution == "local"
-            else ["graphforge-provider:provider"]
+            ["graphforge-local:local"] if execution == "local" else ["graphforge-provider:provider"]
         )
         self.executable_opts = [
             "run",

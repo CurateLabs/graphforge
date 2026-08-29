@@ -75,9 +75,12 @@ class ProgressiveQualificationTests(unittest.TestCase):
             raw_profiles.append(raw)
             self.assertEqual(tuple(raw["lifecycle"]["phases"]), PHASES)
             self.assertEqual(raw["generator"]["edge_factor"], 16)
-            digest = "sha256:" + hashlib.sha256(
-                (ROOT / "runners/graph500-generator/src/main.rs").read_bytes()
-            ).hexdigest()
+            digest = (
+                "sha256:"
+                + hashlib.sha256(
+                    (ROOT / "runners/graph500-generator/src/main.rs").read_bytes()
+                ).hexdigest()
+            )
             self.assertEqual(raw["generator"]["identity"], digest)
             self.assertEqual(raw["phases"][1]["action"]["identity"], digest)
             ingest = raw["phases"][2]["action"]
@@ -105,9 +108,7 @@ class ProgressiveQualificationTests(unittest.TestCase):
         self.assertIsNone(select_next(self.profiles, [rung(18), failed]))
 
     def test_tiny_executable_fixture_is_a_real_certification_profile(self) -> None:
-        fixture = json.loads(
-            (ROOT / "fixtures/progressive/tiny-executable.json").read_text()
-        )
+        fixture = json.loads((ROOT / "fixtures/progressive/tiny-executable.json").read_text())
         self.certification_schema.validate(fixture)
         self.assertEqual([phase["phase"] for phase in fixture["phases"]], list(PHASES))
 
