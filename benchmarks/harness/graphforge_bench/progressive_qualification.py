@@ -201,8 +201,11 @@ def project(
         25: (22, 24),
         26: (24, 25),
     }
-    if profile.projection_sources != expected_sources.get(profile.scale):
-        low_scale, high_scale = expected_sources[profile.scale]
+    adjacent = expected_sources.get(profile.scale)
+    if adjacent is None:
+        raise QualificationError("provider scale is not on the progressive ladder")
+    if profile.projection_sources != adjacent:
+        low_scale, high_scale = adjacent
         raise QualificationError(
             f"S{profile.scale} requires adjacent S{low_scale} and S{high_scale} ladder evidence"
         )

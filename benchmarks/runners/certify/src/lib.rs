@@ -474,6 +474,13 @@ fn sanitize_receipt(value: &serde_json::Value) -> Option<serde_json::Value> {
             ],
         ),
         _ if object.contains_key("selected_generation_uuid") => {
+            if !object
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(is_safe_token)
+            {
+                return None;
+            }
             let mut receipt = serde_json::Map::new();
             for key in [
                 "kind",
@@ -1299,6 +1306,25 @@ mod tests {
         let mut leaked_query = query;
         leaked_query["query_evidence"]["project_path"] = serde_json::json!("/secret");
         let encoded = serde_json::to_vec(&leaked_query).expect("leaked query receipt JSON");
+        assert!(parse_receipts(&encoded, true).is_err());
+        let recovery = serde_json::json!({
+            "kind": "project_open",
+            "selected_generation_uuid": "00000000-0000-4000-8000-000000000001",
+            "selected_generation_class": "published",
+            "work_detected": false,
+            "repaired_journals": 0,
+            "aborted_journals": 0,
+            "removed_generations": 0,
+            "preserved_unknown_entries": 0,
+            "deferred": null,
+            "elapsed_ms": 1
+        });
+        let encoded = serde_json::to_vec(&recovery).expect("recovery receipt JSON");
+        let sanitized = parse_receipts(&encoded, true).expect("ordinary recovery receipt");
+        assert_eq!(sanitized[0]["kind"], "project_open");
+        let mut leaked_recovery = recovery;
+        leaked_recovery["kind"] = serde_json::json!("/private/project");
+        let encoded = serde_json::to_vec(&leaked_recovery).expect("leaked recovery receipt JSON");
         assert!(parse_receipts(&encoded, true).is_err());
     }
 

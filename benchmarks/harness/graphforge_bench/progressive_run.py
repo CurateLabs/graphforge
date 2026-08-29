@@ -248,16 +248,22 @@ def require_bulk_ingest_capability(receipt: Mapping[str, Any]) -> Mapping[str, A
         receipt.get("contract") != "graphforge-import-session/1"
         or receipt.get("outcome") != "committed"
         or not isinstance(construction, Mapping)
-        or not isinstance(construction.get("configured_batch_rows"), int)
+        or not _is_int(construction.get("configured_batch_rows"))
         or construction["configured_batch_rows"] < 65_536
-        or not isinstance(construction.get("accepted_chunks"), int)
+        or not _is_int(construction.get("accepted_chunks"))
         or construction["accepted_chunks"] < 1
         or construction.get("publication_committed") is not True
-        or construction.get("input_rows", 0) < construction["accepted_chunks"]
+        or not _is_int(construction.get("input_rows"))
+        or construction["input_rows"] < construction["accepted_chunks"]
+        or not _is_int(construction.get("input_batches"))
         or construction.get("input_batches") != construction["accepted_chunks"]
     ):
         raise ControllerError("bulk_ingest_capability_unproven")
     return receipt
+
+
+def _is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 def _run_benchexec(stage: Path, executables: Executables, identities: Mapping[str, Any]) -> int:

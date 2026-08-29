@@ -353,6 +353,18 @@ class ProgressiveRunControllerTests(unittest.TestCase):
         invalid["construction"]["configured_batch_rows"] = 8192
         with self.assertRaisesRegex(ControllerError, "bulk_ingest_capability_unproven"):
             require_bulk_ingest_capability(invalid)
+        for field in (
+            "configured_batch_rows",
+            "accepted_chunks",
+            "input_rows",
+            "input_batches",
+        ):
+            for invalid_value in (True, None, "2"):
+                with self.subTest(field=field, invalid_value=invalid_value):
+                    invalid = json.loads(json.dumps(receipt))
+                    invalid["construction"][field] = invalid_value
+                    with self.assertRaisesRegex(ControllerError, "bulk_ingest_capability_unproven"):
+                        require_bulk_ingest_capability(invalid)
 
     def test_named_authorities_assemble_true_passed_evidence_and_refuse_gaps(self) -> None:
         receipts = authoritative_receipts(18)

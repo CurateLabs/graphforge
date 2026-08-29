@@ -8,6 +8,7 @@ import unittest
 
 from graphforge_bench.progressive_qualification import (
     PHASES,
+    Profile,
     QualificationError,
     load_profiles,
     project,
@@ -134,6 +135,19 @@ class ProgressiveQualificationTests(unittest.TestCase):
             self.assertEqual(len(reopen_proof), 5)
             self.assertTrue(all("query" in command for command in reopen_proof[:4]))
             self.assertEqual(reopen_proof[-1][-1], "storage-attribution")
+            profile_uuids = {
+                argument
+                for phase in raw["phases"]
+                for command in (
+                    phase["action"].get("commands") or [phase["action"].get("args", [])]
+                )
+                for argument in command
+                if argument.startswith("00000000-0000-4000-8000-")
+            }
+            self.assertEqual(
+                profile_uuids,
+                {f"00000000-0000-4000-8000-{raw['scale']:012d}"},
+            )
             encoded = json.dumps(raw).lower()
             for forbidden in ("provider_id", "machine_id", "volume_id", "token", "secret"):
                 self.assertNotIn(forbidden, encoded)
@@ -299,6 +313,9 @@ class ProgressiveQualificationTests(unittest.TestCase):
         wrong_source["source"] = "progressive_profile"
         with self.assertRaisesRegex(QualificationError, "canonical S24 and S25"):
             project(self.profiles[6], [rung(24), wrong_source], CAPACITY)
+        unknown = Profile("graph500-s23-provider", 23, "provider", (20, 22))
+        with self.assertRaisesRegex(QualificationError, "not on the progressive ladder"):
+            project(unknown, [rung(20), rung(22)], CAPACITY)
 
 
 if __name__ == "__main__":
