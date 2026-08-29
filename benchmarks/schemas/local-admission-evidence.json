@@ -13,6 +13,7 @@
         "cgroups_v2_unavailable",
         "required_controllers_unavailable",
         "kernel_memory_accounting_unavailable",
+        "benchexec_cpuset_delegation_unavailable",
         "benchexec_cgroups_unavailable",
         "benchexec_fixture_failed",
         "malformed_benchexec_evidence",

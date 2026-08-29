@@ -112,6 +112,8 @@ def qualify_local_host(
 
     check = runner([sys.executable, "-m", "benchexec.check_cgroups", "--wait", "0", "--no-thread"])
     if check.returncode != 0:
+        if "without cpuset cgroup" in check.stderr:
+            return _evidence("disqualified", "benchexec_cpuset_delegation_unavailable", facts)
         return _evidence("disqualified", "benchexec_cgroups_unavailable", facts)
     facts["benchexec_cgroup_delegation"] = True
 

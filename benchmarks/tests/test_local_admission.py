@@ -34,6 +34,16 @@ class LocalAdmissionTests(unittest.TestCase):
             result = qualify_local_host(system="Linux", cgroup_root=Path(directory))
         self.assertEqual(result["cause"], "cgroups_v2_unavailable")
 
+    def test_package_preflight_reports_missing_cpuset_delegation(self) -> None:
+        def runner(_command):
+            return CommandResult(1, "", "Cannot limit CPU cores without cpuset cgroup.")
+
+        with tempfile.TemporaryDirectory() as directory:
+            cgroup, _proc = self._linux_roots(directory)
+            result = qualify_local_host(system="Linux", cgroup_root=cgroup, runner=runner)
+        self.assertEqual(result["result"], "disqualified")
+        self.assertEqual(result["cause"], "benchexec_cpuset_delegation_unavailable")
+
     def test_admitted_linux_requires_metrics_and_tree_termination(self) -> None:
         commands: list[tuple[str, ...]] = []
 
