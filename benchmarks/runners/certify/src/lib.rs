@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::fs;
+use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread;
@@ -137,6 +138,8 @@ impl Profile {
             18 | 19 => ("local", None),
             20 => ("provider", Some([18, 19])),
             22 => ("provider", Some([19, 20])),
+            24 => ("provider", Some([20, 22])),
+            25 => ("provider", Some([22, 24])),
             26 => ("provider", Some([24, 25])),
             _ => return false,
         };
@@ -240,6 +243,7 @@ pub struct Execution {
     pub duration_ms: u64,
     pub peak_rss_bytes: Option<u64>,
     pub failure: Option<FailureKind>,
+    pub receipts: Vec<serde_json::Value>,
 }
 
 pub trait PhaseExecutor {
@@ -254,6 +258,7 @@ impl PhaseExecutor for PublicProcessExecutor {
         if let PhaseAction::GraphForgeCliWorkflow { commands } = &command.action {
             let started = Instant::now();
             let mut peak_rss_bytes = None;
+            let mut receipts = Vec::new();
             for args in commands {
                 let execution = match execute_process(&profile.executable, args) {
                     Ok(execution) => execution,
@@ -263,16 +268,19 @@ impl PhaseExecutor for PublicProcessExecutor {
                             duration_ms: millis(started.elapsed()),
                             peak_rss_bytes,
                             failure: Some(FailureKind::CommandUnavailable),
+                            receipts,
                         });
                     }
                 };
                 peak_rss_bytes = max_optional(peak_rss_bytes, execution.peak_rss_bytes);
+                receipts.extend(execution.receipts);
                 if execution.exit_code != Some(0) {
                     return Ok(Execution {
                         exit_code: execution.exit_code,
                         duration_ms: millis(started.elapsed()),
                         peak_rss_bytes,
                         failure: execution.failure,
+                        receipts,
                     });
                 }
             }
@@ -281,6 +289,7 @@ impl PhaseExecutor for PublicProcessExecutor {
                 duration_ms: millis(started.elapsed()),
                 peak_rss_bytes,
                 failure: None,
+                receipts,
             });
         }
         let (executable, args) = match &command.action {
@@ -299,10 +308,15 @@ fn execute_process(executable: &str, args: &[String]) -> Result<Execution, Strin
     let mut child = Command::new(executable)
         .args(args)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .map_err(|_| "public command could not start".to_owned())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "public command stdout unavailable".to_owned())?;
+    let stdout_reader = thread::spawn(move || read_bounded(stdout, 1_048_576));
     let mut peak_rss_bytes = None;
     loop {
         peak_rss_bytes = max_optional(peak_rss_bytes, resident_bytes(child.id()));
@@ -310,15 +324,230 @@ fn execute_process(executable: &str, args: &[String]) -> Result<Execution, Strin
             .try_wait()
             .map_err(|_| "public command wait failed".to_owned())?
         {
+            let stdout = stdout_reader
+                .join()
+                .map_err(|_| "public command stdout reader failed".to_owned())??;
+            let receipts =
+                parse_receipts(&stdout, args.iter().any(|argument| argument == "--json"))?;
             return Ok(Execution {
                 exit_code: status.code(),
                 duration_ms: millis(started.elapsed()),
                 peak_rss_bytes,
                 failure: None,
+                receipts,
             });
         }
         thread::sleep(Duration::from_millis(10));
     }
+}
+
+fn read_bounded(mut input: impl Read, limit: usize) -> Result<Vec<u8>, String> {
+    let mut kept = Vec::new();
+    let mut chunk = [0_u8; 8_192];
+    let mut exceeded = false;
+    loop {
+        let read = input
+            .read(&mut chunk)
+            .map_err(|_| "public command stdout read failed".to_owned())?;
+        if read == 0 {
+            break;
+        }
+        if kept.len().saturating_add(read) <= limit {
+            kept.extend_from_slice(&chunk[..read]);
+        } else {
+            exceeded = true;
+        }
+    }
+    if exceeded {
+        Err("public command receipt exceeded one MiB".to_owned())
+    } else {
+        Ok(kept)
+    }
+}
+
+fn parse_receipts(stdout: &[u8], expected: bool) -> Result<Vec<serde_json::Value>, String> {
+    if !expected {
+        return Ok(Vec::new());
+    }
+    if stdout.is_empty() {
+        return Err("public command omitted its JSON receipt".to_owned());
+    }
+    let text =
+        std::str::from_utf8(stdout).map_err(|_| "public receipt was not UTF-8".to_owned())?;
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let value: serde_json::Value = serde_json::from_str(line)
+                .map_err(|_| "public receipt was not one JSON object per line".to_owned())?;
+            sanitize_receipt(&value)
+                .ok_or_else(|| "public receipt contract is not allowlisted".to_owned())
+        })
+        .collect()
+}
+
+fn sanitize_receipt(value: &serde_json::Value) -> Option<serde_json::Value> {
+    let object = value.as_object()?;
+    match object.get("contract").and_then(serde_json::Value::as_str) {
+        Some("graphforge-import-session/1") => {
+            if !object
+                .get("outcome")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|outcome| {
+                    matches!(
+                        outcome,
+                        "begun"
+                            | "resumed"
+                            | "registered"
+                            | "checkpointed"
+                            | "validated"
+                            | "committed"
+                            | "aborted"
+                    )
+                })
+            {
+                return None;
+            }
+            if object
+                .get("construction")
+                .is_some_and(|construction| !sanitized_numeric_tree(construction))
+            {
+                return None;
+            }
+            let mut receipt = serde_json::Map::new();
+            for key in [
+                "contract",
+                "outcome",
+                "rows_accepted",
+                "rows_rejected",
+                "bytes_accepted",
+                "construction",
+            ] {
+                if let Some(item) = object.get(key) {
+                    receipt.insert(key.to_owned(), item.clone());
+                }
+            }
+            Some(receipt.into())
+        }
+        Some("graphforge-result-sink/1") => {
+            let mut receipt = serde_json::Map::new();
+            for key in ["contract", "format", "rows", "batches", "bytes", "complete"] {
+                if let Some(item) = object.get(key) {
+                    receipt.insert(key.to_owned(), item.clone());
+                }
+            }
+            Some(receipt.into())
+        }
+        Some("graphforge-storage-attribution/1") => copy_closed_receipt(
+            object,
+            &[
+                "contract",
+                "retained_storage_bytes",
+                "transient_peak_storage_bytes",
+                "logical_read_bytes",
+                "logical_write_bytes",
+                "reader_calls",
+                "publication_work_units",
+            ],
+        ),
+        Some("graphforge-query-qualification/1") => copy_closed_receipt(
+            object,
+            &[
+                "contract",
+                "live_nodes",
+                "live_edges",
+                "one_hop_rows",
+                "two_hop_rows",
+                "source_fingerprint",
+                "imported_fingerprint",
+                "equivalent",
+            ],
+        ),
+        Some(contract) if contract.starts_with("graphforge-portable-") => copy_selected_receipt(
+            object,
+            &[
+                "contract",
+                "package_digest",
+                "transport_digest",
+                "entry_count",
+                "payload_bytes",
+                "representation",
+                "selection_fingerprint",
+                "integrity",
+                "compatibility",
+                "idempotent_replay",
+            ],
+        ),
+        _ if object.contains_key("selected_generation_uuid") => {
+            let mut receipt = serde_json::Map::new();
+            for key in [
+                "kind",
+                "selected_generation_class",
+                "work_detected",
+                "repaired_journals",
+                "aborted_journals",
+                "removed_generations",
+                "preserved_unknown_entries",
+                "deferred",
+                "elapsed_ms",
+            ] {
+                if let Some(item) = object.get(key) {
+                    receipt.insert(key.to_owned(), item.clone());
+                }
+            }
+            Some(receipt.into())
+        }
+        _ => None,
+    }
+}
+
+fn sanitized_numeric_tree(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => true,
+        serde_json::Value::Array(items) => items.iter().all(sanitized_numeric_tree),
+        serde_json::Value::Object(items) => items.iter().all(|(key, value)| {
+            key.len() <= 80
+                && key
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+                && sanitized_numeric_tree(value)
+        }),
+        serde_json::Value::String(_) => false,
+    }
+}
+
+fn copy_closed_receipt(
+    object: &serde_json::Map<String, serde_json::Value>,
+    keys: &[&str],
+) -> Option<serde_json::Value> {
+    if object.keys().any(|key| !keys.contains(&key.as_str())) {
+        return None;
+    }
+    Some(
+        keys.iter()
+            .filter_map(|key| {
+                object
+                    .get(*key)
+                    .map(|value| ((*key).to_owned(), value.clone()))
+            })
+            .collect::<serde_json::Map<_, _>>()
+            .into(),
+    )
+}
+
+fn copy_selected_receipt(
+    object: &serde_json::Map<String, serde_json::Value>,
+    keys: &[&str],
+) -> Option<serde_json::Value> {
+    Some(
+        keys.iter()
+            .filter_map(|key| {
+                object
+                    .get(*key)
+                    .map(|value| ((*key).to_owned(), value.clone()))
+            })
+            .collect::<serde_json::Map<_, _>>()
+            .into(),
+    )
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -345,6 +574,8 @@ pub struct PhaseOutcome {
     pub exit_code: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure: Option<FailureKind>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub receipts: Vec<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -398,6 +629,7 @@ pub fn certify_with_events(
                     } else {
                         execution.failure.or(Some(FailureKind::CommandFailed))
                     },
+                    receipts: execution.receipts,
                 }
             }
             Err(_) => PhaseOutcome {
@@ -407,6 +639,7 @@ pub fn certify_with_events(
                 peak_rss_bytes: None,
                 exit_code: None,
                 failure: Some(FailureKind::CommandUnavailable),
+                receipts: Vec::new(),
             },
         };
         let failed = outcome.status == OutcomeStatus::Failed;
@@ -484,6 +717,7 @@ pub fn normalize_evidence(input: &[u8]) -> Result<Evidence, RunnerError> {
                     peak_rss_bytes: phase.max_rss_kib.and_then(|value| value.checked_mul(1_024)),
                     exit_code: phase.exit_code,
                     failure: (!phase.ok).then_some(FailureKind::CommandFailed),
+                    receipts: Vec::new(),
                 });
                 if !phase.ok {
                     break;
@@ -697,6 +931,18 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
+    #[test]
+    fn child_receipts_are_bounded_allowlisted_and_strip_content_bearing_paths() {
+        let query = br#"{"contract":"graphforge-result-sink/1","destination":"/secret/result.arrow","format":"ArrowIpc","rows":7,"batches":1,"bytes":99,"complete":true}"#;
+        let receipts = parse_receipts(query, true).expect("allowlisted query receipt");
+        assert_eq!(receipts.len(), 1);
+        assert!(receipts[0].get("destination").is_none());
+        assert_eq!(receipts[0]["rows"], 7);
+        assert!(parse_receipts(br#"{"contract":"unknown/1"}"#, true).is_err());
+        assert!(parse_receipts(&[], true).is_err());
+        assert!(parse_receipts(b"human output\n", false).unwrap().is_empty());
+    }
+
     struct FakeExecutor {
         executions: VecDeque<Result<Execution, String>>,
         calls: Vec<Phase>,
@@ -873,6 +1119,7 @@ mod tests {
             duration_ms: index + 1,
             peak_rss_bytes: Some((index + 1) * 1_024),
             failure: None,
+            receipts: Vec::new(),
         })
     }
 
@@ -906,6 +1153,7 @@ mod tests {
             duration_ms: 4,
             peak_rss_bytes: Some(4_096),
             failure: None,
+            receipts: Vec::new(),
         }));
         executions.extend((4..10).map(passed_execution));
         let mut executor = FakeExecutor {

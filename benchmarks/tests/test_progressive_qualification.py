@@ -46,6 +46,23 @@ def rung(scale: int, *, rss: int = 1_000_000_000, wall: int = 100) -> dict:
             "reader_calls": 1_000 * multiplier,
             "publication_work_units": 2_000 * multiplier,
         },
+        "metric_sources": {
+            "benchexec": [
+                "wall_seconds",
+                "peak_rss_bytes",
+                "physical_read_bytes",
+                "physical_write_bytes",
+            ],
+            "storage_attribution": [
+                "retained_storage_bytes",
+                "transient_peak_storage_bytes",
+                "logical_read_bytes",
+                "logical_write_bytes",
+                "reader_calls",
+                "publication_work_units",
+            ],
+            "query_qualification": ["live_edges", "correctness"],
+        },
         "failure": None,
     }
 

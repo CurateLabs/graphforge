@@ -191,14 +191,18 @@ make -C benchmarks progressive-qualification-project-s20 \
   PROVIDER_CAPACITY=/sanitized/provider-capacity.json
 ```
 
-The controller also requires `ordinary-ingest-capability.json` to prove that
-the ordinary `gf import-session` path uses bulk construction with at least
-65,536 rows per batch and no scalar durable write loop. The current 8,192-row
-decode plus per-row durable path does not satisfy that contract, so real rungs
-remain refused until the ordinary product path publishes the closed capability
-evidence. Missing retained/transient storage, logical I/O, reader-call, or
-publication-work evidence likewise causes a typed failure; the controller never
-manufactures those values from command counts or recursive file scans.
+The controller derives bulk-ingest capability from the same run's bounded
+ordinary `gf import-session commit --json` receipt: its construction evidence
+must identify a configuration of at least 65,536 rows, accepted bulk chunks,
+and the single committed publication. There is no separately plantable
+capability file. BenchExec XML is the sole wall/RSS/physical-I/O authority;
+closed ordinary storage-attribution and query-qualification receipts are the
+sole authorities for logical I/O, retained/transient storage, reader and
+publication work, counts, fixed-hop results, and source/import equality.
+Missing or contradictory receipts cause a typed first failure. Until #951 and
+#904 provide those exact ordinary receipts, a real rung remains fail-closed;
+the controller never manufactures values from command counts, recursive file
+scans, or synthetic labels.
 
 ## Native local admission deployment
 

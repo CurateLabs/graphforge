@@ -56,6 +56,16 @@
         },
         "failure": {
           "enum": ["command_failed", "command_unavailable"]
+        },
+        "receipts": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "type": "object",
+            "propertyNames": {
+              "enum": ["contract", "outcome", "rows_accepted", "rows_rejected", "bytes_accepted", "construction", "format", "rows", "batches", "bytes", "complete", "retained_storage_bytes", "transient_peak_storage_bytes", "logical_read_bytes", "logical_write_bytes", "reader_calls", "publication_work_units", "live_nodes", "live_edges", "one_hop_rows", "two_hop_rows", "source_fingerprint", "imported_fingerprint", "equivalent", "kind", "selected_generation_class", "work_detected", "repaired_journals", "aborted_journals", "removed_generations", "preserved_unknown_entries", "deferred", "elapsed_ms", "package_digest", "transport_digest", "entry_count", "payload_bytes", "representation", "selection_fingerprint", "integrity", "compatibility", "idempotent_replay"]
+            }
+          }
         }
       },
       "required": ["phase", "status", "duration_ms", "peak_rss_bytes", "exit_code"],

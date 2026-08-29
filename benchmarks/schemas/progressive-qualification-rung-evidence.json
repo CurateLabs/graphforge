@@ -3,7 +3,7 @@
   "schema": "graphforge-progressive-qualification-rung-evidence-schema/1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["profile_id", "source", "scale", "live_edges", "status", "correctness", "phases", "metrics", "failure"],
+  "required": ["profile_id", "source", "scale", "live_edges", "status", "correctness", "phases", "metrics", "metric_sources", "failure"],
   "properties": {
     "profile_id": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,80}$"},
     "source": {"enum": ["progressive_profile", "canonical_ladder"]},
@@ -23,6 +23,15 @@
         "logical_read_bytes": {"$ref": "#/$defs/nonnegative"}, "logical_write_bytes": {"$ref": "#/$defs/nonnegative"},
         "physical_read_bytes": {"$ref": "#/$defs/nonnegative"}, "physical_write_bytes": {"$ref": "#/$defs/nonnegative"},
         "reader_calls": {"$ref": "#/$defs/nonnegative"}, "publication_work_units": {"$ref": "#/$defs/nonnegative"}
+      }
+    },
+    "metric_sources": {
+      "type": "object", "additionalProperties": false,
+      "required": ["benchexec", "storage_attribution", "query_qualification"],
+      "properties": {
+        "benchexec": {"const": ["wall_seconds", "peak_rss_bytes", "physical_read_bytes", "physical_write_bytes"]},
+        "storage_attribution": {"const": ["retained_storage_bytes", "transient_peak_storage_bytes", "logical_read_bytes", "logical_write_bytes", "reader_calls", "publication_work_units"]},
+        "query_qualification": {"const": ["live_edges", "correctness"]}
       }
     },
     "failure": {"type": ["string", "null"], "enum": [null, "admission", "generate", "ingest", "reopen", "recount", "query", "export", "verify", "clean_import", "reopen_proof", "timeout", "oom", "storage", "correctness", "harness"]}
