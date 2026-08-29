@@ -86,6 +86,44 @@ class LocalAdmissionTests(unittest.TestCase):
         self.assertEqual(result["result"], "failed")
         self.assertEqual(result["cause"], "mandatory_metric_missing")
 
+    def test_non_object_measurements_fail_as_malformed(self) -> None:
+        def runner(command):
+            if "benchexec.check_cgroups" in command:
+                return CommandResult(0, "", "")
+            return CommandResult(0, json.dumps(list(range(5))), "")
+
+        with tempfile.TemporaryDirectory() as directory:
+            cgroup, proc = self._linux_roots(directory)
+            result = qualify_local_host(
+                system="Linux", cgroup_root=cgroup, proc_root=proc, runner=runner
+            )
+        self.assertEqual(result["cause"], "malformed_benchexec_evidence")
+
+    def test_non_numeric_and_non_finite_metrics_fail_as_malformed(self) -> None:
+        for invalid in (None, True, "1", float("nan"), float("inf"), -1):
+            with self.subTest(invalid=invalid):
+
+                def runner(command, invalid_metric=invalid):
+                    if "benchexec.check_cgroups" in command:
+                        return CommandResult(0, "", "")
+                    measurements = {
+                        "walltime": 1.0,
+                        "cputime": 0.1,
+                        "memory": 1048576,
+                        "blkio-read": 4096,
+                        "blkio-write": invalid_metric,
+                        "terminationreason": "walltime",
+                        "descendant_stopped": True,
+                    }
+                    return CommandResult(0, json.dumps(measurements), "")
+
+                with tempfile.TemporaryDirectory() as directory:
+                    cgroup, proc = self._linux_roots(directory)
+                    result = qualify_local_host(
+                        system="Linux", cgroup_root=cgroup, proc_root=proc, runner=runner
+                    )
+                self.assertEqual(result["cause"], "malformed_benchexec_evidence")
+
     def test_live_descendant_fails_closed(self) -> None:
         def runner(command):
             if "benchexec.check_cgroups" in command:

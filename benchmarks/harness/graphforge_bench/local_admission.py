@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 import json
+import math
 from pathlib import Path
 import platform
 import subprocess
@@ -66,6 +67,16 @@ def _evidence(
     return document
 
 
+def _metrics_are_finite_numbers(measurements: Mapping[str, object]) -> bool:
+    for name in REQUIRED_METRICS:
+        value = measurements[name]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return False
+        if not math.isfinite(value) or value < 0:
+            return False
+    return True
+
+
 def qualify_local_host(
     *,
     system: str | None = None,
@@ -96,9 +107,14 @@ def qualify_local_host(
     except json.JSONDecodeError:
         return _evidence("failed", "malformed_benchexec_evidence", facts)
 
+    if not isinstance(measurements, dict):
+        return _evidence("failed", "malformed_benchexec_evidence", facts)
+
     missing = [name for name in REQUIRED_METRICS if name not in measurements]
     if missing:
         return _evidence("failed", "mandatory_metric_missing", facts)
+    if not _metrics_are_finite_numbers(measurements):
+        return _evidence("failed", "malformed_benchexec_evidence", facts)
     if measurements.get("terminationreason") != "walltime":
         return _evidence("failed", "process_tree_limit_not_enforced", facts, measurements)
     if measurements.get("descendant_stopped") is not True:
