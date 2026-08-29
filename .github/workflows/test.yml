@@ -1152,6 +1152,11 @@ jobs:
           sudo ln -sf /usr/local/bin/bazelisk /usr/local/bin/bazel
           bazelisk version
 
+      - name: Install uv for benchmark fixture validation
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+
       - name: Cargo feature drift check (fail-closed)
         run: |
           python3 scripts/ci/cargo-bazel-drift-check.py
@@ -1194,6 +1199,22 @@ jobs:
             //:cli_bins \
             //:resource_inputs \
             //:release_bins 2>&1 | tee dist/bazel-representative-build.log
+
+      - name: Real tiny progressive lifecycle producer
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --manifest-path benchmarks/Cargo.toml \
+            --bin graphforge-benchmark-certify \
+            --bin graphforge-benchmark-graph500-generator
+          gf_bin=$(bazelisk cquery --config=ci --output=files //crates/graphforge-cli:gf | tail -n 1)
+          test -x "$gf_bin"
+          uv run --project benchmarks --locked python \
+            benchmarks/scripts/test-tiny-lifecycle-certification.py \
+            --gf "$gf_bin" \
+            --certify benchmarks/target/debug/graphforge-benchmark-certify \
+            --generator benchmarks/target/debug/graphforge-benchmark-graph500-generator \
+            --workspace-root "$RUNNER_TEMP"
 
       - name: Bazel binding cdylibs + packaging handoff
         run: |

@@ -88,6 +88,14 @@ impl Profile {
                 "progressive profile requires its qualification contract",
             ));
         }
+        if self.schema == "graphforge-public-certification-profile/1"
+            && self.lifecycle.is_some()
+            && !self.lifecycle_storage_requested()
+        {
+            return Err(RunnerError::Profile(
+                "public profile lifecycle declaration is invalid",
+            ));
+        }
         if !is_graphforge_executable(&self.executable) {
             return Err(RunnerError::Profile(
                 "executable must resolve to the public gf command",
@@ -161,6 +169,18 @@ impl Profile {
             && gate.headroom.rss_fraction == 0.2
             && gate.headroom.storage_fraction == 0.15
             && gate.headroom.max_adjacent_rss_growth_fraction == 0.1
+    }
+
+    fn lifecycle_storage_requested(&self) -> bool {
+        let Some(lifecycle) = self.lifecycle.clone() else {
+            return false;
+        };
+        serde_json::from_value::<ProgressiveLifecycle>(lifecycle).is_ok_and(|lifecycle| {
+            lifecycle.mechanics == "public-certification-v1"
+                && lifecycle.phases == Phase::ALL
+                && lifecycle.evidence_schema == EVIDENCE_SCHEMA
+                && lifecycle.storage_receipt == "graphforge-lifecycle-storage/1"
+        })
     }
 }
 
@@ -431,8 +451,7 @@ fn merge_file_identity(identities: &mut BTreeMap<String, u64>, path: &Path) -> R
 
 impl PhaseExecutor for PublicProcessExecutor {
     fn execute(&mut self, profile: &Profile, command: &PhaseCommand) -> Result<Execution, String> {
-        let produce_lifecycle_storage =
-            profile.schema == "graphforge-progressive-qualification-profile/1";
+        let produce_lifecycle_storage = profile.lifecycle_storage_requested();
         if let PhaseAction::GraphForgeCliWorkflow { commands } = &command.action {
             let started = Instant::now();
             let mut peak_rss_bytes = None;
@@ -1882,6 +1901,17 @@ mod tests {
         assert!(profile.validate().is_err());
         let mut profile = progressive_profile();
         profile.gate.as_mut().unwrap()["projection_source_scales"] = serde_json::json!([24, 25]);
+        assert!(profile.validate().is_err());
+    }
+
+    #[test]
+    fn public_profile_lifecycle_storage_is_explicit_and_typed() {
+        let mut profile = tiny_profile();
+        assert!(!profile.lifecycle_storage_requested());
+        profile.lifecycle = progressive_profile().lifecycle;
+        assert!(profile.lifecycle_storage_requested());
+        assert_eq!(profile.validate(), Ok(()));
+        profile.lifecycle.as_mut().unwrap()["storage_receipt"] = serde_json::json!("unknown/1");
         assert!(profile.validate().is_err());
     }
 

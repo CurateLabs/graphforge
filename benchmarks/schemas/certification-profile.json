@@ -6,6 +6,7 @@
     "schema": { "const": "graphforge-public-certification-profile/1" },
     "id": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,80}$" },
     "executable": { "type": "string", "pattern": "(^|[/\\\\])gf(\\.exe)?$" },
+    "lifecycle": { "$ref": "#/$defs/lifecycle" },
     "phases": {
       "type": "array",
       "minItems": 10,
@@ -41,6 +42,19 @@
         }
       },
       "required": ["phase", "action"],
+      "additionalProperties": false
+    },
+    "lifecycle": {
+      "type": "object",
+      "properties": {
+        "mechanics": { "const": "public-certification-v1" },
+        "phases": {
+          "const": ["admission", "generate", "ingest", "reopen", "recount", "query", "export", "verify", "clean_import", "reopen_proof"]
+        },
+        "evidence_schema": { "const": "graphforge-public-certification/1" },
+        "storage_receipt": { "const": "graphforge-lifecycle-storage/1" }
+      },
+      "required": ["mechanics", "phases", "evidence_schema", "storage_receipt"],
       "additionalProperties": false
     },
     "benchmarkGenerator": {
@@ -99,7 +113,10 @@
       { "allOf": [{ "$ref": "#/$defs/graphForgeCommand" }, { "properties": { "phase": { "const": "ingest" } } }] },
       { "allOf": [{ "$ref": "#/$defs/workflowCommand" }, { "properties": { "phase": { "const": "ingest" } } }] }
     ] },
-    "reopen": { "allOf": [{ "$ref": "#/$defs/graphForgeCommand" }, { "properties": { "phase": { "const": "reopen" } } }] },
+    "reopen": { "oneOf": [
+      { "allOf": [{ "$ref": "#/$defs/graphForgeCommand" }, { "properties": { "phase": { "const": "reopen" } } }] },
+      { "allOf": [{ "$ref": "#/$defs/workflowCommand" }, { "properties": { "phase": { "const": "reopen" } } }] }
+    ] },
     "recount": { "oneOf": [
       { "allOf": [{ "$ref": "#/$defs/graphForgeCommand" }, { "properties": { "phase": { "const": "recount" } } }] },
       { "allOf": [{ "$ref": "#/$defs/workflowCommand" }, { "properties": { "phase": { "const": "recount" } } }] }
