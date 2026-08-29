@@ -16,8 +16,10 @@
 //! certify one billion live edges — that is #745. Small rungs run in normal CI;
 //! large rungs are opt-in via `make bench-g500-ladder`.
 
+#![recursion_limit = "256"]
+
 use std::cmp::Reverse;
-use std::collections::BinaryHeap;
+use std::collections::{BTreeMap, BinaryHeap};
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
@@ -29,6 +31,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use arrow::array::{Array, FixedSizeBinaryArray, Int64Array, StringArray, UInt64Array};
 use arrow::record_batch::RecordBatch;
+
 use graphforge_api::{
     CONSTRUCTION_EDGE_SCHEMA, CONSTRUCTION_NODE_SCHEMA, CancellationToken,
     GraphConstructionBudgets, GraphConstructionSession, GraphForge, OperationId, PortableSelection,
@@ -498,6 +501,179 @@ struct RungOutcome {
     evidence: Value,
 }
 
+fn exact_descriptor_allocation(paths: &[PathBuf]) -> Value {
+    let mut logical_bytes = 0_u64;
+    let mut allocated = 0_u64;
+    for path in paths {
+        logical_bytes = logical_bytes.saturating_add(
+            fs::metadata(path)
+                .expect("generator descriptor metadata")
+                .len(),
+        );
+        let file = File::open(path).expect("open exact allocation descriptor");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            allocated = allocated.saturating_add(
+                file.metadata()
+                    .expect("exact descriptor metadata")
+                    .blocks()
+                    .saturating_mul(512),
+            );
+        }
+        #[cfg(not(unix))]
+        panic!("certification descriptor allocation requires Unix stat blocks");
+    }
+    json!({
+        "category": "generator_spill",
+        "logical_bytes": logical_bytes,
+        "allocated_bytes": allocated,
+        "logical_references": paths.len(),
+        "physical_objects": paths.len(),
+        "source": "generator_exact_descriptors",
+    })
+}
+
+fn exact_descriptor_identities(paths: &[PathBuf]) -> BTreeMap<String, u64> {
+    paths
+        .iter()
+        .map(|path| {
+            let file = File::open(path).expect("open exact allocation descriptor");
+            let identity = graphforge_filesystem::file_identity(&file)
+                .expect("exact descriptor native identity");
+            let allocation = graphforge_filesystem::file_space_usage(&file)
+                .expect("exact descriptor allocation")
+                .allocated_bytes;
+            let mut file_id = String::with_capacity(32);
+            for byte in identity.file_id {
+                use std::fmt::Write as _;
+                write!(&mut file_id, "{byte:02x}").expect("write identity string");
+            }
+            (
+                format!("{:016x}:{file_id}", identity.volume_serial),
+                allocation,
+            )
+        })
+        .collect()
+}
+
+fn portable_export_allocation(receipt: &graphforge_api::PortableV2ExportFacadeResult) -> Value {
+    json!({
+        "category": "portable_package",
+        "logical_bytes": receipt.allocation_logical_bytes,
+        "allocated_bytes": receipt.allocation_identity_allocated_bytes.values().copied().sum::<u64>(),
+        "logical_references": receipt.allocation_physical_objects,
+        "physical_objects": receipt.allocation_physical_objects,
+        "source": "portable_writer_receipt",
+    })
+}
+
+fn storage_attribution_value(project: &Path) -> Value {
+    let mut value =
+        serde_json::to_value(storage_attribution(project)).expect("serialize storage attribution");
+    value
+        .as_object_mut()
+        .expect("storage attribution object")
+        .remove("generation_uuid");
+    value
+        .as_object_mut()
+        .expect("storage attribution object")
+        .remove("physical_identity_allocated_bytes");
+    value
+}
+
+fn reject_unsanitized_evidence(value: &Value) -> Result<(), String> {
+    fn visit(value: &Value, trail: &str) -> Result<(), String> {
+        match value {
+            Value::Object(fields) => {
+                for (key, child) in fields {
+                    let normalized = key.to_ascii_lowercase();
+                    if [
+                        "secret",
+                        "credential",
+                        "password",
+                        "token",
+                        "machine_id",
+                        "volume_id",
+                        "provider_resource_id",
+                        "absolute_path",
+                        "host_path",
+                    ]
+                    .iter()
+                    .any(|needle| normalized.contains(needle))
+                    {
+                        return Err(format!("sensitive evidence key at {trail}.{key}"));
+                    }
+                    visit(child, &format!("{trail}.{key}"))?;
+                }
+            }
+            Value::Array(items) => {
+                for (index, child) in items.iter().enumerate() {
+                    visit(child, &format!("{trail}[{index}]"))?;
+                }
+            }
+            Value::String(text) => {
+                if Uuid::parse_str(text).is_ok() {
+                    return Err(format!("raw UUID at {trail}"));
+                }
+                if text.starts_with('/')
+                    || text.starts_with("\\\\")
+                    || (text.len() >= 3
+                        && text.as_bytes()[1] == b':'
+                        && matches!(text.as_bytes()[2], b'/' | b'\\'))
+                    || text.split_whitespace().any(|part| part.starts_with('/'))
+                {
+                    return Err(format!("absolute host path at {trail}"));
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    visit(value, "$")
+}
+
+fn sanitized_construction_evidence(
+    evidence: &graphforge_storage::GraphConstructionEvidence,
+) -> Value {
+    let mut value = serde_json::to_value(evidence).expect("serialize construction evidence");
+    value
+        .as_object_mut()
+        .expect("construction evidence object")
+        .remove("storage_active_identity_allocated_bytes");
+    value
+        .as_object_mut()
+        .expect("construction evidence object")
+        .remove("storage_allocation_transitions");
+    value
+}
+
+fn storage_attribution(project: &Path) -> graphforge_storage::StorageAttributionSnapshot {
+    let graph = GraphForge::new(project.to_str()).expect("open attribution facade");
+    let snapshot = graph
+        .storage_attribution()
+        .expect("capture authenticated storage attribution through public facade");
+    snapshot
+        .validate_reconciliation()
+        .expect("storage attribution reconciliation");
+    assert!(
+        snapshot.is_fully_classified(),
+        "qualification refuses unclassified retained artifacts"
+    );
+    snapshot
+}
+
+#[test]
+fn public_storage_attribution_is_generation_bound_and_fully_classified() {
+    let project = TempDir::new().expect("storage attribution project");
+    let graph = GraphForge::new(project.path().to_str()).expect("open attribution facade");
+    let snapshot = graph
+        .storage_attribution()
+        .expect("public facade storage attribution");
+    snapshot.validate_for_qualification().unwrap();
+    assert!(snapshot.is_fully_classified());
+}
+
 /// Check the envelope after a phase. Returns `Some(error_class)` on the first
 /// violation so the caller can stop the ladder. `ladder_started` is the
 /// ladder-level clock so the 4 h wall-clock fail-safe bounds the whole run, not each
@@ -505,14 +681,12 @@ struct RungOutcome {
 fn envelope_violation(
     env: &RunEnvelope,
     ladder_started: Instant,
-    project: &Path,
-    spill: &Path,
+    disk_used_bytes: u64,
 ) -> Option<&'static str> {
     if peak_rss().is_some_and(|(rss, _)| rss > env.rss_bytes) {
         return Some("oom");
     }
-    let disk = directory_bytes(project).unwrap_or(0) + directory_bytes(spill).unwrap_or(0);
-    if disk > env.disk_bytes {
+    if disk_used_bytes > env.disk_bytes {
         return Some("disk_exhaustion");
     }
     if ladder_started.elapsed().as_secs() > env.timeout_s {
@@ -758,8 +932,6 @@ impl IngestHeartbeat {
         rung: &Rung,
         completed_rungs: &[Value],
         steps: &[Value],
-        project: &Path,
-        spill: &Path,
     ) -> Self {
         let Ok(path) = std::env::var("GF_G500_LADDER_JOURNAL_OUT") else {
             return Self {
@@ -775,8 +947,6 @@ impl IngestHeartbeat {
         let scale = rung.scale;
         let completed_rungs = completed_rungs.to_vec();
         let steps = steps.to_vec();
-        let project = project.to_path_buf();
-        let spill = spill.to_path_buf();
         let handle = thread::spawn(move || {
             loop {
                 let value = json!({
@@ -791,8 +961,6 @@ impl IngestHeartbeat {
                     "active_chunk_index": INGEST_CHUNK_INDEX.load(Ordering::Relaxed),
                     "process_memory": linux_process_memory(),
                     "storage_io": storage_io_value(),
-                    "disk_used_bytes": directory_bytes(&project).unwrap_or(0)
-                        .saturating_add(directory_bytes(&spill).unwrap_or(0)),
                     "completed_rungs": completed_rungs,
                     "active_steps": steps,
                     "first_failing_phase": null,
@@ -892,7 +1060,11 @@ fn run_rung(
         None,
     );
     let generate_s = gen_started.elapsed().as_secs_f64();
-    let gen_violation = envelope_violation(&env, ladder_started, &project, &spill_dir);
+    let generator_allocation = exact_descriptor_allocation(&spill.runs);
+    let generator_allocated_bytes = generator_allocation["allocated_bytes"]
+        .as_u64()
+        .expect("generator allocated bytes");
+    let gen_violation = envelope_violation(&env, ladder_started, generator_allocated_bytes);
     if let Some(class) = gen_violation {
         first_failing_phase = Some("generate");
         error_class = Some(class);
@@ -908,6 +1080,7 @@ fn run_rung(
             "peak_buffer_len": spill.peak_buffer_len,
             "buffer_edges": rung.buffer_edges,
             "run_count": spill.runs.len(),
+            "storage": generator_allocation,
         }
     }));
     persist_phase_journal(
@@ -945,8 +1118,7 @@ fn run_rung(
         graphforge_storage::io_stats::reset();
         INGEST_CHUNK_INDEX.store(0, Ordering::Relaxed);
         INGEST_SUBPHASE.store(1, Ordering::Relaxed);
-        let heartbeat =
-            IngestHeartbeat::start(profile, rung, completed_rungs, &steps, &project, &spill_dir);
+        let heartbeat = IngestHeartbeat::start(profile, rung, completed_rungs, &steps);
         let mut construction = open_persisted_construction(
             &graph,
             &spill_dir.join("construction-session.uuid"),
@@ -986,9 +1158,21 @@ fn run_rung(
         INGEST_SUBPHASE.store(0, Ordering::Relaxed);
         heartbeat.stop();
         drop(graph);
+        let committed_snapshot = storage_attribution(&project);
+        let ingest_disk_used_bytes =
+            generator_allocated_bytes.saturating_add(committed_snapshot.allocated_bytes);
+        let committed_storage =
+            serde_json::to_value(committed_snapshot).expect("serialize committed storage");
+        let construction_phases =
+            graphforge_storage::ConstructionPhaseAttribution::from_construction(
+                &construction_evidence,
+            );
+        construction_phases
+            .validate_reconciliation()
+            .expect("construction phase attribution reconciliation");
         ingest_ran = true;
         let ingest_s = ingest_started.elapsed().as_secs_f64();
-        let ingest_violation = envelope_violation(&env, ladder_started, &project, &spill_dir);
+        let ingest_violation = envelope_violation(&env, ladder_started, ingest_disk_used_bytes);
         if let Some(class) = ingest_violation {
             first_failing_phase = Some("ingest");
             error_class = Some(class);
@@ -998,8 +1182,7 @@ fn run_rung(
             "pass": ingest_violation.is_none(),
             "wall_time_s": ingest_s,
             "rss_peak_bytes": rss_value(),
-            "disk_used_bytes": directory_bytes(&project).unwrap_or(0)
-                .saturating_add(directory_bytes(&spill_dir).unwrap_or(0)),
+            "disk_used_bytes": ingest_disk_used_bytes,
             "detail": {
                 "live_unique_edges": live_unique_edges,
                 "duplicates_rejected": duplicates_rejected,
@@ -1036,7 +1219,10 @@ fn run_rung(
                     "parquet_write_operations": construction_evidence.parquet_write_operations,
                     "retained_probe_read_bytes": construction_evidence.retained_probe_read_bytes,
                     "retained_probe_block_loads": construction_evidence.retained_probe_block_loads,
+                    "storage_transient_peak_allocated_bytes": construction_evidence.storage_transient_peak_allocated_bytes,
                 },
+                "committed_storage": committed_storage,
+                "application_io_phases": construction_phases,
             }
         }));
         persist_phase_journal(
@@ -1072,7 +1258,9 @@ fn run_rung(
         let graph = GraphForge::new(Some(project.to_str().expect("utf8 project")))
             .expect("reopen GraphForge");
         let reopen_s = reopen_started.elapsed().as_secs_f64();
-        let reopen_violation = envelope_violation(&env, ladder_started, &project, &spill_dir);
+        let reopen_disk_used_bytes =
+            generator_allocated_bytes.saturating_add(storage_attribution(&project).allocated_bytes);
+        let reopen_violation = envelope_violation(&env, ladder_started, reopen_disk_used_bytes);
         if let Some(class) = reopen_violation {
             first_failing_phase = Some("reopen");
             error_class = Some(class);
@@ -1114,7 +1302,9 @@ fn run_rung(
             let failure = result.as_ref().err().map(ToString::to_string);
             node_count = result.unwrap_or(0);
             let expected = 1u64 << rung.scale;
-            let mut violation = envelope_violation(&env, ladder_started, &project, &spill_dir);
+            let count_disk_used_bytes = generator_allocated_bytes
+                .saturating_add(storage_attribution(&project).allocated_bytes);
+            let mut violation = envelope_violation(&env, ladder_started, count_disk_used_bytes);
             if failure.is_some() {
                 violation = Some("execution_failure");
             } else if node_count != expected {
@@ -1160,7 +1350,9 @@ fn run_rung(
             let failure = result.as_ref().err().map(ToString::to_string);
             edge_count = result.as_ref().map_or(0, scalar_count);
             gsi = gsi_undirected(node_count, edge_count);
-            let mut violation = envelope_violation(&env, ladder_started, &project, &spill_dir);
+            let count_disk_used_bytes = generator_allocated_bytes
+                .saturating_add(storage_attribution(&project).allocated_bytes);
+            let mut violation = envelope_violation(&env, ladder_started, count_disk_used_bytes);
             if failure.is_some() {
                 violation = Some("execution_failure");
             } else if edge_count != live_unique_edges {
@@ -1219,7 +1411,9 @@ fn run_rung(
                 let (result, work) = execute_with_bounded_evidence(&graph, query);
                 let failure = result.as_ref().err().map(ToString::to_string);
                 let rows = result.as_ref().map_or(0, row_count);
-                let mut violation = envelope_violation(&env, ladder_started, &project, &spill_dir);
+                let query_disk_used_bytes = generator_allocated_bytes
+                    .saturating_add(storage_attribution(&project).allocated_bytes);
+                let mut violation = envelope_violation(&env, ladder_started, query_disk_used_bytes);
                 if failure.is_some() {
                     violation = Some("execution_failure");
                 } else if rows > 1_000 {
@@ -1256,8 +1450,11 @@ fn run_rung(
         drop(graph);
     }
 
-    let disk_used_bytes =
-        directory_bytes(&project).unwrap_or(0) + directory_bytes(&spill_dir).unwrap_or(0);
+    let disk_used_bytes = generator_allocated_bytes.saturating_add(
+        ingest_ran
+            .then(|| storage_attribution(&project).allocated_bytes)
+            .unwrap_or(0),
+    );
     // Tri-state: reconciliation is only *evaluated* once ingest has run. A rung
     // stopped in the generate phase is reported as null (not evaluated), never
     // as a forced `true`.
@@ -1601,26 +1798,6 @@ fn git_sha() -> Value {
         .filter(|output| output.status.success())
         .and_then(|output| String::from_utf8(output.stdout).ok())
         .map_or(Value::Null, |sha| Value::String(sha.trim().to_owned()))
-}
-
-fn directory_bytes(path: &Path) -> std::io::Result<u64> {
-    if !path.exists() {
-        return Ok(0);
-    }
-    if path.is_file() {
-        return Ok(path.metadata()?.len());
-    }
-    let mut total = 0u64;
-    for entry in fs::read_dir(path)? {
-        let entry = entry?;
-        let metadata = entry.metadata()?;
-        total += if metadata.is_dir() {
-            directory_bytes(&entry.path())?
-        } else {
-            metadata.len()
-        };
-    }
-    Ok(total)
 }
 
 /// Returns `(bytes, source)`. `"vmhwm"` (Linux `/proc/self/status`) is a true
@@ -2078,14 +2255,16 @@ struct PhaseJournal {
     path: PathBuf,
     phases: Vec<Value>,
     monitor: ResourceMonitor,
+    allocation: graphforge_storage::StorageAllocationLifecycle,
 }
 
 impl PhaseJournal {
-    fn new(path: PathBuf, workspace: &Path, envelope: Envelope) -> Self {
+    fn new(path: PathBuf, _workspace: &Path, envelope: Envelope) -> Self {
         Self {
             path,
             phases: Vec::new(),
-            monitor: ResourceMonitor::start(workspace.to_path_buf(), envelope),
+            monitor: ResourceMonitor::start(envelope),
+            allocation: graphforge_storage::StorageAllocationLifecycle::default(),
         }
     }
 
@@ -2101,7 +2280,10 @@ impl PhaseJournal {
         detail: Value,
     ) {
         let fingerprint = fingerprint.map_or(Value::Null, Value::String);
-        self.monitor.sample_disk();
+        // Every phase owns the live allocation union for its full duration,
+        // even when it does not install or remove an allocation identity.
+        self.monitor
+            .observe_allocated_union(self.allocation.current_allocated_bytes());
         if let Some(code) = self.monitor.failure_code() {
             self.phases.push(json!({
                 "id": id, "status": "fail",
@@ -2147,6 +2329,50 @@ impl PhaseJournal {
         self.monitor.cancellation.clone()
     }
 
+    fn replace_allocation_owner(&mut self, owner: &str, identities: &BTreeMap<String, u64>) {
+        self.allocation
+            .replace_owner(owner, identities)
+            .expect("replace exact allocation owner");
+        self.monitor
+            .observe_allocated_union(self.allocation.current_allocated_bytes());
+    }
+
+    fn replace_project_owner(
+        &mut self,
+        owner: &str,
+        generation: &graphforge_storage::ResolvedProjectGeneration,
+    ) {
+        let project = graphforge_storage::capture_project_storage_identity_union(generation)
+            .expect("capture retained project identity union");
+        self.replace_allocation_owner(owner, &project.physical_identity_allocated_bytes);
+    }
+
+    fn replay_allocation_transitions(
+        &mut self,
+        owner: &str,
+        transitions: &[graphforge_storage::StorageAllocationTransition],
+    ) {
+        for transition in transitions {
+            self.allocation
+                .apply_owner_transition(owner, transition)
+                .expect("apply writer-owned allocation transition");
+            self.monitor
+                .observe_allocated_union(self.allocation.current_allocated_bytes());
+        }
+    }
+
+    fn remove_allocation_owner(&mut self, owner: &str) {
+        self.allocation
+            .remove_owner(owner)
+            .expect("remove exact allocation owner");
+        self.monitor
+            .observe_allocated_union(self.allocation.current_allocated_bytes());
+    }
+
+    fn current_allocated_union(&self) -> u64 {
+        self.allocation.current_allocated_bytes()
+    }
+
     fn flush(&self) {
         let staged = self.path.with_extension("json.tmp");
         fs::write(
@@ -2172,7 +2398,6 @@ impl Drop for PhaseJournal {
             .failure_code()
             .or_else(|| std::thread::panicking().then_some("operation_failed"));
         if let Some(code) = failure_code {
-            self.monitor.sample_disk();
             self.phases.push(json!({
                 "id": CERTIFICATION_PHASES[self.phases.len()], "status": "fail",
                 "elapsed_ms": 0,
@@ -2208,7 +2433,6 @@ fn certification_query(
 }
 
 struct ResourceMonitor {
-    workspace: PathBuf,
     cancellation: CancellationToken,
     stop: Arc<AtomicBool>,
     peak_rss: Arc<AtomicU64>,
@@ -2219,29 +2443,24 @@ struct ResourceMonitor {
 }
 
 impl ResourceMonitor {
-    fn start(workspace: PathBuf, envelope: Envelope) -> Self {
+    fn start(envelope: Envelope) -> Self {
         let initial_rss = current_rss_bytes().expect("certification host must expose process RSS");
-        let initial_disk = allocated_bytes(&workspace)
-            .expect("certification host must expose allocated disk bytes");
         let cancellation = CancellationToken::new();
         let stop = Arc::new(AtomicBool::new(false));
         let peak_rss = Arc::new(AtomicU64::new(initial_rss));
-        let peak_disk = Arc::new(AtomicU64::new(initial_disk));
+        let peak_disk = Arc::new(AtomicU64::new(0));
         let failure = Arc::new(AtomicU64::new(0));
         let worker_cancellation = cancellation.clone();
         let worker_stop = Arc::clone(&stop);
         let worker_peak_rss = Arc::clone(&peak_rss);
-        let worker_peak_disk = Arc::clone(&peak_disk);
         let worker_failure = Arc::clone(&failure);
-        let worker_workspace = workspace.clone();
         let started = Instant::now();
         let elapsed_before_process = certification_elapsed_before_process();
         let worker = thread::spawn(move || {
-            let mut samples = 0_u8;
             while !worker_stop.load(Ordering::Relaxed) {
                 let rss = current_rss_bytes().expect("certification RSS probe failed");
                 worker_peak_rss.fetch_max(rss, Ordering::Relaxed);
-                let mut code = if rss > envelope.rss_bytes {
+                let code = if rss > envelope.rss_bytes {
                     1
                 } else if elapsed_before_process
                     .saturating_add(started.elapsed())
@@ -2252,14 +2471,6 @@ impl ResourceMonitor {
                 } else {
                     0
                 };
-                if samples == 0 {
-                    let disk = allocated_bytes(&worker_workspace)
-                        .expect("certification disk probe failed");
-                    worker_peak_disk.fetch_max(disk, Ordering::Relaxed);
-                    if disk > envelope.disk_bytes {
-                        code = 2;
-                    }
-                }
                 if code != 0 {
                     worker_failure
                         .compare_exchange(0, code, Ordering::SeqCst, Ordering::Relaxed)
@@ -2267,12 +2478,10 @@ impl ResourceMonitor {
                     worker_cancellation.cancel();
                     break;
                 }
-                samples = (samples + 1) % 20;
                 thread::sleep(Duration::from_millis(250));
             }
         });
         Self {
-            workspace,
             cancellation,
             stop,
             peak_rss,
@@ -2283,10 +2492,9 @@ impl ResourceMonitor {
         }
     }
 
-    fn sample_disk(&self) {
-        let disk = allocated_bytes(&self.workspace).expect("certification disk probe failed");
-        self.peak_disk.fetch_max(disk, Ordering::Relaxed);
-        if disk > self.envelope.disk_bytes {
+    fn observe_allocated_union(&self, bytes: u64) {
+        self.peak_disk.fetch_max(bytes, Ordering::Relaxed);
+        if bytes > self.envelope.disk_bytes {
             self.failure
                 .compare_exchange(0, 2, Ordering::SeqCst, Ordering::Relaxed)
                 .ok();
@@ -2341,23 +2549,6 @@ impl Drop for ResourceMonitor {
             worker.join().expect("resource watchdog thread");
         }
     }
-}
-
-fn allocated_bytes(path: &Path) -> Result<u64, &'static str> {
-    let output = Command::new("du").arg("-sk").arg(path).output();
-    output
-        .ok()
-        .filter(|out| out.status.success())
-        .and_then(|out| {
-            String::from_utf8(out.stdout)
-                .ok()?
-                .split_whitespace()
-                .next()?
-                .parse::<u64>()
-                .ok()
-        })
-        .map(|kibibytes| kibibytes.saturating_mul(1024))
-        .ok_or("allocated disk usage is unavailable")
 }
 
 fn result_fingerprint(result: &graphforge_api::ExecutionResult) -> String {
@@ -2436,7 +2627,17 @@ fn current_generation_uuid(graph: &GraphForge) -> Uuid {
     Uuid::from_bytes(bytes)
 }
 
-fn create_bounded_drill_package(root: &Path, limits: PortableV2Limits) -> (PathBuf, String) {
+struct DrillAllocationEvidence {
+    project: BTreeMap<String, u64>,
+    construction: BTreeMap<String, u64>,
+    expanded: BTreeMap<String, u64>,
+    cancelled_export: BTreeMap<String, u64>,
+}
+
+fn create_bounded_drill_package(
+    root: &Path,
+    limits: PortableV2Limits,
+) -> (PathBuf, String, DrillAllocationEvidence) {
     let project = root.join("drill-source");
     let package = root.join("drill.gfpb");
     fs::create_dir_all(&project).expect("bounded drill project");
@@ -2454,11 +2655,21 @@ fn create_bounded_drill_package(root: &Path, limits: PortableV2Limits) -> (PathB
     construction
         .seal_and_publish()
         .expect("publish bounded drill construction");
+    let construction_identities = construction
+        .progress()
+        .evidence
+        .storage_active_identity_allocated_bytes;
     drop(construction);
     drop(graph);
     let graph = GraphForge::new(project.to_str()).expect("reopen bounded drill project");
+    let project_generation = graphforge_storage::resolve_project_generation(&project)
+        .expect("resolve bounded drill project");
+    let project_identities =
+        graphforge_storage::capture_project_storage_identity_union(&project_generation)
+            .expect("bounded drill retained project attribution")
+            .physical_identity_allocated_bytes;
     let expanded = root.join("drill-expanded");
-    graph
+    let expanded_receipt = graph
         .export_portable_v2(
             &PortableV2ExportRequest {
                 selection: PortableSelection::Current,
@@ -2474,31 +2685,31 @@ fn create_bounded_drill_package(root: &Path, limits: PortableV2Limits) -> (PathB
         .expect("export compact drill expanded package");
     verify_portable_v2(
         &PortableVerifyRequest {
-            input: expanded,
+            input: expanded.clone(),
             mode: PortableV2Mode::Full,
             limits,
         },
         None,
     )
     .expect("verify compact drill expanded package");
+    let expanded_identities = expanded_receipt.allocation_identity_allocated_bytes;
+    fs::remove_dir_all(&expanded).expect("remove bounded expanded drill package");
     let cancelled = AtomicBool::new(true);
     let cancelled_path = root.join("drill-cancelled.gfpb");
-    assert!(
-        graph
-            .export_portable_v2(
-                &PortableV2ExportRequest {
-                    selection: PortableSelection::Current,
-                    output_path: cancelled_path.clone(),
-                    representation: PortableV2Output::Bundle,
-                    profile: PortableV2SelectionProfile::Complete,
-                    subset: None,
-                    limits,
-                },
-                Some(&cancelled),
-                |_| {},
-            )
-            .is_err()
-    );
+    let cancelled_error = graph
+        .export_portable_v2(
+            &PortableV2ExportRequest {
+                selection: PortableSelection::Current,
+                output_path: cancelled_path.clone(),
+                representation: PortableV2Output::Bundle,
+                profile: PortableV2SelectionProfile::Complete,
+                subset: None,
+                limits,
+            },
+            Some(&cancelled),
+            |_| {},
+        )
+        .expect_err("cancelled drill export must fail");
     assert!(!cancelled_path.exists());
     let receipt = graph
         .export_portable_v2(
@@ -2514,11 +2725,29 @@ fn create_bounded_drill_package(root: &Path, limits: PortableV2Limits) -> (PathB
             |_| {},
         )
         .expect("export bounded drill package");
-    (package, receipt.package_digest)
+    (
+        package,
+        receipt.package_digest,
+        DrillAllocationEvidence {
+            project: project_identities,
+            construction: construction_identities,
+            expanded: expanded_identities,
+            cancelled_export: cancelled_error.allocation_identity_allocated_bytes,
+        },
+    )
 }
 
 #[allow(clippy::too_many_lines)]
 fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value {
+    run_integrated_certification_with_edge_factor(root, target_live, None)
+}
+
+#[allow(clippy::too_many_lines)]
+fn run_integrated_certification_with_edge_factor(
+    root: &Path,
+    target_live: Option<u64>,
+    preflight_edge_factor: Option<u32>,
+) -> Value {
     let source = root.join("source");
     let imported = root.join("imported");
     let package = root.join("project.gfpb");
@@ -2550,7 +2779,7 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
     let edge_factor = if target_live.is_some() {
         certification_profile.edgefactor
     } else {
-        4
+        preflight_edge_factor.unwrap_or(4)
     };
     let initiator = if target_live.is_some() {
         certification_profile.initiator
@@ -2593,10 +2822,19 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
         || target_live_fingerprint.expect("target-live payload fingerprint"),
         |value| value.input_fingerprint.clone(),
     );
+    if let Some(spills) = &spills {
+        journal.replace_allocation_owner(
+            "generator_spill",
+            &exact_descriptor_identities(&spills.runs),
+        );
+    }
     journal.pass("generate", phase, Some(generation_fingerprint.clone()));
 
     let phase = Instant::now();
     let graph = GraphForge::new(source.to_str()).expect("open certification source");
+    let initial_generation = graphforge_storage::resolve_project_generation(&source)
+        .expect("resolve initial source generation");
+    journal.replace_project_owner("source_project", &initial_generation);
     let mut construction = graph
         .begin_graph_construction(Default::default())
         .expect("begin certification construction");
@@ -2624,12 +2862,36 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
     construction
         .seal_and_publish()
         .expect("publish certification construction");
+    let construction_evidence = construction.progress().evidence;
+    let mut construction_phases =
+        graphforge_storage::ConstructionPhaseAttribution::from_construction(&construction_evidence);
+    construction_phases
+        .validate_for_qualification()
+        .expect("certification construction phase attribution");
+    let pre_construction_union = journal.current_allocated_union();
+    journal.replay_allocation_transitions(
+        "construction",
+        &construction_evidence.storage_allocation_transitions,
+    );
+    // Construction artifacts are private to this session and cannot alias the
+    // already-open source project. The storage-owned numeric high-water mark
+    // therefore restores peaks compacted out of durable checkpoint history.
+    journal.monitor.observe_allocated_union(
+        pre_construction_union
+            .saturating_add(construction_evidence.storage_transient_peak_total_allocated_bytes),
+    );
+    let committed_generation = graphforge_storage::resolve_project_generation(&source)
+        .expect("resolve committed ingest generation");
+    journal.replace_project_owner("source_project", &committed_generation);
     journal.pass("ingest", phase, Some(input_fingerprint));
 
     let phase = Instant::now();
     let csr = graph
         .rebuild_adjacency(Some(journal.cancellation_token()))
         .expect("build certification CSR");
+    let csr_generation = graphforge_storage::resolve_project_generation(&source)
+        .expect("resolve committed CSR generation");
+    journal.replace_project_owner("source_project", &csr_generation);
     journal.pass(
         "csr",
         phase,
@@ -2721,6 +2983,10 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
         )
         .expect("portable-v2 export");
     assert_eq!(source_generation, exported.generation_uuid);
+    journal.replace_allocation_owner(
+        "portable_package",
+        &exported.allocation_identity_allocated_bytes,
+    );
     journal.pass("export", phase, Some(exported.package_digest.clone()));
     let phase = Instant::now();
     let verified = verify_portable_v2(
@@ -2747,6 +3013,23 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
         Some(journal.cancellation()),
     )
     .expect("atomic portable-v2 import");
+    // Replay the storage-owned operation transitions in their actual order:
+    // private materialization coexisted with the published generation until
+    // deterministic staging cleanup completed.
+    journal.replace_allocation_owner(
+        "import_materialized",
+        &imported_receipt.materialized_identity_allocated_bytes,
+    );
+    journal.replace_allocation_owner(
+        "clean_import",
+        &imported_receipt.published_identity_allocated_bytes,
+    );
+    assert!(imported_receipt.materialized_cleanup_parent_sync_confirmed);
+    assert_eq!(
+        imported_receipt.materialized_cleanup_removed_identity_allocated_bytes,
+        imported_receipt.materialized_identity_allocated_bytes
+    );
+    journal.remove_allocation_owner("import_materialized");
     assert_ne!(exported.generation_uuid, imported_receipt.generation_uuid);
     journal.pass(
         "import",
@@ -2757,6 +3040,9 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
     let imported_graph = GraphForge::new(imported.to_str()).expect("reopen import");
     journal.pass("imported_reopen", phase, None);
     let phase = Instant::now();
+    let imported_generation = graphforge_storage::resolve_project_generation(&imported)
+        .expect("resolve clean import generation");
+    journal.replace_project_owner("clean_import_project", &imported_generation);
     let imported_nodes = imported_graph
         .node_count(NODE_LABEL)
         .expect("imported nodes");
@@ -2831,11 +3117,31 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
         Some(imported_2hop.clone()),
         query_work_evidence(&imported_2hop_work),
     );
-
+    let source_storage = storage_attribution_value(&source);
+    let source_project_current_allocated_bytes =
+        graphforge_storage::capture_project_storage_identity_union(
+            &graphforge_storage::resolve_project_generation(&source)
+                .expect("resolve authoritative source project"),
+        )
+        .expect("capture authoritative source project identity union")
+        .allocated_bytes;
+    let imported_storage = storage_attribution_value(&imported);
+    let package_storage = portable_export_allocation(&exported);
     // Representative drills use the same verifier/import boundaries but never
     // repeat the billion-edge payload.
     let phase = Instant::now();
-    let (drill_package, drill_digest) = create_bounded_drill_package(root, limits);
+    let (drill_package, drill_digest, drill_allocation) =
+        create_bounded_drill_package(root, limits);
+    journal.replace_allocation_owner("drill_project", &drill_allocation.project);
+    journal.replace_allocation_owner("drill_construction", &drill_allocation.construction);
+    journal.replace_allocation_owner("drill_expanded", &drill_allocation.expanded);
+    journal.remove_allocation_owner("drill_expanded");
+    journal.replace_allocation_owner("drill_cancelled_export", &drill_allocation.cancelled_export);
+    journal.remove_allocation_owner("drill_cancelled_export");
+    journal.replace_allocation_owner(
+        "drill_package",
+        &exact_descriptor_identities(std::slice::from_ref(&drill_package)),
+    );
     let drill_verified = verify_portable_v2(
         &PortableVerifyRequest {
             input: drill_package.clone(),
@@ -2856,6 +3162,10 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
         file.write_all(b"corruption").expect("append corruption");
         file.flush().expect("flush corruption");
     }
+    journal.replace_allocation_owner(
+        "corrupt_drill_package",
+        &exact_descriptor_identities(std::slice::from_ref(&corrupt)),
+    );
     assert!(
         verify_portable_v2(
             &PortableVerifyRequest {
@@ -2901,18 +3211,55 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
     journal.pass("drill_resource_limit", phase, None);
     let phase = Instant::now();
     let interrupted = root.join("interrupted-target");
-    assert!(
-        GraphForge::import_portable_v2(
-            &interrupted,
-            &PortableV2ImportRequest {
-                input: drill_package,
-                operation_id: OperationId(uuidv7(0x746)),
-                limits,
-            },
-            Some(&AtomicBool::new(true))
-        )
-        .is_err()
+    let interrupted_operation = uuidv7(0x746);
+    let interrupted_generation = Uuid::new_v5(
+        &interrupted_operation,
+        b"graphforge-portable-v2-import-generation/1",
     );
+    let interrupted_cancelled = AtomicBool::new(false);
+    let supported_capabilities = [
+        "epistemic",
+        "graph",
+        "knowledge",
+        "provenance",
+        "valid_time",
+        "workspace",
+    ]
+    .into_iter()
+    .map(|capability_id| graphforge_storage::ProjectCapability {
+        capability_id: capability_id.into(),
+        capability_version: 1,
+    })
+    .collect::<Vec<_>>();
+    let interrupted_error = graphforge_storage::import_complete_portable_v2_with_progress(
+        &drill_package,
+        &interrupted,
+        interrupted_operation,
+        interrupted_generation,
+        &supported_capabilities,
+        limits,
+        Some(&interrupted_cancelled),
+        |progress| {
+            if progress.phase == graphforge_storage::PortableV2ImportPhase::Materialized {
+                interrupted_cancelled.store(true, Ordering::SeqCst);
+            }
+        },
+    )
+    .expect_err("cancelled finalization must fail");
+    assert!(interrupted_error.recovery_reauthentication_read_bytes > 0);
+    assert!(interrupted_error.recovery_reauthentication_read_calls > 0);
+    construction_phases.add_recovery_reauthentication(
+        interrupted_error.recovery_reauthentication_read_bytes,
+        interrupted_error.recovery_reauthentication_read_calls,
+    );
+    construction_phases
+        .validate_for_qualification()
+        .expect("interrupted recovery phase attribution");
+    journal.replace_allocation_owner(
+        "interrupted_import",
+        &interrupted_error.allocation_identity_allocated_bytes,
+    );
+    journal.remove_allocation_owner("interrupted_import");
     assert!(!interrupted.join("CURRENT").exists());
     journal.pass("drill_interrupted_finalization", phase, None);
 
@@ -2925,10 +3272,12 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
         digest.update(two_hop.as_bytes());
         format!("sha256:{}", hex_encode(digest.finalize()))
     };
-    json!({
-        "source_generation": exported.generation_uuid.to_string(),
+    let workspace_current_allocated_bytes = journal.current_allocated_union();
+    let evidence = json!({
+        "source_export_generation_authenticated": source_generation == exported.generation_uuid,
+        "import_receipt_reopen_authenticated": current_generation_uuid(&imported_graph) == imported_receipt.generation_uuid,
+        "source_import_generations_distinct": exported.generation_uuid != imported_receipt.generation_uuid,
         "package": exported.package_digest, "transport": exported.transport_digest,
-        "imported_generation": imported_receipt.generation_uuid.to_string(),
         "raw_attempts": spills.as_ref().map_or_else(|| summary.as_ref().unwrap().raw_attempts, |value| value.raw_attempts),
         "self_loops_rejected": spills.as_ref().map_or_else(|| summary.as_ref().unwrap().self_loops_rejected, |value| value.self_loops_rejected),
         "duplicates_rejected": generated_counts.as_ref().map_or_else(|| summary.as_ref().unwrap().duplicates_rejected, |value| value.duplicates_rejected),
@@ -2943,8 +3292,19 @@ fn run_integrated_certification(root: &Path, target_live: Option<u64>) -> Value 
         "compatibility": serde_json::to_value(verified.compatibility).expect("compatibility JSON"),
         "source_authority_fingerprint": source_authority_fingerprint,
         "imported_authority_fingerprint": imported_authority_fingerprint,
+        "storage": {
+            "source": source_storage,
+            "source_project_current_allocated_bytes": source_project_current_allocated_bytes,
+            "portable_package": package_storage,
+            "clean_import": imported_storage,
+            "construction": sanitized_construction_evidence(&construction_evidence),
+            "application_io_phases": construction_phases,
+            "workspace_current_allocated_bytes": workspace_current_allocated_bytes,
+        },
         "phases": journal.phases,
-    })
+    });
+    reject_unsanitized_evidence(&evidence).expect("certification lifecycle evidence is sanitized");
+    evidence
 }
 
 #[test]
@@ -2952,16 +3312,128 @@ fn certification_lifecycle_journals_equivalent_round_trip_and_drills() {
     let root = TempDir::new().expect("certification smoke root");
     let evidence = run_integrated_certification(root.path(), None);
     assert_eq!(evidence["source_edges"], evidence["imported_edges"]);
-    assert_ne!(
-        evidence["source_generation"],
-        evidence["imported_generation"]
-    );
+    assert_eq!(evidence["source_export_generation_authenticated"], true);
+    assert_eq!(evidence["import_receipt_reopen_authenticated"], true);
+    assert_eq!(evidence["source_import_generations_distinct"], true);
+    reject_unsanitized_evidence(&evidence).expect("lifecycle evidence remains sanitized");
+}
+
+#[test]
+fn certification_evidence_sanitizer_rejects_identity_paths_and_sensitive_keys() {
+    for (value, expected) in [
+        (
+            json!({"proof": "018f6e45-7f12-7c00-8000-000000000001"}),
+            "raw UUID",
+        ),
+        (
+            json!({"proof": "/var/lib/graphforge/project"}),
+            "absolute host path",
+        ),
+        (
+            json!({"nested": {"api_token": "redacted"}}),
+            "sensitive evidence key",
+        ),
+    ] {
+        let error = reject_unsanitized_evidence(&value).expect_err("unsafe evidence must fail");
+        assert!(
+            error.contains(expected),
+            "unexpected sanitizer failure: {error}"
+        );
+    }
+    reject_unsanitized_evidence(&json!({
+        "generation_authenticated": true,
+        "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }))
+    .expect("closed proof is safe");
+}
+
+#[test]
+fn equivalent_full_lifecycle_1x_2x_4x_has_bounded_phase_slopes() {
+    const FIELDS: [&str; 7] = [
+        "read_bytes",
+        "write_bytes",
+        "read_calls",
+        "write_calls",
+        "object_count",
+        "block_count",
+        "fsync_calls",
+    ];
+    let mut baseline: Option<BTreeMap<String, [u64; 7]>> = None;
+    for factor in [1_u32, 2, 4] {
+        let root = TempDir::new().expect("full lifecycle ladder root");
+        let evidence =
+            run_integrated_certification_with_edge_factor(root.path(), None, Some(factor));
+        assert_eq!(evidence["source_edges"], evidence["imported_edges"]);
+        let phases = evidence["storage"]["application_io_phases"]["phases"]
+            .as_object()
+            .expect("phase evidence object");
+        let attribution: graphforge_storage::ConstructionPhaseAttribution =
+            serde_json::from_value(evidence["storage"]["application_io_phases"].clone())
+                .expect("decode phase evidence");
+        attribution
+            .validate_for_qualification()
+            .expect("full lifecycle phase qualification");
+        let recovery = &phases["recovery_reauthentication"];
+        assert!(
+            recovery["read_bytes"].as_u64().unwrap_or(0) > 0,
+            "{factor}x interrupted-finalization recovery must report authenticated bytes"
+        );
+        assert!(
+            recovery["read_calls"].as_u64().unwrap_or(0) > 0,
+            "{factor}x interrupted-finalization recovery must report authenticated calls"
+        );
+        let observations = phases
+            .iter()
+            .map(|(name, values)| {
+                let counters = std::array::from_fn(|index| {
+                    values[FIELDS[index]]
+                        .as_u64()
+                        .expect("phase counter is an integer")
+                });
+                (name.clone(), counters)
+            })
+            .collect::<BTreeMap<_, _>>();
+        if let Some(base) = &baseline {
+            assert_eq!(
+                base.keys().collect::<Vec<_>>(),
+                observations.keys().collect::<Vec<_>>()
+            );
+            for (phase, current) in &observations {
+                for (index, value) in current.iter().enumerate() {
+                    let first = base[phase][index];
+                    if first == 0 {
+                        assert_eq!(
+                            *value, 0,
+                            "{phase}.{} appeared only at a larger rung",
+                            FIELDS[index]
+                        );
+                    } else {
+                        assert!(
+                            *value <= first.saturating_mul(u64::from(factor)).saturating_mul(2),
+                            "{phase}.{} exceeded the documented 2x constant-factor ceiling",
+                            FIELDS[index]
+                        );
+                    }
+                }
+            }
+        } else {
+            baseline = Some(observations);
+        }
+        let interrupted = evidence["phases"]
+            .as_array()
+            .expect("lifecycle phases")
+            .iter()
+            .find(|phase| phase["id"] == "drill_interrupted_finalization")
+            .expect("interrupted-finalization recovery drill");
+        assert_eq!(interrupted["status"], "pass");
+    }
 }
 
 #[test]
 fn certification_watchdog_persists_typed_first_failure() {
     let root = TempDir::new().expect("watchdog root");
-    fs::write(root.path().join("allocated.bin"), [0_u8; 4096]).expect("allocated fixture");
+    let allocated = root.path().join("allocated.bin");
+    fs::write(&allocated, [0_u8; 4096]).expect("allocated fixture");
     let journal_path = root.path().join("journal.json");
     let mut journal = PhaseJournal::new(
         journal_path.clone(),
@@ -2971,6 +3443,10 @@ fn certification_watchdog_persists_typed_first_failure() {
             disk_bytes: 0,
             timeout_s: u64::MAX,
         },
+    );
+    journal.replace_allocation_owner(
+        "watchdog_fixture",
+        &exact_descriptor_identities(&[allocated]),
     );
     let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         journal.pass("resource_probe", Instant::now(), None);
@@ -3127,6 +3603,32 @@ fn submitted_chunk_count(evidence: &graphforge_storage::GraphConstructionEvidenc
 }
 
 #[test]
+fn active_ingest_heartbeat_does_not_recursively_scan_storage() {
+    let source = include_str!("scale_g500_ladder.rs");
+    let heartbeat = source
+        .split("struct IngestHeartbeat")
+        .nth(1)
+        .and_then(|tail| tail.split("fn run_rung").next())
+        .expect("heartbeat source boundary");
+    let recursive_probe = ["directory", "bytes"].join("_");
+    assert!(
+        !heartbeat.contains(&recursive_probe),
+        "active heartbeat must consume counters, not enumerate project paths"
+    );
+    let monitor = source
+        .split("struct ResourceMonitor")
+        .nth(1)
+        .and_then(|tail| tail.split("fn certification_elapsed_before_process").next())
+        .expect("resource monitor source boundary");
+    for forbidden in ["read_dir", "walkdir", "du\""] {
+        assert!(
+            !monitor.contains(forbidden),
+            "resource monitor must use storage-owned observations, not {forbidden}"
+        );
+    }
+}
+
+#[test]
 fn tiny_construction_ladder_resumes_and_scales_bounded_work_linearly() {
     let budgets = GraphConstructionBudgets {
         max_batch_rows: CONSTRUCTION_BATCH_ROWS,
@@ -3136,6 +3638,8 @@ fn tiny_construction_ladder_resumes_and_scales_bounded_work_linearly() {
     };
     let base_nodes = CONSTRUCTION_BATCH_ROWS as u64;
     let mut baseline_peaks: Option<[u64; 11]> = None;
+    let mut baseline_storage: Option<(u64, u64)> = None;
+    let mut baseline_phase_io: Option<(u64, u64, u64, u64)> = None;
     for factor in [1_u64, 2, 4] {
         let project = TempDir::new().expect("tiny construction project");
         let graph = GraphForge::new(project.path().to_str()).expect("open tiny project");
@@ -3255,6 +3759,79 @@ fn tiny_construction_ladder_resumes_and_scales_bounded_work_linearly() {
         assert!(progress.evidence.parquet_write_operations > 0);
         assert_ne!(receipt.generation_uuid, before);
         assert_eq!(current_generation_uuid(&graph), receipt.generation_uuid);
+        let phases =
+            graphforge_storage::ConstructionPhaseAttribution::from_construction(&progress.evidence);
+        phases.validate_reconciliation().unwrap();
+        let shape =
+            &phases.phases[&graphforge_storage::StorageIoPhase::ShapeConsumeReauthentication];
+        assert!(progress.evidence.merge_read_operations > 0);
+        assert!(progress.evidence.merge_write_operations > 0);
+        assert_eq!(
+            shape.write_bytes,
+            progress
+                .evidence
+                .merge_written_bytes
+                .saturating_add(progress.evidence.parquet_write_bytes)
+        );
+        assert_eq!(
+            shape.write_calls,
+            progress
+                .evidence
+                .merge_write_operations
+                .saturating_add(progress.evidence.parquet_write_operations)
+        );
+        assert_eq!(
+            shape.read_calls,
+            progress
+                .evidence
+                .shape_input_validation_read_operations
+                .saturating_add(progress.evidence.merge_read_operations)
+                .saturating_add(progress.evidence.parquet_read_operations)
+                .saturating_add(progress.evidence.shaped_output_authentication_operations)
+                .saturating_add(progress.evidence.parent_catalog_read_operations)
+                .saturating_add(progress.evidence.retained_probe_block_loads)
+        );
+        let phase_observation = (
+            phases.totals.read_bytes,
+            phases.totals.write_bytes,
+            phases.totals.read_calls,
+            phases.totals.write_calls,
+        );
+        if let Some(baseline) = baseline_phase_io {
+            // Each lifecycle has fixed authenticated control work. Preserve a
+            // documented 2x constant-factor ceiling around ideal linear growth
+            // instead of pretending the intercept is zero at the 1x fixture.
+            let ceiling = |base: u64| base.saturating_mul(factor).saturating_mul(2);
+            assert!(phase_observation.0 <= ceiling(baseline.0));
+            assert!(phase_observation.1 <= ceiling(baseline.1));
+            assert!(phase_observation.2 <= ceiling(baseline.2));
+            assert!(phase_observation.3 <= ceiling(baseline.3));
+        } else {
+            baseline_phase_io = Some(phase_observation);
+        }
+        let generation = graphforge_storage::resolve_project_generation(project.path())
+            .expect("resolve tiny generation");
+        let storage = graphforge_storage::capture_storage_attribution(&generation)
+            .expect("capture tiny storage attribution");
+        storage
+            .validate_reconciliation()
+            .expect("reconcile tiny storage attribution");
+        assert!(
+            storage.is_fully_classified(),
+            "unclassified tiny construction storage: {storage:#?}"
+        );
+        if let Some((base_logical, base_allocated)) = baseline_storage {
+            assert!(
+                storage.logical_bytes <= base_logical.saturating_mul(factor),
+                "authenticated logical bytes exceeded linear growth"
+            );
+            assert!(
+                storage.allocated_bytes <= base_allocated.saturating_mul(factor),
+                "deduplicated allocated bytes exceeded linear growth"
+            );
+        } else {
+            baseline_storage = Some((storage.logical_bytes, storage.allocated_bytes));
+        }
         drop(resumed);
         let replay = graph
             .resume_graph_construction(session_uuid, budgets)
@@ -3380,7 +3957,12 @@ fn certification_target_live_full_lifecycle_evidence() {
             "source_nodes": lifecycle["source_nodes"], "source_edges": source_edges,
             "imported_nodes": lifecycle["imported_nodes"], "imported_edges": lifecycle["imported_edges"],
         },
-        "identities": { "source_generation": lifecycle["source_generation"], "package": lifecycle["package"], "transport": lifecycle["transport"], "imported_generation": lifecycle["imported_generation"] },
+        "identities": {
+            "source_export_generation_authenticated": lifecycle["source_export_generation_authenticated"],
+            "import_receipt_reopen_authenticated": lifecycle["import_receipt_reopen_authenticated"],
+            "source_import_generations_distinct": lifecycle["source_import_generations_distinct"],
+            "package": lifecycle["package"], "transport": lifecycle["transport"]
+        },
         "package": {
             "contract": lifecycle["portable_contract"], "format": "portable-project-v2-bundle",
             "class": lifecycle["package_class"], "integrity": lifecycle["integrity"],
@@ -3389,10 +3971,12 @@ fn certification_target_live_full_lifecycle_evidence() {
         },
         "equivalence": { "source_project_fingerprint": lifecycle["source_project_fingerprint"], "imported_project_fingerprint": lifecycle["imported_project_fingerprint"] },
         "authority": { "source_fingerprint": lifecycle["source_authority_fingerprint"], "imported_fingerprint": lifecycle["imported_authority_fingerprint"] },
+        "storage_attribution": lifecycle["storage"],
         "phases": phases,
-        "envelope": { "peak_rss_bytes": peak_rss, "peak_disk_bytes": peak_disk, "wall_time_s": elapsed_before_process.saturating_add(started.elapsed()).as_secs_f64() },
+        "envelope": { "peak_rss_bytes": peak_rss, "peak_disk_bytes": peak_disk, "peak_disk_source": "storage_owned_active_identity_union", "wall_time_s": elapsed_before_process.saturating_add(started.elapsed()).as_secs_f64() },
         "result": "pass", "first_failure": null,
     });
+    reject_unsanitized_evidence(&evidence).expect("provider certification evidence is sanitized");
     let out = PathBuf::from(std::env::var("GF_G500_CERT_EVIDENCE_OUT").expect("evidence output"));
     fs::write(out, serde_json::to_vec_pretty(&evidence).unwrap())
         .expect("write certification evidence");

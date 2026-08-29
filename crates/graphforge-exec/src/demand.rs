@@ -289,7 +289,17 @@ pub(crate) fn record_plan_completion(
 
     let mut sorts = Vec::new();
     visit(plan, &mut sorts);
+    let completion_rss = current_rss_bytes();
     let mut capture = CAPTURE.lock().expect("demand stats lock");
+    // The physical plan can retain an RSS-probe stream after collection has
+    // completed. Treat this ordinary collect-completion boundary as the
+    // authoritative release observation for wrappers that have not dropped.
+    for operator in &mut capture.operator_rss {
+        if operator.after_bytes == 0 {
+            operator.after_bytes = completion_rss;
+            operator.peak_bytes = operator.peak_bytes.max(completion_rss);
+        }
+    }
     capture.sorts = sorts;
     capture.memory_reserved_before = memory_reserved_before as u64;
     capture.memory_reserved_after = memory_reserved_after as u64;
