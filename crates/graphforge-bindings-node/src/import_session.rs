@@ -296,7 +296,11 @@ impl GraphImportSession {
                 "import session handle is closed".into(),
             ))
         })?;
-        let progress = session.abort().map_err(|error| to_napi_err(&error))?;
+        let graph = self
+            .engine
+            .read()
+            .map_err(|_| to_napi_err(&GfError::Execution("GraphForge lock poisoned".into())))?;
+        let progress = session.abort(&graph).map_err(|error| to_napi_err(&error))?;
         Ok(progress_output(progress))
     }
 }

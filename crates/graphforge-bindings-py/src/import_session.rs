@@ -59,6 +59,17 @@ impl GraphForge {
         })
         .map_err(|error| to_pyerr(py, &error))
     }
+
+    /// Abort and reclaim a staged import while releasing the GIL on `&self`.
+    pub(crate) fn run_import_abort(
+        &self,
+        py: Python<'_>,
+        session: GraphImportSession,
+    ) -> PyResult<ImportProgress> {
+        self.ensure_open()?;
+        py.detach(|| session.abort(&self.inner))
+            .map_err(|error| to_pyerr(py, &error))
+    }
 }
 
 fn phase_name(phase: ImportPhase) -> &'static str {
@@ -237,9 +248,11 @@ impl PyGraphImportSession {
     /// Abort without changing CURRENT.
     fn abort(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let session = self.take_inner(py)?;
-        let progress = py
-            .detach(|| session.abort())
-            .map_err(|error| to_pyerr(py, &error))?;
+        let progress = self
+            .parent
+            .bind(py)
+            .borrow()
+            .run_import_abort(py, session)?;
         progress_dict(py, &progress)
     }
 }

@@ -289,7 +289,7 @@ impl GraphForge {
                 continue;
             }
             let root = entry.path();
-            let mut manifest = read_manifest(&root)?;
+            let manifest = read_manifest(&root)?;
             if matches!(
                 manifest.phase,
                 ImportPhase::Committed | ImportPhase::Aborted
@@ -297,14 +297,12 @@ impl GraphForge {
             {
                 continue;
             }
-            manifest.phase = ImportPhase::Aborted;
-            manifest.updated_unix_millis = now;
-            write_manifest(&root, &manifest)?;
-            for path in [root.join("sources")] {
-                if path.exists() {
-                    fs::remove_dir_all(path).map_err(storage)?;
-                }
+            GraphImportSession {
+                root,
+                manifest,
+                observed: Instant::now(),
             }
+            .abort(self)?;
             cleaned = cleaned.saturating_add(1);
         }
         Ok(cleaned)
@@ -461,6 +459,13 @@ impl GraphImportSession {
                         BulkInputKind::Edge => graph.normalize_import_edge_chunk(operation, &batch),
                     }
                     .map_err(|error| validation(error.to_string()))?;
+                    if batch.num_rows() == 0 {
+                        batch_index += 1;
+                        self.manifest.sources[source_index].batches_staged = batch_index;
+                        self.manifest.sources[source_index].inflight_batch = None;
+                        write_manifest(&self.root, &self.manifest)?;
+                        return Ok(());
+                    }
                     let recovering = source.inflight_batch == Some(batch_index);
                     if !recovering {
                         self.manifest.sources[source_index].inflight_batch = Some(batch_index);
@@ -522,28 +527,32 @@ impl GraphImportSession {
     }
 
     /// Abort without changing CURRENT; removes staged sources or quarantines on cleanup failure.
-    pub fn abort(mut self) -> Result<ImportProgress, GfError> {
+    pub fn abort(mut self, graph: &GraphForge) -> Result<ImportProgress, GfError> {
         if self.manifest.phase == ImportPhase::Committed {
             return Err(validation("committed import cannot be aborted"));
         }
-        self.manifest.phase = ImportPhase::Aborted;
-        self.checkpoint()?;
-        let progress = self.manifest.progress.clone();
-        let cleanup = [self.root.join("sources")]
-            .into_iter()
-            .try_for_each(|path| {
-                if path.exists() {
-                    fs::remove_dir_all(path)
-                } else {
-                    Ok(())
-                }
-            });
+        let cleanup = (|| {
+            if let Some(session_uuid) = self.manifest.construction_session_uuid {
+                graph
+                    .resume_graph_construction(session_uuid, self.construction_budgets())?
+                    .discard()?;
+                self.manifest.construction_session_uuid = None;
+            }
+            let sources = self.root.join("sources");
+            if sources.exists() {
+                fs::remove_dir_all(sources).map_err(storage)?;
+            }
+            Ok::<(), GfError>(())
+        })();
         match cleanup {
-            Ok(()) => Ok(progress),
+            Ok(()) => {
+                self.manifest.phase = ImportPhase::Aborted;
+                self.checkpoint()
+            }
             Err(error) => {
                 self.manifest.phase = ImportPhase::Quarantined;
                 let _ = write_manifest(&self.root, &self.manifest);
-                Err(storage(error))
+                Err(error)
             }
         }
     }
@@ -559,6 +568,7 @@ impl GraphImportSession {
         {
             return Err(validation("import must be fully validated before commit"));
         }
+        self.ensure_base(graph)?;
         let mut construction = self.open_construction(graph)?;
         let publication = match cancellation {
             Some(token) => construction.seal_and_publish_with_cancellation(token)?,
@@ -825,9 +835,11 @@ fn cancelled() -> GfError {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     use arrow::array::{FixedSizeBinaryArray, StringArray};
+    use arrow::datatypes::DataType;
     use parquet::arrow::ArrowWriter;
 
     use super::*;
@@ -872,6 +884,14 @@ mod tests {
         fs::create_dir(&project).unwrap();
         let graph = GraphForge::new(project.to_str()).unwrap();
         (directory, project, graph)
+    }
+
+    fn construction_root(graph: &GraphForge, session_uuid: Uuid) -> PathBuf {
+        graph
+            .resolved_generation
+            .container_root()
+            .join(".graphforge-construction")
+            .join(session_uuid.simple().to_string())
     }
 
     #[test]
@@ -938,8 +958,16 @@ mod tests {
             .register_parquet(BulkInputKind::Node, &parquet)
             .unwrap();
         session.validate(&graph).unwrap();
-        let progress = session.abort().unwrap();
+        let construction_uuid = session.manifest.construction_session_uuid.unwrap();
+        assert!(construction_root(&graph, construction_uuid).exists());
+        let progress = session.abort(&graph).unwrap();
         assert_eq!(progress.rows_accepted, 1);
+        assert!(!construction_root(&graph, construction_uuid).exists());
+        assert!(
+            graph
+                .resume_graph_construction(construction_uuid, GraphConstructionBudgets::default())
+                .is_err()
+        );
         assert_eq!(*graph.current_generation_uuid.lock().unwrap(), before);
         drop(graph);
         GraphForge::new(project.to_str()).unwrap();
@@ -1057,6 +1085,7 @@ mod tests {
         let construction = progress.construction.unwrap();
         assert_eq!(construction.accepted_chunks, 1);
         assert_eq!(construction.input_batches, 1);
+        let construction_uuid = resumed.manifest.construction_session_uuid.unwrap();
         drop(resumed);
 
         let mut manifest = read_manifest(&import_root(&graph, session_uuid).unwrap()).unwrap();
@@ -1070,7 +1099,111 @@ mod tests {
         );
         let root = import_root(&graph, session_uuid).unwrap();
         assert!(!root.join("sources").exists());
+        assert!(!construction_root(&graph, construction_uuid).exists());
         assert_eq!(read_manifest(&root).unwrap().phase, ImportPhase::Aborted);
+    }
+
+    #[test]
+    fn zero_row_node_and_edge_sources_are_canonical_and_publishable() {
+        let (_directory, project, graph) = fixture();
+        let empty_nodes = RecordBatch::new_empty(bulk_node_input_schema(Vec::new()).unwrap());
+        let empty_edges = RecordBatch::new_empty(bulk_edge_input_schema(Vec::new()).unwrap());
+        let normalized_nodes = graph
+            .normalize_import_node_chunk(OperationId(Uuid::now_v7()), &empty_nodes)
+            .unwrap();
+        let normalized_edges = graph
+            .normalize_import_edge_chunk(OperationId(Uuid::now_v7()), &empty_edges)
+            .unwrap();
+        assert_eq!(normalized_nodes.num_rows(), 0);
+        assert_eq!(normalized_edges.num_rows(), 0);
+        assert_eq!(
+            normalized_nodes.column(0).data_type(),
+            &DataType::FixedSizeBinary(16)
+        );
+        assert_eq!(
+            normalized_edges.column(0).data_type(),
+            &DataType::FixedSizeBinary(16)
+        );
+
+        let retained_node = Uuid::now_v7();
+        let mut session = graph
+            .begin_import_session(OperationId(Uuid::now_v7()), ImportSessionLimits::default())
+            .unwrap();
+        session
+            .append_arrow(BulkInputKind::Node, &[empty_nodes, nodes(&[retained_node])])
+            .unwrap();
+        session
+            .append_arrow(BulkInputKind::Edge, &[empty_edges])
+            .unwrap();
+        let progress = session.validate(&graph).unwrap();
+        assert_eq!(progress.rows_accepted, 1);
+        assert_eq!(progress.files_pending, 0);
+        assert_eq!(progress.construction.as_ref().unwrap().accepted_chunks, 1);
+        let generation = session.commit(&graph, None).unwrap();
+
+        drop(graph);
+        let reopened = GraphForge::new(project.to_str()).unwrap();
+        assert_eq!(
+            *reopened.current_generation_uuid.lock().unwrap(),
+            generation
+        );
+        assert_eq!(reopened.node_count("Person").unwrap(), 1);
+    }
+
+    #[test]
+    fn commit_rechecks_the_import_base_generation() {
+        let (_directory, _project, graph) = fixture();
+        let mut session = graph
+            .begin_import_session(OperationId(Uuid::now_v7()), ImportSessionLimits::default())
+            .unwrap();
+        session
+            .append_arrow(BulkInputKind::Node, &[nodes(&[Uuid::now_v7()])])
+            .unwrap();
+        session.validate(&graph).unwrap();
+        graph.add_node("Other", &HashMap::new()).unwrap();
+        let independent = *graph.current_generation_uuid.lock().unwrap();
+
+        let error = session.commit(&graph, None).unwrap_err();
+        assert!(
+            matches!(error, GfError::Validation(message) if message == "project generation changed since import began")
+        );
+        assert_eq!(*graph.current_generation_uuid.lock().unwrap(), independent);
+    }
+
+    #[test]
+    fn stale_cleanup_quarantines_when_construction_authority_changed() {
+        let (_directory, _project, graph) = fixture();
+        let mut session = graph
+            .begin_import_session(OperationId(Uuid::now_v7()), ImportSessionLimits::default())
+            .unwrap();
+        session
+            .append_arrow(BulkInputKind::Node, &[nodes(&[Uuid::now_v7()])])
+            .unwrap();
+        session.validate(&graph).unwrap();
+        let session_uuid = session.session_uuid();
+        let construction_uuid = session.manifest.construction_session_uuid.unwrap();
+        drop(session);
+
+        graph.add_node("Other", &HashMap::new()).unwrap();
+        let independent = *graph.current_generation_uuid.lock().unwrap();
+        let root = import_root(&graph, session_uuid).unwrap();
+        let mut manifest = read_manifest(&root).unwrap();
+        manifest.updated_unix_millis = 0;
+        write_manifest(&root, &manifest).unwrap();
+
+        let error = graph
+            .cleanup_stale_import_sessions(Duration::from_secs(1))
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            GfError::Validation(_) | GfError::Storage(_)
+        ));
+        assert_eq!(
+            read_manifest(&root).unwrap().phase,
+            ImportPhase::Quarantined
+        );
+        assert!(construction_root(&graph, construction_uuid).exists());
+        assert_eq!(*graph.current_generation_uuid.lock().unwrap(), independent);
     }
 
     #[test]

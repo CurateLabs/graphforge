@@ -18,10 +18,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayRef, BooleanArray, FixedSizeBinaryArray, Float32Array, Float64Array, Int8Array,
-    Int16Array, Int32Array, Int64Array, LargeListArray, LargeStringArray, ListArray, StringArray,
-    StructArray, Time64NanosecondArray, TimestampMicrosecondArray, UInt8Array, UInt16Array,
-    UInt32Array, UInt64Array,
+    Array, ArrayRef, BooleanArray, FixedSizeBinaryArray, FixedSizeBinaryBuilder, Float32Array,
+    Float64Array, Int8Array, Int16Array, Int32Array, Int64Array, LargeListArray, LargeStringArray,
+    ListArray, StringArray, StructArray, Time64NanosecondArray, TimestampMicrosecondArray,
+    UInt8Array, UInt16Array, UInt32Array, UInt64Array,
 };
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
@@ -331,6 +331,19 @@ fn canonical_import_chunk(
     })
 }
 
+fn canonical_import_uuid_array(
+    kind: BulkInputKind,
+    values: impl ExactSizeIterator<Item = Uuid>,
+) -> Result<ArrayRef, BulkValidationError> {
+    let mut builder = FixedSizeBinaryBuilder::with_capacity(values.len(), 16);
+    for value in values {
+        builder.append_value(value.as_bytes()).map_err(|error| {
+            contract_error(kind, BulkValidationReason::ProjectState, &error.to_string())
+        })?;
+    }
+    Ok(Arc::new(builder.finish()))
+}
+
 /// Canonical receipt schema used by the later publication slices.
 ///
 /// Receipts retain input order and identify the created object, its node label
@@ -375,25 +388,16 @@ impl GraphForge {
     ) -> Result<RecordBatch, BulkValidationError> {
         let normalized =
             self.normalize_import_nodes(operation_uuid, std::slice::from_ref(batch))?;
-        let identities = FixedSizeBinaryArray::try_from_iter(
-            normalized
-                .rows()
-                .iter()
-                .map(|row| row.node_uuid.as_bytes().as_slice()),
-        )
-        .map_err(|error| {
-            contract_error(
-                BulkInputKind::Node,
-                BulkValidationReason::ProjectState,
-                &error.to_string(),
-            )
-        })?;
+        let identities = canonical_import_uuid_array(
+            BulkInputKind::Node,
+            normalized.rows().iter().map(|row| row.node_uuid),
+        )?;
         let labels =
             StringArray::from_iter_values(normalized.rows().iter().map(|row| row.label.as_str()));
         canonical_import_chunk(
             BulkInputKind::Node,
             batch,
-            vec![Arc::new(identities), Arc::new(labels)],
+            vec![identities, Arc::new(labels)],
         )
     }
 
@@ -832,41 +836,24 @@ impl GraphForge {
             true,
             None,
         )?;
-        let binary = |values: Vec<Uuid>| {
-            FixedSizeBinaryArray::try_from_iter(
-                values.iter().map(|value| value.as_bytes().as_slice()),
-            )
-            .map(Arc::new)
-            .map(|value| value as ArrayRef)
-            .map_err(|error| {
-                contract_error(
-                    BulkInputKind::Edge,
-                    BulkValidationReason::ProjectState,
-                    &error.to_string(),
-                )
-            })
-        };
         canonical_import_chunk(
             BulkInputKind::Edge,
             batch,
             vec![
-                binary(normalized.rows().iter().map(|row| row.edge_uuid).collect())?,
+                canonical_import_uuid_array(
+                    BulkInputKind::Edge,
+                    normalized.rows().iter().map(|row| row.edge_uuid),
+                )?,
                 Arc::new(StringArray::from_iter_values(
                     normalized.rows().iter().map(|row| row.rel_type.as_str()),
                 )),
-                binary(
-                    normalized
-                        .rows()
-                        .iter()
-                        .map(|row| row.source_uuid)
-                        .collect(),
+                canonical_import_uuid_array(
+                    BulkInputKind::Edge,
+                    normalized.rows().iter().map(|row| row.source_uuid),
                 )?,
-                binary(
-                    normalized
-                        .rows()
-                        .iter()
-                        .map(|row| row.target_uuid)
-                        .collect(),
+                canonical_import_uuid_array(
+                    BulkInputKind::Edge,
+                    normalized.rows().iter().map(|row| row.target_uuid),
                 )?,
             ],
         )

@@ -676,7 +676,7 @@ pub(crate) fn run_import_session(
         ImportSessionCommand::Abort(args) => {
             let session = graph.resume_import_session(canonical_uuid(&args.session_uuid)?)?;
             let session_uuid = session.session_uuid();
-            let progress = session.abort()?;
+            let progress = session.abort(graph)?;
             write_progress(session_uuid, "aborted", &progress, json, output)
         }
         ImportSessionCommand::Cleanup(args) => {
