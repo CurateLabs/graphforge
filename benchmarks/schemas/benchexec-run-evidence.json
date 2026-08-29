@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schema": "graphforge-benchexec-run-evidence-schema/1",
+  "$id": "https://graphforge.sh/schemas/benchexec-phase-evidence.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "outcome", "exit_code", "signal", "authority", "limits", "graphforge", "disagreements"],
+  "properties": {
+    "schema": {"const": "graphforge-benchexec-run/1"},
+    "outcome": {"enum": ["passed", "timeout", "oom", "exit", "signal", "harness", "correctness"]},
+    "exit_code": {"type": ["integer", "null"]},
+    "signal": {"type": ["integer", "null"], "minimum": 1},
+    "authority": {
+      "type": "object", "additionalProperties": false,
+      "required": ["wall_seconds", "cpu_seconds", "peak_rss_bytes", "read_bytes", "write_bytes", "pressure_cpu_seconds", "pressure_io_seconds", "pressure_memory_seconds"],
+      "properties": {
+        "wall_seconds": {"type": "number", "minimum": 0},
+        "cpu_seconds": {"type": "number", "minimum": 0},
+        "peak_rss_bytes": {"type": "integer", "minimum": 0},
+        "read_bytes": {"type": "integer", "minimum": 0},
+        "write_bytes": {"type": "integer", "minimum": 0},
+        "pressure_cpu_seconds": {"type": "number", "minimum": 0},
+        "pressure_io_seconds": {"type": "number", "minimum": 0},
+        "pressure_memory_seconds": {"type": "number", "minimum": 0}
+      }
+    },
+    "limits": {
+      "type": "object", "additionalProperties": false,
+      "required": ["wall_seconds", "cpu_seconds", "memory_bytes", "cores"],
+      "properties": {
+        "wall_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "cpu_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "memory_bytes": {"type": "integer", "exclusiveMinimum": 0},
+        "cores": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "integer", "minimum": 0}}
+      }
+    },
+    "graphforge": {
+      "type": "object",
+      "required": ["status", "phases"],
+      "properties": {
+        "status": {"enum": ["passed", "failed"]},
+        "phases": {"type": "array", "minItems": 1, "items": {"type": "object"}}
+      }
+    },
+    "disagreements": {"type": "array", "items": {"enum": ["status", "wall_time"]}, "uniqueItems": true}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"outcome": {"const": "passed"}}, "required": ["outcome"]},
+      "then": {"properties": {"exit_code": {"const": 0}, "signal": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"outcome": {"const": "correctness"}}, "required": ["outcome"]},
+      "then": {"properties": {"exit_code": {"const": 0}, "signal": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"outcome": {"const": "exit"}}, "required": ["outcome"]},
+      "then": {
+        "properties": {
+          "exit_code": {"type": "integer", "not": {"const": 0}},
+          "signal": {"type": "null"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"outcome": {"const": "signal"}}, "required": ["outcome"]},
+      "then": {
+        "properties": {
+          "exit_code": {"type": "null"},
+          "signal": {"type": "integer", "minimum": 1}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"outcome": {"enum": ["timeout", "oom", "harness"]}},
+        "required": ["outcome"]
+      },
+      "then": {"properties": {"exit_code": {"type": "null"}, "signal": {"type": "null"}}}
+    }
+  ]
+}

@@ -230,7 +230,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "benchexec", specifier = ">=3.0,<4" },
+    { name = "benchexec", specifier = ">=3.3,<4" },
     { name = "jsonschema", specifier = ">=4.0,<5" },
     { name = "reframe-hpc", specifier = ">=4.0,<5" },
 ]

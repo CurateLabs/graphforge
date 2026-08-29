@@ -45,6 +45,9 @@ class LocalAdmissionTests(unittest.TestCase):
                 "memory": 1048576,
                 "blkio-read": 4096,
                 "blkio-write": 65536,
+                "pressure-cpu-some": 0.0,
+                "pressure-io-some": 0.0,
+                "pressure-memory-some": 0.0,
                 "terminationreason": "walltime",
                 "descendant_stopped": True,
             }
@@ -112,6 +115,9 @@ class LocalAdmissionTests(unittest.TestCase):
                         "memory": 1048576,
                         "blkio-read": 4096,
                         "blkio-write": invalid_metric,
+                        "pressure-cpu-some": 0.0,
+                        "pressure-io-some": 0.0,
+                        "pressure-memory-some": 0.0,
                         "terminationreason": "walltime",
                         "descendant_stopped": True,
                     }
@@ -137,6 +143,9 @@ class LocalAdmissionTests(unittest.TestCase):
                         "memory": 1,
                         "blkio-read": 0,
                         "blkio-write": 1,
+                        "pressure-cpu-some": 0.0,
+                        "pressure-io-some": 0.0,
+                        "pressure-memory-some": 0.0,
                         "terminationreason": "walltime",
                         "descendant_stopped": False,
                     }

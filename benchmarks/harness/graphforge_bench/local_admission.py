@@ -17,7 +17,16 @@ import subprocess
 import sys
 
 SCHEMA = "graphforge-local-admission-evidence/1"
-REQUIRED_METRICS = ("walltime", "cputime", "memory", "blkio-read", "blkio-write")
+REQUIRED_METRICS = (
+    "walltime",
+    "cputime",
+    "memory",
+    "blkio-read",
+    "blkio-write",
+    "pressure-cpu-some",
+    "pressure-io-some",
+    "pressure-memory-some",
+)
 
 
 @dataclass(frozen=True)
