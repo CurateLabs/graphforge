@@ -1,0 +1,64 @@
+name: Native Local Admission
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: ["main"]
+    paths:
+      - ".github/workflows/native-local-admission.yml"
+      - "benchmarks/harness/graphforge_bench/local_admission.py"
+      - "benchmarks/harness/graphforge_bench/local_admission_fixture.py"
+      - "benchmarks/harness/graphforge_bench/validate_local_admission.py"
+      - "benchmarks/reframe/checks/local_admission.py"
+      - "benchmarks/reframe/settings.py"
+      - "benchmarks/schemas/local-admission-evidence.json"
+      - "benchmarks/tests/test_local_admission.py"
+      - "benchmarks/pyproject.toml"
+      - "benchmarks/uv.lock"
+
+permissions:
+  contents: read
+
+jobs:
+  native-admission:
+    name: BenchExec cgroups-v2 admission
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.10.9"
+          enable-cache: false
+
+      - name: Install locked benchmark environment
+        working-directory: benchmarks
+        run: uv sync --locked
+
+      - name: Run strict ReFrame and BenchExec admission
+        working-directory: benchmarks
+        env:
+          GRAPHFORGE_ADMISSION_EVIDENCE: ${{ github.workspace }}/benchmarks/outputs/local-admission-evidence.json
+        run: |
+          mkdir -p outputs
+          make local-admission
+
+      - name: Validate passed-only sanitized evidence
+        if: always()
+        working-directory: benchmarks
+        run: |
+          PYTHONPATH=harness uv run --locked python -m graphforge_bench.validate_local_admission \
+            outputs/local-admission-evidence.json \
+            schemas/local-admission-evidence.json
+
+      - name: Upload sanitized admission evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-local-admission-${{ github.sha }}
+          path: benchmarks/outputs/local-admission-evidence.json
+          if-no-files-found: error
+          retention-days: 1

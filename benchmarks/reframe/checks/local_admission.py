@@ -12,4 +12,4 @@ class LocalBenchExecAdmission(rfm.RunOnlyRegressionTest):
 
     @sanity_function
     def validate_typed_result(self):
-        return sn.assert_found(r'"result": "(passed|disqualified)"', self.stdout)
+        return sn.assert_found(r'"result": "passed"', self.stdout)

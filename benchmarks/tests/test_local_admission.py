@@ -5,7 +5,8 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from graphforge_bench.local_admission import CommandResult, qualify_local_host
+from graphforge_bench.local_admission import CommandResult, exit_code, qualify_local_host
+from graphforge_bench.validate_local_admission import validate
 
 
 class LocalAdmissionTests(unittest.TestCase):
@@ -26,6 +27,7 @@ class LocalAdmissionTests(unittest.TestCase):
         result = qualify_local_host(system="Darwin")
         self.assertEqual(result["result"], "disqualified")
         self.assertEqual(result["cause"], "unsupported_operating_system")
+        self.assertEqual(exit_code(result), 2)
 
     def test_linux_without_cgroups_v2_is_typed_disqualification(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -47,14 +49,14 @@ class LocalAdmissionTests(unittest.TestCase):
                 "blkio-write": 65536,
                 "terminationreason": "walltime",
                 "descendant_stopped": True,
+                "namespace_isolation": True,
+                "overlay_isolation": True,
             }
             return CommandResult(0, json.dumps(measurements), "")
 
         with tempfile.TemporaryDirectory() as directory:
-            cgroup, proc = self._linux_roots(directory)
-            result = qualify_local_host(
-                system="Linux", cgroup_root=cgroup, proc_root=proc, runner=runner
-            )
+            cgroup, _proc = self._linux_roots(directory)
+            result = qualify_local_host(system="Linux", cgroup_root=cgroup, runner=runner)
         self.assertEqual(result["result"], "passed")
         self.assertIsNone(result["cause"])
         self.assertEqual(len(commands), 2)
@@ -73,16 +75,16 @@ class LocalAdmissionTests(unittest.TestCase):
                         "blkio-read": 0,
                         "terminationreason": "walltime",
                         "descendant_stopped": True,
+                        "namespace_isolation": True,
+                        "overlay_isolation": True,
                     }
                 ),
                 "",
             )
 
         with tempfile.TemporaryDirectory() as directory:
-            cgroup, proc = self._linux_roots(directory)
-            result = qualify_local_host(
-                system="Linux", cgroup_root=cgroup, proc_root=proc, runner=runner
-            )
+            cgroup, _proc = self._linux_roots(directory)
+            result = qualify_local_host(system="Linux", cgroup_root=cgroup, runner=runner)
         self.assertEqual(result["result"], "failed")
         self.assertEqual(result["cause"], "mandatory_metric_missing")
 
@@ -93,10 +95,8 @@ class LocalAdmissionTests(unittest.TestCase):
             return CommandResult(0, json.dumps(list(range(5))), "")
 
         with tempfile.TemporaryDirectory() as directory:
-            cgroup, proc = self._linux_roots(directory)
-            result = qualify_local_host(
-                system="Linux", cgroup_root=cgroup, proc_root=proc, runner=runner
-            )
+            cgroup, _proc = self._linux_roots(directory)
+            result = qualify_local_host(system="Linux", cgroup_root=cgroup, runner=runner)
         self.assertEqual(result["cause"], "malformed_benchexec_evidence")
 
     def test_non_numeric_and_non_finite_metrics_fail_as_malformed(self) -> None:
@@ -114,14 +114,14 @@ class LocalAdmissionTests(unittest.TestCase):
                         "blkio-write": invalid_metric,
                         "terminationreason": "walltime",
                         "descendant_stopped": True,
+                        "namespace_isolation": True,
+                        "overlay_isolation": True,
                     }
                     return CommandResult(0, json.dumps(measurements), "")
 
                 with tempfile.TemporaryDirectory() as directory:
-                    cgroup, proc = self._linux_roots(directory)
-                    result = qualify_local_host(
-                        system="Linux", cgroup_root=cgroup, proc_root=proc, runner=runner
-                    )
+                    cgroup, _proc = self._linux_roots(directory)
+                    result = qualify_local_host(system="Linux", cgroup_root=cgroup, runner=runner)
                 self.assertEqual(result["cause"], "malformed_benchexec_evidence")
 
     def test_live_descendant_fails_closed(self) -> None:
@@ -139,17 +139,25 @@ class LocalAdmissionTests(unittest.TestCase):
                         "blkio-write": 1,
                         "terminationreason": "walltime",
                         "descendant_stopped": False,
+                        "namespace_isolation": True,
+                        "overlay_isolation": True,
                     }
                 ),
                 "",
             )
 
         with tempfile.TemporaryDirectory() as directory:
-            cgroup, proc = self._linux_roots(directory)
-            result = qualify_local_host(
-                system="Linux", cgroup_root=cgroup, proc_root=proc, runner=runner
-            )
+            cgroup, _proc = self._linux_roots(directory)
+            result = qualify_local_host(system="Linux", cgroup_root=cgroup, runner=runner)
         self.assertEqual(result["cause"], "descendant_survived_termination")
+
+    def test_strict_validator_rejects_typed_disqualification(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            evidence = Path(directory) / "evidence.json"
+            evidence.write_text(json.dumps(qualify_local_host(system="Darwin")), encoding="utf-8")
+            schema = Path(__file__).parents[1] / "schemas/local-admission-evidence.json"
+            with self.assertRaisesRegex(ValueError, "was disqualified"):
+                validate(evidence, schema)
 
 
 if __name__ == "__main__":

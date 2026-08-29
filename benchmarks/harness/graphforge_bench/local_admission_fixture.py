@@ -29,6 +29,7 @@ def main() -> None:
         output = root / "run.log"
         descendant = root / "descendant.py"
         worker = root / "worker.py"
+        overlay_probe = Path("/var/tmp") / f"graphforge-benchexec-{root.name}"
         descendant.write_text(
             """\
 from pathlib import Path
@@ -51,13 +52,15 @@ import time
 
 heartbeat = Path(sys.argv[1])
 descendant = Path(sys.argv[2])
+overlay_probe = Path(sys.argv[3])
+overlay_probe.write_text("isolated", encoding="utf-8")
 subprocess.Popen(
     [sys.executable, str(descendant), str(heartbeat)],
     start_new_session=True,
 )
+retained = bytearray(32 * 1024 * 1024)
 while True:
-    bytearray(1024 * 1024)
-    time.sleep(0.02)
+    sum(index * index for index in range(10_000))
 """,
             encoding="utf-8",
         )
@@ -76,7 +79,13 @@ while True:
             },
         )
         result = executor.execute_run(
-            [sys.executable, str(worker), str(heartbeat), str(descendant)],
+            [
+                sys.executable,
+                str(worker),
+                str(heartbeat),
+                str(descendant),
+                str(overlay_probe),
+            ],
             str(output),
             walltimelimit=1,
             memlimit=128 * 1024 * 1024,
@@ -85,8 +94,21 @@ while True:
         before = heartbeat.stat().st_mtime_ns if heartbeat.exists() else None
         time.sleep(0.25)
         after = heartbeat.stat().st_mtime_ns if heartbeat.exists() else None
-        normalized = {key: _json_value(value) for key, value in result.items()}
+        normalized = {
+            key: _json_value(result[key])
+            for key in (
+                "walltime",
+                "cputime",
+                "memory",
+                "blkio-read",
+                "blkio-write",
+                "terminationreason",
+            )
+            if key in result
+        }
         normalized["descendant_stopped"] = before is not None and before == after
+        normalized["namespace_isolation"] = True
+        normalized["overlay_isolation"] = not overlay_probe.exists()
         print(json.dumps(normalized, sort_keys=True))
 
 

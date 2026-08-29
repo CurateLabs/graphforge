@@ -105,3 +105,11 @@ Unsupported hosts return sanitized typed disqualification evidence. In
 particular, macOS and Docker Desktop do not prove native Linux admission and
 must not be used as substitutes. This probe creates no Fly resources and does
 not authorize a Graph500 scale run.
+
+The command is fail-closed: only `passed` exits successfully. A typed
+`disqualified` result exits with status 2 and an execution failure exits with
+status 1. The dedicated `Native Local Admission` workflow runs on a bare Linux
+runner, requires ReFrame to report `passed`, validates the closed evidence
+schema independently, and uploads the sanitized document even when admission
+fails. An uploaded disqualification is diagnostic evidence, never a green
+qualification.
