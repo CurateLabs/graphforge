@@ -5,7 +5,10 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+import math
 from typing import Any
+
+from graphforge_bench.local_admission import REQUIRED_METRICS
 
 SCHEMA = "graphforge-benchexec-run/1"
 LOCAL_ADMISSION_SCHEMA = "graphforge-local-admission-evidence/1"
@@ -13,6 +16,15 @@ LOCAL_ADMISSION_SCHEMA = "graphforge-local-admission-evidence/1"
 
 class EvidenceError(ValueError):
     """BenchExec or phase evidence is absent, malformed, or contradictory."""
+
+
+def _finite_number(value: object) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
 
 
 class Outcome(StrEnum):
@@ -34,7 +46,9 @@ class Limits:
 
     def validate(self) -> None:
         if (
-            self.wall_seconds <= 0
+            not _finite_number(self.wall_seconds)
+            or self.wall_seconds <= 0
+            or not _finite_number(self.cpu_seconds)
             or self.cpu_seconds <= 0
             or self.memory_bytes <= 0
             or not self.cores
@@ -53,7 +67,15 @@ def require_local_admission(evidence: Mapping[str, Any]) -> Mapping[str, Any]:
     ):
         raise EvidenceError("native BenchExec admission did not pass")
     measurements = evidence.get("measurements")
-    if not isinstance(measurements, Mapping) or measurements.get("descendant_stopped") is not True:
+    if not isinstance(measurements, Mapping):
+        raise EvidenceError("native BenchExec child-tree proof is missing")
+    for key in REQUIRED_METRICS:
+        value = measurements.get(key)
+        if not _finite_number(value) or value < 0:
+            raise EvidenceError(f"native BenchExec admission metric is invalid: {key}")
+    if measurements.get("terminationreason") != "walltime":
+        raise EvidenceError("native BenchExec termination proof is missing")
+    if measurements.get("descendant_stopped") is not True:
         raise EvidenceError("native BenchExec child-tree proof is missing")
     return measurements
 
@@ -81,7 +103,7 @@ def adapt_run_result(raw: Mapping[str, Any], *, correctness: bool) -> dict[str, 
 
 def _number(values: Mapping[str, Any], key: str) -> float:
     value = values.get(key)
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+    if not _finite_number(value) or value < 0:
         raise EvidenceError(f"missing or invalid BenchExec field: {key}")
     return float(value)
 

@@ -43,5 +43,40 @@
       }
     },
     "disagreements": {"type": "array", "items": {"enum": ["status", "wall_time"]}, "uniqueItems": true}
-  }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"outcome": {"const": "passed"}}, "required": ["outcome"]},
+      "then": {"properties": {"exit_code": {"const": 0}, "signal": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"outcome": {"const": "correctness"}}, "required": ["outcome"]},
+      "then": {"properties": {"exit_code": {"const": 0}, "signal": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"outcome": {"const": "exit"}}, "required": ["outcome"]},
+      "then": {
+        "properties": {
+          "exit_code": {"type": "integer", "not": {"const": 0}},
+          "signal": {"type": "null"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"outcome": {"const": "signal"}}, "required": ["outcome"]},
+      "then": {
+        "properties": {
+          "exit_code": {"type": "null"},
+          "signal": {"type": "integer", "minimum": 1}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"outcome": {"enum": ["timeout", "oom", "harness"]}},
+        "required": ["outcome"]
+      },
+      "then": {"properties": {"exit_code": {"type": "null"}, "signal": {"type": "null"}}}
+    }
+  ]
 }

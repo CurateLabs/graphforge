@@ -50,5 +50,11 @@
     }
   },
   "required": ["schema", "result", "cause", "facts"],
-  "additionalProperties": false
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {"properties": {"result": {"const": "passed"}}, "required": ["result"]},
+      "then": {"required": ["measurements"]}
+    }
+  ]
 }
