@@ -128,7 +128,10 @@ async fn inspection_from_node_stream(
 ) -> Result<GraphInspection, GfError> {
     let mut inspection = GraphInspection::default();
     while let Some(batch) = stream.next().await {
-        accumulate_node_batch(&mut inspection, &batch.map_err(execution_error)?)?;
+        accumulate_node_batch(
+            &mut inspection,
+            &batch.map_err(|error| GfError::Execution(error.to_string()))?,
+        )?;
     }
     Ok(inspection)
 }
@@ -138,7 +141,10 @@ async fn inspection_from_relationship_stream(
     mut inspection: GraphInspection,
 ) -> Result<GraphInspection, GfError> {
     while let Some(batch) = stream.next().await {
-        accumulate_relationship_batch(&mut inspection, &batch.map_err(execution_error)?)?;
+        accumulate_relationship_batch(
+            &mut inspection,
+            &batch.map_err(|error| GfError::Execution(error.to_string()))?,
+        )?;
     }
     Ok(inspection)
 }
@@ -201,10 +207,6 @@ fn accumulate_relationship_batch(
         )?;
     }
     Ok(())
-}
-
-fn execution_error(error: datafusion::error::DataFusionError) -> GfError {
-    GfError::Execution(error.to_string())
 }
 
 fn increment(counts: &mut BTreeMap<String, u64>, name: &str) -> Result<(), GfError> {
