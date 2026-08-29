@@ -23,8 +23,8 @@ pub mod storage_attribution;
 pub use storage_attribution::{
     ArtifactCategory, ArtifactStorageTotals, ConstructionPhaseAttribution, PhaseIoTotals,
     ProjectStorageIdentityUnion, StorageAllocationLifecycle, StorageAllocationTransition,
-    StorageAttributionSnapshot, StorageIoPhase, capture_project_storage_identity_union,
-    capture_storage_attribution, classify_graph_artifact,
+    StorageAttributionReceipt, StorageAttributionSnapshot, StorageIoPhase,
+    capture_project_storage_identity_union, capture_storage_attribution, classify_graph_artifact,
 };
 
 pub mod generation;
