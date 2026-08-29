@@ -23,8 +23,4 @@ class Tool(BaseTool2):
             return "TIMEOUT"
         if run.was_terminated:
             return "KILLED"
-        return (
-            "DONE"
-            if run.exit_code is not None and run.exit_code.value == 0
-            else "ERROR"
-        )
+        return "DONE" if run.exit_code is not None and run.exit_code.value == 0 else "ERROR"

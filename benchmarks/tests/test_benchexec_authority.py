@@ -115,9 +115,7 @@ class BenchExecAuthorityTests(unittest.TestCase):
         self.assertEqual(evidence["authority"]["cpu_seconds"], 3.0)
         self.assertEqual(evidence["limits"]["cores"], [0, 1])
         self.assertEqual(evidence["disagreements"], [])
-        schema_path = (
-            Path(__file__).resolve().parents[1] / "schemas/benchexec-run-evidence.json"
-        )
+        schema_path = Path(__file__).resolve().parents[1] / "schemas/benchexec-run-evidence.json"
         schema = json.loads(schema_path.read_text())
         Draft202012Validator(schema).validate(evidence)
 
