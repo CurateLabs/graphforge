@@ -1,0 +1,118 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+import tempfile
+import unittest
+
+from graphforge_bench.local_admission import CommandResult, qualify_local_host
+
+
+class LocalAdmissionTests(unittest.TestCase):
+    @staticmethod
+    def _linux_roots(directory: str) -> tuple[Path, Path]:
+        root = Path(directory)
+        cgroup = root / "cgroup"
+        proc = root / "proc"
+        cgroup.mkdir()
+        (cgroup / "cgroup.controllers").write_text("cpu io memory", encoding="utf-8")
+        namespace = proc / "self/ns"
+        namespace.mkdir(parents=True)
+        for name in ("mnt", "pid", "user"):
+            (namespace / name).touch()
+        return cgroup, proc
+
+    def test_macos_is_typed_disqualification_without_importing_benchexec(self) -> None:
+        result = qualify_local_host(system="Darwin")
+        self.assertEqual(result["result"], "disqualified")
+        self.assertEqual(result["cause"], "unsupported_operating_system")
+
+    def test_linux_without_cgroups_v2_is_typed_disqualification(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            result = qualify_local_host(system="Linux", cgroup_root=Path(directory))
+        self.assertEqual(result["cause"], "cgroups_v2_unavailable")
+
+    def test_admitted_linux_requires_metrics_and_tree_termination(self) -> None:
+        commands: list[tuple[str, ...]] = []
+
+        def runner(command):
+            commands.append(tuple(command))
+            if "benchexec.check_cgroups" in command:
+                return CommandResult(0, "", "")
+            measurements = {
+                "walltime": 1.0,
+                "cputime": 0.1,
+                "memory": 1048576,
+                "blkio-read": 4096,
+                "blkio-write": 65536,
+                "terminationreason": "walltime",
+                "descendant_stopped": True,
+            }
+            return CommandResult(0, json.dumps(measurements), "")
+
+        with tempfile.TemporaryDirectory() as directory:
+            cgroup, proc = self._linux_roots(directory)
+            result = qualify_local_host(
+                system="Linux", cgroup_root=cgroup, proc_root=proc, runner=runner
+            )
+        self.assertEqual(result["result"], "passed")
+        self.assertIsNone(result["cause"])
+        self.assertEqual(len(commands), 2)
+
+    def test_missing_io_metric_fails_closed(self) -> None:
+        def runner(command):
+            if "benchexec.check_cgroups" in command:
+                return CommandResult(0, "", "")
+            return CommandResult(
+                0,
+                json.dumps(
+                    {
+                        "walltime": 1.0,
+                        "cputime": 0.1,
+                        "memory": 1,
+                        "blkio-read": 0,
+                        "terminationreason": "walltime",
+                        "descendant_stopped": True,
+                    }
+                ),
+                "",
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            cgroup, proc = self._linux_roots(directory)
+            result = qualify_local_host(
+                system="Linux", cgroup_root=cgroup, proc_root=proc, runner=runner
+            )
+        self.assertEqual(result["result"], "failed")
+        self.assertEqual(result["cause"], "mandatory_metric_missing")
+
+    def test_live_descendant_fails_closed(self) -> None:
+        def runner(command):
+            if "benchexec.check_cgroups" in command:
+                return CommandResult(0, "", "")
+            return CommandResult(
+                0,
+                json.dumps(
+                    {
+                        "walltime": 1.0,
+                        "cputime": 0.1,
+                        "memory": 1,
+                        "blkio-read": 0,
+                        "blkio-write": 1,
+                        "terminationreason": "walltime",
+                        "descendant_stopped": False,
+                    }
+                ),
+                "",
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            cgroup, proc = self._linux_roots(directory)
+            result = qualify_local_host(
+                system="Linux", cgroup_root=cgroup, proc_root=proc, runner=runner
+            )
+        self.assertEqual(result["cause"], "descendant_survived_termination")
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schema": "graphforge-local-admission-evidence/1",
+  "type": "object",
+  "properties": {
+    "schema": {"const": "graphforge-local-admission-evidence/1"},
+    "result": {"enum": ["passed", "disqualified", "failed"]},
+    "cause": {
+      "type": ["string", "null"],
+      "enum": [
+        null,
+        "unsupported_operating_system",
+        "cgroups_v2_unavailable",
+        "namespace_controls_unavailable",
+        "benchexec_cgroups_unavailable",
+        "benchexec_fixture_failed",
+        "malformed_benchexec_evidence",
+        "mandatory_metric_missing",
+        "process_tree_limit_not_enforced",
+        "descendant_survived_termination"
+      ]
+    },
+    "facts": {
+      "type": "object",
+      "properties": {
+        "operating_system": {"type": "string"},
+        "cgroups_version": {"type": ["integer", "null"]},
+        "mount_namespace": {"type": "boolean"},
+        "pid_namespace": {"type": "boolean"},
+        "user_namespace": {"type": "boolean"}
+      },
+      "required": ["operating_system", "cgroups_version", "mount_namespace", "pid_namespace", "user_namespace"],
+      "additionalProperties": false
+    },
+    "measurements": {"type": "object"}
+  },
+  "required": ["schema", "result", "cause", "facts"],
+  "additionalProperties": false
+}
