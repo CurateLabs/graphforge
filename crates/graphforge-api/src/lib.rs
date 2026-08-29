@@ -127,6 +127,7 @@ mod provider_embedding_execution;
 mod provider_find;
 mod provider_rerank;
 mod provider_session;
+mod query_evidence;
 mod repository;
 mod resource_policy;
 mod resumable_construction;
@@ -206,6 +207,10 @@ pub use graphforge_core::{
 pub use import_session::{
     GraphImportSession, ImportConstructionEvidence, ImportPhase, ImportProgress,
     ImportSessionLimits, ImportSourceKind, PublicationWorkComponents,
+};
+pub use query_evidence::{
+    QueryExecutionEvidence, QueryHopEvidence, QueryOperatorRssEvidence, QuerySinkEvidenceReceipt,
+    QuerySortEvidence,
 };
 // The Arrow-backed result of [`GraphForge::execute`].
 pub use generation_diff::{

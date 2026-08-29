@@ -1,8 +1,8 @@
 {
   "contractVersion": 1,
   "rustManifest": "../../../tests/contracts/non-cypher-rust-surface.json",
-  "releaseSurfaceCount": 260,
-  "releaseSurfaceDigest": "18db4cad7c6a094db21b9026b6cc286c38b4d2031579c34d7d485ef53a1afbe0",
+  "releaseSurfaceCount": 261,
+  "releaseSurfaceDigest": "84310d5de1f83e7080f71e7933470640be96cd1b32b0bc10b0584496380924b3",
   "requiredEquivalent": [
     "GraphForge.adopt_ontology",
     "GraphForge.clear_ontology",
@@ -242,7 +242,8 @@
       "GraphForge.execute_to_parquet": {
         "nodeMembers": [
           "GraphForge.plan",
-          "PlanHandle.sinkParquet"
+          "PlanHandle.sinkParquet",
+          "PlanHandle.sinkArrowIpc"
         ],
         "reason": "Node uses the asynchronous PlanHandle Parquet sink."
       },
@@ -259,6 +260,13 @@
           "PlanHandle.sinkParquet"
         ],
         "reason": "Node binds parameters on PlanHandle before the asynchronous bounded Parquet sink."
+      },
+      "GraphForge.execute_to_result_sink_with_evidence": {
+        "nodeMembers": [
+          "GraphForge.plan",
+          "PlanHandle.sinkParquet"
+        ],
+        "reason": "The aggregate qualification receipt is currently a Rust facade and gf CLI certification surface; Node retains its asynchronous result sink without the certification envelope."
       },
       "GraphForge.configure_provider_find_runtime": {
         "nodeMembers": [
