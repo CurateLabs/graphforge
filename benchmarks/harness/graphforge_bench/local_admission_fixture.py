@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-import subprocess
 import sys
 import tempfile
 import time
@@ -21,6 +20,7 @@ def _json_value(value: object) -> object:
 
 def main() -> None:
     # Import only after the outer admission has proved a Linux host.
+    from benchexec.containerexecutor import DIR_FULL_ACCESS, DIR_HIDDEN, DIR_OVERLAY
     from benchexec.runexecutor import RunExecutor
 
     with tempfile.TemporaryDirectory(prefix="graphforge-benchexec-admission-") as directory:
@@ -52,7 +52,19 @@ while True:
             encoding="utf-8",
         )
 
-        executor = RunExecutor(use_namespaces=True)
+        # The exact fixture directory is the only host-writable path. Without
+        # this explicit mount, the heartbeat would live in BenchExec's overlay
+        # and disappear with the container, making descendant cleanup
+        # impossible to verify from the supervising process.
+        executor = RunExecutor(
+            use_namespaces=True,
+            dir_modes={
+                "/": DIR_OVERLAY,
+                "/run": DIR_HIDDEN,
+                "/tmp": DIR_HIDDEN,
+                str(root): DIR_FULL_ACCESS,
+            },
+        )
         result = executor.execute_run(
             [sys.executable, str(worker), str(heartbeat)],
             str(output),
