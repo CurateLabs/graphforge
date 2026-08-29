@@ -1,4 +1,5 @@
 import reframe as rfm
+from reframe.core.builtins import sanity_function
 import reframe.utility.sanity as sn
 
 
@@ -9,6 +10,6 @@ class LocalBenchExecAdmission(rfm.RunOnlyRegressionTest):
     executable = "python"
     executable_opts = ["-m", "graphforge_bench.local_admission"]  # noqa: RUF012
 
-    @rfm.sanity_function
+    @sanity_function
     def validate_typed_result(self):
         return sn.assert_found(r'"result": "(passed|disqualified)"', self.stdout)

@@ -16,4 +16,5 @@ smoke-rust: install
 	PYTHONPATH=harness uv run --locked python -m graphforge_bench.check_rust_graph
 
 local-admission: install
+	PYTHONPATH=$(CURDIR)/harness uv run --locked reframe -C reframe/settings.py -c reframe/checks -l | grep -F LocalBenchExecAdmission
 	PYTHONPATH=$(CURDIR)/harness uv run --locked reframe -C reframe/settings.py -c reframe/checks -r
