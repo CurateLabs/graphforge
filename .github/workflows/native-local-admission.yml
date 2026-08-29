@@ -52,22 +52,35 @@ jobs:
         working-directory: benchmarks
         run: uv sync --locked
 
-      - name: Require package-managed cgroup admission
-        run: python3 -m benchexec.check_cgroups
+      - name: Probe user systemd authority
+        id: systemd
+        shell: bash
+        run: |
+          if systemctl --user show-environment >/dev/null 2>&1; then
+            echo "mode=user" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=system" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Run strict ReFrame and BenchExec admission
-        if: always()
+      - name: Run strict admission in delegated systemd scope
         working-directory: benchmarks
         env:
           GRAPHFORGE_ADMISSION_EVIDENCE: ${{ github.workspace }}/benchmarks/outputs/local-admission-evidence.json
+          GRAPHFORGE_SYSTEMD_SCOPE: graphforge-benchexec-${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}.scope
         run: |
           mkdir -p outputs
-          PYTHONPATH="$PWD/harness" uv run --locked reframe \
-            -C reframe/settings.py -c reframe/checks \
-            -n '^LocalBenchExecAdmission$' -l | grep -F LocalBenchExecAdmission
-          PYTHONPATH="$PWD/harness" uv run --locked reframe \
-            -C reframe/settings.py -c reframe/checks \
-            -n '^LocalBenchExecAdmission$' -r
+          if [[ '${{ steps.systemd.outputs.mode }}' == user ]]; then
+            GRAPHFORGE_SYSTEMD_SCOPE_MODE=user \
+              systemd-run --user --scope --slice=benchexec -p Delegate=yes \
+              --unit="${GRAPHFORGE_SYSTEMD_SCOPE%.scope}" \
+              "$PWD/scripts/run-delegated-local-admission.sh"
+          else
+            sudo --preserve-env=GRAPHFORGE_ADMISSION_EVIDENCE,GRAPHFORGE_SYSTEMD_SCOPE \
+              env GRAPHFORGE_SYSTEMD_SCOPE_MODE=system \
+              systemd-run --scope --slice=benchexec.slice -p Delegate=yes \
+              --unit="${GRAPHFORGE_SYSTEMD_SCOPE%.scope}" \
+              "$PWD/scripts/run-delegated-local-admission.sh"
+          fi
 
       - name: Validate passed-only sanitized evidence
         if: always()
