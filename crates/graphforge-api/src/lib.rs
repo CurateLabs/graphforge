@@ -7063,6 +7063,59 @@ mod tests {
     }
 
     #[test]
+    fn streaming_and_explain_session_pins_wait_for_generation_publication() {
+        use std::sync::mpsc::{self, RecvTimeoutError};
+        use std::time::Duration;
+
+        let graph = GraphForge::new(None).expect("open ephemeral project");
+        graph.execute("CREATE (:Person)").expect("seed graph");
+
+        std::thread::scope(|scope| {
+            let publication = graph.graph_visibility.lock().expect("publication lock");
+            let ready = std::sync::Barrier::new(2);
+            let (sent, received) = mpsc::channel();
+            scope.spawn(|| {
+                ready.wait();
+                sent.send(graph.explain("MATCH (n:Person) RETURN n.node_uuid"))
+                    .expect("send explain result");
+            });
+            ready.wait();
+            assert!(matches!(
+                received.recv_timeout(Duration::from_millis(100)),
+                Err(RecvTimeoutError::Timeout)
+            ));
+            drop(publication);
+            received
+                .recv_timeout(Duration::from_secs(5))
+                .expect("explain completes after publication")
+                .expect("explain session");
+        });
+
+        std::thread::scope(|scope| {
+            let publication = graph.graph_visibility.lock().expect("publication lock");
+            let ready = std::sync::Barrier::new(2);
+            let (sent, received) = mpsc::channel();
+            scope.spawn(|| {
+                ready.wait();
+                let result = graph
+                    .execute_stream("MATCH (n:Person) RETURN n.node_uuid")
+                    .map(drop);
+                sent.send(result).expect("send stream result");
+            });
+            ready.wait();
+            assert!(matches!(
+                received.recv_timeout(Duration::from_millis(100)),
+                Err(RecvTimeoutError::Timeout)
+            ));
+            drop(publication);
+            received
+                .recv_timeout(Duration::from_secs(5))
+                .expect("stream session completes after publication")
+                .expect("stream session");
+        });
+    }
+
+    #[test]
     fn persistent_open_creates_an_absent_final_target_through_storage() {
         let parent = tempfile::tempdir().unwrap();
         let root = parent.path().canonicalize().unwrap().join("project");
