@@ -87,6 +87,7 @@ jobs:
             sudo systemd-run --wait --collect --pipe --service-type=exec \
               --uid="$runner_uid" --gid="$runner_gid" \
               -p 'Delegate=cpu cpuset io memory' \
+              -p DelegateSubgroup=init.scope \
               --unit="${GRAPHFORGE_SYSTEMD_SCOPE%.service}" \
               --setenv="GRAPHFORGE_ADMISSION_EVIDENCE=$GRAPHFORGE_ADMISSION_EVIDENCE" \
               --setenv="GRAPHFORGE_SYSTEMD_SCOPE=$GRAPHFORGE_SYSTEMD_SCOPE" \

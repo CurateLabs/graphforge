@@ -124,9 +124,10 @@ BenchExec's cgroups-v2 installation guidance, both commands execute in one
 `systemd-run --scope -p Delegate=yes` user scope. Two separately named system
 authorities also use transient system services that explicitly delegate
 `cpu cpuset io memory` while executing as the original unprivileged runner UID.
-The in-unit driver proves the live unit's delegation property and its process
-UID before admission; it never writes cgroup control files or runs the benchmark
-as root.
+The service uses systemd's `DelegateSubgroup=init.scope` so its process does not
+occupy the delegated unit root. The in-unit driver proves the live unit's
+delegation controllers, initial subgroup, and process UID before admission; it
+never writes cgroup control files or runs the benchmark as root.
 Each job is independently strict and uploads a provider-labelled evidence
 document; one provider is never a fallback that hides the other's
 disqualification. The workflow does not disable namespace containers, bypass

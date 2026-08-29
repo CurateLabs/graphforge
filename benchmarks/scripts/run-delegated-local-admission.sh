@@ -25,6 +25,13 @@ else
   delegate_controllers=$(
     systemctl show "$GRAPHFORGE_SYSTEMD_SCOPE" -p DelegateControllers --value
   )
+  delegate_subgroup=$(
+    systemctl show "$GRAPHFORGE_SYSTEMD_SCOPE" -p DelegateSubgroup --value
+  )
+  if [[ $delegate_subgroup != init.scope ]]; then
+    echo "system systemd service did not isolate its initial process" >&2
+    exit 1
+  fi
   for controller in cpu cpuset io memory; do
     if [[ " $delegate_controllers " != *" $controller "* ]]; then
       echo "system systemd service did not delegate $controller" >&2
