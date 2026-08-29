@@ -6,7 +6,7 @@
   "required": ["schema", "target", "source_scales", "decision", "limits", "headroom", "projected", "required_rates", "provider_capacity", "slopes_observed", "rss_growth_fraction", "checks", "claim"],
   "properties": {
     "schema": {"const": "graphforge-progressive-qualification-evidence/1"},
-    "target": {"enum": ["S20", "S22", "S26"]},
+    "target": {"enum": ["S20", "S22", "S24", "S25", "S26"]},
     "source_scales": {"type": "array", "minItems": 2, "maxItems": 2, "uniqueItems": true, "items": {"type": "integer", "minimum": 1}},
     "decision": {"enum": ["admitted", "refused"]},
     "limits": {"$ref": "#/$defs/limits"},
@@ -55,6 +55,14 @@
     {
       "if": {"properties": {"target": {"const": "S22"}}, "required": ["target"]},
       "then": {"properties": {"source_scales": {"const": [19, 20]}}}
+    },
+    {
+      "if": {"properties": {"target": {"const": "S24"}}, "required": ["target"]},
+      "then": {"properties": {"source_scales": {"const": [20, 22]}}}
+    },
+    {
+      "if": {"properties": {"target": {"const": "S25"}}, "required": ["target"]},
+      "then": {"properties": {"source_scales": {"const": [22, 24]}}}
     },
     {
       "if": {"properties": {"target": {"const": "S26"}}, "required": ["target"]},

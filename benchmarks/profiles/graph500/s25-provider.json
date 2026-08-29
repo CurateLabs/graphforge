@@ -1,8 +1,8 @@
 {
   "schema": "graphforge-progressive-qualification-profile/1",
-  "id": "graph500-s18-local",
-  "scale": 18,
-  "execution": "local",
+  "id": "graph500-s25-provider",
+  "scale": 25,
+  "execution": "provider",
   "executable": "gf",
   "phases": [
     {
@@ -22,15 +22,15 @@
         "executable": "graphforge-benchmark-graph500-generator",
         "args": [
           "--scale",
-          "18",
+          "25",
           "--edge-factor",
           "16",
           "--seed",
           "13907095936298285200",
           "--nodes",
-          "workspace/s18/nodes.parquet",
+          "workspace/s25/nodes.parquet",
           "--edges",
-          "workspace/s18/edges.parquet"
+          "workspace/s25/edges.parquet"
         ]
       }
     },
@@ -42,55 +42,55 @@
           [
             "--json",
             "--project",
-            "workspace/s18/source",
+            "workspace/s25/source",
             "import-session",
             "begin",
             "--operation-uuid",
-            "00000000-0000-4000-8000-000000000018"
+            "00000000-0000-4000-8000-000000000025"
           ],
           [
             "--json",
             "--project",
-            "workspace/s18/source",
+            "workspace/s25/source",
             "import-session",
             "register-parquet",
             "--session-uuid",
-            "00000000-0000-4000-8000-000000000018",
+            "00000000-0000-4000-8000-000000000025",
             "--path",
-            "workspace/s18/nodes.parquet",
+            "workspace/s25/nodes.parquet",
             "--kind",
             "nodes"
           ],
           [
             "--json",
             "--project",
-            "workspace/s18/source",
+            "workspace/s25/source",
             "import-session",
             "register-parquet",
             "--session-uuid",
-            "00000000-0000-4000-8000-000000000018",
+            "00000000-0000-4000-8000-000000000025",
             "--path",
-            "workspace/s18/edges.parquet",
+            "workspace/s25/edges.parquet",
             "--kind",
             "edges"
           ],
           [
             "--json",
             "--project",
-            "workspace/s18/source",
+            "workspace/s25/source",
             "import-session",
             "validate",
             "--session-uuid",
-            "00000000-0000-4000-8000-000000000018"
+            "00000000-0000-4000-8000-000000000025"
           ],
           [
             "--json",
             "--project",
-            "workspace/s18/source",
+            "workspace/s25/source",
             "import-session",
             "commit",
             "--session-uuid",
-            "00000000-0000-4000-8000-000000000018"
+            "00000000-0000-4000-8000-000000000025"
           ]
         ]
       }
@@ -103,13 +103,13 @@
           [
             "--json",
             "--project",
-            "workspace/s18/source",
+            "workspace/s25/source",
             "recovery"
           ],
           [
             "--json",
             "--project",
-            "workspace/s18/source",
+            "workspace/s25/source",
             "storage-attribution"
           ]
         ]
@@ -123,22 +123,22 @@
           [
             "--json",
             "--project",
-            "workspace/s18/source",
+            "workspace/s25/source",
             "query",
             "--cypher",
             "MATCH (n) RETURN count(n)",
             "--output",
-            "workspace/s18/node-count.arrow"
+            "workspace/s25/node-count.arrow"
           ],
           [
             "--json",
             "--project",
-            "workspace/s18/source",
+            "workspace/s25/source",
             "query",
             "--cypher",
             "MATCH ()-[r]->() RETURN count(r)",
             "--output",
-            "workspace/s18/edge-count.arrow"
+            "workspace/s25/edge-count.arrow"
           ]
         ]
       }
@@ -151,22 +151,22 @@
           [
             "--json",
             "--project",
-            "workspace/s18/source",
+            "workspace/s25/source",
             "query",
             "--cypher",
             "MATCH (a)-[r]->(b) RETURN a, r, b LIMIT 1024",
             "--output",
-            "workspace/s18/one-hop.arrow"
+            "workspace/s25/one-hop.arrow"
           ],
           [
             "--json",
             "--project",
-            "workspace/s18/source",
+            "workspace/s25/source",
             "query",
             "--cypher",
             "MATCH (a)-[r1]->(b)-[r2]->(c) RETURN a, r1, b, r2, c LIMIT 1024",
             "--output",
-            "workspace/s18/two-hop.arrow"
+            "workspace/s25/two-hop.arrow"
           ]
         ]
       }
@@ -178,12 +178,12 @@
         "args": [
           "--json",
           "--project",
-          "workspace/s18/source",
+          "workspace/s25/source",
           "portable",
           "export",
           "--current",
           "--output",
-          "workspace/s18/portable"
+          "workspace/s25/portable"
         ]
       }
     },
@@ -196,7 +196,7 @@
           "portable",
           "verify",
           "--input",
-          "workspace/s18/portable"
+          "workspace/s25/portable"
         ]
       }
     },
@@ -207,13 +207,13 @@
         "args": [
           "--json",
           "--project",
-          "workspace/s18/imported",
+          "workspace/s25/imported",
           "portable",
           "import",
           "--input",
-          "workspace/s18/portable",
+          "workspace/s25/portable",
           "--idempotency-key",
-          "00000000-0000-4000-8000-000000000018"
+          "00000000-0000-4000-8000-000000000025"
         ]
       }
     },
@@ -225,47 +225,47 @@
           [
             "--json",
             "--project",
-            "workspace/s18/imported",
+            "workspace/s25/imported",
             "query",
             "--cypher",
             "MATCH (n) RETURN count(n)",
             "--output",
-            "workspace/s18/imported-node-count.arrow"
+            "workspace/s25/imported-node-count.arrow"
           ],
           [
             "--json",
             "--project",
-            "workspace/s18/imported",
+            "workspace/s25/imported",
             "query",
             "--cypher",
             "MATCH ()-[r]->() RETURN count(r)",
             "--output",
-            "workspace/s18/imported-edge-count.arrow"
+            "workspace/s25/imported-edge-count.arrow"
           ],
           [
             "--json",
             "--project",
-            "workspace/s18/imported",
+            "workspace/s25/imported",
             "query",
             "--cypher",
             "MATCH (a)-[r]->(b) RETURN a, r, b LIMIT 1024",
             "--output",
-            "workspace/s18/imported-one-hop.arrow"
+            "workspace/s25/imported-one-hop.arrow"
           ],
           [
             "--json",
             "--project",
-            "workspace/s18/imported",
+            "workspace/s25/imported",
             "query",
             "--cypher",
             "MATCH (a)-[r1]->(b)-[r2]->(c) RETURN a, r1, b, r2, c LIMIT 1024",
             "--output",
-            "workspace/s18/imported-two-hop.arrow"
+            "workspace/s25/imported-two-hop.arrow"
           ],
           [
             "--json",
             "--project",
-            "workspace/s18/imported",
+            "workspace/s25/imported",
             "storage-attribution"
           ]
         ]
@@ -295,7 +295,10 @@
   },
   "gate": {
     "requires_previous_pass": true,
-    "projection_source_scales": null,
+    "projection_source_scales": [
+      22,
+      24
+    ],
     "limits": {
       "wall_seconds": 14400,
       "rss_bytes": 4294967296,

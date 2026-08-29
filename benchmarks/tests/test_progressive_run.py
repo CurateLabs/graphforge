@@ -11,7 +11,9 @@ from graphforge_bench.progressive_run import (
     _run_benchexec,
     _safe_stage,
     _validate,
+    assemble_rung_evidence,
     build_plan,
+    ingest_benchexec_result,
     require_bulk_ingest_capability,
     require_order,
     validate_fixture_bundle,
@@ -56,11 +58,39 @@ def passed_rung(scale: int) -> dict:
             "reader_calls": 8,
             "publication_work_units": 9,
         },
+        "metric_sources": {
+            "benchexec": [
+                "wall_seconds",
+                "peak_rss_bytes",
+                "physical_read_bytes",
+                "physical_write_bytes",
+            ],
+            "storage_attribution": [
+                "retained_storage_bytes",
+                "transient_peak_storage_bytes",
+                "logical_read_bytes",
+                "logical_write_bytes",
+                "reader_calls",
+                "publication_work_units",
+            ],
+            "query_qualification": ["live_edges", "correctness"],
+        },
+        "storage_components": {
+            "source_allocated_physical_bytes": 100,
+            "source_retained_logical_eof_bytes": 110,
+            "imported_allocated_physical_bytes": 120,
+            "imported_retained_logical_eof_bytes": 130,
+            "transient_peak_allocated_bytes": 300,
+            "logical_read_bytes": 400,
+            "logical_write_bytes": 500,
+            "reader_calls": 8,
+            "publication_work_units": 9,
+        },
         "failure": None,
     }
 
 
-def graphforge(scale: int) -> dict:
+def graphforge(scale: int, receipts: dict[str, list[dict]] | list[dict] | None = None) -> dict:
     phases = [
         {
             "phase": phase,
@@ -71,6 +101,12 @@ def graphforge(scale: int) -> dict:
         }
         for phase in PHASES
     ]
+    if isinstance(receipts, dict):
+        by_name = {phase["phase"]: phase for phase in phases}
+        for name, values in receipts.items():
+            by_name[name]["receipts"] = values
+    elif receipts is not None:
+        phases[2]["receipts"] = receipts
     return {
         "schema": "graphforge-public-certification/1",
         "profile_id": f"graph500-s{scale}-local",
@@ -104,6 +140,102 @@ def benchexec(gf: dict) -> dict:
         },
         "graphforge": gf,
         "disagreements": [],
+    }
+
+
+def sink(digest: str, *, rows: int, scalar: int | None = None) -> dict:
+    receipt = {
+        "contract": "graphforge-result-sink/2",
+        "format": "ArrowIpc",
+        "rows": rows,
+        "batches": 1,
+        "bytes": 64,
+        "complete": True,
+        "result_sha256": digest,
+        "query_evidence": {"contract": "graphforge-query-evidence/1"},
+    }
+    if scalar is not None:
+        receipt["scalar_u64"] = scalar
+    return receipt
+
+
+def authoritative_receipts(scale: int) -> dict[str, list[dict]]:
+    construction = [
+        {
+            "contract": "graphforge-import-session/1",
+            "outcome": "committed",
+            "construction": {
+                "configured_batch_rows": 65_536,
+                "accepted_chunks": 64,
+                "publication_committed": True,
+                "input_rows": 65_536 * 64,
+                "input_batches": 64,
+                "transient_peak_allocated_bytes": 300,
+                "application_io": {
+                    "totals": {"read_bytes": 400, "write_bytes": 500, "read_calls": 8}
+                },
+                "publication_work": {
+                    "contract": "graphforge-publication-work/1",
+                    "semantic_total_operations": 9,
+                },
+            },
+        },
+        {
+            "contract": "graphforge-lifecycle-storage/1",
+            "retained_storage_bytes": 200,
+            "transient_peak_storage_bytes": 300,
+        },
+    ]
+    source_storage = storage_receipt(100, 110)
+    imported_storage = storage_receipt(120, 130)
+    nodes, edges = 1 << scale, 16 * (1 << scale)
+    node_count = sink("a" * 64, rows=1, scalar=nodes)
+    edge_count = sink("b" * 64, rows=1, scalar=edges)
+    one_hop = sink("c" * 64, rows=1024)
+    two_hop = sink("d" * 64, rows=1024)
+    return {
+        "ingest": construction,
+        "reopen": [source_storage],
+        "recount": [node_count, edge_count],
+        "query": [one_hop, two_hop],
+        "reopen_proof": [node_count, edge_count, one_hop, two_hop, imported_storage],
+    }
+
+
+def storage_receipt(allocated: int, logical_eof: int) -> dict:
+    categories = {
+        name: {
+            "logical_references": 0,
+            "logical_bytes": 0,
+            "physical_objects": 0,
+            "physical_logical_bytes": 0,
+            "allocated_bytes": 0,
+        }
+        for name in (
+            "topology_nodes",
+            "topology_edges",
+            "properties",
+            "uuid_and_surrogates",
+            "adjacency",
+            "catalog_and_manifests",
+            "construction_staging",
+            "portable_package",
+            "clean_imported_project",
+            "other",
+        )
+    }
+    return {
+        "contract": "graphforge-storage-attribution-command/1",
+        "storage": {
+            "contract": "graphforge-storage-attribution/1",
+            "categories": categories,
+            "logical_references": 0,
+            "logical_bytes": 0,
+            "retained_logical_eof_bytes": logical_eof,
+            "allocated_physical_bytes": allocated,
+            "physical_objects": 0,
+        },
+        "reopen_agrees": True,
     }
 
 
@@ -204,20 +336,118 @@ class ProgressiveRunControllerTests(unittest.TestCase):
                 executables=self.executables,
             )
 
-    def test_real_run_requires_closed_bulk_ingest_capability(self) -> None:
-        with self.assertRaisesRegex(ControllerError, "bulk_ingest_capability_unproven"):
-            require_bulk_ingest_capability(ROOT, self.output)
-        invalid = {
-            "schema": "graphforge-ordinary-ingest-capability/1",
-            "commit": COMMIT,
-            "interface": "gf_import_session",
-            "bulk_construction": True,
-            "minimum_batch_rows": 8192,
-            "scalar_durable_loop_absent": False,
+    def test_bulk_capability_is_derived_from_the_ordinary_commit_receipt(self) -> None:
+        receipt = {
+            "contract": "graphforge-import-session/1",
+            "outcome": "committed",
+            "construction": {
+                "configured_batch_rows": 65_536,
+                "accepted_chunks": 2,
+                "publication_committed": True,
+                "input_rows": 131_072,
+                "input_batches": 2,
+            },
         }
-        (self.output / "ordinary-ingest-capability.json").write_text(json.dumps(invalid))
-        with self.assertRaisesRegex(ControllerError, "validation failed"):
-            require_bulk_ingest_capability(ROOT, self.output)
+        self.assertIs(require_bulk_ingest_capability(receipt), receipt)
+        invalid = json.loads(json.dumps(receipt))
+        invalid["construction"]["configured_batch_rows"] = 8192
+        with self.assertRaisesRegex(ControllerError, "bulk_ingest_capability_unproven"):
+            require_bulk_ingest_capability(invalid)
+        for field in (
+            "configured_batch_rows",
+            "accepted_chunks",
+            "input_rows",
+            "input_batches",
+        ):
+            for invalid_value in (True, None, "2"):
+                with self.subTest(field=field, invalid_value=invalid_value):
+                    invalid = json.loads(json.dumps(receipt))
+                    invalid["construction"][field] = invalid_value
+                    with self.assertRaisesRegex(ControllerError, "bulk_ingest_capability_unproven"):
+                        require_bulk_ingest_capability(invalid)
+
+    def test_named_authorities_assemble_true_passed_evidence_and_refuse_gaps(self) -> None:
+        receipts = authoritative_receipts(18)
+        gf = graphforge(18, receipts)
+        rung = assemble_rung_evidence(root=ROOT, scale=18, graphforge=gf, benchexec=benchexec(gf))
+        self.assertEqual(rung["status"], "passed")
+        self.assertEqual(rung["metrics"]["physical_read_bytes"], 0)
+        for omitted in receipts:
+            with self.subTest(omitted=omitted), self.assertRaises(ControllerError):
+                changed = {name: values for name, values in receipts.items() if name != omitted}
+                changed_gf = graphforge(18, changed)
+                assemble_rung_evidence(
+                    root=ROOT, scale=18, graphforge=changed_gf, benchexec=benchexec(changed_gf)
+                )
+        contradictory = authoritative_receipts(18)
+        contradictory["reopen_proof"][2] = contradictory["reopen_proof"][2] | {
+            "result_sha256": "e" * 64
+        }
+        changed_gf = graphforge(18, contradictory)
+        with self.assertRaisesRegex(ControllerError, "contradicts"):
+            assemble_rung_evidence(
+                root=ROOT, scale=18, graphforge=changed_gf, benchexec=benchexec(changed_gf)
+            )
+        missing_lifecycle = authoritative_receipts(18)
+        missing_lifecycle["ingest"] = [missing_lifecycle["ingest"][0]]
+        changed_gf = graphforge(18, missing_lifecycle)
+        with self.assertRaisesRegex(ControllerError, "graphforge-lifecycle-storage/1"):
+            assemble_rung_evidence(
+                root=ROOT, scale=18, graphforge=changed_gf, benchexec=benchexec(changed_gf)
+            )
+        contradictory_storage = authoritative_receipts(18)
+        contradictory_storage["reopen"][0]["reopen_agrees"] = False
+        changed_gf = graphforge(18, contradictory_storage)
+        with self.assertRaisesRegex(ControllerError, "ordinary storage receipt"):
+            assemble_rung_evidence(
+                root=ROOT, scale=18, graphforge=changed_gf, benchexec=benchexec(changed_gf)
+            )
+        missing_publication = authoritative_receipts(18)
+        del missing_publication["ingest"][0]["construction"]["publication_work"]
+        changed_gf = graphforge(18, missing_publication)
+        with self.assertRaisesRegex(ControllerError, "construction metrics"):
+            assemble_rung_evidence(
+                root=ROOT, scale=18, graphforge=changed_gf, benchexec=benchexec(changed_gf)
+            )
+
+    def test_exact_benchexec_xml_and_log_are_normalized_into_passed_bundle(self) -> None:
+        plan = build_plan(
+            root=ROOT,
+            output_dir=self.output,
+            scale=18,
+            commit=COMMIT,
+            executables=self.executables,
+        )
+        stage = self.base / "stage-result"
+        raw = stage / "raw"
+        raw.mkdir(parents=True)
+        gf = graphforge(18, authoritative_receipts(18))
+        (raw / "run.log").write_text(json.dumps(gf) + "\n")
+        columns = {
+            "status": "DONE",
+            "walltime": "1.25s",
+            "cputime": "1.0s",
+            "memory": "4096B",
+            "blkio-read": "1024B",
+            "blkio-write": "2048B",
+            "pressure-cpu-some": "0.1s",
+            "pressure-io-some": "0.2s",
+            "pressure-memory-some": "0.3s",
+        }
+        xml = (
+            "<result><run>"
+            + "".join(
+                f'<column title="{name}" value="{value}" />' for name, value in columns.items()
+            )
+            + "</run></result>"
+        )
+        (raw / "result.xml").write_text(xml)
+        normalized, observed, rung = ingest_benchexec_result(
+            root=ROOT, stage=stage, scale=18, plan=plan
+        )
+        self.assertEqual(observed, gf)
+        self.assertEqual(normalized["authority"]["read_bytes"], 1024)
+        self.assertEqual(rung["metrics"]["wall_seconds"], 2)
 
     def test_adjacent_passed_rungs_produce_schema_valid_s20_projection(self) -> None:
         for scale in (18, 19):
@@ -285,7 +515,7 @@ class ProgressiveRunControllerTests(unittest.TestCase):
             "schema": "graphforge-progressive-run-result/1",
             "rung": "S18",
             "status": "failed",
-            "failure": "metrics_evidence_missing",
+            "failure": "ordinary_receipt_missing",
             "identities": plan["identities"],
             "claim": "engineering_evidence_only",
         }

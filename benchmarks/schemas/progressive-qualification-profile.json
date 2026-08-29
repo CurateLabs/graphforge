@@ -6,8 +6,8 @@
   "required": ["schema", "id", "scale", "execution", "executable", "phases", "generator", "lifecycle", "gate"],
   "properties": {
     "schema": {"const": "graphforge-progressive-qualification-profile/1"},
-    "id": {"enum": ["graph500-s18-local", "graph500-s19-local", "graph500-s20-provider", "graph500-s22-provider", "graph500-s26-provider"]},
-    "scale": {"enum": [18, 19, 20, 22, 26]},
+    "id": {"enum": ["graph500-s18-local", "graph500-s19-local", "graph500-s20-provider", "graph500-s22-provider", "graph500-s24-provider", "graph500-s25-provider", "graph500-s26-provider"]},
+    "scale": {"enum": [18, 19, 20, 22, 24, 25, 26]},
     "execution": {"enum": ["local", "provider"]},
     "executable": {"const": "gf"},
     "phases": {

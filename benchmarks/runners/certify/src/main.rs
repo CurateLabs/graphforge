@@ -33,6 +33,9 @@ fn run() -> Result<(), &'static str> {
             .map_err(|_| "certification failed")?;
             output.flush().map_err(|_| "phase event write failed")?;
             write_evidence(Path::new(evidence), &outcome).map_err(|_| "evidence write failed")?;
+            serde_json::to_writer(&mut output, &outcome)
+                .map_err(|_| "final evidence write failed")?;
+            writeln!(output).map_err(|_| "final evidence write failed")?;
             if outcome.failed_phase.is_some() {
                 std::process::exit(1);
             }

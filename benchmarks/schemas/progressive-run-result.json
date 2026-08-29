@@ -7,8 +7,8 @@
   "properties": {
     "schema": {"const": "graphforge-progressive-run-result/1"},
     "rung": {"enum": ["S18", "S19"]},
-    "status": {"const": "failed"},
-    "failure": {"enum": ["metrics_evidence_missing", "benchexec_failed"]},
+    "status": {"enum": ["passed", "failed"]},
+    "failure": {"enum": [null, "ordinary_receipt_missing", "benchexec_failed", "correctness_failed"]},
     "identities": {
       "type": "object",
       "additionalProperties": false,
@@ -27,5 +27,10 @@
     },
     "claim": {"const": "engineering_evidence_only"}
   },
+  "allOf": [
+    {"if": {"properties": {"status": {"const": "passed"}}, "required": ["status"]},
+     "then": {"properties": {"failure": {"type": "null"}}},
+     "else": {"properties": {"failure": {"type": "string"}}}}
+  ],
   "$defs": {"digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
 }

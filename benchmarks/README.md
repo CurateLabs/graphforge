@@ -127,16 +127,18 @@ not authorize a Graph500 scale run.
 ## Progressive Graph500 qualification
 
 `profiles/graph500/` contains distinct declarative S18 and S19 local profiles
-and S20, S22, and S26 provider profiles. They pin the reference generator,
+and S20, S22, S24, S25, and S26 provider profiles. They pin the reference generator,
 edge factor 16, seed, the same ten-phase public certification lifecycle, and a
 closed sanitized evidence contract. Provider profiles describe environment
 classes only; they contain no app, machine, volume, account, region, or secret
 identifier.
 
 The Python qualification policy consumes completed, correct ordinary-lifecycle
-evidence and stops at the first failed rung. S20 requires S18 and S19. S22 has
-its own S19/S20 gate. S26 is separately refused without adjacent S24/S25 disk
-and bounded-RSS observations from the canonical ladder. Projections preserve
+evidence and stops at the first failed rung. Each provider rung projects from
+the preceding two ladder rungs: S20 from S18/S19, S22 from S19/S20, S24 from
+S20/S22, S25 from S22/S24, and S26 from S24/S25. S26 is separately refused
+unless those adjacent S24/S25 observations came from the canonical ladder.
+Projections preserve
 wall time, peak RSS, retained and transient storage, logical and physical I/O,
 reader calls, and publication work as independent dimensions.
 
@@ -189,14 +191,25 @@ make -C benchmarks progressive-qualification-project-s20 \
   PROVIDER_CAPACITY=/sanitized/provider-capacity.json
 ```
 
-The controller also requires `ordinary-ingest-capability.json` to prove that
-the ordinary `gf import-session` path uses bulk construction with at least
-65,536 rows per batch and no scalar durable write loop. The current 8,192-row
-decode plus per-row durable path does not satisfy that contract, so real rungs
-remain refused until the ordinary product path publishes the closed capability
-evidence. Missing retained/transient storage, logical I/O, reader-call, or
-publication-work evidence likewise causes a typed failure; the controller never
-manufactures those values from command counts or recursive file scans.
+The controller derives bulk-ingest capability from the same run's bounded
+ordinary `gf import-session commit --json` receipt: its construction evidence
+must identify a configuration of at least 65,536 rows, accepted bulk chunks,
+and the single committed publication. There is no separately plantable
+capability file. BenchExec XML is the sole wall/RSS/physical-I/O authority.
+Ordinary `storage-attribution --json` receipts preserve source and clean-import
+allocated and logical-EOF components separately. Construction evidence owns
+logical I/O, reader-call, transient-construction, and publication-work
+components; it is not relabeled as a whole-lifecycle storage peak. Passed rung
+evidence therefore also requires an authenticated `graphforge-lifecycle-storage/1`
+owner-union receipt for retained and transient lifecycle maxima. The controller
+fails closed while that ordinary receipt is absent rather than summing project
+owners or treating portable logical payload bytes as allocated storage.
+
+Ordinary result-sink receipts independently own scalar counts, fixed-hop result
+cardinality, query evidence, and source/import logical-result digests. Missing
+or contradictory storage, construction, or query receipts cause a typed first
+failure; the controller never manufactures values from command counts,
+recursive file scans, portable payload size, or synthetic labels.
 
 ## Native local admission deployment
 

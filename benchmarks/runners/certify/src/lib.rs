@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::fs;
+use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread;
@@ -137,6 +138,8 @@ impl Profile {
             18 | 19 => ("local", None),
             20 => ("provider", Some([18, 19])),
             22 => ("provider", Some([19, 20])),
+            24 => ("provider", Some([20, 22])),
+            25 => ("provider", Some([22, 24])),
             26 => ("provider", Some([24, 25])),
             _ => return false,
         };
@@ -240,6 +243,7 @@ pub struct Execution {
     pub duration_ms: u64,
     pub peak_rss_bytes: Option<u64>,
     pub failure: Option<FailureKind>,
+    pub receipts: Vec<serde_json::Value>,
 }
 
 pub trait PhaseExecutor {
@@ -254,6 +258,7 @@ impl PhaseExecutor for PublicProcessExecutor {
         if let PhaseAction::GraphForgeCliWorkflow { commands } = &command.action {
             let started = Instant::now();
             let mut peak_rss_bytes = None;
+            let mut receipts = Vec::new();
             for args in commands {
                 let execution = match execute_process(&profile.executable, args) {
                     Ok(execution) => execution,
@@ -263,16 +268,19 @@ impl PhaseExecutor for PublicProcessExecutor {
                             duration_ms: millis(started.elapsed()),
                             peak_rss_bytes,
                             failure: Some(FailureKind::CommandUnavailable),
+                            receipts,
                         });
                     }
                 };
                 peak_rss_bytes = max_optional(peak_rss_bytes, execution.peak_rss_bytes);
+                receipts.extend(execution.receipts);
                 if execution.exit_code != Some(0) {
                     return Ok(Execution {
                         exit_code: execution.exit_code,
                         duration_ms: millis(started.elapsed()),
                         peak_rss_bytes,
                         failure: execution.failure,
+                        receipts,
                     });
                 }
             }
@@ -281,6 +289,7 @@ impl PhaseExecutor for PublicProcessExecutor {
                 duration_ms: millis(started.elapsed()),
                 peak_rss_bytes,
                 failure: None,
+                receipts,
             });
         }
         let (executable, args) = match &command.action {
@@ -299,10 +308,15 @@ fn execute_process(executable: &str, args: &[String]) -> Result<Execution, Strin
     let mut child = Command::new(executable)
         .args(args)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .map_err(|_| "public command could not start".to_owned())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "public command stdout unavailable".to_owned())?;
+    let stdout_reader = thread::spawn(move || read_bounded(stdout, 1_048_576));
     let mut peak_rss_bytes = None;
     loop {
         peak_rss_bytes = max_optional(peak_rss_bytes, resident_bytes(child.id()));
@@ -310,15 +324,539 @@ fn execute_process(executable: &str, args: &[String]) -> Result<Execution, Strin
             .try_wait()
             .map_err(|_| "public command wait failed".to_owned())?
         {
+            let stdout = stdout_reader
+                .join()
+                .map_err(|_| "public command stdout reader failed".to_owned())??;
+            let receipts =
+                parse_receipts(&stdout, args.iter().any(|argument| argument == "--json"))?;
             return Ok(Execution {
                 exit_code: status.code(),
                 duration_ms: millis(started.elapsed()),
                 peak_rss_bytes,
                 failure: None,
+                receipts,
             });
         }
         thread::sleep(Duration::from_millis(10));
     }
+}
+
+fn read_bounded(mut input: impl Read, limit: usize) -> Result<Vec<u8>, String> {
+    let mut kept = Vec::new();
+    let mut chunk = [0_u8; 8_192];
+    let mut exceeded = false;
+    loop {
+        let read = input
+            .read(&mut chunk)
+            .map_err(|_| "public command stdout read failed".to_owned())?;
+        if read == 0 {
+            break;
+        }
+        if kept.len().saturating_add(read) <= limit {
+            kept.extend_from_slice(&chunk[..read]);
+        } else {
+            exceeded = true;
+        }
+    }
+    if exceeded {
+        Err("public command receipt exceeded one MiB".to_owned())
+    } else {
+        Ok(kept)
+    }
+}
+
+fn parse_receipts(stdout: &[u8], expected: bool) -> Result<Vec<serde_json::Value>, String> {
+    if !expected {
+        return Ok(Vec::new());
+    }
+    if stdout.is_empty() {
+        return Err("public command omitted its JSON receipt".to_owned());
+    }
+    let text =
+        std::str::from_utf8(stdout).map_err(|_| "public receipt was not UTF-8".to_owned())?;
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let value: serde_json::Value = serde_json::from_str(line)
+                .map_err(|_| "public receipt was not one JSON object per line".to_owned())?;
+            sanitize_receipt(&value)
+                .ok_or_else(|| "public receipt contract is not allowlisted".to_owned())
+        })
+        .collect()
+}
+
+fn sanitize_receipt(value: &serde_json::Value) -> Option<serde_json::Value> {
+    let object = value.as_object()?;
+    match object.get("contract").and_then(serde_json::Value::as_str) {
+        Some("graphforge-import-session/1") => {
+            if !object
+                .get("outcome")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|outcome| {
+                    matches!(
+                        outcome,
+                        "begun"
+                            | "resumed"
+                            | "registered"
+                            | "checkpointed"
+                            | "validated"
+                            | "committed"
+                            | "aborted"
+                    )
+                })
+            {
+                return None;
+            }
+            if object
+                .get("construction")
+                .is_some_and(|construction| !sanitized_construction_tree(construction))
+            {
+                return None;
+            }
+            let mut receipt = serde_json::Map::new();
+            for key in [
+                "contract",
+                "outcome",
+                "rows_accepted",
+                "rows_rejected",
+                "bytes_accepted",
+                "construction",
+            ] {
+                if let Some(item) = object.get(key) {
+                    receipt.insert(key.to_owned(), item.clone());
+                }
+            }
+            Some(receipt.into())
+        }
+        Some("graphforge-result-sink/1") => sanitize_legacy_result_sink(object),
+        Some("graphforge-result-sink/2") => sanitize_result_sink(object),
+        Some("graphforge-storage-attribution-command/1") => sanitize_storage_command(object),
+        Some("graphforge-lifecycle-storage/1") => copy_closed_receipt(
+            object,
+            &[
+                "contract",
+                "retained_storage_bytes",
+                "transient_peak_storage_bytes",
+            ],
+        )
+        .filter(|receipt| {
+            sanitized_numeric_fields(
+                receipt,
+                &["retained_storage_bytes", "transient_peak_storage_bytes"],
+            )
+        }),
+        Some("graphforge-query-qualification/1") => copy_closed_receipt(
+            object,
+            &[
+                "contract",
+                "live_nodes",
+                "live_edges",
+                "one_hop_rows",
+                "two_hop_rows",
+                "source_fingerprint",
+                "imported_fingerprint",
+                "equivalent",
+            ],
+        ),
+        Some(contract) if contract.starts_with("graphforge-portable-") => copy_selected_receipt(
+            object,
+            &[
+                "contract",
+                "package_digest",
+                "transport_digest",
+                "entry_count",
+                "payload_bytes",
+                "representation",
+                "selection_fingerprint",
+                "integrity",
+                "compatibility",
+                "idempotent_replay",
+            ],
+        ),
+        _ if object.contains_key("selected_generation_uuid") => {
+            if !object
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(is_safe_token)
+            {
+                return None;
+            }
+            let mut receipt = serde_json::Map::new();
+            for key in [
+                "kind",
+                "selected_generation_class",
+                "work_detected",
+                "repaired_journals",
+                "aborted_journals",
+                "removed_generations",
+                "preserved_unknown_entries",
+                "deferred",
+                "elapsed_ms",
+            ] {
+                if let Some(item) = object.get(key) {
+                    receipt.insert(key.to_owned(), item.clone());
+                }
+            }
+            Some(receipt.into())
+        }
+        _ => None,
+    }
+}
+
+fn sanitized_numeric_tree(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => true,
+        serde_json::Value::Array(items) => items.iter().all(sanitized_numeric_tree),
+        serde_json::Value::Object(items) => items.iter().all(|(key, value)| {
+            key.len() <= 80
+                && key
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+                && sanitized_numeric_tree(value)
+        }),
+        serde_json::Value::String(_) => false,
+    }
+}
+
+fn sanitized_construction_tree(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(items) => items.iter().all(|(key, value)| {
+            key.len() <= 80
+                && key
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+                && if key == "contract" {
+                    value.as_str() == Some("graphforge-publication-work/1")
+                } else {
+                    sanitized_construction_tree(value)
+                }
+        }),
+        _ => sanitized_numeric_tree(value),
+    }
+}
+
+fn sanitized_numeric_fields(value: &serde_json::Value, keys: &[&str]) -> bool {
+    value.as_object().is_some_and(|object| {
+        keys.iter().all(|key| {
+            object
+                .get(*key)
+                .and_then(serde_json::Value::as_u64)
+                .is_some()
+        })
+    })
+}
+
+fn sanitize_storage_command(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Option<serde_json::Value> {
+    if object
+        .keys()
+        .any(|key| !matches!(key.as_str(), "contract" | "storage" | "reopen_agrees"))
+        || object
+            .get("reopen_agrees")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+    {
+        return None;
+    }
+    let storage = object.get("storage")?.as_object()?;
+    const STORAGE_KEYS: [&str; 7] = [
+        "contract",
+        "categories",
+        "logical_references",
+        "logical_bytes",
+        "retained_logical_eof_bytes",
+        "allocated_physical_bytes",
+        "physical_objects",
+    ];
+    if storage
+        .keys()
+        .any(|key| !STORAGE_KEYS.contains(&key.as_str()))
+        || storage.get("contract").and_then(serde_json::Value::as_str)
+            != Some("graphforge-storage-attribution/1")
+        || !sanitized_numeric_fields(
+            &serde_json::Value::Object(storage.clone()),
+            &STORAGE_KEYS[2..],
+        )
+        || !sanitized_storage_categories(storage.get("categories")?)
+    {
+        return None;
+    }
+    Some(serde_json::json!({
+        "contract": "graphforge-storage-attribution-command/1",
+        "storage": storage,
+        "reopen_agrees": true,
+    }))
+}
+
+fn sanitize_legacy_result_sink(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Option<serde_json::Value> {
+    const KEYS: [&str; 7] = [
+        "contract",
+        "destination",
+        "format",
+        "rows",
+        "batches",
+        "bytes",
+        "complete",
+    ];
+    if object.keys().any(|key| !KEYS.contains(&key.as_str()))
+        || !matches!(
+            object.get("format").and_then(serde_json::Value::as_str),
+            Some("ArrowIpc" | "Parquet")
+        )
+        || object.get("complete").and_then(serde_json::Value::as_bool) != Some(true)
+        || !sanitized_numeric_fields(
+            &serde_json::Value::Object(object.clone()),
+            &["rows", "batches", "bytes"],
+        )
+    {
+        return None;
+    }
+    copy_selected_receipt(
+        object,
+        &["contract", "format", "rows", "batches", "bytes", "complete"],
+    )
+}
+
+fn sanitize_result_sink(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Option<serde_json::Value> {
+    const KEYS: [&str; 10] = [
+        "contract",
+        "destination",
+        "format",
+        "rows",
+        "batches",
+        "bytes",
+        "complete",
+        "result_sha256",
+        "scalar_u64",
+        "query_evidence",
+    ];
+    let digest = object.get("result_sha256")?.as_str()?;
+    if object.keys().any(|key| !KEYS.contains(&key.as_str()))
+        || !matches!(
+            object.get("format").and_then(serde_json::Value::as_str),
+            Some("ArrowIpc" | "Parquet")
+        )
+        || object.get("complete").and_then(serde_json::Value::as_bool) != Some(true)
+        || digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        || !sanitized_numeric_fields(
+            &serde_json::Value::Object(object.clone()),
+            &["rows", "batches", "bytes"],
+        )
+        || !object
+            .get("scalar_u64")
+            .is_some_and(|value| value.is_null() || value.as_u64().is_some())
+        || !sanitized_query_evidence(object.get("query_evidence")?)
+    {
+        return None;
+    }
+    copy_selected_receipt(
+        object,
+        &[
+            "contract",
+            "format",
+            "rows",
+            "batches",
+            "bytes",
+            "complete",
+            "result_sha256",
+            "scalar_u64",
+            "query_evidence",
+        ],
+    )
+}
+
+fn sanitized_query_evidence(value: &serde_json::Value) -> bool {
+    const KEYS: [&str; 11] = [
+        "contract",
+        "hops",
+        "sorts",
+        "operator_rss",
+        "max_in_flight_reads",
+        "memory_reserved_before",
+        "memory_reserved_after",
+        "returned_batch_bytes",
+        "execution_batch_rows",
+        "peak_rss_bytes",
+        "rss_after_release_bytes",
+    ];
+    let object = match value.as_object() {
+        Some(object) => object,
+        None => return false,
+    };
+    object.len() == KEYS.len()
+        && object.keys().all(|key| KEYS.contains(&key.as_str()))
+        && object.get("contract").and_then(serde_json::Value::as_str)
+            == Some("graphforge-query-evidence/1")
+        && sanitized_numeric_fields(value, &KEYS[4..])
+        && sanitized_query_records(object.get("hops"), &QUERY_HOP_KEYS, None)
+        && sanitized_query_records(object.get("sorts"), &QUERY_SORT_KEYS, Some("fetch_rows"))
+        && sanitized_operator_rss(object.get("operator_rss"))
+}
+
+const QUERY_HOP_KEYS: [&str; 25] = [
+    "ordinal",
+    "input_batches",
+    "input_rows",
+    "candidates_generated",
+    "rows_emitted",
+    "projected_chunks",
+    "projected_rows",
+    "projected_columns",
+    "edge_projected_columns",
+    "node_projected_columns",
+    "edge_reader_calls",
+    "edge_rows_returned",
+    "edge_logical_rows_scanned",
+    "edge_full_reads",
+    "node_reader_calls",
+    "node_rows_returned",
+    "node_logical_rows_scanned",
+    "node_full_reads",
+    "identity_reader_calls",
+    "identity_logical_bytes",
+    "identity_ranges_selected",
+    "identity_peak_buffer_bytes",
+    "identity_per_record_seeks",
+    "identity_revalidation_calls",
+    "identity_revalidation_bytes",
+];
+
+const QUERY_SORT_KEYS: [&str; 7] = [
+    "ordinal",
+    "fetch_rows",
+    "output_rows",
+    "spill_count",
+    "spilled_rows",
+    "spilled_bytes",
+    "retained_bytes",
+];
+
+fn sanitized_query_records(
+    value: Option<&serde_json::Value>,
+    keys: &[&str],
+    nullable: Option<&str>,
+) -> bool {
+    value
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|records| {
+            records.iter().all(|record| {
+                record.as_object().is_some_and(|object| {
+                    object.len() == keys.len()
+                        && object.keys().all(|key| keys.contains(&key.as_str()))
+                        && keys.iter().all(|key| {
+                            object.get(*key).is_some_and(|value| {
+                                (nullable == Some(*key) && value.is_null())
+                                    || value.as_u64().is_some()
+                            })
+                        })
+                })
+            })
+        })
+}
+
+fn sanitized_operator_rss(value: Option<&serde_json::Value>) -> bool {
+    const KEYS: [&str; 5] = [
+        "ordinal",
+        "operator",
+        "before_bytes",
+        "peak_bytes",
+        "after_bytes",
+    ];
+    value
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|records| {
+            records.iter().all(|record| {
+                record.as_object().is_some_and(|object| {
+                    object.len() == KEYS.len()
+                        && object.keys().all(|key| KEYS.contains(&key.as_str()))
+                        && sanitized_numeric_fields(
+                            record,
+                            &["ordinal", "before_bytes", "peak_bytes", "after_bytes"],
+                        )
+                        && object
+                            .get("operator")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(is_safe_token)
+                })
+            })
+        })
+}
+
+fn sanitized_storage_categories(value: &serde_json::Value) -> bool {
+    const CATEGORIES: [&str; 10] = [
+        "topology_nodes",
+        "topology_edges",
+        "properties",
+        "uuid_and_surrogates",
+        "adjacency",
+        "catalog_and_manifests",
+        "construction_staging",
+        "portable_package",
+        "clean_imported_project",
+        "other",
+    ];
+    const TOTAL_KEYS: [&str; 5] = [
+        "logical_references",
+        "logical_bytes",
+        "physical_objects",
+        "physical_logical_bytes",
+        "allocated_bytes",
+    ];
+    value.as_object().is_some_and(|categories| {
+        categories.len() == CATEGORIES.len()
+            && CATEGORIES.iter().all(|category| {
+                categories.get(*category).is_some_and(|totals| {
+                    totals.as_object().is_some_and(|object| {
+                        object.len() == TOTAL_KEYS.len()
+                            && object.keys().all(|key| TOTAL_KEYS.contains(&key.as_str()))
+                            && sanitized_numeric_fields(totals, &TOTAL_KEYS)
+                    })
+                })
+            })
+    })
+}
+
+fn copy_closed_receipt(
+    object: &serde_json::Map<String, serde_json::Value>,
+    keys: &[&str],
+) -> Option<serde_json::Value> {
+    if object.keys().any(|key| !keys.contains(&key.as_str())) {
+        return None;
+    }
+    Some(
+        keys.iter()
+            .filter_map(|key| {
+                object
+                    .get(*key)
+                    .map(|value| ((*key).to_owned(), value.clone()))
+            })
+            .collect::<serde_json::Map<_, _>>()
+            .into(),
+    )
+}
+
+fn copy_selected_receipt(
+    object: &serde_json::Map<String, serde_json::Value>,
+    keys: &[&str],
+) -> Option<serde_json::Value> {
+    Some(
+        keys.iter()
+            .filter_map(|key| {
+                object
+                    .get(*key)
+                    .map(|value| ((*key).to_owned(), value.clone()))
+            })
+            .collect::<serde_json::Map<_, _>>()
+            .into(),
+    )
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -345,6 +883,8 @@ pub struct PhaseOutcome {
     pub exit_code: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure: Option<FailureKind>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub receipts: Vec<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -398,6 +938,7 @@ pub fn certify_with_events(
                     } else {
                         execution.failure.or(Some(FailureKind::CommandFailed))
                     },
+                    receipts: execution.receipts,
                 }
             }
             Err(_) => PhaseOutcome {
@@ -407,6 +948,7 @@ pub fn certify_with_events(
                 peak_rss_bytes: None,
                 exit_code: None,
                 failure: Some(FailureKind::CommandUnavailable),
+                receipts: Vec::new(),
             },
         };
         let failed = outcome.status == OutcomeStatus::Failed;
@@ -484,6 +1026,7 @@ pub fn normalize_evidence(input: &[u8]) -> Result<Evidence, RunnerError> {
                     peak_rss_bytes: phase.max_rss_kib.and_then(|value| value.checked_mul(1_024)),
                     exit_code: phase.exit_code,
                     failure: (!phase.ok).then_some(FailureKind::CommandFailed),
+                    receipts: Vec::new(),
                 });
                 if !phase.ok {
                     break;
@@ -587,7 +1130,9 @@ fn action_matches_phase(command: &PhaseCommand) -> bool {
     if let PhaseAction::GraphForgeCliWorkflow { commands } = &command.action {
         return match command.phase {
             Phase::Ingest => ingest_workflow_is_valid(commands),
-            Phase::Recount | Phase::Query | Phase::ReopenProof => query_workflow_is_valid(commands),
+            Phase::Reopen => reopen_workflow_is_valid(commands),
+            Phase::Recount | Phase::Query => query_workflow_is_valid(commands, 2),
+            Phase::ReopenProof => reopen_proof_workflow_is_valid(commands),
             _ => false,
         };
     }
@@ -625,8 +1170,8 @@ fn is_sha256_identity(value: &str) -> bool {
     })
 }
 
-fn query_workflow_is_valid(commands: &[Vec<String>]) -> bool {
-    commands.len() == 2
+fn query_workflow_is_valid(commands: &[Vec<String>], expected: usize) -> bool {
+    commands.len() == expected
         && commands.iter().all(|args| {
             args.iter().all(|argument| !argument.contains('\0'))
                 && contains_command(
@@ -634,6 +1179,26 @@ fn query_workflow_is_valid(commands: &[Vec<String>]) -> bool {
                     &["query"],
                 )
         })
+}
+
+fn reopen_workflow_is_valid(commands: &[Vec<String>]) -> bool {
+    commands.len() == 2
+        && cli_command_is_valid(&commands[0], &["recovery"])
+        && cli_command_is_valid(&commands[1], &["storage-attribution"])
+}
+
+fn reopen_proof_workflow_is_valid(commands: &[Vec<String>]) -> bool {
+    commands.len() == 5
+        && query_workflow_is_valid(&commands[..4], 4)
+        && cli_command_is_valid(&commands[4], &["storage-attribution"])
+}
+
+fn cli_command_is_valid(args: &[String], operation: &[&str]) -> bool {
+    args.iter().all(|argument| !argument.contains('\0'))
+        && contains_command(
+            &args.iter().map(String::as_str).collect::<Vec<_>>(),
+            operation,
+        )
 }
 
 fn ingest_workflow_is_valid(commands: &[Vec<String>]) -> bool {
@@ -696,6 +1261,119 @@ mod tests {
     use std::collections::VecDeque;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn child_receipts_are_bounded_allowlisted_and_strip_content_bearing_paths() {
+        let query = br#"{"contract":"graphforge-result-sink/1","destination":"/secret/result.arrow","format":"ArrowIpc","rows":7,"batches":1,"bytes":99,"complete":true}"#;
+        let receipts = parse_receipts(query, true).expect("allowlisted query receipt");
+        assert_eq!(receipts.len(), 1);
+        assert!(receipts[0].get("destination").is_none());
+        assert_eq!(receipts[0]["rows"], 7);
+        assert!(parse_receipts(br#"{"contract":"unknown/1"}"#, true).is_err());
+        assert!(parse_receipts(&[], true).is_err());
+        assert!(parse_receipts(b"human output\n", false).unwrap().is_empty());
+        let import = br#"{"contract":"graphforge-import-session/1","outcome":"committed","construction":{"configured_batch_rows":65536,"publication_work":{"contract":"graphforge-publication-work/1","semantic_total_operations":9}}}"#;
+        assert_eq!(parse_receipts(import, true).unwrap().len(), 1);
+        let leaked = br#"{"contract":"graphforge-import-session/1","outcome":"committed","construction":{"project_path":"/secret"}}"#;
+        assert!(parse_receipts(leaked, true).is_err());
+        let query = serde_json::json!({
+            "contract": "graphforge-result-sink/2",
+            "destination": "/secret/query.arrow",
+            "format": "ArrowIpc",
+            "rows": 1,
+            "batches": 1,
+            "bytes": 64,
+            "complete": true,
+            "result_sha256": "a".repeat(64),
+            "scalar_u64": 7,
+            "query_evidence": {
+                "contract": "graphforge-query-evidence/1",
+                "hops": [],
+                "sorts": [],
+                "operator_rss": [],
+                "max_in_flight_reads": 0,
+                "memory_reserved_before": 0,
+                "memory_reserved_after": 0,
+                "returned_batch_bytes": 8,
+                "execution_batch_rows": 8192,
+                "peak_rss_bytes": 0,
+                "rss_after_release_bytes": 0
+            }
+        });
+        let encoded = serde_json::to_vec(&query).expect("query receipt JSON");
+        let sanitized = parse_receipts(&encoded, true).expect("closed query receipt");
+        assert!(sanitized[0].get("destination").is_none());
+        let mut leaked_query = query;
+        leaked_query["query_evidence"]["project_path"] = serde_json::json!("/secret");
+        let encoded = serde_json::to_vec(&leaked_query).expect("leaked query receipt JSON");
+        assert!(parse_receipts(&encoded, true).is_err());
+        let recovery = serde_json::json!({
+            "kind": "project_open",
+            "selected_generation_uuid": "00000000-0000-4000-8000-000000000001",
+            "selected_generation_class": "published",
+            "work_detected": false,
+            "repaired_journals": 0,
+            "aborted_journals": 0,
+            "removed_generations": 0,
+            "preserved_unknown_entries": 0,
+            "deferred": null,
+            "elapsed_ms": 1
+        });
+        let encoded = serde_json::to_vec(&recovery).expect("recovery receipt JSON");
+        let sanitized = parse_receipts(&encoded, true).expect("ordinary recovery receipt");
+        assert_eq!(sanitized[0]["kind"], "project_open");
+        let mut leaked_recovery = recovery;
+        leaked_recovery["kind"] = serde_json::json!("/private/project");
+        let encoded = serde_json::to_vec(&leaked_recovery).expect("leaked recovery receipt JSON");
+        assert!(parse_receipts(&encoded, true).is_err());
+    }
+
+    #[test]
+    fn storage_receipts_are_closed_and_preserve_only_semantic_attribution() {
+        let totals = serde_json::json!({
+            "logical_references": 0,
+            "logical_bytes": 0,
+            "physical_objects": 0,
+            "physical_logical_bytes": 0,
+            "allocated_bytes": 0
+        });
+        let categories = [
+            "topology_nodes",
+            "topology_edges",
+            "properties",
+            "uuid_and_surrogates",
+            "adjacency",
+            "catalog_and_manifests",
+            "construction_staging",
+            "portable_package",
+            "clean_imported_project",
+            "other",
+        ]
+        .into_iter()
+        .map(|name| (name.to_owned(), totals.clone()))
+        .collect::<serde_json::Map<_, _>>();
+        let receipt = serde_json::json!({
+            "contract": "graphforge-storage-attribution-command/1",
+            "storage": {
+                "contract": "graphforge-storage-attribution/1",
+                "categories": categories,
+                "logical_references": 0,
+                "logical_bytes": 0,
+                "retained_logical_eof_bytes": 64,
+                "allocated_physical_bytes": 128,
+                "physical_objects": 1
+            },
+            "reopen_agrees": true
+        });
+        let encoded = serde_json::to_vec(&receipt).expect("storage receipt JSON");
+        let sanitized = parse_receipts(&encoded, true).expect("closed storage receipt");
+        assert_eq!(sanitized[0]["storage"]["allocated_physical_bytes"], 128);
+
+        let mut leaked = receipt;
+        leaked["storage"]["project_path"] = serde_json::json!("/secret");
+        let encoded = serde_json::to_vec(&leaked).expect("leaked receipt JSON");
+        assert!(parse_receipts(&encoded, true).is_err());
+    }
 
     struct FakeExecutor {
         executions: VecDeque<Result<Execution, String>>,
@@ -873,6 +1551,7 @@ mod tests {
             duration_ms: index + 1,
             peak_rss_bytes: Some((index + 1) * 1_024),
             failure: None,
+            receipts: Vec::new(),
         })
     }
 
@@ -906,6 +1585,7 @@ mod tests {
             duration_ms: 4,
             peak_rss_bytes: Some(4_096),
             failure: None,
+            receipts: Vec::new(),
         }));
         executions.extend((4..10).map(passed_execution));
         let mut executor = FakeExecutor {
