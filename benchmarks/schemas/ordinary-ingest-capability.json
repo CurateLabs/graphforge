@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schema": "graphforge-ordinary-ingest-capability-schema/1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "commit", "interface", "bulk_construction", "minimum_batch_rows", "scalar_durable_loop_absent"],
+  "properties": {
+    "schema": {"const": "graphforge-ordinary-ingest-capability/1"},
+    "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "interface": {"const": "gf_import_session"},
+    "bulk_construction": {"const": true},
+    "minimum_batch_rows": {"type": "integer", "minimum": 65536},
+    "scalar_durable_loop_absent": {"const": true}
+  }
+}

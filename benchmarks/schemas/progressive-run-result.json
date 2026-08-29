@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schema": "graphforge-progressive-run-result-schema/1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "rung", "status", "failure", "identities", "claim"],
+  "properties": {
+    "schema": {"const": "graphforge-progressive-run-result/1"},
+    "rung": {"enum": ["S18", "S19"]},
+    "status": {"const": "failed"},
+    "failure": {"enum": ["metrics_evidence_missing", "benchexec_failed"]},
+    "identities": {"type": "object"},
+    "claim": {"const": "engineering_evidence_only"}
+  }
+}

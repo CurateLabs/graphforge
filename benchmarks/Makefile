@@ -1,4 +1,4 @@
-.PHONY: install smoke smoke-python smoke-rust local-admission progressive-qualification-list
+.PHONY: install smoke smoke-python smoke-rust local-admission progressive-qualification-list progressive-qualification-plan progressive-qualification-run progressive-qualification-project-s20 progressive-qualification-binaries
 
 install:
 	uv sync --locked
@@ -21,3 +21,29 @@ local-admission: install
 
 progressive-qualification-list: install
 	PYTHONPATH=$(CURDIR)/harness uv run --locked reframe -C reframe/settings.py -c reframe/checks -n '^Graph500ProgressiveQualificationProfile' -l
+
+progressive-qualification-binaries:
+	cargo build --locked --release --manifest-path ../Cargo.toml -p graphforge-cli
+	cargo build --locked --release --manifest-path Cargo.toml --bin graphforge-benchmark-certify --bin graphforge-benchmark-graph500-generator
+
+progressive-qualification-plan: install progressive-qualification-binaries
+	test -n "$(RUNG)" && test -n "$(OUTPUT_DIR)"
+	PYTHONPATH=$(CURDIR)/harness uv run --locked python -m graphforge_bench.progressive_run \
+		--rung "$(RUNG)" --output-dir "$(OUTPUT_DIR)" --dry-run \
+		--gf "$(CURDIR)/../target/release/gf" \
+		--certify "$(CURDIR)/target/release/graphforge-benchmark-certify" \
+		--generator "$(CURDIR)/target/release/graphforge-benchmark-graph500-generator"
+
+progressive-qualification-run: install progressive-qualification-binaries
+	test -n "$(RUNG)" && test -n "$(OUTPUT_DIR)"
+	PYTHONPATH=$(CURDIR)/harness uv run --locked python -m graphforge_bench.progressive_run \
+		--rung "$(RUNG)" --output-dir "$(OUTPUT_DIR)" \
+		--gf "$(CURDIR)/../target/release/gf" \
+		--certify "$(CURDIR)/target/release/graphforge-benchmark-certify" \
+		--generator "$(CURDIR)/target/release/graphforge-benchmark-graph500-generator"
+
+progressive-qualification-project-s20: install
+	test -n "$(OUTPUT_DIR)" && test -n "$(PROVIDER_CAPACITY)"
+	PYTHONPATH=$(CURDIR)/harness uv run --locked python -m graphforge_bench.progressive_run \
+		--project-s20 --output-dir "$(OUTPUT_DIR)" \
+		--provider-capacity "$(PROVIDER_CAPACITY)"
