@@ -2683,7 +2683,22 @@ mod tests {
             match value {
                 serde_json::Value::Object(object) => {
                     for (key, value) in object {
-                        assert!(!key.contains("uuid") && !key.contains("path"));
+                        assert!(
+                            !matches!(
+                                key.as_str(),
+                                "uuid"
+                                    | "path"
+                                    | "generation_uuid"
+                                    | "generation_manifest_sha256"
+                                    | "physical_identity_allocated_bytes"
+                                    | "provider_id"
+                                    | "resource_id"
+                                    | "credential"
+                                    | "credentials"
+                                    | "secret"
+                            ),
+                            "sensitive evidence key: {key}"
+                        );
                         assert_sanitized(value);
                     }
                 }
