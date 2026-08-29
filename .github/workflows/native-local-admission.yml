@@ -42,11 +42,21 @@ jobs:
           version: "0.10.9"
           enable-cache: false
 
+      - name: Install official BenchExec Ubuntu package
+        run: |
+          sudo add-apt-repository --yes ppa:sosy-lab/benchmarking
+          sudo apt-get update
+          sudo apt-get install --yes benchexec
+
       - name: Install locked benchmark environment
         working-directory: benchmarks
         run: uv sync --locked
 
+      - name: Require package-managed cgroup admission
+        run: python3 -m benchexec.check_cgroups
+
       - name: Run strict ReFrame and BenchExec admission
+        if: always()
         working-directory: benchmarks
         env:
           GRAPHFORGE_ADMISSION_EVIDENCE: ${{ github.workspace }}/benchmarks/outputs/local-admission-evidence.json
@@ -55,10 +65,7 @@ jobs:
           PYTHONPATH="$PWD/harness" uv run --locked reframe \
             -C reframe/settings.py -c reframe/checks \
             -n '^LocalBenchExecAdmission$' -l | grep -F LocalBenchExecAdmission
-          sudo --preserve-env=GRAPHFORGE_ADMISSION_EVIDENCE env \
-            "PATH=$PWD/.venv/bin:$PATH" \
-            "PYTHONPATH=$PWD/harness" \
-            "$PWD/.venv/bin/reframe" \
+          PYTHONPATH="$PWD/harness" uv run --locked reframe \
             -C reframe/settings.py -c reframe/checks \
             -n '^LocalBenchExecAdmission$' -r
 

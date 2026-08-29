@@ -30,18 +30,6 @@ wheels = [
 ]
 
 [[package]]
-name = "benchexec"
-version = "3.35"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "pyyaml" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/ae/07/bedf7b426f8c85c217b80e8a55d60542a18869e367968df9d375c3cc85cc/benchexec-3.35.tar.gz", hash = "sha256:53eee09f28c227a6240e1359f95eb029c4a323e9a7cbc62e51b20b2bd42d69de", size = 1223508, upload-time = "2026-07-03T11:59:49.959Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/5a/41/f75e3cb3eeb75f18c432df365767b3105d2a0fa3e2024414ce7421f1ef35/benchexec-3.35-py3-none-any.whl", hash = "sha256:af196e0fa5715038a81c4ac25e7427cf312560da8664dc40e5da97454af33a91", size = 768290, upload-time = "2026-07-03T11:59:48.191Z" },
-]
-
-[[package]]
 name = "certifi"
 version = "2026.7.22"
 source = { registry = "https://pypi.org/simple" }
@@ -223,14 +211,12 @@ name = "graphforge-external-benchmarks"
 version = "0.0.0"
 source = { virtual = "." }
 dependencies = [
-    { name = "benchexec" },
     { name = "jsonschema" },
     { name = "reframe-hpc" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "benchexec", specifier = ">=3.0,<4" },
     { name = "jsonschema", specifier = ">=4.0,<5" },
     { name = "reframe-hpc", specifier = ">=4.0,<5" },
 ]

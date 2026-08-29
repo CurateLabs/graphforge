@@ -35,7 +35,9 @@ def discover_fixtures(root: Path | None = None) -> dict[str, tuple[Path, ...]]:
 
 
 def main() -> None:
-    for module in ("reframe", "benchexec"):
+    # BenchExec is deliberately a system dependency installed from the
+    # official Ubuntu package; only workspace-owned dependencies belong here.
+    for module in ("reframe",):
         importlib.import_module(module)
     discovered = discover_fixtures()
     print(

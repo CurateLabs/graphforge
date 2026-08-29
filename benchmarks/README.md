@@ -115,10 +115,12 @@ fails. An uploaded disqualification is diagnostic evidence, never a green
 qualification.
 
 The hosted workflow evaluates bare Blacksmith and GitHub-hosted Ubuntu 24.04 as
-separate explicit authorities. Each runner uses one root authority for both
-BenchExec's cgroup preflight and the measured fixture because the ephemeral
-runner's normal UID may not be delegated a writable cgroup subtree. Each job is
-independently strict and uploads a provider-labelled evidence document; one
-provider is never a fallback that hides the other's disqualification. Root use
-is recorded as a boolean fact in evidence. It does not disable namespace
-containers, bypass cgroups, or grant authority to a persistent/shared host.
+separate explicit authorities. Both install BenchExec from the official
+SoSy-Lab Ubuntu PPA so its package-managed one-time cgroup setup is the system
+authority; the locked Python workspace does not install its own BenchExec. A
+hard `python3 -m benchexec.check_cgroups` preflight runs before the identical
+ReFrame check, and the measured fixture uses that same system interpreter.
+Each job is independently strict and uploads a provider-labelled evidence
+document; one provider is never a fallback that hides the other's
+disqualification. The workflow does not disable namespace containers, bypass
+cgroups, or add custom permission/systemd workarounds.
