@@ -539,6 +539,8 @@ pub(crate) enum ImportSessionCommand {
     Begin(ImportSessionBeginArgs),
     /// Resume an existing session by UUID.
     Resume(ImportSessionResumeArgs),
+    /// Read durable progress, including a terminal construction receipt.
+    Status(ImportSessionIdArgs),
     /// Register a Parquet source path into the session.
     RegisterParquet(ImportSessionRegisterArgs),
     /// Checkpoint session progress.
@@ -611,6 +613,17 @@ pub(crate) fn run_import_session(
             let session = graph.resume_import_session(canonical_uuid(&args.session_uuid)?)?;
             write_session_receipt(session.session_uuid(), "resumed", json, output)
         }
+        ImportSessionCommand::Status(args) => {
+            let session_uuid = canonical_uuid(&args.session_uuid)?;
+            let (phase, progress) = graph.import_session_status(session_uuid)?;
+            write_progress(
+                session_uuid,
+                &format!("{phase:?}").to_ascii_lowercase(),
+                &progress,
+                json,
+                output,
+            )
+        }
         ImportSessionCommand::RegisterParquet(args) => {
             let mut session = graph.resume_import_session(canonical_uuid(&args.session_uuid)?)?;
             let kind = match args.kind {
@@ -639,6 +652,7 @@ pub(crate) fn run_import_session(
         ImportSessionCommand::Commit(args) => {
             let mut session = graph.resume_import_session(canonical_uuid(&args.session_uuid)?)?;
             let generation = session.commit(graph, None)?;
+            let (_, progress) = session.status();
             if json {
                 write_json(
                     &serde_json::json!({
@@ -646,6 +660,7 @@ pub(crate) fn run_import_session(
                         "outcome": "committed",
                         "session_uuid": session.session_uuid(),
                         "generation_uuid": generation,
+                        "construction": progress.construction,
                     }),
                     output,
                 )
@@ -661,7 +676,7 @@ pub(crate) fn run_import_session(
         ImportSessionCommand::Abort(args) => {
             let session = graph.resume_import_session(canonical_uuid(&args.session_uuid)?)?;
             let session_uuid = session.session_uuid();
-            let progress = session.abort()?;
+            let progress = session.abort(graph)?;
             write_progress(session_uuid, "aborted", &progress, json, output)
         }
         ImportSessionCommand::Cleanup(args) => {
@@ -720,6 +735,7 @@ fn write_progress(
                 "rows_accepted": progress.rows_accepted,
                 "rows_rejected": progress.rows_rejected,
                 "bytes_accepted": progress.bytes_accepted,
+                "construction": progress.construction,
             }),
             output,
         )

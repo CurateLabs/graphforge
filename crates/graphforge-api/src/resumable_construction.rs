@@ -214,6 +214,15 @@ impl GraphConstructionSession<'_> {
         }
     }
 
+    /// Complete global shape and endpoint validation without publishing CURRENT.
+    pub(crate) fn validate_and_seal(
+        &mut self,
+        cancellation: Option<&crate::CancellationToken>,
+    ) -> Result<(), GfError> {
+        self.prepare_encoding(cancellation)?;
+        Ok(())
+    }
+
     /// Seal, shape, encode, and atomically publish exactly one generation.
     pub fn seal_and_publish(&mut self) -> Result<GraphConstructionPublicationReceipt, GfError> {
         self.seal_and_publish_inner(None)
@@ -235,19 +244,7 @@ impl GraphConstructionSession<'_> {
             token.checkpoint()?;
         }
         let _visibility = self.graph.graph_visibility.lock()?;
-        let topology_generation = self.inner.parent_topology_generation().saturating_add(1);
-        let encoding = if self.inner.state() == GraphConstructionState::Staging {
-            self.inner
-                .seal_and_prepare_canonical_encoding_with_cancellation(
-                    topology_generation,
-                    || cancellation.is_some_and(crate::CancellationToken::is_cancelled),
-                )?
-        } else {
-            self.inner
-                .prepare_canonical_encoding_with_cancellation(topology_generation, || {
-                    cancellation.is_some_and(crate::CancellationToken::is_cancelled)
-                })?
-        };
+        let encoding = self.prepare_encoding(cancellation)?;
         if let Some(token) = cancellation {
             token.checkpoint()?;
         }
@@ -323,9 +320,32 @@ impl GraphConstructionSession<'_> {
         })
     }
 
+    fn prepare_encoding(
+        &mut self,
+        cancellation: Option<&crate::CancellationToken>,
+    ) -> Result<graphforge_storage::GraphConstructionEncoding, GfError> {
+        let topology_generation = self.inner.parent_topology_generation().saturating_add(1);
+        if self.inner.state() == GraphConstructionState::Staging {
+            self.inner
+                .seal_and_prepare_canonical_encoding_with_cancellation(topology_generation, || {
+                    cancellation.is_some_and(crate::CancellationToken::is_cancelled)
+                })
+        } else {
+            self.inner
+                .prepare_canonical_encoding_with_cancellation(topology_generation, || {
+                    cancellation.is_some_and(crate::CancellationToken::is_cancelled)
+                })
+        }
+    }
+
     /// Abort an unsealed session without changing project authority.
     pub fn abort(&mut self) -> Result<(), GfError> {
         self.inner.abort()
+    }
+
+    /// Reclaim every authenticated private artifact of an unpublished session.
+    pub(crate) fn discard(self) -> Result<(), GfError> {
+        self.inner.discard()
     }
 }
 

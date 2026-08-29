@@ -2705,6 +2705,51 @@ impl GraphConstructionSession {
         replace_checkpoint_control(&self.root, &self.checkpoint)
     }
 
+    /// Authentically reclaim an unpublished session and every file it owns.
+    ///
+    /// Published or publishing sessions belong to generation recovery and can
+    /// never be discarded through the private staging lifecycle.
+    pub fn discard(mut self) -> Result<(), GfError> {
+        self.revalidate_authority()?;
+        self.recover_intent()?;
+        if matches!(
+            self.checkpoint.publication_state,
+            Some(
+                ConstructionPublicationState::Publishing | ConstructionPublicationState::Published
+            )
+        ) {
+            return Err(storage(
+                "published construction belongs to generation recovery",
+            ));
+        }
+        self.checkpoint.state = GraphConstructionState::Aborted;
+        replace_checkpoint_control(&self.root, &self.checkpoint)?;
+
+        let private = self
+            .project
+            .open_child_directory(OsStr::new(PRIVATE_ROOT))
+            .map_err(storage)?;
+        let operation_name = self.checkpoint.operation_uuid.simple().to_string();
+        let session_identity = self.root.identity();
+        let mut remaining = self
+            .checkpoint
+            .budgets
+            .max_chunks
+            .saturating_mul(16)
+            .saturating_add(
+                u64::try_from(self.checkpoint.budgets.max_schema_groups).unwrap_or(u64::MAX),
+            )
+            .saturating_add(4_096);
+        crate::file_lock::unlock(&self.session_lock).map_err(storage)?;
+        drop(self);
+        remove_owned_directory_tree(
+            &private,
+            OsStr::new(&operation_name),
+            session_identity,
+            &mut remaining,
+        )
+    }
+
     #[allow(clippy::too_many_lines)]
     fn recover_intent(&mut self) -> Result<(), GfError> {
         let mut file = match self.root.open_child_file(OsStr::new(INTENT)) {
@@ -2971,6 +3016,61 @@ impl GraphConstructionSession {
         }
         Ok(())
     }
+}
+
+fn remove_owned_directory_tree(
+    parent: &StableDirectory,
+    name: &OsStr,
+    expected: FileIdentity,
+    remaining: &mut u64,
+) -> Result<(), GfError> {
+    if *remaining == 0 {
+        return Err(storage(
+            "construction discard exceeded authenticated entry bound",
+        ));
+    }
+    *remaining -= 1;
+    let directory = parent.open_child_directory(name).map_err(storage)?;
+    if directory.identity() != expected {
+        return Err(storage("construction discard directory identity changed"));
+    }
+    let child_limit = usize::try_from(*remaining).unwrap_or(usize::MAX);
+    let names = directory
+        .child_names_bounded(child_limit)
+        .map_err(storage)?;
+    for child_name in names {
+        if *remaining == 0 {
+            return Err(storage(
+                "construction discard exceeded authenticated entry bound",
+            ));
+        }
+        *remaining -= 1;
+        match directory.open_child_file(&child_name) {
+            Ok(file) => {
+                let identity = file_identity(&file).map_err(storage)?;
+                drop(file);
+                directory
+                    .unlink_child_if_identity(&child_name, identity)
+                    .map_err(storage)?;
+            }
+            Err(file_error) => {
+                let child = directory
+                    .open_child_directory(&child_name)
+                    .map_err(|directory_error| {
+                        storage(format!(
+                            "construction discard child is neither an authenticated file nor directory: file={file_error}; directory={directory_error}"
+                        ))
+                    })?;
+                let identity = child.identity();
+                drop(child);
+                remove_owned_directory_tree(&directory, &child_name, identity, remaining)?;
+            }
+        }
+    }
+    drop(directory);
+    parent
+        .remove_child_directory_if_identity(name, expected)
+        .map_err(storage)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -10262,6 +10362,33 @@ mod tests {
         session
     }
 
+    fn construction_session_root(root: &TempDir, operation: Uuid) -> PathBuf {
+        root.path()
+            .join(PRIVATE_ROOT)
+            .join(operation.simple().to_string())
+    }
+
+    #[test]
+    fn discard_reclaims_open_and_sealed_session_trees() {
+        for (index, seal) in [false, true].into_iter().enumerate() {
+            let root = TempDir::new().unwrap();
+            let operation = Uuid::from_u128(9_350 + index as u128);
+            let mut session = open(&root, operation.as_u128());
+            session
+                .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 2))
+                .unwrap();
+            if seal {
+                session.seal().unwrap();
+            }
+            let private_root = construction_session_root(&root, operation);
+            assert!(private_root.exists());
+
+            session.discard().unwrap();
+
+            assert!(!private_root.exists());
+        }
+    }
+
     fn publish_empty_generation(
         root: &TempDir,
         target: Uuid,
@@ -10329,6 +10456,14 @@ mod tests {
                 .to_string()
                 .contains("result changed")
         );
+        let private_root = construction_session_root(&root, operation);
+        let error = session.discard().unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("published construction belongs to generation recovery")
+        );
+        assert!(private_root.exists());
     }
 
     #[test]
