@@ -1481,7 +1481,16 @@ fn parse_digest(value: &str) -> Result<[u8; 32], PortableV2Error> {
     Ok(digest)
 }
 
-fn storage(_: GfError) -> PortableV2Error {
+fn storage(error: GfError) -> PortableV2Error {
+    // Temporary native tiny-profile diagnostic. This is enabled only by the
+    // no-secret generated CI fixture and is removed with the root repair.
+    if std::env::var_os("GRAPHFORGE_TINY_LIFECYCLE_DIAGNOSTIC").is_some() {
+        let message = error.to_string().chars().take(512).collect::<String>();
+        eprintln!(
+            "{}",
+            serde_json::json!({"portable_import_internal_diagnostic": message})
+        );
+    }
     PortableV2Error::new(
         PortableV2ErrorCode::Io,
         "portable import publication failed",

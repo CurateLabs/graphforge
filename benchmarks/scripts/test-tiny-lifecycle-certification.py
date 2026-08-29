@@ -48,6 +48,7 @@ def main() -> None:
             environment["PATH"],
         ]
     )
+    environment["GRAPHFORGE_TINY_LIFECYCLE_DIAGNOSTIC"] = "1"
     with tempfile.TemporaryDirectory(prefix="gf-tiny-lifecycle-", dir=workspace_root) as directory:
         work = Path(directory)
         evidence_path = work / "evidence.json"
@@ -111,6 +112,12 @@ def main() -> None:
                         }
                         for line in replay.stderr.splitlines()
                         if (value := json.loads(line))
+                    ],
+                    "internal": [
+                        value["portable_import_internal_diagnostic"]
+                        for line in replay.stderr.splitlines()
+                        if (value := json.loads(line))
+                        and "portable_import_internal_diagnostic" in value
                     ],
                 }
             print(json.dumps({"tiny_lifecycle_failure": diagnostic}, sort_keys=True))
