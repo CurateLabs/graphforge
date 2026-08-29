@@ -130,7 +130,7 @@ class ProgressiveQualificationTests(unittest.TestCase):
         self.assertEqual(select_next(self.profiles, [rung(18), rung(19)], CAPACITY).scale, 20)
         completed = [rung(scale) for scale in (18, 19, 20, 22, 24)]
         self.assertEqual(select_next(self.profiles, completed, CAPACITY).scale, 25)
-        self.assertEqual(select_next(self.profiles, completed + [rung(25)], CAPACITY).scale, 26)
+        self.assertEqual(select_next(self.profiles, [*completed, rung(25)], CAPACITY).scale, 26)
         failed = rung(19) | {"status": "failed", "correctness": False, "failure": "correctness"}
         failed["phases"] = list(PHASES[:6])
         self.rung_schema.validate(failed)

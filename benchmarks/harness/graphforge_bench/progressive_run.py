@@ -21,13 +21,13 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import xml.etree.ElementTree as ET
 from typing import Any
+import xml.etree.ElementTree as ET
 
 from jsonschema import Draft202012Validator
 
-from graphforge_bench.local_admission import qualify_local_host
 from graphforge_bench.benchexec_authority import Limits, normalize_run
+from graphforge_bench.local_admission import qualify_local_host
 from graphforge_bench.progressive_qualification import QualificationError, load_profiles, project
 
 PLAN_SCHEMA = "graphforge-progressive-run-plan/1"
