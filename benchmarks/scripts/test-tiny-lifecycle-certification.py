@@ -94,7 +94,17 @@ def main() -> None:
                 diagnostic["clean_import_replay"] = {
                     "returncode": replay.returncode,
                     "receipts": ordinary,
-                    "stderr_present": bool(replay.stderr),
+                    "error": [
+                        {
+                            "code": value.get("error", {}).get("code"),
+                            "kind": value.get("error", {}).get("details", {}).get("kind"),
+                            "semantic_code": value.get("error", {})
+                            .get("details", {})
+                            .get("semantic_code"),
+                        }
+                        for line in replay.stderr.splitlines()
+                        if (value := json.loads(line))
+                    ],
                 }
             print(json.dumps({"tiny_lifecycle_failure": diagnostic}, sort_keys=True))
             raise SystemExit("real tiny lifecycle certification failed")

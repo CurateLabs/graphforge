@@ -461,11 +461,16 @@ fn import_transient_peak(
     result: &graphforge_api::PortableV2ImportResult,
 ) -> Result<u64, graphforge_api::GfError> {
     if !result.materialized_cleanup_parent_sync_confirmed
-        || result.materialized_cleanup_removed_identity_allocated_bytes
-            != result.materialized_identity_allocated_bytes
+        || result
+            .materialized_cleanup_removed_identity_allocated_bytes
+            .iter()
+            .any(|(identity, allocated)| {
+                result.materialized_identity_allocated_bytes.get(identity) != Some(allocated)
+            })
     {
         return Err(graphforge_api::GfError::Validation(
-            "portable import allocation cleanup did not reconcile".into(),
+            "storage.portable_import_allocation_cleanup: portable import allocation cleanup did not reconcile"
+                .into(),
         ));
     }
     let mut lifecycle = graphforge_storage::StorageAllocationLifecycle::default();
@@ -804,6 +809,11 @@ mod lifecycle_storage_tests {
     #[test]
     fn portable_import_peak_deduplicates_shared_native_identity() {
         assert_eq!(import_transient_peak(&import_result()).unwrap(), 20);
+        let mut result = import_result();
+        result
+            .materialized_cleanup_removed_identity_allocated_bytes
+            .remove("stage");
+        assert_eq!(import_transient_peak(&result).unwrap(), 20);
     }
 
     #[test]
@@ -811,7 +821,12 @@ mod lifecycle_storage_tests {
         let mut result = import_result();
         result
             .materialized_cleanup_removed_identity_allocated_bytes
-            .remove("stage");
+            .insert("foreign".to_owned(), 1);
+        assert!(import_transient_peak(&result).is_err());
+        let mut result = import_result();
+        result
+            .materialized_cleanup_removed_identity_allocated_bytes
+            .insert("stage".to_owned(), 7);
         assert!(import_transient_peak(&result).is_err());
         let mut result = import_result();
         result.materialized_cleanup_parent_sync_confirmed = false;

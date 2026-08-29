@@ -546,8 +546,10 @@ fn execute_process(executable: &str, args: &[String]) -> Result<Execution, Strin
             let stdout = stdout_reader
                 .join()
                 .map_err(|_| "public command stdout reader failed".to_owned())??;
-            let receipts =
-                parse_receipts(&stdout, args.iter().any(|argument| argument == "--json"))?;
+            let receipts = parse_receipts(
+                &stdout,
+                status.success() && args.iter().any(|argument| argument == "--json"),
+            )?;
             return Ok(Execution {
                 exit_code: status.code(),
                 duration_ms: millis(started.elapsed()),
