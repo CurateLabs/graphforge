@@ -1,4 +1,4 @@
-.PHONY: install smoke smoke-python smoke-rust local-admission progressive-qualification-list progressive-qualification-plan progressive-qualification-run progressive-qualification-project-s20 progressive-qualification-binaries
+.PHONY: install smoke smoke-python smoke-rust fly-adapter-static local-admission progressive-qualification-list progressive-qualification-plan progressive-qualification-run progressive-qualification-project-s20 progressive-qualification-binaries
 
 install:
 	uv sync --locked
@@ -14,6 +14,9 @@ smoke-rust: install
 	CARGO_TARGET_DIR=$(CURDIR)/target cargo clippy --workspace --locked -- -D warnings
 	CARGO_TARGET_DIR=$(CURDIR)/target cargo test --locked --manifest-path Cargo.toml
 	PYTHONPATH=harness uv run --locked python -m graphforge_bench.check_rust_graph
+
+fly-adapter-static: install
+	PYTHONPATH=harness uv run --locked python -m unittest tests.test_fly_adapter
 
 local-admission: install
 	PYTHONPATH=$(CURDIR)/harness uv run --locked reframe -C reframe/settings.py -c reframe/checks -n '^LocalBenchExecAdmission$$' -l | grep -F LocalBenchExecAdmission

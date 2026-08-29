@@ -98,6 +98,30 @@ Generated datasets, credentials, execution outputs, and local environments are
 ignored. Fly execution is forbidden until the complete benchmark stack is
 merged and has passed local and hosted qualification.
 
+## Disposable Fly adapter
+
+`graphforge_bench.fly_adapter` is an offline command planner, not another
+benchmark controller. It requires merged #955/#956/#957 attestations, a full
+commit, an immutable `registry.fly.io/...@sha256:...` image, a fixed region,
+an explicitly measured Machine class, and an explicit maximum authorized
+scale. It accepts the controller's lifecycle argv and checked-in profile
+identity unchanged. It cannot select a rung, alter a threshold, or retrieve
+anything except allowlisted sanitized JSON evidence.
+
+The planned provider lifecycle is one remotely built image, one private app,
+one encrypted volume, and one Machine with no services. The Machine remains
+alive only so evidence can be retrieved from its attached volume; restart and
+Fly Proxy autostop are disabled. Teardown uses a persisted ownership ledger and
+is safe to repeat. Static tests launch nothing:
+
+```bash
+make -C benchmarks fly-adapter-static
+```
+
+The adapter remains disabled until #956 is complete. The tiny provider
+qualification and independent post-teardown inventory are separate live
+acceptance evidence and are not claimed by these fixtures.
+
 ## Smoke
 
 From the repository root:
