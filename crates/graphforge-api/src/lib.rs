@@ -7074,7 +7074,8 @@ mod tests {
             let publication = graph.graph_visibility.lock().expect("publication lock");
             let ready = std::sync::Barrier::new(2);
             let (sent, received) = mpsc::channel();
-            scope.spawn(|| {
+            let graph = &graph;
+            scope.spawn(move || {
                 ready.wait();
                 sent.send(graph.explain("MATCH (n:Person) RETURN n.node_uuid"))
                     .expect("send explain result");
@@ -7095,7 +7096,8 @@ mod tests {
             let publication = graph.graph_visibility.lock().expect("publication lock");
             let ready = std::sync::Barrier::new(2);
             let (sent, received) = mpsc::channel();
-            scope.spawn(|| {
+            let graph = &graph;
+            scope.spawn(move || {
                 ready.wait();
                 let result = graph
                     .execute_stream("MATCH (n:Person) RETURN n.node_uuid")
