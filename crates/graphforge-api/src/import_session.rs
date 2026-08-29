@@ -1,12 +1,10 @@
 //! Durable, bounded staged graph-import sessions (#738).
 
-use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, BufWriter, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use arrow::array::{Array, FixedSizeBinaryArray};
 use arrow::ipc::reader::FileReader as ArrowFileReader;
 use arrow::ipc::writer::FileWriter as ArrowFileWriter;
 use arrow::record_batch::RecordBatch;
@@ -16,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::{BulkInputKind, CancellationToken, GraphForge, OperationId};
+use crate::{BulkInputKind, CancellationToken, GraphConstructionBudgets, GraphForge, OperationId};
 
 const FORMAT_VERSION: u32 = 1;
 const SESSION_DIR: &str = "import-sessions";
@@ -40,7 +38,7 @@ pub struct ImportSessionLimits {
 impl Default for ImportSessionLimits {
     fn default() -> Self {
         Self {
-            batch_rows: 8_192,
+            batch_rows: GraphConstructionBudgets::default().max_batch_rows,
             max_source_bytes: 1 << 40,
             max_files: 100_000,
             max_rejected_rows: 1_000,
@@ -124,6 +122,40 @@ pub struct ImportProgress {
     pub peak_batch_rows: u64,
     /// Configured source-reader concurrency bound.
     pub io_concurrency_limit: u64,
+    /// Durable, content-free evidence from the ordinary graph-construction path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub construction: Option<ImportConstructionEvidence>,
+}
+
+/// Sanitized durable construction evidence for an ordinary staged import.
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub struct ImportConstructionEvidence {
+    /// Configured authoritative construction chunk budget.
+    pub configured_batch_rows: u64,
+    /// Number of durably accepted construction chunks.
+    pub accepted_chunks: u64,
+    /// Whether the sole generation publication was committed.
+    pub publication_committed: bool,
+    /// Exact application-I/O attribution across the closed construction phases.
+    pub application_io: graphforge_storage::ConstructionPhaseAttribution,
+    /// Exact accepted input rows.
+    pub input_rows: u64,
+    /// Exact non-replay input batches.
+    pub input_batches: u64,
+    /// Immutable construction artifacts accepted from authenticated receipts.
+    pub immutable_artifacts: u64,
+    /// Application payload bytes submitted by construction artifact writers.
+    pub write_bytes: u64,
+    /// Application write submissions by construction artifact writers.
+    pub write_operations: u64,
+    /// File and directory durability barriers completed by construction.
+    pub fsync_operations: u64,
+    /// Largest retained Arrow row window.
+    pub peak_batch_rows: u64,
+    /// Largest retained Arrow byte window.
+    pub peak_batch_bytes: u64,
+    /// Exact transient allocation high-water retained across resume.
+    pub transient_peak_allocated_bytes: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -151,6 +183,8 @@ struct SessionManifest {
     progress: ImportProgress,
     sources: Vec<SourceRecord>,
     #[serde(default)]
+    construction_session_uuid: Option<Uuid>,
+    #[serde(default)]
     updated_unix_millis: u64,
 }
 
@@ -177,15 +211,6 @@ impl GraphForge {
             ));
         }
         fs::create_dir_all(root.join("sources")).map_err(storage)?;
-        copy_tree(&self.dir, &root.join("graph"))?;
-        if !graphforge_storage::uuid_membership_index_is_fresh(&root.join("graph"))? {
-            graphforge_storage::rebuild_uuid_membership_indexes(
-                &root.join("graph"),
-                graphforge_storage::UuidIndexBuildLimits::default(),
-            )?;
-        }
-        File::create(root.join("nodes.uuidx")).map_err(storage)?;
-        File::create(root.join("edges.uuidx")).map_err(storage)?;
         let manifest = SessionManifest {
             format_version: FORMAT_VERSION,
             session_uuid,
@@ -201,6 +226,7 @@ impl GraphForge {
                 ..ImportProgress::default()
             },
             sources: Vec::new(),
+            construction_session_uuid: None,
             updated_unix_millis: unix_millis()?,
         };
         write_manifest(&root, &manifest)?;
@@ -229,6 +255,19 @@ impl GraphForge {
             manifest,
             observed: Instant::now(),
         })
+    }
+
+    /// Reopen the durable, content-free status of any import session, including terminal ones.
+    pub fn import_session_status(
+        &self,
+        session_uuid: Uuid,
+    ) -> Result<(ImportPhase, ImportProgress), GfError> {
+        let root = import_root(self, session_uuid)?;
+        let manifest = read_manifest(&root)?;
+        if manifest.format_version != FORMAT_VERSION || manifest.session_uuid != session_uuid {
+            return Err(validation("incompatible or mismatched import manifest"));
+        }
+        Ok((manifest.phase, manifest.progress))
     }
 
     /// Abort and remove durable staging for non-terminal sessions older than `max_age`.
@@ -261,7 +300,7 @@ impl GraphForge {
             manifest.phase = ImportPhase::Aborted;
             manifest.updated_unix_millis = now;
             write_manifest(&root, &manifest)?;
-            for path in [root.join("sources"), root.join("graph")] {
+            for path in [root.join("sources")] {
                 if path.exists() {
                     fs::remove_dir_all(path).map_err(storage)?;
                 }
@@ -269,99 +308,6 @@ impl GraphForge {
             cleaned = cleaned.saturating_add(1);
         }
         Ok(cleaned)
-    }
-
-    fn publish_import_tree(
-        &self,
-        staged_graph: &Path,
-        operation_uuid: Uuid,
-        expected_parent: Uuid,
-        cancellation: Option<&CancellationToken>,
-    ) -> Result<Uuid, GfError> {
-        use graphforge_storage::{
-            ProjectCapability, ProjectGenerationRequest, ProjectStageOutcome,
-        };
-
-        let _visibility = self.graph_visibility.acquire(cancellation)?;
-        cancellation.map_or(Ok(()), CancellationToken::checkpoint)?;
-        let container = self.resolved_generation.container_root();
-        let parent = graphforge_storage::resolve_project_generation(container)?;
-        parent.validate_complete_participant_inventory()?;
-        if parent.generation_uuid() != expected_parent {
-            return Err(validation(
-                "project generation changed before import commit",
-            ));
-        }
-        if !graphforge_storage::uuid_membership_index_is_fresh(staged_graph)? {
-            graphforge_storage::rebuild_uuid_membership_indexes(
-                staged_graph,
-                graphforge_storage::UuidIndexBuildLimits::default(),
-            )?;
-        }
-        let graph_files = graphforge_storage::capture_graph_files(staged_graph)?.1;
-        let recorded_at = (self.clock.lock().expect("clock lock poisoned"))()?;
-        let receipt = graphforge_exec::MutationReceipt::default();
-        let participants = super::graph_publication_participants(
-            &parent,
-            graph_files,
-            self.semantic_storage_bindings
-                .lock()
-                .expect("semantic storage binding lock poisoned")
-                .as_ref(),
-            parent.capability("provenance")?.is_some(),
-            &receipt,
-            operation_uuid,
-            None,
-            recorded_at,
-        )?;
-        let generation_uuid = super::mutation_generation_uuid(operation_uuid, &participants);
-        let request = ProjectGenerationRequest {
-            transaction_uuid: operation_uuid,
-            generation_uuid,
-            capabilities: parent
-                .capabilities()
-                .into_iter()
-                .map(|capability| ProjectCapability {
-                    capability_id: capability.capability_id,
-                    capability_version: capability.capability_version,
-                })
-                .collect(),
-            participants,
-        };
-        cancellation.map_or(Ok(()), CancellationToken::checkpoint)?;
-        let publication = match graphforge_storage::stage_project_generation_with_graph_tree_mode(
-            container,
-            &request,
-            Some(staged_graph),
-            self.lifecycle_mode,
-        )? {
-            ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
-            ProjectStageOutcome::Staged(staged) => staged
-                .validate(
-                    |_| Ok(()),
-                    |actual_parent, _| {
-                        if actual_parent.generation_uuid() != expected_parent {
-                            return Err(validation(
-                                "project generation changed before import publication",
-                            ));
-                        }
-                        Ok(())
-                    },
-                )?
-                .publish()?,
-        };
-        *self
-            .current_generation_uuid
-            .lock()
-            .expect("generation UUID lock poisoned") = publication.generation_uuid;
-        let resolved = graphforge_storage::resolve_project_generation(container)?;
-        super::rematerialize_graph_workspace(&resolved, &self.dir)?;
-        *self
-            .runtime_catalog
-            .lock()
-            .expect("runtime catalog poisoned") = super::load_runtime_catalog(&self.dir)?;
-        self.adjacency_provider.invalidate();
-        Ok(publication.generation_uuid)
     }
 }
 
@@ -487,6 +433,9 @@ impl GraphImportSession {
     ) -> Result<ImportProgress, GfError> {
         self.ensure_open()?;
         self.ensure_base(graph)?;
+        let mut construction = self.open_construction(graph)?;
+        let session_root = self.root.clone();
+        let batch_rows = self.manifest.limits.batch_rows;
         for input_kind in [BulkInputKind::Node, BulkInputKind::Edge] {
             for source_index in 0..self.manifest.sources.len() {
                 let source = self.manifest.sources[source_index].clone();
@@ -494,74 +443,80 @@ impl GraphImportSession {
                     continue;
                 }
                 let mut batch_index = 0_u64;
-                for_each_source_batch(
-                    &self.root,
-                    &source,
-                    self.manifest.limits.batch_rows,
-                    |batch| {
-                        if batch_index < source.batches_staged {
-                            batch_index += 1;
-                            return Ok(());
-                        }
-                        if cancellation.is_some_and(CancellationToken::is_cancelled) {
-                            return Err(cancelled());
-                        }
-                        let operation = import_batch_operation(
-                            self.manifest.operation_uuid,
-                            source.sequence,
-                            batch_index,
-                        );
-                        let recovering = source.inflight_batch == Some(batch_index);
-                        if !recovering {
-                            self.manifest.sources[source_index].inflight_batch = Some(batch_index);
-                            write_manifest(&self.root, &self.manifest)?;
-                        }
-                        let staged = match input_kind {
-                            BulkInputKind::Node => {
-                                stage_node_batch(graph, &self.root, operation, &batch, recovering)
-                            }
-                            BulkInputKind::Edge => {
-                                stage_edge_batch(graph, &self.root, operation, &batch, recovering)
-                            }
-                        };
-                        if let Err(error) = staged {
-                            self.manifest.sources[source_index].inflight_batch = None;
-                            let remaining = self
-                                .manifest
-                                .limits
-                                .max_rejected_rows
-                                .saturating_sub(self.manifest.progress.rows_rejected);
-                            self.manifest.progress.rows_rejected = self
-                                .manifest
-                                .progress
-                                .rows_rejected
-                                .saturating_add((batch.num_rows() as u64).min(remaining));
-                            write_manifest(&self.root, &self.manifest)?;
-                            return Err(error);
-                        }
+                for_each_source_batch(&session_root, &source, batch_rows, |batch| {
+                    if batch_index < source.batches_staged {
                         batch_index += 1;
-                        self.manifest.sources[source_index].batches_staged = batch_index;
-                        self.manifest.sources[source_index].inflight_batch = None;
-                        self.manifest.progress.rows_accepted = self
-                            .manifest
-                            .progress
-                            .rows_accepted
-                            .saturating_add(batch.num_rows() as u64);
-                        self.manifest.progress.peak_batch_rows = self
-                            .manifest
-                            .progress
-                            .peak_batch_rows
-                            .max(batch.num_rows() as u64);
+                        return Ok(());
+                    }
+                    if cancellation.is_some_and(CancellationToken::is_cancelled) {
+                        return Err(cancelled());
+                    }
+                    let operation = import_batch_operation(
+                        self.manifest.operation_uuid,
+                        source.sequence,
+                        batch_index,
+                    );
+                    let batch = match input_kind {
+                        BulkInputKind::Node => graph.normalize_import_node_chunk(operation, &batch),
+                        BulkInputKind::Edge => graph.normalize_import_edge_chunk(operation, &batch),
+                    }
+                    .map_err(|error| validation(error.to_string()))?;
+                    let recovering = source.inflight_batch == Some(batch_index);
+                    if !recovering {
+                        self.manifest.sources[source_index].inflight_batch = Some(batch_index);
                         write_manifest(&self.root, &self.manifest)?;
-                        Ok(())
-                    },
-                )?;
+                    }
+                    let chunk_id = format!("import-{:020}-{:020}", source.sequence, batch_index);
+                    let staged = match (input_kind, cancellation) {
+                        (BulkInputKind::Node, Some(token)) => {
+                            construction.append_nodes_with_cancellation(&chunk_id, &batch, token)
+                        }
+                        (BulkInputKind::Node, None) => construction.append_nodes(&chunk_id, &batch),
+                        (BulkInputKind::Edge, Some(token)) => {
+                            construction.append_edges_with_cancellation(&chunk_id, &batch, token)
+                        }
+                        (BulkInputKind::Edge, None) => construction.append_edges(&chunk_id, &batch),
+                    };
+                    if let Err(error) = staged {
+                        self.manifest.sources[source_index].inflight_batch = None;
+                        let remaining = self
+                            .manifest
+                            .limits
+                            .max_rejected_rows
+                            .saturating_sub(self.manifest.progress.rows_rejected);
+                        self.manifest.progress.rows_rejected = self
+                            .manifest
+                            .progress
+                            .rows_rejected
+                            .saturating_add((batch.num_rows() as u64).min(remaining));
+                        write_manifest(&self.root, &self.manifest)?;
+                        return Err(error);
+                    }
+                    batch_index += 1;
+                    self.manifest.sources[source_index].batches_staged = batch_index;
+                    self.manifest.sources[source_index].inflight_batch = None;
+                    self.manifest.progress.rows_accepted = self
+                        .manifest
+                        .progress
+                        .rows_accepted
+                        .saturating_add(batch.num_rows() as u64);
+                    self.manifest.progress.peak_batch_rows = self
+                        .manifest
+                        .progress
+                        .peak_batch_rows
+                        .max(batch.num_rows() as u64);
+                    self.update_construction_progress(&construction.progress())?;
+                    write_manifest(&self.root, &self.manifest)?;
+                    Ok(())
+                })?;
                 self.manifest.sources[source_index].staged = true;
                 self.manifest.progress.files_pending =
                     self.manifest.progress.files_pending.saturating_sub(1);
                 write_manifest(&self.root, &self.manifest)?;
             }
         }
+        construction.validate_and_seal(cancellation)?;
+        self.update_construction_progress(&construction.progress())?;
         self.manifest.phase = ImportPhase::Validated;
         self.checkpoint()
     }
@@ -574,7 +529,7 @@ impl GraphImportSession {
         self.manifest.phase = ImportPhase::Aborted;
         self.checkpoint()?;
         let progress = self.manifest.progress.clone();
-        let cleanup = [self.root.join("sources"), self.root.join("graph")]
+        let cleanup = [self.root.join("sources")]
             .into_iter()
             .try_for_each(|path| {
                 if path.exists() {
@@ -599,29 +554,20 @@ impl GraphImportSession {
         graph: &GraphForge,
         cancellation: Option<&CancellationToken>,
     ) -> Result<Uuid, GfError> {
-        if let Some(published) = graphforge_storage::published_project_transaction(
-            graph.resolved_generation.container_root(),
-            self.manifest.operation_uuid,
-        )? {
-            self.manifest.phase = ImportPhase::Committed;
-            self.checkpoint()?;
-            return Ok(published.generation_uuid);
-        }
-        self.ensure_base(graph)?;
         if self.manifest.phase != ImportPhase::Validated
             || self.manifest.progress.files_pending != 0
         {
             return Err(validation("import must be fully validated before commit"));
         }
-        let generation = graph.publish_import_tree(
-            &self.root.join("graph"),
-            self.manifest.operation_uuid,
-            self.manifest.base_generation_uuid,
-            cancellation,
-        )?;
+        let mut construction = self.open_construction(graph)?;
+        let publication = match cancellation {
+            Some(token) => construction.seal_and_publish_with_cancellation(token)?,
+            None => construction.seal_and_publish()?,
+        };
+        self.update_construction_progress(&construction.progress())?;
         self.manifest.phase = ImportPhase::Committed;
         self.checkpoint()?;
-        Ok(generation)
+        Ok(publication.generation_uuid)
     }
 
     fn ensure_open(&self) -> Result<(), GfError> {
@@ -643,6 +589,57 @@ impl GraphImportSession {
         if current != self.manifest.base_generation_uuid {
             return Err(validation("project generation changed since import began"));
         }
+        Ok(())
+    }
+
+    fn construction_budgets(&self) -> GraphConstructionBudgets {
+        let mut budgets = GraphConstructionBudgets::default();
+        budgets.max_batch_rows = self.manifest.limits.batch_rows;
+        budgets.max_run_records = budgets
+            .max_run_records
+            .max(self.manifest.limits.batch_rows.saturating_mul(4));
+        budgets
+    }
+
+    fn open_construction<'a>(
+        &mut self,
+        graph: &'a GraphForge,
+    ) -> Result<crate::GraphConstructionSession<'a>, GfError> {
+        let budgets = self.construction_budgets();
+        if let Some(session_uuid) = self.manifest.construction_session_uuid {
+            return graph.resume_graph_construction(session_uuid, budgets);
+        }
+        let session = graph.begin_graph_construction(budgets)?;
+        self.manifest.construction_session_uuid = Some(session.session_uuid());
+        write_manifest(&self.root, &self.manifest)?;
+        Ok(session)
+    }
+
+    fn update_construction_progress(
+        &mut self,
+        progress: &crate::GraphConstructionProgress,
+    ) -> Result<(), GfError> {
+        let application_io =
+            graphforge_storage::ConstructionPhaseAttribution::from_construction(&progress.evidence);
+        application_io.validate_for_qualification()?;
+        self.manifest.progress.construction = Some(ImportConstructionEvidence {
+            configured_batch_rows: u64::try_from(self.manifest.limits.batch_rows)
+                .unwrap_or(u64::MAX),
+            accepted_chunks: progress.accepted_chunks,
+            publication_committed: progress.publication_committed,
+            application_io,
+            input_rows: progress.evidence.input_rows,
+            input_batches: progress.evidence.input_batches,
+            immutable_artifacts: progress.evidence.immutable_artifacts,
+            write_bytes: progress.evidence.write_bytes,
+            write_operations: progress.evidence.write_operations,
+            fsync_operations: progress.evidence.fsync_operations,
+            peak_batch_rows: progress.evidence.peak_batch_rows,
+            peak_batch_bytes: progress.evidence.peak_batch_bytes,
+            transient_peak_allocated_bytes: progress
+                .evidence
+                .storage_transient_peak_total_allocated_bytes,
+        });
         Ok(())
     }
 
@@ -690,286 +687,6 @@ fn unix_millis() -> Result<u64, GfError> {
             .as_millis(),
     )
     .unwrap_or(u64::MAX))
-}
-
-fn stage_node_batch(
-    graph: &GraphForge,
-    root: &Path,
-    operation: OperationId,
-    batch: &RecordBatch,
-    allow_replay: bool,
-) -> Result<(), GfError> {
-    let graph_dir = root.join("graph");
-    let normalized = graph
-        .normalize_import_nodes(operation, std::slice::from_ref(batch))
-        .map_err(|error| validation(error.to_string()))?;
-    let candidates = normalized
-        .rows()
-        .iter()
-        .map(|row| row.node_uuid)
-        .collect::<Vec<_>>();
-    let base_nodes = graph
-        .import_base_membership(
-            &candidates,
-            graphforge_storage::UuidIndexKind::Node,
-            BulkInputKind::Node,
-        )
-        .map_err(|error| validation(error.to_string()))?;
-    let base_edges = graph
-        .import_base_membership(
-            &candidates,
-            graphforge_storage::UuidIndexKind::Edge,
-            BulkInputKind::Node,
-        )
-        .map_err(|error| validation(error.to_string()))?;
-    let session_nodes = probe_session_index(&root.join("nodes.uuidx"), &candidates)?;
-    let session_edges = probe_session_index(&root.join("edges.uuidx"), &candidates)?;
-    if allow_replay
-        && session_nodes.iter().all(|found| *found)
-        && base_nodes.iter().all(|found| !*found)
-        && base_edges.iter().all(|found| !*found)
-        && session_edges.iter().all(|found| !*found)
-    {
-        return Ok(());
-    }
-    if base_nodes
-        .iter()
-        .chain(&base_edges)
-        .chain(&session_nodes)
-        .chain(&session_edges)
-        .any(|found| *found)
-    {
-        return Err(validation(
-            "import node UUID conflicts with staged graph identity",
-        ));
-    }
-    let mut catalog = super::load_runtime_catalog(&graph_dir)?;
-    let mut writer = graphforge_storage::GraphWriter::open(&graph_dir, graph.ontology_mode)?;
-    for row in normalized.rows() {
-        let type_id = graph
-            .ontology
-            .as_ref()
-            .and_then(|ontology| ontology.entity_type_id(&row.label))
-            .unwrap_or_else(|| {
-                graphforge_ir::runtime_entity_type_id(catalog.intern_label(&row.label))
-            });
-        writer.create_node(row.node_uuid, type_id)?;
-        let properties = row
-            .properties
-            .iter()
-            .map(|(name, value)| {
-                catalog.intern_property(name, Some(&row.label));
-                Ok((name.clone(), crate::construction::prop_literal(value)?))
-            })
-            .collect::<Result<HashMap<_, _>, GfError>>()?;
-        if !properties.is_empty() {
-            writer.set_properties(&row.node_uuid, Some(&row.label), properties)?;
-        }
-    }
-    writer.flush()?;
-    super::persist_runtime_catalog(&graph_dir, &catalog)?;
-    merge_session_index(&root.join("nodes.uuidx"), &candidates)?;
-    Ok(())
-}
-
-fn stage_edge_batch(
-    graph: &GraphForge,
-    root: &Path,
-    operation: OperationId,
-    batch: &RecordBatch,
-    allow_replay: bool,
-) -> Result<(), GfError> {
-    let graph_dir = root.join("graph");
-    let endpoints = batch_endpoint_uuids(batch)?;
-    let imported_found = probe_session_index(&root.join("nodes.uuidx"), &endpoints)?;
-    let imported_endpoints = endpoints
-        .iter()
-        .zip(imported_found)
-        .filter_map(|(candidate, found)| found.then_some(*candidate))
-        .collect::<BTreeSet<_>>();
-    let normalized = graph
-        .normalize_import_edges(operation, std::slice::from_ref(batch), &imported_endpoints)
-        .map_err(|error| validation(error.to_string()))?;
-    let candidates = normalized
-        .rows()
-        .iter()
-        .map(|row| row.edge_uuid)
-        .collect::<Vec<_>>();
-    let base_edges = graph
-        .import_base_membership(
-            &candidates,
-            graphforge_storage::UuidIndexKind::Edge,
-            BulkInputKind::Edge,
-        )
-        .map_err(|error| validation(error.to_string()))?;
-    let base_nodes = graph
-        .import_base_membership(
-            &candidates,
-            graphforge_storage::UuidIndexKind::Node,
-            BulkInputKind::Edge,
-        )
-        .map_err(|error| validation(error.to_string()))?;
-    let session_edges = probe_session_index(&root.join("edges.uuidx"), &candidates)?;
-    let session_nodes = probe_session_index(&root.join("nodes.uuidx"), &candidates)?;
-    if allow_replay
-        && session_edges.iter().all(|found| *found)
-        && base_edges.iter().all(|found| !*found)
-        && base_nodes.iter().all(|found| !*found)
-        && session_nodes.iter().all(|found| !*found)
-    {
-        return Ok(());
-    }
-    if base_edges
-        .iter()
-        .chain(&base_nodes)
-        .chain(&session_edges)
-        .chain(&session_nodes)
-        .any(|found| *found)
-    {
-        return Err(validation(
-            "import edge UUID conflicts with staged graph identity",
-        ));
-    }
-    let mut catalog = super::load_runtime_catalog(&graph_dir)?;
-    let mut writer = graphforge_storage::GraphWriter::open(&graph_dir, graph.ontology_mode)?;
-    let endpoints = normalized
-        .rows()
-        .iter()
-        .flat_map(|row| [row.source_uuid, row.target_uuid])
-        .collect::<BTreeSet<_>>();
-    crate::bulk_construction::register_existing_endpoints(&mut writer, &graph_dir, &endpoints)?;
-    for row in normalized.rows() {
-        catalog.intern_relation_type(&row.rel_type);
-        writer.create_edge(
-            row.edge_uuid,
-            &row.rel_type,
-            &row.source_uuid,
-            &row.target_uuid,
-        )?;
-        let properties = row
-            .properties
-            .iter()
-            .map(|(name, value)| {
-                catalog.intern_property(name, Some(&row.rel_type));
-                Ok((name.clone(), crate::construction::prop_literal(value)?))
-            })
-            .collect::<Result<HashMap<_, _>, GfError>>()?;
-        if !properties.is_empty() {
-            writer.set_edge_properties(&row.edge_uuid, Some(&row.rel_type), properties)?;
-        }
-    }
-    writer.flush()?;
-    super::persist_runtime_catalog(&graph_dir, &catalog)?;
-    merge_session_index(&root.join("edges.uuidx"), &candidates)?;
-    Ok(())
-}
-
-fn batch_endpoint_uuids(batch: &RecordBatch) -> Result<Vec<Uuid>, GfError> {
-    let mut endpoints = Vec::with_capacity(batch.num_rows().saturating_mul(2));
-    for name in ["source_uuid", "target_uuid"] {
-        let column = batch
-            .column_by_name(name)
-            .ok_or_else(|| validation(format!("missing {name}")))?;
-        let values = column
-            .as_any()
-            .downcast_ref::<FixedSizeBinaryArray>()
-            .ok_or_else(|| validation(format!("{name} must be fixed-size binary")))?;
-        for row in 0..values.len() {
-            endpoints.push(Uuid::from_slice(values.value(row)).map_err(storage)?);
-        }
-    }
-    endpoints.sort_unstable();
-    endpoints.dedup();
-    Ok(endpoints)
-}
-
-fn probe_session_index(path: &Path, candidates: &[Uuid]) -> Result<Vec<bool>, GfError> {
-    let mut file = File::open(path).map_err(storage)?;
-    let bytes = file.metadata().map_err(storage)?.len();
-    if bytes % 16 != 0 {
-        return Err(validation("corrupt import membership index"));
-    }
-    let count = bytes / 16;
-    candidates
-        .iter()
-        .map(|candidate| {
-            let mut low = 0_u64;
-            let mut high = count;
-            let needle = candidate.as_bytes();
-            let mut slot = [0_u8; 16];
-            while low < high {
-                let mid = low + (high - low) / 2;
-                file.seek(SeekFrom::Start(mid * 16)).map_err(storage)?;
-                file.read_exact(&mut slot).map_err(storage)?;
-                match slot.cmp(needle) {
-                    std::cmp::Ordering::Less => low = mid + 1,
-                    std::cmp::Ordering::Greater => high = mid,
-                    std::cmp::Ordering::Equal => return Ok(true),
-                }
-            }
-            Ok(false)
-        })
-        .collect()
-}
-
-fn merge_session_index(path: &Path, candidates: &[Uuid]) -> Result<(), GfError> {
-    let mut additions = candidates.to_vec();
-    additions.sort_unstable();
-    additions.dedup();
-    let old_file = File::open(path).map_err(storage)?;
-    if old_file.metadata().map_err(storage)?.len() % 16 != 0 {
-        return Err(validation("corrupt import membership index"));
-    }
-    let temp = path.with_extension("uuidx.tmp");
-    let mut output = BufWriter::new(File::create(&temp).map_err(storage)?);
-    let mut old = BufReader::new(old_file);
-    let mut old_value = read_index_uuid(&mut old)?;
-    let mut new_values = additions.iter().peekable();
-    while old_value.is_some() || new_values.peek().is_some() {
-        match (old_value, new_values.peek()) {
-            (Some(current), Some(new_value)) if current <= *new_value.as_bytes() => {
-                output.write_all(&current).map_err(storage)?;
-                old_value = read_index_uuid(&mut old)?;
-            }
-            (_, Some(new_value)) => {
-                output.write_all(new_value.as_bytes()).map_err(storage)?;
-                new_values.next();
-            }
-            (Some(current), None) => {
-                output.write_all(&current).map_err(storage)?;
-                old_value = read_index_uuid(&mut old)?;
-            }
-            (None, None) => break,
-        }
-    }
-    output.flush().map_err(storage)?;
-    output.get_ref().sync_all().map_err(storage)?;
-    drop(output);
-    fs::rename(temp, path).map_err(storage)
-}
-
-fn read_index_uuid(reader: &mut BufReader<File>) -> Result<Option<[u8; 16]>, GfError> {
-    if reader.fill_buf().map_err(storage)?.is_empty() {
-        return Ok(None);
-    }
-    let mut value = [0_u8; 16];
-    reader.read_exact(&mut value).map_err(storage)?;
-    Ok(Some(value))
-}
-
-fn import_batch_operation(base: Uuid, source: u64, batch: u64) -> OperationId {
-    let mut digest = Sha256::new();
-    digest.update(b"graphforge.import.batch.v1\0");
-    digest.update(base.as_bytes());
-    digest.update(source.to_be_bytes());
-    digest.update(batch.to_be_bytes());
-    let digest = digest.finalize();
-    let mut bytes = [0_u8; 16];
-    bytes[..6].copy_from_slice(&base.as_bytes()[..6]);
-    bytes[6..].copy_from_slice(&digest[..10]);
-    bytes[6] = (bytes[6] & 0x0f) | 0x70;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    OperationId(Uuid::from_bytes(bytes))
 }
 
 fn for_each_source_batch(
@@ -1063,24 +780,19 @@ fn reject_unsafe_path(path: &Path) -> Result<(), GfError> {
     Ok(())
 }
 
-fn copy_tree(source: &Path, destination: &Path) -> Result<(), GfError> {
-    fs::create_dir_all(destination).map_err(storage)?;
-    for entry in fs::read_dir(source).map_err(storage)? {
-        let entry = entry.map_err(storage)?;
-        let file_type = entry.file_type().map_err(storage)?;
-        if file_type.is_symlink() {
-            return Err(validation("staged graph copy refuses symlink entries"));
-        }
-        let target = destination.join(entry.file_name());
-        if file_type.is_dir() {
-            copy_tree(&entry.path(), &target)?;
-        } else if file_type.is_file() {
-            fs::copy(entry.path(), &target).map_err(storage)?;
-        } else {
-            return Err(validation("staged graph copy refuses special files"));
-        }
-    }
-    Ok(())
+fn import_batch_operation(base: Uuid, source: u64, batch: u64) -> OperationId {
+    let mut digest = Sha256::new();
+    digest.update(b"graphforge.import.batch.v1\0");
+    digest.update(base.as_bytes());
+    digest.update(source.to_be_bytes());
+    digest.update(batch.to_be_bytes());
+    let digest = digest.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes[..6].copy_from_slice(&base.as_bytes()[..6]);
+    bytes[6..].copy_from_slice(&digest[..10]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x70;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    OperationId(Uuid::from_bytes(bytes))
 }
 
 fn sync_file(path: &Path) -> Result<(), GfError> {
@@ -1323,14 +1035,28 @@ mod tests {
             .append_arrow(BulkInputKind::Node, std::slice::from_ref(&batch))
             .unwrap();
         let batch_operation = import_batch_operation(operation.0, 0, 0);
-        stage_node_batch(&graph, &session.root, batch_operation, &batch, false).unwrap();
+        let normalized = graph
+            .normalize_import_node_chunk(batch_operation, &batch)
+            .unwrap();
+        let mut construction = session.open_construction(&graph).unwrap();
+        construction
+            .append_nodes(
+                "import-00000000000000000000-00000000000000000000",
+                &normalized,
+            )
+            .unwrap();
+        drop(construction);
         session.manifest.sources[0].inflight_batch = Some(0);
         write_manifest(&session.root, &session.manifest).unwrap();
         let session_uuid = session.session_uuid();
         drop(session);
 
         let mut resumed = graph.resume_import_session(session_uuid).unwrap();
-        assert_eq!(resumed.validate(&graph).unwrap().rows_accepted, 1);
+        let progress = resumed.validate(&graph).unwrap();
+        assert_eq!(progress.rows_accepted, 1);
+        let construction = progress.construction.unwrap();
+        assert_eq!(construction.accepted_chunks, 1);
+        assert_eq!(construction.input_batches, 1);
         drop(resumed);
 
         let mut manifest = read_manifest(&import_root(&graph, session_uuid).unwrap()).unwrap();
@@ -1343,8 +1069,81 @@ mod tests {
             1
         );
         let root = import_root(&graph, session_uuid).unwrap();
-        assert!(!root.join("graph").exists());
         assert!(!root.join("sources").exists());
         assert_eq!(read_manifest(&root).unwrap().phase, ImportPhase::Aborted);
+    }
+
+    #[test]
+    fn parquet_construction_receipts_scale_linearly_and_survive_reopen() {
+        assert_eq!(ImportSessionLimits::default().batch_rows, 65_536);
+
+        fn run(multiplier: usize) -> ImportConstructionEvidence {
+            let (_directory, project, graph) = fixture();
+            let source_dir = tempfile::tempdir().unwrap();
+            let parquet = source_dir.path().join("nodes.parquet");
+            let ids = (0..(4 * multiplier))
+                .map(|_| Uuid::now_v7())
+                .collect::<Vec<_>>();
+            let batch = nodes(&ids);
+            let mut writer =
+                ArrowWriter::try_new(File::create(&parquet).unwrap(), batch.schema(), None)
+                    .unwrap();
+            writer.write(&batch).unwrap();
+            writer.close().unwrap();
+
+            let limits = ImportSessionLimits {
+                batch_rows: 4,
+                ..ImportSessionLimits::default()
+            };
+            let mut session = graph
+                .begin_import_session(OperationId(Uuid::now_v7()), limits)
+                .unwrap();
+            session
+                .register_parquet(BulkInputKind::Node, &parquet)
+                .unwrap();
+            let session_uuid = session.session_uuid();
+            let validated = session.validate(&graph).unwrap();
+            assert_eq!(
+                validated.construction.as_ref().unwrap().accepted_chunks,
+                multiplier as u64
+            );
+            session.commit(&graph, None).unwrap();
+            let (_, durable) = graph.import_session_status(session_uuid).unwrap();
+            let receipt = durable.construction.unwrap();
+            assert!(receipt.publication_committed);
+            assert_eq!(receipt.input_rows, (4 * multiplier) as u64);
+            assert_eq!(receipt.input_batches, multiplier as u64);
+            assert_eq!(receipt.peak_batch_rows, 4);
+
+            drop(graph);
+            let reopened = GraphForge::new(project.to_str()).unwrap();
+            let (phase, reopened_progress) = reopened.import_session_status(session_uuid).unwrap();
+            assert_eq!(phase, ImportPhase::Committed);
+            assert_eq!(reopened_progress.construction.as_ref(), Some(&receipt));
+            receipt
+        }
+
+        let receipts = [run(1), run(2), run(4)];
+        for (previous, next) in receipts.iter().zip(receipts.iter().skip(1)) {
+            assert_eq!(next.accepted_chunks, previous.accepted_chunks * 2);
+            assert_eq!(next.input_rows, previous.input_rows * 2);
+            assert_eq!(next.input_batches, previous.input_batches * 2);
+            for (smaller, larger) in [
+                (previous.write_bytes, next.write_bytes),
+                (previous.write_operations, next.write_operations),
+                (previous.immutable_artifacts, next.immutable_artifacts),
+                (previous.fsync_operations, next.fsync_operations),
+                (
+                    previous.application_io.totals.write_calls,
+                    next.application_io.totals.write_calls,
+                ),
+            ] {
+                assert!(larger >= smaller, "durable work must be monotonic");
+                assert!(
+                    larger <= smaller.saturating_mul(3),
+                    "doubling rows exceeded the bounded linear work envelope"
+                );
+            }
+        }
     }
 }

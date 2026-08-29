@@ -204,7 +204,8 @@ pub use graphforge_core::{
     SpatialType, SpatialValue, TemporalValue,
 };
 pub use import_session::{
-    GraphImportSession, ImportPhase, ImportProgress, ImportSessionLimits, ImportSourceKind,
+    GraphImportSession, ImportConstructionEvidence, ImportPhase, ImportProgress,
+    ImportSessionLimits, ImportSourceKind,
 };
 // The Arrow-backed result of [`GraphForge::execute`].
 pub use generation_diff::{

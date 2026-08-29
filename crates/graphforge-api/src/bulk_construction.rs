@@ -302,6 +302,35 @@ pub fn bulk_edge_input_schema(properties: Vec<Field>) -> Result<SchemaRef, BulkV
     input_schema(BulkInputKind::Edge, &EDGE_REQUIRED, properties)
 }
 
+fn canonical_import_chunk(
+    kind: BulkInputKind,
+    source: &RecordBatch,
+    mut required_columns: Vec<ArrayRef>,
+) -> Result<RecordBatch, BulkValidationError> {
+    let required = match kind {
+        BulkInputKind::Node => &NODE_REQUIRED[..],
+        BulkInputKind::Edge => &EDGE_REQUIRED[..],
+    };
+    let property_fields = source.schema().fields()[required.len()..]
+        .iter()
+        .map(|field| field.as_ref().clone())
+        .collect::<Vec<_>>();
+    let mut fields = match kind {
+        BulkInputKind::Node => graphforge_storage::CONSTRUCTION_NODE_SCHEMA
+            .fields()
+            .to_vec(),
+        BulkInputKind::Edge => graphforge_storage::CONSTRUCTION_EDGE_SCHEMA
+            .fields()
+            .to_vec(),
+    };
+    fields.extend(property_fields.into_iter().map(Arc::new));
+    let schema = Arc::new(Schema::new(fields));
+    required_columns.extend(source.columns()[required.len()..].iter().cloned());
+    RecordBatch::try_new(schema, required_columns).map_err(|error| {
+        contract_error(kind, BulkValidationReason::ProjectState, &error.to_string())
+    })
+}
+
 /// Canonical receipt schema used by the later publication slices.
 ///
 /// Receipts retain input order and identify the created object, its node label
@@ -331,28 +360,6 @@ pub fn bulk_receipt_schema() -> SchemaRef {
 }
 
 impl GraphForge {
-    pub(crate) fn import_base_membership(
-        &self,
-        candidates: &[Uuid],
-        kind: graphforge_storage::UuidIndexKind,
-        input_kind: BulkInputKind,
-    ) -> Result<Vec<bool>, BulkValidationError> {
-        let mut index = open_membership_index(self, input_kind)?;
-        let Some(index) = index.as_mut() else {
-            return Ok(vec![false; candidates.len()]);
-        };
-        index
-            .probe(kind, candidates)
-            .map(|(found, _)| found)
-            .map_err(|error| {
-                contract_error(
-                    input_kind,
-                    BulkValidationReason::ProjectState,
-                    &error.to_string(),
-                )
-            })
-    }
-
     pub(crate) fn normalize_import_nodes(
         &self,
         operation_uuid: OperationId,
@@ -361,26 +368,32 @@ impl GraphForge {
         self.normalize_bulk_nodes(operation_uuid, batches, false)
     }
 
-    pub(crate) fn normalize_import_edges(
+    pub(crate) fn normalize_import_node_chunk(
         &self,
         operation_uuid: OperationId,
-        batches: &[RecordBatch],
-        imported_endpoints: &BTreeSet<Uuid>,
-    ) -> Result<ValidatedBulkEdges, BulkValidationError> {
-        let empty_nodes = ValidatedBulkNodes {
-            rows: Vec::new(),
-            operation_uuid,
-            source_generation_uuid: *self
-                .current_generation_uuid
-                .lock()
-                .expect("generation UUID lock poisoned"),
-        };
-        self.normalize_bulk_edges(
-            operation_uuid,
-            batches,
-            &empty_nodes,
-            false,
-            Some(imported_endpoints),
+        batch: &RecordBatch,
+    ) -> Result<RecordBatch, BulkValidationError> {
+        let normalized =
+            self.normalize_import_nodes(operation_uuid, std::slice::from_ref(batch))?;
+        let identities = FixedSizeBinaryArray::try_from_iter(
+            normalized
+                .rows()
+                .iter()
+                .map(|row| row.node_uuid.as_bytes().as_slice()),
+        )
+        .map_err(|error| {
+            contract_error(
+                BulkInputKind::Node,
+                BulkValidationReason::ProjectState,
+                &error.to_string(),
+            )
+        })?;
+        let labels =
+            StringArray::from_iter_values(normalized.rows().iter().map(|row| row.label.as_str()));
+        canonical_import_chunk(
+            BulkInputKind::Node,
+            batch,
+            vec![Arc::new(identities), Arc::new(labels)],
         )
     }
 
@@ -784,6 +797,79 @@ impl GraphForge {
             operation_uuid,
             source_generation_uuid,
         })
+    }
+
+    pub(crate) fn normalize_import_edge_chunk(
+        &self,
+        operation_uuid: OperationId,
+        batch: &RecordBatch,
+    ) -> Result<RecordBatch, BulkValidationError> {
+        // Construction sealing owns the global endpoint proof across all node
+        // chunks. This prevalidation still checks the complete edge schema,
+        // identities, properties, and within-chunk duplicates without retaining
+        // every imported node UUID in memory.
+        let assumed_endpoints = ValidatedBulkNodes {
+            rows: candidate_endpoint_uuids(std::slice::from_ref(batch))?
+                .into_iter()
+                .enumerate()
+                .map(|(ordinal, node_uuid)| BulkNodeRow {
+                    row_ordinal: ordinal as u64,
+                    node_uuid,
+                    label: String::new(),
+                    properties: BTreeMap::new(),
+                })
+                .collect(),
+            operation_uuid,
+            source_generation_uuid: *self
+                .current_generation_uuid
+                .lock()
+                .expect("generation UUID lock poisoned"),
+        };
+        let normalized = self.normalize_bulk_edges(
+            operation_uuid,
+            std::slice::from_ref(batch),
+            &assumed_endpoints,
+            true,
+            None,
+        )?;
+        let binary = |values: Vec<Uuid>| {
+            FixedSizeBinaryArray::try_from_iter(
+                values.iter().map(|value| value.as_bytes().as_slice()),
+            )
+            .map(Arc::new)
+            .map(|value| value as ArrayRef)
+            .map_err(|error| {
+                contract_error(
+                    BulkInputKind::Edge,
+                    BulkValidationReason::ProjectState,
+                    &error.to_string(),
+                )
+            })
+        };
+        canonical_import_chunk(
+            BulkInputKind::Edge,
+            batch,
+            vec![
+                binary(normalized.rows().iter().map(|row| row.edge_uuid).collect())?,
+                Arc::new(StringArray::from_iter_values(
+                    normalized.rows().iter().map(|row| row.rel_type.as_str()),
+                )),
+                binary(
+                    normalized
+                        .rows()
+                        .iter()
+                        .map(|row| row.source_uuid)
+                        .collect(),
+                )?,
+                binary(
+                    normalized
+                        .rows()
+                        .iter()
+                        .map(|row| row.target_uuid)
+                        .collect(),
+                )?,
+            ],
+        )
     }
 
     /// Validate and atomically publish a logical Arrow edge batch.

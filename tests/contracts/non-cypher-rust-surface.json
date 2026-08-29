@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "8e3a0711619a5e50231bf510a76328ea44b7706dfd28c524b760c6564b805bc3",
+  "public_method_digest": "499f902e4713931d7b3591fbaf978e6694c3029fde08c5c5476547563e5776e5",
   "method_policy": {
     "receiver_defaults": {
       "GraphForge": "release-tested",
@@ -880,6 +880,7 @@
       "ids": [
         "GraphForge.begin_import_session",
         "GraphForge.cleanup_stale_import_sessions",
+        "GraphForge.import_session_status",
         "GraphForge.resume_import_session",
         "GraphImportSession.abort",
         "GraphImportSession.append_arrow",
@@ -898,6 +899,10 @@
         {
           "path": "crates/graphforge-api/src/import_session.rs",
           "symbol": "parquet_abort_and_missing_endpoint_preserve_prior_generation"
+        },
+        {
+          "path": "crates/graphforge-api/src/import_session.rs",
+          "symbol": "parquet_construction_receipts_scale_linearly_and_survive_reopen"
         },
         {
           "path": "crates/graphforge-api/src/import_session.rs",

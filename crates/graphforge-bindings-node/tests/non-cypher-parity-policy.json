@@ -1,8 +1,8 @@
 {
   "contractVersion": 1,
   "rustManifest": "../../../tests/contracts/non-cypher-rust-surface.json",
-  "releaseSurfaceCount": 258,
-  "releaseSurfaceDigest": "6963ebeb6999197aff6de3dbb996c72cbc41561dd2d7400ae81e6d296f8165a7",
+  "releaseSurfaceCount": 259,
+  "releaseSurfaceDigest": "5b0c6f3b4995545f6527b8be3b3fea7cb7aca0d070ad280ae6ec80e24ac9e938",
   "requiredEquivalent": [
     "GraphForge.adopt_ontology",
     "GraphForge.clear_ontology",
@@ -205,6 +205,12 @@
       "GraphImportSession.validate"
     ],
     "languageSpecific": {
+      "GraphForge.import_session_status": {
+        "nodeMembers": [
+          "GraphImportSession.status"
+        ],
+        "reason": "Node reads live session status from its owned handle; terminal receipt reopening is a Rust and CLI lifecycle operation."
+      },
       "GraphForge.execute_stream": {
         "nodeMembers": [
           "GraphForge.plan",
