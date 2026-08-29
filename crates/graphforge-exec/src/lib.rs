@@ -3141,6 +3141,11 @@ pub struct V4OrdinalIdentityResolver {
     >,
 }
 
+struct V4OrdinalIdentityPin {
+    session: Option<Arc<V4OrdinalIdentitySession>>,
+    required: bool,
+}
+
 impl V4OrdinalIdentityResolver {
     /// Construct a resolver for an optional admitted generation facet.
     #[must_use]
@@ -3161,25 +3166,31 @@ impl V4OrdinalIdentityResolver {
             handle.map(|handle| Arc::new(Mutex::new(handle)));
     }
 
-    fn pin(&self) -> Result<Option<Arc<V4OrdinalIdentitySession>>, GfError> {
+    fn pin(&self) -> Result<V4OrdinalIdentityPin, GfError> {
         let handle = self
             .handle
             .read()
             .expect("ordinal identity lock poisoned")
             .clone();
         let Some(handle) = handle else {
-            return Ok(None);
+            return Ok(V4OrdinalIdentityPin {
+                session: None,
+                required: false,
+            });
         };
         let revalidation = handle
             .lock()
             .expect("ordinal identity handle poisoned")
             .revalidate_for_session()
             .map_err(|error| GfError::Execution(error.to_string()))?;
-        Ok(Some(Arc::new(V4OrdinalIdentitySession {
-            handle,
-            revalidation,
-            attribution_available: AtomicBool::new(true),
-        })))
+        Ok(V4OrdinalIdentityPin {
+            session: Some(Arc::new(V4OrdinalIdentitySession {
+                handle,
+                revalidation,
+                attribution_available: AtomicBool::new(true),
+            })),
+            required: true,
+        })
     }
 }
 
@@ -3652,6 +3663,15 @@ fn unused_expand_column(field: &Field, rows: usize) -> Result<ArrayRef, GfError>
     Ok(column)
 }
 
+fn require_admitted_ordinal_identity(required: bool, admitted: bool) -> Result<(), GfError> {
+    if required && !admitted {
+        return Err(GfError::Execution(
+            "destination UUID projection requires admitted v4 ordinal identity".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Execute the adjacency-backed single-hop expansion: for every input row's
 /// source node, emit one output row per adjacency entry, assembling input,
 /// edge-topology, edge-property (nullable), and destination-node columns in
@@ -3749,15 +3769,11 @@ fn expand_single_hop_chunk(
     });
     let uuid_required =
         required.is_some_and(|mask| mask.get(destination_uuid_index).copied().unwrap_or(false));
-    if edge_materialization_unused
-        && destination_identity_only
-        && uuid_required
-        && cfg.ordinal_identity_required
-        && cfg.ordinal_identities.is_none()
-    {
-        return Err(GfError::Execution(
-            "destination UUID projection requires admitted v4 ordinal identity".into(),
-        ));
+    if edge_materialization_unused && destination_identity_only && uuid_required {
+        require_admitted_ordinal_identity(
+            cfg.ordinal_identity_required,
+            cfg.ordinal_identities.is_some(),
+        )?;
     }
     if edge_materialization_unused
         && destination_identity_only
@@ -4972,13 +4988,17 @@ impl ExecutionSession {
         resources: &SessionResourceConfig,
     ) -> Result<Self, GfError> {
         let identity = match ordinal_identities {
-            Some(resolver) => OrdinalIdentityConfig {
-                session: resolver.pin()?,
-                // A missing handle is a legitimate pre-v4 generation. A
-                // generation that declares v4 but cannot admit it is rejected
-                // while opening the authenticated handle, before execution.
-                required: false,
-            },
+            Some(resolver) => {
+                let pin = resolver.pin()?;
+                OrdinalIdentityConfig {
+                    // Requirement and payload come from one resolver snapshot.
+                    // Keep them separate so the expansion boundary remains
+                    // fail-closed if a future planner/config rewrite loses the
+                    // pinned authority.
+                    required: pin.required,
+                    session: pin.session,
+                }
+            }
             None => OrdinalIdentityConfig::default(),
         };
         Ok(Self::build(
@@ -7037,6 +7057,19 @@ mod tests {
         )
         .unwrap();
         assert!(u64_column(&utf8, 0).is_err());
+    }
+
+    #[test]
+    fn required_v4_destination_identity_fails_closed_without_admitted_session() {
+        let error = require_admitted_ordinal_identity(true, false)
+            .expect_err("required v4 identity must not fall back without its admitted session");
+        assert!(
+            error
+                .to_string()
+                .contains("requires admitted v4 ordinal identity")
+        );
+        require_admitted_ordinal_identity(true, true).expect("admitted v4 session");
+        require_admitted_ordinal_identity(false, false).expect("legacy generation fallback");
     }
 
     #[test]

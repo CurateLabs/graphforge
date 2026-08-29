@@ -1799,6 +1799,12 @@ impl GraphForge {
             ));
         }
 
+        // Pin every generation-coupled session participant while publication is
+        // excluded. `install_property_generation` replaces the authenticated
+        // property inventory and ordinal identity authority as one publication
+        // transition; opening them without this guard could otherwise combine
+        // participants from adjacent generations.
+        let _read_visibility = self.graph_visibility.read()?;
         let catalog = {
             let rc = self
                 .runtime_catalog
@@ -3256,6 +3262,10 @@ impl GraphForge {
         let graph_ir =
             serde_json::to_string_pretty(&plan).map_err(|e| GfError::Plan(e.to_string()))?;
 
+        // EXPLAIN constructs a real physical session. Pin all of its
+        // generation-coupled authorities against same-instance publication,
+        // just like query execution does.
+        let _read_visibility = self.graph_visibility.read()?;
         // Open the catalog from the same snapshot so the logical and physical
         // stages resolve property names interned during this bind (a None
         // catalog would render them as `prop_<id>` and fail to lower).
