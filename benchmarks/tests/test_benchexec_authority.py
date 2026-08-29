@@ -10,6 +10,7 @@ from graphforge_bench.benchexec_authority import (
     Outcome,
     adapt_run_result,
     normalize_run,
+    require_local_admission,
 )
 from graphforge_bench.tools.graphforge_certify import Tool
 from jsonschema import Draft202012Validator
@@ -35,6 +36,30 @@ def result(**changes):
 
 
 class BenchExecAuthorityTests(unittest.TestCase):
+    def test_consumes_native_child_tree_admission_interface(self):
+        measurements = result() | {
+            "descendant_stopped": True,
+            "walltime": 1.0,
+        }
+        admitted = require_local_admission(
+            {
+                "schema": "graphforge-local-admission-evidence/1",
+                "result": "passed",
+                "cause": None,
+                "measurements": measurements,
+            }
+        )
+        self.assertIs(admitted, measurements)
+        with self.assertRaisesRegex(EvidenceError, "child-tree"):
+            require_local_admission(
+                {
+                    "schema": "graphforge-local-admission-evidence/1",
+                    "result": "passed",
+                    "cause": None,
+                    "measurements": {"descendant_stopped": False},
+                }
+            )
+
     def test_adapts_native_benchexec_process_tree_keys(self):
         class Exit:
             value = 0
@@ -90,7 +115,10 @@ class BenchExecAuthorityTests(unittest.TestCase):
         self.assertEqual(evidence["authority"]["cpu_seconds"], 3.0)
         self.assertEqual(evidence["limits"]["cores"], [0, 1])
         self.assertEqual(evidence["disagreements"], [])
-        schema = json.loads(Path("benchmarks/schemas/benchexec-run-evidence.json").read_text())
+        schema_path = (
+            Path(__file__).resolve().parents[1] / "schemas/benchexec-run-evidence.json"
+        )
+        schema = json.loads(schema_path.read_text())
         Draft202012Validator(schema).validate(evidence)
 
     def test_typed_termination_outcomes_remain_distinct(self):

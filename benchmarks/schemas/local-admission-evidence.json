@@ -32,7 +32,22 @@
       "required": ["operating_system", "cgroups_version", "mount_namespace", "pid_namespace", "user_namespace"],
       "additionalProperties": false
     },
-    "measurements": {"type": "object"}
+    "measurements": {
+      "type": "object",
+      "required": ["walltime", "cputime", "memory", "blkio-read", "blkio-write", "pressure-cpu-some", "pressure-io-some", "pressure-memory-some", "terminationreason", "descendant_stopped"],
+      "properties": {
+        "walltime": {"type": "number", "minimum": 0},
+        "cputime": {"type": "number", "minimum": 0},
+        "memory": {"type": "number", "minimum": 0},
+        "blkio-read": {"type": "number", "minimum": 0},
+        "blkio-write": {"type": "number", "minimum": 0},
+        "pressure-cpu-some": {"type": "number", "minimum": 0},
+        "pressure-io-some": {"type": "number", "minimum": 0},
+        "pressure-memory-some": {"type": "number", "minimum": 0},
+        "terminationreason": {"type": "string"},
+        "descendant_stopped": {"type": "boolean"}
+      }
+    }
   },
   "required": ["schema", "result", "cause", "facts"],
   "additionalProperties": false

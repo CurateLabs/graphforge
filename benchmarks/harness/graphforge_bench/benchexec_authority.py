@@ -8,6 +8,7 @@ from enum import StrEnum
 from typing import Any
 
 SCHEMA = "graphforge-benchexec-run/1"
+LOCAL_ADMISSION_SCHEMA = "graphforge-local-admission-evidence/1"
 
 
 class EvidenceError(ValueError):
@@ -41,6 +42,20 @@ class Limits:
             or len(set(self.cores)) != len(self.cores)
         ):
             raise EvidenceError("invalid BenchExec limits")
+
+
+def require_local_admission(evidence: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Consume #986's native fixture proof before accepting run evidence."""
+    if (
+        evidence.get("schema") != LOCAL_ADMISSION_SCHEMA
+        or evidence.get("result") != "passed"
+        or evidence.get("cause") is not None
+    ):
+        raise EvidenceError("native BenchExec admission did not pass")
+    measurements = evidence.get("measurements")
+    if not isinstance(measurements, Mapping) or measurements.get("descendant_stopped") is not True:
+        raise EvidenceError("native BenchExec child-tree proof is missing")
+    return measurements
 
 
 def adapt_run_result(raw: Mapping[str, Any], *, correctness: bool) -> dict[str, Any]:
