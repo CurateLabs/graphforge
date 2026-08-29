@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+import shlex
 import tempfile
 import unittest
 
@@ -55,7 +56,7 @@ def attempt(**changes: object) -> FlyAttempt:
         "region": "den",
         "volume_name": "gf-data",
         "volume_gib": 500,
-        "machine_class": "performance-cpu-4x",
+        "machine_class": "performance-4x",
         "image": "registry.fly.io/gf-fixture@sha256:" + "c" * 64,
         "maximum_authorized_scale": 18,
         "prerequisites": {955: "merged", 956: "merged", 957: "merged"},
@@ -84,14 +85,19 @@ class FlyAdapterTests(unittest.TestCase):
         machine = next(c for c in commands if c.operation == "create_machine").argv
         execute = next(c for c in commands if c.operation == "execute_lifecycle").argv
         self.assertIn("den", machine)
-        self.assertIn("performance-cpu-4x", machine)
+        self.assertIn("performance-4x", machine)
         self.assertIn("--restart", machine)
         self.assertIn("no", machine)
         self.assertIn("--autostop", machine)
         self.assertNotIn("--port", machine)
-        separator = execute.index("--")
-        self.assertEqual(execute[separator + 1 :], attempt().lifecycle.argv)
+        self.assertEqual(shlex.split(execute[-1]), list(attempt().lifecycle.argv))
         self.assertNotIn("threshold", " ".join(execute))
+
+    def test_refuses_unknown_machine_class_and_cross_app_image(self) -> None:
+        with self.assertRaisesRegex(AdapterError, "machine class"):
+            validate_attempt(attempt(machine_class="gpu-a100-80gb"))
+        with self.assertRaisesRegex(AdapterError, "requested app"):
+            validate_attempt(attempt(image="registry.fly.io/another-app@sha256:" + "c" * 64))
 
     def test_refuses_unmerged_prerequisite_and_unauthorized_scale(self) -> None:
         with self.assertRaisesRegex(AdapterError, "prerequisite"):
@@ -124,8 +130,8 @@ class FlyAdapterTests(unittest.TestCase):
     def test_cleanup_is_owned_ordered_and_idempotent(self) -> None:
         ledger = ResourceLedger(
             app_owned=True,
-            volume_id="vol_fixture",
-            machine_id="machine_fixture",
+            volume_id="vol_fixture123",
+            machine_id="abcdef01234567",
             secret_names=["temporary-token"],
         )
         first = cleanup_commands("gf-fixture", ledger)
@@ -135,6 +141,30 @@ class FlyAdapterTests(unittest.TestCase):
         )
         self.assertEqual(cleanup_commands("gf-fixture", ResourceLedger()), ())
         self.assertEqual(first, cleanup_commands("gf-fixture", ledger))
+
+    def test_ledger_load_closes_shape_types_and_identifiers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ledger.json"
+            ledger = ResourceLedger(
+                app_owned=True,
+                volume_id="vol_fixture123",
+                machine_id="abcdef01234567",
+                image_digest=attempt().image,
+                secret_names=["temporary-token"],
+                token_material_present=True,
+            )
+            ledger.save(path)
+            self.assertEqual(ResourceLedger.load(path), ledger)
+            value = json.loads(path.read_text(encoding="utf-8"))
+            value["machine_id"] = "--force"
+            path.write_text(json.dumps(value), encoding="utf-8")
+            with self.assertRaisesRegex(AdapterError, "machine identifier"):
+                ResourceLedger.load(path)
+            value["machine_id"] = "abcdef01234567"
+            value["unexpected"] = True
+            path.write_text(json.dumps(value), encoding="utf-8")
+            with self.assertRaisesRegex(AdapterError, "fields"):
+                ResourceLedger.load(path)
 
     def test_inventory_must_independently_be_empty(self) -> None:
         self.assertEqual(len(inventory_commands("gf-fixture")), 3)
@@ -203,7 +233,7 @@ class FlyAdapterTests(unittest.TestCase):
             lifecycle_argv=("controller-reclaim", "S18"),
         )
         self.assertEqual(command.operation, "reclaim_accepted_rung")
-        self.assertEqual(command.argv[-2:], ("controller-reclaim", "S18"))
+        self.assertEqual(shlex.split(command.argv[-1]), ["controller-reclaim", "S18"])
 
     def test_download_requires_typed_json_and_digest(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

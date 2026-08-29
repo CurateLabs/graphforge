@@ -8,11 +8,12 @@ lifecycle.  Benchmark policy remains in the checked-in controller/profile.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 import hashlib
 import json
 from pathlib import Path, PurePosixPath
 import re
+import shlex
 from typing import Any
 
 
@@ -23,8 +24,27 @@ class AdapterError(ValueError):
 OCI_DIGEST = re.compile(r"^registry\.fly\.io/[a-z0-9-]+@sha256:[0-9a-f]{64}$")
 SAFE_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 SAFE_REGION = re.compile(r"^[a-z]{3}$")
-SAFE_MACHINE = re.compile(r"^(shared|performance)-cpu-[0-9]+x$|^[a-z0-9_-]+$")
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
+MACHINE_CLASSES = frozenset(
+    {
+        "shared-cpu-1x",
+        "shared-cpu-2x",
+        "shared-cpu-4x",
+        "shared-cpu-6x",
+        "shared-cpu-8x",
+        "performance-1x",
+        "performance-2x",
+        "performance-4x",
+        "performance-6x",
+        "performance-8x",
+        "performance-10x",
+        "performance-12x",
+        "performance-14x",
+        "performance-16x",
+    }
+)
+MACHINE_ID = re.compile(r"^[0-9a-f]{14}$")
+VOLUME_ID = re.compile(r"^vol_[a-z0-9]+$")
 FAILURE_TYPES = frozenset(
     {
         "authorization_refused",
@@ -85,15 +105,53 @@ class ResourceLedger:
 
     @classmethod
     def load(cls, path: Path) -> ResourceLedger:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise AdapterError("resource ledger is malformed") from error
+        _refuse(not isinstance(value, dict), "resource ledger is malformed")
         if value.pop("schema", None) != "graphforge-fly-resource-ledger/1":
             raise AdapterError("resource ledger schema is invalid")
-        return cls(**value)
+        expected = {item.name for item in fields(cls)} - {"schema"}
+        _refuse(set(value) != expected, "resource ledger fields are invalid")
+        try:
+            ledger = cls(**value)
+        except TypeError as error:
+            raise AdapterError("resource ledger is malformed") from error
+        validate_ledger(ledger)
+        return ledger
 
 
 def _refuse(condition: bool, message: str) -> None:
     if condition:
         raise AdapterError(message)
+
+
+def validate_ledger(ledger: ResourceLedger) -> None:
+    _refuse(type(ledger.app_owned) is not bool, "resource ledger ownership is invalid")
+    _refuse(
+        type(ledger.token_material_present) is not bool, "resource ledger token state is invalid"
+    )
+    _refuse(
+        ledger.machine_id is not None and not MACHINE_ID.fullmatch(ledger.machine_id),
+        "resource ledger machine identifier is invalid",
+    )
+    _refuse(
+        ledger.volume_id is not None and not VOLUME_ID.fullmatch(ledger.volume_id),
+        "resource ledger volume identifier is invalid",
+    )
+    _refuse(
+        ledger.image_digest is not None and not OCI_DIGEST.fullmatch(ledger.image_digest),
+        "resource ledger image identity is invalid",
+    )
+    _refuse(
+        not isinstance(ledger.secret_names, list)
+        or any(
+            not isinstance(name, str) or not SAFE_NAME.fullmatch(name)
+            for name in ledger.secret_names
+        ),
+        "resource ledger secrets are invalid",
+    )
 
 
 def validate_attempt(attempt: FlyAttempt) -> None:
@@ -107,8 +165,12 @@ def validate_attempt(attempt: FlyAttempt) -> None:
     _refuse(not SAFE_NAME.fullmatch(attempt.organization), "organization name is invalid")
     _refuse(not SAFE_NAME.fullmatch(attempt.volume_name), "volume name is invalid")
     _refuse(not SAFE_REGION.fullmatch(attempt.region), "region is invalid")
-    _refuse(not SAFE_MACHINE.fullmatch(attempt.machine_class), "measured machine class is invalid")
+    _refuse(attempt.machine_class not in MACHINE_CLASSES, "measured machine class is invalid")
     _refuse(not OCI_DIGEST.fullmatch(attempt.image), "image must be an immutable Fly OCI digest")
+    _refuse(
+        not attempt.image.startswith(f"registry.fly.io/{attempt.app}@"),
+        "image does not belong to the requested app",
+    )
     _refuse(attempt.volume_gib < 1 or attempt.volume_gib > 500, "volume size is outside Fly bounds")
     _refuse(not COMMIT.fullmatch(lifecycle.commit), "lifecycle commit is invalid")
     _refuse(
@@ -260,8 +322,7 @@ def provisioning_commands(attempt: FlyAttempt) -> tuple[Command, ...]:
                 "14400",
                 "--json",
                 "{machine_id}",
-                "--",
-                *lifecycle.argv,
+                shlex.join(lifecycle.argv),
             ),
         ),
     )
@@ -293,6 +354,7 @@ def retrieval_commands(attempt: FlyAttempt, destination: Path) -> tuple[Command,
 def cleanup_commands(app: str, ledger: ResourceLedger) -> tuple[Command, ...]:
     """Return repeatable best-effort deletion commands for resources we own."""
     _refuse(not SAFE_NAME.fullmatch(app), "app name is invalid")
+    validate_ledger(ledger)
     commands: list[Command] = []
     if ledger.machine_id:
         commands.append(
@@ -309,7 +371,6 @@ def cleanup_commands(app: str, ledger: ResourceLedger) -> tuple[Command, ...]:
             )
         )
     for name in sorted(set(ledger.secret_names)):
-        _refuse(not SAFE_NAME.fullmatch(name), "secret ledger is invalid")
         commands.append(
             Command("unset_secret", ("flyctl", "secrets", "unset", name, "--app", app, "--yes"))
         )
@@ -378,8 +439,7 @@ def accepted_rung_reclamation(
             "600",
             "--json",
             "{machine_id}",
-            "--",
-            *lifecycle_argv,
+            shlex.join(lifecycle_argv),
         ),
     )
 
@@ -391,7 +451,14 @@ def verify_download(path: Path, expected_sha256: str) -> None:
         ),
         "download is not an allowed evidence document",
     )
-    value = json.loads(path.read_text(encoding="utf-8"))
-    _refuse(not isinstance(value, dict) or "schema" not in value, "download is not typed evidence")
-    actual = hashlib.sha256(path.read_bytes()).hexdigest()
+    try:
+        payload = path.read_bytes()
+    except OSError as error:
+        raise AdapterError("download is unavailable") from error
+    actual = hashlib.sha256(payload).hexdigest()
     _refuse(expected_sha256 != f"sha256:{actual}", "download digest mismatch")
+    try:
+        value = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AdapterError("download is not typed evidence") from error
+    _refuse(not isinstance(value, dict) or "schema" not in value, "download is not typed evidence")
