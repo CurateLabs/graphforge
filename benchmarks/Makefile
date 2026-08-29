@@ -16,7 +16,8 @@ smoke-rust: install
 	PYTHONPATH=harness uv run --locked python -m graphforge_bench.check_rust_graph
 
 fly-adapter-static: install
-	PYTHONPATH=harness uv run --locked python -m unittest tests.test_fly_adapter
+	PYTHONPATH=harness uv run --locked python -m unittest \
+		tests.test_fly_adapter tests.test_fly_tiny_qualification
 
 local-admission: install
 	PYTHONPATH=$(CURDIR)/harness uv run --locked reframe -C reframe/settings.py -c reframe/checks -n '^LocalBenchExecAdmission$$' -l | grep -F LocalBenchExecAdmission
