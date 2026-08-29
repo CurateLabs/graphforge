@@ -4,25 +4,21 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import time
 
 
-def _json_value(value: object) -> object:
-    if isinstance(value, (str, int, float, bool)) or value is None:
-        return value
-    raw = getattr(value, "raw", None)
-    if raw is not None:
-        return raw
-    return str(value)
+def _parse_runexec_value(value: str) -> object:
+    if value.endswith("s"):
+        return float(value[:-1])
+    if value.endswith("B"):
+        return int(value[:-1])
+    return value
 
 
 def main() -> None:
-    # Import only after the outer admission has proved a Linux host.
-    from benchexec.containerexecutor import DIR_FULL_ACCESS, DIR_HIDDEN, DIR_OVERLAY
-    from benchexec.runexecutor import RunExecutor
-
     with tempfile.TemporaryDirectory(prefix="graphforge-benchexec-admission-") as directory:
         root = Path(directory)
         heartbeat = root / "descendant.heartbeat"
@@ -69,33 +65,49 @@ while True:
         # this explicit mount, the heartbeat would live in BenchExec's overlay
         # and disappear with the container, making descendant cleanup
         # impossible to verify from the supervising process.
-        executor = RunExecutor(
-            use_namespaces=True,
-            dir_modes={
-                "/": DIR_OVERLAY,
-                "/run": DIR_HIDDEN,
-                "/tmp": DIR_HIDDEN,
-                str(root): DIR_FULL_ACCESS,
-            },
-        )
-        result = executor.execute_run(
+        completed = subprocess.run(
             [
+                "runexec",
+                "--walltimelimit",
+                "1",
+                "--memlimit",
+                str(128 * 1024 * 1024),
+                "--output",
+                str(output),
+                "--overlay-dir",
+                "/",
+                "--hidden-dir",
+                "/run",
+                "--hidden-dir",
+                "/tmp",
+                "--full-access-dir",
+                str(root),
+                "--dir",
+                str(root),
+                "--",
                 sys.executable,
                 str(worker),
                 str(heartbeat),
                 str(descendant),
                 str(overlay_probe),
             ],
-            str(output),
-            walltimelimit=1,
-            memlimit=128 * 1024 * 1024,
-            workingDir=str(root),
+            check=False,
+            capture_output=True,
+            text=True,
         )
+        if completed.returncode != 0:
+            raise SystemExit(completed.returncode)
+        result = {
+            key: _parse_runexec_value(value)
+            for line in completed.stdout.splitlines()
+            if "=" in line
+            for key, value in (line.split("=", 1),)
+        }
         before = heartbeat.stat().st_mtime_ns if heartbeat.exists() else None
         time.sleep(0.25)
         after = heartbeat.stat().st_mtime_ns if heartbeat.exists() else None
         normalized = {
-            key: _json_value(result[key])
+            key: result[key]
             for key in (
                 "walltime",
                 "cputime",

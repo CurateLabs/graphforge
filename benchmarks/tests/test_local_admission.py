@@ -6,10 +6,16 @@ import tempfile
 import unittest
 
 from graphforge_bench.local_admission import CommandResult, exit_code, qualify_local_host
+from graphforge_bench.local_admission_fixture import _parse_runexec_value
 from graphforge_bench.validate_local_admission import validate
 
 
 class LocalAdmissionTests(unittest.TestCase):
+    def test_runexec_cli_measurements_are_typed(self) -> None:
+        self.assertEqual(_parse_runexec_value("1.25s"), 1.25)
+        self.assertEqual(_parse_runexec_value("4096B"), 4096)
+        self.assertEqual(_parse_runexec_value("walltime"), "walltime")
+
     @staticmethod
     def _linux_roots(directory: str) -> tuple[Path, Path]:
         root = Path(directory)
