@@ -7072,10 +7072,10 @@ mod tests {
 
         std::thread::scope(|scope| {
             let publication = graph.graph_visibility.lock().expect("publication lock");
-            let ready = std::sync::Barrier::new(2);
+            let ready = std::sync::Arc::new(std::sync::Barrier::new(2));
             let (sent, received) = mpsc::channel();
             let graph = &graph;
-            let child_ready = &ready;
+            let child_ready = std::sync::Arc::clone(&ready);
             scope.spawn(move || {
                 child_ready.wait();
                 sent.send(graph.explain("MATCH (n:Person) RETURN n.node_uuid"))
@@ -7095,10 +7095,10 @@ mod tests {
 
         std::thread::scope(|scope| {
             let publication = graph.graph_visibility.lock().expect("publication lock");
-            let ready = std::sync::Barrier::new(2);
+            let ready = std::sync::Arc::new(std::sync::Barrier::new(2));
             let (sent, received) = mpsc::channel();
             let graph = &graph;
-            let child_ready = &ready;
+            let child_ready = std::sync::Arc::clone(&ready);
             scope.spawn(move || {
                 child_ready.wait();
                 let result = graph
