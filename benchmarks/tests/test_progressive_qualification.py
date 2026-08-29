@@ -126,6 +126,14 @@ class ProgressiveQualificationTests(unittest.TestCase):
                 [command[command.index("import-session") + 1] for command in ingest["commands"]],
                 ["begin", "register-parquet", "register-parquet", "validate", "commit"],
             )
+            reopen = raw["phases"][3]["action"]["commands"]
+            self.assertEqual(
+                [command[-1] for command in reopen], ["recovery", "storage-attribution"]
+            )
+            reopen_proof = raw["phases"][-1]["action"]["commands"]
+            self.assertEqual(len(reopen_proof), 5)
+            self.assertTrue(all("query" in command for command in reopen_proof[:4]))
+            self.assertEqual(reopen_proof[-1][-1], "storage-attribution")
             encoded = json.dumps(raw).lower()
             for forbidden in ("provider_id", "machine_id", "volume_id", "token", "secret"):
                 self.assertNotIn(forbidden, encoded)
