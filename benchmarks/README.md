@@ -132,3 +132,17 @@ Each job is independently strict and uploads a provider-labelled evidence
 document; one provider is never a fallback that hides the other's
 disqualification. The workflow does not disable namespace containers, bypass
 cgroups, or add custom permission/systemd workarounds.
+
+For a dedicated native Linux authority, provision the administrator-owned user
+manager delegation before qualification:
+
+```bash
+sudo benchmarks/scripts/provision-benchexec-user-delegation.sh
+sudo reboot
+```
+
+The tracked drop-in sets `Delegate=yes` on `user@.service`, as prescribed by
+BenchExec's cgroups-v2/systemd installation guide. A reboot (or complete user
+manager termination and fresh login) is mandatory; editing the unit does not
+retroactively change an already-running user manager. The benchmark and both
+strict checks still run as the unprivileged user.
