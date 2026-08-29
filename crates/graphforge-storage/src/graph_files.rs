@@ -361,7 +361,6 @@ pub fn stage_graph_tree(
                 "graph tree source digest does not match inventory",
             ));
         }
-        sync_file(&destination)?;
         evidence.files_validated = evidence.files_validated.saturating_add(1);
         evidence.bytes_validated = evidence.bytes_validated.saturating_add(entry.byte_length);
         evidence.files_copied = evidence.files_copied.saturating_add(1);

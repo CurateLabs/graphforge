@@ -2786,12 +2786,9 @@ fn try_reuse_existing_object(
         &graph_object_path(&cas.diagnostic_root, digest)?,
         &cas.diagnostic_root,
     )?;
-    let total = ReadIoEvidence {
-        bytes: adoption_io.bytes.saturating_add(io.bytes),
-        calls: adoption_io.calls.saturating_add(io.calls),
-    };
-    let mut evidence = reused_object_evidence(expected_length, total);
-    evidence.bytes_hashed = total.bytes;
+    let mut evidence = reused_object_evidence(expected_length, io);
+    evidence.bytes_hashed = adoption_io.bytes.saturating_add(io.bytes);
+    evidence.read_calls = adoption_io.calls.saturating_add(io.calls);
     Ok(Some(evidence))
 }
 

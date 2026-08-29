@@ -2082,6 +2082,10 @@ impl PhaseJournal {
 
     fn pass(&mut self, id: &str, started: Instant, fingerprint: Option<String>) {
         let fingerprint = fingerprint.map_or(Value::Null, Value::String);
+        // Every phase owns the live allocation union for its full duration,
+        // even when it does not install or remove an allocation identity.
+        self.monitor
+            .observe_allocated_union(self.allocation.current_allocated_bytes());
         if let Some(code) = self.monitor.failure_code() {
             self.phases.push(json!({
                 "id": id, "status": "fail",
@@ -2631,9 +2635,17 @@ fn run_integrated_certification_with_edge_factor(
     construction_phases
         .validate_for_qualification()
         .expect("certification construction phase attribution");
+    let pre_construction_union = journal.current_allocated_union();
     journal.replay_allocation_transitions(
         "construction",
         &construction_evidence.storage_allocation_transitions,
+    );
+    // Construction artifacts are private to this session and cannot alias the
+    // already-open source project. The storage-owned numeric high-water mark
+    // therefore restores peaks compacted out of durable checkpoint history.
+    journal.monitor.observe_allocated_union(
+        pre_construction_union
+            .saturating_add(construction_evidence.storage_transient_peak_total_allocated_bytes),
     );
     let committed_generation = graphforge_storage::resolve_project_generation(&source)
         .expect("resolve committed ingest generation");

@@ -1705,7 +1705,6 @@ fn copy(
             break;
         }
         output.write_all(&buffer[..count]).map_err(storage)?;
-        allocation.observe(&output)?;
         digest.update(&buffer[..count]);
         bytes_read += count as u64;
         tick(count as u64);
@@ -1754,7 +1753,6 @@ fn stream(
             break;
         }
         out.write_all(&buffer[..count]).map_err(storage)?;
-        allocation.observe(out)?;
         transport.update(&buffer[..count]);
         digest.update(&buffer[..count]);
         bytes_read += count as u64;

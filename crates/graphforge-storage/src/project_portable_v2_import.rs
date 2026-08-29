@@ -241,6 +241,8 @@ pub fn import_complete_portable_v2_with_progress(
         owned_retry,
         identities: materialized_identity_allocated_bytes,
         report,
+        materialization_read_bytes,
+        materialization_read_operations,
         stage_identity: materialized_stage_identity,
         entry_count,
     } = materialize_owned_import(
@@ -286,10 +288,12 @@ pub fn import_complete_portable_v2_with_progress(
         }
         error
             .with_allocation_identities(owned_identities)
-            // The shared verifier has authenticated every materialized payload
-            // before finalization begins. Preserve that completed read work on
-            // a finalization error instead of rediscovering the staging tree.
-            .with_recovery_reauthentication(report.payload_bytes, report.entry_count)
+            // Preserve the actual bounded payload-copy reads completed before
+            // finalization failed instead of approximating them from entries.
+            .with_recovery_reauthentication(
+                materialization_read_bytes,
+                materialization_read_operations,
+            )
     });
     let result = result.and_then(|mut receipt| {
         // Finalization can create additional authenticated composition files in
@@ -330,6 +334,8 @@ struct OwnedMaterialization {
     owned_retry: bool,
     identities: std::collections::BTreeMap<String, u64>,
     report: PortableV2Report,
+    materialization_read_bytes: u64,
+    materialization_read_operations: u64,
     stage_identity: graphforge_filesystem::FileIdentity,
     entry_count: usize,
 }
@@ -361,20 +367,21 @@ fn materialize_owned_import(
         PortableV2Error::new(PortableV2ErrorCode::Io, "cannot open import ownership")
     })?;
     record_import_file_identity(&owner_file, &mut identities)?;
-    let report = match crate::project_portable_v2::materialize_verified_portable_v2_observed(
+    let materialized = match crate::project_portable_v2::materialize_verified_portable_v2_observed(
         source,
         &stage,
         limits,
         cancelled,
         |file| record_import_file_identity(file, &mut identities),
     ) {
-        Ok(report) => report,
+        Ok(materialized) => materialized,
         Err(error) => {
             let _ = fs::remove_file(&owner);
             let _ = sync_parent(&owner);
             return Err(error.with_allocation_identities(identities));
         }
     };
+    let report = materialized.report;
     // Atomic replacement can change identities after the write observer. The
     // completed boundary is the cleanup authority; the later finalization
     // capture extends this into the operation-wide identity union.
@@ -400,6 +407,8 @@ fn materialize_owned_import(
         owned_retry,
         identities,
         report,
+        materialization_read_bytes: materialized.application_read_bytes,
+        materialization_read_operations: materialized.application_read_operations,
         stage_identity: stage_directory.identity(),
         entry_count,
     })

@@ -119,9 +119,10 @@ def rung(scale: int, live: int, unit: int) -> dict:
 
 
 def evidence() -> dict:
-    low = rung(20, 10_000, 1_000)
-    high = rung(22, 40_000, 4_000)
-    numerator, denominator = high["totals"]["transient_peak_allocated_bytes"], 40_000
+    low = rung(20, (1 << 20) * 16, 1_000)
+    high = rung(22, (1 << 22) * 16, 4_000)
+    numerator = high["totals"]["transient_peak_allocated_bytes"]
+    denominator = high["live_edges"]
     projected = VALIDATOR.ceil_ratio(numerator * VALIDATOR.S26_EDGES, denominator)
     volume = 50_000_000_000
     return {
@@ -182,6 +183,8 @@ def test_accepts_closed_truthful_zero_io_phase():
         ("logical_total", "totals do not reconcile"),
         ("allocated_total", "totals do not reconcile"),
         ("denominator", "reproducible denominators"),
+        ("node_scale", "declared scale"),
+        ("edge_envelope", "Graph500 envelope"),
         ("one_rung", "schema violation"),
         ("nonadjacent", "ordered, and adjacent"),
         ("understated_slope", "below an observed"),
@@ -208,6 +211,10 @@ def test_rejects_goal_seeking_or_incomplete_evidence(mutation: str, match: str):
         value["rungs"][0]["ratios"]["authoritative_project_bytes_per_live_edge"][
             "denominator_count"
         ] += 1
+    elif mutation == "node_scale":
+        value["rungs"][0]["live_nodes"] -= 1
+    elif mutation == "edge_envelope":
+        value["rungs"][0]["live_edges"] = value["rungs"][0]["live_nodes"] * 16 + 1
     elif mutation == "one_rung":
         value["rungs"].pop()
     elif mutation == "nonadjacent":

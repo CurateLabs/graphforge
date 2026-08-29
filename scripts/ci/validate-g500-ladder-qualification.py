@@ -142,6 +142,10 @@ def validate(evidence: dict[str, Any]) -> None:
         if source_project > retained:
             raise EvidenceError("source project union exceeds the workspace union")
         live, nodes = rung["live_edges"], rung["live_nodes"]
+        if nodes != 1 << rung["scale"]:
+            raise EvidenceError("live node denominator disagrees with declared scale")
+        if not 0 < live <= nodes * 16:
+            raise EvidenceError("live edge denominator exceeds the Graph500 envelope")
         by_category = {item["category"]: item for item in rung["artifacts"]}
         expected = {
             "canonical_node_bytes_per_live_node": {

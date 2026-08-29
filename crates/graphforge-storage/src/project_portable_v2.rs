@@ -874,6 +874,13 @@ pub fn materialize_verified_portable_v2(
     cancelled: Option<&AtomicBool>,
 ) -> Result<PortableV2Report, PortableV2Error> {
     materialize_verified_portable_v2_observed(source, destination, limits, cancelled, |_| Ok(()))
+        .map(|materialized| materialized.report)
+}
+
+pub(crate) struct VerifiedMaterialization {
+    pub(crate) report: PortableV2Report,
+    pub(crate) application_read_bytes: u64,
+    pub(crate) application_read_operations: u64,
 }
 
 pub(crate) fn materialize_verified_portable_v2_observed(
@@ -882,7 +889,7 @@ pub(crate) fn materialize_verified_portable_v2_observed(
     limits: PortableV2Limits,
     cancelled: Option<&AtomicBool>,
     mut observed: impl FnMut(&File) -> Result<(), PortableV2Error>,
-) -> Result<PortableV2Report, PortableV2Error> {
+) -> Result<VerifiedMaterialization, PortableV2Error> {
     let source = source.as_ref();
     let destination = destination.as_ref();
     if destination.exists() {
@@ -902,10 +909,13 @@ pub(crate) fn materialize_verified_portable_v2_observed(
     } else {
         materialize_bundle(source, destination, limits, cancelled, &mut observed)
     };
-    if let Err(error) = result {
-        let _ = fs::remove_dir_all(destination);
-        return Err(error);
-    }
+    let (application_read_bytes, application_read_operations) = match result {
+        Ok(stats) => stats,
+        Err(error) => {
+            let _ = fs::remove_dir_all(destination);
+            return Err(error);
+        }
+    };
     let after = fs::metadata(source).map_err(|_| {
         PortableV2Error::new(
             PortableV2ErrorCode::ConcurrentMutation,
@@ -942,7 +952,11 @@ pub(crate) fn materialize_verified_portable_v2_observed(
             "source changed during materialization",
         ));
     }
-    Ok(report)
+    Ok(VerifiedMaterialization {
+        report,
+        application_read_bytes,
+        application_read_operations,
+    })
 }
 
 fn materialize_expanded(
@@ -951,7 +965,9 @@ fn materialize_expanded(
     limits: PortableV2Limits,
     cancelled: Option<&AtomicBool>,
     observed: &mut impl FnMut(&File) -> Result<(), PortableV2Error>,
-) -> Result<(), PortableV2Error> {
+) -> Result<(u64, u64), PortableV2Error> {
+    let mut read_bytes = 0_u64;
+    let mut read_operations = 0_u64;
     let mut paths = Vec::new();
     walk(source, source, &mut paths, limits, cancelled)?;
     for relative in paths
@@ -975,7 +991,10 @@ fn materialize_expanded(
             .map_err(|_| {
                 PortableV2Error::at(PortableV2ErrorCode::Io, &relative, "cannot stage entry")
             })?;
-        copy_materialized(&mut input, &mut output, limits.copy_buffer_bytes, cancelled)?;
+        let (bytes, operations) =
+            copy_materialized(&mut input, &mut output, limits.copy_buffer_bytes, cancelled)?;
+        read_bytes = read_bytes.saturating_add(bytes);
+        read_operations = read_operations.saturating_add(operations);
         output.sync_all().map_err(|_| {
             PortableV2Error::at(PortableV2ErrorCode::Io, &relative, "cannot sync entry")
         })?;
@@ -995,7 +1014,8 @@ fn materialize_expanded(
             ));
         }
     }
-    sync_materialized_tree(destination)
+    sync_materialized_tree(destination)?;
+    Ok((read_bytes, read_operations))
 }
 
 fn materialize_bundle(
@@ -1004,7 +1024,9 @@ fn materialize_bundle(
     limits: PortableV2Limits,
     cancelled: Option<&AtomicBool>,
     observed: &mut impl FnMut(&File) -> Result<(), PortableV2Error>,
-) -> Result<(), PortableV2Error> {
+) -> Result<(u64, u64), PortableV2Error> {
+    let mut read_bytes = 0_u64;
+    let mut read_operations = 0_u64;
     let mut input = File::open(source)
         .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::Io, "cannot reopen bundle"))?;
     let mut pending_pax = None;
@@ -1045,13 +1067,15 @@ fn materialize_bundle(
                 .map_err(|_| {
                     PortableV2Error::at(PortableV2ErrorCode::Io, &path, "cannot stage entry")
                 })?;
-            copy_exact_materialized(
+            let (bytes, operations) = copy_exact_materialized(
                 &mut input,
                 &mut output,
                 size,
                 limits.copy_buffer_bytes,
                 cancelled,
             )?;
+            read_bytes = read_bytes.saturating_add(bytes);
+            read_operations = read_operations.saturating_add(operations);
             output.sync_all().map_err(|_| {
                 PortableV2Error::at(PortableV2ErrorCode::Io, &path, "cannot sync entry")
             })?;
@@ -1061,7 +1085,8 @@ fn materialize_bundle(
         }
         skip_padding(&mut input, size)?;
     }
-    sync_materialized_tree(destination)
+    sync_materialized_tree(destination)?;
+    Ok((read_bytes, read_operations))
 }
 
 fn create_materialized_parent(path: &Path, entry: &str) -> Result<(), PortableV2Error> {
@@ -1078,16 +1103,20 @@ fn copy_materialized(
     output: &mut impl Write,
     buffer_size: usize,
     cancelled: Option<&AtomicBool>,
-) -> Result<(), PortableV2Error> {
+) -> Result<(u64, u64), PortableV2Error> {
     let mut buffer = vec![0; buffer_size];
+    let mut bytes = 0_u64;
+    let mut operations = 0_u64;
     loop {
         check_cancel(cancelled)?;
         let count = input
             .read(&mut buffer)
             .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::Io, "cannot read entry"))?;
         if count == 0 {
-            return Ok(());
+            return Ok((bytes, operations));
         }
+        bytes = bytes.saturating_add(count as u64);
+        operations = operations.saturating_add(1);
         output
             .write_all(&buffer[..count])
             .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::Io, "cannot stage entry"))?;
@@ -1099,7 +1128,7 @@ fn copy_exact_materialized(
     length: u64,
     buffer_size: usize,
     cancelled: Option<&AtomicBool>,
-) -> Result<(), PortableV2Error> {
+) -> Result<(u64, u64), PortableV2Error> {
     let mut remaining = length;
     let mut buffer = vec![0; buffer_size];
     while remaining > 0 {
@@ -1113,7 +1142,8 @@ fn copy_exact_materialized(
             .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::Io, "cannot stage entry"))?;
         remaining -= count as u64;
     }
-    Ok(())
+    let operations = length.div_ceil(buffer_size as u64);
+    Ok((length, operations))
 }
 fn skip_exact(
     input: &mut File,
@@ -1122,7 +1152,7 @@ fn skip_exact(
     cancelled: Option<&AtomicBool>,
 ) -> Result<(), PortableV2Error> {
     let mut sink = std::io::sink();
-    copy_exact_materialized(input, &mut sink, length, buffer_size, cancelled)
+    copy_exact_materialized(input, &mut sink, length, buffer_size, cancelled).map(|_| ())
 }
 fn skip_padding(input: &mut File, length: u64) -> Result<(), PortableV2Error> {
     let padding = (512 - length % 512) % 512;
@@ -3557,5 +3587,18 @@ mod tests {
         assert_eq!(expanded.component_count, bundled.component_count);
         assert_eq!(bundled.representation, PortableV2Representation::Bundle);
         assert_ne!(expanded.transport_digest, bundled.transport_digest);
+    }
+
+    #[test]
+    fn materialization_reports_actual_bounded_payload_reads() {
+        let parent = tempfile::tempdir().unwrap();
+        let input_path = parent.path().join("input");
+        fs::write(&input_path, vec![7_u8; 10]).unwrap();
+        let mut input = File::open(input_path).unwrap();
+        let mut output = Vec::new();
+        let (bytes, operations) =
+            copy_exact_materialized(&mut input, &mut output, 10, 4, None).unwrap();
+        assert_eq!((bytes, operations), (10, 3));
+        assert_eq!(output, vec![7_u8; 10]);
     }
 }

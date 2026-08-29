@@ -927,7 +927,7 @@ impl GraphConstructionSession {
         validate_publication_intent(&intent, &self.checkpoint)?;
         install_control(&self.root, PUBLICATION_INTENT, &intent)?;
         self.checkpoint.publication_state = Some(ConstructionPublicationState::Publishing);
-        replace_control(&self.root, CHECKPOINT, &self.checkpoint)?;
+        replace_checkpoint_control(&self.root, &self.checkpoint)?;
         Ok(intent)
     }
 
@@ -977,7 +977,7 @@ impl GraphConstructionSession {
         let receipt = provisional;
         install_control(&self.root, PUBLICATION_RECEIPT, &receipt)?;
         self.checkpoint.publication_state = Some(ConstructionPublicationState::Published);
-        replace_control(&self.root, CHECKPOINT, &self.checkpoint)?;
+        replace_checkpoint_control(&self.root, &self.checkpoint)?;
         Ok(receipt)
     }
 
@@ -1095,7 +1095,7 @@ impl GraphConstructionSession {
             Some(_) => {}
             None => {
                 self.checkpoint.encoding_inventory_sha256 = Some(inventory_authority);
-                replace_control(&self.root, CHECKPOINT, &self.checkpoint)?;
+                replace_checkpoint_control(&self.root, &self.checkpoint)?;
             }
         }
         Ok(encoded)
@@ -1870,13 +1870,37 @@ impl GraphConstructionSession {
         };
         recover_shape_intent(&session.root, &mut session.checkpoint)?;
         session.recover_intent()?;
+        if session
+            .checkpoint
+            .evidence
+            .storage_allocation_transitions
+            .is_empty()
+            && !session
+                .checkpoint
+                .evidence
+                .storage_active_identity_allocated_bytes
+                .is_empty()
+        {
+            session
+                .checkpoint
+                .evidence
+                .storage_allocation_transitions
+                .push(crate::StorageAllocationTransition {
+                    installed: session
+                        .checkpoint
+                        .evidence
+                        .storage_active_identity_allocated_bytes
+                        .clone(),
+                    removed: BTreeSet::new(),
+                });
+        }
         session.revalidate_authority()?;
         if session.checkpoint.next_sequence != 0
             && session.checkpoint.evidence.immutable_artifacts == 0
         {
             session.checkpoint.evidence.immutable_artifacts =
                 authenticated_receipt_artifact_count(&session.root, &session.checkpoint)?;
-            replace_control(&session.root, CHECKPOINT, &session.checkpoint)?;
+            replace_checkpoint_control(&session.root, &session.checkpoint)?;
         }
         Ok(session)
     }
@@ -2013,7 +2037,7 @@ impl GraphConstructionSession {
             .evidence
             .hydration_fsync_operations
             .saturating_add(hydration.fsync_calls);
-        replace_control(&self.root, CHECKPOINT, &self.checkpoint)
+        replace_checkpoint_control(&self.root, &self.checkpoint)
     }
 
     /// Number of durably accepted chunks.
@@ -2104,7 +2128,7 @@ impl GraphConstructionSession {
                     .saturating_add(work.operations);
                 self.checkpoint.evidence.replayed_chunks =
                     self.checkpoint.evidence.replayed_chunks.saturating_add(1);
-                replace_control(&self.root, CHECKPOINT, &self.checkpoint)?;
+                replace_checkpoint_control(&self.root, &self.checkpoint)?;
                 return Ok(receipt);
             }
             return Err(storage("conflicting construction chunk replay"));
@@ -2289,7 +2313,7 @@ impl GraphConstructionSession {
             .saturating_add(read_bytes);
         self.checkpoint.state = GraphConstructionState::Sealed;
         self.checkpoint.publication_state = Some(ConstructionPublicationState::Sealed);
-        replace_control(&self.root, CHECKPOINT, &self.checkpoint)
+        replace_checkpoint_control(&self.root, &self.checkpoint)
     }
 
     /// Validate the sealed identity domains and produce deterministic,
@@ -2665,7 +2689,7 @@ impl GraphConstructionSession {
             },
         )?;
         construction_failpoint("shape.after_complete_inventory");
-        replace_control(&self.root, CHECKPOINT, &self.checkpoint)?;
+        replace_checkpoint_control(&self.root, &self.checkpoint)?;
         construction_failpoint("shape.after_evidence_checkpoint");
         Ok(shape)
     }
@@ -2678,7 +2702,7 @@ impl GraphConstructionSession {
             return Err(storage("non-staging session belongs to the publisher"));
         }
         self.checkpoint.state = GraphConstructionState::Aborted;
-        replace_control(&self.root, CHECKPOINT, &self.checkpoint)
+        replace_checkpoint_control(&self.root, &self.checkpoint)
     }
 
     #[allow(clippy::too_many_lines)]
@@ -2925,7 +2949,7 @@ impl GraphConstructionSession {
             }
         }
         self.checkpoint.last_receipt_sha256 = Some(sha256(receipt_bytes));
-        replace_control(&self.root, CHECKPOINT, &self.checkpoint)
+        replace_checkpoint_control(&self.root, &self.checkpoint)
     }
 
     fn revalidate_authority(&self) -> Result<(), GfError> {
@@ -3602,7 +3626,7 @@ fn recover_final_shape_evidence(
     if checkpoint.evidence == *baseline && checkpoint.shape_authority_sha256.is_none() {
         checkpoint.evidence = final_evidence.clone();
         checkpoint.shape_authority_sha256 = Some(expected_authority);
-        return replace_control(root, CHECKPOINT, checkpoint);
+        return replace_checkpoint_control(root, checkpoint);
     }
     let mut observed = checkpoint.evidence.clone();
     copy_post_shape_io(&mut observed, final_evidence);
@@ -3844,7 +3868,7 @@ fn recover_publication(
         && checkpoint.publication_state == Some(ConstructionPublicationState::Sealed)
     {
         checkpoint.publication_state = Some(ConstructionPublicationState::Publishing);
-        replace_control(root, CHECKPOINT, checkpoint)?;
+        replace_checkpoint_control(root, checkpoint)?;
     }
     let receipt_exists = match root.open_child_file(OsStr::new(PUBLICATION_RECEIPT)) {
         Ok(file) => {
@@ -3859,7 +3883,7 @@ fn recover_publication(
         authenticate_published_target(project_dir, checkpoint, &receipt)?;
         if checkpoint.publication_state == Some(ConstructionPublicationState::Publishing) {
             checkpoint.publication_state = Some(ConstructionPublicationState::Published);
-            replace_control(root, CHECKPOINT, checkpoint)?;
+            replace_checkpoint_control(root, checkpoint)?;
         }
     }
     match checkpoint.publication_state {
@@ -6745,6 +6769,19 @@ fn replace_control<T: Serialize>(
     Ok(())
 }
 
+/// Persist only resumable allocation state. Transition history is live
+/// operation evidence; serializing it would make the fixed-size checkpoint
+/// grow with every accepted chunk. The exact current union and numeric peak
+/// remain durable.
+fn replace_checkpoint_control(
+    root: &StableDirectory,
+    checkpoint: &Checkpoint,
+) -> Result<(), GfError> {
+    let mut durable = checkpoint.clone();
+    durable.evidence.storage_allocation_transitions.clear();
+    replace_control(root, CHECKPOINT, &durable)
+}
+
 fn control_limit(target: &str) -> u64 {
     if target == SHAPE_INTENT {
         MAX_SHAPE_CONTROL_BYTES
@@ -7971,6 +8008,64 @@ mod tests {
             assert_eq!(session.state(), GraphConstructionState::Sealed);
             assert!(session.evidence().authentication_read_bytes > 0);
         }
+    }
+
+    #[test]
+    fn checkpoint_compacts_live_transition_history_without_losing_peak_or_union() {
+        let root = TempDir::new().unwrap();
+        let operation = 9_901_u128;
+        let mut session = open(&root, operation);
+        session
+            .append(ConstructionChunkKind::Node, "n", &node_batch(1, 32))
+            .unwrap();
+        let active = session
+            .checkpoint
+            .evidence
+            .storage_active_identity_allocated_bytes
+            .clone();
+        let peak = session
+            .checkpoint
+            .evidence
+            .storage_transient_peak_total_allocated_bytes;
+        let transition = session
+            .checkpoint
+            .evidence
+            .storage_allocation_transitions
+            .last()
+            .unwrap()
+            .clone();
+        session.checkpoint.evidence.storage_allocation_transitions = vec![transition; 20_000];
+        replace_checkpoint_control(&session.root, &session.checkpoint).unwrap();
+        assert!(
+            session
+                .root
+                .open_child_file(OsStr::new(CHECKPOINT))
+                .unwrap()
+                .metadata()
+                .unwrap()
+                .len()
+                < MAX_CONTROL_BYTES
+        );
+        drop(session);
+        let reopened = GraphConstructionSession::resume_with_mode_and_lifecycle(
+            root.path(),
+            Uuid::from_u128(operation),
+            graphforge_core::OntologyMode::Exploratory,
+            GraphConstructionBudgets::default(),
+            crate::filesystem_admission::ProjectLifecycleMode::Durable,
+        )
+        .unwrap();
+        assert_eq!(
+            reopened.evidence().storage_active_identity_allocated_bytes,
+            active
+        );
+        assert_eq!(
+            reopened
+                .evidence()
+                .storage_transient_peak_total_allocated_bytes,
+            peak
+        );
+        assert_eq!(reopened.evidence().storage_allocation_transitions.len(), 1);
     }
 
     #[test]
