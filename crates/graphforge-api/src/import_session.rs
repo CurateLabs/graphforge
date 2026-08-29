@@ -1212,6 +1212,37 @@ mod tests {
     }
 
     #[test]
+    fn legacy_manifest_without_publication_work_backfills_from_application_io() {
+        let (_directory, _project, graph) = fixture();
+        let mut session = graph
+            .begin_import_session(OperationId(Uuid::now_v7()), ImportSessionLimits::default())
+            .unwrap();
+        session
+            .append_arrow(BulkInputKind::Node, &[nodes(&[Uuid::now_v7()])])
+            .unwrap();
+        session.validate(&graph).unwrap();
+
+        let root = session.root.clone();
+        let mut legacy = serde_json::to_value(&session.manifest).unwrap();
+        let construction = legacy["progress"]["construction"].as_object_mut().unwrap();
+        let application_io: graphforge_storage::ConstructionPhaseAttribution =
+            serde_json::from_value(construction["application_io"].clone()).unwrap();
+        assert!(construction.remove("publication_work").is_some());
+        fs::write(root.join(MANIFEST), serde_json::to_vec(&legacy).unwrap()).unwrap();
+
+        let restored = read_manifest(&root).unwrap();
+        let evidence = restored.progress.construction.unwrap();
+        assert_eq!(
+            evidence.publication_work.contract,
+            "graphforge-publication-work/1"
+        );
+        evidence
+            .publication_work
+            .validate_against(&application_io)
+            .unwrap();
+    }
+
+    #[test]
     fn zero_row_node_and_edge_sources_are_canonical_and_publishable() {
         let (_directory, project, graph) = fixture();
         let empty_nodes = RecordBatch::new_empty(bulk_node_input_schema(Vec::new()).unwrap());
