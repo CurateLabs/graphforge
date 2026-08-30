@@ -57,6 +57,10 @@ Merge only when:
 - acceptance criteria have direct tests or deterministic evidence;
 - required CI and CI Gate pass at the exact head SHA;
 - `mergeStateStatus` is `CLEAN`;
+- after the required checks are green and the PR is otherwise ready to merge,
+  request exactly one final CodeRabbit review with `@coderabbitai review`;
+- wait for that review to finish, then use the `autofix` workflow for actionable
+  current findings before rechecking the exact head;
 - review findings were independently verified;
 - no current review thread is unresolved;
 - `closingIssuesReferences` contains exactly the intended issue;
