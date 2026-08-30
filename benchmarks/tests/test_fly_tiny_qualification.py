@@ -368,6 +368,36 @@ class FlyTinyQualificationTests(unittest.TestCase):
             self.assertNotIn("token", json.dumps(result).lower())
 
     @patch("graphforge_bench.fly_tiny_qualification.check_source")
+    def test_readiness_response_after_deadline_cannot_start_build(
+        self, check_source: object
+    ) -> None:
+        del check_source
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            transport = FakeTransport(readiness_responses=[[]])
+            with (
+                patch("graphforge_bench.fly_tiny_qualification.APP_READINESS_TIMEOUT_SECONDS", 2),
+                patch(
+                    "graphforge_bench.fly_tiny_qualification.time.monotonic",
+                    side_effect=(0.0, 0.0, 3.0),
+                ),
+            ):
+                result = execute(
+                    invocation(),
+                    transport=transport,
+                    root=root,
+                    ledger_path=root / "ledger.json",
+                    evidence_out=root / "evidence.json",
+                    dry_run=False,
+                )
+            self.assertEqual(result["failure"], "readiness_timeout")
+            self.assertFalse(
+                any(command[:2] == ("flyctl", "deploy") for command in transport.commands)
+            )
+            self.assertEqual(ResourceLedger.load(root / "ledger.json"), ResourceLedger())
+            self.assertFalse((root / "evidence.json").exists())
+
+    @patch("graphforge_bench.fly_tiny_qualification.check_source")
     def test_readiness_malformed_inventory_is_typed_provider_failure(
         self, check_source: object
     ) -> None:

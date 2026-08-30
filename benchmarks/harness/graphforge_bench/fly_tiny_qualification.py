@@ -359,20 +359,25 @@ def wait_for_app_readiness(
             raise QualificationError(
                 "readiness_timeout", "created app did not become ready for remote build"
             )
+        if remaining < 1:
+            raise QualificationError(
+                "readiness_timeout", "created app did not become ready for remote build"
+            )
         try:
             machines = _list(
                 transport.json(
                     command,
-                    timeout=max(
-                        1,
-                        min(APP_READINESS_PROBE_TIMEOUT_SECONDS, int(remaining)),
-                    ),
+                    timeout=min(APP_READINESS_PROBE_TIMEOUT_SECONDS, int(remaining)),
                 ),
                 "Machine",
             )
         except (subprocess.SubprocessError, OSError):
             machines = None
         if machines is not None:
+            if clock() >= deadline:
+                raise QualificationError(
+                    "readiness_timeout", "created app did not become ready for remote build"
+                )
             if machines:
                 raise QualificationError(
                     "provision_failed", "new app is not empty at readiness admission"
