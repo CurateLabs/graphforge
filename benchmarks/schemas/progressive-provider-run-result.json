@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schema": "graphforge-progressive-provider-run-result-schema/1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "rung", "status", "failure", "identities", "claim"],
+  "properties": {
+    "schema": {"const": "graphforge-progressive-provider-run-result/1"},
+    "rung": {"enum": ["S20", "S22", "S24", "S25", "S26"]},
+    "status": {"enum": ["passed", "failed"]},
+    "failure": {"type": ["string", "null"]},
+    "identities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commit", "profile_id", "profile_sha256"],
+      "properties": {
+        "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "profile_id": {"enum": ["graph500-s20-provider", "graph500-s22-provider", "graph500-s24-provider", "graph500-s25-provider", "graph500-s26-provider"]},
+        "profile_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "claim": {"const": "engineering_evidence_only"}
+  },
+  "allOf": [
+    {"if": {"properties": {"status": {"const": "passed"}}, "required": ["status"]},
+     "then": {"properties": {"failure": {"type": "null"}}},
+     "else": {"properties": {"failure": {"type": "string"}}}}
+  ]
+}

@@ -298,7 +298,8 @@ make -C benchmarks progressive-qualification-project-s20 \
 ```
 
 The sequential provider ladder has a separate no-spend control-plane planner.
-It verifies a contiguous, commit-bound evidence prefix, applies the checked-in
+It verifies a contiguous, commit-bound evidence prefix (including the exact
+checked-out repository commit and profile digest), applies the checked-in
 projection gate, and emits only the next profile and sanitized projection:
 
 ```bash

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -14,7 +16,12 @@ from graphforge_bench.progressive_provider_plan import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
-COMMIT = "a" * 40
+COMMIT = subprocess.run(
+    ["git", "-C", str(ROOT.parent), "rev-parse", "HEAD"],
+    capture_output=True,
+    check=True,
+    text=True,
+).stdout.strip()
 
 
 def rung(scale: int, *, source: str | None = None) -> dict:
@@ -78,6 +85,29 @@ def rung(scale: int, *, source: str | None = None) -> dict:
             "publication_work_units": 9,
         },
         "failure": None,
+    }
+
+
+def result(scale: int) -> dict:
+    profile = ROOT / "profiles" / "graph500" / f"s{scale}-local.json"
+    digest = hashlib.sha256(profile.read_bytes()).hexdigest()
+    return {
+        "schema": "graphforge-progressive-run-result/1",
+        "rung": f"S{scale}",
+        "status": "passed",
+        "failure": None,
+        "identities": {
+            "commit": COMMIT,
+            "profile_id": f"graph500-s{scale}-local",
+            "profile_sha256": digest,
+            "generator": "sha256:" + "0" * 64,
+            "generator_executable_sha256": "0" * 64,
+            "gf_sha256": "0" * 64,
+            "certify_sha256": "0" * 64,
+            "benchexec_python_sha256": "0" * 64,
+            "benchexec_version": "1.0",
+        },
+        "claim": "engineering_evidence_only",
     }
 
 
@@ -146,6 +176,15 @@ class ProgressiveProviderPlanTests(unittest.TestCase):
         self.assertNotIn("app", json.dumps(plan))
         self.assertNotIn("machine", json.dumps(plan))
         self.assertNotIn("volume", json.dumps(plan))
+
+    def test_plan_requires_checked_out_commit(self) -> None:
+        with self.assertRaisesRegex(ProviderPlanError, "checked-out repository commit"):
+            plan_provider_ladder(
+                root=ROOT,
+                output_dir=self.output,
+                commit="a" * 40,
+                maximum_scale=26,
+            )
 
     def test_evidence_must_be_a_contiguous_passed_prefix(self) -> None:
         (self.output / "s19-rung.json").write_text(json.dumps(rung(19)), encoding="utf-8")
@@ -235,16 +274,37 @@ class ProgressiveProviderPlanTests(unittest.TestCase):
         for scale in (18, 19):
             value = rung(scale)
             (self.output / f"s{scale}-rung.json").write_text(json.dumps(value), encoding="utf-8")
-            result = {
-                "rung": f"S{scale}",
-                "status": "passed",
-                "identities": {"commit": COMMIT, "profile_id": value["profile_id"]},
-            }
-            (self.output / f"s{scale}-result.json").write_text(json.dumps(result), encoding="utf-8")
-        result = json.loads((self.output / "s19-result.json").read_text(encoding="utf-8"))
-        result["identities"]["commit"] = "b" * 40
-        (self.output / "s19-result.json").write_text(json.dumps(result), encoding="utf-8")
+            result_doc = result(scale)
+            (self.output / f"s{scale}-result.json").write_text(
+                json.dumps(result_doc), encoding="utf-8"
+            )
+        result_doc = json.loads((self.output / "s19-result.json").read_text(encoding="utf-8"))
+        result_doc["identities"]["commit"] = "b" * 40
+        (self.output / "s19-result.json").write_text(json.dumps(result_doc), encoding="utf-8")
         with self.assertRaisesRegex(ProviderPlanError, "commit/profile"):
+            plan_provider_ladder(
+                root=ROOT,
+                output_dir=self.output,
+                commit=COMMIT,
+                maximum_scale=20,
+                provider_capacity=CAPACITY,
+            )
+
+    def test_minimal_result_document_is_rejected(self) -> None:
+        for scale in (18, 19):
+            value = rung(scale)
+            (self.output / f"s{scale}-rung.json").write_text(json.dumps(value), encoding="utf-8")
+            (self.output / f"s{scale}-result.json").write_text(
+                json.dumps(
+                    {
+                        "rung": f"S{scale}",
+                        "status": "passed",
+                        "identities": {"commit": COMMIT, "profile_id": value["profile_id"]},
+                    }
+                ),
+                encoding="utf-8",
+            )
+        with self.assertRaisesRegex(ProviderPlanError, "result is not schema-valid"):
             plan_provider_ladder(
                 root=ROOT,
                 output_dir=self.output,

@@ -14,6 +14,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import subprocess
 from typing import Any
 
 from jsonschema import Draft202012Validator
@@ -59,6 +60,23 @@ def _sha256(path: Path) -> str:
     return value
 
 
+def _repository_commit(root: Path) -> str:
+    """Return the exact commit checked out for the benchmark workspace."""
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(root.parent), "rev-parse", "HEAD"],
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+    except OSError as error:
+        raise ProviderPlanError("repository commit is unavailable") from error
+    value = completed.stdout.strip()
+    if completed.returncode != 0 or COMMIT.fullmatch(value) is None:
+        raise ProviderPlanError("repository commit is unavailable")
+    return value
+
+
 def _validate_rung(root: Path, value: Any, scale: int) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise ProviderPlanError("completed rung evidence is malformed")
@@ -83,20 +101,36 @@ def _validate_rung(root: Path, value: Any, scale: int) -> Mapping[str, Any]:
 
 
 def _validate_result_identity(
-    output_dir: Path, *, scale: int, commit: str, profile_id: str
+    root: Path, output_dir: Path, *, scale: int, commit: str, profile_id: str
 ) -> None:
     """Bind each completed rung to the exact source commit and profile."""
     value = _read_json(output_dir / f"s{scale}-result.json", "completed rung result is unavailable")
     if not isinstance(value, Mapping):
         raise ProviderPlanError("completed rung result is malformed")
+    schema_name = (
+        "progressive-run-result.json"
+        if scale in (18, 19)
+        else "progressive-provider-run-result.json"
+    )
+    schema = _read_json(
+        root / "schemas" / schema_name, "completed rung result schema is unavailable"
+    )
+    error = next(Draft202012Validator(schema).iter_errors(value), None)
+    if error is not None:
+        raise ProviderPlanError("completed rung result is not schema-valid")
     identities = value.get("identities")
     if not isinstance(identities, Mapping):
         raise ProviderPlanError("completed rung result identity is missing")
+    profile_path = _profile_path(
+        root, _profile(load_profiles(root / "profiles" / "graph500"), scale)
+    )
+    expected_profile_sha = _sha256(profile_path)
     if (
         value.get("rung") != f"S{scale}"
         or value.get("status") != "passed"
         or identities.get("commit") != commit
         or identities.get("profile_id") != profile_id
+        or identities.get("profile_sha256") != expected_profile_sha
     ):
         raise ProviderPlanError(
             "completed rung result is not bound to the requested commit/profile"
@@ -119,6 +153,7 @@ def completed_rungs(
         rung = _validate_rung(root, _read_json(path, "completed rung evidence is malformed"), scale)
         if commit is not None:
             _validate_result_identity(
+                root,
                 output_dir,
                 scale=scale,
                 commit=commit,
@@ -146,6 +181,8 @@ def plan_provider_ladder(
     """Return one immutable, sanitized next-rung plan without provider calls."""
     if COMMIT.fullmatch(commit) is None:
         raise ProviderPlanError("commit must be a lowercase full Git object ID")
+    if _repository_commit(root) != commit:
+        raise ProviderPlanError("requested commit is not the checked-out repository commit")
     if maximum_scale not in SCALES:
         raise ProviderPlanError("maximum scale is not a canonical ladder rung")
     profiles = load_profiles(root / "profiles" / "graph500")
