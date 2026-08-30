@@ -433,7 +433,7 @@ def classify_provider_build_failure(error: BaseException) -> str:
             fragments.append(value[:8_192])
     text = "\n".join(fragments).lower()
     patterns = (
-        ("provider_billing_unavailable", ("payment method", "payment required", "billing")),
+        ("provider_billing_unavailable", ("payment method", "payment required")),
         (
             "provider_remote_builder_unavailable",
             (

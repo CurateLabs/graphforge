@@ -222,6 +222,14 @@ class FlyAdapterTests(unittest.TestCase):
                 self.assertEqual(classify_provider_build_failure(error), expected)
         timeout = subprocess.TimeoutExpired(("flyctl", "deploy"), 30)
         self.assertEqual(classify_provider_build_failure(timeout), "provider_build_timeout")
+        unrelated_billing = subprocess.CalledProcessError(
+            1,
+            ("flyctl", "deploy"),
+            stderr="compiler error: unresolved import billing::invoice",
+        )
+        self.assertEqual(
+            classify_provider_build_failure(unrelated_billing), "provider_build_unknown"
+        )
 
         sensitive = (
             "unknown failure token=secret Bearer auth@example.com "
