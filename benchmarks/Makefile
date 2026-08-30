@@ -1,4 +1,4 @@
-.PHONY: install smoke smoke-python smoke-rust fly-adapter-static local-admission progressive-qualification-list progressive-qualification-plan progressive-qualification-run progressive-qualification-project-s20 progressive-qualification-binaries
+.PHONY: install smoke smoke-python smoke-rust fly-adapter-static local-admission progressive-qualification-list progressive-qualification-plan progressive-qualification-run progressive-qualification-project-s20 progressive-qualification-binaries progressive-provider-plan
 
 install:
 	uv sync --locked
@@ -51,3 +51,11 @@ progressive-qualification-project-s20: install
 	PYTHONPATH=$(CURDIR)/harness uv run --locked python -m graphforge_bench.progressive_run \
 		--project-s20 --output-dir "$(OUTPUT_DIR)" \
 		--provider-capacity "$(PROVIDER_CAPACITY)"
+
+# Safe control-plane admission only; this never provisions a provider.
+progressive-provider-plan: install
+	test -n "$(COMMIT)" && test -n "$(MAXIMUM_SCALE)" && test -n "$(OUTPUT_DIR)" && test -n "$(PLAN_OUT)"
+	PYTHONPATH=$(CURDIR)/harness uv run --locked python -m graphforge_bench.progressive_provider_plan \
+		--root "$(CURDIR)" --output-dir "$(OUTPUT_DIR)" --commit "$(COMMIT)" \
+		--maximum-scale "$(MAXIMUM_SCALE)" $(if $(PROVIDER_CAPACITY),--provider-capacity "$(PROVIDER_CAPACITY)",) \
+		--plan-out "$(PLAN_OUT)"
