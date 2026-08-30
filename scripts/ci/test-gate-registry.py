@@ -42,6 +42,11 @@ class GateRegistryTests(unittest.TestCase):
         mutated["workflows"].pop()
         self.rejected("workflow inventory mismatch", mutated)
 
+    def test_missing_registered_workflow_is_a_registry_error(self) -> None:
+        mutated = copy.deepcopy(self.registry)
+        mutated["workflows"][0]["path"] = ".github/workflows/does-not-exist.yml"
+        self.rejected("workflow file is unavailable", mutated)
+
     def test_required_check_is_exact_head_ci_gate(self) -> None:
         mutated = copy.deepcopy(self.registry)
         test_suite = next(item for item in mutated["workflows"] if item["id"] == "test-suite")

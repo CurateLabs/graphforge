@@ -13,8 +13,9 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Validate registry and render operator handoff
+      - name: Validate registry
+        run: python3 scripts/ci/gate-registry.py validate
+      - name: Render operator handoff
         run: |
-          python3 scripts/ci/gate-registry.py validate
           python3 scripts/ci/gate-registry.py command g500-certification
           echo "No provider operation occurs in GitHub Actions; execute through Pulumi ESC."

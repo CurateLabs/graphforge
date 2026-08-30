@@ -411,9 +411,20 @@ def validate_operator_handoffs_have_no_artifacts() -> None:
         text = (WORKFLOWS / workflow).read_text()
         uploaded, downloaded = artifact_contracts(text)
         assert not uploaded and not downloaded, f"operator handoff transfers artifacts: {workflow}"
-        assert f"gate-registry.py command {gate}" in text, (
-            f"operator handoff does not render its registry command: {workflow}"
-        )
+        command = f"python3 scripts/ci/gate-registry.py command {gate}"
+        matches = [
+            scalar
+            for body in workflow_jobs(text).values()
+            for scalar in job_required_run_scalars(body, command)
+        ]
+        assert matches, f"operator handoff does not execute its registry command: {workflow}"
+        inactive = text.replace(command, f'echo "{command}"', 1)
+        inactive_matches = [
+            scalar
+            for body in workflow_jobs(inactive).values()
+            for scalar in job_required_run_scalars(body, command)
+        ]
+        assert not inactive_matches, f"inactive operator handoff passed policy: {workflow}"
 
 
 def cache_contracts(text: str) -> tuple[list[str], list[str]]:

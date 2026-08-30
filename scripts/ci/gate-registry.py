@@ -136,7 +136,10 @@ def validate_registry(value: dict[str, Any], root: Path = ROOT) -> None:
             if not isinstance(path, str) or path in paths:
                 raise RegistryError(f"{gate_id}: workflow path is duplicate or invalid")
             paths.add(path)
-            workflow = (root / path).read_text(encoding="utf-8")
+            try:
+                workflow = (root / path).read_text(encoding="utf-8")
+            except OSError as error:
+                raise RegistryError(f"{gate_id}: workflow file is unavailable: {path}") from error
             if record.get("control_plane") == "pulumi_esc":
                 marker = next(
                     (item for item in FORBIDDEN_OPERATOR_WORKFLOW_MARKERS if item in workflow),
