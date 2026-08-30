@@ -196,8 +196,13 @@ runner's Docker daemon with `flyctl deploy --local-only --build-only --push`,
 and resolves the same immutable `registry.fly.io/<app>@sha256:...` identity
 before creating a volume or Machine. Runtime admission refuses hosted Docker
 outside Linux GitHub Actions so the disk-constrained Mac cannot accidentally
-become the image builder. The workflow runs an always-on cleanup recovery step
-and uploads only the closed result plus qualified evidence when present.
+become the image builder. A separate recovery job uses a durable pre-creation
+app/commit ownership receipt with a fresh 128-bit app-name nonce and an
+independent timeout; cleanup refuses to delete a present app without that exact
+binding. The protected
+`fly-tiny-recovery.yml` janitor can replay the same receipt manually after
+runner loss or cancellation. Uploaded artifacts are one-day, closed results,
+the credential-free ownership receipt, and qualified evidence when present.
 
 ## Smoke
 

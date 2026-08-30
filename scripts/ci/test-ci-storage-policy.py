@@ -99,7 +99,10 @@ EXPECTED_ARTIFACT_UPLOADS = Counter(
         "m6-memory-${{ github.sha }}-blacksmith-4vcpu-ubuntu-2404": 1,
         "g500-certification-${{ inputs.commit_sha }}": 1,
         "native-local-admission-${{ matrix.authority }}-${{ github.sha }}": 1,
-        "fly-tiny-result-${{ inputs.commit_sha }}": 1,
+        "${{ env.PREFLIGHT_ARTIFACT }}": 1,
+        "fly-tiny-execution-${{ inputs.commit_sha }}": 1,
+        "fly-tiny-cleanup-${{ inputs.commit_sha }}": 1,
+        "fly-tiny-manual-cleanup-${{ inputs.source_run_id }}": 1,
     }
 )
 EXPECTED_ARTIFACT_DOWNLOADS = Counter(
@@ -124,6 +127,7 @@ EXPECTED_ARTIFACT_DOWNLOADS = Counter(
         "pr-node-addon-${{ github.sha }}": 1,
         "native-oracle-windows-${{ github.sha }}": 1,
         "native-oracle-macos-${{ github.sha }}": 1,
+        "${{ env.PREFLIGHT_ARTIFACT }}": 3,
     }
 )
 EXPECTED_DEPENDENCY_KEYS = Counter(
@@ -311,12 +315,10 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
                 "${{ runner.temp }}/g500-certification-phase-journal.json"
             ),
             "benchmarks/outputs/local-admission-evidence.json",
-            (
-                "${{ runner.temp }}/fly-q958-plan.json\n"
-                "${{ runner.temp }}/fly-q958-result.json\n"
-                "${{ runner.temp }}/fly-q958-cleanup-result.json\n"
-                "${{ runner.temp }}/fly-q958-evidence.json"
-            ),
+            ("${{ runner.temp }}/fly-q958-ledger.json\n${{ runner.temp }}/fly-q958-plan.json"),
+            ("${{ runner.temp }}/fly-q958-result.json\n${{ runner.temp }}/fly-q958-evidence.json"),
+            "${{ runner.temp }}/fly-q958-cleanup-result.json",
+            "${{ runner.temp }}/fly-q958-manual-cleanup-result.json",
         }, f"artifact upload contains unapproved bytes: {path}"
         uploaded.append(name)
     for step in action_steps(text, "actions/download-artifact@"):
@@ -344,6 +346,7 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
             "crates/graphforge-bindings-node",
             "native/windows",
             "native/macos",
+            "${{ runner.temp }}",
         }, f"artifact download path drift: {selector}"
         if pattern is not None:
             assert field(step, "merge-multiple") == "true", (
@@ -356,8 +359,10 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
             assert field(step, "merge-multiple") is None, (
                 f"single artifact unexpectedly merged: {name}"
             )
-            same_run = name == "Release-Load-${{ github.run_id }}" or name.startswith(
-                ("pr-", "native-oracle-")
+            same_run = (
+                name == "Release-Load-${{ github.run_id }}"
+                or name.startswith(("pr-", "native-oracle-"))
+                or (name == "${{ env.PREFLIGHT_ARTIFACT }}" and field(step, "run-id") is None)
             )
             cross_run = not same_run
             if cross_run:
@@ -390,6 +395,7 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
                         "${{ steps.candidate.outputs.run_id }}",
                         "${{ needs.locate_candidate.outputs.candidate_run_id }}",
                     },
+                    "${{ runner.temp }}": {"${{ inputs.source_run_id }}"},
                 }[path]
                 assert field(step, "run-id") in expected_run_ids, (
                     f"cross-run artifact run ID drift: {name}"

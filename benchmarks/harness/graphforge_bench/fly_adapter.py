@@ -106,7 +106,10 @@ class Command:
 class ResourceLedger:
     """Local ownership ledger. IDs are never copied into evidence/diagnostics."""
 
-    schema: str = "graphforge-fly-resource-ledger/1"
+    schema: str = "graphforge-fly-resource-ledger/3"
+    owner_app: str | None = None
+    owner_commit: str | None = None
+    owner_nonce: str | None = None
     app_owned: bool = False
     volume_id: str | None = None
     machine_id: str | None = None
@@ -124,7 +127,7 @@ class ResourceLedger:
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
             raise AdapterError("resource ledger is malformed") from error
         _refuse(not isinstance(value, dict), "resource ledger is malformed")
-        if value.pop("schema", None) != "graphforge-fly-resource-ledger/1":
+        if value.pop("schema", None) != "graphforge-fly-resource-ledger/3":
             raise AdapterError("resource ledger schema is invalid")
         expected = {item.name for item in fields(cls)} - {"schema"}
         _refuse(set(value) != expected, "resource ledger fields are invalid")
@@ -142,6 +145,42 @@ def _refuse(condition: bool, message: str) -> None:
 
 
 def validate_ledger(ledger: ResourceLedger) -> None:
+    _refuse(
+        len({item is None for item in (ledger.owner_app, ledger.owner_commit, ledger.owner_nonce)})
+        != 1,
+        "resource ledger ownership binding is incomplete",
+    )
+    _refuse(
+        ledger.owner_app is not None
+        and (not isinstance(ledger.owner_app, str) or not SAFE_NAME.fullmatch(ledger.owner_app)),
+        "resource ledger owner app is invalid",
+    )
+    _refuse(
+        ledger.owner_commit is not None
+        and (not isinstance(ledger.owner_commit, str) or not COMMIT.fullmatch(ledger.owner_commit)),
+        "resource ledger owner commit is invalid",
+    )
+    _refuse(
+        ledger.owner_nonce is not None
+        and (
+            not isinstance(ledger.owner_nonce, str)
+            or not re.fullmatch(r"[0-9a-f]{32}", ledger.owner_nonce)
+            or ledger.owner_app != f"gf-q958-{ledger.owner_nonce}"
+        ),
+        "resource ledger owner nonce is invalid",
+    )
+    _refuse(
+        ledger.owner_app is None
+        and (
+            ledger.app_owned
+            or ledger.volume_id is not None
+            or ledger.machine_id is not None
+            or ledger.image_digest is not None
+            or bool(ledger.secret_names)
+            or ledger.token_material_present
+        ),
+        "resource ledger has unowned resource state",
+    )
     _refuse(type(ledger.app_owned) is not bool, "resource ledger ownership is invalid")
     _refuse(
         type(ledger.token_material_present) is not bool, "resource ledger token state is invalid"
@@ -280,7 +319,7 @@ def remote_build_command(
     *, app: str, source: Path, config: Path, dockerfile: Path, commit: str
 ) -> Command:
     """Retain the provider-builder command used by existing ladder planning."""
-    return image_build_command(
+    command = image_build_command(
         app=app,
         source=source,
         config=config,
@@ -288,6 +327,7 @@ def remote_build_command(
         commit=commit,
         authority="provider",
     )
+    return Command("remote_build", command.argv)
 
 
 def provisioning_commands(attempt: FlyAttempt) -> tuple[Command, ...]:

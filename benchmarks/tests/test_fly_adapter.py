@@ -78,6 +78,7 @@ class FlyAdapterTests(unittest.TestCase):
             dockerfile=Path("/repo/Dockerfile"),
             commit="a" * 40,
         )
+        self.assertEqual(command.operation, "remote_build")
         self.assertIn("--remote-only", command.argv)
         self.assertIn("--build-only", command.argv)
         self.assertIn("--push", command.argv)
@@ -173,23 +174,29 @@ class FlyAdapterTests(unittest.TestCase):
 
     def test_cleanup_is_owned_ordered_and_idempotent(self) -> None:
         ledger = ResourceLedger(
+            owner_app="gf-q958-" + "c" * 32,
+            owner_commit="a" * 40,
+            owner_nonce="c" * 32,
             app_owned=True,
             volume_id="vol_fixture123",
             machine_id="abcdef01234567",
             secret_names=["temporary-token"],
         )
-        first = cleanup_commands("gf-fixture", ledger)
+        first = cleanup_commands("gf-q958-" + "c" * 32, ledger)
         self.assertEqual(
             [c.operation for c in first],
             ["destroy_machine", "destroy_volume", "unset_secret", "destroy_app"],
         )
         self.assertEqual(cleanup_commands("gf-fixture", ResourceLedger()), ())
-        self.assertEqual(first, cleanup_commands("gf-fixture", ledger))
+        self.assertEqual(first, cleanup_commands("gf-q958-" + "c" * 32, ledger))
 
     def test_ledger_load_closes_shape_types_and_identifiers(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "ledger.json"
             ledger = ResourceLedger(
+                owner_app="gf-q958-" + "c" * 32,
+                owner_commit="a" * 40,
+                owner_nonce="c" * 32,
                 app_owned=True,
                 volume_id="vol_fixture123",
                 machine_id="abcdef01234567",

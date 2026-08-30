@@ -154,9 +154,21 @@ runs the non-ladder #958 qualification on a Blacksmith Linux runner. It builds
 the commit-pinned image with hosted Docker, pushes it to the disposable app's
 Fly registry path, resolves the immutable digest, runs only the 10 GiB
 `performance-1x` filesystem smoke, and independently verifies teardown. A
-separate always-on recovery step handles interrupted executions. The workflow
-uploads only one-day sanitized plan/result documents and qualified evidence;
-the ownership ledger and provider resource identifiers are never uploaded.
+separate recovery job has its own timeout budget after execution, and
+`fly-tiny-recovery.yml` provides receipt-bound manual orphan cleanup. The
+workflow uploads a one-day pre-creation ownership receipt plus sanitized
+plan/result documents and qualified evidence. The receipt binds the commit to
+a fresh 128-bit app-name nonce and never contains provider resource identifiers
+or credentials.
+
+### `fly-tiny-recovery.yml` — Manual Fly orphan recovery
+
+This protected manual janitor downloads the one-day ownership receipt from a
+specified qualification run and refuses deletion unless its exact nonce-bound
+app and commit match. It runs the trusted controller from current `main` and
+shares the qualification concurrency lock, so it cannot race the source run.
+It exists for runner loss, workflow cancellation, or a failed independent
+recovery job; it cannot infer ownership from an app prefix.
 
 ### CodeRabbit
 

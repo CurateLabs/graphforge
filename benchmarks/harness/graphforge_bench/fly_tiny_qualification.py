@@ -42,6 +42,7 @@ COMMIT = re.compile(r"^[0-9a-f]{40}$")
 SAFE_NAME = re.compile(r"^[a-z][a-z0-9-]{2,62}$")
 SAFE_VOLUME = re.compile(r"^[a-z][a-z0-9_]{0,29}$")
 SAFE_REGION = re.compile(r"^[a-z]{3}$")
+OWNED_APP = re.compile(r"^gf-q958-([0-9a-f]{32})$")
 MACHINE_ID = re.compile(r"^[0-9a-f]{14}$")
 VOLUME_ID = re.compile(r"^vol_[a-z0-9]+$")
 SMOKE_EVIDENCE = "/work/fly-qualification-evidence.json"
@@ -162,9 +163,9 @@ class TinyQualificationInvocation:
     volume_name: str
     machine_name: str
     prerequisites: Mapping[int, str]
-    build_authority: str = "provider"
     machine_class: str = "performance-1x"
     volume_gib: int = 10
+    build_authority: str = "provider"
 
 
 @dataclass(frozen=True)
@@ -190,6 +191,8 @@ def validate_invocation(invocation: TinyQualificationInvocation) -> None:
             raise AdapterError("provider name is invalid")
     if not SAFE_VOLUME.fullmatch(invocation.volume_name):
         raise AdapterError("volume name is invalid")
+    if not OWNED_APP.fullmatch(invocation.app):
+        raise AdapterError("qualification app lacks a collision-resistant ownership nonce")
     if not SAFE_REGION.fullmatch(invocation.region):
         raise AdapterError("fixed region is invalid")
     if invocation.machine_class != "performance-1x":
@@ -214,6 +217,18 @@ def validate_build_environment(invocation: TinyQualificationInvocation) -> None:
         )
     if shutil.which("docker") is None:
         raise QualificationError("authorization_refused", "hosted Docker is unavailable")
+    try:
+        subprocess.run(
+            ("docker", "info"),
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+        )
+    except (subprocess.SubprocessError, OSError):
+        raise QualificationError(
+            "authorization_refused", "hosted Docker daemon is unavailable"
+        ) from None
 
 
 def check_source(root: Path, commit: str) -> None:
@@ -333,6 +348,9 @@ def _save_ledger(path: Path, ledger: ResourceLedger) -> None:
         path,
         {
             "schema": ledger.schema,
+            "owner_app": ledger.owner_app,
+            "owner_commit": ledger.owner_commit,
+            "owner_nonce": ledger.owner_nonce,
             "app_owned": ledger.app_owned,
             "volume_id": ledger.volume_id,
             "machine_id": ledger.machine_id,
@@ -582,6 +600,13 @@ def _cleanup(
         failures = True
     app_exists = invocation.app in current_names
 
+    if app_exists and (
+        ledger.owner_app != invocation.app or ledger.owner_commit != invocation.commit
+    ):
+        raise QualificationError(
+            "authorization_refused", "cleanup ownership binding is unavailable"
+        )
+
     if app_exists:
         # The app was proven absent before creation, so every child in this
         # owned app belongs to this attempt even if a crash preceded ID capture.
@@ -771,6 +796,9 @@ def _cleanup(
         raise QualificationError("teardown_failed", "provider teardown was not independently empty")
 
     ledger.app_owned = False
+    ledger.owner_app = None
+    ledger.owner_commit = None
+    ledger.owner_nonce = None
     ledger.volume_id = None
     ledger.machine_id = None
     ledger.image_digest = None
@@ -793,6 +821,14 @@ def execute(
     check_source(root, invocation.commit)
     validate_build_environment(invocation)
     live_size = verify_live_capacity(transport, invocation)
+    owner = OWNED_APP.fullmatch(invocation.app)
+    assert owner is not None
+    ledger = ResourceLedger(
+        owner_app=invocation.app,
+        owner_commit=invocation.commit,
+        owner_nonce=owner.group(1),
+    )
+    _save_ledger(ledger_path, ledger)
     if dry_run:
         return {
             "schema": "graphforge-fly-tiny-plan/1",
@@ -803,8 +839,6 @@ def execute(
             "full_run_authorized": False,
         }
 
-    ledger = ResourceLedger()
-    _save_ledger(ledger_path, ledger)
     failure: QualificationError | None = None
     failure_kind = "provision_failed"
     try:
@@ -959,6 +993,20 @@ def cleanup_only(
         not isinstance(name, str) or not SAFE_NAME.fullmatch(name) for name in names
     ):
         raise QualificationError("teardown_failed", "provider app inventory is malformed")
+    if invocation.app not in names:
+        if ledger.owner_app == invocation.app and ledger.owner_commit == invocation.commit:
+            ledger = ResourceLedger()
+            _save_ledger(ledger_path, ledger)
+        return {
+            "schema": "graphforge-fly-adapter-result/2",
+            "status": "passed",
+            "failure": None,
+            "cause": None,
+        }
+    if ledger.owner_app != invocation.app or ledger.owner_commit != invocation.commit:
+        raise QualificationError(
+            "authorization_refused", "cleanup ownership binding is unavailable"
+        )
     baseline = names - {invocation.app}
     _cleanup(transport, invocation, ledger, ledger_path, baseline)
     return {
@@ -1035,7 +1083,9 @@ def main() -> int:
                 evidence_out=args.evidence_out,
                 dry_run=not args.execute,
             )
-    except (AdapterError, QualificationError, subprocess.SubprocessError, OSError):
+    except QualificationError as error:
+        result = sanitized_failure(error.failure, cause=error.cause)
+    except (AdapterError, subprocess.SubprocessError, OSError):
         result = sanitized_failure("authorization_refused")
     _atomic_json(args.result_out, result)
     print(json.dumps(result, sort_keys=True))

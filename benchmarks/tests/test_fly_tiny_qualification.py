@@ -15,6 +15,7 @@ from graphforge_bench.fly_tiny_qualification import (
     _machine_command,
     cleanup_only,
     execute,
+    main,
     validate_build_environment,
     validate_invocation,
     verify_live_capacity,
@@ -22,14 +23,15 @@ from graphforge_bench.fly_tiny_qualification import (
 import tomllib
 
 DIGEST = "sha256:" + "b" * 64
-IMAGE = "registry.fly.io/gf-q958-test@" + DIGEST
+APP = "gf-q958-" + "c" * 32
+IMAGE = f"registry.fly.io/{APP}@" + DIGEST
 
 
 def invocation(**changes: object) -> TinyQualificationInvocation:
     values = {
         "commit": "a" * 40,
         "organization": "personal",
-        "app": "gf-q958-test",
+        "app": APP,
         "region": "dfw",
         "volume_name": "gf_q958_test",
         "machine_name": "gf-q958-machine",
@@ -113,7 +115,7 @@ class FakeTransport:
 
     def machine_state(self, app: str, machine_id: str, *, timeout: int) -> object:
         self.commands.append(("machine-state", app, machine_id))
-        if app != "gf-q958-test" or machine_id != "abcdef01234567" or timeout <= 0:
+        if app != APP or machine_id != "abcdef01234567" or timeout <= 0:
             raise AssertionError("unexpected Machine state lookup")
         return {
             "id": "abcdef01234567",
@@ -130,7 +132,7 @@ class FakeTransport:
 
     @staticmethod
     def assert_resolution(app: str, tag: str, timeout: int) -> None:
-        if app != "gf-q958-test" or tag != "a" * 40 or timeout <= 0:
+        if app != APP or tag != "a" * 40 or timeout <= 0:
             raise AssertionError("unexpected image resolution")
 
     def json(self, argv: tuple[str, ...], *, timeout: int) -> object:
@@ -172,7 +174,7 @@ class FakeTransport:
         if argv[1:3] in {("volumes", "list"), ("secrets", "list")}:
             return []
         if argv[1:3] == ("apps", "list"):
-            return [{"Name": "gf-q958-test"}] if self.app_created else []
+            return [{"Name": APP}] if self.app_created else []
         raise AssertionError(f"unexpected JSON command: {argv}")
 
 
@@ -211,9 +213,9 @@ class FlyTinyQualificationTests(unittest.TestCase):
             return Response({"id": "abcdef01234567", "config": {}})
 
         with patch("graphforge_bench.fly_tiny_qualification.urllib.request.urlopen", open_request):
-            self.assertEqual(transport.resolve_image("gf-q958-test", "fixture", timeout=30), IMAGE)
+            self.assertEqual(transport.resolve_image(APP, "fixture", timeout=30), IMAGE)
             self.assertEqual(
-                transport.machine_state("gf-q958-test", "abcdef01234567", timeout=30)["id"],
+                transport.machine_state(APP, "abcdef01234567", timeout=30)["id"],
                 "abcdef01234567",
             )
         self.assertTrue(
@@ -245,6 +247,22 @@ class FlyTinyQualificationTests(unittest.TestCase):
                 "graphforge_bench.fly_tiny_qualification.shutil.which",
                 return_value="/bin/docker",
             ),
+            patch("graphforge_bench.fly_tiny_qualification.subprocess.run"),
+        ):
+            validate_build_environment(hosted)
+
+        with (
+            patch.dict("os.environ", {"CI": "true", "GITHUB_ACTIONS": "true"}, clear=True),
+            patch("graphforge_bench.fly_tiny_qualification.platform.system", return_value="Linux"),
+            patch(
+                "graphforge_bench.fly_tiny_qualification.shutil.which",
+                return_value="/bin/docker",
+            ),
+            patch(
+                "graphforge_bench.fly_tiny_qualification.subprocess.run",
+                side_effect=subprocess.CalledProcessError(1, ("docker", "info")),
+            ),
+            self.assertRaisesRegex(QualificationError, "daemon"),
         ):
             validate_build_environment(hosted)
 
@@ -253,23 +271,99 @@ class FlyTinyQualificationTests(unittest.TestCase):
             root = Path(directory)
             transport = FakeTransport()
             transport.app_created = True
-            result = cleanup_only(
-                invocation(),
-                transport=transport,
-                ledger_path=root / "ledger.json",
-            )
+            ledger_path = root / "ledger.json"
+            with self.assertRaisesRegex(QualificationError, "ownership binding"):
+                cleanup_only(invocation(), transport=transport, ledger_path=ledger_path)
+            self.assertTrue(transport.app_created)
+
+            ResourceLedger(
+                owner_app=APP,
+                owner_commit="a" * 40,
+                owner_nonce="c" * 32,
+            ).save(ledger_path)
+            result = cleanup_only(invocation(), transport=transport, ledger_path=ledger_path)
             self.assertEqual(result["status"], "passed")
-            self.assertEqual(ResourceLedger.load(root / "ledger.json"), ResourceLedger())
+            self.assertEqual(ResourceLedger.load(ledger_path), ResourceLedger())
             self.assertIn(
-                ("flyctl", "apps", "destroy", "gf-q958-test", "--yes"),
+                ("flyctl", "apps", "destroy", APP, "--yes"),
                 transport.commands,
             )
-            with self.assertRaisesRegex(AdapterError, "disposable qualification"):
+            with self.assertRaisesRegex(AdapterError, "ownership nonce"):
                 cleanup_only(
                     invocation(app="production-app"),
                     transport=FakeTransport(),
                     ledger_path=root / "other-ledger.json",
                 )
+
+    def test_cleanup_only_absent_app_is_safe_without_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            ledger_path = Path(directory) / "ledger.json"
+            ResourceLedger(
+                owner_app=APP,
+                owner_commit="a" * 40,
+                owner_nonce="c" * 32,
+                app_owned=True,
+                volume_id="vol_fixture123",
+                machine_id="abcdef01234567",
+                image_digest=IMAGE,
+            ).save(ledger_path)
+            result = cleanup_only(
+                invocation(),
+                transport=FakeTransport(),
+                ledger_path=ledger_path,
+            )
+            self.assertEqual(result["status"], "passed")
+            self.assertEqual(ResourceLedger.load(ledger_path), ResourceLedger())
+        with tempfile.TemporaryDirectory() as directory:
+            result = cleanup_only(
+                invocation(),
+                transport=FakeTransport(),
+                ledger_path=Path(directory) / "missing-ledger.json",
+            )
+            self.assertEqual(result["status"], "passed")
+
+    def test_cleanup_cli_preserves_teardown_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result_path = root / "result.json"
+            argv = [
+                "fly_tiny_qualification",
+                "--expected-sha",
+                "a" * 40,
+                "--org",
+                "personal",
+                "--app",
+                APP,
+                "--region",
+                "dfw",
+                "--volume-name",
+                "gf_q958_test",
+                "--machine-name",
+                "gf-q958-machine",
+                "--prerequisite-955",
+                "merged",
+                "--prerequisite-956",
+                "merged",
+                "--prerequisite-957",
+                "merged",
+                "--ledger",
+                str(root / "ledger.json"),
+                "--evidence-out",
+                str(root / "evidence.json"),
+                "--result-out",
+                str(result_path),
+                "--cleanup-only",
+                "--confirm-disposable",
+            ]
+            with (
+                patch("sys.argv", argv),
+                patch(
+                    "graphforge_bench.fly_tiny_qualification.cleanup_only",
+                    side_effect=QualificationError("teardown_failed", "still present"),
+                ),
+            ):
+                self.assertEqual(main(), 1)
+            self.assertEqual(json.loads(result_path.read_text())["failure"], "teardown_failed")
 
     def test_live_capacity_requires_current_region_and_smallest_preset(self) -> None:
         transport = FakeTransport()
@@ -368,7 +462,7 @@ class FlyTinyQualificationTests(unittest.TestCase):
             deploy = next(
                 command for command in transport.commands if command[:2] == ("flyctl", "deploy")
             )
-            self.assertEqual(deploy[deploy.index("--app") + 1], "gf-q958-test")
+            self.assertEqual(deploy[deploy.index("--app") + 1], APP)
             self.assertTrue(Path(deploy[deploy.index("--config") + 1]).is_absolute())
             self.assertTrue(Path(deploy[deploy.index("--dockerfile") + 1]).is_absolute())
             self.assertIn("--build-only", deploy)
@@ -382,7 +476,7 @@ class FlyTinyQualificationTests(unittest.TestCase):
                 )
             )
             self.assertIn(
-                ("flyctl", "apps", "destroy", "gf-q958-test", "--yes"),
+                ("flyctl", "apps", "destroy", APP, "--yes"),
                 transport.commands,
             )
 
@@ -415,7 +509,7 @@ class FlyTinyQualificationTests(unittest.TestCase):
                 "machine",
                 "list",
                 "--app",
-                "gf-q958-test",
+                APP,
                 "--json",
             )
             self.assertEqual(transport.commands[:deploy_index].count(readiness), 3)
