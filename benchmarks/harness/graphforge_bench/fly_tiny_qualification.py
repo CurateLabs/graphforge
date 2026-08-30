@@ -8,7 +8,7 @@ and tears every owned provider resource down on every terminal path.
 from __future__ import annotations
 
 import argparse
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 import importlib.util
@@ -46,6 +46,10 @@ BUILD_TIMEOUT_SECONDS = 1_800
 CREATE_TIMEOUT_SECONDS = 180
 RETRIEVAL_TIMEOUT_SECONDS = 1_260
 SFTP_TIMEOUT_SECONDS = 120
+APP_READINESS_TIMEOUT_SECONDS = 60
+APP_READINESS_PROBE_TIMEOUT_SECONDS = 5
+APP_READINESS_INITIAL_BACKOFF_SECONDS = 0.25
+APP_READINESS_MAX_BACKOFF_SECONDS = 2.0
 TEARDOWN_POLL_ATTEMPTS = 6
 TEARDOWN_POLL_INTERVAL_SECONDS = 2
 
@@ -333,6 +337,54 @@ def _machine_id_for_name(value: Any, name: str) -> str:
     if not isinstance(machine_id, str) or not MACHINE_ID.fullmatch(machine_id):
         raise QualificationError("provision_failed", "created Machine identity is malformed")
     return machine_id
+
+
+def wait_for_app_readiness(
+    transport: Transport,
+    invocation: TinyQualificationInvocation,
+    *,
+    timeout_seconds: float = APP_READINESS_TIMEOUT_SECONDS,
+    clock: Callable[[], float] | None = None,
+    sleeper: Callable[[float], None] | None = None,
+) -> None:
+    """Wait until the new app is usable through Fly's Machines authority."""
+    clock = clock or time.monotonic
+    sleeper = sleeper or time.sleep
+    deadline = clock() + timeout_seconds
+    backoff = APP_READINESS_INITIAL_BACKOFF_SECONDS
+    command = ("flyctl", "machine", "list", "--app", invocation.app, "--json")
+    while True:
+        remaining = deadline - clock()
+        if remaining <= 0:
+            raise QualificationError(
+                "readiness_timeout", "created app did not become ready for remote build"
+            )
+        try:
+            machines = _list(
+                transport.json(
+                    command,
+                    timeout=max(
+                        1,
+                        min(APP_READINESS_PROBE_TIMEOUT_SECONDS, int(remaining)),
+                    ),
+                ),
+                "Machine",
+            )
+        except (subprocess.SubprocessError, OSError):
+            machines = None
+        if machines is not None:
+            if machines:
+                raise QualificationError(
+                    "provision_failed", "new app is not empty at readiness admission"
+                )
+            return
+        sleep_for = min(backoff, max(0.0, deadline - clock()))
+        if sleep_for <= 0:
+            raise QualificationError(
+                "readiness_timeout", "created app did not become ready for remote build"
+            )
+        sleeper(sleep_for)
+        backoff = min(backoff * 2, APP_READINESS_MAX_BACKOFF_SECONDS)
 
 
 def verify_machine_state(
@@ -740,6 +792,12 @@ def execute(
         )
         ledger.app_owned = True
         _save_ledger(ledger_path, ledger)
+
+        wait_for_app_readiness(
+            transport,
+            invocation,
+            timeout_seconds=APP_READINESS_TIMEOUT_SECONDS,
+        )
 
         failure_kind = "build_failed"
         build = remote_build_command(
