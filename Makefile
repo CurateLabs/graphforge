@@ -21,6 +21,11 @@ security:  ## Run Bandit security scanner
 workflow-lint:  ## Validate GitHub Actions workflows with pinned actionlint
 	scripts/check-workflows.sh
 
+.PHONY: gate-registry-check
+gate-registry-check:  ## Validate gate classes, owners, commands, evidence, and SHA rules
+	python3 scripts/ci/gate-registry.py validate
+	python3 scripts/ci/test-gate-registry.py
+
 license-check:  ## Verify Apache-2.0 metadata and distributed copies
 	python3 scripts/license_check.py
 
@@ -381,7 +386,7 @@ clean-env-verify-preflight:  ## Probe public registries for VERSION (fails close
 clean-env-verify:  ## Run clean-env lanes against public registries (post-§6 only)
 	@test -n "$(VERSION)" || (echo "VERSION is required (e.g. VERSION=0.5.0)" && exit 2)
 	python3 scripts/ci/clean-env-verify.py run --version "$(VERSION)" \
-		$(if $(RELEASE_RECORD),--release-record "$(RELEASE_RECORD)" --all,--lane pip --lane npm --lane cli --lane skills --lane reopen --lane urls) \
+		$(if $(RELEASE_RECORD),--release-record "$(RELEASE_RECORD)" --all,--default) \
 		$(if $(OUTPUT),--output "$(OUTPUT)",) \
 		$(if $(WORK),--work "$(WORK)",)
 

@@ -316,6 +316,23 @@ Graph500 generator/certifier, Python/BenchExec, and a proven cgroups/I/O
 authority. The canonical order remains S18, S19, S20, S22, S24, S25, S26;
 the first failed or missing gate stops the ladder.
 
+Provider credentials belong to Pulumi ESC rather than GitHub workflow inputs or
+the caller's ambient shell. Live operator commands are rendered from
+`config/gate-registry.json` and run through the Python control plane:
+
+```bash
+make -C benchmarks qualification-operator \
+  GATE=fly-tiny \
+  ESC_ENVIRONMENT=curatelabs/graphforge/qualification \
+  ARGS='--expected-sha <sha> --execute --confirm-disposable <controller-args>'
+```
+
+The operator uses the shell-free form `pulumi env run <environment> -- <argv>`;
+secret values are never copied into its command line or evidence. The
+`progressive-ladder` command is registered now, but fails before opening ESC
+until the dedicated provider image and scale BenchExec executor are present.
+This is a deliberate capability boundary, not a GitHub-dispatch prerequisite.
+
 The controller derives bulk-ingest capability from the same run's bounded
 ordinary `gf import-session commit --json` receipt: its construction evidence
 must identify a configuration of at least 65,536 rows, accepted bulk chunks,

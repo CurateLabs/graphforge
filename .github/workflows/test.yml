@@ -74,6 +74,11 @@ jobs:
       - name: Test changed-path classifier
         run: scripts/ci/test-classify-changes.sh
 
+      - name: Validate authoritative gate registry
+        run: |
+          python3 scripts/ci/gate-registry.py validate
+          python3 scripts/ci/test-gate-registry.py
+
       - name: Test CodSpeed nightly policy
         run: python3 scripts/ci/test-codspeed-nightly.py
 

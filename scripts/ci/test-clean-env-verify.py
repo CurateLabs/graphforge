@@ -23,6 +23,14 @@ assert cev.DEFAULT_CRATES[0] == "graphforge-core"
 assert cev.DEFAULT_CRATES[-1] == "graphforge-cli"
 assert cev.LANE_ISSUES["cargo"] == 185
 assert cev.LANE_RUNNERS["cargo"] is cev.lane_cargo
+assert set(cev.LANE_RUNNERS) == set(cev.LANE_ISSUES)
+assert cev.DEFAULT_LANES == ("pip", "npm", "cli", "skills", "reopen", "urls")
+WORKFLOW = SCRIPT.parents[2] / ".github" / "workflows" / "clean-env-verify.yml"
+MAKEFILE = SCRIPT.parents[2] / "Makefile"
+for entrypoint in (WORKFLOW, MAKEFILE):
+    entrypoint_text = entrypoint.read_text(encoding="utf-8")
+    assert "--default" in entrypoint_text
+    assert "--lane pip" not in entrypoint_text
 
 
 def write_json(path: Path, value: object) -> None:

@@ -61,6 +61,7 @@ LANE_ISSUES = {
     "checksums": 187,
 }
 ALL_LANES = tuple(LANE_ISSUES)
+DEFAULT_LANES = tuple(name for name in ALL_LANES if name not in {"cargo", "checksums"})
 
 
 class VerifyError(RuntimeError):
@@ -872,7 +873,13 @@ def cmd_preflight(args: argparse.Namespace) -> int:
 def cmd_run(args: argparse.Namespace) -> int:
     version = require_version(args.version)
     crates = tuple(args.crate) if args.crate else DEFAULT_CRATES
-    lanes = list(ALL_LANES) if args.all else list(args.lane or [])
+    lanes = (
+        list(ALL_LANES)
+        if args.all
+        else list(DEFAULT_LANES)
+        if args.default
+        else list(args.lane or [])
+    )
     if not lanes:
         raise VerifyError("specify --all or one or more --lane values")
     unknown = [lane for lane in lanes if lane not in LANE_RUNNERS]
@@ -963,8 +970,14 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--version", default=DEFAULT_VERSION)
     run.add_argument("--docs-base", default=DEFAULT_DOCS_BASE)
     run.add_argument("--crate", action="append", default=[])
-    run.add_argument("--lane", action="append", choices=list(ALL_LANES))
-    run.add_argument("--all", action="store_true")
+    selection = run.add_mutually_exclusive_group()
+    selection.add_argument("--lane", action="append", choices=list(ALL_LANES))
+    selection.add_argument("--all", action="store_true")
+    selection.add_argument(
+        "--default",
+        action="store_true",
+        help="Run the canonical no-release-record lane set",
+    )
     run.add_argument("--release-record", help="Path to release record or candidate manifest JSON")
     run.add_argument("--work", help="Work directory (default: temp dir)")
     run.add_argument("--output", help="Write evidence JSON to this path")

@@ -7,6 +7,20 @@ is repository ruleset **19988544** (required status check context exactly
 A deterministic classifier runs only the policy, language, and binding jobs
 relevant to the pull request.
 
+`config/gate-registry.json` is the authoritative inventory for workflow and
+operator gates. It records class, owner, canonical command, evidence contract,
+freshness, and SHA binding. `scripts/ci/gate-registry.py` validates the registry
+in ordinary Repository Policy CI and renders commands for Make or operators.
+Every gate belongs to exactly one of four classes: required PR check, scheduled
+health/stress, operator qualification, or release certification. Supporting
+automation is inventoried with a non-gate role because it produces no gate
+decision. Only `github-status/CI Gate` is a required PR check.
+
+Provider-backed qualifications are Python operator commands entered through
+`pulumi env run`; Pulumi ESC owns secret projection and output filtering.
+GitHub workflow files are compatibility wrappers and evidence viewers, not the
+operational control plane.
+
 **Speed is a first-class value alongside honesty.** Surfaces shed work that is
 not required for their objective. PR CI does **not** run full `llvm-cov`.
 Frequent publishing uses the **publish-track** (Binding RC → tag →
@@ -160,6 +174,18 @@ workflow uploads a one-day pre-creation ownership receipt plus sanitized
 plan/result documents and qualified evidence. The receipt binds the commit to
 a fresh 128-bit app-name nonce and never contains provider resource identifiers
 or credentials.
+
+For new operator runs, use the registry-owned entry point instead of Actions
+dispatch. All controller flags are passed after `ARGS=`; the Python operator
+requires the exact SHA, an explicit live mode, and disposable confirmation
+before it opens the named ESC environment:
+
+```bash
+make -C benchmarks qualification-operator \
+  GATE=fly-tiny \
+  ESC_ENVIRONMENT=curatelabs/graphforge/qualification \
+  ARGS='--expected-sha <sha> --execute --confirm-disposable <remaining-controller-args>'
+```
 
 ### `fly-tiny-recovery.yml` — Manual Fly orphan recovery
 

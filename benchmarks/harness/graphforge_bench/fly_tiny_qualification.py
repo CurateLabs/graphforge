@@ -1045,8 +1045,8 @@ def parser() -> argparse.ArgumentParser:
     return result
 
 
-def main() -> int:
-    args = parser().parse_args()
+def main(argv: list[str] | None = None) -> int:
+    args = parser().parse_args(argv)
     if (args.execute or args.cleanup_only) and not args.confirm_disposable:
         result = sanitized_failure("authorization_refused")
         _atomic_json(args.result_out, result)

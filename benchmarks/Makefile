@@ -1,4 +1,4 @@
-.PHONY: install smoke smoke-python smoke-rust fly-adapter-static local-admission progressive-qualification-list progressive-qualification-plan progressive-qualification-run progressive-qualification-project-s20 progressive-qualification-binaries progressive-provider-plan
+.PHONY: install smoke smoke-python smoke-rust fly-adapter-static local-admission progressive-qualification-list progressive-qualification-plan progressive-qualification-run progressive-qualification-project-s20 progressive-qualification-binaries progressive-provider-plan qualification-operator
 
 install:
 	uv sync --locked
@@ -55,7 +55,15 @@ progressive-qualification-project-s20: install
 # Safe control-plane admission only; this never provisions a provider.
 progressive-provider-plan: install
 	test -n "$(COMMIT)" && test -n "$(MAXIMUM_SCALE)" && test -n "$(OUTPUT_DIR)" && test -n "$(PLAN_OUT)"
-	PYTHONPATH=$(CURDIR)/harness uv run --locked python -m graphforge_bench.progressive_provider_plan \
+	PYTHONPATH=$(CURDIR)/harness uv run --locked python -m graphforge_bench.qualification_operator \
+		plan-progressive -- \
 		--root "$(CURDIR)" --output-dir "$(OUTPUT_DIR)" --commit "$(COMMIT)" \
 		--maximum-scale "$(MAXIMUM_SCALE)" $(if $(PROVIDER_CAPACITY),--provider-capacity "$(PROVIDER_CAPACITY)",) \
 		--plan-out "$(PLAN_OUT)"
+
+# The registry owns the live command. Pulumi ESC supplies provider credentials;
+# the Python controller still requires every gate-specific confirmation flag.
+qualification-operator: install
+	test -n "$(GATE)" && test -n "$(ESC_ENVIRONMENT)"
+	PYTHONPATH=$(CURDIR)/harness uv run --locked python ../scripts/ci/gate-registry.py run "$(GATE)" -- \
+		--environment "$(ESC_ENVIRONMENT)" $(ARGS)

@@ -50,7 +50,7 @@ jobs:
 
       - name: Run scheduled seeded certification lane
         run: >-
-          python3 scripts/ci/durability-certification-gate.py run
+          python3 scripts/ci/gate-registry.py run durability-certification --
           --seed "${GF_CERT_SEED}"
           --histories "${GF_CERT_HISTORIES}"
           --ops "${GF_CERT_OPS}"
