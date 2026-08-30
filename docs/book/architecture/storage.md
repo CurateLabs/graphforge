@@ -1,7 +1,7 @@
 # Storage Architecture
 
 **Status:** v0.5.0 — Parquet project storage shipped
-**Last Updated:** 2026-07-27
+**Last Updated:** 2026-08-30
 
 ---
 
@@ -26,7 +26,9 @@ Parquet is the sole storage provider for the Rust core. It:
 - Stores graph tables and opaque domain-owned participants as columnar Parquet
   files; `graphforge-storage` does not define provenance or knowledge semantics
 - Carries GraphForge metadata at the file level (ontology version, IR version, query ID)
-- Persists the compiled ontology runtime tables for rapid startup
+- Persists derived compiled ontology runtime tables for rapid startup; the
+  CURRENT-selected workspace's canonical ontology JSON remains durable
+  authority
 
 Parquet file-level metadata:
 
@@ -312,7 +314,10 @@ or nonmaximal shapes, wrong routes, duplicate references, and corrupt objects.
 
 Authoritative small-write delta runs, when present, live under
 `graph/deltas/` inside the same generation and are inventory-verified
-([ADR 0019](../../adr/0019-authoritative-graph-delta-journal.md)). Compaction
+([ADR 0019](../../adr/0019-authoritative-graph-delta-journal.md)). GFDR's
+binary framing and JSON payload schema are a permanent, versioned exception to
+the default Parquet graph-data rule; see
+[ADR 0024](../../adr/0024-storage-format-exceptions.md). Compaction
 and ordinary opens decode the compact base from these canonical Parquet files;
 there is no duplicate JSON graph-state authority. A delta-bearing open verifies
 the contiguous typed GFDR chain, materializes a contained private Parquet view,
@@ -757,7 +762,7 @@ The ontology is a **runtime-loadable knowledge schema**, not Rust structs genera
 |---|---|
 | **YAML / JSON** | Human-authored ontology definitions (Serde-based load) |
 | **Arrow tables** | Compiled execution format — cheap joins during binding and planning |
-| **Parquet** | Persisted for rapid startup or reproducible deployments |
+| **Parquet** | Derived compiled-runtime snapshot for rapid startup or reproducible deployments; discard and recompile on ontology-checksum mismatch |
 
 ### Ontology authoring format (YAML)
 
@@ -804,7 +809,9 @@ At load time this compiles into Arrow lookup tables keyed by integer type IDs. S
 | `cardinality_rules` | Endpoint multiplicity (min/max per relation type) |
 | `semantic_flags` | `transitive`, `symmetric`, `reflexive`, `functional`, `acyclic` |
 | `aliases` | Human-facing and deprecated names |
-| `migrations` | Versioned ontology upgrade transforms |
+
+Versioned migration transforms remain part of the authoritative `OntologyDoc`;
+they are not a ninth compiled runtime table or Parquet snapshot file.
 
 ### Ontology versioning
 
@@ -829,14 +836,23 @@ A new ontology version does not require a new IR version, and vice versa. Persis
 
 ## Serialization Systems
 
-**Never mix these two systems:**
+**Default rule (with two named exceptions):**
 
 | System | Purpose | Format |
 |---|---|---|
 | **Arrow / Parquet** (`graphforge-storage`) | Graph topology/properties and generic persistence of domain-owned participants | Binary columnar (Arrow IPC / Parquet) |
 | **JSON / YAML** (`graphforge-ontology`) | Ontology definitions and metadata | Text (human-readable, validatable) |
 
-Graph data → Arrow/Parquet. Ontology/metadata → JSON or YAML. Arrow schema metadata carries version and provenance annotations across language boundaries.
+Graph data → Arrow/Parquet. Ontology definitions and metadata → JSON or YAML.
+The permanent exceptions are (1) authoritative, versioned GFDR binary delta
+runs with schema-qualified JSON mutation payloads, and (2) derived compiled
+ontology runtime tables persisted as Parquet. The latter never supersede the
+CURRENT-selected workspace's canonical ontology JSON and are
+discarded/recompiled when its checksum differs. External YAML/JSON files are
+authoring/import inputs, not alternate project commit pointers.
+[ADR 0024](../../adr/0024-storage-format-exceptions.md)
+defines both compatibility and migration boundaries. Arrow schema metadata
+carries version and provenance annotations across language boundaries.
 
 ---
 

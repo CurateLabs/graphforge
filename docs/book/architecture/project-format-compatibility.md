@@ -33,6 +33,16 @@ and plain-string property representation are not losslessly migratable and are
 rejected with `GF_UNSUPPORTED_PROJECT_FORMAT`; GraphForge never silently
 reinterprets them.
 
+GFDR is therefore a permanent, versioned exception to the default Parquet
+graph-data rule, not an unversioned sidecar. Its exact magic, run/record/schema
+markers, authoritative JSON payload contract, and migration debt are recorded
+in [ADR 0024](../../adr/0024-storage-format-exceptions.md). The same ADR records
+compiled ontology Parquet as a different exception: a derived runtime snapshot
+that never replaces the CURRENT-selected workspace's canonical ontology JSON
+and may be discarded and recompiled when incompatible or stale. External YAML
+or JSON files remain authoring/import inputs rather than project commit
+authority.
+
 Portable-v2 selection is dependency-closed for graph semantic bindings. When
 the selected participant set includes the graph semantic-bindings participant,
 the bundle must also contain the exact workspace ontology-composition
