@@ -115,11 +115,12 @@ execution paths consume it through a single `AdjacencyProvider` abstraction:
 
 `ExpandExec` also receives exact physical column demand. When a hop only feeds
 the destination `node_id`/`node_uuid` projection, it does not open edge records
-or full node rows. Destination UUIDs come from the authenticated immutable
-surrogate index through a query-plan-local 64 MiB block LRU. The LRU is a hard
-memory bound independent of graph cardinality; eviction returns to
-authenticated block reads, never to graph-sized identity materialization or
-per-chunk Parquet hydration. Relationship values, relationship predicates,
+or full node rows. Destination UUIDs come from packed immutable surrogate runs
+that are authenticated once when their generation opens. Fixed-record probes
+read only logarithmically many record bytes per distinct requested identity;
+memory is bounded by the execution chunk rather than graph cardinality, with
+no graph-sized identity materialization or per-chunk Parquet hydration.
+Relationship values, relationship predicates,
 path-uniqueness checks, and other node properties retain the full reference
 materialization path.
 

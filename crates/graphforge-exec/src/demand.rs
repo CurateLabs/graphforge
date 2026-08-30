@@ -99,10 +99,6 @@ pub struct HopSnapshot {
     pub identity_blocks_read: u64,
     /// Authenticated reverse-identity bytes read once for this query plan.
     pub identity_bytes_read: u64,
-    /// Peak authenticated identity-block cache residency.
-    pub identity_cache_peak_bytes: u64,
-    /// Fixed authenticated identity-block cache ceiling.
-    pub identity_cache_limit_bytes: u64,
 }
 
 /// Rows observed at one selective physical filter.
@@ -167,13 +163,7 @@ pub(crate) fn record_projected_chunk(edge_var: u32, rows: usize) {
         .saturating_add(u64::try_from(rows).unwrap_or(u64::MAX));
 }
 
-pub(crate) fn record_identity_snapshot(
-    edge_var: u32,
-    blocks: u64,
-    bytes: u64,
-    cache_resident_bytes: u64,
-    cache_limit_bytes: u64,
-) {
+pub(crate) fn record_identity_snapshot(edge_var: u32, blocks: u64, bytes: u64) {
     if !CAPTURE_ENABLED.load(Ordering::Relaxed) {
         return;
     }
@@ -181,8 +171,6 @@ pub(crate) fn record_identity_snapshot(
     let hop = snapshot.hops.entry(edge_var).or_default();
     hop.identity_blocks_read = hop.identity_blocks_read.saturating_add(blocks);
     hop.identity_bytes_read = hop.identity_bytes_read.saturating_add(bytes);
-    hop.identity_cache_peak_bytes = hop.identity_cache_peak_bytes.max(cache_resident_bytes);
-    hop.identity_cache_limit_bytes = cache_limit_bytes;
 }
 
 pub(crate) fn capture_enabled() -> bool {

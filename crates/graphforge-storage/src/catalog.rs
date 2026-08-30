@@ -278,6 +278,75 @@ pub fn read_edges_filtered_observed(
     Ok(batches)
 }
 
+/// Filter edge topology by `edge_id` while decoding only the requested
+/// canonical columns plus `edge_id` itself.
+#[allow(clippy::implicit_hasher)]
+#[doc(hidden)]
+pub fn read_edges_filtered_projected_observed(
+    dir: &Path,
+    rel_name: &str,
+    mode: OntologyMode,
+    edge_ids: &std::collections::HashSet<u64>,
+    projection: &[usize],
+    observer: Option<&std::sync::Arc<dyn crate::io_stats::FilteredReadObserver>>,
+) -> Result<Vec<RecordBatch>, DataFusionError> {
+    if rel_name == "*" && matches!(mode, OntologyMode::Advisory | OntologyMode::Strict) {
+        // Typed-union normalization synthesizes `rel_type_name`; retain its
+        // existing correctness path until the union owns projected shaping.
+        return read_edges_union(dir, Some(edge_ids), observer).and_then(|batches| {
+            let mut indices = projection.to_vec();
+            indices.push(EXPLORATORY_EDGE_SCHEMA.index_of("edge_id")?);
+            indices.sort_unstable();
+            indices.dedup();
+            batches
+                .into_iter()
+                .map(|batch| batch.project(&indices).map_err(Into::into))
+                .collect()
+        });
+    }
+    if matches!(mode, OntologyMode::Advisory | OntologyMode::Strict) {
+        let mut comps = Path::new(rel_name).components();
+        if !matches!(comps.next(), Some(std::path::Component::Normal(_))) || comps.next().is_some()
+        {
+            return Err(DataFusionError::Execution(format!(
+                "invalid relation name {rel_name:?}: must be a plain file stem"
+            )));
+        }
+    }
+    let (stem, schema) = match mode {
+        OntologyMode::Exploratory => ("_exploratory", EXPLORATORY_EDGE_SCHEMA.clone()),
+        OntologyMode::Advisory | OntologyMode::Strict => (rel_name, TYPED_EDGE_SCHEMA.clone()),
+    };
+    let mut batches = Vec::new();
+    for (_, path) in crate::mutator::edge_parquet_files(dir, Some(stem))
+        .map_err(|error| DataFusionError::Execution(error.to_string()))?
+    {
+        batches.extend(read_parquet_filtered_u64_projected(
+            &path,
+            schema.clone(),
+            "edge_id",
+            edge_ids,
+            FilteredReadKind::Edge,
+            observer,
+            projection,
+        )?);
+    }
+    if batches.is_empty() {
+        let mut indices = projection.to_vec();
+        indices.push(schema.index_of("edge_id")?);
+        indices.sort_unstable();
+        indices.dedup();
+        let fields = indices
+            .iter()
+            .map(|&index| schema.field(index).clone())
+            .collect::<Vec<_>>();
+        batches.push(RecordBatch::new_empty(Arc::new(
+            arrow::datatypes::Schema::new(fields),
+        )));
+    }
+    Ok(batches)
+}
+
 /// Read the union of every relation's edges (#823): the "all relation types"
 /// read for an untyped traversal in a typed project. Enumerates every
 /// `topology/edges/*.parquet` (stem order, for deterministic adjacency/BFS),
@@ -701,7 +770,65 @@ fn read_parquet_filtered_u64(
     if ids.is_empty() || !path.exists() {
         return Ok(vec![RecordBatch::new_empty(fallback_schema)]);
     }
-    read_parquet_filtered_u64_attempt(path, fallback_schema, key_column, ids, kind, observer, true)
+    read_parquet_filtered_u64_attempt(
+        path,
+        fallback_schema,
+        key_column,
+        ids,
+        kind,
+        observer,
+        true,
+        None,
+    )
+}
+
+/// Projected counterpart of [`read_parquet_filtered_u64`]. `projection`
+/// contains canonical schema indices; the filter key is added automatically
+/// and the result stays in canonical schema order.
+#[allow(clippy::too_many_arguments)]
+fn read_parquet_filtered_u64_projected(
+    path: &Path,
+    fallback_schema: SchemaRef,
+    key_column: &str,
+    ids: &std::collections::HashSet<u64>,
+    kind: FilteredReadKind,
+    observer: Option<&std::sync::Arc<dyn crate::io_stats::FilteredReadObserver>>,
+    projection: &[usize],
+) -> Result<Vec<RecordBatch>, DataFusionError> {
+    let key = fallback_schema
+        .index_of(key_column)
+        .map_err(|error| DataFusionError::Execution(format!("filtered read: {error}")))?;
+    let mut projection = projection.to_vec();
+    projection.push(key);
+    projection.sort_unstable();
+    projection.dedup();
+    if projection
+        .iter()
+        .any(|&index| index >= fallback_schema.fields().len())
+    {
+        return Err(DataFusionError::Execution(
+            "filtered read projection index is out of range".into(),
+        ));
+    }
+    if ids.is_empty() || !path.exists() {
+        let schema = Arc::new(arrow::datatypes::Schema::new(
+            projection
+                .iter()
+                .map(|&index| fallback_schema.field(index).clone())
+                .collect::<Vec<_>>(),
+        ));
+        return Ok(vec![RecordBatch::new_empty(schema)]);
+    }
+    read_parquet_filtered_u64_attempt(
+        path,
+        fallback_schema,
+        key_column,
+        ids,
+        kind,
+        observer,
+        true,
+        Some(&projection),
+    )
 }
 
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
@@ -713,6 +840,7 @@ fn read_parquet_filtered_u64_attempt(
     kind: FilteredReadKind,
     observer: Option<&std::sync::Arc<dyn crate::io_stats::FilteredReadObserver>>,
     allow_dense_node_selection: bool,
+    projection: Option<&[usize]>,
 ) -> Result<Vec<RecordBatch>, DataFusionError> {
     use parquet::arrow::ProjectionMask;
     use parquet::arrow::arrow_reader::{
@@ -721,6 +849,17 @@ fn read_parquet_filtered_u64_attempt(
     use parquet::file::metadata::PageIndexPolicy;
     use parquet::file::statistics::Statistics;
 
+    let projected_schema = projection.map_or_else(
+        || fallback_schema.clone(),
+        |indices| {
+            Arc::new(arrow::datatypes::Schema::new(
+                indices
+                    .iter()
+                    .map(|&index| fallback_schema.field(index).clone())
+                    .collect::<Vec<_>>(),
+            ))
+        },
+    );
     let mut observation = FilteredReadObservation::new(observer, kind);
     let file = File::open(path).map_err(|e| io_err(&e))?;
     // Optional, NOT required: with_page_index(true) errors on files lacking a
@@ -768,13 +907,18 @@ fn read_parquet_filtered_u64_attempt(
                     .map(|i| Some(!col.is_null(i) && ids.contains(&col.value(i))))
                     .collect()
             };
-            filtered.push(
-                arrow::compute::filter_record_batch(batch, &mask)
-                    .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?,
-            );
+            let filtered_batch = arrow::compute::filter_record_batch(batch, &mask)
+                .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
+            filtered.push(if let Some(indices) = projection {
+                filtered_batch
+                    .project(indices)
+                    .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?
+            } else {
+                filtered_batch
+            });
         }
         if filtered.is_empty() {
-            filtered.push(RecordBatch::new_empty(fallback_schema));
+            filtered.push(RecordBatch::new_empty(projected_schema));
         }
         record_pruning(
             kind,
@@ -901,6 +1045,12 @@ fn read_parquet_filtered_u64_attempt(
     } else {
         builder
     };
+    let builder = if let Some(indices) = projection {
+        let projection = ProjectionMask::roots(builder.parquet_schema(), indices.iter().copied());
+        builder.with_projection(projection)
+    } else {
+        builder
+    };
     let reader = builder
         .with_row_filter(RowFilter::new(vec![Box::new(predicate)]))
         .build()
@@ -933,13 +1083,14 @@ fn read_parquet_filtered_u64_attempt(
                 kind,
                 observer,
                 false,
+                projection,
             );
         }
     }
     record_pruning(kind, &observation, pruning);
     observation.complete(returned, false);
     if batches.is_empty() {
-        return Ok(vec![RecordBatch::new_empty(fallback_schema)]);
+        return Ok(vec![RecordBatch::new_empty(projected_schema)]);
     }
     Ok(batches)
 }
@@ -1172,6 +1323,76 @@ pub fn read_nodes_filtered_observed(
     }
     if batches.is_empty() {
         batches.push(RecordBatch::new_empty(TOPOLOGY_NODES_SCHEMA.clone()));
+    }
+    Ok(batches)
+}
+
+/// Filter node topology by `node_id` while decoding only requested canonical
+/// columns plus `node_id` itself.
+#[allow(clippy::implicit_hasher)]
+#[doc(hidden)]
+pub fn read_nodes_filtered_projected_observed(
+    dir: &Path,
+    node_ids: &std::collections::HashSet<u64>,
+    projection: &[usize],
+    observer: Option<&std::sync::Arc<dyn crate::io_stats::FilteredReadObserver>>,
+) -> Result<Vec<RecordBatch>, DataFusionError> {
+    let paths = crate::mutator::node_parquet_files(dir)
+        .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+    let mut batches = Vec::new();
+    for path in paths {
+        // Legacy scalar-label files require full normalization when type_ids is
+        // demanded. Other projections are physically decoded by exact roots.
+        let file_schema = admitted_parquet(&path)?.schema().clone();
+        let legacy_schema = file_schema.fields().len() != TOPOLOGY_NODES_SCHEMA.fields().len()
+            || file_schema
+                .fields()
+                .iter()
+                .zip(TOPOLOGY_NODES_SCHEMA.fields())
+                .any(|(actual, canonical)| actual.name() != canonical.name());
+        if legacy_schema {
+            let full = normalize_topology_nodes(read_parquet_filtered_u64(
+                &path,
+                TOPOLOGY_NODES_SCHEMA.clone(),
+                "node_id",
+                node_ids,
+                FilteredReadKind::Node,
+                observer,
+            )?)?;
+            let mut indices = projection.to_vec();
+            indices.push(TOPOLOGY_NODES_SCHEMA.index_of("node_id")?);
+            indices.sort_unstable();
+            indices.dedup();
+            batches.extend(
+                full.into_iter()
+                    .map(|batch| batch.project(&indices).map_err(Into::into))
+                    .collect::<Result<Vec<_>, DataFusionError>>()?,
+            );
+        } else {
+            batches.extend(read_parquet_filtered_u64_projected(
+                &path,
+                TOPOLOGY_NODES_SCHEMA.clone(),
+                "node_id",
+                node_ids,
+                FilteredReadKind::Node,
+                observer,
+                projection,
+            )?);
+        }
+    }
+    if batches.is_empty() {
+        let mut indices = projection.to_vec();
+        indices.push(TOPOLOGY_NODES_SCHEMA.index_of("node_id")?);
+        indices.sort_unstable();
+        indices.dedup();
+        batches.push(RecordBatch::new_empty(Arc::new(
+            arrow::datatypes::Schema::new(
+                indices
+                    .iter()
+                    .map(|&index| TOPOLOGY_NODES_SCHEMA.field(index).clone())
+                    .collect::<Vec<_>>(),
+            ),
+        )));
     }
     Ok(batches)
 }

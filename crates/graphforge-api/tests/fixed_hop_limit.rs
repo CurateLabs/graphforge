@@ -418,10 +418,9 @@ fn ordered_uuid_projection_never_falls_back_to_full_record_hydration() {
         (4_096 * FAN_OUT) as u64,
         "{snapshot:#?}"
     );
-    assert!(hop.identity_blocks_read > 0, "{snapshot:#?}");
-    assert_eq!(hop.identity_cache_limit_bytes, 64 * 1024 * 1024);
+    assert!(hop.identity_bytes_read > 0, "{snapshot:#?}");
     assert!(
-        hop.identity_cache_peak_bytes <= hop.identity_cache_limit_bytes,
+        hop.identity_bytes_read < hop.projected_rows * 64,
         "{snapshot:#?}"
     );
     assert_eq!(hop.edge_reads_started, 0, "{snapshot:#?}");
