@@ -322,7 +322,7 @@ the caller's ambient shell. Live operator commands are rendered from
 
 ```bash
 make -C benchmarks qualification-operator \
-  GATE=fly-tiny \
+  GATE=fly-tiny-qualification \
   ESC_ENVIRONMENT=curatelabs/graphforge/qualification \
   ARGS='--expected-sha <sha> --execute --confirm-disposable <controller-args>'
 ```

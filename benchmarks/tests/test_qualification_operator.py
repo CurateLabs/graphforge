@@ -140,6 +140,26 @@ class QualificationOperatorTests(unittest.TestCase):
             0,
         )
 
+    def test_recovery_attests_current_controller_not_older_receipt_commit(self) -> None:
+        observed: list[str | None] = []
+        recovery_args = [
+            "--expected-sha",
+            "b" * 40,
+            "--cleanup-only",
+            "--confirm-disposable",
+        ]
+        self.assertEqual(
+            run_under_esc(
+                "curatelabs/graphforge/qualification",
+                "fly-tiny-recovery",
+                recovery_args,
+                runner=lambda argv, **_kwargs: subprocess.CompletedProcess(argv, 0),
+                attestor=observed.append,
+            ),
+            0,
+        )
+        self.assertEqual(observed, [None])
+
     def test_inner_controller_rejects_abbreviated_expected_sha(self) -> None:
         with self.assertRaises(SystemExit):
             fly_parser().parse_args(

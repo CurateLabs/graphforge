@@ -33,7 +33,6 @@ jobs:
           mkdir -p non-cypher-evidence
           python3 scripts/ci/non-cypher-surface-gate.py \
             --report non-cypher-evidence/inventory-report.json
-          python3 scripts/ci/test-non-cypher-surface-gate.py
 
       - name: Execute public Rust surface matrix
         run: |

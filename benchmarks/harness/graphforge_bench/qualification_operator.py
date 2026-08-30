@@ -84,7 +84,7 @@ def esc_command(environment: str, gate: str, argv: Sequence[str]) -> tuple[str, 
 
 
 def attest_current_main(
-    commit: str,
+    expected_commit: str | None,
     *,
     root: Path = ROOT,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
@@ -119,10 +119,10 @@ def attest_current_main(
         ).stdout.strip()
     except (OSError, subprocess.CalledProcessError) as error:
         raise OperatorRefusalError("unable to attest current origin/main") from error
-    if head != commit or status or fetched != commit:
-        raise OperatorRefusalError(
-            "--expected-sha must identify a clean checkout of current origin/main"
-        )
+    if status or head != fetched:
+        raise OperatorRefusalError("operator must use a clean checkout of current origin/main")
+    if expected_commit is not None and head != expected_commit:
+        raise OperatorRefusalError("--expected-sha must identify current origin/main")
 
 
 def run_under_esc(
@@ -131,11 +131,11 @@ def run_under_esc(
     argv: Sequence[str],
     *,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
-    attestor: Callable[[str], None] = attest_current_main,
+    attestor: Callable[[str | None], None] = attest_current_main,
 ) -> int:
     command = esc_command(environment, gate, argv)
     commit = _single_value(_forwarded(argv), "--expected-sha")
-    attestor(commit)
+    attestor(commit if gate == "fly-tiny" else None)
     completed = runner(command, check=False)
     return completed.returncode
 
