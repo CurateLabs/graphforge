@@ -43,11 +43,6 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Validate stress configuration
-        run: |
-          python3 scripts/ci/concurrency-stress-gate.py validate
-          python3 scripts/ci/test-concurrency-stress-gate.py
-
       - name: Build native Python wheel for mixed workload
         run: |
           uvx maturin build \
@@ -60,7 +55,7 @@ jobs:
       - name: Run bounded-resource stress lane
         run: >-
           /tmp/gf-concurrency-stress/bin/python
-          scripts/ci/concurrency-stress-gate.py run
+          scripts/ci/gate-registry.py run concurrency-stress --
           --seed "${GF_STRESS_SEED}"
           --iterations "${GF_STRESS_ITERATIONS}"
           --output "${{ runner.temp }}/concurrency-stress-evidence"

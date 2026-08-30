@@ -1018,7 +1018,7 @@ def cleanup_only(
 
 
 def parser() -> argparse.ArgumentParser:
-    result = argparse.ArgumentParser(description=__doc__)
+    result = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     result.add_argument("--expected-sha", required=True)
     result.add_argument("--org", required=True)
     result.add_argument("--app", required=True)
@@ -1045,8 +1045,8 @@ def parser() -> argparse.ArgumentParser:
     return result
 
 
-def main() -> int:
-    args = parser().parse_args()
+def main(argv: list[str] | None = None) -> int:
+    args = parser().parse_args(argv)
     if (args.execute or args.cleanup_only) and not args.confirm_disposable:
         result = sanitized_failure("authorization_refused")
         _atomic_json(args.result_out, result)

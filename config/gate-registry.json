@@ -1,0 +1,386 @@
+{
+  "schema": "graphforge-gate-registry/1",
+  "commands": {
+    "binding-release-candidate": [
+      "python3",
+      "scripts/ci/validate-binding-release-candidate.py"
+    ],
+    "checkpoint-recovery": [
+      "python3",
+      "scripts/ci/checkpoint-recovery-gate.py"
+    ],
+    "clean-environment": [
+      "python3",
+      "scripts/ci/clean-env-verify.py",
+      "run"
+    ],
+    "codspeed": [
+      "cargo",
+      "codspeed",
+      "build"
+    ],
+    "documentation": [
+      "pnpm",
+      "docs:build"
+    ],
+    "epistemic-contract": [
+      "python3",
+      "scripts/ci/epistemic-contract-gate.py",
+      "report"
+    ],
+    "fuzz": [
+      "cargo",
+      "fuzz",
+      "run"
+    ],
+    "github-automation": [
+      "python3",
+      "scripts/ci/gate-registry.py",
+      "validate"
+    ],
+    "knowledge-contract": [
+      "python3",
+      "scripts/ci/knowledge-contract-gate.py",
+      "report"
+    ],
+    "matrix-gate": [
+      "python3",
+      "scripts/ci/gate-registry.py",
+      "matrix"
+    ],
+    "native-admission": [
+      "make",
+      "-C",
+      "benchmarks",
+      "local-admission"
+    ],
+    "non-cypher-surface": [
+      "python3",
+      "scripts/ci/non-cypher-surface-gate.py"
+    ],
+    "operator": [
+      "python3",
+      "-m",
+      "graphforge_bench.qualification_operator",
+      "run"
+    ],
+    "publication": [
+      "python3",
+      "scripts/ci/release-publish-preflight.py"
+    ],
+    "release-certification": [
+      "python3",
+      "scripts/ci/release-certification.py",
+      "aggregate"
+    ],
+    "release-credential-preflight": [
+      "python3",
+      "scripts/ci/test-publish-cli-contract.py"
+    ],
+    "repository-policy": [
+      "scripts/ci/require-gates.sh"
+    ],
+    "visualization-stress": [
+      "python3",
+      "examples/visualization/stress/harness/run.py"
+    ]
+  },
+  "matrix_variants": {
+    "concurrency/stress": "scripts/ci/concurrency-stress-gate.py",
+    "durability/certification": "scripts/ci/durability-certification-gate.py"
+  },
+  "workflows": [
+    {
+      "id": "binding-release-candidate",
+      "path": ".github/workflows/binding-release-candidate.yml",
+      "class": "release_certification",
+      "owner": "release",
+      "command": "binding-release-candidate",
+      "args": [],
+      "evidence_contract": "graphforge-release-candidate-v2",
+      "freshness": "30d",
+      "sha_rule": "exact_commit"
+    },
+    {
+      "id": "checkpoint-recovery",
+      "path": ".github/workflows/checkpoint-recovery-gate.yml",
+      "class": "release_certification",
+      "owner": "release",
+      "command": "checkpoint-recovery",
+      "args": [],
+      "evidence_contract": "graphforge-checkpoint-recovery/1",
+      "freshness": "30d",
+      "sha_rule": "exact_commit"
+    },
+    {
+      "id": "clean-environment",
+      "path": ".github/workflows/clean-env-verify.yml",
+      "class": "release_certification",
+      "owner": "release",
+      "command": "clean-environment",
+      "args": [],
+      "evidence_contract": "graphforge-clean-env-evidence-v1",
+      "freshness": "release_version",
+      "sha_rule": "version_identity"
+    },
+    {
+      "id": "codspeed",
+      "path": ".github/workflows/codspeed.yml",
+      "class": "scheduled_health_stress",
+      "owner": "performance",
+      "command": "codspeed",
+      "args": [],
+      "evidence_contract": "codspeed-measurement",
+      "freshness": "latest_main_change",
+      "sha_rule": "exact_main"
+    },
+    {
+      "id": "concurrency-stress",
+      "path": ".github/workflows/concurrency-stress-gate.yml",
+      "class": "scheduled_health_stress",
+      "owner": "storage",
+      "command": "matrix-gate",
+      "args": [
+        "--family",
+        "concurrency",
+        "--variant",
+        "stress"
+      ],
+      "evidence_contract": "graphforge-concurrency-stress/1",
+      "freshness": "14d",
+      "sha_rule": "exact_main"
+    },
+    {
+      "id": "documentation",
+      "path": ".github/workflows/docs.yml",
+      "role": "supporting_automation",
+      "owner": "docs",
+      "command": "documentation",
+      "args": [],
+      "evidence_contract": "github-pages-build",
+      "freshness": "current_run",
+      "sha_rule": "event_sha"
+    },
+    {
+      "id": "durability-certification",
+      "path": ".github/workflows/durability-certification-gate.yml",
+      "class": "scheduled_health_stress",
+      "owner": "storage",
+      "command": "matrix-gate",
+      "args": [
+        "--family",
+        "durability",
+        "--variant",
+        "certification"
+      ],
+      "evidence_contract": "graphforge-durability-certification/1",
+      "freshness": "14d",
+      "sha_rule": "exact_main"
+    },
+    {
+      "id": "epistemic-contract",
+      "path": ".github/workflows/epistemic-contract-gate.yml",
+      "class": "release_certification",
+      "owner": "release",
+      "command": "epistemic-contract",
+      "args": [],
+      "evidence_contract": "graphforge-epistemic-contract/1",
+      "freshness": "30d",
+      "sha_rule": "exact_commit"
+    },
+    {
+      "id": "fly-tiny-qualification",
+      "path": ".github/workflows/fly-tiny-qualification.yml",
+      "class": "operator_qualification",
+      "owner": "benchmark-operator",
+      "command": "operator",
+      "args": [
+        "--gate",
+        "fly-tiny"
+      ],
+      "evidence_contract": "graphforge-fly-filesystem-qualification/1",
+      "freshness": "24h",
+      "sha_rule": "exact_main",
+      "control_plane": "pulumi_esc"
+    },
+    {
+      "id": "fly-tiny-recovery",
+      "path": ".github/workflows/fly-tiny-recovery.yml",
+      "class": "operator_qualification",
+      "owner": "benchmark-operator",
+      "command": "operator",
+      "args": [
+        "--gate",
+        "fly-tiny-recovery"
+      ],
+      "evidence_contract": "graphforge-fly-adapter-result/2",
+      "freshness": "ownership_receipt_24h",
+      "sha_rule": "receipt_commit",
+      "control_plane": "pulumi_esc"
+    },
+    {
+      "id": "fuzz",
+      "path": ".github/workflows/fuzz.yml",
+      "class": "scheduled_health_stress",
+      "owner": "core",
+      "command": "fuzz",
+      "args": [],
+      "evidence_contract": "cargo-fuzz-artifacts",
+      "freshness": "1d",
+      "sha_rule": "exact_main"
+    },
+    {
+      "id": "g500-certification",
+      "path": ".github/workflows/g500-certification.yml",
+      "class": "operator_qualification",
+      "owner": "benchmark-operator",
+      "command": "operator",
+      "args": [
+        "--gate",
+        "progressive-ladder"
+      ],
+      "evidence_contract": "graphforge-g500-certification/1",
+      "freshness": "release_candidate",
+      "sha_rule": "exact_commit",
+      "control_plane": "pulumi_esc"
+    },
+    {
+      "id": "knowledge-contract",
+      "path": ".github/workflows/knowledge-contract-gate.yml",
+      "class": "release_certification",
+      "owner": "release",
+      "command": "knowledge-contract",
+      "args": [],
+      "evidence_contract": "graphforge-knowledge-contract/1",
+      "freshness": "30d",
+      "sha_rule": "exact_commit"
+    },
+    {
+      "id": "native-local-admission",
+      "path": ".github/workflows/native-local-admission.yml",
+      "class": "operator_qualification",
+      "owner": "benchmark-operator",
+      "command": "native-admission",
+      "args": [],
+      "evidence_contract": "graphforge-local-admission/1",
+      "freshness": "runner_image",
+      "sha_rule": "exact_commit",
+      "control_plane": "local_delegated"
+    },
+    {
+      "id": "non-cypher-surface",
+      "path": ".github/workflows/non-cypher-surface-gate.yml",
+      "class": "release_certification",
+      "owner": "release",
+      "command": "non-cypher-surface",
+      "args": [],
+      "evidence_contract": "graphforge-rust-non-cypher/1",
+      "freshness": "30d",
+      "sha_rule": "exact_commit"
+    },
+    {
+      "id": "pr-labeler",
+      "path": ".github/workflows/pr-labeler.yml",
+      "role": "supporting_automation",
+      "owner": "repository",
+      "command": "github-automation",
+      "args": [],
+      "evidence_contract": "labels",
+      "freshness": "current_run",
+      "sha_rule": "event_sha"
+    },
+    {
+      "id": "publish-track",
+      "path": ".github/workflows/publish-track.yml",
+      "class": "release_certification",
+      "owner": "release",
+      "command": "publication",
+      "args": [],
+      "evidence_contract": "graphforge-release-candidate-v2",
+      "freshness": "30d",
+      "sha_rule": "exact_main"
+    },
+    {
+      "id": "publish",
+      "path": ".github/workflows/publish.yaml",
+      "class": "release_certification",
+      "owner": "release",
+      "command": "publication",
+      "args": [],
+      "evidence_contract": "graphforge-release-reconciliation/1",
+      "freshness": "30d",
+      "sha_rule": "exact_commit"
+    },
+    {
+      "id": "release-certification",
+      "path": ".github/workflows/release-certification.yml",
+      "class": "release_certification",
+      "owner": "release",
+      "command": "release-certification",
+      "args": [],
+      "evidence_contract": "graphforge-release-certification/1",
+      "freshness": "30d",
+      "sha_rule": "exact_main"
+    },
+    {
+      "id": "release-credential-preflight",
+      "path": ".github/workflows/release-credential-preflight.yml",
+      "class": "release_certification",
+      "owner": "release",
+      "command": "release-credential-preflight",
+      "args": [],
+      "evidence_contract": "graphforge-release-credential-preflight/1",
+      "freshness": "same_publication",
+      "sha_rule": "exact_commit"
+    },
+    {
+      "id": "release-labels",
+      "path": ".github/workflows/release-tracking.yml",
+      "role": "supporting_automation",
+      "owner": "repository",
+      "command": "github-automation",
+      "args": [],
+      "evidence_contract": "labels",
+      "freshness": "current_run",
+      "sha_rule": "event_sha"
+    },
+    {
+      "id": "test-suite",
+      "path": ".github/workflows/test.yml",
+      "class": "required_pr_check",
+      "owner": "ci",
+      "command": "repository-policy",
+      "args": [],
+      "evidence_contract": "github-status/CI Gate",
+      "freshness": "current_run",
+      "sha_rule": "exact_head"
+    },
+    {
+      "id": "visualization-limits",
+      "path": ".github/workflows/visualization-limits-stress.yml",
+      "class": "scheduled_health_stress",
+      "owner": "visualization",
+      "command": "visualization-stress",
+      "args": [],
+      "evidence_contract": "graphforge-visualization-limits/1",
+      "freshness": "diagnostic",
+      "sha_rule": "exact_commit"
+    }
+  ],
+  "operator_gates": [
+    {
+      "id": "progressive-ladder",
+      "class": "operator_qualification",
+      "owner": "benchmark-operator",
+      "command": "operator",
+      "args": [
+        "--gate",
+        "progressive-ladder"
+      ],
+      "evidence_contract": "graphforge-progressive-provider-plan/1 + rung evidence",
+      "freshness": "adjacent_rung",
+      "sha_rule": "exact_main",
+      "control_plane": "pulumi_esc"
+    }
+  ]
+}

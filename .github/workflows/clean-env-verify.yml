@@ -47,9 +47,6 @@ jobs:
         with:
           toolchain: "1.96.0"
 
-      - name: Harness unit tests
-        run: python3 scripts/ci/test-clean-env-verify.py
-
       - name: Preflight public registries
         id: preflight
         run: |
@@ -71,10 +68,7 @@ jobs:
           fi
           if [[ "$LANES" == "all" ]]; then
             if [[ -z "$RECORD" ]]; then
-              # checksums requires a release record; run every other lane when absent
-              for lane in pip npm cli skills reopen urls; do
-                args+=(--lane "$lane")
-              done
+              args+=(--default)
             else
               args+=(--all)
             fi

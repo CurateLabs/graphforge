@@ -1,140 +1,21 @@
-name: Fly tiny orphan recovery
+name: Fly Tiny Recovery (operator handoff)
 
 on:
   workflow_dispatch:
-    inputs:
-      source_run_id:
-        description: Qualification workflow run ID that owns the app
-        required: true
-        type: string
-      source_run_attempt:
-        description: Qualification workflow run attempt
-        required: true
-        default: "1"
-        type: string
-      organization:
-        description: Fly organization slug used by the qualification run
-        required: true
-        default: personal
-        type: string
-      region:
-        description: Fly region used by the qualification run
-        required: true
-        default: dfw
-        type: string
-      confirm_recovery:
-        description: Authorize cleanup of the receipt-bound disposable app
-        required: true
-        default: false
-        type: boolean
 
 permissions:
-  actions: read
   contents: read
 
-concurrency:
-  group: fly-tiny-qualification
-  cancel-in-progress: false
-
 jobs:
-  recover:
-    name: Receipt-bound manual recovery
+  handoff:
+    name: Render Python + Pulumi ESC recovery command
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    environment: scale-certification
-    timeout-minutes: 30
-    env:
-      FLY_ORGANIZATION: ${{ inputs.organization }}
-      FLY_REGION: ${{ inputs.region }}
-      PREFLIGHT_ARTIFACT: fly-tiny-preflight-${{ inputs.source_run_id }}-${{ inputs.source_run_attempt }}
+    timeout-minutes: 5
     steps:
-      - name: Require explicit recovery authorization
-        env:
-          CONFIRMED: ${{ inputs.confirm_recovery }}
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
-          SOURCE_RUN_ATTEMPT: ${{ inputs.source_run_attempt }}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Validate registry
+        run: python3 scripts/ci/gate-registry.py validate
+      - name: Render operator handoff
         run: |
-          test "$CONFIRMED" = true
-          test -n "$FLY_API_TOKEN"
-          case "$SOURCE_RUN_ID:$SOURCE_RUN_ATTEMPT" in (*[!0-9:]*) exit 2 ;; esac
-
-      - name: Checkout trusted recovery controller
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: main
-          fetch-depth: 1
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
-        with:
-          version: "0.10.9"
-          enable-cache: false
-
-      - name: Install flyctl
-        uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # v1.6
-
-      - name: Install locked benchmark environment
-        working-directory: benchmarks
-        run: uv sync --locked
-
-      - name: Restore durable ownership receipt
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: ${{ env.PREFLIGHT_ARTIFACT }}
-          path: ${{ runner.temp }}
-          github-token: ${{ github.token }}
-          repository: ${{ github.repository }}
-          run-id: ${{ inputs.source_run_id }}
-
-      - name: Read validated receipt identity
-        id: identity
-        run: |
-          PYTHONPATH=benchmarks/harness python - \
-            "$RUNNER_TEMP/fly-q958-ledger.json" "$GITHUB_OUTPUT" <<'PY'
-          from pathlib import Path
-          import sys
-
-          from graphforge_bench.fly_adapter import ResourceLedger
-
-          ledger = ResourceLedger.load(Path(sys.argv[1]))
-          if ledger.owner_app is None or ledger.owner_commit is None:
-              raise SystemExit("ownership receipt is already consumed")
-          with Path(sys.argv[2]).open("a", encoding="utf-8") as output:
-              output.write(f"app_name={ledger.owner_app}\n")
-              output.write(f"commit_sha={ledger.owner_commit}\n")
-          PY
-
-      - name: Recover and verify teardown
-        env:
-          APP_NAME: ${{ steps.identity.outputs.app_name }}
-          COMMIT_SHA: ${{ steps.identity.outputs.commit_sha }}
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-          MACHINE_NAME: gf-q958-recovery
-          VOLUME_NAME: gfq958_recovery
-        run: >-
-          PYTHONPATH=benchmarks/harness uv run --project benchmarks python -m
-          graphforge_bench.fly_tiny_qualification
-          --expected-sha "$COMMIT_SHA"
-          --org "$FLY_ORGANIZATION"
-          --app "$APP_NAME"
-          --region "$FLY_REGION"
-          --volume-name "$VOLUME_NAME"
-          --machine-name "$MACHINE_NAME"
-          --prerequisite-955 merged
-          --prerequisite-956 merged
-          --prerequisite-957 merged
-          --build-authority hosted-docker
-          --ledger "$RUNNER_TEMP/fly-q958-ledger.json"
-          --evidence-out "$RUNNER_TEMP/fly-q958-evidence.json"
-          --result-out "$RUNNER_TEMP/fly-q958-manual-cleanup-result.json"
-          --cleanup-only
-          --confirm-disposable
-
-      - name: Upload sanitized recovery result
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: fly-tiny-manual-cleanup-${{ inputs.source_run_id }}
-          path: ${{ runner.temp }}/fly-q958-manual-cleanup-result.json
-          if-no-files-found: error
-          retention-days: 1
+          python3 scripts/ci/gate-registry.py command fly-tiny-recovery
+          echo "No provider operation occurs in GitHub Actions; execute through Pulumi ESC."

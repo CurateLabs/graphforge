@@ -52,6 +52,12 @@ Run formatting after the final edit. Review intentional snapshot changes before 
 
 ## PR gate
 
+`config/gate-registry.json` is the machine-readable gate authority. Its sole
+required PR status is `github-status/CI Gate` with `sha_rule=exact_head`, matching
+repository ruleset 19988544. Scheduled stress, operator qualifications, and
+release certification evidence are not required PR checks. Validate changes
+with `make gate-registry-check`.
+
 Merge only when:
 
 - acceptance criteria have direct tests or deterministic evidence;
