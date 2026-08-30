@@ -33,6 +33,7 @@ from graphforge_bench.fly_adapter import (
 
 ROOT = Path(__file__).resolve().parents[3]
 DOCKERFILE = ROOT / "containers" / "fly-filesystem-qualification" / "Dockerfile"
+FLY_BUILD_CONFIG = ROOT / "containers" / "fly-filesystem-qualification" / "fly.build.toml"
 VALIDATOR = ROOT / "scripts" / "ci" / "validate-fly-filesystem-qualification.py"
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
 SAFE_NAME = re.compile(r"^[a-z][a-z0-9-]{2,62}$")
@@ -808,6 +809,7 @@ def execute(
         build = remote_build_command(
             app=invocation.app,
             source=root,
+            config=FLY_BUILD_CONFIG,
             dockerfile=DOCKERFILE,
             commit=invocation.commit,
         )

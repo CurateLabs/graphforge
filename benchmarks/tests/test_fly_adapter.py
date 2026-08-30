@@ -69,16 +69,31 @@ def attempt(**changes: object) -> FlyAttempt:
 class FlyAdapterTests(unittest.TestCase):
     def test_remote_build_is_remote_only_pushed_and_commit_pinned(self) -> None:
         command = remote_build_command(
-            app="gf-fixture", source=Path(), dockerfile=Path("Dockerfile"), commit="a" * 40
+            app="gf-fixture",
+            source=Path("/repo"),
+            config=Path("/repo/fly.build.toml"),
+            dockerfile=Path("/repo/Dockerfile"),
+            commit="a" * 40,
         )
         self.assertIn("--remote-only", command.argv)
         self.assertIn("--build-only", command.argv)
         self.assertIn("--push", command.argv)
+        self.assertEqual(command.argv[command.argv.index("--app") + 1], "gf-fixture")
+        self.assertEqual(command.argv[command.argv.index("--config") + 1], "/repo/fly.build.toml")
+        self.assertEqual(command.argv[command.argv.index("--dockerfile") + 1], "/repo/Dockerfile")
         self.assertNotIn("--local-only", command.argv)
         self.assertIn("GRAPHFORGE_COMMIT=" + "a" * 40, command.argv)
         self.assertEqual(pin_remote_image("gf-fixture", "sha256:" + "c" * 64), attempt().image)
         with self.assertRaisesRegex(AdapterError, "immutable"):
             pin_remote_image("gf-fixture", "latest")
+        with self.assertRaisesRegex(AdapterError, "absolute"):
+            remote_build_command(
+                app="gf-fixture",
+                source=Path(),
+                config=Path("fly.build.toml"),
+                dockerfile=Path("Dockerfile"),
+                commit="a" * 40,
+            )
 
     def test_provisioning_is_private_fixed_and_thin(self) -> None:
         commands = provisioning_commands(attempt())

@@ -1,0 +1,5 @@
+# Build-only Fly Launch configuration. The disposable app name is supplied
+# exclusively through `flyctl deploy --app` at runtime.
+
+[build]
+dockerfile = "containers/fly-filesystem-qualification/Dockerfile"

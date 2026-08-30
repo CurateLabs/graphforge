@@ -140,6 +140,13 @@ service, uses restart/autostop disabled and Fly's `--rm` auto-destroy
 semantics, and is bounded by the smoke's 930-second timeout, 30-second kill
 grace, and 300-second evidence acknowledgement window.
 
+The remote build uses the checked-in
+`containers/fly-filesystem-qualification/fly.build.toml` explicitly. That
+build-only config contains no app identity, service, or public port: the unique
+disposable app is supplied only by the executor's `--app` argument, while the
+Dockerfile and build context are passed as absolute paths so invocation does
+not depend on the caller's working directory.
+
 Dry-run performs source and read-only live-capacity admission but creates
 nothing. Supply unique disposable names and an existing output directory:
 
