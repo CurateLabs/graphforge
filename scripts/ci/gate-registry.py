@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import shlex
 import subprocess
@@ -157,7 +158,21 @@ def command_argv(value: dict[str, Any], gate_id: str) -> list[str]:
         record = next(item for item in records if item["id"] == gate_id)
     except StopIteration as error:
         raise RegistryError(f"unknown gate: {gate_id}") from error
-    return [*value["commands"][record["command"]], *record["args"]]
+    rendered = [*value["commands"][record["command"]], *record["args"]]
+    if rendered[:3] == ["python3", "-m", "graphforge_bench.qualification_operator"]:
+        rendered[0] = sys.executable
+    return rendered
+
+
+def command_environment(argv: list[str]) -> dict[str, str] | None:
+    """Make benchmark modules importable for registry-owned operator commands."""
+    if argv[1:3] != ["-m", "graphforge_bench.qualification_operator"]:
+        return None
+    environment = os.environ.copy()
+    harness = str(ROOT / "benchmarks" / "harness")
+    inherited = environment.get("PYTHONPATH")
+    environment["PYTHONPATH"] = harness if not inherited else harness + os.pathsep + inherited
+    return environment
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -198,7 +213,12 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if passthrough and passthrough[0] == "--":
             passthrough = passthrough[1:]
-        return subprocess.run([*rendered, *passthrough], cwd=ROOT, check=False).returncode
+        return subprocess.run(
+            [*rendered, *passthrough],
+            cwd=ROOT,
+            check=False,
+            env=command_environment(rendered),
+        ).returncode
     except RegistryError as error:
         print(f"gate registry invalid: {error}", file=sys.stderr)
         return 2

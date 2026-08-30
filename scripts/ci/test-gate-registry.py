@@ -72,7 +72,7 @@ class GateRegistryTests(unittest.TestCase):
         self.assertEqual(
             GATE.command_argv(self.registry, "progressive-ladder"),
             [
-                "python3",
+                sys.executable,
                 "-m",
                 "graphforge_bench.qualification_operator",
                 "run",
@@ -109,6 +109,33 @@ class GateRegistryTests(unittest.TestCase):
             ],
             cwd=ROOT,
             check=False,
+        )
+
+    def test_operator_run_uses_invoking_python_and_explicit_harness_path(self) -> None:
+        completed = subprocess.CompletedProcess((), 0)
+        with patch.object(GATE.subprocess, "run", return_value=completed) as run:
+            self.assertEqual(
+                GATE.main(
+                    [
+                        "run",
+                        "fly-tiny-qualification",
+                        "--",
+                        "--environment",
+                        "curatelabs/graphforge/qualification",
+                        "--expected-sha",
+                        "a" * 40,
+                        "--execute",
+                        "--confirm-disposable",
+                    ]
+                ),
+                0,
+            )
+        argv = run.call_args.args[0]
+        environment = run.call_args.kwargs["env"]
+        self.assertEqual(argv[0], sys.executable)
+        self.assertEqual(
+            environment["PYTHONPATH"].split(GATE.os.pathsep)[0],
+            str(ROOT / "benchmarks" / "harness"),
         )
 
 

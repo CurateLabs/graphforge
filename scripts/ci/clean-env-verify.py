@@ -881,7 +881,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         else list(args.lane or [])
     )
     if not lanes:
-        raise VerifyError("specify --all or one or more --lane values")
+        raise VerifyError("specify --all, --default, or one or more --lane values")
     unknown = [lane for lane in lanes if lane not in LANE_RUNNERS]
     if unknown:
         raise VerifyError(f"unknown lanes: {', '.join(unknown)}")
