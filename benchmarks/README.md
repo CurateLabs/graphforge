@@ -175,6 +175,13 @@ requires empty Machine, volume, and secret inventories; afterwards it requires
 the app absent and leaves a cleared ledger. The logged-in `flyctl` credential
 is used directly: the executor creates no secret or temporary token material.
 
+Remote-build failures emit only a closed provider cause code: billing
+unavailable, remote builder unavailable, invalid build configuration,
+Dockerfile/build-step failure, timeout, or unknown. Provider output is inspected
+only through a bounded in-memory window and is never copied into the result;
+unknown or sensitive text collapses to `provider_build_unknown`. The build
+image's Rust major/minor version is kept in parity with `rust-toolchain.toml`.
+
 The tiny smoke records phase peak RSS but authorizes no scale run. Its
 `performance-1x` selection is not an S18 sizing result. Subsequent ladder
 Machines must use same-phase RSS plateau evidence and measured headroom;

@@ -14,6 +14,7 @@ import json
 from pathlib import Path, PurePosixPath
 import re
 import shlex
+import subprocess
 from typing import Any
 
 
@@ -56,6 +57,16 @@ FAILURE_TYPES = frozenset(
         "teardown_failed",
         "inventory_not_empty",
         "qualification_failed",
+    }
+)
+PROVIDER_BUILD_CAUSES = frozenset(
+    {
+        "provider_billing_unavailable",
+        "provider_remote_builder_unavailable",
+        "provider_build_config_invalid",
+        "provider_dockerfile_failed",
+        "provider_build_timeout",
+        "provider_build_unknown",
     }
 )
 
@@ -407,12 +418,57 @@ def verify_empty_inventory(*, machines: Any, volumes: Any, secrets: Any, app_exi
     _refuse(app_exists, "provider inventory is not empty")
 
 
-def sanitized_failure(failure: str) -> dict[str, Any]:
+def classify_provider_build_failure(error: BaseException) -> str:
+    """Map bounded provider output to a closed code without returning raw text."""
+    if isinstance(error, (TimeoutError, subprocess.TimeoutExpired)):
+        return "provider_build_timeout"
+    fragments: list[str] = []
+    for raw_value in (getattr(error, "stdout", None), getattr(error, "stderr", None)):
+        value = (
+            raw_value[:8_192].decode("utf-8", errors="replace")
+            if isinstance(raw_value, bytes)
+            else raw_value
+        )
+        if isinstance(value, str):
+            fragments.append(value[:8_192])
+    text = "\n".join(fragments).lower()
+    patterns = (
+        ("provider_billing_unavailable", ("payment method", "payment required", "billing")),
+        (
+            "provider_remote_builder_unavailable",
+            (
+                "remote builder unavailable",
+                "failed to connect to remote builder",
+                "depot unavailable",
+            ),
+        ),
+        (
+            "provider_build_config_invalid",
+            ("configuration is invalid", "invalid fly.toml", "could not find fly.toml"),
+        ),
+        (
+            "provider_dockerfile_failed",
+            ("dockerfile parse error", "failed to solve", "did not complete successfully"),
+        ),
+    )
+    for cause, markers in patterns:
+        if any(marker in text for marker in markers):
+            return cause
+    return "provider_build_unknown"
+
+
+def sanitized_failure(failure: str, *, cause: str | None = None) -> dict[str, Any]:
     _refuse(failure not in FAILURE_TYPES, "failure type is invalid")
+    if failure == "build_failed":
+        cause = cause or "provider_build_unknown"
+        _refuse(cause not in PROVIDER_BUILD_CAUSES, "provider build cause is invalid")
+    else:
+        _refuse(cause is not None, "provider build cause is invalid")
     return {
-        "schema": "graphforge-fly-adapter-result/1",
+        "schema": "graphforge-fly-adapter-result/2",
         "status": "failed",
         "failure": failure,
+        "cause": cause,
     }
 
 
