@@ -291,6 +291,10 @@ export default defineConfig({
                   label: '0023 Composable multi-ontology',
                   slug: 'adr/0023-composable-multi-ontology',
                 },
+                {
+                  label: '0024 Storage format exceptions',
+                  slug: 'adr/0024-storage-format-exceptions',
+                },
               ],
             },
           ],
