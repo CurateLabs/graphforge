@@ -69,6 +69,7 @@ PROVIDER_BUILD_CAUSES = frozenset(
         "provider_build_unknown",
     }
 )
+BUILD_AUTHORITIES = frozenset({"provider", "hosted-docker"})
 
 
 @dataclass(frozen=True)
@@ -105,7 +106,10 @@ class Command:
 class ResourceLedger:
     """Local ownership ledger. IDs are never copied into evidence/diagnostics."""
 
-    schema: str = "graphforge-fly-resource-ledger/1"
+    schema: str = "graphforge-fly-resource-ledger/3"
+    owner_app: str | None = None
+    owner_commit: str | None = None
+    owner_nonce: str | None = None
     app_owned: bool = False
     volume_id: str | None = None
     machine_id: str | None = None
@@ -123,7 +127,7 @@ class ResourceLedger:
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
             raise AdapterError("resource ledger is malformed") from error
         _refuse(not isinstance(value, dict), "resource ledger is malformed")
-        if value.pop("schema", None) != "graphforge-fly-resource-ledger/1":
+        if value.pop("schema", None) != "graphforge-fly-resource-ledger/3":
             raise AdapterError("resource ledger schema is invalid")
         expected = {item.name for item in fields(cls)} - {"schema"}
         _refuse(set(value) != expected, "resource ledger fields are invalid")
@@ -141,6 +145,42 @@ def _refuse(condition: bool, message: str) -> None:
 
 
 def validate_ledger(ledger: ResourceLedger) -> None:
+    _refuse(
+        len({item is None for item in (ledger.owner_app, ledger.owner_commit, ledger.owner_nonce)})
+        != 1,
+        "resource ledger ownership binding is incomplete",
+    )
+    _refuse(
+        ledger.owner_app is not None
+        and (not isinstance(ledger.owner_app, str) or not SAFE_NAME.fullmatch(ledger.owner_app)),
+        "resource ledger owner app is invalid",
+    )
+    _refuse(
+        ledger.owner_commit is not None
+        and (not isinstance(ledger.owner_commit, str) or not COMMIT.fullmatch(ledger.owner_commit)),
+        "resource ledger owner commit is invalid",
+    )
+    _refuse(
+        ledger.owner_nonce is not None
+        and (
+            not isinstance(ledger.owner_nonce, str)
+            or not re.fullmatch(r"[0-9a-f]{32}", ledger.owner_nonce)
+            or ledger.owner_app != f"gf-q958-{ledger.owner_nonce}"
+        ),
+        "resource ledger owner nonce is invalid",
+    )
+    _refuse(
+        ledger.owner_app is None
+        and (
+            ledger.app_owned
+            or ledger.volume_id is not None
+            or ledger.machine_id is not None
+            or ledger.image_digest is not None
+            or bool(ledger.secret_names)
+            or ledger.token_material_present
+        ),
+        "resource ledger has unowned resource state",
+    )
     _refuse(type(ledger.app_owned) is not bool, "resource ledger ownership is invalid")
     _refuse(
         type(ledger.token_material_present) is not bool, "resource ledger token state is invalid"
@@ -232,17 +272,26 @@ def verify_checked_in_profile(root: Path, lifecycle: LifecycleInvocation) -> Non
     _refuse(lifecycle.profile_sha256 != f"sha256:{actual}", "checked-in profile digest mismatch")
 
 
-def remote_build_command(
-    *, app: str, source: Path, config: Path, dockerfile: Path, commit: str
+def image_build_command(
+    *,
+    app: str,
+    source: Path,
+    config: Path,
+    dockerfile: Path,
+    commit: str,
+    authority: str,
 ) -> Command:
+    """Build and push one commit-pinned image through the selected authority."""
     _refuse(not SAFE_NAME.fullmatch(app), "app name is invalid")
     _refuse(not COMMIT.fullmatch(commit), "build commit is invalid")
+    _refuse(authority not in BUILD_AUTHORITIES, "image build authority is invalid")
     _refuse(
         not all(path.is_absolute() for path in (source, config, dockerfile)),
         "build paths must be absolute",
     )
+    builder_flag = "--remote-only" if authority == "provider" else "--local-only"
     return Command(
-        "remote_build",
+        "image_build",
         (
             "flyctl",
             "deploy",
@@ -253,7 +302,7 @@ def remote_build_command(
             str(config),
             "--dockerfile",
             str(dockerfile),
-            "--remote-only",
+            builder_flag,
             "--build-only",
             "--push",
             "--no-public-ips",
@@ -264,6 +313,21 @@ def remote_build_command(
             "--yes",
         ),
     )
+
+
+def remote_build_command(
+    *, app: str, source: Path, config: Path, dockerfile: Path, commit: str
+) -> Command:
+    """Retain the provider-builder command used by existing ladder planning."""
+    command = image_build_command(
+        app=app,
+        source=source,
+        config=config,
+        dockerfile=dockerfile,
+        commit=commit,
+        authority="provider",
+    )
+    return Command("remote_build", command.argv)
 
 
 def provisioning_commands(attempt: FlyAttempt) -> tuple[Command, ...]:

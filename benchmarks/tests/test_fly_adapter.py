@@ -16,6 +16,7 @@ from graphforge_bench.fly_adapter import (
     accepted_rung_reclamation,
     classify_provider_build_failure,
     cleanup_commands,
+    image_build_command,
     inventory_commands,
     pin_remote_image,
     provisioning_commands,
@@ -77,6 +78,7 @@ class FlyAdapterTests(unittest.TestCase):
             dockerfile=Path("/repo/Dockerfile"),
             commit="a" * 40,
         )
+        self.assertEqual(command.operation, "remote_build")
         self.assertIn("--remote-only", command.argv)
         self.assertIn("--build-only", command.argv)
         self.assertIn("--push", command.argv)
@@ -95,6 +97,29 @@ class FlyAdapterTests(unittest.TestCase):
                 config=Path("fly.build.toml"),
                 dockerfile=Path("Dockerfile"),
                 commit="a" * 40,
+            )
+
+    def test_hosted_build_uses_local_docker_and_pushes_the_same_identity(self) -> None:
+        command = image_build_command(
+            app="gf-fixture",
+            source=Path("/repo"),
+            config=Path("/repo/fly.build.toml"),
+            dockerfile=Path("/repo/Dockerfile"),
+            commit="a" * 40,
+            authority="hosted-docker",
+        )
+        self.assertIn("--local-only", command.argv)
+        self.assertNotIn("--remote-only", command.argv)
+        self.assertIn("--build-only", command.argv)
+        self.assertIn("--push", command.argv)
+        with self.assertRaisesRegex(AdapterError, "authority"):
+            image_build_command(
+                app="gf-fixture",
+                source=Path("/repo"),
+                config=Path("/repo/fly.build.toml"),
+                dockerfile=Path("/repo/Dockerfile"),
+                commit="a" * 40,
+                authority="developer-laptop",
             )
 
     def test_provisioning_is_private_fixed_and_thin(self) -> None:
@@ -149,23 +174,29 @@ class FlyAdapterTests(unittest.TestCase):
 
     def test_cleanup_is_owned_ordered_and_idempotent(self) -> None:
         ledger = ResourceLedger(
+            owner_app="gf-q958-" + "c" * 32,
+            owner_commit="a" * 40,
+            owner_nonce="c" * 32,
             app_owned=True,
             volume_id="vol_fixture123",
             machine_id="abcdef01234567",
             secret_names=["temporary-token"],
         )
-        first = cleanup_commands("gf-fixture", ledger)
+        first = cleanup_commands("gf-q958-" + "c" * 32, ledger)
         self.assertEqual(
             [c.operation for c in first],
             ["destroy_machine", "destroy_volume", "unset_secret", "destroy_app"],
         )
         self.assertEqual(cleanup_commands("gf-fixture", ResourceLedger()), ())
-        self.assertEqual(first, cleanup_commands("gf-fixture", ledger))
+        self.assertEqual(first, cleanup_commands("gf-q958-" + "c" * 32, ledger))
 
     def test_ledger_load_closes_shape_types_and_identifiers(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "ledger.json"
             ledger = ResourceLedger(
+                owner_app="gf-q958-" + "c" * 32,
+                owner_commit="a" * 40,
+                owner_nonce="c" * 32,
                 app_owned=True,
                 volume_id="vol_fixture123",
                 machine_id="abcdef01234567",
