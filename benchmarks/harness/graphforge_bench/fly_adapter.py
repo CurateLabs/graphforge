@@ -69,6 +69,7 @@ PROVIDER_BUILD_CAUSES = frozenset(
         "provider_build_unknown",
     }
 )
+BUILD_AUTHORITIES = frozenset({"provider", "hosted-docker"})
 
 
 @dataclass(frozen=True)
@@ -232,17 +233,26 @@ def verify_checked_in_profile(root: Path, lifecycle: LifecycleInvocation) -> Non
     _refuse(lifecycle.profile_sha256 != f"sha256:{actual}", "checked-in profile digest mismatch")
 
 
-def remote_build_command(
-    *, app: str, source: Path, config: Path, dockerfile: Path, commit: str
+def image_build_command(
+    *,
+    app: str,
+    source: Path,
+    config: Path,
+    dockerfile: Path,
+    commit: str,
+    authority: str,
 ) -> Command:
+    """Build and push one commit-pinned image through the selected authority."""
     _refuse(not SAFE_NAME.fullmatch(app), "app name is invalid")
     _refuse(not COMMIT.fullmatch(commit), "build commit is invalid")
+    _refuse(authority not in BUILD_AUTHORITIES, "image build authority is invalid")
     _refuse(
         not all(path.is_absolute() for path in (source, config, dockerfile)),
         "build paths must be absolute",
     )
+    builder_flag = "--remote-only" if authority == "provider" else "--local-only"
     return Command(
-        "remote_build",
+        "image_build",
         (
             "flyctl",
             "deploy",
@@ -253,7 +263,7 @@ def remote_build_command(
             str(config),
             "--dockerfile",
             str(dockerfile),
-            "--remote-only",
+            builder_flag,
             "--build-only",
             "--push",
             "--no-public-ips",
@@ -263,6 +273,20 @@ def remote_build_command(
             f"GRAPHFORGE_COMMIT={commit}",
             "--yes",
         ),
+    )
+
+
+def remote_build_command(
+    *, app: str, source: Path, config: Path, dockerfile: Path, commit: str
+) -> Command:
+    """Retain the provider-builder command used by existing ladder planning."""
+    return image_build_command(
+        app=app,
+        source=source,
+        config=config,
+        dockerfile=dockerfile,
+        commit=commit,
+        authority="provider",
     )
 
 

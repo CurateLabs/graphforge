@@ -99,6 +99,7 @@ EXPECTED_ARTIFACT_UPLOADS = Counter(
         "m6-memory-${{ github.sha }}-blacksmith-4vcpu-ubuntu-2404": 1,
         "g500-certification-${{ inputs.commit_sha }}": 1,
         "native-local-admission-${{ matrix.authority }}-${{ github.sha }}": 1,
+        "fly-tiny-result-${{ inputs.commit_sha }}": 1,
     }
 )
 EXPECTED_ARTIFACT_DOWNLOADS = Counter(
@@ -310,6 +311,12 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
                 "${{ runner.temp }}/g500-certification-phase-journal.json"
             ),
             "benchmarks/outputs/local-admission-evidence.json",
+            (
+                "${{ runner.temp }}/fly-q958-plan.json\n"
+                "${{ runner.temp }}/fly-q958-result.json\n"
+                "${{ runner.temp }}/fly-q958-cleanup-result.json\n"
+                "${{ runner.temp }}/fly-q958-evidence.json"
+            ),
         }, f"artifact upload contains unapproved bytes: {path}"
         uploaded.append(name)
     for step in action_steps(text, "actions/download-artifact@"):

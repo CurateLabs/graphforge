@@ -15,7 +15,9 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import platform
 import re
+import shutil
 import subprocess
 import tempfile
 import time
@@ -27,8 +29,8 @@ from graphforge_bench.fly_adapter import (
     AdapterError,
     ResourceLedger,
     classify_provider_build_failure,
+    image_build_command,
     pin_remote_image,
-    remote_build_command,
     sanitized_failure,
 )
 
@@ -160,6 +162,7 @@ class TinyQualificationInvocation:
     volume_name: str
     machine_name: str
     prerequisites: Mapping[int, str]
+    build_authority: str = "provider"
     machine_class: str = "performance-1x"
     volume_gib: int = 10
 
@@ -191,8 +194,26 @@ def validate_invocation(invocation: TinyQualificationInvocation) -> None:
         raise AdapterError("fixed region is invalid")
     if invocation.machine_class != "performance-1x":
         raise AdapterError("tiny qualification must use the smallest performance preset")
+    if invocation.build_authority not in {"provider", "hosted-docker"}:
+        raise AdapterError("image build authority is invalid")
     if not 1 <= invocation.volume_gib <= 20:
         raise AdapterError("tiny qualification volume is outside its small bound")
+
+
+def validate_build_environment(invocation: TinyQualificationInvocation) -> None:
+    """Keep hosted Docker builds off developer machines and require a real daemon."""
+    if invocation.build_authority != "hosted-docker":
+        return
+    if (
+        platform.system() != "Linux"
+        or os.environ.get("CI") != "true"
+        or os.environ.get("GITHUB_ACTIONS") != "true"
+    ):
+        raise QualificationError(
+            "authorization_refused", "hosted Docker build requires GitHub Actions Linux"
+        )
+    if shutil.which("docker") is None:
+        raise QualificationError("authorization_refused", "hosted Docker is unavailable")
 
 
 def check_source(root: Path, commit: str) -> None:
@@ -770,6 +791,7 @@ def execute(
     """Run the bounded one-app qualification and return sanitized status."""
     validate_invocation(invocation)
     check_source(root, invocation.commit)
+    validate_build_environment(invocation)
     live_size = verify_live_capacity(transport, invocation)
     if dry_run:
         return {
@@ -777,6 +799,7 @@ def execute(
             "status": "admitted",
             "machine_class": invocation.machine_class,
             "volume_gib": invocation.volume_gib,
+            "build_authority": invocation.build_authority,
             "full_run_authorized": False,
         }
 
@@ -808,12 +831,13 @@ def execute(
         )
 
         failure_kind = "build_failed"
-        build = remote_build_command(
+        build = image_build_command(
             app=invocation.app,
             source=root,
             config=FLY_BUILD_CONFIG,
             dockerfile=DOCKERFILE,
             commit=invocation.commit,
+            authority=invocation.build_authority,
         )
         try:
             transport.run(build.argv, timeout=BUILD_TIMEOUT_SECONDS)
@@ -913,6 +937,38 @@ def execute(
     }
 
 
+def cleanup_only(
+    invocation: TinyQualificationInvocation,
+    *,
+    transport: Transport,
+    ledger_path: Path,
+) -> dict[str, Any]:
+    """Recover a hosted job after interruption and verify the owned app is absent."""
+    validate_invocation(invocation)
+    if not invocation.app.startswith("gf-q958-"):
+        raise AdapterError("cleanup app is not a disposable qualification app")
+    ledger = ResourceLedger.load(ledger_path) if ledger_path.is_file() else ResourceLedger()
+    apps = _list(
+        transport.json(("flyctl", "apps", "list", "--json"), timeout=CREATE_TIMEOUT_SECONDS),
+        "app",
+    )
+    names = frozenset(
+        item.get("Name") or item.get("name") for item in apps if isinstance(item, dict)
+    )
+    if len(names) != len(apps) or any(
+        not isinstance(name, str) or not SAFE_NAME.fullmatch(name) for name in names
+    ):
+        raise QualificationError("teardown_failed", "provider app inventory is malformed")
+    baseline = names - {invocation.app}
+    _cleanup(transport, invocation, ledger, ledger_path, baseline)
+    return {
+        "schema": "graphforge-fly-adapter-result/2",
+        "status": "passed",
+        "failure": None,
+        "cause": None,
+    }
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument("--expected-sha", required=True)
@@ -925,18 +981,25 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--prerequisite-956", choices=("merged",), required=True)
     result.add_argument("--prerequisite-957", choices=("merged",), required=True)
     result.add_argument("--machine-class", default="performance-1x")
+    result.add_argument(
+        "--build-authority",
+        choices=("provider", "hosted-docker"),
+        default="provider",
+    )
     result.add_argument("--volume-gib", type=int, default=10)
     result.add_argument("--ledger", type=Path, required=True)
     result.add_argument("--evidence-out", type=Path, required=True)
     result.add_argument("--result-out", type=Path, required=True)
-    result.add_argument("--execute", action="store_true")
+    mode = result.add_mutually_exclusive_group()
+    mode.add_argument("--execute", action="store_true")
+    mode.add_argument("--cleanup-only", action="store_true")
     result.add_argument("--confirm-disposable", action="store_true")
     return result
 
 
 def main() -> int:
     args = parser().parse_args()
-    if args.execute and not args.confirm_disposable:
+    if (args.execute or args.cleanup_only) and not args.confirm_disposable:
         result = sanitized_failure("authorization_refused")
         _atomic_json(args.result_out, result)
         return 1
@@ -952,18 +1015,26 @@ def main() -> int:
             956: args.prerequisite_956,
             957: args.prerequisite_957,
         },
+        build_authority=args.build_authority,
         machine_class=args.machine_class,
         volume_gib=args.volume_gib,
     )
     try:
-        result = execute(
-            invocation,
-            transport=FlyctlTransport(),
-            root=ROOT,
-            ledger_path=args.ledger,
-            evidence_out=args.evidence_out,
-            dry_run=not args.execute,
-        )
+        if args.cleanup_only:
+            result = cleanup_only(
+                invocation,
+                transport=FlyctlTransport(),
+                ledger_path=args.ledger,
+            )
+        else:
+            result = execute(
+                invocation,
+                transport=FlyctlTransport(),
+                root=ROOT,
+                ledger_path=args.ledger,
+                evidence_out=args.evidence_out,
+                dry_run=not args.execute,
+            )
     except (AdapterError, QualificationError, subprocess.SubprocessError, OSError):
         result = sanitized_failure("authorization_refused")
     _atomic_json(args.result_out, result)

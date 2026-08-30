@@ -147,6 +147,17 @@ journal. Provider, SKU, runner registration, cost approval, and teardown remain
 explicit maintainer decisions; see the
 [certification runbook](../../docs/development/g500-certification.md).
 
+### `fly-tiny-qualification.yml` — Disposable Fly environment smoke
+
+This protected manual workflow checks out the exact current `main` commit and
+runs the non-ladder #958 qualification on a Blacksmith Linux runner. It builds
+the commit-pinned image with hosted Docker, pushes it to the disposable app's
+Fly registry path, resolves the immutable digest, runs only the 10 GiB
+`performance-1x` filesystem smoke, and independently verifies teardown. A
+separate always-on recovery step handles interrupted executions. The workflow
+uploads only one-day sanitized plan/result documents and qualified evidence;
+the ownership ledger and provider resource identifiers are never uploaded.
+
 ### CodeRabbit
 
 CodeRabbit automatic review is disabled to preserve its limited quota. After

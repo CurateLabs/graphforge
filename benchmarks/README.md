@@ -189,6 +189,16 @@ continued material memory growth is an architectural failure. Persistent graph
 size remains expected to be disk/I/O-bound, with Fly's 500 GiB/425 GiB usable
 storage envelope evaluated only by the real ladder.
 
+If Fly's provider builder is unavailable, the protected manual
+`fly-tiny-qualification.yml` workflow may select `hosted-docker`. That mode
+executes the same owner/controller on a Linux GitHub Actions runner, uses the
+runner's Docker daemon with `flyctl deploy --local-only --build-only --push`,
+and resolves the same immutable `registry.fly.io/<app>@sha256:...` identity
+before creating a volume or Machine. Runtime admission refuses hosted Docker
+outside Linux GitHub Actions so the disk-constrained Mac cannot accidentally
+become the image builder. The workflow runs an always-on cleanup recovery step
+and uploads only the closed result plus qualified evidence when present.
+
 ## Smoke
 
 From the repository root:

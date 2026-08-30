@@ -16,6 +16,7 @@ from graphforge_bench.fly_adapter import (
     accepted_rung_reclamation,
     classify_provider_build_failure,
     cleanup_commands,
+    image_build_command,
     inventory_commands,
     pin_remote_image,
     provisioning_commands,
@@ -95,6 +96,29 @@ class FlyAdapterTests(unittest.TestCase):
                 config=Path("fly.build.toml"),
                 dockerfile=Path("Dockerfile"),
                 commit="a" * 40,
+            )
+
+    def test_hosted_build_uses_local_docker_and_pushes_the_same_identity(self) -> None:
+        command = image_build_command(
+            app="gf-fixture",
+            source=Path("/repo"),
+            config=Path("/repo/fly.build.toml"),
+            dockerfile=Path("/repo/Dockerfile"),
+            commit="a" * 40,
+            authority="hosted-docker",
+        )
+        self.assertIn("--local-only", command.argv)
+        self.assertNotIn("--remote-only", command.argv)
+        self.assertIn("--build-only", command.argv)
+        self.assertIn("--push", command.argv)
+        with self.assertRaisesRegex(AdapterError, "authority"):
+            image_build_command(
+                app="gf-fixture",
+                source=Path("/repo"),
+                config=Path("/repo/fly.build.toml"),
+                dockerfile=Path("/repo/Dockerfile"),
+                commit="a" * 40,
+                authority="developer-laptop",
             )
 
     def test_provisioning_is_private_fixed_and_thin(self) -> None:

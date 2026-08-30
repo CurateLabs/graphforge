@@ -1,0 +1,155 @@
+name: Fly tiny qualification
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: Exact current main commit to qualify
+        required: true
+        type: string
+      organization:
+        description: Fly organization slug
+        required: true
+        default: personal
+        type: string
+      region:
+        description: Fixed admitted Fly region
+        required: true
+        default: dfw
+        type: string
+      confirm_disposable:
+        description: Authorize one tiny app, 10 GiB volume, and performance-1x Machine
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fly-tiny-qualification
+  cancel-in-progress: false
+
+jobs:
+  qualify:
+    name: Hosted image and tiny Fly smoke
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    environment: scale-certification
+    timeout-minutes: 75
+    env:
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      COMMIT_SHA: ${{ inputs.commit_sha }}
+      FLY_ORGANIZATION: ${{ inputs.organization }}
+      FLY_REGION: ${{ inputs.region }}
+      APP_NAME: gf-q958-${{ github.run_id }}-${{ github.run_attempt }}
+      VOLUME_NAME: gf_q958_${{ github.run_id }}_${{ github.run_attempt }}
+      MACHINE_NAME: gf-q958-machine-${{ github.run_id }}
+    steps:
+      - name: Require explicit authorization and credential
+        env:
+          CONFIRMED: ${{ inputs.confirm_disposable }}
+        run: |
+          test "$CONFIRMED" = true
+          test -n "$FLY_API_TOKEN"
+          case "$COMMIT_SHA" in
+            (????????????????????????????????????????) ;;
+            (*) exit 2 ;;
+          esac
+          case "$COMMIT_SHA" in (*[!0-9a-f]*) exit 2 ;; esac
+
+      - name: Checkout exact commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.commit_sha }}
+          fetch-depth: 1
+
+      - name: Require exact current main
+        run: |
+          test "$(git rev-parse HEAD)" = "$COMMIT_SHA"
+          git fetch --no-tags --depth=1 origin main
+          test "$(git rev-parse FETCH_HEAD)" = "$COMMIT_SHA"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.10.9"
+          enable-cache: false
+
+      - name: Install flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # v1.6
+
+      - name: Install locked benchmark environment
+        working-directory: benchmarks
+        run: uv sync --locked
+
+      - name: Run no-spend admission
+        run: >-
+          PYTHONPATH=benchmarks/harness uv run --project benchmarks python -m
+          graphforge_bench.fly_tiny_qualification
+          --expected-sha "$COMMIT_SHA"
+          --org "$FLY_ORGANIZATION"
+          --app "$APP_NAME"
+          --region "$FLY_REGION"
+          --volume-name "$VOLUME_NAME"
+          --machine-name "$MACHINE_NAME"
+          --prerequisite-955 merged
+          --prerequisite-956 merged
+          --prerequisite-957 merged
+          --build-authority hosted-docker
+          --ledger "$RUNNER_TEMP/fly-q958-ledger.json"
+          --evidence-out "$RUNNER_TEMP/fly-q958-evidence.json"
+          --result-out "$RUNNER_TEMP/fly-q958-plan.json"
+
+      - name: Execute one tiny qualification
+        run: >-
+          PYTHONPATH=benchmarks/harness uv run --project benchmarks python -m
+          graphforge_bench.fly_tiny_qualification
+          --expected-sha "$COMMIT_SHA"
+          --org "$FLY_ORGANIZATION"
+          --app "$APP_NAME"
+          --region "$FLY_REGION"
+          --volume-name "$VOLUME_NAME"
+          --machine-name "$MACHINE_NAME"
+          --prerequisite-955 merged
+          --prerequisite-956 merged
+          --prerequisite-957 merged
+          --build-authority hosted-docker
+          --ledger "$RUNNER_TEMP/fly-q958-ledger.json"
+          --evidence-out "$RUNNER_TEMP/fly-q958-evidence.json"
+          --result-out "$RUNNER_TEMP/fly-q958-result.json"
+          --execute
+          --confirm-disposable
+
+      - name: Recover and verify teardown
+        if: always()
+        run: >-
+          PYTHONPATH=benchmarks/harness uv run --project benchmarks python -m
+          graphforge_bench.fly_tiny_qualification
+          --expected-sha "$COMMIT_SHA"
+          --org "$FLY_ORGANIZATION"
+          --app "$APP_NAME"
+          --region "$FLY_REGION"
+          --volume-name "$VOLUME_NAME"
+          --machine-name "$MACHINE_NAME"
+          --prerequisite-955 merged
+          --prerequisite-956 merged
+          --prerequisite-957 merged
+          --build-authority hosted-docker
+          --ledger "$RUNNER_TEMP/fly-q958-ledger.json"
+          --evidence-out "$RUNNER_TEMP/fly-q958-evidence.json"
+          --result-out "$RUNNER_TEMP/fly-q958-cleanup-result.json"
+          --cleanup-only
+          --confirm-disposable
+
+      - name: Upload sanitized result
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fly-tiny-result-${{ inputs.commit_sha }}
+          path: |
+            ${{ runner.temp }}/fly-q958-plan.json
+            ${{ runner.temp }}/fly-q958-result.json
+            ${{ runner.temp }}/fly-q958-cleanup-result.json
+            ${{ runner.temp }}/fly-q958-evidence.json
+          if-no-files-found: error
+          retention-days: 1

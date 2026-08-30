@@ -13,7 +13,9 @@ from graphforge_bench.fly_tiny_qualification import (
     QualificationError,
     TinyQualificationInvocation,
     _machine_command,
+    cleanup_only,
     execute,
+    validate_build_environment,
     validate_invocation,
     verify_live_capacity,
 )
@@ -228,6 +230,46 @@ class FlyTinyQualificationTests(unittest.TestCase):
                 invocation(prerequisites={955: "merged", 956: "open", 957: "merged"})
             )
         self.assertFalse(hasattr(invocation(), "rung"))
+
+    def test_hosted_docker_is_linux_github_actions_only(self) -> None:
+        hosted = invocation(build_authority="hosted-docker")
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            self.assertRaisesRegex(QualificationError, "GitHub Actions Linux"),
+        ):
+            validate_build_environment(hosted)
+        with (
+            patch.dict("os.environ", {"CI": "true", "GITHUB_ACTIONS": "true"}, clear=True),
+            patch("graphforge_bench.fly_tiny_qualification.platform.system", return_value="Linux"),
+            patch(
+                "graphforge_bench.fly_tiny_qualification.shutil.which",
+                return_value="/bin/docker",
+            ),
+        ):
+            validate_build_environment(hosted)
+
+    def test_cleanup_only_is_scoped_to_disposable_qualification_app(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            transport = FakeTransport()
+            transport.app_created = True
+            result = cleanup_only(
+                invocation(),
+                transport=transport,
+                ledger_path=root / "ledger.json",
+            )
+            self.assertEqual(result["status"], "passed")
+            self.assertEqual(ResourceLedger.load(root / "ledger.json"), ResourceLedger())
+            self.assertIn(
+                ("flyctl", "apps", "destroy", "gf-q958-test", "--yes"),
+                transport.commands,
+            )
+            with self.assertRaisesRegex(AdapterError, "disposable qualification"):
+                cleanup_only(
+                    invocation(app="production-app"),
+                    transport=FakeTransport(),
+                    ledger_path=root / "other-ledger.json",
+                )
 
     def test_live_capacity_requires_current_region_and_smallest_preset(self) -> None:
         transport = FakeTransport()
