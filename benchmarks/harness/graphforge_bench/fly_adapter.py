@@ -48,6 +48,7 @@ VOLUME_ID = re.compile(r"^vol_[a-z0-9]+$")
 FAILURE_TYPES = frozenset(
     {
         "authorization_refused",
+        "readiness_timeout",
         "build_failed",
         "provision_failed",
         "lifecycle_failed",

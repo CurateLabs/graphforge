@@ -69,6 +69,7 @@ class FakeTransport:
         auto_destroy: bool = True,
         restart_state: object = "valid",
         mount_state: object = "valid",
+        readiness_responses: list[object] | None = None,
     ):
         self.commands: list[tuple[str, ...]] = []
         self.machine_lists = 0
@@ -81,6 +82,7 @@ class FakeTransport:
         self.mount_state = (
             {"volume": "vol_fixture123", "path": "/work"} if mount_state == "valid" else mount_state
         )
+        self.readiness_responses = list(readiness_responses or [])
         self.app_created = False
 
     def run(
@@ -149,6 +151,13 @@ class FakeTransport:
         if argv[1:3] == ("volumes", "create"):
             return {"id": "vol_fixture123"}
         if argv[1:3] == ("machine", "list"):
+            if self.app_created and not self.machine_created and self.readiness_responses:
+                response = self.readiness_responses.pop(0)
+                if isinstance(response, BaseException):
+                    raise response
+                if isinstance(response, list) and response:
+                    self.machine_created = True
+                return response
             if not self.machine_created:
                 return []
             self.machine_lists += 1
@@ -289,6 +298,152 @@ class FlyTinyQualificationTests(unittest.TestCase):
                 ("flyctl", "apps", "destroy", "gf-q958-test", "--yes"),
                 transport.commands,
             )
+
+    @patch("graphforge_bench.fly_tiny_qualification.check_source")
+    def test_readiness_delayed_convergence_precedes_single_build(
+        self, check_source: object
+    ) -> None:
+        del check_source
+        unavailable = subprocess.CalledProcessError(1, ("flyctl", "machine", "list"))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            transport = FakeTransport(readiness_responses=[unavailable, unavailable, []])
+            with patch("graphforge_bench.fly_tiny_qualification.time.sleep") as sleep:
+                result = execute(
+                    invocation(),
+                    transport=transport,
+                    root=root,
+                    ledger_path=root / "ledger.json",
+                    evidence_out=root / "evidence.json",
+                    dry_run=False,
+                )
+            self.assertEqual(result["status"], "passed")
+            deploy_index = next(
+                index
+                for index, command in enumerate(transport.commands)
+                if command[:2] == ("flyctl", "deploy")
+            )
+            readiness = (
+                "flyctl",
+                "machine",
+                "list",
+                "--app",
+                "gf-q958-test",
+                "--json",
+            )
+            self.assertEqual(transport.commands[:deploy_index].count(readiness), 3)
+            self.assertEqual(sleep.call_count, 2)
+
+    @patch("graphforge_bench.fly_tiny_qualification.check_source")
+    def test_readiness_permanent_absence_times_out_and_cleans_owned_app(
+        self, check_source: object
+    ) -> None:
+        del check_source
+        unavailable = subprocess.CalledProcessError(1, ("flyctl", "machine", "list"))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            transport = FakeTransport(readiness_responses=[unavailable])
+            with (
+                patch("graphforge_bench.fly_tiny_qualification.APP_READINESS_TIMEOUT_SECONDS", 1),
+                patch(
+                    "graphforge_bench.fly_tiny_qualification.time.monotonic",
+                    side_effect=(0.0, 0.0, 2.0),
+                ),
+                patch("graphforge_bench.fly_tiny_qualification.time.sleep"),
+            ):
+                result = execute(
+                    invocation(),
+                    transport=transport,
+                    root=root,
+                    ledger_path=root / "ledger.json",
+                    evidence_out=root / "evidence.json",
+                    dry_run=False,
+                )
+            self.assertEqual(result["failure"], "readiness_timeout")
+            self.assertFalse(
+                any(command[:2] == ("flyctl", "deploy") for command in transport.commands)
+            )
+            self.assertEqual(ResourceLedger.load(root / "ledger.json"), ResourceLedger())
+            self.assertFalse((root / "evidence.json").exists())
+            self.assertNotIn("token", json.dumps(result).lower())
+
+    @patch("graphforge_bench.fly_tiny_qualification.check_source")
+    def test_readiness_response_after_deadline_cannot_start_build(
+        self, check_source: object
+    ) -> None:
+        del check_source
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            transport = FakeTransport(readiness_responses=[[]])
+            with (
+                patch("graphforge_bench.fly_tiny_qualification.APP_READINESS_TIMEOUT_SECONDS", 2),
+                patch(
+                    "graphforge_bench.fly_tiny_qualification.time.monotonic",
+                    side_effect=(0.0, 0.0, 3.0),
+                ),
+            ):
+                result = execute(
+                    invocation(),
+                    transport=transport,
+                    root=root,
+                    ledger_path=root / "ledger.json",
+                    evidence_out=root / "evidence.json",
+                    dry_run=False,
+                )
+            self.assertEqual(result["failure"], "readiness_timeout")
+            self.assertFalse(
+                any(command[:2] == ("flyctl", "deploy") for command in transport.commands)
+            )
+            self.assertEqual(ResourceLedger.load(root / "ledger.json"), ResourceLedger())
+            self.assertFalse((root / "evidence.json").exists())
+
+    @patch("graphforge_bench.fly_tiny_qualification.check_source")
+    def test_readiness_malformed_inventory_is_typed_provider_failure(
+        self, check_source: object
+    ) -> None:
+        del check_source
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            transport = FakeTransport(readiness_responses=[{}])
+            result = execute(
+                invocation(),
+                transport=transport,
+                root=root,
+                ledger_path=root / "ledger.json",
+                evidence_out=root / "evidence.json",
+                dry_run=False,
+            )
+            self.assertEqual(result["failure"], "provision_failed")
+            self.assertEqual(ResourceLedger.load(root / "ledger.json"), ResourceLedger())
+            self.assertFalse((root / "evidence.json").exists())
+
+    @patch("graphforge_bench.fly_tiny_qualification.check_source")
+    def test_readiness_rejects_and_adopts_unexpected_child_for_cleanup(
+        self, check_source: object
+    ) -> None:
+        del check_source
+        adopted = [{"id": "abcdef01234567", "name": "unexpected-machine"}]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            transport = FakeTransport(readiness_responses=[adopted])
+            result = execute(
+                invocation(),
+                transport=transport,
+                root=root,
+                ledger_path=root / "ledger.json",
+                evidence_out=root / "evidence.json",
+                dry_run=False,
+            )
+            self.assertEqual(result["failure"], "provision_failed")
+            self.assertTrue(
+                any(
+                    command[:3] == ("flyctl", "machine", "destroy")
+                    for command in transport.commands
+                )
+            )
+            self.assertEqual(ResourceLedger.load(root / "ledger.json"), ResourceLedger())
+            self.assertFalse((root / "evidence.json").exists())
+            self.assertNotIn("token", json.dumps(result).lower())
 
     @patch("graphforge_bench.fly_tiny_qualification.check_source")
     def test_nonempty_teardown_inventory_fails_closed(self, check_source: object) -> None:

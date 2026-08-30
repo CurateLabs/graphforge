@@ -158,7 +158,11 @@ PYTHONPATH=benchmarks/harness uv run --project benchmarks python -m \
 Only after that exact plan is accepted, append `--execute
 --confirm-disposable`. Execution owns exactly one app, one image attachment,
 one volume, and one Machine. It persists the local ownership ledger immediately
-after every create, retrieves only the existing closed sanitized evidence, and
+after every create. Before starting the one remote build, bounded
+deadline/backoff polling requires the new app to be visible and empty through
+the same Fly Machines authority used by deploy. A permanently unready app
+returns typed `readiness_timeout` evidence, tears down, and never retries the
+build. The executor retrieves only the existing closed sanitized evidence and
 always runs child-first teardown. Before deleting the app it independently
 requires empty Machine, volume, and secret inventories; afterwards it requires
 the app absent and leaves a cleared ledger. The logged-in `flyctl` credential
