@@ -568,6 +568,13 @@ jobs:
           --profile dev
           --out dist
 
+      - name: Prove make install preserves the native wheel
+        shell: bash
+        run: |
+          wheels=(dist/*.whl)
+          test "${#wheels[@]}" -eq 1
+          python3 scripts/ci/test-make-install-preserves-native-wheel.py "${wheels[0]}"
+
       - name: Prove isolated native package
         shell: bash
         run: |
