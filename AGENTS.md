@@ -121,10 +121,11 @@ pnpm install
 Standard lint/test/build/run commands are in the `Makefile` and `package.json`;
 prefer those. Non-obvious caveats for this environment:
 
-- **`uv sync` prunes the native wheel.** Plain `uv sync --all-extras` (what
-  `make install` runs) uninstalls the maturin-built `graphforge` package. Use
-  `uv sync --all-extras --inexact` to preserve it, or rebuild afterwards. The
-  editable rebuild is instant when `target/` is warm.
+- **Plain `uv sync` prunes the native wheel.** Direct `uv sync --all-extras`
+  uninstalls the maturin-built `graphforge` package. `make install` and the
+  startup update script use `uv sync --all-extras --inexact` to preserve it;
+  use the same flag for direct syncs, or rebuild afterwards. The editable
+  rebuild is instant when `target/` is warm.
 - **Rebuild native bindings after changing Rust.** The update script does not
   build. After pulling Rust changes, rebuild before Python/Node tests:
   `uv run maturin develop --release -m crates/graphforge-bindings-py/Cargo.toml`

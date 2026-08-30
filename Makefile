@@ -458,7 +458,9 @@ check-coverage-node:  ## Validate Node c8 summary meets ≥85% lines (lib/ surfa
 # ================================================================
 
 install:  ## Install all toolchain dependencies (Python + Rust + Node)
-	uv sync --all-extras
+	# The native graphforge wheel is installed outside this deps-only uv project.
+	# Keep it (and other explicitly installed tooling) while syncing workspace deps.
+	uv sync --all-extras --inexact
 	cargo check --workspace
 	pnpm install
 
