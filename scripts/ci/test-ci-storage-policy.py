@@ -97,12 +97,7 @@ EXPECTED_ARTIFACT_UPLOADS = Counter(
         "native-oracle-macos-${{ github.sha }}": 1,
         "native-durability-aggregate-${{ github.sha }}": 1,
         "m6-memory-${{ github.sha }}-blacksmith-4vcpu-ubuntu-2404": 1,
-        "g500-certification-${{ inputs.commit_sha }}": 1,
         "native-local-admission-${{ matrix.authority }}-${{ github.sha }}": 1,
-        "${{ env.PREFLIGHT_ARTIFACT }}": 1,
-        "fly-tiny-execution-${{ inputs.commit_sha }}": 1,
-        "fly-tiny-cleanup-${{ inputs.commit_sha }}": 1,
-        "fly-tiny-manual-cleanup-${{ inputs.source_run_id }}": 1,
     }
 )
 EXPECTED_ARTIFACT_DOWNLOADS = Counter(
@@ -127,7 +122,6 @@ EXPECTED_ARTIFACT_DOWNLOADS = Counter(
         "pr-node-addon-${{ github.sha }}": 1,
         "native-oracle-windows-${{ github.sha }}": 1,
         "native-oracle-macos-${{ github.sha }}": 1,
-        "${{ env.PREFLIGHT_ARTIFACT }}": 3,
     }
 )
 EXPECTED_DEPENDENCY_KEYS = Counter(
@@ -408,36 +402,18 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
     return uploaded, downloaded
 
 
-def validate_g500_artifact_negative_fixtures() -> None:
-    text = (WORKFLOWS / "g500-certification.yml").read_text()
-    artifact_contracts(text)
-    g500_marker = "          name: g500-certification-${{ inputs.commit_sha }}"
-    g500_start = text.index(g500_marker)
-    retention = "          retention-days: 14"
-    retention_at = text.index(retention, g500_start)
-    retention_mutation = (
-        text[:retention_at] + "          retention-days: 30" + text[retention_at + len(retention) :]
-    )
-    assert retention_mutation[g500_start:].count("retention-days: 30") == 1
-    mutations = (
-        text.replace(
-            "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1",
-            "actions/upload-artifact@65f0bc87b66c8c4f1891f20b5c7a8028c9d7c796 # v4.6.2",
-            1,
-        ),
-        retention_mutation,
-        text.replace(
-            "            ${{ runner.temp }}/g500-certification-phase-journal.json",
-            "            ${{ runner.temp }}/project.gfpb",
-            1,
-        ),
-    )
-    for mutation in mutations:
-        try:
-            artifact_contracts(mutation)
-        except AssertionError:
-            continue
-        raise AssertionError("G500 artifact policy accepted an unsafe mutation")
+def validate_operator_handoffs_have_no_artifacts() -> None:
+    for workflow, gate in (
+        ("g500-certification.yml", "g500-certification"),
+        ("fly-tiny-qualification.yml", "fly-tiny-qualification"),
+        ("fly-tiny-recovery.yml", "fly-tiny-recovery"),
+    ):
+        text = (WORKFLOWS / workflow).read_text()
+        uploaded, downloaded = artifact_contracts(text)
+        assert not uploaded and not downloaded, f"operator handoff transfers artifacts: {workflow}"
+        assert f"gate-registry.py command {gate}" in text, (
+            f"operator handoff does not render its registry command: {workflow}"
+        )
 
 
 def cache_contracts(text: str) -> tuple[list[str], list[str]]:
@@ -667,7 +643,7 @@ def main() -> None:
     test_suite = texts[WORKFLOWS / "test.yml"]
     validate_test_suite_trigger(test_suite)
     validate_required_run_negative_fixtures()
-    validate_g500_artifact_negative_fixtures()
+    validate_operator_handoffs_have_no_artifacts()
     validate_ci_gate_cutover(test_suite)
     jobs = workflow_jobs(test_suite)
     for job_id, runner in (
