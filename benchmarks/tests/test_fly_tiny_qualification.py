@@ -17,6 +17,7 @@ from graphforge_bench.fly_tiny_qualification import (
     validate_invocation,
     verify_live_capacity,
 )
+import tomllib
 
 DIGEST = "sha256:" + "b" * 64
 IMAGE = "registry.fly.io/gf-q958-test@" + DIGEST
@@ -248,6 +249,22 @@ class FlyTinyQualificationTests(unittest.TestCase):
         self.assertNotIn("--port", command)
         self.assertNotIn("S18", " ".join(command))
 
+    def test_build_config_is_identity_free_private_and_workdir_independent(self) -> None:
+        config_path = (
+            Path(__file__).resolve().parents[2]
+            / "containers"
+            / "fly-filesystem-qualification"
+            / "fly.build.toml"
+        )
+        config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            config,
+            {"build": {"dockerfile": "containers/fly-filesystem-qualification/Dockerfile"}},
+        )
+        self.assertNotIn("app", config)
+        self.assertNotIn("services", config)
+        self.assertNotIn("http_service", config)
+
     @patch("graphforge_bench.fly_tiny_qualification.check_source")
     def test_success_persists_ledger_retrieves_only_evidence_and_tears_down(
         self, check_source: object
@@ -294,6 +311,22 @@ class FlyTinyQualificationTests(unittest.TestCase):
                 dry_run=False,
             )
             self.assertEqual(result["failure"], "build_failed")
+            deploy = next(
+                command for command in transport.commands if command[:2] == ("flyctl", "deploy")
+            )
+            self.assertEqual(deploy[deploy.index("--app") + 1], "gf-q958-test")
+            self.assertTrue(Path(deploy[deploy.index("--config") + 1]).is_absolute())
+            self.assertTrue(Path(deploy[deploy.index("--dockerfile") + 1]).is_absolute())
+            self.assertIn("--build-only", deploy)
+            self.assertIn("--push", deploy)
+            self.assertIn("--no-public-ips", deploy)
+            self.assertIn("GRAPHFORGE_COMMIT=" + "a" * 40, deploy)
+            self.assertFalse(
+                any(
+                    command[1:3] in {("volumes", "create"), ("machine", "run")}
+                    for command in transport.commands
+                )
+            )
             self.assertIn(
                 ("flyctl", "apps", "destroy", "gf-q958-test", "--yes"),
                 transport.commands,

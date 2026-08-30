@@ -221,9 +221,15 @@ def verify_checked_in_profile(root: Path, lifecycle: LifecycleInvocation) -> Non
     _refuse(lifecycle.profile_sha256 != f"sha256:{actual}", "checked-in profile digest mismatch")
 
 
-def remote_build_command(*, app: str, source: Path, dockerfile: Path, commit: str) -> Command:
+def remote_build_command(
+    *, app: str, source: Path, config: Path, dockerfile: Path, commit: str
+) -> Command:
     _refuse(not SAFE_NAME.fullmatch(app), "app name is invalid")
     _refuse(not COMMIT.fullmatch(commit), "build commit is invalid")
+    _refuse(
+        not all(path.is_absolute() for path in (source, config, dockerfile)),
+        "build paths must be absolute",
+    )
     return Command(
         "remote_build",
         (
@@ -232,6 +238,8 @@ def remote_build_command(*, app: str, source: Path, dockerfile: Path, commit: st
             str(source),
             "--app",
             app,
+            "--config",
+            str(config),
             "--dockerfile",
             str(dockerfile),
             "--remote-only",
