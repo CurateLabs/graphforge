@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 import shlex
+import subprocess
 import tempfile
 import unittest
 
@@ -13,6 +14,7 @@ from graphforge_bench.fly_adapter import (
     LifecycleInvocation,
     ResourceLedger,
     accepted_rung_reclamation,
+    classify_provider_build_failure,
     cleanup_commands,
     inventory_commands,
     pin_remote_image,
@@ -197,14 +199,48 @@ class FlyAdapterTests(unittest.TestCase):
         self.assertEqual(
             value,
             {
-                "schema": "graphforge-fly-adapter-result/1",
+                "schema": "graphforge-fly-adapter-result/2",
                 "status": "failed",
                 "failure": "lifecycle_failed",
+                "cause": None,
             },
         )
         self.assertNotIn("id", json.dumps(value))
         with self.assertRaisesRegex(AdapterError, "failure type"):
             sanitized_failure("provider said machine-123 failed")
+
+    def test_provider_build_diagnostics_map_only_to_closed_codes(self) -> None:
+        cases = {
+            "payment method is required": "provider_billing_unavailable",
+            "remote builder unavailable": "provider_remote_builder_unavailable",
+            "configuration is invalid": "provider_build_config_invalid",
+            "failed to solve: process did not complete successfully": "provider_dockerfile_failed",
+        }
+        for stderr, expected in cases.items():
+            with self.subTest(stderr=stderr):
+                error = subprocess.CalledProcessError(1, ("flyctl", "deploy"), stderr=stderr)
+                self.assertEqual(classify_provider_build_failure(error), expected)
+        timeout = subprocess.TimeoutExpired(("flyctl", "deploy"), 30)
+        self.assertEqual(classify_provider_build_failure(timeout), "provider_build_timeout")
+        unrelated_billing = subprocess.CalledProcessError(
+            1,
+            ("flyctl", "deploy"),
+            stderr="compiler error: unresolved import billing::invoice",
+        )
+        self.assertEqual(
+            classify_provider_build_failure(unrelated_billing), "provider_build_unknown"
+        )
+
+        sensitive = (
+            "unknown failure token=secret Bearer auth@example.com "
+            "https://provider.invalid/apps/gf-private /Users/private vol_abc123 1234abcd567890"
+        )
+        error = subprocess.CalledProcessError(1, ("flyctl", "deploy"), stderr=sensitive)
+        value = sanitized_failure("build_failed", cause=classify_provider_build_failure(error))
+        self.assertEqual(value["cause"], "provider_build_unknown")
+        encoded = json.dumps(value)
+        for leaked in ("secret", "Bearer", "example.com", "gf-private", "vol_", "/Users"):
+            self.assertNotIn(leaked, encoded)
 
     def test_profile_digest_is_verified_from_repository(self) -> None:
         root = Path(__file__).resolve().parents[2]

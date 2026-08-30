@@ -265,6 +265,16 @@ class FlyTinyQualificationTests(unittest.TestCase):
         self.assertNotIn("services", config)
         self.assertNotIn("http_service", config)
 
+    def test_docker_builder_matches_checked_in_rust_toolchain(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        toolchain = tomllib.loads((root / "rust-toolchain.toml").read_text(encoding="utf-8"))
+        channel = toolchain["toolchain"]["channel"]
+        major_minor = ".".join(channel.split(".")[:2])
+        dockerfile = (
+            root / "containers" / "fly-filesystem-qualification" / "Dockerfile"
+        ).read_text(encoding="utf-8")
+        self.assertIn(f"FROM rust:{major_minor}-bookworm AS build", dockerfile)
+
     @patch("graphforge_bench.fly_tiny_qualification.check_source")
     def test_success_persists_ledger_retrieves_only_evidence_and_tears_down(
         self, check_source: object
@@ -311,6 +321,8 @@ class FlyTinyQualificationTests(unittest.TestCase):
                 dry_run=False,
             )
             self.assertEqual(result["failure"], "build_failed")
+            self.assertEqual(result["cause"], "provider_build_unknown")
+            self.assertEqual(result["schema"], "graphforge-fly-adapter-result/2")
             deploy = next(
                 command for command in transport.commands if command[:2] == ("flyctl", "deploy")
             )

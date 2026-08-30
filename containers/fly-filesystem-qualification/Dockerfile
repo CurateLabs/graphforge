@@ -1,4 +1,4 @@
-FROM rust:1.90-bookworm AS build
+FROM rust:1.96-bookworm AS build
 WORKDIR /source
 COPY . .
 RUN cargo build --locked --release -p graphforge-api --bin graphforge-fly-filesystem-smoke

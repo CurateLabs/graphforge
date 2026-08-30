@@ -26,6 +26,7 @@ import urllib.request
 from graphforge_bench.fly_adapter import (
     AdapterError,
     ResourceLedger,
+    classify_provider_build_failure,
     pin_remote_image,
     remote_build_command,
     sanitized_failure,
@@ -58,9 +59,10 @@ TEARDOWN_POLL_INTERVAL_SECONDS = 2
 class QualificationError(RuntimeError):
     """A typed, sanitized terminal failure."""
 
-    def __init__(self, failure: str, message: str):
+    def __init__(self, failure: str, message: str, *, cause: str | None = None):
         super().__init__(message)
         self.failure = failure
+        self.cause = cause
 
 
 class Transport(Protocol):
@@ -813,7 +815,14 @@ def execute(
             dockerfile=DOCKERFILE,
             commit=invocation.commit,
         )
-        transport.run(build.argv, timeout=BUILD_TIMEOUT_SECONDS)
+        try:
+            transport.run(build.argv, timeout=BUILD_TIMEOUT_SECONDS)
+        except (subprocess.SubprocessError, OSError) as error:
+            raise QualificationError(
+                "build_failed",
+                "remote provider build failed",
+                cause=classify_provider_build_failure(error),
+            ) from None
         image = transport.resolve_image(
             invocation.app, invocation.commit, timeout=CREATE_TIMEOUT_SECONDS
         )
@@ -895,11 +904,12 @@ def execute(
             failure = cleanup_error
 
     if failure is not None:
-        return sanitized_failure(failure.failure)
+        return sanitized_failure(failure.failure, cause=failure.cause)
     return {
-        "schema": "graphforge-fly-adapter-result/1",
+        "schema": "graphforge-fly-adapter-result/2",
         "status": "passed",
         "failure": None,
+        "cause": None,
     }
 
 
