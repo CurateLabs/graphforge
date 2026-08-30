@@ -43,11 +43,6 @@ jobs:
         with:
           toolchain: "1.96.0"
 
-      - name: Validate certification configuration
-        run: |
-          python3 scripts/ci/durability-certification-gate.py validate
-          python3 scripts/ci/test-durability-certification-gate.py
-
       - name: Run scheduled seeded certification lane
         run: >-
           python3 scripts/ci/gate-registry.py run durability-certification --

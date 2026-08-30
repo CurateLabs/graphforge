@@ -43,11 +43,6 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Validate stress configuration
-        run: |
-          python3 scripts/ci/concurrency-stress-gate.py validate
-          python3 scripts/ci/test-concurrency-stress-gate.py
-
       - name: Build native Python wheel for mixed workload
         run: |
           uvx maturin build \

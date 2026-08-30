@@ -1018,7 +1018,7 @@ def cleanup_only(
 
 
 def parser() -> argparse.ArgumentParser:
-    result = argparse.ArgumentParser(description=__doc__)
+    result = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     result.add_argument("--expected-sha", required=True)
     result.add_argument("--org", required=True)
     result.add_argument("--app", required=True)

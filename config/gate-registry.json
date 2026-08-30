@@ -85,6 +85,10 @@
       "examples/visualization/stress/harness/run.py"
     ]
   },
+  "matrix_variants": {
+    "concurrency/stress": "scripts/ci/concurrency-stress-gate.py",
+    "durability/certification": "scripts/ci/durability-certification-gate.py"
+  },
   "workflows": [
     {
       "id": "binding-release-candidate",

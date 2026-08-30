@@ -153,27 +153,17 @@ this project.
 
 ### `g500-certification.yml` — Billion-edge certification
 
-This protected, manual-only workflow checks out an exact commit on a
-maintainer-approved ephemeral Linux scale host. It never provisions or spends.
-It runs the bounded target-live SCALE-26 lifecycle, writes an atomic typed phase
-journal, validates sanitized evidence, and uploads only the evidence JSON and
-journal. Provider, SKU, runner registration, cost approval, and teardown remain
-explicit maintainer decisions; see the
+This manual compatibility wrapper validates and renders the registry-owned
+operator command. It never provisions or spends. Provider, SKU, runner
+registration, cost approval, and teardown remain explicit operator decisions;
+the actual run must use the Python + Pulumi ESC control plane described in the
 [certification runbook](../../docs/development/g500-certification.md).
 
 ### `fly-tiny-qualification.yml` — Disposable Fly environment smoke
 
-This protected manual workflow checks out the exact current `main` commit and
-runs the non-ladder #958 qualification on a Blacksmith Linux runner. It builds
-the commit-pinned image with hosted Docker, pushes it to the disposable app's
-Fly registry path, resolves the immutable digest, runs only the 10 GiB
-`performance-1x` filesystem smoke, and independently verifies teardown. A
-separate recovery job has its own timeout budget after execution, and
-`fly-tiny-recovery.yml` provides receipt-bound manual orphan cleanup. The
-workflow uploads a one-day pre-creation ownership receipt plus sanitized
-plan/result documents and qualified evidence. The receipt binds the commit to
-a fresh 128-bit app-name nonce and never contains provider resource identifiers
-or credentials.
+This manual compatibility wrapper validates and renders the registry-owned
+operator command without credentials or provider execution. Live qualification
+is available only through the Python + Pulumi ESC control plane below.
 
 For new operator runs, use the registry-owned entry point instead of Actions
 dispatch. All controller flags are passed after `ARGS=`; the Python operator
@@ -182,19 +172,17 @@ before it opens the named ESC environment:
 
 ```bash
 make -C benchmarks qualification-operator \
-  GATE=fly-tiny \
+  GATE=fly-tiny-qualification \
   ESC_ENVIRONMENT=curatelabs/graphforge/qualification \
   ARGS='--expected-sha <sha> --execute --confirm-disposable <remaining-controller-args>'
 ```
 
 ### `fly-tiny-recovery.yml` — Manual Fly orphan recovery
 
-This protected manual janitor downloads the one-day ownership receipt from a
-specified qualification run and refuses deletion unless its exact nonce-bound
-app and commit match. It runs the trusted controller from current `main` and
-shares the qualification concurrency lock, so it cannot race the source run.
-It exists for runner loss, workflow cancellation, or a failed independent
-recovery job; it cannot infer ownership from an app prefix.
+This manual compatibility wrapper only validates and renders the registry-owned
+recovery command. Receipt-bound orphan cleanup must be launched through the
+Python + Pulumi ESC operator; Actions has no provider credential or deletion
+authority.
 
 ### CodeRabbit
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Callable, Sequence
+from pathlib import Path
 import re
 import subprocess
 import sys
@@ -21,6 +22,7 @@ ESC_ENVIRONMENT = re.compile(
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
 LIVE_GATES = {"fly-tiny", "fly-tiny-recovery"}
 ALL_GATES = (*sorted(LIVE_GATES), "progressive-ladder")
+ROOT = Path(__file__).resolve().parents[3]
 
 
 class OperatorRefusalError(ValueError):
@@ -81,25 +83,74 @@ def esc_command(environment: str, gate: str, argv: Sequence[str]) -> tuple[str, 
     )
 
 
+def attest_current_main(
+    commit: str,
+    *,
+    root: Path = ROOT,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> None:
+    """Bind provider authority to a clean checkout of current origin/main."""
+    try:
+        head = runner(
+            ("git", "rev-parse", "HEAD"),
+            cwd=root,
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout.strip()
+        status = runner(
+            ("git", "status", "--porcelain"),
+            cwd=root,
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout.strip()
+        runner(
+            ("git", "fetch", "--no-tags", "--depth=1", "origin", "main"),
+            cwd=root,
+            check=True,
+        )
+        fetched = runner(
+            ("git", "rev-parse", "FETCH_HEAD"),
+            cwd=root,
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise OperatorRefusalError("unable to attest current origin/main") from error
+    if head != commit or status or fetched != commit:
+        raise OperatorRefusalError(
+            "--expected-sha must identify a clean checkout of current origin/main"
+        )
+
+
 def run_under_esc(
     environment: str,
     gate: str,
     argv: Sequence[str],
     *,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    attestor: Callable[[str], None] = attest_current_main,
 ) -> int:
     command = esc_command(environment, gate, argv)
+    commit = _single_value(_forwarded(argv), "--expected-sha")
+    attestor(commit)
     completed = runner(command, check=False)
     return completed.returncode
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     sub = parser.add_subparsers(dest="action", required=True)
-    run = sub.add_parser("run", help="Execute a live qualification under Pulumi ESC")
+    run = sub.add_parser(
+        "run", help="Execute a live qualification under Pulumi ESC", allow_abbrev=False
+    )
     run.add_argument("--environment", required=True)
     run.add_argument("--gate", choices=ALL_GATES, required=True)
-    plan = sub.add_parser("plan-progressive", help="Write a no-spend next-rung plan")
+    plan = sub.add_parser(
+        "plan-progressive", help="Write a no-spend next-rung plan", allow_abbrev=False
+    )
     plan.add_argument("arguments", nargs=argparse.REMAINDER)
     args, remainder = parser.parse_known_args(argv)
     try:

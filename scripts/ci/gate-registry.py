@@ -21,6 +21,12 @@ CLASSES = {
     "release_certification",
 }
 REQUIRED_FIELDS = {"id", "owner", "command", "args", "evidence_contract", "freshness", "sha_rule"}
+FORBIDDEN_OPERATOR_WORKFLOW_MARKERS = (
+    "FLY_API_TOKEN",
+    "graphforge_bench.fly_tiny_qualification",
+    "--execute",
+    "--cleanup-only",
+)
 
 
 class RegistryError(ValueError):
@@ -48,14 +54,27 @@ def _workflow_files(root: Path) -> set[str]:
 
 def validate_registry(value: dict[str, Any], root: Path = ROOT) -> None:
     commands = value.get("commands")
+    matrix_variants = value.get("matrix_variants")
     workflows = value.get("workflows")
     operators = value.get("operator_gates")
     if (
         not isinstance(commands, dict)
+        or not isinstance(matrix_variants, dict)
         or not isinstance(workflows, list)
         or not isinstance(operators, list)
     ):
         raise RegistryError("registry collections are malformed")
+    expected_variants = {
+        "concurrency/stress": "scripts/ci/concurrency-stress-gate.py",
+        "durability/certification": "scripts/ci/durability-certification-gate.py",
+    }
+    if matrix_variants != expected_variants:
+        raise RegistryError(
+            "matrix variants must be the registry-owned concurrency/durability pair"
+        )
+    for script in matrix_variants.values():
+        if not (root / script).is_file():
+            raise RegistryError(f"matrix variant references a missing script: {script}")
     for name, argv in commands.items():
         if not isinstance(name, str) or not name or not isinstance(argv, list) or not argv:
             raise RegistryError("command definitions must be non-empty argv arrays")
@@ -117,6 +136,19 @@ def validate_registry(value: dict[str, Any], root: Path = ROOT) -> None:
             if not isinstance(path, str) or path in paths:
                 raise RegistryError(f"{gate_id}: workflow path is duplicate or invalid")
             paths.add(path)
+            workflow = (root / path).read_text(encoding="utf-8")
+            if record.get("control_plane") == "pulumi_esc":
+                marker = next(
+                    (item for item in FORBIDDEN_OPERATOR_WORKFLOW_MARKERS if item in workflow),
+                    None,
+                )
+                if marker is not None:
+                    raise RegistryError(f"{gate_id}: workflow bypasses ESC operator via {marker}")
+                if f"gate-registry.py command {gate_id}" not in workflow:
+                    raise RegistryError(f"{gate_id}: workflow must render its registry command")
+            if gate_id in {"concurrency-stress", "durability-certification"}:
+                if f"gate-registry.py run {gate_id}" not in workflow:
+                    raise RegistryError(f"{gate_id}: workflow bypasses its registry command")
 
     actual = _workflow_files(root)
     if paths != actual:
@@ -175,16 +207,29 @@ def command_environment(argv: list[str]) -> dict[str, str] | None:
     return environment
 
 
+def _strip_separator(argv: list[str]) -> list[str]:
+    return argv[1:] if argv[:1] == ["--"] else argv
+
+
+def reject_owned_options(passthrough: list[str], owned: list[str]) -> None:
+    """Prevent caller arguments from overriding registry-selected options."""
+    reserved = {value for value in owned if value.startswith("--")}
+    for value in passthrough:
+        option = value.split("=", 1)[0]
+        if option in reserved:
+            raise RegistryError(f"caller may not override registry-owned option {option}")
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     sub = parser.add_subparsers(dest="action", required=True)
-    sub.add_parser("validate")
-    command = sub.add_parser("command")
+    sub.add_parser("validate", allow_abbrev=False)
+    command = sub.add_parser("command", allow_abbrev=False)
     command.add_argument("gate")
     command.add_argument("--json", action="store_true")
-    run = sub.add_parser("run")
+    run = sub.add_parser("run", allow_abbrev=False)
     run.add_argument("gate")
-    matrix = sub.add_parser("matrix")
+    matrix = sub.add_parser("matrix", allow_abbrev=False)
     matrix.add_argument("--family", choices=("concurrency", "durability"), required=True)
     matrix.add_argument("--variant", choices=("stress", "certification"), required=True)
     args, passthrough = parser.parse_known_args(argv)
@@ -198,12 +243,9 @@ def main(argv: list[str] | None = None) -> int:
             expected = {"concurrency": "stress", "durability": "certification"}
             if expected[args.family] != args.variant:
                 raise RegistryError("matrix family/variant pairing is invalid")
-            script = {
-                "concurrency": "scripts/ci/concurrency-stress-gate.py",
-                "durability": "scripts/ci/durability-certification-gate.py",
-            }[args.family]
-            if passthrough and passthrough[0] == "--":
-                passthrough = passthrough[1:]
+            script = registry["matrix_variants"][f"{args.family}/{args.variant}"]
+            passthrough = _strip_separator(passthrough)
+            reject_owned_options(passthrough, ["--family", "--variant"])
             return subprocess.run(
                 [sys.executable, script, "run", *passthrough], cwd=ROOT, check=False
             ).returncode
@@ -211,8 +253,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.action == "command":
             print(json.dumps(rendered) if args.json else shlex.join(rendered))
             return 0
-        if passthrough and passthrough[0] == "--":
-            passthrough = passthrough[1:]
+        passthrough = _strip_separator(passthrough)
+        record = next(
+            item
+            for item in registry["workflows"] + registry["operator_gates"]
+            if item["id"] == args.gate
+        )
+        reject_owned_options(passthrough, record["args"])
         return subprocess.run(
             [*rendered, *passthrough],
             cwd=ROOT,

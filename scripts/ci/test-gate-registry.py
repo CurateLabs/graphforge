@@ -62,6 +62,11 @@ class GateRegistryTests(unittest.TestCase):
         concurrency["command"] = "repository-policy"
         self.rejected("must share matrix-gate", mutated)
 
+    def test_matrix_dispatch_map_is_registry_owned(self) -> None:
+        mutated = copy.deepcopy(self.registry)
+        mutated["matrix_variants"]["concurrency/stress"] = "scripts/ci/require-gates.sh"
+        self.rejected("matrix variants", mutated)
+
     def test_publication_verification_has_one_owner(self) -> None:
         mutated = copy.deepcopy(self.registry)
         clean = next(item for item in mutated["workflows"] if item["id"] == "clean-environment")
@@ -137,6 +142,43 @@ class GateRegistryTests(unittest.TestCase):
             environment["PYTHONPATH"].split(GATE.os.pathsep)[0],
             str(ROOT / "benchmarks" / "harness"),
         )
+
+    def test_run_rejects_registry_owned_gate_override(self) -> None:
+        with patch.object(GATE.subprocess, "run") as run:
+            self.assertEqual(
+                GATE.main(
+                    [
+                        "run",
+                        "fly-tiny-qualification",
+                        "--",
+                        "--gate=progressive-ladder",
+                    ]
+                ),
+                2,
+            )
+        run.assert_not_called()
+
+    def test_matrix_rejects_registry_owned_variant_override(self) -> None:
+        with patch.object(GATE.subprocess, "run") as run:
+            self.assertEqual(
+                GATE.main(
+                    [
+                        "matrix",
+                        "--family",
+                        "concurrency",
+                        "--variant",
+                        "stress",
+                        "--",
+                        "--variant=certification",
+                    ]
+                ),
+                2,
+            )
+        run.assert_not_called()
+
+    def test_documented_fly_gate_id_renders(self) -> None:
+        rendered = GATE.command_argv(self.registry, "fly-tiny-qualification")
+        self.assertEqual(rendered[-2:], ["--gate", "fly-tiny"])
 
 
 if __name__ == "__main__":

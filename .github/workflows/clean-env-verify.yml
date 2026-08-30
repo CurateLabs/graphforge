@@ -47,9 +47,6 @@ jobs:
         with:
           toolchain: "1.96.0"
 
-      - name: Harness unit tests
-        run: python3 scripts/ci/test-clean-env-verify.py
-
       - name: Preflight public registries
         id: preflight
         run: |
