@@ -297,6 +297,25 @@ make -C benchmarks progressive-qualification-project-s20 \
   PROVIDER_CAPACITY=/sanitized/provider-capacity.json
 ```
 
+The sequential provider ladder has a separate no-spend control-plane planner.
+It verifies a contiguous, commit-bound evidence prefix (including the exact
+checked-out repository commit and profile digest), applies the checked-in
+projection gate, and emits only the next profile and sanitized projection:
+
+```bash
+make -C benchmarks progressive-provider-plan \
+  COMMIT=$(git rev-parse HEAD) MAXIMUM_SCALE=26 \
+  OUTPUT_DIR=/admitted-volume/graphforge-evidence \
+  PLAN_OUT=/admitted-volume/graphforge-evidence/provider-plan.json \
+  PROVIDER_CAPACITY=/sanitized/provider-capacity.json
+```
+
+The planner is deliberately not a provider executor. Provider plans are marked
+refused for execution until a dedicated provider image contains `gf`, the
+Graph500 generator/certifier, Python/BenchExec, and a proven cgroups/I/O
+authority. The canonical order remains S18, S19, S20, S22, S24, S25, S26;
+the first failed or missing gate stops the ladder.
+
 The controller derives bulk-ingest capability from the same run's bounded
 ordinary `gf import-session commit --json` receipt: its construction evidence
 must identify a configuration of at least 65,536 rows, accepted bulk chunks,
