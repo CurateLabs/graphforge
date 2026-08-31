@@ -12,11 +12,10 @@ from collections.abc import Mapping
 import json
 from pathlib import Path
 import re
-import sys
 from typing import Any
 
 from graphforge_bench.progressive_esc import EscCapsuleError, load_progressive_esc
-from graphforge_bench.progressive_fly_transport import FlyProviderTransport, FlyctlMachineBoundary
+from graphforge_bench.progressive_fly_transport import FlyctlMachineBoundary, FlyProviderTransport
 from graphforge_bench.progressive_provider_attempt import (
     ATTEMPT_SCHEMA,
     AttemptError,
@@ -24,7 +23,6 @@ from graphforge_bench.progressive_provider_attempt import (
     SpendAuthorization,
     cleanup_only,
     execute_attempt,
-    parse_spend_authorization,
 )
 
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
