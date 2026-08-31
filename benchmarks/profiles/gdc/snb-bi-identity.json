@@ -1,0 +1,41 @@
+{
+  "schema": "graphforge-gdc-pinned-identity/1",
+  "suite_id": "snb-bi",
+  "disposition": "executable",
+  "spec": {
+    "name": "ldbc-snb",
+    "source": "https://ldbcouncil.org/benchmarks/snb/",
+    "release": "engineering-pin",
+    "commit": null
+  },
+  "generator": {
+    "name": "ldbc_snb_datagen_spark",
+    "source": "https://github.com/ldbc/ldbc_snb_datagen_spark",
+    "release": null,
+    "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "driver": {
+    "name": "ldbc_snb_bi_driver",
+    "source": "https://github.com/ldbc/ldbc_snb_bi_opensource",
+    "release": null,
+    "commit": "dddddddddddddddddddddddddddddddddddddddd"
+  },
+  "datasets": [
+    {
+      "id": "snb-bi-sf0.003",
+      "role": "dataset",
+      "checksum_sha256": "c0fd57903065bb4950244cc77023e9ce0803f723596922b114141f190ea521d8",
+      "license": "LDBC-SNB-terms",
+      "acquisition": "fixture",
+      "source": "https://github.com/ldbc/ldbc_snb_datagen_spark"
+    }
+  ],
+  "references": [
+    {
+      "dataset_id": "snb-bi-sf0.003",
+      "workload_key": "bi-validation",
+      "checksum_sha256": "20368ad845455de99ef737732930bf7d07d9d44adde19a31ec7ba6ec332b25db",
+      "source": "https://github.com/ldbc/ldbc_snb_bi_opensource"
+    }
+  ]
+}

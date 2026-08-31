@@ -1,0 +1,10 @@
+{
+  "schema": "graphforge-benchmark-suite/1",
+  "id": "gdc-finbench-transaction",
+  "family": "gdc",
+  "suite_id": "finbench-transaction",
+  "disposition": "executable",
+  "pinned_identity": "profiles/gdc/finbench-transaction-identity.json",
+  "runner": "gdc-contracts",
+  "datasets": ["finbench-sf0.01"]
+}

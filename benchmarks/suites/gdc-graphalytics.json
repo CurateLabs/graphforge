@@ -1,0 +1,10 @@
+{
+  "schema": "graphforge-benchmark-suite/1",
+  "id": "gdc-graphalytics",
+  "family": "gdc",
+  "suite_id": "graphalytics",
+  "disposition": "executable",
+  "pinned_identity": "profiles/gdc/graphalytics-identity.json",
+  "runner": "gdc-contracts",
+  "datasets": ["wiki-Talk"]
+}

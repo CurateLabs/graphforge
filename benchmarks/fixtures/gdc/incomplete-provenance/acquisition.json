@@ -1,0 +1,24 @@
+{
+  "schema": "graphforge-gdc-acquisition/1",
+  "suite_id": "graphalytics",
+  "recorded_spec": {
+    "name": "ldbc-graphalytics",
+    "source": "https://ldbcouncil.org/benchmarks/graphalytics/",
+    "release": "1.0.0-engineering-pin",
+    "commit": null
+  },
+  "recorded_generator": {
+    "name": "graphalytics-datasets",
+    "source": "https://repository.surfsara.nl/datasets/cwi/graphalytics",
+    "release": "wiki-Talk-fixture-pin",
+    "commit": null
+  },
+  "recorded_driver": {
+    "name": "ldbc_graphalytics",
+    "source": "https://github.com/ldbc/ldbc_graphalytics",
+    "release": null,
+    "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "assets": [],
+  "references": []
+}

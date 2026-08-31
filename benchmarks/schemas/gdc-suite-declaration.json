@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schema": "graphforge-gdc-suite-declaration-schema/1",
+  "type": "object",
+  "properties": {
+    "schema": { "const": "graphforge-benchmark-suite/1" },
+    "id": {
+      "enum": [
+        "gdc-graphalytics",
+        "gdc-snb-interactive",
+        "gdc-snb-bi",
+        "gdc-finbench-transaction",
+        "gdc-spb"
+      ]
+    },
+    "family": { "const": "gdc" },
+    "suite_id": {
+      "enum": [
+        "graphalytics",
+        "snb-interactive",
+        "snb-bi",
+        "finbench-transaction",
+        "spb"
+      ]
+    },
+    "disposition": { "enum": ["executable", "inventory_only"] },
+    "pinned_identity": {
+      "type": "string",
+      "pattern": "^profiles/gdc/[A-Za-z0-9_.-]+\\.json$"
+    },
+    "runner": { "const": "gdc-contracts" },
+    "datasets": {
+      "type": "array",
+      "maxItems": 64,
+      "items": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,80}$" }
+    }
+  },
+  "required": [
+    "schema",
+    "id",
+    "family",
+    "suite_id",
+    "disposition",
+    "pinned_identity",
+    "runner",
+    "datasets"
+  ],
+  "additionalProperties": false
+}

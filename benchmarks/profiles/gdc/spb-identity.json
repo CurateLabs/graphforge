@@ -1,0 +1,15 @@
+{
+  "schema": "graphforge-gdc-pinned-identity/1",
+  "suite_id": "spb",
+  "disposition": "inventory_only",
+  "spec": {
+    "name": "ldbc-spb",
+    "source": "https://ldbcouncil.org/benchmarks/",
+    "release": "inventory-only",
+    "commit": null
+  },
+  "generator": null,
+  "driver": null,
+  "datasets": [],
+  "references": []
+}

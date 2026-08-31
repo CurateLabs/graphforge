@@ -1,0 +1,39 @@
+{
+  "schema": "graphforge-gdc-acquisition/1",
+  "suite_id": "graphalytics",
+  "recorded_spec": {
+    "name": "ldbc-graphalytics",
+    "source": "https://ldbcouncil.org/benchmarks/graphalytics/",
+    "release": "1.0.0-engineering-pin",
+    "commit": null
+  },
+  "recorded_generator": {
+    "name": "graphalytics-datasets",
+    "source": "https://repository.surfsara.nl/datasets/cwi/graphalytics",
+    "release": "wiki-Talk-fixture-pin",
+    "commit": null
+  },
+  "recorded_driver": {
+    "name": "ldbc_graphalytics",
+    "source": "https://github.com/ldbc/ldbc_graphalytics",
+    "release": null,
+    "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "assets": [
+    {
+      "id": "wiki-Talk",
+      "path": "wiki-Talk.txt",
+      "checksum_sha256": "c0fd57903065bb4950244cc77023e9ce0803f723596922b114141f190ea521d8",
+      "license": "Graphalytics-dataset-terms",
+      "acquisition": "fixture"
+    }
+  ],
+  "references": [
+    {
+      "dataset_id": "wiki-Talk",
+      "workload_key": "bfs",
+      "path": "wiki-Talk-bfs.ref",
+      "checksum_sha256": "20368ad845455de99ef737732930bf7d07d9d44adde19a31ec7ba6ec332b25db"
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "schema": "graphforge-benchmark-suite/1",
+  "id": "gdc-spb",
+  "family": "gdc",
+  "suite_id": "spb",
+  "disposition": "inventory_only",
+  "pinned_identity": "profiles/gdc/spb-identity.json",
+  "runner": "gdc-contracts",
+  "datasets": []
+}
