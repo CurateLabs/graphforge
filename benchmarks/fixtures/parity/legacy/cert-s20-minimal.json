@@ -1,0 +1,698 @@
+{
+  "schema": "graphforge-billion-edge-certification-evidence/1",
+  "git_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "profile_sha256": "sha256:9680d53689ef12d036cb399956643b70c1e361845823bf208d37ffb393472f18",
+  "run": {
+    "command": "cargo test -p graphforge-api --release --test scale_g500_ladder certification_target_live_full_lifecycle_evidence -- --ignored --exact --nocapture --test-threads=1",
+    "scale": 20,
+    "edgefactor": 16,
+    "seed": 1,
+    "directionality": "undirected",
+    "self_loops": "drop",
+    "duplicates": "drop"
+  },
+  "host": {
+    "provider": "Microsoft Azure",
+    "region": "eastus",
+    "sku": "Standard_L64s_v3",
+    "os_image": "Canonical:ubuntu-24_04-lts:server:24.04.202608010",
+    "os": "Linux",
+    "kernel": "6",
+    "filesystem": "xfs",
+    "memory_bytes": 4294967296,
+    "nvme_bytes": 536870912000
+  },
+  "tools": {
+    "rustc": "1.90"
+  },
+  "counts": {
+    "raw_attempts": 15728642,
+    "self_loops_rejected": 1,
+    "duplicates_rejected": 1,
+    "live_unique_edges": 15728640,
+    "source_nodes": 1048576,
+    "source_edges": 15728640,
+    "imported_nodes": 1048576,
+    "imported_edges": 15728640
+  },
+  "identities": {
+    "source_export_generation_authenticated": true,
+    "import_receipt_reopen_authenticated": true,
+    "source_import_generations_distinct": true,
+    "package": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "transport": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "package": {
+    "contract": "graphforge-portable-verify/2",
+    "format": "portable-project-v2-bundle",
+    "class": "complete",
+    "integrity": "verified",
+    "compatibility": "supported",
+    "policy": "complete-current-generation"
+  },
+  "authority": {
+    "source_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "imported_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "equivalence": {
+    "source_project_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "imported_project_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "storage_attribution": {
+    "source": {
+      "generation_manifest_sha256": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "categories": {
+        "topology_nodes": {
+          "logical_references": 1,
+          "logical_bytes": 1,
+          "physical_objects": 1,
+          "physical_logical_bytes": 1,
+          "allocated_bytes": 1
+        },
+        "topology_edges": {
+          "logical_references": 1,
+          "logical_bytes": 1,
+          "physical_objects": 1,
+          "physical_logical_bytes": 1,
+          "allocated_bytes": 1
+        },
+        "properties": {
+          "logical_references": 1,
+          "logical_bytes": 1,
+          "physical_objects": 1,
+          "physical_logical_bytes": 1,
+          "allocated_bytes": 1
+        },
+        "uuid_and_surrogates": {
+          "logical_references": 1,
+          "logical_bytes": 1,
+          "physical_objects": 1,
+          "physical_logical_bytes": 1,
+          "allocated_bytes": 1
+        },
+        "adjacency": {
+          "logical_references": 1,
+          "logical_bytes": 1,
+          "physical_objects": 1,
+          "physical_logical_bytes": 1,
+          "allocated_bytes": 1
+        },
+        "catalog_and_manifests": {
+          "logical_references": 1,
+          "logical_bytes": 1,
+          "physical_objects": 1,
+          "physical_logical_bytes": 1,
+          "allocated_bytes": 1
+        },
+        "construction_staging": {
+          "logical_references": 0,
+          "logical_bytes": 0,
+          "physical_objects": 0,
+          "physical_logical_bytes": 0,
+          "allocated_bytes": 0
+        },
+        "portable_package": {
+          "logical_references": 0,
+          "logical_bytes": 0,
+          "physical_objects": 0,
+          "physical_logical_bytes": 0,
+          "allocated_bytes": 0
+        },
+        "clean_imported_project": {
+          "logical_references": 0,
+          "logical_bytes": 0,
+          "physical_objects": 0,
+          "physical_logical_bytes": 0,
+          "allocated_bytes": 0
+        },
+        "other": {
+          "logical_references": 0,
+          "logical_bytes": 0,
+          "physical_objects": 0,
+          "physical_logical_bytes": 0,
+          "allocated_bytes": 0
+        }
+      },
+      "logical_references": 6,
+      "logical_bytes": 6,
+      "physical_objects": 6,
+      "physical_logical_bytes": 6,
+      "allocated_bytes": 6
+    },
+    "source_project_current_allocated_bytes": 7,
+    "portable_package": {
+      "category": "portable_package",
+      "logical_bytes": 1,
+      "allocated_bytes": 1,
+      "logical_references": 1,
+      "physical_objects": 1,
+      "source": "portable_writer_receipt"
+    },
+    "clean_import": {
+      "generation_manifest_sha256": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "categories": {
+        "topology_nodes": {
+          "logical_references": 1,
+          "logical_bytes": 1,
+          "physical_objects": 1,
+          "physical_logical_bytes": 1,
+          "allocated_bytes": 1
+        },
+        "topology_edges": {
+          "logical_references": 1,
+          "logical_bytes": 1,
+          "physical_objects": 1,
+          "physical_logical_bytes": 1,
+          "allocated_bytes": 1
+        },
+        "properties": {
+          "logical_references": 1,
+          "logical_bytes": 1,
+          "physical_objects": 1,
+          "physical_logical_bytes": 1,
+          "allocated_bytes": 1
+        },
+        "uuid_and_surrogates": {
+          "logical_references": 1,
+          "logical_bytes": 1,
+          "physical_objects": 1,
+          "physical_logical_bytes": 1,
+          "allocated_bytes": 1
+        },
+        "adjacency": {
+          "logical_references": 1,
+          "logical_bytes": 1,
+          "physical_objects": 1,
+          "physical_logical_bytes": 1,
+          "allocated_bytes": 1
+        },
+        "catalog_and_manifests": {
+          "logical_references": 1,
+          "logical_bytes": 1,
+          "physical_objects": 1,
+          "physical_logical_bytes": 1,
+          "allocated_bytes": 1
+        },
+        "construction_staging": {
+          "logical_references": 0,
+          "logical_bytes": 0,
+          "physical_objects": 0,
+          "physical_logical_bytes": 0,
+          "allocated_bytes": 0
+        },
+        "portable_package": {
+          "logical_references": 0,
+          "logical_bytes": 0,
+          "physical_objects": 0,
+          "physical_logical_bytes": 0,
+          "allocated_bytes": 0
+        },
+        "clean_imported_project": {
+          "logical_references": 0,
+          "logical_bytes": 0,
+          "physical_objects": 0,
+          "physical_logical_bytes": 0,
+          "allocated_bytes": 0
+        },
+        "other": {
+          "logical_references": 0,
+          "logical_bytes": 0,
+          "physical_objects": 0,
+          "physical_logical_bytes": 0,
+          "allocated_bytes": 0
+        }
+      },
+      "logical_references": 6,
+      "logical_bytes": 6,
+      "physical_objects": 6,
+      "physical_logical_bytes": 6,
+      "allocated_bytes": 6
+    },
+    "construction": {
+      "seal_application_read_bytes": 0,
+      "shape_application_read_bytes": 0,
+      "encode_application_read_bytes": 0,
+      "encode_application_read_operations": 0,
+      "encode_application_write_bytes": 0,
+      "encode_application_write_operations": 0,
+      "encode_fsync_operations": 0,
+      "publication_application_read_bytes": 0,
+      "publication_application_read_operations": 0,
+      "cas_application_read_bytes": 0,
+      "cas_application_read_operations": 0,
+      "cas_application_write_bytes": 0,
+      "cas_application_write_operations": 0,
+      "cas_fsync_operations": 0,
+      "hydration_application_read_bytes": 0,
+      "hydration_application_read_operations": 0,
+      "hydration_application_write_bytes": 0,
+      "hydration_application_write_operations": 0,
+      "hydration_fsync_operations": 0,
+      "recovery_application_read_bytes": 0,
+      "recovery_application_read_operations": 0,
+      "canonical_output_bytes": 0,
+      "staged_and_retained_disk_bytes": 0,
+      "storage_current": {
+        "topology_nodes": {
+          "logical_references": 1,
+          "logical_bytes": 1,
+          "physical_objects": 1,
+          "physical_logical_bytes": 1,
+          "allocated_bytes": 1
+        },
+        "topology_edges": {
+          "logical_references": 1,
+          "logical_bytes": 1,
+          "physical_objects": 1,
+          "physical_logical_bytes": 1,
+          "allocated_bytes": 1
+        },
+        "properties": {
+          "logical_references": 1,
+          "logical_bytes": 1,
+          "physical_objects": 1,
+          "physical_logical_bytes": 1,
+          "allocated_bytes": 1
+        },
+        "uuid_and_surrogates": {
+          "logical_references": 1,
+          "logical_bytes": 1,
+          "physical_objects": 1,
+          "physical_logical_bytes": 1,
+          "allocated_bytes": 1
+        },
+        "adjacency": {
+          "logical_references": 1,
+          "logical_bytes": 1,
+          "physical_objects": 1,
+          "physical_logical_bytes": 1,
+          "allocated_bytes": 1
+        },
+        "catalog_and_manifests": {
+          "logical_references": 1,
+          "logical_bytes": 1,
+          "physical_objects": 1,
+          "physical_logical_bytes": 1,
+          "allocated_bytes": 1
+        },
+        "construction_staging": {
+          "logical_references": 1,
+          "logical_bytes": 1,
+          "physical_objects": 1,
+          "physical_logical_bytes": 1,
+          "allocated_bytes": 1
+        },
+        "portable_package": {
+          "logical_references": 1,
+          "logical_bytes": 1,
+          "physical_objects": 1,
+          "physical_logical_bytes": 1,
+          "allocated_bytes": 1
+        },
+        "clean_imported_project": {
+          "logical_references": 1,
+          "logical_bytes": 1,
+          "physical_objects": 1,
+          "physical_logical_bytes": 1,
+          "allocated_bytes": 1
+        },
+        "other": {
+          "logical_references": 1,
+          "logical_bytes": 1,
+          "physical_objects": 1,
+          "physical_logical_bytes": 1,
+          "allocated_bytes": 1
+        }
+      },
+      "storage_transient_peak_allocated_bytes": {
+        "topology_nodes": 1,
+        "topology_edges": 1,
+        "properties": 1,
+        "uuid_and_surrogates": 1,
+        "adjacency": 1,
+        "catalog_and_manifests": 1,
+        "construction_staging": 1,
+        "portable_package": 1,
+        "clean_imported_project": 1,
+        "other": 1
+      },
+      "storage_transient_peak_total_allocated_bytes": 10,
+      "input_rows": 0,
+      "input_batches": 0,
+      "parquet_shards": 0,
+      "write_bytes": 0,
+      "write_operations": 0,
+      "fsync_operations": 0,
+      "authentication_read_bytes": 0,
+      "authentication_read_operations": 0,
+      "parent_catalog_read_bytes": 0,
+      "parent_catalog_read_operations": 0,
+      "retained_probe_read_bytes": 0,
+      "retained_probe_block_loads": 0,
+      "shaped_output_authentication_bytes": 0,
+      "shaped_output_authentication_operations": 0,
+      "replay_validation_read_bytes": 0,
+      "replay_validation_read_operations": 0,
+      "shape_input_validation_read_bytes": 0,
+      "shape_input_validation_read_operations": 0,
+      "run_records": 0,
+      "peak_batch_rows": 0,
+      "peak_batch_bytes": 0,
+      "peak_run_records": 0,
+      "prior_topology_rows_decoded": 0,
+      "current_transitions": 0,
+      "replayed_chunks": 0,
+      "merge_read_records": 0,
+      "merge_read_operations": 0,
+      "merge_written_records": 0,
+      "merge_write_operations": 0,
+      "merge_groups": 0,
+      "peak_merge_inputs": 0,
+      "merge_read_bytes": 0,
+      "merge_written_bytes": 0,
+      "merge_read_blocks": 0,
+      "merge_write_blocks": 0,
+      "merge_passes": 0,
+      "peak_merge_temporary_bytes": 0,
+      "current_merge_temporary_allocated_bytes": 0,
+      "peak_accounted_live_bytes": 0,
+      "peak_merge_name_slots": 0,
+      "peak_resolved_endpoint_name_slots": 0,
+      "peak_catalog_entries": 0,
+      "peak_catalog_identifier_bytes": 0,
+      "peak_catalog_decoded_batch_bytes": 0,
+      "merge_fsync_operations": 0,
+      "parquet_read_bytes": 0,
+      "parquet_read_operations": 0,
+      "parquet_write_bytes": 0,
+      "parquet_write_operations": 0
+    },
+    "application_io_phases": {
+      "phases": {
+        "append_merge": {
+          "read_bytes": 1,
+          "write_bytes": 0,
+          "read_calls": 1,
+          "write_calls": 0,
+          "object_count": 0,
+          "block_count": 0,
+          "fsync_calls": 0
+        },
+        "seal_authentication": {
+          "read_bytes": 1,
+          "write_bytes": 0,
+          "read_calls": 1,
+          "write_calls": 0,
+          "object_count": 0,
+          "block_count": 0,
+          "fsync_calls": 0
+        },
+        "shape_consume_reauthentication": {
+          "read_bytes": 1,
+          "write_bytes": 0,
+          "read_calls": 1,
+          "write_calls": 0,
+          "object_count": 0,
+          "block_count": 0,
+          "fsync_calls": 0
+        },
+        "encode_write_postwrite_authentication": {
+          "read_bytes": 1,
+          "write_bytes": 0,
+          "read_calls": 1,
+          "write_calls": 0,
+          "object_count": 0,
+          "block_count": 0,
+          "fsync_calls": 0
+        },
+        "publication_preauthentication": {
+          "read_bytes": 1,
+          "write_bytes": 0,
+          "read_calls": 1,
+          "write_calls": 0,
+          "object_count": 0,
+          "block_count": 0,
+          "fsync_calls": 0
+        },
+        "cas_install_read_write": {
+          "read_bytes": 1,
+          "write_bytes": 0,
+          "read_calls": 1,
+          "write_calls": 0,
+          "object_count": 0,
+          "block_count": 0,
+          "fsync_calls": 0
+        },
+        "hydration_verification": {
+          "read_bytes": 1,
+          "write_bytes": 0,
+          "read_calls": 1,
+          "write_calls": 0,
+          "object_count": 0,
+          "block_count": 0,
+          "fsync_calls": 0
+        },
+        "fsync_synchronization": {
+          "read_bytes": 1,
+          "write_bytes": 0,
+          "read_calls": 1,
+          "write_calls": 0,
+          "object_count": 0,
+          "block_count": 0,
+          "fsync_calls": 1
+        },
+        "recovery_reauthentication": {
+          "read_bytes": 1,
+          "write_bytes": 0,
+          "read_calls": 1,
+          "write_calls": 0,
+          "object_count": 0,
+          "block_count": 0,
+          "fsync_calls": 0
+        }
+      },
+      "totals": {
+        "read_bytes": 9,
+        "write_bytes": 0,
+        "read_calls": 9,
+        "write_calls": 0,
+        "object_count": 0,
+        "block_count": 0,
+        "fsync_calls": 1
+      }
+    },
+    "workspace_current_allocated_bytes": 14
+  },
+  "phases": [
+    {
+      "id": "preflight",
+      "status": "pass",
+      "elapsed_ms": 1,
+      "rss_peak_bytes": 1,
+      "disk_peak_bytes": 1,
+      "fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+      "id": "generate",
+      "status": "pass",
+      "elapsed_ms": 1,
+      "rss_peak_bytes": 1,
+      "disk_peak_bytes": 1,
+      "fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+      "id": "ingest",
+      "status": "pass",
+      "elapsed_ms": 1,
+      "rss_peak_bytes": 1,
+      "disk_peak_bytes": 1,
+      "fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+      "id": "csr",
+      "status": "pass",
+      "elapsed_ms": 1,
+      "rss_peak_bytes": 1,
+      "disk_peak_bytes": 1,
+      "fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+      "id": "source_reopen",
+      "status": "pass",
+      "elapsed_ms": 1,
+      "rss_peak_bytes": 1,
+      "disk_peak_bytes": 1,
+      "fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+      "id": "source_query_1hop",
+      "status": "pass",
+      "elapsed_ms": 1,
+      "rss_peak_bytes": 1,
+      "disk_peak_bytes": 1,
+      "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "id": "source_query_2hop",
+      "status": "pass",
+      "elapsed_ms": 1,
+      "rss_peak_bytes": 1,
+      "disk_peak_bytes": 1,
+      "fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+      "id": "export",
+      "status": "pass",
+      "elapsed_ms": 1,
+      "rss_peak_bytes": 1,
+      "disk_peak_bytes": 1,
+      "fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+      "id": "verify",
+      "status": "pass",
+      "elapsed_ms": 1,
+      "rss_peak_bytes": 1,
+      "disk_peak_bytes": 1,
+      "fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+      "id": "import",
+      "status": "pass",
+      "elapsed_ms": 1,
+      "rss_peak_bytes": 1,
+      "disk_peak_bytes": 1,
+      "fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+      "id": "imported_reopen",
+      "status": "pass",
+      "elapsed_ms": 1,
+      "rss_peak_bytes": 1,
+      "disk_peak_bytes": 1,
+      "fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+      "id": "imported_query_1hop",
+      "status": "pass",
+      "elapsed_ms": 1,
+      "rss_peak_bytes": 1,
+      "disk_peak_bytes": 1,
+      "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "id": "imported_query_2hop",
+      "status": "pass",
+      "elapsed_ms": 1,
+      "rss_peak_bytes": 1,
+      "disk_peak_bytes": 1,
+      "fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+      "id": "drill_corruption",
+      "status": "pass",
+      "elapsed_ms": 1,
+      "rss_peak_bytes": 1,
+      "disk_peak_bytes": 1,
+      "fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+      "id": "drill_cancellation",
+      "status": "pass",
+      "elapsed_ms": 1,
+      "rss_peak_bytes": 1,
+      "disk_peak_bytes": 1,
+      "fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+      "id": "drill_resource_limit",
+      "status": "pass",
+      "elapsed_ms": 1,
+      "rss_peak_bytes": 1,
+      "disk_peak_bytes": 1,
+      "fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+      "id": "drill_interrupted_finalization",
+      "status": "pass",
+      "elapsed_ms": 1,
+      "rss_peak_bytes": 1,
+      "disk_peak_bytes": 1,
+      "fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  ],
+  "envelope": {
+    "peak_rss_bytes": 1,
+    "peak_disk_bytes": 100,
+    "peak_disk_source": "storage_owned_active_identity_union",
+    "wall_time_s": 1
+  },
+  "result": "pass",
+  "first_failure": null
+}

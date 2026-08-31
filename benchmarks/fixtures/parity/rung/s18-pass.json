@@ -1,0 +1,61 @@
+{
+  "profile_id": "graph500-s18-evidence",
+  "source": "progressive_profile",
+  "scale": 18,
+  "live_edges": 4194304,
+  "status": "passed",
+  "correctness": true,
+  "phases": [
+    "admission",
+    "generate",
+    "ingest",
+    "reopen",
+    "recount",
+    "query",
+    "export",
+    "verify",
+    "clean_import",
+    "reopen_proof"
+  ],
+  "metrics": {
+    "wall_seconds": 120,
+    "peak_rss_bytes": 536870912,
+    "retained_storage_bytes": 1048576,
+    "transient_peak_storage_bytes": 2097152,
+    "logical_read_bytes": 4194304,
+    "logical_write_bytes": 8388608,
+    "physical_read_bytes": 1048576,
+    "physical_write_bytes": 2097152,
+    "reader_calls": 4096,
+    "publication_work_units": 8192
+  },
+  "metric_sources": {
+    "benchexec": [
+      "wall_seconds",
+      "peak_rss_bytes",
+      "physical_read_bytes",
+      "physical_write_bytes"
+    ],
+    "storage_attribution": [
+      "retained_storage_bytes",
+      "transient_peak_storage_bytes",
+      "logical_read_bytes",
+      "logical_write_bytes",
+      "reader_calls",
+      "publication_work_units"
+    ],
+    "query_qualification": ["live_edges", "correctness"]
+  },
+  "storage_components": {
+    "source_allocated_physical_bytes": 1048576,
+    "source_retained_logical_eof_bytes": 524288,
+    "imported_allocated_physical_bytes": 1048576,
+    "imported_retained_logical_eof_bytes": 524288,
+    "transient_peak_allocated_bytes": 2097152,
+    "logical_read_bytes": 4194304,
+    "logical_write_bytes": 8388608,
+    "reader_calls": 4096,
+    "publication_work_units": 8192
+  },
+  "failure": null
+}
