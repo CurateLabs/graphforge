@@ -422,12 +422,18 @@ make -C benchmarks progressive-fly-transport-static
 
 The transport accepts only an already-published immutable image, emits fixed
 shell-free Fly commands through an injected boundary, applies the attempt
-deadline to every operation, validates provider-observed Machine identity,
-retrieves the result before the remaining canonical artifacts, and returns only
-sanitized teardown counts. The ESC capsule consumes the fixed projected token
-and spend-authorization variables once, removes them from the ambient process,
-and constructs a minimal child environment with fresh credential state. Both
-components remain import-only: these tests perform no provider operation.
+deadline to every operation, converges Machine readiness within
+`min(attempt_deadline, readiness_cap)` with bounded backoff, replaces unbounded
+idle sleep with the authorized finite Machine lifetime, validates
+provider-observed Machine identity, retrieves the result before the remaining
+canonical artifacts, and returns only sanitized teardown counts. Before any
+provider mutation the controller persists a credential-free recovery lease
+receipt; an expired-lease janitor core can reconstruct an owner-confined
+transport through an injected factory without the local attempt ledger. The ESC
+capsule consumes the fixed projected token and spend-authorization variables
+once, removes them from the ambient process, and constructs a minimal child
+environment with fresh credential state. These components remain import-only:
+these tests perform no provider operation.
 
 Provider credentials belong to Pulumi ESC rather than GitHub workflow inputs or
 the caller's ambient shell. Live operator commands are rendered from
@@ -444,7 +450,14 @@ The operator uses the shell-free form `pulumi env run <environment> -- <argv>`;
 secret values are never copied into its command line or evidence. The
 `progressive-ladder` gate uses the same ESC boundary and invokes
 `progressive_ladder_qualification`, which consumes protected spend authorization
-and runs the whole-attempt Fly transport offline-tested in CI.
+and runs the whole-attempt Fly transport offline-tested in CI. That transport now
+converges Machine readiness with bounded backoff, uses a finite authorized
+Machine lifetime, and persists a credential-free recovery lease before provider
+mutation so expired cleanup can reconstruct an owner-confined transport without
+the local attempt ledger. Protected/versioned ESC configuration, immutable image
+publication, a durable receipt backend with an independently scheduled recovery
+owner, short-lived scoped run/janitor token policy, and the separately reviewed
+spend authorization remain prerequisites for a successful live attempt.
 
 The controller derives bulk-ingest capability from the same run's bounded
 ordinary `gf import-session commit --json` receipt: its construction evidence

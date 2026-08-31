@@ -21,7 +21,7 @@
     "current_rung": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/scale"}]},
     "completed_scales": {"$ref": "#/$defs/completedScales"},
     "first_failed_rung": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/scale"}]},
-    "failure": {"enum": [null, "authorization_refused", "source_mismatch", "provision_failed", "machine_identity_mismatch", "upload_failed", "rung_failed", "retrieval_failed", "evidence_invalid", "progression_refused"]},
+    "failure": {"enum": [null, "authorization_refused", "source_mismatch", "readiness_timeout", "provision_failed", "machine_identity_mismatch", "upload_failed", "rung_failed", "retrieval_failed", "evidence_invalid", "progression_refused"]},
     "cleanup_failure": {"enum": [null, "evidence_cleanup_failed", "teardown_failed", "inventory_unavailable", "inventory_not_empty"]},
     "resources": {
       "oneOf": [

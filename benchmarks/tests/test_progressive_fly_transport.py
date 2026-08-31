@@ -32,6 +32,9 @@ class FakeBoundary:
         self.observed_repository = APP
         self.fail_prefix: tuple[str, ...] | None = None
         self.secrets: list[dict[str, str]] = []
+        self.machine_list_responses: list[object] | None = None
+        self.machine_list_state = "started"
+        self.list_fail_remaining = 0
 
     def run(
         self, argv: tuple[str, ...], *, timeout: int, check: bool = True
@@ -61,7 +64,26 @@ class FakeBoundary:
         if argv[:3] == ("flyctl", "volumes", "create"):
             return {"id": VOLUME_ID}
         if argv[:3] == ("flyctl", "machine", "list"):
-            return [{"id": MACHINE_ID, "name": f"{APP}-worker"}]
+            if self.list_fail_remaining > 0:
+                self.list_fail_remaining -= 1
+                raise OSError("transient machine list failure")
+            if self.machine_list_responses is not None:
+                if self.machine_list_responses:
+                    return self.machine_list_responses.pop(0)
+                return [
+                    {
+                        "id": MACHINE_ID,
+                        "name": f"{APP}-worker",
+                        "state": "started",
+                    }
+                ]
+            return [
+                {
+                    "id": MACHINE_ID,
+                    "name": f"{APP}-worker",
+                    "state": self.machine_list_state,
+                }
+            ]
         if argv[:3] == ("flyctl", "volumes", "list"):
             return [{"id": VOLUME_ID}]
         if argv[:3] == ("flyctl", "secrets", "list"):
@@ -79,7 +101,10 @@ class FakeBoundary:
             "config": {
                 "image": IMAGE,
                 "auto_destroy": True,
-                "init": {"entrypoint": ["/bin/sleep"], "cmd": ["infinity"]},
+                "init": {
+                    "entrypoint": ["/bin/sleep"],
+                    "cmd": [str(self.authorization.maximum_machine_seconds)],
+                },
                 "restart": {"policy": "no"},
                 "services": [],
                 "guest": {"cpu_kind": "performance", "cpus": 4, "memory_mb": 8192},
@@ -159,7 +184,7 @@ class ProgressiveFlyTransportTests(unittest.TestCase):
                 "machine",
                 "run",
                 IMAGE,
-                "infinity",
+                str(self.auth.maximum_machine_seconds),
                 "--app",
                 APP,
                 "--name",
@@ -496,6 +521,65 @@ class ProgressiveFlyTransportTests(unittest.TestCase):
             boundary.machine_state(APP, MACHINE_ID, timeout=1)
         self.assertNotIn(token, str(raised.exception))
         self.assertIsNone(raised.exception.__cause__)
+
+    def test_delayed_readiness_converges_without_mutation_retries(self) -> None:
+        worker = {"id": MACHINE_ID, "name": f"{APP}-worker", "state": "starting"}
+        started = {"id": MACHINE_ID, "name": f"{APP}-worker", "state": "started"}
+        self.boundary.machine_list_responses = [[], [worker], [started]]
+        sleeps: list[float] = []
+        self.transport = FlyProviderTransport(
+            self.boundary, clock=lambda: NOW, sleeper=sleeps.append
+        )
+        self.provision()
+        self.assertEqual(len(sleeps), 2)
+        machine_runs = [
+            call[1]
+            for call in self.boundary.calls
+            if call[0] == "run" and call[1][:3] == ("flyctl", "machine", "run")
+        ]
+        self.assertEqual(len(machine_runs), 1)
+
+    def test_terminal_machine_state_fails_immediately(self) -> None:
+        self.boundary.machine_list_responses = [
+            [{"id": MACHINE_ID, "name": f"{APP}-worker", "state": "stopped"}]
+        ]
+        with self.assertRaisesRegex(FlyTransportError, "terminal"):
+            self.transport.provision(self.invocation, self.auth, deadline=self.deadline)
+
+    def test_extra_machine_fails_immediately(self) -> None:
+        self.boundary.machine_list_responses = [
+            [
+                {"id": MACHINE_ID, "name": f"{APP}-worker", "state": "started"},
+                {"id": "1234567890abcd", "name": "other", "state": "started"},
+            ]
+        ]
+        with self.assertRaisesRegex(FlyTransportError, "unexpected"):
+            self.transport.provision(self.invocation, self.auth, deadline=self.deadline)
+
+    def test_readiness_timeout_is_typed_and_stops_polling(self) -> None:
+        self.boundary.machine_list_responses = [[], [], [], [], [], [], [], []]
+        clock = {"now": NOW}
+
+        def advance() -> datetime:
+            return clock["now"]
+
+        def sleep(seconds: float) -> None:
+            clock["now"] = clock["now"] + timedelta(seconds=seconds)
+
+        self.transport = FlyProviderTransport(self.boundary, clock=advance, sleeper=sleep)
+        with self.assertRaises(AttemptError) as raised:
+            self.transport.provision(
+                self.invocation,
+                self.auth,
+                deadline=NOW + timedelta(seconds=2),
+            )
+        self.assertEqual(raised.exception.failure, "readiness_timeout")
+        machine_runs = [
+            call[1]
+            for call in self.boundary.calls
+            if call[0] == "run" and call[1][:3] == ("flyctl", "machine", "run")
+        ]
+        self.assertEqual(len(machine_runs), 1)
 
     def test_live_surfaces_are_wired_in_operator(self) -> None:
         repository = ROOT.parent
