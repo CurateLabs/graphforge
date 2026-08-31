@@ -1,0 +1,42 @@
+{
+  "schema": "graphforge-scale-orchestration-accepted-differences/1",
+  "differences": [
+    {
+      "id": "generator_seed",
+      "summary": "Legacy in-tree ladder uses seed 1; new harness profiles pin seed 13907095936298285200.",
+      "dimensions": ["seed"]
+    },
+    {
+      "id": "generator_identity",
+      "summary": "Legacy ladder embeds Kronecker generation in the Rust reference client; new harness uses graphforge-benchmark-graph500-generator.",
+      "dimensions": ["generator"]
+    },
+    {
+      "id": "execution_surface",
+      "summary": "Legacy scale orchestration exercises the Rust GraphForge API directly; new harness uses gf CLI and public certification runners.",
+      "dimensions": ["execution_surface"]
+    },
+    {
+      "id": "phase_model",
+      "summary": "Legacy certification evidence may include additional CSR, split-query, and negative-drill phases outside the ten-phase public certification contract.",
+      "dimensions": ["phase_coverage"]
+    },
+    {
+      "id": "resource_authority",
+      "summary": "Legacy evidence samples /proc locally; new harness attributes BenchExec process-tree metrics.",
+      "dimensions": ["resource_authority"]
+    }
+  ],
+  "phase_mapping": [
+    { "legacy": "admission", "new": "admission" },
+    { "legacy": "generate", "new": "generate" },
+    { "legacy": "ingest", "new": "ingest" },
+    { "legacy": "reopen", "new": "reopen" },
+    { "legacy": "recount", "new": "recount" },
+    { "legacy": "query", "new": "query" },
+    { "legacy": "export", "new": "export" },
+    { "legacy": "verify", "new": "verify" },
+    { "legacy": "clean_import", "new": "clean_import" },
+    { "legacy": "reopen_proof", "new": "reopen_proof" }
+  ]
+}
