@@ -46,5 +46,27 @@
     },
     "claim": {"const": "engineering_evidence_only"}
   },
+  "allOf": [
+    {
+      "if": {"properties": {"rung": {"const": "S20"}}, "required": ["rung"]},
+      "then": {"properties": {"outputs": {"const": ["s20-plan.json", "s20-benchexec.json", "s20-graphforge.json", "s20-rung.json", "s20-result.json"]}}}
+    },
+    {
+      "if": {"properties": {"rung": {"const": "S22"}}, "required": ["rung"]},
+      "then": {"properties": {"outputs": {"const": ["s22-plan.json", "s22-benchexec.json", "s22-graphforge.json", "s22-rung.json", "s22-result.json"]}}}
+    },
+    {
+      "if": {"properties": {"rung": {"const": "S24"}}, "required": ["rung"]},
+      "then": {"properties": {"outputs": {"const": ["s24-plan.json", "s24-benchexec.json", "s24-graphforge.json", "s24-rung.json", "s24-result.json"]}}}
+    },
+    {
+      "if": {"properties": {"rung": {"const": "S25"}}, "required": ["rung"]},
+      "then": {"properties": {"outputs": {"const": ["s25-plan.json", "s25-benchexec.json", "s25-graphforge.json", "s25-rung.json", "s25-result.json"]}}}
+    },
+    {
+      "if": {"properties": {"rung": {"const": "S26"}}, "required": ["rung"]},
+      "then": {"properties": {"outputs": {"const": ["s26-plan.json", "s26-benchexec.json", "s26-graphforge.json", "s26-rung.json", "s26-result.json"]}}}
+    }
+  ],
   "$defs": {"digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
 }

@@ -317,7 +317,9 @@ runner requires the image's read-only build manifest, matches the immutable
 `registry.fly.io/...@sha256:...` identity supplied by the admitted plan and
 provider transport, and revalidates the canonical profile, projection, source
 tree, native executables, and BenchExec identity before starting BenchExec. It
-accepts only fixed in-image executable paths, an admitted plan and evidence
+does not self-attest its OCI digest: the trusted provider transport must read
+the provider-observed Machine image digest and supply that matching value.
+It accepts only fixed in-image executable paths, an admitted plan and evidence
 directory below `/work`, no pre-existing files for the selected rung, and a
 real `/work` mount. The host
 must separately pass native Linux cgroups-v2 admission. The runner has no

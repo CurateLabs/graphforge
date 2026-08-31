@@ -621,6 +621,14 @@ def ingest_benchexec_result(
 ) -> tuple[dict[str, Any], Mapping[str, Any], dict[str, Any]]:
     raw_output = stage / "raw"
     graphforge = _parse_graphforge_log(raw_output)
+    identities = plan.get("identities")
+    if not isinstance(identities, Mapping) or not isinstance(identities.get("profile_id"), str):
+        raise ControllerError("run plan profile identity is malformed")
+    planned_profile_id = str(identities["profile_id"])
+    if graphforge.get("profile_id") != planned_profile_id:
+        raise ControllerError("certification profile identity contradicts the run plan")
+    if profile_id is not None and profile_id != planned_profile_id:
+        raise ControllerError("requested profile identity contradicts the run plan")
     raw = _parse_benchexec_xml(raw_output, correctness=graphforge.get("status") == "passed")
     limits = plan["limits"]
     benchexec = normalize_run(
@@ -640,7 +648,7 @@ def ingest_benchexec_result(
         scale=scale,
         graphforge=graphforge,
         benchexec=benchexec,
-        profile_id=profile_id,
+        profile_id=planned_profile_id,
         source=source,
     )
     return benchexec, graphforge, rung

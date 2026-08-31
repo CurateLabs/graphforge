@@ -239,7 +239,7 @@ def build_execution_plan(
         raise ProviderRunError("source tree digest must be a bare SHA-256 digest")
     scale, profile_path, profile = validate_admitted_plan(root, admitted_plan)
     if admitted_plan.get("image_digest") != image_digest:
-        raise ProviderRunError("running image does not match the admitted image digest")
+        raise ProviderRunError("transport-observed image digest contradicts admission")
     generator_identity = "sha256:" + _digest(root / "runners/graph500-generator/src/main.rs")
     if generator_identity != profile.get("generator", {}).get("identity"):
         raise ProviderRunError("generator source identity contradicts the provider profile")
@@ -421,14 +421,20 @@ def run(
             _schema(root, "benchexec-run-evidence.json", benchexec)
             _schema(root, "certification-evidence.json", graphforge)
             _schema(root, "progressive-qualification-rung-evidence.json", rung)
-            stored_plan, _ = _read_document(output_dir / f"s{scale}-plan.json")
-            if dict(stored_plan) != dict(plan):
-                raise ProviderRunError("stored execution plan changed during the run")
         except ProviderRunError as error:
             failed = _result(plan, "failed", "ordinary_receipt_missing")
             _schema(root, "progressive-provider-run-result.json", failed)
             _write_json(result_path, failed)
             raise ProviderRunError("ordinary_receipt_missing") from error
+        try:
+            stored_plan, _ = _read_document(output_dir / f"s{scale}-plan.json")
+            if dict(stored_plan) != dict(plan):
+                raise ProviderRunError("stored execution plan changed during the run")
+        except ProviderRunError as error:
+            failed = _result(plan, "failed", "stored_plan_mismatch")
+            _schema(root, "progressive-provider-run-result.json", failed)
+            _write_json(result_path, failed)
+            raise ProviderRunError("stored_plan_mismatch") from error
         artifact_paths = {
             "benchexec_sha256": output_dir / f"s{scale}-benchexec.json",
             "graphforge_sha256": output_dir / f"s{scale}-graphforge.json",

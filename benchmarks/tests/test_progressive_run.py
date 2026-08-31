@@ -480,6 +480,21 @@ class ProgressiveRunControllerTests(unittest.TestCase):
         self.assertEqual(normalized["authority"]["read_bytes"], 1024)
         self.assertEqual(rung["metrics"]["wall_seconds"], 2)
 
+        changed = {**gf, "profile_id": "graph500-s19-local"}
+        (raw / "run.log").write_text(json.dumps(changed) + "\n")
+        with self.assertRaisesRegex(ControllerError, "contradicts the run plan"):
+            ingest_benchexec_result(root=ROOT, stage=stage, scale=18, plan=plan)
+
+        (raw / "run.log").write_text(json.dumps(gf) + "\n")
+        with self.assertRaisesRegex(ControllerError, "contradicts the run plan"):
+            ingest_benchexec_result(
+                root=ROOT,
+                stage=stage,
+                scale=18,
+                plan=plan,
+                profile_id="graph500-s19-local",
+            )
+
     def test_adjacent_passed_rungs_produce_schema_valid_s20_projection(self) -> None:
         for scale in (18, 19):
             (self.output / f"s{scale}-rung.json").write_text(json.dumps(passed_rung(scale)))

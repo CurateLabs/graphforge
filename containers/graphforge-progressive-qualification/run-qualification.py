@@ -7,6 +7,7 @@ import ctypes
 import os
 import stat
 import sys
+from typing import NoReturn
 
 WORK_ROOT = "/work"
 RUN_UID = 10001
@@ -27,7 +28,7 @@ EXEC_ENV = {
 }
 
 
-def refuse(message: str) -> None:
+def refuse(message: str) -> NoReturn:
     print(f"qualification bootstrap refused: {message}", file=sys.stderr)
     raise SystemExit(64)
 

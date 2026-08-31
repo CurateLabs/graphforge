@@ -419,9 +419,38 @@ class ProgressiveProviderPlanTests(unittest.TestCase):
                 image_digest=IMAGE,
             )
         require_execution_authority(plan)
-        refused = {**plan, "execution_authorized": False, "execution_refusal": "unavailable"}
+        refused = {
+            **plan,
+            "execution_authorized": False,
+            "execution_refusal": "provider_executor_unavailable",
+        }
         with self.assertRaisesRegex(ProviderPlanError, "authority is unavailable"):
             require_execution_authority(refused)
+
+    def test_make_target_only_forwards_an_available_image_digest(self) -> None:
+        variables = [
+            f"COMMIT={COMMIT}",
+            "MAXIMUM_SCALE=19",
+            f"OUTPUT_DIR={self.output}",
+            f"PLAN_OUT={self.output / 'plan.json'}",
+        ]
+        without_image = subprocess.run(
+            ["make", "-n", "progressive-provider-plan", *variables],
+            cwd=ROOT,
+            capture_output=True,
+            check=True,
+            text=True,
+        ).stdout
+        self.assertNotIn("--image-digest", without_image)
+
+        with_image = subprocess.run(
+            ["make", "-n", "progressive-provider-plan", *variables, f"IMAGE_DIGEST={IMAGE}"],
+            cwd=ROOT,
+            capture_output=True,
+            check=True,
+            text=True,
+        ).stdout
+        self.assertIn(f'--image-digest "{IMAGE}"', with_image)
 
     def test_provider_plan_requires_one_immutable_admitted_image(self) -> None:
         with (

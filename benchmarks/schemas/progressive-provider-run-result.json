@@ -9,7 +9,7 @@
     "rung": {"enum": ["S20", "S22", "S24", "S25", "S26"]},
     "status": {"enum": ["passed", "failed"]},
     "failure": {
-      "enum": [null, "native_authority_unavailable", "staging_failed", "execution_boundary_failed", "benchexec_failed", "ordinary_receipt_missing"]
+      "enum": [null, "native_authority_unavailable", "staging_failed", "execution_boundary_failed", "benchexec_failed", "ordinary_receipt_missing", "stored_plan_mismatch"]
     },
     "identities": {
       "type": "object",

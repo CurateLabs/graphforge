@@ -166,6 +166,12 @@ class ProgressiveProviderRunTests(unittest.TestCase):
             hashlib.sha256((ROOT / "profiles/graph500/s20-provider.json").read_bytes()).hexdigest(),
         )
         _schema(ROOT, "progressive-provider-run-plan.json", plan)
+        wrong_outputs = {
+            **plan,
+            "outputs": [name.replace("s20-", "s22-") for name in plan["outputs"]],
+        }
+        with self.assertRaisesRegex(ProviderRunError, "validation failed"):
+            _schema(ROOT, "progressive-provider-run-plan.json", wrong_outputs)
 
     def test_image_commit_attestation_works_without_git_metadata(self) -> None:
         image_root = self.base / "image" / "benchmarks"
@@ -273,7 +279,7 @@ class ProgressiveProviderRunTests(unittest.TestCase):
                 "graphforge_bench.progressive_provider_run._benchexec_version",
                 return_value="3.30",
             ),
-            self.assertRaisesRegex(ProviderRunError, "does not match"),
+            self.assertRaisesRegex(ProviderRunError, "contradicts admission"),
         ):
             build_execution_plan(
                 root=ROOT,
@@ -466,6 +472,58 @@ class ProgressiveProviderRunTests(unittest.TestCase):
         self.assertEqual(result["status"], "failed")
         self.assertEqual(result["failure"], "ordinary_receipt_missing")
 
+    def test_changed_stored_plan_has_distinct_typed_failure(self) -> None:
+        graphforge = graphforge_fixture(20)
+        graphforge["profile_id"] = "graph500-s20-provider"
+        benchexec = benchexec_fixture(graphforge)
+        rung = rung_fixture(20)
+        rung["profile_id"] = "graph500-s20-provider"
+        rung["source"] = "canonical_ladder"
+        for mutation in ("missing", "malformed", "mismatch"):
+            with self.subTest(mutation=mutation):
+                output = self.base / mutation
+                output.mkdir()
+                plan = self.execution_plan()
+                plan_path = output / "s20-plan.json"
+                plan_path.write_text(json.dumps(plan), encoding="utf-8")
+
+                def change_plan(
+                    *_: object, selected: str = mutation, selected_path: Path = plan_path
+                ) -> int:
+                    if selected == "missing":
+                        selected_path.unlink()
+                    elif selected == "malformed":
+                        selected_path.write_text("{", encoding="utf-8")
+                    else:
+                        selected_path.write_text(json.dumps({"changed": True}), encoding="utf-8")
+                    return 0
+
+                with (
+                    patch(
+                        "graphforge_bench.progressive_provider_run._benchexec_version",
+                        return_value="3.30",
+                    ),
+                    patch(
+                        "graphforge_bench.progressive_provider_run.ingest_benchexec_result",
+                        return_value=(benchexec, graphforge, rung),
+                    ),
+                    self.assertRaisesRegex(ProviderRunError, "stored_plan_mismatch"),
+                ):
+                    run(
+                        root=ROOT,
+                        output_dir=output,
+                        plan=plan,
+                        executables=self.executables,
+                        expected_image_digest=IMAGE,
+                        expected_admitted_plan_sha256="a" * 64,
+                        expected_source_tree_sha256="b" * 64,
+                        execution_boundary=change_plan,
+                        authority_boundary=lambda: {"result": "passed"},
+                    )
+                result = json.loads((output / "s20-result.json").read_text())
+                self.assertEqual(result["failure"], "stored_plan_mismatch")
+                _schema(ROOT, "progressive-provider-run-result.json", result)
+
     def test_success_emits_exactly_five_canonical_engineering_files(self) -> None:
         plan = self.execution_plan()
         self.output.mkdir()
@@ -507,17 +565,21 @@ class ProgressiveProviderRunTests(unittest.TestCase):
                 "s20-result.json",
             },
         )
+        stage = ingest.call_args.kwargs["stage"]
         self.assertEqual(
             ingest.call_args.kwargs,
             {
                 "root": ROOT,
-                "stage": ingest.call_args.kwargs["stage"],
+                "stage": stage,
                 "scale": 20,
                 "plan": plan,
                 "profile_id": "graph500-s20-provider",
                 "source": "canonical_ladder",
             },
         )
+        self.assertEqual(stage.parent.parent, self.output)
+        self.assertTrue(stage.name.startswith("gf-progressive-"))
+        self.assertFalse(stage.exists())
         result = json.loads((self.output / "s20-result.json").read_text())
         self.assertEqual(result["claim"], "engineering_evidence_only")
 
