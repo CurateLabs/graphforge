@@ -442,16 +442,16 @@ make -C benchmarks qualification-operator \
 
 The operator uses the shell-free form `pulumi env run <environment> -- <argv>`;
 secret values are never copied into its command line or evidence. The
-`progressive-ladder` is registered, but still fails before opening ESC. The
-typed whole-attempt state machine, production-shaped Fly command boundary,
-isolated ESC input capsule, ownership-ledger recovery, readiness convergence,
-finite Machine lifetime, recovery-lease receipt, expired-lease janitor core, and
-sanitized teardown inventory now exist offline. Protected/versioned ESC
-configuration, immutable image publication, a durable receipt backend with an
-independently scheduled recovery owner, short-lived scoped run/janitor token
-policy, and the separately reviewed spend authorization remain prerequisites for
-live wiring. This is a live capability boundary, not a GitHub-dispatch
-prerequisite.
+`progressive-ladder` gate uses the same ESC boundary and invokes
+`progressive_ladder_qualification`, which consumes protected spend authorization
+and runs the whole-attempt Fly transport offline-tested in CI. That transport now
+converges Machine readiness with bounded backoff, uses a finite authorized
+Machine lifetime, and persists a credential-free recovery lease before provider
+mutation so expired cleanup can reconstruct an owner-confined transport without
+the local attempt ledger. Protected/versioned ESC configuration, immutable image
+publication, a durable receipt backend with an independently scheduled recovery
+owner, short-lived scoped run/janitor token policy, and the separately reviewed
+spend authorization remain prerequisites for a successful live attempt.
 
 The controller derives bulk-ingest capability from the same run's bounded
 ordinary `gf import-session commit --json` receipt: its construction evidence

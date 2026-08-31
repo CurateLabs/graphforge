@@ -581,22 +581,24 @@ class ProgressiveFlyTransportTests(unittest.TestCase):
         ]
         self.assertEqual(len(machine_runs), 1)
 
-    def test_live_surfaces_remain_statically_unwired(self) -> None:
+    def test_live_surfaces_are_wired_in_operator(self) -> None:
         repository = ROOT.parent
         operator = (
             repository / "benchmarks/harness/graphforge_bench/qualification_operator.py"
         ).read_text(encoding="utf-8")
+        controller = (
+            repository / "benchmarks/harness/graphforge_bench/progressive_ladder_qualification.py"
+        ).read_text(encoding="utf-8")
         registry = (repository / "config/gate-registry.json").read_text(encoding="utf-8")
-        workflow = (repository / ".github/workflows/test.yml").read_text(encoding="utf-8")
-        self.assertNotIn("FlyProviderTransport", operator)
-        self.assertIn("progressive-ladder execution is unavailable", operator)
+        self.assertIn("progressive_ladder_qualification", operator)
+        self.assertIn("FlyProviderTransport", controller)
+        self.assertIn("execute_attempt", controller)
         progressive = next(
             gate
             for gate in json.loads(registry)["operator_gates"]
             if gate["id"] == "progressive-ladder"
         )
         self.assertEqual(progressive["control_plane"], "pulumi_esc")
-        self.assertNotIn("execute_attempt", workflow)
 
 
 if __name__ == "__main__":

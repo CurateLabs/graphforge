@@ -1,7 +1,7 @@
 """Credential-isolated ESC inputs for the progressive Fly controller.
 
-This module is deliberately import-only.  It does not invoke Pulumi, Fly, or
-the progressive attempt controller and is not wired to an operator command.
+This module is deliberately import-only.  It does not invoke Pulumi or Fly by
+itself; the progressive ladder controller consumes its capsule at runtime.
 """
 
 from __future__ import annotations
