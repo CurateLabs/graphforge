@@ -69,9 +69,7 @@ def parity_gate_status(root: Path | None = None) -> dict[str, Any]:
 
     accepted = load_accepted_differences()
     migration_fixtures = [
-        path.name
-        for path in (fixtures / "legacy").glob("*.json")
-        if path.name != "tiny-pass.json"
+        path.name for path in (fixtures / "legacy").glob("*.json") if path.name != "tiny-pass.json"
     ]
 
     criteria = [
