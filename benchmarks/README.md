@@ -63,6 +63,18 @@ PYTHONPATH=harness GRAPHFORGE_GDC_SNB_INTERACTIVE_BIN=target/debug/graphforge-be
   uv run --locked python -m unittest tests.test_gdc_snb_interactive
 ```
 
+Per-suite adapters own workload semantics through their own Rust runner and
+harness module. The SNB BI suite (`gdc_snb_bi`) maps the 20 `BI*` analytical
+reads onto the public Cypher / analyst-verb surface, fails closed on weighted
+shortest-path reads and the `INS*`/`DEL*` batch maintenance stream, validates
+reads against pinned references, and records per-phase resources (load, query,
+spill, RSS, I/O) in a section kept distinct from correctness. Its evidence
+stamps `certification: false`:
+
+```bash
+PYTHONPATH=harness uv run --locked python -m unittest tests.test_gdc_snb_bi
+```
+
 ## Public-interface certification runner
 
 `runners/certify` owns the admission through reopen-proof lifecycle. A profile

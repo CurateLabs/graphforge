@@ -15,7 +15,7 @@ executable versus inventory-only.
 |---|---|---|---|
 | `graphalytics` | `suites/gdc-graphalytics.json` | executable | Six-algorithm analytics via `gdc-graphalytics` (#961) |
 | `snb-interactive` | `suites/gdc-snb-interactive.json` | executable | SNB Interactive operations via `gdc-snb-interactive` (#962) |
-| `snb-bi` | `suites/gdc-snb-bi.json` | executable | SNB Business Intelligence; blocked on suite issue #963 |
+| `snb-bi` | `suites/gdc-snb-bi.json` | executable | SNB Business Intelligence; runner `gdc-snb-bi` (see [SNB BI](#snb-bi)) |
 | `finbench-transaction` | `suites/gdc-finbench-transaction.json` | executable | FinBench Transaction; blocked on suite issue #964 |
 | `spb` | `suites/gdc-spb.json` | **inventory_only** | Semantic Publishing Benchmark (RDF/SPARQL) |
 
@@ -72,6 +72,65 @@ engineering runs and never masquerade as an audited GDC certification.
 CARGO_TARGET_DIR=target cargo build --locked -p graphforge-benchmark-gdc-snb-interactive
 PYTHONPATH=harness GRAPHFORGE_GDC_SNB_INTERACTIVE_BIN=target/debug/graphforge-benchmark-gdc-snb-interactive \
   uv run --locked python -m unittest tests.test_gdc_snb_interactive
+```
+
+## SNB BI
+
+**Home:** [LDBC Social Network Benchmark](https://ldbcouncil.org/benchmarks/snb/).
+
+| Item | Value |
+|---|---|
+| Official focus | LDBC SNB Business Intelligence: analytical read queries over the social-network graph plus a batch maintenance stream |
+| Queries | 20 analytical reads `BI1`..`BI20` |
+| Maintenance | Batch inserts `INS1`..`INS8` and batch deletes `DEL1`..`DEL8` |
+| Runner | `runners/gdc-snb-bi` (`gdc-snb-bi`), serde-only control plane; no product-crate dependency |
+| GraphForge disposition | `executable` (bounded tiny fixture only) |
+| Certification | **false** — engineering evidence only; never masquerades as an audited GDC certification |
+
+### Query mapping
+
+Analytical reads that are ordinary traversals, aggregations, grouped counts,
+and top-k rankings map to the public GraphForge Cypher / analyst-verb surface.
+The runner records the concrete Cypher/analyst-verb shape for each compatible
+read.
+
+### Unsupported policy (fail closed)
+
+The runner never approximates semantics the public property-graph + Cypher
+surface does not expose. It fails closed with a typed cause instead:
+
+- `weighted_shortest_path_not_exposed` — `BI15`, `BI19`, and `BI20` require a
+  weighted shortest-path search over a dynamically computed edge-weight
+  function; the public surface exposes only unweighted single-path analyst
+  verbs and pattern matching.
+- `bi_batch_update_stream_not_exposed` — the entire `INS*`/`DEL*` maintenance
+  stream requires the official driver's transactional insert/delete semantics,
+  dependency-time ordering, and cascading deletes.
+
+### Validation
+
+Compatible reads are validated against pinned references either exactly
+(row-for-row for a spec-mandated total order) or order-insensitively
+(`normalized`) for grouped/set-shaped aggregations without a total tie-break.
+
+### Resource vs. correctness separation
+
+Evidence records per-phase resource metrics (`load`, `query`, `spill`, `rss`,
+`io`) in a distinct top-level `resources` section, kept separate from the
+per-operation correctness `operations`. Resource evidence is never mixed into a
+correctness verdict.
+
+### Opt-in large scale factors
+
+The default suite runs only the bounded `snb-bi-sf0.003` tiny fixture. Any
+larger scale factor is opt-in / external and never baked into the default
+declaration or pinned identity.
+
+```bash
+CARGO_TARGET_DIR=target cargo build --locked -p graphforge-benchmark-gdc-snb-bi
+PYTHONPATH=harness GRAPHFORGE_GDC_SNB_BI_BIN=target/debug/graphforge-benchmark-gdc-snb-bi \
+  uv run --locked python -m unittest tests.test_gdc_snb_bi
+>>>>>>> ce976f3 (test(bench): add GDC SNB BI suite (#963))
 ```
 
 ## SPB (Semantic Publishing Benchmark)

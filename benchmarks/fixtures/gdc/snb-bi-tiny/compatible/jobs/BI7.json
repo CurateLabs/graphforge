@@ -1,0 +1,6 @@
+{
+  "schema": "graphforge-gdc-snb-bi-job/1",
+  "suite_id": "snb-bi",
+  "dataset_id": "snb-bi-sf0.003",
+  "operation": "BI7"
+}
