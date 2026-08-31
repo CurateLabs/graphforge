@@ -102,7 +102,9 @@ def _load_provider_capacity(path: Path | None) -> Mapping[str, Any] | None:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise QualificationError("authorization_refused", "provider capacity is malformed") from error
+        raise QualificationError(
+            "authorization_refused", "provider capacity is malformed"
+        ) from error
     if not isinstance(value, Mapping):
         raise QualificationError("authorization_refused", "provider capacity is malformed")
     return value
@@ -174,7 +176,9 @@ def main(argv: list[str] | None = None) -> int:
                     boundary=transport,
                 )
     except EscCapsuleError:
-        _atomic_json(args.result_out, _refused_result("authorization_refused", commit=args.expected_sha))
+        _atomic_json(
+            args.result_out, _refused_result("authorization_refused", commit=args.expected_sha)
+        )
         return 1
     except QualificationError as error:
         _atomic_json(args.result_out, _refused_result(error.failure, commit=args.expected_sha))

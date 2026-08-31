@@ -66,7 +66,9 @@ class QualificationOperatorTests(unittest.TestCase):
             "--execute",
             "--confirm-disposable",
         ]
-        command = esc_command("curatelabs/graphforge/qualification", "progressive-ladder", progressive_args)
+        command = esc_command(
+            "curatelabs/graphforge/qualification", "progressive-ladder", progressive_args
+        )
         self.assertEqual(
             command[:5], ("pulumi", "env", "run", "curatelabs/graphforge/qualification", "--")
         )
