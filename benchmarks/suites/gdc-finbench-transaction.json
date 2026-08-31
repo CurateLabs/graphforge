@@ -5,6 +5,6 @@
   "suite_id": "finbench-transaction",
   "disposition": "executable",
   "pinned_identity": "profiles/gdc/finbench-transaction-identity.json",
-  "runner": "gdc-contracts",
+  "runner": "gdc-finbench-transaction",
   "datasets": ["finbench-sf0.01"]
 }

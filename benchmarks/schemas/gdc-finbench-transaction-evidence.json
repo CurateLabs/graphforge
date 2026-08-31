@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schema": "graphforge-gdc-finbench-transaction-evidence-schema/1",
+  "type": "object",
+  "properties": {
+    "schema": { "const": "graphforge-gdc-finbench-transaction-evidence/1" },
+    "suite_id": { "const": "finbench-transaction" },
+    "dataset_id": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,80}$" },
+    "status": {
+      "enum": [
+        "passed",
+        "correctness_failed",
+        "resource_exceeded",
+        "harness_error",
+        "semantic_incompatibility"
+      ]
+    },
+    "certification": { "const": false },
+    "phases": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": {
+        "enum": ["load", "warmup", "execution", "validation"]
+      }
+    },
+    "identities": { "type": "object" },
+    "operations": {
+      "type": "array",
+      "minItems": 40,
+      "maxItems": 40,
+      "items": {
+        "type": "object",
+        "properties": {
+          "operation": { "$ref": "#/$defs/operation" },
+          "category": {
+            "enum": ["complex_read", "simple_read", "write", "read_write"]
+          },
+          "status": {
+            "enum": [
+              "passed",
+              "correctness_failed",
+              "resource_exceeded",
+              "harness_error",
+              "semantic_incompatibility"
+            ]
+          },
+          "validation_mode": {
+            "enum": ["exact", "normalized", "none"]
+          },
+          "cause": { "type": ["string", "null"] },
+          "public_api": {
+            "type": ["object", "null"],
+            "properties": {
+              "interface": { "enum": ["cypher", "analyst_verb"] },
+              "cypher_shape": { "type": "string" },
+              "notes": { "type": "string" }
+            },
+            "required": ["interface", "cypher_shape", "notes"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["operation", "category", "status", "validation_mode"],
+        "additionalProperties": false
+      }
+    },
+    "resource_events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "operation": { "$ref": "#/$defs/operation" },
+          "phase": { "enum": ["load", "warmup", "execution", "validation"] },
+          "detail": { "type": "string" }
+        },
+        "required": ["operation", "phase", "detail"],
+        "additionalProperties": false
+      }
+    },
+    "harness_failures": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "operation": { "$ref": "#/$defs/operation" },
+          "phase": { "enum": ["load", "warmup", "execution", "validation"] },
+          "detail": { "type": "string" }
+        },
+        "required": ["operation", "phase", "detail"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "schema",
+    "suite_id",
+    "dataset_id",
+    "status",
+    "certification",
+    "phases",
+    "identities",
+    "operations",
+    "resource_events",
+    "harness_failures"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "operation": {
+      "enum": [
+        "TCR1", "TCR2", "TCR3", "TCR4", "TCR5", "TCR6",
+        "TCR7", "TCR8", "TCR9", "TCR10", "TCR11", "TCR12",
+        "TSR1", "TSR2", "TSR3", "TSR4", "TSR5", "TSR6",
+        "TW1", "TW2", "TW3", "TW4", "TW5", "TW6", "TW7", "TW8", "TW9", "TW10",
+        "TW11", "TW12", "TW13", "TW14", "TW15", "TW16", "TW17", "TW18", "TW19",
+        "TRW1", "TRW2", "TRW3"
+      ]
+    }
+  }
+}

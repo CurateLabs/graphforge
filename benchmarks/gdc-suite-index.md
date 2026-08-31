@@ -15,8 +15,8 @@ executable versus inventory-only.
 |---|---|---|---|
 | `graphalytics` | `suites/gdc-graphalytics.json` | executable | Six-algorithm analytics via `gdc-graphalytics` (#961) |
 | `snb-interactive` | `suites/gdc-snb-interactive.json` | executable | SNB Interactive operations via `gdc-snb-interactive` (#962) |
-| `snb-bi` | `suites/gdc-snb-bi.json` | executable | SNB Business Intelligence; runner `gdc-snb-bi` (see [SNB BI](#snb-bi)) |
-| `finbench-transaction` | `suites/gdc-finbench-transaction.json` | executable | FinBench Transaction; blocked on suite issue #964 |
+| `snb-bi` | `suites/gdc-snb-bi.json` | executable | SNB Business Intelligence via `gdc-snb-bi` (#963) |
+| `finbench-transaction` | `suites/gdc-finbench-transaction.json` | executable | FinBench Transaction operations via `gdc-finbench-transaction` (#964) |
 | `spb` | `suites/gdc-spb.json` | **inventory_only** | Semantic Publishing Benchmark (RDF/SPARQL) |
 
 Shared identity and acquisition contracts live in
@@ -130,6 +130,50 @@ declaration or pinned identity.
 CARGO_TARGET_DIR=target cargo build --locked -p graphforge-benchmark-gdc-snb-bi
 PYTHONPATH=harness GRAPHFORGE_GDC_SNB_BI_BIN=target/debug/graphforge-benchmark-gdc-snb-bi \
   uv run --locked python -m unittest tests.test_gdc_snb_bi
+```
+
+## FinBench Transaction
+
+**Home:** [ldbcouncil.org/benchmarks/finbench](https://ldbcouncil.org/benchmarks/finbench/)
+
+| Item | Value |
+|---|---|
+| Operations | Complex reads TCR1–TCR12, simple reads TSR1–TSR6, writes TW1–TW19, read-writes TRW1–TRW3 (40 total) |
+| Runner | `graphforge-benchmark-gdc-finbench-transaction` (`suites/gdc-finbench-transaction.json`) |
+| Phases | Separate `load`, `warmup`, `execution`, `validation` (see evidence `phases`) |
+| Bounded fixture | `finbench-sf0.01` (every ladder/run begins on this tiny dataset) |
+| Validation | exact (ordered rows) and normalized (order-insensitive multiset) reference comparison |
+| Unsupported semantics | Typed `semantic_incompatibility`: `recursive_temporal_path_filtering_not_exposed` (TCR1–TCR2); `temporal_shortest_transfer_path_not_exposed` (TCR3); `temporal_transfer_cycle_detection_not_exposed` (TCR4); `hub_vertex_truncation_not_exposed` (TCR5); `finbench_transaction_write_semantics_not_exposed` (TW1–TW19, TRW1–TRW3) |
+
+Complex and simple reads that are ordinary multi-hop traversals, temporal-window
+filters, aggregations, or top-k map to public Cypher (TCR6–TCR12, TSR1–TSR6).
+Reads whose reference result depends on FinBench choke points the public surface
+does not expose fail closed with a specific typed cause: recursive temporal path
+filtering (monotonically increasing transfer timestamps along a path, TCR1–TCR2),
+temporally filtered shortest transfer path (TCR3), temporally constrained
+transfer-cycle detection (TCR4), and native hub-vertex truncation (TCR5). Write
+queries (TW1–TW19) and read-write transactions (TRW1–TRW3) require the official
+driver's ACID transaction, insert/delete/in-place-update stream, truncation, and
+read-before-write risk semantics, which the public property-graph + Cypher
+surface does not expose, so they fail closed with
+`finbench_transaction_write_semantics_not_exposed`.
+
+Evidence separates three failure classes and never conflates them: a
+**correctness** mismatch (`correctness_failed`), a **resource**-limit event
+(`resource_exceeded`, surfaced in the dedicated `resource_events` section), and a
+**harness/runner** error (`harness_error`, surfaced in the dedicated
+`harness_failures` section, e.g. a malformed job or a missing system output).
+Each class has a distinct per-operation status and its own top-level section, so
+a correctness mismatch, a resource-limit event, and a runner failure remain
+independently attributable. Profiles, validation, and evidence stay under the
+GDC FinBench Transaction suite and are not shared with Graph500, Graphalytics,
+SNB Interactive, or SNB BI. Evidence records `certification: false`: these are
+engineering runs and never masquerade as an audited GDC certification.
+
+```bash
+CARGO_TARGET_DIR=target cargo build --locked -p graphforge-benchmark-gdc-finbench-transaction
+PYTHONPATH=harness GRAPHFORGE_GDC_FINBENCH_TRANSACTION_BIN=target/debug/graphforge-benchmark-gdc-finbench-transaction \
+  uv run --locked python -m unittest tests.test_gdc_finbench_transaction
 ```
 
 ## SPB (Semantic Publishing Benchmark)

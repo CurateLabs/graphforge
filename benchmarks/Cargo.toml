@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "runners/certify",
+    "runners/gdc-finbench-transaction",
     "runners/gdc-graphalytics",
     "runners/gdc-snb-interactive",
     "runners/gdc-snb-bi",
