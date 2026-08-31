@@ -1,0 +1,18 @@
+{
+  "schema": "graphforge-public-certification/1",
+  "profile_id": "graph500-tiny-executable",
+  "status": "passed",
+  "failed_phase": null,
+  "phases": [
+    { "phase": "admission", "status": "passed", "duration_ms": 120, "peak_rss_bytes": 67108864, "exit_code": 0, "receipts": [] },
+    { "phase": "generate", "status": "passed", "duration_ms": 450, "peak_rss_bytes": 100663296, "exit_code": 0, "receipts": [] },
+    { "phase": "ingest", "status": "passed", "duration_ms": 1200, "peak_rss_bytes": 134217728, "exit_code": 0, "receipts": [] },
+    { "phase": "reopen", "status": "passed", "duration_ms": 300, "peak_rss_bytes": 134217728, "exit_code": 0, "receipts": [] },
+    { "phase": "recount", "status": "passed", "duration_ms": 180, "peak_rss_bytes": 134217728, "exit_code": 0, "receipts": [] },
+    { "phase": "query", "status": "passed", "duration_ms": 220, "peak_rss_bytes": 134217728, "exit_code": 0, "receipts": [] },
+    { "phase": "export", "status": "passed", "duration_ms": 350, "peak_rss_bytes": 150994944, "exit_code": 0, "receipts": [] },
+    { "phase": "verify", "status": "passed", "duration_ms": 280, "peak_rss_bytes": 150994944, "exit_code": 0, "receipts": [] },
+    { "phase": "clean_import", "status": "passed", "duration_ms": 400, "peak_rss_bytes": 150994944, "exit_code": 0, "receipts": [] },
+    { "phase": "reopen_proof", "status": "passed", "duration_ms": 250, "peak_rss_bytes": 150994944, "exit_code": 0, "receipts": [] }
+  ]
+}
