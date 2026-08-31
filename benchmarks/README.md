@@ -54,6 +54,18 @@ and fails closed with typed causes on update-stream and IC14 weighted-path
 semantics the public surface does not expose. Its evidence records
 `certification: false` and never masquerades as an audited GDC certification.
 
+The FinBench Transaction suite adapter is `graphforge_bench.gdc_finbench_transaction`
+(runner `graphforge-benchmark-gdc-finbench-transaction`). It maps LDBC FinBench
+Transaction operations (complex reads TCR1–TCR12, simple reads TSR1–TSR6, writes
+TW1–TW19, read-writes TRW1–TRW3) onto the public Cypher / analyst-verb surface,
+separates load/warmup/execution/validation phases, validates read outputs (exact
+and normalized) against pinned references, and fails closed with typed causes on
+recursive temporal path filtering, temporal shortest transfer path, temporal
+transfer-cycle detection, hub-vertex truncation, and write/read-write transaction
+semantics the public surface does not expose. Its evidence keeps correctness,
+resource, and harness failures in distinct statuses and sections, records
+`certification: false`, and never masquerades as an audited GDC certification.
+
 ```bash
 PYTHONPATH=harness uv run --locked python -m unittest tests.test_gdc_contracts
 PYTHONPATH=harness uv run --locked python -m unittest tests.test_gdc_spb_inventory
@@ -61,6 +73,9 @@ CARGO_TARGET_DIR=target cargo test --locked -p graphforge-benchmark-gdc-graphaly
 PYTHONPATH=harness uv run --locked python -m unittest tests.test_gdc_graphalytics
 PYTHONPATH=harness GRAPHFORGE_GDC_SNB_INTERACTIVE_BIN=target/debug/graphforge-benchmark-gdc-snb-interactive \
   uv run --locked python -m unittest tests.test_gdc_snb_interactive
+CARGO_TARGET_DIR=target cargo test --locked -p graphforge-benchmark-gdc-finbench-transaction
+PYTHONPATH=harness GRAPHFORGE_GDC_FINBENCH_TRANSACTION_BIN=target/debug/graphforge-benchmark-gdc-finbench-transaction \
+  uv run --locked python -m unittest tests.test_gdc_finbench_transaction
 ```
 
 Per-suite adapters own workload semantics through their own Rust runner and
