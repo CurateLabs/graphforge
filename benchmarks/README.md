@@ -343,6 +343,22 @@ canonical five-file bundle; and persists an fsync-backed ownership ledger for
 cleanup-only recovery. Its transport is injected, so this proof makes no
 provider calls and spends nothing.
 
+The production-shaped Fly boundary and isolated ESC input capsule are exercised
+offline with:
+
+```bash
+make -C benchmarks progressive-fly-transport-static
+```
+
+The transport accepts only an already-published immutable image, emits fixed
+shell-free Fly commands through an injected boundary, applies the attempt
+deadline to every operation, validates provider-observed Machine identity,
+retrieves the result before the remaining canonical artifacts, and returns only
+sanitized teardown counts. The ESC capsule consumes the fixed projected token
+and spend-authorization variables once, removes them from the ambient process,
+and constructs a minimal child environment with fresh credential state. Both
+components remain import-only: these tests perform no provider operation.
+
 Provider credentials belong to Pulumi ESC rather than GitHub workflow inputs or
 the caller's ambient shell. Live operator commands are rendered from
 `config/gate-registry.json` and run through the Python control plane:
@@ -357,10 +373,12 @@ make -C benchmarks qualification-operator \
 The operator uses the shell-free form `pulumi env run <environment> -- <argv>`;
 secret values are never copied into its command line or evidence. The
 `progressive-ladder` is registered, but still fails before opening ESC. The
-typed whole-attempt state machine, ownership-ledger recovery, and sanitized
-teardown inventory now exist offline; the real Fly transport, ESC environment
-binding, and live recovery gate remain deliberately unavailable. This is a
-live capability boundary, not a GitHub-dispatch prerequisite.
+typed whole-attempt state machine, production-shaped Fly command boundary,
+isolated ESC input capsule, ownership-ledger recovery, and sanitized teardown
+inventory now exist offline. Protected/versioned ESC configuration, immutable
+image publication, an independently scheduled recovery owner or lease, and the
+separately reviewed spend authorization remain prerequisites for live wiring.
+This is a live capability boundary, not a GitHub-dispatch prerequisite.
 
 The controller derives bulk-ingest capability from the same run's bounded
 ordinary `gf import-session commit --json` receipt: its construction evidence
