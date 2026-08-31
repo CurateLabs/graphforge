@@ -1,5 +1,10 @@
 [workspace]
-members = ["runners/certify", "runners/graph500-generator", "runners/smoke"]
+members = [
+    "runners/certify",
+    "runners/gdc-graphalytics",
+    "runners/graph500-generator",
+    "runners/smoke",
+]
 resolver = "2"
 
 [workspace.package]

@@ -13,7 +13,7 @@ executable versus inventory-only.
 
 | Suite id | Declaration | Disposition | Notes |
 |---|---|---|---|
-| `graphalytics` | `suites/gdc-graphalytics.json` | executable | Six-algorithm analytics; blocked on suite issue #961 |
+| `graphalytics` | `suites/gdc-graphalytics.json` | executable | Six-algorithm analytics via `gdc-graphalytics` (#961) |
 | `snb-interactive` | `suites/gdc-snb-interactive.json` | executable | SNB Interactive; blocked on suite issue #962 |
 | `snb-bi` | `suites/gdc-snb-bi.json` | executable | SNB Business Intelligence; blocked on suite issue #963 |
 | `finbench-transaction` | `suites/gdc-finbench-transaction.json` | executable | FinBench Transaction; blocked on suite issue #964 |
@@ -22,6 +22,27 @@ executable versus inventory-only.
 Shared identity and acquisition contracts live in
 `graphforge_bench.gdc_contracts` (#960). Suite adapters share those contracts
 without sharing workload semantics.
+
+## Graphalytics
+
+**Home:** [ldbcouncil.org/benchmarks/graphalytics](https://ldbcouncil.org/benchmarks/graphalytics/)
+
+| Item | Value |
+|---|---|
+| Algorithms | BFS, PR, WCC, CDLP, LCC, SSSP |
+| Runner | `graphforge-benchmark-gdc-graphalytics` (`suites/gdc-graphalytics.json`) |
+| Ladder | `profiles/gdc/graphalytics-ladder.json` (begins with bounded `ga-tiny`) |
+| Validation | exact (BFS/CDLP), equivalence (WCC), epsilon=1e-4 (PR/LCC/SSSP) |
+| Unsupported semantics | Typed `semantic_incompatibility` (fixed-iteration PR; synchronous CDLP) |
+
+Profiles, validation, and evidence stay under the GDC Graphalytics suite and are
+not shared with Graph500 orchestration.
+
+```bash
+CARGO_TARGET_DIR=target cargo build --locked -p graphforge-benchmark-gdc-graphalytics
+PYTHONPATH=harness GRAPHFORGE_GDC_GRAPHALYTICS_BIN=target/debug/graphforge-benchmark-gdc-graphalytics \
+  uv run --locked python -m unittest tests.test_gdc_graphalytics
+```
 
 ## SPB (Semantic Publishing Benchmark)
 

@@ -1,0 +1,8 @@
+{
+  "schema": "graphforge-gdc-graphalytics-job/1",
+  "suite_id": "graphalytics",
+  "dataset_id": "ga-tiny",
+  "algorithm": "bfs",
+  "source_vertex": 1,
+  "directed": true
+}

@@ -28,7 +28,9 @@
       "type": "string",
       "pattern": "^profiles/gdc/[A-Za-z0-9_.-]+\\.json$"
     },
-    "runner": { "const": "gdc-contracts" },
+    "runner": {
+      "enum": ["gdc-contracts", "gdc-graphalytics"]
+    },
     "datasets": {
       "type": "array",
       "maxItems": 64,
