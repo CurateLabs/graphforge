@@ -1,0 +1,26 @@
+{
+  "schema": "graphforge-gdc-snb-interactive-ladder/1",
+  "suite_id": "snb-interactive",
+  "datasets": [
+    {
+      "id": "snb-sf0.003",
+      "order": 1,
+      "role": "engineering_fixture"
+    },
+    {
+      "id": "snb-sf0.1",
+      "order": 2,
+      "role": "ordered_ladder"
+    },
+    {
+      "id": "snb-sf0.3",
+      "order": 3,
+      "role": "ordered_ladder"
+    },
+    {
+      "id": "snb-sf1",
+      "order": 4,
+      "role": "ordered_ladder"
+    }
+  ]
+}

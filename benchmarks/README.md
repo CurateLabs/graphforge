@@ -45,11 +45,21 @@ identity contracts. Unsupported official semantics (fixed-iteration PageRank,
 synchronous CDLP) fail closed with typed `semantic_incompatibility` instead of
 approximating. Bounded fixtures start the ordered dataset ladder at `ga-tiny`.
 
+SNB Interactive (#962) is a separate executable suite: Rust owns the Interactive
+v1 operation catalog (IC/IS/IU), public Cypher mapping for supported short reads,
+load/warmup/execution/validation phase separation, completeness-with-gaps
+policy, and exact reference validation in `runners/gdc-snb-interactive`. Missing
+semantics are reported as typed `semantic_incompatibility`, never skipped.
+Evidence is `run_class=engineering` with `audited_gdc_certification=false`.
+Bounded fixtures start at `snb-sf0.003`.
+
 ```bash
 PYTHONPATH=harness uv run --locked python -m unittest tests.test_gdc_contracts
 PYTHONPATH=harness uv run --locked python -m unittest tests.test_gdc_spb_inventory
 CARGO_TARGET_DIR=target cargo test --locked -p graphforge-benchmark-gdc-graphalytics
 PYTHONPATH=harness uv run --locked python -m unittest tests.test_gdc_graphalytics
+CARGO_TARGET_DIR=target cargo test --locked -p graphforge-benchmark-gdc-snb-interactive
+PYTHONPATH=harness uv run --locked python -m unittest tests.test_gdc_snb_interactive
 ```
 
 ## Public-interface certification runner

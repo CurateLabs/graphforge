@@ -5,6 +5,6 @@
   "suite_id": "snb-interactive",
   "disposition": "executable",
   "pinned_identity": "profiles/gdc/snb-interactive-identity.json",
-  "runner": "gdc-contracts",
-  "datasets": ["snb-sf0.003"]
+  "runner": "gdc-snb-interactive",
+  "datasets": ["snb-sf0.003", "snb-sf0.1", "snb-sf0.3", "snb-sf1"]
 }

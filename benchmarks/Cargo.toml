@@ -2,6 +2,7 @@
 members = [
     "runners/certify",
     "runners/gdc-graphalytics",
+    "runners/gdc-snb-interactive",
     "runners/graph500-generator",
     "runners/smoke",
 ]

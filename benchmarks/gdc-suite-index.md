@@ -14,7 +14,7 @@ executable versus inventory-only.
 | Suite id | Declaration | Disposition | Notes |
 |---|---|---|---|
 | `graphalytics` | `suites/gdc-graphalytics.json` | executable | Six-algorithm analytics via `gdc-graphalytics` (#961) |
-| `snb-interactive` | `suites/gdc-snb-interactive.json` | executable | SNB Interactive; blocked on suite issue #962 |
+| `snb-interactive` | `suites/gdc-snb-interactive.json` | executable | SNB Interactive via `gdc-snb-interactive` (#962) |
 | `snb-bi` | `suites/gdc-snb-bi.json` | executable | SNB Business Intelligence; blocked on suite issue #963 |
 | `finbench-transaction` | `suites/gdc-finbench-transaction.json` | executable | FinBench Transaction; blocked on suite issue #964 |
 | `spb` | `suites/gdc-spb.json` | **inventory_only** | Semantic Publishing Benchmark (RDF/SPARQL) |
@@ -42,6 +42,30 @@ not shared with Graph500 orchestration.
 CARGO_TARGET_DIR=target cargo build --locked -p graphforge-benchmark-gdc-graphalytics
 PYTHONPATH=harness GRAPHFORGE_GDC_GRAPHALYTICS_BIN=target/debug/graphforge-benchmark-gdc-graphalytics \
   uv run --locked python -m unittest tests.test_gdc_graphalytics
+```
+
+## SNB Interactive
+
+**Home:** [ldbcouncil.org/benchmarks/snb](https://ldbcouncil.org/benchmarks/snb/)
+
+| Item | Value |
+|---|---|
+| Catalog | Interactive v1: IC1–IC14, IS1–IS7, IU1–IU8 (29 ops) |
+| Runner | `graphforge-benchmark-gdc-snb-interactive` (`suites/gdc-snb-interactive.json`) |
+| Ladder | `profiles/gdc/snb-interactive-ladder.json` (begins with `snb-sf0.003`) |
+| Phases | load → warmup → execution → validation (never skipped) |
+| Supported engineering map | IS1, IS3, IS4 → public Cypher `query` |
+| Completeness policy | `full_catalog_declare_gaps` (gaps reported, not omitted) |
+| Certification | `run_class=engineering`, `audited_gdc_certification=false` only |
+
+Unsupported complex reads and update-stream ops fail closed with typed
+`semantic_incompatibility`. Engineering evidence never claims audited GDC
+certification.
+
+```bash
+CARGO_TARGET_DIR=target cargo build --locked -p graphforge-benchmark-gdc-snb-interactive
+PYTHONPATH=harness GRAPHFORGE_GDC_SNB_INTERACTIVE_BIN=target/debug/graphforge-benchmark-gdc-snb-interactive \
+  uv run --locked python -m unittest tests.test_gdc_snb_interactive
 ```
 
 ## SPB (Semantic Publishing Benchmark)

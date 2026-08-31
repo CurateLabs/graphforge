@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schema": "graphforge-gdc-snb-interactive-evidence-schema/1",
+  "type": "object",
+  "properties": {
+    "schema": { "const": "graphforge-gdc-snb-interactive-evidence/1" },
+    "suite_id": { "const": "snb-interactive" },
+    "dataset_id": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,80}$" },
+    "run_class": { "const": "engineering" },
+    "audited_gdc_certification": { "const": false },
+    "status": {
+      "enum": ["passed", "failed", "semantic_incompatibility"]
+    },
+    "completeness": {
+      "type": "object",
+      "properties": {
+        "policy": { "const": "full_catalog_declare_gaps" },
+        "catalog_size": { "const": 29 },
+        "supported": { "type": "integer", "minimum": 0, "maximum": 29 },
+        "unsupported": { "type": "integer", "minimum": 0, "maximum": 29 },
+        "failed": { "type": "integer", "minimum": 0, "maximum": 29 }
+      },
+      "required": ["policy", "catalog_size", "supported", "unsupported", "failed"],
+      "additionalProperties": false
+    },
+    "phases": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": {
+        "type": "object",
+        "properties": {
+          "phase": {
+            "enum": ["load", "warmup", "execution", "validation"]
+          },
+          "status": {
+            "enum": ["passed", "failed", "skipped"]
+          },
+          "notes": { "type": ["string", "null"] }
+        },
+        "required": ["phase", "status"],
+        "additionalProperties": false
+      }
+    },
+    "identities": { "type": "object" },
+    "operations": {
+      "type": "array",
+      "minItems": 29,
+      "maxItems": 29,
+      "items": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "enum": [
+              "ic1", "ic2", "ic3", "ic4", "ic5", "ic6", "ic7", "ic8", "ic9",
+              "ic10", "ic11", "ic12", "ic13", "ic14",
+              "is1", "is2", "is3", "is4", "is5", "is6", "is7",
+              "iu1", "iu2", "iu3", "iu4", "iu5", "iu6", "iu7", "iu8"
+            ]
+          },
+          "workload_key": {
+            "enum": [
+              "ic1", "ic2", "ic3", "ic4", "ic5", "ic6", "ic7", "ic8", "ic9",
+              "ic10", "ic11", "ic12", "ic13", "ic14",
+              "is1", "is2", "is3", "is4", "is5", "is6", "is7",
+              "iu1", "iu2", "iu3", "iu4", "iu5", "iu6", "iu7", "iu8"
+            ]
+          },
+          "class": {
+            "enum": ["complex_read", "short_read", "update"]
+          },
+          "status": {
+            "enum": ["passed", "failed", "semantic_incompatibility"]
+          },
+          "validation_mode": {
+            "enum": ["exact", "none"]
+          },
+          "cause": { "type": ["string", "null"] },
+          "public_api": {
+            "type": ["object", "null"],
+            "properties": {
+              "interface": { "type": "string" },
+              "entrypoint": { "type": "string" },
+              "notes": { "type": "string" }
+            },
+            "required": ["interface", "entrypoint", "notes"],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "operation",
+          "workload_key",
+          "class",
+          "status",
+          "validation_mode"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "schema",
+    "suite_id",
+    "dataset_id",
+    "run_class",
+    "audited_gdc_certification",
+    "status",
+    "completeness",
+    "phases",
+    "identities",
+    "operations"
+  ],
+  "additionalProperties": false
+}

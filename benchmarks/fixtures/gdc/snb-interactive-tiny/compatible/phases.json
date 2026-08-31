@@ -1,0 +1,26 @@
+{
+  "schema": "graphforge-gdc-snb-interactive-phases/1",
+  "suite_id": "snb-interactive",
+  "phases": [
+    {
+      "phase": "load",
+      "status": "passed",
+      "notes": "bulk load snb-sf0.003 fixture"
+    },
+    {
+      "phase": "warmup",
+      "status": "passed",
+      "notes": "warmup supported short reads"
+    },
+    {
+      "phase": "execution",
+      "status": "passed",
+      "notes": "execute full Interactive catalog"
+    },
+    {
+      "phase": "validation",
+      "status": "passed",
+      "notes": "exact match supported refs; gaps reported"
+    }
+  ]
+}

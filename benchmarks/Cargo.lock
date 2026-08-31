@@ -1608,6 +1608,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "graphforge-benchmark-gdc-snb-interactive"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "graphforge-benchmark-graph500-generator"
 version = "0.0.0"
 dependencies = [
