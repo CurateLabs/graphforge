@@ -45,11 +45,22 @@ identity contracts. Unsupported official semantics (fixed-iteration PageRank,
 synchronous CDLP) fail closed with typed `semantic_incompatibility` instead of
 approximating. Bounded fixtures start the ordered dataset ladder at `ga-tiny`.
 
+The SNB Interactive suite adapter is `graphforge_bench.gdc_snb_interactive`
+(runner `graphforge-benchmark-gdc-snb-interactive`). It maps LDBC SNB Interactive
+operations (complex reads IC1–IC14, short reads IS1–IS7, updates IU1–IU8) onto the
+public Cypher / analyst-verb surface, separates load/warmup/execution/validation
+phases, validates read outputs (exact and normalized) against pinned references,
+and fails closed with typed causes on update-stream and IC14 weighted-path
+semantics the public surface does not expose. Its evidence records
+`certification: false` and never masquerades as an audited GDC certification.
+
 ```bash
 PYTHONPATH=harness uv run --locked python -m unittest tests.test_gdc_contracts
 PYTHONPATH=harness uv run --locked python -m unittest tests.test_gdc_spb_inventory
 CARGO_TARGET_DIR=target cargo test --locked -p graphforge-benchmark-gdc-graphalytics
 PYTHONPATH=harness uv run --locked python -m unittest tests.test_gdc_graphalytics
+PYTHONPATH=harness GRAPHFORGE_GDC_SNB_INTERACTIVE_BIN=target/debug/graphforge-benchmark-gdc-snb-interactive \
+  uv run --locked python -m unittest tests.test_gdc_snb_interactive
 ```
 
 ## Public-interface certification runner

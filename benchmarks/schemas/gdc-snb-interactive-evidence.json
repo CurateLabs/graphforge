@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schema": "graphforge-gdc-snb-interactive-evidence-schema/1",
+  "type": "object",
+  "properties": {
+    "schema": { "const": "graphforge-gdc-snb-interactive-evidence/1" },
+    "suite_id": { "const": "snb-interactive" },
+    "dataset_id": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,80}$" },
+    "status": {
+      "enum": ["passed", "failed", "semantic_incompatibility"]
+    },
+    "certification": { "const": false },
+    "phases": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": {
+        "enum": ["load", "warmup", "execution", "validation"]
+      }
+    },
+    "identities": { "type": "object" },
+    "operations": {
+      "type": "array",
+      "minItems": 29,
+      "maxItems": 29,
+      "items": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "enum": [
+              "IC1", "IC2", "IC3", "IC4", "IC5", "IC6", "IC7", "IC8", "IC9",
+              "IC10", "IC11", "IC12", "IC13", "IC14",
+              "IS1", "IS2", "IS3", "IS4", "IS5", "IS6", "IS7",
+              "IU1", "IU2", "IU3", "IU4", "IU5", "IU6", "IU7", "IU8"
+            ]
+          },
+          "category": {
+            "enum": ["complex_read", "short_read", "update"]
+          },
+          "status": {
+            "enum": ["passed", "failed", "semantic_incompatibility"]
+          },
+          "validation_mode": {
+            "enum": ["exact", "normalized", "none"]
+          },
+          "cause": { "type": ["string", "null"] },
+          "public_api": {
+            "type": ["object", "null"],
+            "properties": {
+              "interface": { "enum": ["cypher", "analyst_verb"] },
+              "cypher_shape": { "type": "string" },
+              "notes": { "type": "string" }
+            },
+            "required": ["interface", "cypher_shape", "notes"],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "operation",
+          "category",
+          "status",
+          "validation_mode"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "schema",
+    "suite_id",
+    "dataset_id",
+    "status",
+    "certification",
+    "phases",
+    "identities",
+    "operations"
+  ],
+  "additionalProperties": false
+}

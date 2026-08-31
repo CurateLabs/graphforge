@@ -1,0 +1,6 @@
+{
+  "schema": "graphforge-gdc-snb-interactive-job/1",
+  "suite_id": "snb-interactive",
+  "dataset_id": "snb-sf0.003",
+  "operation": "IU6"
+}
