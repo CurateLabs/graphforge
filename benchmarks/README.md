@@ -17,9 +17,10 @@ workspace and remain unchanged. Migration or retirement of that legacy harness
 belongs to issue #959, after parity is proven.
 
 Scale-orchestration parity work lives under `fixtures/parity/` with the
-`graphforge_bench.scale_parity` comparator. The first slice compares tiny/local
-shadow fixtures only; completed #900 ladder bundles are ingested read-only in a
-follow-up.
+`graphforge_bench.scale_parity` comparator. The index is
+[`scale-parity-index.md`](scale-parity-index.md). The first slice compares
+tiny/local shadow fixtures only; completed #900 ladder bundles are ingested
+read-only in a follow-up (`fixtures/parity/ladder-bundle/README.md`).
 
 ## Layout
 
