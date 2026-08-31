@@ -20,9 +20,7 @@ class GdcContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.root = workspace_root()
-        cls.pin = load_pinned_identity(
-            cls.root / "profiles" / "gdc" / "graphalytics-identity.json"
-        )
+        cls.pin = load_pinned_identity(cls.root / "profiles" / "gdc" / "graphalytics-identity.json")
         cls.fixtures = cls.root / "fixtures" / "gdc"
 
     def test_schemas_are_draft2020_valid(self) -> None:
@@ -54,9 +52,7 @@ class GdcContractTests(unittest.TestCase):
 
     def test_complete_acquisition_records_immutable_identities(self) -> None:
         acquisition = load_acquisition(self.fixtures / "complete" / "acquisition.json")
-        evidence = validate_acquisition(
-            self.pin, acquisition, self.fixtures / "complete"
-        )
+        evidence = validate_acquisition(self.pin, acquisition, self.fixtures / "complete")
         self.assertEqual(evidence["status"], "passed")
         self.assertIsNone(evidence["cause"])
         self.assertEqual(evidence["identities"]["spec"]["release"], "1.0.0-engineering-pin")
@@ -79,13 +75,9 @@ class GdcContractTests(unittest.TestCase):
                 encoding="utf-8"
             )
         )
-        acquisition = load_acquisition(
-            self.fixtures / "incomplete-provenance" / "acquisition.json"
-        )
+        acquisition = load_acquisition(self.fixtures / "incomplete-provenance" / "acquisition.json")
         with self.assertRaises(GdcContractError) as raised:
-            validate_acquisition(
-                incomplete, acquisition, self.fixtures / "incomplete-provenance"
-            )
+            validate_acquisition(incomplete, acquisition, self.fixtures / "incomplete-provenance")
         self.assertEqual(raised.exception.cause, "incomplete_provenance")
 
         stripped = copy.deepcopy(self.pin)
@@ -99,37 +91,25 @@ class GdcContractTests(unittest.TestCase):
         self.assertEqual(raised_license.exception.cause, "incomplete_provenance")
 
     def test_checksum_mismatch_fixture(self) -> None:
-        acquisition = load_acquisition(
-            self.fixtures / "checksum-mismatch" / "acquisition.json"
-        )
+        acquisition = load_acquisition(self.fixtures / "checksum-mismatch" / "acquisition.json")
         with self.assertRaises(GdcContractError) as raised:
-            validate_acquisition(
-                self.pin, acquisition, self.fixtures / "checksum-mismatch"
-            )
+            validate_acquisition(self.pin, acquisition, self.fixtures / "checksum-mismatch")
         self.assertEqual(raised.exception.cause, "checksum_mismatch")
 
     def test_missing_assets_fixture(self) -> None:
-        acquisition = load_acquisition(
-            self.fixtures / "missing-assets" / "acquisition.json"
-        )
+        acquisition = load_acquisition(self.fixtures / "missing-assets" / "acquisition.json")
         with self.assertRaises(GdcContractError) as raised:
             validate_acquisition(self.pin, acquisition, self.fixtures / "missing-assets")
         self.assertEqual(raised.exception.cause, "missing_assets")
 
     def test_reference_mismatch_fixture(self) -> None:
-        acquisition = load_acquisition(
-            self.fixtures / "reference-mismatch" / "acquisition.json"
-        )
+        acquisition = load_acquisition(self.fixtures / "reference-mismatch" / "acquisition.json")
         with self.assertRaises(GdcContractError) as raised:
-            validate_acquisition(
-                self.pin, acquisition, self.fixtures / "reference-mismatch"
-            )
+            validate_acquisition(self.pin, acquisition, self.fixtures / "reference-mismatch")
         self.assertEqual(raised.exception.cause, "reference_mismatch")
 
     def test_identity_drift_fixture(self) -> None:
-        acquisition = load_acquisition(
-            self.fixtures / "identity-drift" / "acquisition.json"
-        )
+        acquisition = load_acquisition(self.fixtures / "identity-drift" / "acquisition.json")
         with self.assertRaises(GdcContractError) as raised:
             validate_acquisition(self.pin, acquisition, self.fixtures / "identity-drift")
         self.assertEqual(raised.exception.cause, "identity_drift")
@@ -145,7 +125,7 @@ class GdcContractTests(unittest.TestCase):
             "assets": [],
             "references": [],
         }
-        evidence = validate_acquisition(pin, acquisition, Path("."))
+        evidence = validate_acquisition(pin, acquisition, Path())
         self.assertEqual(evidence["status"], "passed")
         self.assertEqual(evidence["disposition"], "inventory_only")
         self.assertEqual(evidence["datasets"], [])

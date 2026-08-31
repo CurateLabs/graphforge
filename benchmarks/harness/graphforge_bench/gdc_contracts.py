@@ -42,9 +42,7 @@ def workspace_root() -> Path:
 
 
 def _load_schema(name: str) -> Draft202012Validator:
-    document = json.loads(
-        (workspace_root() / "schemas" / name).read_text(encoding="utf-8")
-    )
+    document = json.loads((workspace_root() / "schemas" / name).read_text(encoding="utf-8"))
     Draft202012Validator.check_schema(document)
     return Draft202012Validator(document)
 
@@ -158,9 +156,7 @@ def _evidence(
         "cause": cause,
         "identities": {
             "spec": dict(identities["spec"]),
-            "generator": None
-            if identities["generator"] is None
-            else dict(identities["generator"]),
+            "generator": None if identities["generator"] is None else dict(identities["generator"]),
             "driver": None if identities["driver"] is None else dict(identities["driver"]),
         },
         "datasets": datasets,
@@ -188,7 +184,9 @@ def validate_acquisition(
         ("generator", pin["generator"], acquisition.get("recorded_generator")),
         ("driver", pin["driver"], acquisition.get("recorded_driver")),
     ):
-        if _tool_key(pinned) != _tool_key(recorded if isinstance(recorded, Mapping) or recorded is None else None):
+        if _tool_key(pinned) != _tool_key(
+            recorded if isinstance(recorded, Mapping) or recorded is None else None
+        ):
             raise GdcContractError("identity_drift", f"{label} identity drifted from pin")
 
     if pin["disposition"] == "inventory_only":
@@ -251,9 +249,7 @@ def validate_acquisition(
             }
         )
 
-    pinned_refs = {
-        (item["dataset_id"], item["workload_key"]): item for item in pin["references"]
-    }
+    pinned_refs = {(item["dataset_id"], item["workload_key"]): item for item in pin["references"]}
     acquired_refs = {
         (item["dataset_id"], item["workload_key"]): item
         for item in acquisition.get("references", [])
