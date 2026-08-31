@@ -85,9 +85,7 @@ class GdcSnbInteractiveSuiteTests(unittest.TestCase):
         self.assertTrue(rules["IC14"]["mapping"].startswith("semantic_incompatibility"))
         for update in UPDATES:
             self.assertEqual(rules[update]["category"], "update", update)
-            self.assertTrue(
-                rules[update]["mapping"].startswith("semantic_incompatibility"), update
-            )
+            self.assertTrue(rules[update]["mapping"].startswith("semantic_incompatibility"), update)
             self.assertEqual(rules[update]["validation"], "none", update)
 
     def test_compatible_fixture_passes_with_per_op_statuses(self) -> None:
