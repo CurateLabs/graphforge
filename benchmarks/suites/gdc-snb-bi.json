@@ -1,0 +1,10 @@
+{
+  "schema": "graphforge-benchmark-suite/1",
+  "id": "gdc-snb-bi",
+  "family": "gdc",
+  "suite_id": "snb-bi",
+  "disposition": "executable",
+  "pinned_identity": "profiles/gdc/snb-bi-identity.json",
+  "runner": "gdc-contracts",
+  "datasets": ["snb-bi-sf0.003"]
+}

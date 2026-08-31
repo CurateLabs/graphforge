@@ -26,6 +26,19 @@ belongs to issue #959, after parity is proven.
 - `tests/` — no-cost workspace and fixture-discovery tests.
 - `runners/` — unpublished Rust benchmark runners.
 
+## GDC identity contracts
+
+`graphforge_bench.gdc_contracts` pins shared GDC/LDBC identities, dataset
+checksum provenance, reference digests, and sanitized suite evidence without
+embedding workload semantics. Each suite remains independently selectable via
+`suites/gdc-*.json`. Bulk datasets are not committed; acquisition fixtures only
+carry tiny checksummed stand-ins. Validation rejects incomplete provenance,
+checksum mismatch, missing assets, reference mismatch, and identity drift.
+
+```bash
+PYTHONPATH=harness uv run --locked python -m unittest tests.test_gdc_contracts
+```
+
 ## Public-interface certification runner
 
 `runners/certify` owns the admission through reopen-proof lifecycle. A profile

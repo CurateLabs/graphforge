@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schema": "graphforge-gdc-acquisition-schema/1",
+  "type": "object",
+  "properties": {
+    "schema": { "const": "graphforge-gdc-acquisition/1" },
+    "suite_id": {
+      "enum": [
+        "graphalytics",
+        "snb-interactive",
+        "snb-bi",
+        "finbench-transaction",
+        "spb"
+      ]
+    },
+    "recorded_spec": { "$ref": "#/$defs/toolIdentity" },
+    "recorded_generator": {
+      "oneOf": [
+        { "$ref": "#/$defs/toolIdentity" },
+        { "type": "null" }
+      ]
+    },
+    "recorded_driver": {
+      "oneOf": [
+        { "$ref": "#/$defs/toolIdentity" },
+        { "type": "null" }
+      ]
+    },
+    "assets": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 64,
+      "items": { "$ref": "#/$defs/asset" }
+    },
+    "references": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 256,
+      "items": { "$ref": "#/$defs/referenceAsset" }
+    }
+  },
+  "required": [
+    "schema",
+    "suite_id",
+    "recorded_spec",
+    "recorded_generator",
+    "recorded_driver",
+    "assets",
+    "references"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "relativePath": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-][A-Za-z0-9._/-]{0,200}$"
+    },
+    "toolIdentity": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "source": {
+          "type": "string",
+          "pattern": "^https://[A-Za-z0-9._~:/?#\\[\\]@!$&'()*+,;=%-]+$"
+        },
+        "release": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "commit": {
+          "type": ["string", "null"],
+          "pattern": "^[a-f0-9]{40}$"
+        }
+      },
+      "required": ["name", "source", "release", "commit"],
+      "additionalProperties": false,
+      "anyOf": [
+        {
+          "properties": { "release": { "type": "string" } },
+          "required": ["release"]
+        },
+        {
+          "properties": { "commit": { "type": "string" } },
+          "required": ["commit"]
+        }
+      ]
+    },
+    "asset": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,80}$" },
+        "path": { "$ref": "#/$defs/relativePath" },
+        "checksum_sha256": { "$ref": "#/$defs/sha256" },
+        "license": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "acquisition": {
+          "type": "string",
+          "enum": ["download", "generate", "mirror", "fixture"]
+        }
+      },
+      "required": ["id", "path", "checksum_sha256", "license", "acquisition"],
+      "additionalProperties": false
+    },
+    "referenceAsset": {
+      "type": "object",
+      "properties": {
+        "dataset_id": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,80}$" },
+        "workload_key": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]{1,80}$"
+        },
+        "path": { "$ref": "#/$defs/relativePath" },
+        "checksum_sha256": { "$ref": "#/$defs/sha256" }
+      },
+      "required": ["dataset_id", "workload_key", "path", "checksum_sha256"],
+      "additionalProperties": false
+    }
+  }
+}

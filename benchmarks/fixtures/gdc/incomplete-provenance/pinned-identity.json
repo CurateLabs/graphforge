@@ -1,0 +1,34 @@
+{
+  "schema": "graphforge-gdc-pinned-identity/1",
+  "suite_id": "graphalytics",
+  "disposition": "executable",
+  "spec": {
+    "name": "ldbc-graphalytics",
+    "source": "https://ldbcouncil.org/benchmarks/graphalytics/",
+    "release": null,
+    "commit": null
+  },
+  "generator": {
+    "name": "graphalytics-datasets",
+    "source": "https://repository.surfsara.nl/datasets/cwi/graphalytics",
+    "release": "wiki-Talk-fixture-pin",
+    "commit": null
+  },
+  "driver": {
+    "name": "ldbc_graphalytics",
+    "source": "https://github.com/ldbc/ldbc_graphalytics",
+    "release": null,
+    "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "datasets": [
+    {
+      "id": "wiki-Talk",
+      "role": "dataset",
+      "checksum_sha256": "c0fd57903065bb4950244cc77023e9ce0803f723596922b114141f190ea521d8",
+      "license": "",
+      "acquisition": "fixture",
+      "source": "https://repository.surfsara.nl/datasets/cwi/graphalytics"
+    }
+  ],
+  "references": []
+}

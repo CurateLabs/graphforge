@@ -1,0 +1,157 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schema": "graphforge-gdc-pinned-identity-schema/1",
+  "type": "object",
+  "properties": {
+    "schema": { "const": "graphforge-gdc-pinned-identity/1" },
+    "suite_id": {
+      "enum": [
+        "graphalytics",
+        "snb-interactive",
+        "snb-bi",
+        "finbench-transaction",
+        "spb"
+      ]
+    },
+    "disposition": { "enum": ["executable", "inventory_only"] },
+    "spec": { "$ref": "#/$defs/toolIdentity" },
+    "generator": {
+      "oneOf": [
+        { "$ref": "#/$defs/toolIdentity" },
+        { "type": "null" }
+      ]
+    },
+    "driver": {
+      "oneOf": [
+        { "$ref": "#/$defs/toolIdentity" },
+        { "type": "null" }
+      ]
+    },
+    "datasets": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 64,
+      "items": { "$ref": "#/$defs/datasetPin" }
+    },
+    "references": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 256,
+      "items": { "$ref": "#/$defs/referencePin" }
+    }
+  },
+  "required": [
+    "schema",
+    "suite_id",
+    "disposition",
+    "spec",
+    "generator",
+    "driver",
+    "datasets",
+    "references"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": { "disposition": { "const": "inventory_only" } },
+        "required": ["disposition"]
+      },
+      "then": {
+        "properties": {
+          "generator": { "type": "null" },
+          "driver": { "type": "null" },
+          "datasets": { "maxItems": 0 },
+          "references": { "maxItems": 0 }
+        }
+      },
+      "else": {
+        "properties": {
+          "generator": { "$ref": "#/$defs/toolIdentity" },
+          "driver": { "$ref": "#/$defs/toolIdentity" },
+          "datasets": { "minItems": 1 }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "toolIdentity": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "source": {
+          "type": "string",
+          "pattern": "^https://[A-Za-z0-9._~:/?#\\[\\]@!$&'()*+,;=%-]+$"
+        },
+        "release": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "commit": {
+          "type": ["string", "null"],
+          "pattern": "^[a-f0-9]{40}$"
+        }
+      },
+      "required": ["name", "source", "release", "commit"],
+      "additionalProperties": false,
+      "anyOf": [
+        {
+          "properties": { "release": { "type": "string" } },
+          "required": ["release"]
+        },
+        {
+          "properties": { "commit": { "type": "string" } },
+          "required": ["commit"]
+        }
+      ]
+    },
+    "datasetPin": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,80}$" },
+        "role": { "enum": ["dataset", "parameter", "other"] },
+        "checksum_sha256": { "$ref": "#/$defs/sha256" },
+        "license": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "acquisition": {
+          "type": "string",
+          "enum": ["download", "generate", "mirror", "fixture"]
+        },
+        "source": {
+          "type": "string",
+          "pattern": "^https://[A-Za-z0-9._~:/?#\\[\\]@!$&'()*+,;=%-]+$"
+        }
+      },
+      "required": [
+        "id",
+        "role",
+        "checksum_sha256",
+        "license",
+        "acquisition",
+        "source"
+      ],
+      "additionalProperties": false
+    },
+    "referencePin": {
+      "type": "object",
+      "properties": {
+        "dataset_id": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,80}$" },
+        "workload_key": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]{1,80}$"
+        },
+        "checksum_sha256": { "$ref": "#/$defs/sha256" },
+        "source": {
+          "type": "string",
+          "pattern": "^https://[A-Za-z0-9._~:/?#\\[\\]@!$&'()*+,;=%-]+$"
+        }
+      },
+      "required": ["dataset_id", "workload_key", "checksum_sha256", "source"],
+      "additionalProperties": false
+    }
+  }
+}
