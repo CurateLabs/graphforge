@@ -1176,6 +1176,7 @@ jobs:
         working-directory: benchmarks
         run: |
           PYTHONPATH=harness uv run --locked python -m unittest \
+            tests.test_progressive_provider_attempt \
             tests.test_progressive_provider_plan \
             tests.test_progressive_provider_run \
             tests.test_progressive_run \

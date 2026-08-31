@@ -330,6 +330,19 @@ A successful rung emits exactly `sN-plan.json`, `sN-benchexec.json`,
 engineering evidence. The canonical order remains S18, S19, S20, S22, S24,
 S25, S26; the first failed or missing gate stops the planner.
 
+The provider-free whole-attempt controller core is exercised with:
+
+```bash
+make -C benchmarks progressive-provider-attempt-static
+```
+
+It requires a schema-valid, commit-bound S18/S19 prefix; validates a closed
+five-hour, integer-micro-USD spend authorization; binds the first admitted plan
+before any provider mutation; advances one rung at a time; accepts only the
+canonical five-file bundle; and persists an fsync-backed ownership ledger for
+cleanup-only recovery. Its transport is injected, so this proof makes no
+provider calls and spends nothing.
+
 Provider credentials belong to Pulumi ESC rather than GitHub workflow inputs or
 the caller's ambient shell. Live operator commands are rendered from
 `config/gate-registry.json` and run through the Python control plane:
@@ -344,10 +357,10 @@ make -C benchmarks qualification-operator \
 The operator uses the shell-free form `pulumi env run <environment> -- <argv>`;
 secret values are never copied into its command line or evidence. The
 `progressive-ladder` is registered, but still fails before opening ESC. The
-offline image and rung runner do not implement whole-attempt Fly orchestration,
-typed spend authorization, ownership-ledger recovery, or teardown inventory.
-This is a deliberate live capability boundary, not a GitHub-dispatch
-prerequisite.
+typed whole-attempt state machine, ownership-ledger recovery, and sanitized
+teardown inventory now exist offline; the real Fly transport, ESC environment
+binding, and live recovery gate remain deliberately unavailable. This is a
+live capability boundary, not a GitHub-dispatch prerequisite.
 
 The controller derives bulk-ingest capability from the same run's bounded
 ordinary `gf import-session commit --json` receipt: its construction evidence
