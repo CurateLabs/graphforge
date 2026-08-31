@@ -137,7 +137,7 @@ def run_tiny_suite(
                 "run-suite",
                 str(fixture / "jobs"),
                 str(fixture / "references"),
-                str(fixture / "outputs"),
+                str(fixture / "system-outputs"),
                 str(identities_path),
                 str(out_evidence),
             ],
