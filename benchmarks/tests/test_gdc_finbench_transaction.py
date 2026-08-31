@@ -96,16 +96,12 @@ class GdcFinBenchTransactionSuiteTests(unittest.TestCase):
         self.assertEqual(rules["TSR1"]["validation"], "exact")
         # Unsupported reads fail closed with their specific typed causes.
         for read, cause in UNSUPPORTED_READ_CAUSES.items():
-            self.assertTrue(
-                rules[read]["mapping"].startswith("semantic_incompatibility"), read
-            )
+            self.assertTrue(rules[read]["mapping"].startswith("semantic_incompatibility"), read)
             self.assertTrue(rules[read]["mapping"].endswith(cause), read)
             self.assertEqual(rules[read]["validation"], "none", read)
         # Writes and read-writes fail closed with the write cause.
         for write in list(WRITES) + list(READ_WRITES):
-            self.assertTrue(
-                rules[write]["mapping"].startswith("semantic_incompatibility"), write
-            )
+            self.assertTrue(rules[write]["mapping"].startswith("semantic_incompatibility"), write)
             self.assertTrue(rules[write]["mapping"].endswith(WRITE_CAUSE), write)
             self.assertEqual(rules[write]["validation"], "none", write)
 
