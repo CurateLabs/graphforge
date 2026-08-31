@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schema": "graphforge-gdc-snb-bi-evidence-schema/1",
+  "type": "object",
+  "properties": {
+    "schema": { "const": "graphforge-gdc-snb-bi-evidence/1" },
+    "suite_id": { "const": "snb-bi" },
+    "dataset_id": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,80}$" },
+    "status": {
+      "enum": ["passed", "failed", "semantic_incompatibility"]
+    },
+    "certification": { "const": false },
+    "phases": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": {
+        "enum": ["load", "updates", "query", "validation"]
+      }
+    },
+    "identities": { "type": "object" },
+    "resources": {
+      "type": "object",
+      "properties": {
+        "schema": { "const": "graphforge-gdc-snb-bi-resources/1" },
+        "dataset_id": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,80}$" },
+        "load": {
+          "type": "object",
+          "properties": {
+            "wall_ms": { "type": "integer", "minimum": 0 },
+            "rows_loaded": { "type": "integer", "minimum": 0 }
+          },
+          "required": ["wall_ms", "rows_loaded"],
+          "additionalProperties": false
+        },
+        "query": {
+          "type": "object",
+          "properties": {
+            "wall_ms": { "type": "integer", "minimum": 0 },
+            "queries_executed": { "type": "integer", "minimum": 0 }
+          },
+          "required": ["wall_ms", "queries_executed"],
+          "additionalProperties": false
+        },
+        "spill": {
+          "type": "object",
+          "properties": {
+            "bytes": { "type": "integer", "minimum": 0 },
+            "events": { "type": "integer", "minimum": 0 }
+          },
+          "required": ["bytes", "events"],
+          "additionalProperties": false
+        },
+        "rss": {
+          "type": "object",
+          "properties": {
+            "peak_bytes": { "type": "integer", "minimum": 0 }
+          },
+          "required": ["peak_bytes"],
+          "additionalProperties": false
+        },
+        "io": {
+          "type": "object",
+          "properties": {
+            "read_bytes": { "type": "integer", "minimum": 0 },
+            "write_bytes": { "type": "integer", "minimum": 0 }
+          },
+          "required": ["read_bytes", "write_bytes"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["schema", "dataset_id", "load", "query", "spill", "rss", "io"],
+      "additionalProperties": false
+    },
+    "operations": {
+      "type": "array",
+      "minItems": 36,
+      "maxItems": 36,
+      "items": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "enum": [
+              "BI1", "BI2", "BI3", "BI4", "BI5", "BI6", "BI7", "BI8", "BI9",
+              "BI10", "BI11", "BI12", "BI13", "BI14", "BI15", "BI16", "BI17",
+              "BI18", "BI19", "BI20",
+              "INS1", "INS2", "INS3", "INS4", "INS5", "INS6", "INS7", "INS8",
+              "DEL1", "DEL2", "DEL3", "DEL4", "DEL5", "DEL6", "DEL7", "DEL8"
+            ]
+          },
+          "category": {
+            "enum": ["analytical_read", "batch_insert", "batch_delete"]
+          },
+          "status": {
+            "enum": ["passed", "failed", "semantic_incompatibility"]
+          },
+          "validation_mode": {
+            "enum": ["exact", "normalized", "none"]
+          },
+          "cause": { "type": ["string", "null"] },
+          "public_api": {
+            "type": ["object", "null"],
+            "properties": {
+              "interface": { "enum": ["cypher", "analyst_verb"] },
+              "cypher_shape": { "type": "string" },
+              "notes": { "type": "string" }
+            },
+            "required": ["interface", "cypher_shape", "notes"],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "operation",
+          "category",
+          "status",
+          "validation_mode"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "schema",
+    "suite_id",
+    "dataset_id",
+    "status",
+    "certification",
+    "phases",
+    "identities",
+    "resources",
+    "operations"
+  ],
+  "additionalProperties": false
+}

@@ -29,7 +29,7 @@
       "pattern": "^profiles/gdc/[A-Za-z0-9_.-]+\\.json$"
     },
     "runner": {
-      "enum": ["gdc-contracts", "gdc-graphalytics", "gdc-snb-interactive"]
+      "enum": ["gdc-contracts", "gdc-graphalytics", "gdc-snb-bi", "gdc-snb-interactive"]
     },
     "datasets": {
       "type": "array",

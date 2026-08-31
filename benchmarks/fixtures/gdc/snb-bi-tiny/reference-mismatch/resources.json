@@ -1,0 +1,23 @@
+{
+  "schema": "graphforge-gdc-snb-bi-resources/1",
+  "dataset_id": "snb-bi-sf0.003",
+  "load": {
+    "wall_ms": 12,
+    "rows_loaded": 4096
+  },
+  "query": {
+    "wall_ms": 34,
+    "queries_executed": 17
+  },
+  "spill": {
+    "bytes": 0,
+    "events": 0
+  },
+  "rss": {
+    "peak_bytes": 104857600
+  },
+  "io": {
+    "read_bytes": 2048,
+    "write_bytes": 512
+  }
+}
