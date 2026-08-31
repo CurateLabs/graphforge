@@ -14,7 +14,7 @@ executable versus inventory-only.
 | Suite id | Declaration | Disposition | Notes |
 |---|---|---|---|
 | `graphalytics` | `suites/gdc-graphalytics.json` | executable | Six-algorithm analytics via `gdc-graphalytics` (#961) |
-| `snb-interactive` | `suites/gdc-snb-interactive.json` | executable | SNB Interactive; blocked on suite issue #962 |
+| `snb-interactive` | `suites/gdc-snb-interactive.json` | executable | SNB Interactive operations via `gdc-snb-interactive` (#962) |
 | `snb-bi` | `suites/gdc-snb-bi.json` | executable | SNB Business Intelligence; blocked on suite issue #963 |
 | `finbench-transaction` | `suites/gdc-finbench-transaction.json` | executable | FinBench Transaction; blocked on suite issue #964 |
 | `spb` | `suites/gdc-spb.json` | **inventory_only** | Semantic Publishing Benchmark (RDF/SPARQL) |
@@ -42,6 +42,36 @@ not shared with Graph500 orchestration.
 CARGO_TARGET_DIR=target cargo build --locked -p graphforge-benchmark-gdc-graphalytics
 PYTHONPATH=harness GRAPHFORGE_GDC_GRAPHALYTICS_BIN=target/debug/graphforge-benchmark-gdc-graphalytics \
   uv run --locked python -m unittest tests.test_gdc_graphalytics
+```
+
+## SNB Interactive
+
+**Home:** [ldbcouncil.org/benchmarks/snb](https://ldbcouncil.org/benchmarks/snb/)
+
+| Item | Value |
+|---|---|
+| Operations | Complex reads IC1–IC14, short reads IS1–IS7, updates IU1–IU8 (29 total) |
+| Runner | `graphforge-benchmark-gdc-snb-interactive` (`suites/gdc-snb-interactive.json`) |
+| Phases | Separate `load`, `warmup`, `execution`, `validation` (see evidence `phases`) |
+| Bounded fixture | `snb-sf0.003` (every ladder/run begins on this tiny dataset) |
+| Validation | exact (ordered rows) and normalized (order-insensitive multiset) reference comparison |
+| Unsupported semantics | Typed `semantic_incompatibility`: `interactive_update_stream_not_exposed` (IU1–IU8); `weighted_interaction_path_enumeration_not_exposed` (IC14) |
+
+Read-only complex/short reads that are ordinary graph traversals or aggregations
+map to public Cypher; IC13 uses the public `bfs` path analyst verb. Updates
+require the official driver's transactional update-stream semantics,
+dependency-time ordering, and write validation, which the public property-graph +
+Cypher surface does not expose, so they fail closed with a typed cause. IC14
+requires all-shortest-path enumeration with a dynamically computed interaction
+weight and likewise fails closed. Profiles, validation, and evidence stay under
+the GDC SNB Interactive suite and are not shared with Graph500, Graphalytics,
+SNB BI, or FinBench. Evidence records `certification: false`: these are
+engineering runs and never masquerade as an audited GDC certification.
+
+```bash
+CARGO_TARGET_DIR=target cargo build --locked -p graphforge-benchmark-gdc-snb-interactive
+PYTHONPATH=harness GRAPHFORGE_GDC_SNB_INTERACTIVE_BIN=target/debug/graphforge-benchmark-gdc-snb-interactive \
+  uv run --locked python -m unittest tests.test_gdc_snb_interactive
 ```
 
 ## SPB (Semantic Publishing Benchmark)
