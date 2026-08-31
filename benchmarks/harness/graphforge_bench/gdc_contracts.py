@@ -27,6 +27,16 @@ EXECUTABLE_SUITES = (
 )
 INVENTORY_SUITES = ("spb",)
 ALL_SUITES = EXECUTABLE_SUITES + INVENTORY_SUITES
+STATUS_SCHEMA = "graphforge-gdc-suite-status/1"
+
+# SPB is RDF/SPARQL. GraphForge's current product surface is property-graph +
+# Cypher / analyst verbs, so the harness inventories SPB without approximating.
+SPB_INVENTORY_REASON = "rdf_sparql_outside_property_graph_cypher_surface"
+SPB_ACTIVATION_CRITERIA = (
+    "product_exposes_supported_rdf_or_sparql_binding",
+    "official_spb_spec_and_driver_pins_recorded",
+    "reference_validation_path_exists_without_cypher_approximation",
+)
 
 
 class GdcContractError(ValueError):
@@ -316,3 +326,83 @@ def list_gdc_suites(root: Path | None = None) -> tuple[dict[str, Any], ...]:
             "GDC suite index must declare each suite independently exactly once",
         )
     return tuple(by_id[suite_id] for suite_id in ALL_SUITES)
+
+
+def suite_status(suite_id: str, root: Path | None = None) -> dict[str, Any]:
+    """Report a suite disposition without inventing an incompatible runner."""
+    if suite_id not in ALL_SUITES:
+        raise GdcContractError("invalid_document", f"unknown GDC suite: {suite_id}")
+    suites = {suite["suite_id"]: suite for suite in list_gdc_suites(root)}
+    suite = suites[suite_id]
+    pin = load_pinned_identity((root or workspace_root()) / suite["pinned_identity"])
+    if pin["disposition"] != suite["disposition"]:
+        raise GdcContractError(
+            "identity_drift",
+            f"suite disposition drifted from pinned identity: {suite_id}",
+        )
+    if suite["disposition"] == "inventory_only":
+        if suite_id != "spb":
+            raise GdcContractError(
+                "invalid_document",
+                f"unexpected inventory-only suite: {suite_id}",
+            )
+        document = {
+            "schema": STATUS_SCHEMA,
+            "suite_id": suite_id,
+            "disposition": "inventory_only",
+            "executable": False,
+            "reason": SPB_INVENTORY_REASON,
+            "activation_criteria": list(SPB_ACTIVATION_CRITERIA),
+            "pinned_identity": suite["pinned_identity"],
+        }
+    else:
+        document = {
+            "schema": STATUS_SCHEMA,
+            "suite_id": suite_id,
+            "disposition": "executable",
+            "executable": True,
+            "reason": None,
+            "activation_criteria": [],
+            "pinned_identity": suite["pinned_identity"],
+        }
+    _validate(_load_schema("gdc-suite-status.json"), document, "suite status")
+    return document
+
+
+def assert_no_executable_spb_profile(root: Path | None = None) -> None:
+    """Fail closed if an executable SPB profile is advertised."""
+    base = root or workspace_root()
+    status = suite_status("spb", base)
+    if status["executable"] or status["disposition"] != "inventory_only":
+        raise GdcContractError("invalid_document", "SPB must remain inventory-only")
+    for path in (base / "profiles").rglob("*spb*.json"):
+        document = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(document, dict):
+            raise GdcContractError("invalid_document", f"invalid SPB profile: {path.name}")
+        if document.get("schema") != PIN_SCHEMA:
+            raise GdcContractError(
+                "invalid_document",
+                f"executable SPB profile advertised: {path.relative_to(base)}",
+            )
+        if document.get("disposition") != "inventory_only":
+            raise GdcContractError(
+                "invalid_document",
+                f"executable SPB profile advertised: {path.relative_to(base)}",
+            )
+        if document.get("generator") is not None or document.get("driver") is not None:
+            raise GdcContractError(
+                "invalid_document",
+                f"executable SPB tooling advertised: {path.relative_to(base)}",
+            )
+        if document.get("datasets") or document.get("references"):
+            raise GdcContractError(
+                "invalid_document",
+                f"executable SPB assets advertised: {path.relative_to(base)}",
+            )
+    for path in (base / "suites").glob("*spb*.json"):
+        suite = load_suite_declaration(path)
+        if suite["disposition"] != "inventory_only" or suite.get("datasets"):
+            raise GdcContractError(
+                "invalid_document",
+                f"executable SPB suite advertised: {path.name}",
+            )

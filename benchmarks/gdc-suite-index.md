@@ -1,0 +1,69 @@
+# GDC / LDBC suite index (benchmark workspace)
+
+This index is owned by the isolated `benchmarks/` workspace. It inventories the
+Graph Data Council (GDC, formerly LDBC) portfolio as independently selectable
+suites. Product crates never embed generators, drivers, or SPARQL approximations.
+
+Authoritative product-facing specification remains
+[`docs/guide/datasets/ldbc.md`](../docs/guide/datasets/ldbc.md). This page is the
+**harness index**: which suites exist, how they are selected, and which are
+executable versus inventory-only.
+
+## Suites
+
+| Suite id | Declaration | Disposition | Notes |
+|---|---|---|---|
+| `graphalytics` | `suites/gdc-graphalytics.json` | executable | Six-algorithm analytics; blocked on suite issue #961 |
+| `snb-interactive` | `suites/gdc-snb-interactive.json` | executable | SNB Interactive; blocked on suite issue #962 |
+| `snb-bi` | `suites/gdc-snb-bi.json` | executable | SNB Business Intelligence; blocked on suite issue #963 |
+| `finbench-transaction` | `suites/gdc-finbench-transaction.json` | executable | FinBench Transaction; blocked on suite issue #964 |
+| `spb` | `suites/gdc-spb.json` | **inventory_only** | Semantic Publishing Benchmark (RDF/SPARQL) |
+
+Shared identity and acquisition contracts live in
+`graphforge_bench.gdc_contracts` (#960). Suite adapters share those contracts
+without sharing workload semantics.
+
+## SPB (Semantic Publishing Benchmark)
+
+**Home:** listed under [GDC Benchmarks](https://ldbcouncil.org/benchmarks/).
+
+| Item | Value |
+|---|---|
+| Official focus | RDF / SPARQL stores over a media-publishing ontology |
+| Protocol | Official SPB driver + SPARQL query/update mix (upstream-owned) |
+| GraphForge disposition | `inventory_only` |
+| Semantic reason | `rdf_sparql_outside_property_graph_cypher_surface` |
+| Harness behavior | Report inventory status only; never advertise an executable SPB profile; never approximate SPARQL with Cypher |
+
+### Inventory-only rationale
+
+GraphForge’s current product surface is property-graph persistence with Cypher
+and analyst verbs. SPB requires RDF storage and SPARQL evaluation. Translating
+SPARQL into Cypher, inventing a fake RDF binding, or shipping a partial
+property-graph “SPB-like” runner would be an incompatible approximation and is
+forbidden.
+
+### Activation criteria (objective)
+
+An executable SPB adapter may be added only when **all** of the following are
+true and recorded in evidence:
+
+1. `product_exposes_supported_rdf_or_sparql_binding` — a supported product
+   binding can evaluate the SPB protocol without Cypher approximation.
+2. `official_spb_spec_and_driver_pins_recorded` — immutable upstream spec and
+   driver identities are pinned through the GDC contracts.
+3. `reference_validation_path_exists_without_cypher_approximation` — official
+   reference validation is available without inventing substitute semantics.
+
+Until then, `suite_status("spb")` returns `disposition=inventory_only`,
+`executable=false`, and the semantic reason above.
+
+## Operator status query
+
+```bash
+PYTHONPATH=harness uv run --locked python - <<'PY'
+from graphforge_bench.gdc_contracts import suite_status, assert_no_executable_spb_profile
+print(suite_status("spb"))
+assert_no_executable_spb_profile()
+PY
+```
