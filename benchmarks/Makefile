@@ -1,4 +1,4 @@
-.PHONY: install smoke smoke-python smoke-rust fly-adapter-static local-admission progressive-qualification-list progressive-qualification-plan progressive-qualification-run progressive-qualification-project-s20 progressive-qualification-binaries progressive-provider-plan qualification-operator
+.PHONY: install smoke smoke-python smoke-rust fly-adapter-static progressive-provider-attempt-static local-admission progressive-qualification-list progressive-qualification-plan progressive-qualification-run progressive-qualification-project-s20 progressive-qualification-binaries progressive-provider-plan qualification-operator
 
 install:
 	uv sync --locked
@@ -18,6 +18,11 @@ smoke-rust: install
 fly-adapter-static: install
 	PYTHONPATH=harness uv run --locked python -m unittest \
 		tests.test_fly_adapter tests.test_fly_tiny_qualification
+
+# Provider-free proof of the whole-attempt state machine and recovery contracts.
+progressive-provider-attempt-static: install
+	PYTHONPATH=harness uv run --locked python -m unittest \
+		tests.test_progressive_provider_attempt
 
 local-admission: install
 	PYTHONPATH=$(CURDIR)/harness uv run --locked reframe -C reframe/settings.py -c reframe/checks -n '^LocalBenchExecAdmission$$' -l | grep -F LocalBenchExecAdmission

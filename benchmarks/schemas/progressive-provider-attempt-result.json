@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schema": "graphforge-progressive-provider-attempt-result-schema/1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "status", "failure", "cleanup_failure", "commit", "authorized_maximum_scale", "completed_scales", "first_failed_rung", "authorization_sha256", "admitted_plan_sha256", "authorized_image_digest", "observed_image_digest", "teardown_status", "teardown_inventory_sha256", "claim"],
+  "properties": {
+    "schema": {"const": "graphforge-progressive-provider-attempt-result/1"},
+    "status": {"enum": ["passed", "failed"]},
+    "failure": {"enum": [null, "authorization_refused", "source_mismatch", "readiness_timeout", "provision_failed", "machine_identity_mismatch", "upload_failed", "rung_failed", "retrieval_failed", "evidence_invalid", "progression_refused", "cleanup_failed"]},
+    "cleanup_failure": {"enum": [null, "evidence_cleanup_failed", "teardown_failed", "inventory_unavailable", "inventory_not_empty"]},
+    "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "authorized_maximum_scale": {"enum": [20, 22, 24, 25, 26]},
+    "completed_scales": {"$ref": "#/$defs/completedScales"},
+    "first_failed_rung": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/rung"}]},
+    "authorization_sha256": {"$ref": "#/$defs/digest"},
+    "admitted_plan_sha256": {"$ref": "#/$defs/digest"},
+    "authorized_image_digest": {"$ref": "#/$defs/image"},
+    "observed_image_digest": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/image"}]},
+    "teardown_status": {"enum": ["not_required", "empty", "failed"]},
+    "teardown_inventory_sha256": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/digest"}]},
+    "claim": {"const": "engineering_evidence_only"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "passed"}}, "required": ["status"]},
+      "then": {"properties": {"failure": {"type": "null"}, "cleanup_failure": {"type": "null"}, "first_failed_rung": {"type": "null"}, "observed_image_digest": {"$ref": "#/$defs/image"}, "teardown_status": {"const": "empty"}, "teardown_inventory_sha256": {"$ref": "#/$defs/digest"}}},
+      "else": {"properties": {"failure": {"type": "string"}}}
+    },
+    {
+      "if": {"properties": {"failure": {"enum": ["upload_failed", "rung_failed", "retrieval_failed", "evidence_invalid", "progression_refused"]}}, "required": ["failure"]},
+      "then": {"properties": {"first_failed_rung": {"$ref": "#/$defs/rung"}}},
+      "else": {"properties": {"first_failed_rung": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"failure": {"const": "cleanup_failed"}}, "required": ["failure"]},
+      "then": {"properties": {"cleanup_failure": {"type": "string"}, "teardown_status": {"const": "failed"}, "teardown_inventory_sha256": {"$ref": "#/$defs/digest"}}}
+    },
+    {
+      "if": {"properties": {"teardown_status": {"const": "not_required"}}, "required": ["teardown_status"]},
+      "then": {"properties": {"cleanup_failure": {"type": "null"}, "teardown_inventory_sha256": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"teardown_status": {"const": "empty"}}, "required": ["teardown_status"]},
+      "then": {"properties": {"cleanup_failure": {"type": "null"}, "teardown_inventory_sha256": {"$ref": "#/$defs/digest"}}}
+    },
+    {
+      "if": {"properties": {"teardown_status": {"const": "failed"}}, "required": ["teardown_status"]},
+      "then": {"properties": {"cleanup_failure": {"type": "string"}, "teardown_inventory_sha256": {"$ref": "#/$defs/digest"}}}
+    }
+  ],
+  "$defs": {
+    "completedScales": {"oneOf": [{"const": [18, 19]}, {"const": [18, 19, 20]}, {"const": [18, 19, 20, 22]}, {"const": [18, 19, 20, 22, 24]}, {"const": [18, 19, 20, 22, 24, 25]}, {"const": [18, 19, 20, 22, 24, 25, 26]}]},
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "image": {"type": "string", "pattern": "^registry\\.fly\\.io/[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}$"},
+    "rung": {"enum": ["S20", "S22", "S24", "S25", "S26"]}
+  }
+}

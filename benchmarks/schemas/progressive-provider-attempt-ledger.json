@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schema": "graphforge-progressive-provider-attempt-ledger-schema/1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "generation", "attempt_id", "owner_app", "commit", "authorization_sha256", "admitted_plan_sha256", "authorized_maximum_scale", "authorized_image_digest", "expires_at", "evidence_dir", "phase", "image_digest", "current_rung", "completed_scales", "first_failed_rung", "failure", "cleanup_failure", "resources", "teardown_observed", "teardown_checked_at"],
+  "properties": {
+    "schema": {"const": "graphforge-progressive-provider-attempt-ledger/1"},
+    "generation": {"type": "integer", "minimum": 1, "maximum": 1000},
+    "attempt_id": {"$ref": "#/$defs/nonce"},
+    "owner_app": {"type": "string", "pattern": "^gf-progressive-[0-9a-f]{32}$"},
+    "commit": {"$ref": "#/$defs/commit"},
+    "authorization_sha256": {"$ref": "#/$defs/digest"},
+    "admitted_plan_sha256": {"$ref": "#/$defs/digest"},
+    "authorized_maximum_scale": {"$ref": "#/$defs/scale"},
+    "authorized_image_digest": {"$ref": "#/$defs/image"},
+    "expires_at": {"$ref": "#/$defs/timestamp"},
+    "evidence_dir": {"type": "string", "pattern": "^/[^\\u0000]+$"},
+    "phase": {"enum": ["authorized", "provisioned", "planned", "executing", "rung_failed", "rung_accepted", "completed", "failed", "teardown", "cleanup_failed", "closed"]},
+    "image_digest": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/image"}]},
+    "current_rung": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/scale"}]},
+    "completed_scales": {"$ref": "#/$defs/completedScales"},
+    "first_failed_rung": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/scale"}]},
+    "failure": {"enum": [null, "authorization_refused", "source_mismatch", "provision_failed", "machine_identity_mismatch", "upload_failed", "rung_failed", "retrieval_failed", "evidence_invalid", "progression_refused"]},
+    "cleanup_failure": {"enum": [null, "evidence_cleanup_failed", "teardown_failed", "inventory_unavailable", "inventory_not_empty"]},
+    "resources": {
+      "oneOf": [
+        {"type": "object", "maxProperties": 0},
+        {"type": "object", "additionalProperties": false, "required": ["machine_id", "volume_id"], "properties": {"machine_id": {"type": "string", "pattern": "^[0-9a-f]{14}$"}, "volume_id": {"type": "string", "pattern": "^vol_[a-z0-9]+$"}}}
+      ]
+    },
+    "teardown_observed": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/inventory"}]},
+    "teardown_checked_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/timestamp"}]}
+  },
+  "allOf": [
+    {"if": {"properties": {"phase": {"const": "authorized"}}, "required": ["phase"]}, "then": {"properties": {"image_digest": {"type": "null"}, "resources": {"maxProperties": 0}}}},
+    {"if": {"properties": {"phase": {"const": "closed"}}, "required": ["phase"]}, "then": {"properties": {"cleanup_failure": {"type": "null"}, "resources": {"maxProperties": 0}, "teardown_observed": {"type": "object", "properties": {"app_exists": {"const": false}, "machines": {"const": 0}, "volumes": {"const": 0}, "secrets": {"const": 0}}}, "teardown_checked_at": {"$ref": "#/$defs/timestamp"}}}},
+    {"if": {"properties": {"phase": {"const": "cleanup_failed"}}, "required": ["phase"]}, "then": {"properties": {"cleanup_failure": {"type": "string"}}}}
+  ],
+  "$defs": {
+    "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "nonce": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "image": {"type": "string", "pattern": "^registry\\.fly\\.io/[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}$"},
+    "scale": {"enum": [20, 22, 24, 25, 26]},
+    "timestamp": {"type": "string", "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z$"},
+    "completedScales": {"oneOf": [{"const": [18, 19]}, {"const": [18, 19, 20]}, {"const": [18, 19, 20, 22]}, {"const": [18, 19, 20, 22, 24]}, {"const": [18, 19, 20, 22, 24, 25]}, {"const": [18, 19, 20, 22, 24, 25, 26]}]},
+    "inventory": {"type": "object", "additionalProperties": false, "required": ["app_exists", "machines", "volumes", "secrets"], "properties": {"app_exists": {"type": "boolean"}, "machines": {"type": "integer", "minimum": 0}, "volumes": {"type": "integer", "minimum": 0}, "secrets": {"type": "integer", "minimum": 0}}}
+  }
+}

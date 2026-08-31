@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schema": "graphforge-progressive-spend-authorization-schema/1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "status", "provider", "commit", "admitted_plan_sha256", "image_digest", "organization", "region", "machine_class", "volume_gib", "rung", "maximum_scale", "attempt_nonce", "app", "issued_at", "expires_at", "teardown_owner", "maximum_machine_seconds", "resource_limits", "pricing", "claim"],
+  "properties": {
+    "schema": {"const": "graphforge-progressive-spend-authorization/1"},
+    "status": {"const": "authorized"},
+    "provider": {"const": "fly"},
+    "commit": {"$ref": "#/$defs/commit"},
+    "admitted_plan_sha256": {"$ref": "#/$defs/digest"},
+    "image_digest": {"$ref": "#/$defs/image"},
+    "organization": {"$ref": "#/$defs/name"},
+    "region": {"type": "string", "pattern": "^[a-z]{3}$"},
+    "machine_class": {"$ref": "#/$defs/machineClass"},
+    "volume_gib": {"type": "integer", "minimum": 1, "maximum": 500},
+    "rung": {"$ref": "#/$defs/rung"},
+    "maximum_scale": {"enum": [20, 22, 24, 25, 26]},
+    "attempt_nonce": {"$ref": "#/$defs/nonce"},
+    "app": {"type": "string", "pattern": "^gf-progressive-[0-9a-f]{32}$"},
+    "issued_at": {"$ref": "#/$defs/timestamp"},
+    "expires_at": {"$ref": "#/$defs/timestamp"},
+    "teardown_owner": {"$ref": "#/$defs/name"},
+    "maximum_machine_seconds": {"type": "integer", "minimum": 1, "maximum": 18000},
+    "resource_limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apps", "volumes", "machines", "image_builds"],
+      "properties": {
+        "apps": {"const": 1},
+        "volumes": {"const": 1},
+        "machines": {"const": 1},
+        "image_builds": {"const": 0}
+      }
+    },
+    "pricing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["currency", "machine_microusd_per_hour", "volume_microusd_per_gib_hour", "transfer_allowance_microusd", "estimated_total_microusd", "maximum_total_microusd"],
+      "properties": {
+        "currency": {"const": "USD"},
+        "machine_microusd_per_hour": {"type": "integer", "minimum": 1, "maximum": 1000000000000},
+        "volume_microusd_per_gib_hour": {"type": "integer", "minimum": 1, "maximum": 1000000000000},
+        "transfer_allowance_microusd": {"$ref": "#/$defs/money"},
+        "estimated_total_microusd": {"type": "integer", "minimum": 1, "maximum": 1000000000000},
+        "maximum_total_microusd": {"type": "integer", "minimum": 1, "maximum": 1000000000000}
+      }
+    },
+    "claim": {"const": "spend_authorization_only"}
+  },
+  "$defs": {
+    "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "image": {"type": "string", "pattern": "^registry\\.fly\\.io/[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}$"},
+    "machineClass": {"enum": ["shared-cpu-1x", "shared-cpu-2x", "shared-cpu-4x", "shared-cpu-6x", "shared-cpu-8x", "performance-1x", "performance-2x", "performance-4x", "performance-6x", "performance-8x", "performance-10x", "performance-12x", "performance-14x", "performance-16x"]},
+    "money": {"type": "integer", "minimum": 0, "maximum": 1000000000000},
+    "name": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"},
+    "nonce": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "rung": {"enum": ["S20", "S22", "S24", "S25", "S26"]},
+    "timestamp": {"type": "string", "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z$"}
+  }
+}
