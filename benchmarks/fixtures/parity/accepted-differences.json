@@ -38,5 +38,24 @@
     { "legacy": "verify", "new": "verify" },
     { "legacy": "clean_import", "new": "clean_import" },
     { "legacy": "reopen_proof", "new": "reopen_proof" }
+  ],
+  "legacy_cert_phase_mapping": [
+    { "legacy": "preflight", "new": "admission" },
+    { "legacy": "generate", "new": "generate" },
+    { "legacy": "ingest", "new": "ingest" },
+    { "legacy": "csr", "new": null },
+    { "legacy": "source_reopen", "new": "reopen" },
+    { "legacy": "source_query_1hop", "new": "query" },
+    { "legacy": "source_query_2hop", "new": "query" },
+    { "legacy": "export", "new": "export" },
+    { "legacy": "verify", "new": "verify" },
+    { "legacy": "import", "new": "clean_import" },
+    { "legacy": "imported_reopen", "new": "reopen_proof" },
+    { "legacy": "imported_query_1hop", "new": "reopen_proof" },
+    { "legacy": "imported_query_2hop", "new": "reopen_proof" },
+    { "legacy": "drill_corruption", "new": null },
+    { "legacy": "drill_cancellation", "new": null },
+    { "legacy": "drill_resource_limit", "new": null },
+    { "legacy": "drill_interrupted_finalization", "new": null }
   ]
 }

@@ -8,9 +8,13 @@ from graphforge_bench.scale_parity import (
     assert_no_unexplained_gaps,
     compare_evidence,
     compare_fixture_pair,
+    coverage_map,
     load_accepted_differences,
+    normalize_legacy_cert_lifecycle,
     normalize_legacy_evidence,
     normalize_new_evidence,
+    normalize_rung_evidence,
+    validate_historical_legacy_cert,
     workspace_root,
 )
 from jsonschema import Draft202012Validator
@@ -94,6 +98,26 @@ class ScaleParityTests(unittest.TestCase):
         ]
         self.assertEqual(len(drill_rows), 1)
         self.assertEqual(drill_rows[0]["outcome"], Outcome.ACCEPTED_DIFFERENCE.value)
+
+    def test_rung_and_legacy_cert_lifecycle_align(self) -> None:
+        rung = normalize_rung_evidence(
+            json.loads((FIXTURES / "rung" / "s18-pass.json").read_text(encoding="utf-8"))
+        )
+        legacy = normalize_legacy_cert_lifecycle(
+            json.loads((FIXTURES / "legacy" / "cert-s20-minimal.json").read_text(encoding="utf-8"))
+        )
+        matrix = compare_evidence(legacy, rung)
+        self.assertIn(matrix["overall"], {Outcome.MATCH.value, Outcome.ACCEPTED_DIFFERENCE.value})
+        assert_no_unexplained_gaps(matrix)
+
+    def test_historical_legacy_cert_fixture_validates(self) -> None:
+        fixture = FIXTURES / "legacy" / "cert-s20-minimal.json"
+        validate_historical_legacy_cert(fixture, expected_sha="a" * 40)
+
+    def test_coverage_map_lists_legacy_entrypoints(self) -> None:
+        mapping = coverage_map()
+        self.assertIn("make bench-g500-ladder", mapping)
+        self.assertIn("scripts/ci/validate-g500-certification.py", mapping)
 
 
 if __name__ == "__main__":

@@ -21,6 +21,8 @@ from graphforge_bench.progressive_qualification import PHASES
 MATRIX_SCHEMA = "graphforge-scale-orchestration-parity-matrix/1"
 ACCEPTED_SCHEMA = "graphforge-scale-orchestration-accepted-differences/1"
 CERT_SCHEMA = "graphforge-public-certification/1"
+RUNG_SCHEMA = "graphforge-progressive-qualification-rung-evidence/1"
+LEGACY_CERT_SCHEMA = "graphforge-billion-edge-certification-evidence/1"
 
 
 class ParityError(ValueError):
@@ -152,6 +154,185 @@ def normalize_new_evidence(document: Mapping[str, Any]) -> NormalizedEvidence:
     )
 
 
+def normalize_rung_evidence(document: Mapping[str, Any]) -> NormalizedEvidence:
+    profile_id = document.get("profile_id")
+    status = document.get("status")
+    if not isinstance(profile_id, str) or status not in {"passed", "failed"}:
+        raise ParityError("rung evidence requires profile_id and passed/failed status")
+    phase_names = document.get("phases", ())
+    if not isinstance(phase_names, list) or not phase_names:
+        raise ParityError("rung evidence requires non-empty phases list")
+    metrics = document.get("metrics", {})
+    peak_rss = metrics.get("peak_rss_bytes") if isinstance(metrics, dict) else None
+    if status == "passed":
+        if tuple(phase_names) != PHASES:
+            raise ParityError("passed rung must enumerate the full ten-phase contract")
+        phases = tuple(
+            NormalizedPhase(
+                phase=name,
+                status="passed",
+                duration_ms=None,
+                peak_rss_bytes=peak_rss if isinstance(peak_rss, int) else None,
+            )
+            for name in PHASES
+        )
+        return NormalizedEvidence(
+            profile_id=profile_id,
+            status="passed",
+            phases=phases,
+            source=RUNG_SCHEMA,
+        )
+    failure = document.get("failure")
+    phases: list[NormalizedPhase] = []
+    for name in phase_names:
+        if not isinstance(name, str):
+            raise ParityError("rung phase names must be strings")
+        failed = failure == name
+        phases.append(
+            NormalizedPhase(
+                phase=name,
+                status="failed" if failed else "passed",
+                duration_ms=None,
+                peak_rss_bytes=peak_rss if isinstance(peak_rss, int) else None,
+            )
+        )
+        if failed:
+            break
+    return NormalizedEvidence(
+        profile_id=profile_id,
+        status="failed",
+        phases=tuple(phases),
+        source=RUNG_SCHEMA,
+    )
+
+
+def normalize_legacy_cert_lifecycle(document: Mapping[str, Any]) -> NormalizedEvidence:
+    if document.get("schema") != LEGACY_CERT_SCHEMA:
+        raise ParityError(f"unsupported legacy certification schema: {document.get('schema')}")
+    accepted = load_accepted_differences()
+    cert_mapping = _legacy_cert_phase_mapping(accepted)
+    inverted = _invert_mapping(cert_mapping)
+    legacy_phases = document.get("phases", ())
+    if not isinstance(legacy_phases, list):
+        raise ParityError("legacy certification requires phases array")
+    legacy_status: dict[str, str] = {}
+    legacy_timing: dict[str, int] = {}
+    legacy_rss: dict[str, int] = {}
+    for entry in legacy_phases:
+        phase_id = entry.get("id")
+        status = entry.get("status")
+        if not isinstance(phase_id, str) or status not in {"pass", "fail"}:
+            raise ParityError("legacy certification phase requires id and pass/fail status")
+        legacy_status[phase_id] = "passed" if status == "pass" else "failed"
+        elapsed = entry.get("elapsed_ms")
+        if isinstance(elapsed, int) and elapsed >= 0:
+            legacy_timing[phase_id] = elapsed
+        rss = entry.get("rss_peak_bytes")
+        if isinstance(rss, int) and rss >= 0:
+            legacy_rss[phase_id] = rss
+    phases: list[NormalizedPhase] = []
+    overall = "passed" if document.get("result") == "pass" else "failed"
+    for new_phase in PHASES:
+        sources = inverted.get(new_phase, [])
+        if not sources:
+            phases.append(
+                NormalizedPhase(
+                    phase=new_phase,
+                    status="passed" if overall == "passed" else "failed",
+                    duration_ms=None,
+                    peak_rss_bytes=None,
+                )
+            )
+            continue
+        mapped_statuses = [legacy_status.get(source, "failed") for source in sources]
+        phase_status = (
+            "passed" if all(status == "passed" for status in mapped_statuses) else "failed"
+        )
+        duration_ms = sum(legacy_timing.get(source, 0) for source in sources) or None
+        rss_values = [legacy_rss[source] for source in sources if source in legacy_rss]
+        peak_rss = max(rss_values) if rss_values else None
+        phases.append(
+            NormalizedPhase(
+                phase=new_phase,
+                status=phase_status,
+                duration_ms=duration_ms,
+                peak_rss_bytes=peak_rss,
+            )
+        )
+        if phase_status == "failed":
+            overall = "failed"
+            break
+    profile_id = f"legacy-cert-s{document.get('run', {}).get('scale', 'unknown')}"
+    return NormalizedEvidence(
+        profile_id=profile_id,
+        status=overall,
+        phases=tuple(phases),
+        source=LEGACY_CERT_SCHEMA,
+    )
+
+
+def coverage_map() -> dict[str, str]:
+    """Legacy orchestration entrypoints and their benchmark-harness equivalents."""
+    return {
+        "make bench-g500-ladder": (
+            "make -C benchmarks progressive-qualification-run (local profiles)"
+        ),
+        "make bench-g500-scale20": (
+            "benchmarks/profiles/graph500/s20-*.json + progressive qualification"
+        ),
+        "make g500-ladder-qualification": (
+            "benchmarks progressive qualification + g500-ladder-qualification schema"
+        ),
+        "cargo test scale_g500_ladder (S10 CI)": (
+            "benchmarks/scripts/test-tiny-lifecycle-certification.py"
+        ),
+        "cargo test certification_target_live (ignored)": (
+            "make -C benchmarks qualification-operator GATE=progressive-ladder"
+        ),
+        "docs/development/perf-g500-ladder.md": (
+            "benchmarks/README.md + benchmarks/scale-parity-index.md"
+        ),
+        "scripts/ci/validate-g500-certification.py": (
+            "graphforge_bench.scale_parity + progressive schemas"
+        ),
+        ".github/workflows/g500-certification.yml": (
+            "config/gate-registry.json progressive-ladder gate"
+        ),
+    }
+
+
+def validate_historical_legacy_cert(evidence_path: Path, *, expected_sha: str) -> None:
+    """Ensure preserved legacy certification evidence still passes the historical validator."""
+    import importlib.util
+
+    script = workspace_root().parent / "scripts" / "ci" / "validate-g500-certification.py"
+    spec = importlib.util.spec_from_file_location("g500_validator", script)
+    if spec is None or spec.loader is None:
+        raise ParityError("unable to load validate-g500-certification.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    document = json.loads(evidence_path.read_text(encoding="utf-8"))
+    if not isinstance(document, dict):
+        raise ParityError("legacy certification fixture must be a JSON object")
+    module.validate(document, expected_sha)
+
+
+def compare_ladder_bundle(bundle_root: Path) -> list[dict[str, Any]]:
+    """Compare every rung JSON in a completed #900 bundle directory."""
+    if not bundle_root.is_dir():
+        raise ParityError(f"ladder bundle directory missing: {bundle_root}")
+    matrices: list[dict[str, Any]] = []
+    for rung_path in sorted(bundle_root.glob("*-rung.json")):
+        rung_doc = json.loads(rung_path.read_text(encoding="utf-8"))
+        rung = normalize_rung_evidence(rung_doc)
+        legacy_path = workspace_root() / "fixtures" / "parity" / "legacy" / "cert-s20-minimal.json"
+        if legacy_path.exists():
+            legacy_doc = json.loads(legacy_path.read_text(encoding="utf-8"))
+            legacy = normalize_legacy_cert_lifecycle(legacy_doc)
+            matrices.append(compare_evidence(legacy, rung))
+    return matrices
+
+
 def _phase_mapping(accepted: Mapping[str, Any]) -> dict[str, str | None]:
     mapping: dict[str, str | None] = {}
     for row in accepted.get("phase_mapping", ()):
@@ -160,6 +341,24 @@ def _phase_mapping(accepted: Mapping[str, Any]) -> dict[str, str | None]:
         if isinstance(legacy, str):
             mapping[legacy] = new if isinstance(new, str) else None
     return mapping
+
+
+def _legacy_cert_phase_mapping(accepted: Mapping[str, Any]) -> dict[str, str | None]:
+    mapping: dict[str, str | None] = {}
+    for row in accepted.get("legacy_cert_phase_mapping", ()):
+        legacy = row.get("legacy")
+        new = row.get("new")
+        if isinstance(legacy, str):
+            mapping[legacy] = new if isinstance(new, str) else None
+    return mapping
+
+
+def _invert_mapping(mapping: Mapping[str, str | None]) -> dict[str, list[str]]:
+    inverted: dict[str, list[str]] = {}
+    for legacy, new in mapping.items():
+        if isinstance(new, str):
+            inverted.setdefault(new, []).append(legacy)
+    return inverted
 
 
 def _accepted_ids(accepted: Mapping[str, Any]) -> dict[str, set[str]]:
