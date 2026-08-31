@@ -436,7 +436,16 @@ environment with fresh credential state. These components remain import-only:
 these tests perform no provider operation.
 
 Provider credentials belong to Pulumi ESC rather than GitHub workflow inputs or
-the caller's ambient shell. Live operator commands are rendered from
+the caller's ambient shell. Populate `curatelabs/graphforge/qualification` from
+`config/pulumi/graphforge-qualification.esc.yaml.example`, then verify the
+projections before any live attempt:
+
+```bash
+make -C benchmarks esc-readiness \
+  ESC_ENVIRONMENT=curatelabs/graphforge/qualification
+```
+
+Live operator commands are rendered from
 `config/gate-registry.json` and run through the Python control plane:
 
 ```bash

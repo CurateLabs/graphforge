@@ -1,0 +1,58 @@
+# Example Pulumi ESC definition for live GraphForge benchmark qualification.
+#
+# Copy into `curatelabs/graphforge/qualification` with real secret values.
+# The progressive ladder controller consumes exactly these projections:
+#   - FLY_API_TOKEN
+#   - GRAPHFORGE_PROGRESSIVE_SPEND_AUTHORIZATION
+#
+# Spend authorization must validate against
+# benchmarks/schemas/progressive-spend-authorization.json and bind the exact
+# merged commit, immutable image digest, and authorized maximum scale.
+
+values:
+  fly:
+    token:
+      fn::secret: "<fly-org-scoped-api-token>"
+
+  spend:
+    authorization:
+      fn::secret: |
+        {
+          "schema": "graphforge-progressive-spend-authorization/1",
+          "status": "authorized",
+          "provider": "fly",
+          "commit": "<40-char-git-sha>",
+          "admitted_plan_sha256": "<64-char-hex>",
+          "image_digest": "registry.fly.io/<app>@sha256:<64-char-hex>",
+          "organization": "<fly-org>",
+          "region": "ord",
+          "machine_class": "performance-2x",
+          "volume_gib": 500,
+          "rung": "S20",
+          "maximum_scale": 26,
+          "attempt_nonce": "<32-char-hex>",
+          "app": "gf-progressive-<32-char-hex>",
+          "issued_at": "2026-01-01T00:00:00Z",
+          "expires_at": "2026-01-01T05:00:00Z",
+          "teardown_owner": "qualification-operator",
+          "maximum_machine_seconds": 18000,
+          "resource_limits": {
+            "apps": 1,
+            "volumes": 1,
+            "machines": 1,
+            "image_builds": 0
+          },
+          "pricing": {
+            "currency": "USD",
+            "machine_microusd_per_hour": 1,
+            "volume_microusd_per_gib_hour": 1,
+            "transfer_allowance_microusd": 1,
+            "estimated_total_microusd": 1,
+            "maximum_total_microusd": 1
+          },
+          "claim": "spend_authorization_only"
+        }
+
+  environmentVariables:
+    FLY_API_TOKEN: ${fly.token}
+    GRAPHFORGE_PROGRESSIVE_SPEND_AUTHORIZATION: ${spend.authorization}
