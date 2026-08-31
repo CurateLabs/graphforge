@@ -35,8 +35,12 @@ embedding workload semantics. Each suite remains independently selectable via
 carry tiny checksummed stand-ins. Validation rejects incomplete provenance,
 checksum mismatch, missing assets, reference mismatch, and identity drift.
 
+The harness index is [`gdc-suite-index.md`](gdc-suite-index.md). SPB remains
+`inventory_only` (RDF/SPARQL outside the Cypher product surface); see #965.
+
 ```bash
 PYTHONPATH=harness uv run --locked python -m unittest tests.test_gdc_contracts
+PYTHONPATH=harness uv run --locked python -m unittest tests.test_gdc_spb_inventory
 ```
 
 ## Public-interface certification runner

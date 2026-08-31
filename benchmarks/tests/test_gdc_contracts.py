@@ -29,6 +29,7 @@ class GdcContractTests(unittest.TestCase):
             "gdc-acquisition.json",
             "gdc-suite-evidence.json",
             "gdc-suite-declaration.json",
+            "gdc-suite-status.json",
         ):
             schema = json.loads((self.root / "schemas" / name).read_text(encoding="utf-8"))
             Draft202012Validator.check_schema(schema)

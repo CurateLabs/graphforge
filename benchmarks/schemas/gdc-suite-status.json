@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schema": "graphforge-gdc-suite-status-schema/1",
+  "type": "object",
+  "properties": {
+    "schema": { "const": "graphforge-gdc-suite-status/1" },
+    "suite_id": {
+      "enum": [
+        "graphalytics",
+        "snb-interactive",
+        "snb-bi",
+        "finbench-transaction",
+        "spb"
+      ]
+    },
+    "disposition": { "enum": ["executable", "inventory_only"] },
+    "executable": { "type": "boolean" },
+    "reason": {
+      "type": ["string", "null"],
+      "enum": [
+        null,
+        "rdf_sparql_outside_property_graph_cypher_surface"
+      ]
+    },
+    "activation_criteria": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_]{0,80}$"
+      }
+    },
+    "pinned_identity": {
+      "type": "string",
+      "pattern": "^profiles/gdc/[A-Za-z0-9_.-]+\\.json$"
+    }
+  },
+  "required": [
+    "schema",
+    "suite_id",
+    "disposition",
+    "executable",
+    "reason",
+    "activation_criteria",
+    "pinned_identity"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": { "disposition": { "const": "inventory_only" } },
+        "required": ["disposition"]
+      },
+      "then": {
+        "properties": {
+          "executable": { "const": false },
+          "reason": { "type": "string" },
+          "activation_criteria": { "minItems": 1 }
+        }
+      },
+      "else": {
+        "properties": {
+          "executable": { "const": true },
+          "reason": { "type": "null" },
+          "activation_criteria": { "maxItems": 0 }
+        }
+      }
+    }
+  ]
+}
