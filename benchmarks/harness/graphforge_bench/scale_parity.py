@@ -321,15 +321,25 @@ def compare_ladder_bundle(bundle_root: Path) -> list[dict[str, Any]]:
     """Compare every rung JSON in a completed #900 bundle directory."""
     if not bundle_root.is_dir():
         raise ParityError(f"ladder bundle directory missing: {bundle_root}")
+    rung_paths = sorted(bundle_root.glob("*-rung.json"))
+    if not rung_paths:
+        return []
+    legacy_dir = workspace_root() / "fixtures" / "parity" / "legacy"
     matrices: list[dict[str, Any]] = []
-    for rung_path in sorted(bundle_root.glob("*-rung.json")):
+    for rung_path in rung_paths:
         rung_doc = json.loads(rung_path.read_text(encoding="utf-8"))
         rung = normalize_rung_evidence(rung_doc)
-        legacy_path = workspace_root() / "fixtures" / "parity" / "legacy" / "cert-s20-minimal.json"
-        if legacy_path.exists():
-            legacy_doc = json.loads(legacy_path.read_text(encoding="utf-8"))
-            legacy = normalize_legacy_cert_lifecycle(legacy_doc)
-            matrices.append(compare_evidence(legacy, rung))
+        scale = rung_doc.get("scale")
+        legacy_candidates = []
+        if isinstance(scale, int):
+            legacy_candidates.append(legacy_dir / f"cert-s{scale}-minimal.json")
+        legacy_candidates.append(legacy_dir / "cert-s20-minimal.json")
+        legacy_path = next((path for path in legacy_candidates if path.is_file()), None)
+        if legacy_path is None:
+            raise ParityError(f"no legacy migration fixture for rung {rung_path.name}")
+        legacy_doc = json.loads(legacy_path.read_text(encoding="utf-8"))
+        legacy = normalize_legacy_cert_lifecycle(legacy_doc)
+        matrices.append(compare_evidence(legacy, rung))
     return matrices
 
 
