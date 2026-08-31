@@ -11,7 +11,6 @@ import unittest
 from graphforge_bench.gdc_contracts import list_gdc_suites, workspace_root
 from graphforge_bench.gdc_finbench_transaction import (
     COMPATIBLE_READS,
-    COMPLEX_READS,
     EVIDENCE_SCHEMA,
     OPERATIONS,
     READ_WRITES,
