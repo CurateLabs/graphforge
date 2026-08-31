@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schema": "graphforge-scale-orchestration-parity-matrix-schema/1",
+  "type": "object",
+  "properties": {
+    "schema": { "const": "graphforge-scale-orchestration-parity-matrix/1" },
+    "legacy_source": { "type": "string", "minLength": 1, "maxLength": 120 },
+    "new_source": { "type": "string", "minLength": 1, "maxLength": 120 },
+    "overall": { "enum": ["match", "accepted_difference", "unexplained_gap"] },
+    "dimensions": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": { "$ref": "#/$defs/dimension" }
+    },
+    "phase_rows": {
+      "type": "array",
+      "maxItems": 32,
+      "items": { "$ref": "#/$defs/phaseRow" }
+    }
+  },
+  "required": ["schema", "legacy_source", "new_source", "overall", "dimensions"],
+  "additionalProperties": false,
+  "$defs": {
+    "outcome": {
+      "enum": ["match", "accepted_difference", "unexplained_gap"]
+    },
+    "dimension": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "outcome": { "$ref": "#/$defs/outcome" },
+        "accepted_difference_id": {
+          "oneOf": [
+            { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,80}$" },
+            { "type": "null" }
+          ]
+        },
+        "detail": { "type": "string", "maxLength": 512 }
+      },
+      "required": ["name", "outcome", "accepted_difference_id", "detail"],
+      "additionalProperties": false
+    },
+    "phaseRow": {
+      "type": "object",
+      "properties": {
+        "legacy_phase": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "new_phase": {
+          "oneOf": [
+            { "type": "string", "minLength": 1, "maxLength": 80 },
+            { "type": "null" }
+          ]
+        },
+        "outcome": { "$ref": "#/$defs/outcome" },
+        "accepted_difference_id": {
+          "oneOf": [
+            { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,80}$" },
+            { "type": "null" }
+          ]
+        },
+        "detail": { "type": "string", "maxLength": 512 }
+      },
+      "required": ["legacy_phase", "new_phase", "outcome", "accepted_difference_id", "detail"],
+      "additionalProperties": false
+    }
+  }
+}
