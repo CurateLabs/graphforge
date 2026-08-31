@@ -130,7 +130,6 @@ declaration or pinned identity.
 CARGO_TARGET_DIR=target cargo build --locked -p graphforge-benchmark-gdc-snb-bi
 PYTHONPATH=harness GRAPHFORGE_GDC_SNB_BI_BIN=target/debug/graphforge-benchmark-gdc-snb-bi \
   uv run --locked python -m unittest tests.test_gdc_snb_bi
->>>>>>> ce976f3 (test(bench): add GDC SNB BI suite (#963))
 ```
 
 ## SPB (Semantic Publishing Benchmark)
