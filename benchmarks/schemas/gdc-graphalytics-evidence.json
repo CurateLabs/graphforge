@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schema": "graphforge-gdc-graphalytics-evidence-schema/1",
+  "type": "object",
+  "properties": {
+    "schema": { "const": "graphforge-gdc-graphalytics-evidence/1" },
+    "suite_id": { "const": "graphalytics" },
+    "dataset_id": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,80}$" },
+    "status": {
+      "enum": ["passed", "failed", "semantic_incompatibility"]
+    },
+    "identities": { "type": "object" },
+    "algorithms": {
+      "type": "array",
+      "minItems": 6,
+      "maxItems": 6,
+      "items": {
+        "type": "object",
+        "properties": {
+          "algorithm": {
+            "enum": ["bfs", "pr", "wcc", "cdlp", "lcc", "sssp"]
+          },
+          "workload_key": {
+            "enum": ["bfs", "pr", "wcc", "cdlp", "lcc", "sssp"]
+          },
+          "status": {
+            "enum": ["passed", "failed", "semantic_incompatibility"]
+          },
+          "validation_mode": {
+            "enum": ["exact", "equivalence", "epsilon"]
+          },
+          "cause": { "type": ["string", "null"] },
+          "public_api": {
+            "type": ["object", "null"],
+            "properties": {
+              "verb": { "type": "string" },
+              "by": { "type": "string" },
+              "directed": { "type": "boolean" },
+              "weight_property": { "type": ["string", "null"] },
+              "notes": { "type": "string" }
+            },
+            "required": ["verb", "by", "directed", "notes"],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "algorithm",
+          "workload_key",
+          "status",
+          "validation_mode"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["schema", "suite_id", "dataset_id", "status", "identities", "algorithms"],
+  "additionalProperties": false
+}

@@ -1,0 +1,8 @@
+{
+  "schema": "graphforge-gdc-graphalytics-job/1",
+  "suite_id": "graphalytics",
+  "dataset_id": "ga-tiny",
+  "algorithm": "cdlp",
+  "max_iterations": 2,
+  "directed": true
+}

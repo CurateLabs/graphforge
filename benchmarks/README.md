@@ -38,9 +38,18 @@ checksum mismatch, missing assets, reference mismatch, and identity drift.
 The harness index is [`gdc-suite-index.md`](gdc-suite-index.md). SPB remains
 `inventory_only` (RDF/SPARQL outside the Cypher product surface); see #965.
 
+Graphalytics (#961) is a separate executable suite: Rust owns six-algorithm
+parameter mapping, Graphalytics tolerance rules, and reference validation in
+`runners/gdc-graphalytics`, while Python orchestration reuses shared GDC
+identity contracts. Unsupported official semantics (fixed-iteration PageRank,
+synchronous CDLP) fail closed with typed `semantic_incompatibility` instead of
+approximating. Bounded fixtures start the ordered dataset ladder at `ga-tiny`.
+
 ```bash
 PYTHONPATH=harness uv run --locked python -m unittest tests.test_gdc_contracts
 PYTHONPATH=harness uv run --locked python -m unittest tests.test_gdc_spb_inventory
+CARGO_TARGET_DIR=target cargo test --locked -p graphforge-benchmark-gdc-graphalytics
+PYTHONPATH=harness uv run --locked python -m unittest tests.test_gdc_graphalytics
 ```
 
 ## Public-interface certification runner

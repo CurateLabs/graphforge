@@ -1,0 +1,36 @@
+{
+  "schema": "graphforge-gdc-graphalytics-ladder/1",
+  "suite_id": "graphalytics",
+  "datasets": [
+    {
+      "id": "ga-tiny",
+      "order": 1,
+      "role": "engineering_fixture"
+    },
+    {
+      "id": "wiki-Talk",
+      "order": 2,
+      "role": "first_engineering_dataset"
+    },
+    {
+      "id": "kgs",
+      "order": 3,
+      "role": "ordered_ladder"
+    },
+    {
+      "id": "cit-Patents",
+      "order": 4,
+      "role": "ordered_ladder"
+    },
+    {
+      "id": "dota-league",
+      "order": 5,
+      "role": "ordered_ladder"
+    },
+    {
+      "id": "Graph500-22",
+      "order": 6,
+      "role": "bridge_not_graph500_suite"
+    }
+  ]
+}
