@@ -3,8 +3,8 @@
 The canonical ``run`` command opens an ESC environment and invokes the existing
 controller inside Pulumi's secret-filtered process. It does not claim that a
 caller-controlled marker can prove ESC ancestry. The progressive ladder remains
-fail-closed until a dedicated scale executor exists; its no-spend plan is
-available through ``plan-progressive``.
+fail-closed until whole-attempt orchestration, spend authorization, and teardown
+recovery exist; its no-spend plan is available through ``plan-progressive``.
 """
 
 from __future__ import annotations
@@ -52,8 +52,8 @@ def _single_value(argv: Sequence[str], flag: str) -> str:
 def validate_live_request(gate: str, argv: Sequence[str]) -> None:
     if gate == "progressive-ladder":
         raise OperatorRefusalError(
-            "progressive-ladder execution is unavailable until the dedicated provider "
-            "image and BenchExec scale executor are implemented"
+            "progressive-ladder execution is unavailable until whole-attempt Fly orchestration, "
+            "spend authorization, and teardown recovery are implemented"
         )
     if gate not in LIVE_GATES:
         raise OperatorRefusalError("qualification gate is unknown")

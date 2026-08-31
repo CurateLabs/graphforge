@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schema": "graphforge-progressive-provider-run-plan-schema/1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "rung", "execution", "identities", "limits", "outputs", "claim"],
+  "properties": {
+    "schema": {"const": "graphforge-progressive-provider-execution-plan/1"},
+    "rung": {"enum": ["S20", "S22", "S24", "S25", "S26"]},
+    "execution": {"const": "provider_native_linux_benchexec"},
+    "identities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commit", "profile_id", "profile_sha256", "image_digest", "generator", "generator_executable_sha256", "gf_sha256", "certify_sha256", "benchexec_python_sha256", "benchexec_version", "admitted_plan_sha256", "source_tree_sha256"],
+      "properties": {
+        "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "profile_id": {"enum": ["graph500-s20-provider", "graph500-s22-provider", "graph500-s24-provider", "graph500-s25-provider", "graph500-s26-provider"]},
+        "profile_sha256": {"$ref": "#/$defs/digest"},
+        "image_digest": {"type": "string", "pattern": "^registry\\.fly\\.io/[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}$"},
+        "generator": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "generator_executable_sha256": {"$ref": "#/$defs/digest"},
+        "gf_sha256": {"$ref": "#/$defs/digest"},
+        "certify_sha256": {"$ref": "#/$defs/digest"},
+        "benchexec_python_sha256": {"$ref": "#/$defs/digest"},
+        "benchexec_version": {"type": "string", "pattern": "^[0-9]+(\\.[0-9]+)+$"},
+        "admitted_plan_sha256": {"$ref": "#/$defs/digest"},
+        "source_tree_sha256": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["wall_seconds", "memory_bytes", "cores"],
+      "properties": {
+        "wall_seconds": {"const": 14400},
+        "memory_bytes": {"const": 4294967296},
+        "cores": {"const": 16}
+      }
+    },
+    "outputs": {
+      "type": "array",
+      "minItems": 5,
+      "maxItems": 5,
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^s(20|22|24|25|26)-(plan|benchexec|graphforge|rung|result)\\.json$"}
+    },
+    "claim": {"const": "engineering_evidence_only"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"rung": {"const": "S20"}}, "required": ["rung"]},
+      "then": {"properties": {"outputs": {"const": ["s20-plan.json", "s20-benchexec.json", "s20-graphforge.json", "s20-rung.json", "s20-result.json"]}}}
+    },
+    {
+      "if": {"properties": {"rung": {"const": "S22"}}, "required": ["rung"]},
+      "then": {"properties": {"outputs": {"const": ["s22-plan.json", "s22-benchexec.json", "s22-graphforge.json", "s22-rung.json", "s22-result.json"]}}}
+    },
+    {
+      "if": {"properties": {"rung": {"const": "S24"}}, "required": ["rung"]},
+      "then": {"properties": {"outputs": {"const": ["s24-plan.json", "s24-benchexec.json", "s24-graphforge.json", "s24-rung.json", "s24-result.json"]}}}
+    },
+    {
+      "if": {"properties": {"rung": {"const": "S25"}}, "required": ["rung"]},
+      "then": {"properties": {"outputs": {"const": ["s25-plan.json", "s25-benchexec.json", "s25-graphforge.json", "s25-rung.json", "s25-result.json"]}}}
+    },
+    {
+      "if": {"properties": {"rung": {"const": "S26"}}, "required": ["rung"]},
+      "then": {"properties": {"outputs": {"const": ["s26-plan.json", "s26-benchexec.json", "s26-graphforge.json", "s26-rung.json", "s26-result.json"]}}}
+    }
+  ],
+  "$defs": {"digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
+}

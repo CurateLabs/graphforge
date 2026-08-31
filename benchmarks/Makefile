@@ -59,6 +59,7 @@ progressive-provider-plan: install
 		plan-progressive -- \
 		--root "$(CURDIR)" --output-dir "$(OUTPUT_DIR)" --commit "$(COMMIT)" \
 		--maximum-scale "$(MAXIMUM_SCALE)" $(if $(PROVIDER_CAPACITY),--provider-capacity "$(PROVIDER_CAPACITY)",) \
+		$(if $(IMAGE_DIGEST),--image-digest "$(IMAGE_DIGEST)",) \
 		--plan-out "$(PLAN_OUT)"
 
 # The registry owns the live command. Pulumi ESC supplies provider credentials;

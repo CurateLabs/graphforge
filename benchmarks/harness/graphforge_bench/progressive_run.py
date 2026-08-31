@@ -75,7 +75,9 @@ def _resolve_executable(value: str, expected_name: str) -> Path:
     located = str(candidate) if candidate.is_absolute() else shutil.which(value)
     if located is None:
         raise ControllerError(f"required executable unavailable: {expected_name}")
-    resolved = Path(located).resolve(strict=True)
+    # Keep a venv launcher path intact: resolving its symlink escapes the venv
+    # and makes the base interpreter unable to import the locked BenchExec.
+    resolved = Path(os.path.abspath(located))  # noqa: PTH100
     if not resolved.is_file() or not os.access(resolved, os.X_OK):
         raise ControllerError(f"required executable is not executable: {expected_name}")
     return resolved
@@ -191,7 +193,24 @@ def build_plan(
 
 
 def _write_json(path: Path, value: Mapping[str, Any]) -> None:
-    path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    encoded = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.link(temporary, path)
+        temporary.unlink()
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 def write_plan(output_dir: Path, plan: Mapping[str, Any]) -> Path:
@@ -276,6 +295,7 @@ def _run_benchexec(stage: Path, executables: Executables, identities: Mapping[st
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
         "PATH": f"{stage / 'bin'}:{Path(sys.executable).parent}:/usr/bin:/bin",
+        "PYTHONPATH": str(Path(__file__).resolve().parents[1]),
     }
     command = [
         str(executables.benchexec_python),
@@ -481,7 +501,13 @@ def _construction_metrics(import_receipt: Mapping[str, Any]) -> dict[str, int]:
 
 
 def assemble_rung_evidence(
-    *, root: Path, scale: int, graphforge: Mapping[str, Any], benchexec: Mapping[str, Any]
+    *,
+    root: Path,
+    scale: int,
+    graphforge: Mapping[str, Any],
+    benchexec: Mapping[str, Any],
+    profile_id: str | None = None,
+    source: str = "progressive_profile",
 ) -> dict[str, Any]:
     if graphforge.get("status") != "passed" or benchexec.get("outcome") != "passed":
         raise ControllerError("a failed execution cannot produce passed rung evidence")
@@ -531,8 +557,8 @@ def assemble_rung_evidence(
         raise ControllerError("BenchExec authority is missing")
     phases = [phase.get("phase") for phase in graphforge.get("phases", [])]
     rung = {
-        "profile_id": f"graph500-s{scale}-local",
-        "source": "progressive_profile",
+        "profile_id": profile_id or f"graph500-s{scale}-local",
+        "source": source,
         "scale": scale,
         "live_edges": expected_edges,
         "status": "passed",
@@ -585,10 +611,24 @@ def assemble_rung_evidence(
 
 
 def ingest_benchexec_result(
-    *, root: Path, stage: Path, scale: int, plan: Mapping[str, Any]
+    *,
+    root: Path,
+    stage: Path,
+    scale: int,
+    plan: Mapping[str, Any],
+    profile_id: str | None = None,
+    source: str = "progressive_profile",
 ) -> tuple[dict[str, Any], Mapping[str, Any], dict[str, Any]]:
     raw_output = stage / "raw"
     graphforge = _parse_graphforge_log(raw_output)
+    identities = plan.get("identities")
+    if not isinstance(identities, Mapping) or not isinstance(identities.get("profile_id"), str):
+        raise ControllerError("run plan profile identity is malformed")
+    planned_profile_id = str(identities["profile_id"])
+    if graphforge.get("profile_id") != planned_profile_id:
+        raise ControllerError("certification profile identity contradicts the run plan")
+    if profile_id is not None and profile_id != planned_profile_id:
+        raise ControllerError("requested profile identity contradicts the run plan")
     raw = _parse_benchexec_xml(raw_output, correctness=graphforge.get("status") == "passed")
     limits = plan["limits"]
     benchexec = normalize_run(
@@ -604,7 +644,12 @@ def ingest_benchexec_result(
     _validate(root, "certification-evidence.json", graphforge)
     _validate(root, "benchexec-run-evidence.json", benchexec)
     rung = assemble_rung_evidence(
-        root=root, scale=scale, graphforge=graphforge, benchexec=benchexec
+        root=root,
+        scale=scale,
+        graphforge=graphforge,
+        benchexec=benchexec,
+        profile_id=planned_profile_id,
+        source=source,
     )
     return benchexec, graphforge, rung
 

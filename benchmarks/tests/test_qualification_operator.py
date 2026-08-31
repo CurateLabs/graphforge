@@ -61,7 +61,7 @@ class QualificationOperatorTests(unittest.TestCase):
             runner_called = True
             return subprocess.CompletedProcess(args, 0)
 
-        with self.assertRaisesRegex(OperatorRefusalError, "scale executor"):
+        with self.assertRaisesRegex(OperatorRefusalError, "whole-attempt Fly orchestration"):
             run_under_esc(
                 "curatelabs/graphforge/qualification",
                 "progressive-ladder",

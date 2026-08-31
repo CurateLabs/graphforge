@@ -29,8 +29,8 @@ from graphforge_bench.progressive_qualification import (
 
 SCALES = (18, 19, 20, 22, 24, 25, 26)
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
+IMAGE_DIGEST = re.compile(r"^registry\.fly\.io/[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}$")
 PLAN_SCHEMA = "graphforge-progressive-provider-plan/1"
-EXECUTION_REFUSAL = "provider_executor_unavailable"
 
 
 class ProviderPlanError(ValueError):
@@ -87,14 +87,14 @@ def _validate_rung(root: Path, value: Any, scale: int) -> Mapping[str, Any]:
     error = next(Draft202012Validator(schema).iter_errors(value), None)
     if error is not None:
         raise ProviderPlanError("completed rung evidence is not schema-valid")
-    expected_source = "progressive_profile" if scale in (18, 19) else None
+    expected_source = "progressive_profile" if scale in (18, 19) else "canonical_ladder"
     if (
         value.get("scale") != scale
         or value.get("status") != "passed"
         or value.get("live_edges") != 16 * (1 << scale)
         or value.get("profile_id")
         != f"graph500-s{scale}-{'local' if scale in (18, 19) else 'provider'}"
-        or (expected_source is not None and value.get("source") != expected_source)
+        or value.get("source") != expected_source
     ):
         raise ProviderPlanError("completed rung evidence does not match its canonical profile")
     return value
@@ -135,6 +135,40 @@ def _validate_result_identity(
         raise ProviderPlanError(
             "completed rung result is not bound to the requested commit/profile"
         )
+    if scale not in (18, 19):
+        artifacts = value.get("artifacts")
+        execution_plan = _read_json(
+            output_dir / f"s{scale}-plan.json",
+            "completed provider execution plan is unavailable",
+        )
+        execution_schema = _read_json(
+            root / "schemas" / "progressive-provider-run-plan.json",
+            "provider execution plan schema is unavailable",
+        )
+        execution_error = next(
+            Draft202012Validator(execution_schema).iter_errors(execution_plan), None
+        )
+        if (
+            execution_error is not None
+            or not isinstance(execution_plan, Mapping)
+            or execution_plan.get("rung") != f"S{scale}"
+            or execution_plan.get("identities") != identities
+        ):
+            raise ProviderPlanError("completed provider plan/result identities disagree")
+        try:
+            expected_artifacts = {
+                name: hashlib.sha256(path.read_bytes()).hexdigest()
+                for name, path in {
+                    "plan_sha256": output_dir / f"s{scale}-plan.json",
+                    "benchexec_sha256": output_dir / f"s{scale}-benchexec.json",
+                    "graphforge_sha256": output_dir / f"s{scale}-graphforge.json",
+                    "rung_sha256": output_dir / f"s{scale}-rung.json",
+                }.items()
+            }
+        except OSError as error:
+            raise ProviderPlanError("completed provider artifacts are unavailable") from error
+        if not isinstance(artifacts, Mapping) or dict(artifacts) != expected_artifacts:
+            raise ProviderPlanError("completed provider artifacts do not match their result")
 
 
 def completed_rungs(
@@ -177,6 +211,7 @@ def plan_provider_ladder(
     commit: str,
     maximum_scale: int,
     provider_capacity: Mapping[str, Any] | None = None,
+    image_digest: str | None = None,
 ) -> dict[str, Any]:
     """Return one immutable, sanitized next-rung plan without provider calls."""
     if COMMIT.fullmatch(commit) is None:
@@ -198,6 +233,8 @@ def plan_provider_ladder(
     profile_path = _profile_path(root, selected)
     projection: Mapping[str, Any] | None = None
     if selected.execution == "provider":
+        if image_digest is None or IMAGE_DIGEST.fullmatch(image_digest) is None:
+            raise ProviderPlanError("immutable provider image digest is required")
         try:
             projection = project(selected, completed, provider_capacity)
         except QualificationError as error:
@@ -222,9 +259,10 @@ def plan_provider_ladder(
         "profile_id": selected.id,
         "profile_path": profile_path.relative_to(root).as_posix(),
         "profile_sha256": "sha256:" + _sha256(profile_path),
+        "image_digest": image_digest if selected.execution == "provider" else None,
         "projection": projection,
-        "execution_authorized": selected.execution == "local",
-        "execution_refusal": None if selected.execution == "local" else EXECUTION_REFUSAL,
+        "execution_authorized": True,
+        "execution_refusal": None,
         "claim": "engineering_evidence_only",
     }
     schema_path = root / "schemas" / "progressive-provider-plan.json"
@@ -236,22 +274,20 @@ def plan_provider_ladder(
 
 
 def require_execution_authority(plan: Mapping[str, Any]) -> None:
-    """Refuse provider execution until its image and resource authority exist."""
-    if plan.get("execution") == "provider":
-        raise ProviderPlanError(
-            "provider execution is refused until a dedicated provider image and BenchExec "
-            "authority exist"
-        )
+    """Require the checked-in offline runner before handing a plan to execution."""
+    if plan.get("execution_authorized") is not True or plan.get("execution_refusal") is not None:
+        raise ProviderPlanError("provider execution authority is unavailable")
 
 
 def main(argv: list[str] | None = None) -> int:
     """Write one no-spend provider plan for a protected workflow step."""
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--commit", required=True)
     parser.add_argument("--maximum-scale", type=int, required=True)
     parser.add_argument("--provider-capacity", type=Path)
+    parser.add_argument("--image-digest")
     parser.add_argument("--plan-out", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
@@ -267,6 +303,7 @@ def main(argv: list[str] | None = None) -> int:
             commit=args.commit,
             maximum_scale=args.maximum_scale,
             provider_capacity=capacity,
+            image_digest=args.image_digest,
         )
         args.plan_out.parent.mkdir(parents=True, exist_ok=True)
         args.plan_out.write_text(

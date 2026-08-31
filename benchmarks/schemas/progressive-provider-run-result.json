@@ -3,27 +3,55 @@
   "schema": "graphforge-progressive-provider-run-result-schema/1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "rung", "status", "failure", "identities", "claim"],
+  "required": ["schema", "rung", "status", "failure", "identities", "artifacts", "claim"],
   "properties": {
     "schema": {"const": "graphforge-progressive-provider-run-result/1"},
     "rung": {"enum": ["S20", "S22", "S24", "S25", "S26"]},
     "status": {"enum": ["passed", "failed"]},
-    "failure": {"type": ["string", "null"]},
+    "failure": {
+      "enum": [null, "native_authority_unavailable", "staging_failed", "execution_boundary_failed", "benchexec_failed", "ordinary_receipt_missing", "stored_plan_mismatch"]
+    },
     "identities": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["commit", "profile_id", "profile_sha256"],
+      "required": ["commit", "profile_id", "profile_sha256", "image_digest", "generator", "generator_executable_sha256", "gf_sha256", "certify_sha256", "benchexec_python_sha256", "benchexec_version", "admitted_plan_sha256", "source_tree_sha256"],
       "properties": {
         "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
         "profile_id": {"enum": ["graph500-s20-provider", "graph500-s22-provider", "graph500-s24-provider", "graph500-s25-provider", "graph500-s26-provider"]},
-        "profile_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        "profile_sha256": {"$ref": "#/$defs/digest"},
+        "image_digest": {"type": "string", "pattern": "^registry\\.fly\\.io/[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}$"},
+        "generator": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "generator_executable_sha256": {"$ref": "#/$defs/digest"},
+        "gf_sha256": {"$ref": "#/$defs/digest"},
+        "certify_sha256": {"$ref": "#/$defs/digest"},
+        "benchexec_python_sha256": {"$ref": "#/$defs/digest"},
+        "benchexec_version": {"type": "string", "pattern": "^[0-9]+(\\.[0-9]+)+$"},
+        "admitted_plan_sha256": {"$ref": "#/$defs/digest"},
+        "source_tree_sha256": {"$ref": "#/$defs/digest"}
       }
+    },
+    "artifacts": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["plan_sha256", "benchexec_sha256", "graphforge_sha256", "rung_sha256"],
+          "properties": {
+            "plan_sha256": {"$ref": "#/$defs/digest"},
+            "benchexec_sha256": {"$ref": "#/$defs/digest"},
+            "graphforge_sha256": {"$ref": "#/$defs/digest"},
+            "rung_sha256": {"$ref": "#/$defs/digest"}
+          }
+        }
+      ]
     },
     "claim": {"const": "engineering_evidence_only"}
   },
   "allOf": [
     {"if": {"properties": {"status": {"const": "passed"}}, "required": ["status"]},
-     "then": {"properties": {"failure": {"type": "null"}}},
-     "else": {"properties": {"failure": {"type": "string"}}}}
-  ]
+     "then": {"properties": {"failure": {"type": "null"}, "artifacts": {"type": "object"}}},
+     "else": {"properties": {"failure": {"type": "string"}, "artifacts": {"type": "null"}}}}
+  ],
+  "$defs": {"digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
 }
