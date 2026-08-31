@@ -334,6 +334,54 @@ class ProgressiveProviderAttemptTests(unittest.TestCase):
         self.assertEqual(transport.calls, [])
         self.assertFalse(self.ledger.exists())
 
+    def test_recovery_lease_is_acked_before_provision(self) -> None:
+        self.write_prefix(self.output, 18, 19)
+        seen: list[bool] = []
+
+        class TrackingTransport(FakeTransport):
+            def provision(self, invocation, authorization, *, deadline):  # type: ignore[no-untyped-def]
+                lease = invocation.ledger_path.with_name(
+                    f"{invocation.ledger_path.stem}.recovery-lease.json"
+                )
+                seen.append(lease.is_file())
+                return super().provision(invocation, authorization, deadline=deadline)
+
+        tracked = TrackingTransport(self.remote)
+        outcome = execute(
+            self.invocation,
+            authorization(20),
+            transport=tracked,
+            planner=planner,
+            now=NOW,
+            clock=lambda: NOW,
+        )
+        self.assertEqual(outcome.status, "passed")
+        self.assertEqual(seen, [True])
+        self.assertEqual(tracked.calls[0][0], "provision")
+        lease_path = self.ledger.with_name(f"{self.ledger.stem}.recovery-lease.json")
+        self.assertTrue(lease_path.is_file())
+        self.assertNotIn("FLY_API_TOKEN", lease_path.read_text(encoding="utf-8"))
+
+    def test_readiness_timeout_is_preserved_from_transport(self) -> None:
+        self.write_prefix(self.output, 18, 19)
+
+        class ReadyTimeoutTransport(FakeTransport):
+            def provision(self, invocation, authorization, *, deadline):  # type: ignore[no-untyped-def]
+                self.calls.append(("provision", authorization.app, deadline.isoformat()))
+                raise AttemptError("readiness_timeout", "created Machine did not become ready")
+
+        outcome = execute(
+            self.invocation,
+            authorization(20),
+            transport=ReadyTimeoutTransport(self.remote),
+            planner=planner,
+            now=NOW,
+            clock=lambda: NOW,
+        )
+        self.assertEqual(outcome.status, "failed")
+        self.assertEqual(outcome.failure, "readiness_timeout")
+        self.assertEqual(outcome.teardown_status, "empty")
+
     def test_spend_lifetime_and_integer_ceiling_are_closed(self) -> None:
         too_long = authorization_document()
         too_long["expires_at"] = "2026-06-02T00:00:00Z"

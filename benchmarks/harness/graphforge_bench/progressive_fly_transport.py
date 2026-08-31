@@ -38,6 +38,16 @@ TRANSFER_TIMEOUT_SECONDS = 300
 TEARDOWN_TIMEOUT_SECONDS = 300
 TEARDOWN_POLL_ATTEMPTS = 6
 TEARDOWN_POLL_INTERVAL_SECONDS = 1
+READINESS_CAP_SECONDS = 300
+READINESS_PROBE_TIMEOUT_SECONDS = 5
+READINESS_INITIAL_BACKOFF_SECONDS = 0.25
+READINESS_MAX_BACKOFF_SECONDS = 2.0
+# Documented Fly Machine states still converging toward admission.
+NONTERMINAL_MACHINE_STATES = frozenset({"created", "starting", "replacing"})
+# Documented Fly Machine states that can never converge to a healthy worker.
+TERMINAL_MACHINE_STATES = frozenset(
+    {"stopped", "stopping", "destroyed", "destroying", "suspended", "suspending"}
+)
 REMOTE_OUTPUT_DIR = "/work/evidence"
 API_ROOT = "https://api.machines.dev"
 PROVIDER_ENVIRONMENT = frozenset(
@@ -364,6 +374,7 @@ def _observed_image(
     metadata = config.get("metadata")
     init = config.get("init")
     expected_memory = MACHINE_MEMORY_MB.get(authorization.machine_class)
+    lifetime = str(authorization.maximum_machine_seconds)
     if (
         value.get("id") != machine_id
         or value.get("name") != f"{authorization.app}-worker"
@@ -378,7 +389,7 @@ def _observed_image(
         or config.get("services") not in (None, [])
         or not isinstance(init, Mapping)
         or init.get("entrypoint") not in (["/bin/sleep"], "/bin/sleep")
-        or init.get("cmd") not in (["infinity"], "infinity")
+        or init.get("cmd") not in ([lifetime], lifetime)
         or not isinstance(guest, Mapping)
         or guest.get("cpu_kind") != cpu_kind
         or guest.get("cpus") != int(cpus_text.removesuffix("x"))
@@ -400,6 +411,77 @@ def _observed_image(
     ):
         raise FlyTransportError("Machine state differs from authorized resources")
     return f"registry.fly.io/{repository}@{digest}"
+
+
+def _readiness_machine(value: Any, *, machine_name: str) -> tuple[str, str] | None:
+    """Classify Machine inventory during readiness convergence.
+
+    Returns ``None`` when the expected Machine is still absent. Returns
+    ``(machine_id, state)`` when exactly one expected Machine is present in a
+    documented nonterminal or ``started`` state. Raises on malformed, extra,
+    wrong-name, unknown, or terminal inventory.
+    """
+    machines = _list(value, "Machine")
+    if not machines:
+        return None
+    if len(machines) != 1 or not isinstance(machines[0], Mapping):
+        raise FlyTransportError("provider Machine inventory is unexpected")
+    machine = machines[0]
+    if machine.get("name") != machine_name:
+        raise FlyTransportError("created Machine identity is unavailable")
+    machine_id = machine.get("id")
+    state = machine.get("state")
+    if not isinstance(machine_id, str) or MACHINE_ID.fullmatch(machine_id) is None:
+        raise FlyTransportError("created Machine identity is malformed")
+    if not isinstance(state, str):
+        raise FlyTransportError("provider Machine state is malformed")
+    if state in TERMINAL_MACHINE_STATES:
+        raise FlyTransportError("provider Machine entered a terminal state")
+    if state != "started" and state not in NONTERMINAL_MACHINE_STATES:
+        raise FlyTransportError("provider Machine state is unexpected")
+    return machine_id, state
+
+
+def wait_for_machine_readiness(
+    boundary: FlyBoundary,
+    authorization: SpendAuthorization,
+    *,
+    machine_name: str,
+    deadline: datetime,
+    clock: Callable[[], datetime],
+    sleeper: Callable[[float], None],
+    admit: Callable[[str], str],
+) -> tuple[str, str]:
+    """Poll until the authorized Machine admits under full identity validation.
+
+    Probe failures may be retried. Malformed, extra, wrong-name, terminal, or
+    identity-drift inventory fails immediately. Mutation is never retried.
+    """
+    readiness_deadline = min(deadline, clock() + timedelta(seconds=READINESS_CAP_SECONDS))
+    backoff = READINESS_INITIAL_BACKOFF_SECONDS
+    while True:
+        remaining = (readiness_deadline - clock()).total_seconds()
+        if remaining <= 0 or remaining < 1:
+            raise AttemptError("readiness_timeout", "created Machine did not become ready")
+        probe_timeout = min(READINESS_PROBE_TIMEOUT_SECONDS, int(remaining))
+        try:
+            machines = boundary.json(
+                ("flyctl", "machine", "list", "--app", authorization.app, "--json"),
+                timeout=probe_timeout,
+            )
+        except (OSError, subprocess.SubprocessError, FlyTransportError):
+            machines = None
+        else:
+            observed = _readiness_machine(machines, machine_name=machine_name)
+            if observed is not None:
+                machine_id, state = observed
+                if state == "started":
+                    return machine_id, admit(machine_id)
+        sleep_for = min(backoff, max(0.0, (readiness_deadline - clock()).total_seconds()))
+        if sleep_for <= 0:
+            raise AttemptError("readiness_timeout", "created Machine did not become ready")
+        sleeper(sleep_for)
+        backoff = min(backoff * 2, READINESS_MAX_BACKOFF_SECONDS)
 
 
 class FlyProviderTransport:
@@ -541,13 +623,14 @@ class FlyProviderTransport:
         )
         self._volume_id = volume_id
         machine_name = f"{authorization.app}-worker"
+        lifetime = str(authorization.maximum_machine_seconds)
         self._boundary.run(
             (
                 "flyctl",
                 "machine",
                 "run",
                 authorization.image_digest,
-                "infinity",
+                lifetime,
                 "--app",
                 authorization.app,
                 "--name",
@@ -581,14 +664,20 @@ class FlyProviderTransport:
             ),
             timeout=self._timeout(deadline, CREATE_TIMEOUT_SECONDS),
         )
-        self._machine_id = _machine_id(
-            self._boundary.json(
-                ("flyctl", "machine", "list", "--app", authorization.app, "--json"),
-                timeout=self._timeout(deadline, CREATE_TIMEOUT_SECONDS),
-            ),
-            machine_name,
+
+        def admit(machine_id: str) -> str:
+            self._machine_id = machine_id
+            return self._validate_owned_state(deadline)
+
+        self._machine_id, observed = wait_for_machine_readiness(
+            self._boundary,
+            authorization,
+            machine_name=machine_name,
+            deadline=deadline,
+            clock=self._clock,
+            sleeper=self._sleeper,
+            admit=admit,
         )
-        observed = self._validate_owned_state(deadline)
         return ProvisionedAttempt(
             image_digest=observed,
             resources={"machine_id": self._machine_id, "volume_id": volume_id},

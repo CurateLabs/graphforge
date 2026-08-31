@@ -675,6 +675,26 @@ def execute(
         completed_scales=scales,
     )
     save_ledger(invocation.ledger_path, ledger)
+    from graphforge_bench.progressive_recovery_lease import (
+        ack_recovery_lease,
+        build_recovery_lease,
+    )
+
+    lease_path = invocation.ledger_path.with_name(
+        f"{invocation.ledger_path.stem}.recovery-lease.json"
+    )
+    if lease_path.exists() or lease_path.is_symlink():
+        raise AttemptError(
+            "recovery_refused", "existing recovery lease requires expired-lease cleanup"
+        )
+    ack_recovery_lease(
+        lease_path,
+        build_recovery_lease(
+            authorization,
+            execution_deadline=deadline,
+            acknowledged_at=started_at,
+        ),
+    )
     provisioned: ProvisionedAttempt | None = None
     primary_error: AttemptError | None = None
     pending_plan: Mapping[str, Any] | None = first_plan

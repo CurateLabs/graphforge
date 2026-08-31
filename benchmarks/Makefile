@@ -24,11 +24,12 @@ progressive-provider-attempt-static: install
 	PYTHONPATH=harness uv run --locked python -m unittest \
 		tests.test_progressive_provider_attempt
 
-# Provider-free proof of the Fly command boundary and ESC secret capsule.
+# Provider-free proof of the Fly command boundary, ESC capsule, and recovery lease.
 progressive-fly-transport-static: install
 	PYTHONPATH=harness uv run --locked python -m unittest \
 		tests.test_progressive_fly_transport \
-		tests.test_progressive_esc
+		tests.test_progressive_esc \
+		tests.test_progressive_recovery_lease
 
 local-admission: install
 	PYTHONPATH=$(CURDIR)/harness uv run --locked reframe -C reframe/settings.py -c reframe/checks -n '^LocalBenchExecAdmission$$' -l | grep -F LocalBenchExecAdmission

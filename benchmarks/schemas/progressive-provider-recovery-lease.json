@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schema": "graphforge-progressive-provider-recovery-lease-schema/1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "version",
+    "organization",
+    "app",
+    "attempt_nonce",
+    "commit",
+    "authorization_sha256",
+    "image_digest",
+    "teardown_owner",
+    "execution_deadline",
+    "cleanup_deadline",
+    "resource_limits",
+    "acknowledged_at",
+    "claim"
+  ],
+  "properties": {
+    "schema": {"const": "graphforge-progressive-provider-recovery-lease/1"},
+    "version": {"const": 1},
+    "organization": {"$ref": "#/$defs/name"},
+    "app": {"type": "string", "pattern": "^gf-progressive-[0-9a-f]{32}$"},
+    "attempt_nonce": {"$ref": "#/$defs/nonce"},
+    "commit": {"$ref": "#/$defs/commit"},
+    "authorization_sha256": {"$ref": "#/$defs/digest"},
+    "image_digest": {"$ref": "#/$defs/image"},
+    "teardown_owner": {"$ref": "#/$defs/name"},
+    "execution_deadline": {"$ref": "#/$defs/timestamp"},
+    "cleanup_deadline": {"$ref": "#/$defs/timestamp"},
+    "resource_limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apps", "volumes", "machines", "image_builds"],
+      "properties": {
+        "apps": {"const": 1},
+        "volumes": {"const": 1},
+        "machines": {"const": 1},
+        "image_builds": {"const": 0}
+      }
+    },
+    "acknowledged_at": {"$ref": "#/$defs/timestamp"},
+    "claim": {"const": "recovery_lease_only"}
+  },
+  "$defs": {
+    "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "image": {"type": "string", "pattern": "^registry\\.fly\\.io/[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}$"},
+    "name": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"},
+    "nonce": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "timestamp": {"type": "string", "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z$"}
+  }
+}
