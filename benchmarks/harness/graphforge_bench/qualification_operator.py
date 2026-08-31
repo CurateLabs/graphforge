@@ -2,9 +2,9 @@
 
 The canonical ``run`` command opens an ESC environment and invokes the existing
 controller inside Pulumi's secret-filtered process. It does not claim that a
-caller-controlled marker can prove ESC ancestry. The progressive ladder remains
-fail-closed until whole-attempt orchestration, spend authorization, and teardown
-recovery exist; its no-spend plan is available through ``plan-progressive``.
+caller-controlled marker can prove ESC ancestry. The progressive ladder uses the
+same ESC boundary with protected spend authorization; its no-spend plan is
+available through ``plan-progressive``.
 """
 
 from __future__ import annotations
@@ -20,8 +20,8 @@ ESC_ENVIRONMENT = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9_.-]*(?:/[A-Za-z0-9][A-Za-z0-9_.-]*){0,2}(?:@[A-Za-z0-9_.-]+)?$"
 )
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
-LIVE_GATES = {"fly-tiny", "fly-tiny-recovery"}
-ALL_GATES = (*sorted(LIVE_GATES), "progressive-ladder")
+LIVE_GATES = {"fly-tiny", "fly-tiny-recovery", "progressive-ladder"}
+ALL_GATES = tuple(sorted(LIVE_GATES))
 ROOT = Path(__file__).resolve().parents[3]
 
 
@@ -49,19 +49,29 @@ def _single_value(argv: Sequence[str], flag: str) -> str:
     return value
 
 
-def validate_live_request(gate: str, argv: Sequence[str]) -> None:
+def controller_module(gate: str) -> str:
     if gate == "progressive-ladder":
-        raise OperatorRefusalError(
-            "progressive-ladder execution is unavailable until whole-attempt Fly orchestration, "
-            "spend authorization, and teardown recovery are implemented"
-        )
+        return "graphforge_bench.progressive_ladder_qualification"
+    return "graphforge_bench.fly_tiny_qualification"
+
+
+def validate_live_request(gate: str, argv: Sequence[str]) -> None:
     if gate not in LIVE_GATES:
         raise OperatorRefusalError("qualification gate is unknown")
     commit = _single_value(argv, "--expected-sha")
     if COMMIT.fullmatch(commit) is None:
         raise OperatorRefusalError("--expected-sha must be a lowercase full Git object ID")
     _require_flag(argv, "--confirm-disposable")
+    if gate == "progressive-ladder":
+        if "--execute" not in argv and "--cleanup-only" not in argv:
+            raise OperatorRefusalError("--execute or --cleanup-only is required")
+        return
     _require_flag(argv, "--execute" if gate == "fly-tiny" else "--cleanup-only")
+
+
+def validate_progressive_request(argv: Sequence[str]) -> None:
+    for flag in ("--output-dir", "--ledger", "--result-out"):
+        _single_value(argv, flag)
 
 
 def esc_command(environment: str, gate: str, argv: Sequence[str]) -> tuple[str, ...]:
@@ -70,6 +80,8 @@ def esc_command(environment: str, gate: str, argv: Sequence[str]) -> tuple[str, 
         raise OperatorRefusalError("Pulumi ESC environment name is invalid")
     forwarded = _forwarded(argv)
     validate_live_request(gate, forwarded)
+    if gate == "progressive-ladder":
+        validate_progressive_request(forwarded)
     return (
         "pulumi",
         "env",
@@ -78,7 +90,7 @@ def esc_command(environment: str, gate: str, argv: Sequence[str]) -> tuple[str, 
         "--",
         sys.executable,
         "-m",
-        "graphforge_bench.fly_tiny_qualification",
+        controller_module(gate),
         *forwarded,
     )
 

@@ -53,7 +53,32 @@ class QualificationOperatorTests(unittest.TestCase):
                 ],
             )
 
-    def test_progressive_ladder_refuses_before_opening_esc(self) -> None:
+    def test_progressive_ladder_esc_command_wires_controller(self) -> None:
+        progressive_args = [
+            "--expected-sha",
+            "a" * 40,
+            "--output-dir",
+            "/tmp/evidence",
+            "--ledger",
+            "/tmp/ledger.json",
+            "--result-out",
+            "/tmp/result.json",
+            "--execute",
+            "--confirm-disposable",
+        ]
+        command = esc_command(
+            "curatelabs/graphforge/qualification", "progressive-ladder", progressive_args
+        )
+        self.assertEqual(
+            command[:5], ("pulumi", "env", "run", "curatelabs/graphforge/qualification", "--")
+        )
+        self.assertEqual(
+            command[5:8],
+            (sys.executable, "-m", "graphforge_bench.progressive_ladder_qualification"),
+        )
+        self.assertEqual(list(command[-len(progressive_args) :]), progressive_args)
+
+    def test_progressive_ladder_opens_esc_without_origin_main_attestation(self) -> None:
         runner_called = False
 
         def runner(*args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -61,14 +86,29 @@ class QualificationOperatorTests(unittest.TestCase):
             runner_called = True
             return subprocess.CompletedProcess(args, 0)
 
-        with self.assertRaisesRegex(OperatorRefusalError, "whole-attempt Fly orchestration"):
+        progressive_args = [
+            "--expected-sha",
+            "a" * 40,
+            "--output-dir",
+            "/tmp/evidence",
+            "--ledger",
+            "/tmp/ledger.json",
+            "--result-out",
+            "/tmp/result.json",
+            "--execute",
+            "--confirm-disposable",
+        ]
+        self.assertEqual(
             run_under_esc(
                 "curatelabs/graphforge/qualification",
                 "progressive-ladder",
-                ARGS,
+                progressive_args,
                 runner=runner,
-            )
-        self.assertFalse(runner_called)
+                attestor=lambda _commit: None,
+            ),
+            0,
+        )
+        self.assertTrue(runner_called)
 
     def test_outer_runner_receives_argv_without_secret_values(self) -> None:
         observed: tuple[str, ...] | None = None
