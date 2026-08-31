@@ -174,9 +174,7 @@ class ProviderTransport(Protocol):
 
     def execute_rung(self, *, rung: int, image_digest: str, deadline: datetime) -> int: ...
 
-    def retrieve_result(
-        self, *, rung: int, destination: Path, deadline: datetime
-    ) -> None: ...
+    def retrieve_result(self, *, rung: int, destination: Path, deadline: datetime) -> None: ...
 
     def retrieve_success_artifacts(
         self,
@@ -262,9 +260,7 @@ def parse_spend_authorization(value: str | bytes | Mapping[str, Any]) -> SpendAu
     }
     if not isinstance(decoded, dict) or set(decoded) != expected:
         raise AttemptError("authorization_refused", "spend authorization shape is invalid")
-    _validate_schema(
-        "progressive-spend-authorization.json", decoded, "authorization_refused"
-    )
+    _validate_schema("progressive-spend-authorization.json", decoded, "authorization_refused")
     pricing = decoded.get("pricing")
     pricing_fields = {
         "currency",
@@ -327,10 +323,7 @@ def parse_spend_authorization(value: str | bytes | Mapping[str, Any]) -> SpendAu
     seconds = decoded["maximum_machine_seconds"]
     machine = (pricing["machine_microusd_per_hour"] * seconds + 3599) // 3600
     volume = (
-        pricing["volume_microusd_per_gib_hour"]
-        * decoded["volume_gib"]
-        * seconds
-        + 3599
+        pricing["volume_microusd_per_gib_hour"] * decoded["volume_gib"] * seconds + 3599
     ) // 3600
     conservative_total = machine + volume + pricing["transfer_allowance_microusd"]
     if conservative_total > pricing["estimated_total_microusd"]:
@@ -589,9 +582,8 @@ def _teardown_observation(value: Mapping[str, Any]) -> dict[str, Any]:
     expected = {"app_exists", "machines", "volumes", "secrets"}
     if not isinstance(value, Mapping) or set(value) != expected:
         raise AttemptError("inventory_unavailable", "teardown inventory is malformed")
-    if (
-        type(value["app_exists"]) is not bool
-        or any(not _integer(value[name]) or value[name] < 0 for name in expected - {"app_exists"})
+    if type(value["app_exists"]) is not bool or any(
+        not _integer(value[name]) or value[name] < 0 for name in expected - {"app_exists"}
     ):
         raise AttemptError("inventory_unavailable", "teardown inventory is malformed")
     return dict(value)
@@ -722,9 +714,7 @@ def execute(
             save_ledger(invocation.ledger_path, ledger)
             _atomic_json(control_plan, plan)
             try:
-                transport.upload_plan(
-                    rung=next_rung, plan_path=control_plan, deadline=deadline
-                )
+                transport.upload_plan(rung=next_rung, plan_path=control_plan, deadline=deadline)
                 _require_before_deadline(clock_fn, deadline)
             except AttemptError:
                 raise
@@ -864,8 +854,8 @@ def execute(
         try:
             observed = transport.teardown(_cleanup_handles(ledger))
             ledger.teardown_observed = _teardown_observation(observed)
-            ledger.teardown_checked_at = clock_fn().astimezone(timezone.utc).strftime(
-                "%Y-%m-%dT%H:%M:%SZ"
+            ledger.teardown_checked_at = (
+                clock_fn().astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             )
             if ledger.teardown_observed != {
                 "app_exists": False,
@@ -932,9 +922,7 @@ def _outcome_document(outcome: AttemptOutcome, teardown_inventory_sha256: str) -
 def _write_outcome(result_path: Path, outcome: AttemptOutcome) -> dict[str, Any]:
     inventory_path = result_path.with_name(f"{result_path.stem}-teardown-inventory.json")
     inventory = _teardown_document(outcome)
-    _validate_schema(
-        "progressive-provider-teardown-inventory.json", inventory, "evidence_invalid"
-    )
+    _validate_schema("progressive-provider-teardown-inventory.json", inventory, "evidence_invalid")
     _atomic_json(inventory_path, inventory)
     inventory_sha256 = hashlib.sha256(inventory_path.read_bytes()).hexdigest()
     document = _outcome_document(outcome, inventory_sha256)

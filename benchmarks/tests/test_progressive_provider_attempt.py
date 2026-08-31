@@ -236,9 +236,7 @@ class FakeTransport:
                 stream.write("\n")
         return 0
 
-    def retrieve_result(
-        self, *, rung: int, destination: Path, deadline: datetime
-    ) -> None:
+    def retrieve_result(self, *, rung: int, destination: Path, deadline: datetime) -> None:
         self.calls.append(("retrieve_result", rung))
         shutil.copyfile(self.remote / f"s{rung}-result.json", destination)
 
@@ -385,9 +383,7 @@ class ProgressiveProviderAttemptTests(unittest.TestCase):
                 output, remote = base / "evidence", base / "remote"
                 remote.mkdir()
                 self.write_prefix(output, 18, 19)
-                observations = iter(
-                    (NOW,) * live_observations + (deadline,) * 3
-                )
+                observations = iter((NOW,) * live_observations + (deadline,) * 3)
                 transport = FakeTransport(remote)
                 outcome = asdict(
                     execute(
