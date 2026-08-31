@@ -30,9 +30,10 @@ Declared in `fixtures/parity/accepted-differences.json`:
 ## Comparator commands
 
 ```bash
-# Tiny/local shadow fixtures (no provider spend)
+# Parity gate status (#959 criteria tracker; tiny must pass, retirement blocked until #900)
 cd benchmarks
-PYTHONPATH=harness uv run --locked python -m unittest tests.test_scale_parity
+make parity-gate
+PYTHONPATH=harness uv run --locked python -m unittest tests.test_scale_parity tests.test_parity_gate
 
 # Historical legacy certification fixture readability
 PYTHONPATH=harness uv run --locked python -c "
