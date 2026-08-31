@@ -307,14 +307,26 @@ make -C benchmarks progressive-provider-plan \
   COMMIT=$(git rev-parse HEAD) MAXIMUM_SCALE=26 \
   OUTPUT_DIR=/admitted-volume/graphforge-evidence \
   PLAN_OUT=/admitted-volume/graphforge-evidence/provider-plan.json \
+  IMAGE_DIGEST=registry.fly.io/graphforge-bench@sha256:<64-hex-digest> \
   PROVIDER_CAPACITY=/sanitized/provider-capacity.json
 ```
 
-The planner is deliberately not a provider executor. Provider plans are marked
-refused for execution until a dedicated provider image contains `gf`, the
-Graph500 generator/certifier, Python/BenchExec, and a proven cgroups/I/O
-authority. The canonical order remains S18, S19, S20, S22, S24, S25, S26;
-the first failed or missing gate stops the ladder.
+An admitted S20--S26 plan can be consumed by the offline provider runner inside
+the dedicated `containers/graphforge-progressive-qualification` image. The
+runner requires the image's read-only build manifest, matches the immutable
+`registry.fly.io/...@sha256:...` identity supplied by the admitted plan and
+provider transport, and revalidates the canonical profile, projection, source
+tree, native executables, and BenchExec identity before starting BenchExec. It
+accepts only fixed in-image executable paths, an admitted plan and evidence
+directory below `/work`, no pre-existing files for the selected rung, and a
+real `/work` mount. The host
+must separately pass native Linux cgroups-v2 admission. The runner has no
+laptop fallback and never calls a provider API.
+
+A successful rung emits exactly `sN-plan.json`, `sN-benchexec.json`,
+`sN-graphforge.json`, `sN-rung.json`, and `sN-result.json`, all scoped to
+engineering evidence. The canonical order remains S18, S19, S20, S22, S24,
+S25, S26; the first failed or missing gate stops the planner.
 
 Provider credentials belong to Pulumi ESC rather than GitHub workflow inputs or
 the caller's ambient shell. Live operator commands are rendered from
@@ -329,9 +341,11 @@ make -C benchmarks qualification-operator \
 
 The operator uses the shell-free form `pulumi env run <environment> -- <argv>`;
 secret values are never copied into its command line or evidence. The
-`progressive-ladder` command is registered now, but fails before opening ESC
-until the dedicated provider image and scale BenchExec executor are present.
-This is a deliberate capability boundary, not a GitHub-dispatch prerequisite.
+`progressive-ladder` is registered, but still fails before opening ESC. The
+offline image and rung runner do not implement whole-attempt Fly orchestration,
+typed spend authorization, ownership-ledger recovery, or teardown inventory.
+This is a deliberate live capability boundary, not a GitHub-dispatch
+prerequisite.
 
 The controller derives bulk-ingest capability from the same run's bounded
 ordinary `gf import-session commit --json` receipt: its construction evidence

@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from graphforge_bench.progressive_run import (
     ControllerError,
@@ -11,11 +12,13 @@ from graphforge_bench.progressive_run import (
     _run_benchexec,
     _safe_stage,
     _validate,
+    _write_json,
     assemble_rung_evidence,
     build_plan,
     ingest_benchexec_result,
     require_bulk_ingest_capability,
     require_order,
+    resolve_executables,
     validate_fixture_bundle,
     write_plan,
     write_s20_projection,
@@ -265,6 +268,28 @@ class ProgressiveRunControllerTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def test_evidence_writes_are_atomic_and_never_replace_existing_files(self) -> None:
+        path = self.base / "immutable.json"
+        _write_json(path, {"value": 1})
+        with self.assertRaises(FileExistsError):
+            _write_json(path, {"value": 2})
+        self.assertEqual(json.loads(path.read_text()), {"value": 1})
+        self.assertEqual([item.name for item in self.base.glob(".immutable.json.*")], [])
+
+    def test_venv_python_path_is_not_dereferenced_out_of_its_environment(self) -> None:
+        venv = self.base / "venv/bin"
+        venv.mkdir(parents=True)
+        python = venv / "python"
+        python.symlink_to(self.executables.benchexec_python)
+        resolved = resolve_executables(
+            gf=str(self.executables.gf),
+            certify=str(self.executables.certify),
+            generator=str(self.executables.generator),
+            benchexec_python=str(python),
+        )
+        self.assertEqual(resolved.benchexec_python, python.absolute())
+        self.assertTrue(resolved.benchexec_python.is_symlink())
+
     def test_dry_plan_binds_exact_immutable_identities_without_paths(self) -> None:
         plan = build_plan(
             root=ROOT,
@@ -508,6 +533,25 @@ class ProgressiveRunControllerTests(unittest.TestCase):
         self.executables.benchexec_python.write_bytes(b"changed-after-planning")
         with self.assertRaisesRegex(ControllerError, "identity changed after planning"):
             _run_benchexec(stage, self.executables, plan["identities"])
+
+    def test_benchexec_sanitized_environment_keeps_only_the_tool_module_path(self) -> None:
+        plan = build_plan(
+            root=ROOT,
+            output_dir=self.output,
+            scale=18,
+            commit=COMMIT,
+            executables=self.executables,
+        )
+        stage = self.base / "benchexec-stage"
+        stage.mkdir()
+        (stage / "bin").mkdir()
+        (stage / "benchmark.xml").write_text("fixture", encoding="utf-8")
+        with patch("graphforge_bench.progressive_run.subprocess.run") as execute:
+            execute.return_value.returncode = 0
+            self.assertEqual(_run_benchexec(stage, self.executables, plan["identities"]), 0)
+        environment = execute.call_args.kwargs["env"]
+        self.assertEqual(environment["PYTHONPATH"], str(ROOT / "harness"))
+        self.assertEqual(set(environment), {"HOME", "LANG", "LC_ALL", "PATH", "PYTHONPATH"})
 
     def test_failed_result_schema_requires_closed_exact_identities(self) -> None:
         plan = build_plan(

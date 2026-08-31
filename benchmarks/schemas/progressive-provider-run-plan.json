@@ -1,16 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "schema": "graphforge-progressive-provider-run-result-schema/1",
+  "schema": "graphforge-progressive-provider-run-plan-schema/1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "rung", "status", "failure", "identities", "artifacts", "claim"],
+  "required": ["schema", "rung", "execution", "identities", "limits", "outputs", "claim"],
   "properties": {
-    "schema": {"const": "graphforge-progressive-provider-run-result/1"},
+    "schema": {"const": "graphforge-progressive-provider-execution-plan/1"},
     "rung": {"enum": ["S20", "S22", "S24", "S25", "S26"]},
-    "status": {"enum": ["passed", "failed"]},
-    "failure": {
-      "enum": [null, "native_authority_unavailable", "staging_failed", "execution_boundary_failed", "benchexec_failed", "ordinary_receipt_missing"]
-    },
+    "execution": {"const": "provider_native_linux_benchexec"},
     "identities": {
       "type": "object",
       "additionalProperties": false,
@@ -30,28 +27,24 @@
         "source_tree_sha256": {"$ref": "#/$defs/digest"}
       }
     },
-    "artifacts": {
-      "oneOf": [
-        {"type": "null"},
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["plan_sha256", "benchexec_sha256", "graphforge_sha256", "rung_sha256"],
-          "properties": {
-            "plan_sha256": {"$ref": "#/$defs/digest"},
-            "benchexec_sha256": {"$ref": "#/$defs/digest"},
-            "graphforge_sha256": {"$ref": "#/$defs/digest"},
-            "rung_sha256": {"$ref": "#/$defs/digest"}
-          }
-        }
-      ]
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["wall_seconds", "memory_bytes", "cores"],
+      "properties": {
+        "wall_seconds": {"const": 14400},
+        "memory_bytes": {"const": 4294967296},
+        "cores": {"const": 16}
+      }
+    },
+    "outputs": {
+      "type": "array",
+      "minItems": 5,
+      "maxItems": 5,
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^s(20|22|24|25|26)-(plan|benchexec|graphforge|rung|result)\\.json$"}
     },
     "claim": {"const": "engineering_evidence_only"}
   },
-  "allOf": [
-    {"if": {"properties": {"status": {"const": "passed"}}, "required": ["status"]},
-     "then": {"properties": {"failure": {"type": "null"}, "artifacts": {"type": "object"}}},
-     "else": {"properties": {"failure": {"type": "string"}, "artifacts": {"type": "null"}}}}
-  ],
   "$defs": {"digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
 }

@@ -85,6 +85,9 @@ jobs:
       - name: Test Fly qualification safety contract
         run: python3 scripts/ci/test-fly-filesystem-safety-contract.py
 
+      - name: Test progressive qualification image contract
+        run: python3 scripts/ci/test-progressive-qualification-image.py
+
       - name: Test Repository Policy suite classifier
         run: scripts/ci/test-classify-policy-suites.sh
 
@@ -1168,6 +1171,27 @@ jobs:
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           enable-cache: true
+
+      - name: Test offline progressive provider boundary
+        working-directory: benchmarks
+        run: |
+          PYTHONPATH=harness uv run --locked python -m unittest \
+            tests.test_progressive_provider_plan \
+            tests.test_progressive_provider_run \
+            tests.test_progressive_run \
+            tests.test_qualification_operator
+
+      - name: Build immutable progressive qualification image
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_sha=$(git rev-parse HEAD)
+          image="graphforge-progressive-qualification:${source_sha}"
+          docker build --platform linux/amd64 \
+            --build-arg "GRAPHFORGE_COMMIT=${source_sha}" \
+            --file containers/graphforge-progressive-qualification/Dockerfile \
+            --tag "$image" .
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$image")" = "$source_sha"
 
       - name: Cargo feature drift check (fail-closed)
         run: |

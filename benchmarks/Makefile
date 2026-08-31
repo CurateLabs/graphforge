@@ -54,11 +54,12 @@ progressive-qualification-project-s20: install
 
 # Safe control-plane admission only; this never provisions a provider.
 progressive-provider-plan: install
-	test -n "$(COMMIT)" && test -n "$(MAXIMUM_SCALE)" && test -n "$(OUTPUT_DIR)" && test -n "$(PLAN_OUT)"
+	test -n "$(COMMIT)" && test -n "$(MAXIMUM_SCALE)" && test -n "$(OUTPUT_DIR)" && test -n "$(PLAN_OUT)" && test -n "$(IMAGE_DIGEST)"
 	PYTHONPATH=$(CURDIR)/harness uv run --locked python -m graphforge_bench.qualification_operator \
 		plan-progressive -- \
 		--root "$(CURDIR)" --output-dir "$(OUTPUT_DIR)" --commit "$(COMMIT)" \
 		--maximum-scale "$(MAXIMUM_SCALE)" $(if $(PROVIDER_CAPACITY),--provider-capacity "$(PROVIDER_CAPACITY)",) \
+		--image-digest "$(IMAGE_DIGEST)" \
 		--plan-out "$(PLAN_OUT)"
 
 # The registry owns the live command. Pulumi ESC supplies provider credentials;

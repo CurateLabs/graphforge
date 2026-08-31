@@ -3,7 +3,7 @@
   "schema": "graphforge-progressive-provider-plan-schema/1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "status", "commit", "maximum_scale", "completed_scales", "next_rung", "execution", "profile_id", "profile_path", "profile_sha256", "projection", "execution_authorized", "execution_refusal", "claim"],
+  "required": ["schema", "status", "commit", "maximum_scale", "completed_scales", "next_rung", "execution", "profile_id", "profile_path", "profile_sha256", "image_digest", "projection", "execution_authorized", "execution_refusal", "claim"],
   "properties": {
     "schema": {"const": "graphforge-progressive-provider-plan/1"},
     "status": {"const": "admitted"},
@@ -15,6 +15,12 @@
     "profile_id": {"type": "string", "pattern": "^graph500-s(18|19|20|22|24|25|26)-(local|provider)$"},
     "profile_path": {"type": "string", "pattern": "^profiles/graph500/s(18|19|20|22|24|25|26)-(local|provider)\\.json$"},
     "profile_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "image_digest": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "string", "pattern": "^registry\\.fly\\.io/[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}$"}
+      ]
+    },
     "projection": {"oneOf": [{"type": "object"}, {"type": "null"}]},
     "execution_authorized": {"type": "boolean"},
     "execution_refusal": {"type": ["string", "null"], "enum": [null, "provider_executor_unavailable"]},

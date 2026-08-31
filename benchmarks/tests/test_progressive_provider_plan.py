@@ -155,6 +155,7 @@ CHECK_FIELDS = (
     "io_reader_publication_headroom",
     "correctness",
 )
+IMAGE = "registry.fly.io/graphforge-bench@sha256:" + "1" * 64
 
 
 class ProgressiveProviderPlanTests(unittest.TestCase):
@@ -172,6 +173,7 @@ class ProgressiveProviderPlanTests(unittest.TestCase):
         self.assertEqual(plan["next_rung"], "S18")
         self.assertEqual(plan["execution"], "local")
         self.assertIsNone(plan["projection"])
+        self.assertIsNone(plan["image_digest"])
         self.assertEqual(plan["profile_path"], "profiles/graph500/s18-local.json")
         self.assertNotIn("app", json.dumps(plan))
         self.assertNotIn("machine", json.dumps(plan))
@@ -195,6 +197,14 @@ class ProgressiveProviderPlanTests(unittest.TestCase):
         bad["status"] = "failed"
         (self.output / "s18-rung.json").write_text(json.dumps(bad), encoding="utf-8")
         with self.assertRaisesRegex(ProviderPlanError, "schema-valid"):
+            completed_rungs(ROOT, self.output)
+
+        (self.output / "s18-rung.json").unlink()
+        for scale in (18, 19, 20):
+            (self.output / f"s{scale}-rung.json").write_text(
+                json.dumps(rung(scale, source="progressive_profile")), encoding="utf-8"
+            )
+        with self.assertRaisesRegex(ProviderPlanError, "canonical profile"):
             completed_rungs(ROOT, self.output)
 
     def test_projection_gate_is_required_before_s20(self) -> None:
@@ -246,9 +256,11 @@ class ProgressiveProviderPlanTests(unittest.TestCase):
                 commit=COMMIT,
                 maximum_scale=20,
                 provider_capacity=CAPACITY,
+                image_digest=IMAGE,
             )
         self.assertEqual(plan["next_rung"], "S20")
         self.assertEqual(plan["profile_id"], "graph500-s20-provider")
+        self.assertEqual(plan["image_digest"], IMAGE)
         self.assertEqual(plan["projection"]["decision"], "admitted")
         encoded = json.dumps(plan).lower()
         for forbidden in ("machine_id", "volume_id", "token", "secret", "provider_id"):
@@ -313,7 +325,87 @@ class ProgressiveProviderPlanTests(unittest.TestCase):
                 provider_capacity=CAPACITY,
             )
 
-    def test_provider_execution_is_explicitly_refused(self) -> None:
+    def test_provider_result_hashes_bind_every_projection_artifact(self) -> None:
+        for scale in (18, 19):
+            (self.output / f"s{scale}-rung.json").write_text(
+                json.dumps(rung(scale)), encoding="utf-8"
+            )
+            (self.output / f"s{scale}-result.json").write_text(
+                json.dumps(result(scale)), encoding="utf-8"
+            )
+        scale = 20
+        artifact_paths = {
+            "plan_sha256": self.output / "s20-plan.json",
+            "benchexec_sha256": self.output / "s20-benchexec.json",
+            "graphforge_sha256": self.output / "s20-graphforge.json",
+            "rung_sha256": self.output / "s20-rung.json",
+        }
+        profile = ROOT / "profiles/graph500/s20-provider.json"
+        identities = {
+            "commit": COMMIT,
+            "profile_id": "graph500-s20-provider",
+            "profile_sha256": hashlib.sha256(profile.read_bytes()).hexdigest(),
+            "image_digest": IMAGE,
+            "generator": "sha256:" + "0" * 64,
+            "generator_executable_sha256": "0" * 64,
+            "gf_sha256": "0" * 64,
+            "certify_sha256": "0" * 64,
+            "benchexec_python_sha256": "0" * 64,
+            "benchexec_version": "1.0",
+            "admitted_plan_sha256": "0" * 64,
+            "source_tree_sha256": "0" * 64,
+        }
+        execution_plan = {
+            "schema": "graphforge-progressive-provider-execution-plan/1",
+            "rung": "S20",
+            "execution": "provider_native_linux_benchexec",
+            "identities": identities,
+            "limits": {"wall_seconds": 14400, "memory_bytes": 4294967296, "cores": 16},
+            "outputs": [
+                "s20-plan.json",
+                "s20-benchexec.json",
+                "s20-graphforge.json",
+                "s20-rung.json",
+                "s20-result.json",
+            ],
+            "claim": "engineering_evidence_only",
+        }
+        for name, path in artifact_paths.items():
+            if name == "plan_sha256":
+                document = execution_plan
+            elif name == "rung_sha256":
+                document = rung(scale)
+            else:
+                document = {"fixture": name}
+            path.write_text(json.dumps(document), encoding="utf-8")
+        provider_result = {
+            "schema": "graphforge-progressive-provider-run-result/1",
+            "rung": "S20",
+            "status": "passed",
+            "failure": None,
+            "identities": identities,
+            "artifacts": {
+                name: hashlib.sha256(path.read_bytes()).hexdigest()
+                for name, path in artifact_paths.items()
+            },
+            "claim": "engineering_evidence_only",
+        }
+        (self.output / "s20-result.json").write_text(json.dumps(provider_result), encoding="utf-8")
+        self.assertEqual(len(completed_rungs(ROOT, self.output, commit=COMMIT)), 3)
+
+        changed_result = json.loads(json.dumps(provider_result))
+        changed_result["identities"]["gf_sha256"] = "1" * 64
+        (self.output / "s20-result.json").write_text(json.dumps(changed_result), encoding="utf-8")
+        with self.assertRaisesRegex(ProviderPlanError, "plan/result identities disagree"):
+            completed_rungs(ROOT, self.output, commit=COMMIT)
+        (self.output / "s20-result.json").write_text(json.dumps(provider_result), encoding="utf-8")
+
+        with (self.output / "s20-benchexec.json").open("a", encoding="utf-8") as stream:
+            stream.write("\n")
+        with self.assertRaisesRegex(ProviderPlanError, "artifacts do not match"):
+            completed_rungs(ROOT, self.output, commit=COMMIT)
+
+    def test_provider_plan_has_offline_execution_authority(self) -> None:
         with patch(
             "graphforge_bench.progressive_provider_plan.completed_rungs",
             return_value=[rung(18), rung(19)],
@@ -324,9 +416,28 @@ class ProgressiveProviderPlanTests(unittest.TestCase):
                 commit=COMMIT,
                 maximum_scale=20,
                 provider_capacity=CAPACITY,
+                image_digest=IMAGE,
             )
-        with self.assertRaisesRegex(ProviderPlanError, "dedicated provider image"):
-            require_execution_authority(plan)
+        require_execution_authority(plan)
+        refused = {**plan, "execution_authorized": False, "execution_refusal": "unavailable"}
+        with self.assertRaisesRegex(ProviderPlanError, "authority is unavailable"):
+            require_execution_authority(refused)
+
+    def test_provider_plan_requires_one_immutable_admitted_image(self) -> None:
+        with (
+            patch(
+                "graphforge_bench.progressive_provider_plan.completed_rungs",
+                return_value=[rung(18), rung(19)],
+            ),
+            self.assertRaisesRegex(ProviderPlanError, "immutable provider image digest"),
+        ):
+            plan_provider_ladder(
+                root=ROOT,
+                output_dir=self.output,
+                commit=COMMIT,
+                maximum_scale=20,
+                provider_capacity=CAPACITY,
+            )
 
 
 if __name__ == "__main__":
