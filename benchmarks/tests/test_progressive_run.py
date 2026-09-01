@@ -570,6 +570,7 @@ class ProgressiveRunControllerTests(unittest.TestCase):
             self.assertEqual(_run_benchexec(stage, self.executables, plan["identities"]), 0)
         command = execute.call_args.args[0]
         self.assertEqual(command[0], str(self.base / "benchexec"))
+        self.assertEqual(command[1:3], ["--tool-directory", str(stage / "bin")])
         environment = execute.call_args.kwargs["env"]
         self.assertEqual(environment["PYTHONPATH"], str(ROOT / "harness"))
         self.assertEqual(set(environment), {"HOME", "LANG", "LC_ALL", "PATH", "PYTHONPATH"})

@@ -18,6 +18,7 @@ from pathlib import Path
 import platform
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -254,6 +255,7 @@ def _safe_stage(
     ):
         staged = bin_dir / name
         shutil.copy2(source, staged)
+        staged.chmod(staged.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         if _digest(staged) != identities.get(identity_key):
             raise ControllerError(f"staged executable identity mismatch: {name}")
     return stage
@@ -338,6 +340,8 @@ def _run_benchexec(stage: Path, executables: Executables, identities: Mapping[st
     }
     command = [
         str(_benchexec_cli(executables.benchexec_python)),
+        "--tool-directory",
+        str(stage / "bin"),
         "--no-compress-results",
         "--outputpath",
         str(raw_output),
