@@ -29,6 +29,7 @@ from graphforge_bench.fly_adapter import (
     AdapterError,
     ResourceLedger,
     classify_provider_build_failure,
+    extract_pushed_image_digest,
     image_build_command,
     pin_remote_image,
     sanitized_failure,
@@ -874,16 +875,24 @@ def execute(
             authority=invocation.build_authority,
         )
         try:
-            transport.run(build.argv, timeout=BUILD_TIMEOUT_SECONDS)
+            completed = transport.run(build.argv, timeout=BUILD_TIMEOUT_SECONDS)
         except (subprocess.SubprocessError, OSError) as error:
             raise QualificationError(
                 "build_failed",
                 "remote provider build failed",
                 cause=classify_provider_build_failure(error),
             ) from None
-        image = transport.resolve_image(
-            invocation.app, invocation.commit, timeout=CREATE_TIMEOUT_SECONDS
+        digest = extract_pushed_image_digest(
+            completed.stdout + completed.stderr,
+            app=invocation.app,
+            commit=invocation.commit,
         )
+        if digest is None:
+            image = transport.resolve_image(
+                invocation.app, invocation.commit, timeout=CREATE_TIMEOUT_SECONDS
+            )
+        else:
+            image = pin_remote_image(invocation.app, digest)
         ledger.image_digest = image
         _save_ledger(ledger_path, ledger)
 

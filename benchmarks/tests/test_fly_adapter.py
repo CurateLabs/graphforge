@@ -16,6 +16,7 @@ from graphforge_bench.fly_adapter import (
     accepted_rung_reclamation,
     classify_provider_build_failure,
     cleanup_commands,
+    extract_pushed_image_digest,
     image_build_command,
     inventory_commands,
     pin_remote_image,
@@ -84,10 +85,24 @@ class FlyAdapterTests(unittest.TestCase):
         self.assertIn("--push", command.argv)
         self.assertEqual(command.argv[command.argv.index("--app") + 1], "gf-fixture")
         self.assertEqual(command.argv[command.argv.index("--config") + 1], "/repo/fly.build.toml")
-        self.assertEqual(command.argv[command.argv.index("--dockerfile") + 1], "/repo/Dockerfile")
+        self.assertNotIn("--dockerfile", command.argv)
         self.assertNotIn("--local-only", command.argv)
         self.assertIn("GRAPHFORGE_COMMIT=" + "a" * 40, command.argv)
         self.assertEqual(pin_remote_image("gf-fixture", "sha256:" + "c" * 64), attempt().image)
+        stdout = (
+            "#15 pushing manifest for registry.fly.io/gf-fixture:"
+            + "a" * 40
+            + "@sha256:"
+            + "c" * 64
+            + " 0.1s done"
+        )
+        self.assertEqual(
+            extract_pushed_image_digest(stdout, app="gf-fixture", commit="a" * 40),
+            "sha256:" + "c" * 64,
+        )
+        self.assertIsNone(
+            extract_pushed_image_digest("no digest here", app="gf-fixture", commit="a" * 40)
+        )
         with self.assertRaisesRegex(AdapterError, "immutable"):
             pin_remote_image("gf-fixture", "latest")
         with self.assertRaisesRegex(AdapterError, "absolute"):
