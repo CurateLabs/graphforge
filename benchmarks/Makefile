@@ -1,9 +1,12 @@
-.PHONY: install smoke smoke-python smoke-rust fly-adapter-static progressive-provider-attempt-static progressive-fly-transport-static local-admission progressive-qualification-list progressive-qualification-plan progressive-qualification-run progressive-qualification-project-s20 progressive-qualification-binaries progressive-provider-plan qualification-operator
+.PHONY: install smoke smoke-python smoke-rust fly-adapter-static progressive-provider-attempt-static progressive-fly-transport-static local-admission progressive-qualification-list progressive-qualification-plan progressive-qualification-run progressive-qualification-project-s20 progressive-qualification-binaries progressive-provider-plan qualification-operator esc-readiness ingest-ladder-bundle parity-gate
 
 install:
 	uv sync --locked
 
 smoke: smoke-python smoke-rust
+
+parity-gate: install
+	PYTHONPATH=harness uv run --locked python -m graphforge_bench.parity_gate_cli
 
 smoke-python: install
 	PYTHONPATH=harness uv run --locked python -m graphforge_bench.smoke
@@ -80,3 +83,18 @@ qualification-operator: install
 	test -n "$(GATE)" && test -n "$(ESC_ENVIRONMENT)"
 	PYTHONPATH=$(CURDIR)/harness uv run --locked python ../scripts/ci/gate-registry.py run "$(GATE)" -- \
 		--environment "$(ESC_ENVIRONMENT)" $(ARGS)
+
+# Validate that Pulumi ESC projects Fly credentials and spend authorization.
+esc-readiness: install
+	test -n "$(ESC_ENVIRONMENT)"
+	PYTHONPATH=$(CURDIR)/harness uv run --locked python -m graphforge_bench.esc_readiness_cli \
+		--environment "$(ESC_ENVIRONMENT)" \
+		--gate "$(or $(GATE),progressive-ladder)" \
+		$(if $(filter 1 true yes,$(ASSERT_READY)),--assert-ready,)
+
+# Copy a validated #900 output bundle into fixtures/parity/ladder-bundle/ for #959 parity.
+ingest-ladder-bundle: install
+	test -n "$(SOURCE)"
+	PYTHONPATH=$(CURDIR)/harness uv run --locked python -m graphforge_bench.ladder_bundle_ingest \
+		--source "$(SOURCE)" $(if $(DESTINATION),--destination "$(DESTINATION)",) \
+		$(if $(filter 1 true yes,$(VALIDATE_ONLY)),--validate-only,)
