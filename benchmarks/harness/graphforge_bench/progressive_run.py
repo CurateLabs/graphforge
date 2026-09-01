@@ -353,7 +353,7 @@ def _benchexec_tool_directory(stage: Path) -> Path:
 
 
 def _benchexec_container_flags(stage: Path) -> list[str]:
-    """Configure BenchExec container mounts and working directory for durable runs."""
+    """Configure BenchExec container mounts for durable provider-volume runs."""
     if _provider_volume_mounted():
         return [
             "--overlay-dir",
@@ -364,8 +364,6 @@ def _benchexec_container_flags(stage: Path) -> list[str]:
             "/tmp",
             "--full-access-dir",
             "/work",
-            "--dir",
-            str(stage.resolve()),
         ]
     if stage.is_dir():
         return ["--full-access-dir", str(stage.resolve())]

@@ -610,8 +610,6 @@ class ProgressiveRunControllerTests(unittest.TestCase):
                     "/tmp",
                     "--full-access-dir",
                     "/work",
-                    "--dir",
-                    str(stage.resolve()),
                 ],
             )
         self.assertEqual(
