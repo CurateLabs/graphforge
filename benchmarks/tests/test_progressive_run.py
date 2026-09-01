@@ -660,7 +660,7 @@ class ProgressiveRunControllerTests(unittest.TestCase):
 
             _stage_benchmark_xml(ROOT, stage)
             xml = (stage / "benchmark.xml").read_text(encoding="utf-8")
-            self.assertIn('memlimit="8 GB"', xml)
+            self.assertIn('memlimit="16 GB"', xml)
             self.assertNotIn('memlimit="4 GB"', xml)
             plan = build_plan(
                 root=ROOT,
@@ -679,7 +679,7 @@ class ProgressiveRunControllerTests(unittest.TestCase):
                 _run_benchexec(stage, self.executables, plan["identities"])
             command = execute.call_args.args[0]
             self.assertIn("--memorylimit", command)
-            self.assertIn("8 GB", command)
+            self.assertIn("16 GB", command)
 
     def test_failed_result_schema_requires_closed_exact_identities(self) -> None:
         plan = build_plan(

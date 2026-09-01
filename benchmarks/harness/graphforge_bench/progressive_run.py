@@ -379,13 +379,13 @@ def _stage_benchmark_xml(root: Path, stage: Path) -> None:
         encoding="utf-8"
     )
     if _provider_volume_mounted():
-        text = text.replace('memlimit="4 GB"', 'memlimit="8 GB"')
+        text = text.replace('memlimit="4 GB"', 'memlimit="16 GB"')
     (stage / "benchmark.xml").write_text(text, encoding="utf-8")
 
 
 def _benchexec_memory_limit() -> list[str]:
     if _provider_volume_mounted():
-        return ["--memorylimit", "8 GB"]
+        return ["--memorylimit", "16 GB"]
     return []
 
 
