@@ -1,4 +1,4 @@
-.PHONY: install smoke smoke-python smoke-rust fly-adapter-static progressive-provider-attempt-static progressive-fly-transport-static local-admission progressive-qualification-list progressive-qualification-plan progressive-qualification-run progressive-qualification-project-s20 progressive-qualification-binaries progressive-provider-plan qualification-operator parity-gate
+.PHONY: install smoke smoke-python smoke-rust fly-adapter-static progressive-provider-attempt-static progressive-fly-transport-static local-admission progressive-qualification-list progressive-qualification-plan progressive-qualification-run progressive-qualification-project-s20 progressive-qualification-binaries progressive-provider-plan qualification-operator esc-readiness parity-gate
 
 install:
 	uv sync --locked
@@ -83,3 +83,11 @@ qualification-operator: install
 	test -n "$(GATE)" && test -n "$(ESC_ENVIRONMENT)"
 	PYTHONPATH=$(CURDIR)/harness uv run --locked python ../scripts/ci/gate-registry.py run "$(GATE)" -- \
 		--environment "$(ESC_ENVIRONMENT)" $(ARGS)
+
+# Validate that Pulumi ESC projects Fly credentials and spend authorization.
+esc-readiness: install
+	test -n "$(ESC_ENVIRONMENT)"
+	PYTHONPATH=$(CURDIR)/harness uv run --locked python -m graphforge_bench.esc_readiness_cli \
+		--environment "$(ESC_ENVIRONMENT)" \
+		--gate "$(or $(GATE),progressive-ladder)" \
+		$(if $(filter 1 true yes,$(ASSERT_READY)),--assert-ready,)

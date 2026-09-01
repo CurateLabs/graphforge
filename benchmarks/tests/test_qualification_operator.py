@@ -3,7 +3,9 @@ from __future__ import annotations
 import subprocess
 import sys
 import unittest
+from unittest.mock import patch
 
+from graphforge_bench.esc_readiness import EscReadinessError
 from graphforge_bench.fly_tiny_qualification import parser as fly_parser
 from graphforge_bench.qualification_operator import (
     OperatorRefusalError,
@@ -98,17 +100,37 @@ class QualificationOperatorTests(unittest.TestCase):
             "--execute",
             "--confirm-disposable",
         ]
-        self.assertEqual(
+        with patch(
+            "graphforge_bench.qualification_operator.assert_esc_ready",
+            return_value=None,
+        ):
+            self.assertEqual(
+                run_under_esc(
+                    "curatelabs/graphforge/qualification",
+                    "progressive-ladder",
+                    progressive_args,
+                    runner=runner,
+                    attestor=lambda _commit: None,
+                ),
+                0,
+            )
+        self.assertTrue(runner_called)
+
+    def test_live_run_refuses_when_esc_is_not_ready(self) -> None:
+        with (
+            patch(
+                "graphforge_bench.qualification_operator.assert_esc_ready",
+                side_effect=EscReadinessError("protected projections are unavailable or invalid"),
+            ),
+            self.assertRaisesRegex(OperatorRefusalError, "protected projections"),
+        ):
             run_under_esc(
                 "curatelabs/graphforge/qualification",
-                "progressive-ladder",
-                progressive_args,
-                runner=runner,
+                "fly-tiny",
+                ARGS,
+                runner=lambda argv, **_kwargs: subprocess.CompletedProcess(argv, 0),
                 attestor=lambda _commit: None,
-            ),
-            0,
-        )
-        self.assertTrue(runner_called)
+            )
 
     def test_outer_runner_receives_argv_without_secret_values(self) -> None:
         observed: tuple[str, ...] | None = None
@@ -119,16 +141,20 @@ class QualificationOperatorTests(unittest.TestCase):
             self.assertFalse(check)
             return subprocess.CompletedProcess(argv, 0)
 
-        self.assertEqual(
-            run_under_esc(
-                "curatelabs/graphforge/qualification",
-                "fly-tiny",
-                ARGS,
-                runner=runner,
-                attestor=lambda _commit: None,
-            ),
-            0,
-        )
+        with patch(
+            "graphforge_bench.qualification_operator.assert_esc_ready",
+            return_value=None,
+        ):
+            self.assertEqual(
+                run_under_esc(
+                    "curatelabs/graphforge/qualification",
+                    "fly-tiny",
+                    ARGS,
+                    runner=runner,
+                    attestor=lambda _commit: None,
+                ),
+                0,
+            )
         assert observed is not None
         self.assertNotIn("FLY_API_TOKEN", " ".join(observed))
 
@@ -149,7 +175,13 @@ class QualificationOperatorTests(unittest.TestCase):
             called = True
             return subprocess.CompletedProcess((), 0)
 
-        with self.assertRaisesRegex(OperatorRefusalError, "current origin/main"):
+        with (
+            patch(
+                "graphforge_bench.qualification_operator.assert_esc_ready",
+                return_value=None,
+            ),
+            self.assertRaisesRegex(OperatorRefusalError, "current origin/main"),
+        ):
             run_under_esc(
                 "curatelabs/graphforge/qualification",
                 "fly-tiny",
@@ -169,16 +201,20 @@ class QualificationOperatorTests(unittest.TestCase):
                 return subprocess.CompletedProcess(argv, 0, "", "")
             return subprocess.CompletedProcess(argv, 0, next(responses), "")
 
-        self.assertEqual(
-            run_under_esc(
-                "curatelabs/graphforge/qualification",
-                "fly-tiny",
-                ARGS,
-                runner=lambda argv, **_kwargs: subprocess.CompletedProcess(argv, 0),
-                attestor=lambda commit: attest_current_main(commit, runner=git_runner),
-            ),
-            0,
-        )
+        with patch(
+            "graphforge_bench.qualification_operator.assert_esc_ready",
+            return_value=None,
+        ):
+            self.assertEqual(
+                run_under_esc(
+                    "curatelabs/graphforge/qualification",
+                    "fly-tiny",
+                    ARGS,
+                    runner=lambda argv, **_kwargs: subprocess.CompletedProcess(argv, 0),
+                    attestor=lambda commit: attest_current_main(commit, runner=git_runner),
+                ),
+                0,
+            )
 
     def test_recovery_attests_current_controller_not_older_receipt_commit(self) -> None:
         observed: list[str | None] = []
@@ -188,16 +224,20 @@ class QualificationOperatorTests(unittest.TestCase):
             "--cleanup-only",
             "--confirm-disposable",
         ]
-        self.assertEqual(
-            run_under_esc(
-                "curatelabs/graphforge/qualification",
-                "fly-tiny-recovery",
-                recovery_args,
-                runner=lambda argv, **_kwargs: subprocess.CompletedProcess(argv, 0),
-                attestor=observed.append,
-            ),
-            0,
-        )
+        with patch(
+            "graphforge_bench.qualification_operator.assert_esc_ready",
+            return_value=None,
+        ):
+            self.assertEqual(
+                run_under_esc(
+                    "curatelabs/graphforge/qualification",
+                    "fly-tiny-recovery",
+                    recovery_args,
+                    runner=lambda argv, **_kwargs: subprocess.CompletedProcess(argv, 0),
+                    attestor=observed.append,
+                ),
+                0,
+            )
         self.assertEqual(observed, [None])
 
     def test_inner_controller_rejects_abbreviated_expected_sha(self) -> None:
