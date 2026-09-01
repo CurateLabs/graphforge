@@ -883,7 +883,9 @@ def execute(
                 cause=classify_provider_build_failure(error),
             ) from None
         digest = extract_pushed_image_digest(
-            completed.stdout, app=invocation.app, commit=invocation.commit
+            completed.stdout + completed.stderr,
+            app=invocation.app,
+            commit=invocation.commit,
         )
         if digest is None:
             image = transport.resolve_image(
