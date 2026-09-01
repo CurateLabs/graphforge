@@ -675,7 +675,7 @@ class ProgressiveRunControllerTests(unittest.TestCase):
         with patch("graphforge_bench.progressive_run._provider_volume_mounted", return_value=True):
             self.assertEqual(_benchexec_tool_directory(stage), stage / "bin")
 
-    def test_provider_volume_stages_higher_benchexec_memory(self) -> None:
+    def test_provider_volume_keeps_four_gib_benchexec_memory(self) -> None:
         stage = self.base / "stage"
         stage.mkdir()
         with patch("graphforge_bench.progressive_run._provider_volume_mounted", return_value=True):
@@ -683,8 +683,8 @@ class ProgressiveRunControllerTests(unittest.TestCase):
 
             _stage_benchmark_xml(ROOT, stage)
             xml = (stage / "benchmark.xml").read_text(encoding="utf-8")
-            self.assertIn('memlimit="16 GB"', xml)
-            self.assertNotIn('memlimit="4 GB"', xml)
+            self.assertIn('memlimit="4 GB"', xml)
+            self.assertNotIn('memlimit="16 GB"', xml)
             plan = build_plan(
                 root=ROOT,
                 output_dir=self.output,
@@ -701,8 +701,7 @@ class ProgressiveRunControllerTests(unittest.TestCase):
                 execute.return_value.returncode = 0
                 _run_benchexec(stage, self.executables, plan["identities"])
             command = execute.call_args.args[0]
-            self.assertIn("--memorylimit", command)
-            self.assertIn("16 GB", command)
+            self.assertNotIn("--memorylimit", command)
 
     def test_failed_result_schema_requires_closed_exact_identities(self) -> None:
         plan = build_plan(
