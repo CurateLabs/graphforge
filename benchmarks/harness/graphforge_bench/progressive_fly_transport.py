@@ -20,6 +20,7 @@ from typing import Any, Protocol
 import urllib.error
 import urllib.request
 
+from graphforge_bench.fly_adapter import machine_run_image_ref
 from graphforge_bench.progressive_provider_attempt import (
     AttemptError,
     AttemptInvocation,
@@ -629,7 +630,7 @@ class FlyProviderTransport:
                 "flyctl",
                 "machine",
                 "run",
-                authorization.image_digest,
+                machine_run_image_ref(authorization.image_digest, authorization.commit),
                 lifetime,
                 "--app",
                 authorization.app,

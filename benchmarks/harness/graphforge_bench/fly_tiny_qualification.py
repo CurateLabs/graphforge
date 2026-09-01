@@ -31,6 +31,7 @@ from graphforge_bench.fly_adapter import (
     classify_provider_build_failure,
     extract_pushed_image_digest,
     image_build_command,
+    machine_run_image_ref,
     pin_remote_image,
     sanitized_failure,
 )
@@ -476,11 +477,12 @@ def verify_machine_state(
 def _machine_command(
     invocation: TinyQualificationInvocation, *, image: str, volume_id: str
 ) -> tuple[str, ...]:
+    digest = image.rsplit("@", 1)[1]
     return (
         "flyctl",
         "machine",
         "run",
-        image,
+        machine_run_image_ref(image, invocation.commit),
         "--app",
         invocation.app,
         "--name",
@@ -494,7 +496,7 @@ def _machine_command(
         "--env",
         f"GF_FLY_QUALIFICATION_GIT_SHA={invocation.commit}",
         "--env",
-        f"GF_FLY_QUALIFICATION_IMAGE_DIGEST={image.rsplit('@', 1)[1]}",
+        f"GF_FLY_QUALIFICATION_IMAGE_DIGEST={digest}",
         "--env",
         f"GF_FLY_QUALIFICATION_REGION={invocation.region}",
         "--restart",

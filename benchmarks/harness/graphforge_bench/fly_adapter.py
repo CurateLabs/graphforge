@@ -545,6 +545,15 @@ def pin_remote_image(app: str, digest: str) -> str:
     return image
 
 
+def machine_run_image_ref(pinned_image: str, commit: str) -> str:
+    """Return the flyctl machine-run ref for one commit-pinned build-only push."""
+    _refuse(COMMIT.fullmatch(commit) is None, "build commit is invalid")
+    _refuse(not OCI_DIGEST.fullmatch(pinned_image), "pinned image is invalid")
+    app = pinned_image.removeprefix("registry.fly.io/").rsplit("@", 1)[0]
+    _refuse(not SAFE_NAME.fullmatch(app), "app name is invalid")
+    return f"registry.fly.io/{app}:{commit}"
+
+
 def extract_pushed_image_digest(stdout: str, *, app: str, commit: str) -> str | None:
     """Return the digest flyctl printed for one commit-pinned build-only push."""
     marker = f"registry.fly.io/{app}:{commit}@sha256:"

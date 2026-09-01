@@ -19,6 +19,7 @@ from graphforge_bench.fly_adapter import (
     extract_pushed_image_digest,
     image_build_command,
     inventory_commands,
+    machine_run_image_ref,
     pin_remote_image,
     provisioning_commands,
     remote_build_command,
@@ -89,6 +90,11 @@ class FlyAdapterTests(unittest.TestCase):
         self.assertNotIn("--local-only", command.argv)
         self.assertIn("GRAPHFORGE_COMMIT=" + "a" * 40, command.argv)
         self.assertEqual(pin_remote_image("gf-fixture", "sha256:" + "c" * 64), attempt().image)
+        pinned = pin_remote_image("gf-fixture", "sha256:" + "c" * 64)
+        self.assertEqual(
+            machine_run_image_ref(pinned, "a" * 40),
+            "registry.fly.io/gf-fixture:" + "a" * 40,
+        )
         stdout = (
             "#15 pushing manifest for registry.fly.io/gf-fixture:"
             + "a" * 40
