@@ -12,6 +12,7 @@ from graphforge_bench.progressive_run import (
     _authority_staging_parent,
     _bench_home,
     _benchexec_container_flags,
+    _benchexec_tool_directory,
     _rewrite_profile_for_provider_volume,
     _run_benchexec,
     _safe_stage,
@@ -622,6 +623,33 @@ class ProgressiveRunControllerTests(unittest.TestCase):
         rewritten = _rewrite_profile_for_provider_volume(profile, 18)
         self.assertIn('"/work/workspace/s18/nodes.parquet"', rewritten)
         self.assertNotIn('"workspace/s18/nodes.parquet"', rewritten)
+
+    def test_provider_volume_wraps_staged_executables_with_work_tmpdir(self) -> None:
+        profile_path = ROOT / "profiles/graph500/s18-local.json"
+        plan = build_plan(
+            root=ROOT,
+            output_dir=self.output,
+            scale=18,
+            commit=COMMIT,
+            executables=self.executables,
+        )
+        with (
+            patch("graphforge_bench.progressive_run._provider_volume_mounted", return_value=True),
+            patch("graphforge_bench.progressive_run._stage_benchmark_xml"),
+        ):
+            stage = _safe_stage(
+                ROOT,
+                profile_path,
+                self.executables,
+                plan["identities"],
+                self.base,
+                scale=18,
+            )
+        wrapper = (stage / "bin" / "gf").read_text(encoding="utf-8")
+        self.assertIn('export TMPDIR="/work/tmp"', wrapper)
+        self.assertTrue((stage / "bin" / "gf.real").is_file())
+        with patch("graphforge_bench.progressive_run._provider_volume_mounted", return_value=True):
+            self.assertEqual(_benchexec_tool_directory(stage), stage / "bin")
 
     def test_provider_volume_stages_higher_benchexec_memory(self) -> None:
         stage = self.base / "stage"

@@ -247,6 +247,16 @@ def _rewrite_profile_for_provider_volume(profile_text: str, scale: int) -> str:
     )
 
 
+def _wrap_executable_for_provider_tmp(staged: Path) -> None:
+    real = staged.with_name(f"{staged.name}.real")
+    staged.rename(real)
+    staged.write_text(
+        f'#!/bin/sh\nexport TMPDIR="/work/tmp"\nexec "{real}" "$@"\n',
+        encoding="utf-8",
+    )
+    staged.chmod(staged.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+
 def _safe_stage(
     root: Path,
     profile_path: Path,
@@ -278,6 +288,8 @@ def _safe_stage(
         staged.chmod(staged.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         if _digest(staged) != identities.get(identity_key):
             raise ControllerError(f"staged executable identity mismatch: {name}")
+        if _provider_volume_mounted():
+            _wrap_executable_for_provider_tmp(staged)
     return stage
 
 
@@ -341,6 +353,8 @@ def _authority_staging_parent(output_dir: Path) -> Path | None:
 
 def _benchexec_tool_directory(stage: Path) -> Path:
     """Prefer image-local executables once staged identity checks have passed."""
+    if _provider_volume_mounted():
+        return stage / "bin"
     local = Path("/usr/local/bin")
     try:
         if local.is_dir() and (local / "graphforge-benchmark-certify").is_file():
@@ -785,6 +799,16 @@ def validate_fixture_bundle(root: Path, bundle: Path, scale: int) -> None:
         raise ControllerError("BenchExec and GraphForge evidence disagree")
 
 
+def _preserve_failure_artifacts(stage: Path, output_dir: Path, scale: int) -> None:
+    raw = stage / "raw"
+    if not raw.is_dir():
+        return
+    destination = output_dir / f"s{scale}-failure-raw"
+    if destination.exists():
+        shutil.rmtree(destination)
+    shutil.copytree(raw, destination)
+
+
 def run(
     *, root: Path, output_dir: Path, scale: int, plan: Mapping[str, Any], executables: Executables
 ) -> None:
@@ -802,6 +826,7 @@ def run(
         )
         status = _run_benchexec(stage, executables, identities)
         if status != 0:
+            _preserve_failure_artifacts(stage, output_dir, scale)
             result = {
                 "schema": RESULT_SCHEMA,
                 "rung": f"S{scale}",
@@ -818,6 +843,7 @@ def run(
                 root=root, stage=stage, scale=scale, plan=plan
             )
         except (ControllerError, ValueError) as error:
+            _preserve_failure_artifacts(stage, output_dir, scale)
             result = {
                 "schema": RESULT_SCHEMA,
                 "rung": f"S{scale}",
