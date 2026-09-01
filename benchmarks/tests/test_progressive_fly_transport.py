@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+from graphforge_bench.fly_adapter import machine_run_image_ref
 from graphforge_bench.progressive_fly_transport import (
     FlyctlMachineBoundary,
     FlyProviderTransport,
@@ -183,7 +184,7 @@ class ProgressiveFlyTransportTests(unittest.TestCase):
                 "flyctl",
                 "machine",
                 "run",
-                IMAGE,
+                machine_run_image_ref(IMAGE, self.auth.commit),
                 str(self.auth.maximum_machine_seconds),
                 "--app",
                 APP,
