@@ -18,6 +18,7 @@ from pathlib import Path
 import platform
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -254,6 +255,7 @@ def _safe_stage(
     ):
         staged = bin_dir / name
         shutil.copy2(source, staged)
+        staged.chmod(staged.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         if _digest(staged) != identities.get(identity_key):
             raise ControllerError(f"staged executable identity mismatch: {name}")
     return stage
@@ -314,6 +316,28 @@ def _bench_home(stage: Path) -> Path:
     return home
 
 
+def _authority_staging_parent(output_dir: Path) -> Path | None:
+    """Keep BenchExec staging on the provider volume when /work is mounted."""
+    work = Path("/work")
+    try:
+        if work.is_dir() and os.path.ismount(work):
+            return output_dir
+    except OSError:
+        pass
+    return None
+
+
+def _benchexec_tool_directory(stage: Path) -> Path:
+    """Prefer image-local executables once staged identity checks have passed."""
+    local = Path("/usr/local/bin")
+    try:
+        if local.is_dir() and (local / "graphforge-benchmark-certify").is_file():
+            return local
+    except OSError:
+        pass
+    return stage / "bin"
+
+
 def _run_benchexec(stage: Path, executables: Executables, identities: Mapping[str, Any]) -> int:
     raw_output = stage / "raw"
     raw_output.mkdir()
@@ -322,11 +346,13 @@ def _run_benchexec(stage: Path, executables: Executables, identities: Mapping[st
         "HOME": str(home),
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
-        "PATH": f"{stage / 'bin'}:{Path(sys.executable).parent}:/usr/bin:/bin",
+        "PATH": f"{stage / 'bin'}:/usr/local/bin:{Path(sys.executable).parent}:/usr/bin:/bin",
         "PYTHONPATH": str(Path(__file__).resolve().parents[1]),
     }
     command = [
         str(_benchexec_cli(executables.benchexec_python)),
+        "--tool-directory",
+        str(_benchexec_tool_directory(stage)),
         "--no-compress-results",
         "--outputpath",
         str(raw_output),
@@ -715,7 +741,9 @@ def run(
     _native_authority()
     profile_path, _ = _profile(root, scale)
     output_dir.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="gf-progressive-authority-") as temporary:
+    with tempfile.TemporaryDirectory(
+        prefix="gf-progressive-authority-", dir=_authority_staging_parent(output_dir)
+    ) as temporary:
         identities = plan["identities"]
         if not isinstance(identities, Mapping):
             raise ControllerError("run plan identities are malformed")
