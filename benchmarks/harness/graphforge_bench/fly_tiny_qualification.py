@@ -536,13 +536,19 @@ def _run_machine_with_backoff(
 ) -> subprocess.CompletedProcess[str]:
     backoff = IMAGE_LAUNCH_INITIAL_BACKOFF_SECONDS
     for attempt in range(IMAGE_LAUNCH_ATTEMPTS):
-        try:
-            return transport.run(argv, timeout=timeout)
-        except subprocess.CalledProcessError as error:
-            if not _image_launch_retryable(error) or attempt + 1 >= IMAGE_LAUNCH_ATTEMPTS:
-                raise
-            sleeper(backoff)
-            backoff = min(backoff * 2, IMAGE_LAUNCH_MAX_BACKOFF_SECONDS)
+        completed = transport.run(argv, timeout=timeout, check=False)
+        if completed.returncode == 0:
+            return completed
+        error = subprocess.CalledProcessError(
+            completed.returncode,
+            argv,
+            output=completed.stdout,
+            stderr=completed.stderr,
+        )
+        if not _image_launch_retryable(error) or attempt + 1 >= IMAGE_LAUNCH_ATTEMPTS:
+            raise error
+        sleeper(backoff)
+        backoff = min(backoff * 2, IMAGE_LAUNCH_MAX_BACKOFF_SECONDS)
     raise QualificationError("provision_failed", "pushed image is not launchable yet")
 
 
