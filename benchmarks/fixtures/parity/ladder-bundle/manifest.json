@@ -1,0 +1,8 @@
+{
+  "benchexec_version": "3.35",
+  "commit": "6255f9393362c996b5840566d255569761e881d7",
+  "generator_identity": "sha256:3b4bdf5ae4f41523f911dc1998db2328dadd2fa9e5f95e49478f148e81a14ce2",
+  "image_digest": "registry.fly.io/gf-s18-7606e467d50dd396cffb8700b1c78510@sha256:edc1e012b60fd7d01a7e6cd70dd788748fde61f82ac311a0884e7f9e78d19a6b",
+  "maximum_authorized_scale": 19,
+  "region": "ord"
+}

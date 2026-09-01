@@ -1,0 +1,64 @@
+{
+  "correctness": true,
+  "failure": null,
+  "live_edges": 4194304,
+  "metric_sources": {
+    "benchexec": [
+      "wall_seconds",
+      "peak_rss_bytes",
+      "physical_read_bytes",
+      "physical_write_bytes"
+    ],
+    "query_qualification": [
+      "live_edges",
+      "correctness"
+    ],
+    "storage_attribution": [
+      "retained_storage_bytes",
+      "transient_peak_storage_bytes",
+      "logical_read_bytes",
+      "logical_write_bytes",
+      "reader_calls",
+      "publication_work_units"
+    ]
+  },
+  "metrics": {
+    "logical_read_bytes": 12729359120,
+    "logical_write_bytes": 10101500884,
+    "peak_rss_bytes": 7464845312,
+    "physical_read_bytes": 0,
+    "physical_write_bytes": 0,
+    "publication_work_units": 102927,
+    "reader_calls": 128777,
+    "retained_storage_bytes": 1560346624,
+    "transient_peak_storage_bytes": 5599821824,
+    "wall_seconds": 334
+  },
+  "phases": [
+    "admission",
+    "generate",
+    "ingest",
+    "reopen",
+    "recount",
+    "query",
+    "export",
+    "verify",
+    "clean_import",
+    "reopen_proof"
+  ],
+  "profile_id": "graph500-s18-local",
+  "scale": 18,
+  "source": "progressive_profile",
+  "status": "passed",
+  "storage_components": {
+    "imported_allocated_physical_bytes": 451137536,
+    "imported_retained_logical_eof_bytes": 450531736,
+    "logical_read_bytes": 12729359120,
+    "logical_write_bytes": 10101500884,
+    "publication_work_units": 102927,
+    "reader_calls": 128777,
+    "source_allocated_physical_bytes": 451137536,
+    "source_retained_logical_eof_bytes": 450531736,
+    "transient_peak_allocated_bytes": 5394231296
+  }
+}
