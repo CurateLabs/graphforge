@@ -290,7 +290,17 @@ def _safe_stage(
             raise ControllerError(f"staged executable identity mismatch: {name}")
         if _provider_volume_mounted():
             _wrap_executable_for_provider_tmp(staged)
+    if _provider_volume_mounted():
+        _make_benchexec_stage_writable(stage)
     return stage
+
+
+def _make_benchexec_stage_writable(stage: Path) -> None:
+    """BenchExec runs tools as an unprivileged user that must write evidence.json."""
+    stage.chmod(0o777)
+    for path in stage.rglob("*"):
+        if path.is_dir():
+            path.chmod(0o777)
 
 
 def _native_authority() -> Mapping[str, Any]:

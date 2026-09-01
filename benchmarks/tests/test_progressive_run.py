@@ -648,6 +648,7 @@ class ProgressiveRunControllerTests(unittest.TestCase):
         wrapper = (stage / "bin" / "gf").read_text(encoding="utf-8")
         self.assertIn('export TMPDIR="/work/tmp"', wrapper)
         self.assertTrue((stage / "bin" / "gf.real").is_file())
+        self.assertEqual(oct(stage.stat().st_mode & 0o777), oct(0o777))
         with patch("graphforge_bench.progressive_run._provider_volume_mounted", return_value=True):
             self.assertEqual(_benchexec_tool_directory(stage), stage / "bin")
 
