@@ -4,8 +4,8 @@ import json
 import math
 from pathlib import Path
 import unittest
-import xml.etree.ElementTree as ET
 from unittest.mock import patch
+import xml.etree.ElementTree as ET
 
 from graphforge_bench.benchexec_authority import (
     EvidenceError,
