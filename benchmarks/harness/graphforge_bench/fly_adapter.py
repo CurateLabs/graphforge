@@ -289,6 +289,10 @@ def image_build_command(
         not all(path.is_absolute() for path in (source, config, dockerfile)),
         "build paths must be absolute",
     )
+    _refuse(
+        dockerfile.resolve() != (config.parent / dockerfile.name).resolve(),
+        "dockerfile must live beside the build config",
+    )
     builder_flag = "--remote-only" if authority == "provider" else "--local-only"
     return Command(
         "image_build",
@@ -300,8 +304,6 @@ def image_build_command(
             app,
             "--config",
             str(config),
-            "--dockerfile",
-            str(dockerfile),
             builder_flag,
             "--build-only",
             "--push",

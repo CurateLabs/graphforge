@@ -395,7 +395,7 @@ class FlyTinyQualificationTests(unittest.TestCase):
         config = tomllib.loads(config_path.read_text(encoding="utf-8"))
         self.assertEqual(
             config,
-            {"build": {"dockerfile": "containers/fly-filesystem-qualification/Dockerfile"}},
+            {"build": {"dockerfile": "Dockerfile"}},
         )
         self.assertNotIn("app", config)
         self.assertNotIn("services", config)
@@ -464,7 +464,7 @@ class FlyTinyQualificationTests(unittest.TestCase):
             )
             self.assertEqual(deploy[deploy.index("--app") + 1], APP)
             self.assertTrue(Path(deploy[deploy.index("--config") + 1]).is_absolute())
-            self.assertTrue(Path(deploy[deploy.index("--dockerfile") + 1]).is_absolute())
+            self.assertNotIn("--dockerfile", deploy)
             self.assertIn("--build-only", deploy)
             self.assertIn("--push", deploy)
             self.assertIn("--no-public-ips", deploy)

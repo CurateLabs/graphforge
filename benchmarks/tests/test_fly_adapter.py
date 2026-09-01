@@ -84,7 +84,7 @@ class FlyAdapterTests(unittest.TestCase):
         self.assertIn("--push", command.argv)
         self.assertEqual(command.argv[command.argv.index("--app") + 1], "gf-fixture")
         self.assertEqual(command.argv[command.argv.index("--config") + 1], "/repo/fly.build.toml")
-        self.assertEqual(command.argv[command.argv.index("--dockerfile") + 1], "/repo/Dockerfile")
+        self.assertNotIn("--dockerfile", command.argv)
         self.assertNotIn("--local-only", command.argv)
         self.assertIn("GRAPHFORGE_COMMIT=" + "a" * 40, command.argv)
         self.assertEqual(pin_remote_image("gf-fixture", "sha256:" + "c" * 64), attempt().image)
