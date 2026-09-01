@@ -14,7 +14,7 @@
 //!
 //! It is **not** Official-track and **not** TEPS, and it does **not** itself
 //! certify one billion live edges — that is #745. Small rungs run in normal CI;
-//! large rungs are opt-in via `make bench-g500-ladder`.
+//! provider ladder execution uses `benchmarks/` progressive qualification (#900).
 
 #![recursion_limit = "256"]
 
@@ -1522,43 +1522,6 @@ fn run_rung(
     RungOutcome { passed, evidence }
 }
 
-/// Drive the ladder rung-by-rung, stopping at the first failing rung.
-fn run_ladder(profile: &ScaleProfile, env: RunEnvelope, rungs: &[Rung]) -> Vec<Value> {
-    let ladder_started = Instant::now();
-    let mut evidence = Vec::new();
-    for rung in rungs {
-        let outcome = run_rung(
-            profile,
-            rung,
-            env,
-            profile.edgefactor,
-            ladder_started,
-            &evidence,
-        );
-        let passed = outcome.passed;
-        evidence.push(outcome.evidence);
-        let first_failing_phase = evidence
-            .last()
-            .and_then(|rung| rung["first_failing_phase"].as_str());
-        let error_class = evidence
-            .last()
-            .and_then(|rung| rung["error_class"].as_str());
-        persist_phase_journal(
-            profile,
-            rung,
-            &evidence,
-            "rung",
-            "rung_completed",
-            &[],
-            first_failing_phase.zip(error_class),
-        );
-        if !passed {
-            break;
-        }
-    }
-    evidence
-}
-
 fn provisioned_rungs_through(profile: &ScaleProfile, max_scale: u32) -> Result<Vec<Rung>, String> {
     let is_provisioned_max = profile
         .rungs
@@ -2110,59 +2073,6 @@ fn ci_rung_public_facade_engineering_green() {
         1u64 << ci_rung.scale
     );
     assert!(live > 0, "CI rung must persist a non-empty graph");
-}
-
-/// Provisioned full ladder (SCALE-20 → SCALE-26). Opt-in via
-/// `make bench-g500-ladder`. Writes one evidence object per attempted rung and
-/// stops at the first rung that exceeds the declared 128 GiB / 1 TiB / 4 h
-/// cloud-SKU fail-safe. Never asserts a billion-edge product claim (that is #745).
-/// Certification evidence for #745 must come from a provisioned Linux cloud host.
-#[test]
-#[ignore = "Provisioned billion-edge scale ladder; make bench-g500-ladder"]
-fn ladder_public_facade_first_fail_evidence() {
-    let profile = load_profile();
-    let max_scale = std::env::var("GF_G500_LADDER_MAX_SCALE")
-        .expect("GF_G500_LADDER_MAX_SCALE must explicitly cap the authorized ladder")
-        .parse::<u32>()
-        .expect("GF_G500_LADDER_MAX_SCALE must be an integer");
-    let provisioned =
-        provisioned_rungs_through(&profile, max_scale).unwrap_or_else(|error| panic!("{error}"));
-    let evidence = run_ladder(&profile, profile.envelope.into(), &provisioned);
-    assert!(
-        !evidence.is_empty(),
-        "ladder must attempt at least one rung"
-    );
-
-    let out = std::env::var("GF_G500_LADDER_EVIDENCE_OUT").map_or_else(
-        |_| PathBuf::from("build/g500-ladder-evidence.json"),
-        PathBuf::from,
-    );
-    if let Some(parent) = out.parent() {
-        fs::create_dir_all(parent).expect("evidence parent");
-    }
-    fs::write(
-        &out,
-        serde_json::to_vec_pretty(&json!({
-            "schema": EVIDENCE_SCHEMA,
-            "schema_version": SCHEMA_VERSION,
-            "profile_schema": profile.schema,
-            "authorized_max_scale": max_scale,
-            "rungs": evidence,
-        }))
-        .expect("serialize ladder evidence"),
-    )
-    .expect("write ladder evidence");
-
-    // Every rung that reached ingest reconciles; a rung stopped in the generate
-    // phase reports reconciles=null (not evaluated). The ladder stops at the
-    // first failure.
-    for rung in &evidence {
-        let rec = &rung["reconciles"];
-        assert!(
-            rec.is_null() || rec == &Value::Bool(true),
-            "an evaluated rung must reconcile; got {rec}"
-        );
-    }
 }
 
 #[test]
@@ -3900,125 +3810,4 @@ fn construction_session_reenters_across_processes() {
     assert_eq!(current_generation_uuid(&graph), published);
     assert_eq!(graph.node_count(NODE_LABEL).unwrap(), 8);
     assert_eq!(scalar_count(&graph.execute(COUNT_EDGES).unwrap()), 2);
-}
-
-#[test]
-#[ignore = "requires approved 128 GiB / 1 TiB Linux certification host"]
-fn certification_target_live_full_lifecycle_evidence() {
-    let elapsed_before_process = certification_elapsed_before_process();
-    let started = Instant::now();
-    let profile = load_certification_profile();
-    let root = TempDir::new().expect("certification workspace");
-    let lifecycle = run_integrated_certification(root.path(), Some(profile.target_live_edges));
-    let phases = lifecycle["phases"].as_array().expect("phase array");
-    let peak_rss = phases
-        .iter()
-        .filter_map(|p| p["rss_peak_bytes"].as_u64())
-        .max()
-        .unwrap_or(0);
-    let peak_disk = phases
-        .iter()
-        .filter_map(|p| p["disk_peak_bytes"].as_u64())
-        .max()
-        .unwrap_or(0);
-    let source_edges = lifecycle["source_edges"].as_u64().unwrap();
-    let generated_live_edges = lifecycle["generated_live_unique_edges"].as_u64().unwrap();
-    assert!(source_edges >= 1_000_000_000);
-    assert_eq!(source_edges, generated_live_edges);
-    let profile_digest = format!(
-        "sha256:{}",
-        hex_encode(Sha256::digest(include_bytes!(
-            "fixtures/scale_g500_certification.v1.json"
-        )))
-    );
-    let evidence = json!({
-        "schema": "graphforge-billion-edge-certification-evidence/1",
-        "git_sha": std::env::var("GF_G500_CERT_EXPECTED_SHA").unwrap_or_else(|_| git_sha().as_str().unwrap_or("unknown").to_owned()),
-        "profile_sha256": profile_digest,
-        "run": {
-            "command": "cargo test -p graphforge-api --release --test scale_g500_ladder certification_target_live_full_lifecycle_evidence -- --ignored --exact --nocapture --test-threads=1",
-            "scale": profile.scale, "edgefactor": profile.edgefactor, "seed": profile.seed,
-            "directionality": "undirected", "self_loops": "drop", "duplicates": "drop"
-        },
-        "host": {
-            "provider": std::env::var("GF_G500_CERT_PROVIDER").expect("approved provider input"),
-            "region": std::env::var("GF_G500_CERT_REGION").expect("approved region input"),
-            "sku": std::env::var("GF_G500_CERT_SKU").expect("approved SKU input"),
-            "os_image": std::env::var("GF_G500_CERT_OS_IMAGE").expect("approved OS image input"),
-            "os": command_text("uname", &["-s"]),
-            "kernel": command_text("uname", &["-r"]),
-            "filesystem": normalized_filesystem(root.path()),
-            "memory_bytes": linux_memory_bytes(),
-            "nvme_bytes": filesystem_capacity_bytes(root.path()),
-        },
-        "tools": { "rustc": command_text("rustc", &["--version"]), "cargo": command_text("cargo", &["--version"]) },
-        "counts": {
-            "raw_attempts": lifecycle["raw_attempts"], "self_loops_rejected": lifecycle["self_loops_rejected"],
-            "duplicates_rejected": lifecycle["duplicates_rejected"], "live_unique_edges": generated_live_edges,
-            "source_nodes": lifecycle["source_nodes"], "source_edges": source_edges,
-            "imported_nodes": lifecycle["imported_nodes"], "imported_edges": lifecycle["imported_edges"],
-        },
-        "identities": {
-            "source_export_generation_authenticated": lifecycle["source_export_generation_authenticated"],
-            "import_receipt_reopen_authenticated": lifecycle["import_receipt_reopen_authenticated"],
-            "source_import_generations_distinct": lifecycle["source_import_generations_distinct"],
-            "package": lifecycle["package"], "transport": lifecycle["transport"]
-        },
-        "package": {
-            "contract": lifecycle["portable_contract"], "format": "portable-project-v2-bundle",
-            "class": lifecycle["package_class"], "integrity": lifecycle["integrity"],
-            "compatibility": lifecycle["compatibility"],
-            "policy": "complete-current-generation"
-        },
-        "equivalence": { "source_project_fingerprint": lifecycle["source_project_fingerprint"], "imported_project_fingerprint": lifecycle["imported_project_fingerprint"] },
-        "authority": { "source_fingerprint": lifecycle["source_authority_fingerprint"], "imported_fingerprint": lifecycle["imported_authority_fingerprint"] },
-        "storage_attribution": lifecycle["storage"],
-        "phases": phases,
-        "envelope": { "peak_rss_bytes": peak_rss, "peak_disk_bytes": peak_disk, "peak_disk_source": "storage_owned_active_identity_union", "wall_time_s": elapsed_before_process.saturating_add(started.elapsed()).as_secs_f64() },
-        "result": "pass", "first_failure": null,
-    });
-    reject_unsanitized_evidence(&evidence).expect("provider certification evidence is sanitized");
-    let out = PathBuf::from(std::env::var("GF_G500_CERT_EVIDENCE_OUT").expect("evidence output"));
-    fs::write(out, serde_json::to_vec_pretty(&evidence).unwrap())
-        .expect("write certification evidence");
-}
-
-fn normalized_filesystem(path: &Path) -> String {
-    match command_text("stat", &["-f", "-c", "%T", path.to_str().unwrap()]).as_str() {
-        "ext2/ext3" => "ext4".to_owned(),
-        value => value.to_owned(),
-    }
-}
-
-fn command_text(program: &str, args: &[&str]) -> String {
-    let output = Command::new(program)
-        .args(args)
-        .output()
-        .expect("host attestation command");
-    assert!(output.status.success(), "host attestation command failed");
-    String::from_utf8(output.stdout).unwrap().trim().to_owned()
-}
-
-fn linux_memory_bytes() -> u64 {
-    fs::read_to_string("/proc/meminfo")
-        .ok()
-        .and_then(|text| {
-            text.lines()
-                .find(|line| line.starts_with("MemTotal:"))?
-                .split_whitespace()
-                .nth(1)?
-                .parse::<u64>()
-                .ok()
-        })
-        .unwrap_or(0)
-        .saturating_mul(1024)
-}
-
-fn filesystem_capacity_bytes(path: &Path) -> u64 {
-    command_text("df", &["-k", "--output=size", path.to_str().unwrap()])
-        .lines()
-        .last()
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .unwrap_or(0)
-        .saturating_mul(1024)
 }

@@ -404,7 +404,7 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
 
 def validate_operator_handoffs_have_no_artifacts() -> None:
     for workflow, gate in (
-        ("g500-certification.yml", "g500-certification"),
+        ("progressive-ladder.yml", "progressive-ladder"),
         ("fly-tiny-qualification.yml", "fly-tiny-qualification"),
         ("fly-tiny-recovery.yml", "fly-tiny-recovery"),
     ):

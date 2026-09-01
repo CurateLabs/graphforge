@@ -13,18 +13,6 @@ SPEC = importlib.util.spec_from_file_location("g500_validator", SCRIPT)
 assert SPEC and SPEC.loader
 VALIDATOR = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(VALIDATOR)
-BUILDER_SCRIPT = Path(__file__).with_name("build-g500-ladder-qualification.py")
-BUILDER_SPEC = importlib.util.spec_from_file_location("g500_builder", BUILDER_SCRIPT)
-assert BUILDER_SPEC and BUILDER_SPEC.loader
-BUILDER = importlib.util.module_from_spec(BUILDER_SPEC)
-BUILDER_SPEC.loader.exec_module(BUILDER)
-QUALIFICATION_SCRIPT = Path(__file__).with_name("validate-g500-ladder-qualification.py")
-QUALIFICATION_SPEC = importlib.util.spec_from_file_location(
-    "g500_qualification_validator", QUALIFICATION_SCRIPT
-)
-assert QUALIFICATION_SPEC and QUALIFICATION_SPEC.loader
-QUALIFICATION = importlib.util.module_from_spec(QUALIFICATION_SPEC)
-QUALIFICATION_SPEC.loader.exec_module(QUALIFICATION)
 
 SHA = "a" * 40
 DIGEST_A = "sha256:" + "a" * 64
@@ -194,45 +182,6 @@ def test_accepts_complete_sanitized_evidence():
     Draft202012Validator.check_schema(contract)
     Draft202012Validator(contract).validate(evidence())
     VALIDATOR.validate(evidence(), SHA)
-
-
-def test_actual_certification_contract_builds_and_validates_adjacent_qualification(
-    tmp_path, monkeypatch
-):
-    low = evidence(20, 1)
-    high = evidence(22, 4)
-    for document in (low, high):
-        VALIDATOR.validate(document, SHA)
-    low_path = tmp_path / "s20.json"
-    high_path = tmp_path / "s22.json"
-    output = tmp_path / "qualification.json"
-    low_path.write_text(json.dumps(low))
-    high_path.write_text(json.dumps(high))
-    monkeypatch.setattr(
-        "sys.argv",
-        [
-            str(BUILDER_SCRIPT),
-            str(low_path),
-            str(high_path),
-            str(output),
-            "--volume-bytes",
-            str(500 * 1024**3),
-            "--reserved-headroom-bytes",
-            str(75 * 1024**3),
-        ],
-    )
-    BUILDER.main()
-    qualification = json.loads(output.read_text())
-    QUALIFICATION.validate(qualification)
-    assert qualification["projection"]["source_rungs"] == ["S20", "S22"]
-    for source, rung in zip((low, high), qualification["rungs"], strict=True):
-        selected = source["storage_attribution"]["source"]["allocated_bytes"]
-        project_union = rung["source_project_current_allocated_bytes"]
-        assert project_union > selected
-        assert rung["ratios"]["authoritative_project_bytes_per_live_edge"] == {
-            "numerator_bytes": project_union,
-            "denominator_count": rung["live_edges"],
-        }
 
 
 @pytest.mark.parametrize(
