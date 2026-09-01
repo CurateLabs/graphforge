@@ -117,10 +117,13 @@ class QualificationOperatorTests(unittest.TestCase):
         self.assertTrue(runner_called)
 
     def test_live_run_refuses_when_esc_is_not_ready(self) -> None:
-        with patch(
-            "graphforge_bench.qualification_operator.assert_esc_ready",
-            side_effect=EscReadinessError("protected projections are unavailable or invalid"),
-        ), self.assertRaisesRegex(OperatorRefusalError, "protected projections"):
+        with (
+            patch(
+                "graphforge_bench.qualification_operator.assert_esc_ready",
+                side_effect=EscReadinessError("protected projections are unavailable or invalid"),
+            ),
+            self.assertRaisesRegex(OperatorRefusalError, "protected projections"),
+        ):
             run_under_esc(
                 "curatelabs/graphforge/qualification",
                 "fly-tiny",
@@ -172,10 +175,13 @@ class QualificationOperatorTests(unittest.TestCase):
             called = True
             return subprocess.CompletedProcess((), 0)
 
-        with patch(
-            "graphforge_bench.qualification_operator.assert_esc_ready",
-            return_value=None,
-        ), self.assertRaisesRegex(OperatorRefusalError, "current origin/main"):
+        with (
+            patch(
+                "graphforge_bench.qualification_operator.assert_esc_ready",
+                return_value=None,
+            ),
+            self.assertRaisesRegex(OperatorRefusalError, "current origin/main"),
+        ):
             run_under_esc(
                 "curatelabs/graphforge/qualification",
                 "fly-tiny",
