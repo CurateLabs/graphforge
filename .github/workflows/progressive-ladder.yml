@@ -1,4 +1,4 @@
-name: G500 Certification (operator handoff)
+name: Progressive ladder (operator handoff)
 
 on:
   workflow_dispatch:
@@ -17,5 +17,5 @@ jobs:
         run: python3 scripts/ci/gate-registry.py validate
       - name: Render operator handoff
         run: |
-          python3 scripts/ci/gate-registry.py command g500-certification
+          python3 scripts/ci/gate-registry.py command progressive-ladder
           echo "No provider operation occurs in GitHub Actions; execute through Pulumi ESC."

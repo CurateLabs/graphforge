@@ -272,31 +272,31 @@ def normalize_legacy_cert_lifecycle(document: Mapping[str, Any]) -> NormalizedEv
 
 
 def coverage_map() -> dict[str, str]:
-    """Legacy orchestration entrypoints and their benchmark-harness equivalents."""
+    """Retired legacy orchestration entrypoints and their harness equivalents."""
     return {
-        "make bench-g500-ladder": (
+        "make bench-g500-ladder (retired)": (
             "make -C benchmarks progressive-qualification-run (local profiles)"
         ),
-        "make bench-g500-scale20": (
+        "make bench-g500-scale20 (retired)": (
             "benchmarks/profiles/graph500/s20-*.json + progressive qualification"
         ),
-        "make g500-ladder-qualification": (
-            "benchmarks progressive qualification + g500-ladder-qualification schema"
+        "make g500-ladder-qualification (retired)": (
+            "benchmarks progressive qualification schemas + controller"
         ),
         "cargo test scale_g500_ladder (S10 CI)": (
             "benchmarks/scripts/test-tiny-lifecycle-certification.py"
         ),
-        "cargo test certification_target_live (ignored)": (
+        "cargo test certification_target_live (retired)": (
             "make -C benchmarks qualification-operator GATE=progressive-ladder"
         ),
-        "docs/development/perf-g500-ladder.md": (
+        "docs/development/perf-g500-ladder.md (historical)": (
             "benchmarks/README.md + benchmarks/scale-parity-index.md"
         ),
-        "scripts/ci/validate-g500-certification.py": (
+        "scripts/ci/validate-g500-certification.py (historical)": (
             "graphforge_bench.scale_parity + progressive schemas"
         ),
-        ".github/workflows/g500-certification.yml": (
-            "config/gate-registry.json progressive-ladder gate"
+        ".github/workflows/g500-certification.yml (retired)": (
+            ".github/workflows/progressive-ladder.yml + config/gate-registry.json"
         ),
     }
 

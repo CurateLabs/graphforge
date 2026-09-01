@@ -151,13 +151,13 @@ open/recovery/commit/GC/compaction use CodSpeed's isolated bare-metal
 compaction peak-RSS artifacts while CodSpeed memory mode is unavailable for
 this project.
 
-### `g500-certification.yml` — Billion-edge certification
+### `progressive-ladder.yml` — Progressive Fly qualification ladder
 
 This manual compatibility wrapper validates and renders the registry-owned
 operator command. It never provisions or spends. Provider, SKU, runner
 registration, cost approval, and teardown remain explicit operator decisions;
-the actual run must use the Python + Pulumi ESC control plane described in the
-[certification runbook](../../docs/development/g500-certification.md).
+the actual run must use the Python + Pulumi ESC control plane described in
+`benchmarks/README.md` and the progressive qualification operator.
 
 ### `fly-tiny-qualification.yml` — Disposable Fly environment smoke
 
