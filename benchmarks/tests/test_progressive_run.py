@@ -9,6 +9,7 @@ from unittest.mock import patch
 from graphforge_bench.progressive_run import (
     ControllerError,
     Executables,
+    _bench_home,
     _run_benchexec,
     _safe_stage,
     _validate,
@@ -260,9 +261,10 @@ class ProgressiveRunControllerTests(unittest.TestCase):
         gf = self.base / "gf"
         certify = self.base / "graphforge-benchmark-certify"
         python = self.base / "python"
-        for path in (gf, certify, python):
+        benchexec = self.base / "benchexec"
+        for path in (gf, certify, python, benchexec):
             path.write_bytes(b"fixture")
-        for path in (generator, gf, certify, python):
+        for path in (generator, gf, certify, python, benchexec):
             path.chmod(path.stat().st_mode | 0o111)
         self.executables = Executables(gf, certify, generator, python)
 
@@ -565,9 +567,21 @@ class ProgressiveRunControllerTests(unittest.TestCase):
         with patch("graphforge_bench.progressive_run.subprocess.run") as execute:
             execute.return_value.returncode = 0
             self.assertEqual(_run_benchexec(stage, self.executables, plan["identities"]), 0)
+        command = execute.call_args.args[0]
+        self.assertEqual(command[0], str(self.base / "benchexec"))
         environment = execute.call_args.kwargs["env"]
         self.assertEqual(environment["PYTHONPATH"], str(ROOT / "harness"))
         self.assertEqual(set(environment), {"HOME", "LANG", "LC_ALL", "PATH", "PYTHONPATH"})
+        self.assertEqual(environment["HOME"], str(stage / "home"))
+
+    def test_bench_home_uses_provider_volume_when_mounted(self) -> None:
+        stage = self.base / "stage"
+        stage.mkdir()
+        with (
+            patch("graphforge_bench.progressive_run.os.path.ismount", return_value=True),
+            patch.object(Path, "is_dir", return_value=True),
+        ):
+            self.assertEqual(_bench_home(stage), Path("/work"))
 
     def test_failed_result_schema_requires_closed_exact_identities(self) -> None:
         plan = build_plan(

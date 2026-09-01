@@ -27,6 +27,7 @@ import xml.etree.ElementTree as ET
 from jsonschema import Draft202012Validator
 
 from graphforge_bench.benchexec_authority import Limits, normalize_run
+from graphforge_bench.hybrid_cgroup_v2 import measure_hybrid_pressure
 from graphforge_bench.local_admission import qualify_local_host
 from graphforge_bench.progressive_qualification import QualificationError, load_profiles, project
 
@@ -293,11 +294,30 @@ def _is_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def _benchexec_cli(benchexec_python: Path) -> Path:
+    candidate = benchexec_python.parent / "benchexec"
+    if candidate.is_file():
+        return candidate
+    raise ControllerError("BenchExec CLI is missing beside the configured Python")
+
+
+def _bench_home(stage: Path) -> Path:
+    """Use the provider volume as HOME when BenchExec must write durable projects."""
+    work = Path("/work")
+    try:
+        if work.is_dir() and os.path.ismount(work):
+            return work
+    except OSError:
+        pass
+    home = stage / "home"
+    home.mkdir()
+    return home
+
+
 def _run_benchexec(stage: Path, executables: Executables, identities: Mapping[str, Any]) -> int:
     raw_output = stage / "raw"
     raw_output.mkdir()
-    home = stage / "home"
-    home.mkdir()
+    home = _bench_home(stage)
     environment = {
         "HOME": str(home),
         "LANG": "C.UTF-8",
@@ -306,9 +326,7 @@ def _run_benchexec(stage: Path, executables: Executables, identities: Mapping[st
         "PYTHONPATH": str(Path(__file__).resolve().parents[1]),
     }
     command = [
-        str(executables.benchexec_python),
-        "-m",
-        "benchexec",
+        str(_benchexec_cli(executables.benchexec_python)),
         "--no-compress-results",
         "--outputpath",
         str(raw_output),
@@ -318,7 +336,14 @@ def _run_benchexec(stage: Path, executables: Executables, identities: Mapping[st
     ]
     if _digest(executables.benchexec_python) != identities.get("benchexec_python_sha256"):
         raise ControllerError("BenchExec Python identity changed after planning")
-    return subprocess.run(command, env=environment, check=False).returncode
+    with measure_hybrid_pressure() as hybrid_pressure:
+        returncode = subprocess.run(command, env=environment, check=False).returncode
+    pressure_path = stage / "hybrid-pressure.json"
+    pressure_path.write_text(
+        json.dumps(hybrid_pressure(), sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return returncode
 
 
 def _scaled_number(value: str, *, integral: bool = False) -> int | float:
@@ -360,6 +385,14 @@ def _parse_benchexec_xml(raw_output: Path, *, correctness: bool) -> Mapping[str,
     if len(runs) != 1:
         raise ControllerError("BenchExec result must contain exactly one run")
     columns = {column.attrib.get("title"): column.attrib.get("value") for column in runs[0]}
+
+    hybrid_path = raw_output.parent / "hybrid-pressure.json"
+    if hybrid_path.is_file():
+        hybrid = json.loads(hybrid_path.read_text(encoding="utf-8"))
+        if isinstance(hybrid, Mapping):
+            for key in ("pressure-cpu-some", "pressure-io-some", "pressure-memory-some"):
+                if columns.get(key) is None and isinstance(hybrid.get(key), (int, float)):
+                    columns[key] = f"{hybrid[key]}s"
 
     def required(name: str) -> str:
         value = columns.get(name)
