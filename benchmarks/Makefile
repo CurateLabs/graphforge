@@ -1,4 +1,4 @@
-.PHONY: install smoke smoke-python smoke-rust fly-adapter-static progressive-provider-attempt-static progressive-fly-transport-static local-admission progressive-qualification-list progressive-qualification-plan progressive-qualification-run progressive-qualification-project-s20 progressive-qualification-binaries progressive-provider-plan qualification-operator esc-readiness parity-gate
+.PHONY: install smoke smoke-python smoke-rust fly-adapter-static progressive-provider-attempt-static progressive-fly-transport-static local-admission progressive-qualification-list progressive-qualification-plan progressive-qualification-run progressive-qualification-project-s20 progressive-qualification-binaries progressive-provider-plan qualification-operator esc-readiness ingest-ladder-bundle parity-gate
 
 install:
 	uv sync --locked
@@ -91,3 +91,10 @@ esc-readiness: install
 		--environment "$(ESC_ENVIRONMENT)" \
 		--gate "$(or $(GATE),progressive-ladder)" \
 		$(if $(filter 1 true yes,$(ASSERT_READY)),--assert-ready,)
+
+# Copy a validated #900 output bundle into fixtures/parity/ladder-bundle/ for #959 parity.
+ingest-ladder-bundle: install
+	test -n "$(SOURCE)"
+	PYTHONPATH=$(CURDIR)/harness uv run --locked python -m graphforge_bench.ladder_bundle_ingest \
+		--source "$(SOURCE)" $(if $(DESTINATION),--destination "$(DESTINATION)",) \
+		$(if $(filter 1 true yes,$(VALIDATE_ONLY)),--validate-only,)

@@ -23,6 +23,10 @@ class ParityGateTests(unittest.TestCase):
         }
         self.assertIn("harness_authoritative_after_ladder_comparison", blocked)
         self.assertEqual(blocked["harness_authoritative_after_ladder_comparison"], "#900")
+        self.assertEqual(
+            blocked["legacy_orchestration_retired_with_coverage"],
+            "parity_matrix_no_unexplained_gaps + harness_authoritative",
+        )
 
     def test_historical_evidence_criterion_met(self) -> None:
         status = parity_gate_status()
