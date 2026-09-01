@@ -301,11 +301,23 @@ def _benchexec_cli(benchexec_python: Path) -> Path:
     raise ControllerError("BenchExec CLI is missing beside the configured Python")
 
 
+def _bench_home(stage: Path) -> Path:
+    """Use the provider volume as HOME when BenchExec must write durable projects."""
+    work = Path("/work")
+    try:
+        if work.is_dir() and os.path.ismount(work):
+            return work
+    except OSError:
+        pass
+    home = stage / "home"
+    home.mkdir()
+    return home
+
+
 def _run_benchexec(stage: Path, executables: Executables, identities: Mapping[str, Any]) -> int:
     raw_output = stage / "raw"
     raw_output.mkdir()
-    home = stage / "home"
-    home.mkdir()
+    home = _bench_home(stage)
     environment = {
         "HOME": str(home),
         "LANG": "C.UTF-8",
