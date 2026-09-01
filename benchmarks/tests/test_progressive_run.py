@@ -11,6 +11,7 @@ from graphforge_bench.progressive_run import (
     Executables,
     _authority_staging_parent,
     _bench_home,
+    _benchexec_container_access,
     _run_benchexec,
     _safe_stage,
     _validate,
@@ -571,6 +572,7 @@ class ProgressiveRunControllerTests(unittest.TestCase):
         command = execute.call_args.args[0]
         self.assertEqual(command[0], str(self.base / "benchexec"))
         self.assertEqual(command[1:3], ["--tool-directory", str(stage / "bin")])
+        self.assertEqual(command[3:5], ["--full-access-dir", str(stage.resolve())])
         environment = execute.call_args.kwargs["env"]
         self.assertEqual(environment["PYTHONPATH"], str(ROOT / "harness"))
         self.assertEqual(set(environment), {"HOME", "LANG", "LC_ALL", "PATH", "PYTHONPATH"})
@@ -593,6 +595,19 @@ class ProgressiveRunControllerTests(unittest.TestCase):
         ):
             self.assertEqual(_authority_staging_parent(self.output), self.output)
         self.assertIsNone(_authority_staging_parent(self.output))
+
+    def test_benchexec_container_access_exposes_mounted_work(self) -> None:
+        stage = self.base / "stage"
+        stage.mkdir()
+        with (
+            patch("graphforge_bench.progressive_run.os.path.ismount", return_value=True),
+            patch.object(Path, "is_dir", return_value=True),
+        ):
+            self.assertEqual(_benchexec_container_access(stage), ["--full-access-dir", "/work"])
+        self.assertEqual(
+            _benchexec_container_access(stage),
+            ["--full-access-dir", str(stage.resolve())],
+        )
 
     def test_failed_result_schema_requires_closed_exact_identities(self) -> None:
         plan = build_plan(

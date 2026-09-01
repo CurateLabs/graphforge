@@ -338,6 +338,20 @@ def _benchexec_tool_directory(stage: Path) -> Path:
     return stage / "bin"
 
 
+def _benchexec_container_access(stage: Path) -> list[str]:
+    """Expose durable provider paths to BenchExec container runs."""
+    flags: list[str] = []
+    work = Path("/work")
+    try:
+        if work.is_dir() and os.path.ismount(work):
+            flags.extend(["--full-access-dir", str(work)])
+    except OSError:
+        pass
+    if not flags and stage.is_dir():
+        flags.extend(["--full-access-dir", str(stage.resolve())])
+    return flags
+
+
 def _run_benchexec(stage: Path, executables: Executables, identities: Mapping[str, Any]) -> int:
     raw_output = stage / "raw"
     raw_output.mkdir()
@@ -353,6 +367,7 @@ def _run_benchexec(stage: Path, executables: Executables, identities: Mapping[st
         str(_benchexec_cli(executables.benchexec_python)),
         "--tool-directory",
         str(_benchexec_tool_directory(stage)),
+        *_benchexec_container_access(stage),
         "--no-compress-results",
         "--outputpath",
         str(raw_output),
