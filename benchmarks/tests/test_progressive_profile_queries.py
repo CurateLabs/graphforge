@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import json
-import unittest
 from pathlib import Path
+import unittest
 
 from graphforge_bench.progressive_queries import (
     CANONICAL_QUERY_PHASES,
