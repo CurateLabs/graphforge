@@ -327,6 +327,17 @@ def _authority_staging_parent(output_dir: Path) -> Path | None:
     return None
 
 
+def _benchexec_tool_directory(stage: Path) -> Path:
+    """Prefer image-local executables once staged identity checks have passed."""
+    local = Path("/usr/local/bin")
+    try:
+        if local.is_dir() and (local / "graphforge-benchmark-certify").is_file():
+            return local
+    except OSError:
+        pass
+    return stage / "bin"
+
+
 def _run_benchexec(stage: Path, executables: Executables, identities: Mapping[str, Any]) -> int:
     raw_output = stage / "raw"
     raw_output.mkdir()
@@ -341,7 +352,7 @@ def _run_benchexec(stage: Path, executables: Executables, identities: Mapping[st
     command = [
         str(_benchexec_cli(executables.benchexec_python)),
         "--tool-directory",
-        str(stage / "bin"),
+        str(_benchexec_tool_directory(stage)),
         "--no-compress-results",
         "--outputpath",
         str(raw_output),
