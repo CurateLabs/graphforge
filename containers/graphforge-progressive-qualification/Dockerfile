@@ -48,6 +48,8 @@ COPY benchmarks/harness /opt/graphforge/benchmarks/harness
 COPY benchmarks/profiles /opt/graphforge/benchmarks/profiles
 COPY benchmarks/schemas /opt/graphforge/benchmarks/schemas
 COPY benchmarks/definitions /opt/graphforge/benchmarks/definitions
+COPY benchmarks/runners/graph500-generator/src/main.rs \
+    /opt/graphforge/benchmarks/runners/graph500-generator/src/main.rs
 COPY --chmod=0555 containers/graphforge-progressive-qualification/run-qualification.py \
     /usr/local/bin/run-progressive-qualification
 COPY --from=rust-build /source-tree-sha256 /tmp/source-tree-sha256
