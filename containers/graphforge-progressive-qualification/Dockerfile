@@ -33,7 +33,10 @@ FROM python:3.12.11-slim-bookworm@sha256:519591d6871b7bc437060736b9f7456b8731f14
 
 ARG GRAPHFORGE_COMMIT
 LABEL org.opencontainers.image.revision="${GRAPHFORGE_COMMIT}"
-RUN mkdir -p /opt/graphforge /work \
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends fuse-overlayfs \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /opt/graphforge /work \
     && chown 10001:10001 /work \
     && chmod 0755 /work
 
