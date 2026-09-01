@@ -350,7 +350,6 @@ def _benchexec_tool_directory(stage: Path) -> Path:
     return stage / "bin"
 
 
-
 def _stage_benchmark_xml(root: Path, stage: Path) -> None:
     text = (root / "definitions/graphforge-progressive-qualification-v1.xml").read_text(
         encoding="utf-8"
