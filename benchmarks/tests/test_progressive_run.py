@@ -9,6 +9,7 @@ from unittest.mock import patch
 from graphforge_bench.progressive_run import (
     ControllerError,
     Executables,
+    _authority_staging_parent,
     _bench_home,
     _run_benchexec,
     _safe_stage,
@@ -573,6 +574,7 @@ class ProgressiveRunControllerTests(unittest.TestCase):
         self.assertEqual(environment["PYTHONPATH"], str(ROOT / "harness"))
         self.assertEqual(set(environment), {"HOME", "LANG", "LC_ALL", "PATH", "PYTHONPATH"})
         self.assertEqual(environment["HOME"], str(stage / "home"))
+        self.assertIn("/usr/local/bin", environment["PATH"])
 
     def test_bench_home_uses_provider_volume_when_mounted(self) -> None:
         stage = self.base / "stage"
@@ -582,6 +584,14 @@ class ProgressiveRunControllerTests(unittest.TestCase):
             patch.object(Path, "is_dir", return_value=True),
         ):
             self.assertEqual(_bench_home(stage), Path("/work"))
+
+    def test_authority_staging_parent_uses_output_dir_on_mounted_work(self) -> None:
+        with (
+            patch("graphforge_bench.progressive_run.os.path.ismount", return_value=True),
+            patch.object(Path, "is_dir", return_value=True),
+        ):
+            self.assertEqual(_authority_staging_parent(self.output), self.output)
+        self.assertIsNone(_authority_staging_parent(self.output))
 
     def test_failed_result_schema_requires_closed_exact_identities(self) -> None:
         plan = build_plan(

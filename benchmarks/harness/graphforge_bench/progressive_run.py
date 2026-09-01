@@ -314,6 +314,17 @@ def _bench_home(stage: Path) -> Path:
     return home
 
 
+def _authority_staging_parent(output_dir: Path) -> Path | None:
+    """Keep BenchExec staging on the provider volume when /work is mounted."""
+    work = Path("/work")
+    try:
+        if work.is_dir() and os.path.ismount(work):
+            return output_dir
+    except OSError:
+        pass
+    return None
+
+
 def _run_benchexec(stage: Path, executables: Executables, identities: Mapping[str, Any]) -> int:
     raw_output = stage / "raw"
     raw_output.mkdir()
@@ -322,7 +333,7 @@ def _run_benchexec(stage: Path, executables: Executables, identities: Mapping[st
         "HOME": str(home),
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
-        "PATH": f"{stage / 'bin'}:{Path(sys.executable).parent}:/usr/bin:/bin",
+        "PATH": f"{stage / 'bin'}:/usr/local/bin:{Path(sys.executable).parent}:/usr/bin:/bin",
         "PYTHONPATH": str(Path(__file__).resolve().parents[1]),
     }
     command = [
@@ -715,7 +726,9 @@ def run(
     _native_authority()
     profile_path, _ = _profile(root, scale)
     output_dir.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="gf-progressive-authority-") as temporary:
+    with tempfile.TemporaryDirectory(
+        prefix="gf-progressive-authority-", dir=_authority_staging_parent(output_dir)
+    ) as temporary:
         identities = plan["identities"]
         if not isinstance(identities, Mapping):
             raise ControllerError("run plan identities are malformed")
