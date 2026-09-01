@@ -9,6 +9,11 @@ from unittest.mock import patch
 from graphforge_bench.progressive_run import (
     ControllerError,
     Executables,
+    _authority_staging_parent,
+    _bench_home,
+    _benchexec_container_flags,
+    _benchexec_tool_directory,
+    _rewrite_profile_for_provider_volume,
     _run_benchexec,
     _safe_stage,
     _validate,
@@ -16,6 +21,7 @@ from graphforge_bench.progressive_run import (
     assemble_rung_evidence,
     build_plan,
     ingest_benchexec_result,
+    repository_commit,
     require_bulk_ingest_capability,
     require_order,
     resolve_executables,
@@ -259,9 +265,10 @@ class ProgressiveRunControllerTests(unittest.TestCase):
         gf = self.base / "gf"
         certify = self.base / "graphforge-benchmark-certify"
         python = self.base / "python"
-        for path in (gf, certify, python):
+        benchexec = self.base / "benchexec"
+        for path in (gf, certify, python, benchexec):
             path.write_bytes(b"fixture")
-        for path in (generator, gf, certify, python):
+        for path in (generator, gf, certify, python, benchexec):
             path.chmod(path.stat().st_mode | 0o111)
         self.executables = Executables(gf, certify, generator, python)
 
@@ -524,14 +531,16 @@ class ProgressiveRunControllerTests(unittest.TestCase):
             executables=self.executables,
         )
         profile = ROOT / "profiles/graph500/s18-local.json"
-        stage = _safe_stage(ROOT, profile, self.executables, plan["identities"], self.base)
+        stage = _safe_stage(
+            ROOT, profile, self.executables, plan["identities"], self.base, scale=18
+        )
         staged_gf = stage / "bin/gf"
         self.assertFalse(staged_gf.is_symlink())
         original = staged_gf.read_bytes()
         self.executables.gf.write_bytes(b"changed-after-planning")
         self.assertEqual(staged_gf.read_bytes(), original)
         with self.assertRaisesRegex(ControllerError, "staged executable identity mismatch"):
-            _safe_stage(ROOT, profile, self.executables, plan["identities"], self.base)
+            _safe_stage(ROOT, profile, self.executables, plan["identities"], self.base, scale=18)
 
     def test_benchexec_python_is_rechecked_immediately_before_invocation(self) -> None:
         plan = build_plan(
@@ -564,9 +573,113 @@ class ProgressiveRunControllerTests(unittest.TestCase):
         with patch("graphforge_bench.progressive_run.subprocess.run") as execute:
             execute.return_value.returncode = 0
             self.assertEqual(_run_benchexec(stage, self.executables, plan["identities"]), 0)
+        command = execute.call_args.args[0]
+        self.assertEqual(command[0], str(self.base / "benchexec"))
+        self.assertEqual(command[1:3], ["--tool-directory", str(stage / "bin")])
+        self.assertEqual(command[3:5], ["--full-access-dir", str(stage.resolve())])
         environment = execute.call_args.kwargs["env"]
         self.assertEqual(environment["PYTHONPATH"], str(ROOT / "harness"))
         self.assertEqual(set(environment), {"HOME", "LANG", "LC_ALL", "PATH", "PYTHONPATH"})
+        self.assertEqual(environment["HOME"], str(stage / "home"))
+        self.assertIn("/usr/local/bin", environment["PATH"])
+
+    def test_bench_home_uses_provider_volume_when_mounted(self) -> None:
+        stage = self.base / "stage"
+        stage.mkdir()
+        with patch("graphforge_bench.progressive_run._provider_volume_mounted", return_value=True):
+            self.assertEqual(_bench_home(stage), Path("/work"))
+
+    def test_authority_staging_parent_uses_output_dir_on_mounted_work(self) -> None:
+        with patch("graphforge_bench.progressive_run._provider_volume_mounted", return_value=True):
+            self.assertEqual(_authority_staging_parent(self.output), self.output)
+        self.assertIsNone(_authority_staging_parent(self.output))
+
+    def test_benchexec_container_flags_expose_mounted_work(self) -> None:
+        stage = self.base / "stage"
+        stage.mkdir()
+        with (
+            patch("graphforge_bench.progressive_run._provider_volume_mounted", return_value=True),
+        ):
+            self.assertEqual(
+                _benchexec_container_flags(stage),
+                [
+                    "--read-only-dir",
+                    "/",
+                    "--hidden-dir",
+                    "/run",
+                    "--hidden-dir",
+                    "/tmp",
+                    "--full-access-dir",
+                    "/work",
+                ],
+            )
+        self.assertEqual(
+            _benchexec_container_flags(stage),
+            ["--full-access-dir", str(stage.resolve())],
+        )
+
+    def test_rewrite_profile_for_provider_volume_uses_absolute_workspace(self) -> None:
+        profile = (ROOT / "profiles/graph500/s18-local.json").read_text(encoding="utf-8")
+        rewritten = _rewrite_profile_for_provider_volume(profile, 18)
+        self.assertIn('"/work/workspace/s18/nodes.parquet"', rewritten)
+        self.assertNotIn('"workspace/s18/nodes.parquet"', rewritten)
+
+    def test_provider_volume_wraps_staged_executables_with_work_tmpdir(self) -> None:
+        profile_path = ROOT / "profiles/graph500/s18-local.json"
+        plan = build_plan(
+            root=ROOT,
+            output_dir=self.output,
+            scale=18,
+            commit=COMMIT,
+            executables=self.executables,
+        )
+        with (
+            patch("graphforge_bench.progressive_run._provider_volume_mounted", return_value=True),
+            patch("graphforge_bench.progressive_run._stage_benchmark_xml"),
+        ):
+            stage = _safe_stage(
+                ROOT,
+                profile_path,
+                self.executables,
+                plan["identities"],
+                self.base,
+                scale=18,
+            )
+        wrapper = (stage / "bin" / "gf").read_text(encoding="utf-8")
+        self.assertIn('export TMPDIR="/work/tmp"', wrapper)
+        self.assertTrue((stage / "bin" / "gf.real").is_file())
+        self.assertEqual(oct(stage.stat().st_mode & 0o777), oct(0o777))
+        with patch("graphforge_bench.progressive_run._provider_volume_mounted", return_value=True):
+            self.assertEqual(_benchexec_tool_directory(stage), stage / "bin")
+
+    def test_provider_volume_stages_higher_benchexec_memory(self) -> None:
+        stage = self.base / "stage"
+        stage.mkdir()
+        with patch("graphforge_bench.progressive_run._provider_volume_mounted", return_value=True):
+            from graphforge_bench.progressive_run import _stage_benchmark_xml
+
+            _stage_benchmark_xml(ROOT, stage)
+            xml = (stage / "benchmark.xml").read_text(encoding="utf-8")
+            self.assertIn('memlimit="16 GB"', xml)
+            self.assertNotIn('memlimit="4 GB"', xml)
+            plan = build_plan(
+                root=ROOT,
+                output_dir=self.output,
+                scale=18,
+                commit=COMMIT,
+                executables=self.executables,
+            )
+            (stage / "bin").mkdir()
+            (stage / "benchmark.xml").write_text("fixture", encoding="utf-8")
+            with (
+                patch("graphforge_bench.progressive_run.subprocess.run") as execute,
+                patch.object(Path, "mkdir"),
+            ):
+                execute.return_value.returncode = 0
+                _run_benchexec(stage, self.executables, plan["identities"])
+            command = execute.call_args.args[0]
+            self.assertIn("--memorylimit", command)
+            self.assertIn("16 GB", command)
 
     def test_failed_result_schema_requires_closed_exact_identities(self) -> None:
         plan = build_plan(
@@ -588,6 +701,14 @@ class ProgressiveRunControllerTests(unittest.TestCase):
         result["identities"] = {}
         with self.assertRaisesRegex(ControllerError, "validation failed"):
             _validate(ROOT, "progressive-run-result.json", result)
+
+    def test_repository_commit_reads_image_attestation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            benchmarks = base / "benchmarks"
+            benchmarks.mkdir()
+            (base / "commit").write_text(COMMIT + "\n", encoding="ascii")
+            self.assertEqual(repository_commit(benchmarks), COMMIT)
 
 
 if __name__ == "__main__":

@@ -24,6 +24,9 @@ FROM python:3.12.11-slim-bookworm@sha256:519591d6871b7bc437060736b9f7456b8731f14
 
 ENV UV_LINK_MODE=copy
 WORKDIR /opt/graphforge/benchmarks
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends fuse-overlayfs \
+    && rm -rf /var/lib/apt/lists/*
 RUN python -m pip install --no-cache-dir "uv==0.11.33"
 COPY benchmarks/pyproject.toml benchmarks/uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
@@ -37,6 +40,9 @@ RUN mkdir -p /opt/graphforge /work \
     && chown 10001:10001 /work \
     && chmod 0755 /work
 
+COPY --from=python-deps /usr/bin/fuse-overlayfs /usr/bin/fuse-overlayfs
+COPY --from=python-deps /lib/x86_64-linux-gnu/libfuse3.so.3 /lib/x86_64-linux-gnu/libfuse3.so.3
+
 COPY --from=rust-build /source/target/release/gf /usr/local/bin/gf
 COPY --from=rust-build /source/benchmarks/target/release/graphforge-benchmark-certify \
     /usr/local/bin/graphforge-benchmark-certify
@@ -48,6 +54,8 @@ COPY benchmarks/harness /opt/graphforge/benchmarks/harness
 COPY benchmarks/profiles /opt/graphforge/benchmarks/profiles
 COPY benchmarks/schemas /opt/graphforge/benchmarks/schemas
 COPY benchmarks/definitions /opt/graphforge/benchmarks/definitions
+COPY benchmarks/runners/graph500-generator/src/main.rs \
+    /opt/graphforge/benchmarks/runners/graph500-generator/src/main.rs
 COPY --chmod=0555 containers/graphforge-progressive-qualification/run-qualification.py \
     /usr/local/bin/run-progressive-qualification
 COPY --from=rust-build /source-tree-sha256 /tmp/source-tree-sha256

@@ -18,6 +18,7 @@ from pathlib import Path
 import platform
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -27,6 +28,7 @@ import xml.etree.ElementTree as ET
 from jsonschema import Draft202012Validator
 
 from graphforge_bench.benchexec_authority import Limits, normalize_run
+from graphforge_bench.hybrid_cgroup_v2 import measure_hybrid_pressure
 from graphforge_bench.local_admission import qualify_local_host
 from graphforge_bench.progressive_qualification import QualificationError, load_profiles, project
 
@@ -101,6 +103,14 @@ def _commit(value: str) -> str:
 
 
 def repository_commit(root: Path) -> str:
+    """Return the checked-out commit or the read-only image attestation."""
+    attestation = root.parent / "commit"
+    if attestation.is_file():
+        try:
+            value = attestation.read_text(encoding="ascii").strip()
+        except (OSError, UnicodeDecodeError) as error:
+            raise ControllerError("image commit attestation is unavailable") from error
+        return _commit(value)
     completed = subprocess.run(
         ["git", "-C", str(root.parent), "rev-parse", "HEAD"],
         text=True,
@@ -220,18 +230,48 @@ def write_plan(output_dir: Path, plan: Mapping[str, Any]) -> Path:
     return path
 
 
+def _provider_volume_mounted() -> bool:
+    work = Path("/work")
+    try:
+        return work.is_dir() and os.path.ismount(work)
+    except OSError:
+        return False
+
+
+def _rewrite_profile_for_provider_volume(profile_text: str, scale: int) -> str:
+    """Pin durable workspace paths on the provider volume for BenchExec containers."""
+    relative = f"workspace/s{scale}"
+    absolute = f"/work/{relative}"
+    return profile_text.replace(f'"{relative}/', f'"{absolute}/').replace(
+        f'"{relative}"', f'"{absolute}"'
+    )
+
+
+def _wrap_executable_for_provider_tmp(staged: Path) -> None:
+    real = staged.with_name(f"{staged.name}.real")
+    staged.rename(real)
+    staged.write_text(
+        f'#!/bin/sh\nexport TMPDIR="/work/tmp"\nexec "{real}" "$@"\n',
+        encoding="utf-8",
+    )
+    staged.chmod(staged.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+
 def _safe_stage(
     root: Path,
     profile_path: Path,
     executables: Executables,
     identities: Mapping[str, Any],
     parent: Path,
+    *,
+    scale: int,
 ) -> Path:
     stage = Path(tempfile.mkdtemp(prefix="gf-progressive-", dir=parent))
-    shutil.copyfile(profile_path, stage / "profile.json")
-    shutil.copyfile(
-        root / "definitions/graphforge-progressive-qualification-v1.xml", stage / "benchmark.xml"
-    )
+    profile_text = profile_path.read_text(encoding="utf-8")
+    if _provider_volume_mounted():
+        profile_text = _rewrite_profile_for_provider_volume(profile_text, scale)
+    (stage / "profile.json").write_text(profile_text, encoding="utf-8")
+    _stage_benchmark_xml(root, stage)
     bin_dir = stage / "bin"
     bin_dir.mkdir()
     for name, source, identity_key in (
@@ -245,9 +285,22 @@ def _safe_stage(
     ):
         staged = bin_dir / name
         shutil.copy2(source, staged)
+        staged.chmod(staged.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         if _digest(staged) != identities.get(identity_key):
             raise ControllerError(f"staged executable identity mismatch: {name}")
+        if _provider_volume_mounted():
+            _wrap_executable_for_provider_tmp(staged)
+    if _provider_volume_mounted():
+        _make_benchexec_stage_writable(stage)
     return stage
+
+
+def _make_benchexec_stage_writable(stage: Path) -> None:
+    """BenchExec runs tools as an unprivileged user that must write evidence.json."""
+    stage.chmod(0o777)
+    for path in stage.rglob("*"):
+        if path.is_dir():
+            path.chmod(0o777)
 
 
 def _native_authority() -> Mapping[str, Any]:
@@ -285,22 +338,95 @@ def _is_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def _benchexec_cli(benchexec_python: Path) -> Path:
+    candidate = benchexec_python.parent / "benchexec"
+    if candidate.is_file():
+        return candidate
+    raise ControllerError("BenchExec CLI is missing beside the configured Python")
+
+
+def _bench_home(stage: Path) -> Path:
+    """Use the provider volume as HOME when BenchExec must write durable projects."""
+    if _provider_volume_mounted():
+        return Path("/work")
+    home = stage / "home"
+    home.mkdir()
+    return home
+
+
+def _authority_staging_parent(output_dir: Path) -> Path | None:
+    """Keep BenchExec staging on the provider volume when /work is mounted."""
+    if _provider_volume_mounted():
+        return output_dir
+    return None
+
+
+def _benchexec_tool_directory(stage: Path) -> Path:
+    """Prefer image-local executables once staged identity checks have passed."""
+    if _provider_volume_mounted():
+        return stage / "bin"
+    local = Path("/usr/local/bin")
+    try:
+        if local.is_dir() and (local / "graphforge-benchmark-certify").is_file():
+            return local
+    except OSError:
+        pass
+    return stage / "bin"
+
+
+def _stage_benchmark_xml(root: Path, stage: Path) -> None:
+    text = (root / "definitions/graphforge-progressive-qualification-v1.xml").read_text(
+        encoding="utf-8"
+    )
+    if _provider_volume_mounted():
+        text = text.replace('memlimit="4 GB"', 'memlimit="16 GB"')
+    (stage / "benchmark.xml").write_text(text, encoding="utf-8")
+
+
+def _benchexec_memory_limit() -> list[str]:
+    if _provider_volume_mounted():
+        return ["--memorylimit", "16 GB"]
+    return []
+
+
+def _benchexec_container_flags(stage: Path) -> list[str]:
+    """Configure BenchExec container mounts for durable provider-volume runs."""
+    if _provider_volume_mounted():
+        return [
+            "--read-only-dir",
+            "/",
+            "--hidden-dir",
+            "/run",
+            "--hidden-dir",
+            "/tmp",
+            "--full-access-dir",
+            "/work",
+        ]
+    if stage.is_dir():
+        return ["--full-access-dir", str(stage.resolve())]
+    return []
+
+
 def _run_benchexec(stage: Path, executables: Executables, identities: Mapping[str, Any]) -> int:
     raw_output = stage / "raw"
     raw_output.mkdir()
-    home = stage / "home"
-    home.mkdir()
+    home = _bench_home(stage)
     environment = {
         "HOME": str(home),
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
-        "PATH": f"{stage / 'bin'}:{Path(sys.executable).parent}:/usr/bin:/bin",
+        "PATH": f"{stage / 'bin'}:/usr/local/bin:{Path(sys.executable).parent}:/usr/bin:/bin",
         "PYTHONPATH": str(Path(__file__).resolve().parents[1]),
     }
+    if _provider_volume_mounted():
+        (Path("/work") / "tmp").mkdir(exist_ok=True)
+        environment["TMPDIR"] = str(home / "tmp")
     command = [
-        str(executables.benchexec_python),
-        "-m",
-        "benchexec",
+        str(_benchexec_cli(executables.benchexec_python)),
+        "--tool-directory",
+        str(_benchexec_tool_directory(stage)),
+        *_benchexec_container_flags(stage),
+        *_benchexec_memory_limit(),
         "--no-compress-results",
         "--outputpath",
         str(raw_output),
@@ -310,7 +436,14 @@ def _run_benchexec(stage: Path, executables: Executables, identities: Mapping[st
     ]
     if _digest(executables.benchexec_python) != identities.get("benchexec_python_sha256"):
         raise ControllerError("BenchExec Python identity changed after planning")
-    return subprocess.run(command, env=environment, check=False).returncode
+    with measure_hybrid_pressure() as hybrid_pressure:
+        returncode = subprocess.run(command, env=environment, check=False).returncode
+    pressure_path = stage / "hybrid-pressure.json"
+    pressure_path.write_text(
+        json.dumps(hybrid_pressure(), sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return returncode
 
 
 def _scaled_number(value: str, *, integral: bool = False) -> int | float:
@@ -352,6 +485,14 @@ def _parse_benchexec_xml(raw_output: Path, *, correctness: bool) -> Mapping[str,
     if len(runs) != 1:
         raise ControllerError("BenchExec result must contain exactly one run")
     columns = {column.attrib.get("title"): column.attrib.get("value") for column in runs[0]}
+
+    hybrid_path = raw_output.parent / "hybrid-pressure.json"
+    if hybrid_path.is_file():
+        hybrid = json.loads(hybrid_path.read_text(encoding="utf-8"))
+        if isinstance(hybrid, Mapping):
+            for key in ("pressure-cpu-some", "pressure-io-some", "pressure-memory-some"):
+                if columns.get(key) is None and isinstance(hybrid.get(key), (int, float)):
+                    columns[key] = f"{hybrid[key]}s"
 
     def required(name: str) -> str:
         value = columns.get(name)
@@ -668,19 +809,34 @@ def validate_fixture_bundle(root: Path, bundle: Path, scale: int) -> None:
         raise ControllerError("BenchExec and GraphForge evidence disagree")
 
 
+def _preserve_failure_artifacts(stage: Path, output_dir: Path, scale: int) -> None:
+    raw = stage / "raw"
+    if not raw.is_dir():
+        return
+    destination = output_dir / f"s{scale}-failure-raw"
+    if destination.exists():
+        shutil.rmtree(destination)
+    shutil.copytree(raw, destination)
+
+
 def run(
     *, root: Path, output_dir: Path, scale: int, plan: Mapping[str, Any], executables: Executables
 ) -> None:
     _native_authority()
     profile_path, _ = _profile(root, scale)
     output_dir.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="gf-progressive-authority-") as temporary:
+    with tempfile.TemporaryDirectory(
+        prefix="gf-progressive-authority-", dir=_authority_staging_parent(output_dir)
+    ) as temporary:
         identities = plan["identities"]
         if not isinstance(identities, Mapping):
             raise ControllerError("run plan identities are malformed")
-        stage = _safe_stage(root, profile_path, executables, identities, Path(temporary))
+        stage = _safe_stage(
+            root, profile_path, executables, identities, Path(temporary), scale=scale
+        )
         status = _run_benchexec(stage, executables, identities)
         if status != 0:
+            _preserve_failure_artifacts(stage, output_dir, scale)
             result = {
                 "schema": RESULT_SCHEMA,
                 "rung": f"S{scale}",
@@ -697,6 +853,7 @@ def run(
                 root=root, stage=stage, scale=scale, plan=plan
             )
         except (ControllerError, ValueError) as error:
+            _preserve_failure_artifacts(stage, output_dir, scale)
             result = {
                 "schema": RESULT_SCHEMA,
                 "rung": f"S{scale}",
