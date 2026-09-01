@@ -374,16 +374,16 @@ def _run_benchexec(stage: Path, executables: Executables, identities: Mapping[st
     raw_output = stage / "raw"
     raw_output.mkdir()
     home = _bench_home(stage)
-    if _provider_volume_mounted():
-        (Path("/work") / "tmp").mkdir(exist_ok=True)
     environment = {
         "HOME": str(home),
-        "TMPDIR": str(home / "tmp") if _provider_volume_mounted() else "/tmp",
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
         "PATH": f"{stage / 'bin'}:/usr/local/bin:{Path(sys.executable).parent}:/usr/bin:/bin",
         "PYTHONPATH": str(Path(__file__).resolve().parents[1]),
     }
+    if _provider_volume_mounted():
+        (Path("/work") / "tmp").mkdir(exist_ok=True)
+        environment["TMPDIR"] = str(home / "tmp")
     command = [
         str(_benchexec_cli(executables.benchexec_python)),
         "--tool-directory",
