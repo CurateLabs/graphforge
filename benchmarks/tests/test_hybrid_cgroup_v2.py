@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+from pathlib import Path
 import tempfile
 import unittest
-from pathlib import Path
 
 from graphforge_bench.hybrid_cgroup_v2 import (
     benchexec_cgroup_version,
@@ -35,7 +35,10 @@ class HybridCgroupV2Tests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertTrue(has_cgroup_v2_mount(mounts_path=mounts))
-            self.assertEqual(cgroup_v1_mountpoints(mounts_path=mounts), (Path("/sys/fs/cgroup/memory"),))
+            self.assertEqual(
+                cgroup_v1_mountpoints(mounts_path=mounts),
+                (Path("/sys/fs/cgroup/memory"),),
+            )
             self.assertEqual(benchexec_cgroup_version(mounts_path=mounts), 1)
             self.assertTrue(is_hybrid_cgroup_layout(cgroup_root=cgroup, mounts_path=mounts))
 
@@ -57,7 +60,10 @@ class HybridCgroupV2Tests(unittest.TestCase):
     def test_read_psi_total_seconds(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             pressure = Path(directory) / "cpu.pressure"
-            pressure.write_text("some avg10=0.00 avg60=0.00 avg300=0.00 total=2500000000\n", encoding="utf-8")
+            pressure.write_text(
+                "some avg10=0.00 avg60=0.00 avg300=0.00 total=2500000000\n",
+                encoding="utf-8",
+            )
             self.assertEqual(read_psi_total_seconds(pressure), 2.5)
 
     def test_hybrid_pressure_deltas_are_non_negative(self) -> None:

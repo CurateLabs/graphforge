@@ -116,11 +116,7 @@ def _evidence(
         "schema": SCHEMA,
         "result": result,
         "cause": cause,
-        "facts": {
-            key: value
-            for key, value in facts.items()
-            if not str(key).startswith("_")
-        },
+        "facts": {key: value for key, value in facts.items() if not str(key).startswith("_")},
     }
     if measurements is not None:
         document["measurements"] = dict(measurements)

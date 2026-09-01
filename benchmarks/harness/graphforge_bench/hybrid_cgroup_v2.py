@@ -9,10 +9,10 @@ unified PSI files around a BenchExec invocation.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator, TypeVar
+from typing import TypeVar
 
 T = TypeVar("T")
 
@@ -107,10 +107,7 @@ def read_unified_pressure_totals(*, unified_root: Path) -> dict[str, float]:
 def hybrid_pressure_deltas(
     before: Mapping[str, float], after: Mapping[str, float]
 ) -> dict[str, float]:
-    return {
-        key: max(0.0, after.get(key, 0.0) - before.get(key, 0.0))
-        for key in PRESSURE_KEYS
-    }
+    return {key: max(0.0, after.get(key, 0.0) - before.get(key, 0.0)) for key in PRESSURE_KEYS}
 
 
 @contextmanager
@@ -122,7 +119,7 @@ def measure_hybrid_pressure(
 
     unified_root = unified_v2_root(cgroup_root=cgroup_root)
     before = read_unified_pressure_totals(unified_root=unified_root)
-    deltas: dict[str, float] = {key: 0.0 for key in PRESSURE_KEYS}
+    deltas: dict[str, float] = dict.fromkeys(PRESSURE_KEYS, 0.0)
 
     def _result() -> dict[str, float]:
         return dict(deltas)

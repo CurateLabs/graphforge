@@ -82,20 +82,20 @@ class LocalAdmissionTests(unittest.TestCase):
             namespace.mkdir(parents=True)
             for name in ("mnt", "pid", "user"):
                 (namespace / name).touch()
-            with patch(
-                "graphforge_bench.local_admission.platform.release", return_value="6.12.0-fly"
-            ):
-                with patch(
+            with (
+                patch(
+                    "graphforge_bench.local_admission.platform.release", return_value="6.12.0-fly"
+                ),
+                patch(
                     "graphforge_bench.local_admission.is_hybrid_cgroup_layout",
                     return_value=False,
-                ):
-                    with patch(
-                        "graphforge_bench.local_admission.benchexec_cgroup_version",
-                        return_value=2,
-                    ):
-                        result = qualify_local_host(
-                            system="Linux", cgroup_root=hybrid, runner=runner
-                        )
+                ),
+                patch(
+                    "graphforge_bench.local_admission.benchexec_cgroup_version",
+                    return_value=2,
+                ),
+            ):
+                result = qualify_local_host(system="Linux", cgroup_root=hybrid, runner=runner)
         self.assertEqual(result["result"], "passed")
         self.assertEqual(result["facts"]["cgroups_version"], 2)
         self.assertTrue(result["facts"]["required_controllers"])
@@ -138,20 +138,20 @@ class LocalAdmissionTests(unittest.TestCase):
             namespace.mkdir(parents=True)
             for name in ("mnt", "pid", "user"):
                 (namespace / name).touch()
-            with patch(
-                "graphforge_bench.local_admission.platform.release", return_value="6.12.0-fly"
-            ):
-                with patch(
+            with (
+                patch(
+                    "graphforge_bench.local_admission.platform.release", return_value="6.12.0-fly"
+                ),
+                patch(
                     "graphforge_bench.local_admission.is_hybrid_cgroup_layout",
                     return_value=False,
-                ):
-                    with patch(
-                        "graphforge_bench.local_admission.benchexec_cgroup_version",
-                        return_value=2,
-                    ):
-                        result = qualify_local_host(
-                            system="Linux", cgroup_root=hybrid, runner=runner
-                        )
+                ),
+                patch(
+                    "graphforge_bench.local_admission.benchexec_cgroup_version",
+                    return_value=2,
+                ),
+            ):
+                result = qualify_local_host(system="Linux", cgroup_root=hybrid, runner=runner)
         self.assertEqual(result["result"], "passed")
         self.assertTrue(entered)
 
