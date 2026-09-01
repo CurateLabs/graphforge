@@ -29,6 +29,11 @@ REQUIRED_METRICS = (
     "pressure-memory-some",
 )
 REQUIRED_CONTROLLERS = ("cpu", "io", "memory")
+CONTROLLER_INTERFACE_FILES = {
+    "cpu": ("cpu.stat", "cpu.max", "cpu.weight"),
+    "io": ("io.stat", "io.max", "io.pressure"),
+    "memory": ("memory.current", "memory.max", "memory.stat", "memory.pressure"),
+}
 
 
 @dataclass(frozen=True)
@@ -46,16 +51,38 @@ def _run(command: Sequence[str]) -> CommandResult:
     return CommandResult(completed.returncode, completed.stdout, completed.stderr)
 
 
+def _resolve_cgroup_v2_root(cgroup_root: Path) -> Path | None:
+    """Return the unified cgroup v2 mount root, including hybrid v1 layouts."""
+    if (cgroup_root / "cgroup.controllers").is_file():
+        return cgroup_root
+    unified = cgroup_root / "unified"
+    if (unified / "cgroup.controllers").is_file():
+        return unified
+    return None
+
+
+def _available_controllers(resolved: Path) -> set[str]:
+    """Return cgroup v2 controllers declared or already active in this cgroup."""
+    try:
+        declared = set(resolved.joinpath("cgroup.controllers").read_text(encoding="utf-8").split())
+    except OSError:
+        declared = set()
+    if declared:
+        return declared
+    return {
+        name
+        for name, interface_files in CONTROLLER_INTERFACE_FILES.items()
+        if any(resolved.joinpath(filename).exists() for filename in interface_files)
+    }
+
+
 def _facts(
     system: str,
     cgroup_root: Path = Path("/sys/fs/cgroup"),
 ) -> dict[str, object]:
     linux = system == "Linux"
-    controllers = (
-        set((cgroup_root / "cgroup.controllers").read_text(encoding="utf-8").split())
-        if linux and (cgroup_root / "cgroup.controllers").is_file()
-        else set()
-    )
+    resolved = _resolve_cgroup_v2_root(cgroup_root) if linux else None
+    controllers = _available_controllers(resolved) if resolved is not None else set()
     release = platform.release() if linux else ""
     try:
         major, minor = (int(part) for part in release.split("-", 1)[0].split(".")[:2])
@@ -63,7 +90,7 @@ def _facts(
         major, minor = (0, 0)
     return {
         "operating_system": system.lower(),
-        "cgroups_version": 2 if linux and (cgroup_root / "cgroup.controllers").is_file() else None,
+        "cgroups_version": 2 if resolved is not None else None,
         "required_controllers": all(name in controllers for name in REQUIRED_CONTROLLERS),
         "kernel_memory_accounting": linux and (major, minor) >= (5, 19),
         "privileged_execution": linux and os.geteuid() == 0,
