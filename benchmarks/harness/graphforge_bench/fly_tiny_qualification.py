@@ -57,6 +57,9 @@ APP_READINESS_TIMEOUT_SECONDS = 60
 APP_READINESS_PROBE_TIMEOUT_SECONDS = 5
 APP_READINESS_INITIAL_BACKOFF_SECONDS = 0.25
 APP_READINESS_MAX_BACKOFF_SECONDS = 2.0
+IMAGE_LAUNCH_INITIAL_BACKOFF_SECONDS = 2.0
+IMAGE_LAUNCH_MAX_BACKOFF_SECONDS = 15.0
+IMAGE_LAUNCH_ATTEMPTS = 6
 TEARDOWN_POLL_ATTEMPTS = 6
 TEARDOWN_POLL_INTERVAL_SECONDS = 2
 
@@ -512,6 +515,37 @@ def _machine_command(
     )
 
 
+def _image_launch_retryable(error: subprocess.CalledProcessError) -> bool:
+    text = "\n".join(
+        fragment
+        for fragment in (
+            getattr(error, "stdout", None),
+            getattr(error, "stderr", None),
+        )
+        if isinstance(fragment, str)
+    ).lower()
+    return "manifest_unknown" in text or "manifest unknown" in text
+
+
+def _run_machine_with_backoff(
+    transport: Transport,
+    argv: tuple[str, ...],
+    *,
+    timeout: int,
+    sleeper: Callable[[float], None] = time.sleep,
+) -> subprocess.CompletedProcess[str]:
+    backoff = IMAGE_LAUNCH_INITIAL_BACKOFF_SECONDS
+    for attempt in range(IMAGE_LAUNCH_ATTEMPTS):
+        try:
+            return transport.run(argv, timeout=timeout)
+        except subprocess.CalledProcessError as error:
+            if not _image_launch_retryable(error) or attempt + 1 >= IMAGE_LAUNCH_ATTEMPTS:
+                raise
+            sleeper(backoff)
+            backoff = min(backoff * 2, IMAGE_LAUNCH_MAX_BACKOFF_SECONDS)
+    raise QualificationError("provision_failed", "pushed image is not launchable yet")
+
+
 def _validate_evidence(path: Path, invocation: TinyQualificationInvocation, image: str) -> None:
     spec = importlib.util.spec_from_file_location("fly_evidence_validator", VALIDATOR)
     if spec is None or spec.loader is None:
@@ -922,7 +956,8 @@ def execute(
         ledger.volume_id = _single_volume_id(volume)
         _save_ledger(ledger_path, ledger)
 
-        transport.run(
+        _run_machine_with_backoff(
+            transport,
             _machine_command(invocation, image=image, volume_id=ledger.volume_id),
             timeout=CREATE_TIMEOUT_SECONDS,
         )
