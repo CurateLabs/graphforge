@@ -28,3 +28,11 @@ declared accepted differences in `fixtures/parity/accepted-differences.json`.
 
 Until #900 completes, parity work uses only tiny/local shadow fixtures in
 `fixtures/parity/legacy/tiny-pass.json` and `fixtures/parity/new/tiny-pass.json`.
+
+After #900 completes, validate and ingest the sanitized bundle read-only:
+
+```bash
+make -C benchmarks ingest-ladder-bundle SOURCE=/path/to/#900-output VALIDATE_ONLY=1
+make -C benchmarks ingest-ladder-bundle SOURCE=/path/to/#900-output
+make -C benchmarks parity-gate
+```

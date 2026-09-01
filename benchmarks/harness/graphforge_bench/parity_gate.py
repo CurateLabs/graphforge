@@ -72,23 +72,32 @@ def parity_gate_status(root: Path | None = None) -> dict[str, Any]:
         path.name for path in (fixtures / "legacy").glob("*.json") if path.name != "tiny-pass.json"
     ]
 
+    harness_authoritative_met = ladder_ok if rung_files else False
+    parity_matrix_met = tiny_ok and harness_authoritative_met
+
     criteria = [
         _criterion(
             "parity_matrix_no_unexplained_gaps",
-            met=tiny_ok and (ladder_ok if rung_files else False),
+            met=parity_matrix_met,
             blocked_by="#900 ladder bundles" if tiny_ok and not rung_files else None,
             evidence=f"tiny overall={tiny_matrix['overall']}; ladder {ladder_detail}",
         ),
         _criterion(
             "harness_authoritative_after_ladder_comparison",
-            met=False,
-            blocked_by="#900",
+            met=harness_authoritative_met,
+            blocked_by="#900"
+            if not rung_files
+            else ("ladder parity gaps" if not ladder_ok else None),
             evidence=ladder_detail,
         ),
         _criterion(
             "legacy_orchestration_retired_with_coverage",
             met=False,
-            blocked_by="parity_matrix_no_unexplained_gaps + harness_authoritative",
+            blocked_by=(
+                "parity_matrix_no_unexplained_gaps + harness_authoritative"
+                if not parity_matrix_met
+                else "legacy Makefile targets and workflows remain"
+            ),
             evidence=f"coverage entries={len(coverage_map())}",
         ),
         _criterion(
