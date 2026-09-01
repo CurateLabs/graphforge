@@ -260,9 +260,10 @@ class ProgressiveRunControllerTests(unittest.TestCase):
         gf = self.base / "gf"
         certify = self.base / "graphforge-benchmark-certify"
         python = self.base / "python"
-        for path in (gf, certify, python):
+        benchexec = self.base / "benchexec"
+        for path in (gf, certify, python, benchexec):
             path.write_bytes(b"fixture")
-        for path in (generator, gf, certify, python):
+        for path in (generator, gf, certify, python, benchexec):
             path.chmod(path.stat().st_mode | 0o111)
         self.executables = Executables(gf, certify, generator, python)
 
@@ -565,6 +566,8 @@ class ProgressiveRunControllerTests(unittest.TestCase):
         with patch("graphforge_bench.progressive_run.subprocess.run") as execute:
             execute.return_value.returncode = 0
             self.assertEqual(_run_benchexec(stage, self.executables, plan["identities"]), 0)
+        command = execute.call_args.args[0]
+        self.assertEqual(command[0], str(self.base / "benchexec"))
         environment = execute.call_args.kwargs["env"]
         self.assertEqual(environment["PYTHONPATH"], str(ROOT / "harness"))
         self.assertEqual(set(environment), {"HOME", "LANG", "LC_ALL", "PATH", "PYTHONPATH"})

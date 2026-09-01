@@ -294,6 +294,13 @@ def _is_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def _benchexec_cli(benchexec_python: Path) -> Path:
+    candidate = benchexec_python.parent / "benchexec"
+    if candidate.is_file():
+        return candidate
+    raise ControllerError("BenchExec CLI is missing beside the configured Python")
+
+
 def _run_benchexec(stage: Path, executables: Executables, identities: Mapping[str, Any]) -> int:
     raw_output = stage / "raw"
     raw_output.mkdir()
@@ -307,9 +314,7 @@ def _run_benchexec(stage: Path, executables: Executables, identities: Mapping[st
         "PYTHONPATH": str(Path(__file__).resolve().parents[1]),
     }
     command = [
-        str(executables.benchexec_python),
-        "-m",
-        "benchexec",
+        str(_benchexec_cli(executables.benchexec_python)),
         "--no-compress-results",
         "--outputpath",
         str(raw_output),
