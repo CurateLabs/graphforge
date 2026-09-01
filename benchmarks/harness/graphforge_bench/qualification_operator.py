@@ -16,6 +16,8 @@ import re
 import subprocess
 import sys
 
+from graphforge_bench.esc_readiness import EscReadinessError, assert_esc_ready
+
 ESC_ENVIRONMENT = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9_.-]*(?:/[A-Za-z0-9][A-Za-z0-9_.-]*){0,2}(?:@[A-Za-z0-9_.-]+)?$"
 )
@@ -145,6 +147,11 @@ def run_under_esc(
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
     attestor: Callable[[str | None], None] = attest_current_main,
 ) -> int:
+    if gate in LIVE_GATES:
+        try:
+            assert_esc_ready(environment, gate=gate)
+        except EscReadinessError as error:
+            raise OperatorRefusalError(str(error)) from error
     command = esc_command(environment, gate, argv)
     commit = _single_value(_forwarded(argv), "--expected-sha")
     attestor(commit if gate == "fly-tiny" else None)

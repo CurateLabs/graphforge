@@ -88,4 +88,6 @@ qualification-operator: install
 esc-readiness: install
 	test -n "$(ESC_ENVIRONMENT)"
 	PYTHONPATH=$(CURDIR)/harness uv run --locked python -m graphforge_bench.esc_readiness_cli \
-		--environment "$(ESC_ENVIRONMENT)" $(if $(filter 1 true yes,$(ASSERT_READY)),--assert-ready,)
+		--environment "$(ESC_ENVIRONMENT)" \
+		--gate "$(or $(GATE),progressive-ladder)" \
+		$(if $(filter 1 true yes,$(ASSERT_READY)),--assert-ready,)

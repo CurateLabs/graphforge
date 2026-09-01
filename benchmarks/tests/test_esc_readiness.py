@@ -35,7 +35,18 @@ class EscReadinessTests(unittest.TestCase):
                 }
             },
         ):
-            status = esc_readiness_status("curatelabs/graphforge/qualification")
+            status = esc_readiness_status(
+                "curatelabs/graphforge/qualification", gate="progressive-ladder"
+            )
+        self.assertTrue(status["ready"])
+        self.assertTrue(status["spend_authorization_valid"])
+
+    def test_fly_tiny_requires_only_token(self) -> None:
+        with patch(
+            "graphforge_bench.esc_readiness._open_environment",
+            return_value={"environmentVariables": {FLY_TOKEN_ENV: "fixture-token"}},
+        ):
+            status = esc_readiness_status("curatelabs/graphforge/qualification", gate="fly-tiny")
         self.assertTrue(status["ready"])
         self.assertTrue(status["spend_authorization_valid"])
 

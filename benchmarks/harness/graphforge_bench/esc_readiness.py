@@ -4,15 +4,22 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import json
+import re
 import subprocess
 from typing import Any
 
 from graphforge_bench.progressive_esc import FLY_TOKEN_ENV, SPEND_AUTHORIZATION_ENV
 from graphforge_bench.progressive_provider_attempt import parse_spend_authorization
-from graphforge_bench.qualification_operator import ESC_ENVIRONMENT
 
 READINESS_SCHEMA = "graphforge-progressive-esc-readiness/1"
-REQUIRED_VARIABLES = (FLY_TOKEN_ENV, SPEND_AUTHORIZATION_ENV)
+ESC_ENVIRONMENT = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9_.-]*(?:/[A-Za-z0-9][A-Za-z0-9_.-]*){0,2}(?:@[A-Za-z0-9_.-]+)?$"
+)
+REQUIRED_BY_GATE = {
+    "fly-tiny": (FLY_TOKEN_ENV,),
+    "fly-tiny-recovery": (FLY_TOKEN_ENV,),
+    "progressive-ladder": (FLY_TOKEN_ENV, SPEND_AUTHORIZATION_ENV),
+}
 
 
 class EscReadinessError(ValueError):
@@ -54,14 +61,34 @@ def _non_empty_string(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
-def esc_readiness_status(environment: str) -> dict[str, Any]:
-    """Report whether an ESC environment projects the progressive qualification inputs."""
+def required_projections(gate: str) -> tuple[str, ...]:
+    try:
+        return REQUIRED_BY_GATE[gate]
+    except KeyError as error:
+        raise EscReadinessError("qualification gate is unknown") from error
+
+
+def esc_readiness_status(environment: str, *, gate: str = "progressive-ladder") -> dict[str, Any]:
+    """Report whether an ESC environment projects the inputs required for one live gate."""
+    try:
+        required = required_projections(gate)
+    except EscReadinessError as error:
+        return {
+            "schema": READINESS_SCHEMA,
+            "environment": environment,
+            "gate": gate,
+            "ready": False,
+            "failure": str(error),
+            "projections": [],
+        }
+
     try:
         opened = _open_environment(environment)
     except EscReadinessError as error:
         return {
             "schema": READINESS_SCHEMA,
             "environment": environment,
+            "gate": gate,
             "ready": False,
             "failure": str(error),
             "projections": [],
@@ -70,7 +97,7 @@ def esc_readiness_status(environment: str) -> dict[str, Any]:
     variables = _projected_variables(opened)
     projections: list[dict[str, Any]] = []
     ready = True
-    for name in REQUIRED_VARIABLES:
+    for name in required:
         present = name in variables
         valid = present and _non_empty_string(variables.get(name))
         if not valid:
@@ -78,17 +105,20 @@ def esc_readiness_status(environment: str) -> dict[str, Any]:
         projections.append({"name": name, "present": present, "valid": valid})
 
     spend_valid = False
-    if ready:
+    if SPEND_AUTHORIZATION_ENV in required and ready:
         try:
             parse_spend_authorization(str(variables[SPEND_AUTHORIZATION_ENV]))
             spend_valid = True
         except Exception:
             ready = False
             spend_valid = False
+    elif SPEND_AUTHORIZATION_ENV not in required:
+        spend_valid = True
 
     return {
         "schema": READINESS_SCHEMA,
         "environment": environment,
+        "gate": gate,
         "ready": ready,
         "failure": None if ready else "protected projections are unavailable or invalid",
         "spend_authorization_valid": spend_valid,
@@ -96,8 +126,8 @@ def esc_readiness_status(environment: str) -> dict[str, Any]:
     }
 
 
-def assert_esc_ready(environment: str) -> None:
+def assert_esc_ready(environment: str, *, gate: str = "progressive-ladder") -> None:
     """Fail closed when the ESC environment cannot authorize live qualification."""
-    status = esc_readiness_status(environment)
+    status = esc_readiness_status(environment, gate=gate)
     if not status["ready"]:
         raise EscReadinessError(status.get("failure") or "ESC environment is not ready")

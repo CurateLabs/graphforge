@@ -13,6 +13,11 @@ def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     result.add_argument("--environment", required=True)
     result.add_argument(
+        "--gate",
+        default="progressive-ladder",
+        choices=("fly-tiny", "fly-tiny-recovery", "progressive-ladder"),
+    )
+    result.add_argument(
         "--assert-ready",
         action="store_true",
         help="exit non-zero when required projections are missing or invalid",
@@ -24,13 +29,17 @@ def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     if args.assert_ready:
         try:
-            assert_esc_ready(args.environment)
+            assert_esc_ready(args.environment, gate=args.gate)
         except EscReadinessError as error:
             print(f"esc readiness refused: {error}", file=sys.stderr)
             return 2
-        print(json.dumps(esc_readiness_status(args.environment), indent=2, sort_keys=True))
+        print(
+            json.dumps(
+                esc_readiness_status(args.environment, gate=args.gate), indent=2, sort_keys=True
+            )
+        )
         return 0
-    status = esc_readiness_status(args.environment)
+    status = esc_readiness_status(args.environment, gate=args.gate)
     print(json.dumps(status, indent=2, sort_keys=True))
     return 0 if status["ready"] else 1
 

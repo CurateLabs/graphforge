@@ -442,7 +442,8 @@ projections before any live attempt:
 
 ```bash
 make -C benchmarks esc-readiness \
-  ESC_ENVIRONMENT=curatelabs/graphforge/qualification
+  ESC_ENVIRONMENT=curatelabs/graphforge/qualification \
+  GATE=progressive-ladder
 ```
 
 Live operator commands are rendered from
