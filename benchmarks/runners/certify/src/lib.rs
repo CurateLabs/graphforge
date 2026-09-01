@@ -595,6 +595,7 @@ fn execute_process(executable: &str, args: &[String]) -> Result<Execution, Strin
             ) {
                 Ok(receipts) => receipts,
                 Err(_) if status.success() => {
+                    release_cgroup_page_cache();
                     return Ok(Execution {
                         exit_code: status.code(),
                         duration_ms: millis(started.elapsed()),
@@ -603,8 +604,12 @@ fn execute_process(executable: &str, args: &[String]) -> Result<Execution, Strin
                         receipts: Vec::new(),
                     });
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    release_cgroup_page_cache();
+                    return Err(error);
+                }
             };
+            release_cgroup_page_cache();
             return Ok(Execution {
                 exit_code: status.code(),
                 duration_ms: millis(started.elapsed()),
@@ -616,6 +621,23 @@ fn execute_process(executable: &str, args: &[String]) -> Result<Execution, Strin
         thread::sleep(Duration::from_millis(10));
     }
 }
+
+/// Drop Linux page-cache pressure attributed to the BenchExec cgroup between
+/// sequential public-command invocations. Without this, file-backed cache from
+/// prior `gf` subprocesses accumulates until the 4 GiB memlimit even though
+/// each invocation's anonymous RSS stays bounded (#904).
+#[cfg(target_os = "linux")]
+fn release_cgroup_page_cache() {
+    use std::io::Write;
+
+    let _ = std::process::Command::new("sync").status();
+    if let Ok(mut drop_caches) = fs::File::create("/proc/sys/vm/drop_caches") {
+        let _ = drop_caches.write_all(b"3");
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn release_cgroup_page_cache() {}
 
 fn read_bounded(mut input: impl Read, limit: usize) -> Result<Vec<u8>, String> {
     let mut kept = Vec::new();
