@@ -46,14 +46,25 @@ def _run(command: Sequence[str]) -> CommandResult:
     return CommandResult(completed.returncode, completed.stdout, completed.stderr)
 
 
+def _resolve_cgroup_v2_root(cgroup_root: Path) -> Path | None:
+    """Return the unified cgroup v2 mount root, including hybrid v1 layouts."""
+    if (cgroup_root / "cgroup.controllers").is_file():
+        return cgroup_root
+    unified = cgroup_root / "unified"
+    if (unified / "cgroup.controllers").is_file():
+        return unified
+    return None
+
+
 def _facts(
     system: str,
     cgroup_root: Path = Path("/sys/fs/cgroup"),
 ) -> dict[str, object]:
     linux = system == "Linux"
+    resolved = _resolve_cgroup_v2_root(cgroup_root) if linux else None
     controllers = (
-        set((cgroup_root / "cgroup.controllers").read_text(encoding="utf-8").split())
-        if linux and (cgroup_root / "cgroup.controllers").is_file()
+        set((resolved / "cgroup.controllers").read_text(encoding="utf-8").split())
+        if resolved is not None
         else set()
     )
     release = platform.release() if linux else ""
@@ -63,7 +74,7 @@ def _facts(
         major, minor = (0, 0)
     return {
         "operating_system": system.lower(),
-        "cgroups_version": 2 if linux and (cgroup_root / "cgroup.controllers").is_file() else None,
+        "cgroups_version": 2 if resolved is not None else None,
         "required_controllers": all(name in controllers for name in REQUIRED_CONTROLLERS),
         "kernel_memory_accounting": linux and (major, minor) >= (5, 19),
         "privileged_execution": linux and os.geteuid() == 0,
