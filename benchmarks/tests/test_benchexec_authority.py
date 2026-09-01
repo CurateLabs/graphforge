@@ -4,6 +4,7 @@ import json
 import math
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 import xml.etree.ElementTree as ET
 
 from graphforge_bench.benchexec_authority import (
@@ -147,6 +148,20 @@ class BenchExecAuthorityTests(unittest.TestCase):
                 "evidence.json",
             ],
         )
+
+    def test_tool_info_writes_certify_evidence_on_provider_work_volume(self):
+        class Task:
+            input_files_or_identifier = ("profile.json",)
+
+        with (
+            patch("graphforge_bench.tools.graphforge_certify.os.path.ismount", return_value=True),
+            patch.object(Path, "is_dir", return_value=True),
+            patch.object(Path, "mkdir"),
+        ):
+            self.assertEqual(
+                Tool().cmdline("graphforge-benchmark-certify", [], Task(), None)[-1],
+                "/work/tmp/graphforge-certify-evidence.json",
+            )
 
     def test_preserves_tree_authority_and_graphforge_telemetry(self):
         evidence = normalize_run(

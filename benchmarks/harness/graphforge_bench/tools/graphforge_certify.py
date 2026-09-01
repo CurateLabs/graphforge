@@ -1,6 +1,21 @@
 """BenchExec tool-info module for the public GraphForge certification runner."""
 
+import os
+from pathlib import Path
+
 from benchexec.tools.template import BaseTool2
+
+
+def _certify_evidence_path() -> str:
+    work = Path("/work")
+    try:
+        if work.is_dir() and os.path.ismount(work):
+            tmp = work / "tmp"
+            tmp.mkdir(exist_ok=True)
+            return str(tmp / "graphforge-certify-evidence.json")
+    except OSError:
+        pass
+    return "evidence.json"
 
 
 class Tool(BaseTool2):
@@ -16,7 +31,7 @@ class Tool(BaseTool2):
     def cmdline(self, executable, options, task, rlimits):
         if options:
             raise ValueError("certification definition does not accept opaque options")
-        return [executable, "run", *task.input_files_or_identifier, "evidence.json"]
+        return [executable, "run", *task.input_files_or_identifier, _certify_evidence_path()]
 
     def determine_result(self, run):
         if run.was_timeout:

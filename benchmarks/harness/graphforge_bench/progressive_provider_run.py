@@ -385,7 +385,9 @@ def run(
         raise ProviderRunError("staging_failed") from error
     with temporary_context as temporary:
         try:
-            stage = _safe_stage(root, profile_path, executables, identities, Path(temporary))
+            stage = _safe_stage(
+                root, profile_path, executables, identities, Path(temporary), scale=scale
+            )
         except (ControllerError, OSError) as error:
             failed = _result(plan, "failed", "staging_failed")
             _schema(root, "progressive-provider-run-result.json", failed)
