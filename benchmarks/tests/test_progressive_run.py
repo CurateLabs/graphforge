@@ -522,6 +522,29 @@ class ProgressiveRunControllerTests(unittest.TestCase):
         self.assertEqual(evidence["source_scales"], [18, 19])
         self.assertNotIn("secret", path.read_text())
 
+    def test_fly_s18_s19_ladder_bundle_refuses_s20_until_rss_plateaus(self) -> None:
+        """Real #900 Fly evidence must not authorize S20 while RSS grows across rungs."""
+        bundle = ROOT / "fixtures" / "parity" / "ladder-bundle"
+        for scale in (18, 19):
+            source = bundle / f"s{scale}-rung.json"
+            (self.output / source.name).write_text(source.read_text(encoding="utf-8"))
+        capacity = self.base / "capacity.json"
+        capacity.write_text(
+            json.dumps(
+                {
+                    "physical_read_bytes_per_second": 1_000_000_000,
+                    "physical_write_bytes_per_second": 500_000_000,
+                    "reader_calls_per_second": 1_000_000,
+                    "publication_work_per_second": 500_000,
+                }
+            )
+        )
+        path = write_s20_projection(ROOT, self.output, capacity)
+        evidence = json.loads(path.read_text())
+        self.assertEqual(evidence["decision"], "refused")
+        self.assertFalse(evidence["checks"]["rss_bounded_or_plateaued"])
+        self.assertFalse(evidence["checks"]["rss_headroom"])
+
     def test_staged_executables_are_verified_private_copies(self) -> None:
         plan = build_plan(
             root=ROOT,
