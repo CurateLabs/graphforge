@@ -27,6 +27,12 @@ class ParityGateTests(unittest.TestCase):
             blocked["legacy_orchestration_retired_with_coverage"],
             "parity_matrix_no_unexplained_gaps + harness_authoritative",
         )
+        legacy = next(
+            row
+            for row in status["criteria"]
+            if row["name"] == "legacy_orchestration_retired_with_coverage"
+        )
+        self.assertIn("legacy_present=False", legacy["evidence"])
 
     def test_historical_evidence_criterion_met(self) -> None:
         status = parity_gate_status()

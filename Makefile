@@ -1,4 +1,4 @@
-.PHONY: help lint format type-check security workflow-lint license-check third-party-notices third-party-notices-check cargo-deny-licenses test pre-push pre-push-clean pre-push-preflight pre-push-fast bazel-test clean test-tck docstring-coverage test-network benchmark test-perf test-perf-xs test-perf-slow test-perf-large coverage coverage-rust coverage-python coverage-node coverage-quick coverage-report coverage-diff coverage-strict check-coverage check-coverage-rust check-coverage-python check-coverage-node check-patch-coverage test-durations test-analytics docs-serve docs-build docs-clean cargo-build codspeed-build codspeed-build-walltime codspeed-run bench-traversal bench-fixed-hop-limit bench-fixed-hop-livejournal bench-m4-entry bench-g500-scale20 bench-g500-ladder g500-ladder-qualification g500-ladder-qualification-check bench-adjacency-200m bench-file-backed-128m m4-entry-matrix-check durability-isolation-check native-consumers release-load-matrix-check release-load-matrix bulk-construction-conformance-check bulk-construction-conformance cargo-test cargo-check cargo-clippy cargo-fmt cargo-fmt-check clean-builds clean-builds-all pnpm-install pnpm-build pnpm-test-bdd install build release-version-check package-license-verify publish-dry-run publish-dry-run-npm publish-dry-run-docs publish-dry-run-python publish-dry-run-cargo record-release-artifacts clean-env-verify-check clean-env-verify-preflight clean-env-verify
+.PHONY: help lint format type-check security workflow-lint license-check third-party-notices third-party-notices-check cargo-deny-licenses test pre-push pre-push-clean pre-push-preflight pre-push-fast bazel-test clean test-tck docstring-coverage test-network benchmark test-perf test-perf-xs test-perf-slow test-perf-large coverage coverage-rust coverage-python coverage-node coverage-quick coverage-report coverage-diff coverage-strict check-coverage check-coverage-rust check-coverage-python check-coverage-node check-patch-coverage test-durations test-analytics docs-serve docs-build docs-clean cargo-build codspeed-build codspeed-build-walltime codspeed-run bench-traversal bench-fixed-hop-limit bench-fixed-hop-livejournal bench-m4-entry bench-adjacency-200m bench-file-backed-128m m4-entry-matrix-check durability-isolation-check native-consumers release-load-matrix-check release-load-matrix bulk-construction-conformance-check bulk-construction-conformance cargo-test cargo-check cargo-clippy cargo-fmt cargo-fmt-check clean-builds clean-builds-all pnpm-install pnpm-build pnpm-test-bdd install build release-version-check package-license-verify publish-dry-run publish-dry-run-npm publish-dry-run-docs publish-dry-run-python publish-dry-run-cargo record-release-artifacts clean-env-verify-check clean-env-verify-preflight clean-env-verify
 
 help:  ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -323,29 +323,6 @@ durability-certification-check:  ## Validate seeded durability certification gat
 
 bench-m4-entry:  ## Emit the M4 entry large/manual evidence envelope (#334; hardware-specific)
 	cargo test -p graphforge-api --release --test m4_entry_baseline large_manual_matrix_emits_hardware_dataset_evidence -- --ignored --nocapture --test-threads=1
-
-bench-g500-scale20:  ## Official-parameter SCALE-20 public-facade engineering green (#710; ignored, not Official-track)
-	cargo test -p graphforge-api --release --test scale_g500_scale20 scale20_public_facade_engineering_green -- --ignored --nocapture --test-threads=1
-
-bench-g500-ladder:  ## Bounded billion-edge scale ladder S20-S26 first-fail evidence (#736; ignored, provisioned scale-host)
-	@test -n "$$GF_G500_LADDER_MAX_SCALE" || (echo "GF_G500_LADDER_MAX_SCALE is required" && exit 2)
-	GF_G500_LADDER_EVIDENCE_OUT="$(CURDIR)/docs/development/g500-ladder-evidence.json" \
-	GF_G500_LADDER_JOURNAL_OUT="$(CURDIR)/build/g500-ladder-journal.json" \
-	GF_G500_LADDER_MAX_SCALE="$$GF_G500_LADDER_MAX_SCALE" \
-	cargo test -p graphforge-api --release --test scale_g500_ladder ladder_public_facade_first_fail_evidence -- --ignored --nocapture --test-threads=1
-
-g500-ladder-qualification-check:  ## Validate #951 disk attribution and conservative S26 projection
-	@test -n "$$EVIDENCE" || (echo "EVIDENCE is required" && exit 2)
-	uv run --frozen --with jsonschema python scripts/ci/validate-g500-ladder-qualification.py "$$EVIDENCE"
-
-g500-ladder-qualification:  ## Build and validate #951 evidence from adjacent real certifications
-	@test -n "$$LOW_CERT" || (echo "LOW_CERT is required" && exit 2)
-	@test -n "$$HIGH_CERT" || (echo "HIGH_CERT is required" && exit 2)
-	@test -n "$$EVIDENCE" || (echo "EVIDENCE is required" && exit 2)
-	@test -n "$$VOLUME_BYTES" || (echo "VOLUME_BYTES is required" && exit 2)
-	@test -n "$$RESERVED_HEADROOM_BYTES" || (echo "RESERVED_HEADROOM_BYTES is required" && exit 2)
-	uv run --frozen python scripts/ci/build-g500-ladder-qualification.py "$$LOW_CERT" "$$HIGH_CERT" "$$EVIDENCE" --volume-bytes "$$VOLUME_BYTES" --reserved-headroom-bytes "$$RESERVED_HEADROOM_BYTES"
-	$(MAKE) g500-ladder-qualification-check EVIDENCE="$$EVIDENCE"
 
 bench-adjacency-200m:  ## >200M-edge public adjacency build evidence (#336; ignored, scale-host)
 	GF_ADJACENCY_SCALE_EVIDENCE_OUT="$(CURDIR)/docs/development/adjacency-200m-evidence.json" \

@@ -230,8 +230,8 @@
       "sha_rule": "exact_main"
     },
     {
-      "id": "g500-certification",
-      "path": ".github/workflows/g500-certification.yml",
+      "id": "progressive-ladder",
+      "path": ".github/workflows/progressive-ladder.yml",
       "class": "operator_qualification",
       "owner": "benchmark-operator",
       "command": "operator",
@@ -239,9 +239,9 @@
         "--gate",
         "progressive-ladder"
       ],
-      "evidence_contract": "graphforge-g500-certification/1",
-      "freshness": "release_candidate",
-      "sha_rule": "exact_commit",
+      "evidence_contract": "graphforge-progressive-provider-plan/1 + rung evidence",
+      "freshness": "adjacent_rung",
+      "sha_rule": "exact_main",
       "control_plane": "pulumi_esc"
     },
     {
@@ -367,20 +367,5 @@
       "sha_rule": "exact_commit"
     }
   ],
-  "operator_gates": [
-    {
-      "id": "progressive-ladder",
-      "class": "operator_qualification",
-      "owner": "benchmark-operator",
-      "command": "operator",
-      "args": [
-        "--gate",
-        "progressive-ladder"
-      ],
-      "evidence_contract": "graphforge-progressive-provider-plan/1 + rung evidence",
-      "freshness": "adjacent_rung",
-      "sha_rule": "exact_main",
-      "control_plane": "pulumi_esc"
-    }
-  ]
+  "operator_gates": []
 }

@@ -116,8 +116,8 @@ class ScaleParityTests(unittest.TestCase):
 
     def test_coverage_map_lists_legacy_entrypoints(self) -> None:
         mapping = coverage_map()
-        self.assertIn("make bench-g500-ladder", mapping)
-        self.assertIn("scripts/ci/validate-g500-certification.py", mapping)
+        self.assertIn("make bench-g500-ladder (retired)", mapping)
+        self.assertIn("scripts/ci/validate-g500-certification.py (historical)", mapping)
 
 
 if __name__ == "__main__":

@@ -1,9 +1,7 @@
 //! Official-parameter Graph500 SCALE engineering green on the public facade (#710).
 //!
-//! SCALE-6 is required CI. SCALE-20 is ignored / `make bench-g500-scale20`.
-//! This is **not** Official-track: the generator is a bench-local Kronecker,
-//! not the pinned `github.com/graph500/graph500` binary. `teps` stays null;
-//! GraphForge `paths(by="bfs")` is not the Graph500 BFS kernel.
+//! SCALE-6 is required CI. Legacy SCALE-20 orchestration retired in #959; use
+//! `make -C benchmarks qualification-operator GATE=progressive-ladder` for provider runs.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -101,21 +99,6 @@ fn scale6_smoke_public_facade_engineering_green() {
     );
     assert!(evidence["teps"].is_null());
     assert_eq!(evidence["pass"], true);
-}
-
-#[test]
-#[ignore = "Official-parameter SCALE-20 ingest/reopen/LIMIT; make bench-g500-scale20"]
-fn scale20_public_facade_engineering_green() {
-    let out = evidence_out_path();
-    let evidence = run_engineering_green(20, "GU-06-MD-", Some(out.as_path()));
-    assert_eq!(evidence["schema"], EVIDENCE_SCHEMA);
-    assert!(evidence["track"].is_null());
-    assert_eq!(evidence["pass"], true);
-    assert!(
-        out.is_file(),
-        "evidence JSON must be written to {}",
-        out.display()
-    );
 }
 
 #[allow(clippy::too_many_lines)]
@@ -617,12 +600,6 @@ fn uuidv7(seed: u128) -> Uuid {
     bytes[6] = (bytes[6] & 0x0f) | 0x70;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     Uuid::from_bytes(bytes)
-}
-
-fn evidence_out_path() -> PathBuf {
-    std::env::var("GF_G500_SCALE20_EVIDENCE_OUT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("build/g500-scale20-evidence.json"))
 }
 
 fn git_sha() -> Value {
