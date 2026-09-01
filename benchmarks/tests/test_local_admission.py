@@ -73,16 +73,22 @@ class LocalAdmissionTests(unittest.TestCase):
             hybrid = root / "cgroup"
             unified = hybrid / "unified"
             unified.mkdir(parents=True)
-            (unified / "cgroup.controllers").write_text("cpu io memory", encoding="utf-8")
+            (unified / "cgroup.controllers").write_text("", encoding="utf-8")
+            (unified / "cpu.stat").write_text("", encoding="utf-8")
+            (unified / "io.pressure").write_text("", encoding="utf-8")
+            (unified / "memory.pressure").write_text("", encoding="utf-8")
             proc = root / "proc"
             namespace = proc / "self/ns"
             namespace.mkdir(parents=True)
             for name in ("mnt", "pid", "user"):
                 (namespace / name).touch()
-            with patch("graphforge_bench.local_admission.platform.release", return_value="6.12.0-fly"):
+            with patch(
+                "graphforge_bench.local_admission.platform.release", return_value="6.12.0-fly"
+            ):
                 result = qualify_local_host(system="Linux", cgroup_root=hybrid, runner=runner)
         self.assertEqual(result["result"], "passed")
         self.assertEqual(result["facts"]["cgroups_version"], 2)
+        self.assertTrue(result["facts"]["required_controllers"])
 
     def test_package_preflight_reports_missing_cpuset_delegation(self) -> None:
         def runner(_command):
