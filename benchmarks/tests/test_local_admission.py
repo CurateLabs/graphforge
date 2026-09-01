@@ -85,10 +85,75 @@ class LocalAdmissionTests(unittest.TestCase):
             with patch(
                 "graphforge_bench.local_admission.platform.release", return_value="6.12.0-fly"
             ):
-                result = qualify_local_host(system="Linux", cgroup_root=hybrid, runner=runner)
+                with patch(
+                    "graphforge_bench.local_admission.is_hybrid_cgroup_layout",
+                    return_value=False,
+                ):
+                    with patch(
+                        "graphforge_bench.local_admission.benchexec_cgroup_version",
+                        return_value=2,
+                    ):
+                        result = qualify_local_host(
+                            system="Linux", cgroup_root=hybrid, runner=runner
+                        )
         self.assertEqual(result["result"], "passed")
         self.assertEqual(result["facts"]["cgroups_version"], 2)
         self.assertTrue(result["facts"]["required_controllers"])
+
+    def test_hybrid_layout_supplies_pressure_from_unified_psi(self) -> None:
+        entered = False
+
+        def runner(command):
+            nonlocal entered
+            if "benchexec.check_cgroups" in command:
+                entered = True
+                return CommandResult(0, "", "")
+            measurements = {
+                "walltime": 1.0,
+                "cputime": 0.1,
+                "memory": 1048576,
+                "blkio-read": 4096,
+                "blkio-write": 65536,
+                "pressure-cpu-some": 0.0,
+                "pressure-io-some": 0.0,
+                "pressure-memory-some": 0.0,
+                "terminationreason": "walltime",
+                "descendant_stopped": True,
+                "namespace_isolation": True,
+                "overlay_isolation": True,
+            }
+            return CommandResult(0, json.dumps(measurements), "")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            hybrid = root / "cgroup"
+            unified = hybrid / "unified"
+            unified.mkdir(parents=True)
+            (unified / "cgroup.controllers").write_text("", encoding="utf-8")
+            (unified / "cpu.stat").write_text("", encoding="utf-8")
+            (unified / "io.pressure").write_text("", encoding="utf-8")
+            (unified / "memory.pressure").write_text("", encoding="utf-8")
+            proc = root / "proc"
+            namespace = proc / "self/ns"
+            namespace.mkdir(parents=True)
+            for name in ("mnt", "pid", "user"):
+                (namespace / name).touch()
+            with patch(
+                "graphforge_bench.local_admission.platform.release", return_value="6.12.0-fly"
+            ):
+                with patch(
+                    "graphforge_bench.local_admission.is_hybrid_cgroup_layout",
+                    return_value=False,
+                ):
+                    with patch(
+                        "graphforge_bench.local_admission.benchexec_cgroup_version",
+                        return_value=2,
+                    ):
+                        result = qualify_local_host(
+                            system="Linux", cgroup_root=hybrid, runner=runner
+                        )
+        self.assertEqual(result["result"], "passed")
+        self.assertTrue(entered)
 
     def test_package_preflight_reports_missing_cpuset_delegation(self) -> None:
         def runner(_command):

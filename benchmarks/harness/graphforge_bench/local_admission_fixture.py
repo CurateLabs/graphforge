@@ -9,6 +9,12 @@ import sys
 import tempfile
 import time
 
+from graphforge_bench.hybrid_cgroup_v2 import (
+    benchexec_cgroup_version,
+    is_hybrid_cgroup_layout,
+    measure_hybrid_pressure,
+)
+
 
 def _parse_runexec_value(value: str) -> object:
     if value.endswith("s"):
@@ -68,36 +74,37 @@ while True:
         # this explicit mount, the heartbeat would live in BenchExec's overlay
         # and disappear with the container, making descendant cleanup
         # impossible to verify from the supervising process.
-        completed = subprocess.run(
-            [
-                "runexec",
-                "--walltimelimit",
-                "1",
-                "--memlimit",
-                str(128 * 1024 * 1024),
-                "--output",
-                str(output),
-                "--overlay-dir",
-                "/",
-                "--hidden-dir",
-                "/run",
-                "--hidden-dir",
-                "/tmp",
-                "--full-access-dir",
-                str(root),
-                "--dir",
-                str(root),
-                "--",
-                sys.executable,
-                str(worker),
-                str(heartbeat),
-                str(descendant),
-                str(overlay_probe),
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
+        with measure_hybrid_pressure() as hybrid_pressure:
+            completed = subprocess.run(
+                [
+                    "runexec",
+                    "--walltimelimit",
+                    "1",
+                    "--memlimit",
+                    str(128 * 1024 * 1024),
+                    "--output",
+                    str(output),
+                    "--overlay-dir",
+                    "/",
+                    "--hidden-dir",
+                    "/run",
+                    "--hidden-dir",
+                    "/tmp",
+                    "--full-access-dir",
+                    str(root),
+                    "--dir",
+                    str(root),
+                    "--",
+                    sys.executable,
+                    str(worker),
+                    str(heartbeat),
+                    str(descendant),
+                    str(overlay_probe),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
         if completed.returncode != 0:
             raise SystemExit(completed.returncode)
         result = {
@@ -106,6 +113,9 @@ while True:
             if "=" in line
             for key, value in (line.split("=", 1),)
         }
+        if is_hybrid_cgroup_layout() and benchexec_cgroup_version() == 1:
+            for key, value in hybrid_pressure().items():
+                result.setdefault(key, value)
         before = heartbeat.stat().st_mtime_ns if heartbeat.exists() else None
         time.sleep(0.25)
         after = heartbeat.stat().st_mtime_ns if heartbeat.exists() else None

@@ -17,6 +17,8 @@ import platform
 import subprocess
 import sys
 
+from graphforge_bench.hybrid_cgroup_v2 import benchexec_cgroup_version, is_hybrid_cgroup_layout
+
 SCHEMA = "graphforge-local-admission-evidence/1"
 REQUIRED_METRICS = (
     "walltime",
@@ -88,6 +90,8 @@ def _facts(
         major, minor = (int(part) for part in release.split("-", 1)[0].split(".")[:2])
     except (TypeError, ValueError):
         major, minor = (0, 0)
+    benchexec_version = benchexec_cgroup_version() if linux else None
+    hybrid_layout = is_hybrid_cgroup_layout(cgroup_root=cgroup_root) if linux else False
     return {
         "operating_system": system.lower(),
         "cgroups_version": 2 if resolved is not None else None,
@@ -97,6 +101,8 @@ def _facts(
         "benchexec_cgroup_delegation": False,
         "namespace_isolation": False,
         "overlay_isolation": False,
+        "_benchexec_cgroups_version": benchexec_version,
+        "_hybrid_cgroup_layout": hybrid_layout,
     }
 
 
@@ -110,7 +116,11 @@ def _evidence(
         "schema": SCHEMA,
         "result": result,
         "cause": cause,
-        "facts": dict(facts),
+        "facts": {
+            key: value
+            for key, value in facts.items()
+            if not str(key).startswith("_")
+        },
     }
     if measurements is not None:
         document["measurements"] = dict(measurements)
