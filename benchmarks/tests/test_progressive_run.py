@@ -11,7 +11,8 @@ from graphforge_bench.progressive_run import (
     Executables,
     _authority_staging_parent,
     _bench_home,
-    _benchexec_container_access,
+    _benchexec_container_flags,
+    _rewrite_profile_for_provider_volume,
     _run_benchexec,
     _safe_stage,
     _validate,
@@ -529,14 +530,16 @@ class ProgressiveRunControllerTests(unittest.TestCase):
             executables=self.executables,
         )
         profile = ROOT / "profiles/graph500/s18-local.json"
-        stage = _safe_stage(ROOT, profile, self.executables, plan["identities"], self.base)
+        stage = _safe_stage(
+            ROOT, profile, self.executables, plan["identities"], self.base, scale=18
+        )
         staged_gf = stage / "bin/gf"
         self.assertFalse(staged_gf.is_symlink())
         original = staged_gf.read_bytes()
         self.executables.gf.write_bytes(b"changed-after-planning")
         self.assertEqual(staged_gf.read_bytes(), original)
         with self.assertRaisesRegex(ControllerError, "staged executable identity mismatch"):
-            _safe_stage(ROOT, profile, self.executables, plan["identities"], self.base)
+            _safe_stage(ROOT, profile, self.executables, plan["identities"], self.base, scale=18)
 
     def test_benchexec_python_is_rechecked_immediately_before_invocation(self) -> None:
         plan = build_plan(
@@ -582,32 +585,45 @@ class ProgressiveRunControllerTests(unittest.TestCase):
     def test_bench_home_uses_provider_volume_when_mounted(self) -> None:
         stage = self.base / "stage"
         stage.mkdir()
-        with (
-            patch("graphforge_bench.progressive_run.os.path.ismount", return_value=True),
-            patch.object(Path, "is_dir", return_value=True),
-        ):
+        with patch("graphforge_bench.progressive_run._provider_volume_mounted", return_value=True):
             self.assertEqual(_bench_home(stage), Path("/work"))
 
     def test_authority_staging_parent_uses_output_dir_on_mounted_work(self) -> None:
-        with (
-            patch("graphforge_bench.progressive_run.os.path.ismount", return_value=True),
-            patch.object(Path, "is_dir", return_value=True),
-        ):
+        with patch("graphforge_bench.progressive_run._provider_volume_mounted", return_value=True):
             self.assertEqual(_authority_staging_parent(self.output), self.output)
         self.assertIsNone(_authority_staging_parent(self.output))
 
-    def test_benchexec_container_access_exposes_mounted_work(self) -> None:
+    def test_benchexec_container_flags_expose_mounted_work(self) -> None:
         stage = self.base / "stage"
         stage.mkdir()
         with (
-            patch("graphforge_bench.progressive_run.os.path.ismount", return_value=True),
-            patch.object(Path, "is_dir", return_value=True),
+            patch("graphforge_bench.progressive_run._provider_volume_mounted", return_value=True),
         ):
-            self.assertEqual(_benchexec_container_access(stage), ["--full-access-dir", "/work"])
+            self.assertEqual(
+                _benchexec_container_flags(stage),
+                [
+                    "--overlay-dir",
+                    "/",
+                    "--hidden-dir",
+                    "/run",
+                    "--hidden-dir",
+                    "/tmp",
+                    "--full-access-dir",
+                    "/work",
+                    "--dir",
+                    str(stage.resolve()),
+                ],
+            )
         self.assertEqual(
-            _benchexec_container_access(stage),
+            _benchexec_container_flags(stage),
             ["--full-access-dir", str(stage.resolve())],
         )
+
+    def test_rewrite_profile_for_provider_volume_uses_absolute_workspace(self) -> None:
+        profile = (ROOT / "profiles/graph500/s18-local.json").read_text(encoding="utf-8")
+        rewritten = _rewrite_profile_for_provider_volume(profile, 18)
+        self.assertIn('"/work/workspace/s18/nodes.parquet"', rewritten)
+        self.assertNotIn('"workspace/s18/nodes.parquet"', rewritten)
 
     def test_failed_result_schema_requires_closed_exact_identities(self) -> None:
         plan = build_plan(

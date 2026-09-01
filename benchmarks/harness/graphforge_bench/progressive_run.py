@@ -230,15 +230,37 @@ def write_plan(output_dir: Path, plan: Mapping[str, Any]) -> Path:
     return path
 
 
+def _provider_volume_mounted() -> bool:
+    work = Path("/work")
+    try:
+        return work.is_dir() and os.path.ismount(work)
+    except OSError:
+        return False
+
+
+def _rewrite_profile_for_provider_volume(profile_text: str, scale: int) -> str:
+    """Pin durable workspace paths on the provider volume for BenchExec containers."""
+    relative = f"workspace/s{scale}"
+    absolute = f"/work/{relative}"
+    return profile_text.replace(f'"{relative}/', f'"{absolute}/').replace(
+        f'"{relative}"', f'"{absolute}"'
+    )
+
+
 def _safe_stage(
     root: Path,
     profile_path: Path,
     executables: Executables,
     identities: Mapping[str, Any],
     parent: Path,
+    *,
+    scale: int,
 ) -> Path:
     stage = Path(tempfile.mkdtemp(prefix="gf-progressive-", dir=parent))
-    shutil.copyfile(profile_path, stage / "profile.json")
+    profile_text = profile_path.read_text(encoding="utf-8")
+    if _provider_volume_mounted():
+        profile_text = _rewrite_profile_for_provider_volume(profile_text, scale)
+    (stage / "profile.json").write_text(profile_text, encoding="utf-8")
     shutil.copyfile(
         root / "definitions/graphforge-progressive-qualification-v1.xml", stage / "benchmark.xml"
     )
@@ -305,12 +327,8 @@ def _benchexec_cli(benchexec_python: Path) -> Path:
 
 def _bench_home(stage: Path) -> Path:
     """Use the provider volume as HOME when BenchExec must write durable projects."""
-    work = Path("/work")
-    try:
-        if work.is_dir() and os.path.ismount(work):
-            return work
-    except OSError:
-        pass
+    if _provider_volume_mounted():
+        return Path("/work")
     home = stage / "home"
     home.mkdir()
     return home
@@ -318,12 +336,8 @@ def _bench_home(stage: Path) -> Path:
 
 def _authority_staging_parent(output_dir: Path) -> Path | None:
     """Keep BenchExec staging on the provider volume when /work is mounted."""
-    work = Path("/work")
-    try:
-        if work.is_dir() and os.path.ismount(work):
-            return output_dir
-    except OSError:
-        pass
+    if _provider_volume_mounted():
+        return output_dir
     return None
 
 
@@ -338,18 +352,24 @@ def _benchexec_tool_directory(stage: Path) -> Path:
     return stage / "bin"
 
 
-def _benchexec_container_access(stage: Path) -> list[str]:
-    """Expose durable provider paths to BenchExec container runs."""
-    flags: list[str] = []
-    work = Path("/work")
-    try:
-        if work.is_dir() and os.path.ismount(work):
-            flags.extend(["--full-access-dir", str(work)])
-    except OSError:
-        pass
-    if not flags and stage.is_dir():
-        flags.extend(["--full-access-dir", str(stage.resolve())])
-    return flags
+def _benchexec_container_flags(stage: Path) -> list[str]:
+    """Configure BenchExec container mounts and working directory for durable runs."""
+    if _provider_volume_mounted():
+        return [
+            "--overlay-dir",
+            "/",
+            "--hidden-dir",
+            "/run",
+            "--hidden-dir",
+            "/tmp",
+            "--full-access-dir",
+            "/work",
+            "--dir",
+            str(stage.resolve()),
+        ]
+    if stage.is_dir():
+        return ["--full-access-dir", str(stage.resolve())]
+    return []
 
 
 def _run_benchexec(stage: Path, executables: Executables, identities: Mapping[str, Any]) -> int:
@@ -367,7 +387,7 @@ def _run_benchexec(stage: Path, executables: Executables, identities: Mapping[st
         str(_benchexec_cli(executables.benchexec_python)),
         "--tool-directory",
         str(_benchexec_tool_directory(stage)),
-        *_benchexec_container_access(stage),
+        *_benchexec_container_flags(stage),
         "--no-compress-results",
         "--outputpath",
         str(raw_output),
@@ -762,7 +782,9 @@ def run(
         identities = plan["identities"]
         if not isinstance(identities, Mapping):
             raise ControllerError("run plan identities are malformed")
-        stage = _safe_stage(root, profile_path, executables, identities, Path(temporary))
+        stage = _safe_stage(
+            root, profile_path, executables, identities, Path(temporary), scale=scale
+        )
         status = _run_benchexec(stage, executables, identities)
         if status != 0:
             result = {
