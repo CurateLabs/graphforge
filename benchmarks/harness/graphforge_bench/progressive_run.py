@@ -261,9 +261,7 @@ def _safe_stage(
     if _provider_volume_mounted():
         profile_text = _rewrite_profile_for_provider_volume(profile_text, scale)
     (stage / "profile.json").write_text(profile_text, encoding="utf-8")
-    shutil.copyfile(
-        root / "definitions/graphforge-progressive-qualification-v1.xml", stage / "benchmark.xml"
-    )
+    _stage_benchmark_xml(root, stage)
     bin_dir = stage / "bin"
     bin_dir.mkdir()
     for name, source, identity_key in (
@@ -352,6 +350,24 @@ def _benchexec_tool_directory(stage: Path) -> Path:
     return stage / "bin"
 
 
+PROVIDER_BENCHEXEC_MEMORY_BYTES = 8 * 1024 * 1024 * 1024
+
+
+def _stage_benchmark_xml(root: Path, stage: Path) -> None:
+    text = (root / "definitions/graphforge-progressive-qualification-v1.xml").read_text(
+        encoding="utf-8"
+    )
+    if _provider_volume_mounted():
+        text = text.replace('memlimit="4 GB"', 'memlimit="8 GB"')
+    (stage / "benchmark.xml").write_text(text, encoding="utf-8")
+
+
+def _benchexec_memory_limit() -> list[str]:
+    if _provider_volume_mounted():
+        return ["--memorylimit", str(PROVIDER_BENCHEXEC_MEMORY_BYTES)]
+    return []
+
+
 def _benchexec_container_flags(stage: Path) -> list[str]:
     """Configure BenchExec container mounts for durable provider-volume runs."""
     if _provider_volume_mounted():
@@ -389,6 +405,7 @@ def _run_benchexec(stage: Path, executables: Executables, identities: Mapping[st
         "--tool-directory",
         str(_benchexec_tool_directory(stage)),
         *_benchexec_container_flags(stage),
+        *_benchexec_memory_limit(),
         "--no-compress-results",
         "--outputpath",
         str(raw_output),
