@@ -602,7 +602,7 @@ class ProgressiveRunControllerTests(unittest.TestCase):
             self.assertEqual(
                 _benchexec_container_flags(stage),
                 [
-                    "--overlay-dir",
+                    "--read-only-dir",
                     "/",
                     "--hidden-dir",
                     "/run",

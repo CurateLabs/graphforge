@@ -356,7 +356,7 @@ def _benchexec_container_flags(stage: Path) -> list[str]:
     """Configure BenchExec container mounts for durable provider-volume runs."""
     if _provider_volume_mounted():
         return [
-            "--overlay-dir",
+            "--read-only-dir",
             "/",
             "--hidden-dir",
             "/run",
@@ -374,8 +374,11 @@ def _run_benchexec(stage: Path, executables: Executables, identities: Mapping[st
     raw_output = stage / "raw"
     raw_output.mkdir()
     home = _bench_home(stage)
+    if _provider_volume_mounted():
+        (Path("/work") / "tmp").mkdir(exist_ok=True)
     environment = {
         "HOME": str(home),
+        "TMPDIR": str(home / "tmp") if _provider_volume_mounted() else "/tmp",
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
         "PATH": f"{stage / 'bin'}:/usr/local/bin:{Path(sys.executable).parent}:/usr/bin:/bin",
