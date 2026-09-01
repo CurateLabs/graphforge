@@ -650,7 +650,7 @@ class ProgressiveRunControllerTests(unittest.TestCase):
                 _run_benchexec(stage, self.executables, plan["identities"])
             command = execute.call_args.args[0]
             self.assertIn("--memorylimit", command)
-            self.assertIn(str(8 * 1024 * 1024 * 1024), command)
+            self.assertIn("8 GB", command)
 
     def test_failed_result_schema_requires_closed_exact_identities(self) -> None:
         plan = build_plan(

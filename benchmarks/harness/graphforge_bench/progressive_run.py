@@ -350,8 +350,6 @@ def _benchexec_tool_directory(stage: Path) -> Path:
     return stage / "bin"
 
 
-PROVIDER_BENCHEXEC_MEMORY_BYTES = 8 * 1024 * 1024 * 1024
-
 
 def _stage_benchmark_xml(root: Path, stage: Path) -> None:
     text = (root / "definitions/graphforge-progressive-qualification-v1.xml").read_text(
@@ -364,7 +362,7 @@ def _stage_benchmark_xml(root: Path, stage: Path) -> None:
 
 def _benchexec_memory_limit() -> list[str]:
     if _provider_volume_mounted():
-        return ["--memorylimit", str(PROVIDER_BENCHEXEC_MEMORY_BYTES)]
+        return ["--memorylimit", "8 GB"]
     return []
 
 
