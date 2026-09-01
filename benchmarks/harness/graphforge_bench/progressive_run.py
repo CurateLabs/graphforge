@@ -101,6 +101,14 @@ def _commit(value: str) -> str:
 
 
 def repository_commit(root: Path) -> str:
+    """Return the checked-out commit or the read-only image attestation."""
+    attestation = root.parent / "commit"
+    if attestation.is_file():
+        try:
+            value = attestation.read_text(encoding="ascii").strip()
+        except (OSError, UnicodeDecodeError) as error:
+            raise ControllerError("image commit attestation is unavailable") from error
+        return _commit(value)
     completed = subprocess.run(
         ["git", "-C", str(root.parent), "rev-parse", "HEAD"],
         text=True,

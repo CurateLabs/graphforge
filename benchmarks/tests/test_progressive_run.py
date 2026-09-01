@@ -18,6 +18,7 @@ from graphforge_bench.progressive_run import (
     ingest_benchexec_result,
     require_bulk_ingest_capability,
     require_order,
+    repository_commit,
     resolve_executables,
     validate_fixture_bundle,
     write_plan,
@@ -588,6 +589,14 @@ class ProgressiveRunControllerTests(unittest.TestCase):
         result["identities"] = {}
         with self.assertRaisesRegex(ControllerError, "validation failed"):
             _validate(ROOT, "progressive-run-result.json", result)
+
+    def test_repository_commit_reads_image_attestation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            benchmarks = base / "benchmarks"
+            benchmarks.mkdir()
+            (base / "commit").write_text(COMMIT + "\n", encoding="ascii")
+            self.assertEqual(repository_commit(benchmarks), COMMIT)
 
 
 if __name__ == "__main__":
