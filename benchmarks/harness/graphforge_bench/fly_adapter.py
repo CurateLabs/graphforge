@@ -545,6 +545,19 @@ def pin_remote_image(app: str, digest: str) -> str:
     return image
 
 
+def extract_pushed_image_digest(stdout: str, *, app: str, commit: str) -> str | None:
+    """Return the digest flyctl printed for one commit-pinned build-only push."""
+    marker = f"registry.fly.io/{app}:{commit}@sha256:"
+    for line in reversed(stdout.splitlines()):
+        index = line.find(marker)
+        if index == -1:
+            continue
+        digest = line[index + len(marker) : index + len(marker) + 64]
+        if re.fullmatch(r"[0-9a-f]{64}", digest) is not None:
+            return f"sha256:{digest}"
+    return None
+
+
 def accepted_rung_reclamation(
     *,
     accepted_rung: int,
