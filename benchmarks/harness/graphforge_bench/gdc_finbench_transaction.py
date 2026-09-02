@@ -314,6 +314,6 @@ __all__ = [
     "identity_path",
     "list_operation_rules",
     "map_operation_file",
-    "run_tiny_suite",
     "run_live_suite",
+    "run_tiny_suite",
 ]
