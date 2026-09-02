@@ -1160,29 +1160,13 @@ pub fn run_trusted_live_is1() -> Result<SuiteEvidence, SuiteError> {
     ))
 }
 
-pub fn run_live_is1_job(
+fn run_live_is1_job(
     job: &OperationJob,
     reference: &ResultRows,
     system: &ResultRows,
 ) -> OperationOutcome {
-    if job.operation != Operation::Is1 {
-        return failed_live_is1(job.operation, "live lane supports only IS1");
-    }
-    if job.dataset_id != LIVE_IS1_DATASET {
-        return failed_live_is1(
-            job.operation,
-            "live IS1 requires the pinned synthetic fixture dataset",
-        );
-    }
-    let Some(parameters) = &job.parameters else {
-        return failed_live_is1(job.operation, "live IS1 requires explicit parameters");
-    };
-    if parameters.len() != 1 || parameters.get("personId").and_then(|value| value.as_i64()).is_none()
-    {
-        return failed_live_is1(
-            job.operation,
-            "live IS1 parameters must contain exactly one integer personId",
-        );
+    if let Err(error) = validate_live_job(job) {
+        return failed_live_is1(job.operation, &error.to_string());
     }
     run_job(job, Some(reference), Some(system))
 }
@@ -1475,14 +1459,35 @@ mod tests {
         }));
         let context = evidence.live_context.unwrap();
         assert_eq!(context.operation, Operation::Is1);
+        assert_eq!(context.parameter.name, "personId");
         assert_eq!(context.parameter.data_type, "int64");
         assert_eq!(context.parameter.value, 1001);
         assert_eq!(context.fixture_sha256, LIVE_GRAPH_SHA256);
+        assert_eq!(context.job_sha256, LIVE_JOB_SHA256);
         assert_eq!(context.reference_sha256, LIVE_REFERENCE_SHA256);
+        assert_eq!(context.acquisition_sha256, LIVE_ACQUISITION_SHA256);
+        assert_eq!(context.identity_sha256, LIVE_IDENTITY_SHA256);
         assert_eq!(context.public_api, "graphforge_api::GraphForge");
         assert_eq!(context.mode, "in_memory");
+        assert_eq!(context.query, LIVE_IS1_QUERY);
         assert_eq!(context.row_schema.len(), 8);
         assert_eq!(context.row_order.len(), 8);
+        assert_eq!(
+            evidence.identities["fixture"]["classification"],
+            "synthetic_engineering_fixture"
+        );
+        assert_eq!(
+            evidence.identities["spec"]["commit"],
+            "5f7956e07a214373c363b371a3b88bc83ddcd118"
+        );
+        assert_eq!(
+            evidence.identities["generator"]["commit"],
+            "2459f4e45834c78902a50511fc64a05c48dd4029"
+        );
+        assert_eq!(
+            evidence.identities["driver"]["commit"],
+            "f9c394a92cd55e535893f6c9907b141d6533c817"
+        );
     }
 
     #[test]

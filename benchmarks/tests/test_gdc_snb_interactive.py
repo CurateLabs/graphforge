@@ -168,12 +168,45 @@ class GdcSnbInteractiveSuiteTests(unittest.TestCase):
         self.assertEqual(
             context["parameter"], {"name": "personId", "data_type": "int64", "value": 1001}
         )
+        self.assertEqual(
+            context["fixture_sha256"],
+            "58e3c52a4ac2d74456439a322211adf1e8f560a7762e3fd2d376bbe96d243d6f",
+        )
+        self.assertEqual(
+            context["job_sha256"],
+            "0143a649da769c093d5e235e66c6036a4aa38ab05a5c68f5744ad4025a503831",
+        )
+        self.assertEqual(
+            context["reference_sha256"],
+            "71465ea5b672abd79693590e316cb4cc023cd25737c57d8daa13467542972385",
+        )
+        self.assertEqual(
+            context["acquisition_sha256"],
+            "fe8167c8b9cb939306495a937b45c375ea09b08725772a439c487099363f25e2",
+        )
+        self.assertEqual(
+            context["identity_sha256"],
+            "a7b31720ac9ba61a5968f752d4e8eb8d709353226f36a2dcd065016657d4f030",
+        )
         self.assertEqual(context["public_api"], "graphforge_api::GraphForge")
         self.assertEqual(context["mode"], "in_memory")
+        self.assertIn("person.id = $personId", context["query"])
         self.assertEqual(len(context["row_schema"]), 8)
         self.assertEqual(
             context["row_order"],
             [field["name"] for field in context["row_schema"]],
+        )
+        self.assertEqual(
+            evidence["identities"]["spec"]["commit"],
+            "5f7956e07a214373c363b371a3b88bc83ddcd118",
+        )
+        self.assertEqual(
+            evidence["identities"]["generator"]["commit"],
+            "2459f4e45834c78902a50511fc64a05c48dd4029",
+        )
+        self.assertEqual(
+            evidence["identities"]["driver"]["commit"],
+            "f9c394a92cd55e535893f6c9907b141d6533c817",
         )
         Draft202012Validator(
             json.loads(
