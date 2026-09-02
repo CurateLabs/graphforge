@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import secrets
 import shutil
 import stat
 import subprocess
@@ -242,29 +243,78 @@ def build_plan(
     return plan
 
 
-def _write_json(path: Path, value: Mapping[str, Any]) -> None:
-    encoded = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
-    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    temporary = Path(temporary_name)
+def _open_durable_directory(path: Path) -> int:
+    absolute = path.absolute()
+    flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+    directory = os.open(absolute.anchor, flags)
     try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(encoded)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.link(temporary, path)
-        temporary.unlink()
-        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(directory)
-        finally:
+        for part in absolute.parts[1:]:
+            created = False
+            try:
+                child = os.open(part, flags, dir_fd=directory)
+            except FileNotFoundError:
+                try:
+                    os.mkdir(part, mode=0o755, dir_fd=directory)
+                    created = True
+                    os.fsync(directory)
+                except FileExistsError:
+                    pass
+                child = os.open(part, flags, dir_fd=directory)
+            if created:
+                os.fsync(child)
             os.close(directory)
+            directory = child
+        os.fsync(directory)
+        return directory
     except BaseException:
-        temporary.unlink(missing_ok=True)
+        os.close(directory)
         raise
 
 
+def publish_json_no_clobber(path: Path, value: Mapping[str, Any]) -> None:
+    """Durably publish JSON once without trusting symlinked directory components."""
+    encoded = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    directory = _open_durable_directory(path.parent)
+    temporary_name = f".{path.name}.{secrets.token_hex(8)}"
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            temporary_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=directory,
+        )
+        with os.fdopen(descriptor, "wb") as stream:
+            descriptor = -1
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.link(
+            temporary_name,
+            path.name,
+            src_dir_fd=directory,
+            dst_dir_fd=directory,
+            follow_symlinks=False,
+        )
+        os.unlink(temporary_name, dir_fd=directory)
+        os.fsync(directory)
+    except BaseException:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            os.unlink(temporary_name, dir_fd=directory)
+            os.fsync(directory)
+        except FileNotFoundError:
+            pass
+        raise
+    finally:
+        os.close(directory)
+
+
+_write_json = publish_json_no_clobber
+
+
 def write_plan(output_dir: Path, plan: Mapping[str, Any]) -> Path:
-    output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / f"{str(plan['rung']).lower()}-plan.json"
     _write_json(path, plan)
     return path
@@ -591,16 +641,44 @@ def _phase_receipts(graphforge: Mapping[str, Any], name: str) -> list[Mapping[st
     return receipts
 
 
+def _closed_receipt_inventory(
+    graphforge: Mapping[str, Any],
+    contract: str,
+    expected_counts: Mapping[str, int],
+) -> dict[str, list[Mapping[str, Any]]]:
+    phases = graphforge.get("phases")
+    if not isinstance(phases, list):
+        raise ControllerError("GraphForge phases are missing")
+    inventory: dict[str, list[Mapping[str, Any]]] = {}
+    for phase in phases:
+        if not isinstance(phase, Mapping) or not isinstance(phase.get("phase"), str):
+            raise ControllerError("GraphForge phase is malformed")
+        name = str(phase["phase"])
+        receipts = phase.get("receipts", [])
+        if not isinstance(receipts, list) or any(
+            not isinstance(receipt, Mapping) for receipt in receipts
+        ):
+            raise ControllerError(f"GraphForge phase receipts are malformed: {name}")
+        matching = [receipt for receipt in receipts if receipt.get("contract") == contract]
+        if matching:
+            inventory.setdefault(name, []).extend(matching)
+    actual_counts = {name: len(receipts) for name, receipts in inventory.items()}
+    if actual_counts != dict(expected_counts):
+        raise ControllerError(
+            f"ordinary receipt inventory is incomplete, moved, or ambiguous: {contract}"
+        )
+    return inventory
+
+
 def _query_receipts(
     graphforge: Mapping[str, Any], phase: str, expected: int
 ) -> list[Mapping[str, Any]]:
-    receipts = [
-        receipt
-        for receipt in _phase_receipts(graphforge, phase)
-        if receipt.get("contract") == "graphforge-result-sink/2"
-    ]
-    if len(receipts) != expected:
+    expected_inventory = {"recount": 2, "query": 2, "reopen_proof": 4}
+    if expected_inventory.get(phase) != expected:
         raise ControllerError(f"ordinary query receipts are missing or ambiguous: {phase}")
+    receipts = _closed_receipt_inventory(
+        graphforge, "graphforge-result-sink/2", expected_inventory
+    )[phase]
     for receipt in receipts:
         digest = receipt.get("result_sha256")
         if (
@@ -641,13 +719,15 @@ def _phase_bound_receipt(
 
 
 def _storage_receipt(graphforge: Mapping[str, Any], phase: str) -> Mapping[str, Any]:
-    receipts = _phase_receipts(graphforge, phase)
-    matching = [
-        receipt
-        for receipt in receipts
-        if receipt.get("contract") == "graphforge-storage-attribution-command/1"
-    ]
-    if len(matching) != 1 or matching[0].get("reopen_agrees") is not True:
+    expected_inventory = {"reopen": 1, "reopen_proof": 1}
+    if phase not in expected_inventory:
+        raise ControllerError(f"ordinary storage receipt phase is not authoritative: {phase}")
+    matching = _closed_receipt_inventory(
+        graphforge,
+        "graphforge-storage-attribution-command/1",
+        expected_inventory,
+    )[phase]
+    if matching[0].get("reopen_agrees") is not True:
         raise ControllerError(f"ordinary storage receipt is missing or ambiguous: {phase}")
     storage = matching[0].get("storage")
     if (

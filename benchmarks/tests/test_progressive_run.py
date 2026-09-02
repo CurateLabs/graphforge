@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -22,6 +23,7 @@ from graphforge_bench.progressive_run import (
     assemble_rung_evidence,
     build_plan,
     ingest_benchexec_result,
+    publish_json_no_clobber,
     repository_commit,
     require_bulk_ingest_capability,
     require_order,
@@ -367,6 +369,59 @@ class ProgressiveRunControllerTests(unittest.TestCase):
         self.assertEqual(json.loads(path.read_text()), {"value": 1})
         self.assertEqual([item.name for item in self.base.glob(".immutable.json.*")], [])
 
+    def test_nested_publication_syncs_each_fresh_directory_parent(self) -> None:
+        path = self.base / "fresh" / "nested" / "evidence.json"
+        synced_inodes: list[int] = []
+        real_fsync = os.fsync
+
+        def record_fsync(descriptor: int) -> None:
+            synced_inodes.append(os.fstat(descriptor).st_ino)
+            real_fsync(descriptor)
+
+        with (
+            patch(
+                "graphforge_bench.progressive_run.os.fsync",
+                side_effect=record_fsync,
+            ),
+            patch(
+                "graphforge_bench.progressive_run.os.mkdir",
+                wraps=os.mkdir,
+            ) as mkdir,
+        ):
+            publish_json_no_clobber(path, {"value": 1})
+        expected_directories = (
+            self.base,
+            self.base / "fresh",
+            self.base / "fresh" / "nested",
+        )
+        self.assertTrue(
+            {item.stat().st_ino for item in expected_directories}.issubset(synced_inodes)
+        )
+        self.assertEqual([call.args[0] for call in mkdir.call_args_list], ["fresh", "nested"])
+        self.assertEqual(json.loads(path.read_text()), {"value": 1})
+
+    def test_interrupted_nested_publication_leaves_no_partial_file(self) -> None:
+        path = self.base / "fresh" / "nested" / "evidence.json"
+        with (
+            patch(
+                "graphforge_bench.progressive_run.os.link",
+                side_effect=OSError("injected interruption"),
+            ),
+            self.assertRaisesRegex(OSError, "injected interruption"),
+        ):
+            publish_json_no_clobber(path, {"value": 1})
+        self.assertFalse(path.exists())
+        self.assertEqual(list(path.parent.glob(f".{path.name}.*")), [])
+
+    def test_publication_refuses_symlinked_directory_components(self) -> None:
+        outside = self.base / "outside"
+        outside.mkdir()
+        linked = self.base / "linked"
+        linked.symlink_to(outside, target_is_directory=True)
+        with self.assertRaises(OSError):
+            publish_json_no_clobber(linked / "evidence.json", {"value": 1})
+        self.assertFalse((outside / "evidence.json").exists())
+
     def test_venv_python_path_is_not_dereferenced_out_of_its_environment(self) -> None:
         venv = self.base / "venv/bin"
         venv.mkdir(parents=True)
@@ -622,6 +677,28 @@ class ProgressiveRunControllerTests(unittest.TestCase):
                 receipts[phase].append(copy.deepcopy(receipts[phase][index]))
                 gf = graphforge(18, receipts)
                 with self.assertRaisesRegex(ControllerError, "missing, moved, or ambiguous"):
+                    assemble_rung_evidence(
+                        root=ROOT, scale=18, graphforge=gf, benchexec=benchexec(gf)
+                    )
+
+    def test_storage_and_query_receipts_reject_global_moves_and_duplicates(self) -> None:
+        cases = (
+            ("reopen", "query", "graphforge-storage-attribution-command/1", "moved"),
+            ("reopen", "query", "graphforge-storage-attribution-command/1", "duplicated"),
+            ("recount", "admission", "graphforge-result-sink/2", "moved"),
+            ("query", "export", "graphforge-result-sink/2", "duplicated"),
+        )
+        for source, destination, contract, mutation in cases:
+            with self.subTest(contract=contract, mutation=mutation):
+                receipts = authoritative_receipts(18)
+                selected = next(
+                    receipt for receipt in receipts[source] if receipt.get("contract") == contract
+                )
+                if mutation == "moved":
+                    receipts[source].remove(selected)
+                receipts[destination].append(copy.deepcopy(selected))
+                gf = graphforge(18, receipts)
+                with self.assertRaisesRegex(ControllerError, "inventory"):
                     assemble_rung_evidence(
                         root=ROOT, scale=18, graphforge=gf, benchexec=benchexec(gf)
                     )
