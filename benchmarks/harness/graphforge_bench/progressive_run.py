@@ -37,6 +37,45 @@ PLAN_SCHEMA = "graphforge-progressive-run-plan/1"
 RESULT_SCHEMA = "graphforge-progressive-run-result/1"
 GIT_COMMIT = re.compile(r"^[0-9a-f]{40}$")
 LOCAL_RUNGS = (18, 19)
+STORAGE_CATEGORIES = (
+    "topology_nodes",
+    "topology_edges",
+    "properties",
+    "uuid_and_surrogates",
+    "adjacency",
+    "catalog_and_manifests",
+    "construction_staging",
+    "portable_package",
+    "clean_imported_project",
+    "other",
+)
+STORAGE_CATEGORY_FIELDS = (
+    "logical_references",
+    "logical_bytes",
+    "physical_objects",
+    "physical_logical_bytes",
+    "allocated_bytes",
+)
+APPLICATION_IO_PHASES = (
+    "append_merge",
+    "seal_authentication",
+    "shape_consume_reauthentication",
+    "encode_write_postwrite_authentication",
+    "publication_preauthentication",
+    "cas_install_read_write",
+    "hydration_verification",
+    "fsync_synchronization",
+    "recovery_reauthentication",
+)
+APPLICATION_IO_FIELDS = (
+    "read_bytes",
+    "write_bytes",
+    "read_calls",
+    "write_calls",
+    "object_count",
+    "block_count",
+    "fsync_calls",
+)
 
 
 class ControllerError(ValueError):
@@ -597,34 +636,85 @@ def _storage_receipt(graphforge: Mapping[str, Any], phase: str) -> Mapping[str, 
         or storage.get("contract") != "graphforge-storage-attribution/1"
     ):
         raise ControllerError("ordinary storage receipt is incomplete")
-    for name in (
-        "logical_references",
-        "logical_bytes",
-        "retained_logical_eof_bytes",
-        "allocated_physical_bytes",
-        "physical_objects",
-    ):
-        if (
-            isinstance(storage.get(name), bool)
-            or not isinstance(storage.get(name), int)
-            or storage[name] < 0
-        ):
+    categories = storage.get("categories")
+    if not isinstance(categories, Mapping) or set(categories) != set(STORAGE_CATEGORIES):
+        raise ControllerError("ordinary storage receipt categories are incomplete")
+    sums = dict.fromkeys(STORAGE_CATEGORY_FIELDS, 0)
+    for category in STORAGE_CATEGORIES:
+        values = categories.get(category)
+        if not isinstance(values, Mapping) or set(values) != set(STORAGE_CATEGORY_FIELDS):
+            raise ControllerError(f"ordinary storage category is malformed: {category}")
+        for name in STORAGE_CATEGORY_FIELDS:
+            value = values.get(name)
+            if not _is_int(value) or value < 0:
+                raise ControllerError(f"ordinary storage category omitted {name}: {category}")
+            sums[name] += value
+        if values["physical_objects"] > values["logical_references"]:
+            raise ControllerError("ordinary storage category physical identities contradict")
+    expected = {
+        "logical_references": sums["logical_references"],
+        "logical_bytes": sums["logical_bytes"],
+        "retained_logical_eof_bytes": sums["physical_logical_bytes"],
+        "allocated_physical_bytes": sums["allocated_bytes"],
+        "physical_objects": sums["physical_objects"],
+    }
+    for name, value in expected.items():
+        if not _is_int(storage.get(name)) or storage[name] < 0:
             raise ControllerError(f"ordinary storage receipt omitted {name}")
+        if storage[name] != value:
+            raise ControllerError(f"ordinary storage receipt does not reconcile: {name}")
+    other = categories["other"]
+    if other["logical_references"] != 0 or other["physical_objects"] != 0:
+        raise ControllerError("ordinary storage receipt contains unclassified artifacts")
     return storage
 
 
-def _construction_metrics(import_receipt: Mapping[str, Any]) -> dict[str, int]:
+def _application_io(construction: Mapping[str, Any]) -> Mapping[str, Any]:
+    application_io = construction.get("application_io")
+    if not isinstance(application_io, Mapping) or set(application_io) != {"phases", "totals"}:
+        raise ControllerError("ordinary import application I/O evidence is absent")
+    phases = application_io.get("phases")
+    totals = application_io.get("totals")
+    if (
+        not isinstance(phases, Mapping)
+        or set(phases) != set(APPLICATION_IO_PHASES)
+        or not isinstance(totals, Mapping)
+        or set(totals) != set(APPLICATION_IO_FIELDS)
+    ):
+        raise ControllerError("ordinary import application I/O inventory is incomplete")
+    sums = dict.fromkeys(APPLICATION_IO_FIELDS, 0)
+    for phase in APPLICATION_IO_PHASES:
+        values = phases.get(phase)
+        if not isinstance(values, Mapping) or set(values) != set(APPLICATION_IO_FIELDS):
+            raise ControllerError(f"ordinary import application I/O phase is malformed: {phase}")
+        for name in APPLICATION_IO_FIELDS:
+            value = values.get(name)
+            if not _is_int(value) or value < 0:
+                raise ControllerError(f"ordinary import application I/O omitted {name}: {phase}")
+            sums[name] += value
+        if (values["read_bytes"] == 0) != (values["read_calls"] == 0):
+            raise ControllerError("ordinary import application I/O read counters disagree")
+        if (values["write_bytes"] == 0) != (values["write_calls"] == 0):
+            raise ControllerError("ordinary import application I/O write counters disagree")
+    if totals != sums:
+        raise ControllerError("ordinary import application I/O totals do not reconcile")
+    return application_io
+
+
+def _construction_metrics(
+    import_receipt: Mapping[str, Any],
+) -> tuple[dict[str, int], Mapping[str, Any]]:
     construction = import_receipt.get("construction")
     if not isinstance(construction, Mapping):
         raise ControllerError("ordinary import construction evidence is absent")
-    application_io = construction.get("application_io")
-    totals = application_io.get("totals") if isinstance(application_io, Mapping) else None
+    application_io = _application_io(construction)
+    totals = application_io["totals"]
     publication = construction.get("publication_work")
     values = {
         "transient_peak_allocated_bytes": construction.get("transient_peak_allocated_bytes"),
-        "logical_read_bytes": totals.get("read_bytes") if isinstance(totals, Mapping) else None,
-        "logical_write_bytes": totals.get("write_bytes") if isinstance(totals, Mapping) else None,
-        "reader_calls": totals.get("read_calls") if isinstance(totals, Mapping) else None,
+        "logical_read_bytes": totals["read_bytes"],
+        "logical_write_bytes": totals["write_bytes"],
+        "reader_calls": totals["read_calls"],
         "publication_work_units": publication.get("semantic_total_operations")
         if isinstance(publication, Mapping)
         and publication.get("contract") == "graphforge-publication-work/1"
@@ -635,7 +725,19 @@ def _construction_metrics(import_receipt: Mapping[str, Any]) -> dict[str, int]:
         for value in values.values()
     ):
         raise ControllerError("ordinary import construction metrics are incomplete")
-    return {name: int(value) for name, value in values.items()}
+    return {name: int(value) for name, value in values.items()}, application_io
+
+
+def _portable_allocation(graphforge: Mapping[str, Any]) -> Mapping[str, Any]:
+    receipt = _one_receipt(graphforge, "graphforge-portable-export/2")
+    names = (
+        "allocation_logical_bytes",
+        "allocation_allocated_bytes",
+        "allocation_physical_objects",
+    )
+    if any(not _is_int(receipt.get(name)) or receipt[name] < 0 for name in names):
+        raise ControllerError("ordinary portable allocation authority is incomplete")
+    return {"contract": receipt["contract"], **{name: receipt[name] for name in names}}
 
 
 def assemble_rung_evidence(
@@ -661,13 +763,15 @@ def assemble_rung_evidence(
     source_storage = _storage_receipt(graphforge, "reopen")
     imported_storage = _storage_receipt(graphforge, "reopen_proof")
     lifecycle_storage = _one_receipt(graphforge, "graphforge-lifecycle-storage/1")
-    construction = _construction_metrics(imports[0])
+    construction, application_io = _construction_metrics(imports[0])
+    portable_allocation = _portable_allocation(graphforge)
     expected_edges = 16 * (1 << scale)
     source_counts = _query_receipts(graphforge, "recount", 2)
     source_hops = _query_receipts(graphforge, "query", 2)
     imported = _query_receipts(graphforge, "reopen_proof", 4)
     imported_counts, imported_hops = imported[:2], imported[2:]
     expected_counts = (1 << scale, expected_edges)
+    authoritative_counts: dict[str, int] = {}
     for index, expected in enumerate(expected_counts):
         source_value = source_counts[index].get("scalar_u64")
         imported_value = imported_counts[index].get("scalar_u64")
@@ -675,6 +779,9 @@ def assemble_rung_evidence(
             raise ControllerError("recount evidence contradicts the selected rung")
         if source_counts[index]["result_sha256"] != imported_counts[index]["result_sha256"]:
             raise ControllerError("source/imported recount evidence disagrees")
+        name = ("nodes", "edges")[index]
+        authoritative_counts[f"source_{name}"] = source_value
+        authoritative_counts[f"imported_{name}"] = imported_value
     if any(
         source.get("rows") != ORDERED_LIMIT_ROW_COUNT
         or imported_receipt.get("rows") != ORDERED_LIMIT_ROW_COUNT
@@ -745,6 +852,17 @@ def assemble_rung_evidence(
             "imported_allocated_physical_bytes": imported_storage["allocated_physical_bytes"],
             "imported_retained_logical_eof_bytes": imported_storage["retained_logical_eof_bytes"],
             **construction,
+        },
+        "storage_attribution": {
+            "source": source_storage,
+            "imported": imported_storage,
+            "construction": {
+                "application_io": application_io,
+                "transient_peak_allocated_bytes": construction["transient_peak_allocated_bytes"],
+            },
+            "portable_package": portable_allocation,
+            "lifecycle": lifecycle_storage,
+            "counts": authoritative_counts,
         },
         "failure": None,
     }

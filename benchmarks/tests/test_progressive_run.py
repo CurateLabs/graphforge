@@ -97,6 +97,7 @@ def passed_rung(scale: int) -> dict:
             "reader_calls": 8,
             "publication_work_units": 9,
         },
+        "storage_attribution": rung_storage_attribution(scale),
         "failure": None,
     }
 
@@ -182,9 +183,7 @@ def authoritative_receipts(scale: int) -> dict[str, list[dict]]:
                 "input_rows": 65_536 * 64,
                 "input_batches": 64,
                 "transient_peak_allocated_bytes": 300,
-                "application_io": {
-                    "totals": {"read_bytes": 400, "write_bytes": 500, "read_calls": 8}
-                },
+                "application_io": application_io(),
                 "publication_work": {
                     "contract": "graphforge-publication-work/1",
                     "semantic_total_operations": 9,
@@ -204,6 +203,14 @@ def authoritative_receipts(scale: int) -> dict[str, list[dict]]:
         "reopen": [source_storage],
         "recount": [node_count, edge_count],
         "query": [one_hop, two_hop],
+        "export": [
+            {
+                "contract": "graphforge-portable-export/2",
+                "allocation_logical_bytes": 140,
+                "allocation_allocated_bytes": 150,
+                "allocation_physical_objects": 1,
+            }
+        ],
         "reopen_proof": [
             node_count,
             edge_count,
@@ -242,18 +249,79 @@ def storage_receipt(allocated: int, logical_eof: int) -> dict:
             "other",
         )
     }
+    categories["topology_nodes"] = {
+        "logical_references": 1,
+        "logical_bytes": logical_eof,
+        "physical_objects": 1,
+        "physical_logical_bytes": logical_eof,
+        "allocated_bytes": allocated,
+    }
     return {
         "contract": "graphforge-storage-attribution-command/1",
         "storage": {
             "contract": "graphforge-storage-attribution/1",
             "categories": categories,
-            "logical_references": 0,
-            "logical_bytes": 0,
+            "logical_references": 1,
+            "logical_bytes": logical_eof,
             "retained_logical_eof_bytes": logical_eof,
             "allocated_physical_bytes": allocated,
-            "physical_objects": 0,
+            "physical_objects": 1,
         },
         "reopen_agrees": True,
+    }
+
+
+def application_io() -> dict:
+    fields = (
+        "read_bytes",
+        "write_bytes",
+        "read_calls",
+        "write_calls",
+        "object_count",
+        "block_count",
+        "fsync_calls",
+    )
+    names = (
+        "append_merge",
+        "seal_authentication",
+        "shape_consume_reauthentication",
+        "encode_write_postwrite_authentication",
+        "publication_preauthentication",
+        "cas_install_read_write",
+        "hydration_verification",
+        "fsync_synchronization",
+        "recovery_reauthentication",
+    )
+    phases = {name: dict.fromkeys(fields, 0) for name in names}
+    phases["append_merge"].update(
+        read_bytes=400,
+        write_bytes=500,
+        read_calls=8,
+        write_calls=1,
+    )
+    return {
+        "phases": phases,
+        "totals": {field: sum(phase[field] for phase in phases.values()) for field in fields},
+    }
+
+
+def rung_storage_attribution(scale: int) -> dict:
+    receipts = authoritative_receipts(scale)
+    return {
+        "source": receipts["reopen"][0]["storage"],
+        "imported": receipts["reopen_proof"][4]["storage"],
+        "construction": {
+            "application_io": receipts["ingest"][0]["construction"]["application_io"],
+            "transient_peak_allocated_bytes": 300,
+        },
+        "portable_package": receipts["export"][0],
+        "lifecycle": receipts["reopen_proof"][-1],
+        "counts": {
+            "source_nodes": 1 << scale,
+            "source_edges": 16 * (1 << scale),
+            "imported_nodes": 1 << scale,
+            "imported_edges": 16 * (1 << scale),
+        },
     }
 
 
@@ -414,6 +482,9 @@ class ProgressiveRunControllerTests(unittest.TestCase):
         self.assertEqual(rung["status"], "passed")
         self.assertEqual(rung["metrics"]["physical_read_bytes"], 0)
         self.assertEqual(rung["storage_components"]["source_project_current_allocated_bytes"], 105)
+        self.assertEqual(
+            rung["storage_attribution"]["portable_package"]["allocation_allocated_bytes"], 150
+        )
         for omitted in receipts:
             with self.subTest(omitted=omitted), self.assertRaises(ControllerError):
                 changed = {name: values for name, values in receipts.items() if name != omitted}
@@ -475,6 +546,29 @@ class ProgressiveRunControllerTests(unittest.TestCase):
         del missing_publication["ingest"][0]["construction"]["publication_work"]
         changed_gf = graphforge(18, missing_publication)
         with self.assertRaisesRegex(ControllerError, "construction metrics"):
+            assemble_rung_evidence(
+                root=ROOT, scale=18, graphforge=changed_gf, benchexec=benchexec(changed_gf)
+            )
+        missing_portable = authoritative_receipts(18)
+        del missing_portable["export"]
+        changed_gf = graphforge(18, missing_portable)
+        with self.assertRaisesRegex(ControllerError, "graphforge-portable-export/2"):
+            assemble_rung_evidence(
+                root=ROOT, scale=18, graphforge=changed_gf, benchexec=benchexec(changed_gf)
+            )
+        malformed_categories = authoritative_receipts(18)
+        del malformed_categories["reopen"][0]["storage"]["categories"]["other"]
+        changed_gf = graphforge(18, malformed_categories)
+        with self.assertRaisesRegex(ControllerError, "categories are incomplete"):
+            assemble_rung_evidence(
+                root=ROOT, scale=18, graphforge=changed_gf, benchexec=benchexec(changed_gf)
+            )
+        malformed_phases = authoritative_receipts(18)
+        del malformed_phases["ingest"][0]["construction"]["application_io"]["phases"][
+            "recovery_reauthentication"
+        ]
+        changed_gf = graphforge(18, malformed_phases)
+        with self.assertRaisesRegex(ControllerError, "inventory is incomplete"):
             assemble_rung_evidence(
                 root=ROOT, scale=18, graphforge=changed_gf, benchexec=benchexec(changed_gf)
             )
