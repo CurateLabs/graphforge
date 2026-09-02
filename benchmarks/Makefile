@@ -1,4 +1,4 @@
-.PHONY: install smoke smoke-python smoke-rust fly-adapter-static progressive-provider-attempt-static progressive-fly-transport-static local-admission progressive-qualification-list progressive-qualification-plan progressive-qualification-run progressive-qualification-project-s20 progressive-qualification-binaries progressive-provider-plan qualification-operator esc-readiness ingest-ladder-bundle parity-gate
+.PHONY: install smoke smoke-python smoke-rust fly-adapter-static progressive-provider-attempt-static progressive-fly-transport-static local-admission progressive-qualification-list progressive-qualification-plan progressive-qualification-run progressive-qualification-project-s20 progressive-storage-qualification progressive-qualification-binaries progressive-provider-plan qualification-operator esc-readiness ingest-ladder-bundle parity-gate
 
 install:
 	uv sync --locked
@@ -66,6 +66,15 @@ progressive-qualification-project-s20: install
 	PYTHONPATH=$(CURDIR)/harness uv run --locked python -m graphforge_bench.progressive_run \
 		--project-s20 --output-dir "$(OUTPUT_DIR)" \
 		--provider-capacity "$(PROVIDER_CAPACITY)"
+
+progressive-storage-qualification: install
+	test -n "$(LOW_RUNG)" && test -n "$(HIGH_RUNG)" && test -n "$(EVIDENCE)"
+	test -n "$(VOLUME_BYTES)" && test -n "$(RESERVED_HEADROOM_BYTES)"
+	PYTHONPATH=$(CURDIR)/harness uv run --locked python -m \
+		graphforge_bench.progressive_storage_qualification \
+		"$(LOW_RUNG)" "$(HIGH_RUNG)" "$(EVIDENCE)" \
+		--volume-bytes "$(VOLUME_BYTES)" \
+		--reserved-headroom-bytes "$(RESERVED_HEADROOM_BYTES)"
 
 # Safe control-plane admission only; this never provisions a provider.
 progressive-provider-plan: install
