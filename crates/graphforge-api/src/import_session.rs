@@ -1442,6 +1442,11 @@ mod tests {
             let (phase, reopened_progress) = reopened.import_session_status(session_uuid).unwrap();
             assert_eq!(phase, ImportPhase::Committed);
             assert_eq!(reopened_progress.construction.as_ref(), Some(&receipt));
+            let reopened_receipt = reopened_progress.construction.as_ref().unwrap();
+            assert!(
+                reopened_receipt.construction_staging_transient_peak_allocated_bytes
+                    >= reopened_receipt.construction_staging.allocated_bytes
+            );
             receipt
         }
 
