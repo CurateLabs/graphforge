@@ -1977,6 +1977,64 @@ mod tests {
     }
 
     #[test]
+    fn official_tcr10_jaccard_schema_is_truthful_for_normalized_and_exact() {
+        let reference = parse_result_rows("0.667\n");
+        let matching = parse_result_rows("0.667\n");
+        validate_result(ValidationMode::Normalized, &reference, &matching).unwrap();
+        validate_result(ValidationMode::Exact, &reference, &matching).unwrap();
+
+        let obsolete_companies = parse_result_rows("company-1\ncompany-2\ncompany-3\n");
+        assert!(
+            validate_result(ValidationMode::Normalized, &reference, &obsolete_companies).is_err()
+        );
+        assert!(validate_result(ValidationMode::Exact, &reference, &obsolete_companies).is_err());
+
+        let wrong = parse_result_rows("0.500\n");
+        assert!(validate_result(ValidationMode::Normalized, &reference, &wrong).is_err());
+        assert!(validate_result(ValidationMode::Exact, &reference, &wrong).is_err());
+    }
+
+    #[test]
+    fn static_tcr10_fixtures_use_official_jaccard_and_stay_non_live() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/gdc/finbench-transaction-tiny");
+        let compatible_ref = load_result_rows(
+            &root.join("compatible/references/finbench-engineering-tiny-v1-TCR10.ref"),
+        )
+        .unwrap();
+        let compatible_out = load_result_rows(
+            &root.join("compatible/system-outputs/finbench-engineering-tiny-v1-TCR10.out"),
+        )
+        .unwrap();
+        assert_eq!(compatible_ref, vec!["0.667".to_string()]);
+        assert_eq!(compatible_out, vec!["0.667".to_string()]);
+        validate_result(ValidationMode::Normalized, &compatible_ref, &compatible_out).unwrap();
+        validate_result(ValidationMode::Exact, &compatible_ref, &compatible_out).unwrap();
+
+        let mismatch_ref = load_result_rows(
+            &root.join("reference-mismatch/references/finbench-engineering-tiny-v1-TCR10.ref"),
+        )
+        .unwrap();
+        let mismatch_out = load_result_rows(
+            &root.join("reference-mismatch/system-outputs/finbench-engineering-tiny-v1-TCR10.out"),
+        )
+        .unwrap();
+        assert_eq!(mismatch_ref, vec!["0.667".to_string()]);
+        assert_eq!(mismatch_out, vec!["0.500".to_string()]);
+        assert!(validate_result(ValidationMode::Normalized, &mismatch_ref, &mismatch_out).is_err());
+        assert!(validate_result(ValidationMode::Exact, &mismatch_ref, &mismatch_out).is_err());
+
+        let MappingOutcome::Compatible(mapping) = map_operation(Operation::Tcr10) else {
+            panic!("TCR10 must stay compatible");
+        };
+        assert!(mapping.cypher_shape.contains("jaccardSimilarity"));
+        assert_eq!(
+            Operation::Tcr10.intended_validation(),
+            ValidationMode::Normalized
+        );
+    }
+
+    #[test]
     fn live_tcr10_mapping_is_official_jaccard_with_open_window() {
         let MappingOutcome::Compatible(mapping) = map_operation(Operation::Tcr10) else {
             panic!("TCR10 must stay compatible");

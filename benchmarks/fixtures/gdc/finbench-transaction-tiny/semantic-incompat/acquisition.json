@@ -33,7 +33,7 @@
       "dataset_id": "finbench-engineering-tiny-v1",
       "workload_key": "transaction-validation",
       "path": "transaction-validation.ref",
-      "checksum_sha256": "e4f8737530cadba45d1be8b0ebed83ab7728f6ee5c45cdbb31eb745e3552341b"
+      "checksum_sha256": "80818cd2d0365b3289b237f6115ee9f081f3483801844381fba31e8aa8651b85"
     }
   ]
 }

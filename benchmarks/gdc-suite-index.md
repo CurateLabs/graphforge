@@ -180,7 +180,11 @@ live execution. The reference `0.667` is independently derived from the seed
 unsupported in the same evidence document, and correctness, resource, and
 harness lanes stay distinct. The older `run-suite` command is retained only as
 an explicitly marked `static_replay` regression lane and cannot satisfy live
-evidence.
+evidence. Its compatible TCR10 reference and system output use the same official
+single-column `jaccardSimilarity` value `0.667`; the reference-mismatch TCR10
+output is a deliberately wrong Jaccard (`0.500`) so normalized and exact
+comparison both fail closed. Obsolete company-ID rows are not a valid TCR10
+result schema.
 
 Evidence separates three failure classes and never conflates them: a
 **correctness** mismatch (`correctness_failed`), a **resource**-limit event

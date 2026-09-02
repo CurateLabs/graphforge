@@ -125,6 +125,30 @@ class GdcFinBenchTransactionSuiteTests(unittest.TestCase):
         for read in COMPATIBLE_READS:
             self.assertEqual(by_op[read]["status"], "passed", read)
             self.assertIsNotNone(by_op[read].get("public_api"))
+        self.assertEqual(by_op["TCR10"]["validation_mode"], "normalized")
+        self.assertIn("jaccardSimilarity", by_op["TCR10"]["public_api"]["cypher_shape"])
+        tcr10_ref = (
+            self.root
+            / "fixtures"
+            / "gdc"
+            / "finbench-transaction-tiny"
+            / "compatible"
+            / "references"
+            / "finbench-engineering-tiny-v1-TCR10.ref"
+        ).read_text(encoding="utf-8")
+        tcr10_out = (
+            self.root
+            / "fixtures"
+            / "gdc"
+            / "finbench-transaction-tiny"
+            / "compatible"
+            / "system-outputs"
+            / "finbench-engineering-tiny-v1-TCR10.out"
+        ).read_text(encoding="utf-8")
+        self.assertIn("0.667", tcr10_ref)
+        self.assertEqual(tcr10_out.strip(), "0.667")
+        self.assertNotIn("company-", tcr10_ref)
+        self.assertNotIn("company-", tcr10_out)
         incompatible = list(UNSUPPORTED_READ_CAUSES) + list(WRITES) + list(READ_WRITES)
         for op in incompatible:
             self.assertEqual(by_op[op]["status"], "semantic_incompatibility", op)
@@ -316,12 +340,27 @@ class GdcFinBenchTransactionSuiteTests(unittest.TestCase):
     def test_reference_mismatch_is_visible_in_correctness_lane_only(self) -> None:
         evidence = run_tiny_suite(fixture_name="reference-mismatch")
         by_op = {item["operation"]: item for item in evidence["operations"]}
+        self.assertEqual(evidence["execution_mode"], "static_replay")
         self.assertEqual(by_op["TCR6"]["status"], "correctness_failed")
         self.assertIn("reference_mismatch", by_op["TCR6"]["cause"])
+        self.assertEqual(by_op["TCR10"]["status"], "correctness_failed")
+        self.assertIn("reference_mismatch", by_op["TCR10"]["cause"])
+        self.assertEqual(by_op["TCR10"]["validation_mode"], "normalized")
         self.assertEqual(evidence["status"], "correctness_failed")
         # A correctness mismatch never leaks into the resource or harness lanes.
         self.assertEqual(evidence["resource_events"], [])
         self.assertEqual(evidence["harness_failures"], [])
+        mismatch_out = (
+            self.root
+            / "fixtures"
+            / "gdc"
+            / "finbench-transaction-tiny"
+            / "reference-mismatch"
+            / "system-outputs"
+            / "finbench-engineering-tiny-v1-TCR10.out"
+        ).read_text(encoding="utf-8")
+        self.assertEqual(mismatch_out.strip(), "0.500")
+        self.assertNotIn("company-", mismatch_out)
         self._evidence_validator().validate(evidence)
 
     def test_correctness_resource_and_harness_failures_are_distinguished(self) -> None:

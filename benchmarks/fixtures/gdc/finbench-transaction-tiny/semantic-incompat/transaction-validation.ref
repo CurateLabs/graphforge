@@ -1,4 +1,5 @@
-# Independently derived from the two post-startTime investment sets documented
-# in TCR10-request.json. This file is not generated from GraphForge output.
-company-beta
-company-alpha
+# Independent official TCR10 Jaccard derivation. Static replay only; not live execution.
+# Same open-window neighborhood ratio as map_operation(TCR10):
+# |{10,11} ∩ {10,11,12}| / |union| = 2/3, official 3-decimal rounding = 0.667.
+# This file is not generated from GraphForge output.
+0.667
