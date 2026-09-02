@@ -195,10 +195,7 @@ def run_live_suite(
         for statement in fixture_document["setup_cypher"]:
             graph.execute(statement)
         table = graph.execute(request["query"], params=request["params"])
-        rows = [
-            " ".join(str(value) for value in row.values())
-            for row in table.to_pylist()
-        ]
+        rows = [" ".join(str(value) for value in row.values()) for row in table.to_pylist()]
     except Exception as error:
         raise FinBenchTransactionSuiteError(
             "harness_error", f"live public API execution failed: {error}"

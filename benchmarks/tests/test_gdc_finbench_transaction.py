@@ -148,9 +148,7 @@ class GdcFinBenchTransactionSuiteTests(unittest.TestCase):
         self.assertEqual(by_op["TCR10"]["status"], "passed")
         self.assertEqual(by_op["TCR10"]["validation_mode"], "normalized")
         self.assertEqual(by_op["TCR1"]["status"], "semantic_incompatibility")
-        self.assertIn(
-            "recursive_temporal_path_filtering_not_exposed", by_op["TCR1"]["cause"]
-        )
+        self.assertIn("recursive_temporal_path_filtering_not_exposed", by_op["TCR1"]["cause"])
         self.assertEqual(by_op["TW1"]["status"], "semantic_incompatibility")
         self.assertIn(WRITE_CAUSE, by_op["TW1"]["cause"])
         self._evidence_validator().validate(evidence)
