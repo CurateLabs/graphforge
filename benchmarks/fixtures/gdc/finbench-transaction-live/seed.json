@@ -1,0 +1,19 @@
+{
+  "schema": "graphforge-gdc-finbench-synthetic-seed/1",
+  "seed": 964,
+  "persons": [1, 2, 3],
+  "companies": [10, 11, 12, 13, 14, 15],
+  "invests": [
+    {"person": 1, "company": 10, "timestamp": 110},
+    {"person": 1, "company": 11, "timestamp": 120},
+    {"person": 1, "company": 13, "timestamp": 100},
+    {"person": 1, "company": 14, "timestamp": 200},
+    {"person": 1, "company": 15, "timestamp": 90},
+    {"person": 2, "company": 10, "timestamp": 130},
+    {"person": 2, "company": 11, "timestamp": 140},
+    {"person": 2, "company": 12, "timestamp": 150},
+    {"person": 2, "company": 13, "timestamp": 100},
+    {"person": 2, "company": 14, "timestamp": 200},
+    {"person": 3, "company": 10, "timestamp": 160}
+  ]
+}

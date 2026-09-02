@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 from typing import Any
@@ -35,6 +36,8 @@ OPERATIONS = COMPLEX_READS + SIMPLE_READS + WRITES + READ_WRITES
 JOB_SCHEMA = "graphforge-gdc-finbench-transaction-job/1"
 EVIDENCE_SCHEMA = "graphforge-gdc-finbench-transaction-evidence/1"
 LIVE_EXECUTION_MODE = "live_graphforge"
+LIVE_DATASET_ID = "finbench-engineering-live-tcr10-v1"
+LIVE_FIXTURE = "finbench-transaction-live"
 
 WRITE_CAUSE = "finbench_transaction_write_semantics_not_exposed"
 RECURSIVE_PATH_CAUSE = "recursive_temporal_path_filtering_not_exposed"
@@ -172,74 +175,60 @@ def run_tiny_suite(
         return evidence
 
 
+def _raise_live_error(completed: subprocess.CompletedProcess[str]) -> None:
+    message = completed.stderr.strip()
+    if "reference_mismatch" in message:
+        raise FinBenchTransactionSuiteError("correctness_failed", message)
+    if "parameter" in message:
+        raise FinBenchTransactionSuiteError("parameter_identity_mismatch", message)
+    if "identity" in message:
+        raise FinBenchTransactionSuiteError("identity_drift", message)
+    if "checksum" in message:
+        raise FinBenchTransactionSuiteError("checksum_mismatch", message)
+    if "static" in message:
+        raise FinBenchTransactionSuiteError("static_output_rejected", message)
+    raise FinBenchTransactionSuiteError("invalid_document", message or "live runner failed")
+
+
+def validate_live_fixture(
+    fixture: Path,
+    *,
+    root: Path | None = None,
+) -> dict[str, Any]:
+    """Ask the trusted Rust runner to validate the complete closed live context."""
+    completed = _run_runner(["validate-live-context", str(fixture)], root)
+    if completed.returncode != 0:
+        _raise_live_error(completed)
+    return json.loads((fixture / "identity.json").read_text(encoding="utf-8"))
+
+
 def run_live_suite(
     *,
     root: Path | None = None,
     evidence_path: Path | None = None,
     params_override: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Execute TCR10 against a real in-memory GraphForge, never static output."""
+    """Orchestrate trusted Rust-owned in-memory TCR10; never accept static output."""
     base = root or workspace_root()
-    fixture = base / "fixtures" / "gdc" / "finbench-transaction-live"
-    pin = load_pinned_identity(identity_path(base))
-    acquisition = json.loads((fixture / "acquisition.json").read_text(encoding="utf-8"))
-    contract_evidence = validate_acquisition(pin, acquisition, fixture)
-    fixture_document = json.loads((fixture / "fixture.json").read_text(encoding="utf-8"))
-    request = json.loads((fixture / "TCR10-request.json").read_text(encoding="utf-8"))
-    if params_override:
-        request["params"].update(params_override)
-    try:
-        from graphforge import GraphForge
-
-        graph = GraphForge()
-        for statement in fixture_document["setup_cypher"]:
-            graph.execute(statement)
-        table = graph.execute(request["query"], params=request["params"])
-        rows = [" ".join(str(value) for value in row.values()) for row in table.to_pylist()]
-    except Exception as error:
-        raise FinBenchTransactionSuiteError(
-            "harness_error", f"live public API execution failed: {error}"
-        ) from error
+    fixture = base / "fixtures" / "gdc" / LIVE_FIXTURE
     with tempfile.TemporaryDirectory(prefix="gdc-finbench-live-") as tmp:
-        tmp_path = Path(tmp)
-        identities_path = tmp_path / "identities.json"
-        identities_path.write_text(
-            json.dumps(contract_evidence["identities"], indent=2) + "\n",
-            encoding="utf-8",
-        )
-        request_path = tmp_path / "request.json"
-        request_path.write_text(json.dumps(request, indent=2) + "\n", encoding="utf-8")
-        produced_path = tmp_path / "produced.json"
-        produced_path.write_text(
-            json.dumps(
-                {
-                    "schema": "graphforge-gdc-finbench-live-produced/1",
-                    "source": "python_public_api_in_memory",
-                    "rows": rows,
-                },
-                indent=2,
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-        out_evidence = evidence_path or (tmp_path / "evidence.json")
-        completed = _run_runner(
-            [
-                "validate-live",
-                str(fixture / "fixture.json"),
-                str(request_path),
-                str(fixture / "TCR10-reference.ref"),
-                str(produced_path),
-                str(identities_path),
-                str(out_evidence),
-            ],
-            base,
-        )
+        execution_fixture = fixture
+        if params_override:
+            execution_fixture = Path(tmp) / "fixture"
+            shutil.copytree(fixture, execution_fixture)
+            parameter_path = execution_fixture / "parameters.json"
+            parameters = json.loads(parameter_path.read_text(encoding="utf-8"))
+            for name, value in params_override.items():
+                if name not in parameters["bindings"]:
+                    raise FinBenchTransactionSuiteError(
+                        "harness_error", f"unknown live parameter {name}"
+                    )
+                parameters["bindings"][name]["value"] = value
+            parameter_path.write_text(json.dumps(parameters, indent=2) + "\n", encoding="utf-8")
+        out_evidence = evidence_path or (Path(tmp) / "evidence.json")
+        completed = _run_runner(["run-live", str(execution_fixture), str(out_evidence)], base)
         if not out_evidence.is_file():
-            raise FinBenchTransactionSuiteError(
-                "harness_error",
-                f"live runner failed to emit evidence: {completed.stderr.strip()}",
-            )
+            _raise_live_error(completed)
         evidence = json.loads(out_evidence.read_text(encoding="utf-8"))
         if completed.returncode != 0:
             raise FinBenchTransactionSuiteError(
@@ -254,6 +243,13 @@ def run_live_suite(
         if evidence.get("certification") is not False:
             raise FinBenchTransactionSuiteError(
                 "invalid_document", "live evidence must keep certification=false"
+            )
+        if evidence.get("identities", {}).get("execution_authority", {}).get(
+            "caller_supplied_result"
+        ):
+            raise FinBenchTransactionSuiteError(
+                "static_output_rejected",
+                "live evidence must not accept a caller-supplied result",
             )
         return evidence
 
@@ -297,7 +293,9 @@ __all__ = [
     "COMPLEX_READS",
     "EVIDENCE_SCHEMA",
     "JOB_SCHEMA",
+    "LIVE_DATASET_ID",
     "LIVE_EXECUTION_MODE",
+    "LIVE_FIXTURE",
     "OPERATIONS",
     "READ_WRITES",
     "RECURSIVE_PATH_CAUSE",
@@ -316,4 +314,5 @@ __all__ = [
     "map_operation_file",
     "run_live_suite",
     "run_tiny_suite",
+    "validate_live_fixture",
 ]

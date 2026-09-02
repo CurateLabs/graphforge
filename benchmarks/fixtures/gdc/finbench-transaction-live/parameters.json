@@ -1,0 +1,22 @@
+{
+  "schema": "graphforge-gdc-finbench-live-parameters/1",
+  "operation": "TCR10",
+  "bindings": {
+    "pid1": {
+      "kind": "int64",
+      "value": 1
+    },
+    "pid2": {
+      "kind": "int64",
+      "value": 2
+    },
+    "startTime": {
+      "kind": "int64",
+      "value": 100
+    },
+    "endTime": {
+      "kind": "int64",
+      "value": 200
+    }
+  }
+}

@@ -1,7 +1,7 @@
 use graphforge_benchmark_gdc_finbench_transaction::{
-    ExecutionSignal, JOB_SCHEMA, LiveFixture, LiveProducedRows, LiveRequest, MappingOutcome,
-    Operation, OperationJob, OperationStatus, assemble_evidence, load_result_rows, map_operation,
-    operation_rules, run_job, validate_live,
+    assemble_evidence, load_result_rows, map_operation, operation_rules, run_job, run_live_fixture,
+    validate_live_fixture_context, ExecutionSignal, MappingOutcome, Operation, OperationJob,
+    OperationStatus, JOB_SCHEMA,
 };
 use std::env;
 use std::fs;
@@ -12,7 +12,8 @@ fn main() -> ExitCode {
     let mut args = env::args().skip(1);
     let Some(command) = args.next() else {
         eprintln!(
-            "usage: graphforge-benchmark-gdc-finbench-transaction <list-operations|map-operation|run-suite|validate-live> ..."
+            "usage: graphforge-benchmark-gdc-finbench-transaction \
+             <list-operations|map-operation|run-suite|validate-live-context|run-live> ..."
         );
         return ExitCode::from(2);
     };
@@ -83,96 +84,83 @@ fn main() -> ExitCode {
                 }
             }
         }
-        "validate-live" => {
+        "validate-live-context" => {
             let Some(fixture_path) = args.next() else {
-                eprintln!(
-                    "usage: validate-live FIXTURE.json REQUEST.json REFERENCE.ref PRODUCED.json IDENTITIES.json EVIDENCE.json"
-                );
+                eprintln!("usage: validate-live-context FIXTURE_DIR");
                 return ExitCode::from(2);
             };
-            let Some(request_path) = args.next() else {
-                eprintln!("missing REQUEST.json");
-                return ExitCode::from(2);
-            };
-            let Some(reference_path) = args.next() else {
-                eprintln!("missing REFERENCE.ref");
-                return ExitCode::from(2);
-            };
-            let Some(identities_path) = args.next() else {
-                eprintln!("missing PRODUCED.json");
-                return ExitCode::from(2);
-            };
-            let produced_path = identities_path;
-            let Some(identities_path) = args.next() else {
-                eprintln!("missing IDENTITIES.json");
-                return ExitCode::from(2);
-            };
-            let Some(evidence_path) = args.next() else {
-                eprintln!("missing EVIDENCE.json");
-                return ExitCode::from(2);
-            };
-            match validate_live_command(
-                &fixture_path,
-                &request_path,
-                &reference_path,
-                &produced_path,
-                &identities_path,
-                &evidence_path,
-            ) {
-                Ok(code) => code,
+            match validate_live_fixture_context(&PathBuf::from(fixture_path)) {
+                Ok(()) => ExitCode::SUCCESS,
                 Err(error) => {
                     eprintln!("{error}");
                     ExitCode::FAILURE
                 }
             }
         }
+        "run-live" => {
+            let Some(fixture_path) = args.next() else {
+                eprintln!("usage: run-live FIXTURE_DIR EVIDENCE.json");
+                return ExitCode::from(2);
+            };
+            let Some(evidence_path) = args.next() else {
+                eprintln!("missing EVIDENCE.json");
+                return ExitCode::from(2);
+            };
+            if args.next().is_some() {
+                eprintln!(
+                    "static output rejected: run-live does not accept a caller-supplied result envelope"
+                );
+                return ExitCode::from(2);
+            }
+            let executable = match env::current_exe() {
+                Ok(path) => path,
+                Err(error) => {
+                    eprintln!("failed to identify runner executable: {error}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            match run_live_fixture(&PathBuf::from(fixture_path), &executable) {
+                Ok(evidence) => {
+                    let failed = evidence.operations.iter().any(|outcome| {
+                        matches!(
+                            outcome.status,
+                            OperationStatus::CorrectnessFailed
+                                | OperationStatus::ResourceExceeded
+                                | OperationStatus::HarnessError
+                        )
+                    });
+                    let payload = serde_json::to_string_pretty(&evidence).unwrap();
+                    match fs::write(evidence_path, format!("{payload}\n")) {
+                        Ok(()) => {
+                            if failed {
+                                ExitCode::FAILURE
+                            } else {
+                                ExitCode::SUCCESS
+                            }
+                        }
+                        Err(error) => {
+                            eprintln!("failed to write live evidence: {error}");
+                            ExitCode::FAILURE
+                        }
+                    }
+                }
+                Err(error) => {
+                    eprintln!("{error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "validate-live" => {
+            eprintln!(
+                "static output rejected: validate-live no longer accepts a produced-row envelope; use run-live"
+            );
+            ExitCode::from(2)
+        }
         other => {
             eprintln!("unknown command: {other}");
             ExitCode::from(2)
         }
     }
-}
-
-fn validate_live_command(
-    fixture_path: &str,
-    request_path: &str,
-    reference_path: &str,
-    produced_path: &str,
-    identities_path: &str,
-    evidence_path: &str,
-) -> Result<ExitCode, String> {
-    let fixture: LiveFixture =
-        serde_json::from_str(&fs::read_to_string(fixture_path).map_err(|error| error.to_string())?)
-            .map_err(|error| error.to_string())?;
-    let request: LiveRequest =
-        serde_json::from_str(&fs::read_to_string(request_path).map_err(|error| error.to_string())?)
-            .map_err(|error| error.to_string())?;
-    let reference = load_result_rows(PathBuf::from(reference_path).as_path())
-        .map_err(|error| error.to_string())?;
-    let produced_text = fs::read_to_string(produced_path).map_err(|error| error.to_string())?;
-    let produced: LiveProducedRows = serde_json::from_str(&produced_text)
-        .map_err(|error| format!("static output rejected: live produced-row envelope: {error}"))?;
-    let identities = serde_json::from_str(
-        &fs::read_to_string(identities_path).map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| error.to_string())?;
-    let evidence = validate_live(&fixture, &request, &reference, &produced, identities)
-        .map_err(|error| error.to_string())?;
-    let failed = evidence.operations.iter().any(|outcome| {
-        matches!(
-            outcome.status,
-            OperationStatus::CorrectnessFailed
-                | OperationStatus::ResourceExceeded
-                | OperationStatus::HarnessError
-        )
-    });
-    let payload = serde_json::to_string_pretty(&evidence).map_err(|error| error.to_string())?;
-    fs::write(evidence_path, format!("{payload}\n")).map_err(|error| error.to_string())?;
-    Ok(if failed {
-        ExitCode::FAILURE
-    } else {
-        ExitCode::SUCCESS
-    })
 }
 
 fn load_job(path: &str) -> Result<OperationJob, String> {

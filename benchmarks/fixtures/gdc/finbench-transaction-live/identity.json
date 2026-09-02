@@ -1,0 +1,54 @@
+{
+  "schema": "graphforge-gdc-finbench-live-identity/1",
+  "suite_id": "finbench-transaction",
+  "operation": "TCR10",
+  "source_mode": "runner_owned_rust_api",
+  "certification": false,
+  "upstream_spec": {
+    "source": "https://github.com/ldbc/ldbc_finbench_docs",
+    "release": "v0.1.0",
+    "commit": "d3ec7036bf6919df8cd3eeaa3a986048e779ea02"
+  },
+  "upstream_query": {
+    "source": "https://github.com/ldbc/ldbc_finbench_transaction_impls",
+    "release": "galaxybase-cypher",
+    "commit": "4891ab426377ec98564822d54bdadb1d02e5fe41",
+    "path": "galaxybase-cypher/queries/transaction-complex-read-10.cypher"
+  },
+  "fixture": {
+    "dataset_id": "finbench-engineering-live-tcr10-v1",
+    "kind": "synthetic_minimal_finbench_shaped",
+    "provenance_kind": "content_addressed_committed_fixture",
+    "seed": 964,
+    "scale_factor": null,
+    "path": "seed.json",
+    "sha256": "3360c7722b55bb9b60e242fa9c7d7c8b2beb32503892a2402ed606e6b0c50117"
+  },
+  "parameters": {
+    "kind": "typed_internal_deterministic_tcr10_parameters",
+    "path": "parameters.json",
+    "file_sha256": "87dbdbf8e6a16039e86efd00042509af055c519fdad285039b2b09a52db75364",
+    "names_kinds_values_sha256": "46e5bf9bf7d961ecf8f97a6d0e31e2bcbc82a5f4c278aea31cbb4fdb1c431af7"
+  },
+  "reference": {
+    "authority": "independent_semantic_derivation_from_seed",
+    "captured_from_engine": false,
+    "validation": "normalized_rounded_jaccard",
+    "path": "expected-tcr10.ref",
+    "sha256": "40b8483eaba45fe3d11f5a68004d1ce712d6e4340e5cfbe1a916337073cc68a0"
+  },
+  "driver": {
+    "kind": "internal_rust_public_api_driver",
+    "source_mode": "runner_executes_query_no_caller_result",
+    "interface": "graphforge_api::GraphForge::execute_with_params",
+    "durable": false,
+    "validator": "same_process_normalized"
+  },
+  "normalization": {
+    "upstream_temporal_window": "startTime < invest.timestamp < endTime",
+    "internal_equivalent": "precomputed integer timestamps with the same open window",
+    "reason": "exercise supported Cypher while not claiming DateTime-literal parity",
+    "result_schema": ["jaccardSimilarity"],
+    "numeric_format": "float64_rounded_3dp"
+  }
+}

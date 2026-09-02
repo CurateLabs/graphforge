@@ -8,16 +8,11 @@ import subprocess
 import tempfile
 import unittest
 
-from graphforge_bench.gdc_contracts import (
-    GdcContractError,
-    list_gdc_suites,
-    load_pinned_identity,
-    validate_acquisition,
-    workspace_root,
-)
+from graphforge_bench.gdc_contracts import list_gdc_suites, workspace_root
 from graphforge_bench.gdc_finbench_transaction import (
     COMPATIBLE_READS,
     EVIDENCE_SCHEMA,
+    LIVE_DATASET_ID,
     OPERATIONS,
     READ_WRITES,
     SIMPLE_READS,
@@ -30,6 +25,7 @@ from graphforge_bench.gdc_finbench_transaction import (
     map_operation_file,
     run_live_suite,
     run_tiny_suite,
+    validate_live_fixture,
 )
 from jsonschema import Draft202012Validator
 
@@ -137,44 +133,46 @@ class GdcFinBenchTransactionSuiteTests(unittest.TestCase):
 
     def test_live_tcr10_loads_graphforge_and_validates_normalized_rows(self) -> None:
         evidence = run_live_suite()
-        self.assertEqual(evidence["dataset_id"], "finbench-engineering-tiny-v1")
+        self.assertEqual(evidence["dataset_id"], LIVE_DATASET_ID)
         self.assertEqual(evidence["execution_mode"], "live_graphforge")
         self.assertIs(evidence["certification"], False)
         self.assertEqual(
             evidence["validator"]["interface"],
             "graphforge-finbench-rust-reference-validator/1",
         )
+        self.assertFalse(evidence["identities"]["execution_authority"]["caller_supplied_result"])
+        self.assertEqual(
+            evidence["identities"]["live"]["normalization"]["result_schema"],
+            ["jaccardSimilarity"],
+        )
         by_op = {item["operation"]: item for item in evidence["operations"]}
         self.assertEqual(by_op["TCR10"]["status"], "passed")
         self.assertEqual(by_op["TCR10"]["validation_mode"], "normalized")
+        self.assertIn("$startTime", by_op["TCR10"]["public_api"]["cypher_shape"])
+        self.assertIn("$endTime", by_op["TCR10"]["public_api"]["cypher_shape"])
+        self.assertIn("jaccardSimilarity", by_op["TCR10"]["public_api"]["cypher_shape"])
         self.assertEqual(by_op["TCR1"]["status"], "semantic_incompatibility")
         self.assertIn("recursive_temporal_path_filtering_not_exposed", by_op["TCR1"]["cause"])
         self.assertEqual(by_op["TW1"]["status"], "semantic_incompatibility")
         self.assertIn(WRITE_CAUSE, by_op["TW1"]["cause"])
+        self.assertEqual(evidence["resource_events"], [])
+        self.assertEqual(evidence["harness_failures"], [])
         self._evidence_validator().validate(evidence)
 
-    def test_live_params_drive_mismatch_and_invalid_params_fail_as_harness(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="finbench-live-params-") as tmp:
-            work = Path(tmp)
-            evidence_path = work / "mismatch-evidence.json"
-            with self.assertRaises(FinBenchTransactionSuiteError) as mismatch:
-                run_live_suite(
-                    evidence_path=evidence_path,
-                    params_override={"id2": "person-noise"},
-                )
-            self.assertEqual(mismatch.exception.cause, "correctness_failed")
-            evidence = json.loads(evidence_path.read_text())
-            self.assertEqual(evidence["status"], "correctness_failed")
-            self.assertEqual(evidence["resource_events"], [])
-            self.assertEqual(evidence["harness_failures"], [])
+    def test_live_parameter_and_unknown_mutations_fail_before_execution(self) -> None:
+        with self.assertRaises(FinBenchTransactionSuiteError) as window:
+            run_live_suite(params_override={"startTime": 99})
+        self.assertEqual(window.exception.cause, "parameter_identity_mismatch")
 
-            with self.assertRaises(FinBenchTransactionSuiteError) as invalid:
-                run_live_suite(params_override={"start": object()})
-            self.assertEqual(invalid.exception.cause, "harness_error")
-            self.assertIn("public API execution failed", str(invalid.exception))
+        with self.assertRaises(FinBenchTransactionSuiteError) as person:
+            run_live_suite(params_override={"pid2": 3})
+        self.assertEqual(person.exception.cause, "parameter_identity_mismatch")
+
+        with self.assertRaises(FinBenchTransactionSuiteError) as unknown:
+            run_live_suite(params_override={"start": 100})
+        self.assertEqual(unknown.exception.cause, "harness_error")
 
     def test_live_lane_rejects_static_output_documents(self) -> None:
-        fixture = self.root / "fixtures" / "gdc" / "finbench-transaction-live"
         static_output = (
             self.root
             / "fixtures"
@@ -184,36 +182,115 @@ class GdcFinBenchTransactionSuiteTests(unittest.TestCase):
             / "system-outputs"
             / "finbench-engineering-tiny-v1-TCR10.out"
         )
+        envelope = {
+            "schema": "graphforge-gdc-finbench-live-produced/1",
+            "source": "python_public_api_in_memory",
+            "rows": ["0.667"],
+        }
         with tempfile.TemporaryDirectory(prefix="finbench-no-static-") as tmp:
             work = Path(tmp)
-            completed = subprocess.run(
+            produced = work / "produced.json"
+            produced.write_text(json.dumps(envelope) + "\n", encoding="utf-8")
+            evidence_path = work / "evidence.json"
+            for extra in (static_output, produced):
+                completed = subprocess.run(
+                    [
+                        str(self.binary),
+                        "run-live",
+                        str(extra),
+                        str(evidence_path),
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertNotEqual(completed.returncode, 0, extra)
+                self.assertIn("static output rejected", completed.stderr)
+                self.assertFalse(evidence_path.exists())
+
+            retired = subprocess.run(
                 [
                     str(self.binary),
                     "validate-live",
-                    str(fixture / "fixture.json"),
-                    str(fixture / "TCR10-request.json"),
-                    str(fixture / "TCR10-reference.ref"),
-                    str(static_output),
-                    str(fixture / "acquisition.json"),
-                    str(work / "evidence.json"),
+                    str(produced),
+                    str(evidence_path),
                 ],
                 check=False,
                 capture_output=True,
                 text=True,
             )
-        self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("static output rejected", completed.stderr)
+        self.assertNotEqual(retired.returncode, 0)
+        self.assertIn("static output rejected", retired.stderr)
 
-    def test_live_acquisition_identity_drift_is_rejected(self) -> None:
-        fixture = self.root / "fixtures" / "gdc" / "finbench-transaction-live"
-        pin = load_pinned_identity(
-            self.root / "profiles" / "gdc" / "finbench-transaction-identity.json"
-        )
-        acquisition = json.loads((fixture / "acquisition.json").read_text())
-        acquisition["recorded_spec"]["commit"] = "0" * 40
-        with self.assertRaises(GdcContractError) as raised:
-            validate_acquisition(pin, acquisition, fixture)
-        self.assertEqual(raised.exception.cause, "identity_drift")
+    def test_every_live_identity_field_and_member_is_closed(self) -> None:
+        source = self.root / "fixtures" / "gdc" / "finbench-transaction-live"
+        original = json.loads((source / "identity.json").read_text(encoding="utf-8"))
+
+        def leaves(value: object, path: tuple[object, ...] = ()) -> list[tuple[object, ...]]:
+            if isinstance(value, dict):
+                return [
+                    leaf for key, child in value.items() for leaf in leaves(child, (*path, key))
+                ]
+            if isinstance(value, list):
+                return [
+                    leaf
+                    for index, child in enumerate(value)
+                    for leaf in leaves(child, (*path, index))
+                ]
+            return [path]
+
+        def mutate(value: object) -> object:
+            if value is None:
+                return "mutated"
+            if isinstance(value, bool):
+                return not value
+            if isinstance(value, int):
+                return value + 1
+            if isinstance(value, str):
+                return f"{value}-mutated"
+            raise AssertionError(type(value))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            for index, path in enumerate(leaves(original)):
+                fixture = base / f"fixture-{index}"
+                shutil.copytree(source, fixture)
+                changed = json.loads(json.dumps(original))
+                parent = changed
+                for member in path[:-1]:
+                    parent = parent[member]
+                parent[path[-1]] = mutate(parent[path[-1]])
+                (fixture / "identity.json").write_text(
+                    json.dumps(changed) + "\n",
+                    encoding="utf-8",
+                )
+                with self.subTest(path=path), self.assertRaises(FinBenchTransactionSuiteError) as raised:
+                    validate_live_fixture(fixture)
+                self.assertEqual(raised.exception.cause, "identity_drift")
+                shutil.rmtree(fixture)
+
+            unknown = base / "fixture-unknown"
+            shutil.copytree(source, unknown)
+            changed = json.loads(json.dumps(original))
+            changed["unexpected"] = "forbidden"
+            (unknown / "identity.json").write_text(
+                json.dumps(changed) + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(FinBenchTransactionSuiteError):
+                validate_live_fixture(unknown)
+
+    def test_semantic_seed_mutation_fails_closed(self) -> None:
+        source = self.root / "fixtures" / "gdc" / "finbench-transaction-live"
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = Path(tmp) / "fixture"
+            shutil.copytree(source, fixture)
+            seed = json.loads((fixture / "seed.json").read_text(encoding="utf-8"))
+            seed["invests"].append({"person": 1, "company": 12, "timestamp": 160})
+            (fixture / "seed.json").write_text(json.dumps(seed, indent=2) + "\n", encoding="utf-8")
+            with self.assertRaises(FinBenchTransactionSuiteError) as raised:
+                validate_live_fixture(fixture)
+            self.assertEqual(raised.exception.cause, "checksum_mismatch")
 
     def test_unsupported_and_write_ops_fail_visibly(self) -> None:
         jobs = self.root / "fixtures" / "gdc" / "finbench-transaction-tiny" / "compatible" / "jobs"

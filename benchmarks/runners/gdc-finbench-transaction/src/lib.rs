@@ -21,18 +21,22 @@
 #![forbid(unsafe_code)]
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
 use std::path::Path;
 use std::str::FromStr;
+use std::time::Instant;
 
 pub const EVIDENCE_SCHEMA: &str = "graphforge-gdc-finbench-transaction-evidence/1";
 pub const JOB_SCHEMA: &str = "graphforge-gdc-finbench-transaction-job/1";
 pub const LADDER_SCHEMA: &str = "graphforge-gdc-finbench-transaction-ladder/1";
 pub const SUITE_ID: &str = "finbench-transaction";
-pub const LIVE_FIXTURE_SCHEMA: &str = "graphforge-gdc-finbench-live-fixture/1";
-pub const LIVE_REQUEST_SCHEMA: &str = "graphforge-gdc-finbench-live-request/1";
+pub const LIVE_IDENTITY_SCHEMA: &str = "graphforge-gdc-finbench-live-identity/1";
+pub const LIVE_PARAMETERS_SCHEMA: &str = "graphforge-gdc-finbench-live-parameters/1";
+pub const LIVE_SEED_SCHEMA: &str = "graphforge-gdc-finbench-synthetic-seed/1";
+pub const LIVE_DATASET_ID: &str = "finbench-engineering-live-tcr10-v1";
 pub const VALIDATOR_INTERFACE: &str = "graphforge-finbench-rust-reference-validator/1";
 
 /// The bounded engineering fixture dataset every ladder and suite run begins on.
@@ -365,36 +369,140 @@ pub struct OperationJob {
     pub operation: Operation,
 }
 
-/// Synthetic, FinBench-shaped data loaded through ordinary public Cypher.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct LiveFixture {
+pub struct LiveIdentity {
     pub schema: String,
-    pub dataset_id: String,
-    pub engineering_fixture: bool,
-    pub setup_cypher: Vec<String>,
+    pub suite_id: String,
+    pub operation: Operation,
+    pub source_mode: String,
+    pub certification: bool,
+    pub upstream_spec: UpstreamIdentity,
+    pub upstream_query: UpstreamQueryIdentity,
+    pub fixture: LiveFixtureIdentity,
+    pub parameters: LiveParametersIdentity,
+    pub reference: LiveReferenceIdentity,
+    pub driver: LiveDriverIdentity,
+    pub normalization: LiveNormalizationIdentity,
 }
 
-/// One live public-API invocation. Parameters are intentionally limited to the
-/// scalar types used by this bounded engineering fixture.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct LiveRequest {
+pub struct UpstreamIdentity {
+    pub source: String,
+    pub release: String,
+    pub commit: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct UpstreamQueryIdentity {
+    pub source: String,
+    pub release: String,
+    pub commit: String,
+    pub path: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LiveFixtureIdentity {
+    pub dataset_id: String,
+    pub kind: String,
+    pub provenance_kind: String,
+    pub seed: u64,
+    pub scale_factor: Option<String>,
+    pub path: String,
+    pub sha256: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LiveParametersIdentity {
+    pub kind: String,
+    pub path: String,
+    pub file_sha256: String,
+    pub names_kinds_values_sha256: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LiveReferenceIdentity {
+    pub authority: String,
+    pub captured_from_engine: bool,
+    pub validation: String,
+    pub path: String,
+    pub sha256: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LiveDriverIdentity {
+    pub kind: String,
+    pub source_mode: String,
+    pub interface: String,
+    pub durable: bool,
+    pub validator: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LiveNormalizationIdentity {
+    pub upstream_temporal_window: String,
+    pub internal_equivalent: String,
+    pub reason: String,
+    pub result_schema: Vec<String>,
+    pub numeric_format: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LiveParameters {
     pub schema: String,
     pub operation: Operation,
-    pub query: String,
-    pub params: BTreeMap<String, serde_json::Value>,
-    pub reference_derivation: String,
+    pub bindings: LiveBindings,
 }
 
-/// Rows produced by the Python thin binding's real in-memory GraphForge call.
-/// A plain static `.out` file cannot deserialize as this envelope.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct LiveProducedRows {
-    pub schema: String,
-    pub source: String,
-    pub rows: ResultRows,
+pub struct LiveBindings {
+    pub pid1: Int64Binding,
+    pub pid2: Int64Binding,
+    #[serde(rename = "startTime")]
+    pub start_time: Int64Binding,
+    #[serde(rename = "endTime")]
+    pub end_time: Int64Binding,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Int64Binding {
+    pub kind: String,
+    pub value: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct LiveSeed {
+    schema: String,
+    seed: u64,
+    persons: Vec<i64>,
+    companies: Vec<i64>,
+    invests: Vec<LiveInvest>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct LiveInvest {
+    person: i64,
+    company: i64,
+    timestamp: i64,
+}
+
+struct ValidatedLiveContext {
+    identity: LiveIdentity,
+    parameters: LiveParameters,
+    seed: LiveSeed,
+    reference: ResultRows,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -741,11 +849,9 @@ pub fn map_operation(operation: Operation) -> MappingOutcome {
         ),
         Operation::Tcr10 => compatible(
             "cypher",
-            "MATCH (p1:Person {id:$id1})-[:own]->(:Account)-[i1:invest]->(c:Company) \
-             MATCH (p2:Person {id:$id2})-[:own]->(:Account)-[i2:invest]->(c) \
-             WHERE i1.createTime>=$start AND i2.createTime>=$start \
-             RETURN c.id AS shared",
-            "shared-investment similarity between two persons; unordered common-company set (normalized validation)",
+            LIVE_TCR10_QUERY,
+            "official TCR10 investor-relationship Jaccard with open startTime < timestamp < endTime \
+             window and 3-decimal rounding; single-row similarity (normalized validation)",
         ),
         Operation::Tcr11 => compatible(
             "cypher",
@@ -1020,52 +1126,385 @@ pub fn run_job(
     }
 }
 
-/// Validate rows from the explicit live binding lane.
-///
-/// The harness owns public-API execution; this Rust boundary owns mapping,
-/// normalized comparison, typed unsupported outcomes, and evidence assembly.
-pub fn validate_live(
-    fixture: &LiveFixture,
-    request: &LiveRequest,
-    reference: &ResultRows,
-    produced: &LiveProducedRows,
-    identities: serde_json::Value,
-) -> Result<SuiteEvidence, SuiteError> {
-    if fixture.schema != LIVE_FIXTURE_SCHEMA || request.schema != LIVE_REQUEST_SCHEMA {
+const LIVE_TCR10_QUERY: &str = "\
+MATCH (p1:Person {id:$pid1}), (p2:Person {id:$pid2}) \
+OPTIONAL MATCH (p1)-[e1:invest]->(c1:Company) \
+WHERE $startTime < e1.timestamp AND e1.timestamp < $endTime \
+WITH p1, p2, count(DISTINCT c1) AS p1Neighbors \
+OPTIONAL MATCH (p2)-[e2:invest]->(c2:Company) \
+WHERE $startTime < e2.timestamp AND e2.timestamp < $endTime \
+WITH p1, p2, p1Neighbors, count(DISTINCT c2) AS p2Neighbors \
+OPTIONAL MATCH (p1)-[e3:invest]->(mid:Company)<-[e4:invest]-(p2) \
+WHERE $startTime < e3.timestamp AND e3.timestamp < $endTime \
+AND $startTime < e4.timestamp AND e4.timestamp < $endTime \
+WITH p1Neighbors, p2Neighbors, count(DISTINCT mid) AS intersection \
+WITH intersection, p1Neighbors + p2Neighbors - intersection AS unionSize \
+RETURN CASE WHEN unionSize = 0 THEN 0.0 ELSE round(toFloat(intersection) / toFloat(unionSize) * 1000) / 1000 END AS jaccardSimilarity";
+
+fn expected_live_identity() -> LiveIdentity {
+    LiveIdentity {
+        schema: LIVE_IDENTITY_SCHEMA.into(),
+        suite_id: SUITE_ID.into(),
+        operation: Operation::Tcr10,
+        source_mode: "runner_owned_rust_api".into(),
+        certification: false,
+        upstream_spec: UpstreamIdentity {
+            source: "https://github.com/ldbc/ldbc_finbench_docs".into(),
+            release: "v0.1.0".into(),
+            commit: "d3ec7036bf6919df8cd3eeaa3a986048e779ea02".into(),
+        },
+        upstream_query: UpstreamQueryIdentity {
+            source: "https://github.com/ldbc/ldbc_finbench_transaction_impls".into(),
+            release: "galaxybase-cypher".into(),
+            commit: "4891ab426377ec98564822d54bdadb1d02e5fe41".into(),
+            path: "galaxybase-cypher/queries/transaction-complex-read-10.cypher".into(),
+        },
+        fixture: LiveFixtureIdentity {
+            dataset_id: LIVE_DATASET_ID.into(),
+            kind: "synthetic_minimal_finbench_shaped".into(),
+            provenance_kind: "content_addressed_committed_fixture".into(),
+            seed: 964,
+            scale_factor: None,
+            path: "seed.json".into(),
+            sha256: "3360c7722b55bb9b60e242fa9c7d7c8b2beb32503892a2402ed606e6b0c50117".into(),
+        },
+        parameters: LiveParametersIdentity {
+            kind: "typed_internal_deterministic_tcr10_parameters".into(),
+            path: "parameters.json".into(),
+            file_sha256: "87dbdbf8e6a16039e86efd00042509af055c519fdad285039b2b09a52db75364".into(),
+            names_kinds_values_sha256:
+                "46e5bf9bf7d961ecf8f97a6d0e31e2bcbc82a5f4c278aea31cbb4fdb1c431af7".into(),
+        },
+        reference: LiveReferenceIdentity {
+            authority: "independent_semantic_derivation_from_seed".into(),
+            captured_from_engine: false,
+            validation: "normalized_rounded_jaccard".into(),
+            path: "expected-tcr10.ref".into(),
+            sha256: "40b8483eaba45fe3d11f5a68004d1ce712d6e4340e5cfbe1a916337073cc68a0".into(),
+        },
+        driver: LiveDriverIdentity {
+            kind: "internal_rust_public_api_driver".into(),
+            source_mode: "runner_executes_query_no_caller_result".into(),
+            interface: "graphforge_api::GraphForge::execute_with_params".into(),
+            durable: false,
+            validator: "same_process_normalized".into(),
+        },
+        normalization: LiveNormalizationIdentity {
+            upstream_temporal_window: "startTime < invest.timestamp < endTime".into(),
+            internal_equivalent: "precomputed integer timestamps with the same open window".into(),
+            reason: "exercise supported Cypher while not claiming DateTime-literal parity".into(),
+            result_schema: vec!["jaccardSimilarity".into()],
+            numeric_format: "float64_rounded_3dp".into(),
+        },
+    }
+}
+
+fn expected_live_parameters() -> LiveParameters {
+    LiveParameters {
+        schema: LIVE_PARAMETERS_SCHEMA.into(),
+        operation: Operation::Tcr10,
+        bindings: LiveBindings {
+            pid1: Int64Binding {
+                kind: "int64".into(),
+                value: 1,
+            },
+            pid2: Int64Binding {
+                kind: "int64".into(),
+                value: 2,
+            },
+            start_time: Int64Binding {
+                kind: "int64".into(),
+                value: 100,
+            },
+            end_time: Int64Binding {
+                kind: "int64".into(),
+                value: 200,
+            },
+        },
+    }
+}
+
+fn sha256_bytes(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let digest = Sha256::digest(bytes);
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    encoded
+}
+
+fn read_bytes(path: &Path, label: &str) -> Result<Vec<u8>, SuiteError> {
+    fs::read(path).map_err(|error| {
+        SuiteError::InvalidDocument(format!(
+            "failed to read {label} {}: {error}",
+            path.display()
+        ))
+    })
+}
+
+fn parse_closed_json<T: for<'de> Deserialize<'de>>(
+    bytes: &[u8],
+    label: &str,
+) -> Result<T, SuiteError> {
+    serde_json::from_slice(bytes)
+        .map_err(|error| SuiteError::InvalidDocument(format!("invalid {label}: {error}")))
+}
+
+fn validate_live_context(fixture: &Path) -> Result<ValidatedLiveContext, SuiteError> {
+    let identity_bytes = read_bytes(&fixture.join("identity.json"), "live identity")?;
+    let identity: LiveIdentity = parse_closed_json(&identity_bytes, "live identity")?;
+    if identity != expected_live_identity() {
         return Err(SuiteError::InvalidDocument(
-            "unexpected live fixture or request schema".into(),
+            "live_identity_drift: complete expected identity mismatch".into(),
         ));
     }
-    if !fixture.engineering_fixture {
+
+    let seed_bytes = read_bytes(&fixture.join(&identity.fixture.path), "live seed")?;
+    if sha256_bytes(&seed_bytes) != identity.fixture.sha256 {
         return Err(SuiteError::InvalidDocument(
-            "live input must disclose engineering_fixture=true".into(),
+            "live_fixture_checksum_mismatch".into(),
         ));
     }
-    if request.operation != Operation::Tcr10 {
+    let seed: LiveSeed = parse_closed_json(&seed_bytes, "live seed")?;
+    if seed.schema != LIVE_SEED_SCHEMA || seed.seed != identity.fixture.seed {
         return Err(SuiteError::InvalidDocument(
-            "the bounded live lane supports TCR10 only".into(),
+            "live_fixture_identity_mismatch".into(),
         ));
     }
-    let MappingOutcome::Compatible(mapping) = map_operation(request.operation) else {
+
+    let parameter_bytes = read_bytes(&fixture.join(&identity.parameters.path), "live parameters")?;
+    if sha256_bytes(&parameter_bytes) != identity.parameters.file_sha256 {
+        return Err(SuiteError::InvalidDocument(
+            "live_parameter_file_checksum_mismatch".into(),
+        ));
+    }
+    let parameters: LiveParameters = parse_closed_json(&parameter_bytes, "live parameters")?;
+    if parameters.schema != LIVE_PARAMETERS_SCHEMA || parameters.operation != Operation::Tcr10 {
+        return Err(SuiteError::InvalidDocument(
+            "live_parameter_identity_mismatch".into(),
+        ));
+    }
+    let binding_bytes = serde_json::to_vec(&parameters.bindings).map_err(|error| {
+        SuiteError::InvalidDocument(format!("failed to canonicalize live parameters: {error}"))
+    })?;
+    if sha256_bytes(&binding_bytes) != identity.parameters.names_kinds_values_sha256 {
+        return Err(SuiteError::InvalidDocument(
+            "live_parameter_binding_digest_mismatch".into(),
+        ));
+    }
+    if parameters != expected_live_parameters() {
+        return Err(SuiteError::InvalidDocument(
+            "live_parameter_values_mismatch".into(),
+        ));
+    }
+
+    let reference_bytes = read_bytes(&fixture.join(&identity.reference.path), "live reference")?;
+    if sha256_bytes(&reference_bytes) != identity.reference.sha256 {
+        return Err(SuiteError::InvalidDocument(
+            "live_reference_checksum_mismatch".into(),
+        ));
+    }
+    let reference = parse_result_rows(std::str::from_utf8(&reference_bytes).map_err(|error| {
+        SuiteError::InvalidDocument(format!("reference is not UTF-8: {error}"))
+    })?);
+    let independent = independently_derived_jaccard(&seed, &parameters.bindings);
+    if reference != vec![independent.clone()] {
+        return Err(SuiteError::InvalidDocument(format!(
+            "live_reference_not_independently_derived: expected {independent} from seed"
+        )));
+    }
+    Ok(ValidatedLiveContext {
+        identity,
+        parameters,
+        seed,
+        reference,
+    })
+}
+
+pub fn validate_live_fixture_context(fixture: &Path) -> Result<(), SuiteError> {
+    validate_live_context(fixture).map(|_| ())
+}
+
+/// Official TCR10 Jaccard from the committed seed, never from engine output.
+fn independently_derived_jaccard(seed: &LiveSeed, bindings: &LiveBindings) -> String {
+    let window_start = bindings.start_time.value;
+    let window_end = bindings.end_time.value;
+    let neighborhood = |person: i64| -> BTreeSet<i64> {
+        seed.invests
+            .iter()
+            .filter(|edge| {
+                edge.person == person
+                    && window_start < edge.timestamp
+                    && edge.timestamp < window_end
+            })
+            .map(|edge| edge.company)
+            .collect()
+    };
+    let left = neighborhood(bindings.pid1.value);
+    let right = neighborhood(bindings.pid2.value);
+    let intersection = left.intersection(&right).count();
+    let union = left.union(&right).count();
+    let similarity = if union == 0 {
+        0.0
+    } else {
+        ((intersection as f64) / (union as f64) * 1000.0).round() / 1000.0
+    };
+    format!("{similarity:.3}")
+}
+
+fn api_error(context: &str, error: impl fmt::Display) -> SuiteError {
+    SuiteError::InvalidDocument(format!("live_api_execution_failed:{context}: {error}"))
+}
+
+fn execute_with_params(
+    forge: &graphforge_api::GraphForge,
+    query: &str,
+    params: std::collections::HashMap<String, graphforge_api::IrLiteral>,
+) -> Result<(), SuiteError> {
+    forge
+        .execute_with_params(query, &params)
+        .map(|_| ())
+        .map_err(|error| api_error("load", error))
+}
+
+fn load_live_seed(forge: &graphforge_api::GraphForge, seed: &LiveSeed) -> Result<u64, SuiteError> {
+    use graphforge_api::IrLiteral;
+    use std::collections::HashMap;
+
+    for person in &seed.persons {
+        execute_with_params(
+            forge,
+            "CREATE (:Person {id: $id})",
+            HashMap::from([("id".into(), IrLiteral::Int(*person))]),
+        )?;
+    }
+    for company in &seed.companies {
+        execute_with_params(
+            forge,
+            "CREATE (:Company {id: $id})",
+            HashMap::from([("id".into(), IrLiteral::Int(*company))]),
+        )?;
+    }
+    for edge in &seed.invests {
+        execute_with_params(
+            forge,
+            "MATCH (person:Person {id: $person}), (company:Company {id: $company}) \
+             CREATE (person)-[:invest {timestamp: $timestamp}]->(company)",
+            HashMap::from([
+                ("person".into(), IrLiteral::Int(edge.person)),
+                ("company".into(), IrLiteral::Int(edge.company)),
+                ("timestamp".into(), IrLiteral::Int(edge.timestamp)),
+            ]),
+        )?;
+    }
+    Ok((seed.persons.len() + seed.companies.len() + seed.invests.len()) as u64)
+}
+
+fn execute_live_tcr10(
+    forge: &graphforge_api::GraphForge,
+    bindings: &LiveBindings,
+) -> Result<ResultRows, SuiteError> {
+    use arrow::array::{Array, Float64Array};
+    use graphforge_api::IrLiteral;
+    use std::collections::HashMap;
+
+    let params = HashMap::from([
+        ("pid1".into(), IrLiteral::Int(bindings.pid1.value)),
+        ("pid2".into(), IrLiteral::Int(bindings.pid2.value)),
+        (
+            "startTime".into(),
+            IrLiteral::Int(bindings.start_time.value),
+        ),
+        ("endTime".into(), IrLiteral::Int(bindings.end_time.value)),
+    ]);
+    let result = forge
+        .execute_with_params(LIVE_TCR10_QUERY, &params)
+        .map_err(|error| api_error("query", error))?;
+    if result.schema.fields().len() != 1 || result.schema.field(0).name() != "jaccardSimilarity" {
+        return Err(SuiteError::InvalidDocument(format!(
+            "TCR10 result schema drifted: expected [jaccardSimilarity], got {:?}",
+            result
+                .schema
+                .fields()
+                .iter()
+                .map(|field| field.name().to_string())
+                .collect::<Vec<_>>()
+        )));
+    }
+    let mut rows = Vec::new();
+    for batch in result.batches {
+        let similarities = batch
+            .column_by_name("jaccardSimilarity")
+            .and_then(|column| column.as_any().downcast_ref::<Float64Array>())
+            .ok_or_else(|| {
+                SuiteError::InvalidDocument("TCR10 jaccardSimilarity is not Float64".into())
+            })?;
+        for row in 0..batch.num_rows() {
+            if similarities.is_null(row) {
+                return Err(SuiteError::InvalidDocument(
+                    "TCR10 returned a null jaccardSimilarity".into(),
+                ));
+            }
+            rows.push(format!("{:.3}", similarities.value(row)));
+        }
+    }
+    Ok(rows)
+}
+
+fn live_identities(identity: &LiveIdentity, executable_sha256: String) -> serde_json::Value {
+    serde_json::json!({
+        "spec": identity.upstream_spec,
+        "generator": {
+            "name": "finbench-datagen",
+            "source": "https://github.com/ldbc/ldbc_finbench_datagen",
+            "release": "0.1.0",
+            "commit": "eddcc0551861eaefeb9b37497b10de1bb0f52672"
+        },
+        "driver": identity.driver,
+        "live": identity,
+        "execution_authority": {
+            "interface": "graphforge_api::GraphForge::execute_with_params",
+            "runner_executable_sha256": executable_sha256,
+            "caller_supplied_result": false
+        }
+    })
+}
+
+pub fn run_live_fixture(fixture: &Path, executable: &Path) -> Result<SuiteEvidence, SuiteError> {
+    if fixture.is_file() {
+        return Err(SuiteError::InvalidDocument(
+            "static output rejected: live lane requires a fixture directory, not a result envelope"
+                .into(),
+        ));
+    }
+    let context = validate_live_context(fixture)?;
+    let executable_sha256 = sha256_bytes(&read_bytes(executable, "runner executable")?);
+    let forge =
+        graphforge_api::GraphForge::new(None).map_err(|error| api_error("initialize", error))?;
+
+    let load_started = Instant::now();
+    let _rows_loaded = load_live_seed(&forge, &context.seed)?;
+    let _load_ms = u64::try_from(load_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+
+    let query_started = Instant::now();
+    let rows = execute_live_tcr10(&forge, &context.parameters.bindings)?;
+    let _query_ms = u64::try_from(query_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+
+    let MappingOutcome::Compatible(mapping) = map_operation(Operation::Tcr10) else {
         return Err(SuiteError::InvalidDocument(
             "live operation is not mapped to the public API".into(),
         ));
     };
-    if request.query != mapping.cypher_shape {
+    if mapping.cypher_shape != LIVE_TCR10_QUERY {
         return Err(SuiteError::InvalidDocument(
             "live query drifted from the pinned public-API mapping".into(),
         ));
     }
-    if produced.schema != "graphforge-gdc-finbench-live-produced/1"
-        || produced.source != "python_public_api_in_memory"
-    {
-        return Err(SuiteError::InvalidDocument(
-            "static output rejected: live produced-row envelope required".into(),
-        ));
-    }
 
     let validator = RustReferenceValidator;
-    let validation = validator.validate(ValidationMode::Normalized, reference, &produced.rows);
+    let validation = validator.validate(ValidationMode::Normalized, &context.reference, &rows);
     let status = match &validation {
         Ok(()) => OperationStatus::Passed,
         Err(SuiteError::ReferenceMismatch(_)) => OperationStatus::CorrectnessFailed,
@@ -1083,7 +1522,7 @@ pub fn validate_live(
         &OperationJob {
             schema: JOB_SCHEMA.into(),
             suite_id: SUITE_ID.into(),
-            dataset_id: fixture.dataset_id.clone(),
+            dataset_id: LIVE_DATASET_ID.into(),
             operation: Operation::Tcr1,
         },
         None,
@@ -1093,20 +1532,20 @@ pub fn validate_live(
         &OperationJob {
             schema: JOB_SCHEMA.into(),
             suite_id: SUITE_ID.into(),
-            dataset_id: fixture.dataset_id.clone(),
+            dataset_id: LIVE_DATASET_ID.into(),
             operation: Operation::Tw1,
         },
         None,
         None,
     );
     Ok(assemble_evidence_with_context(
-        &fixture.dataset_id,
-        identities,
+        LIVE_DATASET_ID,
+        live_identities(&context.identity, executable_sha256),
         vec![tcr10, tcr1, tw1],
         "live_graphforge",
         ValidatorEvidence {
             interface: validator.interface().into(),
-            reference_derivation: request.reference_derivation.clone(),
+            reference_derivation: context.identity.reference.authority.clone(),
         },
     ))
 }
@@ -1224,6 +1663,7 @@ pub fn operation_rules() -> BTreeMap<&'static str, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     fn sample_job(operation: Operation) -> OperationJob {
         OperationJob {
@@ -1435,18 +1875,14 @@ mod tests {
         assert_eq!(evidence.harness_failures.len(), 1);
         assert_eq!(evidence.harness_failures[0].operation, Operation::Tsr3);
         // Correctness failures are never projected into the other two lanes.
-        assert!(
-            !evidence
-                .resource_events
-                .iter()
-                .any(|item| item.operation == Operation::Tsr1)
-        );
-        assert!(
-            !evidence
-                .harness_failures
-                .iter()
-                .any(|item| item.operation == Operation::Tsr1)
-        );
+        assert!(!evidence
+            .resource_events
+            .iter()
+            .any(|item| item.operation == Operation::Tsr1));
+        assert!(!evidence
+            .harness_failures
+            .iter()
+            .any(|item| item.operation == Operation::Tsr1));
         // Harness error is the worst class and drives the top-level status.
         assert_eq!(evidence.status, OperationStatus::HarnessError);
     }
@@ -1538,5 +1974,168 @@ mod tests {
         assert!(!evidence.certification);
         assert!(evidence.resource_events.is_empty());
         assert!(evidence.harness_failures.is_empty());
+    }
+
+    #[test]
+    fn live_tcr10_mapping_is_official_jaccard_with_open_window() {
+        let MappingOutcome::Compatible(mapping) = map_operation(Operation::Tcr10) else {
+            panic!("TCR10 must stay compatible");
+        };
+        assert_eq!(mapping.cypher_shape, LIVE_TCR10_QUERY);
+        assert!(LIVE_TCR10_QUERY.contains("$startTime < e1.timestamp"));
+        assert!(LIVE_TCR10_QUERY.contains("e1.timestamp < $endTime"));
+        assert!(LIVE_TCR10_QUERY.contains("jaccardSimilarity"));
+        assert!(LIVE_TCR10_QUERY.contains("round("));
+        assert!(!LIVE_TCR10_QUERY.contains("$id1"));
+        assert!(!LIVE_TCR10_QUERY.contains("createTime"));
+    }
+
+    #[test]
+    fn live_expected_identity_is_closed_and_non_certifying() {
+        let identity = expected_live_identity();
+        assert_eq!(identity.schema, LIVE_IDENTITY_SCHEMA);
+        assert_eq!(identity.suite_id, SUITE_ID);
+        assert_eq!(identity.operation, Operation::Tcr10);
+        assert_eq!(identity.source_mode, "runner_owned_rust_api");
+        assert!(!identity.certification);
+        assert!(!identity.reference.captured_from_engine);
+        assert!(!identity.driver.durable);
+        assert_eq!(
+            identity.driver.interface,
+            "graphforge_api::GraphForge::execute_with_params"
+        );
+        assert_eq!(identity.normalization.result_schema, ["jaccardSimilarity"]);
+    }
+
+    #[test]
+    fn independent_seed_jaccard_is_officially_rounded_to_667() {
+        let seed = LiveSeed {
+            schema: LIVE_SEED_SCHEMA.into(),
+            seed: 964,
+            persons: vec![1, 2, 3],
+            companies: vec![10, 11, 12, 13, 14, 15],
+            invests: vec![
+                LiveInvest {
+                    person: 1,
+                    company: 10,
+                    timestamp: 110,
+                },
+                LiveInvest {
+                    person: 1,
+                    company: 11,
+                    timestamp: 120,
+                },
+                LiveInvest {
+                    person: 1,
+                    company: 13,
+                    timestamp: 100,
+                },
+                LiveInvest {
+                    person: 1,
+                    company: 14,
+                    timestamp: 200,
+                },
+                LiveInvest {
+                    person: 1,
+                    company: 15,
+                    timestamp: 90,
+                },
+                LiveInvest {
+                    person: 2,
+                    company: 10,
+                    timestamp: 130,
+                },
+                LiveInvest {
+                    person: 2,
+                    company: 11,
+                    timestamp: 140,
+                },
+                LiveInvest {
+                    person: 2,
+                    company: 12,
+                    timestamp: 150,
+                },
+                LiveInvest {
+                    person: 2,
+                    company: 13,
+                    timestamp: 100,
+                },
+                LiveInvest {
+                    person: 2,
+                    company: 14,
+                    timestamp: 200,
+                },
+                LiveInvest {
+                    person: 3,
+                    company: 10,
+                    timestamp: 160,
+                },
+            ],
+        };
+        let bindings = expected_live_parameters().bindings;
+        assert_eq!(independently_derived_jaccard(&seed, &bindings), "0.667");
+        let mut inclusive_start = bindings.clone();
+        inclusive_start.start_time.value = 99;
+        assert_eq!(
+            independently_derived_jaccard(&seed, &inclusive_start),
+            "0.750"
+        );
+        let mut empty = bindings;
+        empty.start_time.value = 300;
+        empty.end_time.value = 400;
+        assert_eq!(independently_derived_jaccard(&seed, &empty), "0.000");
+    }
+
+    #[test]
+    fn trusted_live_runner_executes_graphforge_and_keeps_failure_lanes() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/gdc/finbench-transaction-live");
+        let evidence = run_live_fixture(
+            &fixture,
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"),
+        )
+        .unwrap();
+        assert_eq!(evidence.dataset_id, LIVE_DATASET_ID);
+        assert_eq!(evidence.execution_mode, "live_graphforge");
+        assert!(!evidence.certification);
+        assert_eq!(evidence.status, OperationStatus::Passed);
+        assert!(evidence.resource_events.is_empty());
+        assert!(evidence.harness_failures.is_empty());
+        let status_of = |operation: Operation| {
+            evidence
+                .operations
+                .iter()
+                .find(|item| item.operation == operation)
+                .map(|item| item.status.clone())
+        };
+        assert_eq!(status_of(Operation::Tcr10), Some(OperationStatus::Passed));
+        assert_eq!(
+            status_of(Operation::Tcr1),
+            Some(OperationStatus::SemanticIncompatibility)
+        );
+        assert_eq!(
+            status_of(Operation::Tw1),
+            Some(OperationStatus::SemanticIncompatibility)
+        );
+        assert_eq!(
+            evidence.identities["execution_authority"]["caller_supplied_result"],
+            false
+        );
+        assert_eq!(
+            evidence.identities["live"]["normalization"]["result_schema"][0],
+            "jaccardSimilarity"
+        );
+    }
+
+    #[test]
+    fn static_envelope_cannot_claim_live_execution() {
+        let error = run_live_fixture(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("Cargo.toml")
+                .as_path(),
+            Path::new(env!("CARGO_MANIFEST_DIR")),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("static output rejected"));
     }
 }

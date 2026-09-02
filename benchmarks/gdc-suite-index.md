@@ -145,7 +145,7 @@ PYTHONPATH=harness GRAPHFORGE_GDC_SNB_BI_BIN=target/debug/graphforge-benchmark-g
 | Runner | `graphforge-benchmark-gdc-finbench-transaction` (`suites/gdc-finbench-transaction.json`) |
 | Phases | Separate `load`, `warmup`, `execution`, `validation` (see evidence `phases`) |
 | Bounded fixture | `finbench-engineering-tiny-v1` (synthetic engineering data; not an official scale factor) |
-| Live lane | In-memory `GraphForge::new(None)` → public `execute` load → public parameterized `execute_with_params` TCR10 |
+| Live lane | Trusted Rust runner owns in-memory `GraphForge::new(None)` load + official TCR10 `execute_with_params` |
 | Validation | exact (ordered rows) and normalized (order-insensitive multiset) reference comparison |
 | Unsupported semantics | Typed `semantic_incompatibility`: `recursive_temporal_path_filtering_not_exposed` (TCR1–TCR2); `temporal_shortest_transfer_path_not_exposed` (TCR3); `temporal_transfer_cycle_detection_not_exposed` (TCR4); `hub_vertex_truncation_not_exposed` (TCR5); `finbench_transaction_write_semantics_not_exposed` (TW1–TW19, TRW1–TRW3) |
 
@@ -170,17 +170,17 @@ FinBench-shaped synthetic engineering fixture authored in this repository, not
 an official `SF0.01` dataset. The Rust benchmark runner is an internal driver,
 not the upstream FinBench driver and not a certification implementation.
 
-The explicit Python `run_live_suite` lane has no system-output argument. It
-loads the fixture into a real in-memory `GraphForge()`, executes parameterized
-TCR10 through the public binding, converts returned Arrow rows into a typed
-live-produced envelope, and invokes the Rust runner's separate `validate-live`
-interface (`graphforge-finbench-rust-reference-validator/1`). Plain static
-`.out` files are rejected at that boundary. The reference is independently
-derived as the intersection of the two persons' post-start-time investment
-sets. A reversed committed reference proves normalized reordering without
-copying engine output into expected values. The older `run-suite` command is
-retained only as an explicitly marked `static_replay` regression lane and
-cannot satisfy live evidence.
+The explicit Python `run_live_suite` lane only orchestrates the trusted Rust
+`run-live` command. The runner itself opens in-memory `GraphForge`, loads the
+committed seed, and executes official TCR10 (`pid1`, `pid2`, open
+`startTime < timestamp < endTime` window, single `jaccardSimilarity` column
+rounded to three decimals). A static JSON envelope or `.out` file cannot claim
+live execution. The reference `0.667` is independently derived from the seed
+(`|{10,11} ∩ {10,11,12}| / |union| = 2/3`). TCR1 and TW1 remain typed
+unsupported in the same evidence document, and correctness, resource, and
+harness lanes stay distinct. The older `run-suite` command is retained only as
+an explicitly marked `static_replay` regression lane and cannot satisfy live
+evidence.
 
 Evidence separates three failure classes and never conflates them: a
 **correctness** mismatch (`correctness_failed`), a **resource**-limit event
