@@ -13,7 +13,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::fmt;
+use std::fmt::{self, Write as _};
 use std::fs;
 use std::path::Path;
 use std::str::FromStr;
@@ -933,7 +933,12 @@ fn embedded_live_assets() -> TrustedLiveAssets<'static> {
 }
 
 fn sha256(text: &str) -> String {
-    format!("{:x}", Sha256::digest(text.as_bytes()))
+    let digest = Sha256::digest(text.as_bytes());
+    let mut output = String::with_capacity(64);
+    for byte in digest {
+        write!(&mut output, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    output
 }
 
 fn require_sha(label: &str, text: &str, expected: &str) -> Result<(), SuiteError> {
