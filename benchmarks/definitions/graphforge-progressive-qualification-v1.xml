@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <benchmark tool="graphforge_bench.tools.graphforge_certify" timelimit="14400 s"
-           hardtimelimit="14430 s" memlimit="4294967296 B" cpuCores="16">
+           hardtimelimit="14430 s" memlimit="4 GB" cpuCores="16">
   <rundefinition name="graphforge-progressive-qualification-v1">
     <tasks name="profile"><include>profile.json</include></tasks>
   </rundefinition>
