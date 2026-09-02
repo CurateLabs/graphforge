@@ -696,7 +696,7 @@ class ProgressiveRunControllerTests(unittest.TestCase):
                 )
                 if mutation == "moved":
                     receipts[source].remove(selected)
-                receipts[destination].append(copy.deepcopy(selected))
+                receipts.setdefault(destination, []).append(copy.deepcopy(selected))
                 gf = graphforge(18, receipts)
                 with self.assertRaisesRegex(ControllerError, "inventory"):
                     assemble_rung_evidence(
