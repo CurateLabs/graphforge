@@ -2139,6 +2139,7 @@ mod tests {
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
         let project = root.join("project");
         let current =
             graphforge_storage::open_or_initialize_ephemeral_project(&project).unwrap();
