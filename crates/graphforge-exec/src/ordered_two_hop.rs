@@ -19,6 +19,7 @@ use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::common::{DataFusionError, Result};
 use datafusion::execution::TaskContext;
 use datafusion::physical_expr::ScalarFunctionExpr;
+use datafusion::physical_expr::expressions::Column;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::filter::FilterExec;
 use datafusion::physical_plan::limit::GlobalLimitExec;
@@ -76,7 +77,7 @@ struct OrderedTwoHopSpec {
     rel_type_name: String,
     direction: Direction,
     provider: Arc<dyn AdjacencyProvider>,
-    ordinal_identities: Option<Arc<crate::V4OrdinalIdentitySession>>,
+    ordinal_identities: Arc<crate::V4OrdinalIdentitySession>,
     require_edge_disjoint: bool,
 }
 
@@ -121,6 +122,19 @@ fn detect_ordered_two_hop(plan: &Arc<dyn ExecutionPlan>) -> Option<OrderedTwoHop
     if projection.expr().len() != 1 {
         return None;
     }
+    let projected_column = projection.expr()[0]
+        .expr
+        .as_any()
+        .downcast_ref::<Column>()?;
+    if projection
+        .input()
+        .schema()
+        .field(projected_column.index())
+        .name()
+        != "node_uuid"
+    {
+        return None;
+    }
     let projection_children = projection.children();
     let sort_input = projection_children.first()?;
     let sort = if let Some(merge) = sort_input.downcast_ref::<SortPreservingMergeExec>() {
@@ -133,6 +147,10 @@ fn detect_ordered_two_hop(plan: &Arc<dyn ExecutionPlan>) -> Option<OrderedTwoHop
     // #endregion
     let fetch = sort.fetch()?;
     if sort.expr().len() != 1 || sort.expr()[0].options.descending {
+        return None;
+    }
+    let sort_column = sort.expr()[0].expr.as_any().downcast_ref::<Column>()?;
+    if sort.input().schema().field(sort_column.index()).name() != "node_uuid" {
         return None;
     }
     let (expand2_plan, require_edge_disjoint) =
@@ -153,14 +171,16 @@ fn detect_ordered_two_hop(plan: &Arc<dyn ExecutionPlan>) -> Option<OrderedTwoHop
     // #region agent log
     let _ = std::fs::OpenOptions::new().create(true).append(true).open("/opt/cursor/logs/debug.log").and_then(|mut file| writeln!(file, "{{\"hypothesisId\":\"A-B\",\"location\":\"ordered_two_hop.rs:detect:expands\",\"message\":\"expand chain matched\",\"data\":{{\"expand1_identity_only\":{},\"expand2_identity_only\":{},\"same_type\":{},\"same_direction\":{}}},\"timestamp\":0}}", expand1.is_destination_identity_only(), expand2.is_destination_identity_only(), expand1.rel_type_name() == expand2.rel_type_name(), expand1.direction() == expand2.direction()));
     // #endregion
-    if !expand1.is_destination_identity_only() || !expand2.is_destination_identity_only() {
+    if !expand1.is_intermediate_topology_only() || !expand2.is_destination_identity_only() {
         return None;
     }
     if expand1.rel_type_name() != expand2.rel_type_name()
         || expand1.direction() != expand2.direction()
+        || expand2.direction() != Direction::Out
     {
         return None;
     }
+    let ordinal_identities = expand2.ordinal_identities()?;
     Some(OrderedTwoHopSpec {
         schema: plan.schema(),
         props: Arc::clone(plan.properties()),
@@ -168,7 +188,7 @@ fn detect_ordered_two_hop(plan: &Arc<dyn ExecutionPlan>) -> Option<OrderedTwoHop
         rel_type_name: expand2.rel_type_name().to_owned(),
         direction: expand2.direction(),
         provider: Arc::clone(expand2.provider()),
-        ordinal_identities: expand2.ordinal_identities(),
+        ordinal_identities,
         require_edge_disjoint,
     })
 }
@@ -180,7 +200,7 @@ pub struct OrderedTwoHopPathCountExec {
     rel_type_name: String,
     direction: Direction,
     provider: Arc<dyn AdjacencyProvider>,
-    ordinal_identities: Option<Arc<crate::V4OrdinalIdentitySession>>,
+    ordinal_identities: Arc<crate::V4OrdinalIdentitySession>,
     require_edge_disjoint: bool,
 }
 
@@ -269,11 +289,6 @@ impl ExecutionPlan for OrderedTwoHopPathCountExec {
             max_node = max_node.max(node_id);
         });
 
-        let ordinal = self
-            .ordinal_identities
-            .as_ref()
-            .ok_or_else(|| DataFusionError::Internal("ordinal identity required".into()))?;
-
         let mut remaining = self.fetch;
         let mut uuids = Vec::with_capacity(self.fetch);
         let mut candidates = 0_u64;
@@ -287,9 +302,11 @@ impl ExecutionPlan for OrderedTwoHopPathCountExec {
                 continue;
             }
             candidates = candidates.saturating_add(path_count);
-            let lookup = ordinal
+            let lookup = self
+                .ordinal_identities
                 .lookup_node_uuids(&[destination])
                 .map_err(|error| DataFusionError::External(Box::new(error)))?;
+            demand::record_identity_projection(1, 1, 1, &lookup.metrics);
             let uuid = *lookup.values[0]
                 .as_ref()
                 .ok_or_else(|| DataFusionError::Internal("missing destination uuid".into()))?
