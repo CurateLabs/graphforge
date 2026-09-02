@@ -34,12 +34,14 @@
         "generator": {
           "oneOf": [
             { "$ref": "#/$defs/toolIdentity" },
+            { "$ref": "#/$defs/contentIdentity" },
             { "type": "null" }
           ]
         },
         "driver": {
           "oneOf": [
             { "$ref": "#/$defs/toolIdentity" },
+            { "$ref": "#/$defs/contentIdentity" },
             { "type": "null" }
           ]
         }
@@ -98,12 +100,67 @@
       },
       "then": { "properties": { "cause": { "type": "null" } } },
       "else": { "properties": { "cause": { "type": "string" } } }
+    },
+    {
+      "if": {
+        "properties": {
+          "suite_id": { "not": { "const": "snb-bi" } }
+        },
+        "required": ["suite_id"]
+      },
+      "then": {
+        "properties": {
+          "identities": {
+            "properties": {
+              "generator": {
+                "oneOf": [
+                  { "$ref": "#/$defs/toolIdentity" },
+                  { "type": "null" }
+                ]
+              },
+              "driver": {
+                "oneOf": [
+                  { "$ref": "#/$defs/toolIdentity" },
+                  { "type": "null" }
+                ]
+              }
+            }
+          }
+        }
+      }
     }
   ],
   "$defs": {
     "sha256": {
       "type": "string",
       "pattern": "^[a-f0-9]{64}$"
+    },
+    "contentIdentity": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "source": {
+          "type": "string",
+          "pattern": "^https://[A-Za-z0-9._~:/?#\\[\\]@!$&'()*+,;=%-]+$"
+        },
+        "provenance_kind": {
+          "enum": ["content_addressed_synthetic", "repository_source"]
+        },
+        "content_sha256": { "$ref": "#/$defs/sha256" },
+        "content_description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        }
+      },
+      "required": [
+        "name",
+        "source",
+        "provenance_kind",
+        "content_sha256",
+        "content_description"
+      ],
+      "additionalProperties": false
     },
     "toolIdentity": {
       "type": "object",
