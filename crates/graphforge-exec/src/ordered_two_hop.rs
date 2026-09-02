@@ -25,6 +25,7 @@ use datafusion::physical_plan::limit::GlobalLimitExec;
 use datafusion::physical_plan::projection::ProjectionExec;
 use datafusion::physical_plan::repartition::RepartitionExec;
 use datafusion::physical_plan::sorts::sort::SortExec;
+use datafusion::physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, RecordBatchStream,
     SendableRecordBatchStream,
@@ -92,6 +93,19 @@ fn peel_plan(plan: &Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
     Arc::clone(plan)
 }
 
+fn peel_expand_transport(plan: &Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
+    if let Some(coalesce) = plan.downcast_ref::<CoalescePartitionsExec>() {
+        return peel_expand_transport(coalesce.input());
+    }
+    if let Some(repartition) = plan.downcast_ref::<RepartitionExec>() {
+        return peel_expand_transport(repartition.input());
+    }
+    if let Some(projection) = plan.downcast_ref::<ProjectionExec>() {
+        return peel_expand_transport(projection.input());
+    }
+    Arc::clone(plan)
+}
+
 fn detect_ordered_two_hop(plan: &Arc<dyn ExecutionPlan>) -> Option<OrderedTwoHopSpec> {
     // #region agent log
     let _ = std::fs::OpenOptions::new().create(true).append(true).open("/opt/cursor/logs/debug.log").and_then(|mut file| writeln!(file, "{{\"hypothesisId\":\"A-D\",\"location\":\"ordered_two_hop.rs:detect:entry\",\"message\":\"matcher entry\",\"data\":{{\"plan\":\"{}\"}},\"timestamp\":0}}", plan.name()));
@@ -107,7 +121,12 @@ fn detect_ordered_two_hop(plan: &Arc<dyn ExecutionPlan>) -> Option<OrderedTwoHop
     if projection.expr().len() != 1 {
         return None;
     }
-    let sort = projection.children().first()?.downcast_ref::<SortExec>()?;
+    let sort_input = projection.children().first()?;
+    let sort = if let Some(merge) = sort_input.downcast_ref::<SortPreservingMergeExec>() {
+        merge.children().first()?.downcast_ref::<SortExec>()?
+    } else {
+        sort_input.downcast_ref::<SortExec>()?
+    };
     // #region agent log
     let _ = std::fs::OpenOptions::new().create(true).append(true).open("/opt/cursor/logs/debug.log").and_then(|mut file| writeln!(file, "{{\"hypothesisId\":\"C\",\"location\":\"ordered_two_hop.rs:detect:sort\",\"message\":\"sort matched\",\"data\":{{\"exprs\":{},\"fetch\":{}}},\"timestamp\":0}}", sort.expr().len(), sort.fetch().unwrap_or(0)));
     // #endregion
@@ -124,10 +143,12 @@ fn detect_ordered_two_hop(plan: &Arc<dyn ExecutionPlan>) -> Option<OrderedTwoHop
             if !disjoint {
                 return None;
             }
-            let expand2 = filter.children().first()?.downcast_ref::<ExpandExec>()?;
+            let child = peel_expand_transport(filter.children().first()?);
+            let expand2 = child.downcast_ref::<ExpandExec>()?;
             (expand2, true)
         } else {
-            let expand2 = sort.children().first()?.downcast_ref::<ExpandExec>()?;
+            let child = peel_expand_transport(sort.children().first()?);
+            let expand2 = child.downcast_ref::<ExpandExec>()?;
             (expand2, false)
         };
     let expand1 = expand2.children().first()?.downcast_ref::<ExpandExec>()?;
