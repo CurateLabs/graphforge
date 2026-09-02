@@ -51,6 +51,54 @@
         "publication_work_units": {"$ref": "#/$defs/nonnegative"}
       }
     },
+    "storage_attribution": {
+      "type": "object", "additionalProperties": false,
+      "required": ["source", "imported", "construction", "portable_package", "lifecycle", "counts"],
+      "properties": {
+        "source": {"$ref": "#/$defs/storageSnapshot"},
+        "imported": {"$ref": "#/$defs/storageSnapshot"},
+        "construction": {
+          "type": "object", "additionalProperties": false,
+          "required": ["application_io", "staging", "staging_transient_peak_allocated_bytes", "transient_peak_allocated_bytes"],
+          "properties": {
+            "application_io": {"$ref": "#/$defs/applicationIo"},
+            "staging": {"$ref": "#/$defs/categoryTotals"},
+            "staging_transient_peak_allocated_bytes": {"$ref": "#/$defs/nonnegative"},
+            "transient_peak_allocated_bytes": {"$ref": "#/$defs/nonnegative"}
+          }
+        },
+        "portable_package": {
+          "type": "object", "additionalProperties": false,
+          "required": ["contract", "allocation_logical_bytes", "allocation_allocated_bytes", "allocation_physical_objects"],
+          "properties": {
+            "contract": {"const": "graphforge-portable-export/2"},
+            "allocation_logical_bytes": {"$ref": "#/$defs/nonnegative"},
+            "allocation_allocated_bytes": {"$ref": "#/$defs/nonnegative"},
+            "allocation_physical_objects": {"$ref": "#/$defs/nonnegative"}
+          }
+        },
+        "lifecycle": {
+          "type": "object", "additionalProperties": false,
+          "required": ["contract", "source_project_current_allocated_bytes", "retained_storage_bytes", "transient_peak_storage_bytes"],
+          "properties": {
+            "contract": {"const": "graphforge-lifecycle-storage/1"},
+            "source_project_current_allocated_bytes": {"$ref": "#/$defs/nonnegative"},
+            "retained_storage_bytes": {"$ref": "#/$defs/nonnegative"},
+            "transient_peak_storage_bytes": {"$ref": "#/$defs/nonnegative"}
+          }
+        },
+        "counts": {
+          "type": "object", "additionalProperties": false,
+          "required": ["source_nodes", "source_edges", "imported_nodes", "imported_edges"],
+          "properties": {
+            "source_nodes": {"$ref": "#/$defs/positive"},
+            "source_edges": {"$ref": "#/$defs/positive"},
+            "imported_nodes": {"$ref": "#/$defs/positive"},
+            "imported_edges": {"$ref": "#/$defs/positive"}
+          }
+        }
+      }
+    },
     "failure": {"type": ["string", "null"], "enum": [null, "admission", "generate", "ingest", "reopen", "recount", "query", "export", "verify", "clean_import", "reopen_proof", "timeout", "oom", "storage", "correctness", "harness"]}
   },
   "allOf": [
@@ -76,6 +124,7 @@
         "required": ["status", "assembly_contract"]
       },
       "then": {
+        "required": ["storage_attribution"],
         "properties": {
           "storage_components": {
             "required": ["source_project_current_allocated_bytes"]
@@ -84,5 +133,84 @@
       }
     }
   ],
-  "$defs": {"nonnegative": {"type": "integer", "minimum": 0}}
+  "$defs": {
+    "nonnegative": {"type": "integer", "minimum": 0},
+    "positive": {"type": "integer", "minimum": 1},
+    "categoryTotals": {
+      "type": "object", "additionalProperties": false,
+      "required": ["logical_references", "logical_bytes", "physical_objects", "physical_logical_bytes", "allocated_bytes"],
+      "properties": {
+        "logical_references": {"$ref": "#/$defs/nonnegative"},
+        "logical_bytes": {"$ref": "#/$defs/nonnegative"},
+        "physical_objects": {"$ref": "#/$defs/nonnegative"},
+        "physical_logical_bytes": {"$ref": "#/$defs/nonnegative"},
+        "allocated_bytes": {"$ref": "#/$defs/nonnegative"}
+      }
+    },
+    "categories": {
+      "type": "object", "additionalProperties": false,
+      "required": ["topology_nodes", "topology_edges", "properties", "uuid_and_surrogates", "adjacency", "catalog_and_manifests", "construction_staging", "portable_package", "clean_imported_project", "other"],
+      "properties": {
+        "topology_nodes": {"$ref": "#/$defs/categoryTotals"},
+        "topology_edges": {"$ref": "#/$defs/categoryTotals"},
+        "properties": {"$ref": "#/$defs/categoryTotals"},
+        "uuid_and_surrogates": {"$ref": "#/$defs/categoryTotals"},
+        "adjacency": {"$ref": "#/$defs/categoryTotals"},
+        "catalog_and_manifests": {"$ref": "#/$defs/categoryTotals"},
+        "construction_staging": {"$ref": "#/$defs/categoryTotals"},
+        "portable_package": {"$ref": "#/$defs/categoryTotals"},
+        "clean_imported_project": {"$ref": "#/$defs/categoryTotals"},
+        "other": {"$ref": "#/$defs/categoryTotals"}
+      }
+    },
+    "storageSnapshot": {
+      "type": "object", "additionalProperties": false,
+      "required": ["contract", "categories", "logical_references", "logical_bytes", "retained_logical_eof_bytes", "allocated_physical_bytes", "physical_objects"],
+      "properties": {
+        "contract": {"const": "graphforge-storage-attribution/1"},
+        "categories": {"$ref": "#/$defs/categories"},
+        "logical_references": {"$ref": "#/$defs/nonnegative"},
+        "logical_bytes": {"$ref": "#/$defs/nonnegative"},
+        "retained_logical_eof_bytes": {"$ref": "#/$defs/nonnegative"},
+        "allocated_physical_bytes": {"$ref": "#/$defs/nonnegative"},
+        "physical_objects": {"$ref": "#/$defs/nonnegative"}
+      }
+    },
+    "phaseTotals": {
+      "type": "object", "additionalProperties": false,
+      "required": ["read_bytes", "write_bytes", "read_calls", "write_calls", "object_count", "block_count", "fsync_calls"],
+      "properties": {
+        "read_bytes": {"$ref": "#/$defs/nonnegative"},
+        "write_bytes": {"$ref": "#/$defs/nonnegative"},
+        "read_calls": {"$ref": "#/$defs/nonnegative"},
+        "write_calls": {"$ref": "#/$defs/nonnegative"},
+        "object_count": {"$ref": "#/$defs/nonnegative"},
+        "block_count": {"$ref": "#/$defs/nonnegative"},
+        "fsync_calls": {"$ref": "#/$defs/nonnegative"}
+      }
+    },
+    "phaseMap": {
+      "type": "object", "additionalProperties": false,
+      "required": ["append_merge", "seal_authentication", "shape_consume_reauthentication", "encode_write_postwrite_authentication", "publication_preauthentication", "cas_install_read_write", "hydration_verification", "fsync_synchronization", "recovery_reauthentication"],
+      "properties": {
+        "append_merge": {"$ref": "#/$defs/phaseTotals"},
+        "seal_authentication": {"$ref": "#/$defs/phaseTotals"},
+        "shape_consume_reauthentication": {"$ref": "#/$defs/phaseTotals"},
+        "encode_write_postwrite_authentication": {"$ref": "#/$defs/phaseTotals"},
+        "publication_preauthentication": {"$ref": "#/$defs/phaseTotals"},
+        "cas_install_read_write": {"$ref": "#/$defs/phaseTotals"},
+        "hydration_verification": {"$ref": "#/$defs/phaseTotals"},
+        "fsync_synchronization": {"$ref": "#/$defs/phaseTotals"},
+        "recovery_reauthentication": {"$ref": "#/$defs/phaseTotals"}
+      }
+    },
+    "applicationIo": {
+      "type": "object", "additionalProperties": false,
+      "required": ["phases", "totals"],
+      "properties": {
+        "phases": {"$ref": "#/$defs/phaseMap"},
+        "totals": {"$ref": "#/$defs/phaseTotals"}
+      }
+    }
+  }
 }

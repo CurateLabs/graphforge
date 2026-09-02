@@ -27,8 +27,8 @@ from graphforge_bench.progressive_run import (
     _native_authority,
     _run_benchexec,
     _safe_stage,
-    _write_json,
     ingest_benchexec_result,
+    publish_json_no_clobber,
     repository_commit,
     resolve_executables,
 )
@@ -367,12 +367,12 @@ def run(
     except (ControllerError, OSError) as error:
         failed = _result(plan, "failed", "native_authority_unavailable")
         _schema(root, "progressive-provider-run-result.json", failed)
-        _write_json(result_path, failed)
+        publish_json_no_clobber(result_path, failed)
         raise ProviderRunError("native BenchExec authority is unavailable") from error
     if not isinstance(authority, Mapping) or authority.get("result") != "passed":
         failed = _result(plan, "failed", "native_authority_unavailable")
         _schema(root, "progressive-provider-run-result.json", failed)
-        _write_json(result_path, failed)
+        publish_json_no_clobber(result_path, failed)
         raise ProviderRunError("native BenchExec authority is unavailable")
     try:
         temporary_context = tempfile.TemporaryDirectory(
@@ -381,7 +381,7 @@ def run(
     except OSError as error:
         failed = _result(plan, "failed", "staging_failed")
         _schema(root, "progressive-provider-run-result.json", failed)
-        _write_json(result_path, failed)
+        publish_json_no_clobber(result_path, failed)
         raise ProviderRunError("staging_failed") from error
     with temporary_context as temporary:
         try:
@@ -391,19 +391,19 @@ def run(
         except (ControllerError, OSError) as error:
             failed = _result(plan, "failed", "staging_failed")
             _schema(root, "progressive-provider-run-result.json", failed)
-            _write_json(result_path, failed)
+            publish_json_no_clobber(result_path, failed)
             raise ProviderRunError("staging_failed") from error
         try:
             execution_status = execution_boundary(stage, executables, identities)
         except Exception as error:
             failed = _result(plan, "failed", "execution_boundary_failed")
             _schema(root, "progressive-provider-run-result.json", failed)
-            _write_json(result_path, failed)
+            publish_json_no_clobber(result_path, failed)
             raise ProviderRunError("execution_boundary_failed") from error
         if execution_status != 0:
             failed = _result(plan, "failed", "benchexec_failed")
             _schema(root, "progressive-provider-run-result.json", failed)
-            _write_json(result_path, failed)
+            publish_json_no_clobber(result_path, failed)
             raise ProviderRunError("benchexec_failed")
         try:
             benchexec, graphforge, rung = ingest_benchexec_result(
@@ -417,7 +417,7 @@ def run(
         except (ControllerError, ValueError) as error:
             failed = _result(plan, "failed", "ordinary_receipt_missing")
             _schema(root, "progressive-provider-run-result.json", failed)
-            _write_json(result_path, failed)
+            publish_json_no_clobber(result_path, failed)
             raise ProviderRunError("ordinary_receipt_missing") from error
         try:
             _schema(root, "benchexec-run-evidence.json", benchexec)
@@ -426,7 +426,7 @@ def run(
         except ProviderRunError as error:
             failed = _result(plan, "failed", "ordinary_receipt_missing")
             _schema(root, "progressive-provider-run-result.json", failed)
-            _write_json(result_path, failed)
+            publish_json_no_clobber(result_path, failed)
             raise ProviderRunError("ordinary_receipt_missing") from error
         try:
             stored_plan, _ = _read_document(output_dir / f"s{scale}-plan.json")
@@ -435,7 +435,7 @@ def run(
         except ProviderRunError as error:
             failed = _result(plan, "failed", "stored_plan_mismatch")
             _schema(root, "progressive-provider-run-result.json", failed)
-            _write_json(result_path, failed)
+            publish_json_no_clobber(result_path, failed)
             raise ProviderRunError("stored_plan_mismatch") from error
         artifact_paths = {
             "benchexec_sha256": output_dir / f"s{scale}-benchexec.json",
@@ -443,13 +443,13 @@ def run(
             "rung_sha256": output_dir / f"s{scale}-rung.json",
             "plan_sha256": output_dir / f"s{scale}-plan.json",
         }
-        _write_json(artifact_paths["benchexec_sha256"], benchexec)
-        _write_json(artifact_paths["graphforge_sha256"], graphforge)
-        _write_json(artifact_paths["rung_sha256"], rung)
+        publish_json_no_clobber(artifact_paths["benchexec_sha256"], benchexec)
+        publish_json_no_clobber(artifact_paths["graphforge_sha256"], graphforge)
+        publish_json_no_clobber(artifact_paths["rung_sha256"], rung)
         artifacts = {name: _digest(path) for name, path in artifact_paths.items()}
         passed = _result(plan, "passed", None, artifacts)
         _schema(root, "progressive-provider-run-result.json", passed)
-        _write_json(result_path, passed)
+        publish_json_no_clobber(result_path, passed)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -477,7 +477,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         output_dir.mkdir(parents=True, exist_ok=True)
         _require_fresh_outputs(output_dir, plan)
-        _write_json(output_dir / f"{str(plan['rung']).lower()}-plan.json", plan)
+        publish_json_no_clobber(output_dir / f"{str(plan['rung']).lower()}-plan.json", plan)
         run(
             root=root,
             output_dir=output_dir,

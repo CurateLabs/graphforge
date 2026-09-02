@@ -24,6 +24,91 @@ COMMIT = subprocess.run(
 ).stdout.strip()
 
 
+def storage_attribution(scale: int) -> dict:
+    category = {
+        "logical_references": 0,
+        "logical_bytes": 0,
+        "physical_objects": 0,
+        "physical_logical_bytes": 0,
+        "allocated_bytes": 0,
+    }
+    categories = {
+        name: dict(category)
+        for name in (
+            "topology_nodes",
+            "topology_edges",
+            "properties",
+            "uuid_and_surrogates",
+            "adjacency",
+            "catalog_and_manifests",
+            "construction_staging",
+            "portable_package",
+            "clean_imported_project",
+            "other",
+        )
+    }
+    snapshot = {
+        "contract": "graphforge-storage-attribution/1",
+        "categories": categories,
+        "logical_references": 0,
+        "logical_bytes": 0,
+        "retained_logical_eof_bytes": 0,
+        "allocated_physical_bytes": 0,
+        "physical_objects": 0,
+    }
+    phase = {
+        "read_bytes": 0,
+        "write_bytes": 0,
+        "read_calls": 0,
+        "write_calls": 0,
+        "object_count": 0,
+        "block_count": 0,
+        "fsync_calls": 0,
+    }
+    phases = {
+        name: dict(phase)
+        for name in (
+            "append_merge",
+            "seal_authentication",
+            "shape_consume_reauthentication",
+            "encode_write_postwrite_authentication",
+            "publication_preauthentication",
+            "cas_install_read_write",
+            "hydration_verification",
+            "fsync_synchronization",
+            "recovery_reauthentication",
+        )
+    }
+    return {
+        "source": snapshot,
+        "imported": {**snapshot, "categories": {k: dict(v) for k, v in categories.items()}},
+        "construction": {
+            "application_io": {"phases": phases, "totals": phase},
+            "staging": category,
+            "staging_transient_peak_allocated_bytes": 0,
+            "transient_peak_allocated_bytes": 300,
+        },
+        "portable_package": {
+            "contract": "graphforge-portable-export/2",
+            "allocation_logical_bytes": 0,
+            "allocation_allocated_bytes": 0,
+            "allocation_physical_objects": 0,
+        },
+        "lifecycle": {
+            "contract": "graphforge-lifecycle-storage/1",
+            "source_project_current_allocated_bytes": 105,
+            "retained_storage_bytes": 200,
+            "transient_peak_storage_bytes": 300,
+        },
+        "counts": {
+            "source_nodes": 1 << scale,
+            "source_edges": 16 * (1 << scale),
+            "imported_nodes": 1 << scale,
+            "imported_edges": 16 * (1 << scale),
+        },
+    }
+
+
 def rung(scale: int, *, source: str | None = None) -> dict:
     return {
         "assembly_contract": "graphforge-progressive-rung-assembly/2",
@@ -86,6 +171,7 @@ def rung(scale: int, *, source: str | None = None) -> dict:
             "reader_calls": 8,
             "publication_work_units": 9,
         },
+        "storage_attribution": storage_attribution(scale),
         "failure": None,
     }
 

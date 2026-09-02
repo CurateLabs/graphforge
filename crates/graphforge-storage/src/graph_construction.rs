@@ -4458,6 +4458,11 @@ fn record_encoded_active_artifacts(
             .physical_logical_bytes
             .saturating_add(usage.logical_bytes);
         totals.allocated_bytes = totals.allocated_bytes.saturating_add(usage.allocated_bytes);
+        evidence
+            .storage_transient_peak_allocated_bytes
+            .entry(crate::ArtifactCategory::ConstructionStaging)
+            .and_modify(|peak| *peak = (*peak).max(totals.allocated_bytes))
+            .or_insert(totals.allocated_bytes);
         let active_total = evidence
             .storage_active_identity_allocated_bytes
             .values()
@@ -8122,6 +8127,33 @@ mod tests {
             session.seal().unwrap();
             assert_eq!(session.state(), GraphConstructionState::Sealed);
             assert!(session.evidence().authentication_read_bytes > 0);
+            let sealed_staging =
+                &session.evidence().storage_current[&crate::ArtifactCategory::ConstructionStaging];
+            let sealed_staging_peak = session.evidence().storage_transient_peak_allocated_bytes
+                [&crate::ArtifactCategory::ConstructionStaging];
+            assert!(
+                sealed_staging_peak >= sealed_staging.allocated_bytes,
+                "encoded artifacts advanced current staging allocation without its category peak"
+            );
+            let sealed_current = session.evidence().storage_current.clone();
+            let sealed_peaks = session
+                .evidence()
+                .storage_transient_peak_allocated_bytes
+                .clone();
+            drop(session);
+            let resumed = GraphConstructionSession::resume_with_mode_and_lifecycle(
+                root.path(),
+                Uuid::from_u128(operation),
+                graphforge_core::OntologyMode::Exploratory,
+                GraphConstructionBudgets::default(),
+                crate::filesystem_admission::ProjectLifecycleMode::Durable,
+            )
+            .unwrap();
+            assert_eq!(resumed.evidence().storage_current, sealed_current);
+            assert_eq!(
+                resumed.evidence().storage_transient_peak_allocated_bytes,
+                sealed_peaks
+            );
         }
     }
 

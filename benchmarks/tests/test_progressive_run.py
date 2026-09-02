@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import copy
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -21,6 +23,7 @@ from graphforge_bench.progressive_run import (
     assemble_rung_evidence,
     build_plan,
     ingest_benchexec_result,
+    publish_json_no_clobber,
     repository_commit,
     require_bulk_ingest_capability,
     require_order,
@@ -97,6 +100,7 @@ def passed_rung(scale: int) -> dict:
             "reader_calls": 8,
             "publication_work_units": 9,
         },
+        "storage_attribution": rung_storage_attribution(scale),
         "failure": None,
     }
 
@@ -182,9 +186,15 @@ def authoritative_receipts(scale: int) -> dict[str, list[dict]]:
                 "input_rows": 65_536 * 64,
                 "input_batches": 64,
                 "transient_peak_allocated_bytes": 300,
-                "application_io": {
-                    "totals": {"read_bytes": 400, "write_bytes": 500, "read_calls": 8}
+                "construction_staging": {
+                    "logical_references": 3,
+                    "logical_bytes": 250,
+                    "physical_objects": 3,
+                    "physical_logical_bytes": 250,
+                    "allocated_bytes": 275,
                 },
+                "construction_staging_transient_peak_allocated_bytes": 290,
+                "application_io": application_io(),
                 "publication_work": {
                     "contract": "graphforge-publication-work/1",
                     "semantic_total_operations": 9,
@@ -204,6 +214,14 @@ def authoritative_receipts(scale: int) -> dict[str, list[dict]]:
         "reopen": [source_storage],
         "recount": [node_count, edge_count],
         "query": [one_hop, two_hop],
+        "export": [
+            {
+                "contract": "graphforge-portable-export/2",
+                "allocation_logical_bytes": 140,
+                "allocation_allocated_bytes": 150,
+                "allocation_physical_objects": 1,
+            }
+        ],
         "reopen_proof": [
             node_count,
             edge_count,
@@ -242,18 +260,83 @@ def storage_receipt(allocated: int, logical_eof: int) -> dict:
             "other",
         )
     }
+    categories["topology_nodes"] = {
+        "logical_references": 1,
+        "logical_bytes": logical_eof,
+        "physical_objects": 1,
+        "physical_logical_bytes": logical_eof,
+        "allocated_bytes": allocated,
+    }
     return {
         "contract": "graphforge-storage-attribution-command/1",
         "storage": {
             "contract": "graphforge-storage-attribution/1",
             "categories": categories,
-            "logical_references": 0,
-            "logical_bytes": 0,
+            "logical_references": 1,
+            "logical_bytes": logical_eof,
             "retained_logical_eof_bytes": logical_eof,
             "allocated_physical_bytes": allocated,
-            "physical_objects": 0,
+            "physical_objects": 1,
         },
         "reopen_agrees": True,
+    }
+
+
+def application_io() -> dict:
+    fields = (
+        "read_bytes",
+        "write_bytes",
+        "read_calls",
+        "write_calls",
+        "object_count",
+        "block_count",
+        "fsync_calls",
+    )
+    names = (
+        "append_merge",
+        "seal_authentication",
+        "shape_consume_reauthentication",
+        "encode_write_postwrite_authentication",
+        "publication_preauthentication",
+        "cas_install_read_write",
+        "hydration_verification",
+        "fsync_synchronization",
+        "recovery_reauthentication",
+    )
+    phases = {name: dict.fromkeys(fields, 0) for name in names}
+    phases["append_merge"].update(
+        read_bytes=400,
+        write_bytes=500,
+        read_calls=8,
+        write_calls=1,
+    )
+    return {
+        "phases": phases,
+        "totals": {field: sum(phase[field] for phase in phases.values()) for field in fields},
+    }
+
+
+def rung_storage_attribution(scale: int) -> dict:
+    receipts = authoritative_receipts(scale)
+    return {
+        "source": receipts["reopen"][0]["storage"],
+        "imported": receipts["reopen_proof"][4]["storage"],
+        "construction": {
+            "application_io": receipts["ingest"][0]["construction"]["application_io"],
+            "staging": receipts["ingest"][0]["construction"]["construction_staging"],
+            "staging_transient_peak_allocated_bytes": receipts["ingest"][0]["construction"][
+                "construction_staging_transient_peak_allocated_bytes"
+            ],
+            "transient_peak_allocated_bytes": 300,
+        },
+        "portable_package": receipts["export"][0],
+        "lifecycle": receipts["reopen_proof"][-1],
+        "counts": {
+            "source_nodes": 1 << scale,
+            "source_edges": 16 * (1 << scale),
+            "imported_nodes": 1 << scale,
+            "imported_edges": 16 * (1 << scale),
+        },
     }
 
 
@@ -285,6 +368,87 @@ class ProgressiveRunControllerTests(unittest.TestCase):
             _write_json(path, {"value": 2})
         self.assertEqual(json.loads(path.read_text()), {"value": 1})
         self.assertEqual([item.name for item in self.base.glob(".immutable.json.*")], [])
+
+    def test_nested_publication_syncs_each_fresh_directory_parent(self) -> None:
+        path = self.base / "fresh" / "nested" / "evidence.json"
+        synced_inodes: list[int] = []
+        real_fsync = os.fsync
+
+        def record_fsync(descriptor: int) -> None:
+            synced_inodes.append(os.fstat(descriptor).st_ino)
+            real_fsync(descriptor)
+
+        with (
+            patch(
+                "graphforge_bench.progressive_run.os.fsync",
+                side_effect=record_fsync,
+            ),
+            patch(
+                "graphforge_bench.progressive_run.os.mkdir",
+                wraps=os.mkdir,
+            ) as mkdir,
+        ):
+            publish_json_no_clobber(path, {"value": 1})
+        expected_directories = (
+            self.base,
+            self.base / "fresh",
+            self.base / "fresh" / "nested",
+        )
+        self.assertTrue(
+            {item.stat().st_ino for item in expected_directories}.issubset(synced_inodes)
+        )
+        self.assertEqual([call.args[0] for call in mkdir.call_args_list], ["fresh", "nested"])
+        self.assertEqual(json.loads(path.read_text()), {"value": 1})
+
+    def test_interrupted_nested_publication_leaves_no_partial_file(self) -> None:
+        path = self.base / "fresh" / "nested" / "evidence.json"
+        with (
+            patch(
+                "graphforge_bench.progressive_run.os.link",
+                side_effect=OSError("injected interruption"),
+            ),
+            self.assertRaisesRegex(OSError, "injected interruption"),
+        ):
+            publish_json_no_clobber(path, {"value": 1})
+        self.assertFalse(path.exists())
+        self.assertEqual(list(path.parent.glob(f".{path.name}.*")), [])
+
+    def test_post_link_directory_fsync_failure_keeps_complete_no_clobber_target(
+        self,
+    ) -> None:
+        path = self.base / "evidence.json"
+        value = {"status": "complete", "value": 1}
+        real_fsync = os.fsync
+
+        def fail_after_link(descriptor: int) -> None:
+            temporary = list(path.parent.glob(f".{path.name}.*"))
+            if path.exists() and not temporary:
+                raise OSError("injected post-link directory fsync failure")
+            real_fsync(descriptor)
+
+        with (
+            patch(
+                "graphforge_bench.progressive_run.os.fsync",
+                side_effect=fail_after_link,
+            ),
+            self.assertRaisesRegex(OSError, "post-link directory fsync failure"),
+        ):
+            publish_json_no_clobber(path, value)
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8")), value)
+        self.assertEqual(list(path.parent.glob(f".{path.name}.*")), [])
+        with self.assertRaises(FileExistsError):
+            publish_json_no_clobber(path, {"status": "replacement"})
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8")), value)
+        self.assertEqual(list(path.parent.glob(f".{path.name}.*")), [])
+
+    def test_publication_refuses_symlinked_directory_components(self) -> None:
+        outside = self.base / "outside"
+        outside.mkdir()
+        linked = self.base / "linked"
+        linked.symlink_to(outside, target_is_directory=True)
+        with self.assertRaises(OSError):
+            publish_json_no_clobber(linked / "evidence.json", {"value": 1})
+        self.assertFalse((outside / "evidence.json").exists())
 
     def test_venv_python_path_is_not_dereferenced_out_of_its_environment(self) -> None:
         venv = self.base / "venv/bin"
@@ -414,6 +578,16 @@ class ProgressiveRunControllerTests(unittest.TestCase):
         self.assertEqual(rung["status"], "passed")
         self.assertEqual(rung["metrics"]["physical_read_bytes"], 0)
         self.assertEqual(rung["storage_components"]["source_project_current_allocated_bytes"], 105)
+        self.assertEqual(
+            rung["storage_attribution"]["portable_package"]["allocation_allocated_bytes"], 150
+        )
+        self.assertEqual(
+            rung["storage_attribution"]["construction"]["staging"]["allocated_bytes"], 275
+        )
+        self.assertEqual(
+            rung["storage_attribution"]["construction"]["staging_transient_peak_allocated_bytes"],
+            290,
+        )
         for omitted in receipts:
             with self.subTest(omitted=omitted), self.assertRaises(ControllerError):
                 changed = {name: values for name, values in receipts.items() if name != omitted}
@@ -478,6 +652,84 @@ class ProgressiveRunControllerTests(unittest.TestCase):
             assemble_rung_evidence(
                 root=ROOT, scale=18, graphforge=changed_gf, benchexec=benchexec(changed_gf)
             )
+        missing_portable = authoritative_receipts(18)
+        del missing_portable["export"]
+        changed_gf = graphforge(18, missing_portable)
+        with self.assertRaisesRegex(ControllerError, "graphforge-portable-export/2"):
+            assemble_rung_evidence(
+                root=ROOT, scale=18, graphforge=changed_gf, benchexec=benchexec(changed_gf)
+            )
+        malformed_categories = authoritative_receipts(18)
+        del malformed_categories["reopen"][0]["storage"]["categories"]["other"]
+        changed_gf = graphforge(18, malformed_categories)
+        with self.assertRaisesRegex(ControllerError, "categories are incomplete"):
+            assemble_rung_evidence(
+                root=ROOT, scale=18, graphforge=changed_gf, benchexec=benchexec(changed_gf)
+            )
+        malformed_phases = authoritative_receipts(18)
+        del malformed_phases["ingest"][0]["construction"]["application_io"]["phases"][
+            "recovery_reauthentication"
+        ]
+        changed_gf = graphforge(18, malformed_phases)
+        with self.assertRaisesRegex(ControllerError, "inventory is incomplete"):
+            assemble_rung_evidence(
+                root=ROOT, scale=18, graphforge=changed_gf, benchexec=benchexec(changed_gf)
+            )
+        missing_staging = authoritative_receipts(18)
+        del missing_staging["ingest"][0]["construction"]["construction_staging"]
+        changed_gf = graphforge(18, missing_staging)
+        with self.assertRaisesRegex(ControllerError, "staging authority"):
+            assemble_rung_evidence(
+                root=ROOT, scale=18, graphforge=changed_gf, benchexec=benchexec(changed_gf)
+            )
+
+    def test_receipt_authorities_are_bound_to_their_ordinary_phases(self) -> None:
+        cases = (
+            ("ingest", "query", 0),
+            ("export", "query", 0),
+            ("reopen_proof", "query", -1),
+        )
+        for source_phase, destination_phase, index in cases:
+            with self.subTest(source_phase=source_phase):
+                receipts = authoritative_receipts(18)
+                moved = receipts[source_phase].pop(index)
+                receipts[destination_phase].append(moved)
+                gf = graphforge(18, receipts)
+                with self.assertRaisesRegex(ControllerError, "missing, moved, or ambiguous"):
+                    assemble_rung_evidence(
+                        root=ROOT, scale=18, graphforge=gf, benchexec=benchexec(gf)
+                    )
+        for phase, index in (("ingest", 0), ("export", 0), ("reopen_proof", -1)):
+            with self.subTest(duplicate=phase):
+                receipts = authoritative_receipts(18)
+                receipts[phase].append(copy.deepcopy(receipts[phase][index]))
+                gf = graphforge(18, receipts)
+                with self.assertRaisesRegex(ControllerError, "missing, moved, or ambiguous"):
+                    assemble_rung_evidence(
+                        root=ROOT, scale=18, graphforge=gf, benchexec=benchexec(gf)
+                    )
+
+    def test_storage_and_query_receipts_reject_global_moves_and_duplicates(self) -> None:
+        cases = (
+            ("reopen", "query", "graphforge-storage-attribution-command/1", "moved"),
+            ("reopen", "query", "graphforge-storage-attribution-command/1", "duplicated"),
+            ("recount", "admission", "graphforge-result-sink/2", "moved"),
+            ("query", "export", "graphforge-result-sink/2", "duplicated"),
+        )
+        for source, destination, contract, mutation in cases:
+            with self.subTest(contract=contract, mutation=mutation):
+                receipts = authoritative_receipts(18)
+                selected = next(
+                    receipt for receipt in receipts[source] if receipt.get("contract") == contract
+                )
+                if mutation == "moved":
+                    receipts[source].remove(selected)
+                receipts.setdefault(destination, []).append(copy.deepcopy(selected))
+                gf = graphforge(18, receipts)
+                with self.assertRaisesRegex(ControllerError, "inventory"):
+                    assemble_rung_evidence(
+                        root=ROOT, scale=18, graphforge=gf, benchexec=benchexec(gf)
+                    )
 
     def test_exact_benchexec_xml_and_log_are_normalized_into_passed_bundle(self) -> None:
         plan = build_plan(
