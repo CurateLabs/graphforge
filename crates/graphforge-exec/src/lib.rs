@@ -189,6 +189,7 @@ pub(crate) mod algorithm_similar_knn;
 pub(crate) mod algorithm_weighted_undirected;
 #[doc(hidden)]
 pub mod demand;
+mod ordered_two_hop;
 pub use adjacency::{
     Adjacency, AdjacencyBacking, AdjacencyProvider, AdjacencyStatus, PersistentAdjacencyProvider,
     ScanBuildAdjacencyProvider,
@@ -3199,14 +3200,14 @@ impl V4OrdinalIdentityResolver {
 /// One exact, already-authenticated ordinal authority pinned for the lifetime
 /// of an execution session.
 #[derive(Debug)]
-struct V4OrdinalIdentitySession {
+pub(crate) struct V4OrdinalIdentitySession {
     handle: Arc<Mutex<graphforge_storage::ordinal_identity_v4::V4OrdinalIdentityHandle>>,
     revalidation: graphforge_storage::V4OrdinalRevalidationMetrics,
     attribution_available: AtomicBool,
 }
 
 impl V4OrdinalIdentitySession {
-    fn lookup_node_uuids(
+    pub(crate) fn lookup_node_uuids(
         &self,
         requested: &[u64],
     ) -> Result<graphforge_storage::V4OrdinalLookup, GfError> {
@@ -3361,6 +3362,52 @@ impl ExpandExec {
             ordinal_identities: self.ordinal_identities.clone(),
             ordinal_identity_required: self.ordinal_identity_required,
         })
+    }
+
+    pub(crate) fn rel_type_name(&self) -> &str {
+        &self.rel_type_name
+    }
+
+    pub(crate) fn direction(&self) -> graphforge_ir::Direction {
+        self.direction
+    }
+
+    pub(crate) fn provider(&self) -> &Arc<dyn AdjacencyProvider> {
+        &self.provider
+    }
+
+    pub(crate) fn ordinal_identities(&self) -> Option<Arc<V4OrdinalIdentitySession>> {
+        self.ordinal_identities.clone()
+    }
+
+    pub(crate) fn is_destination_identity_only(&self) -> bool {
+        let Some(required) = self.required_output.as_deref() else {
+            return false;
+        };
+        let dst_width = graphforge_storage::TOPOLOGY_NODES_SCHEMA.fields().len();
+        let edge_end = self.schema.fields().len().saturating_sub(dst_width);
+        let destination_uuid_index = edge_end;
+        let destination_id_index = edge_end + 1;
+        let edge_materialization_unused =
+            required
+                .get(self.input_width..edge_end)
+                .is_some_and(|fields| {
+                    fields.iter().enumerate().all(|(offset, needed)| {
+                        !needed || self.schema.field(self.input_width + offset).name() == "edge_id"
+                    })
+                });
+        edge_materialization_unused
+            && required
+                .iter()
+                .enumerate()
+                .skip(edge_end)
+                .all(|(index, needed)| {
+                    !needed || index == destination_uuid_index || index == destination_id_index
+                })
+            && required
+                .get(destination_uuid_index)
+                .copied()
+                .unwrap_or(false)
     }
 }
 
