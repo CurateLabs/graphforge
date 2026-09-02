@@ -482,6 +482,13 @@ evidence therefore also requires an authenticated `graphforge-lifecycle-storage/
 owner-union receipt for retained and transient lifecycle maxima. The controller
 fails closed while that ordinary receipt is absent rather than summing project
 owners or treating portable logical payload bytes as allocated storage.
+Newly assembled rungs identify `graphforge-progressive-rung-assembly/2`; for
+that provenance the rung schema requires the lifecycle receipt's authoritative
+`source_project_current_allocated_bytes`. Historical version-1 S18/S19 rungs
+lack both the assembly marker and this previously unavailable measurement, so
+they remain schema-readable but cannot supply #951 adapter evidence. The
+controller rejects a missing or malformed value before emitting any new passed
+rung; consumers producing #951 evidence must apply the same refusal.
 The Rust certification runner owns that allocation session: it deduplicates
 stable native identities for the generated inputs, source project, result
 sinks, portable package, and clean-imported project; consumes writer-owned

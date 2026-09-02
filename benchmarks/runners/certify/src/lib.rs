@@ -282,6 +282,7 @@ pub struct PublicProcessExecutor {
 struct LifecycleStorageSession {
     allocation: graphforge_storage::StorageAllocationLifecycle,
     transient_peak_storage_bytes: u64,
+    source_project_current_allocated_bytes: Option<u64>,
     generator_observed: bool,
     construction_peak_observed: bool,
     source_project_observed: bool,
@@ -346,6 +347,9 @@ impl LifecycleStorageSession {
                     "imported-project"
                 } else {
                     self.source_project_observed = true;
+                    if phase == Phase::Reopen {
+                        self.source_project_current_allocated_bytes = Some(union.allocated_bytes);
+                    }
                     "source-project"
                 };
                 self.allocation
@@ -397,15 +401,20 @@ impl LifecycleStorageSession {
             || !self.portable_package_observed
             || !self.portable_import_peak_observed
             || !self.imported_project_observed
+            || self.source_project_current_allocated_bytes.is_none()
         {
             return Err("lifecycle storage session is missing an authenticated owner or transient phase"
                 .to_owned());
         }
+        let source_project_current_allocated_bytes = self
+            .source_project_current_allocated_bytes
+            .ok_or_else(|| "source-project reopen allocation was not captured".to_owned())?;
         self.finalized = true;
         let retained = self.allocation.current_allocated_bytes();
         let peak = self.transient_peak_storage_bytes.max(retained);
         Ok(Some(serde_json::json!({
             "contract": "graphforge-lifecycle-storage/1",
+            "source_project_current_allocated_bytes": source_project_current_allocated_bytes,
             "retained_storage_bytes": retained,
             "transient_peak_storage_bytes": peak,
         })))
@@ -733,6 +742,7 @@ fn sanitize_receipt(value: &serde_json::Value) -> Option<serde_json::Value> {
             object,
             &[
                 "contract",
+                "source_project_current_allocated_bytes",
                 "retained_storage_bytes",
                 "transient_peak_storage_bytes",
             ],
@@ -740,7 +750,11 @@ fn sanitize_receipt(value: &serde_json::Value) -> Option<serde_json::Value> {
         .filter(|receipt| {
             sanitized_numeric_fields(
                 receipt,
-                &["retained_storage_bytes", "transient_peak_storage_bytes"],
+                &[
+                    "source_project_current_allocated_bytes",
+                    "retained_storage_bytes",
+                    "transient_peak_storage_bytes",
+                ],
             )
         }),
         Some("graphforge-query-qualification/1") => copy_closed_receipt(
@@ -1710,6 +1724,38 @@ mod tests {
         leaked["storage"]["project_path"] = serde_json::json!("/secret");
         let encoded = serde_json::to_vec(&leaked).expect("leaked receipt JSON");
         assert!(parse_receipts(&encoded, true).is_err());
+
+        let lifecycle = serde_json::json!({
+            "contract": "graphforge-lifecycle-storage/1",
+            "source_project_current_allocated_bytes": 256,
+            "retained_storage_bytes": 384,
+            "transient_peak_storage_bytes": 512
+        });
+        let encoded = serde_json::to_vec(&lifecycle).expect("lifecycle receipt JSON");
+        let sanitized = parse_receipts(&encoded, true).expect("closed lifecycle receipt");
+        assert_eq!(
+            sanitized[0]["source_project_current_allocated_bytes"],
+            256
+        );
+        for invalid in [
+            serde_json::Value::Null,
+            serde_json::json!(true),
+            serde_json::json!(-1),
+            serde_json::json!("256"),
+        ] {
+            let mut malformed = lifecycle.clone();
+            malformed["source_project_current_allocated_bytes"] = invalid;
+            let encoded =
+                serde_json::to_vec(&malformed).expect("malformed lifecycle receipt JSON");
+            assert!(parse_receipts(&encoded, true).is_err());
+        }
+        let mut missing = lifecycle;
+        missing
+            .as_object_mut()
+            .expect("lifecycle receipt object")
+            .remove("source_project_current_allocated_bytes");
+        let encoded = serde_json::to_vec(&missing).expect("incomplete lifecycle receipt JSON");
+        assert!(parse_receipts(&encoded, true).is_err());
     }
 
     #[test]
@@ -2158,6 +2204,63 @@ mod tests {
     }
 
     #[test]
+    fn reopen_emits_authoritative_source_project_union_allocation() {
+        let root = std::env::temp_dir().join(format!(
+            "gf-certify-source-union-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let project = root.join("project");
+        let current =
+            graphforge_storage::open_or_initialize_ephemeral_project(&project).unwrap();
+        let selected = graphforge_storage::capture_storage_attribution(&current).unwrap();
+        let union =
+            graphforge_storage::capture_project_storage_identity_union(&current).unwrap();
+        assert!(
+            union
+                .retained_generation_uuids
+                .contains(&current.generation_uuid())
+        );
+        assert!(union.allocated_bytes > selected.allocated_bytes);
+
+        let mut session = LifecycleStorageSession::default();
+        let reopen = PhaseCommand {
+            phase: Phase::Reopen,
+            action: PhaseAction::GraphForgeCli {
+                args: vec![
+                    "--project".to_owned(),
+                    project.to_string_lossy().into_owned(),
+                    "storage-attribution".to_owned(),
+                ],
+            },
+        };
+        assert!(session.observe(Phase::Reopen, &reopen, &[]).unwrap().is_none());
+        session.generator_observed = true;
+        session.construction_peak_observed = true;
+        session.portable_package_observed = true;
+        session.portable_import_peak_observed = true;
+        session.imported_project_observed = true;
+        let final_command = PhaseCommand {
+            phase: Phase::ReopenProof,
+            action: PhaseAction::GraphForgeCli { args: Vec::new() },
+        };
+        let receipt = session
+            .observe(Phase::ReopenProof, &final_command, &[])
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            receipt["source_project_current_allocated_bytes"].as_u64(),
+            Some(union.allocated_bytes)
+        );
+        assert_ne!(
+            receipt["source_project_current_allocated_bytes"].as_u64(),
+            Some(selected.allocated_bytes)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn lifecycle_storage_deduplicates_aliases_and_finalizes_once() {
         let root =
             std::env::temp_dir().join(format!("gf-certify-lifecycle-{}", std::process::id()));
@@ -2218,6 +2321,7 @@ mod tests {
         session.observe(Phase::Export, &export, &[]).unwrap();
         assert!(session.portable_package_observed);
         session.source_project_observed = true;
+        session.source_project_current_allocated_bytes = Some(one_identity_allocation);
         session.portable_import_peak_observed = true;
         session.imported_project_observed = true;
 
@@ -2229,6 +2333,10 @@ mod tests {
             .observe(Phase::ReopenProof, &final_command, &[])
             .unwrap()
             .unwrap();
+        assert_eq!(
+            receipt["source_project_current_allocated_bytes"].as_u64(),
+            Some(one_identity_allocation)
+        );
         assert_eq!(
             receipt["retained_storage_bytes"].as_u64(),
             Some(one_identity_allocation)
