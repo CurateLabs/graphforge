@@ -272,7 +272,13 @@ def _open_durable_directory(path: Path) -> int:
 
 
 def publish_json_no_clobber(path: Path, value: Mapping[str, Any]) -> None:
-    """Durably publish JSON once without trusting symlinked directory components."""
+    """Durably publish JSON once without trusting symlinked directory components.
+
+    If the final directory fsync fails after linking the complete target, this
+    function raises but leaves that target in place. It never rolls back,
+    removes, or replaces a complete linked target; a retry therefore fails
+    closed with ``FileExistsError``.
+    """
     encoded = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
     directory = _open_durable_directory(path.parent)
     temporary_name = f".{path.name}.{secrets.token_hex(8)}"

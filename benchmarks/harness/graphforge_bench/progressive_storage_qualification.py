@@ -461,7 +461,12 @@ def build(
     volume_bytes: int,
     reserved_headroom_bytes: int,
 ) -> dict[str, Any]:
-    """Build from two provider-result-bound rung bundle paths."""
+    """Build from ordered low/high bundles using externally trusted result digests.
+
+    ``provider_result_sha256`` must contain the low-result digest followed by
+    the high-result digest. Each digest must come from trusted transport or an
+    immutable manifest outside the evidence bundle.
+    """
     if COMMIT.fullmatch(expected_commit) is None:
         raise StorageQualificationError("expected commit must be a full Git object ID")
     if IMAGE_DIGEST.fullmatch(expected_image_digest) is None:
@@ -705,13 +710,27 @@ def validate(evidence: Mapping[str, Any]) -> None:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("low", type=Path)
-    parser.add_argument("high", type=Path)
+    parser.add_argument("low", type=Path, help="lower-scale provider rung path")
+    parser.add_argument("high", type=Path, help="higher-scale provider rung path")
     parser.add_argument("output", type=Path)
     parser.add_argument("--commit", required=True)
     parser.add_argument("--image-digest", required=True)
-    parser.add_argument("--low-result-sha256", required=True)
-    parser.add_argument("--high-result-sha256", required=True)
+    parser.add_argument(
+        "--low-result-sha256",
+        required=True,
+        help=(
+            "SHA-256 of the low provider result from trusted transport or an immutable "
+            "manifest outside the evidence bundle"
+        ),
+    )
+    parser.add_argument(
+        "--high-result-sha256",
+        required=True,
+        help=(
+            "SHA-256 of the high provider result from trusted transport or an immutable "
+            "manifest outside the evidence bundle"
+        ),
+    )
     parser.add_argument("--volume-bytes", type=int, required=True)
     parser.add_argument("--reserved-headroom-bytes", type=int, required=True)
     args = parser.parse_args(argv)

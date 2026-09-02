@@ -413,6 +413,34 @@ class ProgressiveRunControllerTests(unittest.TestCase):
         self.assertFalse(path.exists())
         self.assertEqual(list(path.parent.glob(f".{path.name}.*")), [])
 
+    def test_post_link_directory_fsync_failure_keeps_complete_no_clobber_target(
+        self,
+    ) -> None:
+        path = self.base / "evidence.json"
+        value = {"status": "complete", "value": 1}
+        real_fsync = os.fsync
+
+        def fail_after_link(descriptor: int) -> None:
+            temporary = list(path.parent.glob(f".{path.name}.*"))
+            if path.exists() and not temporary:
+                raise OSError("injected post-link directory fsync failure")
+            real_fsync(descriptor)
+
+        with (
+            patch(
+                "graphforge_bench.progressive_run.os.fsync",
+                side_effect=fail_after_link,
+            ),
+            self.assertRaisesRegex(OSError, "post-link directory fsync failure"),
+        ):
+            publish_json_no_clobber(path, value)
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8")), value)
+        self.assertEqual(list(path.parent.glob(f".{path.name}.*")), [])
+        with self.assertRaises(FileExistsError):
+            publish_json_no_clobber(path, {"status": "replacement"})
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8")), value)
+        self.assertEqual(list(path.parent.glob(f".{path.name}.*")), [])
+
     def test_publication_refuses_symlinked_directory_components(self) -> None:
         outside = self.base / "outside"
         outside.mkdir()
