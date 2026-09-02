@@ -72,6 +72,24 @@ def attempt(**changes: object) -> FlyAttempt:
 
 
 class FlyAdapterTests(unittest.TestCase):
+    def test_progressive_image_build_preserves_incremental_cargo_cache(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        dockerfile = (
+            root / "containers" / "graphforge-progressive-qualification" / "Dockerfile"
+        ).read_text(encoding="utf-8")
+        dockerignore = (root / ".dockerignore").read_text(encoding="utf-8").splitlines()
+
+        self.assertIn("**/target", dockerignore)
+        self.assertIn("**/.venv", dockerignore)
+        self.assertIn("target=/usr/local/cargo/registry", dockerfile)
+        self.assertEqual(dockerfile.count("target=/cargo-target"), 1)
+        self.assertEqual(dockerfile.count("CARGO_TARGET_DIR=/cargo-target cargo build"), 2)
+        self.assertLess(
+            dockerfile.index("cargo build --locked"),
+            dockerfile.index("ARG GRAPHFORGE_COMMIT"),
+        )
+        self.assertIn("COPY --from=rust-build /artifacts/gf", dockerfile)
+
     def test_remote_build_is_remote_only_pushed_and_commit_pinned(self) -> None:
         command = remote_build_command(
             app="gf-fixture",
