@@ -586,6 +586,7 @@ impl PhysicalOptimizerRule for FixedHopDemandRule {
         } else {
             plan
         };
+        let plan = crate::ordered_two_hop::try_rewrite_ordered_two_hop(plan)?;
         let Some(terminal) = find_terminal_demand(&plan) else {
             if capture_enabled() {
                 let mut rss_ordinal = 0;
