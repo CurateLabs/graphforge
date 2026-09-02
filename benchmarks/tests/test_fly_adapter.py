@@ -82,8 +82,8 @@ class FlyAdapterTests(unittest.TestCase):
         self.assertIn("**/target", dockerignore)
         self.assertIn("**/.venv", dockerignore)
         self.assertIn("target=/usr/local/cargo/registry", dockerfile)
-        self.assertIn("target=/source/target", dockerfile)
-        self.assertIn("target=/source/benchmarks/target", dockerfile)
+        self.assertEqual(dockerfile.count("target=/cargo-target"), 1)
+        self.assertEqual(dockerfile.count("CARGO_TARGET_DIR=/cargo-target cargo build"), 2)
         self.assertLess(
             dockerfile.index("cargo build --locked"),
             dockerfile.index("ARG GRAPHFORGE_COMMIT"),

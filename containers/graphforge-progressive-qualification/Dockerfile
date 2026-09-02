@@ -14,16 +14,15 @@ RUN test "${TARGETOS}/${TARGETARCH}" = linux/amd64 \
     && chmod 0444 /source-tree-sha256
 RUN --mount=type=cache,id=graphforge-progressive-cargo-registry-v1,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=graphforge-progressive-cargo-git-v1,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=graphforge-progressive-target-v1,target=/source/target,sharing=locked \
-    --mount=type=cache,id=graphforge-progressive-benchmark-target-v1,target=/source/benchmarks/target,sharing=locked \
-    cargo build --locked --release --package graphforge-cli --bin gf \
-    && cargo build --manifest-path benchmarks/Cargo.toml --locked --release \
+    --mount=type=cache,id=graphforge-progressive-target-v1,target=/cargo-target,sharing=locked \
+    CARGO_TARGET_DIR=/cargo-target cargo build --locked --release --package graphforge-cli --bin gf \
+    && CARGO_TARGET_DIR=/cargo-target cargo build --manifest-path benchmarks/Cargo.toml --locked --release \
         --package graphforge-benchmark-certify \
         --package graphforge-benchmark-graph500-generator \
-    && install -D -m 0555 target/release/gf /artifacts/gf \
-    && install -D -m 0555 benchmarks/target/release/graphforge-benchmark-certify \
+    && install -D -m 0555 /cargo-target/release/gf /artifacts/gf \
+    && install -D -m 0555 /cargo-target/release/graphforge-benchmark-certify \
         /artifacts/graphforge-benchmark-certify \
-    && install -D -m 0555 benchmarks/target/release/graphforge-benchmark-graph500-generator \
+    && install -D -m 0555 /cargo-target/release/graphforge-benchmark-graph500-generator \
         /artifacts/graphforge-benchmark-graph500-generator
 ARG GRAPHFORGE_COMMIT
 RUN printf '%s\n' "${GRAPHFORGE_COMMIT}" | grep -Eq '^[0-9a-f]{40}$' \
