@@ -34,6 +34,67 @@
         "additionalProperties": false
       }
     },
+    "live_context": {
+      "type": "object",
+      "properties": {
+        "operation": { "const": "IS1" },
+        "parameter": {
+          "type": "object",
+          "properties": {
+            "name": { "const": "personId" },
+            "data_type": { "const": "int64" },
+            "value": { "const": 1001 }
+          },
+          "required": ["name", "data_type", "value"],
+          "additionalProperties": false
+        },
+        "fixture_sha256": { "$ref": "#/$defs/sha256" },
+        "job_sha256": { "$ref": "#/$defs/sha256" },
+        "reference_sha256": { "$ref": "#/$defs/sha256" },
+        "acquisition_sha256": { "$ref": "#/$defs/sha256" },
+        "identity_sha256": { "$ref": "#/$defs/sha256" },
+        "public_api": { "const": "graphforge_api::GraphForge" },
+        "mode": { "const": "in_memory" },
+        "query": { "type": "string", "minLength": 1 },
+        "row_schema": {
+          "type": "array",
+          "minItems": 8,
+          "maxItems": 8,
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string", "minLength": 1 },
+              "data_type": { "enum": ["utf8", "int64"] }
+            },
+            "required": ["name", "data_type"],
+            "additionalProperties": false
+          }
+        },
+        "row_order": {
+          "type": "array",
+          "minItems": 8,
+          "maxItems": 8,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "normalization": { "type": "string", "minLength": 1 }
+      },
+      "required": [
+        "operation",
+        "parameter",
+        "fixture_sha256",
+        "job_sha256",
+        "reference_sha256",
+        "acquisition_sha256",
+        "identity_sha256",
+        "public_api",
+        "mode",
+        "query",
+        "row_schema",
+        "row_order",
+        "normalization"
+      ],
+      "additionalProperties": false
+    },
     "identities": { "type": "object" },
     "operations": {
       "type": "array",
@@ -93,5 +154,21 @@
     "identities",
     "operations"
   ],
-  "additionalProperties": false
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": { "lane": { "const": "live_in_memory" } },
+        "required": ["lane"]
+      },
+      "then": { "required": ["live_context"] },
+      "else": { "not": { "required": ["live_context"] } }
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    }
+  }
 }

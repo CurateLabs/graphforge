@@ -3,12 +3,11 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-import shutil
 import subprocess
 import tempfile
 import unittest
 
-from graphforge_bench.gdc_contracts import GdcContractError, list_gdc_suites, workspace_root
+from graphforge_bench.gdc_contracts import list_gdc_suites, workspace_root
 from graphforge_bench.gdc_snb_interactive import (
     COMPLEX_READS,
     EVIDENCE_SCHEMA,
@@ -164,6 +163,18 @@ class GdcSnbInteractiveSuiteTests(unittest.TestCase):
             evidence["identities"]["fixture"]["classification"], "synthetic_engineering_fixture"
         )
         self.assertIsNone(evidence["identities"]["runner"]["commit"])
+        context = evidence["live_context"]
+        self.assertEqual(context["operation"], "IS1")
+        self.assertEqual(
+            context["parameter"], {"name": "personId", "data_type": "int64", "value": 1001}
+        )
+        self.assertEqual(context["public_api"], "graphforge_api::GraphForge")
+        self.assertEqual(context["mode"], "in_memory")
+        self.assertEqual(len(context["row_schema"]), 8)
+        self.assertEqual(
+            context["row_order"],
+            [field["name"] for field in context["row_schema"]],
+        )
         Draft202012Validator(
             json.loads(
                 (self.root / "schemas" / "gdc-snb-interactive-evidence.json").read_text(
@@ -172,49 +183,68 @@ class GdcSnbInteractiveSuiteTests(unittest.TestCase):
             )
         ).validate(evidence)
 
-    def test_live_parameter_and_reference_mutations_fail(self) -> None:
-        source = self.root / "fixtures" / "gdc" / "snb-interactive-live-is1"
-        with tempfile.TemporaryDirectory() as tmp:
-            copied = Path(tmp) / "fixture"
-            shutil.copytree(source, copied)
-            job = json.loads((copied / "IS1.json").read_text(encoding="utf-8"))
-            job["parameters"]["personId"] = 9999
-            (copied / "IS1.json").write_text(json.dumps(job), encoding="utf-8")
-            with self.assertRaises(SnbInteractiveSuiteError) as raised:
-                run_live_is1(fixture_path=copied / "graph.json")
-            self.assertEqual(raised.exception.cause, "reference_mismatch")
+    def test_python_wrapper_cannot_supply_rows_fixture_reference_or_identity(self) -> None:
+        for replacement in (
+            {"fixture_path": Path("graph.json")},
+            {"job_path": Path("IS1.json")},
+            {"reference_path": Path("IS1.ref")},
+            {"rows": [["forged"]]},
+            {"identities": {}},
+        ):
+            with self.assertRaises(TypeError):
+                run_live_is1(**replacement)
 
-        with tempfile.NamedTemporaryFile("w", suffix=".ref") as mutated:
-            mutated.write(
-                "Grace Hopper 1906-12-09 192.0.2.11 Safari 2001 female 2026-01-03T04:05:06Z\n"
+    def test_adversarial_producer_envelope_cannot_emit_live_success(self) -> None:
+        fixture = self.root / "fixtures" / "gdc" / "snb-interactive-live-is1"
+        forged = {
+            "schema": "graphforge-arrow-row-receipt/1",
+            "source": "graphforge_in_memory_execute",
+            "columns": [
+                "firstName",
+                "lastName",
+                "birthday",
+                "locationIP",
+                "browserUsed",
+                "cityId",
+                "gender",
+                "creationDate",
+            ],
+            "rows": [(fixture / "IS1.ref").read_text(encoding="utf-8").splitlines()[-1].split()],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            envelope = tmp_path / "forged-envelope.json"
+            identities = tmp_path / "empty-identities.json"
+            evidence = tmp_path / "evidence.json"
+            envelope.write_text(json.dumps(forged), encoding="utf-8")
+            identities.write_text("{}", encoding="utf-8")
+            completed = subprocess.run(
+                [
+                    str(self.binary),
+                    "validate-live-is1",
+                    str(fixture / "IS1.json"),
+                    str(fixture / "IS1.ref"),
+                    str(envelope),
+                    str(identities),
+                    str(evidence),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
             )
-            mutated.flush()
-            with self.assertRaises(SnbInteractiveSuiteError) as raised:
-                run_live_is1(reference_path=Path(mutated.name))
-            self.assertEqual(raised.exception.cause, "reference_mismatch")
+            self.assertEqual(completed.returncode, 2)
+            self.assertIn("unknown command", completed.stderr)
+            self.assertFalse(evidence.exists())
 
-    def test_live_lane_rejects_static_fixture_and_acquisition_drift(self) -> None:
-        static_graph = (
-            self.root
-            / "fixtures"
-            / "gdc"
-            / "snb-interactive-tiny"
-            / "compatible"
-            / "snb-interactive-static-synthetic-v1.graph"
-        )
-        with self.assertRaises((json.JSONDecodeError, GdcContractError, SnbInteractiveSuiteError)):
-            run_live_is1(fixture_path=static_graph)
-
-        source = self.root / "fixtures" / "gdc" / "snb-interactive-live-is1"
-        with tempfile.TemporaryDirectory() as tmp:
-            copied = Path(tmp) / "fixture"
-            shutil.copytree(source, copied)
-            acquisition = json.loads((copied / "acquisition.json").read_text(encoding="utf-8"))
-            acquisition["recorded_driver"]["commit"] = "0" * 40
-            (copied / "acquisition.json").write_text(json.dumps(acquisition), encoding="utf-8")
-            with self.assertRaises(GdcContractError) as raised:
-                run_live_is1(fixture_path=copied / "graph.json")
-            self.assertEqual(raised.exception.cause, "identity_drift")
+            extra_arg = subprocess.run(
+                [str(self.binary), "run-live-is1", str(evidence), str(envelope)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(extra_arg.returncode, 2)
+            self.assertIn("accepts only EVIDENCE.json", extra_arg.stderr)
+            self.assertFalse(evidence.exists())
 
     def test_index_and_readme_point_at_snb_interactive_suite(self) -> None:
         index = (self.root / "gdc-suite-index.md").read_text(encoding="utf-8")

@@ -82,11 +82,13 @@ public Cypher / analyst-verb surface, separates load/warmup/execution/validation
 phases, and fails closed with typed causes on update-stream and IC14 weighted-path
 semantics the public surface does not expose. `run_tiny_suite` is explicitly a
 legacy static-replay lane over committed `.out` files. `run_live_is1` is the
-separate live lane: it loads a committed synthetic engineering fixture through
-the public construction API, warms and executes IS1 with an explicit `personId`
-on `GraphForge()` in memory, normalizes its Arrow rows, and delegates comparison
-with the independently declared IS1 reference to the Rust validator. Neither
-fixture is official Datagen scale-factor output. Evidence records
+thin Python orchestrator for the trusted Rust `run-live-is1` command. That
+command embeds and checksum-binds the committed synthetic fixture, job,
+reference, acquisition, and identity; creates `graphforge_api::GraphForge`
+in memory; loads through the public construction API; warms and executes IS1
+with fixed typed `personId`; and normalizes and validates Arrow rows itself.
+It accepts only an evidence output path, never caller rows or identities.
+Neither fixture is official Datagen scale-factor output. Evidence records
 `certification: false` and never masquerades as an audited GDC certification.
 
 The FinBench Transaction suite adapter is `graphforge_bench.gdc_finbench_transaction`

@@ -1,7 +1,6 @@
 use graphforge_benchmark_gdc_snb_interactive::{
-    JOB_SCHEMA, MappingOutcome, Operation, OperationJob, OperationStatus,
-    assemble_evidence, assemble_live_is1_evidence, load_live_arrow_rows, load_result_rows,
-    map_operation, operation_rules, run_job, run_live_is1_job,
+    JOB_SCHEMA, MappingOutcome, Operation, OperationJob, OperationStatus, assemble_evidence,
+    load_result_rows, map_operation, operation_rules, run_job, run_trusted_live_is1,
 };
 use std::env;
 use std::fs;
@@ -13,7 +12,7 @@ fn main() -> ExitCode {
     let Some(command) = args.next() else {
         eprintln!(
             "usage: graphforge-benchmark-gdc-snb-interactive \
-             <list-operations|map-operation|run-suite|validate-live-is1> ..."
+             <list-operations|map-operation|run-suite|run-live-is1> ..."
         );
         return ExitCode::from(2);
     };
@@ -84,37 +83,16 @@ fn main() -> ExitCode {
                 }
             }
         }
-        "validate-live-is1" => {
-            let Some(job_path) = args.next() else {
-                eprintln!(
-                    "usage: validate-live-is1 JOB.json REFERENCE.ref ARROW_ROWS.out \
-                     IDENTITIES.json EVIDENCE.json"
-                );
-                return ExitCode::from(2);
-            };
-            let Some(reference_path) = args.next() else {
-                eprintln!("missing REFERENCE.ref");
-                return ExitCode::from(2);
-            };
-            let Some(system_path) = args.next() else {
-                eprintln!("missing ARROW_ROWS.out");
-                return ExitCode::from(2);
-            };
-            let Some(identities_path) = args.next() else {
-                eprintln!("missing IDENTITIES.json");
-                return ExitCode::from(2);
-            };
+        "run-live-is1" => {
             let Some(evidence_path) = args.next() else {
-                eprintln!("missing EVIDENCE.json");
+                eprintln!("usage: run-live-is1 EVIDENCE.json");
                 return ExitCode::from(2);
             };
-            match validate_live_is1(
-                &job_path,
-                &reference_path,
-                &system_path,
-                &identities_path,
-                &evidence_path,
-            ) {
+            if args.next().is_some() {
+                eprintln!("run-live-is1 accepts only EVIDENCE.json");
+                return ExitCode::from(2);
+            }
+            match run_live_is1(&evidence_path) {
                 Ok(code) => code,
                 Err(error) => {
                     eprintln!("{error}");
@@ -129,32 +107,14 @@ fn main() -> ExitCode {
     }
 }
 
-fn validate_live_is1(
-    job_path: &str,
-    reference_path: &str,
-    system_path: &str,
-    identities_path: &str,
-    evidence_path: &str,
-) -> Result<ExitCode, String> {
-    let job = load_job(job_path)?;
-    let reference =
-        load_result_rows(&PathBuf::from(reference_path)).map_err(|error| error.to_string())?;
-    let system =
-        load_live_arrow_rows(&PathBuf::from(system_path)).map_err(|error| error.to_string())?;
-    let identities: serde_json::Value = serde_json::from_str(
-        &fs::read_to_string(identities_path).map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| error.to_string())?;
-    let outcome = run_live_is1_job(&job, &reference, &system);
-    let failed = matches!(outcome.status, OperationStatus::Failed);
-    let evidence = assemble_live_is1_evidence(&job.dataset_id, identities, outcome);
+fn run_live_is1(evidence_path: &str) -> Result<ExitCode, String> {
+    if PathBuf::from(evidence_path).exists() {
+        return Err("refusing to overwrite existing live evidence".into());
+    }
+    let evidence = run_trusted_live_is1().map_err(|error| error.to_string())?;
     let payload = serde_json::to_string_pretty(&evidence).map_err(|error| error.to_string())?;
     fs::write(evidence_path, format!("{payload}\n")).map_err(|error| error.to_string())?;
-    Ok(if failed {
-        ExitCode::FAILURE
-    } else {
-        ExitCode::SUCCESS
-    })
+    Ok(ExitCode::SUCCESS)
 }
 
 fn load_job(path: &str) -> Result<OperationJob, String> {

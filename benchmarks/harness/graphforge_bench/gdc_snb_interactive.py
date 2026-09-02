@@ -33,28 +33,6 @@ OPERATIONS = COMPLEX_READS + SHORT_READS + UPDATES
 JOB_SCHEMA = "graphforge-gdc-snb-interactive-job/1"
 EVIDENCE_SCHEMA = "graphforge-gdc-snb-interactive-evidence/1"
 LIVE_DATASET_ID = "snb-interactive-live-is1-synthetic-v1"
-LIVE_IS1_COLUMNS = (
-    "firstName",
-    "lastName",
-    "birthday",
-    "locationIP",
-    "browserUsed",
-    "cityId",
-    "gender",
-    "creationDate",
-)
-LIVE_IS1_QUERY = """
-MATCH (person:Person)-[:IS_LOCATED_IN]->(city:City)
-WHERE person.id = $personId
-RETURN person.firstName AS firstName,
-       person.lastName AS lastName,
-       person.birthday AS birthday,
-       person.locationIP AS locationIP,
-       person.browserUsed AS browserUsed,
-       city.id AS cityId,
-       person.gender AS gender,
-       person.creationDate AS creationDate
-"""
 
 UPDATE_CAUSE = "interactive_update_stream_not_exposed"
 IC14_CAUSE = "weighted_interaction_path_enumeration_not_exposed"
@@ -181,118 +159,26 @@ def run_tiny_suite(
         return evidence
 
 
-def _arrow_row_receipt(table: Any) -> dict[str, Any]:
-    if tuple(table.column_names) != LIVE_IS1_COLUMNS:
-        raise SnbInteractiveSuiteError(
-            "invalid_live_result",
-            f"IS1 Arrow columns drifted: expected {LIVE_IS1_COLUMNS}, got {table.column_names}",
-        )
-    rows: list[list[Any]] = []
-    for row in table.to_pylist():
-        values = [row[column] for column in LIVE_IS1_COLUMNS]
-        if any(value is None for value in values):
-            raise SnbInteractiveSuiteError("invalid_live_result", "IS1 returned a null field")
-        rows.append(values)
-    return {
-        "schema": "graphforge-arrow-row-receipt/1",
-        "source": "graphforge_in_memory_execute",
-        "columns": list(LIVE_IS1_COLUMNS),
-        "rows": rows,
-    }
-
-
 def run_live_is1(
     *,
     root: Path | None = None,
     evidence_path: Path | None = None,
-    fixture_path: Path | None = None,
-    job_path: Path | None = None,
-    reference_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Load and execute synthetic IS1 through a real in-memory GraphForge instance."""
-    from graphforge import GraphForge
-
+    """Orchestrate the trusted Rust-owned in-memory IS1 command."""
     base = root or workspace_root()
-    fixture = fixture_path or (
-        base / "fixtures" / "gdc" / "snb-interactive-live-is1" / "graph.json"
-    )
-    job_file = job_path or fixture.parent / "IS1.json"
-    reference = reference_path or fixture.parent / "IS1.ref"
-    acquisition = json.loads((fixture.parent / "acquisition.json").read_text(encoding="utf-8"))
-    pin = load_pinned_identity(live_identity_path(base))
-    contract_evidence = validate_acquisition(pin, acquisition, fixture.parent)
-    graph = json.loads(fixture.read_text(encoding="utf-8"))
-    if graph.get("classification") != "synthetic_engineering_fixture":
-        raise SnbInteractiveSuiteError(
-            "invalid_document", "live graph must be classified as a synthetic engineering fixture"
-        )
-    job = json.loads(job_file.read_text(encoding="utf-8"))
-    if job.get("dataset_id") != LIVE_DATASET_ID or job.get("operation") != "IS1":
-        raise SnbInteractiveSuiteError(
-            "invalid_document", "live lane accepts only its pinned IS1 job"
-        )
-    parameters = job.get("parameters")
-    if (
-        not isinstance(parameters, dict)
-        or set(parameters) != {"personId"}
-        or not isinstance(parameters["personId"], int)
-    ):
-        raise SnbInteractiveSuiteError(
-            "invalid_document", "live IS1 requires exactly one integer personId parameter"
-        )
-
-    forge = GraphForge()
-    handles: dict[str, Any] = {}
-    for node in graph.get("nodes", []):
-        handles[node["key"]] = forge.add_node(node["label"], **node["properties"])
-    for edge in graph.get("edges", []):
-        forge.add_edge(
-            handles[edge["source"]],
-            edge["type"],
-            handles[edge["destination"]],
-        )
-
-    # Warmup and measured execution use the same explicit parameter binding.
-    forge.execute(LIVE_IS1_QUERY, parameters)
-    arrow_table = forge.execute(LIVE_IS1_QUERY, parameters)
-    arrow_rows = _arrow_row_receipt(arrow_table)
-
-    identities = contract_evidence["identities"]
-    identities["fixture"] = {"classification": "synthetic_engineering_fixture"}
-    identities["runner"] = {
-        "name": "graphforge-benchmark-gdc-snb-interactive",
-        "release": "workspace",
-        # A checked-in file cannot truthfully pin the commit that includes itself.
-        "commit": None,
-    }
     with tempfile.TemporaryDirectory(prefix="gdc-snb-interactive-live-") as tmp:
-        tmp_path = Path(tmp)
-        rows_path = tmp_path / "arrow-rows.json"
-        rows_path.write_text(json.dumps(arrow_rows), encoding="utf-8")
-        identities_path = tmp_path / "identities.json"
-        identities_path.write_text(json.dumps(identities, indent=2) + "\n", encoding="utf-8")
-        out_evidence = evidence_path or (tmp_path / "evidence.json")
-        completed = _run_runner(
-            [
-                "validate-live-is1",
-                str(job_file),
-                str(reference),
-                str(rows_path),
-                str(identities_path),
-                str(out_evidence),
-            ],
-            base,
-        )
+        out_evidence = evidence_path or (Path(tmp) / "evidence.json")
+        completed = _run_runner(["run-live-is1", str(out_evidence)], base)
         if not out_evidence.is_file():
             raise SnbInteractiveSuiteError(
                 "invalid_live_result",
-                f"live validator did not emit evidence: {completed.stderr.strip()}",
+                f"trusted live runner did not emit evidence: {completed.stderr.strip()}",
             )
         evidence = json.loads(out_evidence.read_text(encoding="utf-8"))
         if completed.returncode != 0:
             raise SnbInteractiveSuiteError(
-                "reference_mismatch",
-                evidence["operations"][0].get("cause", completed.stderr.strip()),
+                "live_execution",
+                completed.stderr.strip(),
             )
         if evidence.get("lane") != "live_in_memory" or evidence.get("certification") is not False:
             raise SnbInteractiveSuiteError(
@@ -339,8 +225,6 @@ __all__ = [
     "IC14_CAUSE",
     "JOB_SCHEMA",
     "LIVE_DATASET_ID",
-    "LIVE_IS1_COLUMNS",
-    "LIVE_IS1_QUERY",
     "OPERATIONS",
     "SHORT_READS",
     "UPDATES",
