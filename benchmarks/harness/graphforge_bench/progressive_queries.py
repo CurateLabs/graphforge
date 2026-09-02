@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
-ONE_HOP_ORDERED_LIMIT = "MATCH (a)-[r]->(b) RETURN b.node_uuid AS id ORDER BY id LIMIT 1000"
+ORDERED_LIMIT_ROW_COUNT = 1000
+
+ONE_HOP_ORDERED_LIMIT = (
+    f"MATCH (a)-[r]->(b) RETURN b.node_uuid AS id ORDER BY id LIMIT {ORDERED_LIMIT_ROW_COUNT}"
+)
 TWO_HOP_ORDERED_LIMIT = (
-    "MATCH (a)-[r1]->(b)-[r2]->(c) RETURN c.node_uuid AS id ORDER BY id LIMIT 1000"
+    f"MATCH (a)-[r1]->(b)-[r2]->(c) RETURN c.node_uuid AS id ORDER BY id "
+    f"LIMIT {ORDERED_LIMIT_ROW_COUNT}"
 )
 
 CANONICAL_QUERY_PHASES = (

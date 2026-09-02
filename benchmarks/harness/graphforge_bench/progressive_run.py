@@ -31,6 +31,7 @@ from graphforge_bench.benchexec_authority import Limits, normalize_run
 from graphforge_bench.hybrid_cgroup_v2 import measure_hybrid_pressure
 from graphforge_bench.local_admission import qualify_local_host
 from graphforge_bench.progressive_qualification import QualificationError, load_profiles, project
+from graphforge_bench.progressive_queries import ORDERED_LIMIT_ROW_COUNT
 
 PLAN_SCHEMA = "graphforge-progressive-run-plan/1"
 RESULT_SCHEMA = "graphforge-progressive-run-result/1"
@@ -675,8 +676,8 @@ def assemble_rung_evidence(
         if source_counts[index]["result_sha256"] != imported_counts[index]["result_sha256"]:
             raise ControllerError("source/imported recount evidence disagrees")
     if any(
-        source.get("rows") != 1024
-        or imported_receipt.get("rows") != 1024
+        source.get("rows") != ORDERED_LIMIT_ROW_COUNT
+        or imported_receipt.get("rows") != ORDERED_LIMIT_ROW_COUNT
         or source["result_sha256"] != imported_receipt["result_sha256"]
         for source, imported_receipt in zip(source_hops, imported_hops, strict=True)
     ):
