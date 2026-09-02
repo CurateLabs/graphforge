@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import copy
+import json
+from pathlib import Path
+import tempfile
 import unittest
 
 from graphforge_bench.progressive_storage_qualification import (
     StorageQualificationError,
     build,
+    main,
     validate,
     validate_source_rung,
 )
@@ -63,6 +67,14 @@ class ProgressiveStorageQualificationTests(unittest.TestCase):
         ]
         with self.assertRaisesRegex(StorageQualificationError, "application_io"):
             validate_source_rung(missing_phase)
+        for malformed in (True, -1, "1"):
+            with self.subTest(portable_allocation=malformed):
+                invalid = self.source_pair()[0]
+                invalid["storage_attribution"]["portable_package"]["allocation_allocated_bytes"] = (
+                    malformed
+                )
+                with self.assertRaises(StorageQualificationError):
+                    validate_source_rung(invalid)
 
     def test_one_rung_and_non_adjacent_rungs_are_rejected(self) -> None:
         with self.assertRaisesRegex(StorageQualificationError, "exactly two"):
@@ -106,6 +118,33 @@ class ProgressiveStorageQualificationTests(unittest.TestCase):
         contradiction["projection"]["decision"] = "admit"
         with self.assertRaisesRegex(StorageQualificationError, "decision contradicts"):
             validate(contradiction)
+
+    def test_cli_writes_only_the_validated_closed_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            low, high = self.source_pair()
+            low_path = root / "s20-rung.json"
+            high_path = root / "s22-rung.json"
+            output = root / "qualification.json"
+            low_path.write_text(json.dumps(low), encoding="utf-8")
+            high_path.write_text(json.dumps(high), encoding="utf-8")
+            self.assertEqual(
+                main(
+                    [
+                        str(low_path),
+                        str(high_path),
+                        str(output),
+                        "--volume-bytes",
+                        str(VOLUME_BYTES),
+                        "--reserved-headroom-bytes",
+                        str(RESERVED_BYTES),
+                    ]
+                ),
+                0,
+            )
+            evidence = json.loads(output.read_text(encoding="utf-8"))
+            validate(evidence)
+            self.assertNotIn(str(root), output.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
