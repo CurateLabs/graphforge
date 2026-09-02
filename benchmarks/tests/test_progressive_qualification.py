@@ -28,6 +28,7 @@ CAPACITY = {
 def rung(scale: int, *, rss: int = 1_000_000_000, wall: int = 100) -> dict:
     multiplier = 1 << max(0, scale - 18)
     return {
+        "assembly_contract": "graphforge-progressive-rung-assembly/2",
         "profile_id": f"graph500-s{scale}-evidence",
         "source": "canonical_ladder" if scale in {24, 25} else "progressive_profile",
         "scale": scale,
@@ -65,6 +66,7 @@ def rung(scale: int, *, rss: int = 1_000_000_000, wall: int = 100) -> dict:
             "query_qualification": ["live_edges", "correctness"],
         },
         "storage_components": {
+            "source_project_current_allocated_bytes": 450_000 * multiplier,
             "source_allocated_physical_bytes": 400_000 * multiplier,
             "source_retained_logical_eof_bytes": 500_000 * multiplier,
             "imported_allocated_physical_bytes": 400_000 * multiplier,
@@ -222,6 +224,22 @@ class ProgressiveQualificationTests(unittest.TestCase):
         missing_capacity = copy.deepcopy(evidence)
         missing_capacity["provider_capacity"] = None
         self.assertFalse(self.evidence_schema.is_valid(missing_capacity))
+
+    def test_source_project_union_allocation_is_typed_but_additive_for_old_rungs(self) -> None:
+        current = rung(18)
+        self.rung_schema.validate(current)
+        missing = copy.deepcopy(current)
+        del missing["storage_components"]["source_project_current_allocated_bytes"]
+        self.assertFalse(self.rung_schema.is_valid(missing))
+        historical = copy.deepcopy(current)
+        del historical["assembly_contract"]
+        del historical["storage_components"]["source_project_current_allocated_bytes"]
+        self.rung_schema.validate(historical)
+        for malformed in (True, -1, "450000"):
+            with self.subTest(malformed=malformed):
+                invalid = copy.deepcopy(current)
+                invalid["storage_components"]["source_project_current_allocated_bytes"] = malformed
+                self.assertFalse(self.rung_schema.is_valid(invalid))
 
     def test_profile_schema_rejects_non_string_generator_identity(self) -> None:
         profile = json.loads((ROOT / "profiles/graph500/s18-local.json").read_text())

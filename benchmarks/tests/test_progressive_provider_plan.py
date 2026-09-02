@@ -26,6 +26,7 @@ COMMIT = subprocess.run(
 
 def rung(scale: int, *, source: str | None = None) -> dict:
     return {
+        "assembly_contract": "graphforge-progressive-rung-assembly/2",
         "profile_id": f"graph500-s{scale}-{'local' if scale in (18, 19) else 'provider'}",
         "source": source or ("progressive_profile" if scale in (18, 19) else "canonical_ladder"),
         "scale": scale,
@@ -74,6 +75,7 @@ def rung(scale: int, *, source: str | None = None) -> dict:
             "query_qualification": ["live_edges", "correctness"],
         },
         "storage_components": {
+            "source_project_current_allocated_bytes": 105,
             "source_allocated_physical_bytes": 100,
             "source_retained_logical_eof_bytes": 110,
             "imported_allocated_physical_bytes": 120,

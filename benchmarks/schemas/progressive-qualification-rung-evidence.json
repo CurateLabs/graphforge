@@ -5,6 +5,7 @@
   "additionalProperties": false,
   "required": ["profile_id", "source", "scale", "live_edges", "status", "correctness", "phases", "metrics", "metric_sources", "failure"],
   "properties": {
+    "assembly_contract": {"const": "graphforge-progressive-rung-assembly/2"},
     "profile_id": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,80}$"},
     "source": {"enum": ["progressive_profile", "canonical_ladder"]},
     "scale": {"type": "integer", "minimum": 1, "maximum": 26},
@@ -38,6 +39,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["source_allocated_physical_bytes", "source_retained_logical_eof_bytes", "imported_allocated_physical_bytes", "imported_retained_logical_eof_bytes", "transient_peak_allocated_bytes", "logical_read_bytes", "logical_write_bytes", "reader_calls", "publication_work_units"],
       "properties": {
+        "source_project_current_allocated_bytes": {"$ref": "#/$defs/nonnegative"},
         "source_allocated_physical_bytes": {"$ref": "#/$defs/nonnegative"},
         "source_retained_logical_eof_bytes": {"$ref": "#/$defs/nonnegative"},
         "imported_allocated_physical_bytes": {"$ref": "#/$defs/nonnegative"},
@@ -64,6 +66,22 @@
         }
       },
       "else": {"properties": {"failure": {"type": "string"}}}
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {"const": "passed"},
+          "assembly_contract": {"const": "graphforge-progressive-rung-assembly/2"}
+        },
+        "required": ["status", "assembly_contract"]
+      },
+      "then": {
+        "properties": {
+          "storage_components": {
+            "required": ["source_project_current_allocated_bytes"]
+          }
+        }
+      }
     }
   ],
   "$defs": {"nonnegative": {"type": "integer", "minimum": 0}}
