@@ -706,16 +706,12 @@ class ProgressiveRunControllerTests(unittest.TestCase):
         with patch("graphforge_bench.progressive_run._provider_volume_mounted", return_value=True):
             self.assertEqual(_benchexec_tool_directory(stage), stage / "bin")
 
-    def test_provider_volume_keeps_four_gib_benchexec_memory(self) -> None:
+    def test_provider_volume_uses_exact_planned_binary_memory_limit(self) -> None:
         stage = self.base / "stage"
         stage.mkdir()
         with patch("graphforge_bench.progressive_run._provider_volume_mounted", return_value=True):
             from graphforge_bench.progressive_run import _stage_benchmark_xml
 
-            _stage_benchmark_xml(ROOT, stage)
-            xml = (stage / "benchmark.xml").read_text(encoding="utf-8")
-            self.assertIn('memlimit="4 GB"', xml)
-            self.assertNotIn('memlimit="16 GB"', xml)
             plan = build_plan(
                 root=ROOT,
                 output_dir=self.output,
@@ -723,6 +719,13 @@ class ProgressiveRunControllerTests(unittest.TestCase):
                 commit=COMMIT,
                 executables=self.executables,
             )
+            _stage_benchmark_xml(ROOT, stage)
+            xml = (stage / "benchmark.xml").read_text(encoding="utf-8")
+            self.assertIn(
+                f'memlimit="{plan["limits"]["memory_bytes"]} B"',
+                xml,
+            )
+            self.assertNotIn('memlimit="4 GB"', xml)
             (stage / "bin").mkdir()
             (stage / "benchmark.xml").write_text("fixture", encoding="utf-8")
             with (
