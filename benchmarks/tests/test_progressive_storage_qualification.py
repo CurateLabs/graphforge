@@ -9,7 +9,7 @@ from graphforge_bench.progressive_storage_qualification import (
     validate,
     validate_source_rung,
 )
-from test_progressive_qualification import rung
+from tests.test_progressive_qualification import rung
 
 
 VOLUME_BYTES = 500 * 1024**3
@@ -62,7 +62,7 @@ class ProgressiveStorageQualificationTests(unittest.TestCase):
         del missing_phase["storage_attribution"]["construction"]["application_io"]["phases"][
             "recovery_reauthentication"
         ]
-        with self.assertRaisesRegex(StorageQualificationError, "application I/O"):
+        with self.assertRaisesRegex(StorageQualificationError, "application_io"):
             validate_source_rung(missing_phase)
 
     def test_one_rung_and_non_adjacent_rungs_are_rejected(self) -> None:
