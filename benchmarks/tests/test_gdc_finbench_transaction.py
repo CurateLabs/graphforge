@@ -156,72 +156,46 @@ class GdcFinBenchTransactionSuiteTests(unittest.TestCase):
         self._evidence_validator().validate(evidence)
 
     def test_live_params_drive_mismatch_and_invalid_params_fail_as_harness(self) -> None:
-        fixture = self.root / "fixtures" / "gdc" / "finbench-transaction-live"
-        identities = fixture / "acquisition.json"
         with tempfile.TemporaryDirectory(prefix="finbench-live-params-") as tmp:
             work = Path(tmp)
-            request = json.loads((fixture / "TCR10-request.json").read_text())
-            request["params"]["id2"] = "person-noise"
-            mismatch_request = work / "mismatch.json"
-            mismatch_request.write_text(json.dumps(request), encoding="utf-8")
             evidence_path = work / "mismatch-evidence.json"
-            completed = subprocess.run(
-                [
-                    str(self.binary),
-                    "run-live",
-                    str(fixture / "fixture.json"),
-                    str(mismatch_request),
-                    str(fixture / "TCR10-reference.ref"),
-                    str(identities),
-                    str(evidence_path),
-                ],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-            self.assertNotEqual(completed.returncode, 0)
+            with self.assertRaises(FinBenchTransactionSuiteError) as mismatch:
+                run_live_suite(
+                    evidence_path=evidence_path,
+                    params_override={"id2": "person-noise"},
+                )
+            self.assertEqual(mismatch.exception.cause, "correctness_failed")
             evidence = json.loads(evidence_path.read_text())
             self.assertEqual(evidence["status"], "correctness_failed")
             self.assertEqual(evidence["resource_events"], [])
             self.assertEqual(evidence["harness_failures"], [])
 
-            request["params"]["start"] = {"not": "scalar"}
-            invalid_request = work / "invalid.json"
-            invalid_request.write_text(json.dumps(request), encoding="utf-8")
-            invalid_evidence = work / "invalid-evidence.json"
-            completed = subprocess.run(
-                [
-                    str(self.binary),
-                    "run-live",
-                    str(fixture / "fixture.json"),
-                    str(invalid_request),
-                    str(fixture / "TCR10-reference.ref"),
-                    str(identities),
-                    str(invalid_evidence),
-                ],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-            self.assertNotEqual(completed.returncode, 0)
-            self.assertIn("parameter start", completed.stderr)
-            self.assertFalse(invalid_evidence.exists())
+            with self.assertRaises(FinBenchTransactionSuiteError) as invalid:
+                run_live_suite(params_override={"start": {"not": "scalar"}})
+            self.assertEqual(invalid.exception.cause, "harness_error")
+            self.assertIn("public API execution failed", str(invalid.exception))
 
     def test_live_lane_rejects_static_output_documents(self) -> None:
         fixture = self.root / "fixtures" / "gdc" / "finbench-transaction-live"
-        request = json.loads((fixture / "TCR10-request.json").read_text())
-        request["system_output"] = "committed.out"
+        static_output = (
+            self.root
+            / "fixtures"
+            / "gdc"
+            / "finbench-transaction-tiny"
+            / "compatible"
+            / "system-outputs"
+            / "finbench-engineering-tiny-v1-TCR10.out"
+        )
         with tempfile.TemporaryDirectory(prefix="finbench-no-static-") as tmp:
             work = Path(tmp)
-            request_path = work / "request.json"
-            request_path.write_text(json.dumps(request), encoding="utf-8")
             completed = subprocess.run(
                 [
                     str(self.binary),
-                    "run-live",
+                    "validate-live",
                     str(fixture / "fixture.json"),
-                    str(request_path),
+                    str(fixture / "TCR10-request.json"),
                     str(fixture / "TCR10-reference.ref"),
+                    str(static_output),
                     str(fixture / "acquisition.json"),
                     str(work / "evidence.json"),
                 ],
@@ -230,7 +204,7 @@ class GdcFinBenchTransactionSuiteTests(unittest.TestCase):
                 text=True,
             )
         self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("unknown field `system_output`", completed.stderr)
+        self.assertIn("static output rejected", completed.stderr)
 
     def test_live_acquisition_identity_drift_is_rejected(self) -> None:
         fixture = self.root / "fixtures" / "gdc" / "finbench-transaction-live"

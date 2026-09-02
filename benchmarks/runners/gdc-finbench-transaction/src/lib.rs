@@ -20,10 +20,8 @@
 
 #![forbid(unsafe_code)]
 
-use arrow::util::display::array_value_to_string;
-use graphforge_api::{GraphForge, IrLiteral};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
 use std::path::Path;
@@ -387,6 +385,16 @@ pub struct LiveRequest {
     pub query: String,
     pub params: BTreeMap<String, serde_json::Value>,
     pub reference_derivation: String,
+}
+
+/// Rows produced by the Python thin binding's real in-memory GraphForge call.
+/// A plain static `.out` file cannot deserialize as this envelope.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LiveProducedRows {
+    pub schema: String,
+    pub source: String,
+    pub rows: ResultRows,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -1012,29 +1020,15 @@ pub fn run_job(
     }
 }
 
-fn live_param(name: &str, value: &serde_json::Value) -> Result<IrLiteral, SuiteError> {
-    match value {
-        serde_json::Value::String(value) => Ok(IrLiteral::Str(value.clone())),
-        serde_json::Value::Number(value) => value.as_i64().map(IrLiteral::Int).ok_or_else(|| {
-            SuiteError::InvalidDocument(format!("parameter {name} must be a signed integer"))
-        }),
-        serde_json::Value::Bool(value) => Ok(IrLiteral::Bool(*value)),
-        _ => Err(SuiteError::InvalidDocument(format!(
-            "parameter {name} must be a string, integer, or boolean"
-        ))),
-    }
-}
-
-/// Load a committed synthetic fixture into an in-memory GraphForge and execute
-/// the mapped TCR10 read through `GraphForge::execute_with_params`.
+/// Validate rows from the explicit live binding lane.
 ///
-/// This is deliberately separate from `run-suite`: no static output path is
-/// accepted, and the produced Arrow rows cross the explicit Rust validator
-/// interface before evidence can pass.
-pub fn run_live(
+/// The harness owns public-API execution; this Rust boundary owns mapping,
+/// normalized comparison, typed unsupported outcomes, and evidence assembly.
+pub fn validate_live(
     fixture: &LiveFixture,
     request: &LiveRequest,
     reference: &ResultRows,
+    produced: &LiveProducedRows,
     identities: serde_json::Value,
 ) -> Result<SuiteEvidence, SuiteError> {
     if fixture.schema != LIVE_FIXTURE_SCHEMA || request.schema != LIVE_REQUEST_SCHEMA {
@@ -1062,54 +1056,22 @@ pub fn run_live(
             "live query drifted from the pinned public-API mapping".into(),
         ));
     }
-
-    let forge = GraphForge::new(None)
-        .map_err(|error| SuiteError::InvalidDocument(format!("live GraphForge open: {error}")))?;
-    for statement in &fixture.setup_cypher {
-        forge.execute(statement).map_err(|error| {
-            SuiteError::InvalidDocument(format!("live fixture load failed: {error}"))
-        })?;
-    }
-    let params = request
-        .params
-        .iter()
-        .map(|(name, value)| Ok((name.clone(), live_param(name, value)?)))
-        .collect::<Result<HashMap<_, _>, SuiteError>>()?;
-    let result = forge
-        .execute_with_params(&request.query, &params)
-        .map_err(|error| SuiteError::InvalidDocument(format!("live query failed: {error}")))?;
-    let mut produced = Vec::new();
-    for batch in result.batches {
-        for row in 0..batch.num_rows() {
-            let cells = batch
-                .columns()
-                .iter()
-                .map(|column| {
-                    array_value_to_string(column.as_ref(), row).map_err(|error| {
-                        SuiteError::InvalidDocument(format!(
-                            "live Arrow result conversion failed: {error}"
-                        ))
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            produced.push(cells.join(" "));
-        }
+    if produced.schema != "graphforge-gdc-finbench-live-produced/1"
+        || produced.source != "python_public_api_in_memory"
+    {
+        return Err(SuiteError::InvalidDocument(
+            "static output rejected: live produced-row envelope required".into(),
+        ));
     }
 
     let validator = RustReferenceValidator;
-    let status = match validator.validate(ValidationMode::Normalized, reference, &produced) {
+    let validation = validator.validate(ValidationMode::Normalized, reference, &produced.rows);
+    let status = match &validation {
         Ok(()) => OperationStatus::Passed,
         Err(SuiteError::ReferenceMismatch(_)) => OperationStatus::CorrectnessFailed,
-        Err(error) => return Err(error),
+        Err(error) => return Err(error.clone()),
     };
-    let cause = if status == OperationStatus::CorrectnessFailed {
-        validator
-            .validate(ValidationMode::Normalized, reference, &produced)
-            .err()
-            .map(|error| error.to_string())
-    } else {
-        None
-    };
+    let cause = validation.err().map(|error| error.to_string());
     let tcr10 = outcome(
         Operation::Tcr10,
         status,

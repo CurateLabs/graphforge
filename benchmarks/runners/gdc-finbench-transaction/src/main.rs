@@ -1,7 +1,7 @@
 use graphforge_benchmark_gdc_finbench_transaction::{
-    ExecutionSignal, JOB_SCHEMA, LiveFixture, LiveRequest, MappingOutcome, Operation, OperationJob,
-    OperationStatus, assemble_evidence, load_result_rows, map_operation, operation_rules, run_job,
-    run_live,
+    ExecutionSignal, JOB_SCHEMA, LiveFixture, LiveProducedRows, LiveRequest, MappingOutcome,
+    Operation, OperationJob, OperationStatus, assemble_evidence, load_result_rows, map_operation,
+    operation_rules, run_job, validate_live,
 };
 use std::env;
 use std::fs;
@@ -12,7 +12,7 @@ fn main() -> ExitCode {
     let mut args = env::args().skip(1);
     let Some(command) = args.next() else {
         eprintln!(
-            "usage: graphforge-benchmark-gdc-finbench-transaction <list-operations|map-operation|run-suite|run-live> ..."
+            "usage: graphforge-benchmark-gdc-finbench-transaction <list-operations|map-operation|run-suite|validate-live> ..."
         );
         return ExitCode::from(2);
     };
@@ -83,10 +83,10 @@ fn main() -> ExitCode {
                 }
             }
         }
-        "run-live" => {
+        "validate-live" => {
             let Some(fixture_path) = args.next() else {
                 eprintln!(
-                    "usage: run-live FIXTURE.json REQUEST.json REFERENCE.ref IDENTITIES.json EVIDENCE.json"
+                    "usage: validate-live FIXTURE.json REQUEST.json REFERENCE.ref PRODUCED.json IDENTITIES.json EVIDENCE.json"
                 );
                 return ExitCode::from(2);
             };
@@ -99,6 +99,11 @@ fn main() -> ExitCode {
                 return ExitCode::from(2);
             };
             let Some(identities_path) = args.next() else {
+                eprintln!("missing PRODUCED.json");
+                return ExitCode::from(2);
+            };
+            let produced_path = identities_path;
+            let Some(identities_path) = args.next() else {
                 eprintln!("missing IDENTITIES.json");
                 return ExitCode::from(2);
             };
@@ -106,10 +111,11 @@ fn main() -> ExitCode {
                 eprintln!("missing EVIDENCE.json");
                 return ExitCode::from(2);
             };
-            match run_live_command(
+            match validate_live_command(
                 &fixture_path,
                 &request_path,
                 &reference_path,
+                &produced_path,
                 &identities_path,
                 &evidence_path,
             ) {
@@ -127,10 +133,11 @@ fn main() -> ExitCode {
     }
 }
 
-fn run_live_command(
+fn validate_live_command(
     fixture_path: &str,
     request_path: &str,
     reference_path: &str,
+    produced_path: &str,
     identities_path: &str,
     evidence_path: &str,
 ) -> Result<ExitCode, String> {
@@ -142,12 +149,15 @@ fn run_live_command(
             .map_err(|error| error.to_string())?;
     let reference = load_result_rows(PathBuf::from(reference_path).as_path())
         .map_err(|error| error.to_string())?;
+    let produced_text = fs::read_to_string(produced_path).map_err(|error| error.to_string())?;
+    let produced: LiveProducedRows = serde_json::from_str(&produced_text)
+        .map_err(|error| format!("static output rejected: live produced-row envelope: {error}"))?;
     let identities = serde_json::from_str(
         &fs::read_to_string(identities_path).map_err(|error| error.to_string())?,
     )
     .map_err(|error| error.to_string())?;
-    let evidence =
-        run_live(&fixture, &request, &reference, identities).map_err(|error| error.to_string())?;
+    let evidence = validate_live(&fixture, &request, &reference, &produced, identities)
+        .map_err(|error| error.to_string())?;
     let failed = evidence.operations.iter().any(|outcome| {
         matches!(
             outcome.status,

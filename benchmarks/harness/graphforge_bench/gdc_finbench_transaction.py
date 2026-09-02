@@ -176,6 +176,7 @@ def run_live_suite(
     *,
     root: Path | None = None,
     evidence_path: Path | None = None,
+    params_override: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Execute TCR10 against a real in-memory GraphForge, never static output."""
     base = root or workspace_root()
@@ -183,6 +184,25 @@ def run_live_suite(
     pin = load_pinned_identity(identity_path(base))
     acquisition = json.loads((fixture / "acquisition.json").read_text(encoding="utf-8"))
     contract_evidence = validate_acquisition(pin, acquisition, fixture)
+    fixture_document = json.loads((fixture / "fixture.json").read_text(encoding="utf-8"))
+    request = json.loads((fixture / "TCR10-request.json").read_text(encoding="utf-8"))
+    if params_override:
+        request["params"].update(params_override)
+    try:
+        from graphforge import GraphForge
+
+        graph = GraphForge()
+        for statement in fixture_document["setup_cypher"]:
+            graph.execute(statement)
+        table = graph.execute(request["query"], params=request["params"])
+        rows = [
+            " ".join(str(value) for value in row.values())
+            for row in table.to_pylist()
+        ]
+    except Exception as error:
+        raise FinBenchTransactionSuiteError(
+            "harness_error", f"live public API execution failed: {error}"
+        ) from error
     with tempfile.TemporaryDirectory(prefix="gdc-finbench-live-") as tmp:
         tmp_path = Path(tmp)
         identities_path = tmp_path / "identities.json"
@@ -190,13 +210,29 @@ def run_live_suite(
             json.dumps(contract_evidence["identities"], indent=2) + "\n",
             encoding="utf-8",
         )
+        request_path = tmp_path / "request.json"
+        request_path.write_text(json.dumps(request, indent=2) + "\n", encoding="utf-8")
+        produced_path = tmp_path / "produced.json"
+        produced_path.write_text(
+            json.dumps(
+                {
+                    "schema": "graphforge-gdc-finbench-live-produced/1",
+                    "source": "python_public_api_in_memory",
+                    "rows": rows,
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
         out_evidence = evidence_path or (tmp_path / "evidence.json")
         completed = _run_runner(
             [
-                "run-live",
+                "validate-live",
                 str(fixture / "fixture.json"),
-                str(fixture / "TCR10-request.json"),
+                str(request_path),
                 str(fixture / "TCR10-reference.ref"),
+                str(produced_path),
                 str(identities_path),
                 str(out_evidence),
             ],

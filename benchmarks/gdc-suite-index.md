@@ -170,11 +170,12 @@ FinBench-shaped synthetic engineering fixture authored in this repository, not
 an official `SF0.01` dataset. The Rust benchmark runner is an internal driver,
 not the upstream FinBench driver and not a certification implementation.
 
-The explicit `run-live` lane accepts fixture, request, reference, identity, and
-evidence paths; it has no system-output argument. It loads the fixture into a
-real in-memory GraphForge, executes parameterized TCR10 through the public API,
-converts the returned Arrow rows, and invokes
-`graphforge-finbench-rust-reference-validator/1`. The reference is independently
+The explicit Python `run_live_suite` lane has no system-output argument. It
+loads the fixture into a real in-memory `GraphForge()`, executes parameterized
+TCR10 through the public binding, converts returned Arrow rows into a typed
+live-produced envelope, and invokes the Rust runner's separate `validate-live`
+interface (`graphforge-finbench-rust-reference-validator/1`). Plain static
+`.out` files are rejected at that boundary. The reference is independently
 derived as the intersection of the two persons' post-start-time investment
 sets. A reversed committed reference proves normalized reordering without
 copying engine output into expected values. The older `run-suite` command is
