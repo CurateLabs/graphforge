@@ -888,7 +888,7 @@ pub fn assemble_evidence(
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LiveGraphFixture {
     classification: String,
@@ -896,7 +896,7 @@ struct LiveGraphFixture {
     edges: Vec<LiveFixtureEdge>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LiveFixtureNode {
     key: String,
@@ -904,7 +904,7 @@ struct LiveFixtureNode {
     properties: BTreeMap<String, serde_json::Value>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LiveFixtureEdge {
     source: String,
