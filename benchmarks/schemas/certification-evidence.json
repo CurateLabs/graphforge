@@ -63,7 +63,7 @@
           "items": {
             "type": "object",
             "propertyNames": {
-              "enum": ["contract", "outcome", "rows_accepted", "rows_rejected", "bytes_accepted", "construction", "format", "rows", "batches", "bytes", "complete", "result_sha256", "scalar_u64", "query_evidence", "storage", "reopen_agrees", "source_project_current_allocated_bytes", "retained_storage_bytes", "transient_peak_storage_bytes", "transient_peak_allocated_bytes", "logical_read_bytes", "logical_write_bytes", "reader_calls", "publication_work_units", "live_nodes", "live_edges", "one_hop_rows", "two_hop_rows", "source_fingerprint", "imported_fingerprint", "equivalent", "kind", "selected_generation_class", "work_detected", "repaired_journals", "aborted_journals", "removed_generations", "preserved_unknown_entries", "deferred", "elapsed_ms", "package_digest", "transport_digest", "entry_count", "payload_bytes", "representation", "selection_fingerprint", "integrity", "compatibility", "idempotent_replay"]
+              "enum": ["contract", "outcome", "rows_accepted", "rows_rejected", "bytes_accepted", "construction", "format", "rows", "batches", "bytes", "complete", "result_sha256", "scalar_u64", "query_evidence", "storage", "reopen_agrees", "source_project_current_allocated_bytes", "retained_storage_bytes", "transient_peak_storage_bytes", "transient_peak_allocated_bytes", "logical_read_bytes", "logical_write_bytes", "reader_calls", "publication_work_units", "live_nodes", "live_edges", "one_hop_rows", "two_hop_rows", "source_fingerprint", "imported_fingerprint", "equivalent", "kind", "selected_generation_class", "work_detected", "repaired_journals", "aborted_journals", "removed_generations", "preserved_unknown_entries", "deferred", "elapsed_ms", "package_digest", "transport_digest", "entry_count", "payload_bytes", "representation", "selection_fingerprint", "allocation_logical_bytes", "allocation_allocated_bytes", "allocation_physical_objects", "integrity", "compatibility", "idempotent_replay"]
             },
             "allOf": [
               {
@@ -79,6 +79,22 @@
                     "source_project_current_allocated_bytes": { "type": "integer", "minimum": 0 },
                     "retained_storage_bytes": { "type": "integer", "minimum": 0 },
                     "transient_peak_storage_bytes": { "type": "integer", "minimum": 0 }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "contract": { "const": "graphforge-portable-export/2" }
+                  },
+                  "required": ["contract"]
+                },
+                "then": {
+                  "required": ["contract", "allocation_logical_bytes", "allocation_allocated_bytes", "allocation_physical_objects"],
+                  "properties": {
+                    "allocation_logical_bytes": { "type": "integer", "minimum": 0 },
+                    "allocation_allocated_bytes": { "type": "integer", "minimum": 0 },
+                    "allocation_physical_objects": { "type": "integer", "minimum": 0 }
                   }
                 }
               }
