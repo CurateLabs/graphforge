@@ -1842,7 +1842,7 @@ dependencies = [
  "graphforge-api",
  "serde",
  "serde_json",
- "sha2 0.11.0",
+ "sha2",
 ]
 
 [[package]]
