@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from graphforge_bench.progressive_run import (
+    BenchExecRunError,
     ControllerError,
     Executables,
     _authority_staging_parent,
@@ -518,6 +519,23 @@ class ProgressiveRunControllerTests(unittest.TestCase):
         self.assertEqual(normalized["authority"]["read_bytes"], 1024)
         self.assertEqual(rung["metrics"]["wall_seconds"], 2)
 
+        oom_columns = {
+            **columns,
+            "status": "OUT OF MEMORY",
+            "terminationreason": "memory",
+        }
+        oom_xml = (
+            "<result><run>"
+            + "".join(
+                f'<column title="{name}" value="{value}" />' for name, value in oom_columns.items()
+            )
+            + "</run></result>"
+        )
+        (raw / "result.xml").write_text(oom_xml)
+        with self.assertRaisesRegex(BenchExecRunError, "BenchExec authority did not pass: oom"):
+            ingest_benchexec_result(root=ROOT, stage=stage, scale=18, plan=plan)
+
+        (raw / "result.xml").write_text(xml)
         changed = {**gf, "profile_id": "graph500-s19-local"}
         (raw / "run.log").write_text(json.dumps(changed) + "\n")
         with self.assertRaisesRegex(ControllerError, "contradicts the run plan"):
