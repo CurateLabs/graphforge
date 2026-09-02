@@ -3,39 +3,39 @@
   "suite_id": "snb-interactive",
   "disposition": "executable",
   "spec": {
-    "name": "ldbc-snb",
-    "source": "https://ldbcouncil.org/benchmarks/snb/",
-    "release": "engineering-pin",
-    "commit": null
+    "name": "ldbc_snb_docs",
+    "source": "https://github.com/ldbc/ldbc_snb_docs",
+    "release": "v2.2.4",
+    "commit": "5f7956e07a214373c363b371a3b88bc83ddcd118"
   },
   "generator": {
     "name": "ldbc_snb_datagen_spark",
     "source": "https://github.com/ldbc/ldbc_snb_datagen_spark",
-    "release": null,
-    "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    "release": "v0.5.1",
+    "commit": "2459f4e45834c78902a50511fc64a05c48dd4029"
   },
   "driver": {
-    "name": "ldbc_snb_interactive_driver",
+    "name": "ldbc_snb_interactive_v1_impls",
     "source": "https://github.com/ldbc/ldbc_snb_interactive_v1_impls",
-    "release": null,
-    "commit": "cccccccccccccccccccccccccccccccccccccccc"
+    "release": "1.0.0",
+    "commit": "f9c394a92cd55e535893f6c9907b141d6533c817"
   },
   "datasets": [
     {
-      "id": "snb-sf0.003",
-      "role": "dataset",
+      "id": "snb-interactive-static-synthetic-v1",
+      "role": "other",
       "checksum_sha256": "c0fd57903065bb4950244cc77023e9ce0803f723596922b114141f190ea521d8",
-      "license": "LDBC-SNB-terms",
+      "license": "Apache-2.0",
       "acquisition": "fixture",
-      "source": "https://github.com/ldbc/ldbc_snb_datagen_spark"
+      "source": "https://github.com/CurateLabs/graphforge"
     }
   ],
   "references": [
     {
-      "dataset_id": "snb-sf0.003",
+      "dataset_id": "snb-interactive-static-synthetic-v1",
       "workload_key": "interactive-validation",
       "checksum_sha256": "20368ad845455de99ef737732930bf7d07d9d44adde19a31ec7ba6ec332b25db",
-      "source": "https://github.com/ldbc/ldbc_snb_interactive_v1_impls"
+      "source": "https://github.com/CurateLabs/graphforge"
     }
   ]
 }

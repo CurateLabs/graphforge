@@ -6,6 +6,7 @@
     "schema": { "const": "graphforge-gdc-snb-interactive-evidence/1" },
     "suite_id": { "const": "snb-interactive" },
     "dataset_id": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,80}$" },
+    "lane": { "enum": ["static_replay", "live_in_memory"] },
     "status": {
       "enum": ["passed", "failed", "semantic_incompatibility"]
     },
@@ -18,10 +19,25 @@
         "enum": ["load", "warmup", "execution", "validation"]
       }
     },
+    "phase_evidence": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": {
+        "type": "object",
+        "properties": {
+          "phase": { "enum": ["load", "warmup", "execution", "validation"] },
+          "status": { "enum": ["passed", "not_executed"] },
+          "detail": { "type": "string", "minLength": 1 }
+        },
+        "required": ["phase", "status", "detail"],
+        "additionalProperties": false
+      }
+    },
     "identities": { "type": "object" },
     "operations": {
       "type": "array",
-      "minItems": 29,
+      "minItems": 1,
       "maxItems": 29,
       "items": {
         "type": "object",
@@ -69,9 +85,11 @@
     "schema",
     "suite_id",
     "dataset_id",
+    "lane",
     "status",
     "certification",
     "phases",
+    "phase_evidence",
     "identities",
     "operations"
   ],

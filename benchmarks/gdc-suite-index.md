@@ -55,9 +55,9 @@ PYTHONPATH=harness GRAPHFORGE_GDC_GRAPHALYTICS_BIN=target/debug/graphforge-bench
 |---|---|
 | Operations | Complex reads IC1–IC14, short reads IS1–IS7, updates IU1–IU8 (29 total) |
 | Runner | `graphforge-benchmark-gdc-snb-interactive` (`suites/gdc-snb-interactive.json`) |
-| Phases | Separate `load`, `warmup`, `execution`, `validation` (see evidence `phases`) |
-| Bounded fixture | `snb-sf0.003` (every ladder/run begins on this tiny dataset) |
-| Validation | exact (ordered rows) and normalized (order-insensitive multiset) reference comparison |
+| Phases | Separate `load`, `warmup`, `execution`, `validation` with per-phase status/detail |
+| Fixtures | `snb-interactive-static-synthetic-v1` is static replay; `snb-interactive-live-is1-synthetic-v1` is a synthetic engineering graph, not official SF0.003 Datagen output |
+| Validation | Live IS1 normalizes real Arrow rows and uses the same exact Rust reference validator; the independently declared reference follows SNB IS1 semantics |
 | Unsupported semantics | Typed `semantic_incompatibility`: `interactive_update_stream_not_exposed` (IU1–IU8); `weighted_interaction_path_enumeration_not_exposed` (IC14) |
 
 Read-only complex/short reads that are ordinary graph traversals or aggregations

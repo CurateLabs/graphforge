@@ -79,9 +79,14 @@ The SNB Interactive suite adapter is `graphforge_bench.gdc_snb_interactive`
 (runner `graphforge-benchmark-gdc-snb-interactive`). It maps LDBC SNB Interactive
 operations (complex reads IC1–IC14, short reads IS1–IS7, updates IU1–IU8) onto the
 public Cypher / analyst-verb surface, separates load/warmup/execution/validation
-phases, validates read outputs (exact and normalized) against pinned references,
-and fails closed with typed causes on update-stream and IC14 weighted-path
-semantics the public surface does not expose. Its evidence records
+phases, and fails closed with typed causes on update-stream and IC14 weighted-path
+semantics the public surface does not expose. `run_tiny_suite` is explicitly a
+legacy static-replay lane over committed `.out` files. `run_live_is1` is the
+separate live lane: it loads a committed synthetic engineering fixture through
+the public construction API, warms and executes IS1 with an explicit `personId`
+on `GraphForge()` in memory, normalizes its Arrow rows, and delegates comparison
+with the independently declared IS1 reference to the Rust validator. Neither
+fixture is official Datagen scale-factor output. Evidence records
 `certification: false` and never masquerades as an audited GDC certification.
 
 The FinBench Transaction suite adapter is `graphforge_bench.gdc_finbench_transaction`

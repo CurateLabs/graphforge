@@ -3,14 +3,17 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
+import tempfile
 import unittest
 
-from graphforge_bench.gdc_contracts import list_gdc_suites, workspace_root
+from graphforge_bench.gdc_contracts import GdcContractError, list_gdc_suites, workspace_root
 from graphforge_bench.gdc_snb_interactive import (
     COMPLEX_READS,
     EVIDENCE_SCHEMA,
     IC14_CAUSE,
+    LIVE_DATASET_ID,
     OPERATIONS,
     SHORT_READS,
     UPDATE_CAUSE,
@@ -19,6 +22,7 @@ from graphforge_bench.gdc_snb_interactive import (
     assert_separate_from_other_suites,
     list_operation_rules,
     map_operation_file,
+    run_live_is1,
     run_tiny_suite,
 )
 from jsonschema import Draft202012Validator
@@ -64,7 +68,7 @@ class GdcSnbInteractiveSuiteTests(unittest.TestCase):
         suite = suites["snb-interactive"]
         self.assertEqual(suite["runner"], "gdc-snb-interactive")
         self.assertEqual(suite["disposition"], "executable")
-        self.assertEqual(suite["datasets"][0], "snb-sf0.003")
+        self.assertEqual(suite["datasets"][0], "snb-interactive-static-synthetic-v1")
         assert_separate_from_other_suites()
 
     def test_all_operations_declare_mapping_and_validation_rules(self) -> None:
@@ -92,10 +96,14 @@ class GdcSnbInteractiveSuiteTests(unittest.TestCase):
         evidence = run_tiny_suite(fixture_name="compatible")
         self.assertEqual(evidence["schema"], EVIDENCE_SCHEMA)
         self.assertEqual(evidence["suite_id"], "snb-interactive")
-        self.assertEqual(evidence["dataset_id"], "snb-sf0.003")
+        self.assertEqual(evidence["dataset_id"], "snb-interactive-static-synthetic-v1")
+        self.assertEqual(evidence["lane"], "static_replay")
         self.assertEqual(evidence["status"], "passed")
         self.assertIs(evidence["certification"], False)
         self.assertEqual(evidence["phases"], ["load", "warmup", "execution", "validation"])
+        self.assertTrue(
+            all(phase["status"] == "not_executed" for phase in evidence["phase_evidence"])
+        )
         self.assertIn("spec", evidence["identities"])
         by_op = {item["operation"]: item for item in evidence["operations"]}
         self.assertEqual(set(by_op), set(OPERATIONS))
@@ -135,6 +143,78 @@ class GdcSnbInteractiveSuiteTests(unittest.TestCase):
         self.assertEqual(by_op["IC1"]["status"], "failed")
         self.assertIn("reference_mismatch", by_op["IC1"]["cause"])
         self.assertEqual(evidence["status"], "failed")
+
+    def test_live_is1_executes_real_in_memory_engine_and_validates_arrow_rows(self) -> None:
+        evidence = run_live_is1()
+        self.assertEqual(evidence["dataset_id"], LIVE_DATASET_ID)
+        self.assertEqual(evidence["lane"], "live_in_memory")
+        self.assertEqual(evidence["status"], "passed")
+        self.assertIs(evidence["certification"], False)
+        self.assertEqual(
+            [phase["phase"] for phase in evidence["phase_evidence"]],
+            ["load", "warmup", "execution", "validation"],
+        )
+        self.assertTrue(all(phase["status"] == "passed" for phase in evidence["phase_evidence"]))
+        by_op = {item["operation"]: item for item in evidence["operations"]}
+        self.assertEqual(by_op["IS1"]["status"], "passed")
+        self.assertEqual(by_op["IC14"]["status"], "semantic_incompatibility")
+        for update in UPDATES:
+            self.assertEqual(by_op[update]["status"], "semantic_incompatibility")
+        self.assertEqual(
+            evidence["identities"]["fixture"]["classification"], "synthetic_engineering_fixture"
+        )
+        self.assertIsNone(evidence["identities"]["runner"]["commit"])
+        Draft202012Validator(
+            json.loads(
+                (self.root / "schemas" / "gdc-snb-interactive-evidence.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+        ).validate(evidence)
+
+    def test_live_parameter_and_reference_mutations_fail(self) -> None:
+        source = self.root / "fixtures" / "gdc" / "snb-interactive-live-is1"
+        with tempfile.TemporaryDirectory() as tmp:
+            copied = Path(tmp) / "fixture"
+            shutil.copytree(source, copied)
+            job = json.loads((copied / "IS1.json").read_text(encoding="utf-8"))
+            job["parameters"]["personId"] = 9999
+            (copied / "IS1.json").write_text(json.dumps(job), encoding="utf-8")
+            with self.assertRaises(SnbInteractiveSuiteError) as raised:
+                run_live_is1(fixture_path=copied / "graph.json")
+            self.assertEqual(raised.exception.cause, "reference_mismatch")
+
+        with tempfile.NamedTemporaryFile("w", suffix=".ref") as mutated:
+            mutated.write(
+                "Grace Hopper 1906-12-09 192.0.2.11 Safari 2001 female 2026-01-03T04:05:06Z\n"
+            )
+            mutated.flush()
+            with self.assertRaises(SnbInteractiveSuiteError) as raised:
+                run_live_is1(reference_path=Path(mutated.name))
+            self.assertEqual(raised.exception.cause, "reference_mismatch")
+
+    def test_live_lane_rejects_static_fixture_and_acquisition_drift(self) -> None:
+        static_graph = (
+            self.root
+            / "fixtures"
+            / "gdc"
+            / "snb-interactive-tiny"
+            / "compatible"
+            / "snb-interactive-static-synthetic-v1.graph"
+        )
+        with self.assertRaises((json.JSONDecodeError, GdcContractError, SnbInteractiveSuiteError)):
+            run_live_is1(fixture_path=static_graph)
+
+        source = self.root / "fixtures" / "gdc" / "snb-interactive-live-is1"
+        with tempfile.TemporaryDirectory() as tmp:
+            copied = Path(tmp) / "fixture"
+            shutil.copytree(source, copied)
+            acquisition = json.loads((copied / "acquisition.json").read_text(encoding="utf-8"))
+            acquisition["recorded_driver"]["commit"] = "0" * 40
+            (copied / "acquisition.json").write_text(json.dumps(acquisition), encoding="utf-8")
+            with self.assertRaises(GdcContractError) as raised:
+                run_live_is1(fixture_path=copied / "graph.json")
+            self.assertEqual(raised.exception.cause, "identity_drift")
 
     def test_index_and_readme_point_at_snb_interactive_suite(self) -> None:
         index = (self.root / "gdc-suite-index.md").read_text(encoding="utf-8")

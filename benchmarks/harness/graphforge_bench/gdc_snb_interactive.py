@@ -32,6 +32,29 @@ OPERATIONS = COMPLEX_READS + SHORT_READS + UPDATES
 
 JOB_SCHEMA = "graphforge-gdc-snb-interactive-job/1"
 EVIDENCE_SCHEMA = "graphforge-gdc-snb-interactive-evidence/1"
+LIVE_DATASET_ID = "snb-interactive-live-is1-synthetic-v1"
+LIVE_IS1_COLUMNS = (
+    "firstName",
+    "lastName",
+    "birthday",
+    "locationIP",
+    "browserUsed",
+    "cityId",
+    "gender",
+    "creationDate",
+)
+LIVE_IS1_QUERY = """
+MATCH (person:Person)-[:IS_LOCATED_IN]->(city:City)
+WHERE person.id = $personId
+RETURN person.firstName AS firstName,
+       person.lastName AS lastName,
+       person.birthday AS birthday,
+       person.locationIP AS locationIP,
+       person.browserUsed AS browserUsed,
+       city.id AS cityId,
+       person.gender AS gender,
+       person.creationDate AS creationDate
+"""
 
 UPDATE_CAUSE = "interactive_update_stream_not_exposed"
 IC14_CAUSE = "weighted_interaction_path_enumeration_not_exposed"
@@ -47,6 +70,12 @@ class SnbInteractiveSuiteError(ValueError):
 
 def identity_path(root: Path | None = None) -> Path:
     return (root or workspace_root()) / "profiles" / "gdc" / "snb-interactive-identity.json"
+
+
+def live_identity_path(root: Path | None = None) -> Path:
+    return (
+        (root or workspace_root()) / "profiles" / "gdc" / "snb-interactive-live-is1-identity.json"
+    )
 
 
 def runner_binary(root: Path | None = None) -> Path:
@@ -104,7 +133,7 @@ def run_tiny_suite(
     root: Path | None = None,
     evidence_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Run the bounded snb-sf0.003 SNB Interactive suite through the Rust runner."""
+    """Run the bounded snb-interactive-static-synthetic-v1 SNB Interactive suite through the Rust runner."""
     base = root or workspace_root()
     fixture = base / "fixtures" / "gdc" / "snb-interactive-tiny" / fixture_name
     pin = load_pinned_identity(identity_path(base))
@@ -152,6 +181,121 @@ def run_tiny_suite(
         return evidence
 
 
+def _normalize_arrow_rows(table: Any) -> str:
+    if tuple(table.column_names) != LIVE_IS1_COLUMNS:
+        raise SnbInteractiveSuiteError(
+            "invalid_live_result",
+            f"IS1 Arrow columns drifted: expected {LIVE_IS1_COLUMNS}, got {table.column_names}",
+        )
+    rows: list[str] = []
+    for row in table.to_pylist():
+        values = [row[column] for column in LIVE_IS1_COLUMNS]
+        if any(value is None for value in values):
+            raise SnbInteractiveSuiteError("invalid_live_result", "IS1 returned a null field")
+        rows.append("\t".join(str(value) for value in values))
+    return "\n".join(rows) + ("\n" if rows else "")
+
+
+def run_live_is1(
+    *,
+    root: Path | None = None,
+    evidence_path: Path | None = None,
+    fixture_path: Path | None = None,
+    job_path: Path | None = None,
+    reference_path: Path | None = None,
+) -> dict[str, Any]:
+    """Load and execute synthetic IS1 through a real in-memory GraphForge instance."""
+    from graphforge import GraphForge
+
+    base = root or workspace_root()
+    fixture = fixture_path or (
+        base / "fixtures" / "gdc" / "snb-interactive-live-is1" / "graph.json"
+    )
+    job_file = job_path or fixture.parent / "IS1.json"
+    reference = reference_path or fixture.parent / "IS1.ref"
+    acquisition = json.loads((fixture.parent / "acquisition.json").read_text(encoding="utf-8"))
+    pin = load_pinned_identity(live_identity_path(base))
+    contract_evidence = validate_acquisition(pin, acquisition, fixture.parent)
+    graph = json.loads(fixture.read_text(encoding="utf-8"))
+    if graph.get("classification") != "synthetic_engineering_fixture":
+        raise SnbInteractiveSuiteError(
+            "invalid_document", "live graph must be classified as a synthetic engineering fixture"
+        )
+    job = json.loads(job_file.read_text(encoding="utf-8"))
+    if job.get("dataset_id") != LIVE_DATASET_ID or job.get("operation") != "IS1":
+        raise SnbInteractiveSuiteError(
+            "invalid_document", "live lane accepts only its pinned IS1 job"
+        )
+    parameters = job.get("parameters")
+    if (
+        not isinstance(parameters, dict)
+        or set(parameters) != {"personId"}
+        or not isinstance(parameters["personId"], int)
+    ):
+        raise SnbInteractiveSuiteError(
+            "invalid_document", "live IS1 requires exactly one integer personId parameter"
+        )
+
+    forge = GraphForge()
+    handles: dict[str, Any] = {}
+    for node in graph.get("nodes", []):
+        handles[node["key"]] = forge.add_node(node["label"], **node["properties"])
+    for edge in graph.get("edges", []):
+        forge.add_edge(
+            handles[edge["source"]],
+            edge["type"],
+            handles[edge["destination"]],
+        )
+
+    # Warmup and measured execution use the same explicit parameter binding.
+    forge.execute(LIVE_IS1_QUERY, parameters)
+    arrow_table = forge.execute(LIVE_IS1_QUERY, parameters)
+    normalized_rows = _normalize_arrow_rows(arrow_table)
+
+    identities = contract_evidence["identities"]
+    identities["fixture"] = {"classification": "synthetic_engineering_fixture"}
+    identities["runner"] = {
+        "name": "graphforge-benchmark-gdc-snb-interactive",
+        "release": "workspace",
+        # A checked-in file cannot truthfully pin the commit that includes itself.
+        "commit": None,
+    }
+    with tempfile.TemporaryDirectory(prefix="gdc-snb-interactive-live-") as tmp:
+        tmp_path = Path(tmp)
+        rows_path = tmp_path / "arrow-rows.out"
+        rows_path.write_text(normalized_rows, encoding="utf-8")
+        identities_path = tmp_path / "identities.json"
+        identities_path.write_text(json.dumps(identities, indent=2) + "\n", encoding="utf-8")
+        out_evidence = evidence_path or (tmp_path / "evidence.json")
+        completed = _run_runner(
+            [
+                "validate-live-is1",
+                str(job_file),
+                str(reference),
+                str(rows_path),
+                str(identities_path),
+                str(out_evidence),
+            ],
+            base,
+        )
+        if not out_evidence.is_file():
+            raise SnbInteractiveSuiteError(
+                "invalid_live_result",
+                f"live validator did not emit evidence: {completed.stderr.strip()}",
+            )
+        evidence = json.loads(out_evidence.read_text(encoding="utf-8"))
+        if completed.returncode != 0:
+            raise SnbInteractiveSuiteError(
+                "reference_mismatch",
+                evidence["operations"][0].get("cause", completed.stderr.strip()),
+            )
+        if evidence.get("lane") != "live_in_memory" or evidence.get("certification") is not False:
+            raise SnbInteractiveSuiteError(
+                "invalid_document", "live evidence lane or certification marker is invalid"
+            )
+        return evidence
+
+
 def map_operation_file(path: Path, root: Path | None = None) -> dict[str, Any]:
     completed = _run_runner(["map-operation", str(path)], root)
     if completed.returncode == 3:
@@ -189,6 +333,9 @@ __all__ = [
     "EVIDENCE_SCHEMA",
     "IC14_CAUSE",
     "JOB_SCHEMA",
+    "LIVE_DATASET_ID",
+    "LIVE_IS1_COLUMNS",
+    "LIVE_IS1_QUERY",
     "OPERATIONS",
     "SHORT_READS",
     "UPDATES",
@@ -197,7 +344,9 @@ __all__ = [
     "SnbInteractiveSuiteError",
     "assert_separate_from_other_suites",
     "identity_path",
+    "live_identity_path",
     "list_operation_rules",
     "map_operation_file",
+    "run_live_is1",
     "run_tiny_suite",
 ]
