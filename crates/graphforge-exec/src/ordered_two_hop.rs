@@ -121,9 +121,10 @@ fn detect_ordered_two_hop(plan: &Arc<dyn ExecutionPlan>) -> Option<OrderedTwoHop
     if projection.expr().len() != 1 {
         return None;
     }
-    let sort_input = projection.children().first()?;
+    let projection_children = projection.children();
+    let sort_input = projection_children.first()?;
     let sort = if let Some(merge) = sort_input.downcast_ref::<SortPreservingMergeExec>() {
-        merge.children().first()?.downcast_ref::<SortExec>()?
+        merge.input().downcast_ref::<SortExec>()?
     } else {
         sort_input.downcast_ref::<SortExec>()?
     };
@@ -134,7 +135,7 @@ fn detect_ordered_two_hop(plan: &Arc<dyn ExecutionPlan>) -> Option<OrderedTwoHop
     if sort.expr().len() != 1 || sort.expr()[0].options.descending {
         return None;
     }
-    let (expand2, require_edge_disjoint) =
+    let (expand2_plan, require_edge_disjoint) =
         if let Some(filter) = sort.children().first()?.downcast_ref::<FilterExec>() {
             let disjoint = filter
                 .predicate()
@@ -143,14 +144,11 @@ fn detect_ordered_two_hop(plan: &Arc<dyn ExecutionPlan>) -> Option<OrderedTwoHop
             if !disjoint {
                 return None;
             }
-            let child = peel_expand_transport(filter.children().first()?);
-            let expand2 = child.downcast_ref::<ExpandExec>()?;
-            (expand2, true)
+            (peel_expand_transport(filter.children().first()?), true)
         } else {
-            let child = peel_expand_transport(sort.children().first()?);
-            let expand2 = child.downcast_ref::<ExpandExec>()?;
-            (expand2, false)
+            (peel_expand_transport(sort.children().first()?), false)
         };
+    let expand2 = expand2_plan.downcast_ref::<ExpandExec>()?;
     let expand1 = expand2.children().first()?.downcast_ref::<ExpandExec>()?;
     // #region agent log
     let _ = std::fs::OpenOptions::new().create(true).append(true).open("/opt/cursor/logs/debug.log").and_then(|mut file| writeln!(file, "{{\"hypothesisId\":\"A-B\",\"location\":\"ordered_two_hop.rs:detect:expands\",\"message\":\"expand chain matched\",\"data\":{{\"expand1_identity_only\":{},\"expand2_identity_only\":{},\"same_type\":{},\"same_direction\":{}}},\"timestamp\":0}}", expand1.is_destination_identity_only(), expand2.is_destination_identity_only(), expand1.rel_type_name() == expand2.rel_type_name(), expand1.direction() == expand2.direction()));
