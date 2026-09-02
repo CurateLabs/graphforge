@@ -185,10 +185,12 @@ class ProgressiveStorageQualificationTests(unittest.TestCase):
                 )
                 with self.assertRaises(StorageQualificationError):
                     validate_source_rung(invalid)
-        missing_staging = self.source_pair()[0]
-        del missing_staging["storage_attribution"]["construction"]["staging"]
-        with self.assertRaisesRegex(StorageQualificationError, "staging"):
-            validate_source_rung(missing_staging)
+        for field in ("staging", "staging_transient_peak_allocated_bytes"):
+            with self.subTest(missing_construction_authority=field):
+                missing_staging = self.source_pair()[0]
+                del missing_staging["storage_attribution"]["construction"][field]
+                with self.assertRaisesRegex(StorageQualificationError, field):
+                    validate_source_rung(missing_staging)
 
     def test_one_rung_and_non_adjacent_rungs_are_rejected(self) -> None:
         with self.assertRaisesRegex(StorageQualificationError, "exactly two"):

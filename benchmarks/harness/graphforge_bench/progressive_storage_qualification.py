@@ -191,7 +191,25 @@ def validate_source_rung(value: Mapping[str, Any]) -> None:
     storage = value["storage_attribution"]
     _validate_snapshot(storage["source"], "source")
     _validate_snapshot(storage["imported"], "imported")
-    _validate_application_io(storage["construction"]["application_io"])
+    construction = storage["construction"]
+    _validate_application_io(construction["application_io"])
+    staging = construction["staging"]
+    for field in STORAGE_FIELDS:
+        _integer(staging[field], f"construction.staging.{field}")
+    staging_peak = _integer(
+        construction["staging_transient_peak_allocated_bytes"],
+        "construction.staging_transient_peak_allocated_bytes",
+    )
+    total_peak = _integer(
+        construction["transient_peak_allocated_bytes"],
+        "construction.transient_peak_allocated_bytes",
+    )
+    if (
+        staging["physical_objects"] > staging["logical_references"]
+        or staging_peak < staging["allocated_bytes"]
+        or total_peak < staging_peak
+    ):
+        raise StorageQualificationError("construction staging authority contradicts its peak")
     counts = storage["counts"]
     scale = _integer(value["scale"], "scale", positive=True)
     if (
