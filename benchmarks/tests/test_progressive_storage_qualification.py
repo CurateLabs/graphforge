@@ -115,9 +115,20 @@ class ProgressiveStorageQualificationTests(unittest.TestCase):
     def bound_pair(self, scales: tuple[int, int] = (20, 22)) -> list[Path]:
         return [self.write_bundle(self.provider_rung(scale)) for scale in scales]
 
+    def result_anchors(self, paths: list[Path]) -> list[str]:
+        result = []
+        for path in paths:
+            scale = json.loads(path.read_text(encoding="utf-8"))["scale"]
+            result.append(
+                hashlib.sha256((path.parent / f"s{scale}-result.json").read_bytes()).hexdigest()
+            )
+        return result
+
     def build_pair(self, scales: tuple[int, int] = (20, 22), **overrides: int) -> dict:
+        paths = self.bound_pair(scales)
         return build(
-            self.bound_pair(scales),
+            paths,
+            provider_result_sha256=self.result_anchors(paths),
             expected_commit=COMMIT,
             expected_image_digest=IMAGE,
             volume_bytes=overrides.get("volume_bytes", VOLUME_BYTES),
@@ -193,17 +204,21 @@ class ProgressiveStorageQualificationTests(unittest.TestCase):
                     validate_source_rung(missing_staging)
 
     def test_one_rung_and_non_adjacent_rungs_are_rejected(self) -> None:
+        single = [self.write_bundle(self.provider_rung(20))]
         with self.assertRaisesRegex(StorageQualificationError, "exactly two"):
             build(
-                [self.write_bundle(self.provider_rung(20))],
+                single,
+                provider_result_sha256=self.result_anchors(single),
                 expected_commit=COMMIT,
                 expected_image_digest=IMAGE,
                 volume_bytes=VOLUME_BYTES,
                 reserved_headroom_bytes=RESERVED_BYTES,
             )
+        nonadjacent = self.bound_pair((20, 24))
         with self.assertRaisesRegex(StorageQualificationError, "ordered adjacent"):
             build(
-                self.bound_pair((20, 24)),
+                nonadjacent,
+                provider_result_sha256=self.result_anchors(nonadjacent),
                 expected_commit=COMMIT,
                 expected_image_digest=IMAGE,
                 volume_bytes=VOLUME_BYTES,
@@ -264,6 +279,7 @@ class ProgressiveStorageQualificationTests(unittest.TestCase):
         with self.assertRaisesRegex(StorageQualificationError, "expected commit"):
             build(
                 paths,
+                provider_result_sha256=self.result_anchors(paths),
                 expected_commit=COMMIT,
                 expected_image_digest=IMAGE,
                 volume_bytes=VOLUME_BYTES,
@@ -271,15 +287,35 @@ class ProgressiveStorageQualificationTests(unittest.TestCase):
             )
 
         paths = self.bound_pair()
+        anchors = self.result_anchors(paths)
         paths[0].write_text(paths[0].read_text(encoding="utf-8") + "\n", encoding="utf-8")
-        with self.assertRaisesRegex(StorageQualificationError, "artifacts do not match"):
+        result_path = self.base / "s20-result.json"
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+        result["artifacts"]["rung_sha256"] = hashlib.sha256(paths[0].read_bytes()).hexdigest()
+        result_path.write_text(json.dumps(result), encoding="utf-8")
+        with self.assertRaisesRegex(StorageQualificationError, "external anchor"):
             build(
                 paths,
+                provider_result_sha256=anchors,
                 expected_commit=COMMIT,
                 expected_image_digest=IMAGE,
                 volume_bytes=VOLUME_BYTES,
                 reserved_headroom_bytes=RESERVED_BYTES,
             )
+
+    def test_provider_result_anchors_are_complete_ordered_and_well_formed(self) -> None:
+        paths = self.bound_pair()
+        anchors = self.result_anchors(paths)
+        for invalid in (anchors[:1], ["g" * 64, anchors[1]], list(reversed(anchors))):
+            with self.subTest(anchors=invalid), self.assertRaises(StorageQualificationError):
+                build(
+                    paths,
+                    provider_result_sha256=invalid,
+                    expected_commit=COMMIT,
+                    expected_image_digest=IMAGE,
+                    volume_bytes=VOLUME_BYTES,
+                    reserved_headroom_bytes=RESERVED_BYTES,
+                )
 
     def test_v3_schema_rejects_three_or_four_rungs_directly(self) -> None:
         evidence = _build_qualification(
@@ -307,6 +343,7 @@ class ProgressiveStorageQualificationTests(unittest.TestCase):
 
     def test_cli_writes_only_the_validated_closed_contract(self) -> None:
         low_path, high_path = self.bound_pair()
+        low_anchor, high_anchor = self.result_anchors([low_path, high_path])
         output = self.base / "qualification.json"
         self.assertEqual(
             main(
@@ -318,6 +355,10 @@ class ProgressiveStorageQualificationTests(unittest.TestCase):
                     COMMIT,
                     "--image-digest",
                     IMAGE,
+                    "--low-result-sha256",
+                    low_anchor,
+                    "--high-result-sha256",
+                    high_anchor,
                     "--volume-bytes",
                     str(VOLUME_BYTES),
                     "--reserved-headroom-bytes",
@@ -332,6 +373,7 @@ class ProgressiveStorageQualificationTests(unittest.TestCase):
 
     def test_cli_never_replaces_an_existing_qualification(self) -> None:
         low_path, high_path = self.bound_pair()
+        low_anchor, high_anchor = self.result_anchors([low_path, high_path])
         output = self.base / "qualification.json"
         output.write_text("preserve-existing\n", encoding="utf-8")
         with self.assertRaises(SystemExit):
@@ -344,6 +386,10 @@ class ProgressiveStorageQualificationTests(unittest.TestCase):
                     COMMIT,
                     "--image-digest",
                     IMAGE,
+                    "--low-result-sha256",
+                    low_anchor,
+                    "--high-result-sha256",
+                    high_anchor,
                     "--volume-bytes",
                     str(VOLUME_BYTES),
                     "--reserved-headroom-bytes",

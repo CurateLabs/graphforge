@@ -515,15 +515,20 @@ make -C benchmarks progressive-storage-qualification \
   EVIDENCE=/evidence/g500-ladder-qualification.json \
   COMMIT=$(git rev-parse HEAD) \
   IMAGE_DIGEST=registry.fly.io/graphforge-bench@sha256:<64-hex-digest> \
+  LOW_RESULT_SHA256=<independently-recorded-s20-result-sha256> \
+  HIGH_RESULT_SHA256=<independently-recorded-s22-result-sha256> \
   VOLUME_BYTES=536870912000 RESERVED_HEADROOM_BYTES=53687091200
 ```
 
 Each rung path must be accompanied by its canonical provider plan, BenchExec,
 GraphForge, and passed result files in the same evidence directory. The adapter
-verifies the result-owned artifact digests and exact commit/profile/image
-identities, preserves integer numerators and denominators, recomputes all
-reconciliations, and emits `refuse` when the projected S26 lifecycle peak lacks
-the requested storage headroom.
+first verifies each result against its independently supplied SHA-256 trust
+anchor, then verifies the result-owned artifact digests and exact
+commit/profile/image identities. The anchors must come from trusted transport
+metadata or an immutable manifest outside the evidence directory, never from
+the bundle being qualified. The adapter preserves integer numerators and
+denominators, recomputes all reconciliations, and emits `refuse` when the
+projected S26 lifecycle peak lacks the requested storage headroom.
 
 ## Native local admission deployment
 

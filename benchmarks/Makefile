@@ -70,11 +70,14 @@ progressive-qualification-project-s20: install
 progressive-storage-qualification: install
 	test -n "$(LOW_RUNG)" && test -n "$(HIGH_RUNG)" && test -n "$(EVIDENCE)"
 	test -n "$(COMMIT)" && test -n "$(IMAGE_DIGEST)"
+	test -n "$(LOW_RESULT_SHA256)" && test -n "$(HIGH_RESULT_SHA256)"
 	test -n "$(VOLUME_BYTES)" && test -n "$(RESERVED_HEADROOM_BYTES)"
 	PYTHONPATH=$(CURDIR)/harness uv run --locked python -m \
 		graphforge_bench.progressive_storage_qualification \
 		"$(LOW_RUNG)" "$(HIGH_RUNG)" "$(EVIDENCE)" \
 		--commit "$(COMMIT)" --image-digest "$(IMAGE_DIGEST)" \
+		--low-result-sha256 "$(LOW_RESULT_SHA256)" \
+		--high-result-sha256 "$(HIGH_RESULT_SHA256)" \
 		--volume-bytes "$(VOLUME_BYTES)" \
 		--reserved-headroom-bytes "$(RESERVED_HEADROOM_BYTES)"
 

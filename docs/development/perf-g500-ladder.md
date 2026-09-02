@@ -306,6 +306,8 @@ make -C benchmarks progressive-storage-qualification \
   EVIDENCE=build/g500-ladder-qualification.json \
   COMMIT=$(git rev-parse HEAD) \
   IMAGE_DIGEST=registry.fly.io/graphforge-bench@sha256:<64-hex-digest> \
+  LOW_RESULT_SHA256=<independently-recorded-s20-result-sha256> \
+  HIGH_RESULT_SHA256=<independently-recorded-s22-result-sha256> \
   VOLUME_BYTES=536870912000 \
   RESERVED_HEADROOM_BYTES=53687091200
 ```

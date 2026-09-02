@@ -14,7 +14,7 @@ from typing import Any
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError, ValidationError
 
-from graphforge_bench.progressive_run import _write_json
+from graphforge_bench.progressive_run import publish_json_no_clobber
 
 BENCHMARK_ROOT = Path(__file__).resolve().parents[2]
 REPOSITORY_ROOT = BENCHMARK_ROOT.parent
@@ -77,6 +77,7 @@ APPLICATION_IO_FIELDS = (
 )
 ADJACENT_SOURCES = ((20, 22), (22, 24))
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
+HEX_DIGEST = re.compile(r"^[0-9a-f]{64}$")
 IMAGE_DIGEST = re.compile(r"^registry\.fly\.io/[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}$")
 FORBIDDEN_KEY = re.compile(
     r"(?:secret|credential|token|password|host_path|absolute_path|machine[_-]?id|"
@@ -372,14 +373,36 @@ def _read_digest(path: Path) -> tuple[Mapping[str, Any], str]:
     return value, hashlib.sha256(encoded).hexdigest()
 
 
+def _read_anchored_result(path: Path, expected_sha256: str) -> Mapping[str, Any]:
+    if HEX_DIGEST.fullmatch(expected_sha256) is None:
+        raise StorageQualificationError("provider result anchor must be a SHA-256 digest")
+    try:
+        encoded = path.read_bytes()
+    except OSError as error:
+        raise StorageQualificationError("anchored provider result is unavailable") from error
+    if hashlib.sha256(encoded).hexdigest() != expected_sha256:
+        raise StorageQualificationError("provider result does not match its external anchor")
+    try:
+        value = json.loads(encoded)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise StorageQualificationError("anchored provider result is malformed") from error
+    if not isinstance(value, Mapping):
+        raise StorageQualificationError("anchored provider result must be an object")
+    return value
+
+
 def _bound_provider_rung(
-    path: Path, *, expected_commit: str, expected_image_digest: str
+    path: Path,
+    *,
+    provider_result_sha256: str,
+    expected_commit: str,
+    expected_image_digest: str,
 ) -> Mapping[str, Any]:
     rung, rung_digest = _read_digest(path)
     validate_source_rung(rung)
     scale = int(rung["scale"])
     base = path.parent
-    result, _ = _read_digest(base / f"s{scale}-result.json")
+    result = _read_anchored_result(base / f"s{scale}-result.json", provider_result_sha256)
     plan, plan_digest = _read_digest(base / f"s{scale}-plan.json")
     _schema(PROVIDER_RESULT_SCHEMA, result, "provider result")
     _schema(PROVIDER_PLAN_SCHEMA, plan, "provider execution plan")
@@ -432,6 +455,7 @@ def _bound_provider_rung(
 def build(
     source_paths: Sequence[Path],
     *,
+    provider_result_sha256: Sequence[str],
     expected_commit: str,
     expected_image_digest: str,
     volume_bytes: int,
@@ -444,13 +468,18 @@ def build(
         raise StorageQualificationError("expected image must be an immutable Fly OCI digest")
     if len(source_paths) != 2:
         raise StorageQualificationError("exactly two adjacent observations are required")
+    if len(provider_result_sha256) != 2:
+        raise StorageQualificationError("exactly two ordered provider result anchors are required")
+    if any(HEX_DIGEST.fullmatch(digest) is None for digest in provider_result_sha256):
+        raise StorageQualificationError("provider result anchor must be a SHA-256 digest")
     source_rungs = [
         _bound_provider_rung(
             path,
+            provider_result_sha256=digest,
             expected_commit=expected_commit,
             expected_image_digest=expected_image_digest,
         )
-        for path in source_paths
+        for path, digest in zip(source_paths, provider_result_sha256, strict=True)
     ]
     return _build_qualification(
         source_rungs,
@@ -681,19 +710,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("output", type=Path)
     parser.add_argument("--commit", required=True)
     parser.add_argument("--image-digest", required=True)
+    parser.add_argument("--low-result-sha256", required=True)
+    parser.add_argument("--high-result-sha256", required=True)
     parser.add_argument("--volume-bytes", type=int, required=True)
     parser.add_argument("--reserved-headroom-bytes", type=int, required=True)
     args = parser.parse_args(argv)
     try:
         qualification = build(
             [args.low, args.high],
+            provider_result_sha256=[
+                args.low_result_sha256,
+                args.high_result_sha256,
+            ],
             expected_commit=args.commit,
             expected_image_digest=args.image_digest,
             volume_bytes=args.volume_bytes,
             reserved_headroom_bytes=args.reserved_headroom_bytes,
         )
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        _write_json(args.output, qualification)
+        publish_json_no_clobber(args.output, qualification)
         return 0
     except (OSError, StorageQualificationError) as error:
         parser.error(str(error))
