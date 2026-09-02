@@ -244,8 +244,10 @@ def run_live_suite(
             raise FinBenchTransactionSuiteError(
                 "invalid_document", "live evidence must keep certification=false"
             )
-        if evidence.get("identities", {}).get("execution_authority", {}).get(
-            "caller_supplied_result"
+        if (
+            evidence.get("identities", {})
+            .get("execution_authority", {})
+            .get("caller_supplied_result")
         ):
             raise FinBenchTransactionSuiteError(
                 "static_output_rejected",

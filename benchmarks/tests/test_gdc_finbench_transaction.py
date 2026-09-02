@@ -264,7 +264,10 @@ class GdcFinBenchTransactionSuiteTests(unittest.TestCase):
                     json.dumps(changed) + "\n",
                     encoding="utf-8",
                 )
-                with self.subTest(path=path), self.assertRaises(FinBenchTransactionSuiteError) as raised:
+                with (
+                    self.subTest(path=path),
+                    self.assertRaises(FinBenchTransactionSuiteError) as raised,
+                ):
                     validate_live_fixture(fixture)
                 self.assertEqual(raised.exception.cause, "identity_drift")
                 shutil.rmtree(fixture)
