@@ -56,21 +56,22 @@ fn measured_identity_query(forge: &GraphForge, query: &str) -> (Vec<Vec<u8>>, De
     let io = io_stats::snapshot();
     assert_eq!(io.edge_full_reads + io.edge_filtered_reads, 0, "{io:#?}");
     assert_eq!(io.node_full_reads + io.node_filtered_reads, 0, "{io:#?}");
-    assert_eq!(snapshot.sorts.len(), 1, "{snapshot:#?}");
-    let sort = &snapshot.sorts[0];
-    assert_eq!(sort.fetch, Some(LIMIT), "{snapshot:#?}");
-    assert!(snapshot.execution_batch_rows > 0, "{snapshot:#?}");
-    assert!(
-        sort.output_rows <= (LIMIT as u64).saturating_add(snapshot.execution_batch_rows),
-        "{snapshot:#?}"
-    );
-    assert_eq!(sort.retained_bytes, 0, "{snapshot:#?}");
-    let expected_hops = usize::from(query.contains("-[r2]->")) + 1;
-    assert_eq!(
-        snapshot.operator_rss.len(),
-        expected_hops + 1,
-        "{snapshot:#?}"
-    );
+    let optimized_two_hop = query == ORDERED_TWO_HOP;
+    if optimized_two_hop {
+        assert!(snapshot.sorts.is_empty(), "{snapshot:#?}");
+        assert!(snapshot.operator_rss.is_empty(), "{snapshot:#?}");
+    } else {
+        assert_eq!(snapshot.sorts.len(), 1, "{snapshot:#?}");
+        let sort = &snapshot.sorts[0];
+        assert_eq!(sort.fetch, Some(LIMIT), "{snapshot:#?}");
+        assert!(snapshot.execution_batch_rows > 0, "{snapshot:#?}");
+        assert!(
+            sort.output_rows <= (LIMIT as u64).saturating_add(snapshot.execution_batch_rows),
+            "{snapshot:#?}"
+        );
+        assert_eq!(sort.retained_bytes, 0, "{snapshot:#?}");
+        assert_eq!(snapshot.operator_rss.len(), 2, "{snapshot:#?}");
+    }
     assert!(
         snapshot.operator_rss.iter().all(|operator| {
             operator.peak_bytes >= operator.before_bytes
@@ -816,10 +817,14 @@ fn ordinary_streaming_sink_exposes_deterministic_query_evidence() {
             )
             .unwrap();
         assert_eq!(receipt.evidence.contract, "graphforge-query-evidence/1");
-        assert_eq!(receipt.evidence.hops.len(), ordinal + 1);
-        assert_eq!(receipt.evidence.sorts.len(), 1);
-        assert_eq!(receipt.evidence.sorts[0].fetch_rows, Some(LIMIT));
-        assert_eq!(receipt.evidence.sorts[0].retained_bytes, 0);
+        assert_eq!(receipt.evidence.hops.len(), 1);
+        if ordinal == 0 {
+            assert_eq!(receipt.evidence.sorts.len(), 1);
+            assert_eq!(receipt.evidence.sorts[0].fetch_rows, Some(LIMIT));
+            assert_eq!(receipt.evidence.sorts[0].retained_bytes, 0);
+        } else {
+            assert!(receipt.evidence.sorts.is_empty());
+        }
         assert!(
             receipt.evidence.memory_reserved_after
                 <= receipt
@@ -950,6 +955,29 @@ fn optimized_v4_two_hop_direction_type_alias_and_quiescence_are_exact() {
         .execute("MATCH (n) RETURN n.node_uuid AS id ORDER BY id")
         .unwrap();
     let node_ids = fixed_binary_values(&scan, "id");
+
+    let canonical_plan = forge.explain(ORDERED_TWO_HOP).unwrap();
+    assert!(
+        canonical_plan.contains("OrderedTwoHopPathCountExec"),
+        "{canonical_plan}"
+    );
+    assert!(!canonical_plan.contains("ExpandExec"), "{canonical_plan}");
+    io_stats::reset();
+    let (canonical, canonical_demand) = demand::capture(|| forge.execute(ORDERED_TWO_HOP));
+    let canonical = canonical.unwrap();
+    let expected = node_ids
+        .iter()
+        .flat_map(|uuid| std::iter::repeat_n(uuid.clone(), FAN_OUT * FAN_OUT))
+        .take(LIMIT)
+        .collect::<Vec<_>>();
+    assert_eq!(fixed_binary_values(&canonical, "id"), expected);
+    assert_projected_identity_io(&io_stats::snapshot());
+    assert_eq!(canonical_demand.hops.len(), 1, "{canonical_demand:#?}");
+    assert!(canonical_demand.sorts.is_empty(), "{canonical_demand:#?}");
+    let hop = canonical_demand.hops.values().next().unwrap();
+    assert!(hop.projected_chunks > 0, "{canonical_demand:#?}");
+    assert!(hop.identity_read_calls > 0, "{canonical_demand:#?}");
+    assert_eq!(hop.identity_per_record_seeks, 0, "{canonical_demand:#?}");
 
     let cases = [
         (

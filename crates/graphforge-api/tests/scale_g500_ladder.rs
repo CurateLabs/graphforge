@@ -718,11 +718,23 @@ fn query_work_evidence(snapshot: &DemandSnapshot) -> Value {
             "input_rows": hop.input_rows,
             "candidates_generated": hop.candidates_generated,
             "rows_emitted": hop.rows_emitted,
+            "edge_reads_started": hop.edge_reads_started,
+            "edge_reads_completed": hop.edge_reads_completed,
+            "edge_full_reads": hop.edge_full_reads,
             "edge_rows_scanned": hop.edge_rows_scanned,
+            "node_reads_started": hop.node_reads_started,
+            "node_reads_completed": hop.node_reads_completed,
+            "node_full_reads": hop.node_full_reads,
             "node_rows_scanned": hop.node_rows_scanned,
+            "projected_chunks": hop.projected_chunks,
+            "projected_rows": hop.projected_rows,
+            "projected_columns": hop.projected_columns,
+            "identity_ranges_selected": hop.identity_ranges_selected,
             "identity_read_calls": hop.identity_read_calls,
             "identity_bytes_read": hop.identity_bytes_read,
             "identity_peak_buffer_bytes": hop.identity_peak_buffer_bytes,
+            "identity_per_record_seeks": hop.identity_per_record_seeks,
+            "reads_after_cancel": hop.reads_after_cancel,
         })).collect::<Vec<_>>(),
         "sorts": snapshot.sorts.iter().map(|sort| json!({
             "ordinal": sort.ordinal,
@@ -749,7 +761,74 @@ fn query_work_evidence(snapshot: &DemandSnapshot) -> Value {
     })
 }
 
-fn bounded_ordered_limit(snapshot: &DemandSnapshot, expected_hops: usize, limit: usize) -> bool {
+const MAX_IDENTITY_BUFFER_BYTES: u64 = 16 * 1024 * 1024;
+
+fn released_memory_is_bounded(snapshot: &DemandSnapshot) -> bool {
+    snapshot.memory_reserved_after
+        <= snapshot
+            .memory_reserved_before
+            .saturating_add(snapshot.returned_batch_bytes)
+}
+
+fn has_no_materializing_reads(hop: &demand::HopSnapshot) -> bool {
+    hop.edge_reads_started == 0
+        && hop.edge_reads_completed == 0
+        && hop.edge_reads_failed == 0
+        && hop.edge_rows_returned == 0
+        && hop.edge_rows_scanned == 0
+        && hop.edge_full_reads == 0
+        && hop.node_reads_started == 0
+        && hop.node_reads_completed == 0
+        && hop.node_reads_failed == 0
+        && hop.node_rows_returned == 0
+        && hop.node_rows_scanned == 0
+        && hop.node_full_reads == 0
+        && hop.edge_projected_columns == 0
+        && hop.node_projected_columns == 0
+}
+
+fn bounded_counting_ordered_two_hop(snapshot: &DemandSnapshot, limit: usize) -> bool {
+    let Some(hop) = snapshot.hops.values().next() else {
+        return false;
+    };
+    snapshot.hops.len() == 1
+        && snapshot.sorts.is_empty()
+        && snapshot.operator_rss.is_empty()
+        && snapshot.execution_batch_rows > 0
+        && hop.input_batches == 0
+        && hop.input_rows == 0
+        && hop.rows_emitted == limit as u64
+        && hop.candidates_generated >= hop.rows_emitted
+        && hop.candidates_generated <= (limit as u64).saturating_add(snapshot.execution_batch_rows)
+        && has_no_materializing_reads(hop)
+        && hop.projected_chunks > 0
+        && hop.projected_chunks == hop.projected_rows
+        && hop.projected_rows <= limit as u64
+        && hop.projected_columns == 1
+        && hop.identity_ranges_selected > 0
+        && hop.identity_ranges_selected <= hop.projected_rows
+        && hop.identity_read_calls
+            <= hop
+                .identity_ranges_selected
+                .saturating_mul(2)
+                .saturating_add(2)
+        && hop.identity_bytes_read
+            <= hop
+                .identity_read_calls
+                .saturating_mul(MAX_IDENTITY_BUFFER_BYTES)
+        && hop.identity_peak_buffer_bytes <= MAX_IDENTITY_BUFFER_BYTES
+        && hop.identity_per_record_seeks == 0
+        && hop.reads_after_cancel == 0
+        && snapshot.cancellations == 0
+        && snapshot.max_in_flight_reads == 0
+        && released_memory_is_bounded(snapshot)
+}
+
+fn bounded_streaming_ordered_limit(
+    snapshot: &DemandSnapshot,
+    expected_hops: usize,
+    limit: usize,
+) -> bool {
     snapshot.hops.len() == expected_hops
         && snapshot.sorts.len() == 1
         && snapshot.sorts[0].fetch == Some(limit)
@@ -766,14 +845,111 @@ fn bounded_ordered_limit(snapshot: &DemandSnapshot, expected_hops: usize, limit:
                 && operator.peak_bytes >= operator.after_bytes
                 && (operator.after_bytes > 0 || !cfg!(target_os = "linux"))
         })
-        && snapshot.memory_reserved_after
-            <= snapshot
-                .memory_reserved_before
-                .saturating_add(snapshot.returned_batch_bytes)
+        && released_memory_is_bounded(snapshot)
         && snapshot
             .hops
             .values()
             .all(|hop| hop.reads_after_cancel == 0)
+}
+
+fn bounded_ordered_limit(snapshot: &DemandSnapshot, expected_hops: usize, limit: usize) -> bool {
+    let optimized_two_hop_shape = expected_hops == 2
+        && snapshot.hops.len() == 1
+        && snapshot.sorts.is_empty()
+        && snapshot.operator_rss.is_empty();
+    if optimized_two_hop_shape {
+        bounded_counting_ordered_two_hop(snapshot, limit)
+    } else {
+        bounded_streaming_ordered_limit(snapshot, expected_hops, limit)
+    }
+}
+
+fn counting_snapshot(limit: usize) -> DemandSnapshot {
+    let mut snapshot = DemandSnapshot {
+        execution_batch_rows: 8_192,
+        returned_batch_bytes: (limit as u64).saturating_mul(16),
+        ..DemandSnapshot::default()
+    };
+    snapshot.hops.insert(
+        1,
+        demand::HopSnapshot {
+            candidates_generated: (limit as u64).saturating_add(10),
+            rows_emitted: limit as u64,
+            projected_chunks: 52,
+            projected_rows: 52,
+            projected_columns: 1,
+            identity_ranges_selected: 52,
+            identity_read_calls: 2,
+            identity_bytes_read: 8_192,
+            identity_peak_buffer_bytes: 4_096,
+            ..demand::HopSnapshot::default()
+        },
+    );
+    snapshot
+}
+
+#[test]
+fn optimized_two_hop_budget_requires_complete_counting_evidence() {
+    let limit = 1_000;
+    let baseline = counting_snapshot(limit);
+    assert!(bounded_ordered_limit(&baseline, 2, limit));
+    assert!(
+        !bounded_ordered_limit(&baseline, 1, limit),
+        "the optimized exception must not weaken the one-hop budget"
+    );
+    assert!(!bounded_ordered_limit(&DemandSnapshot::default(), 2, limit));
+
+    macro_rules! reject_mutation {
+        ($name:literal, $mutate:expr) => {{
+            let mut snapshot = baseline.clone();
+            $mutate(&mut snapshot);
+            assert!(
+                !bounded_ordered_limit(&snapshot, 2, limit),
+                "accepted {}: {snapshot:#?}",
+                $name
+            );
+        }};
+    }
+    reject_mutation!("missing hop", |s: &mut DemandSnapshot| s.hops.clear());
+    reject_mutation!("under-emission", |s: &mut DemandSnapshot| {
+        s.hops.get_mut(&1).unwrap().rows_emitted -= 1;
+    });
+    reject_mutation!("candidate undercount", |s: &mut DemandSnapshot| {
+        s.hops.get_mut(&1).unwrap().candidates_generated = 999;
+    });
+    reject_mutation!("candidate overflow", |s: &mut DemandSnapshot| {
+        s.hops.get_mut(&1).unwrap().candidates_generated = 9_193;
+    });
+    reject_mutation!("missing projection", |s: &mut DemandSnapshot| {
+        s.hops.get_mut(&1).unwrap().projected_rows = 0;
+    });
+    reject_mutation!("missing ranges", |s: &mut DemandSnapshot| {
+        s.hops.get_mut(&1).unwrap().identity_ranges_selected = 0;
+    });
+    reject_mutation!("unbounded calls", |s: &mut DemandSnapshot| {
+        s.hops.get_mut(&1).unwrap().identity_read_calls = 107;
+    });
+    reject_mutation!("unbounded bytes", |s: &mut DemandSnapshot| {
+        s.hops.get_mut(&1).unwrap().identity_bytes_read = 2 * MAX_IDENTITY_BUFFER_BYTES + 1;
+    });
+    reject_mutation!("per-record seek", |s: &mut DemandSnapshot| {
+        s.hops.get_mut(&1).unwrap().identity_per_record_seeks = 1;
+    });
+    reject_mutation!("edge materialization", |s: &mut DemandSnapshot| {
+        s.hops.get_mut(&1).unwrap().edge_reads_started = 1;
+    });
+    reject_mutation!("node materialization", |s: &mut DemandSnapshot| {
+        s.hops.get_mut(&1).unwrap().node_rows_scanned = 1;
+    });
+    reject_mutation!("unexpected cancellation", |s: &mut DemandSnapshot| {
+        s.cancellations = 1;
+    });
+    reject_mutation!("in-flight read", |s: &mut DemandSnapshot| {
+        s.max_in_flight_reads = 1;
+    });
+    reject_mutation!("retained memory", |s: &mut DemandSnapshot| {
+        s.memory_reserved_after = 16_001;
+    });
 }
 
 fn linux_process_memory() -> Value {
@@ -1416,7 +1592,7 @@ fn run_rung(
                 let mut violation = envelope_violation(&env, ladder_started, query_disk_used_bytes);
                 if failure.is_some() {
                     violation = Some("execution_failure");
-                } else if rows > 1_000 {
+                } else if rows != 1_000 {
                     violation = Some("result_mismatch");
                 } else if !bounded_ordered_limit(&work, expected_hops, 1_000) {
                     violation = Some("operator_budget_violation");

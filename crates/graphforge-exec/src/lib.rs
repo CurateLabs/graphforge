@@ -3381,6 +3381,14 @@ impl ExpandExec {
     }
 
     pub(crate) fn is_destination_identity_only(&self) -> bool {
+        self.is_identity_projection_only(true)
+    }
+
+    pub(crate) fn is_intermediate_topology_only(&self) -> bool {
+        self.is_identity_projection_only(false)
+    }
+
+    fn is_identity_projection_only(&self, require_destination_uuid: bool) -> bool {
         let Some(required) = self.required_output.as_deref() else {
             return false;
         };
@@ -3396,6 +3404,11 @@ impl ExpandExec {
                         !needed || self.schema.field(self.input_width + offset).name() == "edge_id"
                     })
                 });
+        let required_destination = if require_destination_uuid {
+            destination_uuid_index
+        } else {
+            destination_id_index
+        };
         edge_materialization_unused
             && required
                 .iter()
@@ -3404,10 +3417,7 @@ impl ExpandExec {
                 .all(|(index, needed)| {
                     !needed || index == destination_uuid_index || index == destination_id_index
                 })
-            && required
-                .get(destination_uuid_index)
-                .copied()
-                .unwrap_or(false)
+            && required.get(required_destination).copied().unwrap_or(false)
     }
 }
 
