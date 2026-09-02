@@ -133,7 +133,7 @@ def run_tiny_suite(
     root: Path | None = None,
     evidence_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Run the bounded snb-interactive-static-synthetic-v1 SNB Interactive suite through the Rust runner."""
+    """Replay the bounded synthetic SNB Interactive fixture through the Rust runner."""
     base = root or workspace_root()
     fixture = base / "fixtures" / "gdc" / "snb-interactive-tiny" / fixture_name
     pin = load_pinned_identity(identity_path(base))
@@ -181,19 +181,24 @@ def run_tiny_suite(
         return evidence
 
 
-def _normalize_arrow_rows(table: Any) -> str:
+def _arrow_row_receipt(table: Any) -> dict[str, Any]:
     if tuple(table.column_names) != LIVE_IS1_COLUMNS:
         raise SnbInteractiveSuiteError(
             "invalid_live_result",
             f"IS1 Arrow columns drifted: expected {LIVE_IS1_COLUMNS}, got {table.column_names}",
         )
-    rows: list[str] = []
+    rows: list[list[Any]] = []
     for row in table.to_pylist():
         values = [row[column] for column in LIVE_IS1_COLUMNS]
         if any(value is None for value in values):
             raise SnbInteractiveSuiteError("invalid_live_result", "IS1 returned a null field")
-        rows.append("\t".join(str(value) for value in values))
-    return "\n".join(rows) + ("\n" if rows else "")
+        rows.append(values)
+    return {
+        "schema": "graphforge-arrow-row-receipt/1",
+        "source": "graphforge_in_memory_execute",
+        "columns": list(LIVE_IS1_COLUMNS),
+        "rows": rows,
+    }
 
 
 def run_live_is1(
@@ -250,7 +255,7 @@ def run_live_is1(
     # Warmup and measured execution use the same explicit parameter binding.
     forge.execute(LIVE_IS1_QUERY, parameters)
     arrow_table = forge.execute(LIVE_IS1_QUERY, parameters)
-    normalized_rows = _normalize_arrow_rows(arrow_table)
+    arrow_rows = _arrow_row_receipt(arrow_table)
 
     identities = contract_evidence["identities"]
     identities["fixture"] = {"classification": "synthetic_engineering_fixture"}
@@ -262,8 +267,8 @@ def run_live_is1(
     }
     with tempfile.TemporaryDirectory(prefix="gdc-snb-interactive-live-") as tmp:
         tmp_path = Path(tmp)
-        rows_path = tmp_path / "arrow-rows.out"
-        rows_path.write_text(normalized_rows, encoding="utf-8")
+        rows_path = tmp_path / "arrow-rows.json"
+        rows_path.write_text(json.dumps(arrow_rows), encoding="utf-8")
         identities_path = tmp_path / "identities.json"
         identities_path.write_text(json.dumps(identities, indent=2) + "\n", encoding="utf-8")
         out_evidence = evidence_path or (tmp_path / "evidence.json")
@@ -344,8 +349,8 @@ __all__ = [
     "SnbInteractiveSuiteError",
     "assert_separate_from_other_suites",
     "identity_path",
-    "live_identity_path",
     "list_operation_rules",
+    "live_identity_path",
     "map_operation_file",
     "run_live_is1",
     "run_tiny_suite",

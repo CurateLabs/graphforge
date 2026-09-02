@@ -399,6 +399,7 @@ pub enum EvidenceLane {
 #[serde(rename_all = "snake_case")]
 pub enum PhaseStatus {
     Passed,
+    Failed,
     NotExecuted,
 }
 
@@ -671,6 +672,64 @@ pub fn load_result_rows(path: &Path) -> Result<ResultRows, SuiteError> {
     Ok(parse_result_rows(&text))
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArrowRowReceipt {
+    schema: String,
+    source: String,
+    columns: Vec<String>,
+    rows: Vec<Vec<serde_json::Value>>,
+}
+
+pub fn load_live_arrow_rows(path: &Path) -> Result<ResultRows, SuiteError> {
+    const COLUMNS: [&str; 8] = [
+        "firstName",
+        "lastName",
+        "birthday",
+        "locationIP",
+        "browserUsed",
+        "cityId",
+        "gender",
+        "creationDate",
+    ];
+    let text = fs::read_to_string(path).map_err(|error| {
+        SuiteError::InvalidDocument(format!("failed to read {}: {error}", path.display()))
+    })?;
+    let receipt: ArrowRowReceipt = serde_json::from_str(&text).map_err(|error| {
+        SuiteError::InvalidDocument(format!("invalid Arrow row receipt: {error}"))
+    })?;
+    if receipt.schema != "graphforge-arrow-row-receipt/1"
+        || receipt.source != "graphforge_in_memory_execute"
+        || receipt.columns != COLUMNS
+    {
+        return Err(SuiteError::InvalidDocument(
+            "live lane requires a GraphForge in-memory Arrow row receipt with IS1 columns".into(),
+        ));
+    }
+    receipt
+        .rows
+        .into_iter()
+        .map(|row| {
+            if row.len() != COLUMNS.len() {
+                return Err(SuiteError::InvalidDocument(
+                    "live IS1 Arrow row has the wrong width".into(),
+                ));
+            }
+            row.into_iter()
+                .map(|value| match value {
+                    serde_json::Value::String(value) => Ok(value),
+                    serde_json::Value::Number(value) => Ok(value.to_string()),
+                    serde_json::Value::Bool(value) => Ok(value.to_string()),
+                    _ => Err(SuiteError::InvalidDocument(
+                        "live IS1 Arrow row values must be non-null scalars".into(),
+                    )),
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map(|values| normalize_row(&values.join("\t")))
+        })
+        .collect()
+}
+
 pub fn validate_result(
     mode: ValidationMode,
     reference: &ResultRows,
@@ -822,6 +881,12 @@ pub fn run_live_is1_job(
     if job.operation != Operation::Is1 {
         return failed_live_is1(job.operation, "live lane supports only IS1");
     }
+    if job.dataset_id != LIVE_IS1_DATASET {
+        return failed_live_is1(
+            job.operation,
+            "live IS1 requires the pinned synthetic fixture dataset",
+        );
+    }
     let Some(parameters) = &job.parameters else {
         return failed_live_is1(job.operation, "live IS1 requires explicit parameters");
     };
@@ -851,6 +916,11 @@ pub fn assemble_live_is1_evidence(
     identities: serde_json::Value,
     is1: OperationOutcome,
 ) -> SuiteEvidence {
+    let validation_status = if matches!(is1.status, OperationStatus::Passed) {
+        PhaseStatus::Passed
+    } else {
+        PhaseStatus::Failed
+    };
     let mut outcomes = vec![is1];
     outcomes.push(run_job(
         &OperationJob {
@@ -916,7 +986,11 @@ pub fn assemble_live_is1_evidence(
         .into_iter()
         .map(|(phase, detail)| PhaseEvidence {
             phase: phase.into(),
-            status: PhaseStatus::Passed,
+            status: if phase == "validation" {
+                validation_status
+            } else {
+                PhaseStatus::Passed
+            },
             detail: detail.into(),
         })
         .collect(),
@@ -1057,6 +1131,18 @@ mod tests {
 
         let missing = parse_result_rows("tag-a 3\ntag-c 9\n");
         assert!(validate_result(ValidationMode::Normalized, &reference, &missing).is_err());
+    }
+
+    #[test]
+    fn static_output_cannot_satisfy_live_arrow_lane() {
+        let path = std::env::temp_dir().join(format!(
+            "graphforge-snb-static-output-{}.out",
+            std::process::id()
+        ));
+        fs::write(&path, "Ada Lovelace 1815-12-10\n").unwrap();
+        let error = load_live_arrow_rows(&path).unwrap_err();
+        fs::remove_file(path).unwrap();
+        assert!(error.to_string().contains("invalid Arrow row receipt"));
     }
 
     #[test]

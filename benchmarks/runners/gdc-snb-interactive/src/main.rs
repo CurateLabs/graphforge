@@ -1,7 +1,7 @@
 use graphforge_benchmark_gdc_snb_interactive::{
     JOB_SCHEMA, MappingOutcome, Operation, OperationJob, OperationStatus,
-    assemble_evidence, assemble_live_is1_evidence, load_result_rows, map_operation,
-    operation_rules, run_job, run_live_is1_job,
+    assemble_evidence, assemble_live_is1_evidence, load_live_arrow_rows, load_result_rows,
+    map_operation, operation_rules, run_job, run_live_is1_job,
 };
 use std::env;
 use std::fs;
@@ -139,7 +139,8 @@ fn validate_live_is1(
     let job = load_job(job_path)?;
     let reference =
         load_result_rows(&PathBuf::from(reference_path)).map_err(|error| error.to_string())?;
-    let system = load_result_rows(&PathBuf::from(system_path)).map_err(|error| error.to_string())?;
+    let system =
+        load_live_arrow_rows(&PathBuf::from(system_path)).map_err(|error| error.to_string())?;
     let identities: serde_json::Value = serde_json::from_str(
         &fs::read_to_string(identities_path).map_err(|error| error.to_string())?,
     )

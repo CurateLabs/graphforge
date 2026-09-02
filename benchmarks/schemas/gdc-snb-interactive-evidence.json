@@ -27,7 +27,7 @@
         "type": "object",
         "properties": {
           "phase": { "enum": ["load", "warmup", "execution", "validation"] },
-          "status": { "enum": ["passed", "not_executed"] },
+          "status": { "enum": ["passed", "failed", "not_executed"] },
           "detail": { "type": "string", "minLength": 1 }
         },
         "required": ["phase", "status", "detail"],
