@@ -110,14 +110,27 @@ PYTHONPATH=harness GRAPHFORGE_GDC_FINBENCH_TRANSACTION_BIN=target/debug/graphfor
 
 Per-suite adapters own workload semantics through their own Rust runner and
 harness module. The SNB BI suite (`gdc_snb_bi`) maps the 20 `BI*` analytical
-reads onto the public Cypher / analyst-verb surface, fails closed on weighted
-shortest-path reads and the `INS*`/`DEL*` batch maintenance stream, validates
-reads against pinned references, and records per-phase resources (load, query,
-spill, RSS, I/O) in a section kept distinct from correctness. Its evidence
-stamps `certification: false`:
+reads onto the public Cypher / analyst-verb surface and fails closed on weighted
+shortest-path reads and the `INS*`/`DEL*` batch maintenance stream. The
+`snb-bi-tiny` fixtures are legacy static validator-contract fixtures: their
+historical `snb-bi-sf0.003` identifier is not an official SF0.003 dataset, their
+`.graph`/`.out` bytes are synthetic replay inputs, and they provide no live
+engine evidence.
+
+The explicit `snb-bi-live` lane closes that static-replay gap for BI2. It loads
+the committed deterministic seed into `GraphForge()` (in-memory), executes the
+supported BI2 shape through `GraphForge.execute`, and sends the resulting rows
+to the existing Rust normalized validator. The reference is independently
+derived from the seed. `identity.json` pins the official SNB specification and
+BI query release/commit while explicitly identifying the synthetic fixture and
+internal Python driver; it does not claim LDBC datagen, official parameters,
+SF0.003, or certification. Live resource timings and row counts remain separate
+from correctness, and unobserved spill/RSS/I/O fields are named rather than
+invented. All evidence stamps `certification: false`:
 
 ```bash
-PYTHONPATH=harness uv run --locked python -m unittest tests.test_gdc_snb_bi
+PYTHONPATH=benchmarks/harness uv run python -m unittest \
+  benchmarks.tests.test_gdc_snb_bi
 ```
 
 ## Public-interface certification runner

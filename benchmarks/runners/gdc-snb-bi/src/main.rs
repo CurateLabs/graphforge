@@ -1,6 +1,7 @@
 use graphforge_benchmark_gdc_snb_bi::{
     JOB_SCHEMA, MappingOutcome, Operation, OperationJob, OperationStatus, assemble_evidence,
-    load_resource_report, load_result_rows, map_operation, operation_rules, run_job,
+    load_live_result_document, load_resource_report, load_result_rows, map_operation,
+    operation_rules, run_job, validate_live_result,
 };
 use std::env;
 use std::fs;
@@ -39,6 +40,32 @@ fn main() -> ExitCode {
                         ExitCode::from(3)
                     }
                 },
+                Err(error) => {
+                    eprintln!("{error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "validate-live" => {
+            let Some(reference_path) = args.next() else {
+                eprintln!("usage: validate-live REFERENCE RESULT.json PARAMETERS_SHA256");
+                return ExitCode::from(2);
+            };
+            let Some(result_path) = args.next() else {
+                eprintln!("missing RESULT.json");
+                return ExitCode::from(2);
+            };
+            let Some(parameters_sha256) = args.next() else {
+                eprintln!("missing PARAMETERS_SHA256");
+                return ExitCode::from(2);
+            };
+            let reference_path = PathBuf::from(reference_path);
+            let result_path = PathBuf::from(result_path);
+            match load_result_rows(&reference_path).and_then(|reference| {
+                let result = load_live_result_document(&result_path)?;
+                validate_live_result(&parameters_sha256, &reference, &result)
+            }) {
+                Ok(()) => ExitCode::SUCCESS,
                 Err(error) => {
                     eprintln!("{error}");
                     ExitCode::FAILURE

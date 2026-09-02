@@ -1,0 +1,46 @@
+{
+  "schema": "graphforge-gdc-snb-bi-live-identity/1",
+  "suite_id": "snb-bi",
+  "operation": "BI2",
+  "certification": false,
+  "upstream_spec": {
+    "source": "https://github.com/ldbc/ldbc_snb_docs",
+    "release": "v2.2.4",
+    "commit": "5f7956e07a214373c363b371a3b88bc83ddcd118"
+  },
+  "upstream_query": {
+    "source": "https://github.com/ldbc/ldbc_snb_bi",
+    "release": "v1.0.0",
+    "commit": "abf8cd4862f2b96ba9267e6298a1f7402439040b",
+    "path": "cypher/queries/bi-2.cypher"
+  },
+  "fixture": {
+    "kind": "synthetic_minimal_snb_shaped",
+    "generator": "committed deterministic seed 963; not ldbc_snb_datagen_spark",
+    "scale_factor": null,
+    "path": "seed.json",
+    "sha256": "9acb1d3413c35a72c0f1ffbf40ef69a330483f8ca2a6da76e939c9adaf999689"
+  },
+  "parameters": {
+    "kind": "internal_deterministic_bi2_parameters",
+    "path": "parameters.json",
+    "sha256": "72806ba8eae872db38f4ee064292e312993741221354706c24f595db03bf6d73"
+  },
+  "reference": {
+    "authority": "independent_semantic_derivation_from_seed",
+    "captured_from_engine": false,
+    "path": "expected-bi2.ref",
+    "sha256": "b8be3e0d66ee2a776ef91d1c67e5b88ed7c436fe0b5a51ab38fd41560a63fb28"
+  },
+  "driver": {
+    "kind": "internal_python_public_api_driver",
+    "durable": false,
+    "interface": "GraphForge.execute",
+    "result_validator": "graphforge-benchmark-gdc-snb-bi"
+  },
+  "normalization": {
+    "upstream_temporal_window": "$date plus 100-day durations",
+    "internal_equivalent": "precomputed integer day boundaries [0,100), [100,200)",
+    "reason": "exercise the current supported Cypher surface without claiming temporal-literal parity"
+  }
+}

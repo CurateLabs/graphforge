@@ -1,0 +1,68 @@
+{
+  "schema": "graphforge-gdc-snb-bi-synthetic-seed/1",
+  "seed": 963,
+  "tag_classes": [
+    "MusicalArtist",
+    "SportsTeam"
+  ],
+  "tags": [
+    {
+      "name": "Alpha",
+      "tag_class": "MusicalArtist"
+    },
+    {
+      "name": "Beta",
+      "tag_class": "MusicalArtist"
+    },
+    {
+      "name": "Gamma",
+      "tag_class": "MusicalArtist"
+    },
+    {
+      "name": "Strikers",
+      "tag_class": "SportsTeam"
+    }
+  ],
+  "messages": [
+    {
+      "id": 1,
+      "creation_day": 10,
+      "tags": ["Alpha"]
+    },
+    {
+      "id": 2,
+      "creation_day": 20,
+      "tags": ["Alpha", "Gamma"]
+    },
+    {
+      "id": 3,
+      "creation_day": 30,
+      "tags": ["Beta", "Gamma"]
+    },
+    {
+      "id": 4,
+      "creation_day": 110,
+      "tags": ["Alpha"]
+    },
+    {
+      "id": 5,
+      "creation_day": 120,
+      "tags": ["Beta"]
+    },
+    {
+      "id": 6,
+      "creation_day": 130,
+      "tags": ["Beta"]
+    },
+    {
+      "id": 7,
+      "creation_day": 140,
+      "tags": ["Beta"]
+    },
+    {
+      "id": 8,
+      "creation_day": 15,
+      "tags": ["Strikers"]
+    }
+  ]
+}

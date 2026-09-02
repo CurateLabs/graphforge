@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
+import tempfile
 import unittest
 
 from graphforge_bench.gdc_contracts import list_gdc_suites, workspace_root
@@ -13,6 +15,8 @@ from graphforge_bench.gdc_snb_bi import (
     BATCH_INSERTS,
     BATCH_UPDATE_CAUSE,
     EVIDENCE_SCHEMA,
+    LIVE_EVIDENCE_SCHEMA,
+    LIVE_RESULT_SCHEMA,
     OPERATIONS,
     RESOURCE_SCHEMA,
     WEIGHTED_PATH_CAUSE,
@@ -22,7 +26,10 @@ from graphforge_bench.gdc_snb_bi import (
     assert_separate_from_other_suites,
     list_operation_rules,
     map_operation_file,
+    run_live_bi2,
     run_tiny_suite,
+    validate_live_fixture,
+    validate_live_result_document,
 )
 from jsonschema import Draft202012Validator
 
@@ -121,6 +128,97 @@ class GdcSnbBiSuiteTests(unittest.TestCase):
                 (self.root / "schemas" / "gdc-snb-bi-evidence.json").read_text(encoding="utf-8")
             )
         ).validate(evidence)
+
+    def _write_live_result(self, directory: Path, rows: list[str]) -> Path:
+        fixture = self.root / "fixtures" / "gdc" / "snb-bi-live"
+        identity = validate_live_fixture(fixture)
+        result = {
+            "schema": LIVE_RESULT_SCHEMA,
+            "operation": "BI2",
+            "source": "graphforge_public_python_api",
+            "parameters_sha256": identity["parameters"]["sha256"],
+            "columns": ["tagName", "countWindow1", "countWindow2", "diff"],
+            "rows": rows,
+        }
+        path = directory / "result.json"
+        path.write_text(json.dumps(result) + "\n", encoding="utf-8")
+        return path
+
+    def test_live_bi2_executes_real_in_memory_graphforge(self) -> None:
+        evidence = run_live_bi2()
+        self.assertEqual(evidence["schema"], LIVE_EVIDENCE_SCHEMA)
+        self.assertEqual(evidence["lane"], "live_in_memory")
+        self.assertEqual(evidence["operation"], "BI2")
+        self.assertEqual(evidence["status"], "passed")
+        self.assertIs(evidence["certification"], False)
+        self.assertEqual(
+            set(evidence["correctness"]["rows"]),
+            {"Beta 1 3 2", "Gamma 2 0 2", "Alpha 2 1 1"},
+        )
+        self.assertEqual(
+            evidence["correctness"]["validator"],
+            "graphforge-benchmark-gdc-snb-bi",
+        )
+
+    def test_live_validator_normalizes_reordering_and_rejects_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            reordered = self._write_live_result(
+                directory,
+                ["Alpha 2 1 1", "Gamma 2 0 2", "Beta 1 3 2"],
+            )
+            validate_live_result_document(reordered)
+            mismatch = self._write_live_result(
+                directory,
+                ["Alpha 2 1 1", "Gamma 2 0 2"],
+            )
+            with self.assertRaises(SnbBiSuiteError) as raised:
+                validate_live_result_document(mismatch)
+            self.assertEqual(raised.exception.cause, "reference_mismatch")
+
+    def test_live_lane_rejects_parameter_mutation_and_static_output(self) -> None:
+        with self.assertRaises(SnbBiSuiteError) as raised:
+            run_live_bi2(parameters_override={"tagClass": "SportsTeam"})
+        self.assertEqual(raised.exception.cause, "parameter_identity_mismatch")
+
+        static_output = (
+            self.root
+            / "fixtures"
+            / "gdc"
+            / "snb-bi-tiny"
+            / "compatible"
+            / "system-outputs"
+            / "snb-bi-sf0.003-BI2.out"
+        )
+        with self.assertRaises(SnbBiSuiteError) as raised_static:
+            validate_live_result_document(static_output)
+        self.assertEqual(raised_static.exception.cause, "static_output_rejected")
+
+    def test_live_fixture_rejects_identity_drift(self) -> None:
+        source = self.root / "fixtures" / "gdc" / "snb-bi-live"
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = Path(tmp) / "fixture"
+            shutil.copytree(source, fixture)
+            identity_path = fixture / "identity.json"
+            identity = json.loads(identity_path.read_text(encoding="utf-8"))
+            identity["upstream_query"]["commit"] = "0" * 40
+            identity_path.write_text(json.dumps(identity) + "\n", encoding="utf-8")
+            with self.assertRaises(SnbBiSuiteError) as raised:
+                validate_live_fixture(fixture)
+            self.assertEqual(raised.exception.cause, "identity_drift")
+
+    def test_live_phase_and_resource_evidence_stays_out_of_correctness(self) -> None:
+        evidence = run_live_bi2()
+        self.assertEqual(evidence["phases"], ["load", "query", "validation"])
+        self.assertEqual(evidence["resources"]["load"]["rows_loaded"], 27)
+        self.assertEqual(evidence["resources"]["query"]["rows_returned"], 3)
+        self.assertIs(evidence["resources"]["correctness_authority"], False)
+        self.assertNotIn("resources", evidence["correctness"])
+        self.assertNotIn("wall_ms", evidence["correctness"])
+        self.assertEqual(
+            evidence["resources"]["unobserved"],
+            ["spill_bytes", "peak_rss_bytes", "io_bytes"],
+        )
 
     def test_resources_recorded_separately_from_correctness(self) -> None:
         evidence = run_tiny_suite(fixture_name="compatible")

@@ -3,31 +3,31 @@
   "suite_id": "snb-bi",
   "disposition": "executable",
   "spec": {
-    "name": "ldbc-snb",
-    "source": "https://ldbcouncil.org/benchmarks/snb/",
-    "release": "engineering-pin",
-    "commit": null
+    "name": "ldbc_snb_docs",
+    "source": "https://github.com/ldbc/ldbc_snb_docs",
+    "release": "v2.2.4",
+    "commit": "5f7956e07a214373c363b371a3b88bc83ddcd118"
   },
   "generator": {
-    "name": "ldbc_snb_datagen_spark",
-    "source": "https://github.com/ldbc/ldbc_snb_datagen_spark",
-    "release": null,
-    "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    "name": "graphforge_synthetic_snb_bi_fixture",
+    "source": "https://github.com/CurateLabs/graphforge",
+    "release": "synthetic-fixture-v1",
+    "commit": null
   },
   "driver": {
-    "name": "ldbc_snb_bi_driver",
-    "source": "https://github.com/ldbc/ldbc_snb_bi_opensource",
-    "release": null,
-    "commit": "dddddddddddddddddddddddddddddddddddddddd"
+    "name": "graphforge_internal_snb_bi_driver",
+    "source": "https://github.com/CurateLabs/graphforge",
+    "release": "internal-driver-v1",
+    "commit": null
   },
   "datasets": [
     {
       "id": "snb-bi-sf0.003",
-      "role": "dataset",
+      "role": "other",
       "checksum_sha256": "c0fd57903065bb4950244cc77023e9ce0803f723596922b114141f190ea521d8",
-      "license": "LDBC-SNB-terms",
+      "license": "Apache-2.0",
       "acquisition": "fixture",
-      "source": "https://github.com/ldbc/ldbc_snb_datagen_spark"
+      "source": "https://github.com/CurateLabs/graphforge"
     }
   ],
   "references": [
@@ -35,7 +35,7 @@
       "dataset_id": "snb-bi-sf0.003",
       "workload_key": "bi-validation",
       "checksum_sha256": "20368ad845455de99ef737732930bf7d07d9d44adde19a31ec7ba6ec332b25db",
-      "source": "https://github.com/ldbc/ldbc_snb_bi_opensource"
+      "source": "https://github.com/CurateLabs/graphforge"
     }
   ]
 }

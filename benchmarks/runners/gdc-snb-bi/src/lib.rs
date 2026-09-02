@@ -22,10 +22,11 @@ use std::str::FromStr;
 pub const EVIDENCE_SCHEMA: &str = "graphforge-gdc-snb-bi-evidence/1";
 pub const JOB_SCHEMA: &str = "graphforge-gdc-snb-bi-job/1";
 pub const LADDER_SCHEMA: &str = "graphforge-gdc-snb-bi-ladder/1";
+pub const LIVE_RESULT_SCHEMA: &str = "graphforge-gdc-snb-bi-live-result/1";
 pub const RESOURCE_SCHEMA: &str = "graphforge-gdc-snb-bi-resources/1";
 pub const SUITE_ID: &str = "snb-bi";
 
-/// The bounded engineering fixture dataset every ladder and suite run begins on.
+/// Historical ID of the synthetic static validator fixture (not official SF0.003).
 pub const BOUNDED_TINY_DATASET: &str = "snb-bi-sf0.003";
 
 /// SNB BI workload category.
@@ -797,6 +798,76 @@ pub fn parse_result_rows(text: &str) -> ResultRows {
         .collect()
 }
 
+/// Result produced by the explicit live lane after a public GraphForge call.
+///
+/// The source and parameter digest prevent the validator CLI from accepting
+/// the legacy static `.out` replay as live evidence. The rows remain ordinary
+/// strings so the same Rust-owned normalization and multiset validator used by
+/// the suite is authoritative.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LiveResultDocument {
+    pub schema: String,
+    pub operation: Operation,
+    pub source: String,
+    pub parameters_sha256: String,
+    pub columns: Vec<String>,
+    pub rows: Vec<String>,
+}
+
+pub fn load_live_result_document(path: &Path) -> Result<LiveResultDocument, SuiteError> {
+    let text = fs::read_to_string(path).map_err(|error| {
+        SuiteError::InvalidDocument(format!("failed to read {}: {error}", path.display()))
+    })?;
+    serde_json::from_str(&text)
+        .map_err(|error| SuiteError::InvalidDocument(format!("invalid live result: {error}")))
+}
+
+pub fn validate_live_result(
+    expected_parameters_sha256: &str,
+    reference: &ResultRows,
+    document: &LiveResultDocument,
+) -> Result<(), SuiteError> {
+    if document.schema != LIVE_RESULT_SCHEMA {
+        return Err(SuiteError::InvalidDocument(format!(
+            "unexpected live result schema: {}",
+            document.schema
+        )));
+    }
+    if document.operation != Operation::Bi2 {
+        return Err(SuiteError::InvalidDocument(
+            "live lane supports exactly BI2".into(),
+        ));
+    }
+    if document.source != "graphforge_public_python_api" {
+        return Err(SuiteError::InvalidDocument(
+            "static_output_rejected: live result source must be graphforge_public_python_api"
+                .into(),
+        ));
+    }
+    if document.parameters_sha256 != expected_parameters_sha256 {
+        return Err(SuiteError::InvalidDocument(
+            "parameter_identity_mismatch".into(),
+        ));
+    }
+    if document.columns
+        != ["tagName", "countWindow1", "countWindow2", "diff"]
+            .map(str::to_string)
+            .to_vec()
+    {
+        return Err(SuiteError::InvalidDocument(
+            "unexpected BI2 live result columns".into(),
+        ));
+    }
+    if document.rows.iter().any(|row| row.trim().is_empty()) {
+        return Err(SuiteError::InvalidDocument(
+            "live result rows must not be empty".into(),
+        ));
+    }
+    let system = document.rows.iter().map(|row| normalize_row(row)).collect();
+    validate_result(ValidationMode::Normalized, reference, &system)
+}
+
 fn normalize_row(row: &str) -> String {
     row.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -1109,6 +1180,54 @@ mod tests {
 
         let missing = parse_result_rows("tag-a 3\ntag-c 9\n");
         assert!(validate_result(ValidationMode::Normalized, &reference, &missing).is_err());
+    }
+
+    fn sample_live_result(rows: &[&str]) -> LiveResultDocument {
+        LiveResultDocument {
+            schema: LIVE_RESULT_SCHEMA.into(),
+            operation: Operation::Bi2,
+            source: "graphforge_public_python_api".into(),
+            parameters_sha256: "a".repeat(64),
+            columns: ["tagName", "countWindow1", "countWindow2", "diff"]
+                .map(str::to_string)
+                .to_vec(),
+            rows: rows.iter().map(|row| (*row).into()).collect(),
+        }
+    }
+
+    #[test]
+    fn live_bi2_uses_authoritative_normalized_validation() {
+        let reference = parse_result_rows("Beta 1 3 2\nGamma 2 0 2\nAlpha 2 1 1\n");
+        let reordered = sample_live_result(&["Alpha 2 1 1", "Gamma 2 0 2", "Beta 1 3 2"]);
+        validate_live_result(&"a".repeat(64), &reference, &reordered).unwrap();
+
+        let mismatch = sample_live_result(&["Alpha 2 1 1", "Gamma 2 0 2"]);
+        assert!(matches!(
+            validate_live_result(&"a".repeat(64), &reference, &mismatch),
+            Err(SuiteError::ReferenceMismatch(_))
+        ));
+    }
+
+    #[test]
+    fn live_validation_rejects_static_source_and_parameter_mutation() {
+        let reference = parse_result_rows("Alpha 2 1 1\n");
+        let mut document = sample_live_result(&["Alpha 2 1 1"]);
+        document.source = "committed_static_output".into();
+        assert!(
+            validate_live_result(&"a".repeat(64), &reference, &document)
+                .unwrap_err()
+                .to_string()
+                .contains("static_output_rejected")
+        );
+
+        document.source = "graphforge_public_python_api".into();
+        document.parameters_sha256 = "b".repeat(64);
+        assert!(
+            validate_live_result(&"a".repeat(64), &reference, &document)
+                .unwrap_err()
+                .to_string()
+                .contains("parameter_identity_mismatch")
+        );
     }
 
     #[test]

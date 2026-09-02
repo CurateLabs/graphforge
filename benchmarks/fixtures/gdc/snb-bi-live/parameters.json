@@ -1,0 +1,8 @@
+{
+  "schema": "graphforge-gdc-snb-bi-live-parameters/1",
+  "operation": "BI2",
+  "tagClass": "MusicalArtist",
+  "window1Start": 0,
+  "window2Start": 100,
+  "windowEnd": 200
+}
