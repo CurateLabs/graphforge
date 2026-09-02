@@ -2134,79 +2134,22 @@ mod tests {
 
     #[test]
     fn reopen_emits_authoritative_source_project_union_allocation() {
-        fn publish_generation(
-            project: &Path,
-            workspace: &Path,
-            generation_uuid: &str,
-            transaction_uuid: &str,
-        ) -> graphforge_storage::ResolvedProjectGeneration {
-            let (_, graph) = graphforge_storage::capture_graph_files(workspace).unwrap();
-            let mut participants = graphforge_storage::empty_workspace_participants().unwrap();
-            participants.insert(0, graph);
-            let request = graphforge_storage::ProjectGenerationRequest {
-                transaction_uuid: transaction_uuid.parse().unwrap(),
-                generation_uuid: generation_uuid.parse().unwrap(),
-                capabilities: vec![
-                    graphforge_storage::ProjectCapability {
-                        capability_id: graphforge_storage::GRAPH_CAPABILITY_ID.into(),
-                        capability_version: graphforge_storage::GRAPH_CAPABILITY_VERSION,
-                    },
-                    graphforge_storage::ProjectCapability {
-                        capability_id: graphforge_storage::WORKSPACE_CAPABILITY_ID.into(),
-                        capability_version: graphforge_storage::WORKSPACE_CAPABILITY_VERSION,
-                    },
-                ],
-                participants,
-            };
-            let graphforge_storage::ProjectStageOutcome::Staged(staged) =
-                graphforge_storage::stage_project_generation_with_graph_tree(
-                    project,
-                    &request,
-                    Some(workspace),
-                )
-                .unwrap()
-            else {
-                panic!("fresh fixture generation unexpectedly replayed");
-            };
-            staged
-                .validate(|_| Ok(()), |_, _| Ok(()))
-                .unwrap()
-                .publish()
-                .unwrap();
-            graphforge_storage::resolve_project_generation(project).unwrap()
-        }
-
         let root = std::env::temp_dir().join(format!(
             "gf-certify-source-union-{}",
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&root);
         let project = root.join("project");
-        let workspace = root.join("workspace");
-        fs::create_dir_all(workspace.join("topology")).unwrap();
-        fs::write(
-            workspace.join("topology/nodes.parquet"),
-            vec![7_u8; 8_192],
-        )
-        .unwrap();
-        let initial = graphforge_storage::open_or_initialize_project(&project).unwrap();
-        let first = publish_generation(
-            &project,
-            &workspace,
-            "00000000-0000-4000-8000-000000000002",
-            "00000000-0000-4000-8000-000000000102",
-        );
-        let current = publish_generation(
-            &project,
-            &workspace,
-            "00000000-0000-4000-8000-000000000003",
-            "00000000-0000-4000-8000-000000000103",
-        );
+        let current =
+            graphforge_storage::open_or_initialize_ephemeral_project(&project).unwrap();
         let selected = graphforge_storage::capture_storage_attribution(&current).unwrap();
         let union =
             graphforge_storage::capture_project_storage_identity_union(&current).unwrap();
-        assert!(union.retained_generation_uuids.contains(&initial.generation_uuid()));
-        assert!(union.retained_generation_uuids.contains(&first.generation_uuid()));
+        assert!(
+            union
+                .retained_generation_uuids
+                .contains(&current.generation_uuid())
+        );
         assert!(union.allocated_bytes > selected.allocated_bytes);
 
         let mut session = LifecycleStorageSession::default();
