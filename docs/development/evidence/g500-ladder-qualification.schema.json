@@ -5,7 +5,7 @@
   "required": ["schema", "rungs", "projection"],
   "properties": {
     "schema": {"const": "graphforge-g500-ladder-qualification/3"},
-    "rungs": {"type": "array", "minItems": 2, "maxItems": 4, "items": {"$ref": "#/$defs/rung"}},
+    "rungs": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"$ref": "#/$defs/rung"}},
     "projection": {"$ref": "#/$defs/projection"}
   },
   "$defs": {

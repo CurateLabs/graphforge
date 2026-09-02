@@ -212,7 +212,8 @@ rejected as certification evidence.
 ### Disk attribution and S26 admission
 
 The versioned `graphforge-g500-ladder-qualification/3` companion document is
-validated by `scripts/ci/validate-g500-ladder-qualification.py`. Every observed
+produced and validated by
+`graphforge_bench.progressive_storage_qualification`. Every observed
 rung has exactly one row for canonical node topology, canonical edge topology,
 properties, UUID/surrogate indexes, adjacency/CSR, catalogs/manifests,
 construction staging/spill, portable package, and clean import. Native file
@@ -295,14 +296,18 @@ canonical-edge allocation plus the lifecycle peak,
 volume headroom, and the admit/refuse decision. A single successful rung is not
 a projection, and insufficient reserved headroom always refuses SCALE-26.
 
-Build and validate a companion document from two adjacent real certification
-documents with:
+Build and validate a companion document from two adjacent complete progressive
+rung documents with:
 
 ```bash
-make g500-ladder-qualification \
-  LOW_CERT=build/s20-certification.json \
-  HIGH_CERT=build/s22-certification.json \
+make -C benchmarks progressive-storage-qualification \
+  LOW_RUNG=build/s20-rung.json \
+  HIGH_RUNG=build/s22-rung.json \
   EVIDENCE=build/g500-ladder-qualification.json \
+  COMMIT=$(git rev-parse HEAD) \
+  IMAGE_DIGEST=registry.fly.io/graphforge-bench@sha256:<64-hex-digest> \
+  LOW_RESULT_SHA256=<independently-recorded-s20-result-sha256> \
+  HIGH_RESULT_SHA256=<independently-recorded-s22-result-sha256> \
   VOLUME_BYTES=536870912000 \
   RESERVED_HEADROOM_BYTES=53687091200
 ```
