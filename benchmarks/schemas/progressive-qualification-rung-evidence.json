@@ -36,7 +36,7 @@
     },
     "storage_components": {
       "type": "object", "additionalProperties": false,
-      "required": ["source_project_current_allocated_bytes", "source_allocated_physical_bytes", "source_retained_logical_eof_bytes", "imported_allocated_physical_bytes", "imported_retained_logical_eof_bytes", "transient_peak_allocated_bytes", "logical_read_bytes", "logical_write_bytes", "reader_calls", "publication_work_units"],
+      "required": ["source_allocated_physical_bytes", "source_retained_logical_eof_bytes", "imported_allocated_physical_bytes", "imported_retained_logical_eof_bytes", "transient_peak_allocated_bytes", "logical_read_bytes", "logical_write_bytes", "reader_calls", "publication_work_units"],
       "properties": {
         "source_project_current_allocated_bytes": {"$ref": "#/$defs/nonnegative"},
         "source_allocated_physical_bytes": {"$ref": "#/$defs/nonnegative"},
