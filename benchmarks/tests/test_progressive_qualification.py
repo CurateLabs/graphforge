@@ -224,6 +224,18 @@ class ProgressiveQualificationTests(unittest.TestCase):
         missing_capacity["provider_capacity"] = None
         self.assertFalse(self.evidence_schema.is_valid(missing_capacity))
 
+    def test_source_project_union_allocation_is_typed_but_additive_for_old_rungs(self) -> None:
+        current = rung(18)
+        self.rung_schema.validate(current)
+        historical = copy.deepcopy(current)
+        del historical["storage_components"]["source_project_current_allocated_bytes"]
+        self.rung_schema.validate(historical)
+        for malformed in (True, -1, "450000"):
+            with self.subTest(malformed=malformed):
+                invalid = copy.deepcopy(current)
+                invalid["storage_components"]["source_project_current_allocated_bytes"] = malformed
+                self.assertFalse(self.rung_schema.is_valid(invalid))
+
     def test_profile_schema_rejects_non_string_generator_identity(self) -> None:
         profile = json.loads((ROOT / "profiles/graph500/s18-local.json").read_text())
         profile["generator"]["identity"] = 42
