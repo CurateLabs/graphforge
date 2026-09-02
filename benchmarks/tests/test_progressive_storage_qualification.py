@@ -11,7 +11,6 @@ from graphforge_bench.progressive_storage_qualification import (
 )
 from tests.test_progressive_qualification import rung
 
-
 VOLUME_BYTES = 500 * 1024**3
 RESERVED_BYTES = 75 * 1024**3
 
