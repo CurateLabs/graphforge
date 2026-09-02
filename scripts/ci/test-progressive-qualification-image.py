@@ -174,14 +174,14 @@ def validate_contract(root: Path) -> None:
         raise ContractError("benchmark lock must resolve exactly one pinned BenchExec package")
 
     ignored = (root / DOCKERIGNORE).read_text(encoding="utf-8").splitlines()
-    for pattern in (".git", "*.env", ".env*", "*.pem", "*.key"):
+    for pattern in (".git", "**/.venv", "**/target", "*.env", ".env*", "*.pem", "*.key"):
         if pattern not in ignored:
             raise ContractError(f"container build context must exclude {pattern}")
 
     for binary in (
-        "/source/target/release/gf",
-        "/source/benchmarks/target/release/graphforge-benchmark-certify",
-        "/source/benchmarks/target/release/graphforge-benchmark-graph500-generator",
+        "/artifacts/gf",
+        "/artifacts/graphforge-benchmark-certify",
+        "/artifacts/graphforge-benchmark-graph500-generator",
     ):
         require(dockerfile, binary, f"runtime must copy built binary {Path(binary).name}")
     require(
