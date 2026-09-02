@@ -9,7 +9,6 @@
 //! path multiplicity until the limit is satisfied.
 
 use std::fmt;
-use std::io::Write;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -108,17 +107,8 @@ fn peel_expand_transport(plan: &Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan
 }
 
 fn detect_ordered_two_hop(plan: &Arc<dyn ExecutionPlan>) -> Option<OrderedTwoHopSpec> {
-    // #region agent log
-    let _ = std::fs::OpenOptions::new().create(true).append(true).open("/opt/cursor/logs/debug.log").and_then(|mut file| writeln!(file, "{{\"hypothesisId\":\"A-D\",\"location\":\"ordered_two_hop.rs:detect:entry\",\"message\":\"matcher entry\",\"data\":{{\"plan\":\"{}\"}},\"timestamp\":0}}", plan.name()));
-    // #endregion
     let plan = peel_plan(plan);
-    // #region agent log
-    let _ = std::fs::OpenOptions::new().create(true).append(true).open("/opt/cursor/logs/debug.log").and_then(|mut file| writeln!(file, "{{\"hypothesisId\":\"C-D\",\"location\":\"ordered_two_hop.rs:detect:peeled\",\"message\":\"peeled root\",\"data\":{{\"plan\":\"{}\"}},\"timestamp\":0}}", plan.name()));
-    // #endregion
     let projection = plan.downcast_ref::<ProjectionExec>()?;
-    // #region agent log
-    let _ = std::fs::OpenOptions::new().create(true).append(true).open("/opt/cursor/logs/debug.log").and_then(|mut file| writeln!(file, "{{\"hypothesisId\":\"C\",\"location\":\"ordered_two_hop.rs:detect:projection\",\"message\":\"projection matched\",\"data\":{{\"exprs\":{}}},\"timestamp\":0}}", projection.expr().len()));
-    // #endregion
     if projection.expr().len() != 1 {
         return None;
     }
@@ -139,9 +129,6 @@ fn detect_ordered_two_hop(plan: &Arc<dyn ExecutionPlan>) -> Option<OrderedTwoHop
     } else {
         sort_input.downcast_ref::<SortExec>()?
     };
-    // #region agent log
-    let _ = std::fs::OpenOptions::new().create(true).append(true).open("/opt/cursor/logs/debug.log").and_then(|mut file| writeln!(file, "{{\"hypothesisId\":\"C\",\"location\":\"ordered_two_hop.rs:detect:sort\",\"message\":\"sort matched\",\"data\":{{\"exprs\":{},\"fetch\":{}}},\"timestamp\":0}}", sort.expr().len(), sort.fetch().unwrap_or(0)));
-    // #endregion
     let fetch = sort.fetch()?;
     if sort.expr().len() != 1 || sort.expr()[0].options.descending {
         return None;
@@ -165,12 +152,6 @@ fn detect_ordered_two_hop(plan: &Arc<dyn ExecutionPlan>) -> Option<OrderedTwoHop
         };
     let expand2 = expand2_plan.downcast_ref::<ExpandExec>()?;
     let expand1 = expand2.children().first()?.downcast_ref::<ExpandExec>()?;
-    // #region agent log
-    let _ = std::fs::OpenOptions::new().create(true).append(true).open("/opt/cursor/logs/debug.log").and_then(|mut file| writeln!(file, "{{\"hypothesisId\":\"A-B\",\"location\":\"ordered_two_hop.rs:detect:expands\",\"message\":\"expand chain matched\",\"data\":{{\"expand1_identity_only\":{},\"expand2_identity_only\":{},\"same_type\":{},\"same_direction\":{}}},\"timestamp\":0}}", expand1.is_destination_identity_only(), expand2.is_destination_identity_only(), expand1.rel_type_name() == expand2.rel_type_name(), expand1.direction() == expand2.direction()));
-    // #endregion
-    // #region agent log
-    let _ = std::fs::OpenOptions::new().create(true).append(true).open("/opt/cursor/logs/debug.log").and_then(|mut file| writeln!(file, "{{\"hypothesisId\":\"A\",\"location\":\"ordered_two_hop.rs:detect:eligibility\",\"message\":\"corrected expand eligibility\",\"data\":{{\"intermediate_topology_only\":{},\"terminal_identity_only\":{},\"has_ordinal_identity\":{}}},\"timestamp\":0}}", expand1.is_intermediate_topology_only(), expand2.is_destination_identity_only(), expand2.ordinal_identities().is_some()));
-    // #endregion
     if !expand1.is_intermediate_topology_only() || !expand2.is_destination_identity_only() {
         return None;
     }
