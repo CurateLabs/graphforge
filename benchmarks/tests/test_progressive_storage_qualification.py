@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 
 from graphforge_bench.progressive_storage_qualification import (
     StorageQualificationError,
+    _build_qualification,
     build,
     main,
     validate,
@@ -17,19 +20,106 @@ from tests.test_progressive_qualification import rung
 
 VOLUME_BYTES = 500 * 1024**3
 RESERVED_BYTES = 75 * 1024**3
+COMMIT = subprocess.run(
+    ["git", "-C", str(Path(__file__).resolve().parents[2]), "rev-parse", "HEAD"],
+    capture_output=True,
+    check=True,
+    text=True,
+).stdout.strip()
+IMAGE = "registry.fly.io/graphforge-bench@sha256:" + "1" * 64
 
 
 class ProgressiveStorageQualificationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.base = Path(self.temporary.name)
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
     def source_pair(self) -> list[dict]:
         return [rung(20), rung(22)]
 
+    def write_bundle(self, value: dict) -> Path:
+        scale = value["scale"]
+        prefix = self.base / f"s{scale}"
+        rung_path = prefix.with_name(f"s{scale}-rung.json")
+        plan_path = prefix.with_name(f"s{scale}-plan.json")
+        benchexec_path = prefix.with_name(f"s{scale}-benchexec.json")
+        graphforge_path = prefix.with_name(f"s{scale}-graphforge.json")
+        result_path = prefix.with_name(f"s{scale}-result.json")
+        profile = Path(__file__).resolve().parents[1] / (
+            f"profiles/graph500/s{scale}-provider.json"
+        )
+        identities = {
+            "commit": COMMIT,
+            "profile_id": f"graph500-s{scale}-provider",
+            "profile_sha256": hashlib.sha256(profile.read_bytes()).hexdigest(),
+            "image_digest": IMAGE,
+            "generator": "sha256:" + "2" * 64,
+            "generator_executable_sha256": "3" * 64,
+            "gf_sha256": "4" * 64,
+            "certify_sha256": "5" * 64,
+            "benchexec_python_sha256": "6" * 64,
+            "benchexec_version": "3.30",
+            "admitted_plan_sha256": "7" * 64,
+            "source_tree_sha256": "8" * 64,
+        }
+        plan = {
+            "schema": "graphforge-progressive-provider-execution-plan/1",
+            "rung": f"S{scale}",
+            "execution": "provider_native_linux_benchexec",
+            "identities": identities,
+            "limits": {"wall_seconds": 14_400, "memory_bytes": 4_294_967_296, "cores": 16},
+            "outputs": [
+                f"s{scale}-plan.json",
+                f"s{scale}-benchexec.json",
+                f"s{scale}-graphforge.json",
+                f"s{scale}-rung.json",
+                f"s{scale}-result.json",
+            ],
+            "claim": "engineering_evidence_only",
+        }
+        rung_path.write_text(json.dumps(value), encoding="utf-8")
+        plan_path.write_text(json.dumps(plan), encoding="utf-8")
+        benchexec_path.write_text("{}\n", encoding="utf-8")
+        graphforge_path.write_text("{}\n", encoding="utf-8")
+        artifacts = {
+            name: hashlib.sha256(path.read_bytes()).hexdigest()
+            for name, path in {
+                "plan_sha256": plan_path,
+                "benchexec_sha256": benchexec_path,
+                "graphforge_sha256": graphforge_path,
+                "rung_sha256": rung_path,
+            }.items()
+        }
+        result = {
+            "schema": "graphforge-progressive-provider-run-result/1",
+            "rung": f"S{scale}",
+            "status": "passed",
+            "failure": None,
+            "identities": identities,
+            "artifacts": artifacts,
+            "claim": "engineering_evidence_only",
+        }
+        result_path.write_text(json.dumps(result), encoding="utf-8")
+        return rung_path
+
+    def bound_pair(self, scales: tuple[int, int] = (20, 22)) -> list[Path]:
+        return [self.write_bundle(rung(scale)) for scale in scales]
+
+    def build_pair(self, scales: tuple[int, int] = (20, 22), **overrides: int) -> dict:
+        return build(
+            self.bound_pair(scales),
+            expected_commit=COMMIT,
+            expected_image_digest=IMAGE,
+            volume_bytes=overrides.get("volume_bytes", VOLUME_BYTES),
+            reserved_headroom_bytes=overrides.get("reserved_headroom_bytes", RESERVED_BYTES),
+        )
+
     def test_two_complete_adjacent_rungs_produce_valid_exact_v3_evidence(self) -> None:
         low, high = self.source_pair()
-        evidence = build(
-            [low, high],
-            volume_bytes=VOLUME_BYTES,
-            reserved_headroom_bytes=RESERVED_BYTES,
-        )
+        evidence = self.build_pair()
         validate(evidence)
         self.assertEqual(evidence["schema"], "graphforge-g500-ladder-qualification/3")
         self.assertEqual(evidence["projection"]["source_rungs"], ["S20", "S22"])
@@ -44,6 +134,19 @@ class ProgressiveStorageQualificationTests(unittest.TestCase):
         )
         self.assertEqual(len(evidence["rungs"][0]["artifacts"]), 9)
         self.assertEqual(len(evidence["rungs"][0]["phases"]), 9)
+        staging = next(
+            item
+            for item in evidence["rungs"][0]["artifacts"]
+            if item["category"] == "construction_staging_spill"
+        )
+        self.assertEqual(
+            staging["allocated_bytes"],
+            low["storage_attribution"]["construction"]["staging"]["allocated_bytes"],
+        )
+        self.assertEqual(
+            staging["transient_peak_allocated_bytes"],
+            low["storage_attribution"]["construction"]["staging_transient_peak_allocated_bytes"],
+        )
 
     def test_missing_portable_authority_and_historical_v1_are_rejected(self) -> None:
         missing = self.source_pair()[0]
@@ -75,17 +178,25 @@ class ProgressiveStorageQualificationTests(unittest.TestCase):
                 )
                 with self.assertRaises(StorageQualificationError):
                     validate_source_rung(invalid)
+        missing_staging = self.source_pair()[0]
+        del missing_staging["storage_attribution"]["construction"]["staging"]
+        with self.assertRaisesRegex(StorageQualificationError, "staging"):
+            validate_source_rung(missing_staging)
 
     def test_one_rung_and_non_adjacent_rungs_are_rejected(self) -> None:
         with self.assertRaisesRegex(StorageQualificationError, "exactly two"):
             build(
-                [rung(20)],
+                [self.write_bundle(rung(20))],
+                expected_commit=COMMIT,
+                expected_image_digest=IMAGE,
                 volume_bytes=VOLUME_BYTES,
                 reserved_headroom_bytes=RESERVED_BYTES,
             )
         with self.assertRaisesRegex(StorageQualificationError, "ordered adjacent"):
             build(
-                [rung(20), rung(24)],
+                self.bound_pair((20, 24)),
+                expected_commit=COMMIT,
+                expected_image_digest=IMAGE,
                 volume_bytes=VOLUME_BYTES,
                 reserved_headroom_bytes=RESERVED_BYTES,
             )
@@ -100,18 +211,84 @@ class ProgressiveStorageQualificationTests(unittest.TestCase):
         with self.assertRaisesRegex(StorageQualificationError, "sensitive evidence key"):
             validate_source_rung(unsafe)
 
-    def test_s26_storage_headroom_refuses_and_cannot_be_relabelled_admit(self) -> None:
-        baseline = build(
+    def test_every_other_category_numeric_must_be_zero(self) -> None:
+        totals = {
+            "logical_references": "logical_references",
+            "logical_bytes": "logical_bytes",
+            "physical_objects": "physical_objects",
+            "physical_logical_bytes": "retained_logical_eof_bytes",
+            "allocated_bytes": "allocated_physical_bytes",
+        }
+        for field, total in totals.items():
+            with self.subTest(field=field):
+                invalid = self.source_pair()[0]
+                source = invalid["storage_attribution"]["source"]
+                source["categories"]["other"][field] = 1
+                source[total] += 1
+                with self.assertRaises(StorageQualificationError):
+                    validate_source_rung(invalid)
+
+    def test_provider_result_binds_source_profile_commit_image_and_rung_bytes(self) -> None:
+        for field, value in (
+            ("source", "progressive_profile"),
+            ("profile_id", "graph500-s20-local"),
+        ):
+            with self.subTest(field=field):
+                invalid = rung(20)
+                invalid[field] = value
+                with self.assertRaisesRegex(
+                    StorageQualificationError, "canonical provider source/profile"
+                ):
+                    validate_source_rung(invalid)
+
+        paths = self.bound_pair()
+        wrong_commit = "9" * 40
+        result_path = self.base / "s20-result.json"
+        plan_path = self.base / "s20-plan.json"
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        result["identities"]["commit"] = wrong_commit
+        plan["identities"]["commit"] = wrong_commit
+        plan_path.write_text(json.dumps(plan), encoding="utf-8")
+        result["artifacts"]["plan_sha256"] = hashlib.sha256(plan_path.read_bytes()).hexdigest()
+        result_path.write_text(json.dumps(result), encoding="utf-8")
+        with self.assertRaisesRegex(StorageQualificationError, "expected commit"):
+            build(
+                paths,
+                expected_commit=COMMIT,
+                expected_image_digest=IMAGE,
+                volume_bytes=VOLUME_BYTES,
+                reserved_headroom_bytes=RESERVED_BYTES,
+            )
+
+        paths = self.bound_pair()
+        paths[0].write_text(paths[0].read_text(encoding="utf-8") + "\n", encoding="utf-8")
+        with self.assertRaisesRegex(StorageQualificationError, "artifacts do not match"):
+            build(
+                paths,
+                expected_commit=COMMIT,
+                expected_image_digest=IMAGE,
+                volume_bytes=VOLUME_BYTES,
+                reserved_headroom_bytes=RESERVED_BYTES,
+            )
+
+    def test_v3_schema_rejects_three_or_four_rungs_directly(self) -> None:
+        evidence = _build_qualification(
             self.source_pair(),
             volume_bytes=VOLUME_BYTES,
-            reserved_headroom_bytes=0,
+            reserved_headroom_bytes=RESERVED_BYTES,
         )
+        for count in (3, 4):
+            with self.subTest(count=count):
+                invalid = copy.deepcopy(evidence)
+                invalid["rungs"].extend(copy.deepcopy(evidence["rungs"][: count - 2]))
+                with self.assertRaisesRegex(StorageQualificationError, "schema violation"):
+                    validate(invalid)
+
+    def test_s26_storage_headroom_refuses_and_cannot_be_relabelled_admit(self) -> None:
+        baseline = self.build_pair(reserved_headroom_bytes=0)
         projected = baseline["projection"]["projected_lifecycle_peak_bytes"]
-        refused = build(
-            self.source_pair(),
-            volume_bytes=projected - 1,
-            reserved_headroom_bytes=0,
-        )
+        refused = self.build_pair(volume_bytes=projected - 1, reserved_headroom_bytes=0)
         self.assertEqual(refused["projection"]["decision"], "refuse")
         self.assertEqual(refused["projection"]["headroom_bytes"], 0)
         contradiction = copy.deepcopy(refused)
@@ -120,31 +297,52 @@ class ProgressiveStorageQualificationTests(unittest.TestCase):
             validate(contradiction)
 
     def test_cli_writes_only_the_validated_closed_contract(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            low, high = self.source_pair()
-            low_path = root / "s20-rung.json"
-            high_path = root / "s22-rung.json"
-            output = root / "qualification.json"
-            low_path.write_text(json.dumps(low), encoding="utf-8")
-            high_path.write_text(json.dumps(high), encoding="utf-8")
-            self.assertEqual(
-                main(
-                    [
-                        str(low_path),
-                        str(high_path),
-                        str(output),
-                        "--volume-bytes",
-                        str(VOLUME_BYTES),
-                        "--reserved-headroom-bytes",
-                        str(RESERVED_BYTES),
-                    ]
-                ),
-                0,
+        low_path, high_path = self.bound_pair()
+        output = self.base / "qualification.json"
+        self.assertEqual(
+            main(
+                [
+                    str(low_path),
+                    str(high_path),
+                    str(output),
+                    "--commit",
+                    COMMIT,
+                    "--image-digest",
+                    IMAGE,
+                    "--volume-bytes",
+                    str(VOLUME_BYTES),
+                    "--reserved-headroom-bytes",
+                    str(RESERVED_BYTES),
+                ]
+            ),
+            0,
+        )
+        evidence = json.loads(output.read_text(encoding="utf-8"))
+        validate(evidence)
+        self.assertNotIn(str(self.base), output.read_text(encoding="utf-8"))
+
+    def test_cli_never_replaces_an_existing_qualification(self) -> None:
+        low_path, high_path = self.bound_pair()
+        output = self.base / "qualification.json"
+        output.write_text("preserve-existing\n", encoding="utf-8")
+        with self.assertRaises(SystemExit):
+            main(
+                [
+                    str(low_path),
+                    str(high_path),
+                    str(output),
+                    "--commit",
+                    COMMIT,
+                    "--image-digest",
+                    IMAGE,
+                    "--volume-bytes",
+                    str(VOLUME_BYTES),
+                    "--reserved-headroom-bytes",
+                    str(RESERVED_BYTES),
+                ]
             )
-            evidence = json.loads(output.read_text(encoding="utf-8"))
-            validate(evidence)
-            self.assertNotIn(str(root), output.read_text(encoding="utf-8"))
+        self.assertEqual(output.read_text(encoding="utf-8"), "preserve-existing\n")
+        self.assertEqual(list(self.base.glob(".qualification.json.*")), [])
 
 
 if __name__ == "__main__":

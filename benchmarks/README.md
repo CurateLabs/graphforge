@@ -513,10 +513,15 @@ orchestration:
 make -C benchmarks progressive-storage-qualification \
   LOW_RUNG=/evidence/s20-rung.json HIGH_RUNG=/evidence/s22-rung.json \
   EVIDENCE=/evidence/g500-ladder-qualification.json \
+  COMMIT=$(git rev-parse HEAD) \
+  IMAGE_DIGEST=registry.fly.io/graphforge-bench@sha256:<64-hex-digest> \
   VOLUME_BYTES=536870912000 RESERVED_HEADROOM_BYTES=53687091200
 ```
 
-The adapter preserves integer numerators and denominators, recomputes all
+Each rung path must be accompanied by its canonical provider plan, BenchExec,
+GraphForge, and passed result files in the same evidence directory. The adapter
+verifies the result-owned artifact digests and exact commit/profile/image
+identities, preserves integer numerators and denominators, recomputes all
 reconciliations, and emits `refuse` when the projected S26 lifecycle peak lacks
 the requested storage headroom.
 

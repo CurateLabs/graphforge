@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Mapping, Sequence
+import hashlib
 from itertools import pairwise
 import json
 from pathlib import Path
@@ -13,12 +14,16 @@ from typing import Any
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError, ValidationError
 
+from graphforge_bench.progressive_run import _write_json
+
 BENCHMARK_ROOT = Path(__file__).resolve().parents[2]
 REPOSITORY_ROOT = BENCHMARK_ROOT.parent
 RUNG_SCHEMA = BENCHMARK_ROOT / "schemas/progressive-qualification-rung-evidence.json"
 QUALIFICATION_SCHEMA = (
     REPOSITORY_ROOT / "docs/development/evidence/g500-ladder-qualification.schema.json"
 )
+PROVIDER_RESULT_SCHEMA = BENCHMARK_ROOT / "schemas/progressive-provider-run-result.json"
+PROVIDER_PLAN_SCHEMA = BENCHMARK_ROOT / "schemas/progressive-provider-run-plan.json"
 ASSEMBLY_CONTRACT = "graphforge-progressive-rung-assembly/2"
 QUALIFICATION_CONTRACT = "graphforge-g500-ladder-qualification/3"
 S26_EDGES = 1 << 30
@@ -71,6 +76,8 @@ APPLICATION_IO_FIELDS = (
     "fsync_calls",
 )
 ADJACENT_SOURCES = ((20, 22), (22, 24))
+COMMIT = re.compile(r"^[0-9a-f]{40}$")
+IMAGE_DIGEST = re.compile(r"^registry\.fly\.io/[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}$")
 FORBIDDEN_KEY = re.compile(
     r"(?:secret|credential|token|password|host_path|absolute_path|machine[_-]?id|"
     r"volume[_-]?id|provider_resource_id)",
@@ -149,7 +156,7 @@ def _validate_snapshot(snapshot: Mapping[str, Any], label: str) -> None:
     if any(snapshot[name] != value for name, value in expected.items()):
         raise StorageQualificationError(f"{label} category totals do not reconcile")
     other = categories["other"]
-    if other["logical_references"] != 0 or other["physical_objects"] != 0:
+    if any(other[field] != 0 for field in STORAGE_FIELDS):
         raise StorageQualificationError(f"{label} contains unclassified storage")
 
 
@@ -187,6 +194,14 @@ def validate_source_rung(value: Mapping[str, Any]) -> None:
     _validate_application_io(storage["construction"]["application_io"])
     counts = storage["counts"]
     scale = _integer(value["scale"], "scale", positive=True)
+    if (
+        scale not in {20, 22, 24}
+        or value.get("source") != "canonical_ladder"
+        or value.get("profile_id") != f"graph500-s{scale}-provider"
+    ):
+        raise StorageQualificationError(
+            "storage qualification requires the canonical provider source/profile"
+        )
     nodes = 1 << scale
     edges = 16 * nodes
     if (
@@ -236,9 +251,9 @@ def adapt_rung(value: Mapping[str, Any]) -> dict[str, Any]:
     artifacts.append(
         _artifact(
             "construction_staging_spill",
-            source["categories"]["construction_staging"],
+            construction["staging"],
             "construction_receipts",
-            transient_peak=construction["transient_peak_allocated_bytes"],
+            transient_peak=construction["staging_transient_peak_allocated_bytes"],
         )
     )
     artifacts.append(
@@ -328,7 +343,105 @@ def ceil_ratio(numerator: int, denominator: int) -> int:
     return (numerator + denominator - 1) // denominator
 
 
+def _read_digest(path: Path) -> tuple[Mapping[str, Any], str]:
+    try:
+        encoded = path.read_bytes()
+        value = json.loads(encoded)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise StorageQualificationError(f"invalid evidence document: {path.name}") from error
+    if not isinstance(value, Mapping):
+        raise StorageQualificationError(f"evidence root must be an object: {path.name}")
+    return value, hashlib.sha256(encoded).hexdigest()
+
+
+def _bound_provider_rung(
+    path: Path, *, expected_commit: str, expected_image_digest: str
+) -> Mapping[str, Any]:
+    rung, rung_digest = _read_digest(path)
+    validate_source_rung(rung)
+    scale = int(rung["scale"])
+    base = path.parent
+    result, _ = _read_digest(base / f"s{scale}-result.json")
+    plan, plan_digest = _read_digest(base / f"s{scale}-plan.json")
+    _schema(PROVIDER_RESULT_SCHEMA, result, "provider result")
+    _schema(PROVIDER_PLAN_SCHEMA, plan, "provider execution plan")
+    profile_path = BENCHMARK_ROOT / "profiles" / "graph500" / f"s{scale}-provider.json"
+    try:
+        profile_digest = hashlib.sha256(profile_path.read_bytes()).hexdigest()
+    except OSError as error:
+        raise StorageQualificationError("canonical provider profile is unavailable") from error
+    identities = result.get("identities")
+    if (
+        result.get("status") != "passed"
+        or result.get("rung") != f"S{scale}"
+        or not isinstance(identities, Mapping)
+        or identities.get("commit") != expected_commit
+        or identities.get("profile_id") != f"graph500-s{scale}-provider"
+        or identities.get("profile_sha256") != profile_digest
+        or identities.get("image_digest") != expected_image_digest
+        or plan.get("rung") != f"S{scale}"
+        or plan.get("identities") != identities
+    ):
+        raise StorageQualificationError(
+            "provider rung is not bound to the expected commit/profile/image"
+        )
+    artifacts = result.get("artifacts")
+    artifact_paths = {
+        "plan_sha256": base / f"s{scale}-plan.json",
+        "benchexec_sha256": base / f"s{scale}-benchexec.json",
+        "graphforge_sha256": base / f"s{scale}-graphforge.json",
+        "rung_sha256": path,
+    }
+    try:
+        expected_artifacts = {
+            name: hashlib.sha256(artifact.read_bytes()).hexdigest()
+            for name, artifact in artifact_paths.items()
+        }
+    except OSError as error:
+        raise StorageQualificationError("provider rung bundle is incomplete") from error
+    if (
+        not isinstance(artifacts, Mapping)
+        or dict(artifacts) != expected_artifacts
+        or plan_digest != expected_artifacts["plan_sha256"]
+        or rung_digest != expected_artifacts["rung_sha256"]
+    ):
+        raise StorageQualificationError(
+            "provider rung bundle artifacts do not match the provider result"
+        )
+    return rung
+
+
 def build(
+    source_paths: Sequence[Path],
+    *,
+    expected_commit: str,
+    expected_image_digest: str,
+    volume_bytes: int,
+    reserved_headroom_bytes: int,
+) -> dict[str, Any]:
+    """Build from two provider-result-bound rung bundle paths."""
+    if COMMIT.fullmatch(expected_commit) is None:
+        raise StorageQualificationError("expected commit must be a full Git object ID")
+    if IMAGE_DIGEST.fullmatch(expected_image_digest) is None:
+        raise StorageQualificationError("expected image must be an immutable Fly OCI digest")
+    if len(source_paths) != 2:
+        raise StorageQualificationError("exactly two adjacent observations are required")
+    source_rungs = [
+        _bound_provider_rung(
+            path,
+            expected_commit=expected_commit,
+            expected_image_digest=expected_image_digest,
+        )
+        for path in source_paths
+    ]
+    return _build_qualification(
+        source_rungs,
+        volume_bytes=volume_bytes,
+        reserved_headroom_bytes=reserved_headroom_bytes,
+    )
+
+
+def _build_qualification(
     source_rungs: Sequence[Mapping[str, Any]],
     *,
     volume_bytes: int,
@@ -543,37 +656,28 @@ def validate(evidence: Mapping[str, Any]) -> None:
         raise StorageQualificationError("S26 admission decision contradicts projected headroom")
 
 
-def _read(path: Path) -> Mapping[str, Any]:
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise StorageQualificationError(f"invalid evidence document: {path.name}") from error
-    if not isinstance(value, Mapping):
-        raise StorageQualificationError(f"evidence root must be an object: {path.name}")
-    return value
-
-
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("low", type=Path)
     parser.add_argument("high", type=Path)
     parser.add_argument("output", type=Path)
+    parser.add_argument("--commit", required=True)
+    parser.add_argument("--image-digest", required=True)
     parser.add_argument("--volume-bytes", type=int, required=True)
     parser.add_argument("--reserved-headroom-bytes", type=int, required=True)
     args = parser.parse_args(argv)
     try:
         qualification = build(
-            [_read(args.low), _read(args.high)],
+            [args.low, args.high],
+            expected_commit=args.commit,
+            expected_image_digest=args.image_digest,
             volume_bytes=args.volume_bytes,
             reserved_headroom_bytes=args.reserved_headroom_bytes,
         )
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(
-            json.dumps(qualification, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
+        _write_json(args.output, qualification)
         return 0
-    except StorageQualificationError as error:
+    except (OSError, StorageQualificationError) as error:
         parser.error(str(error))
 
 
