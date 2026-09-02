@@ -8,7 +8,13 @@ import subprocess
 import tempfile
 import unittest
 
-from graphforge_bench.gdc_contracts import list_gdc_suites, workspace_root
+from graphforge_bench.gdc_contracts import (
+    GdcContractError,
+    list_gdc_suites,
+    load_pinned_identity,
+    validate_acquisition,
+    workspace_root,
+)
 from graphforge_bench.gdc_finbench_transaction import (
     COMPATIBLE_READS,
     EVIDENCE_SCHEMA,
@@ -22,6 +28,7 @@ from graphforge_bench.gdc_finbench_transaction import (
     assert_separate_from_other_suites,
     list_operation_rules,
     map_operation_file,
+    run_live_suite,
     run_tiny_suite,
 )
 from jsonschema import Draft202012Validator
@@ -76,7 +83,7 @@ class GdcFinBenchTransactionSuiteTests(unittest.TestCase):
         suite = suites["finbench-transaction"]
         self.assertEqual(suite["runner"], "gdc-finbench-transaction")
         self.assertEqual(suite["disposition"], "executable")
-        self.assertEqual(suite["datasets"][0], "finbench-sf0.01")
+        self.assertEqual(suite["datasets"][0], "finbench-engineering-tiny-v1")
         assert_separate_from_other_suites()
 
     def test_all_operations_declare_mapping_and_validation_rules(self) -> None:
@@ -108,9 +115,10 @@ class GdcFinBenchTransactionSuiteTests(unittest.TestCase):
         evidence = run_tiny_suite(fixture_name="compatible")
         self.assertEqual(evidence["schema"], EVIDENCE_SCHEMA)
         self.assertEqual(evidence["suite_id"], "finbench-transaction")
-        self.assertEqual(evidence["dataset_id"], "finbench-sf0.01")
+        self.assertEqual(evidence["dataset_id"], "finbench-engineering-tiny-v1")
         self.assertEqual(evidence["status"], "passed")
         self.assertIs(evidence["certification"], False)
+        self.assertEqual(evidence["execution_mode"], "static_replay")
         self.assertEqual(evidence["phases"], ["load", "warmup", "execution", "validation"])
         self.assertIn("spec", evidence["identities"])
         # The compatible fixture is clean: no resource or harness failures.
@@ -126,6 +134,114 @@ class GdcFinBenchTransactionSuiteTests(unittest.TestCase):
             self.assertEqual(by_op[op]["status"], "semantic_incompatibility", op)
             self.assertIsNotNone(by_op[op].get("cause"))
         self._evidence_validator().validate(evidence)
+
+    def test_live_tcr10_loads_graphforge_and_validates_normalized_rows(self) -> None:
+        evidence = run_live_suite()
+        self.assertEqual(evidence["dataset_id"], "finbench-engineering-tiny-v1")
+        self.assertEqual(evidence["execution_mode"], "live_graphforge")
+        self.assertIs(evidence["certification"], False)
+        self.assertEqual(
+            evidence["validator"]["interface"],
+            "graphforge-finbench-rust-reference-validator/1",
+        )
+        by_op = {item["operation"]: item for item in evidence["operations"]}
+        self.assertEqual(by_op["TCR10"]["status"], "passed")
+        self.assertEqual(by_op["TCR10"]["validation_mode"], "normalized")
+        self.assertEqual(by_op["TCR1"]["status"], "semantic_incompatibility")
+        self.assertIn(
+            "recursive_temporal_path_filtering_not_exposed", by_op["TCR1"]["cause"]
+        )
+        self.assertEqual(by_op["TW1"]["status"], "semantic_incompatibility")
+        self.assertIn(WRITE_CAUSE, by_op["TW1"]["cause"])
+        self._evidence_validator().validate(evidence)
+
+    def test_live_params_drive_mismatch_and_invalid_params_fail_as_harness(self) -> None:
+        fixture = self.root / "fixtures" / "gdc" / "finbench-transaction-live"
+        identities = fixture / "acquisition.json"
+        with tempfile.TemporaryDirectory(prefix="finbench-live-params-") as tmp:
+            work = Path(tmp)
+            request = json.loads((fixture / "TCR10-request.json").read_text())
+            request["params"]["id2"] = "person-noise"
+            mismatch_request = work / "mismatch.json"
+            mismatch_request.write_text(json.dumps(request), encoding="utf-8")
+            evidence_path = work / "mismatch-evidence.json"
+            completed = subprocess.run(
+                [
+                    str(self.binary),
+                    "run-live",
+                    str(fixture / "fixture.json"),
+                    str(mismatch_request),
+                    str(fixture / "TCR10-reference.ref"),
+                    str(identities),
+                    str(evidence_path),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(completed.returncode, 0)
+            evidence = json.loads(evidence_path.read_text())
+            self.assertEqual(evidence["status"], "correctness_failed")
+            self.assertEqual(evidence["resource_events"], [])
+            self.assertEqual(evidence["harness_failures"], [])
+
+            request["params"]["start"] = {"not": "scalar"}
+            invalid_request = work / "invalid.json"
+            invalid_request.write_text(json.dumps(request), encoding="utf-8")
+            invalid_evidence = work / "invalid-evidence.json"
+            completed = subprocess.run(
+                [
+                    str(self.binary),
+                    "run-live",
+                    str(fixture / "fixture.json"),
+                    str(invalid_request),
+                    str(fixture / "TCR10-reference.ref"),
+                    str(identities),
+                    str(invalid_evidence),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("parameter start", completed.stderr)
+            self.assertFalse(invalid_evidence.exists())
+
+    def test_live_lane_rejects_static_output_documents(self) -> None:
+        fixture = self.root / "fixtures" / "gdc" / "finbench-transaction-live"
+        request = json.loads((fixture / "TCR10-request.json").read_text())
+        request["system_output"] = "committed.out"
+        with tempfile.TemporaryDirectory(prefix="finbench-no-static-") as tmp:
+            work = Path(tmp)
+            request_path = work / "request.json"
+            request_path.write_text(json.dumps(request), encoding="utf-8")
+            completed = subprocess.run(
+                [
+                    str(self.binary),
+                    "run-live",
+                    str(fixture / "fixture.json"),
+                    str(request_path),
+                    str(fixture / "TCR10-reference.ref"),
+                    str(fixture / "acquisition.json"),
+                    str(work / "evidence.json"),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("unknown field `system_output`", completed.stderr)
+
+    def test_live_acquisition_identity_drift_is_rejected(self) -> None:
+        fixture = self.root / "fixtures" / "gdc" / "finbench-transaction-live"
+        pin = load_pinned_identity(
+            self.root / "profiles" / "gdc" / "finbench-transaction-identity.json"
+        )
+        acquisition = json.loads((fixture / "acquisition.json").read_text())
+        acquisition["recorded_spec"]["commit"] = "0" * 40
+        with self.assertRaises(GdcContractError) as raised:
+            validate_acquisition(pin, acquisition, fixture)
+        self.assertEqual(raised.exception.cause, "identity_drift")
 
     def test_unsupported_and_write_ops_fail_visibly(self) -> None:
         jobs = self.root / "fixtures" / "gdc" / "finbench-transaction-tiny" / "compatible" / "jobs"
@@ -167,17 +283,17 @@ class GdcFinBenchTransactionSuiteTests(unittest.TestCase):
             outputs = work / "system-outputs"
 
             # Correctness lane: corrupt TCR6's produced output.
-            (outputs / "finbench-sf0.01-TCR6.out").write_text(
+            (outputs / "finbench-engineering-tiny-v1-TCR6.out").write_text(
                 "acct-10 500\nacct-11 000\n", encoding="utf-8"
             )
             # Resource lane: TCR8 hits a resource limit (sidecar replaces output).
-            (outputs / "finbench-sf0.01-TCR8.out").unlink()
-            (outputs / "finbench-sf0.01-TCR8.limit").write_text(
+            (outputs / "finbench-engineering-tiny-v1-TCR8.out").unlink()
+            (outputs / "finbench-engineering-tiny-v1-TCR8.limit").write_text(
                 "rss_limit_exceeded\n", encoding="utf-8"
             )
             # Harness lane: TSR1's runner crashed (sidecar replaces output).
-            (outputs / "finbench-sf0.01-TSR1.out").unlink()
-            (outputs / "finbench-sf0.01-TSR1.harness").write_text(
+            (outputs / "finbench-engineering-tiny-v1-TSR1.out").unlink()
+            (outputs / "finbench-engineering-tiny-v1-TSR1.harness").write_text(
                 "driver_process_crashed\n", encoding="utf-8"
             )
 

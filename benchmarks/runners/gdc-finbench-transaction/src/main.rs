@@ -1,6 +1,7 @@
 use graphforge_benchmark_gdc_finbench_transaction::{
-    ExecutionSignal, JOB_SCHEMA, MappingOutcome, Operation, OperationJob, OperationStatus,
-    assemble_evidence, load_result_rows, map_operation, operation_rules, run_job,
+    ExecutionSignal, JOB_SCHEMA, LiveFixture, LiveRequest, MappingOutcome, Operation, OperationJob,
+    OperationStatus, assemble_evidence, load_result_rows, map_operation, operation_rules, run_job,
+    run_live,
 };
 use std::env;
 use std::fs;
@@ -11,7 +12,7 @@ fn main() -> ExitCode {
     let mut args = env::args().skip(1);
     let Some(command) = args.next() else {
         eprintln!(
-            "usage: graphforge-benchmark-gdc-finbench-transaction <list-operations|map-operation|run-suite> ..."
+            "usage: graphforge-benchmark-gdc-finbench-transaction <list-operations|map-operation|run-suite|run-live> ..."
         );
         return ExitCode::from(2);
     };
@@ -82,11 +83,86 @@ fn main() -> ExitCode {
                 }
             }
         }
+        "run-live" => {
+            let Some(fixture_path) = args.next() else {
+                eprintln!(
+                    "usage: run-live FIXTURE.json REQUEST.json REFERENCE.ref IDENTITIES.json EVIDENCE.json"
+                );
+                return ExitCode::from(2);
+            };
+            let Some(request_path) = args.next() else {
+                eprintln!("missing REQUEST.json");
+                return ExitCode::from(2);
+            };
+            let Some(reference_path) = args.next() else {
+                eprintln!("missing REFERENCE.ref");
+                return ExitCode::from(2);
+            };
+            let Some(identities_path) = args.next() else {
+                eprintln!("missing IDENTITIES.json");
+                return ExitCode::from(2);
+            };
+            let Some(evidence_path) = args.next() else {
+                eprintln!("missing EVIDENCE.json");
+                return ExitCode::from(2);
+            };
+            match run_live_command(
+                &fixture_path,
+                &request_path,
+                &reference_path,
+                &identities_path,
+                &evidence_path,
+            ) {
+                Ok(code) => code,
+                Err(error) => {
+                    eprintln!("{error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         other => {
             eprintln!("unknown command: {other}");
             ExitCode::from(2)
         }
     }
+}
+
+fn run_live_command(
+    fixture_path: &str,
+    request_path: &str,
+    reference_path: &str,
+    identities_path: &str,
+    evidence_path: &str,
+) -> Result<ExitCode, String> {
+    let fixture: LiveFixture =
+        serde_json::from_str(&fs::read_to_string(fixture_path).map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string())?;
+    let request: LiveRequest =
+        serde_json::from_str(&fs::read_to_string(request_path).map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string())?;
+    let reference = load_result_rows(PathBuf::from(reference_path).as_path())
+        .map_err(|error| error.to_string())?;
+    let identities = serde_json::from_str(
+        &fs::read_to_string(identities_path).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    let evidence =
+        run_live(&fixture, &request, &reference, identities).map_err(|error| error.to_string())?;
+    let failed = evidence.operations.iter().any(|outcome| {
+        matches!(
+            outcome.status,
+            OperationStatus::CorrectnessFailed
+                | OperationStatus::ResourceExceeded
+                | OperationStatus::HarnessError
+        )
+    });
+    let payload = serde_json::to_string_pretty(&evidence).map_err(|error| error.to_string())?;
+    fs::write(evidence_path, format!("{payload}\n")).map_err(|error| error.to_string())?;
+    Ok(if failed {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    })
 }
 
 fn load_job(path: &str) -> Result<OperationJob, String> {

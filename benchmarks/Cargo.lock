@@ -1808,6 +1808,8 @@ dependencies = [
 name = "graphforge-benchmark-gdc-finbench-transaction"
 version = "0.0.0"
 dependencies = [
+ "arrow",
+ "graphforge-api",
  "serde",
  "serde_json",
 ]

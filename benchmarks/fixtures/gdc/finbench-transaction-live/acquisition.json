@@ -22,7 +22,7 @@
   "assets": [
     {
       "id": "finbench-engineering-tiny-v1",
-      "path": "finbench-engineering-tiny-v1.graph",
+      "path": "fixture.json",
       "checksum_sha256": "687e35c0f14dda48c90dfb305b0a2ddc8b0dd7f3d62a078e81c98deb443770b5",
       "license": "Apache-2.0 synthetic engineering fixture",
       "acquisition": "fixture"
@@ -32,7 +32,7 @@
     {
       "dataset_id": "finbench-engineering-tiny-v1",
       "workload_key": "transaction-validation",
-      "path": "transaction-validation.ref",
+      "path": "TCR10-reference.ref",
       "checksum_sha256": "e4f8737530cadba45d1be8b0ebed83ab7728f6ee5c45cdbb31eb745e3552341b"
     }
   ]

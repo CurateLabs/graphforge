@@ -20,8 +20,10 @@
 
 #![forbid(unsafe_code)]
 
+use arrow::util::display::array_value_to_string;
+use graphforge_api::{GraphForge, IrLiteral};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::fs;
 use std::path::Path;
@@ -31,9 +33,12 @@ pub const EVIDENCE_SCHEMA: &str = "graphforge-gdc-finbench-transaction-evidence/
 pub const JOB_SCHEMA: &str = "graphforge-gdc-finbench-transaction-job/1";
 pub const LADDER_SCHEMA: &str = "graphforge-gdc-finbench-transaction-ladder/1";
 pub const SUITE_ID: &str = "finbench-transaction";
+pub const LIVE_FIXTURE_SCHEMA: &str = "graphforge-gdc-finbench-live-fixture/1";
+pub const LIVE_REQUEST_SCHEMA: &str = "graphforge-gdc-finbench-live-request/1";
+pub const VALIDATOR_INTERFACE: &str = "graphforge-finbench-rust-reference-validator/1";
 
 /// The bounded engineering fixture dataset every ladder and suite run begins on.
-pub const BOUNDED_TINY_DATASET: &str = "finbench-sf0.01";
+pub const BOUNDED_TINY_DATASET: &str = "finbench-engineering-tiny-v1";
 
 /// Typed cause emitted when a write / read-write transaction fails closed.
 pub const WRITE_CAUSE: &str = "finbench_transaction_write_semantics_not_exposed";
@@ -362,6 +367,63 @@ pub struct OperationJob {
     pub operation: Operation,
 }
 
+/// Synthetic, FinBench-shaped data loaded through ordinary public Cypher.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LiveFixture {
+    pub schema: String,
+    pub dataset_id: String,
+    pub engineering_fixture: bool,
+    pub setup_cypher: Vec<String>,
+}
+
+/// One live public-API invocation. Parameters are intentionally limited to the
+/// scalar types used by this bounded engineering fixture.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LiveRequest {
+    pub schema: String,
+    pub operation: Operation,
+    pub query: String,
+    pub params: BTreeMap<String, serde_json::Value>,
+    pub reference_derivation: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ValidatorEvidence {
+    pub interface: String,
+    pub reference_derivation: String,
+}
+
+/// Explicit validator boundary shared by static and live lanes.
+pub trait ResultValidator {
+    fn interface(&self) -> &'static str;
+    fn validate(
+        &self,
+        mode: ValidationMode,
+        reference: &ResultRows,
+        system: &ResultRows,
+    ) -> Result<(), SuiteError>;
+}
+
+/// Existing Rust normalizer/reference comparator exposed as an interface.
+pub struct RustReferenceValidator;
+
+impl ResultValidator for RustReferenceValidator {
+    fn interface(&self) -> &'static str {
+        VALIDATOR_INTERFACE
+    }
+
+    fn validate(
+        &self,
+        mode: ValidationMode,
+        reference: &ResultRows,
+        system: &ResultRows,
+    ) -> Result<(), SuiteError> {
+        validate_result(mode, reference, system)
+    }
+}
+
 impl OperationJob {
     pub fn validate_schema(&self) -> Result<(), SuiteError> {
         if self.schema != JOB_SCHEMA {
@@ -555,6 +617,8 @@ pub struct SuiteEvidence {
     pub status: OperationStatus,
     /// Engineering evidence flag: never an audited GDC certification.
     pub certification: bool,
+    pub execution_mode: String,
+    pub validator: ValidatorEvidence,
     pub phases: Vec<String>,
     pub identities: serde_json::Value,
     /// Per-operation correctness / semantic outcomes.
@@ -948,6 +1012,143 @@ pub fn run_job(
     }
 }
 
+fn live_param(name: &str, value: &serde_json::Value) -> Result<IrLiteral, SuiteError> {
+    match value {
+        serde_json::Value::String(value) => Ok(IrLiteral::Str(value.clone())),
+        serde_json::Value::Number(value) => value.as_i64().map(IrLiteral::Int).ok_or_else(|| {
+            SuiteError::InvalidDocument(format!("parameter {name} must be a signed integer"))
+        }),
+        serde_json::Value::Bool(value) => Ok(IrLiteral::Bool(*value)),
+        _ => Err(SuiteError::InvalidDocument(format!(
+            "parameter {name} must be a string, integer, or boolean"
+        ))),
+    }
+}
+
+/// Load a committed synthetic fixture into an in-memory GraphForge and execute
+/// the mapped TCR10 read through `GraphForge::execute_with_params`.
+///
+/// This is deliberately separate from `run-suite`: no static output path is
+/// accepted, and the produced Arrow rows cross the explicit Rust validator
+/// interface before evidence can pass.
+pub fn run_live(
+    fixture: &LiveFixture,
+    request: &LiveRequest,
+    reference: &ResultRows,
+    identities: serde_json::Value,
+) -> Result<SuiteEvidence, SuiteError> {
+    if fixture.schema != LIVE_FIXTURE_SCHEMA || request.schema != LIVE_REQUEST_SCHEMA {
+        return Err(SuiteError::InvalidDocument(
+            "unexpected live fixture or request schema".into(),
+        ));
+    }
+    if !fixture.engineering_fixture {
+        return Err(SuiteError::InvalidDocument(
+            "live input must disclose engineering_fixture=true".into(),
+        ));
+    }
+    if request.operation != Operation::Tcr10 {
+        return Err(SuiteError::InvalidDocument(
+            "the bounded live lane supports TCR10 only".into(),
+        ));
+    }
+    let MappingOutcome::Compatible(mapping) = map_operation(request.operation) else {
+        return Err(SuiteError::InvalidDocument(
+            "live operation is not mapped to the public API".into(),
+        ));
+    };
+    if request.query != mapping.cypher_shape {
+        return Err(SuiteError::InvalidDocument(
+            "live query drifted from the pinned public-API mapping".into(),
+        ));
+    }
+
+    let forge = GraphForge::new(None)
+        .map_err(|error| SuiteError::InvalidDocument(format!("live GraphForge open: {error}")))?;
+    for statement in &fixture.setup_cypher {
+        forge.execute(statement).map_err(|error| {
+            SuiteError::InvalidDocument(format!("live fixture load failed: {error}"))
+        })?;
+    }
+    let params = request
+        .params
+        .iter()
+        .map(|(name, value)| Ok((name.clone(), live_param(name, value)?)))
+        .collect::<Result<HashMap<_, _>, SuiteError>>()?;
+    let result = forge
+        .execute_with_params(&request.query, &params)
+        .map_err(|error| SuiteError::InvalidDocument(format!("live query failed: {error}")))?;
+    let mut produced = Vec::new();
+    for batch in result.batches {
+        for row in 0..batch.num_rows() {
+            let cells = batch
+                .columns()
+                .iter()
+                .map(|column| {
+                    array_value_to_string(column.as_ref(), row).map_err(|error| {
+                        SuiteError::InvalidDocument(format!(
+                            "live Arrow result conversion failed: {error}"
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            produced.push(cells.join(" "));
+        }
+    }
+
+    let validator = RustReferenceValidator;
+    let status = match validator.validate(ValidationMode::Normalized, reference, &produced) {
+        Ok(()) => OperationStatus::Passed,
+        Err(SuiteError::ReferenceMismatch(_)) => OperationStatus::CorrectnessFailed,
+        Err(error) => return Err(error),
+    };
+    let cause = if status == OperationStatus::CorrectnessFailed {
+        validator
+            .validate(ValidationMode::Normalized, reference, &produced)
+            .err()
+            .map(|error| error.to_string())
+    } else {
+        None
+    };
+    let tcr10 = outcome(
+        Operation::Tcr10,
+        status,
+        ValidationMode::Normalized.name(),
+        cause,
+        Some(mapping),
+    );
+    let tcr1 = run_job(
+        &OperationJob {
+            schema: JOB_SCHEMA.into(),
+            suite_id: SUITE_ID.into(),
+            dataset_id: fixture.dataset_id.clone(),
+            operation: Operation::Tcr1,
+        },
+        None,
+        None,
+    );
+    let tw1 = run_job(
+        &OperationJob {
+            schema: JOB_SCHEMA.into(),
+            suite_id: SUITE_ID.into(),
+            dataset_id: fixture.dataset_id.clone(),
+            operation: Operation::Tw1,
+        },
+        None,
+        None,
+    );
+    Ok(assemble_evidence_with_context(
+        &fixture.dataset_id,
+        identities,
+        vec![tcr10, tcr1, tw1],
+        "live_graphforge",
+        ValidatorEvidence {
+            interface: validator.interface().into(),
+            reference_derivation: request.reference_derivation.clone(),
+        },
+    ))
+}
+
 /// Aggregate per-operation outcomes into the suite evidence, projecting the
 /// resource and harness lanes into their own dedicated sections. The top-level
 /// status keeps the lanes separate by strict precedence: a harness error (the
@@ -958,6 +1159,25 @@ pub fn assemble_evidence(
     dataset_id: &str,
     identities: serde_json::Value,
     outcomes: Vec<OperationOutcome>,
+) -> SuiteEvidence {
+    assemble_evidence_with_context(
+        dataset_id,
+        identities,
+        outcomes,
+        "static_replay",
+        ValidatorEvidence {
+            interface: VALIDATOR_INTERFACE.into(),
+            reference_derivation: "committed_reference".into(),
+        },
+    )
+}
+
+pub fn assemble_evidence_with_context(
+    dataset_id: &str,
+    identities: serde_json::Value,
+    outcomes: Vec<OperationOutcome>,
+    execution_mode: &str,
+    validator: ValidatorEvidence,
 ) -> SuiteEvidence {
     let resource_events = outcomes
         .iter()
@@ -1000,6 +1220,8 @@ pub fn assemble_evidence(
         dataset_id: dataset_id.into(),
         status,
         certification: false,
+        execution_mode: execution_mode.into(),
+        validator,
         phases: phase_names(),
         identities,
         operations: outcomes,

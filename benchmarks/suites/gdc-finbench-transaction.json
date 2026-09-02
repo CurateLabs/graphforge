@@ -6,5 +6,5 @@
   "disposition": "executable",
   "pinned_identity": "profiles/gdc/finbench-transaction-identity.json",
   "runner": "gdc-finbench-transaction",
-  "datasets": ["finbench-sf0.01"]
+  "datasets": ["finbench-engineering-tiny-v1"]
 }

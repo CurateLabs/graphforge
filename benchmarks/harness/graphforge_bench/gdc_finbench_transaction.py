@@ -34,6 +34,7 @@ OPERATIONS = COMPLEX_READS + SIMPLE_READS + WRITES + READ_WRITES
 
 JOB_SCHEMA = "graphforge-gdc-finbench-transaction-job/1"
 EVIDENCE_SCHEMA = "graphforge-gdc-finbench-transaction-evidence/1"
+LIVE_EXECUTION_MODE = "live_graphforge"
 
 WRITE_CAUSE = "finbench_transaction_write_semantics_not_exposed"
 RECURSIVE_PATH_CAUSE = "recursive_temporal_path_filtering_not_exposed"
@@ -123,7 +124,7 @@ def run_tiny_suite(
     root: Path | None = None,
     evidence_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Run the bounded finbench-sf0.01 Transaction suite through the Rust runner."""
+    """Run the bounded finbench-engineering-tiny-v1 Transaction suite through the Rust runner."""
     base = root or workspace_root()
     fixture = base / "fixtures" / "gdc" / "finbench-transaction-tiny" / fixture_name
     pin = load_pinned_identity(identity_path(base))
@@ -171,6 +172,59 @@ def run_tiny_suite(
         return evidence
 
 
+def run_live_suite(
+    *,
+    root: Path | None = None,
+    evidence_path: Path | None = None,
+) -> dict[str, Any]:
+    """Execute TCR10 against a real in-memory GraphForge, never static output."""
+    base = root or workspace_root()
+    fixture = base / "fixtures" / "gdc" / "finbench-transaction-live"
+    pin = load_pinned_identity(identity_path(base))
+    acquisition = json.loads((fixture / "acquisition.json").read_text(encoding="utf-8"))
+    contract_evidence = validate_acquisition(pin, acquisition, fixture)
+    with tempfile.TemporaryDirectory(prefix="gdc-finbench-live-") as tmp:
+        tmp_path = Path(tmp)
+        identities_path = tmp_path / "identities.json"
+        identities_path.write_text(
+            json.dumps(contract_evidence["identities"], indent=2) + "\n",
+            encoding="utf-8",
+        )
+        out_evidence = evidence_path or (tmp_path / "evidence.json")
+        completed = _run_runner(
+            [
+                "run-live",
+                str(fixture / "fixture.json"),
+                str(fixture / "TCR10-request.json"),
+                str(fixture / "TCR10-reference.ref"),
+                str(identities_path),
+                str(out_evidence),
+            ],
+            base,
+        )
+        if not out_evidence.is_file():
+            raise FinBenchTransactionSuiteError(
+                "harness_error",
+                f"live runner failed to emit evidence: {completed.stderr.strip()}",
+            )
+        evidence = json.loads(out_evidence.read_text(encoding="utf-8"))
+        if completed.returncode != 0:
+            raise FinBenchTransactionSuiteError(
+                evidence.get("status", "harness_error"),
+                completed.stderr.strip() or "live execution failed",
+            )
+        if evidence.get("execution_mode") != LIVE_EXECUTION_MODE:
+            raise FinBenchTransactionSuiteError(
+                "static_output_rejected",
+                "live lane did not prove live_graphforge execution",
+            )
+        if evidence.get("certification") is not False:
+            raise FinBenchTransactionSuiteError(
+                "invalid_document", "live evidence must keep certification=false"
+            )
+        return evidence
+
+
 def map_operation_file(path: Path, root: Path | None = None) -> dict[str, Any]:
     completed = _run_runner(["map-operation", str(path)], root)
     if completed.returncode == 3:
@@ -210,6 +264,7 @@ __all__ = [
     "COMPLEX_READS",
     "EVIDENCE_SCHEMA",
     "JOB_SCHEMA",
+    "LIVE_EXECUTION_MODE",
     "OPERATIONS",
     "READ_WRITES",
     "RECURSIVE_PATH_CAUSE",
@@ -227,4 +282,5 @@ __all__ = [
     "list_operation_rules",
     "map_operation_file",
     "run_tiny_suite",
+    "run_live_suite",
 ]

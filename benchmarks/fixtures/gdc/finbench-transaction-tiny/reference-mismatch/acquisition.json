@@ -3,37 +3,37 @@
   "suite_id": "finbench-transaction",
   "recorded_spec": {
     "name": "ldbc-finbench",
-    "source": "https://ldbcouncil.org/benchmarks/finbench/",
-    "release": "0.2.0-alpha-engineering-pin",
-    "commit": null
+    "source": "https://github.com/ldbc/ldbc_finbench_docs",
+    "release": "v0.1.0",
+    "commit": "d3ec7036bf6919df8cd3eeaa3a986048e779ea02"
   },
   "recorded_generator": {
     "name": "finbench-datagen",
     "source": "https://github.com/ldbc/ldbc_finbench_datagen",
-    "release": null,
-    "commit": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    "release": "0.1.0",
+    "commit": "eddcc0551861eaefeb9b37497b10de1bb0f52672"
   },
   "recorded_driver": {
     "name": "finbench-transaction-driver",
-    "source": "https://github.com/ldbc/ldbc_finbench_transaction",
-    "release": null,
-    "commit": "ffffffffffffffffffffffffffffffffffffffff"
+    "source": "https://github.com/ldbc/ldbc_finbench_driver",
+    "release": "0.1.0",
+    "commit": "27e5640f47e91c783112ca654f670d15863780a6"
   },
   "assets": [
     {
-      "id": "finbench-sf0.01",
-      "path": "finbench-sf0.01.graph",
-      "checksum_sha256": "c0fd57903065bb4950244cc77023e9ce0803f723596922b114141f190ea521d8",
-      "license": "LDBC-FinBench-terms",
+      "id": "finbench-engineering-tiny-v1",
+      "path": "finbench-engineering-tiny-v1.graph",
+      "checksum_sha256": "687e35c0f14dda48c90dfb305b0a2ddc8b0dd7f3d62a078e81c98deb443770b5",
+      "license": "Apache-2.0 synthetic engineering fixture",
       "acquisition": "fixture"
     }
   ],
   "references": [
     {
-      "dataset_id": "finbench-sf0.01",
+      "dataset_id": "finbench-engineering-tiny-v1",
       "workload_key": "transaction-validation",
       "path": "transaction-validation.ref",
-      "checksum_sha256": "20368ad845455de99ef737732930bf7d07d9d44adde19a31ec7ba6ec332b25db"
+      "checksum_sha256": "e4f8737530cadba45d1be8b0ebed83ab7728f6ee5c45cdbb31eb745e3552341b"
     }
   ]
 }

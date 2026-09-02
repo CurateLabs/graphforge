@@ -16,6 +16,20 @@
       ]
     },
     "certification": { "const": false },
+    "execution_mode": {
+      "enum": ["static_replay", "live_graphforge"]
+    },
+    "validator": {
+      "type": "object",
+      "properties": {
+        "interface": {
+          "const": "graphforge-finbench-rust-reference-validator/1"
+        },
+        "reference_derivation": { "type": "string", "minLength": 1 }
+      },
+      "required": ["interface", "reference_derivation"],
+      "additionalProperties": false
+    },
     "phases": {
       "type": "array",
       "minItems": 4,
@@ -27,7 +41,7 @@
     "identities": { "type": "object" },
     "operations": {
       "type": "array",
-      "minItems": 40,
+      "minItems": 3,
       "maxItems": 40,
       "items": {
         "type": "object",
@@ -97,6 +111,8 @@
     "dataset_id",
     "status",
     "certification",
+    "execution_mode",
+    "validator",
     "phases",
     "identities",
     "operations",

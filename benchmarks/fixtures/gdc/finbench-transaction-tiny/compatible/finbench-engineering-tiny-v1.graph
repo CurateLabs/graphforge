@@ -1,0 +1,8 @@
+{
+  "schema": "graphforge-gdc-finbench-live-fixture/1",
+  "dataset_id": "finbench-engineering-tiny-v1",
+  "engineering_fixture": true,
+  "setup_cypher": [
+    "CREATE (p1:Person {id:'person-1'}), (p2:Person {id:'person-2'}), (p3:Person {id:'person-noise'}), (a1:Account {id:'account-1'}), (a2:Account {id:'account-2'}), (a3:Account {id:'account-noise'}), (c1:Company {id:'company-alpha'}), (c2:Company {id:'company-beta'}), (c3:Company {id:'company-before-window'}), (c4:Company {id:'company-one-sided'}), (p1)-[:own]->(a1), (p2)-[:own]->(a2), (p3)-[:own]->(a3), (a1)-[:invest {createTime:120}]->(c1), (a2)-[:invest {createTime:130}]->(c1), (a1)-[:invest {createTime:140}]->(c2), (a2)-[:invest {createTime:150}]->(c2), (a1)-[:invest {createTime:90}]->(c3), (a2)-[:invest {createTime:80}]->(c3), (a1)-[:invest {createTime:160}]->(c4), (a3)-[:invest {createTime:170}]->(c1)"
+  ]
+}
