@@ -695,6 +695,7 @@ def assemble_rung_evidence(
         raise ControllerError("BenchExec authority is missing")
     phases = [phase.get("phase") for phase in graphforge.get("phases", [])]
     rung = {
+        "assembly_contract": "graphforge-progressive-rung-assembly/2",
         "profile_id": profile_id or f"graph500-s{scale}-local",
         "source": source,
         "scale": scale,

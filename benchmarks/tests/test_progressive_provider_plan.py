@@ -26,6 +26,7 @@ COMMIT = subprocess.run(
 
 def rung(scale: int, *, source: str | None = None) -> dict:
     return {
+        "assembly_contract": "graphforge-progressive-rung-assembly/2",
         "profile_id": f"graph500-s{scale}-{'local' if scale in (18, 19) else 'provider'}",
         "source": source or ("progressive_profile" if scale in (18, 19) else "canonical_ladder"),
         "scale": scale,

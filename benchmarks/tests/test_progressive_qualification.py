@@ -28,6 +28,7 @@ CAPACITY = {
 def rung(scale: int, *, rss: int = 1_000_000_000, wall: int = 100) -> dict:
     multiplier = 1 << max(0, scale - 18)
     return {
+        "assembly_contract": "graphforge-progressive-rung-assembly/2",
         "profile_id": f"graph500-s{scale}-evidence",
         "source": "canonical_ladder" if scale in {24, 25} else "progressive_profile",
         "scale": scale,
@@ -227,7 +228,11 @@ class ProgressiveQualificationTests(unittest.TestCase):
     def test_source_project_union_allocation_is_typed_but_additive_for_old_rungs(self) -> None:
         current = rung(18)
         self.rung_schema.validate(current)
+        missing = copy.deepcopy(current)
+        del missing["storage_components"]["source_project_current_allocated_bytes"]
+        self.assertFalse(self.rung_schema.is_valid(missing))
         historical = copy.deepcopy(current)
+        del historical["assembly_contract"]
         del historical["storage_components"]["source_project_current_allocated_bytes"]
         self.rung_schema.validate(historical)
         for malformed in (True, -1, "450000"):

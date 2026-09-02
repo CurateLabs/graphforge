@@ -48,6 +48,7 @@ PHASES = [
 
 def passed_rung(scale: int) -> dict:
     return {
+        "assembly_contract": "graphforge-progressive-rung-assembly/2",
         "profile_id": f"graph500-s{scale}-local",
         "source": "progressive_profile",
         "scale": scale,
