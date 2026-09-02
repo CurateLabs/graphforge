@@ -122,10 +122,7 @@ fn detect_ordered_two_hop(plan: &Arc<dyn ExecutionPlan>) -> Option<OrderedTwoHop
     if projection.expr().len() != 1 {
         return None;
     }
-    let projected_column = projection.expr()[0]
-        .expr
-        .as_any()
-        .downcast_ref::<Column>()?;
+    let projected_column = projection.expr()[0].expr.downcast_ref::<Column>()?;
     if projection
         .input()
         .schema()
@@ -149,7 +146,7 @@ fn detect_ordered_two_hop(plan: &Arc<dyn ExecutionPlan>) -> Option<OrderedTwoHop
     if sort.expr().len() != 1 || sort.expr()[0].options.descending {
         return None;
     }
-    let sort_column = sort.expr()[0].expr.as_any().downcast_ref::<Column>()?;
+    let sort_column = sort.expr()[0].expr.downcast_ref::<Column>()?;
     if sort.input().schema().field(sort_column.index()).name() != "node_uuid" {
         return None;
     }
