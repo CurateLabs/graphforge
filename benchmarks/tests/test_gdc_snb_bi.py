@@ -85,9 +85,7 @@ class GdcSnbBiSuiteTests(unittest.TestCase):
             digest.update((runner / relative).read_bytes())
             digest.update(b"\0")
         identity = json.loads(
-            (self.root / "profiles" / "gdc" / "snb-bi-identity.json").read_text(
-                encoding="utf-8"
-            )
+            (self.root / "profiles" / "gdc" / "snb-bi-identity.json").read_text(encoding="utf-8")
         )
         self.assertEqual(identity["driver"]["content_sha256"], digest.hexdigest())
 
