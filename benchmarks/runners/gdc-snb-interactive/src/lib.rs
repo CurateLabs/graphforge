@@ -44,20 +44,16 @@ RETURN person.firstName AS firstName,
        person.gender AS gender,
        person.creationDate AS creationDate";
 
-const LIVE_GRAPH: &str =
-    include_str!("../../../fixtures/gdc/snb-interactive-live-is1/graph.json");
+const LIVE_GRAPH: &str = include_str!("../../../fixtures/gdc/snb-interactive-live-is1/graph.json");
 const LIVE_JOB: &str = include_str!("../../../fixtures/gdc/snb-interactive-live-is1/IS1.json");
-const LIVE_REFERENCE: &str =
-    include_str!("../../../fixtures/gdc/snb-interactive-live-is1/IS1.ref");
+const LIVE_REFERENCE: &str = include_str!("../../../fixtures/gdc/snb-interactive-live-is1/IS1.ref");
 const LIVE_ACQUISITION: &str =
     include_str!("../../../fixtures/gdc/snb-interactive-live-is1/acquisition.json");
 const LIVE_IDENTITY: &str =
     include_str!("../../../profiles/gdc/snb-interactive-live-is1-identity.json");
 
-const LIVE_GRAPH_SHA256: &str =
-    "58e3c52a4ac2d74456439a322211adf1e8f560a7762e3fd2d376bbe96d243d6f";
-const LIVE_JOB_SHA256: &str =
-    "0143a649da769c093d5e235e66c6036a4aa38ab05a5c68f5744ad4025a503831";
+const LIVE_GRAPH_SHA256: &str = "58e3c52a4ac2d74456439a322211adf1e8f560a7762e3fd2d376bbe96d243d6f";
+const LIVE_JOB_SHA256: &str = "0143a649da769c093d5e235e66c6036a4aa38ab05a5c68f5744ad4025a503831";
 const LIVE_REFERENCE_SHA256: &str =
     "71465ea5b672abd79693590e316cb4cc023cd25737c57d8daa13467542972385";
 const LIVE_ACQUISITION_SHA256: &str =
@@ -954,7 +950,15 @@ fn require_sha(label: &str, text: &str, expected: &str) -> Result<(), SuiteError
 
 fn validate_trusted_live_assets(
     assets: TrustedLiveAssets<'_>,
-) -> Result<(LiveGraphFixture, OperationJob, ResultRows, serde_json::Value), SuiteError> {
+) -> Result<
+    (
+        LiveGraphFixture,
+        OperationJob,
+        ResultRows,
+        serde_json::Value,
+    ),
+    SuiteError,
+> {
     for (label, text, digest) in [
         ("fixture", assets.graph, LIVE_GRAPH_SHA256),
         ("job", assets.job, LIVE_JOB_SHA256),
@@ -978,9 +982,10 @@ fn validate_trusted_live_assets(
 
     let identity: serde_json::Value = serde_json::from_str(assets.identity)
         .map_err(|error| SuiteError::InvalidDocument(format!("invalid live identity: {error}")))?;
-    let acquisition: serde_json::Value = serde_json::from_str(assets.acquisition).map_err(|error| {
-        SuiteError::InvalidDocument(format!("invalid live acquisition: {error}"))
-    })?;
+    let acquisition: serde_json::Value =
+        serde_json::from_str(assets.acquisition).map_err(|error| {
+            SuiteError::InvalidDocument(format!("invalid live acquisition: {error}"))
+        })?;
     if identity["suite_id"] != SUITE_ID
         || identity["datasets"][0]["id"] != LIVE_IS1_DATASET
         || identity["datasets"][0]["role"] != "other"
@@ -1007,7 +1012,12 @@ fn validate_trusted_live_assets(
             "commit": null
         }
     });
-    Ok((fixture, job, parse_result_rows(assets.reference), identities))
+    Ok((
+        fixture,
+        job,
+        parse_result_rows(assets.reference),
+        identities,
+    ))
 }
 
 fn validate_live_job(job: &OperationJob) -> Result<(), SuiteError> {
@@ -1028,7 +1038,10 @@ fn validate_live_job(job: &OperationJob) -> Result<(), SuiteError> {
         ));
     };
     if parameters.len() != 1
-        || parameters.get("personId").and_then(serde_json::Value::as_i64) != Some(1001)
+        || parameters
+            .get("personId")
+            .and_then(serde_json::Value::as_i64)
+            != Some(1001)
     {
         return Err(SuiteError::InvalidDocument(
             "trusted live IS1 requires exactly personId:int64=1001".into(),
@@ -1240,7 +1253,10 @@ fn assemble_live_is1_evidence(
         certification: false,
         phases: phase_names(),
         phase_evidence: [
-            ("load", "synthetic fixture loaded with public GraphForge construction API"),
+            (
+                "load",
+                "synthetic fixture loaded with public GraphForge construction API",
+            ),
             (
                 "warmup",
                 "IS1 executed once with explicit parameters through public GraphForge.execute",
@@ -1454,9 +1470,10 @@ mod tests {
         assert_eq!(evidence.lane, EvidenceLane::LiveInMemory);
         assert_eq!(evidence.status, OperationStatus::Passed);
         assert!(!evidence.certification);
-        assert!(evidence.phase_evidence.iter().all(|phase| {
-            phase.status == PhaseStatus::Passed && !phase.detail.is_empty()
-        }));
+        assert!(evidence
+            .phase_evidence
+            .iter()
+            .all(|phase| { phase.status == PhaseStatus::Passed && !phase.detail.is_empty() }));
         let context = evidence.live_context.unwrap();
         assert_eq!(context.operation, Operation::Is1);
         assert_eq!(context.parameter.name, "personId");
@@ -1531,13 +1548,11 @@ mod tests {
 
         let update = run_job(&sample_job(Operation::Iu1), None, None);
         assert_eq!(update.status, OperationStatus::SemanticIncompatibility);
-        assert!(
-            update
-                .cause
-                .as_deref()
-                .unwrap()
-                .contains("interactive_update_stream_not_exposed")
-        );
+        assert!(update
+            .cause
+            .as_deref()
+            .unwrap()
+            .contains("interactive_update_stream_not_exposed"));
 
         let missing_output = run_job(&sample_job(Operation::Is1), Some(&reference), None);
         assert_eq!(missing_output.status, OperationStatus::Failed);
@@ -1611,17 +1626,17 @@ mod tests {
         assert_eq!(evidence.status, OperationStatus::Passed);
         assert!(!evidence.certification);
         assert_eq!(evidence.lane, EvidenceLane::StaticReplay);
-        assert!(
-            evidence
-                .phase_evidence
-                .iter()
-                .all(|phase| phase.status == PhaseStatus::NotExecuted)
-        );
+        assert!(evidence
+            .phase_evidence
+            .iter()
+            .all(|phase| phase.status == PhaseStatus::NotExecuted));
     }
 
     #[test]
     fn live_is1_requires_explicit_parameters_and_keeps_gaps_typed() {
-        let reference = parse_result_rows("Ada Lovelace 1815-12-10 192.0.2.10 Firefox 2001 female 2026-01-02T03:04:05Z");
+        let reference = parse_result_rows(
+            "Ada Lovelace 1815-12-10 192.0.2.10 Firefox 2001 female 2026-01-02T03:04:05Z",
+        );
         let mut job = sample_job(Operation::Is1);
         job.dataset_id = LIVE_IS1_DATASET.into();
         assert_eq!(

@@ -1,6 +1,6 @@
 use graphforge_benchmark_gdc_snb_interactive::{
-    JOB_SCHEMA, MappingOutcome, Operation, OperationJob, OperationStatus, assemble_evidence,
-    load_result_rows, map_operation, operation_rules, run_job, run_trusted_live_is1,
+    assemble_evidence, load_result_rows, map_operation, operation_rules, run_job,
+    run_trusted_live_is1, MappingOutcome, Operation, OperationJob, OperationStatus, JOB_SCHEMA,
 };
 use std::env;
 use std::fs;
