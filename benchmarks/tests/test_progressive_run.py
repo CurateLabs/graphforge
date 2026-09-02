@@ -195,8 +195,8 @@ def authoritative_receipts(scale: int) -> dict[str, list[dict]]:
     nodes, edges = 1 << scale, 16 * (1 << scale)
     node_count = sink("a" * 64, rows=1, scalar=nodes)
     edge_count = sink("b" * 64, rows=1, scalar=edges)
-    one_hop = sink("c" * 64, rows=1024)
-    two_hop = sink("d" * 64, rows=1024)
+    one_hop = sink("c" * 64, rows=1000)
+    two_hop = sink("d" * 64, rows=1000)
     return {
         "ingest": construction,
         "reopen": [source_storage],
