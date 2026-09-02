@@ -614,11 +614,30 @@ def _query_receipts(
     return receipts
 
 
-def _one_receipt(graphforge: Mapping[str, Any], contract: str) -> Mapping[str, Any]:
-    matching = [receipt for receipt in _receipts(graphforge) if receipt.get("contract") == contract]
-    if len(matching) != 1:
-        raise ControllerError(f"required ordinary receipt is missing or ambiguous: {contract}")
-    return matching[0]
+def _phase_bound_receipt(
+    graphforge: Mapping[str, Any],
+    phase: str,
+    contract: str,
+    *,
+    outcome: str | None = None,
+) -> Mapping[str, Any]:
+    matching: list[tuple[str, Mapping[str, Any]]] = []
+    phases = graphforge.get("phases")
+    if not isinstance(phases, list):
+        raise ControllerError("GraphForge phases are missing")
+    for phase_value in phases:
+        if not isinstance(phase_value, Mapping) or not isinstance(phase_value.get("phase"), str):
+            raise ControllerError("GraphForge phase is malformed")
+        for receipt in _phase_receipts(graphforge, str(phase_value["phase"])):
+            if receipt.get("contract") == contract and (
+                outcome is None or receipt.get("outcome") == outcome
+            ):
+                matching.append((str(phase_value["phase"]), receipt))
+    if len(matching) != 1 or matching[0][0] != phase:
+        raise ControllerError(
+            f"required ordinary receipt is missing, moved, or ambiguous: {contract}"
+        )
+    return matching[0][1]
 
 
 def _storage_receipt(graphforge: Mapping[str, Any], phase: str) -> Mapping[str, Any]:
@@ -664,7 +683,7 @@ def _storage_receipt(graphforge: Mapping[str, Any], phase: str) -> Mapping[str, 
         if storage[name] != value:
             raise ControllerError(f"ordinary storage receipt does not reconcile: {name}")
     other = categories["other"]
-    if other["logical_references"] != 0 or other["physical_objects"] != 0:
+    if any(other[name] != 0 for name in STORAGE_CATEGORY_FIELDS):
         raise ControllerError("ordinary storage receipt contains unclassified artifacts")
     return storage
 
@@ -703,11 +722,22 @@ def _application_io(construction: Mapping[str, Any]) -> Mapping[str, Any]:
 
 def _construction_metrics(
     import_receipt: Mapping[str, Any],
-) -> tuple[dict[str, int], Mapping[str, Any]]:
+) -> tuple[dict[str, int], Mapping[str, Any], Mapping[str, Any], int]:
     construction = import_receipt.get("construction")
     if not isinstance(construction, Mapping):
         raise ControllerError("ordinary import construction evidence is absent")
     application_io = _application_io(construction)
+    staging = construction.get("construction_staging")
+    staging_peak = construction.get("construction_staging_transient_peak_allocated_bytes")
+    if (
+        not isinstance(staging, Mapping)
+        or set(staging) != set(STORAGE_CATEGORY_FIELDS)
+        or any(not _is_int(staging.get(name)) or staging[name] < 0 for name in staging)
+        or not _is_int(staging_peak)
+        or staging_peak < staging["allocated_bytes"]
+        or staging["physical_objects"] > staging["logical_references"]
+    ):
+        raise ControllerError("ordinary import construction staging authority is incomplete")
     totals = application_io["totals"]
     publication = construction.get("publication_work")
     values = {
@@ -725,11 +755,16 @@ def _construction_metrics(
         for value in values.values()
     ):
         raise ControllerError("ordinary import construction metrics are incomplete")
-    return {name: int(value) for name, value in values.items()}, application_io
+    return (
+        {name: int(value) for name, value in values.items()},
+        application_io,
+        staging,
+        staging_peak,
+    )
 
 
 def _portable_allocation(graphforge: Mapping[str, Any]) -> Mapping[str, Any]:
-    receipt = _one_receipt(graphforge, "graphforge-portable-export/2")
+    receipt = _phase_bound_receipt(graphforge, "export", "graphforge-portable-export/2")
     names = (
         "allocation_logical_bytes",
         "allocation_allocated_bytes",
@@ -751,19 +786,21 @@ def assemble_rung_evidence(
 ) -> dict[str, Any]:
     if graphforge.get("status") != "passed" or benchexec.get("outcome") != "passed":
         raise ControllerError("a failed execution cannot produce passed rung evidence")
-    imports = [
-        receipt
-        for receipt in _receipts(graphforge)
-        if receipt.get("contract") == "graphforge-import-session/1"
-        and receipt.get("outcome") == "committed"
-    ]
-    if len(imports) != 1:
-        raise ControllerError("ordinary import commit receipt is missing or ambiguous")
-    require_bulk_ingest_capability(imports[0])
+    committed_import = _phase_bound_receipt(
+        graphforge,
+        "ingest",
+        "graphforge-import-session/1",
+        outcome="committed",
+    )
+    require_bulk_ingest_capability(committed_import)
     source_storage = _storage_receipt(graphforge, "reopen")
     imported_storage = _storage_receipt(graphforge, "reopen_proof")
-    lifecycle_storage = _one_receipt(graphforge, "graphforge-lifecycle-storage/1")
-    construction, application_io = _construction_metrics(imports[0])
+    lifecycle_storage = _phase_bound_receipt(
+        graphforge, "reopen_proof", "graphforge-lifecycle-storage/1"
+    )
+    construction, application_io, construction_staging, staging_peak = _construction_metrics(
+        committed_import
+    )
     portable_allocation = _portable_allocation(graphforge)
     expected_edges = 16 * (1 << scale)
     source_counts = _query_receipts(graphforge, "recount", 2)
@@ -858,6 +895,8 @@ def assemble_rung_evidence(
             "imported": imported_storage,
             "construction": {
                 "application_io": application_io,
+                "staging": construction_staging,
+                "staging_transient_peak_allocated_bytes": staging_peak,
                 "transient_peak_allocated_bytes": construction["transient_peak_allocated_bytes"],
             },
             "portable_package": portable_allocation,

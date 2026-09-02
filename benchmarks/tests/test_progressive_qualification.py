@@ -110,6 +110,14 @@ def storage_attribution(scale: int, multiplier: int) -> dict:
                     field: sum(phase[field] for phase in phases.values()) for field in io_fields
                 },
             },
+            "staging": {
+                "logical_references": 3,
+                "logical_bytes": 100_000 * multiplier,
+                "physical_objects": 3,
+                "physical_logical_bytes": 100_000 * multiplier,
+                "allocated_bytes": 120_000 * multiplier,
+            },
+            "staging_transient_peak_allocated_bytes": 200_000 * multiplier,
             "transient_peak_allocated_bytes": 1_500_000 * multiplier,
         },
         "portable_package": {

@@ -59,9 +59,11 @@
         "imported": {"$ref": "#/$defs/storageSnapshot"},
         "construction": {
           "type": "object", "additionalProperties": false,
-          "required": ["application_io", "transient_peak_allocated_bytes"],
+          "required": ["application_io", "staging", "staging_transient_peak_allocated_bytes", "transient_peak_allocated_bytes"],
           "properties": {
             "application_io": {"$ref": "#/$defs/applicationIo"},
+            "staging": {"$ref": "#/$defs/categoryTotals"},
+            "staging_transient_peak_allocated_bytes": {"$ref": "#/$defs/nonnegative"},
             "transient_peak_allocated_bytes": {"$ref": "#/$defs/nonnegative"}
           }
         },

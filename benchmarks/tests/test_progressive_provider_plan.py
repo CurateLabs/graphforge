@@ -84,6 +84,8 @@ def storage_attribution(scale: int) -> dict:
         "imported": {**snapshot, "categories": {k: dict(v) for k, v in categories.items()}},
         "construction": {
             "application_io": {"phases": phases, "totals": phase},
+            "staging": category,
+            "staging_transient_peak_allocated_bytes": 0,
             "transient_peak_allocated_bytes": 300,
         },
         "portable_package": {

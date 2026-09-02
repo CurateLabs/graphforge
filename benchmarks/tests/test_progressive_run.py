@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 import tempfile
@@ -183,6 +184,14 @@ def authoritative_receipts(scale: int) -> dict[str, list[dict]]:
                 "input_rows": 65_536 * 64,
                 "input_batches": 64,
                 "transient_peak_allocated_bytes": 300,
+                "construction_staging": {
+                    "logical_references": 3,
+                    "logical_bytes": 250,
+                    "physical_objects": 3,
+                    "physical_logical_bytes": 250,
+                    "allocated_bytes": 275,
+                },
+                "construction_staging_transient_peak_allocated_bytes": 290,
                 "application_io": application_io(),
                 "publication_work": {
                     "contract": "graphforge-publication-work/1",
@@ -312,6 +321,10 @@ def rung_storage_attribution(scale: int) -> dict:
         "imported": receipts["reopen_proof"][4]["storage"],
         "construction": {
             "application_io": receipts["ingest"][0]["construction"]["application_io"],
+            "staging": receipts["ingest"][0]["construction"]["construction_staging"],
+            "staging_transient_peak_allocated_bytes": receipts["ingest"][0]["construction"][
+                "construction_staging_transient_peak_allocated_bytes"
+            ],
             "transient_peak_allocated_bytes": 300,
         },
         "portable_package": receipts["export"][0],
@@ -485,6 +498,13 @@ class ProgressiveRunControllerTests(unittest.TestCase):
         self.assertEqual(
             rung["storage_attribution"]["portable_package"]["allocation_allocated_bytes"], 150
         )
+        self.assertEqual(
+            rung["storage_attribution"]["construction"]["staging"]["allocated_bytes"], 275
+        )
+        self.assertEqual(
+            rung["storage_attribution"]["construction"]["staging_transient_peak_allocated_bytes"],
+            290,
+        )
         for omitted in receipts:
             with self.subTest(omitted=omitted), self.assertRaises(ControllerError):
                 changed = {name: values for name, values in receipts.items() if name != omitted}
@@ -572,6 +592,39 @@ class ProgressiveRunControllerTests(unittest.TestCase):
             assemble_rung_evidence(
                 root=ROOT, scale=18, graphforge=changed_gf, benchexec=benchexec(changed_gf)
             )
+        missing_staging = authoritative_receipts(18)
+        del missing_staging["ingest"][0]["construction"]["construction_staging"]
+        changed_gf = graphforge(18, missing_staging)
+        with self.assertRaisesRegex(ControllerError, "staging authority"):
+            assemble_rung_evidence(
+                root=ROOT, scale=18, graphforge=changed_gf, benchexec=benchexec(changed_gf)
+            )
+
+    def test_receipt_authorities_are_bound_to_their_ordinary_phases(self) -> None:
+        cases = (
+            ("ingest", "query", 0),
+            ("export", "query", 0),
+            ("reopen_proof", "query", -1),
+        )
+        for source_phase, destination_phase, index in cases:
+            with self.subTest(source_phase=source_phase):
+                receipts = authoritative_receipts(18)
+                moved = receipts[source_phase].pop(index)
+                receipts[destination_phase].append(moved)
+                gf = graphforge(18, receipts)
+                with self.assertRaisesRegex(ControllerError, "missing, moved, or ambiguous"):
+                    assemble_rung_evidence(
+                        root=ROOT, scale=18, graphforge=gf, benchexec=benchexec(gf)
+                    )
+        for phase, index in (("ingest", 0), ("export", 0), ("reopen_proof", -1)):
+            with self.subTest(duplicate=phase):
+                receipts = authoritative_receipts(18)
+                receipts[phase].append(copy.deepcopy(receipts[phase][index]))
+                gf = graphforge(18, receipts)
+                with self.assertRaisesRegex(ControllerError, "missing, moved, or ambiguous"):
+                    assemble_rung_evidence(
+                        root=ROOT, scale=18, graphforge=gf, benchexec=benchexec(gf)
+                    )
 
     def test_exact_benchexec_xml_and_log_are_normalized_into_passed_bundle(self) -> None:
         plan = build_plan(

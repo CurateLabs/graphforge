@@ -1623,8 +1623,17 @@ mod tests {
         assert!(parse_receipts(br#"{"contract":"unknown/1"}"#, true).is_err());
         assert!(parse_receipts(&[], true).is_err());
         assert!(parse_receipts(b"human output\n", false).unwrap().is_empty());
-        let import = br#"{"contract":"graphforge-import-session/1","outcome":"committed","construction":{"configured_batch_rows":65536,"publication_work":{"contract":"graphforge-publication-work/1","semantic_total_operations":9}}}"#;
-        assert_eq!(parse_receipts(import, true).unwrap().len(), 1);
+        let import = br#"{"contract":"graphforge-import-session/1","outcome":"committed","construction":{"configured_batch_rows":65536,"construction_staging":{"logical_references":3,"logical_bytes":4096,"physical_objects":3,"physical_logical_bytes":4096,"allocated_bytes":8192},"construction_staging_transient_peak_allocated_bytes":12288,"publication_work":{"contract":"graphforge-publication-work/1","semantic_total_operations":9}}}"#;
+        let sanitized = parse_receipts(import, true).unwrap();
+        assert_eq!(sanitized.len(), 1);
+        assert_eq!(
+            sanitized[0]["construction"]["construction_staging"]["allocated_bytes"],
+            8192
+        );
+        assert_eq!(
+            sanitized[0]["construction"]["construction_staging_transient_peak_allocated_bytes"],
+            12288
+        );
         let leaked = br#"{"contract":"graphforge-import-session/1","outcome":"committed","construction":{"project_path":"/secret"}}"#;
         assert!(parse_receipts(leaked, true).is_err());
         let query = serde_json::json!({
