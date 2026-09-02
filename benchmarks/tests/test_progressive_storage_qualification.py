@@ -37,8 +37,15 @@ class ProgressiveStorageQualificationTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    @staticmethod
+    def provider_rung(scale: int) -> dict:
+        value = rung(scale)
+        value["source"] = "canonical_ladder"
+        value["profile_id"] = f"graph500-s{scale}-provider"
+        return value
+
     def source_pair(self) -> list[dict]:
-        return [rung(20), rung(22)]
+        return [self.provider_rung(20), self.provider_rung(22)]
 
     def write_bundle(self, value: dict) -> Path:
         scale = value["scale"]
@@ -106,7 +113,7 @@ class ProgressiveStorageQualificationTests(unittest.TestCase):
         return rung_path
 
     def bound_pair(self, scales: tuple[int, int] = (20, 22)) -> list[Path]:
-        return [self.write_bundle(rung(scale)) for scale in scales]
+        return [self.write_bundle(self.provider_rung(scale)) for scale in scales]
 
     def build_pair(self, scales: tuple[int, int] = (20, 22), **overrides: int) -> dict:
         return build(
@@ -186,7 +193,7 @@ class ProgressiveStorageQualificationTests(unittest.TestCase):
     def test_one_rung_and_non_adjacent_rungs_are_rejected(self) -> None:
         with self.assertRaisesRegex(StorageQualificationError, "exactly two"):
             build(
-                [self.write_bundle(rung(20))],
+                [self.write_bundle(self.provider_rung(20))],
                 expected_commit=COMMIT,
                 expected_image_digest=IMAGE,
                 volume_bytes=VOLUME_BYTES,
@@ -234,7 +241,7 @@ class ProgressiveStorageQualificationTests(unittest.TestCase):
             ("profile_id", "graph500-s20-local"),
         ):
             with self.subTest(field=field):
-                invalid = rung(20)
+                invalid = self.provider_rung(20)
                 invalid[field] = value
                 with self.assertRaisesRegex(
                     StorageQualificationError, "canonical provider source/profile"
