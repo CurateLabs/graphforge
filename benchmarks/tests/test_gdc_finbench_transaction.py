@@ -171,7 +171,7 @@ class GdcFinBenchTransactionSuiteTests(unittest.TestCase):
             self.assertEqual(evidence["harness_failures"], [])
 
             with self.assertRaises(FinBenchTransactionSuiteError) as invalid:
-                run_live_suite(params_override={"start": {"not": "scalar"}})
+                run_live_suite(params_override={"start": object()})
             self.assertEqual(invalid.exception.cause, "harness_error")
             self.assertIn("public API execution failed", str(invalid.exception))
 
