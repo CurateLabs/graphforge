@@ -168,6 +168,9 @@ fn detect_ordered_two_hop(plan: &Arc<dyn ExecutionPlan>) -> Option<OrderedTwoHop
     // #region agent log
     let _ = std::fs::OpenOptions::new().create(true).append(true).open("/opt/cursor/logs/debug.log").and_then(|mut file| writeln!(file, "{{\"hypothesisId\":\"A-B\",\"location\":\"ordered_two_hop.rs:detect:expands\",\"message\":\"expand chain matched\",\"data\":{{\"expand1_identity_only\":{},\"expand2_identity_only\":{},\"same_type\":{},\"same_direction\":{}}},\"timestamp\":0}}", expand1.is_destination_identity_only(), expand2.is_destination_identity_only(), expand1.rel_type_name() == expand2.rel_type_name(), expand1.direction() == expand2.direction()));
     // #endregion
+    // #region agent log
+    let _ = std::fs::OpenOptions::new().create(true).append(true).open("/opt/cursor/logs/debug.log").and_then(|mut file| writeln!(file, "{{\"hypothesisId\":\"A\",\"location\":\"ordered_two_hop.rs:detect:eligibility\",\"message\":\"corrected expand eligibility\",\"data\":{{\"intermediate_topology_only\":{},\"terminal_identity_only\":{},\"has_ordinal_identity\":{}}},\"timestamp\":0}}", expand1.is_intermediate_topology_only(), expand2.is_destination_identity_only(), expand2.ordinal_identities().is_some()));
+    // #endregion
     if !expand1.is_intermediate_topology_only() || !expand2.is_destination_identity_only() {
         return None;
     }
