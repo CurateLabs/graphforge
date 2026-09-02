@@ -756,6 +756,31 @@ fn sanitize_receipt(value: &serde_json::Value) -> Option<serde_json::Value> {
                 "equivalent",
             ],
         ),
+        Some("graphforge-portable-export/2") => copy_selected_receipt(
+            object,
+            &[
+                "contract",
+                "package_digest",
+                "transport_digest",
+                "entry_count",
+                "payload_bytes",
+                "representation",
+                "selection_fingerprint",
+                "allocation_logical_bytes",
+                "allocation_allocated_bytes",
+                "allocation_physical_objects",
+            ],
+        )
+        .filter(|receipt| {
+            sanitized_numeric_fields(
+                receipt,
+                &[
+                    "allocation_logical_bytes",
+                    "allocation_allocated_bytes",
+                    "allocation_physical_objects",
+                ],
+            )
+        }),
         Some("graphforge-portable-import/2") => copy_selected_receipt(
             object,
             &[
@@ -1684,6 +1709,52 @@ mod tests {
         let mut leaked = receipt;
         leaked["storage"]["project_path"] = serde_json::json!("/secret");
         let encoded = serde_json::to_vec(&leaked).expect("leaked receipt JSON");
+        assert!(parse_receipts(&encoded, true).is_err());
+    }
+
+    #[test]
+    fn portable_export_receipt_preserves_only_writer_allocation_totals() {
+        let receipt = serde_json::json!({
+            "contract": "graphforge-portable-export/2",
+            "source": "current",
+            "generation_uuid": "00000000-0000-4000-8000-000000000001",
+            "output": "/secret/package.gfpb",
+            "package_digest": format!("sha256:{}", "0".repeat(64)),
+            "transport_digest": format!("sha256:{}", "1".repeat(64)),
+            "entry_count": 4,
+            "payload_bytes": 8_192,
+            "representation": "bundle",
+            "selection_fingerprint": format!("sha256:{}", "2".repeat(64)),
+            "allocation_logical_bytes": 9_000,
+            "allocation_allocated_bytes": 12_288,
+            "allocation_physical_objects": 3,
+            "allocation_identity_allocated_bytes": {"secret-native-id": 12_288}
+        });
+        let encoded = serde_json::to_vec(&receipt).expect("portable export receipt JSON");
+
+        let sanitized = parse_receipts(&encoded, true).expect("closed portable export receipt");
+
+        assert_eq!(sanitized[0]["allocation_logical_bytes"], 9_000);
+        assert_eq!(sanitized[0]["allocation_allocated_bytes"], 12_288);
+        assert_eq!(sanitized[0]["allocation_physical_objects"], 3);
+        let encoded = serde_json::to_string(&sanitized[0]).unwrap();
+        for forbidden in ["/secret", "uuid", "identity", "secret-native-id"] {
+            assert!(!encoded.contains(forbidden));
+        }
+
+        let mut missing_authority = receipt.clone();
+        missing_authority
+            .as_object_mut()
+            .unwrap()
+            .remove("allocation_allocated_bytes");
+        let encoded =
+            serde_json::to_vec(&missing_authority).expect("incomplete portable export receipt");
+        assert!(parse_receipts(&encoded, true).is_err());
+
+        let mut malformed_authority = receipt;
+        malformed_authority["allocation_physical_objects"] = serde_json::json!(-1);
+        let encoded =
+            serde_json::to_vec(&malformed_authority).expect("malformed portable export receipt");
         assert!(parse_receipts(&encoded, true).is_err());
     }
 
