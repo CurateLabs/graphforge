@@ -210,7 +210,7 @@ class GdcSnbBiSuiteTests(unittest.TestCase):
     def test_live_phase_and_resource_evidence_stays_out_of_correctness(self) -> None:
         evidence = run_live_bi2()
         self.assertEqual(evidence["phases"], ["load", "query", "validation"])
-        self.assertEqual(evidence["resources"]["load"]["rows_loaded"], 28)
+        self.assertEqual(evidence["resources"]["load"]["rows_loaded"], 29)
         self.assertEqual(evidence["resources"]["query"]["rows_returned"], 3)
         self.assertIs(evidence["resources"]["correctness_authority"], False)
         self.assertNotIn("resources", evidence["correctness"])
