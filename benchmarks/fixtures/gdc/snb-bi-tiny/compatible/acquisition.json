@@ -10,14 +10,16 @@
   "recorded_generator": {
     "name": "graphforge_synthetic_snb_bi_fixture",
     "source": "https://github.com/CurateLabs/graphforge",
-    "release": "synthetic-fixture-v1",
-    "commit": null
+    "provenance_kind": "content_addressed_synthetic",
+    "content_sha256": "c0fd57903065bb4950244cc77023e9ce0803f723596922b114141f190ea521d8",
+    "content_description": "exact committed synthetic static fixture bytes"
   },
   "recorded_driver": {
-    "name": "graphforge_internal_snb_bi_driver",
+    "name": "graphforge_benchmark_gdc_snb_bi",
     "source": "https://github.com/CurateLabs/graphforge",
-    "release": "internal-driver-v1",
-    "commit": null
+    "provenance_kind": "repository_source",
+    "content_sha256": "b2759b99f60e395c541bf8d42cac8189b5e174cbc85d2e6d845017e1b0b791d4",
+    "content_description": "sha256 of sorted runner Cargo.toml and src path-content framing"
   },
   "assets": [
     {

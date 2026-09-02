@@ -1,7 +1,8 @@
 {
-  "schema": "graphforge-gdc-snb-bi-live-identity/1",
+  "schema": "graphforge-gdc-snb-bi-live-identity/2",
   "suite_id": "snb-bi",
   "operation": "BI2",
+  "source_mode": "runner_owned_rust_api",
   "certification": false,
   "upstream_spec": {
     "source": "https://github.com/ldbc/ldbc_snb_docs",
@@ -15,32 +16,42 @@
     "path": "cypher/queries/bi-2.cypher"
   },
   "fixture": {
+    "dataset_id": "snb-bi-synthetic-minimal",
     "kind": "synthetic_minimal_snb_shaped",
-    "generator": "committed deterministic seed 963; not ldbc_snb_datagen_spark",
+    "provenance_kind": "content_addressed_committed_fixture",
+    "seed": 963,
     "scale_factor": null,
     "path": "seed.json",
     "sha256": "9dc8c9987d4ce403a30808c268d25a6f9fdb451b7a5c68fbd2d37d700b4cb88e"
   },
   "parameters": {
-    "kind": "internal_deterministic_bi2_parameters",
+    "kind": "typed_internal_deterministic_bi2_parameters",
     "path": "parameters.json",
-    "sha256": "72806ba8eae872db38f4ee064292e312993741221354706c24f595db03bf6d73"
+    "file_sha256": "55a5c78e5573909531b6290a38ccc7d670b1a8eb09136ebfc4b4668c45646d7a",
+    "names_kinds_values_sha256": "79ef56283a4ac9320c82415977eb1f2c27574970bccb247e04cfaf02e59384b5"
   },
   "reference": {
     "authority": "independent_semantic_derivation_from_seed",
     "captured_from_engine": false,
+    "validation": "exact_order_numeric_text_normalized",
     "path": "expected-bi2.ref",
-    "sha256": "2a6af839fd9b6dc3b9f92305eea309b71dba26973885a0ae04a3c276a52d9e19"
+    "sha256": "bd4c037d3aae1881e9329e148743d153d4bf671afc1f35d3d7ab4eaab0748d7b"
   },
   "driver": {
-    "kind": "internal_python_public_api_driver",
+    "kind": "internal_rust_public_api_driver",
+    "source_mode": "runner_executes_query_no_caller_result",
+    "interface": "graphforge_api::GraphForge::execute_with_params",
     "durable": false,
-    "interface": "GraphForge.execute",
-    "result_validator": "graphforge-benchmark-gdc-snb-bi"
+    "validator": "same_process_exact_order"
   },
   "normalization": {
     "upstream_temporal_window": "$date plus 100-day durations",
     "internal_equivalent": "precomputed integer day boundaries [0,100), [100,200)",
-    "reason": "exercise the current supported Cypher surface without claiming temporal-literal parity"
+    "reason": "exercise supported Cypher while not claiming temporal-literal parity",
+    "result_order": [
+      "diff DESC",
+      "tag.name ASC"
+    ],
+    "numeric_format": "base10_i64"
   }
 }

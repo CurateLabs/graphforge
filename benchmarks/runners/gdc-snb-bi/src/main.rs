@@ -1,7 +1,7 @@
 use graphforge_benchmark_gdc_snb_bi::{
-    JOB_SCHEMA, MappingOutcome, Operation, OperationJob, OperationStatus, assemble_evidence,
-    load_live_result_document, load_resource_report, load_result_rows, map_operation,
-    operation_rules, run_job, validate_live_result,
+    assemble_evidence, load_resource_report, load_result_rows, map_operation, operation_rules,
+    run_job, run_live_fixture, validate_live_fixture_context, MappingOutcome, Operation,
+    OperationJob, OperationStatus, JOB_SCHEMA,
 };
 use std::env;
 use std::fs;
@@ -12,7 +12,8 @@ fn main() -> ExitCode {
     let mut args = env::args().skip(1);
     let Some(command) = args.next() else {
         eprintln!(
-            "usage: graphforge-benchmark-gdc-snb-bi <list-operations|map-operation|run-suite> ..."
+            "usage: graphforge-benchmark-gdc-snb-bi \
+             <list-operations|map-operation|validate-live-context|run-live|run-static-suite> ..."
         );
         return ExitCode::from(2);
     };
@@ -46,25 +47,16 @@ fn main() -> ExitCode {
                 }
             }
         }
-        "validate-live" => {
-            let Some(reference_path) = args.next() else {
-                eprintln!("usage: validate-live REFERENCE RESULT.json PARAMETERS_SHA256");
+        "validate-live-context" => {
+            let Some(fixture_path) = args.next() else {
+                eprintln!("usage: validate-live-context FIXTURE_DIR");
                 return ExitCode::from(2);
             };
-            let Some(result_path) = args.next() else {
-                eprintln!("missing RESULT.json");
+            if args.next().is_some() {
+                eprintln!("validate-live-context accepts only FIXTURE_DIR");
                 return ExitCode::from(2);
-            };
-            let Some(parameters_sha256) = args.next() else {
-                eprintln!("missing PARAMETERS_SHA256");
-                return ExitCode::from(2);
-            };
-            let reference_path = PathBuf::from(reference_path);
-            let result_path = PathBuf::from(result_path);
-            match load_result_rows(&reference_path).and_then(|reference| {
-                let result = load_live_result_document(&result_path)?;
-                validate_live_result(&parameters_sha256, &reference, &result)
-            }) {
+            }
+            match validate_live_fixture_context(&PathBuf::from(fixture_path)) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(error) => {
                     eprintln!("{error}");
@@ -72,10 +64,48 @@ fn main() -> ExitCode {
                 }
             }
         }
-        "run-suite" => {
+        "run-live" => {
+            let Some(fixture_path) = args.next() else {
+                eprintln!("usage: run-live FIXTURE_DIR EVIDENCE.json");
+                return ExitCode::from(2);
+            };
+            let Some(evidence_path) = args.next() else {
+                eprintln!("missing EVIDENCE.json");
+                return ExitCode::from(2);
+            };
+            if args.next().is_some() {
+                eprintln!("run-live accepts only FIXTURE_DIR EVIDENCE.json");
+                return ExitCode::from(2);
+            }
+            let executable = match env::current_exe() {
+                Ok(path) => path,
+                Err(error) => {
+                    eprintln!("failed to identify runner executable: {error}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            match run_live_fixture(&PathBuf::from(fixture_path), &executable) {
+                Ok(evidence) => {
+                    let payload = serde_json::to_string_pretty(&evidence).unwrap();
+                    match fs::write(evidence_path, format!("{payload}\n")) {
+                        Ok(()) => ExitCode::SUCCESS,
+                        Err(error) => {
+                            eprintln!("failed to write live evidence: {error}");
+                            ExitCode::FAILURE
+                        }
+                    }
+                }
+                Err(error) => {
+                    eprintln!("{error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "run-static-suite" => {
             let Some(jobs_dir) = args.next() else {
                 eprintln!(
-                    "usage: run-suite JOBS_DIR REFERENCE_DIR OUTPUT_DIR RESOURCES.json IDENTITIES.json EVIDENCE.json"
+                    "usage: run-static-suite JOBS_DIR REFERENCE_DIR OUTPUT_DIR \
+                     RESOURCES.json IDENTITIES.json EVIDENCE.json"
                 );
                 return ExitCode::from(2);
             };

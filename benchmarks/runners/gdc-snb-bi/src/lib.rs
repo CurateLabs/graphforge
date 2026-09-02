@@ -13,16 +13,20 @@
 #![forbid(unsafe_code)]
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
 use std::path::Path;
 use std::str::FromStr;
+use std::time::Instant;
 
 pub const EVIDENCE_SCHEMA: &str = "graphforge-gdc-snb-bi-evidence/1";
 pub const JOB_SCHEMA: &str = "graphforge-gdc-snb-bi-job/1";
 pub const LADDER_SCHEMA: &str = "graphforge-gdc-snb-bi-ladder/1";
-pub const LIVE_RESULT_SCHEMA: &str = "graphforge-gdc-snb-bi-live-result/1";
+pub const LIVE_EVIDENCE_SCHEMA: &str = "graphforge-gdc-snb-bi-live-evidence/2";
+pub const LIVE_IDENTITY_SCHEMA: &str = "graphforge-gdc-snb-bi-live-identity/2";
+pub const LIVE_PARAMETERS_SCHEMA: &str = "graphforge-gdc-snb-bi-live-parameters/2";
 pub const RESOURCE_SCHEMA: &str = "graphforge-gdc-snb-bi-resources/1";
 pub const SUITE_ID: &str = "snb-bi";
 
@@ -287,9 +291,10 @@ impl Operation {
     fn intended_validation(self) -> ValidationMode {
         match self {
             // Grouped/set-shaped aggregations without a spec-mandated total
-            // tie-break (tag lists, message-count histogram, related-tag
-            // co-occurrence): compared order-insensitively.
-            Self::Bi2 | Self::Bi12 | Self::Bi16 => ValidationMode::Normalized,
+            // tie-break (message-count histogram, related-tag co-occurrence):
+            // compared order-insensitively. BI2 has the explicit total order
+            // `diff DESC, tag.name ASC` and therefore remains exact.
+            Self::Bi12 | Self::Bi16 => ValidationMode::Normalized,
             _ => ValidationMode::Exact,
         }
     }
@@ -624,8 +629,8 @@ pub fn map_operation(operation: Operation) -> MappingOutcome {
         Operation::Bi2 => compatible(
             "cypher",
             "MATCH (t:Tag)<-[:HAS_TAG]-(m:Message) WHERE m.creationDate window \
-             RETURN t.name, countWindow1, countWindow2, abs(diff) ORDER BY diff DESC, t.name",
-            "tag evolution: per-tag message counts across two windows; grouped tag set (normalized validation)",
+             RETURN t.name, countWindow1, countWindow2, abs(diff) ORDER BY diff DESC, t.name ASC",
+            "tag evolution: per-tag message counts across two windows; official total order diff DESC, tag.name ASC",
         ),
         Operation::Bi3 => compatible(
             "cypher",
@@ -798,74 +803,586 @@ pub fn parse_result_rows(text: &str) -> ResultRows {
         .collect()
 }
 
-/// Result produced by the explicit live lane after a public GraphForge call.
-///
-/// The source and parameter digest prevent the validator CLI from accepting
-/// the legacy static `.out` replay as live evidence. The rows remain ordinary
-/// strings so the same Rust-owned normalization and multiset validator used by
-/// the suite is authoritative.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct LiveResultDocument {
+pub struct LiveIdentity {
+    pub schema: String,
+    pub suite_id: String,
+    pub operation: Operation,
+    pub source_mode: String,
+    pub certification: bool,
+    pub upstream_spec: UpstreamIdentity,
+    pub upstream_query: UpstreamQueryIdentity,
+    pub fixture: LiveFixtureIdentity,
+    pub parameters: LiveParametersIdentity,
+    pub reference: LiveReferenceIdentity,
+    pub driver: LiveDriverIdentity,
+    pub normalization: LiveNormalizationIdentity,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct UpstreamIdentity {
+    pub source: String,
+    pub release: String,
+    pub commit: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct UpstreamQueryIdentity {
+    pub source: String,
+    pub release: String,
+    pub commit: String,
+    pub path: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LiveFixtureIdentity {
+    pub dataset_id: String,
+    pub kind: String,
+    pub provenance_kind: String,
+    pub seed: u64,
+    pub scale_factor: Option<String>,
+    pub path: String,
+    pub sha256: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LiveParametersIdentity {
+    pub kind: String,
+    pub path: String,
+    pub file_sha256: String,
+    pub names_kinds_values_sha256: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LiveReferenceIdentity {
+    pub authority: String,
+    pub captured_from_engine: bool,
+    pub validation: String,
+    pub path: String,
+    pub sha256: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LiveDriverIdentity {
+    pub kind: String,
+    pub source_mode: String,
+    pub interface: String,
+    pub durable: bool,
+    pub validator: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LiveNormalizationIdentity {
+    pub upstream_temporal_window: String,
+    pub internal_equivalent: String,
+    pub reason: String,
+    pub result_order: Vec<String>,
+    pub numeric_format: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LiveParameters {
     pub schema: String,
     pub operation: Operation,
-    pub source: String,
-    pub parameters_sha256: String,
-    pub columns: Vec<String>,
-    pub rows: Vec<String>,
+    pub bindings: LiveBindings,
 }
 
-pub fn load_live_result_document(path: &Path) -> Result<LiveResultDocument, SuiteError> {
-    let text = fs::read_to_string(path).map_err(|error| {
-        SuiteError::InvalidDocument(format!("failed to read {}: {error}", path.display()))
-    })?;
-    serde_json::from_str(&text)
-        .map_err(|error| SuiteError::InvalidDocument(format!("invalid live result: {error}")))
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LiveBindings {
+    #[serde(rename = "tagClass")]
+    pub tag_class: StringBinding,
+    #[serde(rename = "window1Start")]
+    pub window_1_start: Int64Binding,
+    #[serde(rename = "window2Start")]
+    pub window_2_start: Int64Binding,
+    #[serde(rename = "windowEnd")]
+    pub window_end: Int64Binding,
 }
 
-pub fn validate_live_result(
-    expected_parameters_sha256: &str,
-    reference: &ResultRows,
-    document: &LiveResultDocument,
-) -> Result<(), SuiteError> {
-    if document.schema != LIVE_RESULT_SCHEMA {
-        return Err(SuiteError::InvalidDocument(format!(
-            "unexpected live result schema: {}",
-            document.schema
-        )));
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct StringBinding {
+    pub kind: String,
+    pub value: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Int64Binding {
+    pub kind: String,
+    pub value: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct LiveSeed {
+    schema: String,
+    seed: u64,
+    tag_classes: Vec<String>,
+    tags: Vec<LiveSeedTag>,
+    messages: Vec<LiveSeedMessage>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct LiveSeedTag {
+    name: String,
+    tag_class: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct LiveSeedMessage {
+    id: i64,
+    creation_day: i64,
+    tags: Vec<String>,
+}
+
+struct ValidatedLiveContext {
+    identity: LiveIdentity,
+    parameters: LiveParameters,
+    seed: LiveSeed,
+    reference: ResultRows,
+}
+
+const LIVE_BI2_QUERY: &str = "\
+MATCH (tag:Tag)-[:HAS_TYPE]->(:TagClass {name: $tagClass}) \
+OPTIONAL MATCH (message1:Message)-[:HAS_TAG]->(tag) \
+WHERE $window1Start <= message1.creationDate AND message1.creationDate < $window2Start \
+WITH tag, count(message1) AS countWindow1 \
+OPTIONAL MATCH (message2:Message)-[:HAS_TAG]->(tag) \
+WHERE $window2Start <= message2.creationDate AND message2.creationDate < $windowEnd \
+WITH tag, countWindow1, count(message2) AS countWindow2 \
+RETURN tag.name AS tagName, countWindow1, countWindow2, \
+abs(countWindow1 - countWindow2) AS diff \
+ORDER BY diff DESC, tagName ASC LIMIT 100";
+
+fn expected_live_identity() -> LiveIdentity {
+    LiveIdentity {
+        schema: LIVE_IDENTITY_SCHEMA.into(),
+        suite_id: SUITE_ID.into(),
+        operation: Operation::Bi2,
+        source_mode: "runner_owned_rust_api".into(),
+        certification: false,
+        upstream_spec: UpstreamIdentity {
+            source: "https://github.com/ldbc/ldbc_snb_docs".into(),
+            release: "v2.2.4".into(),
+            commit: "5f7956e07a214373c363b371a3b88bc83ddcd118".into(),
+        },
+        upstream_query: UpstreamQueryIdentity {
+            source: "https://github.com/ldbc/ldbc_snb_bi".into(),
+            release: "v1.0.0".into(),
+            commit: "abf8cd4862f2b96ba9267e6298a1f7402439040b".into(),
+            path: "cypher/queries/bi-2.cypher".into(),
+        },
+        fixture: LiveFixtureIdentity {
+            dataset_id: "snb-bi-synthetic-minimal".into(),
+            kind: "synthetic_minimal_snb_shaped".into(),
+            provenance_kind: "content_addressed_committed_fixture".into(),
+            seed: 963,
+            scale_factor: None,
+            path: "seed.json".into(),
+            sha256: "9dc8c9987d4ce403a30808c268d25a6f9fdb451b7a5c68fbd2d37d700b4cb88e".into(),
+        },
+        parameters: LiveParametersIdentity {
+            kind: "typed_internal_deterministic_bi2_parameters".into(),
+            path: "parameters.json".into(),
+            file_sha256: "55a5c78e5573909531b6290a38ccc7d670b1a8eb09136ebfc4b4668c45646d7a".into(),
+            names_kinds_values_sha256:
+                "79ef56283a4ac9320c82415977eb1f2c27574970bccb247e04cfaf02e59384b5".into(),
+        },
+        reference: LiveReferenceIdentity {
+            authority: "independent_semantic_derivation_from_seed".into(),
+            captured_from_engine: false,
+            validation: "exact_order_numeric_text_normalized".into(),
+            path: "expected-bi2.ref".into(),
+            sha256: "bd4c037d3aae1881e9329e148743d153d4bf671afc1f35d3d7ab4eaab0748d7b".into(),
+        },
+        driver: LiveDriverIdentity {
+            kind: "internal_rust_public_api_driver".into(),
+            source_mode: "runner_executes_query_no_caller_result".into(),
+            interface: "graphforge_api::GraphForge::execute_with_params".into(),
+            durable: false,
+            validator: "same_process_exact_order".into(),
+        },
+        normalization: LiveNormalizationIdentity {
+            upstream_temporal_window: "$date plus 100-day durations".into(),
+            internal_equivalent: "precomputed integer day boundaries [0,100), [100,200)".into(),
+            reason: "exercise supported Cypher while not claiming temporal-literal parity".into(),
+            result_order: vec!["diff DESC".into(), "tag.name ASC".into()],
+            numeric_format: "base10_i64".into(),
+        },
     }
-    if document.operation != Operation::Bi2 {
+}
+
+fn sha256_bytes(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let digest = Sha256::digest(bytes);
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(encoded, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    encoded
+}
+
+fn read_bytes(path: &Path, label: &str) -> Result<Vec<u8>, SuiteError> {
+    fs::read(path).map_err(|error| {
+        SuiteError::InvalidDocument(format!(
+            "failed to read {label} {}: {error}",
+            path.display()
+        ))
+    })
+}
+
+fn parse_closed_json<T: for<'de> Deserialize<'de>>(
+    bytes: &[u8],
+    label: &str,
+) -> Result<T, SuiteError> {
+    serde_json::from_slice(bytes)
+        .map_err(|error| SuiteError::InvalidDocument(format!("invalid {label}: {error}")))
+}
+
+/// Independently derive official BI2 rows from the seed and typed windows.
+///
+/// Semantics match upstream `bi-2.cypher`: every tag of `$tagClass` appears,
+/// `countWindow1`/`countWindow2` use the half-open windows, `diff` is the
+/// absolute count delta, and the total order is `diff DESC, tag.name ASC`
+/// with `LIMIT 100`. This derivation is the reference authority; the committed
+/// `.ref` file must match it and is never captured from GraphForge.
+fn derive_expected_bi2(seed: &LiveSeed, bindings: &LiveBindings) -> ResultRows {
+    let tag_class = &bindings.tag_class.value;
+    let window_1_start = bindings.window_1_start.value;
+    let window_2_start = bindings.window_2_start.value;
+    let window_end = bindings.window_end.value;
+    let mut rows: Vec<(i64, String, i64, i64)> = seed
+        .tags
+        .iter()
+        .filter(|tag| tag.tag_class == *tag_class)
+        .map(|tag| {
+            let count_window_1 = seed
+                .messages
+                .iter()
+                .filter(|message| {
+                    message.tags.iter().any(|name| name == &tag.name)
+                        && window_1_start <= message.creation_day
+                        && message.creation_day < window_2_start
+                })
+                .count() as i64;
+            let count_window_2 = seed
+                .messages
+                .iter()
+                .filter(|message| {
+                    message.tags.iter().any(|name| name == &tag.name)
+                        && window_2_start <= message.creation_day
+                        && message.creation_day < window_end
+                })
+                .count() as i64;
+            let diff = (count_window_1 - count_window_2).abs();
+            (diff, tag.name.clone(), count_window_1, count_window_2)
+        })
+        .collect();
+    rows.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+    rows.truncate(100);
+    rows.into_iter()
+        .map(|(diff, name, count_window_1, count_window_2)| {
+            format!("{name} {count_window_1} {count_window_2} {diff}")
+        })
+        .collect()
+}
+
+fn validate_live_context(fixture: &Path) -> Result<ValidatedLiveContext, SuiteError> {
+    let identity_bytes = read_bytes(&fixture.join("identity.json"), "live identity")?;
+    let identity: LiveIdentity = parse_closed_json(&identity_bytes, "live identity")?;
+    if identity != expected_live_identity() {
         return Err(SuiteError::InvalidDocument(
-            "live lane supports exactly BI2".into(),
+            "live_identity_drift: complete expected identity mismatch".into(),
         ));
     }
-    if document.source != "graphforge_public_python_api" {
+
+    let seed_bytes = read_bytes(&fixture.join(&identity.fixture.path), "live seed")?;
+    if sha256_bytes(&seed_bytes) != identity.fixture.sha256 {
         return Err(SuiteError::InvalidDocument(
-            "static_output_rejected: live result source must be graphforge_public_python_api"
-                .into(),
+            "live_fixture_checksum_mismatch".into(),
         ));
     }
-    if document.parameters_sha256 != expected_parameters_sha256 {
-        return Err(SuiteError::InvalidDocument(
-            "parameter_identity_mismatch".into(),
-        ));
-    }
-    if document.columns
-        != ["tagName", "countWindow1", "countWindow2", "diff"]
-            .map(str::to_string)
-            .to_vec()
+    let seed: LiveSeed = parse_closed_json(&seed_bytes, "live seed")?;
+    if seed.schema != "graphforge-gdc-snb-bi-synthetic-seed/1" || seed.seed != identity.fixture.seed
     {
         return Err(SuiteError::InvalidDocument(
-            "unexpected BI2 live result columns".into(),
+            "live_fixture_identity_mismatch".into(),
         ));
     }
-    if document.rows.iter().any(|row| row.trim().is_empty()) {
+
+    let parameter_bytes = read_bytes(&fixture.join(&identity.parameters.path), "live parameters")?;
+    if sha256_bytes(&parameter_bytes) != identity.parameters.file_sha256 {
         return Err(SuiteError::InvalidDocument(
-            "live result rows must not be empty".into(),
+            "live_parameter_file_checksum_mismatch".into(),
         ));
     }
-    let system = document.rows.iter().map(|row| normalize_row(row)).collect();
-    validate_result(ValidationMode::Normalized, reference, &system)
+    let parameters: LiveParameters = parse_closed_json(&parameter_bytes, "live parameters")?;
+    if parameters.schema != LIVE_PARAMETERS_SCHEMA || parameters.operation != Operation::Bi2 {
+        return Err(SuiteError::InvalidDocument(
+            "live_parameter_identity_mismatch".into(),
+        ));
+    }
+    let binding_bytes = serde_json::to_vec(&parameters.bindings).map_err(|error| {
+        SuiteError::InvalidDocument(format!("failed to canonicalize live parameters: {error}"))
+    })?;
+    if sha256_bytes(&binding_bytes) != identity.parameters.names_kinds_values_sha256 {
+        return Err(SuiteError::InvalidDocument(
+            "live_parameter_binding_digest_mismatch".into(),
+        ));
+    }
+    let expected_parameters = LiveParameters {
+        schema: LIVE_PARAMETERS_SCHEMA.into(),
+        operation: Operation::Bi2,
+        bindings: LiveBindings {
+            tag_class: StringBinding {
+                kind: "string".into(),
+                value: "MusicalArtist".into(),
+            },
+            window_1_start: Int64Binding {
+                kind: "int64".into(),
+                value: 0,
+            },
+            window_2_start: Int64Binding {
+                kind: "int64".into(),
+                value: 100,
+            },
+            window_end: Int64Binding {
+                kind: "int64".into(),
+                value: 200,
+            },
+        },
+    };
+    if parameters != expected_parameters {
+        return Err(SuiteError::InvalidDocument(
+            "live_parameter_values_mismatch".into(),
+        ));
+    }
+
+    let reference_bytes = read_bytes(&fixture.join(&identity.reference.path), "live reference")?;
+    if sha256_bytes(&reference_bytes) != identity.reference.sha256 {
+        return Err(SuiteError::InvalidDocument(
+            "live_reference_checksum_mismatch".into(),
+        ));
+    }
+    let reference = parse_result_rows(std::str::from_utf8(&reference_bytes).map_err(|error| {
+        SuiteError::InvalidDocument(format!("reference is not UTF-8: {error}"))
+    })?);
+    let derived = derive_expected_bi2(&seed, &parameters.bindings);
+    if derived != reference {
+        return Err(SuiteError::ReferenceMismatch(
+            "live_reference_does_not_match_independent_semantic_derivation".into(),
+        ));
+    }
+    Ok(ValidatedLiveContext {
+        identity,
+        parameters,
+        seed,
+        reference,
+    })
+}
+
+pub fn validate_live_fixture_context(fixture: &Path) -> Result<(), SuiteError> {
+    validate_live_context(fixture).map(|_| ())
+}
+
+fn api_error(context: &str, error: impl fmt::Display) -> SuiteError {
+    SuiteError::InvalidDocument(format!("live_api_execution_failed:{context}: {error}"))
+}
+
+fn execute_with_params(
+    forge: &graphforge_api::GraphForge,
+    query: &str,
+    params: std::collections::HashMap<String, graphforge_api::IrLiteral>,
+) -> Result<(), SuiteError> {
+    forge
+        .execute_with_params(query, &params)
+        .map(|_| ())
+        .map_err(|error| api_error("load", error))
+}
+
+fn load_live_seed(forge: &graphforge_api::GraphForge, seed: &LiveSeed) -> Result<u64, SuiteError> {
+    use graphforge_api::IrLiteral;
+    use std::collections::HashMap;
+
+    for name in &seed.tag_classes {
+        execute_with_params(
+            forge,
+            "CREATE (:TagClass {name: $name})",
+            HashMap::from([("name".into(), IrLiteral::Str(name.clone()))]),
+        )?;
+    }
+    for tag in &seed.tags {
+        execute_with_params(
+            forge,
+            "CREATE (:Tag {name: $name})",
+            HashMap::from([("name".into(), IrLiteral::Str(tag.name.clone()))]),
+        )?;
+        execute_with_params(
+            forge,
+            "MATCH (tag:Tag {name: $tag}), (class:TagClass {name: $class}) \
+             CREATE (tag)-[:HAS_TYPE]->(class)",
+            HashMap::from([
+                ("tag".into(), IrLiteral::Str(tag.name.clone())),
+                ("class".into(), IrLiteral::Str(tag.tag_class.clone())),
+            ]),
+        )?;
+    }
+    let mut tagged_edges = 0_u64;
+    for message in &seed.messages {
+        execute_with_params(
+            forge,
+            "CREATE (:Message {id: $id, creationDate: $creationDate})",
+            HashMap::from([
+                ("id".into(), IrLiteral::Int(message.id)),
+                ("creationDate".into(), IrLiteral::Int(message.creation_day)),
+            ]),
+        )?;
+        for tag in &message.tags {
+            execute_with_params(
+                forge,
+                "MATCH (message:Message {id: $id}), (tag:Tag {name: $tag}) \
+                 CREATE (message)-[:HAS_TAG]->(tag)",
+                HashMap::from([
+                    ("id".into(), IrLiteral::Int(message.id)),
+                    ("tag".into(), IrLiteral::Str(tag.clone())),
+                ]),
+            )?;
+            tagged_edges += 1;
+        }
+    }
+    Ok(
+        (seed.tag_classes.len() + seed.tags.len() + seed.tags.len() + seed.messages.len()) as u64
+            + tagged_edges,
+    )
+}
+
+fn execute_live_bi2(
+    forge: &graphforge_api::GraphForge,
+    bindings: &LiveBindings,
+) -> Result<ResultRows, SuiteError> {
+    use arrow::array::{Int64Array, StringArray};
+    use graphforge_api::IrLiteral;
+    use std::collections::HashMap;
+
+    let params = HashMap::from([
+        (
+            "tagClass".into(),
+            IrLiteral::Str(bindings.tag_class.value.clone()),
+        ),
+        (
+            "window1Start".into(),
+            IrLiteral::Int(bindings.window_1_start.value),
+        ),
+        (
+            "window2Start".into(),
+            IrLiteral::Int(bindings.window_2_start.value),
+        ),
+        (
+            "windowEnd".into(),
+            IrLiteral::Int(bindings.window_end.value),
+        ),
+    ]);
+    let result = forge
+        .execute_with_params(LIVE_BI2_QUERY, &params)
+        .map_err(|error| api_error("query", error))?;
+    let mut rows = Vec::new();
+    for batch in result.batches {
+        let tags = batch
+            .column_by_name("tagName")
+            .and_then(|column| column.as_any().downcast_ref::<StringArray>())
+            .ok_or_else(|| SuiteError::InvalidDocument("BI2 tagName is not Utf8".into()))?;
+        let count_1 = batch
+            .column_by_name("countWindow1")
+            .and_then(|column| column.as_any().downcast_ref::<Int64Array>())
+            .ok_or_else(|| SuiteError::InvalidDocument("BI2 countWindow1 is not Int64".into()))?;
+        let count_2 = batch
+            .column_by_name("countWindow2")
+            .and_then(|column| column.as_any().downcast_ref::<Int64Array>())
+            .ok_or_else(|| SuiteError::InvalidDocument("BI2 countWindow2 is not Int64".into()))?;
+        let diff = batch
+            .column_by_name("diff")
+            .and_then(|column| column.as_any().downcast_ref::<Int64Array>())
+            .ok_or_else(|| SuiteError::InvalidDocument("BI2 diff is not Int64".into()))?;
+        for row in 0..batch.num_rows() {
+            rows.push(format!(
+                "{} {} {} {}",
+                tags.value(row),
+                count_1.value(row),
+                count_2.value(row),
+                diff.value(row)
+            ));
+        }
+    }
+    Ok(rows)
+}
+
+pub fn run_live_fixture(
+    fixture: &Path,
+    executable: &Path,
+) -> Result<serde_json::Value, SuiteError> {
+    let context = validate_live_context(fixture)?;
+    let executable_sha256 = sha256_bytes(&read_bytes(executable, "runner executable")?);
+    let forge =
+        graphforge_api::GraphForge::new(None).map_err(|error| api_error("initialize", error))?;
+
+    let load_started = Instant::now();
+    let rows_loaded = load_live_seed(&forge, &context.seed)?;
+    let load_ms = u64::try_from(load_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+
+    let query_started = Instant::now();
+    let rows = execute_live_bi2(&forge, &context.parameters.bindings)?;
+    let query_ms = u64::try_from(query_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+
+    let validation_started = Instant::now();
+    let derived = derive_expected_bi2(&context.seed, &context.parameters.bindings);
+    validate_result(ValidationMode::Exact, &derived, &context.reference)?;
+    validate_result(ValidationMode::Exact, &derived, &rows)?;
+    let validation_ms = u64::try_from(validation_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+
+    Ok(serde_json::json!({
+        "schema": LIVE_EVIDENCE_SCHEMA,
+        "suite_id": SUITE_ID,
+        "lane": "live_in_memory",
+        "operation": "BI2",
+        "source_mode": "runner_owned_rust_api",
+        "status": "passed",
+        "certification": false,
+        "phases": ["load", "query", "validation"],
+        "identity": context.identity,
+        "execution_authority": {
+            "interface": "graphforge_api::GraphForge::execute_with_params",
+            "runner_executable_sha256": executable_sha256,
+            "caller_supplied_result": false
+        },
+        "correctness": {
+            "status": "passed",
+            "validation_mode": "exact",
+            "numeric_format": "base10_i64",
+            "reference_authority": "independent_semantic_derivation_from_seed",
+            "rows": rows
+        },
+        "resources": {
+            "correctness_authority": false,
+            "load": {"wall_ms": load_ms, "rows_loaded": rows_loaded},
+            "query": {"wall_ms": query_ms, "rows_returned": context.reference.len()},
+            "validation": {"wall_ms": validation_ms},
+            "unobserved": ["spill_bytes", "peak_rss_bytes", "io_bytes"]
+        }
+    }))
 }
 
 fn normalize_row(row: &str) -> String {
@@ -1046,6 +1563,7 @@ pub fn operation_rules() -> BTreeMap<&'static str, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     fn sample_job(operation: Operation) -> OperationJob {
         OperationJob {
@@ -1182,51 +1700,189 @@ mod tests {
         assert!(validate_result(ValidationMode::Normalized, &reference, &missing).is_err());
     }
 
-    fn sample_live_result(rows: &[&str]) -> LiveResultDocument {
-        LiveResultDocument {
-            schema: LIVE_RESULT_SCHEMA.into(),
-            operation: Operation::Bi2,
-            source: "graphforge_public_python_api".into(),
-            parameters_sha256: "a".repeat(64),
-            columns: ["tagName", "countWindow1", "countWindow2", "diff"]
-                .map(str::to_string)
-                .to_vec(),
-            rows: rows.iter().map(|row| (*row).into()).collect(),
+    fn sample_live_seed() -> LiveSeed {
+        LiveSeed {
+            schema: "graphforge-gdc-snb-bi-synthetic-seed/1".into(),
+            seed: 963,
+            tag_classes: vec!["MusicalArtist".into(), "SportsTeam".into()],
+            tags: vec![
+                LiveSeedTag {
+                    name: "Alpha".into(),
+                    tag_class: "MusicalArtist".into(),
+                },
+                LiveSeedTag {
+                    name: "Beta".into(),
+                    tag_class: "MusicalArtist".into(),
+                },
+                LiveSeedTag {
+                    name: "Gamma".into(),
+                    tag_class: "MusicalArtist".into(),
+                },
+                LiveSeedTag {
+                    name: "Strikers".into(),
+                    tag_class: "SportsTeam".into(),
+                },
+            ],
+            messages: vec![
+                LiveSeedMessage {
+                    id: 1,
+                    creation_day: 10,
+                    tags: vec!["Alpha".into()],
+                },
+                LiveSeedMessage {
+                    id: 2,
+                    creation_day: 20,
+                    tags: vec!["Alpha".into(), "Gamma".into()],
+                },
+                LiveSeedMessage {
+                    id: 3,
+                    creation_day: 30,
+                    tags: vec!["Beta".into(), "Gamma".into()],
+                },
+                LiveSeedMessage {
+                    id: 4,
+                    creation_day: 110,
+                    tags: vec!["Alpha".into()],
+                },
+                LiveSeedMessage {
+                    id: 5,
+                    creation_day: 120,
+                    tags: vec!["Beta".into(), "Gamma".into()],
+                },
+                LiveSeedMessage {
+                    id: 6,
+                    creation_day: 130,
+                    tags: vec!["Beta".into()],
+                },
+                LiveSeedMessage {
+                    id: 7,
+                    creation_day: 140,
+                    tags: vec!["Beta".into()],
+                },
+                LiveSeedMessage {
+                    id: 8,
+                    creation_day: 15,
+                    tags: vec!["Strikers".into()],
+                },
+            ],
+        }
+    }
+
+    fn sample_live_bindings() -> LiveBindings {
+        LiveBindings {
+            tag_class: StringBinding {
+                kind: "string".into(),
+                value: "MusicalArtist".into(),
+            },
+            window_1_start: Int64Binding {
+                kind: "int64".into(),
+                value: 0,
+            },
+            window_2_start: Int64Binding {
+                kind: "int64".into(),
+                value: 100,
+            },
+            window_end: Int64Binding {
+                kind: "int64".into(),
+                value: 200,
+            },
         }
     }
 
     #[test]
-    fn live_bi2_uses_authoritative_normalized_validation() {
-        let reference = parse_result_rows("Beta 1 3 2\nGamma 2 1 1\nAlpha 2 1 1\n");
-        let reordered = sample_live_result(&["Alpha 2 1 1", "Gamma 2 1 1", "Beta 1 3 2"]);
-        validate_live_result(&"a".repeat(64), &reference, &reordered).unwrap();
-
-        let mismatch = sample_live_result(&["Alpha 2 1 1", "Gamma 2 1 1"]);
+    fn live_bi2_has_total_order_and_rejects_swapped_ties() {
+        assert_eq!(
+            Operation::Bi2.validation_mode(),
+            Some(ValidationMode::Exact)
+        );
+        assert!(LIVE_BI2_QUERY.contains("ORDER BY diff DESC, tagName ASC"));
+        let reference = parse_result_rows("Beta 1 3 2\nAlpha 2 1 1\nGamma 2 1 1\n");
+        validate_result(ValidationMode::Exact, &reference, &reference).unwrap();
+        let swapped_tie = parse_result_rows("Beta 1 3 2\nGamma 2 1 1\nAlpha 2 1 1\n");
         assert!(matches!(
-            validate_live_result(&"a".repeat(64), &reference, &mismatch),
+            validate_result(ValidationMode::Exact, &reference, &swapped_tie),
             Err(SuiteError::ReferenceMismatch(_))
         ));
     }
 
     #[test]
-    fn live_validation_rejects_static_source_and_parameter_mutation() {
-        let reference = parse_result_rows("Alpha 2 1 1\n");
-        let mut document = sample_live_result(&["Alpha 2 1 1"]);
-        document.source = "committed_static_output".into();
-        assert!(
-            validate_live_result(&"a".repeat(64), &reference, &document)
-                .unwrap_err()
-                .to_string()
-                .contains("static_output_rejected")
+    fn independent_bi2_derivation_orders_beta_alpha_gamma() {
+        let derived = derive_expected_bi2(&sample_live_seed(), &sample_live_bindings());
+        assert_eq!(
+            derived,
+            vec![
+                "Beta 1 3 2".to_string(),
+                "Alpha 2 1 1".to_string(),
+                "Gamma 2 1 1".to_string(),
+            ]
         );
+        let official_swapped_gamma_first =
+            parse_result_rows("Beta 1 3 2\nGamma 2 1 1\nAlpha 2 1 1\n");
+        assert_ne!(derived, official_swapped_gamma_first);
+    }
 
-        document.source = "graphforge_public_python_api".into();
-        document.parameters_sha256 = "b".repeat(64);
-        assert!(
-            validate_live_result(&"a".repeat(64), &reference, &document)
-                .unwrap_err()
-                .to_string()
-                .contains("parameter_identity_mismatch")
+    #[test]
+    fn committed_live_fixture_matches_closed_identity_and_derivation() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/gdc/snb-bi-live");
+        validate_live_fixture_context(&fixture).unwrap();
+        let context = validate_live_context(&fixture).unwrap();
+        assert_eq!(
+            context.reference,
+            vec![
+                "Beta 1 3 2".to_string(),
+                "Alpha 2 1 1".to_string(),
+                "Gamma 2 1 1".to_string(),
+            ]
+        );
+        assert!(!context.identity.certification);
+        assert_eq!(
+            context.identity.fixture.provenance_kind,
+            "content_addressed_committed_fixture"
+        );
+        assert!(context.identity.upstream_spec.release.starts_with('v'));
+        assert_eq!(context.identity.upstream_query.release, "v1.0.0");
+    }
+
+    #[test]
+    fn trusted_runner_executes_public_in_memory_graphforge() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/gdc/snb-bi-live");
+        let executable = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let evidence = run_live_fixture(&fixture, &executable).unwrap();
+        assert_eq!(evidence["schema"], LIVE_EVIDENCE_SCHEMA);
+        assert_eq!(evidence["source_mode"], "runner_owned_rust_api");
+        assert_eq!(evidence["certification"], serde_json::json!(false));
+        assert_eq!(
+            evidence["execution_authority"]["caller_supplied_result"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            evidence["correctness"]["rows"],
+            serde_json::json!(["Beta 1 3 2", "Alpha 2 1 1", "Gamma 2 1 1"])
+        );
+        assert_eq!(evidence["correctness"]["validation_mode"], "exact");
+        assert_eq!(
+            evidence["resources"]["unobserved"],
+            serde_json::json!(["spill_bytes", "peak_rss_bytes", "io_bytes"])
+        );
+    }
+
+    #[test]
+    fn live_expected_identity_is_closed_and_non_certifying() {
+        let identity = expected_live_identity();
+        assert_eq!(identity.schema, LIVE_IDENTITY_SCHEMA);
+        assert_eq!(identity.suite_id, SUITE_ID);
+        assert_eq!(identity.operation, Operation::Bi2);
+        assert_eq!(identity.source_mode, "runner_owned_rust_api");
+        assert!(!identity.certification);
+        assert!(!identity.reference.captured_from_engine);
+        assert_eq!(
+            identity.reference.validation,
+            "exact_order_numeric_text_normalized"
+        );
+        assert!(!identity.driver.durable);
+        assert_eq!(
+            identity.driver.interface,
+            "graphforge_api::GraphForge::execute_with_params"
         );
     }
 
@@ -1240,23 +1896,19 @@ mod tests {
 
         let insert = run_job(&sample_job(Operation::Ins1), None, None);
         assert_eq!(insert.status, OperationStatus::SemanticIncompatibility);
-        assert!(
-            insert
-                .cause
-                .as_deref()
-                .unwrap()
-                .contains("bi_batch_update_stream_not_exposed")
-        );
+        assert!(insert
+            .cause
+            .as_deref()
+            .unwrap()
+            .contains("bi_batch_update_stream_not_exposed"));
 
         let weighted = run_job(&sample_job(Operation::Bi15), None, None);
         assert_eq!(weighted.status, OperationStatus::SemanticIncompatibility);
-        assert!(
-            weighted
-                .cause
-                .as_deref()
-                .unwrap()
-                .contains("weighted_shortest_path_not_exposed")
-        );
+        assert!(weighted
+            .cause
+            .as_deref()
+            .unwrap()
+            .contains("weighted_shortest_path_not_exposed"));
 
         let missing_output = run_job(&sample_job(Operation::Bi1), Some(&reference), None);
         assert_eq!(missing_output.status, OperationStatus::Failed);
@@ -1272,12 +1924,11 @@ mod tests {
         let system = parse_result_rows("1 WRONG\n");
         let read = run_job(&sample_job(Operation::Bi1), Some(&reference), Some(&system));
         assert_eq!(read.status, OperationStatus::Failed);
-        assert!(
-            read.cause
-                .as_deref()
-                .unwrap()
-                .contains("reference_mismatch")
-        );
+        assert!(read
+            .cause
+            .as_deref()
+            .unwrap()
+            .contains("reference_mismatch"));
     }
 
     #[test]

@@ -66,12 +66,7 @@ def _validate(validator: Draft202012Validator, document: Mapping[str, Any], labe
 def _tool_key(identity: Mapping[str, Any] | None) -> tuple[Any, ...]:
     if identity is None:
         return ("null",)
-    return (
-        identity.get("name"),
-        identity.get("source"),
-        identity.get("release"),
-        identity.get("commit"),
-    )
+    return ("identity", json.dumps(dict(identity), sort_keys=True, separators=(",", ":")))
 
 
 def _sha256_file(path: Path) -> str:
@@ -131,7 +126,27 @@ def _reject_incomplete_pin(pin: Mapping[str, Any]) -> None:
             raise GdcContractError("incomplete_provenance", f"{tool_name} identity is incomplete")
         if not tool.get("name") or not tool.get("source"):
             raise GdcContractError("incomplete_provenance", f"{tool_name} identity is incomplete")
-        if tool.get("release") is None and tool.get("commit") is None:
+        provenance_kind = tool.get("provenance_kind")
+        if provenance_kind is not None:
+            if pin.get("suite_id") != "snb-bi":
+                raise GdcContractError(
+                    "incomplete_provenance",
+                    "content-addressed tool identity is restricted to the SNB BI synthetic fixture",
+                )
+            if provenance_kind not in {
+                "content_addressed_synthetic",
+                "repository_source",
+            }:
+                raise GdcContractError(
+                    "incomplete_provenance",
+                    f"{tool_name} provenance kind is unsupported",
+                )
+            if not tool.get("content_sha256") or not tool.get("content_description"):
+                raise GdcContractError(
+                    "incomplete_provenance",
+                    f"{tool_name} content identity is incomplete",
+                )
+        elif tool.get("release") is None and tool.get("commit") is None:
             raise GdcContractError(
                 "incomplete_provenance",
                 f"{tool_name} requires release or commit",

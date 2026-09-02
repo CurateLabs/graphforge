@@ -13,13 +13,12 @@ certification (the runner stamps ``certification: false``).
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
-import time
 from typing import Any
 
 from graphforge_bench.gdc_contracts import (
@@ -37,8 +36,7 @@ OPERATIONS = ANALYTICAL_READS + BATCH_INSERTS + BATCH_DELETES
 JOB_SCHEMA = "graphforge-gdc-snb-bi-job/1"
 EVIDENCE_SCHEMA = "graphforge-gdc-snb-bi-evidence/1"
 RESOURCE_SCHEMA = "graphforge-gdc-snb-bi-resources/1"
-LIVE_EVIDENCE_SCHEMA = "graphforge-gdc-snb-bi-live-evidence/1"
-LIVE_RESULT_SCHEMA = "graphforge-gdc-snb-bi-live-result/1"
+LIVE_EVIDENCE_SCHEMA = "graphforge-gdc-snb-bi-live-evidence/2"
 LIVE_OPERATION = "BI2"
 LIVE_FIXTURE = "snb-bi-live"
 
@@ -47,37 +45,6 @@ WEIGHTED_PATH_CAUSE = "weighted_shortest_path_not_exposed"
 WEIGHTED_PATH_READS = ("BI15", "BI19", "BI20")
 
 BOUNDED_TINY_DATASET = "snb-bi-sf0.003"
-
-_PINNED_SPEC = {
-    "source": "https://github.com/ldbc/ldbc_snb_docs",
-    "release": "v2.2.4",
-    "commit": "5f7956e07a214373c363b371a3b88bc83ddcd118",
-}
-_PINNED_QUERY = {
-    "source": "https://github.com/ldbc/ldbc_snb_bi",
-    "release": "v1.0.0",
-    "commit": "abf8cd4862f2b96ba9267e6298a1f7402439040b",
-    "path": "cypher/queries/bi-2.cypher",
-}
-
-_LIVE_BI2 = """
-MATCH (tag:Tag)-[:HAS_TYPE]->(:TagClass {name: $tagClass})
-OPTIONAL MATCH (message1:Message)-[:HAS_TAG]->(tag)
-  WHERE $window1Start <= message1.creationDate
-    AND message1.creationDate < $window2Start
-WITH tag, count(message1) AS countWindow1
-OPTIONAL MATCH (message2:Message)-[:HAS_TAG]->(tag)
-  WHERE $window2Start <= message2.creationDate
-    AND message2.creationDate < $windowEnd
-WITH tag, countWindow1, count(message2) AS countWindow2
-RETURN
-  tag.name AS tagName,
-  countWindow1,
-  countWindow2,
-  abs(countWindow1 - countWindow2) AS diff
-ORDER BY diff DESC, tagName ASC
-LIMIT 100
-""".strip()
 
 
 class SnbBiSuiteError(ValueError):
@@ -119,128 +86,30 @@ def _run_runner(args: list[str], root: Path | None = None) -> subprocess.Complet
     )
 
 
-def _sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+def _raise_live_error(completed: subprocess.CompletedProcess[str]) -> None:
+    message = completed.stderr.strip()
+    if "reference_mismatch" in message:
+        raise SnbBiSuiteError("reference_mismatch", message)
+    if "parameter" in message:
+        raise SnbBiSuiteError("parameter_identity_mismatch", message)
+    if "identity" in message:
+        raise SnbBiSuiteError("identity_drift", message)
+    if "checksum" in message:
+        raise SnbBiSuiteError("checksum_mismatch", message)
+    raise SnbBiSuiteError("invalid_document", message)
 
 
-def validate_live_fixture(fixture: Path) -> dict[str, Any]:
-    """Validate immutable live-lane identity and every byte-bearing input."""
-    try:
-        identity = json.loads((fixture / "identity.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise SnbBiSuiteError("invalid_document", f"invalid live identity: {error}") from error
-    if identity.get("schema") != "graphforge-gdc-snb-bi-live-identity/1":
-        raise SnbBiSuiteError("invalid_document", "unexpected live identity schema")
-    if identity.get("certification") is not False:
-        raise SnbBiSuiteError("invalid_document", "live lane must set certification=false")
-    if identity.get("upstream_spec") != _PINNED_SPEC:
-        raise SnbBiSuiteError("identity_drift", "pinned upstream SNB specification drifted")
-    if identity.get("upstream_query") != _PINNED_QUERY:
-        raise SnbBiSuiteError("identity_drift", "pinned upstream BI2 query drifted")
-    if identity.get("fixture", {}).get("kind") != "synthetic_minimal_snb_shaped":
-        raise SnbBiSuiteError("identity_drift", "fixture must disclose synthetic provenance")
-    if identity.get("fixture", {}).get("scale_factor") is not None:
-        raise SnbBiSuiteError(
-            "identity_drift", "synthetic fixture must not claim an SNB scale factor"
-        )
-    if identity.get("reference", {}).get("captured_from_engine") is not False:
-        raise SnbBiSuiteError("identity_drift", "reference must be independently derived")
-    if identity.get("driver", {}).get("kind") != "internal_python_public_api_driver":
-        raise SnbBiSuiteError("identity_drift", "live lane must disclose its internal driver")
-    for key in ("fixture", "parameters", "reference"):
-        item = identity.get(key, {})
-        path = fixture / item.get("path", "")
-        if not path.is_file():
-            raise SnbBiSuiteError("missing_assets", f"missing live {key}: {path.name}")
-        if _sha256(path) != item.get("sha256"):
-            raise SnbBiSuiteError("checksum_mismatch", f"live {key} bytes drifted")
-    return identity
-
-
-def _load_live_inputs(
+def validate_live_fixture(
     fixture: Path,
-    parameters_override: dict[str, Any] | None,
-) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], str]:
-    identity = validate_live_fixture(fixture)
-    seed = json.loads((fixture / identity["fixture"]["path"]).read_text(encoding="utf-8"))
-    parameters = json.loads((fixture / identity["parameters"]["path"]).read_text(encoding="utf-8"))
-    parameters_sha256 = identity["parameters"]["sha256"]
-    if parameters_override:
-        parameters.update(parameters_override)
-        parameters_sha256 = hashlib.sha256(
-            json.dumps(parameters, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
-    if seed.get("schema") != "graphforge-gdc-snb-bi-synthetic-seed/1":
-        raise SnbBiSuiteError("invalid_document", "unexpected live seed schema")
-    if seed.get("seed") != 963:
-        raise SnbBiSuiteError("identity_drift", "deterministic seed must remain 963")
-    if parameters.get("schema") != "graphforge-gdc-snb-bi-live-parameters/1":
-        raise SnbBiSuiteError("invalid_document", "unexpected live parameter schema")
-    if parameters.get("operation") != LIVE_OPERATION:
-        raise SnbBiSuiteError("invalid_document", "live parameters must select BI2")
-    return identity, seed, parameters, parameters_sha256
-
-
-def _load_seed_into_graphforge(forge: Any, seed: dict[str, Any]) -> int:
-    for name in seed["tag_classes"]:
-        forge.execute("CREATE (:TagClass {name: $name})", {"name": name})
-    for tag in seed["tags"]:
-        forge.execute("CREATE (:Tag {name: $name})", {"name": tag["name"]})
-        forge.execute(
-            "MATCH (tag:Tag {name: $tag}), (class:TagClass {name: $class}) "
-            "CREATE (tag)-[:HAS_TYPE]->(class)",
-            {"tag": tag["name"], "class": tag["tag_class"]},
-        )
-    tagged_edges = 0
-    for message in seed["messages"]:
-        forge.execute(
-            "CREATE (:Message {id: $id, creationDate: $creationDate})",
-            {"id": message["id"], "creationDate": message["creation_day"]},
-        )
-        for tag in message["tags"]:
-            forge.execute(
-                "MATCH (message:Message {id: $id}), (tag:Tag {name: $tag}) "
-                "CREATE (message)-[:HAS_TAG]->(tag)",
-                {"id": message["id"], "tag": tag},
-            )
-            tagged_edges += 1
-    return (
-        len(seed["tag_classes"])
-        + len(seed["tags"])
-        + len(seed["tags"])
-        + len(seed["messages"])
-        + tagged_edges
-    )
-
-
-def validate_live_result_document(
-    result_path: Path,
     *,
     root: Path | None = None,
-    fixture: Path | None = None,
-) -> None:
+) -> dict[str, Any]:
+    """Ask the trusted Rust runner to validate the complete closed context."""
     base = root or workspace_root()
-    live_fixture = fixture or (base / "fixtures" / "gdc" / LIVE_FIXTURE)
-    identity = validate_live_fixture(live_fixture)
-    reference = live_fixture / identity["reference"]["path"]
-    completed = _run_runner(
-        [
-            "validate-live",
-            str(reference),
-            str(result_path),
-            identity["parameters"]["sha256"],
-        ],
-        base,
-    )
+    completed = _run_runner(["validate-live-context", str(fixture)], base)
     if completed.returncode != 0:
-        message = completed.stderr.strip()
-        if "reference_mismatch" in message:
-            raise SnbBiSuiteError("reference_mismatch", message)
-        if "parameter_identity_mismatch" in message:
-            raise SnbBiSuiteError("parameter_identity_mismatch", message)
-        if "static_output_rejected" in message or "invalid live result" in message:
-            raise SnbBiSuiteError("static_output_rejected", message)
-        raise SnbBiSuiteError("invalid_document", message)
+        _raise_live_error(completed)
+    return json.loads((fixture / "identity.json").read_text(encoding="utf-8"))
 
 
 def run_live_bi2(
@@ -248,67 +117,33 @@ def run_live_bi2(
     root: Path | None = None,
     parameters_override: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Execute normalized BI2 through the real in-memory public Python API."""
-    from graphforge import GraphForge
-
+    """Run the trusted Rust-owned in-memory API execution and evidence path."""
     base = root or workspace_root()
     fixture = base / "fixtures" / "gdc" / LIVE_FIXTURE
-    identity, seed, parameters, parameters_sha256 = _load_live_inputs(fixture, parameters_override)
-    forge = GraphForge()
-    load_started = time.perf_counter_ns()
-    rows_loaded = _load_seed_into_graphforge(forge, seed)
-    load_ms = (time.perf_counter_ns() - load_started) // 1_000_000
-
-    query_parameters = {
-        key: parameters[key] for key in ("tagClass", "window1Start", "window2Start", "windowEnd")
-    }
-    query_started = time.perf_counter_ns()
-    table = forge.execute(_LIVE_BI2, query_parameters)
-    query_ms = (time.perf_counter_ns() - query_started) // 1_000_000
-    columns = ["tagName", "countWindow1", "countWindow2", "diff"]
-    rows = [
-        " ".join(str(row[column]) for column in columns)
-        for row in table.select(columns).to_pylist()
-    ]
-    result = {
-        "schema": LIVE_RESULT_SCHEMA,
-        "operation": LIVE_OPERATION,
-        "source": "graphforge_public_python_api",
-        "parameters_sha256": parameters_sha256,
-        "columns": columns,
-        "rows": rows,
-    }
     with tempfile.TemporaryDirectory(prefix="gdc-snb-bi-live-") as tmp:
-        result_path = Path(tmp) / "live-result.json"
-        result_path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
-        validation_started = time.perf_counter_ns()
-        validate_live_result_document(result_path, root=base, fixture=fixture)
-        validation_ms = (time.perf_counter_ns() - validation_started) // 1_000_000
-
-    return {
-        "schema": LIVE_EVIDENCE_SCHEMA,
-        "suite_id": "snb-bi",
-        "lane": "live_in_memory",
-        "operation": LIVE_OPERATION,
-        "status": "passed",
-        "certification": False,
-        "phases": ["load", "query", "validation"],
-        "identities": identity,
-        "correctness": {
-            "status": "passed",
-            "validation_mode": "normalized",
-            "validator": "graphforge-benchmark-gdc-snb-bi",
-            "reference_authority": identity["reference"]["authority"],
-            "rows": rows,
-        },
-        "resources": {
-            "correctness_authority": False,
-            "load": {"wall_ms": load_ms, "rows_loaded": rows_loaded},
-            "query": {"wall_ms": query_ms, "rows_returned": len(rows)},
-            "validation": {"wall_ms": validation_ms},
-            "unobserved": ["spill_bytes", "peak_rss_bytes", "io_bytes"],
-        },
-    }
+        temp = Path(tmp)
+        execution_fixture = fixture
+        if parameters_override:
+            execution_fixture = temp / "fixture"
+            shutil.copytree(fixture, execution_fixture)
+            parameter_path = execution_fixture / "parameters.json"
+            parameters = json.loads(parameter_path.read_text(encoding="utf-8"))
+            for name, value in parameters_override.items():
+                parameters["bindings"][name]["value"] = value
+            parameter_path.write_text(json.dumps(parameters, indent=2) + "\n", encoding="utf-8")
+        evidence_path = temp / "evidence.json"
+        completed = _run_runner(
+            ["run-live", str(execution_fixture), str(evidence_path)],
+            base,
+        )
+        if completed.returncode != 0:
+            _raise_live_error(completed)
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    if evidence.get("schema") != LIVE_EVIDENCE_SCHEMA:
+        raise SnbBiSuiteError("invalid_document", "unexpected live evidence schema")
+    if evidence.get("certification") is not False:
+        raise SnbBiSuiteError("invalid_document", "live evidence must set certification=false")
+    return evidence
 
 
 def list_operation_rules(root: Path | None = None) -> dict[str, dict[str, str]]:
@@ -354,7 +189,7 @@ def run_tiny_suite(
         out_evidence = evidence_path or (tmp_path / "evidence.json")
         completed = _run_runner(
             [
-                "run-suite",
+                "run-static-suite",
                 str(fixture / "jobs"),
                 str(fixture / "references"),
                 str(fixture / "system-outputs"),
@@ -461,7 +296,6 @@ __all__ = [
     "LIVE_EVIDENCE_SCHEMA",
     "LIVE_FIXTURE",
     "LIVE_OPERATION",
-    "LIVE_RESULT_SCHEMA",
     "OPERATIONS",
     "RESOURCE_SCHEMA",
     "WEIGHTED_PATH_CAUSE",
@@ -476,5 +310,4 @@ __all__ = [
     "run_live_bi2",
     "run_tiny_suite",
     "validate_live_fixture",
-    "validate_live_result_document",
 ]

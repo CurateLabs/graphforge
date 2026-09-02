@@ -118,15 +118,22 @@ historical `snb-bi-sf0.003` identifier is not an official SF0.003 dataset, their
 engine evidence.
 
 The explicit `snb-bi-live` lane closes that static-replay gap for BI2. It loads
-the committed deterministic seed into `GraphForge()` (in-memory), executes the
-supported BI2 shape through `GraphForge.execute`, and sends the resulting rows
-to the existing Rust normalized validator. The reference is independently
-derived from the seed. `identity.json` pins the official SNB specification and
-BI query release/commit while explicitly identifying the synthetic fixture and
-internal Python driver; it does not claim LDBC datagen, official parameters,
-SF0.003, or certification. Live resource timings and row counts remain separate
-from correctness, and unobserved spill/RSS/I/O fields are named rather than
-invented. All evidence stamps `certification: false`:
+the committed deterministic seed into `GraphForge::new(None)`, executes the BI2
+shape through `graphforge_api::GraphForge::execute_with_params`, validates the
+official `diff DESC, tag.name ASC` total order in the same trusted Rust process,
+and directly constructs the evidence. The command accepts no caller result
+rows, source label, parameter digest, or producer field. `run-static-suite` is
+the separate legacy replay command and cannot emit live evidence.
+
+The expected rows are independently derived from the seed. `identity.json`
+pins the complete closed operation context, official SNB specification and BI
+query release/commit, typed parameter names/kinds/values, content-addressed
+synthetic fixture, reference, normalization, and internal Rust driver contract.
+Runner evidence binds its actual executable digest; no nonexistent GraphForge
+release or commit is used. This lane does not claim LDBC datagen, official
+parameters, SF0.003, or certification. Live resource timings and row counts
+remain separate from correctness, and unobserved spill/RSS/I/O fields are named
+rather than invented. All evidence stamps `certification: false`:
 
 ```bash
 PYTHONPATH=benchmarks/harness uv run python -m unittest \

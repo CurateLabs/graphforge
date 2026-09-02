@@ -18,12 +18,14 @@
     "generator": {
       "oneOf": [
         { "$ref": "#/$defs/toolIdentity" },
+        { "$ref": "#/$defs/contentIdentity" },
         { "type": "null" }
       ]
     },
     "driver": {
       "oneOf": [
         { "$ref": "#/$defs/toolIdentity" },
+        { "$ref": "#/$defs/contentIdentity" },
         { "type": "null" }
       ]
     },
@@ -67,9 +69,34 @@
       },
       "else": {
         "properties": {
-          "generator": { "$ref": "#/$defs/toolIdentity" },
-          "driver": { "$ref": "#/$defs/toolIdentity" },
+          "generator": {
+            "oneOf": [
+              { "$ref": "#/$defs/toolIdentity" },
+              { "$ref": "#/$defs/contentIdentity" }
+            ]
+          },
+          "driver": {
+            "oneOf": [
+              { "$ref": "#/$defs/toolIdentity" },
+              { "$ref": "#/$defs/contentIdentity" }
+            ]
+          },
           "datasets": { "minItems": 1 }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "suite_id": { "not": { "const": "snb-bi" } },
+          "disposition": { "const": "executable" }
+        },
+        "required": ["suite_id", "disposition"]
+      },
+      "then": {
+        "properties": {
+          "generator": { "$ref": "#/$defs/toolIdentity" },
+          "driver": { "$ref": "#/$defs/toolIdentity" }
         }
       }
     }
@@ -109,6 +136,33 @@
           "required": ["commit"]
         }
       ]
+    },
+    "contentIdentity": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "source": {
+          "type": "string",
+          "pattern": "^https://[A-Za-z0-9._~:/?#\\[\\]@!$&'()*+,;=%-]+$"
+        },
+        "provenance_kind": {
+          "enum": ["content_addressed_synthetic", "repository_source"]
+        },
+        "content_sha256": { "$ref": "#/$defs/sha256" },
+        "content_description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        }
+      },
+      "required": [
+        "name",
+        "source",
+        "provenance_kind",
+        "content_sha256",
+        "content_description"
+      ],
+      "additionalProperties": false
     },
     "datasetPin": {
       "type": "object",

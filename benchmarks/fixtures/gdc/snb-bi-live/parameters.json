@@ -1,8 +1,22 @@
 {
-  "schema": "graphforge-gdc-snb-bi-live-parameters/1",
+  "schema": "graphforge-gdc-snb-bi-live-parameters/2",
   "operation": "BI2",
-  "tagClass": "MusicalArtist",
-  "window1Start": 0,
-  "window2Start": 100,
-  "windowEnd": 200
+  "bindings": {
+    "tagClass": {
+      "kind": "string",
+      "value": "MusicalArtist"
+    },
+    "window1Start": {
+      "kind": "int64",
+      "value": 0
+    },
+    "window2Start": {
+      "kind": "int64",
+      "value": 100
+    },
+    "windowEnd": {
+      "kind": "int64",
+      "value": 200
+    }
+  }
 }
