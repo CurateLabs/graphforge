@@ -683,7 +683,7 @@ def assemble_rung_evidence(
     ):
         raise ControllerError("source/imported query evidence contradicts the selected rung")
     lifecycle_names = ("retained_storage_bytes", "transient_peak_storage_bytes")
-    for name in lifecycle_names:
+    for name in ("source_project_current_allocated_bytes", *lifecycle_names):
         if (
             isinstance(lifecycle_storage.get(name), bool)
             or not isinstance(lifecycle_storage.get(name), int)
@@ -736,6 +736,9 @@ def assemble_rung_evidence(
             "query_qualification": ["live_edges", "correctness"],
         },
         "storage_components": {
+            "source_project_current_allocated_bytes": lifecycle_storage[
+                "source_project_current_allocated_bytes"
+            ],
             "source_allocated_physical_bytes": source_storage["allocated_physical_bytes"],
             "source_retained_logical_eof_bytes": source_storage["retained_logical_eof_bytes"],
             "imported_allocated_physical_bytes": imported_storage["allocated_physical_bytes"],

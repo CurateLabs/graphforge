@@ -85,6 +85,7 @@ def passed_rung(scale: int) -> dict:
             "query_qualification": ["live_edges", "correctness"],
         },
         "storage_components": {
+            "source_project_current_allocated_bytes": 105,
             "source_allocated_physical_bytes": 100,
             "source_retained_logical_eof_bytes": 110,
             "imported_allocated_physical_bytes": 120,
@@ -210,6 +211,7 @@ def authoritative_receipts(scale: int) -> dict[str, list[dict]]:
             imported_storage,
             {
                 "contract": "graphforge-lifecycle-storage/1",
+                "source_project_current_allocated_bytes": 105,
                 "retained_storage_bytes": 200,
                 "transient_peak_storage_bytes": 300,
             },
@@ -410,6 +412,7 @@ class ProgressiveRunControllerTests(unittest.TestCase):
         rung = assemble_rung_evidence(root=ROOT, scale=18, graphforge=gf, benchexec=benchexec(gf))
         self.assertEqual(rung["status"], "passed")
         self.assertEqual(rung["metrics"]["physical_read_bytes"], 0)
+        self.assertEqual(rung["storage_components"]["source_project_current_allocated_bytes"], 105)
         for omitted in receipts:
             with self.subTest(omitted=omitted), self.assertRaises(ControllerError):
                 changed = {name: values for name, values in receipts.items() if name != omitted}
@@ -430,6 +433,33 @@ class ProgressiveRunControllerTests(unittest.TestCase):
         missing_lifecycle["reopen_proof"] = missing_lifecycle["reopen_proof"][:-1]
         changed_gf = graphforge(18, missing_lifecycle)
         with self.assertRaisesRegex(ControllerError, "graphforge-lifecycle-storage/1"):
+            assemble_rung_evidence(
+                root=ROOT, scale=18, graphforge=changed_gf, benchexec=benchexec(changed_gf)
+            )
+        for invalid in (None, True, -1, "105"):
+            with self.subTest(source_project_current_allocated_bytes=invalid):
+                malformed_lifecycle = authoritative_receipts(18)
+                malformed_lifecycle["reopen_proof"][-1][
+                    "source_project_current_allocated_bytes"
+                ] = invalid
+                changed_gf = graphforge(18, malformed_lifecycle)
+                with self.assertRaisesRegex(
+                    ControllerError,
+                    "lifecycle storage receipt omitted source_project_current_allocated_bytes",
+                ):
+                    assemble_rung_evidence(
+                        root=ROOT,
+                        scale=18,
+                        graphforge=changed_gf,
+                        benchexec=benchexec(changed_gf),
+                    )
+        incomplete_lifecycle = authoritative_receipts(18)
+        del incomplete_lifecycle["reopen_proof"][-1]["source_project_current_allocated_bytes"]
+        changed_gf = graphforge(18, incomplete_lifecycle)
+        with self.assertRaisesRegex(
+            ControllerError,
+            "lifecycle storage receipt omitted source_project_current_allocated_bytes",
+        ):
             assemble_rung_evidence(
                 root=ROOT, scale=18, graphforge=changed_gf, benchexec=benchexec(changed_gf)
             )

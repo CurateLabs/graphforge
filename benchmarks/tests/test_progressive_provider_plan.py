@@ -74,6 +74,7 @@ def rung(scale: int, *, source: str | None = None) -> dict:
             "query_qualification": ["live_edges", "correctness"],
         },
         "storage_components": {
+            "source_project_current_allocated_bytes": 105,
             "source_allocated_physical_bytes": 100,
             "source_retained_logical_eof_bytes": 110,
             "imported_allocated_physical_bytes": 120,
