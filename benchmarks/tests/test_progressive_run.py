@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from graphforge_bench.progressive_run import (
+    BenchExecRunError,
     ControllerError,
     Executables,
     _authority_staging_parent,
@@ -28,6 +29,7 @@ from graphforge_bench.progressive_run import (
     require_bulk_ingest_capability,
     require_order,
     resolve_executables,
+    run,
     validate_fixture_bundle,
     write_plan,
     write_s20_projection,
@@ -770,6 +772,23 @@ class ProgressiveRunControllerTests(unittest.TestCase):
         self.assertEqual(normalized["authority"]["read_bytes"], 1024)
         self.assertEqual(rung["metrics"]["wall_seconds"], 2)
 
+        oom_columns = {
+            **columns,
+            "status": "OUT OF MEMORY",
+            "terminationreason": "memory",
+        }
+        oom_xml = (
+            "<result><run>"
+            + "".join(
+                f'<column title="{name}" value="{value}" />' for name, value in oom_columns.items()
+            )
+            + "</run></result>"
+        )
+        (raw / "result.xml").write_text(oom_xml)
+        with self.assertRaisesRegex(BenchExecRunError, "BenchExec authority did not pass: oom"):
+            ingest_benchexec_result(root=ROOT, stage=stage, scale=18, plan=plan)
+
+        (raw / "result.xml").write_text(xml)
         changed = {**gf, "profile_id": "graph500-s19-local"}
         (raw / "run.log").write_text(json.dumps(changed) + "\n")
         with self.assertRaisesRegex(ControllerError, "contradicts the run plan"):
@@ -863,6 +882,38 @@ class ProgressiveRunControllerTests(unittest.TestCase):
         self.executables.benchexec_python.write_bytes(b"changed-after-planning")
         with self.assertRaisesRegex(ControllerError, "identity changed after planning"):
             _run_benchexec(stage, self.executables, plan["identities"])
+
+    def test_benchexec_authority_failure_is_not_mislabeled_as_missing_receipt(self) -> None:
+        plan = build_plan(
+            root=ROOT,
+            output_dir=self.output,
+            scale=18,
+            commit=COMMIT,
+            executables=self.executables,
+        )
+        stage = self.base / "failed-stage"
+        (stage / "raw").mkdir(parents=True)
+        (stage / "raw" / "result.xml").write_text("<result />")
+        with (
+            patch("graphforge_bench.progressive_run._native_authority"),
+            patch("graphforge_bench.progressive_run._safe_stage", return_value=stage),
+            patch("graphforge_bench.progressive_run._run_benchexec", return_value=0),
+            patch(
+                "graphforge_bench.progressive_run.ingest_benchexec_result",
+                side_effect=BenchExecRunError("BenchExec authority did not pass: oom"),
+            ),
+            self.assertRaisesRegex(ControllerError, "benchexec_failed"),
+        ):
+            run(
+                root=ROOT,
+                output_dir=self.output,
+                scale=18,
+                plan=plan,
+                executables=self.executables,
+            )
+        result = json.loads((self.output / "s18-result.json").read_text())
+        self.assertEqual(result["failure"], "benchexec_failed")
+        self.assertTrue((self.output / "s18-failure-raw" / "result.xml").is_file())
 
     def test_benchexec_sanitized_environment_keeps_only_the_tool_module_path(self) -> None:
         plan = build_plan(

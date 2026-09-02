@@ -83,6 +83,10 @@ class ControllerError(ValueError):
     """The requested run is unsafe, out of order, or lacks valid evidence."""
 
 
+class BenchExecRunError(ControllerError):
+    """BenchExec authority reports that the benchmark execution did not pass."""
+
+
 @dataclass(frozen=True)
 class Executables:
     gf: Path
@@ -1028,6 +1032,10 @@ def ingest_benchexec_result(
     )
     _validate(root, "certification-evidence.json", graphforge)
     _validate(root, "benchexec-run-evidence.json", benchexec)
+    if benchexec.get("outcome") != "passed":
+        raise BenchExecRunError(
+            f"BenchExec authority did not pass: {benchexec.get('outcome', 'unknown')}"
+        )
     rung = assemble_rung_evidence(
         root=root,
         scale=scale,
@@ -1096,6 +1104,19 @@ def run(
             benchexec, graphforge, rung = ingest_benchexec_result(
                 root=root, stage=stage, scale=scale, plan=plan
             )
+        except BenchExecRunError as error:
+            _preserve_failure_artifacts(stage, output_dir, scale)
+            result = {
+                "schema": RESULT_SCHEMA,
+                "rung": f"S{scale}",
+                "status": "failed",
+                "failure": "benchexec_failed",
+                "identities": plan["identities"],
+                "claim": "engineering_evidence_only",
+            }
+            _validate(root, "progressive-run-result.json", result)
+            _write_json(output_dir / f"s{scale}-result.json", result)
+            raise ControllerError("benchexec_failed") from error
         except (ControllerError, ValueError) as error:
             _preserve_failure_artifacts(stage, output_dir, scale)
             result = {
