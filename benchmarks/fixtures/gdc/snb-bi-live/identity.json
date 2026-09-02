@@ -19,7 +19,7 @@
     "generator": "committed deterministic seed 963; not ldbc_snb_datagen_spark",
     "scale_factor": null,
     "path": "seed.json",
-    "sha256": "9acb1d3413c35a72c0f1ffbf40ef69a330483f8ca2a6da76e939c9adaf999689"
+    "sha256": "9dc8c9987d4ce403a30808c268d25a6f9fdb451b7a5c68fbd2d37d700b4cb88e"
   },
   "parameters": {
     "kind": "internal_deterministic_bi2_parameters",
@@ -30,7 +30,7 @@
     "authority": "independent_semantic_derivation_from_seed",
     "captured_from_engine": false,
     "path": "expected-bi2.ref",
-    "sha256": "b8be3e0d66ee2a776ef91d1c67e5b88ed7c436fe0b5a51ab38fd41560a63fb28"
+    "sha256": "2a6af839fd9b6dc3b9f92305eea309b71dba26973885a0ae04a3c276a52d9e19"
   },
   "driver": {
     "kind": "internal_python_public_api_driver",

@@ -1197,11 +1197,11 @@ mod tests {
 
     #[test]
     fn live_bi2_uses_authoritative_normalized_validation() {
-        let reference = parse_result_rows("Beta 1 3 2\nGamma 2 0 2\nAlpha 2 1 1\n");
-        let reordered = sample_live_result(&["Alpha 2 1 1", "Gamma 2 0 2", "Beta 1 3 2"]);
+        let reference = parse_result_rows("Beta 1 3 2\nGamma 2 1 1\nAlpha 2 1 1\n");
+        let reordered = sample_live_result(&["Alpha 2 1 1", "Gamma 2 1 1", "Beta 1 3 2"]);
         validate_live_result(&"a".repeat(64), &reference, &reordered).unwrap();
 
-        let mismatch = sample_live_result(&["Alpha 2 1 1", "Gamma 2 0 2"]);
+        let mismatch = sample_live_result(&["Alpha 2 1 1", "Gamma 2 1 1"]);
         assert!(matches!(
             validate_live_result(&"a".repeat(64), &reference, &mismatch),
             Err(SuiteError::ReferenceMismatch(_))

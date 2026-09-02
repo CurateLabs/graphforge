@@ -153,7 +153,7 @@ class GdcSnbBiSuiteTests(unittest.TestCase):
         self.assertIs(evidence["certification"], False)
         self.assertEqual(
             set(evidence["correctness"]["rows"]),
-            {"Beta 1 3 2", "Gamma 2 0 2", "Alpha 2 1 1"},
+            {"Beta 1 3 2", "Gamma 2 1 1", "Alpha 2 1 1"},
         )
         self.assertEqual(
             evidence["correctness"]["validator"],
@@ -165,12 +165,12 @@ class GdcSnbBiSuiteTests(unittest.TestCase):
             directory = Path(tmp)
             reordered = self._write_live_result(
                 directory,
-                ["Alpha 2 1 1", "Gamma 2 0 2", "Beta 1 3 2"],
+                ["Alpha 2 1 1", "Gamma 2 1 1", "Beta 1 3 2"],
             )
             validate_live_result_document(reordered)
             mismatch = self._write_live_result(
                 directory,
-                ["Alpha 2 1 1", "Gamma 2 0 2"],
+                ["Alpha 2 1 1", "Gamma 2 1 1"],
             )
             with self.assertRaises(SnbBiSuiteError) as raised:
                 validate_live_result_document(mismatch)
@@ -210,7 +210,7 @@ class GdcSnbBiSuiteTests(unittest.TestCase):
     def test_live_phase_and_resource_evidence_stays_out_of_correctness(self) -> None:
         evidence = run_live_bi2()
         self.assertEqual(evidence["phases"], ["load", "query", "validation"])
-        self.assertEqual(evidence["resources"]["load"]["rows_loaded"], 27)
+        self.assertEqual(evidence["resources"]["load"]["rows_loaded"], 28)
         self.assertEqual(evidence["resources"]["query"]["rows_returned"], 3)
         self.assertIs(evidence["resources"]["correctness_authority"], False)
         self.assertNotIn("resources", evidence["correctness"])
