@@ -15,18 +15,23 @@ class ParityGateTests(unittest.TestCase):
     def test_tiny_parity_ready(self) -> None:
         assert_tiny_parity_ready()
 
-    def test_gate_status_reports_retirement_blocked(self) -> None:
+    def test_gate_status_reports_retirement_ready(self) -> None:
         status = parity_gate_status()
-        self.assertFalse(status["ready_for_retirement"])
-        blocked = {
-            row["name"]: row["blocked_by"] for row in status["criteria"] if row.get("blocked_by")
-        }
-        self.assertIn("harness_authoritative_after_ladder_comparison", blocked)
-        self.assertEqual(blocked["harness_authoritative_after_ladder_comparison"], "#900")
-        self.assertEqual(
-            blocked["legacy_orchestration_retired_with_coverage"],
-            "parity_matrix_no_unexplained_gaps + harness_authoritative",
+        self.assertTrue(status["ready_for_retirement"])
+        harness = next(
+            row
+            for row in status["criteria"]
+            if row["name"] == "harness_authoritative_after_ladder_comparison"
         )
+        self.assertTrue(harness["met"])
+        self.assertIsNone(harness["blocked_by"])
+        legacy = next(
+            row
+            for row in status["criteria"]
+            if row["name"] == "legacy_orchestration_retired_with_coverage"
+        )
+        self.assertTrue(legacy["met"])
+        self.assertIn("legacy_present=False", legacy["evidence"])
 
     def test_historical_evidence_criterion_met(self) -> None:
         status = parity_gate_status()
@@ -35,8 +40,10 @@ class ParityGateTests(unittest.TestCase):
         )
         self.assertTrue(historical["met"])
 
-    def test_empty_ladder_bundle_returns_no_comparisons(self) -> None:
-        self.assertEqual(compare_ladder_bundle(ladder_bundle_root()), [])
+    def test_ingested_ladder_bundle_runs_comparisons(self) -> None:
+        comparisons = compare_ladder_bundle(ladder_bundle_root())
+        self.assertEqual(len(comparisons), 2)
+        self.assertTrue(all(matrix.get("overall") for matrix in comparisons))
 
     def test_gate_status_json_serializable(self) -> None:
         payload = parity_gate_status()

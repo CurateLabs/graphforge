@@ -25,9 +25,126 @@ CAPACITY = {
 }
 
 
+def storage_attribution(scale: int, multiplier: int) -> dict:
+    category_names = (
+        "topology_nodes",
+        "topology_edges",
+        "properties",
+        "uuid_and_surrogates",
+        "adjacency",
+        "catalog_and_manifests",
+        "construction_staging",
+        "portable_package",
+        "clean_imported_project",
+        "other",
+    )
+    empty = {
+        "logical_references": 0,
+        "logical_bytes": 0,
+        "physical_objects": 0,
+        "physical_logical_bytes": 0,
+        "allocated_bytes": 0,
+    }
+
+    def snapshot(node_bytes: int, edge_bytes: int) -> dict:
+        categories = {name: dict(empty) for name in category_names}
+        categories["topology_nodes"] = {
+            "logical_references": 1,
+            "logical_bytes": node_bytes,
+            "physical_objects": 1,
+            "physical_logical_bytes": node_bytes,
+            "allocated_bytes": node_bytes,
+        }
+        categories["topology_edges"] = {
+            "logical_references": 1,
+            "logical_bytes": edge_bytes,
+            "physical_objects": 1,
+            "physical_logical_bytes": edge_bytes,
+            "allocated_bytes": edge_bytes,
+        }
+        total = node_bytes + edge_bytes
+        return {
+            "contract": "graphforge-storage-attribution/1",
+            "categories": categories,
+            "logical_references": 2,
+            "logical_bytes": total,
+            "retained_logical_eof_bytes": total,
+            "allocated_physical_bytes": total,
+            "physical_objects": 2,
+        }
+
+    io_fields = (
+        "read_bytes",
+        "write_bytes",
+        "read_calls",
+        "write_calls",
+        "object_count",
+        "block_count",
+        "fsync_calls",
+    )
+    phase_names = (
+        "append_merge",
+        "seal_authentication",
+        "shape_consume_reauthentication",
+        "encode_write_postwrite_authentication",
+        "publication_preauthentication",
+        "cas_install_read_write",
+        "hydration_verification",
+        "fsync_synchronization",
+        "recovery_reauthentication",
+    )
+    phases = {name: dict.fromkeys(io_fields, 0) for name in phase_names}
+    phases["append_merge"].update(
+        read_bytes=2_000_000 * multiplier,
+        write_bytes=3_000_000 * multiplier,
+        read_calls=1_000 * multiplier,
+        write_calls=500 * multiplier,
+    )
+    return {
+        "source": snapshot(150_000 * multiplier, 250_000 * multiplier),
+        "imported": snapshot(150_000 * multiplier, 250_000 * multiplier),
+        "construction": {
+            "application_io": {
+                "phases": phases,
+                "totals": {
+                    field: sum(phase[field] for phase in phases.values()) for field in io_fields
+                },
+            },
+            "staging": {
+                "logical_references": 3,
+                "logical_bytes": 100_000 * multiplier,
+                "physical_objects": 3,
+                "physical_logical_bytes": 100_000 * multiplier,
+                "allocated_bytes": 120_000 * multiplier,
+            },
+            "staging_transient_peak_allocated_bytes": 200_000 * multiplier,
+            "transient_peak_allocated_bytes": 1_500_000 * multiplier,
+        },
+        "portable_package": {
+            "contract": "graphforge-portable-export/2",
+            "allocation_logical_bytes": 300_000 * multiplier,
+            "allocation_allocated_bytes": 300_000 * multiplier,
+            "allocation_physical_objects": 1,
+        },
+        "lifecycle": {
+            "contract": "graphforge-lifecycle-storage/1",
+            "source_project_current_allocated_bytes": 450_000 * multiplier,
+            "retained_storage_bytes": 1_000_000 * multiplier,
+            "transient_peak_storage_bytes": 1_500_000 * multiplier,
+        },
+        "counts": {
+            "source_nodes": 1 << scale,
+            "source_edges": 16 * (1 << scale),
+            "imported_nodes": 1 << scale,
+            "imported_edges": 16 * (1 << scale),
+        },
+    }
+
+
 def rung(scale: int, *, rss: int = 1_000_000_000, wall: int = 100) -> dict:
     multiplier = 1 << max(0, scale - 18)
     return {
+        "assembly_contract": "graphforge-progressive-rung-assembly/2",
         "profile_id": f"graph500-s{scale}-evidence",
         "source": "canonical_ladder" if scale in {24, 25} else "progressive_profile",
         "scale": scale,
@@ -65,6 +182,7 @@ def rung(scale: int, *, rss: int = 1_000_000_000, wall: int = 100) -> dict:
             "query_qualification": ["live_edges", "correctness"],
         },
         "storage_components": {
+            "source_project_current_allocated_bytes": 450_000 * multiplier,
             "source_allocated_physical_bytes": 400_000 * multiplier,
             "source_retained_logical_eof_bytes": 500_000 * multiplier,
             "imported_allocated_physical_bytes": 400_000 * multiplier,
@@ -75,6 +193,7 @@ def rung(scale: int, *, rss: int = 1_000_000_000, wall: int = 100) -> dict:
             "reader_calls": 1_000 * multiplier,
             "publication_work_units": 2_000 * multiplier,
         },
+        "storage_attribution": storage_attribution(scale, multiplier),
         "failure": None,
     }
 
@@ -222,6 +341,22 @@ class ProgressiveQualificationTests(unittest.TestCase):
         missing_capacity = copy.deepcopy(evidence)
         missing_capacity["provider_capacity"] = None
         self.assertFalse(self.evidence_schema.is_valid(missing_capacity))
+
+    def test_source_project_union_allocation_is_typed_but_additive_for_old_rungs(self) -> None:
+        current = rung(18)
+        self.rung_schema.validate(current)
+        missing = copy.deepcopy(current)
+        del missing["storage_components"]["source_project_current_allocated_bytes"]
+        self.assertFalse(self.rung_schema.is_valid(missing))
+        historical = copy.deepcopy(current)
+        del historical["assembly_contract"]
+        del historical["storage_components"]["source_project_current_allocated_bytes"]
+        self.rung_schema.validate(historical)
+        for malformed in (True, -1, "450000"):
+            with self.subTest(malformed=malformed):
+                invalid = copy.deepcopy(current)
+                invalid["storage_components"]["source_project_current_allocated_bytes"] = malformed
+                self.assertFalse(self.rung_schema.is_valid(invalid))
 
     def test_profile_schema_rejects_non_string_generator_identity(self) -> None:
         profile = json.loads((ROOT / "profiles/graph500/s18-local.json").read_text())

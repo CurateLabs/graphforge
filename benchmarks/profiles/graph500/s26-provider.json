@@ -154,7 +154,7 @@
             "workspace/s26/source",
             "query",
             "--cypher",
-            "MATCH (a)-[r]->(b) RETURN a, r, b LIMIT 1024",
+            "MATCH (a)-[r]->(b) RETURN b.node_uuid AS id ORDER BY id LIMIT 1000",
             "--output",
             "workspace/s26/one-hop.arrow"
           ],
@@ -164,7 +164,7 @@
             "workspace/s26/source",
             "query",
             "--cypher",
-            "MATCH (a)-[r1]->(b)-[r2]->(c) RETURN a, r1, b, r2, c LIMIT 1024",
+            "MATCH (a)-[r1]->(b)-[r2]->(c) RETURN c.node_uuid AS id ORDER BY id LIMIT 1000",
             "--output",
             "workspace/s26/two-hop.arrow"
           ]
@@ -248,7 +248,7 @@
             "workspace/s26/imported",
             "query",
             "--cypher",
-            "MATCH (a)-[r]->(b) RETURN a, r, b LIMIT 1024",
+            "MATCH (a)-[r]->(b) RETURN b.node_uuid AS id ORDER BY id LIMIT 1000",
             "--output",
             "workspace/s26/imported-one-hop.arrow"
           ],
@@ -258,7 +258,7 @@
             "workspace/s26/imported",
             "query",
             "--cypher",
-            "MATCH (a)-[r1]->(b)-[r2]->(c) RETURN a, r1, b, r2, c LIMIT 1024",
+            "MATCH (a)-[r1]->(b)-[r2]->(c) RETURN c.node_uuid AS id ORDER BY id LIMIT 1000",
             "--output",
             "workspace/s26/imported-two-hop.arrow"
           ],

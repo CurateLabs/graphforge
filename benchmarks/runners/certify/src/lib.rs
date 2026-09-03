@@ -282,6 +282,7 @@ pub struct PublicProcessExecutor {
 struct LifecycleStorageSession {
     allocation: graphforge_storage::StorageAllocationLifecycle,
     transient_peak_storage_bytes: u64,
+    source_project_current_allocated_bytes: Option<u64>,
     generator_observed: bool,
     construction_peak_observed: bool,
     source_project_observed: bool,
@@ -346,6 +347,9 @@ impl LifecycleStorageSession {
                     "imported-project"
                 } else {
                     self.source_project_observed = true;
+                    if phase == Phase::Reopen {
+                        self.source_project_current_allocated_bytes = Some(union.allocated_bytes);
+                    }
                     "source-project"
                 };
                 self.allocation
@@ -397,15 +401,20 @@ impl LifecycleStorageSession {
             || !self.portable_package_observed
             || !self.portable_import_peak_observed
             || !self.imported_project_observed
+            || self.source_project_current_allocated_bytes.is_none()
         {
             return Err("lifecycle storage session is missing an authenticated owner or transient phase"
                 .to_owned());
         }
+        let source_project_current_allocated_bytes = self
+            .source_project_current_allocated_bytes
+            .ok_or_else(|| "source-project reopen allocation was not captured".to_owned())?;
         self.finalized = true;
         let retained = self.allocation.current_allocated_bytes();
         let peak = self.transient_peak_storage_bytes.max(retained);
         Ok(Some(serde_json::json!({
             "contract": "graphforge-lifecycle-storage/1",
+            "source_project_current_allocated_bytes": source_project_current_allocated_bytes,
             "retained_storage_bytes": retained,
             "transient_peak_storage_bytes": peak,
         })))
@@ -595,6 +604,7 @@ fn execute_process(executable: &str, args: &[String]) -> Result<Execution, Strin
             ) {
                 Ok(receipts) => receipts,
                 Err(_) if status.success() => {
+                    release_cgroup_page_cache();
                     return Ok(Execution {
                         exit_code: status.code(),
                         duration_ms: millis(started.elapsed()),
@@ -603,8 +613,12 @@ fn execute_process(executable: &str, args: &[String]) -> Result<Execution, Strin
                         receipts: Vec::new(),
                     });
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    release_cgroup_page_cache();
+                    return Err(error);
+                }
             };
+            release_cgroup_page_cache();
             return Ok(Execution {
                 exit_code: status.code(),
                 duration_ms: millis(started.elapsed()),
@@ -616,6 +630,23 @@ fn execute_process(executable: &str, args: &[String]) -> Result<Execution, Strin
         thread::sleep(Duration::from_millis(10));
     }
 }
+
+/// Drop Linux page-cache pressure attributed to the BenchExec cgroup between
+/// sequential public-command invocations. Without this, file-backed cache from
+/// prior `gf` subprocesses accumulates until the 4 GiB memlimit even though
+/// each invocation's anonymous RSS stays bounded (#904).
+#[cfg(target_os = "linux")]
+fn release_cgroup_page_cache() {
+    use std::io::Write;
+
+    let _ = std::process::Command::new("sync").status();
+    if let Ok(mut drop_caches) = fs::File::create("/proc/sys/vm/drop_caches") {
+        let _ = drop_caches.write_all(b"3");
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn release_cgroup_page_cache() {}
 
 fn read_bounded(mut input: impl Read, limit: usize) -> Result<Vec<u8>, String> {
     let mut kept = Vec::new();
@@ -711,6 +742,7 @@ fn sanitize_receipt(value: &serde_json::Value) -> Option<serde_json::Value> {
             object,
             &[
                 "contract",
+                "source_project_current_allocated_bytes",
                 "retained_storage_bytes",
                 "transient_peak_storage_bytes",
             ],
@@ -718,7 +750,11 @@ fn sanitize_receipt(value: &serde_json::Value) -> Option<serde_json::Value> {
         .filter(|receipt| {
             sanitized_numeric_fields(
                 receipt,
-                &["retained_storage_bytes", "transient_peak_storage_bytes"],
+                &[
+                    "source_project_current_allocated_bytes",
+                    "retained_storage_bytes",
+                    "transient_peak_storage_bytes",
+                ],
             )
         }),
         Some("graphforge-query-qualification/1") => copy_closed_receipt(
@@ -734,6 +770,31 @@ fn sanitize_receipt(value: &serde_json::Value) -> Option<serde_json::Value> {
                 "equivalent",
             ],
         ),
+        Some("graphforge-portable-export/2") => copy_selected_receipt(
+            object,
+            &[
+                "contract",
+                "package_digest",
+                "transport_digest",
+                "entry_count",
+                "payload_bytes",
+                "representation",
+                "selection_fingerprint",
+                "allocation_logical_bytes",
+                "allocation_allocated_bytes",
+                "allocation_physical_objects",
+            ],
+        )
+        .filter(|receipt| {
+            sanitized_numeric_fields(
+                receipt,
+                &[
+                    "allocation_logical_bytes",
+                    "allocation_allocated_bytes",
+                    "allocation_physical_objects",
+                ],
+            )
+        }),
         Some("graphforge-portable-import/2") => copy_selected_receipt(
             object,
             &[
@@ -1562,8 +1623,17 @@ mod tests {
         assert!(parse_receipts(br#"{"contract":"unknown/1"}"#, true).is_err());
         assert!(parse_receipts(&[], true).is_err());
         assert!(parse_receipts(b"human output\n", false).unwrap().is_empty());
-        let import = br#"{"contract":"graphforge-import-session/1","outcome":"committed","construction":{"configured_batch_rows":65536,"publication_work":{"contract":"graphforge-publication-work/1","semantic_total_operations":9}}}"#;
-        assert_eq!(parse_receipts(import, true).unwrap().len(), 1);
+        let import = br#"{"contract":"graphforge-import-session/1","outcome":"committed","construction":{"configured_batch_rows":65536,"construction_staging":{"logical_references":3,"logical_bytes":4096,"physical_objects":3,"physical_logical_bytes":4096,"allocated_bytes":8192},"construction_staging_transient_peak_allocated_bytes":12288,"publication_work":{"contract":"graphforge-publication-work/1","semantic_total_operations":9}}}"#;
+        let sanitized = parse_receipts(import, true).unwrap();
+        assert_eq!(sanitized.len(), 1);
+        assert_eq!(
+            sanitized[0]["construction"]["construction_staging"]["allocated_bytes"],
+            8192
+        );
+        assert_eq!(
+            sanitized[0]["construction"]["construction_staging_transient_peak_allocated_bytes"],
+            12288
+        );
         let leaked = br#"{"contract":"graphforge-import-session/1","outcome":"committed","construction":{"project_path":"/secret"}}"#;
         assert!(parse_receipts(leaked, true).is_err());
         let query = serde_json::json!({
@@ -1662,6 +1732,84 @@ mod tests {
         let mut leaked = receipt;
         leaked["storage"]["project_path"] = serde_json::json!("/secret");
         let encoded = serde_json::to_vec(&leaked).expect("leaked receipt JSON");
+        assert!(parse_receipts(&encoded, true).is_err());
+
+        let lifecycle = serde_json::json!({
+            "contract": "graphforge-lifecycle-storage/1",
+            "source_project_current_allocated_bytes": 256,
+            "retained_storage_bytes": 384,
+            "transient_peak_storage_bytes": 512
+        });
+        let encoded = serde_json::to_vec(&lifecycle).expect("lifecycle receipt JSON");
+        let sanitized = parse_receipts(&encoded, true).expect("closed lifecycle receipt");
+        assert_eq!(
+            sanitized[0]["source_project_current_allocated_bytes"],
+            256
+        );
+        for invalid in [
+            serde_json::Value::Null,
+            serde_json::json!(true),
+            serde_json::json!(-1),
+            serde_json::json!("256"),
+        ] {
+            let mut malformed = lifecycle.clone();
+            malformed["source_project_current_allocated_bytes"] = invalid;
+            let encoded =
+                serde_json::to_vec(&malformed).expect("malformed lifecycle receipt JSON");
+            assert!(parse_receipts(&encoded, true).is_err());
+        }
+        let mut missing = lifecycle;
+        missing
+            .as_object_mut()
+            .expect("lifecycle receipt object")
+            .remove("source_project_current_allocated_bytes");
+        let encoded = serde_json::to_vec(&missing).expect("incomplete lifecycle receipt JSON");
+        assert!(parse_receipts(&encoded, true).is_err());
+    }
+
+    #[test]
+    fn portable_export_receipt_preserves_only_writer_allocation_totals() {
+        let receipt = serde_json::json!({
+            "contract": "graphforge-portable-export/2",
+            "source": "current",
+            "generation_uuid": "00000000-0000-4000-8000-000000000001",
+            "output": "/secret/package.gfpb",
+            "package_digest": format!("sha256:{}", "0".repeat(64)),
+            "transport_digest": format!("sha256:{}", "1".repeat(64)),
+            "entry_count": 4,
+            "payload_bytes": 8_192,
+            "representation": "bundle",
+            "selection_fingerprint": format!("sha256:{}", "2".repeat(64)),
+            "allocation_logical_bytes": 9_000,
+            "allocation_allocated_bytes": 12_288,
+            "allocation_physical_objects": 3,
+            "allocation_identity_allocated_bytes": {"secret-native-id": 12_288}
+        });
+        let encoded = serde_json::to_vec(&receipt).expect("portable export receipt JSON");
+
+        let sanitized = parse_receipts(&encoded, true).expect("closed portable export receipt");
+
+        assert_eq!(sanitized[0]["allocation_logical_bytes"], 9_000);
+        assert_eq!(sanitized[0]["allocation_allocated_bytes"], 12_288);
+        assert_eq!(sanitized[0]["allocation_physical_objects"], 3);
+        let encoded = serde_json::to_string(&sanitized[0]).unwrap();
+        for forbidden in ["/secret", "uuid", "identity", "secret-native-id"] {
+            assert!(!encoded.contains(forbidden));
+        }
+
+        let mut missing_authority = receipt.clone();
+        missing_authority
+            .as_object_mut()
+            .unwrap()
+            .remove("allocation_allocated_bytes");
+        let encoded =
+            serde_json::to_vec(&missing_authority).expect("incomplete portable export receipt");
+        assert!(parse_receipts(&encoded, true).is_err());
+
+        let mut malformed_authority = receipt;
+        malformed_authority["allocation_physical_objects"] = serde_json::json!(-1);
+        let encoded =
+            serde_json::to_vec(&malformed_authority).expect("malformed portable export receipt");
         assert!(parse_receipts(&encoded, true).is_err());
     }
 
@@ -2065,6 +2213,63 @@ mod tests {
     }
 
     #[test]
+    fn reopen_emits_authoritative_source_project_union_allocation() {
+        let root = std::env::temp_dir().join(format!(
+            "gf-certify-source-union-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let project = root.join("project");
+        let current =
+            graphforge_storage::open_or_initialize_ephemeral_project(&project).unwrap();
+        let selected = graphforge_storage::capture_storage_attribution(&current).unwrap();
+        let union =
+            graphforge_storage::capture_project_storage_identity_union(&current).unwrap();
+        assert!(
+            union
+                .retained_generation_uuids
+                .contains(&current.generation_uuid())
+        );
+        assert!(union.allocated_bytes > selected.allocated_bytes);
+
+        let mut session = LifecycleStorageSession::default();
+        let reopen = PhaseCommand {
+            phase: Phase::Reopen,
+            action: PhaseAction::GraphForgeCli {
+                args: vec![
+                    "--project".to_owned(),
+                    project.to_string_lossy().into_owned(),
+                    "storage-attribution".to_owned(),
+                ],
+            },
+        };
+        assert!(session.observe(Phase::Reopen, &reopen, &[]).unwrap().is_none());
+        session.generator_observed = true;
+        session.construction_peak_observed = true;
+        session.portable_package_observed = true;
+        session.portable_import_peak_observed = true;
+        session.imported_project_observed = true;
+        let final_command = PhaseCommand {
+            phase: Phase::ReopenProof,
+            action: PhaseAction::GraphForgeCli { args: Vec::new() },
+        };
+        let receipt = session
+            .observe(Phase::ReopenProof, &final_command, &[])
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            receipt["source_project_current_allocated_bytes"].as_u64(),
+            Some(union.allocated_bytes)
+        );
+        assert_ne!(
+            receipt["source_project_current_allocated_bytes"].as_u64(),
+            Some(selected.allocated_bytes)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn lifecycle_storage_deduplicates_aliases_and_finalizes_once() {
         let root =
             std::env::temp_dir().join(format!("gf-certify-lifecycle-{}", std::process::id()));
@@ -2125,6 +2330,7 @@ mod tests {
         session.observe(Phase::Export, &export, &[]).unwrap();
         assert!(session.portable_package_observed);
         session.source_project_observed = true;
+        session.source_project_current_allocated_bytes = Some(one_identity_allocation);
         session.portable_import_peak_observed = true;
         session.imported_project_observed = true;
 
@@ -2136,6 +2342,10 @@ mod tests {
             .observe(Phase::ReopenProof, &final_command, &[])
             .unwrap()
             .unwrap();
+        assert_eq!(
+            receipt["source_project_current_allocated_bytes"].as_u64(),
+            Some(one_identity_allocation)
+        );
         assert_eq!(
             receipt["retained_storage_bytes"].as_u64(),
             Some(one_identity_allocation)

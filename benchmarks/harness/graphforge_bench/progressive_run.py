@@ -17,7 +17,9 @@ import os
 from pathlib import Path
 import platform
 import re
+import secrets
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -27,17 +29,62 @@ import xml.etree.ElementTree as ET
 from jsonschema import Draft202012Validator
 
 from graphforge_bench.benchexec_authority import Limits, normalize_run
+from graphforge_bench.hybrid_cgroup_v2 import measure_hybrid_pressure
 from graphforge_bench.local_admission import qualify_local_host
 from graphforge_bench.progressive_qualification import QualificationError, load_profiles, project
+from graphforge_bench.progressive_queries import ORDERED_LIMIT_ROW_COUNT
 
 PLAN_SCHEMA = "graphforge-progressive-run-plan/1"
 RESULT_SCHEMA = "graphforge-progressive-run-result/1"
 GIT_COMMIT = re.compile(r"^[0-9a-f]{40}$")
 LOCAL_RUNGS = (18, 19)
+STORAGE_CATEGORIES = (
+    "topology_nodes",
+    "topology_edges",
+    "properties",
+    "uuid_and_surrogates",
+    "adjacency",
+    "catalog_and_manifests",
+    "construction_staging",
+    "portable_package",
+    "clean_imported_project",
+    "other",
+)
+STORAGE_CATEGORY_FIELDS = (
+    "logical_references",
+    "logical_bytes",
+    "physical_objects",
+    "physical_logical_bytes",
+    "allocated_bytes",
+)
+APPLICATION_IO_PHASES = (
+    "append_merge",
+    "seal_authentication",
+    "shape_consume_reauthentication",
+    "encode_write_postwrite_authentication",
+    "publication_preauthentication",
+    "cas_install_read_write",
+    "hydration_verification",
+    "fsync_synchronization",
+    "recovery_reauthentication",
+)
+APPLICATION_IO_FIELDS = (
+    "read_bytes",
+    "write_bytes",
+    "read_calls",
+    "write_calls",
+    "object_count",
+    "block_count",
+    "fsync_calls",
+)
 
 
 class ControllerError(ValueError):
     """The requested run is unsafe, out of order, or lacks valid evidence."""
+
+
+class BenchExecRunError(ControllerError):
+    """BenchExec authority reports that the benchmark execution did not pass."""
 
 
 @dataclass(frozen=True)
@@ -101,6 +148,14 @@ def _commit(value: str) -> str:
 
 
 def repository_commit(root: Path) -> str:
+    """Return the checked-out commit or the read-only image attestation."""
+    attestation = root.parent / "commit"
+    if attestation.is_file():
+        try:
+            value = attestation.read_text(encoding="ascii").strip()
+        except (OSError, UnicodeDecodeError) as error:
+            raise ControllerError("image commit attestation is unavailable") from error
+        return _commit(value)
     completed = subprocess.run(
         ["git", "-C", str(root.parent), "rev-parse", "HEAD"],
         text=True,
@@ -192,32 +247,114 @@ def build_plan(
     return plan
 
 
-def _write_json(path: Path, value: Mapping[str, Any]) -> None:
-    encoded = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
-    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    temporary = Path(temporary_name)
+def _open_durable_directory(path: Path) -> int:
+    absolute = path.absolute()
+    flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+    directory = os.open(absolute.anchor, flags)
     try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(encoded)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.link(temporary, path)
-        temporary.unlink()
-        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(directory)
-        finally:
+        for part in absolute.parts[1:]:
+            created = False
+            try:
+                child = os.open(part, flags, dir_fd=directory)
+            except FileNotFoundError:
+                try:
+                    os.mkdir(part, mode=0o755, dir_fd=directory)
+                    created = True
+                    os.fsync(directory)
+                except FileExistsError:
+                    pass
+                child = os.open(part, flags, dir_fd=directory)
+            if created:
+                os.fsync(child)
             os.close(directory)
+            directory = child
+        os.fsync(directory)
+        return directory
     except BaseException:
-        temporary.unlink(missing_ok=True)
+        os.close(directory)
         raise
 
 
+def publish_json_no_clobber(path: Path, value: Mapping[str, Any]) -> None:
+    """Durably publish JSON once without trusting symlinked directory components.
+
+    If the final directory fsync fails after linking the complete target, this
+    function raises but leaves that target in place. It never rolls back,
+    removes, or replaces a complete linked target; a retry therefore fails
+    closed with ``FileExistsError``.
+    """
+    encoded = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    directory = _open_durable_directory(path.parent)
+    temporary_name = f".{path.name}.{secrets.token_hex(8)}"
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            temporary_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=directory,
+        )
+        with os.fdopen(descriptor, "wb") as stream:
+            descriptor = -1
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.link(
+            temporary_name,
+            path.name,
+            src_dir_fd=directory,
+            dst_dir_fd=directory,
+            follow_symlinks=False,
+        )
+        os.unlink(temporary_name, dir_fd=directory)
+        os.fsync(directory)
+    except BaseException:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            os.unlink(temporary_name, dir_fd=directory)
+            os.fsync(directory)
+        except FileNotFoundError:
+            pass
+        raise
+    finally:
+        os.close(directory)
+
+
+_write_json = publish_json_no_clobber
+
+
 def write_plan(output_dir: Path, plan: Mapping[str, Any]) -> Path:
-    output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / f"{str(plan['rung']).lower()}-plan.json"
     _write_json(path, plan)
     return path
+
+
+def _provider_volume_mounted() -> bool:
+    work = Path("/work")
+    try:
+        return work.is_dir() and os.path.ismount(work)
+    except OSError:
+        return False
+
+
+def _rewrite_profile_for_provider_volume(profile_text: str, scale: int) -> str:
+    """Pin durable workspace paths on the provider volume for BenchExec containers."""
+    relative = f"workspace/s{scale}"
+    absolute = f"/work/{relative}"
+    return profile_text.replace(f'"{relative}/', f'"{absolute}/').replace(
+        f'"{relative}"', f'"{absolute}"'
+    )
+
+
+def _wrap_executable_for_provider_tmp(staged: Path) -> None:
+    real = staged.with_name(f"{staged.name}.real")
+    staged.rename(real)
+    staged.write_text(
+        f'#!/bin/sh\nexport TMPDIR="/work/tmp"\nexec "{real}" "$@"\n',
+        encoding="utf-8",
+    )
+    staged.chmod(staged.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
 def _safe_stage(
@@ -226,12 +363,15 @@ def _safe_stage(
     executables: Executables,
     identities: Mapping[str, Any],
     parent: Path,
+    *,
+    scale: int,
 ) -> Path:
     stage = Path(tempfile.mkdtemp(prefix="gf-progressive-", dir=parent))
-    shutil.copyfile(profile_path, stage / "profile.json")
-    shutil.copyfile(
-        root / "definitions/graphforge-progressive-qualification-v1.xml", stage / "benchmark.xml"
-    )
+    profile_text = profile_path.read_text(encoding="utf-8")
+    if _provider_volume_mounted():
+        profile_text = _rewrite_profile_for_provider_volume(profile_text, scale)
+    (stage / "profile.json").write_text(profile_text, encoding="utf-8")
+    _stage_benchmark_xml(root, stage)
     bin_dir = stage / "bin"
     bin_dir.mkdir()
     for name, source, identity_key in (
@@ -245,9 +385,22 @@ def _safe_stage(
     ):
         staged = bin_dir / name
         shutil.copy2(source, staged)
+        staged.chmod(staged.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         if _digest(staged) != identities.get(identity_key):
             raise ControllerError(f"staged executable identity mismatch: {name}")
+        if _provider_volume_mounted():
+            _wrap_executable_for_provider_tmp(staged)
+    if _provider_volume_mounted():
+        _make_benchexec_stage_writable(stage)
     return stage
+
+
+def _make_benchexec_stage_writable(stage: Path) -> None:
+    """BenchExec runs tools as an unprivileged user that must write evidence.json."""
+    stage.chmod(0o777)
+    for path in stage.rglob("*"):
+        if path.is_dir():
+            path.chmod(0o777)
 
 
 def _native_authority() -> Mapping[str, Any]:
@@ -285,22 +438,91 @@ def _is_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def _benchexec_cli(benchexec_python: Path) -> Path:
+    candidate = benchexec_python.parent / "benchexec"
+    if candidate.is_file():
+        return candidate
+    raise ControllerError("BenchExec CLI is missing beside the configured Python")
+
+
+def _bench_home(stage: Path) -> Path:
+    """Use the provider volume as HOME when BenchExec must write durable projects."""
+    if _provider_volume_mounted():
+        return Path("/work")
+    home = stage / "home"
+    home.mkdir()
+    return home
+
+
+def _authority_staging_parent(output_dir: Path) -> Path | None:
+    """Keep BenchExec staging on the provider volume when /work is mounted."""
+    if _provider_volume_mounted():
+        return output_dir
+    return None
+
+
+def _benchexec_tool_directory(stage: Path) -> Path:
+    """Prefer image-local executables once staged identity checks have passed."""
+    if _provider_volume_mounted():
+        return stage / "bin"
+    local = Path("/usr/local/bin")
+    try:
+        if local.is_dir() and (local / "graphforge-benchmark-certify").is_file():
+            return local
+    except OSError:
+        pass
+    return stage / "bin"
+
+
+def _stage_benchmark_xml(root: Path, stage: Path) -> None:
+    text = (root / "definitions/graphforge-progressive-qualification-v1.xml").read_text(
+        encoding="utf-8"
+    )
+    (stage / "benchmark.xml").write_text(text, encoding="utf-8")
+
+
+def _benchexec_memory_limit() -> list[str]:
+    return []
+
+
+def _benchexec_container_flags(stage: Path) -> list[str]:
+    """Configure BenchExec container mounts for durable provider-volume runs."""
+    if _provider_volume_mounted():
+        return [
+            "--read-only-dir",
+            "/",
+            "--hidden-dir",
+            "/run",
+            "--hidden-dir",
+            "/tmp",
+            "--full-access-dir",
+            "/work",
+        ]
+    if stage.is_dir():
+        return ["--full-access-dir", str(stage.resolve())]
+    return []
+
+
 def _run_benchexec(stage: Path, executables: Executables, identities: Mapping[str, Any]) -> int:
     raw_output = stage / "raw"
     raw_output.mkdir()
-    home = stage / "home"
-    home.mkdir()
+    home = _bench_home(stage)
     environment = {
         "HOME": str(home),
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
-        "PATH": f"{stage / 'bin'}:{Path(sys.executable).parent}:/usr/bin:/bin",
+        "PATH": f"{stage / 'bin'}:/usr/local/bin:{Path(sys.executable).parent}:/usr/bin:/bin",
         "PYTHONPATH": str(Path(__file__).resolve().parents[1]),
     }
+    if _provider_volume_mounted():
+        (Path("/work") / "tmp").mkdir(exist_ok=True)
+        environment["TMPDIR"] = str(home / "tmp")
     command = [
-        str(executables.benchexec_python),
-        "-m",
-        "benchexec",
+        str(_benchexec_cli(executables.benchexec_python)),
+        "--tool-directory",
+        str(_benchexec_tool_directory(stage)),
+        *_benchexec_container_flags(stage),
+        *_benchexec_memory_limit(),
         "--no-compress-results",
         "--outputpath",
         str(raw_output),
@@ -310,7 +532,14 @@ def _run_benchexec(stage: Path, executables: Executables, identities: Mapping[st
     ]
     if _digest(executables.benchexec_python) != identities.get("benchexec_python_sha256"):
         raise ControllerError("BenchExec Python identity changed after planning")
-    return subprocess.run(command, env=environment, check=False).returncode
+    with measure_hybrid_pressure() as hybrid_pressure:
+        returncode = subprocess.run(command, env=environment, check=False).returncode
+    pressure_path = stage / "hybrid-pressure.json"
+    pressure_path.write_text(
+        json.dumps(hybrid_pressure(), sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return returncode
 
 
 def _scaled_number(value: str, *, integral: bool = False) -> int | float:
@@ -352,6 +581,14 @@ def _parse_benchexec_xml(raw_output: Path, *, correctness: bool) -> Mapping[str,
     if len(runs) != 1:
         raise ControllerError("BenchExec result must contain exactly one run")
     columns = {column.attrib.get("title"): column.attrib.get("value") for column in runs[0]}
+
+    hybrid_path = raw_output.parent / "hybrid-pressure.json"
+    if hybrid_path.is_file():
+        hybrid = json.loads(hybrid_path.read_text(encoding="utf-8"))
+        if isinstance(hybrid, Mapping):
+            for key in ("pressure-cpu-some", "pressure-io-some", "pressure-memory-some"):
+                if columns.get(key) is None and isinstance(hybrid.get(key), (int, float)):
+                    columns[key] = f"{hybrid[key]}s"
 
     def required(name: str) -> str:
         value = columns.get(name)
@@ -414,16 +651,44 @@ def _phase_receipts(graphforge: Mapping[str, Any], name: str) -> list[Mapping[st
     return receipts
 
 
+def _closed_receipt_inventory(
+    graphforge: Mapping[str, Any],
+    contract: str,
+    expected_counts: Mapping[str, int],
+) -> dict[str, list[Mapping[str, Any]]]:
+    phases = graphforge.get("phases")
+    if not isinstance(phases, list):
+        raise ControllerError("GraphForge phases are missing")
+    inventory: dict[str, list[Mapping[str, Any]]] = {}
+    for phase in phases:
+        if not isinstance(phase, Mapping) or not isinstance(phase.get("phase"), str):
+            raise ControllerError("GraphForge phase is malformed")
+        name = str(phase["phase"])
+        receipts = phase.get("receipts", [])
+        if not isinstance(receipts, list) or any(
+            not isinstance(receipt, Mapping) for receipt in receipts
+        ):
+            raise ControllerError(f"GraphForge phase receipts are malformed: {name}")
+        matching = [receipt for receipt in receipts if receipt.get("contract") == contract]
+        if matching:
+            inventory.setdefault(name, []).extend(matching)
+    actual_counts = {name: len(receipts) for name, receipts in inventory.items()}
+    if actual_counts != dict(expected_counts):
+        raise ControllerError(
+            f"ordinary receipt inventory is incomplete, moved, or ambiguous: {contract}"
+        )
+    return inventory
+
+
 def _query_receipts(
     graphforge: Mapping[str, Any], phase: str, expected: int
 ) -> list[Mapping[str, Any]]:
-    receipts = [
-        receipt
-        for receipt in _phase_receipts(graphforge, phase)
-        if receipt.get("contract") == "graphforge-result-sink/2"
-    ]
-    if len(receipts) != expected:
+    expected_inventory = {"recount": 2, "query": 2, "reopen_proof": 4}
+    if expected_inventory.get(phase) != expected:
         raise ControllerError(f"ordinary query receipts are missing or ambiguous: {phase}")
+    receipts = _closed_receipt_inventory(
+        graphforge, "graphforge-result-sink/2", expected_inventory
+    )[phase]
     for receipt in receipts:
         digest = receipt.get("result_sha256")
         if (
@@ -437,21 +702,42 @@ def _query_receipts(
     return receipts
 
 
-def _one_receipt(graphforge: Mapping[str, Any], contract: str) -> Mapping[str, Any]:
-    matching = [receipt for receipt in _receipts(graphforge) if receipt.get("contract") == contract]
-    if len(matching) != 1:
-        raise ControllerError(f"required ordinary receipt is missing or ambiguous: {contract}")
-    return matching[0]
+def _phase_bound_receipt(
+    graphforge: Mapping[str, Any],
+    phase: str,
+    contract: str,
+    *,
+    outcome: str | None = None,
+) -> Mapping[str, Any]:
+    matching: list[tuple[str, Mapping[str, Any]]] = []
+    phases = graphforge.get("phases")
+    if not isinstance(phases, list):
+        raise ControllerError("GraphForge phases are missing")
+    for phase_value in phases:
+        if not isinstance(phase_value, Mapping) or not isinstance(phase_value.get("phase"), str):
+            raise ControllerError("GraphForge phase is malformed")
+        for receipt in _phase_receipts(graphforge, str(phase_value["phase"])):
+            if receipt.get("contract") == contract and (
+                outcome is None or receipt.get("outcome") == outcome
+            ):
+                matching.append((str(phase_value["phase"]), receipt))
+    if len(matching) != 1 or matching[0][0] != phase:
+        raise ControllerError(
+            f"required ordinary receipt is missing, moved, or ambiguous: {contract}"
+        )
+    return matching[0][1]
 
 
 def _storage_receipt(graphforge: Mapping[str, Any], phase: str) -> Mapping[str, Any]:
-    receipts = _phase_receipts(graphforge, phase)
-    matching = [
-        receipt
-        for receipt in receipts
-        if receipt.get("contract") == "graphforge-storage-attribution-command/1"
-    ]
-    if len(matching) != 1 or matching[0].get("reopen_agrees") is not True:
+    expected_inventory = {"reopen": 1, "reopen_proof": 1}
+    if phase not in expected_inventory:
+        raise ControllerError(f"ordinary storage receipt phase is not authoritative: {phase}")
+    matching = _closed_receipt_inventory(
+        graphforge,
+        "graphforge-storage-attribution-command/1",
+        expected_inventory,
+    )[phase]
+    if matching[0].get("reopen_agrees") is not True:
         raise ControllerError(f"ordinary storage receipt is missing or ambiguous: {phase}")
     storage = matching[0].get("storage")
     if (
@@ -459,34 +745,96 @@ def _storage_receipt(graphforge: Mapping[str, Any], phase: str) -> Mapping[str, 
         or storage.get("contract") != "graphforge-storage-attribution/1"
     ):
         raise ControllerError("ordinary storage receipt is incomplete")
-    for name in (
-        "logical_references",
-        "logical_bytes",
-        "retained_logical_eof_bytes",
-        "allocated_physical_bytes",
-        "physical_objects",
-    ):
-        if (
-            isinstance(storage.get(name), bool)
-            or not isinstance(storage.get(name), int)
-            or storage[name] < 0
-        ):
+    categories = storage.get("categories")
+    if not isinstance(categories, Mapping) or set(categories) != set(STORAGE_CATEGORIES):
+        raise ControllerError("ordinary storage receipt categories are incomplete")
+    sums = dict.fromkeys(STORAGE_CATEGORY_FIELDS, 0)
+    for category in STORAGE_CATEGORIES:
+        values = categories.get(category)
+        if not isinstance(values, Mapping) or set(values) != set(STORAGE_CATEGORY_FIELDS):
+            raise ControllerError(f"ordinary storage category is malformed: {category}")
+        for name in STORAGE_CATEGORY_FIELDS:
+            value = values.get(name)
+            if not _is_int(value) or value < 0:
+                raise ControllerError(f"ordinary storage category omitted {name}: {category}")
+            sums[name] += value
+        if values["physical_objects"] > values["logical_references"]:
+            raise ControllerError("ordinary storage category physical identities contradict")
+    expected = {
+        "logical_references": sums["logical_references"],
+        "logical_bytes": sums["logical_bytes"],
+        "retained_logical_eof_bytes": sums["physical_logical_bytes"],
+        "allocated_physical_bytes": sums["allocated_bytes"],
+        "physical_objects": sums["physical_objects"],
+    }
+    for name, value in expected.items():
+        if not _is_int(storage.get(name)) or storage[name] < 0:
             raise ControllerError(f"ordinary storage receipt omitted {name}")
+        if storage[name] != value:
+            raise ControllerError(f"ordinary storage receipt does not reconcile: {name}")
+    other = categories["other"]
+    if any(other[name] != 0 for name in STORAGE_CATEGORY_FIELDS):
+        raise ControllerError("ordinary storage receipt contains unclassified artifacts")
     return storage
 
 
-def _construction_metrics(import_receipt: Mapping[str, Any]) -> dict[str, int]:
+def _application_io(construction: Mapping[str, Any]) -> Mapping[str, Any]:
+    application_io = construction.get("application_io")
+    if not isinstance(application_io, Mapping) or set(application_io) != {"phases", "totals"}:
+        raise ControllerError("ordinary import application I/O evidence is absent")
+    phases = application_io.get("phases")
+    totals = application_io.get("totals")
+    if (
+        not isinstance(phases, Mapping)
+        or set(phases) != set(APPLICATION_IO_PHASES)
+        or not isinstance(totals, Mapping)
+        or set(totals) != set(APPLICATION_IO_FIELDS)
+    ):
+        raise ControllerError("ordinary import application I/O inventory is incomplete")
+    sums = dict.fromkeys(APPLICATION_IO_FIELDS, 0)
+    for phase in APPLICATION_IO_PHASES:
+        values = phases.get(phase)
+        if not isinstance(values, Mapping) or set(values) != set(APPLICATION_IO_FIELDS):
+            raise ControllerError(f"ordinary import application I/O phase is malformed: {phase}")
+        for name in APPLICATION_IO_FIELDS:
+            value = values.get(name)
+            if not _is_int(value) or value < 0:
+                raise ControllerError(f"ordinary import application I/O omitted {name}: {phase}")
+            sums[name] += value
+        if (values["read_bytes"] == 0) != (values["read_calls"] == 0):
+            raise ControllerError("ordinary import application I/O read counters disagree")
+        if (values["write_bytes"] == 0) != (values["write_calls"] == 0):
+            raise ControllerError("ordinary import application I/O write counters disagree")
+    if totals != sums:
+        raise ControllerError("ordinary import application I/O totals do not reconcile")
+    return application_io
+
+
+def _construction_metrics(
+    import_receipt: Mapping[str, Any],
+) -> tuple[dict[str, int], Mapping[str, Any], Mapping[str, Any], int]:
     construction = import_receipt.get("construction")
     if not isinstance(construction, Mapping):
         raise ControllerError("ordinary import construction evidence is absent")
-    application_io = construction.get("application_io")
-    totals = application_io.get("totals") if isinstance(application_io, Mapping) else None
+    application_io = _application_io(construction)
+    staging = construction.get("construction_staging")
+    staging_peak = construction.get("construction_staging_transient_peak_allocated_bytes")
+    if (
+        not isinstance(staging, Mapping)
+        or set(staging) != set(STORAGE_CATEGORY_FIELDS)
+        or any(not _is_int(staging.get(name)) or staging[name] < 0 for name in staging)
+        or not _is_int(staging_peak)
+        or staging_peak < staging["allocated_bytes"]
+        or staging["physical_objects"] > staging["logical_references"]
+    ):
+        raise ControllerError("ordinary import construction staging authority is incomplete")
+    totals = application_io["totals"]
     publication = construction.get("publication_work")
     values = {
         "transient_peak_allocated_bytes": construction.get("transient_peak_allocated_bytes"),
-        "logical_read_bytes": totals.get("read_bytes") if isinstance(totals, Mapping) else None,
-        "logical_write_bytes": totals.get("write_bytes") if isinstance(totals, Mapping) else None,
-        "reader_calls": totals.get("read_calls") if isinstance(totals, Mapping) else None,
+        "logical_read_bytes": totals["read_bytes"],
+        "logical_write_bytes": totals["write_bytes"],
+        "reader_calls": totals["read_calls"],
         "publication_work_units": publication.get("semantic_total_operations")
         if isinstance(publication, Mapping)
         and publication.get("contract") == "graphforge-publication-work/1"
@@ -497,7 +845,24 @@ def _construction_metrics(import_receipt: Mapping[str, Any]) -> dict[str, int]:
         for value in values.values()
     ):
         raise ControllerError("ordinary import construction metrics are incomplete")
-    return {name: int(value) for name, value in values.items()}
+    return (
+        {name: int(value) for name, value in values.items()},
+        application_io,
+        staging,
+        staging_peak,
+    )
+
+
+def _portable_allocation(graphforge: Mapping[str, Any]) -> Mapping[str, Any]:
+    receipt = _phase_bound_receipt(graphforge, "export", "graphforge-portable-export/2")
+    names = (
+        "allocation_logical_bytes",
+        "allocation_allocated_bytes",
+        "allocation_physical_objects",
+    )
+    if any(not _is_int(receipt.get(name)) or receipt[name] < 0 for name in names):
+        raise ControllerError("ordinary portable allocation authority is incomplete")
+    return {"contract": receipt["contract"], **{name: receipt[name] for name in names}}
 
 
 def assemble_rung_evidence(
@@ -511,25 +876,29 @@ def assemble_rung_evidence(
 ) -> dict[str, Any]:
     if graphforge.get("status") != "passed" or benchexec.get("outcome") != "passed":
         raise ControllerError("a failed execution cannot produce passed rung evidence")
-    imports = [
-        receipt
-        for receipt in _receipts(graphforge)
-        if receipt.get("contract") == "graphforge-import-session/1"
-        and receipt.get("outcome") == "committed"
-    ]
-    if len(imports) != 1:
-        raise ControllerError("ordinary import commit receipt is missing or ambiguous")
-    require_bulk_ingest_capability(imports[0])
+    committed_import = _phase_bound_receipt(
+        graphforge,
+        "ingest",
+        "graphforge-import-session/1",
+        outcome="committed",
+    )
+    require_bulk_ingest_capability(committed_import)
     source_storage = _storage_receipt(graphforge, "reopen")
     imported_storage = _storage_receipt(graphforge, "reopen_proof")
-    lifecycle_storage = _one_receipt(graphforge, "graphforge-lifecycle-storage/1")
-    construction = _construction_metrics(imports[0])
+    lifecycle_storage = _phase_bound_receipt(
+        graphforge, "reopen_proof", "graphforge-lifecycle-storage/1"
+    )
+    construction, application_io, construction_staging, staging_peak = _construction_metrics(
+        committed_import
+    )
+    portable_allocation = _portable_allocation(graphforge)
     expected_edges = 16 * (1 << scale)
     source_counts = _query_receipts(graphforge, "recount", 2)
     source_hops = _query_receipts(graphforge, "query", 2)
     imported = _query_receipts(graphforge, "reopen_proof", 4)
     imported_counts, imported_hops = imported[:2], imported[2:]
     expected_counts = (1 << scale, expected_edges)
+    authoritative_counts: dict[str, int] = {}
     for index, expected in enumerate(expected_counts):
         source_value = source_counts[index].get("scalar_u64")
         imported_value = imported_counts[index].get("scalar_u64")
@@ -537,15 +906,18 @@ def assemble_rung_evidence(
             raise ControllerError("recount evidence contradicts the selected rung")
         if source_counts[index]["result_sha256"] != imported_counts[index]["result_sha256"]:
             raise ControllerError("source/imported recount evidence disagrees")
+        name = ("nodes", "edges")[index]
+        authoritative_counts[f"source_{name}"] = source_value
+        authoritative_counts[f"imported_{name}"] = imported_value
     if any(
-        source.get("rows") != 1024
-        or imported_receipt.get("rows") != 1024
+        source.get("rows") != ORDERED_LIMIT_ROW_COUNT
+        or imported_receipt.get("rows") != ORDERED_LIMIT_ROW_COUNT
         or source["result_sha256"] != imported_receipt["result_sha256"]
         for source, imported_receipt in zip(source_hops, imported_hops, strict=True)
     ):
         raise ControllerError("source/imported query evidence contradicts the selected rung")
     lifecycle_names = ("retained_storage_bytes", "transient_peak_storage_bytes")
-    for name in lifecycle_names:
+    for name in ("source_project_current_allocated_bytes", *lifecycle_names):
         if (
             isinstance(lifecycle_storage.get(name), bool)
             or not isinstance(lifecycle_storage.get(name), int)
@@ -557,6 +929,7 @@ def assemble_rung_evidence(
         raise ControllerError("BenchExec authority is missing")
     phases = [phase.get("phase") for phase in graphforge.get("phases", [])]
     rung = {
+        "assembly_contract": "graphforge-progressive-rung-assembly/2",
         "profile_id": profile_id or f"graph500-s{scale}-local",
         "source": source,
         "scale": scale,
@@ -598,11 +971,27 @@ def assemble_rung_evidence(
             "query_qualification": ["live_edges", "correctness"],
         },
         "storage_components": {
+            "source_project_current_allocated_bytes": lifecycle_storage[
+                "source_project_current_allocated_bytes"
+            ],
             "source_allocated_physical_bytes": source_storage["allocated_physical_bytes"],
             "source_retained_logical_eof_bytes": source_storage["retained_logical_eof_bytes"],
             "imported_allocated_physical_bytes": imported_storage["allocated_physical_bytes"],
             "imported_retained_logical_eof_bytes": imported_storage["retained_logical_eof_bytes"],
             **construction,
+        },
+        "storage_attribution": {
+            "source": source_storage,
+            "imported": imported_storage,
+            "construction": {
+                "application_io": application_io,
+                "staging": construction_staging,
+                "staging_transient_peak_allocated_bytes": staging_peak,
+                "transient_peak_allocated_bytes": construction["transient_peak_allocated_bytes"],
+            },
+            "portable_package": portable_allocation,
+            "lifecycle": lifecycle_storage,
+            "counts": authoritative_counts,
         },
         "failure": None,
     }
@@ -643,6 +1032,10 @@ def ingest_benchexec_result(
     )
     _validate(root, "certification-evidence.json", graphforge)
     _validate(root, "benchexec-run-evidence.json", benchexec)
+    if benchexec.get("outcome") != "passed":
+        raise BenchExecRunError(
+            f"BenchExec authority did not pass: {benchexec.get('outcome', 'unknown')}"
+        )
     rung = assemble_rung_evidence(
         root=root,
         scale=scale,
@@ -668,19 +1061,34 @@ def validate_fixture_bundle(root: Path, bundle: Path, scale: int) -> None:
         raise ControllerError("BenchExec and GraphForge evidence disagree")
 
 
+def _preserve_failure_artifacts(stage: Path, output_dir: Path, scale: int) -> None:
+    raw = stage / "raw"
+    if not raw.is_dir():
+        return
+    destination = output_dir / f"s{scale}-failure-raw"
+    if destination.exists():
+        shutil.rmtree(destination)
+    shutil.copytree(raw, destination)
+
+
 def run(
     *, root: Path, output_dir: Path, scale: int, plan: Mapping[str, Any], executables: Executables
 ) -> None:
     _native_authority()
     profile_path, _ = _profile(root, scale)
     output_dir.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="gf-progressive-authority-") as temporary:
+    with tempfile.TemporaryDirectory(
+        prefix="gf-progressive-authority-", dir=_authority_staging_parent(output_dir)
+    ) as temporary:
         identities = plan["identities"]
         if not isinstance(identities, Mapping):
             raise ControllerError("run plan identities are malformed")
-        stage = _safe_stage(root, profile_path, executables, identities, Path(temporary))
+        stage = _safe_stage(
+            root, profile_path, executables, identities, Path(temporary), scale=scale
+        )
         status = _run_benchexec(stage, executables, identities)
         if status != 0:
+            _preserve_failure_artifacts(stage, output_dir, scale)
             result = {
                 "schema": RESULT_SCHEMA,
                 "rung": f"S{scale}",
@@ -696,7 +1104,21 @@ def run(
             benchexec, graphforge, rung = ingest_benchexec_result(
                 root=root, stage=stage, scale=scale, plan=plan
             )
+        except BenchExecRunError as error:
+            _preserve_failure_artifacts(stage, output_dir, scale)
+            result = {
+                "schema": RESULT_SCHEMA,
+                "rung": f"S{scale}",
+                "status": "failed",
+                "failure": "benchexec_failed",
+                "identities": plan["identities"],
+                "claim": "engineering_evidence_only",
+            }
+            _validate(root, "progressive-run-result.json", result)
+            _write_json(output_dir / f"s{scale}-result.json", result)
+            raise ControllerError("benchexec_failed") from error
         except (ControllerError, ValueError) as error:
+            _preserve_failure_artifacts(stage, output_dir, scale)
             result = {
                 "schema": RESULT_SCHEMA,
                 "rung": f"S{scale}",

@@ -289,6 +289,10 @@ def image_build_command(
         not all(path.is_absolute() for path in (source, config, dockerfile)),
         "build paths must be absolute",
     )
+    _refuse(
+        dockerfile.resolve() != (config.parent / dockerfile.name).resolve(),
+        "dockerfile must live beside the build config",
+    )
     builder_flag = "--remote-only" if authority == "provider" else "--local-only"
     return Command(
         "image_build",
@@ -300,8 +304,6 @@ def image_build_command(
             app,
             "--config",
             str(config),
-            "--dockerfile",
-            str(dockerfile),
             builder_flag,
             "--build-only",
             "--push",
@@ -541,6 +543,28 @@ def pin_remote_image(app: str, digest: str) -> str:
     image = f"registry.fly.io/{app}@{digest}"
     _refuse(not OCI_DIGEST.fullmatch(image), "remote build did not return an immutable digest")
     return image
+
+
+def machine_run_image_ref(pinned_image: str, commit: str) -> str:
+    """Return the flyctl machine-run ref for one commit-pinned build-only push."""
+    _refuse(COMMIT.fullmatch(commit) is None, "build commit is invalid")
+    _refuse(not OCI_DIGEST.fullmatch(pinned_image), "pinned image is invalid")
+    app = pinned_image.removeprefix("registry.fly.io/").rsplit("@", 1)[0]
+    _refuse(not SAFE_NAME.fullmatch(app), "app name is invalid")
+    return f"registry.fly.io/{app}:{commit}"
+
+
+def extract_pushed_image_digest(stdout: str, *, app: str, commit: str) -> str | None:
+    """Return the digest flyctl printed for one commit-pinned build-only push."""
+    marker = f"registry.fly.io/{app}:{commit}@sha256:"
+    for line in reversed(stdout.splitlines()):
+        index = line.find(marker)
+        if index == -1:
+            continue
+        digest = line[index + len(marker) : index + len(marker) + 64]
+        if re.fullmatch(r"[0-9a-f]{64}", digest) is not None:
+            return f"sha256:{digest}"
+    return None
 
 
 def accepted_rung_reclamation(

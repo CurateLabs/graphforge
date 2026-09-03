@@ -1,0 +1,13 @@
+{
+  "admitted_plan_sha256": "15592258c9ea2c7f08c58b7a7919df5046281b8b3dbcba85d4b55cd5480528d4",
+  "authorization_sha256": "1ab34ecd52c26836c536102ad84c75482735f8f91d52164dd346b45403a6ce56",
+  "authorized_maximum_scale": 26,
+  "checked_at": null,
+  "claim": "control_plane_evidence_only",
+  "commit": "6255f9393362c996b5840566d255569761e881d7",
+  "completed_scales": [18, 19],
+  "failure": null,
+  "observed": null,
+  "schema": "graphforge-progressive-provider-teardown-inventory/1",
+  "status": "not_required"
+}

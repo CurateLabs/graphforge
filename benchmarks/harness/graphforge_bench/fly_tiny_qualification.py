@@ -29,7 +29,9 @@ from graphforge_bench.fly_adapter import (
     AdapterError,
     ResourceLedger,
     classify_provider_build_failure,
+    extract_pushed_image_digest,
     image_build_command,
+    machine_run_image_ref,
     pin_remote_image,
     sanitized_failure,
 )
@@ -55,6 +57,9 @@ APP_READINESS_TIMEOUT_SECONDS = 60
 APP_READINESS_PROBE_TIMEOUT_SECONDS = 5
 APP_READINESS_INITIAL_BACKOFF_SECONDS = 0.25
 APP_READINESS_MAX_BACKOFF_SECONDS = 2.0
+IMAGE_LAUNCH_INITIAL_BACKOFF_SECONDS = 2.0
+IMAGE_LAUNCH_MAX_BACKOFF_SECONDS = 15.0
+IMAGE_LAUNCH_ATTEMPTS = 6
 TEARDOWN_POLL_ATTEMPTS = 6
 TEARDOWN_POLL_INTERVAL_SECONDS = 2
 
@@ -475,11 +480,12 @@ def verify_machine_state(
 def _machine_command(
     invocation: TinyQualificationInvocation, *, image: str, volume_id: str
 ) -> tuple[str, ...]:
+    digest = image.rsplit("@", 1)[1]
     return (
         "flyctl",
         "machine",
         "run",
-        image,
+        machine_run_image_ref(image, invocation.commit),
         "--app",
         invocation.app,
         "--name",
@@ -493,7 +499,7 @@ def _machine_command(
         "--env",
         f"GF_FLY_QUALIFICATION_GIT_SHA={invocation.commit}",
         "--env",
-        f"GF_FLY_QUALIFICATION_IMAGE_DIGEST={image.rsplit('@', 1)[1]}",
+        f"GF_FLY_QUALIFICATION_IMAGE_DIGEST={digest}",
         "--env",
         f"GF_FLY_QUALIFICATION_REGION={invocation.region}",
         "--restart",
@@ -507,6 +513,43 @@ def _machine_command(
         "--rm",
         "--detach",
     )
+
+
+def _image_launch_retryable(error: subprocess.CalledProcessError) -> bool:
+    text = "\n".join(
+        fragment
+        for fragment in (
+            getattr(error, "stdout", None),
+            getattr(error, "stderr", None),
+        )
+        if isinstance(fragment, str)
+    ).lower()
+    return "manifest_unknown" in text or "manifest unknown" in text
+
+
+def _run_machine_with_backoff(
+    transport: Transport,
+    argv: tuple[str, ...],
+    *,
+    timeout: int,
+    sleeper: Callable[[float], None] = time.sleep,
+) -> subprocess.CompletedProcess[str]:
+    backoff = IMAGE_LAUNCH_INITIAL_BACKOFF_SECONDS
+    for attempt in range(IMAGE_LAUNCH_ATTEMPTS):
+        completed = transport.run(argv, timeout=timeout, check=False)
+        if completed.returncode == 0:
+            return completed
+        error = subprocess.CalledProcessError(
+            completed.returncode,
+            argv,
+            output=completed.stdout,
+            stderr=completed.stderr,
+        )
+        if not _image_launch_retryable(error) or attempt + 1 >= IMAGE_LAUNCH_ATTEMPTS:
+            raise error
+        sleeper(backoff)
+        backoff = min(backoff * 2, IMAGE_LAUNCH_MAX_BACKOFF_SECONDS)
+    raise QualificationError("provision_failed", "pushed image is not launchable yet")
 
 
 def _validate_evidence(path: Path, invocation: TinyQualificationInvocation, image: str) -> None:
@@ -874,16 +917,24 @@ def execute(
             authority=invocation.build_authority,
         )
         try:
-            transport.run(build.argv, timeout=BUILD_TIMEOUT_SECONDS)
+            completed = transport.run(build.argv, timeout=BUILD_TIMEOUT_SECONDS)
         except (subprocess.SubprocessError, OSError) as error:
             raise QualificationError(
                 "build_failed",
                 "remote provider build failed",
                 cause=classify_provider_build_failure(error),
             ) from None
-        image = transport.resolve_image(
-            invocation.app, invocation.commit, timeout=CREATE_TIMEOUT_SECONDS
+        digest = extract_pushed_image_digest(
+            completed.stdout + completed.stderr,
+            app=invocation.app,
+            commit=invocation.commit,
         )
+        if digest is None:
+            image = transport.resolve_image(
+                invocation.app, invocation.commit, timeout=CREATE_TIMEOUT_SECONDS
+            )
+        else:
+            image = pin_remote_image(invocation.app, digest)
         ledger.image_digest = image
         _save_ledger(ledger_path, ledger)
 
@@ -911,7 +962,8 @@ def execute(
         ledger.volume_id = _single_volume_id(volume)
         _save_ledger(ledger_path, ledger)
 
-        transport.run(
+        _run_machine_with_backoff(
+            transport,
             _machine_command(invocation, image=image, volume_id=ledger.volume_id),
             timeout=CREATE_TIMEOUT_SECONDS,
         )

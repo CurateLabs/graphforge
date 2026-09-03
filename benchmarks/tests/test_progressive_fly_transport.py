@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+from graphforge_bench.fly_adapter import machine_run_image_ref
 from graphforge_bench.progressive_fly_transport import (
     FlyctlMachineBoundary,
     FlyProviderTransport,
@@ -183,7 +184,7 @@ class ProgressiveFlyTransportTests(unittest.TestCase):
                 "flyctl",
                 "machine",
                 "run",
-                IMAGE,
+                machine_run_image_ref(IMAGE, self.auth.commit),
                 str(self.auth.maximum_machine_seconds),
                 "--app",
                 APP,
@@ -593,12 +594,14 @@ class ProgressiveFlyTransportTests(unittest.TestCase):
         self.assertIn("progressive_ladder_qualification", operator)
         self.assertIn("FlyProviderTransport", controller)
         self.assertIn("execute_attempt", controller)
-        progressive = next(
-            gate
-            for gate in json.loads(registry)["operator_gates"]
-            if gate["id"] == "progressive-ladder"
-        )
+        registry_doc = json.loads(registry)
+        records = registry_doc["workflows"] + registry_doc.get("operator_gates", [])
+        progressive = next(gate for gate in records if gate["id"] == "progressive-ladder")
         self.assertEqual(progressive["control_plane"], "pulumi_esc")
+        self.assertEqual(
+            progressive["path"],
+            ".github/workflows/progressive-ladder.yml",
+        )
 
 
 if __name__ == "__main__":

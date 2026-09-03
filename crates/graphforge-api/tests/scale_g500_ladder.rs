@@ -14,7 +14,7 @@
 //!
 //! It is **not** Official-track and **not** TEPS, and it does **not** itself
 //! certify one billion live edges — that is #745. Small rungs run in normal CI;
-//! large rungs are opt-in via `make bench-g500-ladder`.
+//! provider ladder execution uses `benchmarks/` progressive qualification (#900).
 
 #![recursion_limit = "256"]
 
@@ -718,11 +718,23 @@ fn query_work_evidence(snapshot: &DemandSnapshot) -> Value {
             "input_rows": hop.input_rows,
             "candidates_generated": hop.candidates_generated,
             "rows_emitted": hop.rows_emitted,
+            "edge_reads_started": hop.edge_reads_started,
+            "edge_reads_completed": hop.edge_reads_completed,
+            "edge_full_reads": hop.edge_full_reads,
             "edge_rows_scanned": hop.edge_rows_scanned,
+            "node_reads_started": hop.node_reads_started,
+            "node_reads_completed": hop.node_reads_completed,
+            "node_full_reads": hop.node_full_reads,
             "node_rows_scanned": hop.node_rows_scanned,
+            "projected_chunks": hop.projected_chunks,
+            "projected_rows": hop.projected_rows,
+            "projected_columns": hop.projected_columns,
+            "identity_ranges_selected": hop.identity_ranges_selected,
             "identity_read_calls": hop.identity_read_calls,
             "identity_bytes_read": hop.identity_bytes_read,
             "identity_peak_buffer_bytes": hop.identity_peak_buffer_bytes,
+            "identity_per_record_seeks": hop.identity_per_record_seeks,
+            "reads_after_cancel": hop.reads_after_cancel,
         })).collect::<Vec<_>>(),
         "sorts": snapshot.sorts.iter().map(|sort| json!({
             "ordinal": sort.ordinal,
@@ -749,7 +761,74 @@ fn query_work_evidence(snapshot: &DemandSnapshot) -> Value {
     })
 }
 
-fn bounded_ordered_limit(snapshot: &DemandSnapshot, expected_hops: usize, limit: usize) -> bool {
+const MAX_IDENTITY_BUFFER_BYTES: u64 = 16 * 1024 * 1024;
+
+fn released_memory_is_bounded(snapshot: &DemandSnapshot) -> bool {
+    snapshot.memory_reserved_after
+        <= snapshot
+            .memory_reserved_before
+            .saturating_add(snapshot.returned_batch_bytes)
+}
+
+fn has_no_materializing_reads(hop: &demand::HopSnapshot) -> bool {
+    hop.edge_reads_started == 0
+        && hop.edge_reads_completed == 0
+        && hop.edge_reads_failed == 0
+        && hop.edge_rows_returned == 0
+        && hop.edge_rows_scanned == 0
+        && hop.edge_full_reads == 0
+        && hop.node_reads_started == 0
+        && hop.node_reads_completed == 0
+        && hop.node_reads_failed == 0
+        && hop.node_rows_returned == 0
+        && hop.node_rows_scanned == 0
+        && hop.node_full_reads == 0
+        && hop.edge_projected_columns == 0
+        && hop.node_projected_columns == 0
+}
+
+fn bounded_counting_ordered_two_hop(snapshot: &DemandSnapshot, limit: usize) -> bool {
+    let Some(hop) = snapshot.hops.values().next() else {
+        return false;
+    };
+    snapshot.hops.len() == 1
+        && snapshot.sorts.is_empty()
+        && snapshot.operator_rss.is_empty()
+        && snapshot.execution_batch_rows > 0
+        && hop.input_batches == 0
+        && hop.input_rows == 0
+        && hop.rows_emitted == limit as u64
+        && hop.candidates_generated >= hop.rows_emitted
+        && hop.candidates_generated <= (limit as u64).saturating_add(snapshot.execution_batch_rows)
+        && has_no_materializing_reads(hop)
+        && hop.projected_chunks > 0
+        && hop.projected_chunks == hop.projected_rows
+        && hop.projected_rows <= limit as u64
+        && hop.projected_columns == 1
+        && hop.identity_ranges_selected > 0
+        && hop.identity_ranges_selected <= hop.projected_rows
+        && hop.identity_read_calls
+            <= hop
+                .identity_ranges_selected
+                .saturating_mul(2)
+                .saturating_add(2)
+        && hop.identity_bytes_read
+            <= hop
+                .identity_read_calls
+                .saturating_mul(MAX_IDENTITY_BUFFER_BYTES)
+        && hop.identity_peak_buffer_bytes <= MAX_IDENTITY_BUFFER_BYTES
+        && hop.identity_per_record_seeks == 0
+        && hop.reads_after_cancel == 0
+        && snapshot.cancellations == 0
+        && snapshot.max_in_flight_reads == 0
+        && released_memory_is_bounded(snapshot)
+}
+
+fn bounded_streaming_ordered_limit(
+    snapshot: &DemandSnapshot,
+    expected_hops: usize,
+    limit: usize,
+) -> bool {
     snapshot.hops.len() == expected_hops
         && snapshot.sorts.len() == 1
         && snapshot.sorts[0].fetch == Some(limit)
@@ -766,14 +845,111 @@ fn bounded_ordered_limit(snapshot: &DemandSnapshot, expected_hops: usize, limit:
                 && operator.peak_bytes >= operator.after_bytes
                 && (operator.after_bytes > 0 || !cfg!(target_os = "linux"))
         })
-        && snapshot.memory_reserved_after
-            <= snapshot
-                .memory_reserved_before
-                .saturating_add(snapshot.returned_batch_bytes)
+        && released_memory_is_bounded(snapshot)
         && snapshot
             .hops
             .values()
             .all(|hop| hop.reads_after_cancel == 0)
+}
+
+fn bounded_ordered_limit(snapshot: &DemandSnapshot, expected_hops: usize, limit: usize) -> bool {
+    let optimized_two_hop_shape = expected_hops == 2
+        && snapshot.hops.len() == 1
+        && snapshot.sorts.is_empty()
+        && snapshot.operator_rss.is_empty();
+    if optimized_two_hop_shape {
+        bounded_counting_ordered_two_hop(snapshot, limit)
+    } else {
+        bounded_streaming_ordered_limit(snapshot, expected_hops, limit)
+    }
+}
+
+fn counting_snapshot(limit: usize) -> DemandSnapshot {
+    let mut snapshot = DemandSnapshot {
+        execution_batch_rows: 8_192,
+        returned_batch_bytes: (limit as u64).saturating_mul(16),
+        ..DemandSnapshot::default()
+    };
+    snapshot.hops.insert(
+        1,
+        demand::HopSnapshot {
+            candidates_generated: (limit as u64).saturating_add(10),
+            rows_emitted: limit as u64,
+            projected_chunks: 52,
+            projected_rows: 52,
+            projected_columns: 1,
+            identity_ranges_selected: 52,
+            identity_read_calls: 2,
+            identity_bytes_read: 8_192,
+            identity_peak_buffer_bytes: 4_096,
+            ..demand::HopSnapshot::default()
+        },
+    );
+    snapshot
+}
+
+#[test]
+fn optimized_two_hop_budget_requires_complete_counting_evidence() {
+    let limit = 1_000;
+    let baseline = counting_snapshot(limit);
+    assert!(bounded_ordered_limit(&baseline, 2, limit));
+    assert!(
+        !bounded_ordered_limit(&baseline, 1, limit),
+        "the optimized exception must not weaken the one-hop budget"
+    );
+    assert!(!bounded_ordered_limit(&DemandSnapshot::default(), 2, limit));
+
+    macro_rules! reject_mutation {
+        ($name:literal, $mutate:expr) => {{
+            let mut snapshot = baseline.clone();
+            $mutate(&mut snapshot);
+            assert!(
+                !bounded_ordered_limit(&snapshot, 2, limit),
+                "accepted {}: {snapshot:#?}",
+                $name
+            );
+        }};
+    }
+    reject_mutation!("missing hop", |s: &mut DemandSnapshot| s.hops.clear());
+    reject_mutation!("under-emission", |s: &mut DemandSnapshot| {
+        s.hops.get_mut(&1).unwrap().rows_emitted -= 1;
+    });
+    reject_mutation!("candidate undercount", |s: &mut DemandSnapshot| {
+        s.hops.get_mut(&1).unwrap().candidates_generated = 999;
+    });
+    reject_mutation!("candidate overflow", |s: &mut DemandSnapshot| {
+        s.hops.get_mut(&1).unwrap().candidates_generated = 9_193;
+    });
+    reject_mutation!("missing projection", |s: &mut DemandSnapshot| {
+        s.hops.get_mut(&1).unwrap().projected_rows = 0;
+    });
+    reject_mutation!("missing ranges", |s: &mut DemandSnapshot| {
+        s.hops.get_mut(&1).unwrap().identity_ranges_selected = 0;
+    });
+    reject_mutation!("unbounded calls", |s: &mut DemandSnapshot| {
+        s.hops.get_mut(&1).unwrap().identity_read_calls = 107;
+    });
+    reject_mutation!("unbounded bytes", |s: &mut DemandSnapshot| {
+        s.hops.get_mut(&1).unwrap().identity_bytes_read = 2 * MAX_IDENTITY_BUFFER_BYTES + 1;
+    });
+    reject_mutation!("per-record seek", |s: &mut DemandSnapshot| {
+        s.hops.get_mut(&1).unwrap().identity_per_record_seeks = 1;
+    });
+    reject_mutation!("edge materialization", |s: &mut DemandSnapshot| {
+        s.hops.get_mut(&1).unwrap().edge_reads_started = 1;
+    });
+    reject_mutation!("node materialization", |s: &mut DemandSnapshot| {
+        s.hops.get_mut(&1).unwrap().node_rows_scanned = 1;
+    });
+    reject_mutation!("unexpected cancellation", |s: &mut DemandSnapshot| {
+        s.cancellations = 1;
+    });
+    reject_mutation!("in-flight read", |s: &mut DemandSnapshot| {
+        s.max_in_flight_reads = 1;
+    });
+    reject_mutation!("retained memory", |s: &mut DemandSnapshot| {
+        s.memory_reserved_after = 16_001;
+    });
 }
 
 fn linux_process_memory() -> Value {
@@ -1416,7 +1592,7 @@ fn run_rung(
                 let mut violation = envelope_violation(&env, ladder_started, query_disk_used_bytes);
                 if failure.is_some() {
                     violation = Some("execution_failure");
-                } else if rows > 1_000 {
+                } else if rows != 1_000 {
                     violation = Some("result_mismatch");
                 } else if !bounded_ordered_limit(&work, expected_hops, 1_000) {
                     violation = Some("operator_budget_violation");
@@ -1520,43 +1696,6 @@ fn run_rung(
     });
 
     RungOutcome { passed, evidence }
-}
-
-/// Drive the ladder rung-by-rung, stopping at the first failing rung.
-fn run_ladder(profile: &ScaleProfile, env: RunEnvelope, rungs: &[Rung]) -> Vec<Value> {
-    let ladder_started = Instant::now();
-    let mut evidence = Vec::new();
-    for rung in rungs {
-        let outcome = run_rung(
-            profile,
-            rung,
-            env,
-            profile.edgefactor,
-            ladder_started,
-            &evidence,
-        );
-        let passed = outcome.passed;
-        evidence.push(outcome.evidence);
-        let first_failing_phase = evidence
-            .last()
-            .and_then(|rung| rung["first_failing_phase"].as_str());
-        let error_class = evidence
-            .last()
-            .and_then(|rung| rung["error_class"].as_str());
-        persist_phase_journal(
-            profile,
-            rung,
-            &evidence,
-            "rung",
-            "rung_completed",
-            &[],
-            first_failing_phase.zip(error_class),
-        );
-        if !passed {
-            break;
-        }
-    }
-    evidence
 }
 
 fn provisioned_rungs_through(profile: &ScaleProfile, max_scale: u32) -> Result<Vec<Rung>, String> {
@@ -2110,59 +2249,6 @@ fn ci_rung_public_facade_engineering_green() {
         1u64 << ci_rung.scale
     );
     assert!(live > 0, "CI rung must persist a non-empty graph");
-}
-
-/// Provisioned full ladder (SCALE-20 → SCALE-26). Opt-in via
-/// `make bench-g500-ladder`. Writes one evidence object per attempted rung and
-/// stops at the first rung that exceeds the declared 128 GiB / 1 TiB / 4 h
-/// cloud-SKU fail-safe. Never asserts a billion-edge product claim (that is #745).
-/// Certification evidence for #745 must come from a provisioned Linux cloud host.
-#[test]
-#[ignore = "Provisioned billion-edge scale ladder; make bench-g500-ladder"]
-fn ladder_public_facade_first_fail_evidence() {
-    let profile = load_profile();
-    let max_scale = std::env::var("GF_G500_LADDER_MAX_SCALE")
-        .expect("GF_G500_LADDER_MAX_SCALE must explicitly cap the authorized ladder")
-        .parse::<u32>()
-        .expect("GF_G500_LADDER_MAX_SCALE must be an integer");
-    let provisioned =
-        provisioned_rungs_through(&profile, max_scale).unwrap_or_else(|error| panic!("{error}"));
-    let evidence = run_ladder(&profile, profile.envelope.into(), &provisioned);
-    assert!(
-        !evidence.is_empty(),
-        "ladder must attempt at least one rung"
-    );
-
-    let out = std::env::var("GF_G500_LADDER_EVIDENCE_OUT").map_or_else(
-        |_| PathBuf::from("build/g500-ladder-evidence.json"),
-        PathBuf::from,
-    );
-    if let Some(parent) = out.parent() {
-        fs::create_dir_all(parent).expect("evidence parent");
-    }
-    fs::write(
-        &out,
-        serde_json::to_vec_pretty(&json!({
-            "schema": EVIDENCE_SCHEMA,
-            "schema_version": SCHEMA_VERSION,
-            "profile_schema": profile.schema,
-            "authorized_max_scale": max_scale,
-            "rungs": evidence,
-        }))
-        .expect("serialize ladder evidence"),
-    )
-    .expect("write ladder evidence");
-
-    // Every rung that reached ingest reconciles; a rung stopped in the generate
-    // phase reports reconciles=null (not evaluated). The ladder stops at the
-    // first failure.
-    for rung in &evidence {
-        let rec = &rung["reconciles"];
-        assert!(
-            rec.is_null() || rec == &Value::Bool(true),
-            "an evaluated rung must reconcile; got {rec}"
-        );
-    }
 }
 
 #[test]
@@ -3900,125 +3986,4 @@ fn construction_session_reenters_across_processes() {
     assert_eq!(current_generation_uuid(&graph), published);
     assert_eq!(graph.node_count(NODE_LABEL).unwrap(), 8);
     assert_eq!(scalar_count(&graph.execute(COUNT_EDGES).unwrap()), 2);
-}
-
-#[test]
-#[ignore = "requires approved 128 GiB / 1 TiB Linux certification host"]
-fn certification_target_live_full_lifecycle_evidence() {
-    let elapsed_before_process = certification_elapsed_before_process();
-    let started = Instant::now();
-    let profile = load_certification_profile();
-    let root = TempDir::new().expect("certification workspace");
-    let lifecycle = run_integrated_certification(root.path(), Some(profile.target_live_edges));
-    let phases = lifecycle["phases"].as_array().expect("phase array");
-    let peak_rss = phases
-        .iter()
-        .filter_map(|p| p["rss_peak_bytes"].as_u64())
-        .max()
-        .unwrap_or(0);
-    let peak_disk = phases
-        .iter()
-        .filter_map(|p| p["disk_peak_bytes"].as_u64())
-        .max()
-        .unwrap_or(0);
-    let source_edges = lifecycle["source_edges"].as_u64().unwrap();
-    let generated_live_edges = lifecycle["generated_live_unique_edges"].as_u64().unwrap();
-    assert!(source_edges >= 1_000_000_000);
-    assert_eq!(source_edges, generated_live_edges);
-    let profile_digest = format!(
-        "sha256:{}",
-        hex_encode(Sha256::digest(include_bytes!(
-            "fixtures/scale_g500_certification.v1.json"
-        )))
-    );
-    let evidence = json!({
-        "schema": "graphforge-billion-edge-certification-evidence/1",
-        "git_sha": std::env::var("GF_G500_CERT_EXPECTED_SHA").unwrap_or_else(|_| git_sha().as_str().unwrap_or("unknown").to_owned()),
-        "profile_sha256": profile_digest,
-        "run": {
-            "command": "cargo test -p graphforge-api --release --test scale_g500_ladder certification_target_live_full_lifecycle_evidence -- --ignored --exact --nocapture --test-threads=1",
-            "scale": profile.scale, "edgefactor": profile.edgefactor, "seed": profile.seed,
-            "directionality": "undirected", "self_loops": "drop", "duplicates": "drop"
-        },
-        "host": {
-            "provider": std::env::var("GF_G500_CERT_PROVIDER").expect("approved provider input"),
-            "region": std::env::var("GF_G500_CERT_REGION").expect("approved region input"),
-            "sku": std::env::var("GF_G500_CERT_SKU").expect("approved SKU input"),
-            "os_image": std::env::var("GF_G500_CERT_OS_IMAGE").expect("approved OS image input"),
-            "os": command_text("uname", &["-s"]),
-            "kernel": command_text("uname", &["-r"]),
-            "filesystem": normalized_filesystem(root.path()),
-            "memory_bytes": linux_memory_bytes(),
-            "nvme_bytes": filesystem_capacity_bytes(root.path()),
-        },
-        "tools": { "rustc": command_text("rustc", &["--version"]), "cargo": command_text("cargo", &["--version"]) },
-        "counts": {
-            "raw_attempts": lifecycle["raw_attempts"], "self_loops_rejected": lifecycle["self_loops_rejected"],
-            "duplicates_rejected": lifecycle["duplicates_rejected"], "live_unique_edges": generated_live_edges,
-            "source_nodes": lifecycle["source_nodes"], "source_edges": source_edges,
-            "imported_nodes": lifecycle["imported_nodes"], "imported_edges": lifecycle["imported_edges"],
-        },
-        "identities": {
-            "source_export_generation_authenticated": lifecycle["source_export_generation_authenticated"],
-            "import_receipt_reopen_authenticated": lifecycle["import_receipt_reopen_authenticated"],
-            "source_import_generations_distinct": lifecycle["source_import_generations_distinct"],
-            "package": lifecycle["package"], "transport": lifecycle["transport"]
-        },
-        "package": {
-            "contract": lifecycle["portable_contract"], "format": "portable-project-v2-bundle",
-            "class": lifecycle["package_class"], "integrity": lifecycle["integrity"],
-            "compatibility": lifecycle["compatibility"],
-            "policy": "complete-current-generation"
-        },
-        "equivalence": { "source_project_fingerprint": lifecycle["source_project_fingerprint"], "imported_project_fingerprint": lifecycle["imported_project_fingerprint"] },
-        "authority": { "source_fingerprint": lifecycle["source_authority_fingerprint"], "imported_fingerprint": lifecycle["imported_authority_fingerprint"] },
-        "storage_attribution": lifecycle["storage"],
-        "phases": phases,
-        "envelope": { "peak_rss_bytes": peak_rss, "peak_disk_bytes": peak_disk, "peak_disk_source": "storage_owned_active_identity_union", "wall_time_s": elapsed_before_process.saturating_add(started.elapsed()).as_secs_f64() },
-        "result": "pass", "first_failure": null,
-    });
-    reject_unsanitized_evidence(&evidence).expect("provider certification evidence is sanitized");
-    let out = PathBuf::from(std::env::var("GF_G500_CERT_EVIDENCE_OUT").expect("evidence output"));
-    fs::write(out, serde_json::to_vec_pretty(&evidence).unwrap())
-        .expect("write certification evidence");
-}
-
-fn normalized_filesystem(path: &Path) -> String {
-    match command_text("stat", &["-f", "-c", "%T", path.to_str().unwrap()]).as_str() {
-        "ext2/ext3" => "ext4".to_owned(),
-        value => value.to_owned(),
-    }
-}
-
-fn command_text(program: &str, args: &[&str]) -> String {
-    let output = Command::new(program)
-        .args(args)
-        .output()
-        .expect("host attestation command");
-    assert!(output.status.success(), "host attestation command failed");
-    String::from_utf8(output.stdout).unwrap().trim().to_owned()
-}
-
-fn linux_memory_bytes() -> u64 {
-    fs::read_to_string("/proc/meminfo")
-        .ok()
-        .and_then(|text| {
-            text.lines()
-                .find(|line| line.starts_with("MemTotal:"))?
-                .split_whitespace()
-                .nth(1)?
-                .parse::<u64>()
-                .ok()
-        })
-        .unwrap_or(0)
-        .saturating_mul(1024)
-}
-
-fn filesystem_capacity_bytes(path: &Path) -> u64 {
-    command_text("df", &["-k", "--output=size", path.to_str().unwrap()])
-        .lines()
-        .last()
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .unwrap_or(0)
-        .saturating_mul(1024)
 }

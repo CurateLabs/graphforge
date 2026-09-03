@@ -159,6 +159,12 @@ pub struct ImportConstructionEvidence {
     pub peak_batch_bytes: u64,
     /// Exact transient allocation high-water retained across resume.
     pub transient_peak_allocated_bytes: u64,
+    /// Receipt-owned construction staging/spill category totals.
+    #[serde(default)]
+    pub construction_staging: graphforge_storage::ArtifactStorageTotals,
+    /// Peak allocated bytes for construction staging/spill specifically.
+    #[serde(default)]
+    pub construction_staging_transient_peak_allocated_bytes: u64,
 }
 
 /// Closed semantic publication-work contract for ordinary construction evidence.
@@ -727,6 +733,18 @@ impl GraphImportSession {
             graphforge_storage::ConstructionPhaseAttribution::from_construction(&progress.evidence);
         application_io.validate_for_qualification()?;
         let publication_work = PublicationWorkComponents::from_application_io(&application_io)?;
+        let construction_staging = progress
+            .evidence
+            .storage_current
+            .get(&graphforge_storage::ArtifactCategory::ConstructionStaging)
+            .cloned()
+            .unwrap_or_default();
+        let construction_staging_transient_peak_allocated_bytes = progress
+            .evidence
+            .storage_transient_peak_allocated_bytes
+            .get(&graphforge_storage::ArtifactCategory::ConstructionStaging)
+            .copied()
+            .unwrap_or_default();
         self.manifest.progress.construction = Some(ImportConstructionEvidence {
             configured_batch_rows: u64::try_from(self.manifest.limits.batch_rows)
                 .unwrap_or(u64::MAX),
@@ -745,6 +763,8 @@ impl GraphImportSession {
             transient_peak_allocated_bytes: progress
                 .evidence
                 .storage_transient_peak_total_allocated_bytes,
+            construction_staging,
+            construction_staging_transient_peak_allocated_bytes,
         });
         Ok(())
     }
@@ -1386,6 +1406,15 @@ mod tests {
             assert_eq!(receipt.input_rows, (4 * multiplier) as u64);
             assert_eq!(receipt.input_batches, multiplier as u64);
             assert_eq!(receipt.peak_batch_rows, 4);
+            assert!(receipt.construction_staging.logical_references > 0);
+            assert!(receipt.construction_staging.logical_bytes > 0);
+            assert!(receipt.construction_staging.physical_objects > 0);
+            assert!(receipt.construction_staging.physical_logical_bytes > 0);
+            assert!(receipt.construction_staging.allocated_bytes > 0);
+            assert!(
+                receipt.construction_staging_transient_peak_allocated_bytes
+                    >= receipt.construction_staging.allocated_bytes
+            );
             assert_eq!(
                 receipt.publication_work.contract,
                 "graphforge-publication-work/1"
@@ -1413,6 +1442,11 @@ mod tests {
             let (phase, reopened_progress) = reopened.import_session_status(session_uuid).unwrap();
             assert_eq!(phase, ImportPhase::Committed);
             assert_eq!(reopened_progress.construction.as_ref(), Some(&receipt));
+            let reopened_receipt = reopened_progress.construction.as_ref().unwrap();
+            assert!(
+                reopened_receipt.construction_staging_transient_peak_allocated_bytes
+                    >= reopened_receipt.construction_staging.allocated_bytes
+            );
             receipt
         }
 

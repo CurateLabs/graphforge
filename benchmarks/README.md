@@ -482,6 +482,15 @@ evidence therefore also requires an authenticated `graphforge-lifecycle-storage/
 owner-union receipt for retained and transient lifecycle maxima. The controller
 fails closed while that ordinary receipt is absent rather than summing project
 owners or treating portable logical payload bytes as allocated storage.
+Newly assembled rungs identify `graphforge-progressive-rung-assembly/2`; for
+that provenance the rung schema requires the lifecycle receipt's authoritative
+`source_project_current_allocated_bytes` and the complete closed
+`storage_attribution` payload. That payload copies the source and imported
+ten-category snapshots, committed construction application-I/O phases,
+portable-writer allocation, lifecycle unions, and reopened counts from the
+ordinary sanitized receipts. Historical version-1 rungs remain schema-readable
+but cannot supply #951 adapter evidence. The controller rejects any missing,
+malformed, or non-reconciling authority before emitting a new passed rung.
 The Rust certification runner owns that allocation session: it deduplicates
 stable native identities for the generated inputs, source project, result
 sinks, portable package, and clean-imported project; consumes writer-owned
@@ -495,6 +504,31 @@ cardinality, query evidence, and source/import logical-result digests. Missing
 or contradictory storage, construction, or query receipts cause a typed first
 failure; the controller never manufactures values from command counts,
 recursive file scans, portable payload size, or synthetic labels.
+
+Two complete adjacent S20/S22 or S22/S24 `/2` rungs can be adapted to the
+versioned `/3` storage qualification without restoring retired root
+orchestration:
+
+```bash
+make -C benchmarks progressive-storage-qualification \
+  LOW_RUNG=/evidence/s20-rung.json HIGH_RUNG=/evidence/s22-rung.json \
+  EVIDENCE=/evidence/g500-ladder-qualification.json \
+  COMMIT=$(git rev-parse HEAD) \
+  IMAGE_DIGEST=registry.fly.io/graphforge-bench@sha256:<64-hex-digest> \
+  LOW_RESULT_SHA256=<independently-recorded-s20-result-sha256> \
+  HIGH_RESULT_SHA256=<independently-recorded-s22-result-sha256> \
+  VOLUME_BYTES=536870912000 RESERVED_HEADROOM_BYTES=53687091200
+```
+
+Each rung path must be accompanied by its canonical provider plan, BenchExec,
+GraphForge, and passed result files in the same evidence directory. The adapter
+first verifies each result against its independently supplied SHA-256 trust
+anchor, then verifies the result-owned artifact digests and exact
+commit/profile/image identities. The anchors must come from trusted transport
+metadata or an immutable manifest outside the evidence directory, never from
+the bundle being qualified. The adapter preserves integer numerators and
+denominators, recomputes all reconciliations, and emits `refuse` when the
+projected S26 lifecycle peak lacks the requested storage headroom.
 
 ## Native local admission deployment
 

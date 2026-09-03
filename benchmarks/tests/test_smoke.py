@@ -50,6 +50,108 @@ class WorkspaceSmokeTests(unittest.TestCase):
             }
         )
 
+    def test_lifecycle_storage_receipt_schema_requires_closed_numeric_contract(self) -> None:
+        schema = json.loads(
+            (workspace_root() / "schemas" / "certification-evidence.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        validator = Draft202012Validator(schema)
+        receipt = {
+            "contract": "graphforge-lifecycle-storage/1",
+            "source_project_current_allocated_bytes": 1024,
+            "retained_storage_bytes": 2048,
+            "transient_peak_storage_bytes": 4096,
+        }
+
+        def evidence(candidate: dict[str, object]) -> dict[str, object]:
+            return {
+                "schema": "graphforge-public-certification/1",
+                "profile_id": "tiny-public-certification",
+                "status": "passed",
+                "phases": [
+                    {
+                        "phase": "reopen_proof",
+                        "status": "passed",
+                        "duration_ms": 1,
+                        "peak_rss_bytes": 1024,
+                        "exit_code": 0,
+                        "receipts": [candidate],
+                    }
+                ],
+                "failed_phase": None,
+            }
+
+        validator.validate(evidence(receipt))
+        for missing in (
+            "source_project_current_allocated_bytes",
+            "retained_storage_bytes",
+            "transient_peak_storage_bytes",
+        ):
+            with self.subTest(missing=missing):
+                invalid = dict(receipt)
+                del invalid[missing]
+                self.assertFalse(validator.is_valid(evidence(invalid)))
+        for malformed in (True, -1, "1024"):
+            with self.subTest(malformed=malformed):
+                invalid = dict(receipt)
+                invalid["source_project_current_allocated_bytes"] = malformed
+                self.assertFalse(validator.is_valid(evidence(invalid)))
+
+    def test_portable_export_receipt_schema_requires_writer_allocation(self) -> None:
+        schema = json.loads(
+            (workspace_root() / "schemas" / "certification-evidence.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        validator = Draft202012Validator(schema)
+        receipt = {
+            "contract": "graphforge-portable-export/2",
+            "package_digest": f"sha256:{'0' * 64}",
+            "transport_digest": f"sha256:{'1' * 64}",
+            "entry_count": 4,
+            "payload_bytes": 8192,
+            "representation": "bundle",
+            "selection_fingerprint": f"sha256:{'2' * 64}",
+            "allocation_logical_bytes": 9000,
+            "allocation_allocated_bytes": 12288,
+            "allocation_physical_objects": 3,
+        }
+
+        def evidence(candidate: dict[str, object]) -> dict[str, object]:
+            return {
+                "schema": "graphforge-public-certification/1",
+                "profile_id": "tiny-public-certification",
+                "status": "passed",
+                "phases": [
+                    {
+                        "phase": "export",
+                        "status": "passed",
+                        "duration_ms": 1,
+                        "peak_rss_bytes": 1024,
+                        "exit_code": 0,
+                        "receipts": [candidate],
+                    }
+                ],
+                "failed_phase": None,
+            }
+
+        validator.validate(evidence(receipt))
+        for missing in (
+            "allocation_logical_bytes",
+            "allocation_allocated_bytes",
+            "allocation_physical_objects",
+        ):
+            with self.subTest(missing=missing):
+                invalid = dict(receipt)
+                del invalid[missing]
+                self.assertFalse(validator.is_valid(evidence(invalid)))
+        for malformed in (True, -1, "12288"):
+            with self.subTest(malformed=malformed):
+                invalid = dict(receipt)
+                invalid["allocation_allocated_bytes"] = malformed
+                self.assertFalse(validator.is_valid(evidence(invalid)))
+
     def test_product_manifests_do_not_reference_benchmark_dependencies(self) -> None:
         repository = workspace_root().parent
         manifests = sorted(repository.rglob("Cargo.toml")) + sorted(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +35,32 @@ def _criterion(
 
 def ladder_bundle_root(root: Path | None = None) -> Path:
     return (root or workspace_root()) / "fixtures" / "parity" / "ladder-bundle"
+
+
+def _legacy_orchestration_present(root: Path | None = None) -> bool:
+    """Return True while legacy Makefile targets or workflows remain in-tree."""
+    repo = (root or workspace_root()).parent
+    makefile = repo / "Makefile"
+    if not makefile.is_file():
+        return True
+    text = makefile.read_text(encoding="utf-8")
+    legacy_targets = (
+        "bench-g500-ladder:",
+        "bench-g500-scale20:",
+        "g500-ladder-qualification:",
+    )
+    if any(target in text for target in legacy_targets):
+        return True
+    legacy_workflow = repo / ".github" / "workflows" / "g500-certification.yml"
+    if legacy_workflow.is_file():
+        return True
+    registry = repo / "config" / "gate-registry.json"
+    if registry.is_file():
+        gate_doc = json.loads(registry.read_text(encoding="utf-8"))
+        workflow_ids = {row["id"] for row in gate_doc.get("workflows", [])}
+        if "g500-certification" in workflow_ids:
+            return True
+    return False
 
 
 def parity_gate_status(root: Path | None = None) -> dict[str, Any]:
@@ -74,6 +101,7 @@ def parity_gate_status(root: Path | None = None) -> dict[str, Any]:
 
     harness_authoritative_met = ladder_ok if rung_files else False
     parity_matrix_met = tiny_ok and harness_authoritative_met
+    legacy_retired = not _legacy_orchestration_present(base)
 
     criteria = [
         _criterion(
@@ -92,13 +120,17 @@ def parity_gate_status(root: Path | None = None) -> dict[str, Any]:
         ),
         _criterion(
             "legacy_orchestration_retired_with_coverage",
-            met=False,
+            met=legacy_retired and parity_matrix_met and harness_authoritative_met,
             blocked_by=(
                 "parity_matrix_no_unexplained_gaps + harness_authoritative"
                 if not parity_matrix_met
-                else "legacy Makefile targets and workflows remain"
+                else (
+                    "legacy Makefile targets and workflows remain" if not legacy_retired else None
+                )
             ),
-            evidence=f"coverage entries={len(coverage_map())}",
+            evidence=(
+                f"coverage entries={len(coverage_map())}; legacy_present={not legacy_retired}"
+            ),
         ),
         _criterion(
             "historical_evidence_readable",

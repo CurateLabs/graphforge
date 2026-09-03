@@ -1,10 +1,17 @@
 .git
 .venv
 target
+**/.venv
+**/target
+**/__pycache__
+**/.mypy_cache
+**/.pytest_cache
+**/.ruff_cache
 bazel-*
 build
 dist
 node_modules
+**/node_modules
 *.env
 .env*
 *.pem

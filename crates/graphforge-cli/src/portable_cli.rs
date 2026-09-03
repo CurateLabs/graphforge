@@ -13,6 +13,7 @@ use graphforge_api::{
     PortableV2SelectionProfile, PortableV2SelectionRequest, PortableVerifyRequest,
     ResultSinkOptions, publish_portable_v2_oci, pull_portable_v2_oci, verify_portable_v2,
 };
+use serde_json::Value;
 use uuid::Uuid;
 
 use crate::canonical_uuid;
@@ -268,21 +269,7 @@ pub(crate) fn run_portable(
                 )
                 .map_err(map_portable)?;
             if json {
-                write_json(
-                    &serde_json::json!({
-                        "contract": result.contract,
-                        "source": result.source,
-                        "checkpoint": result.checkpoint,
-                        "generation_uuid": result.generation_uuid,
-                        "package_digest": result.package_digest,
-                        "transport_digest": result.transport_digest,
-                        "entry_count": result.entry_count,
-                        "payload_bytes": result.payload_bytes,
-                        "representation": result.representation,
-                        "selection_fingerprint": result.selection_fingerprint,
-                    }),
-                    output,
-                )?;
+                write_json(&portable_export_receipt(&result), output)?;
             } else {
                 writeln!(
                     output,
@@ -305,6 +292,28 @@ pub(crate) fn run_portable(
         }
     }
     Ok(())
+}
+
+fn portable_export_receipt(result: &graphforge_api::PortableV2ExportFacadeResult) -> Value {
+    serde_json::json!({
+        "contract": result.contract,
+        "source": result.source,
+        "checkpoint": result.checkpoint,
+        "generation_uuid": result.generation_uuid,
+        "package_digest": result.package_digest,
+        "transport_digest": result.transport_digest,
+        "entry_count": result.entry_count,
+        "payload_bytes": result.payload_bytes,
+        "representation": result.representation,
+        "selection_fingerprint": result.selection_fingerprint,
+        "allocation_logical_bytes": result.allocation_logical_bytes,
+        "allocation_allocated_bytes": result
+            .allocation_identity_allocated_bytes
+            .values()
+            .copied()
+            .sum::<u64>(),
+        "allocation_physical_objects": result.allocation_physical_objects,
+    })
 }
 
 /// Project-free portable operations that must not hold a live `GraphForge` lock.
@@ -779,6 +788,39 @@ fn write_progress(
 mod lifecycle_storage_tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn portable_export_receipt_exposes_closed_writer_allocation() {
+        let result = graphforge_api::PortableV2ExportFacadeResult {
+            contract: "graphforge-portable-export/2",
+            source: "current",
+            checkpoint: None,
+            generation_uuid: Uuid::nil(),
+            package_digest: format!("sha256:{}", "0".repeat(64)),
+            transport_digest: format!("sha256:{}", "1".repeat(64)),
+            entry_count: 2,
+            payload_bytes: 100,
+            representation: "bundle",
+            selection_fingerprint: format!("sha256:{}", "2".repeat(64)),
+            output: PathBuf::from("/secret/package.gfpb"),
+            allocation_identity_allocated_bytes: BTreeMap::from([
+                ("first-native-identity".to_owned(), 4_096),
+                ("second-native-identity".to_owned(), 8_192),
+            ]),
+            allocation_logical_bytes: 10_000,
+            allocation_physical_objects: 2,
+        };
+
+        let receipt = portable_export_receipt(&result);
+
+        assert_eq!(receipt["allocation_logical_bytes"], 10_000);
+        assert_eq!(receipt["allocation_allocated_bytes"], 12_288);
+        assert_eq!(receipt["allocation_physical_objects"], 2);
+        let encoded = serde_json::to_string(&receipt).unwrap();
+        for forbidden in ["/secret", "native-identity", "output"] {
+            assert!(!encoded.contains(forbidden));
+        }
+    }
 
     fn import_result() -> graphforge_api::PortableV2ImportResult {
         graphforge_api::PortableV2ImportResult {
