@@ -206,6 +206,9 @@ bazel-test:  ## Run authoritative Bazel Rust suite (//:ci_rust_tests); see docs/
 	bazelisk test //:ci_rust_tests
 
 pre-push-fast:  ## Run fast checks only — format, lint, type, security, docstrings (no coverage, ~30s)
+	@echo "━━━ Committed Python lock ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	@uv lock --check
+	@python3 scripts/ci/test-python-lock-policy.py
 	@echo "━━━ Bazelisk preflight + Cargo/Bazel drift ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@command -v bazelisk >/dev/null || (echo "bazelisk is required on PATH; see docs/development/bazel.md"; exit 1)
 	@python3 scripts/ci/cargo-bazel-drift-check.py
