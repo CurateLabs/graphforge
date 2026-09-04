@@ -17,6 +17,7 @@ from graphforge_bench.progressive_host_run import (
     reclaim_rung_workspace,
     require_order,
     require_work_root,
+    resolve_host_benchexec_python,
 )
 from graphforge_bench.progressive_run import Executables
 from tests.test_progressive_run import passed_rung as local_passed_rung
@@ -215,6 +216,20 @@ class ProgressiveHostRunTests(unittest.TestCase):
                 sha256(ROOT / "profiles" / f"{HOST_PROFILE_ID}.json"),
             )
             self.assertNotIn("admitted_projection_sha256", plan["identities"])
+
+    def test_resolve_host_benchexec_python_requires_pystemd(self) -> None:
+        venv_python = ROOT / ".venv/bin/python"
+        self.assertTrue(venv_python.is_file())
+        with self.assertRaises(HostRunError):
+            resolve_host_benchexec_python(venv_python)
+        system = Path("/usr/bin/python3")
+        if system.is_file():
+            try:
+                resolved = resolve_host_benchexec_python(system)
+            except HostRunError:
+                self.skipTest("system BenchExec+pystemd unavailable")
+            else:
+                self.assertEqual(resolved, system.resolve())
 
 
 if __name__ == "__main__":

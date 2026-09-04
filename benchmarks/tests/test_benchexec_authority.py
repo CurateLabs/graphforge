@@ -163,6 +163,24 @@ class BenchExecAuthorityTests(unittest.TestCase):
                 "/work/tmp/graphforge-certify-evidence.json",
             )
 
+    def test_tool_info_writes_certify_evidence_under_host_work_root(self):
+        class Task:
+            input_files_or_identifier = ("profile.json",)
+
+        with (
+            patch.dict(
+                "graphforge_bench.tools.graphforge_certify.os.environ",
+                {"GRAPHFORGE_HOST_WORK_ROOT": "/host/work"},
+                clear=False,
+            ),
+            patch("graphforge_bench.tools.graphforge_certify.os.path.ismount", return_value=False),
+            patch.object(Path, "mkdir"),
+        ):
+            self.assertEqual(
+                Tool().cmdline("graphforge-benchmark-certify", [], Task(), None)[-1],
+                "/host/work/tmp/graphforge-certify-evidence.json",
+            )
+
     def test_preserves_tree_authority_and_graphforge_telemetry(self):
         evidence = normalize_run(
             benchexec=result(),

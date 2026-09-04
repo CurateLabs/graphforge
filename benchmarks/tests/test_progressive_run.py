@@ -936,9 +936,19 @@ class ProgressiveRunControllerTests(unittest.TestCase):
         self.assertEqual(command[3:5], ["--full-access-dir", str(stage.resolve())])
         environment = execute.call_args.kwargs["env"]
         self.assertEqual(environment["PYTHONPATH"], str(ROOT / "harness"))
-        self.assertEqual(set(environment), {"HOME", "LANG", "LC_ALL", "PATH", "PYTHONPATH"})
+        required = {"HOME", "LANG", "LC_ALL", "PATH", "PYTHONPATH"}
+        allowed = required | {
+            "XDG_RUNTIME_DIR",
+            "DBUS_SESSION_BUS_ADDRESS",
+            "DBUS_SESSION_BUS_PID",
+            "USER",
+            "LOGNAME",
+        }
+        self.assertTrue(required <= set(environment))
+        self.assertTrue(set(environment) <= allowed)
         self.assertEqual(environment["HOME"], str(stage / "home"))
         self.assertIn("/usr/local/bin", environment["PATH"])
+        self.assertNotIn("GRAPHFORGE_HOST_WORK_ROOT", environment)
 
     def test_bench_home_uses_provider_volume_when_mounted(self) -> None:
         stage = self.base / "stage"

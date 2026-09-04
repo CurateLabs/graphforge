@@ -14,6 +14,7 @@ import json
 from pathlib import Path
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 from typing import Any
@@ -30,6 +31,7 @@ from graphforge_bench.progressive_run import (
     Executables,
     _digest,
     _native_authority,
+    _preserve_failure_artifacts,
     _run_benchexec,
     _stage_benchmark_xml,
     ingest_benchexec_result,
@@ -50,10 +52,43 @@ CAPACITY_RATE_FIELDS = (
     "reader_calls_per_second",
     "publication_work_per_second",
 )
+SYSTEM_BENCHEXEC_PYTHON = Path("/usr/bin/python3")
 
 
 class HostRunError(ControllerError):
     """Host-native ladder planning or execution refused."""
+
+
+def resolve_host_benchexec_python(candidate: Path | None = None) -> Path:
+    """Prefer package BenchExec with pystemd for host cgroup delegation.
+
+    The locked harness venv installs BenchExec without pystemd. Nested under an
+    already-delegated systemd scope, that build cannot attach required cgroups.
+    System Python on OVHC-AGENCY carries BenchExec 3.x + pystemd and is the
+    ReFrame admission interpreter.
+    """
+    path = Path(candidate) if candidate is not None else SYSTEM_BENCHEXEC_PYTHON
+    if not path.is_file():
+        raise HostRunError(f"BenchExec Python is missing: {path}")
+    probe = subprocess.run(
+        [
+            str(path),
+            "-c",
+            "import benchexec, pystemd; print('ok')",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if probe.returncode != 0 or probe.stdout.strip() != "ok":
+        raise HostRunError(
+            "host ladder requires BenchExec Python with pystemd "
+            f"(tried {path}; install system BenchExec/pystemd or pass --benchexec-python)"
+        )
+    cli = path.parent / "benchexec"
+    if not cli.is_file():
+        raise HostRunError(f"BenchExec CLI is missing beside {path}")
+    return path.resolve()
 
 
 def _json(path: Path) -> Any:
@@ -366,18 +401,23 @@ def run(
                 home=work_root,
             )
             if status != 0:
+                _preserve_failure_artifacts(stage, output_dir, scale)
                 failed = _result(plan, "failed", "benchexec_failed")
                 _validate(root, "progressive-host-run-result.json", failed)
                 publish_json_no_clobber(result_path, failed)
                 raise HostRunError("benchexec_failed")
-            benchexec, graphforge, rung = ingest_benchexec_result(
-                root=root,
-                stage=stage,
-                scale=scale,
-                plan=plan,
-                profile_id=str(identities["profile_id"]),
-                source=_source_for(scale),
-            )
+            try:
+                benchexec, graphforge, rung = ingest_benchexec_result(
+                    root=root,
+                    stage=stage,
+                    scale=scale,
+                    plan=plan,
+                    profile_id=str(identities["profile_id"]),
+                    source=_source_for(scale),
+                )
+            except (ControllerError, OSError, ValueError):
+                _preserve_failure_artifacts(stage, output_dir, scale)
+                raise
     except HostRunError:
         raise
     except (ControllerError, OSError, ValueError) as error:
@@ -419,7 +459,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--gf")
     parser.add_argument("--certify")
     parser.add_argument("--generator")
-    parser.add_argument("--benchexec-python", default=sys.executable)
+    parser.add_argument(
+        "--benchexec-python",
+        default=str(SYSTEM_BENCHEXEC_PYTHON),
+        help="Python that provides BenchExec + pystemd (default: /usr/bin/python3)",
+    )
     parser.add_argument("--host-capacity", type=Path)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
@@ -442,11 +486,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.host_capacity is None:
                 raise HostRunError("S20+ requires --host-capacity")
             capacity = load_host_capacity(root, args.host_capacity)
+        benchexec_python = resolve_host_benchexec_python(Path(args.benchexec_python))
         executables = resolve_executables(
             gf=args.gf,
             certify=args.certify,
             generator=args.generator,
-            benchexec_python=args.benchexec_python,
+            benchexec_python=str(benchexec_python),
         )
         plan = build_plan(
             root=root,

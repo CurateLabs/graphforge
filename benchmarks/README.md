@@ -319,7 +319,9 @@ GRAPHFORGE_ADMISSION_EVIDENCE=$PWD/benchmarks/outputs/local-admission-evidence.j
 ```
 
 Execute rungs sequentially. `WORK_ROOT` must share the process-root filesystem
-device with `/` (ext4 on OVHC-AGENCY). Do not use `/tmp` (tmpfs).
+device with `/` (ext4 on OVHC-AGENCY). Do not use `/tmp` (tmpfs). Host runs
+default to `--benchexec-python /usr/bin/python3` (BenchExec + pystemd); the
+locked harness venv BenchExec cannot attach cgroups under a delegated scope.
 
 ```bash
 make -C benchmarks progressive-host-ladder-run   RUNG=S18 OUTPUT_DIR=$OUTPUT_DIR WORK_ROOT=$WORK_ROOT

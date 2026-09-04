@@ -115,6 +115,10 @@ ingest-ladder-bundle: install
 
 # OVHC-AGENCY / local-linux-cgroups-v2 host ladder (no Fly). WORK_ROOT must share
 # the process-root filesystem device with `/` (ext4 on this host).
+# Host BenchExec must use system Python (BenchExec + pystemd). The harness venv
+# BenchExec cannot attach cgroups even inside a delegated systemd scope.
+BENCHEXEC_PYTHON ?= /usr/bin/python3
+
 progressive-host-ladder-plan: install progressive-qualification-binaries
 	test -n "$(RUNG)" && test -n "$(OUTPUT_DIR)" && test -n "$(WORK_ROOT)"
 	PYTHONPATH=$(CURDIR)/harness uv run --locked python -m graphforge_bench.progressive_host_run \
@@ -122,6 +126,7 @@ progressive-host-ladder-plan: install progressive-qualification-binaries
 		--gf "$(CURDIR)/../target/release/gf" \
 		--certify "$(CURDIR)/target/release/graphforge-benchmark-certify" \
 		--generator "$(CURDIR)/target/release/graphforge-benchmark-graph500-generator" \
+		--benchexec-python "$(BENCHEXEC_PYTHON)" \
 		$(if $(HOST_CAPACITY),--host-capacity "$(HOST_CAPACITY)",)
 
 progressive-host-ladder-run: install progressive-qualification-binaries
@@ -131,6 +136,7 @@ progressive-host-ladder-run: install progressive-qualification-binaries
 		--gf "$(CURDIR)/../target/release/gf" \
 		--certify "$(CURDIR)/target/release/graphforge-benchmark-certify" \
 		--generator "$(CURDIR)/target/release/graphforge-benchmark-graph500-generator" \
+		--benchexec-python "$(BENCHEXEC_PYTHON)" \
 		$(if $(HOST_CAPACITY),--host-capacity "$(HOST_CAPACITY)",)
 
 progressive-host-ladder-inventory: install

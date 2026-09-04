@@ -577,6 +577,16 @@ def _run_benchexec(
         "PATH": f"{stage / 'bin'}:/usr/local/bin:{Path(sys.executable).parent}:/usr/bin:/bin",
         "PYTHONPATH": str(Path(__file__).resolve().parents[1]),
     }
+    for key in (
+        "XDG_RUNTIME_DIR",
+        "DBUS_SESSION_BUS_ADDRESS",
+        "DBUS_SESSION_BUS_PID",
+        "USER",
+        "LOGNAME",
+    ):
+        value = os.environ.get(key)
+        if value:
+            environment[key] = value
     if _provider_volume_mounted():
         (Path("/work") / "tmp").mkdir(exist_ok=True)
         environment["TMPDIR"] = str(resolved_home / "tmp")
@@ -584,6 +594,7 @@ def _run_benchexec(
         # Intentionally leave TMPDIR unset / default-hidden so fuse-overlayfs
         # (or namespace temp) is not placed under the full-access work root.
         environment.pop("TMPDIR", None)
+        environment["GRAPHFORGE_HOST_WORK_ROOT"] = str(durable_root.resolve())
     command = [
         str(_benchexec_cli(executables.benchexec_python)),
         "--tool-directory",
