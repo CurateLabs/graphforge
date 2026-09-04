@@ -3568,6 +3568,7 @@ impl ExecutionPlan for ExpandExec {
             out_schema: self.schema.clone(),
             provider: self.provider.clone(),
             edge_var: self.edge_var,
+            capture_epoch: demand::capture_epoch(),
             demand: self.demand.clone(),
             required_output: self.required_output.clone(),
             ordinal_identities: self.ordinal_identities.clone(),
@@ -3640,7 +3641,7 @@ impl ExecutionPlan for ExpandExec {
                         return Ok(None);
                     };
                     let input_batch = input_batch?;
-                    demand::record_input(cfg.edge_var, input_batch.num_rows());
+                    demand::record_input(cfg.capture_epoch, cfg.edge_var, input_batch.num_rows());
                     pending = Some((input_batch, SingleHopPosition::default()));
                 }
             },
@@ -3662,6 +3663,7 @@ struct SingleHopConfig {
     out_schema: SchemaRef,
     provider: Arc<dyn AdjacencyProvider>,
     edge_var: u32,
+    capture_epoch: u64,
     demand: Option<Arc<demand::QueryDemand>>,
     required_output: Option<Arc<[bool]>>,
     ordinal_identities: Option<Arc<V4OrdinalIdentitySession>>,
@@ -3804,7 +3806,7 @@ fn expand_single_hop_chunk(
     if triples.is_empty() {
         return Ok(RecordBatch::new_empty(cfg.out_schema.clone()));
     }
-    demand::record_candidates(cfg.edge_var, triples.len());
+    demand::record_candidates(cfg.capture_epoch, cfg.edge_var, triples.len());
 
     let dst_width = graphforge_storage::TOPOLOGY_NODES_SCHEMA.fields().len();
     let edge_end = cfg.out_schema.fields().len().saturating_sub(dst_width);
@@ -3923,12 +3925,13 @@ fn expand_single_hop_chunk(
             mask.iter().filter(|needed| **needed).count()
         });
         demand::record_identity_projection(
+            cfg.capture_epoch,
             cfg.edge_var,
             output.num_rows(),
             projected_columns,
             &identity_metrics,
         );
-        demand::record_emitted(cfg.edge_var, output.num_rows());
+        demand::record_emitted(cfg.capture_epoch, cfg.edge_var, output.num_rows());
         return Ok(output);
     }
 
@@ -3941,9 +3944,11 @@ fn expand_single_hop_chunk(
     if cfg.demand.is_some() && edge_permit.is_none() {
         return Ok(RecordBatch::new_empty(cfg.out_schema.clone()));
     }
-    let edge_observer = demand::capture_enabled().then(|| {
-        Arc::new(demand::HopReadObserver::new(cfg.edge_var))
-            as Arc<dyn graphforge_storage::io_stats::FilteredReadObserver>
+    let edge_observer = demand::session_active_for(cfg.capture_epoch).then(|| {
+        Arc::new(demand::HopReadObserver::with_epoch(
+            cfg.edge_var,
+            cfg.capture_epoch,
+        )) as Arc<dyn graphforge_storage::io_stats::FilteredReadObserver>
     });
     let edge_topology_width = edge_end
         .saturating_sub(cfg.input_width)
@@ -4016,9 +4021,11 @@ fn expand_single_hop_chunk(
     if cfg.demand.is_some() && node_permit.is_none() {
         return Ok(RecordBatch::new_empty(cfg.out_schema.clone()));
     }
-    let node_observer = demand::capture_enabled().then(|| {
-        Arc::new(demand::HopReadObserver::new(cfg.edge_var))
-            as Arc<dyn graphforge_storage::io_stats::FilteredReadObserver>
+    let node_observer = demand::session_active_for(cfg.capture_epoch).then(|| {
+        Arc::new(demand::HopReadObserver::with_epoch(
+            cfg.edge_var,
+            cfg.capture_epoch,
+        )) as Arc<dyn graphforge_storage::io_stats::FilteredReadObserver>
     });
     let node_projection = (0..dst_width)
         .filter(|offset| required.is_none_or(|mask| mask[edge_end + offset]))
@@ -4033,6 +4040,7 @@ fn expand_single_hop_chunk(
     let edge_key_already_demanded = usize::from(edge_projection.contains(&edge_key_index));
     let node_key_already_demanded = usize::from(node_projection.contains(&1));
     demand::record_materialization_projection(
+        cfg.capture_epoch,
         cfg.edge_var,
         edge_projection
             .len()
@@ -4191,7 +4199,7 @@ fn expand_single_hop_chunk(
     }
     let output = RecordBatch::try_new(cfg.out_schema.clone(), columns)
         .map_err(|e| exec_err(e.to_string()))?;
-    demand::record_emitted(cfg.edge_var, output.num_rows());
+    demand::record_emitted(cfg.capture_epoch, cfg.edge_var, output.num_rows());
     Ok(output)
 }
 

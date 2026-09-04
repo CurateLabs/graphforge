@@ -9,7 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::task::{Context, Poll};
 
@@ -195,6 +195,7 @@ pub struct DemandSnapshot {
 }
 
 static CAPTURE_ENABLED: AtomicBool = AtomicBool::new(false);
+static CAPTURE_EPOCH: AtomicU64 = AtomicU64::new(1);
 static CAPTURE_GUARD: Mutex<()> = Mutex::new(());
 static CAPTURE: LazyLock<Mutex<DemandSnapshot>> =
     LazyLock::new(|| Mutex::new(DemandSnapshot::default()));
@@ -213,6 +214,11 @@ impl Drop for CaptureDisable {
 /// threads. Serializing the complete operation prevents concurrent tests or
 /// certification phases from mixing counters while leaving execution itself
 /// unchanged.
+///
+/// Physical streams stamp [`capture_epoch`] at creation. Deferred drops or
+/// polls after a later [`reset`] must not mutate the next session: record
+/// paths ignore mismatched epochs so one-hop expand evidence cannot leak into
+/// a following optimized two-hop snapshot (Bazel CI failure mode).
 #[doc(hidden)]
 pub fn capture<T>(operation: impl FnOnce() -> T) -> (T, DemandSnapshot) {
     let _exclusive = CAPTURE_GUARD
@@ -221,13 +227,18 @@ pub fn capture<T>(operation: impl FnOnce() -> T) -> (T, DemandSnapshot) {
     reset();
     let disable_on_exit = CaptureDisable;
     let result = operation();
+    // Snapshot while this session is still the active epoch, then retire it so
+    // any still-alive operator streams cannot append to the next capture.
+    let captured = snapshot();
     drop(disable_on_exit);
-    (result, snapshot())
+    CAPTURE_EPOCH.fetch_add(1, Ordering::SeqCst);
+    (result, captured)
 }
 
 /// Reset and enable fixed-hop demand capture.
 #[doc(hidden)]
 pub fn reset() {
+    CAPTURE_EPOCH.fetch_add(1, Ordering::SeqCst);
     *CAPTURE.lock().expect("demand stats lock") = DemandSnapshot::default();
     CAPTURE_ENABLED.store(true, Ordering::SeqCst);
 }
@@ -247,6 +258,21 @@ pub fn snapshot() -> DemandSnapshot {
 
 pub(crate) fn capture_enabled() -> bool {
     CAPTURE_ENABLED.load(Ordering::Relaxed)
+}
+
+/// Epoch of the active capture session. Physical streams must stamp this when
+/// created and pass it to record helpers so deferred work cannot pollute a
+/// newer session.
+pub(crate) fn capture_epoch() -> u64 {
+    CAPTURE_EPOCH.load(Ordering::Acquire)
+}
+
+fn session_active(epoch: u64) -> bool {
+    capture_enabled() && CAPTURE_EPOCH.load(Ordering::Acquire) == epoch
+}
+
+pub(crate) fn session_active_for(epoch: u64) -> bool {
+    session_active(epoch)
 }
 
 /// Preserve physical-plan and memory evidence after execution, including when
@@ -307,32 +333,35 @@ pub(crate) fn record_plan_completion(
     capture.execution_batch_rows = execution_batch_rows as u64;
 }
 
-fn with_hop(edge_var: u32, update: impl FnOnce(&mut HopSnapshot)) {
-    if !capture_enabled() {
+fn with_hop(epoch: u64, edge_var: u32, update: impl FnOnce(&mut HopSnapshot)) {
+    if !session_active(epoch) {
         return;
     }
     let mut capture = CAPTURE.lock().expect("demand stats lock");
     update(capture.hops.entry(edge_var).or_default());
 }
 
-pub(crate) fn record_input(edge_var: u32, rows: usize) {
-    with_hop(edge_var, |hop| {
+pub(crate) fn record_input(epoch: u64, edge_var: u32, rows: usize) {
+    with_hop(epoch, edge_var, |hop| {
         hop.input_batches += 1;
         hop.input_rows += rows as u64;
     });
 }
 
-pub(crate) fn record_candidates(edge_var: u32, rows: usize) {
-    with_hop(edge_var, |hop| hop.candidates_generated += rows as u64);
+pub(crate) fn record_candidates(epoch: u64, edge_var: u32, rows: usize) {
+    with_hop(epoch, edge_var, |hop| {
+        hop.candidates_generated += rows as u64
+    });
 }
 
 pub(crate) fn record_identity_projection(
+    epoch: u64,
     edge_var: u32,
     rows: usize,
     projected_columns: usize,
     metrics: &graphforge_storage::V4OrdinalLookupMetrics,
 ) {
-    with_hop(edge_var, |hop| {
+    with_hop(epoch, edge_var, |hop| {
         hop.projected_chunks = hop.projected_chunks.saturating_add(1);
         hop.projected_rows = hop.projected_rows.saturating_add(rows as u64);
         hop.projected_columns = hop
@@ -361,11 +390,12 @@ pub(crate) fn record_identity_projection(
 }
 
 pub(crate) fn record_materialization_projection(
+    epoch: u64,
     edge_var: u32,
     edge_columns: usize,
     node_columns: usize,
 ) {
-    with_hop(edge_var, |hop| {
+    with_hop(epoch, edge_var, |hop| {
         hop.edge_projected_columns = hop
             .edge_projected_columns
             .max(edge_columns.try_into().unwrap_or(u64::MAX));
@@ -375,12 +405,12 @@ pub(crate) fn record_materialization_projection(
     });
 }
 
-pub(crate) fn record_emitted(edge_var: u32, rows: usize) {
-    with_hop(edge_var, |hop| hop.rows_emitted += rows as u64);
+pub(crate) fn record_emitted(epoch: u64, edge_var: u32, rows: usize) {
+    with_hop(epoch, edge_var, |hop| hop.rows_emitted += rows as u64);
 }
 
-fn record_filter(ordinal: usize, uniqueness: bool, input: bool, rows: usize) {
-    if !capture_enabled() {
+fn record_filter(epoch: u64, ordinal: usize, uniqueness: bool, input: bool, rows: usize) {
+    if !session_active(epoch) {
         return;
     }
     let mut capture = CAPTURE.lock().expect("demand stats lock");
@@ -403,6 +433,7 @@ pub(crate) struct QueryDemand {
     max_in_flight_reads: AtomicUsize,
     produced_rows: AtomicUsize,
     quiescent_waker: AtomicWaker,
+    capture_epoch: u64,
 }
 
 impl QueryDemand {
@@ -413,6 +444,7 @@ impl QueryDemand {
             max_in_flight_reads: AtomicUsize::new(0),
             produced_rows: AtomicUsize::new(0),
             quiescent_waker: AtomicWaker::new(),
+            capture_epoch: capture_epoch(),
         }
     }
 
@@ -421,7 +453,7 @@ impl QueryDemand {
     }
 
     fn cancel(&self) {
-        if !self.cancelled.swap(true, Ordering::AcqRel) && capture_enabled() {
+        if !self.cancelled.swap(true, Ordering::AcqRel) && session_active(self.capture_epoch) {
             CAPTURE.lock().expect("demand stats lock").cancellations += 1;
         }
     }
@@ -433,19 +465,23 @@ impl QueryDemand {
 
     pub(crate) fn begin_read(self: &Arc<Self>, edge_var: u32) -> Option<ReadPermit> {
         if self.is_cancelled() {
-            with_hop(edge_var, |hop| hop.reads_after_cancel += 1);
+            with_hop(self.capture_epoch, edge_var, |hop| {
+                hop.reads_after_cancel += 1
+            });
             return None;
         }
         let current = self.in_flight_reads.fetch_add(1, Ordering::AcqRel) + 1;
         self.max_in_flight_reads
             .fetch_max(current, Ordering::AcqRel);
-        if capture_enabled() {
+        if session_active(self.capture_epoch) {
             let mut capture = CAPTURE.lock().expect("demand stats lock");
             capture.max_in_flight_reads = capture.max_in_flight_reads.max(current as u64);
         }
         if self.is_cancelled() {
             self.finish_read();
-            with_hop(edge_var, |hop| hop.reads_after_cancel += 1);
+            with_hop(self.capture_epoch, edge_var, |hop| {
+                hop.reads_after_cancel += 1
+            });
             return None;
         }
         Some(ReadPermit {
@@ -485,24 +521,33 @@ impl Drop for ReadPermit {
 /// Attributes storage observer events to one fixed-hop edge binding.
 pub(crate) struct HopReadObserver {
     edge_var: u32,
+    capture_epoch: u64,
 }
 
 impl HopReadObserver {
+    #[cfg(test)]
     pub(crate) fn new(edge_var: u32) -> Self {
-        Self { edge_var }
+        Self::with_epoch(edge_var, capture_epoch())
+    }
+
+    pub(crate) fn with_epoch(edge_var: u32, capture_epoch: u64) -> Self {
+        Self {
+            edge_var,
+            capture_epoch,
+        }
     }
 }
 
 impl graphforge_storage::io_stats::FilteredReadObserver for HopReadObserver {
     fn read_started(&self, table: graphforge_storage::io_stats::FilteredReadTable) {
-        with_hop(self.edge_var, |hop| match table {
+        with_hop(self.capture_epoch, self.edge_var, |hop| match table {
             graphforge_storage::io_stats::FilteredReadTable::Edge => hop.edge_reads_started += 1,
             graphforge_storage::io_stats::FilteredReadTable::Node => hop.node_reads_started += 1,
         });
     }
 
     fn rows_scanned(&self, table: graphforge_storage::io_stats::FilteredReadTable, rows: u64) {
-        with_hop(self.edge_var, |hop| match table {
+        with_hop(self.capture_epoch, self.edge_var, |hop| match table {
             graphforge_storage::io_stats::FilteredReadTable::Edge => hop.edge_rows_scanned += rows,
             graphforge_storage::io_stats::FilteredReadTable::Node => hop.node_rows_scanned += rows,
         });
@@ -514,7 +559,7 @@ impl graphforge_storage::io_stats::FilteredReadObserver for HopReadObserver {
         rows: u64,
         full: bool,
     ) {
-        with_hop(self.edge_var, |hop| match table {
+        with_hop(self.capture_epoch, self.edge_var, |hop| match table {
             graphforge_storage::io_stats::FilteredReadTable::Edge => {
                 hop.edge_reads_completed += 1;
                 hop.edge_rows_returned += rows;
@@ -529,7 +574,7 @@ impl graphforge_storage::io_stats::FilteredReadObserver for HopReadObserver {
     }
 
     fn read_failed(&self, table: graphforge_storage::io_stats::FilteredReadTable) {
-        with_hop(self.edge_var, |hop| match table {
+        with_hop(self.capture_epoch, self.edge_var, |hop| match table {
             graphforge_storage::io_stats::FilteredReadTable::Edge => hop.edge_reads_failed += 1,
             graphforge_storage::io_stats::FilteredReadTable::Node => hop.node_reads_failed += 1,
         });
@@ -543,7 +588,7 @@ impl graphforge_storage::io_stats::FilteredReadObserver for HopReadObserver {
         if table != graphforge_storage::io_stats::FilteredReadTable::Node {
             return;
         }
-        with_hop(self.edge_var, |hop| {
+        with_hop(self.capture_epoch, self.edge_var, |hop| {
             match pruning.strategy {
                 graphforge_storage::io_stats::FilteredReadStrategy::DenseRowSelection => {
                     hop.node_dense_row_selection_reads += 1;
@@ -726,8 +771,9 @@ impl ExecutionPlan for RssProbeExec {
         context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
         let stream = self.input.execute(partition, context)?;
+        let epoch = capture_epoch();
         let before = current_rss_bytes();
-        if capture_enabled() {
+        if session_active(epoch) {
             let mut capture = CAPTURE.lock().expect("demand stats lock");
             if let Some(operator) = capture
                 .operator_rss
@@ -753,6 +799,7 @@ impl ExecutionPlan for RssProbeExec {
             schema: stream.schema(),
             inner: stream,
             ordinal: self.ordinal,
+            capture_epoch: epoch,
         }))
     }
 }
@@ -761,6 +808,7 @@ struct RssProbeStream {
     schema: SchemaRef,
     inner: SendableRecordBatchStream,
     ordinal: usize,
+    capture_epoch: u64,
 }
 
 impl Stream for RssProbeStream {
@@ -768,14 +816,14 @@ impl Stream for RssProbeStream {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let result = Pin::new(&mut self.inner).poll_next(cx);
-        record_operator_rss(self.ordinal, false);
+        record_operator_rss(self.capture_epoch, self.ordinal, false);
         result
     }
 }
 
 impl Drop for RssProbeStream {
     fn drop(&mut self) {
-        record_operator_rss(self.ordinal, true);
+        record_operator_rss(self.capture_epoch, self.ordinal, true);
     }
 }
 
@@ -785,8 +833,8 @@ impl RecordBatchStream for RssProbeStream {
     }
 }
 
-fn record_operator_rss(ordinal: usize, released: bool) {
-    if !capture_enabled() {
+fn record_operator_rss(epoch: u64, ordinal: usize, released: bool) {
+    if !session_active(epoch) {
         return;
     }
     let rss = current_rss_bytes();
@@ -1138,6 +1186,7 @@ impl ExecutionPlan for ProbeExec {
             ordinal: self.ordinal,
             uniqueness: self.uniqueness,
             input_side: self.input_side,
+            capture_epoch: capture_epoch(),
         }))
     }
 }
@@ -1148,6 +1197,7 @@ struct ProbeStream {
     ordinal: usize,
     uniqueness: bool,
     input_side: bool,
+    capture_epoch: u64,
 }
 
 impl Stream for ProbeStream {
@@ -1157,6 +1207,7 @@ impl Stream for ProbeStream {
         match Pin::new(&mut self.inner).poll_next(cx) {
             Poll::Ready(Some(Ok(batch))) => {
                 record_filter(
+                    self.capture_epoch,
                     self.ordinal,
                     self.uniqueness,
                     self.input_side,
@@ -1341,11 +1392,12 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         reset();
-        record_input(12, 3);
-        record_candidates(12, 7);
-        record_emitted(12, 2);
-        record_filter(4, true, true, 7);
-        record_filter(4, true, false, 2);
+        let epoch = capture_epoch();
+        record_input(epoch, 12, 3);
+        record_candidates(epoch, 12, 7);
+        record_emitted(epoch, 12, 2);
+        record_filter(epoch, 4, true, true, 7);
+        record_filter(epoch, 4, true, false, 2);
 
         let observer = HopReadObserver::new(12);
         for table in [FilteredReadTable::Edge, FilteredReadTable::Node] {
@@ -1455,8 +1507,50 @@ mod tests {
         );
 
         disable();
-        record_input(12, 100);
+        record_input(epoch, 12, 100);
         assert_eq!(snapshot(), captured);
+    }
+
+    #[test]
+    fn stale_capture_epoch_cannot_pollute_next_session() {
+        static CAPTURE_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+        let _guard = CAPTURE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let mut stale_epoch = 0_u64;
+        let ((), first) = capture(|| {
+            stale_epoch = capture_epoch();
+            record_input(stale_epoch, 1, 1024);
+            record_candidates(stale_epoch, 1, 4310);
+            record_emitted(stale_epoch, 1, 4300);
+        });
+        assert_eq!(first.hops[&1].rows_emitted, 4300);
+
+        let ((), second) = capture(|| {
+            let epoch = capture_epoch();
+            assert_ne!(epoch, stale_epoch);
+            record_identity_projection(
+                epoch,
+                1,
+                100,
+                1,
+                &graphforge_storage::V4OrdinalLookupMetrics::default(),
+            );
+            record_emitted(epoch, 1, 1000);
+            // Simulate a deferred one-hop expand drop from the prior session.
+            record_input(stale_epoch, 1, 1024);
+            record_candidates(stale_epoch, 1, 4310);
+            record_emitted(stale_epoch, 1, 4300);
+            record_operator_rss(stale_epoch, 0, true);
+        });
+
+        let hop = &second.hops[&1];
+        assert_eq!(hop.rows_emitted, 1000);
+        assert_eq!(hop.input_rows, 0);
+        assert_eq!(hop.candidates_generated, 0);
+        assert_eq!(hop.projected_rows, 100);
+        assert!(second.operator_rss.is_empty());
     }
 
     #[test]
