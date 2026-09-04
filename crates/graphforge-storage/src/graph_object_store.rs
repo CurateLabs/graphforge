@@ -1612,6 +1612,7 @@ pub fn install_graph_object_file(
     install_graph_object_file_with_lease(&lease, source, expected_digest, expected_length)
 }
 
+#[allow(clippy::too_many_lines)] // The streamed copy keeps source authentication and destination durability atomic.
 fn install_graph_object_file_with_lease(
     lease: &GraphObjectPublicationLease,
     source: &Path,
@@ -1635,35 +1636,106 @@ fn install_graph_object_file_with_lease(
         expected_length,
         true,
         |output| {
-            let mut input = File::open(source)
-                .map_err(|error| storage("open graph object source", source, error))?;
-            let mut hasher = Sha256::new();
-            let mut total = 0_u64;
-            let mut buffer = vec![0_u8; BUFFER_BYTES];
-            loop {
-                let read = input
-                    .read(&mut buffer)
-                    .map_err(|error| storage("read graph object source", source, error))?;
-                if read == 0 {
-                    break;
-                }
-                read_calls.set(read_calls.get().saturating_add(1));
-                output.write_all(&buffer[..read]).map_err(|error| {
+            let cache_window =
+                graphforge_filesystem::cache_release_window_for_streams(2).map_err(|error| {
                     storage(
-                        "write temporary graph object",
+                        "derive graph object cache budget",
                         &lease.cas.diagnostic_root,
                         error,
                     )
                 })?;
-                write_calls.set(write_calls.get().saturating_add(1));
-                hasher.update(&buffer[..read]);
-                total = total.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
-            }
-            if total != expected_length || hex_digest(hasher.finalize().into()) != expected_digest {
-                return Err(validation(
-                    "graph object source digest or length changed during install",
-                ));
-            }
+            let input = File::open(source)
+                .map_err(|error| storage("open graph object source", source, error))?;
+            let mut input = graphforge_filesystem::FileCacheReleasingReader::with_window_bytes(
+                input,
+                cache_window,
+                graphforge_filesystem::FileCacheReleaseTracker::default(),
+            )
+            .map_err(|error| storage("open bounded graph object source", source, error))?;
+            #[cfg(unix)]
+            let mut bounded_output =
+                graphforge_filesystem::DurableFileCacheWriter::with_window_bytes(
+                    output.try_clone().map_err(|error| {
+                        storage(
+                            "clone temporary graph object",
+                            &lease.cas.diagnostic_root,
+                            error,
+                        )
+                    })?,
+                    cache_window,
+                )
+                .map_err(|error| {
+                    storage(
+                        "open bounded temporary graph object",
+                        &lease.cas.diagnostic_root,
+                        error,
+                    )
+                })?;
+            let mut hasher = Sha256::new();
+            let mut total = 0_u64;
+            let mut buffer = vec![0_u8; BUFFER_BYTES];
+            let copied = (|| -> Result<u64, GfError> {
+                loop {
+                    let read = input
+                        .read(&mut buffer)
+                        .map_err(|error| storage("read graph object source", source, error))?;
+                    if read == 0 {
+                        break;
+                    }
+                    read_calls.set(read_calls.get().saturating_add(1));
+                    #[cfg(unix)]
+                    bounded_output.write_all(&buffer[..read]).map_err(|error| {
+                        storage(
+                            "write temporary graph object",
+                            &lease.cas.diagnostic_root,
+                            error,
+                        )
+                    })?;
+                    #[cfg(windows)]
+                    output.write_all(&buffer[..read]).map_err(|error| {
+                        storage(
+                            "write temporary graph object",
+                            &lease.cas.diagnostic_root,
+                            error,
+                        )
+                    })?;
+                    write_calls.set(write_calls.get().saturating_add(1));
+                    hasher.update(&buffer[..read]);
+                    total = total.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
+                }
+                if total != expected_length
+                    || hex_digest(hasher.finalize().into()) != expected_digest
+                {
+                    return Err(validation(
+                        "graph object source digest or length changed during install",
+                    ));
+                }
+                Ok(total)
+            })();
+            let released = input
+                .finish()
+                .map_err(|error| storage("release graph object source cache", source, error));
+            let total = match (copied, released) {
+                (Ok(total), Ok(_)) => total,
+                (Ok(_), Err(release)) => return Err(release),
+                (Err(primary), Ok(_)) => return Err(primary),
+                (Err(primary), Err(release)) => {
+                    return Err(storage(
+                        "copy and release graph object source",
+                        source,
+                        format!("{primary}; cache release also failed: {release}"),
+                    ));
+                }
+            };
+            #[cfg(unix)]
+            bounded_output.sync_all_and_release().map_err(|error| {
+                storage(
+                    "fsync temporary graph object",
+                    &lease.cas.diagnostic_root,
+                    error,
+                )
+            })?;
+            #[cfg(windows)]
             output.sync_all().map_err(|error| {
                 storage(
                     "fsync temporary graph object",
@@ -1862,6 +1934,7 @@ fn requires_single_link_materialization(relative_path: &str) -> bool {
             && crate::uuid_membership::is_exact_private_v4_name(name)))
 }
 
+#[allow(clippy::too_many_lines)] // One guarded publication owns copy, release, install, and verification cleanup.
 fn copy_single_link_materialized_object(
     cas: &CasRoot,
     source: &File,
@@ -1873,13 +1946,33 @@ fn copy_single_link_materialized_object(
         ".ordinal-v4-materialize-{}.tmp",
         Uuid::new_v4().simple()
     ));
-    let mut input = source
+    let input = source
         .try_clone()
         .map_err(|error| storage("clone materialization source", &cas.diagnostic_root, error))?;
+    let cache_window =
+        graphforge_filesystem::cache_release_window_for_streams(2).map_err(|error| {
+            storage(
+                "derive materialization cache budget",
+                &cas.diagnostic_root,
+                error,
+            )
+        })?;
+    let mut input = graphforge_filesystem::FileCacheReleasingReader::with_window_bytes(
+        input,
+        cache_window,
+        graphforge_filesystem::FileCacheReleaseTracker::default(),
+    )
+    .map_err(|error| {
+        storage(
+            "open bounded materialization source",
+            &cas.diagnostic_root,
+            error,
+        )
+    })?;
     input
         .rewind()
         .map_err(|error| storage("rewind materialization source", &cas.diagnostic_root, error))?;
-    let mut output = parent
+    let output = parent
         .create_replaceable_child_file(&temporary_name)
         .map_err(|error| {
             storage(
@@ -1895,15 +1988,51 @@ fn copy_single_link_materialized_object(
             error,
         )
     })?;
+    let mut output =
+        graphforge_filesystem::DurableFileCacheWriter::with_window_bytes(output, cache_window)
+            .map_err(|error| {
+                storage(
+                    "open bounded private materialization file",
+                    &cas.diagnostic_root,
+                    error,
+                )
+            })?;
     let mut installed = false;
     let result = (|| -> Result<MaterializeIoEvidence, GfError> {
-        let mut io = copy_and_authenticate_materialized_object(
+        let copied = copy_and_authenticate_materialized_object(
             &mut input,
             &mut output,
             entry,
             &cas.diagnostic_root,
-        )?;
-        drop(output);
+        );
+        let released = input.finish().map_err(|error| {
+            storage(
+                "release materialization source cache",
+                &cas.diagnostic_root,
+                error,
+            )
+        });
+        let mut io = match (copied, released) {
+            (Ok(io), Ok(_)) => io,
+            (Ok(_), Err(error)) => return Err(error),
+            (Err(primary), Ok(_)) => return Err(primary),
+            (Err(primary), Err(release)) => {
+                return Err(storage(
+                    "copy and release private materialization source",
+                    &cas.diagnostic_root,
+                    format!("{primary}; cache release also failed: {release}"),
+                ));
+            }
+        };
+        output.sync_all_and_release().map_err(|error| {
+            storage(
+                "sync private materialization file",
+                &cas.diagnostic_root,
+                error,
+            )
+        })?;
+        io.fsync_calls = output.evidence().sync_operations;
+        drop(output.into_file());
         parent
             .replace_child(&temporary_name, output_identity, name)
             .map_err(|error| {
@@ -1961,8 +2090,8 @@ fn copy_single_link_materialized_object(
 }
 
 fn copy_and_authenticate_materialized_object(
-    input: &mut File,
-    output: &mut File,
+    input: &mut impl Read,
+    output: &mut impl Write,
     entry: &crate::GraphFileEntry,
     diagnostic_root: &Path,
 ) -> Result<MaterializeIoEvidence, GfError> {
@@ -1993,16 +2122,13 @@ fn copy_and_authenticate_materialized_object(
             "private materialization bytes do not match inventory",
         ));
     }
-    output
-        .sync_all()
-        .map_err(|error| storage("sync private materialization file", diagnostic_root, error))?;
     Ok(MaterializeIoEvidence {
         copied: true,
         read_bytes: length,
         read_calls,
         write_bytes: length,
         write_calls,
-        fsync_calls: 1,
+        fsync_calls: 0,
     })
 }
 
@@ -2996,7 +3122,7 @@ struct ReadIoEvidence {
 }
 
 fn verify_file_counted(
-    mut file: File,
+    file: File,
     digest: &str,
     expected_length: u64,
     diagnostic: &Path,
@@ -3009,24 +3135,45 @@ fn verify_file_counted(
             "graph object handle is not the declared regular file",
         ));
     }
+    let mut file = graphforge_filesystem::FileCacheReleasingReader::new(file)
+        .map_err(|error| storage("open bounded graph object handle", diagnostic, error))?;
     let mut hasher = Sha256::new();
     let mut io = ReadIoEvidence::default();
     let mut buffer = vec![0_u8; BUFFER_BYTES];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .map_err(|error| storage("read graph object handle", diagnostic, error))?;
-        if read == 0 {
-            break;
+    let verified = (|| -> Result<(), GfError> {
+        loop {
+            let read = file
+                .read(&mut buffer)
+                .map_err(|error| storage("read graph object handle", diagnostic, error))?;
+            if read == 0 {
+                break;
+            }
+            io.bytes = io.bytes.saturating_add(read as u64);
+            io.calls = io.calls.saturating_add(1);
+            hasher.update(&buffer[..read]);
         }
-        io.bytes = io.bytes.saturating_add(read as u64);
-        io.calls = io.calls.saturating_add(1);
-        hasher.update(&buffer[..read]);
+        if hex_digest(hasher.finalize().into()) != digest {
+            return Err(validation("graph object digest does not match its address"));
+        }
+        Ok(())
+    })();
+    let released = file.finish().map_err(|error| {
+        storage(
+            "release graph object authentication cache",
+            diagnostic,
+            error,
+        )
+    });
+    match (verified, released) {
+        (Ok(()), Ok(_)) => Ok(io),
+        (Ok(()), Err(error)) => Err(error),
+        (Err(primary), Ok(_)) => Err(primary),
+        (Err(primary), Err(release)) => Err(storage(
+            "authenticate graph object and release consumed cache",
+            diagnostic,
+            std::io::Error::other(format!("{primary}; {release}")),
+        )),
     }
-    if hex_digest(hasher.finalize().into()) != digest {
-        return Err(validation("graph object digest does not match its address"));
-    }
-    Ok(io)
 }
 
 fn verify_stream(

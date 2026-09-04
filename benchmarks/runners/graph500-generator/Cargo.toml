@@ -12,4 +12,8 @@ path = "src/main.rs"
 
 [dependencies]
 arrow.workspace = true
+graphforge-filesystem = { path = "../../../crates/graphforge-filesystem" }
 parquet.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

@@ -20,7 +20,9 @@ graphforge-exec = { version = "0.5.2", path = "../graphforge-exec" }
 graphforge-io = { version = "0.5.2", path = "../graphforge-io" }
 graphforge-observability = { version = "0.5.2", path = "../graphforge-observability" }
 graphforge-search = { version = "0.5.2", path = "../graphforge-search" }
+graphforge-filesystem = { version = "0.5.2", path = "../graphforge-filesystem" }
 arrow = { workspace = true }
+bytes = "1"
 datafusion = { workspace = true }
 futures = { workspace = true }
 parquet = { workspace = true }
@@ -39,7 +41,6 @@ cucumber = { workspace = true }
 tokio = { workspace = true }
 graphforge-cypher = { path = "../graphforge-cypher" }
 graphforge-storage = { path = "../graphforge-storage", features = ["test-failpoints", "test-support"] }
-graphforge-filesystem = { path = "../graphforge-filesystem" }
 
 # BDD runner for the public-API + TCK feature files (tests/features/).
 # A custom-harness target (cucumber drives its own main).

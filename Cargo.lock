@@ -2157,6 +2157,7 @@ name = "graphforge-api"
 version = "0.5.2"
 dependencies = [
  "arrow",
+ "bytes",
  "cucumber",
  "datafusion",
  "fs4 1.1.0",

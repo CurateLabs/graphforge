@@ -3769,7 +3769,17 @@ fn tiny_construction_ladder_resumes_and_scales_bounded_work_linearly() {
             progress.evidence.input_batches
         );
         assert_eq!(progress.evidence.immutable_artifacts, 7 * factor + 4);
-        assert_eq!(progress.evidence.fsync_operations, 23 * factor + 13);
+        // Each full node-detail run (272 * 65,536 bytes = 17 MiB) and
+        // edge-detail run (304 * 65,536 bytes = 19 MiB) crosses the 16 MiB
+        // per-stream cache window once. The final edge chunk is two rows
+        // short and still crosses once; the separately acknowledged one-edge
+        // chunk does not. These synchronized rollovers add two real barriers
+        // per factor to the original artifact publication protocol on Linux.
+        let rollover_fsyncs = u64::from(cfg!(target_os = "linux")) * 2 * factor;
+        assert_eq!(
+            progress.evidence.fsync_operations,
+            23 * factor + 13 + rollover_fsyncs
+        );
         assert!(progress.evidence.peak_batch_rows <= CONSTRUCTION_BATCH_ROWS as u64);
         assert!(progress.evidence.peak_accounted_live_bytes <= 64 * 1024 * 1024);
         assert!(progress.evidence.peak_run_records <= budgets.max_run_records as u64);

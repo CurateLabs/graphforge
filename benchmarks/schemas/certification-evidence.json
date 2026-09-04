@@ -57,6 +57,9 @@
         "failure": {
           "enum": ["command_failed", "command_unavailable", "evidence_invalid"]
         },
+        "cleanup_failure": {
+          "enum": ["receipt_cleanup_failed", "command_owned_cache_release_failed", "multiple_cleanup_failures", "cleanup_failed"]
+        },
         "receipts": {
           "type": "array",
           "maxItems": 8,
@@ -111,6 +114,14 @@
           },
           "then": { "required": ["failure"] },
           "else": { "not": { "required": ["failure"] } }
+        },
+        {
+          "if": {
+            "required": ["cleanup_failure"]
+          },
+          "then": {
+            "properties": { "status": { "const": "failed" } }
+          }
         }
       ],
       "additionalProperties": false

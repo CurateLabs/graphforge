@@ -45,8 +45,8 @@ pub use graph_construction::{
     CONSTRUCTION_EDGE_SCHEMA, CONSTRUCTION_NODE_SCHEMA, ConstructionChunkKind,
     ConstructionChunkReceipt, ConstructionRetainedArtifact, ConstructionSemanticAuthority,
     ConstructionShape, GraphConstructionBudgets, GraphConstructionEncoding,
-    GraphConstructionEncodingEvidence, GraphConstructionEvidence, GraphConstructionSession,
-    GraphConstructionState,
+    GraphConstructionEncodingEvidence, GraphConstructionEncodingInvocationEvidence,
+    GraphConstructionEvidence, GraphConstructionSession, GraphConstructionState,
 };
 
 pub mod graph_files;
