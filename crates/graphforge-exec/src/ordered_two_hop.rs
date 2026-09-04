@@ -183,6 +183,7 @@ pub struct OrderedTwoHopPathCountExec {
     provider: Arc<dyn AdjacencyProvider>,
     ordinal_identities: Arc<crate::V4OrdinalIdentitySession>,
     require_edge_disjoint: bool,
+    capture_epoch: u64,
 }
 
 impl OrderedTwoHopPathCountExec {
@@ -196,6 +197,7 @@ impl OrderedTwoHopPathCountExec {
             provider: spec.provider,
             ordinal_identities: spec.ordinal_identities,
             require_edge_disjoint: spec.require_edge_disjoint,
+            capture_epoch: demand::capture_epoch(),
         }
     }
 }
@@ -273,7 +275,7 @@ impl ExecutionPlan for OrderedTwoHopPathCountExec {
         let mut remaining = self.fetch;
         let mut uuids = Vec::with_capacity(self.fetch);
         let mut candidates = 0_u64;
-        let epoch = demand::capture_epoch();
+        let epoch = self.capture_epoch;
         for destination in 0..=max_node {
             if remaining == 0 {
                 break;

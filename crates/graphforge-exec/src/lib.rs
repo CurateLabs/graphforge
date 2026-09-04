@@ -3258,6 +3258,9 @@ pub struct ExpandExec {
     demand_batch: Option<usize>,
     /// Query-scoped terminal cancellation shared by the bounded hop chain.
     demand: Option<Arc<demand::QueryDemand>>,
+    /// Capture session stamped when demand instrumentation attached this node.
+    /// Deferred partition execution must not re-read the global epoch.
+    capture_epoch: u64,
     /// Exact output columns consumed above this operator. `None` preserves the
     /// standalone full-schema contract.
     required_output: Option<Arc<[bool]>>,
@@ -3308,6 +3311,7 @@ impl ExpandExec {
             edge_var: node.edge_var,
             demand_batch: None,
             demand: None,
+            capture_epoch: demand::capture_epoch(),
             required_output: None,
             ordinal_identities,
             ordinal_identity_required,
@@ -3319,6 +3323,7 @@ impl ExpandExec {
         batch_goal: usize,
         demand: Arc<demand::QueryDemand>,
     ) -> Arc<dyn ExecutionPlan> {
+        let capture_epoch = demand.capture_epoch();
         Arc::new(Self {
             input: Arc::clone(&self.input),
             rel_type_name: self.rel_type_name.clone(),
@@ -3335,6 +3340,7 @@ impl ExpandExec {
             edge_var: self.edge_var,
             demand_batch: Some(batch_goal),
             demand: Some(demand),
+            capture_epoch,
             required_output: self.required_output.clone(),
             ordinal_identities: self.ordinal_identities.clone(),
             ordinal_identity_required: self.ordinal_identity_required,
@@ -3358,6 +3364,7 @@ impl ExpandExec {
             edge_var: self.edge_var,
             demand_batch: self.demand_batch,
             demand: self.demand.clone(),
+            capture_epoch: self.capture_epoch,
             required_output: Some(required.into()),
             ordinal_identities: self.ordinal_identities.clone(),
             ordinal_identity_required: self.ordinal_identity_required,
@@ -3506,6 +3513,7 @@ impl ExecutionPlan for ExpandExec {
             edge_var: self.edge_var,
             demand_batch: self.demand_batch,
             demand: self.demand.clone(),
+            capture_epoch: self.capture_epoch,
             required_output: self.required_output.clone(),
             ordinal_identities: self.ordinal_identities.clone(),
             ordinal_identity_required: self.ordinal_identity_required,
@@ -3529,6 +3537,7 @@ impl ExecutionPlan for ExpandExec {
             edge_var: self.edge_var,
             demand_batch: self.demand_batch,
             demand: self.demand.clone(),
+            capture_epoch: self.capture_epoch,
             required_output: self.required_output.clone(),
             ordinal_identities: self.ordinal_identities.clone(),
             ordinal_identity_required: self.ordinal_identity_required,
@@ -3568,7 +3577,7 @@ impl ExecutionPlan for ExpandExec {
             out_schema: self.schema.clone(),
             provider: self.provider.clone(),
             edge_var: self.edge_var,
-            capture_epoch: demand::capture_epoch(),
+            capture_epoch: self.capture_epoch,
             demand: self.demand.clone(),
             required_output: self.required_output.clone(),
             ordinal_identities: self.ordinal_identities.clone(),

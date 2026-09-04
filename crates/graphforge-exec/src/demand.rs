@@ -215,10 +215,11 @@ impl Drop for CaptureDisable {
 /// certification phases from mixing counters while leaving execution itself
 /// unchanged.
 ///
-/// Physical streams stamp [`capture_epoch`] at creation. Deferred drops or
-/// polls after a later [`reset`] must not mutate the next session: record
-/// paths ignore mismatched epochs so one-hop expand evidence cannot leak into
-/// a following optimized two-hop snapshot (Bazel CI failure mode).
+/// Physical plans stamp [`capture_epoch`] at optimize/construction time.
+/// Deferred partition `execute` or stream drops after a later [`reset`] must
+/// not mutate the next session: record paths ignore mismatched epochs so
+/// one-hop expand evidence cannot leak into a following optimized two-hop
+/// snapshot (Bazel CI failure mode).
 #[doc(hidden)]
 pub fn capture<T>(operation: impl FnOnce() -> T) -> (T, DemandSnapshot) {
     let _exclusive = CAPTURE_GUARD
@@ -446,6 +447,10 @@ impl QueryDemand {
             quiescent_waker: AtomicWaker::new(),
             capture_epoch: capture_epoch(),
         }
+    }
+
+    pub(crate) fn capture_epoch(&self) -> u64 {
+        self.capture_epoch
     }
 
     pub(crate) fn is_cancelled(&self) -> bool {
@@ -709,6 +714,10 @@ struct RssProbeExec {
     input: Arc<dyn ExecutionPlan>,
     ordinal: usize,
     operator: &'static str,
+    /// Epoch of the capture session that instrumented this plan node.
+    /// Stamped at optimize time so deferred partition `execute` cannot adopt a
+    /// later session's epoch.
+    capture_epoch: u64,
     props: Arc<PlanProperties>,
 }
 
@@ -719,6 +728,22 @@ impl RssProbeExec {
             input,
             ordinal,
             operator,
+            capture_epoch: capture_epoch(),
+        }
+    }
+
+    fn with_input(
+        &self,
+        input: Arc<dyn ExecutionPlan>,
+        ordinal: usize,
+        operator: &'static str,
+    ) -> Self {
+        Self {
+            props: Arc::clone(input.properties()),
+            input,
+            ordinal,
+            operator,
+            capture_epoch: self.capture_epoch,
         }
     }
 }
@@ -762,7 +787,11 @@ impl ExecutionPlan for RssProbeExec {
         let input = children
             .pop()
             .ok_or_else(|| DataFusionError::Internal("RSS probe needs one child".into()))?;
-        Ok(Arc::new(Self::new(input, self.ordinal, self.operator)))
+        Ok(Arc::new(self.with_input(
+            input,
+            self.ordinal,
+            self.operator,
+        )))
     }
 
     fn execute(
@@ -771,7 +800,7 @@ impl ExecutionPlan for RssProbeExec {
         context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
         let stream = self.input.execute(partition, context)?;
-        let epoch = capture_epoch();
+        let epoch = self.capture_epoch;
         let before = current_rss_bytes();
         if session_active(epoch) {
             let mut capture = CAPTURE.lock().expect("demand stats lock");
@@ -1105,6 +1134,7 @@ struct ProbeExec {
     ordinal: usize,
     uniqueness: bool,
     input_side: bool,
+    capture_epoch: u64,
     props: Arc<PlanProperties>,
 }
 
@@ -1117,6 +1147,7 @@ impl ProbeExec {
     ) -> Self {
         let props = Arc::clone(input.properties());
         Self {
+            capture_epoch: capture_epoch(),
             input,
             ordinal,
             uniqueness,
@@ -1166,12 +1197,15 @@ impl ExecutionPlan for ProbeExec {
         let input = children
             .pop()
             .ok_or_else(|| DataFusionError::Internal("DemandProbeExec needs one child".into()))?;
-        Ok(Arc::new(Self::new(
+        let props = Arc::clone(input.properties());
+        Ok(Arc::new(Self {
             input,
-            self.ordinal,
-            self.uniqueness,
-            self.input_side,
-        )))
+            ordinal: self.ordinal,
+            uniqueness: self.uniqueness,
+            input_side: self.input_side,
+            capture_epoch: self.capture_epoch,
+            props,
+        }))
     }
 
     fn execute(
@@ -1186,7 +1220,7 @@ impl ExecutionPlan for ProbeExec {
             ordinal: self.ordinal,
             uniqueness: self.uniqueness,
             input_side: self.input_side,
-            capture_epoch: capture_epoch(),
+            capture_epoch: self.capture_epoch,
         }))
     }
 }
@@ -1550,6 +1584,39 @@ mod tests {
         assert_eq!(hop.input_rows, 0);
         assert_eq!(hop.candidates_generated, 0);
         assert_eq!(hop.projected_rows, 100);
+        assert!(second.operator_rss.is_empty());
+    }
+
+    #[test]
+    fn plan_stamped_epoch_ignores_later_global_epoch() {
+        static CAPTURE_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+        let _guard = CAPTURE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let mut plan_epoch = 0_u64;
+        let ((), _first) = capture(|| {
+            plan_epoch = capture_epoch();
+            // Simulate FixedHopDemandRule / ExpandExec construction under this session.
+            record_input(plan_epoch, 1, 10);
+        });
+
+        let ((), second) = capture(|| {
+            let live = capture_epoch();
+            assert_ne!(live, plan_epoch);
+            record_emitted(live, 1, 1000);
+            // Deferred partition execute from the prior plan still carries plan_epoch.
+            record_input(plan_epoch, 1, 1024);
+            record_candidates(plan_epoch, 1, 4310);
+            record_emitted(plan_epoch, 1, 4300);
+            record_operator_rss(plan_epoch, 0, false);
+            record_operator_rss(plan_epoch, 0, true);
+        });
+
+        let hop = &second.hops[&1];
+        assert_eq!(hop.rows_emitted, 1000);
+        assert_eq!(hop.input_rows, 0);
+        assert_eq!(hop.candidates_generated, 0);
         assert!(second.operator_rss.is_empty());
     }
 
