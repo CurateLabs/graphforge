@@ -322,6 +322,8 @@ Execute rungs sequentially. `WORK_ROOT` must share the process-root filesystem
 device with `/` (ext4 on OVHC-AGENCY). Do not use `/tmp` (tmpfs). Host runs
 default to `--benchexec-python /usr/bin/python3` (BenchExec + pystemd); the
 locked harness venv BenchExec cannot attach cgroups under a delegated scope.
+Product RSS remains the 4 GiB process VmHWM envelope; host BenchExec uses a
+raised cgroup kill ceiling so durable NVMe page cache does not false-OOM.
 
 ```bash
 make -C benchmarks progressive-host-ladder-run   RUNG=S18 OUTPUT_DIR=$OUTPUT_DIR WORK_ROOT=$WORK_ROOT
@@ -519,15 +521,18 @@ evidence therefore also requires an authenticated `graphforge-lifecycle-storage/
 owner-union receipt for retained and transient lifecycle maxima. The controller
 fails closed while that ordinary receipt is absent rather than summing project
 owners or treating portable logical payload bytes as allocated storage.
-Newly assembled rungs identify `graphforge-progressive-rung-assembly/2`; for
+Newly assembled rungs identify `graphforge-progressive-rung-assembly/3`; for
 that provenance the rung schema requires the lifecycle receipt's authoritative
 `source_project_current_allocated_bytes` and the complete closed
-`storage_attribution` payload. That payload copies the source and imported
-ten-category snapshots, committed construction application-I/O phases,
-portable-writer allocation, lifecycle unions, and reopened counts from the
-ordinary sanitized receipts. Historical version-1 rungs remain schema-readable
-but cannot supply #951 adapter evidence. The controller rejects any missing,
-malformed, or non-reconciling authority before emitting a new passed rung.
+`storage_attribution` payload. Process `peak_rss_bytes` comes from GraphForge
+certify VmHWM phase observations (`graphforge_process`), not BenchExec cgroup
+`memory.peak` (which includes durable page cache on host NVMe mounts). That
+payload copies the source and imported ten-category snapshots, committed
+construction application-I/O phases, portable-writer allocation, lifecycle
+unions, and reopened counts from the ordinary sanitized receipts. Historical
+version-1 rungs remain schema-readable but cannot supply #951 adapter
+evidence. The controller rejects any missing, malformed, or non-reconciling
+authority before emitting a new passed rung.
 The Rust certification runner owns that allocation session: it deduplicates
 stable native identities for the generated inputs, source project, result
 sinks, portable package, and clean-imported project; consumes writer-owned

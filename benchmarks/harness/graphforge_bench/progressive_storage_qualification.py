@@ -24,7 +24,7 @@ QUALIFICATION_SCHEMA = (
 )
 PROVIDER_RESULT_SCHEMA = BENCHMARK_ROOT / "schemas/progressive-provider-run-result.json"
 PROVIDER_PLAN_SCHEMA = BENCHMARK_ROOT / "schemas/progressive-provider-run-plan.json"
-ASSEMBLY_CONTRACT = "graphforge-progressive-rung-assembly/2"
+ASSEMBLY_CONTRACT = "graphforge-progressive-rung-assembly/3"
 QUALIFICATION_CONTRACT = "graphforge-g500-ladder-qualification/3"
 S26_EDGES = 1 << 30
 S26_NODES = 1 << 26

@@ -53,7 +53,7 @@ PHASES = [
 
 def passed_rung(scale: int) -> dict:
     return {
-        "assembly_contract": "graphforge-progressive-rung-assembly/2",
+        "assembly_contract": "graphforge-progressive-rung-assembly/3",
         "profile_id": f"graph500-s{scale}-local",
         "source": "progressive_profile",
         "scale": scale,
@@ -76,10 +76,10 @@ def passed_rung(scale: int) -> dict:
         "metric_sources": {
             "benchexec": [
                 "wall_seconds",
-                "peak_rss_bytes",
                 "physical_read_bytes",
                 "physical_write_bytes",
             ],
+            "graphforge_process": ["peak_rss_bytes"],
             "storage_attribution": [
                 "retained_storage_bytes",
                 "transient_peak_storage_bytes",
@@ -573,6 +573,27 @@ class ProgressiveRunControllerTests(unittest.TestCase):
                     with self.assertRaisesRegex(ControllerError, "bulk_ingest_capability_unproven"):
                         require_bulk_ingest_capability(invalid)
 
+    def test_rung_peak_rss_uses_process_vmhwm_not_cgroup_memory_peak(self) -> None:
+        receipts = authoritative_receipts(18)
+        gf = graphforge(18, receipts)
+        for index, phase in enumerate(gf["phases"]):
+            phase["peak_rss_bytes"] = 50_000_000 + index
+        gf["phases"][2]["peak_rss_bytes"] = 250_000_000
+        authority = benchexec(gf)
+        authority["authority"]["peak_rss_bytes"] = 4_000_000_000
+        rung = assemble_rung_evidence(root=ROOT, scale=18, graphforge=gf, benchexec=authority)
+        self.assertEqual(rung["assembly_contract"], "graphforge-progressive-rung-assembly/3")
+        self.assertEqual(rung["metrics"]["peak_rss_bytes"], 250_000_000)
+        self.assertEqual(rung["metric_sources"]["graphforge_process"], ["peak_rss_bytes"])
+        self.assertNotIn("peak_rss_bytes", rung["metric_sources"]["benchexec"])
+        missing = graphforge(18, receipts)
+        for phase in missing["phases"]:
+            phase["peak_rss_bytes"] = 0
+        with self.assertRaisesRegex(ControllerError, "VmHWM peak_rss_bytes is missing"):
+            assemble_rung_evidence(
+                root=ROOT, scale=18, graphforge=missing, benchexec=benchexec(missing)
+            )
+
     def test_named_authorities_assemble_true_passed_evidence_and_refuse_gaps(self) -> None:
         receipts = authoritative_receipts(18)
         gf = graphforge(18, receipts)
@@ -1046,6 +1067,35 @@ class ProgressiveRunControllerTests(unittest.TestCase):
                 _run_benchexec(stage, self.executables, plan["identities"])
             command = execute.call_args.args[0]
             self.assertNotIn("--memorylimit", command)
+
+    def test_host_durable_root_raises_benchexec_memory_ceiling(self) -> None:
+        stage = self.base / "host-stage"
+        stage.mkdir()
+        plan = build_plan(
+            root=ROOT,
+            output_dir=self.output,
+            scale=18,
+            commit=COMMIT,
+            executables=self.executables,
+        )
+        (stage / "bin").mkdir()
+        (stage / "benchmark.xml").write_text("fixture", encoding="utf-8")
+        work = Path("/home/ubuntu/graphforge-ladder")
+        with (
+            patch("graphforge_bench.progressive_run.subprocess.run") as execute,
+            patch.object(Path, "mkdir"),
+        ):
+            execute.return_value.returncode = 0
+            _run_benchexec(
+                stage,
+                self.executables,
+                plan["identities"],
+                durable_root=work,
+                home=work,
+            )
+        command = execute.call_args.args[0]
+        self.assertIn("--memorylimit", command)
+        self.assertEqual(command[command.index("--memorylimit") + 1], "96GB")
 
     def test_failed_result_schema_requires_closed_exact_identities(self) -> None:
         plan = build_plan(

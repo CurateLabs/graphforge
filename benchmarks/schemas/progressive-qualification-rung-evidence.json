@@ -5,7 +5,7 @@
   "additionalProperties": false,
   "required": ["profile_id", "source", "scale", "live_edges", "status", "correctness", "phases", "metrics", "metric_sources", "failure"],
   "properties": {
-    "assembly_contract": {"const": "graphforge-progressive-rung-assembly/2"},
+    "assembly_contract": {"const": "graphforge-progressive-rung-assembly/3"},
     "profile_id": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,80}$"},
     "source": {"enum": ["progressive_profile", "canonical_ladder"]},
     "scale": {"type": "integer", "minimum": 1, "maximum": 26},
@@ -28,9 +28,10 @@
     },
     "metric_sources": {
       "type": "object", "additionalProperties": false,
-      "required": ["benchexec", "storage_attribution", "query_qualification"],
+      "required": ["benchexec", "graphforge_process", "storage_attribution", "query_qualification"],
       "properties": {
-        "benchexec": {"const": ["wall_seconds", "peak_rss_bytes", "physical_read_bytes", "physical_write_bytes"]},
+        "benchexec": {"const": ["wall_seconds", "physical_read_bytes", "physical_write_bytes"]},
+        "graphforge_process": {"const": ["peak_rss_bytes"]},
         "storage_attribution": {"const": ["retained_storage_bytes", "transient_peak_storage_bytes", "logical_read_bytes", "logical_write_bytes", "reader_calls", "publication_work_units"]},
         "query_qualification": {"const": ["live_edges", "correctness"]}
       }
@@ -119,7 +120,7 @@
       "if": {
         "properties": {
           "status": {"const": "passed"},
-          "assembly_contract": {"const": "graphforge-progressive-rung-assembly/2"}
+          "assembly_contract": {"const": "graphforge-progressive-rung-assembly/3"}
         },
         "required": ["status", "assembly_contract"]
       },
