@@ -234,22 +234,6 @@ impl Drop for CaptureDisable {
     }
 }
 
-struct CaptureScopeGuard {
-    previous: u64,
-}
-
-impl Drop for CaptureScopeGuard {
-    fn drop(&mut self) {
-        BOUND_CAPTURE_SESSION.set(self.previous);
-    }
-}
-
-fn enter_capture_scope(epoch: u64) -> CaptureScopeGuard {
-    let previous = BOUND_CAPTURE_SESSION.get();
-    BOUND_CAPTURE_SESSION.set(epoch);
-    CaptureScopeGuard { previous }
-}
-
 /// Epoch bound to the current thread's capture scope, if any.
 #[must_use]
 #[doc(hidden)]
@@ -296,7 +280,8 @@ pub fn capture<T>(operation: impl FnOnce() -> T) -> (T, DemandSnapshot) {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     reset();
     let disable_on_exit = CaptureDisable;
-    let _scope = enter_capture_scope(capture_epoch());
+    // `reset` binds this thread to the live epoch (inherited across block_on
+    // workers). Concurrent unbound executes stamp epoch 0 and cannot record.
     let result = operation();
     // Snapshot while this session is still the active epoch, then retire it so
     // any still-alive operator streams cannot append to the next capture.
@@ -307,6 +292,10 @@ pub fn capture<T>(operation: impl FnOnce() -> T) -> (T, DemandSnapshot) {
 }
 
 /// Reset and enable fixed-hop demand capture.
+///
+/// Binds the new session to the calling thread so `demand::reset()` /
+/// `execute` / `disable` callers (and `explain` under an active reset) stamp
+/// the live epoch. Concurrent threads stay unbound and must not adopt it.
 #[doc(hidden)]
 pub fn reset() {
     let mut state = CAPTURE
@@ -317,6 +306,7 @@ pub fn reset() {
     state.enabled = true;
     CAPTURE_EPOCH.store(state.epoch, Ordering::SeqCst);
     CAPTURE_ENABLED.store(true, Ordering::SeqCst);
+    BOUND_CAPTURE_SESSION.set(state.epoch);
 }
 
 /// Disable demand capture without discarding the last snapshot.
@@ -327,6 +317,11 @@ pub fn disable() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     state.enabled = false;
     CAPTURE_ENABLED.store(false, Ordering::SeqCst);
+    // Drop the calling thread's binding when it still points at this session so
+    // a later unbound execute cannot stamp a retired epoch after re-enable races.
+    if BOUND_CAPTURE_SESSION.get() == state.epoch {
+        BOUND_CAPTURE_SESSION.set(0);
+    }
 }
 
 fn retire_epoch() {
@@ -408,13 +403,19 @@ pub(crate) fn record_plan_completion(
         return;
     }
 
+    // Only the capturing thread may write completion evidence into the live
+    // snapshot; concurrent executes must not overwrite sorts/memory counters.
+    if !may_instrument_demand() {
+        return;
+    }
+
     let mut sorts = Vec::new();
     visit(plan, &mut sorts);
     let completion_rss = current_rss_bytes();
     let mut state = CAPTURE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if !state.enabled {
+    if !state.enabled || state.epoch != BOUND_CAPTURE_SESSION.get() {
         return;
     }
     // The physical plan can retain an RSS-probe stream after collection has
@@ -552,8 +553,10 @@ impl QueryDemand {
             max_in_flight_reads: AtomicUsize::new(0),
             produced_rows: AtomicUsize::new(0),
             quiescent_waker: AtomicWaker::new(),
-            // QueryDemand is only constructed from FixedHopDemandRule inside capture.
-            capture_epoch: stamp_capture_epoch().unwrap_or_else(capture_epoch),
+            // Prefer the thread-bound session. Unbound concurrent executes (or
+            // explain without reset) stamp 0 so record paths no-op against a
+            // live process-global capture they did not start.
+            capture_epoch: stamp_capture_epoch().unwrap_or(0),
         }
     }
 
@@ -756,6 +759,8 @@ impl PhysicalOptimizerRule for FixedHopDemandRule {
         };
         let plan = crate::ordered_two_hop::try_rewrite_ordered_two_hop(plan)?;
         let Some(terminal) = find_terminal_demand(&plan) else {
+            // RSS probes are diagnostics only; skip when this thread is not the
+            // capturing session so concurrent executes cannot append operator_rss.
             if may_instrument_demand() {
                 let mut rss_ordinal = 0;
                 return instrument_operator_rss(plan, &mut rss_ordinal);
@@ -769,9 +774,9 @@ impl PhysicalOptimizerRule for FixedHopDemandRule {
             }
             return Ok(plan);
         }
-        if !may_instrument_demand() {
-            return Ok(plan);
-        }
+        // Soft demand_batch goals are behavioral (not diagnostics): always wrap
+        // terminal fixed-hop limits. QueryDemand / RSS stamp epoch 0 when this
+        // thread is unbound so concurrent executes cannot pollute a live capture.
         let demand = Arc::new(QueryDemand::new());
         if terminal.cancel_after == 0 {
             demand.cancel();
@@ -789,8 +794,12 @@ impl PhysicalOptimizerRule for FixedHopDemandRule {
             demand,
             terminal.cancel_after,
         ));
-        let mut rss_ordinal = 0;
-        instrument_operator_rss(guarded, &mut rss_ordinal)
+        if may_instrument_demand() {
+            let mut rss_ordinal = 0;
+            instrument_operator_rss(guarded, &mut rss_ordinal)
+        } else {
+            Ok(guarded)
+        }
     }
 
     fn name(&self) -> &str {
@@ -849,7 +858,7 @@ impl RssProbeExec {
             input,
             ordinal,
             operator,
-            capture_epoch: stamp_capture_epoch().unwrap_or_else(capture_epoch),
+            capture_epoch: stamp_capture_epoch().unwrap_or(0),
         }
     }
 
@@ -1276,7 +1285,7 @@ impl ProbeExec {
     ) -> Self {
         let props = Arc::clone(input.properties());
         Self {
-            capture_epoch: stamp_capture_epoch().unwrap_or_else(capture_epoch),
+            capture_epoch: stamp_capture_epoch().unwrap_or(0),
             input,
             ordinal,
             uniqueness,
@@ -1810,9 +1819,30 @@ mod tests {
             let peer = std::thread::spawn(move || {
                 assert!(stamp_capture_epoch().is_none());
                 assert_ne!(bound_capture_session(), live);
+                assert_eq!(stamp_capture_epoch().unwrap_or(0), 0);
             });
             peer.join().expect("peer");
         });
+        assert!(stamp_capture_epoch().is_none());
+    }
+
+    #[test]
+    fn reset_binds_calling_thread_like_capture() {
+        let _guard = CAPTURE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        disable();
+        BOUND_CAPTURE_SESSION.set(0);
+        reset();
+        let epoch = capture_epoch();
+        assert_eq!(bound_capture_session(), epoch);
+        assert_eq!(stamp_capture_epoch(), Some(epoch));
+        // Legacy reset/execute/disable path must record into this session.
+        record_emitted(epoch, 1, 42);
+        assert_eq!(snapshot().hops[&1].rows_emitted, 42);
+        disable();
+        assert_eq!(bound_capture_session(), 0);
         assert!(stamp_capture_epoch().is_none());
     }
 
