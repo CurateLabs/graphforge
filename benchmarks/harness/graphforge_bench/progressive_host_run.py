@@ -1,6 +1,6 @@
 """Fail-closed OVHC-AGENCY host ladder under local-linux-cgroups-v2.
 
-Runs S18–S26 through ordinary BenchExec authority on a durable ext4 work root.
+Runs S18-S26 through ordinary BenchExec authority on a durable ext4 work root.
 Fly image digests and disposable provider mounts are intentionally out of scope;
 retain those adapters as optional offline tooling only.
 """
@@ -9,10 +9,8 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Mapping, Sequence
-import hashlib
 from importlib.metadata import PackageNotFoundError, version
 import json
-import os
 from pathlib import Path
 import shutil
 import stat
@@ -95,7 +93,7 @@ def require_work_root(work_root: Path) -> Path:
     if not resolved.is_dir() or resolved.is_symlink():
         raise HostRunError("work_root_invalid")
     try:
-        if os.stat(resolved).st_dev != os.stat("/").st_dev:
+        if resolved.stat().st_dev != Path("/").stat().st_dev:
             raise HostRunError("work_root_invalid")
     except OSError as error:
         raise HostRunError("work_root_invalid") from error
@@ -160,7 +158,7 @@ def _admit_projection(
     capacity: Mapping[str, Any],
 ) -> tuple[dict[str, Any], str]:
     if scale not in PROVIDER_SCALES:
-        raise HostRunError("projection is only required for S20–S26")
+        raise HostRunError("projection is only required for S20-S26")
     profiles = load_profiles(root / "profiles" / "graph500")
     profile = next(item for item in profiles if item.scale == scale)
     completed = completed_prefix(root, output_dir)
