@@ -236,6 +236,12 @@ graphforge.query_id = "01J..."
 These annotations survive IPC serialization and Parquet round-trips, which is why Arrow is
 the correct contract for tabular results rather than a Polars or Python-specific result type.
 
+The unused string-column `graphforge_api::RecordBatch` interim type is removed
+for v0.6.0. Query results continue to expose Arrow batches through
+`ExecutionResult`; Rust table consumers use `arrow::record_batch::RecordBatch`.
+Metadata lists, counts, and explanations retain their public collection,
+scalar, and string return types.
+
 ### Control and construction plane (intentional non-Arrow returns)
 
 Not every public method is a tabular data operation. The Rust facade

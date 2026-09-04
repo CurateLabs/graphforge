@@ -389,32 +389,6 @@ pub use provider_session::{OpenRouterProviderSession, OpenRouterProviderSessionC
 pub use search_index::SearchIndexOptions;
 
 // ---------------------------------------------------------------------------
-// RecordBatch (interim tabular result)
-// ---------------------------------------------------------------------------
-
-/// Minimal tabular result.  Replaced by Arrow `RecordBatch` when the read path
-/// lands (#717/#719).
-#[derive(Debug, Clone, Default)]
-pub struct RecordBatch {
-    /// Column names.
-    pub schema: Vec<String>,
-    /// One entry per column; each entry is the column's values as strings.
-    pub columns: Vec<Vec<String>>,
-}
-
-impl RecordBatch {
-    /// Return an empty batch with the given schema.
-    #[must_use]
-    pub fn empty(schema: Vec<String>) -> Self {
-        let ncols = schema.len();
-        Self {
-            schema,
-            columns: vec![vec![]; ncols],
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // GraphForge
 // ---------------------------------------------------------------------------
 
@@ -4819,11 +4793,7 @@ mod tests {
     }
 
     #[test]
-    fn facade_debug_empty_batch_and_procedure_width_contracts_are_exact() {
-        let empty = RecordBatch::empty(vec!["node_uuid".into(), "name".into()]);
-        assert_eq!(empty.schema, ["node_uuid", "name"]);
-        assert_eq!(empty.columns, [Vec::<String>::new(), Vec::new()]);
-
+    fn facade_debug_and_procedure_width_contracts_are_exact() {
         let graph = GraphForge::new(None).unwrap();
         let debug = format!("{graph:?}");
         for field in [
