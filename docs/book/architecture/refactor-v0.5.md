@@ -6,6 +6,15 @@
 
 This document is the authoritative reference for architectural decisions made before and during the v0.5 refactor. Treat this document as the primary constraint document for v0.5 architecture. When an implementation decision conflicts with something here, update this document first, then update the implementation.
 
+For the current storage/value boundary, [ADR 0025](../../adr/0025-storage-value-contract.md)
+supersedes this baseline's implicit coupling of durable values to Graph IR.
+The diagrams here describe workflow, not the complete Cargo graph: storage
+currently depends on IR and ontology. The `ir_version` examples below are
+compiler metadata, not implemented project-open admission rules; the
+[project format compatibility policy](project-format-compatibility.md) governs
+supported committed generations. Extraction of the chosen value contract is
+pending in #1011/#1012.
+
 **Product positioning:** GraphForge is a **Knowledge Analysis Workbench** — not a graph database and not merely a graph analytics engine. The graph is one asset inside a larger analytical project. The workbench is designed for analysts who build knowledge from uncertain, incomplete, or heterogeneous data over time.
 
 ---

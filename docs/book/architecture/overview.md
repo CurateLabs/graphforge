@@ -150,12 +150,28 @@ Project = Graph (topology + properties)          ← graph layer
 
 ---
 
+## Crate dependencies and durable values
+
+The diagram above shows execution flow, not Cargo dependencies. Today storage
+also depends on IR and ontology: `IrLiteral`, tagged runtime IDs and the runtime
+catalog's persistence schema live in IR, and storage consumes ontology and
+composition adapters. `IrVersion` annotates results; it is not a project-open
+compatibility gate.
+
+[ADR 0025](../../adr/0025-storage-value-contract.md) chooses a compiler-independent
+`graphforge-value` crate above core for shared values, checked tagged IDs and
+Arrow/catalog codecs. That extraction is **Designed**, tracked by #1011 and
+#1012; the crate is not yet present. Compiler plans remain in IR, storage owns
+project admission and physical persistence, and existing encodings must be
+preserved. The [project compatibility policy](project-format-compatibility.md)
+remains separate from compiler-plan versioning.
+
 ## Rust Workspace Layout
 
 ```
 crates/
   graphforge-api/              # public Rust facade (lifecycle, Cypher, verbs, knowledge)
-  graphforge-core/             # engine facade helpers used by graphforge-api
+  graphforge-core/             # shared primitive types, identities, and errors
   graphforge-ast/              # AST + spans + syntax diagnostics
   graphforge-cypher/           # hand-written lexer + recursive-descent/Pratt parser
   graphforge-ontology/         # runtime ontology model, validation, migration
@@ -285,7 +301,7 @@ Shipped v0.5.0 expects these surfaces to stay green on `main`:
 - [Algorithm Verbs](algorithms.md) — full algorithm catalog across rank/cluster/paths/analyze/similar
 - [Execution Model](execution-model.md) — DataFusion integration, custom graph operators, Arrow result streams
 - [Storage](storage.md) — StorageProvider trait, Parquet provider
-- [ADR Index](../../adr/README.md) — contiguous decision log (`0001`–`0018`)
+- [ADR Index](../../adr/README.md) — contiguous decision log (`0001`–`0025`)
 - [ADR 0001: Rust Core](../../adr/0001-rust-core.md) — Rust core and binding strategy
 - [ADR 0002: RD+Pratt Parser](../../adr/0002-lr1-grammar.md) — Parser algorithm decision
 - [ADR 0003: Progressive Ontology](../../adr/0003-progressive-ontology.md) — exploration-first ontology modes

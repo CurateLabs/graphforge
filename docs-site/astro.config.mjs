@@ -295,6 +295,10 @@ export default defineConfig({
                   label: '0024 Storage format exceptions',
                   slug: 'adr/0024-storage-format-exceptions',
                 },
+                {
+                  label: '0025 Storage value contract',
+                  slug: 'adr/0025-storage-value-contract',
+                },
               ],
             },
           ],

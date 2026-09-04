@@ -61,3 +61,4 @@ Keeper set after #2730 (mirrors [`../../adr/README.md`](../../adr/README.md)):
 | 0022 | Multi-ontology semantics in portable project v2 | Accepted | [`../../adr/0022-portable-v2-multi-ontology-compatibility.md`](../../adr/0022-portable-v2-multi-ontology-compatibility.md) |
 | 0023 | Composable ontology modules and semantic bridges | Accepted | [`../../adr/0023-composable-multi-ontology.md`](../../adr/0023-composable-multi-ontology.md) |
 | 0024 | Storage format exceptions for GFDR and compiled ontologies | Accepted | [`../../adr/0024-storage-format-exceptions.md`](../../adr/0024-storage-format-exceptions.md) |
+| 0025 | Storage values have a compiler-independent contract | Accepted (extraction pending) | [`../../adr/0025-storage-value-contract.md`](../../adr/0025-storage-value-contract.md) |
