@@ -350,7 +350,7 @@ pub(crate) fn record_input(epoch: u64, edge_var: u32, rows: usize) {
 
 pub(crate) fn record_candidates(epoch: u64, edge_var: u32, rows: usize) {
     with_hop(epoch, edge_var, |hop| {
-        hop.candidates_generated += rows as u64
+        hop.candidates_generated += rows as u64;
     });
 }
 
@@ -466,7 +466,7 @@ impl QueryDemand {
     pub(crate) fn begin_read(self: &Arc<Self>, edge_var: u32) -> Option<ReadPermit> {
         if self.is_cancelled() {
             with_hop(self.capture_epoch, edge_var, |hop| {
-                hop.reads_after_cancel += 1
+                hop.reads_after_cancel += 1;
             });
             return None;
         }
@@ -480,7 +480,7 @@ impl QueryDemand {
         if self.is_cancelled() {
             self.finish_read();
             with_hop(self.capture_epoch, edge_var, |hop| {
-                hop.reads_after_cancel += 1
+                hop.reads_after_cancel += 1;
             });
             return None;
         }
